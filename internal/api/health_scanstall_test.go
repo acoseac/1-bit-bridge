@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,19 @@ func TestHealth_ScanStalledOmittedWhenFalse(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "scanStalled") {
 		t.Errorf("scanStalled must be omitted when false, got %s", raw)
+	}
+}
+
+func TestHealthAssignsTheAdvertisedScan(t *testing.T) {
+	src, err := os.ReadFile("api.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "scanState.IsScanning = manifest.AdvertisedScan(scanning, stalled)") {
+		t.Fatal("health must report the advertised scan")
+	}
+	if strings.Contains(body, "scanState.IsScanning = scanning && !stalled") {
+		t.Fatal("health must not keep a second copy of the advertised-scan formula")
 	}
 }

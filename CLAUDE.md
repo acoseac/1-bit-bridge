@@ -2180,6 +2180,59 @@ lost my library."
   `TestReadFavoritesDoesNotTakeTheWriterLock`,
   `TestFavorites304DoesNotReadTheRows`,
   `TestRestoreRemovesStaleWALSHM`.)
+- **A user-data change event is published after its commit, and
+  `library.changed` is one event at the end of a full scan** (2026-10-07).
+  `favorites.changed` (`{"revision":N}`), `playlists.changed`
+  (`{"epoch":"…"}`) and `library.changed` (`{"indexedAt":"…"}`) go through
+  `eventBroker.Publish`, so they carry `id:` and take part in
+  `Last-Event-ID` replay. The store notifies from a hook installed by
+  serve, and the hook runs only after `Commit` has returned nil and only
+  when the write changed the document, the playlist list, or what a
+  delta client sees (`indexed_at`, or a journaled deletion or
+  suppression). A rolled-back write, a `409`, and a no-op publish
+  nothing. Tombstone collection commits before the favorites
+  compare-and-swap and publishes its own revision when it removed a row.
+  That revision is read with `context.WithoutCancel`: the request may
+  already be cancelled once the commit has returned, and a cancelled
+  read drops the event while the revision has moved.
+  `library.changed` is suppressed while health's
+  `scanState.isScanning` is true (`Scanner.AdvertisedScanning`:
+  `IsScanning` and not stalled, not `ScanInFlight`: a subtree scan stays
+  on the debounce, and a stalled scan does not suppress). The scan-end
+  callback is a defer registered ahead of `scanning.Store(false)`, so it
+  runs once the flag is clear, once, on a successful scan whose context
+  is still live, and that one event covers every `indexed_at` write the
+  scan made, enrichment included. Every other library change shares one
+  trailing 30s debounce, including a journaled deletion or suppression
+  outside a full scan; a note during a scan cancels a timer already
+  armed, and the scan-end event cancels one that is still pending. The
+  payload watermark is the later of `MAX(indexed_at)`,
+  `MAX(manifest_deletions.deleted_at)` and the deletion-journal
+  coverage start, rendered as millisecond UTC RFC3339, which
+  `GET /v1/manifest?since=` parses. A mass delete that resets that
+  coverage publishes the new start, including when it deletes every
+  track. An empty library at scan end publishes the publisher clock
+  when no watermark exists. A watermark query error at scan end is
+  logged and that event carries the publisher clock; a note outside a
+  scan still publishes nothing when the query fails. A sidecar lyrics bump on the
+  version-stamp leg notes after its commit; a refusal skips lyrics.
+  A smart-mix cover and a cover pruned from an already-tombstoned
+  playlist publish no `playlists.changed`. The demo wires none of
+  this and does not advertise `syncEvents`. `bridge restore` replaces the
+  epoch in its own process, which has no broker and publishes nothing;
+  the serving process publishes `playlists.changed` only from a store
+  that holds the hooks.
+  (`TestFavoritesRevisionPutPublishesTheNewRevisionAfterCommit`,
+  `TestFavoriteTombstoneCollectionPublishesAfterItsCommit`,
+  `TestFavoriteCollectionPublishesAfterItsRequestIsCancelled`,
+  `TestPlaylistPutDeleteRestoreAndCoverPublishAfterCommit`,
+  `TestAnIdenticalPlaylistBodyAndAMismatchPublishNothing`,
+  `TestLibraryChangedIsSuppressedWhileAScanRunsAndEmittedOnceAtTheEnd`,
+  `TestLibraryChangedIsOneEventAfterAQuietThirtySeconds`,
+  `TestAFullScanPublishesOneLibraryEvent`,
+  `TestAWatermarkQueryErrorPublishesTheScanEndClock`,
+  `TestADemoBridgeDoesNotAdvertiseSyncEvents`,
+  `TestSyncTopicsReplayOnLastEventID`.)
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process
   ring**, and fires ONE LINE PER TOMBSTONE past the threshold
   (`manifest.PlaylistDeleteBurstThreshold` = 5 within

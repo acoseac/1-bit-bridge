@@ -489,7 +489,19 @@ func (s *Store) collectFavoriteTombstonesLocked(ctx context.Context) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if removed > 0 {
+		var rev int64
+		// The request may already be cancelled: the commit has landed, and
+		// this read only publishes it. A cancelled context here drops the
+		// event while the document has moved.
+		if err := s.db.QueryRowContext(context.WithoutCancel(ctx), `SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&rev); err == nil {
+			s.noteFavorites(rev)
+		}
+	}
+	return nil
 }
 
 func (s *Store) noteFavoriteDevice(ctx context.Context, deviceToken string, nowNS int64, legacy bool) error {
@@ -561,7 +573,11 @@ func (s *Store) writeFavoritesDocument(ctx context.Context, deviceToken string, 
 	if err := noteFavoriteDeviceTx(ctx, tx, deviceToken, nowNS, legacy); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteFavorites(revision)
+	return nil
 }
 
 func insertFavoriteTracks(ctx context.Context, tx *sql.Tx, tracks []FavoriteTrackRow) error {

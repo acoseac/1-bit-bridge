@@ -195,6 +195,13 @@ type Scanner struct {
 	// can't race a startup scan already in flight on another goroutine.
 	postScanHook atomic.Pointer[func()]
 
+	// libraryScanEnded fires after a successful full Scan once
+	// s.scanning has been cleared, so health's scanState.isScanning is
+	// already false when library.changed goes out. It is a separate
+	// callback from postScanHook: that one runs while the flag is still
+	// set, and a second SetPostScanHook would replace the sweeper fan-out.
+	libraryScanEnded atomic.Pointer[func()]
+
 	// dupePolicy, when set, supplies the duplicates-suppression policy
 	// snapshot each stamping pass runs under — see SetDupePolicy
 	// (scanner_dupes.go). Same atomic.Pointer rationale as postScanHook:
@@ -260,6 +267,18 @@ func (s *Scanner) SetPostScanHook(fn func()) {
 		return
 	}
 	s.postScanHook.Store(&fn)
+}
+
+// SetLibraryScanEnded installs the callback that publishes library.changed
+// once a successful full scan has cleared scanState.isScanning. A nil
+// function clears it. The callback runs on the scanner goroutine after
+// the flag is false and must be cheap.
+func (s *Scanner) SetLibraryScanEnded(fn func()) {
+	if fn == nil {
+		s.libraryScanEnded.Store(nil)
+		return
+	}
+	s.libraryScanEnded.Store(&fn)
 }
 
 // SetDeleteThreshold configures the missing-count grace period. Values
@@ -464,6 +483,19 @@ func (s *Scanner) IsScanStalled(now time.Time) bool {
 	return true
 }
 
+// AdvertisedScan is the scan /v1/health reports as in progress: running,
+// and not stalled. library.changed follows this predicate, so a stalled
+// scan does not keep the topic quiet.
+func AdvertisedScan(scanning, stalled bool) bool {
+	return scanning && !stalled
+}
+
+// AdvertisedScanning reports AdvertisedScan for this scanner at now.
+func (s *Scanner) AdvertisedScanning(now time.Time) bool {
+	scanning := s.IsScanning()
+	return AdvertisedScan(scanning, scanning && s.IsScanStalled(now))
+}
+
 // noteScanProgress records that the scan just got somewhere, clearing
 // any stall latch so a scan that recovers logs again if it stalls
 // twice.
@@ -542,6 +574,23 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	defer s.resetScanCaches()
 	s.unread.reset()
 	s.artUnread.reset()
+	// Declared here so the scan-end event, registered BEFORE the flag
+	// clears, closes over the same scanOK the post-scan hook uses. The
+	// carry is the first-indexed dates this scan may clear; the hook
+	// clears them only on that same successful exit. Exit order is
+	// LIFO: the hook runs while IsScanning is still true, the flag then
+	// clears, and this callback publishes after that.
+	scanOK := false
+	carryClear := false
+	var carryGen int64
+	defer func() {
+		if !scanOK || ctx.Err() != nil {
+			return
+		}
+		if fn := s.libraryScanEnded.Load(); fn != nil {
+			(*fn)()
+		}
+	}()
 	defer s.scanning.Store(false)
 	// Zeroing the clock alongside the flag keeps ScanStalledFor's "no
 	// scan running" answer honest without depending on read ordering
@@ -553,9 +602,6 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// never nudges downstream consumers, and on ctx liveness so a
 	// shutdown-time completion stays quiet. scanOK is set ONLY
 	// immediately before the successful `return count, nil` sites below.
-	scanOK := false
-	carryClear := false
-	var carryGen int64
 	defer func() {
 		if !scanOK || ctx.Err() != nil {
 			return

@@ -88,6 +88,10 @@ type Store struct {
 	// can do so without racing the wall clock.
 	now func() time.Time
 
+	// syncHooks publishes user-data change events after commit. Nil
+	// publishes nothing. See sync_notify.go.
+	syncHooks *SyncHooks
+
 	// ftsAvailable caches whether the `tracks_fts` virtual table exists,
 	// probed once in OpenStore after migrate(). The FTS5 module is either
 	// compiled into the driver or not for the process lifetime, and the
@@ -2927,6 +2931,7 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 		return err
 	}
 	t.rowVersion = wrote
+	s.noteLibrary(ctx)
 	return nil
 }
 
@@ -3201,6 +3206,9 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	if err := tx.Commit(); err != nil {
 		return 0, err // rollback on failed commit → nothing persisted.
 	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
 	return n, nil
 }
 
@@ -3270,6 +3278,7 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 	}
 	defer stmt.Close()
 	now := s.now().UnixNano()
+	var lyricsBumped bool
 	for _, t := range ts {
 		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey,
 			boolToInt(t.extractRefused), t.Path); err != nil {
@@ -3283,11 +3292,19 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		// here for every byte-identical tag row); indexed_at bumps ONLY
 		// when the lyrics tag changed, so an unchanged library stays out of
 		// the iOS delta.
-		if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
+		bumped, err := writeLyricsRowTx(ctx, tx, t, now)
+		if err != nil {
 			return err
 		}
+		lyricsBumped = lyricsBumped || bumped
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if lyricsBumped {
+		s.noteLibrary(ctx)
+	}
+	return nil
 }
 
 // ----- tracks -----
@@ -3418,7 +3435,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	// content-changed-but-still-suppressed upsert keeps its tombstone
 	// (the row is still absent from the served set). Runs AFTER the
 	// row write so a fresh INSERT satisfies the EXISTS.
-	if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
+	if _, err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, clearTombstoneIfServedSQL, t.Path); err != nil {
@@ -3435,6 +3452,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 		return err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
+	s.noteLibrary(ctx)
 	return nil
 }
 
@@ -3534,7 +3552,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		}
 	}
 	for _, t := range ts {
-		if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
+		if _, err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
 			return err
 		}
 	}
@@ -3548,7 +3566,11 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	if _, err := tx.ExecContext(ctx, clearAllServedTombstonesSQL); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // DeleteTrack removes a track by path. Missing rows are not an error.
@@ -3620,6 +3642,7 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	// Step 3: best-effort filesystem cleanup, shared with the
 	// bulk-delete paths.
 	removeSidecarFiles(sidecars)
+	s.noteLibrary(ctx)
 	return nil
 }
 
@@ -3780,6 +3803,7 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("manifest: DeleteTracksBatch commit: %w", err)
 	}
+	s.noteLibrary(ctx)
 
 	// Sidecar files unlinked once, after the single commit — still UNDER
 	// s.mu (matches DeleteTracksByPrefix / WipeAllTracks). The
@@ -5270,6 +5294,9 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
 	// Step 2: filesystem cleanup AFTER the commit. Best-effort —
 	// per-file errors logged but never propagated; the row delete
 	// already committed and the operator's intent ("get rid of
@@ -6309,6 +6336,9 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	// releasing the lock first would let a concurrent UpsertVariant
 	// resurrect a row pointing at a content-hashed file we're removing).
 	removeSidecarFiles(doomedSidecars)
+	if deleted > 0 {
+		s.noteLibrary(ctx)
+	}
 	return deleted, nil
 }
 
@@ -6589,6 +6619,9 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if tCount > 0 {
+		s.noteLibrary(ctx)
 	}
 	return tCount + fCount, nil
 }
@@ -8305,7 +8338,11 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, v.SourcePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // setArtworkVersionSQL binds (version, clock, artworkMBID, version). The
@@ -8345,7 +8382,14 @@ func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, 
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
+	return n, nil
 }
 
 // variantRowSelect is the column list EVERY VariantRow reader selects
@@ -8810,7 +8854,13 @@ func (s *Store) deleteVariantRow(ctx context.Context, sourcePath, query string, 
 			return 0, err
 		}
 	}
-	return rows, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if rows > 0 {
+		s.noteLibrary(ctx)
+	}
+	return rows, nil
 }
 
 // UpdateVariantSidecarPath rewrites the `sidecar_path` of a single
@@ -9367,7 +9417,13 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if !visibleSame {
+		s.noteLibrary(ctx)
+	}
+	return nil
 }
 
 // GetAnalysis fetches one analysis row by exact source_path. Returns
@@ -9569,7 +9625,11 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, sourcePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // AnalysisCoverage is the whole-library analysed-vs-eligible breakdown
@@ -9726,7 +9786,7 @@ func localOutranksStored(local, stored string) bool {
 // tag changed (appeared, changed, or vanished) — a sidecar touch that left
 // the body identical refreshes the staleness columns and nothing else, so
 // the iOS delta carries exactly the rows whose lyricsTag moved.
-func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) error {
+func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) (bool, error) {
 	var oldTag, oldSource string
 	hadRow := true
 	err := tx.QueryRowContext(ctx, `SELECT tag, source FROM track_lyrics WHERE source_path = ?`,
@@ -9734,7 +9794,7 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 	if errors.Is(err, sql.ErrNoRows) {
 		hadRow = false
 	} else if err != nil {
-		return err
+		return false, err
 	}
 	// A NETWORK row is not this function's to reap or to overwrite on sight.
 	//
@@ -9754,7 +9814,7 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 	if networkHeld && (t.lyrics == nil || !localOutranksStored(t.lyrics.Source, oldSource)) {
 		// Nothing client-visible changed, so indexed_at is untouched — the
 		// row is byte-identical to what every paired device already holds.
-		return nil
+		return false, nil
 	}
 	// The bump goes through the SHARED statement, never a hand-rolled CASE:
 	// this writer's ONLY job is the bump, which is exactly what
@@ -9766,13 +9826,15 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 	// `indexed_at > since` drops it — see indexedAtAdvanceSQL.
 	// StampExtractorVersionBatch is precisely that shape: one `now` for the
 	// whole batch, every lyrics-changed row bumped against it.
-	bump := func() error {
-		_, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, t.Path)
-		return err
+	bump := func() (bool, error) {
+		if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, t.Path); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if t.lyrics == nil {
 		if !hadRow {
-			return nil
+			return false, nil
 		}
 		// A row exists and this extraction found nothing — drop it, INCLUDING
 		// a `sidecar-rejected` row, whose tag is '' by construction. Gating
@@ -9782,10 +9844,10 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 		// with no sidecar on disk, reported drift, and re-extracted the audio
 		// file on every scan for the rest of the library's life.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM track_lyrics WHERE source_path = ?`, t.Path); err != nil {
-			return err
+			return false, err
 		}
 		if oldTag == "" {
-			return nil // never client-visible: nothing to sync
+			return false, nil // never client-visible: nothing to sync
 		}
 		return bump()
 	}
@@ -9801,7 +9863,7 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 			source = ?, sidecar_name = ?, source_mtime_ns = ?, source_size = ?
 			WHERE source_path = ?`, l.Format, synced, l.Body, l.Language,
 			l.Source, l.SidecarName, l.SourceMTimeNS, l.SourceSize, t.Path)
-		return err
+		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO track_lyrics(source_path, format, synced, body, language, source, sidecar_name, tag,
@@ -9814,12 +9876,12 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 			source_size = excluded.source_size, indexed_at = excluded.indexed_at`,
 		t.Path, l.Format, synced, l.Body, l.Language, l.Source, l.SidecarName, l.Tag,
 		l.SourceMTimeNS, l.SourceSize, now); err != nil {
-		return err
+		return false, err
 	}
 	// A `sidecar-rejected` row (empty tag) on a track that had none is not
 	// a client-visible change — nothing to sync.
 	if oldTag == l.Tag {
-		return nil
+		return false, nil
 	}
 	return bump()
 }

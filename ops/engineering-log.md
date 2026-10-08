@@ -37699,3 +37699,78 @@ the wipe has committed still retargets that generation. The case-only
 rename pairing folds accent encoding the same way. The old spelling is
 reaped, and both spellings left in place are not
 (`TestCaseOnlyRenames`).
+
+## 2026-10-07 — sync phase 2 change events
+
+`GET /v1/events` gained `favorites.changed`, `playlists.changed` and
+`library.changed`. Each is published through the existing broker after
+the transaction that changed the document, the playlist list, or
+`indexed_at` has committed. A stale favorites PUT and an identical
+playlist body publish nothing; a second connection opened from the hook
+sees the committed revision, playlist row, or watermark, which is what
+fails if the hook moves back ahead of `Commit`.
+
+`library.changed` follows the resolved reading of the phase-2 spec. A
+full scan is `scanState.isScanning` (`Scanner.IsScanning`). Writes
+during that scan, including enrichment, produce no event of their own.
+One event is published at the end, after the flag clears, from a defer
+registered ahead of `scanning.Store(false)`. Other `indexed_at` writers
+share one trailing 30s debounce. The first draft of `NoteLibrary`
+stored the watermark and then cancelled the timer, and the cancel
+zeroed the watermark, so the quiet period published nothing; the cancel
+that re-arms only stops the previous timer. A scan-end event cancels a
+debounce that is still pending. `indexedAt` is millisecond UTC RFC3339
+(`2026-10-07T10:15:04.000Z`), which `time.RFC3339Nano` parses and which
+`since=` already accepts. Subtree scans do not set `IsScanning`, so
+their writes take the debounce; widening that flag would move the admin
+badge and the booklet-GC skip. A delete that does not bump `indexed_at`
+is not its own `library.changed`: a full scan's deletions are in the
+scan-end event because the next delta reads the journal.
+
+The demo does not construct the publisher and does not set
+`syncEvents`. The health complete-set fixture sets the flag beside
+`demoMode` because that fixture's job is every key the builder can
+emit; production serve sets it only in the non-demo branch.
+`bridge restore` still replaces the epoch from the CLI process, which
+holds no broker. Clients learn that epoch from the next playlist GET.
+The serving process publishes `playlists.changed` from
+`ReplaceBackupEpochAndNotify` when a store in that process replaces the
+epoch. `ProtocolVersion` stays 1. The iOS mirror of this PROTOCOL.md
+text is a later PR.
+
+2026-10-07, review of #1159. The sentences above that name
+`Scanner.IsScanning` as the scan and `ReplaceBackupEpochAndNotify` as a
+publisher are the first draft. Health reports a scan only while it is
+in progress and not stalled (`manifest.AdvertisedScan`), and the
+publisher follows that same predicate. `ReplaceBackupEpochAndNotify`
+had no production caller and is gone: `bridge restore` publishes
+nothing. A journaled deletion or suppression outside a full scan is a
+library change on the same trailing debounce. The watermark is the
+later of `MAX(indexed_at)` and `MAX(manifest_deletions.deleted_at)`;
+an empty library at scan end uses the publisher clock, and a query
+error publishes nothing. A sidecar lyrics bump on the version-stamp
+leg notes after that commit. A smart-mix cover does not publish
+`playlists.changed`, and a cover pruned after the playlist is already
+tombstoned does not publish a second time.
+
+2026-10-08, review round 2 of #1159. A mass delete past the journal's
+line wipes `manifest_deletions` and stamps `deletion_journal_coverage_start_ns`.
+The watermark is the later of `MAX(indexed_at)`, `MAX(deleted_at)` and
+that start, so the event moves forward when surviving rows are older
+and still fires when every track is gone. A client whose cursor
+predates the reset still sees `deltaIncomplete`. The sentences above
+that stop the watermark at the two MAXes are that earlier reading.
+
+The favorites tombstone collection reads the new revision after its
+own commit, on the request context. A cancel that lands in the commit
+hook — after the transaction is marked done, before that read — leaves
+the revision at 3 and publishes nothing (`notes` stay `[1 2]`). The
+read uses `context.WithoutCancel`. The save path already holds the
+revision and does not re-read it.
+
+A watermark query error at scan end used to publish nothing, so a
+client waiting on `library.changed` slept until the next write. Scan
+end now logs `library watermark` and publishes the publisher clock.
+A delta from an older cursor is idempotent. `noteLibrary` still
+publishes nothing when its own query fails. The sentences above that
+say a query error publishes nothing are that earlier scan-end reading.

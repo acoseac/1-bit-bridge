@@ -253,7 +253,11 @@ func (s *Store) UpsertAtlasLyrics(ctx context.Context, path string, doc lyrics.D
 	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, path); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	s.noteLibrary(ctx)
+	return true, nil
 }
 
 // AtlasLyricsStats is the operator-facing rollup of the network tier.

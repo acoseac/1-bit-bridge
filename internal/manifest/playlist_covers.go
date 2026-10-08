@@ -16,6 +16,21 @@ const (
 	CoverScopePlaylist = "playlist" // key = user-playlist id (uuid string)
 )
 
+// coverChangesPlaylistList is true only for a cover on a playlist that is
+// still live. A smart-mix cover is not a playlist-list change, and a cover
+// pruned from a playlist that is already tombstoned is not one either. A
+// query error fails closed: the commit has landed, and a missed note is
+// recovered by the next GET.
+func coverChangesPlaylistList(ctx context.Context, db *sql.DB, scope, key string) bool {
+	if scope != CoverScopePlaylist {
+		return false
+	}
+	var deleted int
+	err := db.QueryRowContext(context.WithoutCancel(ctx),
+		`SELECT deleted FROM playlists WHERE id = ?`, key).Scan(&deleted)
+	return err == nil && deleted == 0
+}
+
 // PlaylistCoverDir is the on-disk directory (under DataDir) holding the
 // resized cover JPEGs.
 func PlaylistCoverDir(dataDir string) string {
@@ -109,6 +124,14 @@ func (s *Store) SetPlaylistCover(ctx context.Context, c PlaylistCover) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var prev sql.NullString
+	switch err := s.db.QueryRowContext(ctx,
+		`SELECT image_hash FROM playlist_covers WHERE scope = ? AND key = ?`, c.Scope, c.Key).Scan(&prev); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	}
+	changed := !prev.Valid || prev.String != c.ImageHash
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO playlist_covers (scope, key, image_hash, ext, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -117,7 +140,13 @@ func (s *Store) SetPlaylistCover(ctx context.Context, c PlaylistCover) error {
 			ext        = excluded.ext,
 			updated_at = excluded.updated_at
 	`, c.Scope, c.Key, c.ImageHash, c.Ext, c.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if changed && coverChangesPlaylistList(ctx, s.db, c.Scope, c.Key) {
+		s.notePlaylists(ctx)
+	}
+	return nil
 }
 
 // GetPlaylistCover returns the cover mapping for (scope,key); ok=false when
@@ -154,6 +183,9 @@ func (s *Store) DeletePlaylistCover(ctx context.Context, scope, key string) (has
 	if _, e := s.db.ExecContext(ctx,
 		`DELETE FROM playlist_covers WHERE scope = ? AND key = ?`, scope, key); e != nil {
 		return "", "", false, e
+	}
+	if coverChangesPlaylistList(ctx, s.db, scope, key) {
+		s.notePlaylists(ctx)
 	}
 	return hash, ext, true, nil
 }

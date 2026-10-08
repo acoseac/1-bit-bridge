@@ -206,7 +206,13 @@ func (s *Store) TombstonePlaylist(ctx context.Context, id, deletedBy string) (bo
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		s.notePlaylists(ctx)
+	}
+	return n > 0, nil
 }
 
 // RestorePlaylist lifts a tombstone: the row goes live again with its
@@ -244,7 +250,13 @@ func (s *Store) RestorePlaylist(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		s.notePlaylists(ctx)
+	}
+	return n > 0, nil
 }
 
 // ListAllPlaylistsForAdmin returns every live playlist summary for the

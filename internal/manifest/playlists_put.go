@@ -69,6 +69,7 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 		if err := tx.Commit(); err != nil {
 			return PlaylistPutResult{}, err
 		}
+		s.notePlaylists(ctx)
 		return PlaylistPutResult{LastModifiedAt: p.LastModifiedAt}, nil
 	}
 	if err != nil {
@@ -111,6 +112,7 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 		if err := tx.Commit(); err != nil {
 			return PlaylistPutResult{}, err
 		}
+		s.notePlaylists(ctx)
 		return PlaylistPutResult{LastModifiedAt: stamp}, nil
 	}
 
@@ -123,6 +125,7 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 	if err := tx.Commit(); err != nil {
 		return PlaylistPutResult{}, err
 	}
+	s.notePlaylists(ctx)
 	return PlaylistPutResult{LastModifiedAt: p.LastModifiedAt}, nil
 }
 
