@@ -2,6 +2,8 @@ package api
 
 import (
 	"bufio"
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -314,5 +316,62 @@ func TestRedactPairingSecrets(t *testing.T) {
 		if string(got.Data) != tc.wantData {
 			t.Errorf("%s: data = %s, want %s", tc.name, got.Data, tc.wantData)
 		}
+	}
+}
+
+// TestAnEventStreamEndsWhenTheServeContextEnds holds GET /v1/events and
+// ends the context EndEventStreamsWhen was given. The stream closes on
+// its own. The request context is not that context: a client that is
+// still reading sees a finished body.
+func TestAnEventStreamEndsWhenTheServeContextEnds(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{dir},
+		ListenAddress: ":0",
+		LibraryName:   "Test",
+	}
+	store, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := store.Mint("test-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, store, nil, "fp")
+	stop := srv.StartEventBroker()
+	defer stop()
+	end, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.EndEventStreamsWhen(end)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, resp.Body)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the stream was still open after the serve context ended")
 	}
 }

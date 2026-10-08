@@ -149,6 +149,7 @@ type Server struct {
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses); wired once at startup, see StartEventBroker
+	eventStreamsEnd        context.Context              // nil in tests; serve sets it to the context the stop cancels. Only the event streams select on it.
 	bookletStore           BookletStore                 // nil unless WithBooklets wired — /v1/booklet availability lookups
 	bookletDir             string                       // on-disk PDF cache dir (WithBooklets)
 	bookletNudge           func(mbid string)            // optional fetch-priority nudge for the 202 path (WithBooklets)
@@ -1211,6 +1212,35 @@ func (s *Server) StartEventBroker() (stopFn func()) {
 		s.eventBroker = newEventBroker()
 	}
 	return s.eventBroker.Start()
+}
+
+// EndEventStreamsWhen makes GET /v1/events and the pairing event stream
+// return when ctx ends. The stop cancels ctx before it drains the
+// listeners. Shutdown does not cancel a handler, and a stream never goes
+// idle, so without this the drain waits out the grace. Ordinary requests
+// are not children of ctx: a manifest page, a favorites write and an
+// artwork read keep the request context and finish inside the grace.
+//
+// Called once during bridge serve startup, before the listeners accept,
+// the same happens-before StartEventBroker documents. A nil ctx is not
+// set; eventStreamDone then returns a nil channel, which blocks forever
+// in select, so a test server that never calls this keeps its streams
+// open until the client disconnects.
+func (s *Server) EndEventStreamsWhen(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	s.eventStreamsEnd = ctx
+}
+
+// eventStreamDone is the serve-shutdown signal the event-stream loops
+// select on. A server that was not told when to end returns a nil
+// channel, and a nil channel blocks forever in a select.
+func (s *Server) eventStreamDone() <-chan struct{} {
+	if s.eventStreamsEnd == nil {
+		return nil
+	}
+	return s.eventStreamsEnd.Done()
 }
 
 // WithUpscaleStats attaches the snapshot provider for GET
