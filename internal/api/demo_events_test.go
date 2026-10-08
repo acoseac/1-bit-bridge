@@ -84,7 +84,6 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 	defer stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	client := &http.Client{}
 
 	type result struct {
@@ -95,6 +94,23 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 	results := make([]result, maxBrokerSubscribers)
 	var wg sync.WaitGroup
 	wg.Add(maxBrokerSubscribers)
+	// t.Cleanup is LIFO. The body close is registered first and the
+	// join second, so a test that fails or times out cancels and waits
+	// for every stream goroutine before a cleanup reads results or
+	// closes a body.
+	t.Cleanup(func() {
+		for _, r := range results {
+			if r.held != nil {
+				r.held.Body.Close()
+			}
+		}
+	})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+		<-done
+	})
 	for i := 0; i < maxBrokerSubscribers; i++ {
 		go func(i int) {
 			defer wg.Done()
@@ -118,7 +134,6 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 			results[i].held = resp
 		}(i)
 	}
-	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
@@ -128,13 +143,6 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("demo /v1/events streams did not answer")
 	}
-	t.Cleanup(func() {
-		for _, r := range results {
-			if r.held != nil {
-				r.held.Body.Close()
-			}
-		}
-	})
 
 	var not404, wrongCode, failed int
 	for _, r := range results {
