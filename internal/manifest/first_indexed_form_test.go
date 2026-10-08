@@ -62,10 +62,7 @@ func TestACancelledCollapseKeepsTheDatesTheAddRecorded(t *testing.T) {
 	other := t.TempDir()
 	base := filepath.Base(root)
 	ctx := context.Background()
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, base); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
+	if _, err := store.RecordFirstIndexedCarryAndWipe(ctx, false, base); err != nil {
 		t.Fatal(err)
 	}
 	sc.SetRoots([]string{root, other})
