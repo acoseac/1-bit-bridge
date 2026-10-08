@@ -304,8 +304,14 @@ func TestJournal_PruneAdvancesCoverage(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	// Tombstone written "200 days ago" via the injected clock.
+	// Tombstone written "200 days ago" via the injected clock. A delete
+	// stamps one past the coverage seed OpenStore just wrote, which is
+	// the real clock, so that seed moves back with the injected clock
+	// or the old tombstone is stamped at the seed and the prune keeps it.
 	old := base.Add(-200 * 24 * time.Hour)
+	if err := s.SetScanState(ctx, deletionJournalCoverageKey, fmt.Sprintf("%d", old.Add(-time.Hour).UnixNano())); err != nil {
+		t.Fatal(err)
+	}
 	s.now = func() time.Time { return old }
 	journalUpsert(t, s, "p/old.flac", 1)
 	if err := s.DeleteTrack(ctx, "p/old.flac"); err != nil {
@@ -464,13 +470,13 @@ func TestManifest_DeltaOmitsPathsWithServedRows(t *testing.T) {
 // journalDecision is what one decideDeletionJournalMode call did: the
 // answer it gave, and BOTH halves of the reset it may have performed.
 //
-// Both, because `resetDeletionJournalCoverageTx` runs two statements —
-// it DELETEs every tombstone and it stamps `deletionJournalCoverageKey`
-// in scan_state — and an assertion on the tombstones alone passes
-// against a version that drops the marker. The marker is what makes a
-// delta client answer `deltaIncomplete` and full-sync; without it the
-// client reads a wiped journal as "nothing was deleted", which is the
-// exact wrong answer in the exact case this guard exists for.
+// Both, because `resetDeletionJournalCoverageTx` reads the next stamp,
+// DELETEs every tombstone and stamps `deletionJournalCoverageKey` in
+// scan_state — and an assertion on the tombstones alone passes against
+// a version that drops the marker. The marker is what makes a delta
+// client answer `deltaIncomplete` and full-sync; without it the client
+// reads a wiped journal as "nothing was deleted", which is the exact
+// wrong answer in the exact case this guard exists for.
 // (CodeRabbit on #958.)
 type journalDecision struct {
 	perChunk      bool

@@ -37857,3 +37857,91 @@ also what a missing carry produces.
 `go test -race -count=2 ./internal/manifest/` passed
 (`ok … 1727.170s`). `make check` passed: fmt, vet, and the race suite,
 with `internal/manifest` at `913.686s`.
+
+## 2026-10-08 — a same-tick delta stamp is one past the watermark (backlog B300)
+
+`TestAMassDeletePublishesAWatermarkThatMovedForward` failed the Windows
+legs of #1161 and #1162 with "watermark went backwards: before
+1791477528076963800, event 1791477528076963800". The two values are
+equal, and both are multiples of 100 ns, which is the Windows clock.
+The test passed when #1159 merged, so it depends on the upserts and the
+delete landing in one tick. The assertion is `got <= before`.
+
+The delete is a mass op. The test deletes 2 of 3 tracks, and
+`n * deletionJournalMassOpLibraryDivisor > total` is `2 * 4 > 3`.
+`decideDeletionJournalMode` then calls `resetDeletionJournalCoverageTx`,
+which wiped `manifest_deletions` and stored `now` as
+`deletion_journal_coverage_start_ns`. `libraryWatermark` is the MAX of
+`tracks.indexed_at`, `manifest_deletions.deleted_at` and that start. On
+a coarse clock the start equals the `indexed_at` the upserts just
+wrote, or the coverage seed migration v41 wrote at open when the whole
+test fits in one tick. The published event equals the watermark taken
+before the delete.
+
+That is also a lost delete. `DeltaSinceCovered` is
+`since.UnixNano() >= startNs`. `DeletedSince` is `deleted_at > since`.
+A client whose cursor equals the new start is told the journal covers
+it, and the wipe wrote no tombstone, so the delta lists nothing. The
+old reset stored the start AFTER the wipe, so a cursor sitting on a
+tombstone the wipe had just erased was covered too: with `indexed_at`
+at 100, a tombstone at 200 and the clock at 200, the watermark left
+after the wipe is 100 and `MAX(now, indexed_at + 1)` is 200.
+
+`indexed_at` bumps already cleared the library-wide max of that one
+column (`MAX(now, MAX(indexed_at) + 1)`). A `deleted_at` or a coverage
+start above that max was invisible to them. A bump whose clock equals
+that tombstone lands on the cursor, and `indexed_at > since` drops the
+row. Journal inserts bound a plain `now` for `deleted_at`, so a
+per-path tombstone in the same tick has the same miss.
+
+`nextDeltaStampSQL` is the one expression, aliased as
+`indexedAtAdvanceSQL` and pasted at each `indexed_at` assignment (a
+concatenated const is what SonarCloud `go:S2077` flags). It is
+`MAX(clock, MAX(indexed_at) + 1, MAX(deleted_at) + 1, coverage + 1)`,
+each arm COALESCE'd because scalar MAX is NULL when any argument is.
+The coverage key is the literal `deletionJournalCoverageKey`, so the
+fragment keeps one placeholder and the existing `(clock, …)` binds.
+The journal insert selects it. The coverage reset reads it BEFORE the
+`DELETE FROM manifest_deletions`, then stores that value. The `>`
+filters and `DeltaSinceCovered`'s `>=` are unchanged. `ProtocolVersion`
+stays 1.
+
+The upsert conflict arms, a fresh insert's clock, and migration v34's
+`post()` stay as they were. `PruneDeletionJournal` still advances the
+coverage start with `MAX(stored, cutoff)` only when it pruned, and the
+cutoff is 180 days back. Applying the next-stamp expression there would
+move coverage to now and force a full sync on every prune.
+`TestJournal_PruneAdvancesCoverage` moves the coverage seed back with
+the injected clock: a delete stamps one past that seed, so a seed left
+at store-open time stamps the "200 days ago" tombstone at now and the
+prune keeps it.
+
+No migration. `idx_tracks_indexed` and
+`idx_manifest_deletions_deleted_at` already exist, and `scan_state` is
+keyed on `k`. `EXPLAIN QUERY PLAN` of `SELECT nextDeltaStampSQL`, after
+`ANALYZE`, is three scalar subqueries: `SEARCH tracks USING COVERING
+INDEX idx_tracks_indexed`, `SEARCH manifest_deletions USING COVERING
+INDEX idx_manifest_deletions_deleted_at`, and `SEARCH scan_state` on
+its primary key. The library-watermark UNION uses the same three.
+
+`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm` is the
+truth table. The deleted_at-max case (clock 45, deleted_at 50) wants
+51; the indexed_at-only expression returns the clock.
+`TestADeleteInTheSameNanosecondReachesADelta` plants a tombstone a
+million nanoseconds above `indexed_at`, freezes the clock there, and
+deletes one of four tracks (`DeleteTrack`, so it is per-path either
+way). The new `deleted_at` is past that watermark and
+`BuildManifest` since it lists the path. `TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered`
+deletes two of four (`8 > 4`) at the same shape and wants the start
+past the planted tombstone and `deltaIncomplete` on a cursor there. A
+stamp read after the wipe reports that cursor covered.
+`TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark` bumps
+through `UpsertVariant` with the clock on that tombstone and wants the
+row in a since-delta. `TestAMassDeletePublishesAWatermarkThatMovedForward`
+freezes one instant an hour ahead of `time.Now()` (past the v41 seed)
+across the upserts and the delete. Replacing `nextDeltaStampSQL` and
+every pasted copy with the indexed_at-only expression turns the union
+tests red and leaves the event test green, because
+`MAX(now, indexed_at + 1)` already moves a coverage start whose
+watermark is `indexed_at`. Storing plain `now` again in the coverage
+reset turns the event test red.

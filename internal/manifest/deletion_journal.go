@@ -71,13 +71,35 @@ const (
 // instead — cheap insurance against a pathological journal.
 const manifestDeltaDeletedCap = 20_000
 
+// nextDeltaStampSQL is the next value a delta client can see. One bind,
+// the clock (`s.now().UnixNano()`). The result is the later of that
+// clock and one past each arm of the library watermark: MAX(indexed_at),
+// MAX(deleted_at), and the deletion-journal coverage start.
+// indexedAtAdvanceSQL is this expression. The coverage key is the literal
+// deletionJournalCoverageKey, so the fragment has exactly one placeholder
+// and every existing (clock, …) bind order stays. Scalar MAX, not a
+// UNION, so each arm stays a subquery SQLite's max-optimization can
+// answer from its index. Scalar MAX is NULL when any argument is NULL,
+// so each arm is COALESCE'd.
+const nextDeltaStampSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)`
+
+// selectNextDeltaStampSQL reads that stamp. The coverage reset calls it
+// before it deletes the tombstones the stamp has to clear. A plain
+// literal, not `"SELECT " + nextDeltaStampSQL`: QueryRowContext of a
+// concatenated const is what SonarCloud go:S2077 flags.
+// TestNextDeltaStampReadsTheCoverageKey requires this equal to
+// "SELECT " + nextDeltaStampSQL.
+const selectNextDeltaStampSQL = `SELECT MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)`
+
 // Journal INSERT fragments. Prefix + <the sibling DELETE's WHERE> +
 // suffix, concatenated at COMPILE time where the predicate is a const —
 // the same const-derivation that keeps thresholdReap's unlink set and
-// row set in lockstep (and keeps SonarCloud go:S2077 quiet).
+// row set in lockstep (and keeps SonarCloud go:S2077 quiet). The clock
+// bind is the one placeholder inside nextDeltaStampSQL, still the first
+// argument.
 const (
 	journalInsertPrefixSQL = `INSERT INTO manifest_deletions(path, deleted_at)
-		SELECT path, ? FROM tracks WHERE `
+		SELECT path, ` + nextDeltaStampSQL + ` FROM tracks WHERE `
 	journalInsertSuffixSQL = `
 		ON CONFLICT(path) DO UPDATE SET deleted_at = excluded.deleted_at`
 
@@ -131,17 +153,25 @@ const clearAllServedTombstonesSQL = `DELETE FROM manifest_deletions
 const clearTombstoneSQL = `DELETE FROM manifest_deletions WHERE path = ?`
 
 // resetDeletionJournalCoverageTx wipes every tombstone and restarts
-// coverage at nowNs, inside the caller's transaction. Direct scan_state
-// upsert (NOT SetScanState — the callers already hold s.mu and
-// SetScanState would deadlock re-acquiring it).
+// coverage past the watermark that wipe is about to erase, inside the
+// caller's transaction. The stamp is read BEFORE the DELETE: afterwards
+// MAX(deleted_at) is empty, and a client holding that deleted_at reads a
+// coverage start equal to its cursor as covered, with no tombstones left
+// to list. nowNs is the clock bind. Direct scan_state upsert (NOT
+// SetScanState — the callers already hold s.mu and SetScanState would
+// deadlock re-acquiring it).
 func resetDeletionJournalCoverageTx(ctx context.Context, tx *sql.Tx, nowNs int64) error {
+	var stamp int64
+	if err := tx.QueryRowContext(ctx, selectNextDeltaStampSQL, nowNs).Scan(&stamp); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM manifest_deletions`); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO scan_state(k, v) VALUES(?, ?)
 		ON CONFLICT(k) DO UPDATE SET v = excluded.v
-	`, deletionJournalCoverageKey, strconv.FormatInt(nowNs, 10))
+	`, deletionJournalCoverageKey, strconv.FormatInt(stamp, 10))
 	return err
 }
 
