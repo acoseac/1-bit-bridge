@@ -37775,6 +37775,46 @@ A delta from an older cursor is idempotent. `noteLibrary` still
 publishes nothing when its own query fails. The sentences above that
 say a query error publishes nothing are that earlier scan-end reading.
 
+## 2026-10-08 — demo `/v1/events` takes no broker slot (backlog B161)
+
+`GET /v1/events` subscribed with `maxPerTopic` 0. The only bound was
+`maxBrokerSubscribers` (256), shared with `GET /v1/pairing/{id}/events`.
+On a demo bridge the bearer is the one static token every app ships.
+Measured over the real `api.Server` in demo mode, with the broker and
+the pairing store wired: 256 held `GET /v1/events` streams from that
+token filled the broker, and the next pairing stream answered 503.
+
+Nothing in this process reads `/v1/events` with the demo token. The
+admin console's stream is `GET /api/events`, a different broker. The
+iOS app opens `v1/events` only from `BridgeSyncEventCoordinator`, and
+`shouldOpenStream` requires a non-demo share that advertises
+`syncEvents`. A demo share never qualifies, whatever `features` it
+lists. `pushEventsSupported` is not a production decision in the app
+(one test fixture names the string). Pairing streams are
+`v1/pairing/{id}/events` with the poll secret, from `BridgeJoinSession`,
+and serve still wires that store on a demo bridge.
+
+A per-token cap would cap the whole demo, because every client shares
+one token id. A per-client cap would need the PROXY protocol: the
+demo's API arrives through a TCP passthrough, so `RemoteAddr` is
+`127.0.0.1` for every client. The handler now returns 404
+`events_not_supported` when `demoMode` is set, before `subscribe`, the
+same code a missing broker already returns and the same polling
+fallback the app already uses. `pushEventsSupported` stays in
+`features` when the broker is running: the complete-set health fixture
+emits it beside `demoMode`, and the 404 is the documented fallback.
+Pairing streams and a non-demo `/v1/events` are unchanged.
+`ProtocolVersion` stays 1.
+
+`TestADemoTokenHolderCannotStarvePairingEvents` was red before the
+return (256 of 256 answered 200, the broker held 256, the pairing
+stream was 503) and green after (every demo stream 404
+`events_not_supported`, the broker empty, the pairing stream 200).
+`TestAMintedTokenOnADemoBridgeGetsNoEventStream` pins the refusal to
+the posture. `TestAPairedDeviceEventStreamStillSubscribes` pins the
+non-demo 200. Removing the `demoMode` arm turns the starvation test
+red again.
+
 ## 2026-10-08 — backlog B290: scenario tests use the combined record and wipe
 
 Since #1158 a root flip records the first-indexed carry and wipes

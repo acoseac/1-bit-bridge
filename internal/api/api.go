@@ -574,13 +574,15 @@ func (s *Server) WithDeviceRegistrar(r DeviceRegistrar) *Server {
 }
 
 // WithDemoMode marks this server as the read-only public demo posture.
-// The only behavior here is the `demoMode` flag in /v1/health.features —
-// clients use it to label the source as a demo and hard-lock their sync
-// UI. The actual read-only enforcement comes from the stores that were
-// deliberately NOT wired in cmd/bridge when demo mode is on (playlist /
-// favorites / history / device registrar), whose absence already yields
-// the typed 404s and drops their five feature flags. Returns the
-// receiver for chaining.
+// It sets the `demoMode` flag in /v1/health.features — clients use it to
+// label the source as a demo and hard-lock their sync UI — and
+// GET /v1/events answers 404 events_not_supported before subscribing, so
+// the public demo token occupies no broker slot. Pairing streams stay on
+// the broker. The read-only enforcement for user data comes from the
+// stores that were deliberately NOT wired in cmd/bridge when demo mode
+// is on (playlist / favorites / history / device registrar), whose
+// absence already yields the typed 404s and drops their five feature
+// flags. Returns the receiver for chaining.
 func (s *Server) WithDemoMode(enabled bool) *Server {
 	s.demoMode = enabled
 	return s

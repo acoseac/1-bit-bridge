@@ -2225,7 +2225,13 @@ lost my library."
   version-stamp leg notes after its commit; a refusal skips lyrics.
   A smart-mix cover and a cover pruned from an already-tombstoned
   playlist publish no `playlists.changed`. The demo wires none of
-  this and does not advertise `syncEvents`. `bridge restore` replaces the
+  this and does not advertise `syncEvents`. A demo bridge answers
+  `GET /v1/events` with 404 `events_not_supported` before it subscribes,
+  so the public demo token occupies no broker slot; pairing streams
+  keep the global cap, and a non-demo `/v1/events` still subscribes
+  (`TestADemoTokenHolderCannotStarvePairingEvents`,
+  `TestAMintedTokenOnADemoBridgeGetsNoEventStream`,
+  `TestAPairedDeviceEventStreamStillSubscribes`). `bridge restore` replaces the
   epoch in its own process, which has no broker and publishes nothing;
   the serving process publishes `playlists.changed` only from a store
   that holds the hooks.
@@ -2239,6 +2245,9 @@ lost my library."
   `TestAFullScanPublishesOneLibraryEvent`,
   `TestAWatermarkQueryErrorPublishesTheScanEndClock`,
   `TestADemoBridgeDoesNotAdvertiseSyncEvents`,
+  `TestADemoTokenHolderCannotStarvePairingEvents`,
+  `TestAMintedTokenOnADemoBridgeGetsNoEventStream`,
+  `TestAPairedDeviceEventStreamStillSubscribes`,
   `TestSyncTopicsReplayOnLastEventID`.)
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process
   ring**, and fires ONE LINE PER TOMBSTONE past the threshold
