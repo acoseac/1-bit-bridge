@@ -3604,6 +3604,37 @@ no failing test — which is the shape to expect in this area.
   `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`,
   `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
+- **A PCM job's `-G` file lands in the configured temp dir, and a short
+  rendition whose temp volume cannot hold it is the host's** (2026-10-08,
+  backlog B270). `soxArgsFrom` puts `--temp` and `renderScratchDir` ahead
+  of `-G` on the direct route and the ffmpeg pipe, and `Run` creates that
+  directory before sox. sox holds one `int32` sample per output frame
+  there — duration × target rate × channels × 4 — and keeps the file
+  open at that size while it writes the rendition. Measured on sox
+  14.4.2: a 90 s stereo file to 176.4 kHz held exactly 127,008,000 bytes,
+  one file, on both routes. The file is unlinked at `mkstemp` / `tmpfile`,
+  so a directory listing stays empty and an earlier poll of `--temp`
+  (the DSD chain's S1 note) saw nothing. A DSD job passes no `-G`, so
+  `GuardTempBytes` is 0 and `TempVolumeBytes` is the Stage A scratch. One
+  lane holds one of the two, and the pre-flight budgets
+  `lanes × max(scratch, guard)` on the upscale submit, the rendition
+  submit, the on-demand room check and the sweep. The settings blob is
+  unchanged and names no path. When a finished stream is shorter than
+  its source and the temp volume's free space is below that file, or a
+  64 KiB write in the scratch directory fails for a cause
+  `hostOutputFault` names, the job is an output fault
+  (`reasonGuardTempShort`) and strikes nothing. A short stream whose
+  temp volume has room for the file still strikes. sox exits 0 after
+  `gain: error writing temporary file` and leaves a finished short FLAC;
+  the temporary is gone by then, so the free space afterwards is what
+  was left beside the write.
+  (`TestGuardTempBytesIsThePostRateInt32File`,
+  `TestSoxArgsShape`, `TestSoxArgsFromSharesOneChain`,
+  `TestRunPublishesOnlyAWholeRendition`,
+  `TestACutRenditionStrikesNothingAndAShortOneStrikes`,
+  `TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing`,
+  `TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit`,
+  `TestListAutoOptimizeCandidatesReadsAPCMRowsDuration`.)
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,

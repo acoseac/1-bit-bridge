@@ -1075,20 +1075,16 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 }
 
 // roomForRendition refuses a job whose volumes have no room for it, before it
-// is queued: the variants volume for the projected rendition, and for a DSD
-// render the scratch volume for its Stage A intermediate. The batch and the
-// auto-optimize sweep check before they queue too (ProjectedSize and
-// RequiredBytesWithMargin with DefaultDiskSafetyMargin; RenderScratchBytes);
-// the on-demand path made no check, so on a full volume every request queued
-// a render that could only fail, and a phone's requests kept coming (backlog
-// B264). A DSD render holds its scratch while it writes the rendition (Stage
-// C reads the one into the other), so where the two directories are on one
-// volume it needs the sum there. A probe that cannot read a volume refuses
-// too, as theirs do.
+// is queued: the variants volume for the projected rendition, and the temp
+// volume for the file the job holds there (a DSD render's Stage A scratch,
+// or a PCM job's gain-guard file). The batch and the auto-optimize sweep
+// check before they queue too. A job holds that file while it writes the
+// rendition, so where the two directories are on one volume it needs the
+// sum there. A probe that cannot read a volume refuses too.
 func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
 	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
 		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
-	scratch := spec.RenderScratchBytes()
+	scratch := spec.TempVolumeBytes()
 	if scratch <= 0 {
 		return a.roomOn(spec.OutputDir, projected)
 	}
@@ -1197,11 +1193,11 @@ func buildPCMRenderSpec(track *manifest.Track, absPath, outputDir, tempDir strin
 	return renditionSpec(track, absPath, outputDir, tempDir, sourceHz, sourceBits, target, 24, transcode.JobKindPCMRender), nil
 }
 
-// renditionSpec assembles the JobSpec both rendition kinds share. For a
-// DSD source the render facts ride along from the manifest row: the
-// nominal DSD rate is SourceSampleRate already, and channels / duration /
-// compression / the scratch dir are what the chain's geometry check, the
-// completeness guard, the pool's timeout and Stage A read.
+// renditionSpec assembles the JobSpec both rendition kinds share. Channels,
+// duration and the temp dir ride along for every source: a PCM job's -G
+// file lands in that dir and is sized from the duration, and a DSD job's
+// Stage A scratch does too. The DSD flag and compression stay on a DSD
+// source. The nominal DSD rate is SourceSampleRate already.
 func renditionSpec(track *manifest.Track, absPath, outputDir, tempDir string, sourceHz, sourceBits, targetRate, targetBits int, kind transcode.JobKind) transcode.JobSpec {
 	spec := transcode.JobSpec{
 		SourceAbsPath:    absPath,
@@ -1212,18 +1208,18 @@ func renditionSpec(track *manifest.Track, absPath, outputDir, tempDir string, so
 		TargetBits:       targetBits,
 		Quality:          transcode.QualityVeryHigh,
 		OutputDir:        outputDir,
+		TempDir:          tempDir,
 		Kind:             kind,
+	}
+	if track.Channels != nil {
+		spec.SourceChannels = *track.Channels
+	}
+	if track.Duration != nil {
+		spec.SourceDurationSec = *track.Duration
 	}
 	if isDSDTrack(track) {
 		spec.SourceIsDSD = true
 		spec.SourceCompression = track.Compression
-		spec.TempDir = tempDir
-		if track.Channels != nil {
-			spec.SourceChannels = *track.Channels
-		}
-		if track.Duration != nil {
-			spec.SourceDurationSec = *track.Duration
-		}
 	}
 	return spec
 }

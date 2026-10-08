@@ -128,8 +128,8 @@ func TestAutoOptimizeSweepIncludesDSDOnlyWhenCapsOn(t *testing.T) {
 		if !ok {
 			t.Fatal("the FLAC was not swept")
 		}
-		if flac.SourceIsDSD || flac.TempDir != "" {
-			t.Errorf("the PCM job must not carry DSD facts: SourceIsDSD=%v TempDir=%q", flac.SourceIsDSD, flac.TempDir)
+		if flac.SourceIsDSD || flac.TempDir != "/scratch/render" {
+			t.Errorf("the PCM job lands its gain-guard file in the scratch dir: SourceIsDSD=%v TempDir=%q", flac.SourceIsDSD, flac.TempDir)
 		}
 	})
 	t.Run("caps with DST add the DST row", func(t *testing.T) {

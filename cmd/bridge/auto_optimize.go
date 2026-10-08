@@ -335,16 +335,17 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, k
 		// CarPlay request the two-channel queue exists to protect. See the
 		// JobSpec.Background docstring.
 		Background: true,
+		// The temp dir holds a PCM job's gain-guard file and a DSD job's
+		// Stage A scratch. Channels and duration size that file.
+		TempDir:           sw.renderTempDir(),
+		SourceChannels:    c.Channels,
+		SourceDurationSec: c.DurationSec,
 	}
 	if c.IsDSD {
-		// The render facts the two-stage chain and the pool's timeout
-		// consume; VariantID() lands in the `optimized-dsd-` family off
+		// VariantID() lands in the `optimized-dsd-` family off
 		// SourceIsDSD. The nominal DSD rate is SourceSampleRate already.
 		spec.SourceIsDSD = true
 		spec.SourceCompression = c.Compression
-		spec.SourceChannels = c.Channels
-		spec.SourceDurationSec = c.DurationSec
-		spec.TempDir = sw.renderTempDir()
 	}
 	return spec, projected, planEnqueue
 }
@@ -386,12 +387,13 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			counts.DiskFloorReached = true
 			return false
 		}
-		// The scratch volume, for a DSD render. A point check, not a
+		// The temp volume, for a DSD render's scratch or a PCM job's
+		// gain-guard file. A point check, not a
 		// running sum — scratch is freed per job, so the sweep's TOTAL is
 		// never held at once — but it is sized for every lane the pool can
 		// run concurrently, because that peak IS held at once. Stop rather
 		// than skip, for the same reason as above.
-		if scratch := spec.RenderScratchBytes() * int64(sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
+		if scratch := spec.TempVolumeBytes() * int64(sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
 			counts.DiskFloorReached = true
 			return false
 		}

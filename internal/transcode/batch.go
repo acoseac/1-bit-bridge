@@ -353,6 +353,17 @@ func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string
 	return available, nil
 }
 
+// preflightTempVolume grades the volume that holds one lane's temporary
+// file (the DSD Stage A scratch, or the PCM gain-guard file) times the
+// lane count. hold is the largest single file; zero skips the check.
+func (c *Coordinator) preflightTempVolume(hold int64, op string) error {
+	if hold <= 0 {
+		return nil
+	}
+	_, err := c.diskPreflight(renderScratchDir(c.renderTempDir), hold*int64(c.laneCount()), op+" (render scratch)")
+	return err
+}
+
 // Submit walks every track under `path`, filters ineligible /
 // already-covered, computes the projected variant size, refuses on
 // insufficient disk headroom, inserts an `upscale_batches` row,
@@ -424,18 +435,24 @@ func validateUpscaleTarget(targetRate, targetBits int) error {
 }
 
 type upscaleCandidate struct {
-	path       string
-	absPath    string
-	size       int64
-	mtimeNS    int64
-	sampleRate int
-	bits       int
+	path        string
+	absPath     string
+	size        int64
+	mtimeNS     int64
+	sampleRate  int
+	bits        int
+	channels    int
+	durationSec float64
 }
 
 type upscaleCandidates struct {
 	cands          []upscaleCandidate
 	alreadyCovered int
 	totalProjected int64
+	// maxGuardTemp is the largest -G file any single PCM candidate holds
+	// on the temp volume (GuardTempBytes). Zero when no candidate carries
+	// a duration. The largest, not the sum: one lane holds one job.
+	maxGuardTemp int64
 }
 
 // buildUpscaleCandidates filters projections through the upscale
@@ -545,13 +562,18 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 			continue
 		}
 		out.cands = append(out.cands, upscaleCandidate{
-			path:       t.Path,
-			absPath:    absPath,
-			size:       t.Size,
-			mtimeNS:    t.MTimeNS,
-			sampleRate: t.SampleRate,
-			bits:       t.BitsPerSample,
+			path:        t.Path,
+			absPath:     absPath,
+			size:        t.Size,
+			mtimeNS:     t.MTimeNS,
+			sampleRate:  t.SampleRate,
+			bits:        t.BitsPerSample,
+			channels:    t.Channels,
+			durationSec: t.DurationSec,
 		})
+		if g := (JobSpec{SourceChannels: t.Channels, SourceDurationSec: t.DurationSec, TargetSampleRate: targetRate}).GuardTempBytes(); g > out.maxGuardTemp {
+			out.maxGuardTemp = g
+		}
 		out.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 			targetRate, targetBits, compressionFct)
 	}
@@ -573,6 +595,9 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 	picked := c.buildUpscaleCandidates(path, projections, targetRate, targetBits)
 	cands, alreadyCovered, totalProjected := picked.cands, picked.alreadyCovered, picked.totalProjected
 
+	if err := c.preflightTempVolume(picked.maxGuardTemp, "submit"); err != nil {
+		return nil, err
+	}
 	available, err := c.diskPreflight(outputDir, totalProjected, "submit")
 	if err != nil {
 		return nil, err
@@ -668,17 +693,20 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 	enqueued := 0
 	for _, ca := range cands {
 		spec := JobSpec{
-			SourceAbsPath:    ca.absPath,
-			SourceLibraryRel: ca.path,
-			SourceMTimeNS:    ca.mtimeNS,
-			SourceSize:       ca.size,
-			SourceSampleRate: ca.sampleRate,
-			SourceBits:       ca.bits,
-			TargetSampleRate: targetRate,
-			TargetBits:       targetBits,
-			Quality:          QualityVeryHigh,
-			OutputDir:        outputDir,
-			BatchID:          batchID,
+			SourceAbsPath:     ca.absPath,
+			SourceLibraryRel:  ca.path,
+			SourceMTimeNS:     ca.mtimeNS,
+			SourceSize:        ca.size,
+			SourceSampleRate:  ca.sampleRate,
+			SourceBits:        ca.bits,
+			TargetSampleRate:  targetRate,
+			TargetBits:        targetBits,
+			Quality:           QualityVeryHigh,
+			OutputDir:         outputDir,
+			TempDir:           c.renderTempDir,
+			SourceChannels:    ca.channels,
+			SourceDurationSec: ca.durationSec,
+			BatchID:           batchID,
 		}
 		err := c.pool.Enqueue(spec)
 		if errors.Is(err, ErrDuplicateInflight) {
@@ -970,15 +998,17 @@ type optimizeCandidates struct {
 	// whole-library batch would refuse every batch for scratch that is
 	// never held at once.
 	maxRenderScratch int64
+	// maxGuardTemp is the largest PCM -G file in the batch. Kept apart
+	// from maxRenderScratch so a FLAC, which has no Stage A file, still
+	// adds nothing to that figure. One lane holds one of the two.
+	maxGuardTemp int64
 }
 
 // add appends one candidate and folds it into the run totals: the
-// projected sidecar size, and — for a DSD source — the scratch its render
-// holds (JobSpec.RenderScratchBytes, the same derivation the sweeper
-// budgets with). A projection carries neither duration nor channels, so
-// the duration is size-derived at the nominal DSD rate and the channel
-// count is stereo — a multichannel source over-estimates, which is the
-// conservative direction for a pre-flight.
+// projected sidecar size, the DSD Stage A scratch (RenderScratchBytes:
+// the row's duration, or a size-derived one at the nominal DSD rate
+// when the row has none, stereo when the channel count is missing),
+// and the PCM gain-guard file (GuardTempBytes, from the row's duration).
 func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, targetRate int, kind JobKind, targetBits int, compressionFct float64) {
 	o.cands = append(o.cands, optimizeCandidate{
 		path:        t.Path,
@@ -1002,6 +1032,9 @@ func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, tar
 		TargetSampleRate: targetRate}).RenderScratchBytes()
 	if scratch > o.maxRenderScratch {
 		o.maxRenderScratch = scratch
+	}
+	if g := (JobSpec{SourceIsDSD: t.IsDSD, SourceChannels: t.Channels, SourceDurationSec: t.DurationSec, TargetSampleRate: targetRate}).GuardTempBytes(); g > o.maxGuardTemp {
+		o.maxGuardTemp = g
 	}
 }
 
@@ -1105,24 +1138,16 @@ func (c *Coordinator) submitRenditionProjections(ctx context.Context, path strin
 	// track, and on the VPS it lives on a 23 GB root disk while the
 	// sidecars go to a B2 mount — the two volumes have nothing to do with
 	// each other, so neither check can stand in for the other.
-	if picked.maxRenderScratch > 0 {
-		// Times the LANE COUNT. The pool runs EffectiveWorkers() jobs
-		// concurrently on distinct dedup keys, so a batch legitimately holds
-		// that many Stage A intermediates at once — and an intermediate is
-		// int32 at the target rate for the whole track (the docblock's own
-		// figure: 5.08 GB for an hour of stereo at 176.4 kHz). Grading the
-		// largest SINGLE job passed a pre-flight that four concurrent writes
-		// then blew through, and on a host whose tempDir is the root disk
-		// that is a system-wide ENOSPC rather than one failed job.
-		//
-		// The auto-optimize sweeper already answers this question correctly
-		// and says so in its own comment ("sized for every lane the pool can
-		// run concurrently, because that peak IS held at once"); this is the
-		// batch path catching up to it.
-		want := picked.maxRenderScratch * int64(c.laneCount())
-		if _, err := c.diskPreflight(renderScratchDir(c.renderTempDir), want, op+" (render scratch)"); err != nil {
-			return nil, err
-		}
+	// Times the LANE COUNT, over the larger of the DSD Stage A scratch and
+	// the PCM gain-guard file. One lane holds one job, and a job holds one
+	// of those files, so the peak is lanes times the larger single file.
+	// Adding the two would refuse a batch whose jobs each fit.
+	hold := picked.maxRenderScratch
+	if picked.maxGuardTemp > hold {
+		hold = picked.maxGuardTemp
+	}
+	if err := c.preflightTempVolume(hold, op); err != nil {
+		return nil, err
 	}
 	available, err := c.diskPreflight(outputDir, picked.totalProjected, op)
 	if err != nil {

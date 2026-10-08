@@ -171,11 +171,12 @@ func TestSidecarFilenameLengthBounded(t *testing.T) {
 }
 
 // TestSoxArgsShape pins the exact argv shape we hand to sox.
-// `-G` (gain-guard) leads as a global option; quality "very-high"
-// → `rate -v -L <Hz>` (linear phase pinned explicitly; byte-identical
-// to sox's default — see SoxArgs), dither -s, bit depth flag -b N,
-// .tmp suffix on output. Any change to this shape needs an
-// integration-test re-run on a known-good fixture.
+// `--temp` names the bridge scratch directory and `-G` (gain-guard)
+// follows it, both global options ahead of the input; quality
+// "very-high" → `rate -v -L <Hz>` (linear phase pinned explicitly;
+// byte-identical to sox's default — see SoxArgs), dither -s, bit
+// depth flag -b N, .tmp suffix on output. Any change to this shape
+// needs an integration-test re-run on a known-good fixture.
 func TestSoxArgsShape(t *testing.T) {
 	j := JobSpec{
 		SourceAbsPath:    "/lib/Music/Album/01.flac",
@@ -187,6 +188,7 @@ func TestSoxArgsShape(t *testing.T) {
 	}
 	args, settings, finalPath, tmpPath := j.SoxArgs()
 	want := []string{
+		"--temp", renderScratchDir(j.TempDir),
 		"-G",
 		"/lib/Music/Album/01.flac",
 		"-b", "24",
@@ -206,8 +208,8 @@ func TestSoxArgsShape(t *testing.T) {
 	// Q2: the returned tmpPath IS the sox output argument, and finalPath is the
 	// rename target — so RunSox renames exactly the file sox wrote, with no
 	// independent SidecarPath recomputation.
-	if tmpPath != args[6] {
-		t.Errorf("tmpPath %q != sox output arg args[6] %q", tmpPath, args[6])
+	if tmpPath != args[8] {
+		t.Errorf("tmpPath %q != sox output arg args[8] %q", tmpPath, args[8])
 	}
 	if finalPath != j.SidecarPath() {
 		t.Errorf("finalPath = %q, want %q", finalPath, j.SidecarPath())
@@ -217,23 +219,56 @@ func TestSoxArgsShape(t *testing.T) {
 	if !tokenRe.MatchString(tmpPath) {
 		t.Errorf("tmpPath = %q, want %q + .<8 hex>.tmp", tmpPath, j.SidecarPath())
 	}
-	// Settings JSON must mention the rate flag, phase, target rate,
-	// guard flag, and schema version so a future post-mortem can
-	// identify what produced this sidecar.
-	for _, needle := range []string{`"resampler":"sox"`, `"rateFlag":"-v"`, `"phase":"linear"`, `"targetRate":176400`, `"guard":true`, `"schemaVersion":"v2"`} {
-		if !strings.Contains(settings, needle) {
-			t.Errorf("settings JSON missing %q (got: %s)", needle, settings)
-		}
+	// The settings blob is the variant's identity. A temp directory is a
+	// path on this host and must not enter it.
+	const wantSettings = `{"resampler":"sox","decoder":"sox","quality":"very-high","rateFlag":"-v","phase":"linear","targetRate":176400,"targetBits":24,"guard":true,"schemaVersion":"v2"}`
+	if settings != wantSettings {
+		t.Errorf("settings = %s, want %s", settings, wantSettings)
 	}
 }
 
-// TestSoxArgsIncludesGuardFlag pins `-G` as the leading global
-// option. Sox's gain-guard is what prevents intersample peaks on
-// 0 dBFS-mastered material from clipping through the rate-conversion
-// + dither pipeline. Regression trap: a future refactor that drops
+// TestGuardTempBytesIsThePostRateInt32File pins the size measured on this
+// host: a 90 s stereo file rendered to 176.4 kHz held one unlinked
+// temporary of exactly 90×176400×2×4 bytes, on the direct route and on
+// the ffmpeg pipe, while the output was still being written.
+func TestGuardTempBytesIsThePostRateInt32File(t *testing.T) {
+	j := JobSpec{TargetSampleRate: 176400, SourceDurationSec: 90, SourceChannels: 2}
+	const want = int64(90 * 176400 * 2 * 4)
+	if got := j.GuardTempBytes(); got != want {
+		t.Fatalf("GuardTempBytes = %d, want %d", got, want)
+	}
+	if j.RenderScratchBytes() != 0 {
+		t.Fatalf("RenderScratchBytes = %d, want 0 for a PCM job", j.RenderScratchBytes())
+	}
+	if j.TempVolumeBytes() != want {
+		t.Fatalf("TempVolumeBytes = %d, want the guard file", j.TempVolumeBytes())
+	}
+	j.SourceChannels = 0
+	if got := j.GuardTempBytes(); got != want {
+		t.Fatalf("unknown channels = %d, want stereo %d", got, want)
+	}
+	j.SourceDurationSec = 0
+	if got := j.GuardTempBytes(); got != 0 {
+		t.Fatalf("unknown duration = %d, want 0", got)
+	}
+	dsd := JobSpec{SourceIsDSD: true, SourceSize: 1 << 20, SourceSampleRate: 2822400,
+		SourceChannels: 2, SourceDurationSec: 90, TargetSampleRate: 176400}
+	if dsd.GuardTempBytes() != 0 {
+		t.Fatalf("DSD GuardTempBytes = %d, want 0", dsd.GuardTempBytes())
+	}
+	if scratch := dsd.RenderScratchBytes(); scratch == 0 || dsd.TempVolumeBytes() != scratch {
+		t.Fatalf("DSD temp volume = %d, scratch = %d", dsd.TempVolumeBytes(), scratch)
+	}
+}
+
+// TestSoxArgsIncludesGuardFlag pins `--temp` and `-G` as global
+// options ahead of the input. Sox's gain-guard is what prevents
+// intersample peaks on 0 dBFS-mastered material from clipping through
+// the rate-conversion + dither pipeline, and `--temp` is where that
+// guard's file lands. Regression trap: a future refactor that drops
 // or repositions `-G` would silently re-introduce occasional
-// clipping in upscale variants. Position matters — sox treats `-G`
-// as a global option that must precede the input file argument.
+// clipping in upscale variants. Position matters — sox treats both
+// as global options that must precede the input file argument.
 func TestSoxArgsIncludesGuardFlag(t *testing.T) {
 	j := JobSpec{
 		SourceAbsPath:    "/lib/Music/Album/01.flac",
@@ -242,13 +277,14 @@ func TestSoxArgsIncludesGuardFlag(t *testing.T) {
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
+		TempDir:          "/scratch",
 	}
 	args, _, _, _ := j.SoxArgs()
-	if len(args) == 0 {
-		t.Fatal("SoxArgs returned empty slice")
+	if len(args) < 4 {
+		t.Fatalf("SoxArgs returned %v", args)
 	}
-	if args[0] != "-G" {
-		t.Errorf("args[0] = %q, want %q (gain-guard must lead as a global option, before the input path)", args[0], "-G")
+	if args[0] != "--temp" || args[1] != renderScratchDir(j.TempDir) || args[2] != "-G" || args[3] != j.SourceAbsPath {
+		t.Errorf("argv head = %q, want --temp %s -G %s", args[:4], renderScratchDir(j.TempDir), j.SourceAbsPath)
 	}
 }
 

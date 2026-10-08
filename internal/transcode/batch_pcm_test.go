@@ -448,8 +448,9 @@ func TestBuildPCMRenderCandidates_ScratchIsTheLargestSingleJob(t *testing.T) {
 		t.Errorf("pcm scratch = %d (%d candidates), want %d for the hour-long DSF", pcm.maxRenderScratch, len(pcm.cands), want)
 	}
 	opt := c.buildOptimizeCandidates("DSD", projections)
-	if want := TempBytesForRender(2, 44100, 3600); opt.maxRenderScratch != want || len(opt.cands) != 3 {
-		t.Errorf("optimize scratch = %d (%d candidates), want %d — the FLAC adds none", opt.maxRenderScratch, len(opt.cands), want)
+	if want := TempBytesForRender(2, 44100, 3600); opt.maxRenderScratch != want || opt.maxGuardTemp != 0 || len(opt.cands) != 3 {
+		t.Errorf("optimize scratch = %d, guard = %d (%d candidates), want scratch %d and guard 0 — the FLAC adds nothing to the scratch and carries no duration",
+			opt.maxRenderScratch, opt.maxGuardTemp, len(opt.cands), want)
 	}
 	if opt.cands[2].isDSD || opt.cands[0].kind != JobKindOptimize || opt.cands[0].targetBits != 16 {
 		t.Errorf("optimize candidates = %+v, want the FLAC un-flagged and the DSD rows at kind optimize / 16", opt.cands)
@@ -483,5 +484,63 @@ func TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume(t *testing.T) {
 	}
 	if rows := batchRows(t, s); len(rows) != 0 {
 		t.Errorf("a refused pre-flight must not leave a batch row: %+v", rows)
+	}
+}
+
+// TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit refuses a PCM upscale
+// whose -G file (duration × target rate × channels × 4) cannot fit on the
+// temp volume, naming that scratch directory. A one-second file of the
+// same shape is the control: its guard file fits, so the refusal is about
+// the size.
+func TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit(t *testing.T) {
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	rate, bits := 44100.0, 16
+	huge, one := 1e9, 1.0
+	ch := 2
+	for _, row := range []struct {
+		path string
+		dur  float64
+	}{
+		{"Guard/huge.flac", huge},
+		{"Guard/one.flac", one},
+	} {
+		d := row.dur
+		if err := s.UpsertTrack(context.Background(), &manifest.Track{
+			Path: row.path, Size: 4096, Codec: "FLAC", SampleRate: &rate, BitsPerSample: &bits,
+			Duration: &d, Channels: &ch, ModTime: time.Unix(1700000000, 0),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tempDir := filepath.Join(t.TempDir(), "scratch-not-created-yet")
+	outDir := t.TempDir()
+
+	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
+	t.Cleanup(p.Stop)
+	c.WithRenderTempDir(tempDir)
+	// A file path projects no descendants, so the scope is the folder.
+	_, err := c.Submit(context.Background(), "Guard", 176400, 24, outDir)
+	var dskErr *InsufficientDiskSpaceError
+	if !errors.As(err, &dskErr) {
+		t.Fatalf("Submit(huge) = %v, want *InsufficientDiskSpaceError", err)
+	}
+	if want := renderScratchDir(tempDir); dskErr.Dir != want {
+		t.Errorf("disk check graded %q, want the render scratch dir %q", dskErr.Dir, want)
+	}
+	if rows := batchRows(t, s); len(rows) != 0 {
+		t.Errorf("a refused pre-flight must not leave a batch row: %+v", rows)
+	}
+
+	c2, p2, _ := newTestCoordinatorWithStubbedPool(t, s)
+	t.Cleanup(p2.Stop)
+	c2.WithRenderTempDir(tempDir)
+	res, err := c2.SubmitPaths(context.Background(), "one", []string{"Guard/one.flac"}, 176400, 24, outDir)
+	var roomy *InsufficientDiskSpaceError
+	if errors.As(err, &roomy) && roomy.Dir == renderScratchDir(tempDir) {
+		t.Fatalf("a 1s file was refused on the temp volume: %v", err)
+	}
+	if err != nil || res == nil || res.EnqueuedCount != 1 {
+		t.Fatalf("1s file: SubmitPaths = %v, %+v; want it enqueued", err, res)
 	}
 }

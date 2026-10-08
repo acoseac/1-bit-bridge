@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // A rendition is published only when the file its tool wrote is the WHOLE
@@ -43,8 +46,11 @@ import (
 // whose fault is gone: a full volume the job's own temporaries or another
 // job's cleanup emptied as the tool exited (sox frees its -G file at exit,
 // and on a shared volume that is most of the room), so it is the output
-// side's too. A whole stream of the wrong length strikes, as any tool
-// failure does: the tool finished what it read.
+// side's too. A whole stream of the wrong length strikes when the temp
+// volume has room for the gain-guard file. When that volume is full, or
+// holds less than the guard needs, the short file is the temp volume's
+// and strikes nothing (guardTempShort): sox has already freed the file,
+// so the free space afterwards is what was left, not what the write saw.
 
 // ErrRenditionIncomplete is returned when the file a render's tool wrote is
 // not the whole rendition: a stream cut short, one that is not the rate or
@@ -192,6 +198,72 @@ func probeVolumeRoom(path string) error {
 		return err
 	}
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return err
+	}
+	_, err = f.Write(probeBytes())
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// reasonGuardTempShort is the host-fault reason for a finished rendition
+// whose gain-guard file did not fit. It names no path.
+const reasonGuardTempShort = "the gain guard's temporary file did not fit on the temp volume"
+
+// guardTempShort classifies a complete rendition that came out the wrong
+// length. The length is asked of the source (ffprobe, or the container's
+// own duration on the pipe). When the temp volume cannot hold the int32
+// guard file that length implies, the failure is the host's: sox exits 0
+// and finishes a shorter FLAC, and a strike would suppress a good file.
+// A volume with room keeps the strike. A nil error is returned as it is.
+func (j JobSpec) guardTempShort(sourceSec float64, channels int, err error) error {
+	if err == nil || j.SourceIsDSD {
+		return err
+	}
+	if channels <= 0 {
+		channels = j.SourceChannels
+	}
+	if channels <= 0 {
+		channels = 2
+	}
+	need := TempBytesForRender(channels, j.TargetSampleRate, sourceSec)
+	if need <= 0 {
+		return err
+	}
+	dir := renderScratchDir(j.TempDir)
+	if free, ferr := AvailableDiskSpaceNearest(dir); ferr == nil && free < need {
+		return &outputFaultError{
+			fault: outputFault{where: outputScratch, kind: outputFull, dir: dir, reason: reasonGuardTempShort},
+			err:   err,
+		}
+	}
+	if perr := probeTempDirRoom(dir); perr != nil {
+		if kind, reason, ok := hostOutputFault(perr); ok {
+			return &outputFaultError{
+				fault: outputFault{where: outputScratch, kind: kind, dir: dir, reason: reason},
+				err:   fmt.Errorf("%w; writing in the temp dir: %w", err, perr),
+			}
+		}
+	}
+	return err
+}
+
+// probeTempDirRoom asks whether dir will take a write, the question
+// probeVolumeRoom asks of a file that already exists. The gain-guard file
+// is unlinked before this runs, so there is no file to extend.
+func probeTempDirRoom(dir string) error {
+	f, err := os.CreateTemp(dir, ".guard-probe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	// The file already exists, so the owner kept is the directory's: a
+	// path in dir that is not there. A root CLI then leaves nothing the
+	// service user cannot remove if the probe is interrupted.
+	if err := fsutil.KeepOwner(f, filepath.Join(dir, ".guard-probe-absent")); err != nil {
 		_ = f.Close()
 		return err
 	}
