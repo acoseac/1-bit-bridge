@@ -28,15 +28,21 @@ const eventStreamShutdownBound = time.Second
 // stops it. Each stream has to close on its own, well inside the grace,
 // and the stop must not report that it ran the grace out.
 func TestEventStreamsEndWhenServeShutsDown(t *testing.T) {
-	b := startConsoleBridge(t, "mdns:\n  enabled: false\n", nil)
+	// The HTTP/3 stream reaches serve on the UDP port of the listener's
+	// number, so that port has to be free too.
+	b := startConsoleBridge(t, "mdns:\n  enabled: false\n", nil, func(o *serveOpts) {
+		o.addrOverride = freeLoopbackTCPAndUDPAddr(t)
+	})
 	token := mintedToken(t, b)
 
 	// A Transport with its own TLS config does not speak HTTP/2 unless
 	// asked (net/http issue 14275). The phone's stream is HTTP/2.
-	api := &http.Client{Transport: &http.Transport{
+	tr := &http.Transport{
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-	}}
+	}
+	t.Cleanup(tr.CloseIdleConnections)
+	api := &http.Client{Transport: tr}
 	events := openEventStream(t, "GET /v1/events", api, b.apiBase+"/v1/events", "Bearer "+token)
 	pairing := openPairingEventStream(t, api, b.apiBase)
 	h3 := openHTTP3EventStream(t, b.apiBase+"/v1/events", "Bearer "+token)
@@ -110,12 +116,9 @@ func TestAnOrdinaryRequestInFlightAtShutdownCompletes(t *testing.T) {
 	})
 	t.Cleanup(release)
 
-	client := &http.Client{
-		Timeout: shutdownGrace,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Timeout: shutdownGrace, Transport: tr}
 	result := make(chan ordinaryResult, 1)
 	go func() {
 		req, err := http.NewRequest(http.MethodGet, b.apiBase+"/shutdown-hold", nil)
