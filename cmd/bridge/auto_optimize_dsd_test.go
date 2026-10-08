@@ -37,6 +37,23 @@ func (f *autoOptimizeFixture) seedDSDTrack(t *testing.T, rel, codec string, rate
 	}
 }
 
+// seedTimedPCMTrack is seedTrack with a duration and a channel count, the
+// facts a PCM job's gain-guard budget is computed from. The row is a
+// 96 kHz / 24-bit FLAC, which the optimize query admits.
+func (f *autoOptimizeFixture) seedTimedPCMTrack(t *testing.T, rel string, sizeBytes int, durationSec float64, channels int) {
+	t.Helper()
+	scanned := f.scannedSparseFile(t, rel, sizeBytes)
+	rate, bits, dsd := 96000.0, 24, false
+	d, c := durationSec, channels
+	if err := f.store.UpsertTrack(context.Background(), &manifest.Track{
+		Path: rel, Size: int64(sizeBytes), ModTime: scanned,
+		SampleRate: &rate, BitsPerSample: &bits, Codec: "FLAC", IsDSD: &dsd,
+		Duration: &d, Channels: &c,
+	}); err != nil {
+		t.Fatalf("UpsertTrack(%q): %v", rel, err)
+	}
+}
+
 func sweptJob(t *testing.T, f *autoOptimizeFixture, rel string) (transcode.JobSpec, bool) {
 	t.Helper()
 	for _, s := range f.submitted.snapshot() {
@@ -167,23 +184,27 @@ func TestAutoOptimizeSweepIncludesDSDOnlyWhenCapsOn(t *testing.T) {
 	})
 }
 
-// TestAutoOptimizeSweepProbesScratchVolumeOnlyWithCaps: a PCM-only
-// bridge never spends a statfs on a directory it never writes; with caps
-// on, the scratch dir is probed and a probe failure fails CLOSED.
-func TestAutoOptimizeSweepProbesScratchVolumeOnlyWithCaps(t *testing.T) {
+// TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep: the temp
+// volume holds a PCM job's gain-guard file, so a PCM-only bridge probes
+// it too. A probe failure skips the sweep with or without DSD caps.
+func TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep(t *testing.T) {
 	scratchDir := transcode.RenderScratchDir("/scratch/render")
-	t.Run("no caps, no probe", func(t *testing.T) {
+	t.Run("no caps still probes", func(t *testing.T) {
 		f := newAutoOptimizeFixture(t)
 		f.seedTrack(t, "A/Album/01.flac", 4096)
 		f.sweeper.tempDir = func() string { return "/scratch/render" }
+		probed := false
 		f.sweeper.diskFree = func(dir string) (int64, error) {
 			if dir == scratchDir {
-				t.Errorf("the scratch volume was probed with DSD renditions off")
+				probed = true
 			}
 			return 1 << 50, nil
 		}
 		if counts := f.sweeper.sweepOnce(context.Background()); counts == nil || counts.Enqueued != 1 {
 			t.Fatalf("sweepOnce = %+v, want one enqueued FLAC", counts)
+		}
+		if !probed {
+			t.Errorf("diskFree was never asked about %q", scratchDir)
 		}
 	})
 	t.Run("caps on probes the scratch dir", func(t *testing.T) {
@@ -221,6 +242,93 @@ func TestAutoOptimizeSweepProbesScratchVolumeOnlyWithCaps(t *testing.T) {
 		}
 		if f.submitted.count() != 0 {
 			t.Errorf("enqueued %d jobs despite an unreadable scratch volume, want 0", f.submitted.count())
+		}
+	})
+	t.Run("no caps, scratch probe error fails closed", func(t *testing.T) {
+		f := newAutoOptimizeFixture(t)
+		f.seedTrack(t, "A/Album/01.flac", 4096)
+		f.sweeper.tempDir = func() string { return "/scratch/render" }
+		f.sweeper.diskFree = func(dir string) (int64, error) {
+			if dir == scratchDir {
+				return 0, errors.New("statfs boom")
+			}
+			return 1 << 50, nil
+		}
+		if counts := f.sweeper.sweepOnce(context.Background()); counts != nil {
+			t.Errorf("sweepOnce = %+v, want nil (fail closed on an unreadable scratch volume)", counts)
+		}
+		if f.submitted.count() != 0 {
+			t.Errorf("enqueued %d jobs despite an unreadable scratch volume, want 0", f.submitted.count())
+		}
+	})
+}
+
+// TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom pins the
+// PCM half of the scratch budget. A candidate with a known duration has
+// a positive TempVolumeBytes, so the sweep has to have read the temp
+// volume's free space or the floor check stops before any job is
+// submitted. The tight-space case is the control: a sweep that skips
+// the floor check once the probe runs would submit it.
+func TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom(t *testing.T) {
+	const floor = 100 << 20
+	const durationSec = 300.0
+	scratchDir := transcode.RenderScratchDir("/scratch/render")
+	target := transcode.TargetRateForOptimize(96000)
+	perJob := transcode.JobSpec{
+		SourceChannels: 2, SourceDurationSec: durationSec, TargetSampleRate: target,
+	}.GuardTempBytes()
+	if perJob <= 0 {
+		t.Fatalf("fixture: a 300 s stereo PCM job budgets %d bytes of guard file", perJob)
+	}
+	seed := func(t *testing.T, scratchFree int64, probeErr error) *autoOptimizeFixture {
+		t.Helper()
+		f := newAutoOptimizeFixture(t)
+		f.seedTimedPCMTrack(t, "A/Album/01.flac", 4096, durationSec, 2)
+		f.sweeper.tempDir = func() string { return "/scratch/render" }
+		f.sweeper.minFreeBytes = func() int64 { return floor }
+		f.sweeper.diskFree = func(dir string) (int64, error) {
+			if dir == scratchDir {
+				return scratchFree, probeErr
+			}
+			return 1 << 50, nil
+		}
+		return f
+	}
+
+	t.Run("room on the temp volume submits the job", func(t *testing.T) {
+		f := seed(t, floor+perJob, nil)
+		counts := f.sweeper.sweepOnce(context.Background())
+		if counts == nil {
+			t.Fatal("sweepOnce returned nil")
+		}
+		if counts.DiskFloorReached {
+			t.Error("DiskFloorReached = true, want false (the guard file fits beside the floor)")
+		}
+		if counts.Enqueued != 1 || f.submitted.count() != 1 {
+			t.Errorf("Enqueued = %d (submitted %d), want 1 — swept %v",
+				counts.Enqueued, f.submitted.count(), strings.Join(sweptPaths(f), ", "))
+		}
+	})
+	t.Run("below the floor submits nothing", func(t *testing.T) {
+		f := seed(t, floor+perJob-1, nil)
+		counts := f.sweeper.sweepOnce(context.Background())
+		if counts == nil {
+			t.Fatal("sweepOnce returned nil")
+		}
+		if !counts.DiskFloorReached {
+			t.Error("DiskFloorReached = false, want true (the guard file would breach the floor)")
+		}
+		if counts.Enqueued != 0 || f.submitted.count() != 0 {
+			t.Errorf("Enqueued = %d (submitted %d), want 0", counts.Enqueued, f.submitted.count())
+		}
+	})
+	t.Run("a probe failure skips the sweep", func(t *testing.T) {
+		f := seed(t, floor+perJob, errors.New("statfs boom"))
+		if counts := f.sweeper.sweepOnce(context.Background()); counts != nil {
+			t.Errorf("sweepOnce = %+v, want nil (an unreadable temp volume skips the sweep)", counts)
+		}
+		if f.submitted.count() != 0 {
+			t.Errorf("enqueued %d jobs despite an unreadable temp volume, want 0", f.submitted.count())
 		}
 	})
 }

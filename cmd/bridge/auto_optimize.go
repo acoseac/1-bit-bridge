@@ -93,11 +93,14 @@ type autoOptimizeSweeper struct {
 
 	// dsdCaps returns the live DSD-render capability. It decides whether
 	// the candidate query admits DSD sources at all (the compact
-	// `optimized-dsd-` tier rides this sweep) and whether the scratch
-	// volume is probed. Nil-safe and fail-CLOSED: unwired grants nothing.
+	// `optimized-dsd-` tier rides this sweep). Nil-safe and fail-CLOSED:
+	// unwired grants nothing. The scratch volume is probed on every
+	// sweep, whatever these caps say: a PCM job's gain-guard file lands
+	// in the same directory.
 	dsdCaps func() transcode.DSDRenderCaps
 	// tempDir resolves the render scratch directory per sweep (empty =
-	// the OS temp dir); forwarded onto every DSD JobSpec and graded by
+	// the OS temp dir). Forwarded onto every JobSpec — a PCM job's
+	// gain-guard file and a DSD job's Stage A scratch — and graded by
 	// the sweep's second disk budget. Nil-safe.
 	tempDir func() string
 
@@ -175,26 +178,24 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return nil
 	}
 
-	// The scratch volume, probed only while DSD renditions are on — a
-	// PCM-only bridge never spends a statfs on a directory it never
-	// writes to. Same fail-CLOSED rule as the sidecar volume: with no
-	// reading there is no honouring the floor. The probe is the SAME
-	// nearest-existing-ancestor closure the sidecar volume uses
+	// The temp volume holds a PCM job's gain-guard file and a DSD job's
+	// Stage A scratch, so every sweep probes it. A PCM candidate with a
+	// known duration has a positive TempVolumeBytes, and a free figure
+	// left at 0 reads as the disk floor and submits nothing. Same
+	// fail-CLOSED rule as the sidecar volume: with no reading there is
+	// no honouring the floor. The probe is the SAME nearest-existing-ancestor
+	// closure the sidecar volume uses
 	// (transcode.AvailableDiskSpaceNearest, wired in cmd/bridge/main.go),
 	// so a scratch directory that does not exist yet — it is created by
 	// the first render — is graded by its parent volume, never a skip.
-	var scratchFree int64
-	if sw.caps().Active() {
-		scratchDir := transcode.RenderScratchDir(sw.renderTempDir())
-		sf, serr := sw.diskFree(scratchDir)
-		if serr != nil {
-			if ctx.Err() == nil {
-				logger.Warn("auto-optimize sweep: render scratch disk probe failed; skipping sweep",
-					"dir", scratchDir, "err", serr)
-			}
-			return nil
+	scratchDir := transcode.RenderScratchDir(sw.renderTempDir())
+	scratchFree, serr := sw.diskFree(scratchDir)
+	if serr != nil {
+		if ctx.Err() == nil {
+			logger.Warn("auto-optimize sweep: render scratch disk probe failed; skipping sweep",
+				"dir", scratchDir, "err", serr)
 		}
-		scratchFree = sf
+		return nil
 	}
 
 	counts := &admin.AutoOptimizeSweepCounts{

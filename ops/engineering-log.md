@@ -38110,3 +38110,22 @@ Pins: `TestGuardTempBytesIsThePostRateInt32File`,
 `TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing` (real sox,
 temp on a full volume), `TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit`
 (the 1 s file enqueues), `TestListAutoOptimizeCandidatesReadsAPCMRowsDuration`.
+
+Review of #1164, the same day. The sweep probed the temp volume only
+while DSD caps were active. A PCM-only bridge left `scratchFree` at 0.
+A PCM candidate with a known duration has a positive
+`TempVolumeBytes`, so `drainCandidates` set `DiskFloorReached` and
+submitted nothing: PCM auto-optimize stopped. The probe now runs on
+every sweep (`RenderScratchDir` of the configured temp dir). A probe
+failure still skips the sweep. The batch (`preflightTempVolume`) and
+the on-demand room check (`roomForRendition`) already read free space
+whenever the hold is positive; the pool does not budget disk itself.
+The guard-room probe registers `defer os.Remove` and then
+`defer f.Close`, so the close runs first. The explicit Close on the
+write path stays the one whose error is returned, and `KeepOwner`
+stays so a root CLI gives the probe the directory's owner.
+
+Pins added: `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`
+(a PCM-only sweep with room submits; one byte under the floor does
+not; a probe error skips), `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
+`TestProbeTempDirRoomClosesBeforeItRemoves`.

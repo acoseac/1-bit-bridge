@@ -259,7 +259,12 @@ func probeTempDirRoom(dir string) error {
 		return err
 	}
 	name := f.Name()
+	// Remove is registered first so it runs last. Close has to release
+	// the handle before the name is removed: Windows cannot delete a
+	// file that is still open, and a panic or an early return must not
+	// leave the probe behind.
 	defer os.Remove(name)
+	defer f.Close()
 	// The file already exists, so the owner kept is the directory's: a
 	// path in dir that is not there. A root CLI then leaves nothing the
 	// service user cannot remove if the probe is interrupted.

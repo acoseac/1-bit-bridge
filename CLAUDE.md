@@ -3638,7 +3638,12 @@ no failing test — which is the shape to expect in this area.
   `GuardTempBytes` is 0 and `TempVolumeBytes` is the Stage A scratch. One
   lane holds one of the two, and the pre-flight budgets
   `lanes × max(scratch, guard)` on the upscale submit, the rendition
-  submit, the on-demand room check and the sweep. The settings blob is
+  submit, the on-demand room check and the sweep. The sweep reads that
+  volume's free space on every pass, a PCM-only bridge included: a known
+  duration makes the guard budget positive, and a free figure left at 0
+  is the disk floor, so no PCM job is submitted. A probe failure skips
+  the sweep. The batch and the on-demand room check already read free
+  space whenever the hold is positive. The settings blob is
   unchanged and names no path. When a finished stream is shorter than
   its source and the temp volume's free space is below that file, or a
   64 KiB write in the scratch directory fails for a cause
@@ -3647,14 +3652,21 @@ no failing test — which is the shape to expect in this area.
   temp volume has room for the file still strikes. sox exits 0 after
   `gain: error writing temporary file` and leaves a finished short FLAC;
   the temporary is gone by then, so the free space afterwards is what
-  was left beside the write.
+  was left beside the write. The probe that asks the temp directory
+  whether it will take a write closes the file before it removes it:
+  `defer os.Remove` is registered first, then `defer f.Close`, so a
+  panic or an early return does not leave the probe, and Windows can
+  delete it.
   (`TestGuardTempBytesIsThePostRateInt32File`,
   `TestSoxArgsShape`, `TestSoxArgsFromSharesOneChain`,
   `TestRunPublishesOnlyAWholeRendition`,
   `TestACutRenditionStrikesNothingAndAShortOneStrikes`,
   `TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing`,
   `TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit`,
-  `TestListAutoOptimizeCandidatesReadsAPCMRowsDuration`.)
+  `TestListAutoOptimizeCandidatesReadsAPCMRowsDuration`,
+  `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`,
+  `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
+  `TestProbeTempDirRoomClosesBeforeItRemoves`.)
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,
