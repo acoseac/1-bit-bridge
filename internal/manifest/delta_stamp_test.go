@@ -56,11 +56,10 @@ func TestNextDeltaStampReadsTheCoverageKey(t *testing.T) {
 // TestEveryDeltaStampConstEmbedsNextDeltaStamp names every SQL const that
 // writes a delta-visible stamp and requires the expression verbatim.
 // The copies stay literals: concatenating them trips SonarCloud go:S2077.
-// Grep of indexed_at and deleted_at assignments: the upsert conflict
-// arms, migration v34's post(), and `indexed_at = excluded.indexed_at`
-// are the exclusions the advance docblock already names, and
-// `deleted_at = excluded.deleted_at` copies the SELECT that already
-// stamps with this expression.
+// The track upserts bind a value readNextDeltaStamp computed from
+// selectNextDeltaStampSQL; that bound parameter is not another const.
+// Migration v34's post() stays out, and `deleted_at = excluded.deleted_at`
+// copies the SELECT that already stamps with this expression.
 func TestEveryDeltaStampConstEmbedsNextDeltaStamp(t *testing.T) {
 	for name, stmt := range map[string]string{
 		"indexedAtAdvanceSQL":          indexedAtAdvanceSQL,
@@ -292,6 +291,130 @@ func plantTombstone(t *testing.T, s *Store, path string, deletedAt int64) {
 func containsPath(paths []string, want string) bool {
 	for _, p := range paths {
 		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAnUpsertClearsAWatermarkAboveTheRow is the gap the bump writers
+// closed and the track upserts left: a tombstone or a coverage start
+// strictly above this row's indexed_at, with the clock frozen on that
+// watermark. The conflict arm's ELSE and a fresh insert both store the
+// clock, which is the cursor a client already holds, and indexed_at >
+// since then skips the row. A batch shares one stamp: readers see the
+// commit whole, so two rows at the same value arrive together or not
+// at all. The tombstone is a different path, because the upsert clears
+// a tombstone of a path it just wrote and that would drop the watermark.
+func TestAnUpsertClearsAWatermarkAboveTheRow(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		arm   string
+		fresh bool
+		batch bool
+	}{
+		{"tombstone conflict", "tombstone", false, false},
+		{"tombstone conflict batch", "tombstone", false, true},
+		{"tombstone fresh", "tombstone", true, false},
+		{"tombstone fresh batch", "tombstone", true, true},
+		{"coverage conflict", "coverage", false, false},
+		{"coverage conflict batch", "coverage", false, true},
+		{"coverage fresh", "coverage", true, false},
+		{"coverage fresh batch", "coverage", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTempStore(t)
+			t.Cleanup(func() { s.Close() })
+			// An hour ahead of OpenStore, so the v41 coverage seed is
+			// behind the rows this case plants.
+			base := time.Now().Add(time.Hour)
+			s.now = func() time.Time { return base }
+			for _, p := range []string{"Music/A/a.flac", "Music/A/b.flac"} {
+				if err := s.UpsertTrack(ctx, &Track{Path: p, Size: 10, ModTime: base}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			watermark := indexedAtOf(t, s, "Music/A/a.flac") + 1_000_000
+			if tc.arm == "tombstone" {
+				plantTombstone(t, s, "Music/A/gone.flac", watermark)
+			} else {
+				setCoverage(t, s, watermark)
+			}
+			s.now = func() time.Time { return time.Unix(0, watermark) }
+
+			written := []string{"Music/A/a.flac"}
+			if tc.fresh {
+				written = []string{"Music/A/new.flac"}
+			}
+			if tc.batch {
+				if tc.fresh {
+					written = append(written, "Music/A/new2.flac")
+				} else {
+					written = append(written, "Music/A/b.flac")
+				}
+			}
+			rows := make([]*Track, len(written))
+			for i, p := range written {
+				rows[i] = &Track{Path: p, Size: 20, ModTime: time.Unix(0, watermark)}
+			}
+			var err error
+			if tc.batch {
+				err = s.UpsertTrackBatch(ctx, rows)
+			} else {
+				err = s.UpsertTrack(ctx, rows[0])
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stamps []int64
+			for _, p := range written {
+				requireUpsertPastWatermark(t, s, p, watermark)
+				stamps = append(stamps, indexedAtOf(t, s, p))
+			}
+			if len(stamps) == 2 && stamps[0] != stamps[1] {
+				t.Errorf("batch stamps differ: %d and %d", stamps[0], stamps[1])
+			}
+		})
+	}
+}
+
+func setCoverage(t *testing.T, s *Store, ns int64) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`INSERT INTO scan_state(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+		deletionJournalCoverageKey, strconv.FormatInt(ns, 10)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireUpsertPastWatermark(t *testing.T, s *Store, path string, watermark int64) {
+	t.Helper()
+	ctx := context.Background()
+	got := indexedAtOf(t, s, path)
+	if got <= watermark {
+		t.Errorf("%s indexed_at = %d, want past watermark %d", path, got, watermark)
+	}
+	since := time.Unix(0, watermark)
+	listed, err := s.ListTracks(ctx, &since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trackListed(listed, path) {
+		t.Errorf("ListTracks since the watermark omitted %s", path)
+	}
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trackListed(m.Tracks, path) {
+		t.Errorf("BuildManifest since the watermark omitted %s", path)
+	}
+}
+
+func trackListed(tracks []Track, path string) bool {
+	for _, tr := range tracks {
+		if tr.Path == path {
 			return true
 		}
 	}

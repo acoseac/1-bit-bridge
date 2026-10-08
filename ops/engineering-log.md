@@ -38036,3 +38036,50 @@ The console's `GET /api/events` already ends, because `admin.Server.Serve`
 parents every console request on the serve context. That parent was
 already there, and the console handlers that read `r.Context()` were
 written to stop with it, so it stayed. The phone API does not copy it.
+
+## 2026-10-08 — track upserts stamp past the library watermark (backlog B303)
+
+`UpsertTrack` and `UpsertTrackBatch` wrote `indexed_at` from the clock on a
+fresh insert, and on conflict from `CASE WHEN tracks.indexed_at >=
+excluded.indexed_at THEN tracks.indexed_at + 1 ELSE excluded.indexed_at END`.
+That clears only the row's own previous value. A tombstone `deleted_at` or a
+deletion-journal coverage start strictly above that value, in the same
+nanosecond as the write, stored the clock. `indexed_at > since` then skipped
+the row. `TestAnUpsertClearsAWatermarkAboveTheRow` froze the clock at that
+watermark (an hour past `OpenStore`, so the v41 coverage seed sat behind the
+planted arm) and failed on all eight shapes — tombstone and coverage, conflict
+and fresh insert, one row and a batch — before the stamp moved. Each stored
+`indexed_at` equal to the watermark, and both `ListTracks` and `BuildManifest`
+omitted the path.
+
+The watermark read is cheap beside the upsert. On an Apple M3 Pro, a store of
+25,000 tracks, `ANALYZE` first (`BenchmarkUpsertStampCost`, `-benchtime 400ms`):
+
+- one `selectNextDeltaStampSQL`: 18,156 ns
+- 500 of those queries: 9.09 ms
+- 500 prepared `UPDATE`s of a bound `indexed_at`: 2.12 ms
+- the same 500 with `nextDeltaStampSQL` inside each statement: 2.83 ms (about
+  1.4 µs extra per row)
+- one 500-row `UpsertTrackBatch` of conflict updates: 3.97 s (one sample; the
+  op exceeded the bench window)
+
+A second timing of the same batch, then of 500 raw upsert execs, a
+`tags_json`-only update, the lyrics lookup and the commit, put the batch at
+2.86 s and 2.77 s warm. Under load the upsert execs and a tags-only update of
+the same 500 rows were the same order (about 10–11 s) while 500 lyrics
+lookups were 2–36 ms and the commit under 1 ms. The batch cost is rewriting
+`tags_json` and its `json_extract` indexes. The stamp is one 18 µs read.
+A full scan of 50,000 tracks is 100 such batches, about 1.8 ms of stamp
+queries.
+
+`readNextDeltaStamp` evaluates `selectNextDeltaStampSQL` once per transaction,
+after `Begin` and before any row is written, and both arms bind that integer.
+The conflict arm is `indexed_at = excluded.indexed_at`. Re-evaluating the
+subquery per row would see rows the same transaction already wrote and stamp
+each later row higher, in statement order. A shared stamp needs no order
+among the rows: a reader sees the commit atomically, and `indexed_at > since`
+takes every row of it or none. `first_indexed_at` stays the scan clock.
+`TestNoHandRolledIndexedAtBump` reports an `indexed_at` assignment whose
+right-hand side starts with `CASE`; `artwork_version`'s `CASE` later in the
+same literal is a different column. Migration v34's `post()` and
+`StampExtractorVersionBatch` stay as they were. `ProtocolVersion` stays 1.

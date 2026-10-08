@@ -1266,20 +1266,29 @@ lost my library."
   the same expression, inside the write. The coverage start is read BEFORE
   the tombstone wipe: a stamp taken after it no longer sees the `deleted_at`
   the cursor may sit on, `DeltaSinceCovered` treats `since >= start` as
-  covered, and the wipe left no tombstones. Three deliberate exclusions —
-  the `UpsertTrack`/`UpsertTrackBatch` conflict arms, migration v34's
-  `post()`, and `StampExtractorVersionBatch` (not an `indexed_at` writer at
-  all). Don't "finish the job" by converting them. A bump-only writer uses
+  covered, and the wipe left no tombstones. The track upserts bind it too:
+  `readNextDeltaStamp` evaluates `selectNextDeltaStampSQL` once per
+  transaction, before any row of that transaction is written, and both the
+  fresh insert and the conflict arm store that integer. A 500-row batch
+  pays one read. Every row of the commit carries that one stamp, so
+  `indexed_at > since` takes the batch whole or not at all: a reader sees
+  the commit atomically, and two rows at one value cannot arrive as a
+  prefix. `first_indexed_at` stays the scan clock. Two exclusions remain —
+  migration v34's `post()`, and `StampExtractorVersionBatch` (not an
+  `indexed_at` writer at all). Don't convert those. A bump-only writer uses
   `bumpIndexedAtByPathSQL`. `TestIndexedAtAdvanceIsShared` walks the named
   CONSTS and is blind to an inline literal in a function body — which is
   how #840 reintroduced the dead `CASE WHEN` form — so
   `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package
   and classifies each assignment against the SQL literal that contains it.
-  (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
+  An `indexed_at` assignment that starts with `CASE` is hand-rolled;
+  `artwork_version`'s `CASE` later in the same literal is a different
+  column. (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
   `TestADeleteInTheSameNanosecondReachesADelta`,
   `TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered`,
   `TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark`,
-  `TestAMassDeletePublishesAWatermarkThatMovedForward`.)
+  `TestAMassDeletePublishesAWatermarkThatMovedForward`,
+  `TestAnUpsertClearsAWatermarkAboveTheRow`.)
 - **A writer that writes back a row it READ earlier writes it only while the
   row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
   compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote

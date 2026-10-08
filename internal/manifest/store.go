@@ -135,18 +135,19 @@ type Store struct {
 // NULL, which would write a NULL into a NOT NULL column. The coverage
 // key is a literal so this fragment has exactly one placeholder.
 //
-// Deliberately NOT applied at two kinds of site:
+// The track upserts bind it too. readNextDeltaStamp evaluates it once per
+// transaction, before any row of that transaction is written, and the
+// INSERT stores that integer (the conflict arm assigns excluded.indexed_at).
+// A 500-row batch pays one read. Every row of the commit carries that one
+// stamp, so indexed_at > since takes the batch whole or not at all: a
+// reader sees the commit atomically, and two rows at one value cannot
+// arrive as a prefix. first_indexed_at stays the scan clock.
 //
-//   - The `UpsertTrack` / `UpsertTrackBatch` conflict arms, which compare
-//     against `excluded.indexed_at`. Those write NEW content at wall-clock
-//     time on the hottest path in the codebase (500-row batches sharing one
-//     `now`, 50k-track libraries); a per-row subquery there would make each
-//     row's value depend on evaluation order for a gain no client can
-//     observe.
-//   - `healTransitionBandBandwidths`, migration v34's `post()`. Migrations
-//     are append-only and MUST NOT be rewritten once shipped (both live
-//     bridges ran it at v34/v35), so changing its SQL would alter only
-//     fresh installs while diverging from what deployed DBs actually did.
+// Deliberately NOT applied at healTransitionBandBandwidths, migration v34's
+// post(). Migrations are append-only and MUST NOT be rewritten once shipped
+// (both live bridges ran it at v34/v35), so changing its SQL would alter
+// only fresh installs while diverging from what deployed DBs actually did.
+// StampExtractorVersionBatch is not an indexed_at writer.
 //
 // Written out VERBATIM at each statement below rather than concatenated
 // in (`"… " + indexedAtAdvanceSQL + " …"`), following the
@@ -3328,10 +3329,11 @@ func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
 			tags_json     = excluded.tags_json,
-			indexed_at    = CASE
-				WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1
-				ELSE excluded.indexed_at
-			END,
+			-- The bound indexed_at is the stamp readNextDeltaStamp computed
+			-- before this statement. One value for every row of the
+			-- transaction, already past the watermark, so the conflict
+			-- arm stores it as it stands.
+			indexed_at    = excluded.indexed_at,
 			enriched_at   = 0,
 			-- missing_count reset is UNCONDITIONAL on confirm: the row
 			-- being upserted is by definition "seen this scan", which
@@ -3398,14 +3400,13 @@ func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
 //
 // Holds `s.mu` per the writer contract on Store.
 //
-// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
-// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
-// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
-// mtime-changed-but-clock-stable scan tick) would leave indexed_at
-// unchanged, and a client that synced at the equal timestamp would miss
-// the second mutation under the `WHERE indexed_at > since` delta-sync
-// filter. The `excluded.indexed_at` reference keeps the bind count at 5
-// (the original UPSERT shape) rather than broadening to 7.
+// indexed_at is the stamp readNextDeltaStamp computed in this transaction
+// before the write: the later of the clock and one past each watermark
+// arm. Binding that integer (the fifth VALUES placeholder) keeps a
+// same-nanosecond rewrite strictly past a cursor the client already holds,
+// including a tombstone or a coverage start above this row. The conflict
+// arm stores it with indexed_at = excluded.indexed_at. first_indexed_at
+// stays the scan clock.
 //
 // On success t records the version of the row it wrote (Track.rowVersion),
 // as a read would: this is the single-row writer whose Track a caller keeps,
@@ -3425,12 +3426,16 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := s.now().UnixNano()
+	stamp, err := readNextDeltaStamp(ctx, tx, now)
+	if err != nil {
+		return err
+	}
 	stmt, err := prepareTrackUpsert(ctx, tx)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
+	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, stamp,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
 		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now))
 	if err != nil {
@@ -3535,23 +3540,25 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	}
 	observeLockWait("upsert_batch", beginAt)
 	defer tx.Rollback()
-	// indexed_at uses the strict-advance CASE WHEN form from UpsertTrack
-	// (and UpsertVariant / MarkEnriched). Batch semantics: `now` is computed
-	// once per flush (below) and bound to every row's `excluded.indexed_at`;
-	// the CASE WHEN holds per-row, comparing each existing track's
-	// indexed_at against the shared `now`. A stale row at `now-1ns`
-	// advances to `now`; a row already at `now` (or beyond, under a fake
-	// clock) advances to `existing+1`. The batch-level shared `now` is
-	// the right shape — per-track s.now() calls would burn 500 syscalls
-	// per batch on Pi-class hardware and break the deterministic test seam.
+	// One stamp for the transaction, read before any row is written.
+	// Re-evaluating nextDeltaStampSQL per row would see the rows this
+	// transaction already wrote and stamp each one higher, in statement
+	// order. A shared stamp needs no order among the rows: indexed_at >
+	// since takes every row of the commit or none of them, and a reader
+	// sees the commit atomically. first_indexed_at stays `now`, the scan
+	// clock, not this stamp.
 	stmt, err := prepareTrackUpsert(ctx, tx)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	now := s.now().UnixNano()
+	stamp, err := readNextDeltaStamp(ctx, tx, now)
+	if err != nil {
+		return err
+	}
 	for _, r := range rows {
-		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
+		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, stamp,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
 			r.refused, firstIndexedInsertNS(r.firstNS, now)); err != nil {
 			return err

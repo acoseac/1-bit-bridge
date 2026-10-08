@@ -12,8 +12,8 @@ import (
 // TestUpsertTrackEqualClockStillAdvances: when the injected clock returns
 // EXACTLY the existing row's indexed_at (rapid back-to-back UpsertTrack
 // at the same nanosecond — fake clocks, low-resolution wall clocks, an
-// mtime-changed-but-clock-stable scan tick), the CASE WHEN form must
-// produce a strict advance. Without it, a client that synced at the
+// mtime-changed-but-clock-stable scan tick), the stamp read before the
+// write lands one past that value. Without it, a client that synced at the
 // equal timestamp would miss the second mutation under
 // `WHERE indexed_at > since`. Mirrors TestUpsertVariantEqualClockStillAdvances
 // for the track-write path.
@@ -53,9 +53,8 @@ func TestUpsertTrackEqualClockStillAdvances(t *testing.T) {
 }
 
 // TestUpsertTrackMonotonicGuard: an injected clock that returns a
-// timestamp in the PAST must NOT regress indexed_at. The CASE WHEN
-// form takes existing+1 in that case (past-clock branch lands in the
-// `tracks.indexed_at >= excluded.indexed_at` arm). Mirrors
+// timestamp in the PAST must NOT regress indexed_at. The stamp is one
+// past the row's own indexed_at when that is the top arm. Mirrors
 // TestUpsertVariantMonotonicGuard for the track-write path.
 func TestUpsertTrackMonotonicGuard(t *testing.T) {
 	s := openTempStore(t)
@@ -97,26 +96,26 @@ func TestUpsertTrackMonotonicGuard(t *testing.T) {
 }
 
 // TestUpsertTrackBatchEqualClockEachRowAdvances: when every row in a
-// batch flush is already at the injected clock's `now`, each one must
-// independently advance to `now+1`. The shared batch-level `now` is
-// bound once per row's `excluded.indexed_at`; the CASE WHEN evaluates
-// per-row against ITS own existing `tracks.indexed_at`. A regression
-// that switched to a single-row check (e.g. a global comparison) would
-// flatten the post-batch state and reveal here.
+// batch is already at the injected clock, the one stamp read before the
+// writes is that clock plus one, and every row lands there. A per-row
+// re-evaluation would see the rows already written and stamp the later
+// ones higher. Storing the clock would leave them at t0, which
+// indexed_at > since then skips.
 func TestUpsertTrackBatchEqualClockEachRowAdvances(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Seed three rows via UpsertTrack at a known clock value.
-	const t0 int64 = 1_000_000_000
+	// An hour past OpenStore, so the v41 coverage seed sits behind t0.
+	// One batch, so every seed row takes that one stamp, which is t0.
+	t0 := time.Now().Add(time.Hour).UnixNano()
 	s.now = func() time.Time { return time.Unix(0, t0) }
 	paths := []string{"Music/A/1.flac", "Music/A/2.flac", "Music/A/3.flac"}
-	for _, p := range paths {
-		if err := s.UpsertTrack(context.Background(), &Track{
-			Path: p, Size: 100, ModTime: time.Unix(0, t0),
-		}); err != nil {
-			t.Fatalf("seed UpsertTrack(%q): %v", p, err)
-		}
+	seed := make([]*Track, len(paths))
+	for i, p := range paths {
+		seed[i] = &Track{Path: p, Size: 100, ModTime: time.Unix(0, t0)}
+	}
+	if err := s.UpsertTrackBatch(context.Background(), seed); err != nil {
+		t.Fatalf("seed UpsertTrackBatch: %v", err)
 	}
 
 	// Verify seed state — every row at t0.
@@ -132,8 +131,8 @@ func TestUpsertTrackBatchEqualClockEachRowAdvances(t *testing.T) {
 		}
 	}
 
-	// Pin the clock to t0 again — the batch's shared `now` will equal
-	// every row's existing indexed_at, exercising the CASE WHEN per-row.
+	// Pin the clock to t0 again — the batch's clock equals every row's
+	// indexed_at, so the stamp is t0+1 for the whole commit.
 	batch := make([]*Track, len(paths))
 	for i, p := range paths {
 		batch[i] = &Track{Path: p, Size: 200, ModTime: time.Unix(0, t0)}
@@ -156,15 +155,16 @@ func TestUpsertTrackBatchEqualClockEachRowAdvances(t *testing.T) {
 	}
 }
 
-// TestUpsertTrackBatchFreshInsertUsesClock: a batch flush that inserts
-// NEW rows (no conflict) must stamp indexed_at = `now`, not `now+1`.
-// The CASE WHEN only fires on the ON CONFLICT branch; brand-new rows
-// take the unconditional VALUES path. Locks the no-conflict contract.
+// TestUpsertTrackBatchFreshInsertUsesClock: a batch of new rows stamps
+// indexed_at at the clock when the clock is already past the watermark,
+// not at clock+1. The stamp is the later of the clock and one past each
+// watermark arm; with the clock an hour past OpenStore's coverage seed,
+// the clock is the top arm.
 func TestUpsertTrackBatchFreshInsertUsesClock(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	const t0 int64 = 2_000_000_000
+	t0 := time.Now().Add(time.Hour).UnixNano()
 	s.now = func() time.Time { return time.Unix(0, t0) }
 	batch := []*Track{
 		{Path: "Music/B/1.flac", Size: 100, ModTime: time.Unix(0, t0)},
@@ -199,11 +199,11 @@ func TestUpsertTrackBatchFreshInsertUsesClock(t *testing.T) {
 // EXACTLY ON a cursor equal to the sibling's value, where
 // `indexed_at > since` filters it out.
 //
-// Covers every writer sharing the expression, because the guarantee
-// belongs to the SQL and not to any one caller. Deliberately excludes the
-// UpsertTrack / UpsertTrackBatch conflict arms (they write new content at
-// wall-clock time — see indexedAtAdvanceSQL) and migration v34's post()
-// (shipped migrations are not rewritten).
+// Covers every bump writer sharing the expression, because the guarantee
+// belongs to the SQL and not to any one caller. The track upserts bind
+// the same stamp, read once per transaction
+// (TestAnUpsertClearsAWatermarkAboveTheRow). Migration v34's post() stays
+// out: shipped migrations are not rewritten.
 func TestIndexedAtBumpsClearTheLibraryWideMax(t *testing.T) {
 	const (
 		target  = "Music/A/target.flac"
@@ -405,14 +405,16 @@ func TestLyricsBumpClearsLibraryWideMax(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	const t0 int64 = 1_000_000_000
+	// An hour past OpenStore, so the seed upsert stores t0 and the
+	// planted library max sits above it.
+	t0 := time.Now().Add(time.Hour).UnixNano()
 	s.now = func() time.Time { return time.Unix(0, t0) }
 	upsertParent(t, s, "Music/A/ahead.flac")
 	upsertParent(t, s, "Music/A/lyrical.flac")
 
 	// Another row carries the library-wide max — the state UpsertTrackBatch's
 	// MAX+1 arm produces while a stamp batch runs against an older `now`.
-	const ahead = t0 + 100_000
+	ahead := t0 + 100_000
 	if _, err := s.db.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`,
 		ahead, "Music/A/ahead.flac"); err != nil {
 		t.Fatalf("seed library max: %v", err)
@@ -456,7 +458,9 @@ func TestLyricsBumpClearsLibraryWideMax(t *testing.T) {
 
 // TestNoHandRolledIndexedAtBump sweeps every non-test file in the package for
 // `indexed_at =` assignments and fails on any that is neither the shared
-// advance nor one of the two exclusions indexedAtAdvanceSQL's docblock names.
+// advance nor an excluded.indexed_at whose bound value was computed by
+// readNextDeltaStamp. A CASE that is itself the indexed_at assignment is
+// the form this sweep exists to catch. Migration v34's post() stays out.
 //
 // TestIndexedAtAdvanceIsShared cannot see this class: it walks a map of named
 // CONSTS, and PR #840's regression was an inline string literal inside a
@@ -556,8 +560,17 @@ func handRolledIndexedAtAssignments(text, shared string) (checked int, handRolle
 		case strings.Contains(window, shared):
 			// The shared advance, written out verbatim.
 		case strings.Contains(window, "excluded.indexed_at"):
-			// The UpsertTrack / UpsertTrackBatch conflict arms, and the
-			// track_lyrics insert, which carries a value computed above.
+			// The bound value was computed by readNextDeltaStamp (the
+			// track upserts) or above the statement (track_lyrics, atlas
+			// lyrics). A CASE that is the indexed_at assignment is the
+			// per-row form, and artwork_version's CASE later in the same
+			// literal is not this assignment.
+			assign := strings.TrimSpace(strings.TrimPrefix(window, "indexed_at ="))
+			if strings.HasPrefix(strings.ToLower(assign), "case") {
+				handRolled = append(handRolled, handRolledAssignment{
+					line: 1 + strings.Count(text[:loc[0]], "\n"), window: window,
+				})
+			}
 		case strings.Contains(window, "track_analysis"):
 			// healTransitionBandBandwidths, migration v34's post(): frozen and
 			// append-only, both live bridges already ran it.
@@ -588,22 +601,23 @@ func inPredicate(before string) bool {
 // TestTheIndexedAtSweepTellsAnAssignmentFromAComparison pins what
 // TestNoHandRolledIndexedAtBump reads as an assignment. On the package it
 // cannot show both halves: the tree holds no hand-rolled bump to fail, so
-// this reads a fixture holding each shape (a bare SET, a SET through the
-// shared advance, a compare-and-set predicate after AND, one after WHERE on
-// the line before, one after OR, and prose).
+// this reads a fixture holding each shape (a bare SET, a CASE assignment,
+// a SET through the shared advance, a compare-and-set predicate after AND,
+// one after WHERE on the line before, one after OR, and prose).
 func TestTheIndexedAtSweepTellsAnAssignmentFromAComparison(t *testing.T) {
 	shared := squashSpace(indexedAtAdvanceSQL)
 	src := "package manifest\n" +
 		"const handRolled = `UPDATE tracks SET indexed_at = ? WHERE path = ?`\n" +
+		"const oldArm = `UPDATE tracks SET indexed_at = CASE WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1 ELSE excluded.indexed_at END`\n" +
 		"const column = `UPDATE tracks SET first_indexed_at = ? WHERE path = ?`\n" +
 		"const advanced = `UPDATE tracks\n SET indexed_at = " + indexedAtAdvanceSQL + "\n WHERE path = ? AND indexed_at = ?`\n" +
 		"const compared = `SELECT 1 FROM tracks WHERE\n indexed_at = ? OR indexed_at = ?`\n" +
 		"// prose naming indexed_at = something is not read\n"
 	checked, handRolled := handRolledIndexedAtAssignments(src, shared)
-	if checked != 2 {
-		t.Errorf("counted %d assignments, want 2 (the two SETs; every comparison and the prose is skipped)", checked)
+	if checked != 3 {
+		t.Errorf("counted %d assignments, want 3 (the bare SET, the CASE, the shared advance; every comparison and the prose is skipped)", checked)
 	}
-	if len(handRolled) != 1 || handRolled[0].line != 2 {
-		t.Errorf("hand-rolled = %+v, want the one on line 2 (the SET without the shared advance)", handRolled)
+	if len(handRolled) != 2 || handRolled[0].line != 2 || handRolled[1].line != 3 {
+		t.Errorf("hand-rolled = %+v, want the bare SET on line 2 and the CASE assignment on line 3", handRolled)
 	}
 }

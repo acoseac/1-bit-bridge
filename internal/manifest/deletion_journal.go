@@ -91,6 +91,16 @@ const nextDeltaStampSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),
 // "SELECT " + nextDeltaStampSQL.
 const selectNextDeltaStampSQL = `SELECT MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)`
 
+// readNextDeltaStamp evaluates selectNextDeltaStampSQL once. UpsertTrack
+// and UpsertTrackBatch bind the result as indexed_at for every row of the
+// transaction, so a batch pays one watermark read and every row of that
+// commit carries the same stamp, strictly past the watermark the read saw.
+func readNextDeltaStamp(ctx context.Context, tx *sql.Tx, now int64) (int64, error) {
+	var stamp int64
+	err := tx.QueryRowContext(ctx, selectNextDeltaStampSQL, now).Scan(&stamp)
+	return stamp, err
+}
+
 // Journal INSERT fragments. Prefix + <the sibling DELETE's WHERE> +
 // suffix, concatenated at COMPILE time where the predicate is a const —
 // the same const-derivation that keeps thresholdReap's unlink set and
