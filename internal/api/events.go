@@ -41,10 +41,13 @@ import (
 // buffer window get the missed events, beyond it get a "dropped"
 // hint so iOS knows it needs to refetch state.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	if s.eventBroker == nil {
-		// Broker not wired (test harness, or feature disabled
-		// in a future config). 404 is the back-compat shape iOS
-		// is built to recognise — falls back to polling.
+	if s.eventBroker == nil || s.demoMode {
+		// 404 is the back-compat shape iOS is built to recognise —
+		// falls back to polling. A missing broker is a test harness
+		// or a build that never started one. A demo bridge returns
+		// the same answer before subscribe: the public demo token is
+		// shared by every client, and a subscription here takes a
+		// slot in the broker pairing streams also use.
 		writeError(w, http.StatusNotFound, "events_not_supported",
 			"this bridge does not support push events; clients should use the polling endpoints")
 		return
