@@ -221,7 +221,7 @@ func writeCarryGeneration(ctx context.Context, tx *sql.Tx, fromMultiRoot bool, b
 	return next, nil
 }
 
-// RecordFirstIndexedCarry snapshots filesystem rows before a root flip
+// recordFirstIndexedCarry snapshots filesystem rows before a root flip
 // that changes the stored path form. fromMultiRoot is the form the rows
 // have now. rootBase is the existing root's folder name when a second
 // root is added, and the surviving root's folder name when several roots
@@ -230,11 +230,12 @@ func writeCarryGeneration(ctx context.Context, tx *sql.Tx, fromMultiRoot bool, b
 // nothing when no dates are saved yet, and the returned generation is 0.
 // When dates are already saved it moves them onto the new generation and
 // the form this flip is heading toward, and does not delete the keys. A
-// later record merges: it keeps the earlier date for a key. A flip that
-// also wipes uses RecordFirstIndexedCarryAndWipe, so this snapshot and
-// that wipe commit together. This call stays for a caller that writes a
-// row between the snapshot and the wipe.
-func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
+// later record merges: it keeps the earlier date for a key. A production
+// flip uses RecordFirstIndexedCarryAndWipe, which commits this snapshot
+// and the wipe together. This stays unexported so a caller cannot record
+// and wipe apart. A test that writes a row between the snapshot and the
+// wipe, and the snapshot's own checks, call it.
+func (s *Store) recordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
 	if err := checkCarryRootBase(rootBase); err != nil {
 		return 0, err
 	}
@@ -271,7 +272,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 // including dates an earlier flip had already saved and this snapshot
 // had moved onto its generation. The generation is returned only after
 // the commit. Sidecar files are removed after that commit. fromMultiRoot
-// and rootBase are RecordFirstIndexedCarry's.
+// and rootBase are recordFirstIndexedCarry's.
 func (s *Store) RecordFirstIndexedCarryAndWipe(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
 	if err := checkCarryRootBase(rootBase); err != nil {
 		return 0, err
@@ -318,7 +319,7 @@ func (s *Store) RecordFirstIndexedCarryAndWipe(ctx context.Context, fromMultiRoo
 var rootFlipStage atomic.Value // func(string)
 
 // SetRootFlipStageHookForTest installs fn. "record" runs after
-// RecordFirstIndexedCarry commits, and after
+// recordFirstIndexedCarry commits, and after
 // RecordFirstIndexedCarryAndWipe has staged its snapshot and before
 // that transaction commits, so a cancel there rolls the snapshot back
 // with the wipe. "wipe" runs after the wipe commits. The hook runs

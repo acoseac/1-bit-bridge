@@ -37815,6 +37815,49 @@ the posture. `TestAPairedDeviceEventStreamStillSubscribes` pins the
 non-demo 200. Removing the `demoMode` arm turns the starvation test
 red again.
 
+## 2026-10-08 — backlog B290: scenario tests use the combined record and wipe
+
+Since #1158 a root flip records the first-indexed carry and wipes
+filesystem tracks in one transaction, `RecordFirstIndexedCarryAndWipe`.
+The scenario fixture `recordAndWipe` and the add in
+`TestACancelledCollapseKeepsTheDatesTheAddRecorded` still called
+`RecordFirstIndexedCarry` and then `WipeFilesystemTracks`. Both now
+call the combined function. Nothing in production called the snapshot
+alone (admin add and collapse, `bridge library add` and `bridge
+library remove` already use the combined call), so
+`RecordFirstIndexedCarry` is unexported as `recordFirstIndexedCarry`.
+The callers that remain are the snapshot's own checks
+(`TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows`,
+`TestASecondRecordAfterTheWipeKeepsTheCarry`) and
+`TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt`, which
+inserts a track after the snapshot and before the wipe.
+
+Negative control: `best = nil` ahead of `writeCarryGeneration` inside
+`RecordFirstIndexedCarryAndWipe`, so the wipe still runs and no date
+is saved. Six tests went red, then green again with the line removed:
+
+- `TestAnInFlightScanLeavesTheCarryForThePostFlipScan` — post-flip row
+  dated at the scan clock, want the carried date.
+- `TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots` — survivor
+  dated at the scan clock, want its own date.
+- `TestAFlipBackBeforeAnyRescanKeepsTheDate` — flip back dated at the
+  scan clock.
+- `TestACollapseDuringThePostAddRescanKeepsBothAlbums` — both albums
+  dated at the scan clock.
+- `TestACompensatingScanAfterAFailedSaveKeepsTheDate` — compensating
+  scan dated at the scan clock.
+- `TestACancelledCollapseKeepsTheDatesTheAddRecorded` — the second
+  call wrote nothing (`next == 0`), so the cancel hook at `"record"`
+  did not run and the test failed with "cancelled wipe succeeded".
+
+`TestAnAddedRootDoesNotInheritTheOldRootsDate` stayed green. Its pin
+is that a root added in the flip is dated at the scan clock, which is
+also what a missing carry produces.
+
+`go test -race -count=2 ./internal/manifest/` passed
+(`ok … 1727.170s`). `make check` passed: fmt, vet, and the race suite,
+with `internal/manifest` at `913.686s`.
+
 ## 2026-10-08 — event streams end when serve shuts down (backlog B216)
 
 `GET /v1/events` did not end on a graceful shutdown. `http.Server.Shutdown`
