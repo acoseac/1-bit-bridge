@@ -95,7 +95,7 @@ const selectNextDeltaStampSQL = `SELECT MAX(?, COALESCE((SELECT MAX(indexed_at) 
 // and UpsertTrackBatch bind the result as indexed_at for every row of the
 // transaction, so a batch pays one watermark read and every row of that
 // commit carries the same stamp, strictly past the watermark the read saw.
-func readNextDeltaStamp(ctx context.Context, tx *sql.Tx, now int64) (int64, error) {
+func readNextDeltaStamp(ctx context.Context, tx dbTx, now int64) (int64, error) {
 	var stamp int64
 	err := tx.QueryRowContext(ctx, selectNextDeltaStampSQL, now).Scan(&stamp)
 	return stamp, err

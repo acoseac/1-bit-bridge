@@ -54,8 +54,11 @@ var logger = logging.Component("manifest")
 // Store persists Tracks and Folders in a single SQLite file.
 // The store is safe for concurrent Open/Close/Read/Write within one
 // process. WAL mode lets readers proceed concurrently with at most one
-// active writer; the Go-side `mu` enforces "at most one writer" so
-// SQLite's `busy_timeout` retry is never reached under our workload.
+// active writer; the Go-side `mu` serializes writers in this process.
+// Another process can still write the same file: the data-dir lock
+// covers a second `bridge serve`, and `bridge scan` opens the store
+// without it. `busy_timeout` retries SQLITE_BUSY. It does not retry
+// SQLITE_BUSY_SNAPSHOT, which is why the track upserts begin immediate.
 //
 // **Writer contract**: every method that issues `INSERT` / `UPDATE` /
 // `DELETE` SQL MUST hold `s.mu` (UpsertTrack, UpsertTrackBatch,
@@ -100,6 +103,11 @@ type Store struct {
 	// call (once per admin-search keystroke). Set once before the Store
 	// is published to any caller, so it's safe to read without s.mu.
 	ftsAvailable bool
+
+	// afterDeltaStampRead, when set, runs after a track upsert has read
+	// its stamp and before that upsert writes a row. Tests commit from a
+	// second connection in that window. Production leaves it nil.
+	afterDeltaStampRead func()
 }
 
 // indexedAtAdvanceSQL is the `SET indexed_at = …` expression EVERY
@@ -3316,9 +3324,85 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 
 // ----- tracks -----
 
+// dbTx is the statement surface of a transaction. *sql.Tx implements it.
+// The track upserts pass an immediateTx so the write lock is reserved
+// before the stamp read.
+type dbTx interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	PrepareContext(context.Context, string) (*sql.Stmt, error)
+}
+
+// immediateTx holds one pooled connection from BEGIN IMMEDIATE through
+// the caller's Commit. database/sql BeginTx starts a deferred transaction,
+// and the driver ignores TxOptions.Isolation, so a DSN `_txlock` is the
+// only other way to begin immediate — and that mode would cover every
+// non-readonly Begin in the store. These upserts are the transactions
+// whose first statement is a read, so they begin the statement themselves.
+type immediateTx struct {
+	ctx  context.Context
+	conn *sql.Conn
+	done bool
+}
+
+func (s *Store) beginImmediate(ctx context.Context) (*immediateTx, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &immediateTx{ctx: ctx, conn: conn}, nil
+}
+
+func (t *immediateTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return t.conn.ExecContext(ctx, query, args...)
+}
+
+func (t *immediateTx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return t.conn.QueryRowContext(ctx, query, args...)
+}
+
+func (t *immediateTx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return t.conn.PrepareContext(ctx, query)
+}
+
+func (t *immediateTx) Commit() error {
+	if t.done || t.conn == nil {
+		return sql.ErrTxDone
+	}
+	if _, err := t.conn.ExecContext(t.ctx, "COMMIT"); err != nil {
+		return err
+	}
+	t.done = true
+	return nil
+}
+
+// Rollback ends the transaction and returns the connection to the pool.
+// A Commit that already landed only closes the connection: the statements
+// prepared on it are closed by the caller first.
+func (t *immediateTx) Rollback() error {
+	if t.conn == nil {
+		return nil
+	}
+	var err error
+	if !t.done {
+		_, err = t.conn.ExecContext(context.Background(), "ROLLBACK")
+		t.done = true
+	}
+	cerr := t.conn.Close()
+	t.conn = nil
+	if err != nil {
+		return err
+	}
+	return cerr
+}
+
 // prepareTrackUpsert prepares the one INSERT both track upserts run.
 // first_indexed_at is written only on insert; the conflict arm leaves it.
-func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
+func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 	return tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
@@ -3402,11 +3486,14 @@ func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
 //
 // indexed_at is the stamp readNextDeltaStamp computed in this transaction
 // before the write: the later of the clock and one past each watermark
-// arm. Binding that integer (the fifth VALUES placeholder) keeps a
-// same-nanosecond rewrite strictly past a cursor the client already holds,
-// including a tombstone or a coverage start above this row. The conflict
-// arm stores it with indexed_at = excluded.indexed_at. first_indexed_at
-// stays the scan clock.
+// arm. The transaction is BEGIN IMMEDIATE, so the write lock is reserved
+// before that read: a deferred transaction that reads and then writes
+// fails SQLITE_BUSY_SNAPSHOT when another connection commits in between,
+// and busy_timeout does not retry that code. Binding that integer (the
+// fifth VALUES placeholder) keeps a same-nanosecond rewrite strictly past
+// a cursor the client already holds, including a tombstone or a coverage
+// start above this row. The conflict arm stores it with
+// indexed_at = excluded.indexed_at. first_indexed_at stays the scan clock.
 //
 // On success t records the version of the row it wrote (Track.rowVersion),
 // as a read would: this is the single-row writer whose Track a caller keeps,
@@ -3420,7 +3507,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
@@ -3429,6 +3516,9 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	stamp, err := readNextDeltaStamp(ctx, tx, now)
 	if err != nil {
 		return err
+	}
+	if s.afterDeltaStampRead != nil {
+		s.afterDeltaStampRead()
 	}
 	stmt, err := prepareTrackUpsert(ctx, tx)
 	if err != nil {
@@ -3534,12 +3624,12 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	beginAt := time.Now()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
 	observeLockWait("upsert_batch", beginAt)
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// One stamp for the transaction, read before any row is written.
 	// Re-evaluating nextDeltaStampSQL per row would see the rows this
 	// transaction already wrote and stamp each one higher, in statement
@@ -3556,6 +3646,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	stamp, err := readNextDeltaStamp(ctx, tx, now)
 	if err != nil {
 		return err
+	}
+	if s.afterDeltaStampRead != nil {
+		s.afterDeltaStampRead()
 	}
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, stamp,
@@ -9799,7 +9892,7 @@ func localOutranksStored(local, stored string) bool {
 // tag changed (appeared, changed, or vanished) — a sidecar touch that left
 // the body identical refreshes the staleness columns and nothing else, so
 // the iOS delta carries exactly the rows whose lyricsTag moved.
-func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) (bool, error) {
+func writeLyricsRowTx(ctx context.Context, tx dbTx, t *Track, now int64) (bool, error) {
 	var oldTag, oldSource string
 	hadRow := true
 	err := tx.QueryRowContext(ctx, `SELECT tag, source FROM track_lyrics WHERE source_path = ?`,

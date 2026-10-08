@@ -2,10 +2,13 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
 
 // TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm pins the
@@ -308,75 +311,169 @@ func containsPath(paths []string, want string) bool {
 // a tombstone of a path it just wrote and that would drop the watermark.
 func TestAnUpsertClearsAWatermarkAboveTheRow(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct {
-		name  string
-		arm   string
-		fresh bool
-		batch bool
-	}{
-		{"tombstone conflict", "tombstone", false, false},
-		{"tombstone conflict batch", "tombstone", false, true},
-		{"tombstone fresh", "tombstone", true, false},
-		{"tombstone fresh batch", "tombstone", true, true},
-		{"coverage conflict", "coverage", false, false},
-		{"coverage conflict batch", "coverage", false, true},
-		{"coverage fresh", "coverage", true, false},
-		{"coverage fresh batch", "coverage", true, true},
-	} {
+	for _, tc := range watermarkUpsertCases {
 		t.Run(tc.name, func(t *testing.T) {
+			runWatermarkUpsertCase(t, ctx, tc)
+		})
+	}
+}
+
+type watermarkUpsertCase struct {
+	name  string
+	arm   string
+	fresh bool
+	batch bool
+}
+
+var watermarkUpsertCases = []watermarkUpsertCase{
+	{"tombstone conflict", "tombstone", false, false},
+	{"tombstone conflict batch", "tombstone", false, true},
+	{"tombstone fresh", "tombstone", true, false},
+	{"tombstone fresh batch", "tombstone", true, true},
+	{"coverage conflict", "coverage", false, false},
+	{"coverage conflict batch", "coverage", false, true},
+	{"coverage fresh", "coverage", true, false},
+	{"coverage fresh batch", "coverage", true, true},
+}
+
+func runWatermarkUpsertCase(t *testing.T, ctx context.Context, tc watermarkUpsertCase) {
+	t.Helper()
+	s := openTempStore(t)
+	t.Cleanup(func() { s.Close() })
+	// An hour ahead of OpenStore, so the v41 coverage seed is
+	// behind the rows this case plants.
+	base := time.Now().Add(time.Hour)
+	s.now = func() time.Time { return base }
+	seedWatermarkTracks(t, ctx, s, base)
+	watermark := indexedAtOf(t, s, "Music/A/a.flac") + 1_000_000
+	plantWatermarkArm(t, s, tc.arm, watermark)
+	s.now = func() time.Time { return time.Unix(0, watermark) }
+	written := watermarkUpsertPaths(tc)
+	writeWatermarkUpsert(t, ctx, s, tc.batch, watermarkUpsertRows(written, watermark))
+	requireSharedStampPastWatermark(t, s, written, watermark)
+}
+
+func seedWatermarkTracks(t *testing.T, ctx context.Context, s *Store, base time.Time) {
+	t.Helper()
+	for _, p := range []string{"Music/A/a.flac", "Music/A/b.flac"} {
+		if err := s.UpsertTrack(ctx, &Track{Path: p, Size: 10, ModTime: base}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func plantWatermarkArm(t *testing.T, s *Store, arm string, watermark int64) {
+	t.Helper()
+	if arm == "tombstone" {
+		plantTombstone(t, s, "Music/A/gone.flac", watermark)
+		return
+	}
+	setCoverage(t, s, watermark)
+}
+
+func watermarkUpsertPaths(tc watermarkUpsertCase) []string {
+	written := []string{"Music/A/a.flac"}
+	if tc.fresh {
+		written = []string{"Music/A/new.flac"}
+	}
+	if !tc.batch {
+		return written
+	}
+	if tc.fresh {
+		return append(written, "Music/A/new2.flac")
+	}
+	return append(written, "Music/A/b.flac")
+}
+
+func watermarkUpsertRows(paths []string, watermark int64) []*Track {
+	rows := make([]*Track, len(paths))
+	mod := time.Unix(0, watermark)
+	for i, p := range paths {
+		rows[i] = &Track{Path: p, Size: 20, ModTime: mod}
+	}
+	return rows
+}
+
+func writeWatermarkUpsert(t *testing.T, ctx context.Context, s *Store, batch bool, rows []*Track) {
+	t.Helper()
+	var err error
+	if batch {
+		err = s.UpsertTrackBatch(ctx, rows)
+	} else {
+		err = s.UpsertTrack(ctx, rows[0])
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireSharedStampPastWatermark(t *testing.T, s *Store, written []string, watermark int64) {
+	t.Helper()
+	var stamps []int64
+	for _, p := range written {
+		requireUpsertPastWatermark(t, s, p, watermark)
+		stamps = append(stamps, indexedAtOf(t, s, p))
+	}
+	if len(stamps) == 2 && stamps[0] != stamps[1] {
+		t.Errorf("batch stamps differ: %d and %d", stamps[0], stamps[1])
+	}
+}
+
+// TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp is the window a
+// deferred transaction opens: the stamp read takes a snapshot, and a
+// second connection that commits before the upsert's write makes that
+// write fail SQLITE_BUSY_SNAPSHOT. busy_timeout does not retry it.
+// The second connection tries its write after the stamp read returns
+// and before the upsert writes a row, on the same database file. The
+// upsert has to come back with the row written.
+func TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp(t *testing.T) {
+	ctx := context.Background()
+	for _, batch := range []bool{false, true} {
+		name := "one row"
+		if batch {
+			name = "batch"
+		}
+		t.Run(name, func(t *testing.T) {
 			s := openTempStore(t)
 			t.Cleanup(func() { s.Close() })
-			// An hour ahead of OpenStore, so the v41 coverage seed is
-			// behind the rows this case plants.
 			base := time.Now().Add(time.Hour)
 			s.now = func() time.Time { return base }
-			for _, p := range []string{"Music/A/a.flac", "Music/A/b.flac"} {
-				if err := s.UpsertTrack(ctx, &Track{Path: p, Size: 10, ModTime: base}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			watermark := indexedAtOf(t, s, "Music/A/a.flac") + 1_000_000
-			if tc.arm == "tombstone" {
-				plantTombstone(t, s, "Music/A/gone.flac", watermark)
-			} else {
-				setCoverage(t, s, watermark)
-			}
-			s.now = func() time.Time { return time.Unix(0, watermark) }
-
-			written := []string{"Music/A/a.flac"}
-			if tc.fresh {
-				written = []string{"Music/A/new.flac"}
-			}
-			if tc.batch {
-				if tc.fresh {
-					written = append(written, "Music/A/new2.flac")
-				} else {
-					written = append(written, "Music/A/b.flac")
-				}
-			}
-			rows := make([]*Track, len(written))
-			for i, p := range written {
-				rows[i] = &Track{Path: p, Size: 20, ModTime: time.Unix(0, watermark)}
-			}
-			var err error
-			if tc.batch {
-				err = s.UpsertTrackBatch(ctx, rows)
-			} else {
-				err = s.UpsertTrack(ctx, rows[0])
-			}
-			if err != nil {
+			if err := s.UpsertTrack(ctx, &Track{Path: "Music/A/a.flac", Size: 10, ModTime: base}); err != nil {
 				t.Fatal(err)
 			}
-			var stamps []int64
-			for _, p := range written {
-				requireUpsertPastWatermark(t, s, p, watermark)
-				stamps = append(stamps, indexedAtOf(t, s, p))
+			other := openStampRacer(t, s.path)
+			var otherErr error
+			s.afterDeltaStampRead = func() {
+				_, otherErr = other.Exec(
+					`INSERT INTO manifest_deletions(path, deleted_at) VALUES(?, ?)`,
+					"Music/A/racer.flac", time.Now().UnixNano())
 			}
-			if len(stamps) == 2 && stamps[0] != stamps[1] {
-				t.Errorf("batch stamps differ: %d and %d", stamps[0], stamps[1])
+			row := &Track{Path: "Music/A/a.flac", Size: 11, ModTime: base}
+			var err error
+			if batch {
+				err = s.UpsertTrackBatch(ctx, []*Track{row})
+			} else {
+				err = s.UpsertTrack(ctx, row)
+			}
+			if err != nil {
+				t.Fatalf("upsert: %v (the other connection: %v)", err, otherErr)
+			}
+			if otherErr == nil {
+				t.Fatal("the other connection committed between the stamp read and the write")
 			}
 		})
 	}
+}
+
+func openStampRacer(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", dsn.File(path,
+		"_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
 }
 
 func setCoverage(t *testing.T, s *Store, ns int64) {

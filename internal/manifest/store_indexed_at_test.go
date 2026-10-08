@@ -565,9 +565,9 @@ func handRolledIndexedAtAssignments(text, shared string) (checked int, handRolle
 			// track upserts) or above the statement (track_lyrics, atlas
 			// lyrics). A CASE that is the indexed_at assignment is the
 			// per-row form, and artwork_version's CASE later in the same
-			// literal is not this assignment.
-			assign := strings.TrimSpace(strings.TrimPrefix(window, "indexed_at ="))
-			if strings.HasPrefix(strings.ToLower(assign), "case") {
+			// literal is not this assignment. The split is the first '=',
+			// so indexed_at=CASE is the same assignment as indexed_at = CASE.
+			if strings.HasPrefix(strings.ToLower(indexedAtRHS(window)), "case") {
 				handRolled = append(handRolled, handRolledAssignment{
 					line: 1 + strings.Count(text[:loc[0]], "\n"), window: window,
 				})
@@ -582,6 +582,13 @@ func handRolledIndexedAtAssignments(text, shared string) (checked int, handRolle
 		}
 	}
 	return checked, handRolled
+}
+
+// indexedAtRHS is the text after the assignment's first '='. The window
+// starts at indexed_at, with or without a space before the operator.
+func indexedAtRHS(window string) string {
+	_, rhs, _ := strings.Cut(window, "=")
+	return strings.TrimSpace(rhs)
 }
 
 // inPredicate reports whether the text before an `indexed_at =` ends in the
@@ -602,23 +609,25 @@ func inPredicate(before string) bool {
 // TestTheIndexedAtSweepTellsAnAssignmentFromAComparison pins what
 // TestNoHandRolledIndexedAtBump reads as an assignment. On the package it
 // cannot show both halves: the tree holds no hand-rolled bump to fail, so
-// this reads a fixture holding each shape (a bare SET, a CASE assignment,
-// a SET through the shared advance, a compare-and-set predicate after AND,
-// one after WHERE on the line before, one after OR, and prose).
+// this reads a fixture holding each shape (a bare SET, a CASE assignment
+// with a space and one without, a SET through the shared advance, a
+// compare-and-set predicate after AND, one after WHERE on the line before,
+// one after OR, and prose).
 func TestTheIndexedAtSweepTellsAnAssignmentFromAComparison(t *testing.T) {
 	shared := squashSpace(indexedAtAdvanceSQL)
 	src := "package manifest\n" +
 		"const handRolled = `UPDATE tracks SET indexed_at = ? WHERE path = ?`\n" +
 		"const oldArm = `UPDATE tracks SET indexed_at = CASE WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1 ELSE excluded.indexed_at END`\n" +
+		"const tight = `UPDATE tracks SET indexed_at=CASE WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1 ELSE excluded.indexed_at END`\n" +
 		"const column = `UPDATE tracks SET first_indexed_at = ? WHERE path = ?`\n" +
 		"const advanced = `UPDATE tracks\n SET indexed_at = " + indexedAtAdvanceSQL + "\n WHERE path = ? AND indexed_at = ?`\n" +
 		"const compared = `SELECT 1 FROM tracks WHERE\n indexed_at = ? OR indexed_at = ?`\n" +
 		"// prose naming indexed_at = something is not read\n"
 	checked, handRolled := handRolledIndexedAtAssignments(src, shared)
-	if checked != 3 {
-		t.Errorf("counted %d assignments, want 3 (the bare SET, the CASE, the shared advance; every comparison and the prose is skipped)", checked)
+	if checked != 4 {
+		t.Errorf("counted %d assignments, want 4 (the bare SET, both CASE forms, the shared advance; every comparison and the prose is skipped)", checked)
 	}
-	if len(handRolled) != 2 || handRolled[0].line != 2 || handRolled[1].line != 3 {
-		t.Errorf("hand-rolled = %+v, want the bare SET on line 2 and the CASE assignment on line 3", handRolled)
+	if len(handRolled) != 3 || handRolled[0].line != 2 || handRolled[1].line != 3 || handRolled[2].line != 4 {
+		t.Errorf("hand-rolled = %+v, want the bare SET on line 2 and both CASE assignments on lines 3 and 4", handRolled)
 	}
 }

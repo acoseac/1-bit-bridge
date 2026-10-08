@@ -40,27 +40,27 @@ func BenchmarkUpsertStampCost(b *testing.B) {
 	})
 
 	b.Run("stamp-query-1", func(b *testing.B) {
-		tx := beginBenchTx(b, s)
-		defer tx.Rollback()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			if _, err := queryStamp(tx, int64(i)); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-
-	b.Run("stamp-query-500", func(b *testing.B) {
-		tx := beginBenchTx(b, s)
-		defer tx.Rollback()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			for n := 0; n < 500; n++ {
+		withBenchTx(b, s, func(tx *sql.Tx) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
 				if _, err := queryStamp(tx, int64(i)); err != nil {
 					b.Fatal(err)
 				}
 			}
-		}
+		})
+	})
+
+	b.Run("stamp-query-500", func(b *testing.B) {
+		withBenchTx(b, s, func(tx *sql.Tx) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for n := 0; n < 500; n++ {
+					if _, err := queryStamp(tx, int64(i)); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
 	})
 
 	b.Run("update-bound-500", func(b *testing.B) {
@@ -113,13 +113,17 @@ func benchTracks(paths []string, size int64) []*Track {
 	return rows
 }
 
-func beginBenchTx(b *testing.B, s *Store) *sql.Tx {
+// withBenchTx begins a transaction, rolls it back when fn returns, and
+// keeps it open for the queries fn runs. The rollback is in the function
+// that called Begin, which is the lifetime of the transaction.
+func withBenchTx(b *testing.B, s *Store, fn func(*sql.Tx)) {
 	b.Helper()
 	tx, err := s.db.Begin()
 	if err != nil {
 		b.Fatal(err)
 	}
-	return tx
+	defer tx.Rollback()
+	fn(tx)
 }
 
 func queryStamp(tx *sql.Tx, now int64) (int64, error) {

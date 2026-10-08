@@ -38083,3 +38083,31 @@ takes every row of it or none. `first_indexed_at` stays the scan clock.
 right-hand side starts with `CASE`; `artwork_version`'s `CASE` later in the
 same literal is a different column. Migration v34's `post()` and
 `StampExtractorVersionBatch` stay as they were. `ProtocolVersion` stays 1.
+
+## 2026-10-09 — track upserts reserve the write lock before the stamp read (PR #1166)
+
+The stamp read made `UpsertTrack` and `UpsertTrackBatch` a deferred transaction
+whose first statement is a read. In WAL mode that transaction fails to upgrade
+with `SQLITE_BUSY_SNAPSHOT` (517, `database is locked (517)`) when another
+connection commits after the read. `busy_timeout` does not retry that code.
+`s.mu` serializes writers in this process. The data-dir lock
+(`lockServeDataDir`, `<dataDir>/server.lock`) covers a second `bridge serve`.
+`bridge scan` (`scanCmd`) opens the store without it, as do the other CLI
+writers. Before the stamp moved, the upsert's first statement was the INSERT,
+which reserved the write lock at once.
+
+`TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp` opens a second connection
+on the same file and, from a hook after the stamp read, inserts a tombstone.
+Both subtests failed with code 517 while that insert committed. The upserts
+now `BEGIN IMMEDIATE` on a checked-out connection before the read, so the
+second connection's insert is `SQLITE_BUSY` and the upsert commits. The driver
+ignores `sql.TxOptions.Isolation` and takes `_txlock` from the DSN for every
+non-readonly `Begin`. That was left store-wide off: these two are the
+transactions whose first statement is the stamp read.
+
+The indexed_at sweep splits an assignment at the first `=`.
+`indexed_at=CASE` (no space) is the same hand-rolled form as
+`indexed_at = CASE`. `TestTheIndexedAtSweepTellsAnAssignmentFromAComparison`
+holds both. The stamp benchmark's read transaction rolls back in the function
+that begins it. `TestAnUpsertClearsAWatermarkAboveTheRow` keeps its eight
+cases in helpers.

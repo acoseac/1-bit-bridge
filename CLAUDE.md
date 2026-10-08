@@ -1270,7 +1270,16 @@ lost my library."
   `readNextDeltaStamp` evaluates `selectNextDeltaStampSQL` once per
   transaction, before any row of that transaction is written, and both the
   fresh insert and the conflict arm store that integer. A 500-row batch
-  pays one read. Every row of the commit carries that one stamp, so
+  pays one read. Those two transactions are `BEGIN IMMEDIATE`, so the
+  write lock is reserved before the stamp read. A deferred transaction
+  that reads and then writes fails `SQLITE_BUSY_SNAPSHOT` when another
+  connection commits in between, and `busy_timeout` does not retry that
+  code. `s.mu` serializes writers in this process only. The data-dir lock
+  covers a second `bridge serve`; `bridge scan` and the other CLIs open
+  the same database without it. Store-wide `_txlock=immediate` was not
+  taken: the driver applies it to every non-readonly `Begin`, and these
+  two are the transactions whose first statement is the stamp read.
+  Every row of the commit carries that one stamp, so
   `indexed_at > since` takes the batch whole or not at all: a reader sees
   the commit atomically, and two rows at one value cannot arrive as a
   prefix. `first_indexed_at` stays the scan clock. Two exclusions remain —
@@ -1281,14 +1290,16 @@ lost my library."
   how #840 reintroduced the dead `CASE WHEN` form — so
   `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package
   and classifies each assignment against the SQL literal that contains it.
-  An `indexed_at` assignment that starts with `CASE` is hand-rolled;
-  `artwork_version`'s `CASE` later in the same literal is a different
-  column. (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
+  An `indexed_at` assignment that starts with `CASE` is hand-rolled,
+  with or without a space before `=`; `artwork_version`'s `CASE` later
+  in the same literal is a different column.
+  (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
   `TestADeleteInTheSameNanosecondReachesADelta`,
   `TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered`,
   `TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark`,
   `TestAMassDeletePublishesAWatermarkThatMovedForward`,
-  `TestAnUpsertClearsAWatermarkAboveTheRow`.)
+  `TestAnUpsertClearsAWatermarkAboveTheRow`,
+  `TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp`.)
 - **A writer that writes back a row it READ earlier writes it only while the
   row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
   compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote
