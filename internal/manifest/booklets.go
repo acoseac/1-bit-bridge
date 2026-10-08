@@ -107,7 +107,7 @@ func (s *Store) UpsertBookletAvailability(ctx context.Context, mbid string, avai
 const setBookletTagSQL = `
 		UPDATE tracks
 		   SET booklet_tag = ?,
-		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE json_extract(tags_json, '$.musicBrainzAlbumID') = ?
 		   AND COALESCE(booklet_tag, '') <> COALESCE(?, '')`
 

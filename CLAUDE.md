@@ -1255,18 +1255,31 @@ lost my library."
  `TestACancelledWipeDropsTheSavedDates`,
  `TestACancelledSaveAfterTheWipeDropsTheSavedDates`,
  `TestACancelledCollapseKeepsTheDatesTheAddRecorded`.)
-- **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
-  the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
-  Both terms are load-bearing: the clock term anchors to wall-clock because the
-  cursor IS wall-clock, the `MAX+1` term clears same-tick siblings. Three
-  deliberate exclusions — the `UpsertTrack`/`UpsertTrackBatch` conflict arms,
-  migration v34's `post()`, and `StampExtractorVersionBatch` (not an
-  `indexed_at` writer at all). Don't "finish the job" by converting them.
-  A bump-only writer uses `bumpIndexedAtByPathSQL`. `TestIndexedAtAdvanceIsShared`
-  walks the named CONSTS and is blind to an inline literal in a function body —
-  which is how #840 reintroduced the dead `CASE WHEN` form — so
-  `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package and
-  classifies each assignment against the SQL literal that contains it.
+- **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which is
+  `nextDeltaStampSQL`: the later of the clock and one past each arm of the
+  library watermark (`MAX(indexed_at)`, `MAX(deleted_at)`, and the
+  deletion-journal coverage start). The clock term anchors to wall-clock
+  because the cursor IS wall-clock. Each `+1` clears a stamp that landed in
+  the same tick — on Windows that tick is 100 ns wide — and a delta filters
+  with a strict `>`, so a stamp equal to a cursor the client already holds
+  never arrives. The journal's `deleted_at` and a mass-op coverage start use
+  the same expression, inside the write. The coverage start is read BEFORE
+  the tombstone wipe: a stamp taken after it no longer sees the `deleted_at`
+  the cursor may sit on, `DeltaSinceCovered` treats `since >= start` as
+  covered, and the wipe left no tombstones. Three deliberate exclusions —
+  the `UpsertTrack`/`UpsertTrackBatch` conflict arms, migration v34's
+  `post()`, and `StampExtractorVersionBatch` (not an `indexed_at` writer at
+  all). Don't "finish the job" by converting them. A bump-only writer uses
+  `bumpIndexedAtByPathSQL`. `TestIndexedAtAdvanceIsShared` walks the named
+  CONSTS and is blind to an inline literal in a function body — which is
+  how #840 reintroduced the dead `CASE WHEN` form — so
+  `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package
+  and classifies each assignment against the SQL literal that contains it.
+  (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
+  `TestADeleteInTheSameNanosecondReachesADelta`,
+  `TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered`,
+  `TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark`,
+  `TestAMassDeletePublishesAWatermarkThatMovedForward`.)
 - **A writer that writes back a row it READ earlier writes it only while the
   row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
   compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote
@@ -2217,9 +2230,9 @@ lost my library."
   `MAX(manifest_deletions.deleted_at)` and the deletion-journal
   coverage start, rendered as millisecond UTC RFC3339, which
   `GET /v1/manifest?since=` parses. A mass delete that resets that
-  coverage publishes the new start, including when it deletes every
-  track. An empty library at scan end publishes the publisher clock
-  when no watermark exists. A watermark query error at scan end is
+  coverage publishes a start one past the watermark it replaced, including
+  when it deletes every track. An empty library at scan end publishes the
+  publisher clock when no watermark exists. A watermark query error at scan end is
   logged and that event carries the publisher clock; a note outside a
   scan still publishes nothing when the query fails. A sidecar lyrics bump on the
   version-stamp leg notes after its commit; a refusal skips lyrics.
