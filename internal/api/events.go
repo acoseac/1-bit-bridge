@@ -7,6 +7,23 @@ import (
 	"strings"
 )
 
+// setEventStreamHeaders sets the SSE response headers. Connection is
+// HTTP/1's keep-alive hint. HTTP/2 strips a hop-by-hop Connection
+// header itself; HTTP/3 forbids it (RFC 9114 §4.2), and a client that
+// enforces that drops the stream as soon as the headers arrive.
+func setEventStreamHeaders(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	if r.ProtoMajor < 2 {
+		h.Set("Connection", "keep-alive")
+	}
+	h.Set("Content-Encoding", "identity")
+	// Defensive against fronting reverse-proxies (nginx,
+	// cloudflare) that buffer responses by default.
+	h.Set("X-Accel-Buffering", "no")
+}
+
 // events handles GET /v1/events?topics=upscale,pairing.
 //
 // Wire shape (RFC EventSource / "Server-Sent Events"):
@@ -64,13 +81,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// middleware would buffer the response until close (defeating
 	// `Flush()`) — explicit `identity` is a tripwire AND a
 	// defence. Tested by `TestEventsResponseIsNotGzipped`.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Content-Encoding", "identity")
-	// Defensive against fronting reverse-proxies (nginx,
-	// cloudflare) that buffer responses by default.
-	w.Header().Set("X-Accel-Buffering", "no")
+	setEventStreamHeaders(w, r)
 
 	rc := http.NewResponseController(w)
 
@@ -118,6 +129,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
 	for {
 		select {
 		case <-ctx.Done():

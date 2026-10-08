@@ -4693,6 +4693,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Shutdown cancels nothing it is serving. Event streams select
+		// on the request context, which is a child of this one, and the
+		// stop has already cancelled it. A download does not: ServeContent
+		// copies until the file ends or this grace closes the connection.
+		BaseContext: apiBaseContext(ctx),
 	}
 
 	// Admin console: plain HTTP on a loopback address (default
@@ -5468,6 +5473,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 						srv: &http3.Server{
 							Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
 							TLSConfig: lanTLSConfig,
+							// HTTP/3 has no BaseContext. Same parent as the
+							// TCP server, so a stream ends when the stop
+							// cancels ctx rather than at the grace.
+							ConnContext: apiConnContext(ctx),
 						},
 						conn:   udpConn,
 						stderr: stderr,

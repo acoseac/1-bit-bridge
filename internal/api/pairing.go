@@ -265,12 +265,9 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	// Same defensive headers as /v1/events — see events.go for the
 	// rationale on Content-Encoding: identity + X-Accel-Buffering: no
 	// (defends against future global gzip middleware and fronting
-	// reverse proxies that buffer response bodies).
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Content-Encoding", "identity")
-	w.Header().Set("X-Accel-Buffering", "no")
+	// reverse proxies that buffer response bodies). Connection stays
+	// off HTTP/2 and HTTP/3, which forbid that hop-by-hop field.
+	setEventStreamHeaders(w, r)
 	rc := http.NewResponseController(w)
 
 	// Scope the subscription to JUST this request's topic. The

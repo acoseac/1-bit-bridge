@@ -234,6 +234,8 @@ func (f *tsnetFront) run(ctx context.Context) {
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          handshakelog.ErrorLog(),
+		// stop cancels ctx before it drains. Same reason as the LAN server.
+		BaseContext: apiBaseContext(ctx),
 	}
 	if !f.publishHTTPS(srv) {
 		_ = lis.Close()
@@ -339,7 +341,11 @@ func (f *tsnetFront) bindHTTP3(ctx context.Context, ips []netip.Addr, port strin
 			continue
 		}
 		listeners = append(listeners, tsnetH3Listener{
-			srv:  &http3.Server{Handler: f.handler, TLSConfig: f.node.HTTP3TLSConfig()},
+			srv: &http3.Server{
+				Handler:     f.handler,
+				TLSConfig:   f.node.HTTP3TLSConfig(),
+				ConnContext: apiConnContext(ctx),
+			},
 			conn: pconn,
 		})
 	}
