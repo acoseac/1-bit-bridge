@@ -364,6 +364,11 @@ func TestDeletingAPlaylistWithACoverPublishesOnce(t *testing.T) {
 func TestAMassDeletePublishesAWatermarkThatMovedForward(t *testing.T) {
 	s, _, notes := openNotifyingStore(t)
 	ctx := context.Background()
+	// One instant for the upserts and the delete, past the coverage seed
+	// OpenStore writes. A coarse clock puts both in the same tick; the
+	// event still has to move.
+	frozen := time.Now().Add(time.Hour)
+	s.now = func() time.Time { return frozen }
 	for _, p := range []string{"A/1.flac", "A/2.flac", "A/3.flac"} {
 		upsertParent(t, s, p)
 	}

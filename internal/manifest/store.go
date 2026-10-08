@@ -106,7 +106,7 @@ type Store struct {
 // delta-visibility bump uses. It takes exactly ONE bind: the clock value
 // (`s.now().UnixNano()`).
 //
-// Both terms are load-bearing, and neither can be dropped:
+// Every term is load-bearing, and none can be dropped:
 //
 //   - `?` (the clock) anchors the value to wall-clock time, because the
 //     delta cursor is wall-clock. iOS sends its OWN `Date.now` captured at
@@ -114,20 +114,26 @@ type Store struct {
 //     and `indexed_at` is never on the wire, so no client can derive a
 //     cursor from stored values. A purely counter-based value would drift
 //     arbitrarily far behind that cursor and break delta sync outright.
-//   - `MAX(indexed_at) + 1` raises the result past every OTHER row, which
-//     the older `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END`
-//     form did not do. That CASE WHEN advances strictly relative to the
-//     row's OWN prior value only; its ELSE arm assigns the raw clock, so
-//     when the clock equals a value another row already holds the bumped
-//     row lands EXACTLY ON a cursor equal to that value and `indexed_at >
+//   - One past each arm of the library watermark raises the result past
+//     every other row, every tombstone and the deletion-journal coverage
+//     start. A cursor is the later of those three, and a bump that clears
+//     only `MAX(indexed_at)` lands on a `deleted_at` or a coverage start
+//     the client already holds. The older `CASE WHEN indexed_at >= ? THEN
+//     indexed_at + 1 ELSE ? END` form advanced strictly relative to the
+//     row's OWN prior value; its ELSE arm assigns the raw clock, so when
+//     the clock equals a value another row already holds the bumped row
+//     lands EXACTLY ON a cursor equal to that value and `indexed_at >
 //     since` excludes it. Windows' ~15.6 ms clock granularity makes that
 //     collision routine (it is why TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta
 //     failed only on the windows-latest CI leg); nanosecond clocks hide it.
 //
-// Cost is one index seek: `idx_tracks_indexed` makes the subquery a
-// `SEARCH tracks USING COVERING INDEX` (SQLite's max-optimization), not a
-// scan. COALESCE guards the empty-table read — SQLite's `MAX(x, NULL)` is
-// NULL, which would write a NULL into a NOT NULL column.
+// Cost is three index seeks: `idx_tracks_indexed` and
+// `idx_manifest_deletions_deleted_at` make the two MAX subqueries
+// `SEARCH … USING COVERING INDEX` (SQLite's max-optimization), and the
+// coverage arm is the scan_state primary key. COALESCE guards each
+// empty-table read — SQLite's scalar `MAX` is NULL when any argument is
+// NULL, which would write a NULL into a NOT NULL column. The coverage
+// key is a literal so this fragment has exactly one placeholder.
 //
 // Deliberately NOT applied at two kinds of site:
 //
@@ -149,7 +155,7 @@ type Store struct {
 // ("dynamically formatted SQL") and reads as an assembled query. Nothing at
 // the language level then stops the copies drifting —
 // TestIndexedAtAdvanceIsShared does.
-const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
+const indexedAtAdvanceSQL = nextDeltaStampSQL
 
 // bumpIndexedAtByPathSQL is the whole statement for the six writers whose
 // ONLY job is the bump (UpsertVariant / deleteVariantRow, the body of
@@ -163,7 +169,7 @@ const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks
 // count did not — an enumeration in a docblock is a claim like any other.
 const bumpIndexedAtByPathSQL = `
 		UPDATE tracks
-		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE path = ?`
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
@@ -2868,7 +2874,7 @@ const markEnrichedSQL = `
 		UPDATE tracks
 		   SET tags_json   = ?,
 		       enriched_at = ?,
-		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE path = ? AND indexed_at = ?
 		RETURNING indexed_at`
 
@@ -3125,7 +3131,7 @@ func (s *Store) ApplyAlbumTitleReconciliation(ctx context.Context, changed []Tra
 const applyReconciledTrackSQL = `
 		UPDATE tracks
 		   SET tags_json  = ?,
-		       indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		       indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE path = ? AND indexed_at = ?`
 
 // applyReconciledTracks is the shared writer behind the post-scan
@@ -8346,7 +8352,7 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 const setArtworkVersionSQL = `
 		UPDATE tracks
 		   SET artwork_version = ?,
-		       indexed_at      = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		       indexed_at      = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE json_extract(tags_json, '$.artworkMBID') = ?
 		   AND COALESCE(artwork_version, '') <> ?`
 
