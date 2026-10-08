@@ -91,7 +91,7 @@ func (s *Store) LibraryWatermark(ctx context.Context) (int64, bool, error) {
 }
 
 func libraryWatermark(ctx context.Context, db *sql.DB) (int64, bool, error) {
-	var max sql.NullInt64
+	var latest sql.NullInt64
 	err := db.QueryRowContext(ctx, `
 		SELECT MAX(v) FROM (
 			SELECT MAX(indexed_at) AS v FROM tracks
@@ -99,12 +99,12 @@ func libraryWatermark(ctx context.Context, db *sql.DB) (int64, bool, error) {
 			SELECT MAX(deleted_at) AS v FROM manifest_deletions
 			UNION ALL
 			SELECT CAST(v AS INTEGER) AS v FROM scan_state WHERE k = ?
-		)`, deletionJournalCoverageKey).Scan(&max)
+		)`, deletionJournalCoverageKey).Scan(&latest)
 	if err != nil {
 		return 0, false, err
 	}
-	if !max.Valid || max.Int64 <= 0 {
+	if !latest.Valid || latest.Int64 <= 0 {
 		return 0, false, nil
 	}
-	return max.Int64, true, nil
+	return latest.Int64, true, nil
 }
