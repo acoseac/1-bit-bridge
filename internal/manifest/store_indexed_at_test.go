@@ -508,8 +508,9 @@ func classifyIndexedAtAssignments(t *testing.T, name, text, shared string) int {
 		t.Errorf("%s:%d — hand-rolled indexed_at assignment.\n"+
 			"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
 			"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
-			"the only exclusions are the upsert conflict arms and migration\n"+
-			"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
+			"a bound excluded.indexed_at is the stamp readNextDeltaStamp\n"+
+			"computed, and migration v34's post() stays out. A CASE that\n"+
+			"is itself the indexed_at assignment is hand-rolled.\nSaw: %s",
 			name, h.line, h.window[:min(180, len(h.window))])
 	}
 	return checked
