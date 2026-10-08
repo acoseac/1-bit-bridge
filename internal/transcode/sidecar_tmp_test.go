@@ -49,8 +49,8 @@ func TestSoxArgsTmpPathIsUniquePerCall(t *testing.T) {
 		seen[tmpPath] = true
 		// The temp path must still be the exact sox output argument — RunSox
 		// renames what sox wrote, with no re-derivation of its own.
-		if args[6] != tmpPath {
-			t.Fatalf("call %d: sox output arg %q != returned tmpPath %q", i, args[6], tmpPath)
+		if args[8] != tmpPath {
+			t.Fatalf("call %d: sox output arg %q != returned tmpPath %q", i, args[8], tmpPath)
 		}
 		if !strings.HasPrefix(tmpPath, finalPath+".") || !strings.HasSuffix(tmpPath, sidecarTmpSuffix) {
 			t.Fatalf("call %d: tmpPath %q is not %q + .<token> + %q",

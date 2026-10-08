@@ -328,3 +328,38 @@ func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
 		t.Errorf("CountAutoOptimizeCandidates = %d, want 1 (not double-counted)", n)
 	}
 }
+
+// TestListAutoOptimizeCandidatesReadsAPCMRowsDuration pins the columns
+// the gain-guard budget reads: a PCM row's duration and channel count,
+// which the candidate query used to extract only for a DSD row.
+func TestListAutoOptimizeCandidatesReadsAPCMRowsDuration(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	rate, bits := 96000.0, 24
+	dur, ch := 90.0, 2
+	isDSD := false
+	if err := s.UpsertTrack(context.Background(), &Track{
+		Path: "P/timed.flac", Size: 1_000_000, ModTime: time.Unix(1700000000, 0),
+		SampleRate: &rate, BitsPerSample: &bits, Codec: "FLAC", IsDSD: &isDSD,
+		Duration: &dur, Channels: &ch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListAutoOptimizeCandidates(context.Background(), 10, EligibilityOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row *AutoOptimizeCandidate
+	for i := range got {
+		if got[i].Path == "P/timed.flac" {
+			row = &got[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("candidates = %+v, want P/timed.flac", got)
+	}
+	if row.IsDSD || row.DurationSec != 90 || row.Channels != 2 {
+		t.Errorf("PCM candidate = %+v, want duration 90, 2 channels, not DSD", row)
+	}
+}

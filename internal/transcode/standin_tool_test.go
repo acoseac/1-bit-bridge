@@ -196,9 +196,10 @@ func checkStruck(t *testing.T, a *announcingPool, rel string, announced []string
 // whatever it wrote, on every platform. Only the positive control may be
 // published. A stream cut short (what a full volume left) is the output
 // side's fault, which strikes nothing; the rest is the run's, which strikes:
-// a stream the tool finished at a length the source disagrees with (what
-// sox leaves when its own -G temporary file could not be written), at
-// another rate, or no FLAC at all.
+// a stream the tool finished at a length the source disagrees with while
+// the temp volume can hold the -G file, at another rate, or no FLAC at
+// all. The same short stream is the temp volume's when the probed
+// duration asks for a guard file larger than the free space.
 func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 	block := flactest.Stream(176400, 2, 24, flactest.Block, 0)
 	// One block at 176.4 kHz is 4096/176400 s; ffprobe prints six decimals,
@@ -217,6 +218,11 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 		{name: "cut short", rendition: block[:len(block)-5], probe: blockSeconds, outputs: true},
 		{name: "cut short, ffprobe missing", rendition: block[:len(block)-1], outputs: true},
 		{name: "whole, shorter than the source", rendition: block, probe: "1.000000\n"},
+		// 1e9 s at 176.4 kHz stereo is more than any temp volume holds, so
+		// the same short file is the gain guard's and strikes nothing. The
+		// 1 s row above is the control: that volume has room, and it strikes.
+		{name: "whole, shorter, temp volume below the guard's need", rendition: block,
+			probe: "1000000000.000000\n", outputs: true},
 		{name: "whole, longer than the source", rendition: flactest.Stream(176400, 2, 24, 3*flactest.Block, 0),
 			probe: blockSeconds},
 		{name: "another rate", rendition: flactest.Stream(44100, 2, 24, flactest.Block, 0)},
@@ -238,7 +244,9 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 // TestACutRenditionStrikesNothingAndAShortOneStrikes is the pool's half, on
 // every platform: three jobs whose stream was cut short leave the source
 // unstruck and report one output outage; three whose stream was whole but
-// short strike it, as any run whose tool finished does.
+// short strike it while the temp volume can hold the guard file. The same
+// short stream leaves the source unstruck when the probed duration asks
+// for a guard file larger than the free space.
 func TestACutRenditionStrikesNothingAndAShortOneStrikes(t *testing.T) {
 	block := flactest.Stream(176400, 2, 24, flactest.Block, 0)
 	for _, tc := range []struct {
@@ -249,6 +257,8 @@ func TestACutRenditionStrikesNothingAndAShortOneStrikes(t *testing.T) {
 	}{
 		{name: "cut short", rendition: block[:len(block)-7]},
 		{name: "whole and short", rendition: block, probe: "1.000000\n", struck: true},
+		{name: "whole and short, temp volume below the guard's need", rendition: block,
+			probe: "1000000000.000000\n", struck: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			standInsWriting(t, tc.rendition, tc.probe)

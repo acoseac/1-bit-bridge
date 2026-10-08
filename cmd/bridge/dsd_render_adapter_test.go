@@ -146,7 +146,9 @@ func TestBuildOptimizeSpec_DSDNeedsCaps(t *testing.T) {
 }
 
 // TestBuildOptimizeSpec_PCMUnchangedByCaps: caps never touch a PCM
-// source — same id as before, no DSD facts, no scratch dir.
+// source — same id as before, and it stays a PCM job. The temp dir and
+// the row's duration ride along so the gain-guard file has a home and a
+// size.
 func TestBuildOptimizeSpec_PCMUnchangedByCaps(t *testing.T) {
 	f := newAdapterFixture(t)
 	tr := f.seed(t, "A/Album/01.flac", "FLAC", 96000, 24, false, "", 300, 2)
@@ -159,9 +161,9 @@ func TestBuildOptimizeSpec_PCMUnchangedByCaps(t *testing.T) {
 		if got, want := spec.VariantID(), "optimized-v2-48000-16"; got != want {
 			t.Errorf("caps %+v: VariantID = %q, want %q", caps, got, want)
 		}
-		if spec.SourceIsDSD || spec.TempDir != "" || spec.SourceDurationSec != 0 {
-			t.Errorf("caps %+v: a PCM spec carries DSD facts: isDSD=%v tempDir=%q dur=%v",
-				caps, spec.SourceIsDSD, spec.TempDir, spec.SourceDurationSec)
+		if spec.SourceIsDSD || spec.TempDir != "/scratch" || spec.SourceDurationSec != 300 || spec.SourceChannels != 2 {
+			t.Errorf("caps %+v: PCM spec = isDSD=%v tempDir=%q dur=%v ch=%d, want false /scratch 300 2",
+				caps, spec.SourceIsDSD, spec.TempDir, spec.SourceDurationSec, spec.SourceChannels)
 		}
 	}
 }

@@ -489,7 +489,7 @@ func TestListAutoOptimizeCandidates_DSDArm(t *testing.T) {
 		t.Errorf("DSD candidate row = %+v, want IsDSD, duration 300.5, 2 channels, 2822400/1 DSF", c)
 	}
 	if c := on["P/01.flac"]; c.IsDSD || c.DurationSec != 0 || c.Channels != 0 {
-		t.Errorf("PCM candidate row carries DSD-only facts: %+v", c)
+		t.Errorf("unseeded PCM candidate row = %+v, want duration 0 and channels 0", c)
 	}
 	dst := list(EligibilityOpts{DSDRender: true, DST: true})
 	if got := keys(dst); !equal(got, []string{"D/01.dsf", "D/02.dff", "P/01.flac"}) {
