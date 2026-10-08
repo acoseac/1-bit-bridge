@@ -1172,15 +1172,22 @@ lost my library."
  scan and a subtree scan, including a virtual row under a renamed
  container) and for a library-root flip. The saved key is the root's
  folder name plus the path within that root, the same string in both
- storage forms. `RecordFirstIndexedCarry` takes the existing root's
- folder name when a root is added and prefixes the stored path, and on a
- collapse keeps only the surviving root's rows, whose stored path already
- begins with that folder name. A single-root scan looks a date up by
- prefixing the folder name of the root that scan is walking. A multi-root
- scan looks the stored path up directly. A flip that changes the
- storage form records and wipes in one transaction
+ storage forms. The snapshot takes the existing root's folder name
+ when a root is added and prefixes the stored path, and on a collapse
+ keeps only the surviving root's rows, whose stored path already begins
+ with that folder name. A single-root scan looks a date up by prefixing
+ the folder name of the root that scan is walking. A multi-root scan
+ looks the stored path up directly. A flip that changes the storage
+ form records and wipes in one transaction
  (`RecordFirstIndexedCarryAndWipe`: admin add, admin remove that
  collapses to one root, `bridge library add`, `bridge library remove`).
+ The scenario tests take that same call (`recordAndWipe`, and the add
+ ahead of the cancelled collapse in
+ `TestACancelledCollapseKeepsTheDatesTheAddRecorded`). The snapshot
+ alone is `recordFirstIndexedCarry`, unexported, so a caller cannot
+ record and wipe apart. A test that inserts a row between the snapshot
+ and the wipe (`TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt`)
+ and the snapshot's own checks are its callers. Don't export it again.
  A prefix delete that stays multi-root records nothing.
  A record merges and bumps the generation. A snapshot with no rows writes
  nothing when no dates are saved yet; when dates are already saved it
