@@ -84,8 +84,12 @@ const manifestDeltaDeletedCap = 20_000
 const nextDeltaStampSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)`
 
 // selectNextDeltaStampSQL reads that stamp. The coverage reset calls it
-// before it deletes the tombstones the stamp has to clear.
-const selectNextDeltaStampSQL = `SELECT ` + nextDeltaStampSQL
+// before it deletes the tombstones the stamp has to clear. A plain
+// literal, not `"SELECT " + nextDeltaStampSQL`: QueryRowContext of a
+// concatenated const is what SonarCloud go:S2077 flags.
+// TestNextDeltaStampReadsTheCoverageKey requires this equal to
+// "SELECT " + nextDeltaStampSQL.
+const selectNextDeltaStampSQL = `SELECT MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)`
 
 // Journal INSERT fragments. Prefix + <the sibling DELETE's WHERE> +
 // suffix, concatenated at COMPILE time where the predicate is a const —

@@ -53,6 +53,37 @@ func TestNextDeltaStampReadsTheCoverageKey(t *testing.T) {
 	}
 }
 
+// TestEveryDeltaStampConstEmbedsNextDeltaStamp names every SQL const that
+// writes a delta-visible stamp and requires the expression verbatim.
+// The copies stay literals: concatenating them trips SonarCloud go:S2077.
+// Grep of indexed_at and deleted_at assignments: the upsert conflict
+// arms, migration v34's post(), and `indexed_at = excluded.indexed_at`
+// are the exclusions the advance docblock already names, and
+// `deleted_at = excluded.deleted_at` copies the SELECT that already
+// stamps with this expression.
+func TestEveryDeltaStampConstEmbedsNextDeltaStamp(t *testing.T) {
+	for name, stmt := range map[string]string{
+		"indexedAtAdvanceSQL":          indexedAtAdvanceSQL,
+		"selectNextDeltaStampSQL":      selectNextDeltaStampSQL,
+		"journalInsertPrefixSQL":       journalInsertPrefixSQL,
+		"journalThresholdReapBatchSQL": journalThresholdReapBatchSQL,
+		"journalThresholdReapOneSQL":   journalThresholdReapOneSQL,
+		"journalDeleteByPrefixSQL":     journalDeleteByPrefixSQL,
+		"journalClearMissingSQL":       journalClearMissingSQL,
+		"journalSinglePathSQL":         journalSinglePathSQL,
+		"bumpIndexedAtByPathSQL":       bumpIndexedAtByPathSQL,
+		"markEnrichedSQL":              markEnrichedSQL,
+		"applyReconciledTrackSQL":      applyReconciledTrackSQL,
+		"setArtworkVersionSQL":         setArtworkVersionSQL,
+		"setBookletTagSQL":             setBookletTagSQL,
+		"applyDupeStampBumpSQL":        applyDupeStampBumpSQL,
+	} {
+		if !strings.Contains(stmt, nextDeltaStampSQL) {
+			t.Errorf("%s does not contain nextDeltaStampSQL", name)
+		}
+	}
+}
+
 func TestNextDeltaStampUsesTheWatermarkIndexes(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { s.Close() })
