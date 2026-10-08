@@ -304,8 +304,14 @@ func TestJournal_PruneAdvancesCoverage(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now()
 
-	// Tombstone written "200 days ago" via the injected clock.
+	// Tombstone written "200 days ago" via the injected clock. A delete
+	// stamps one past the coverage seed OpenStore just wrote, which is
+	// the real clock, so that seed moves back with the injected clock
+	// or the old tombstone is stamped at the seed and the prune keeps it.
 	old := base.Add(-200 * 24 * time.Hour)
+	if err := s.SetScanState(ctx, deletionJournalCoverageKey, fmt.Sprintf("%d", old.Add(-time.Hour).UnixNano())); err != nil {
+		t.Fatal(err)
+	}
 	s.now = func() time.Time { return old }
 	journalUpsert(t, s, "p/old.flac", 1)
 	if err := s.DeleteTrack(ctx, "p/old.flac"); err != nil {

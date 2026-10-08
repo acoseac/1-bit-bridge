@@ -37911,6 +37911,10 @@ The upsert conflict arms, a fresh insert's clock, and migration v34's
 coverage start with `MAX(stored, cutoff)` only when it pruned, and the
 cutoff is 180 days back. Applying the next-stamp expression there would
 move coverage to now and force a full sync on every prune.
+`TestJournal_PruneAdvancesCoverage` moves the coverage seed back with
+the injected clock: a delete stamps one past that seed, so a seed left
+at store-open time stamps the "200 days ago" tombstone at now and the
+prune keeps it.
 
 No migration. `idx_tracks_indexed` and
 `idx_manifest_deletions_deleted_at` already exist, and `scan_state` is
