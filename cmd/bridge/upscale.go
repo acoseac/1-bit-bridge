@@ -508,6 +508,12 @@ func classifyUpscaleTrack(
 		Kind:             p.kind, // zero-value preserves upscale for legacy callers
 		TempDir:          p.tempDir,
 	}
+	if t.Channels != nil {
+		spec.SourceChannels = *t.Channels
+	}
+	if t.Duration != nil {
+		spec.SourceDurationSec = *t.Duration
+	}
 	if trackIsDSD {
 		applyDSDSpecFacts(&spec, t)
 	}

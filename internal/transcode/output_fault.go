@@ -215,15 +215,14 @@ type outputWrite struct {
 }
 
 // writtenBy names the places a successful job wrote: its sidecar's directory
-// under the variants directory, and for a run that took the DSD route (read
-// from the settings it recorded, as toolsProvenBy reads them) the render
-// scratch directory its Stage A wrote.
+// under the variants directory, and the render scratch directory. A DSD job
+// writes Stage A there; a PCM job writes its -G file there (--temp). Either
+// proves a scratch-volume outage over.
 func writtenBy(spec JobSpec, sidecarPath, settings string) []outputWrite {
-	w := []outputWrite{{where: outputVariants, dir: filepath.Dir(sidecarPath)}}
-	if v, ok := ParseSoxSettings(settings); ok && v.Decoder == routeFFmpegDSDPipe.String() {
-		w = append(w, outputWrite{where: outputScratch, dir: renderScratchDir(spec.TempDir)})
+	return []outputWrite{
+		{where: outputVariants, dir: filepath.Dir(sidecarPath)},
+		{where: outputScratch, dir: renderScratchDir(spec.TempDir)},
 	}
-	return w
 }
 
 // proven ends the outages a successful job's writes prove over, logging each

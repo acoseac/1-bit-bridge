@@ -51,12 +51,12 @@ type AutoOptimizeCandidate struct {
 	// can re-run transcode.DSDRenderEligible on the row.
 	IsDSD       bool
 	Compression string
-	// DurationSec / Channels feed the DSD render job's geometry check
-	// and per-spec timeout (transcode.JobSpec.SourceDurationSec /
-	// SourceChannels). Read from tags_json for DSD rows ONLY — the two
-	// json_extract calls run per returned candidate, never in the WHERE
-	// — and 0 for everything else ("unknown", which the consumers treat
-	// as "fall back", never as a real value).
+	// DurationSec / Channels feed the job's geometry: the DSD render's
+	// completeness check and timeout, and the PCM gain-guard budget
+	// (transcode.JobSpec.SourceDurationSec / SourceChannels). Read from
+	// tags_json for every row — the two json_extract calls run per
+	// returned candidate, never in the WHERE — and 0 when the tag is
+	// absent ("unknown", which the consumers treat as "fall back").
 	DurationSec float64
 	Channels    int
 	// StaleVariantID is non-empty when the candidate already holds SOME
@@ -155,10 +155,8 @@ const autoOptimizeCandidateSQL = `
 	       COALESCE(t.sample_rate, 0), COALESCE(t.bits_per_sample, 0),
 	       COALESCE(t.codec, ''),
 	       COALESCE(t.is_dsd, 0), COALESCE(t.compression, ''),
-	       CASE WHEN COALESCE(t.is_dsd, 0) = 1
-	            THEN COALESCE(json_extract(t.tags_json, '$.duration'), 0) ELSE 0 END,
-	       CASE WHEN COALESCE(t.is_dsd, 0) = 1
-	            THEN COALESCE(json_extract(t.tags_json, '$.channels'), 0) ELSE 0 END,
+	       COALESCE(json_extract(t.tags_json, '$.duration'), 0),
+	       COALESCE(json_extract(t.tags_json, '$.channels'), 0),
 	       COALESCE((SELECT sv.variant_id FROM track_variants sv
 	                  WHERE sv.source_path = t.path
 	                    AND sv.variant_id LIKE 'optimized-%'

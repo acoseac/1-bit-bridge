@@ -8094,14 +8094,12 @@ type TrackProjection struct {
 	// ffmpeg's `dst` decoder, and this is what lets them do it from
 	// projected columns alone.
 	Compression string
-	// DurationSec / Channels are the DSD render's geometry — the same
-	// pair AutoOptimizeCandidate carries, for the same two consumers:
-	// transcode.JobSpec.SourceDurationSec (the decode-completeness
-	// guard's fallback when ffprobe reports 0, and the per-spec timeout)
-	// and SourceChannels (scratch sizing, which otherwise assumes
-	// stereo and under-reserves for a multichannel source). Read from
-	// tags_json for DSD rows ONLY and 0 elsewhere — "unknown", which
-	// every consumer treats as "fall back", never as a real value.
+	// DurationSec / Channels are the render's geometry — the same pair
+	// AutoOptimizeCandidate carries. SourceDurationSec feeds the
+	// per-spec timeout and the PCM gain-guard budget; SourceChannels
+	// sizes that file and the DSD scratch, which otherwise assume stereo.
+	// Read from tags_json for every row. A missing tag is 0 — "unknown",
+	// which every consumer treats as "fall back", never as a real value.
 	DurationSec float64
 	Channels    int
 	HasVariant  bool
@@ -8197,10 +8195,8 @@ const trackProjectionSelect = `
 		       COALESCE(json_extract(t.tags_json, '$.codec'),              '') AS codec,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
 		       COALESCE(t.compression, '') AS compression,
-		       CASE WHEN CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'), 0) AS INTEGER) = 1
-		            THEN COALESCE(json_extract(t.tags_json, '$.duration'), 0) ELSE 0 END AS duration_sec,
-		       CASE WHEN CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'), 0) AS INTEGER) = 1
-		            THEN CAST(COALESCE(json_extract(t.tags_json, '$.channels'), 0) AS INTEGER) ELSE 0 END AS channels,
+		       COALESCE(json_extract(t.tags_json, '$.duration'), 0) AS duration_sec,
+		       CAST(COALESCE(json_extract(t.tags_json, '$.channels'), 0) AS INTEGER) AS channels,
 		       EXISTS(SELECT 1 FROM track_variants tv
 		               WHERE tv.source_path = t.path
 		                 AND tv.variant_id LIKE ?) AS has_variant,

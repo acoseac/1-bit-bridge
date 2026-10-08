@@ -2,7 +2,11 @@ package transcode
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -73,4 +77,84 @@ func TestAShortScratchIsTheOutputSidesOnlyWhenItsVolumeRefuses(t *testing.T) {
 	if f, ok := unwritableOutput(err); !ok || f.where != outputScratch || f.kind != outputDenied || !errors.Is(err, short) {
 		t.Errorf("a permission: classifyScratch = %v (%+v, %v), want the scratch's, the error wrapped", err, f, ok)
 	}
+}
+
+// TestProbeTempDirRoomClosesBeforeItRemoves pins the two defers on the
+// guard probe: Remove is registered first and Close second, so a panic
+// or an early return closes the handle and then deletes the name.
+// Windows cannot remove a file that is still open. An explicit Close
+// stays on the error paths, and KeepOwner stays, because a root CLI
+// otherwise leaves the probe owned by root.
+func TestProbeTempDirRoomClosesBeforeItRemoves(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "rendition_complete.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse rendition_complete.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if ok && fd.Name.Name == "probeTempDirRoom" && fd.Body != nil {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("probeTempDirRoom is not in rendition_complete.go")
+	}
+	var defers []string
+	explicitClose := 0
+	keepOwner := false
+	for _, stmt := range fn.Body.List {
+		if d, ok := stmt.(*ast.DeferStmt); ok {
+			defers = append(defers, callSel(d.Call))
+			continue
+		}
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			if _, ok := n.(*ast.DeferStmt); ok {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel := callSel(call)
+			if sel == "Close" {
+				explicitClose++
+			}
+			if sel == "KeepOwner" {
+				keepOwner = true
+			}
+			return true
+		})
+	}
+	if len(defers) < 2 || defers[0] != "Remove" || defers[1] != "Close" {
+		t.Fatalf("probeTempDirRoom defers = %v, want Remove then Close (Close registered second runs first)", defers)
+	}
+	if !keepOwner {
+		t.Error("probeTempDirRoom no longer calls KeepOwner")
+	}
+	if explicitClose == 0 {
+		t.Error("probeTempDirRoom has no Close outside a defer; the write path has to return that error")
+	}
+
+	dir := t.TempDir()
+	if err := probeTempDirRoom(dir); err != nil {
+		t.Fatalf("probeTempDirRoom: %v", err)
+	}
+	left, err := filepath.Glob(filepath.Join(dir, ".guard-probe-*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(left) != 0 {
+		t.Errorf("probe left %v", left)
+	}
+}
+
+func callSel(call *ast.CallExpr) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	return sel.Sel.Name
 }

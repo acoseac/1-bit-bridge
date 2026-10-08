@@ -92,8 +92,9 @@ func TestMarkOutputFaultReturnsEveryOtherErrorAsItIs(t *testing.T) {
 // about one directory: in a variants tree where one album folder is root's,
 // every other album still renders, and ending the outage on any success would
 // report it over, then back, at every success between two of its failures.
-// So it ends only when a job writes in the folder that refused it. And a PCM
-// job writes no render scratch, so it proves nothing about one.
+// So it ends only when a job writes in the folder that refused it. A PCM
+// job writes its gain-guard file in the scratch directory, so it proves a
+// scratch volume back the way a DSD job's Stage A does.
 func TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack(t *testing.T) {
 	const relX, relY, relDSD = "Music/X/01.flac", "Music/Y/01.flac", "Music/Z/01.dsf"
 	a := newAnnouncingPool(t, relX, relY, relDSD)
@@ -123,7 +124,7 @@ func TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack(t *testing.
 		succeededVia(routeSoxDirect))
 	a.run(t, x, 2)
 	a.run(t, y, 1)
-	// The scratch volume fills; a PCM job between proves nothing about it.
+	// The scratch volume fills; the PCM job's gain-guard write proves it back.
 	scratch := renderScratchDir(dsd.TempDir)
 	s.then(fail(outputScratch, scratch, fullVolumeErrno()), fail(outputScratch, scratch, fullVolumeErrno()),
 		succeededVia(routeSoxDirect), succeededVia(routeFFmpegDSDPipe))
@@ -149,7 +150,7 @@ func TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack(t *testing.
 		!strings.Contains(back[1], "output="+outputVariants) || !strings.Contains(back[1], "failedJobs=2") ||
 		!strings.Contains(back[2], "output="+outputScratch) || !strings.Contains(back[2], "failedJobs=2") {
 		t.Errorf("recovery lines:\n%s\nwant the denied folder back after 3 jobs (when X rendered, not Y), "+
-			"the read-only volume after 2 (when Y rendered), the scratch after 2 (when a DSD job rendered)",
+			"the read-only volume after 2 (when Y rendered), the scratch after 2 (when the PCM job wrote its guard file)",
 			strings.Join(back, "\n"))
 	}
 	for _, rel := range []string{relX, relY, relDSD} {

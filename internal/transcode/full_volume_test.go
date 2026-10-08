@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -230,5 +231,36 @@ func (tc fullVolumeCase) check(t *testing.T, a *announcingPool, spec JobSpec, go
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(spec.SidecarPath()), "*"+sidecarTmpSuffix)); len(leftovers) != 0 {
 		t.Errorf("temp sidecars left behind: %v", leftovers)
+	}
+}
+
+// TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing renders a PCM
+// source through the real sox with --temp on a volume that cannot hold
+// the post-rate guard file. sox exits 0 and leaves a finished short FLAC;
+// the job is the temp volume's and the source takes no strike.
+func TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing(t *testing.T) {
+	requireSox(t)
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe supplies the source duration the length check reads")
+	}
+	full := smallVolume(t, 16)
+	fillVolume(t, full, 256<<10)
+	roomy := t.TempDir()
+	src := realSource(t, roomy, "01.flac", 1)
+	spec := stampedAsScanned(pcmUpscaleSpec("Album/01.flac")(src, filepath.Join(roomy, "variants"), filepath.Join(full, "tmp")))
+	spec.SourceChannels = 2
+	res, err := Run(context.Background(), spec)
+	if res.SizeBytes != 0 {
+		t.Fatalf("Run published %d bytes", res.SizeBytes)
+	}
+	if _, statErr := os.Stat(spec.SidecarPath()); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("sidecar stat = %v, want ENOENT", statErr)
+	}
+	var fault *outputFaultError
+	if !errors.As(err, &fault) || !errors.Is(err, ErrRenditionIncomplete) {
+		t.Fatalf("Run = %v, want a rendition-incomplete output fault", err)
+	}
+	if fault.fault.where != outputScratch || fault.fault.kind != outputFull || fault.fault.reason != reasonGuardTempShort {
+		t.Errorf("fault = %+v, want scratch / full / %q", fault.fault, reasonGuardTempShort)
 	}
 }

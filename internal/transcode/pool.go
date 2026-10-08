@@ -1645,8 +1645,8 @@ func redactSoxErr(s string, spec JobSpec) string {
 	// is an absolute HOST path that lands in sox's argv as Stage A's output
 	// and Stage B/C's input, so a failing stage names it in stderr and a
 	// mkdir failure names it in the PathError. The scratch basename is an
-	// opaque token, so the prefix goes and the name stays. A no-op for every
-	// PCM job — nothing in a sox-direct run mentions the directory.
+	// opaque token, so the prefix goes and the name stays. A PCM job names
+	// the same directory as sox --temp.
 	scratch := strings.TrimRight(renderScratchDir(spec.TempDir), `/\`)
 	s = strings.ReplaceAll(s, scratch+"/", "")
 	s = strings.ReplaceAll(s, scratch+`\`, "")
