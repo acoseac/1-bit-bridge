@@ -53,7 +53,7 @@ type DupeStamp struct {
 const applyDupeStampBumpSQL = `
 		UPDATE tracks
 		   SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
-		       indexed_at    = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		       indexed_at    = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
 		 WHERE path = ?`
 
 // ApplyDupeStamps writes the changed stamps in one transaction.

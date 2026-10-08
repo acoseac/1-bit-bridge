@@ -464,13 +464,13 @@ func TestManifest_DeltaOmitsPathsWithServedRows(t *testing.T) {
 // journalDecision is what one decideDeletionJournalMode call did: the
 // answer it gave, and BOTH halves of the reset it may have performed.
 //
-// Both, because `resetDeletionJournalCoverageTx` runs two statements —
-// it DELETEs every tombstone and it stamps `deletionJournalCoverageKey`
-// in scan_state — and an assertion on the tombstones alone passes
-// against a version that drops the marker. The marker is what makes a
-// delta client answer `deltaIncomplete` and full-sync; without it the
-// client reads a wiped journal as "nothing was deleted", which is the
-// exact wrong answer in the exact case this guard exists for.
+// Both, because `resetDeletionJournalCoverageTx` reads the next stamp,
+// DELETEs every tombstone and stamps `deletionJournalCoverageKey` in
+// scan_state — and an assertion on the tombstones alone passes against
+// a version that drops the marker. The marker is what makes a delta
+// client answer `deltaIncomplete` and full-sync; without it the client
+// reads a wiped journal as "nothing was deleted", which is the exact
+// wrong answer in the exact case this guard exists for.
 // (CodeRabbit on #958.)
 type journalDecision struct {
 	perChunk      bool
