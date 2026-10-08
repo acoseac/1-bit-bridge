@@ -148,7 +148,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this, and `admin.loopbackHostOnly` holds a request's Host to loopback as well (421 otherwise, backlog B170: the source alone admits a browser a page has rebound to 127.0.0.1). **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what the public demo and the hosted tenants run, and what `bridge.ars.md` ran as the operator bridge until it moved to a home NUC on 2026-09-22; this bullet omitted public mode until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`, as `restart.request`, which also makes serve exit with `supervision.RestartExitCode` (75) where a stop exits 0: launchd and the Windows SCM relaunch only the former (B201, under **Config, settings and process lifecycle**).
-- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets). An event stream is not one of those handlers. The LAN and tailnet API servers parent every request on the serve context the stop cancels first (`apiBaseContext` on HTTP/1 and HTTP/2, `apiConnContext` on HTTP/3), so `GET /v1/events` and the pairing event stream return as a finished stream, the same way the console's server already parents `GET /api/events`. A download still occupies the grace, because `ServeContent` does not read the request context.
+- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets). An event stream is not one of those handlers. `GET /v1/events` and the pairing event stream select on the serve context the stop cancels first (`Server.EndEventStreamsWhen`), so they return as a finished stream. Ordinary requests keep the context net/http gives them and finish inside the grace: a manifest page, a favorites or playlist write, an artwork read. The console's own server still parents every request, which is what already ends `GET /api/events`. A download still occupies the grace, because `ServeContent` does not read the request context.
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
@@ -2225,10 +2225,13 @@ lost my library."
   (`TestADemoTokenHolderCannotStarvePairingEvents`,
   `TestAMintedTokenOnADemoBridgeGetsNoEventStream`,
   `TestAPairedDeviceEventStreamStillSubscribes`). A shutdown ends an
-  open stream by cancelling the request context the handler already
-  selects on, after the 200 has flushed, so the client sees a finished
-  stream and reconnects (`TestEventStreamsEndWhenServeShutsDown`, the
-  serve-wiring bullet). `bridge restore` replaces the
+  open stream because the handler also selects on the serve context the
+  stop cancels (`Server.EndEventStreamsWhen`), after the 200 has flushed,
+  so the client sees a finished stream and reconnects. An ordinary
+  request keeps its own context and finishes inside the grace
+  (`TestEventStreamsEndWhenServeShutsDown`,
+  `TestAnOrdinaryRequestInFlightAtShutdownCompletes`, the serve-wiring
+  bullet). `bridge restore` replaces the
   epoch in its own process, which has no broker and publishes nothing;
   the serving process publishes `playlists.changed` only from a store
   that holds the hooks.
@@ -7494,41 +7497,49 @@ mentions across the four `ops/audit-*.md` files.
   through `serveOpts.wrapAPIHandler`, and pre-pick a port free on TCP
   and UDP both (`freeLoopbackTCPAndUDPAddr`), because serve prints no
   UDP address.
-- **An event stream ends when shutdown starts, because its request is a
-  child of the context the stop cancels before it drains** (2026-10-08,
-  backlog B216). `http.Server.Shutdown` closes idle connections and does
-  not cancel a handler. `GET /v1/events` and
-  `GET /v1/pairing/{id}/events` stay in `select` on `r.Context().Done()`,
-  and since sync phase 2 every foreground phone holds one of the first,
-  so every stop ran the whole 5 s grace and logged
-  `http shutdown: context deadline exceeded`. HTTP/3 did the same:
-  quic-go's `Shutdown` stops new streams and does not cancel one already
-  running, and the drain logged
+- **An event stream ends when shutdown starts, and an ordinary request
+  keeps the grace** (2026-10-08, backlog B216). `http.Server.Shutdown`
+  closes idle connections and does not cancel a handler.
+  `GET /v1/events` and `GET /v1/pairing/{id}/events` select on the
+  request context and on the serve context the stop cancels before it
+  drains (`Server.EndEventStreamsWhen`). Since sync phase 2 every
+  foreground phone holds one of the first, so every stop ran the whole
+  5 s grace and logged `http shutdown: context deadline exceeded`.
+  HTTP/3 did the same: quic-go's `Shutdown` stops new streams and does
+  not cancel one already running, and the drain logged
   `lan h3 shutdown: context deadline exceeded`. Measured on a real
   `serve` with both protocols held: before, the HTTP/3 handler returned
   at 5002 ms while the client was still reading at 8 s, the HTTP/2
   streams were still open at 8 s, and both deadline lines printed.
-  After, each stream ended with a nil read error in the same millisecond
-  the stop ran, and `serve` returned 11 ms later with neither line. The
-  console already parented its requests
-  (`admin.Server.Serve`'s `BaseContext`). The API servers do it too:
-  `apiBaseContext` on the LAN and tailnet `http.Server`, and
-  `apiConnContext` on both `http3.Server`s, which have no `BaseContext`.
-  The HTTP/3 parent stays the QUIC connection's context and is also
-  cancelled when the serve context ends, so a connection that closes
-  still ends the request. The handler returns the 200 it already
+  After the streams selected on the serve context, each ended with a nil
+  read error in the same millisecond the stop ran, and neither deadline
+  line printed. The first wiring also parented every API request on
+  that context, and with that parent `serve` returned 11 ms later. That
+  parent cancelled a manifest page, a favorites write and an artwork
+  read the moment the stop began. The streams select on the context
+  themselves, set once before the listeners accept. Ordinary requests
+  keep the context net/http gives them and finish inside the grace
+  (`TestAnOrdinaryRequestInFlightAtShutdownCompletes`: 200, and the
+  request context is still live). With the parent gone, `serve` returns
+  in about a second, inside the grace: the HTTP/2 GOAWAY wait on a
+  connection the parent used to abort. The handler returns the 200 it already
   flushed. The phone reads that as a finished stream and reconnects. A
   404 is the demo fallback and is not this path. **A download is left
   alone**: `ServeContent` does not read the request context, so an
   in-flight file still occupies the grace, which is what the grace is
-  for. `Connection: keep-alive` is sent only when `ProtoMajor < 2`
+  for. The console already parented its own server
+  (`admin.Server.Serve`'s `BaseContext`), which is what ends
+  `GET /api/events`, and that parent was left as it was. `Connection:
+  keep-alive` is sent only when `ProtoMajor < 2`
   (`setEventStreamHeaders`): HTTP/3 forbids that field name, and a
   client that enforces it dropped the stream before a shutdown could be
-  measured. Removing `BaseContext` and `ConnContext` turns
+  measured. Removing the serve-context select turns
   `TestEventStreamsEndWhenServeShutsDown` red again (both deadline
-  lines, streams still open at 8 s).
-  `TestAPIServersParentRequestsOnTheServeContext` requires both
-  production servers of each kind to call the helpers.
+  lines, streams still open at 8 s). Putting `BaseContext` or
+  `ConnContext` back on a production API server turns
+  `TestAnOrdinaryRequestInFlightAtShutdownCompletes` red, because the
+  request context is cancelled, and
+  `TestAPIServersLeaveOrdinaryRequestsTheirOwnContext` red with it.
 - **On a shutdown the LAN and the tailnet drain TOGETHER, under one
   grace** (#1019). The shutdown branch drained the LAN servers and
   returned, and only then did the deferred `tsnetFront.stop` begin on

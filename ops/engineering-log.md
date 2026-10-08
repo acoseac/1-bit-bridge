@@ -37866,9 +37866,42 @@ error in the same millisecond the stop ran (handler durations 2 ms, 1 ms
 and 0 ms) and `serve` returned 11 ms later, with neither line. Removing
 `BaseContext` and `ConnContext` from the LAN and tailnet servers makes
 that test red again, the same two lines and the same 8 s holds.
-`TestAPIServersParentRequestsOnTheServeContext` requires each production
+The structural pin of that wiring
+(…APIServersParentRequestsOnTheServeContext) required each production
 server literal to call the helper, so a tailnet server the loopback boot
-does not start cannot lose it quietly. The two exits that shut the API
+does not start could not lose it quietly. The review below replaced
+that pin with `TestAPIServersLeaveOrdinaryRequestsTheirOwnContext`. The two exits that shut the API
 server down because the admin listener or the tailnet listener failed
 to bind call `Shutdown` while the serve context is still live. Those
 are failed starts. The stop a phone hits cancels first.
+
+## 2026-10-08 — event streams end on shutdown; ordinary requests keep the grace (backlog B216, review of #1162)
+
+The first wiring parented every API request on the serve context
+(`apiBaseContext` on the LAN and tailnet `http.Server`, `apiConnContext`
+on both `http3.Server`s). `Shutdown` then cancelled a manifest page, a
+favorites or playlist write, and an artwork or Atlas read at the moment
+the stop began, which is the grace those requests are given to finish
+in. The streams are the handlers that never go idle.
+
+`GET /v1/events` and `GET /v1/pairing/{id}/events` now select on the
+serve context themselves (`Server.EndEventStreamsWhen`, set once before
+the listeners accept, the same happens-before as `StartEventBroker`).
+A server that was not told when to end gets a nil channel, and a nil
+channel blocks forever in `select`, so the httptest servers stay as
+they were. Ordinary requests keep the context net/http gives them.
+`TestAnOrdinaryRequestInFlightAtShutdownCompletes` holds one across the
+stop and wants 200 with that context still live, inside the grace.
+Putting `BaseContext` back on the LAN server, returning the serve
+context, made that test fail: status 200, `cancelled=true`, 103 ms
+after the stop. `TestAPIServersLeaveOrdinaryRequestsTheirOwnContext`
+refuses `BaseContext` and `ConnContext` on the production API server
+literals, the tailnet pair included. With the parent gone the stream
+test still ends each stream at the stop and prints neither deadline
+line. `serve` then returns in about a second, inside the grace: the
+HTTP/2 GOAWAY wait on a connection the parent used to abort.
+
+The console's `GET /api/events` already ends, because `admin.Server.Serve`
+parents every console request on the serve context. That parent was
+already there, and the console handlers that read `r.Context()` were
+written to stop with it, so it stayed. The phone API does not copy it.

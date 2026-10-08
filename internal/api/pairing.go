@@ -349,14 +349,14 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bound the stream's own lifetime to the pairing row's deadline. The loop
-	// below selects only on ctx.Done() and sub.ch and never re-checks pairing
-	// state, so without this a stream OUTLIVES the request (whose row the
-	// store deletes at TTL+grace) and is never reaped — the goroutine,
-	// channel, fd and TLS conn stay held indefinitely while nothing can ever
-	// send to it again. `pairing.DefaultGrace` matches the store's own
-	// terminal-state linger, and the floor keeps an already-approved request
-	// (whose remaining TTL may read <= 0) open long enough for the token
-	// delivery + DELETE acknowledgment round trip.
+	// below selects on ctx.Done(), the serve-shutdown signal and sub.ch, and
+	// never re-checks pairing state, so without this a stream OUTLIVES the
+	// request (whose row the store deletes at TTL+grace) and is never reaped
+	// — the goroutine, channel, fd and TLS conn stay held indefinitely while
+	// nothing can ever send to it again. `pairing.DefaultGrace` matches the
+	// store's own terminal-state linger, and the floor keeps an
+	// already-approved request (whose remaining TTL may read <= 0) open long
+	// enough for the token delivery + DELETE acknowledgment round trip.
 	lifetime := time.Duration(res.TTLSecondsRemaining)*time.Second + pairing.DefaultGrace
 	if lifetime < minPairingStreamLifetime {
 		lifetime = minPairingStreamLifetime
@@ -368,6 +368,11 @@ func (s *Server) pairingEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-s.eventStreamDone():
+			// Same finish as GET /v1/events: the stop ended the
+			// serve context, and this request's own context is
+			// left for the client.
 			return
 		case <-streamDeadline.C:
 			// Past TTL+grace the row is gone from the store; holding the

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,6 +86,121 @@ func TestEventStreamsEndWhenServeShutsDown(t *testing.T) {
 	if strings.Contains(out, "did not drain within grace") || strings.Contains(out, "lan h3 shutdown:") {
 		t.Errorf("an HTTP/3 stream held the drain past the grace:\n%s", out)
 	}
+}
+
+// ordinaryRequestSettle is how long the held request waits after the
+// stop before it reads its context. A cancel that the stop delivered
+// has arrived by then. The request then answers, well inside the grace.
+const ordinaryRequestSettle = 100 * time.Millisecond
+
+// TestAnOrdinaryRequestInFlightAtShutdownCompletes holds a request that
+// is not an event stream across the stop. It has to answer 200 with its
+// own context still live, inside the grace. Parenting that request on
+// the serve context (BaseContext or ConnContext) makes cancelled come
+// back true, and this test goes red.
+func TestAnOrdinaryRequestInFlightAtShutdownCompletes(t *testing.T) {
+	hold := &ordinaryHold{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold.release) }) }
+	b := startConsoleBridge(t, "mdns:\n  enabled: false\n", nil, func(o *serveOpts) {
+		o.wrapAPIHandler = hold.wrap
+	})
+	t.Cleanup(release)
+
+	client := &http.Client{
+		Timeout: shutdownGrace,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	result := make(chan ordinaryResult, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, b.apiBase+"/shutdown-hold", nil)
+		if err != nil {
+			result <- ordinaryResult{err: err}
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			result <- ordinaryResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Cancelled bool `json:"cancelled"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		result <- ordinaryResult{status: resp.StatusCode, cancelled: body.Cancelled, err: err}
+	}()
+
+	select {
+	case <-hold.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ordinary request never reached the handler")
+	}
+	started := time.Now()
+	b.stop()
+	release()
+
+	select {
+	case got := <-result:
+		elapsed := time.Since(started)
+		t.Logf("ordinary request completed %s after shutdown (status=%d cancelled=%v err=%v)",
+			elapsed.Round(time.Millisecond), got.status, got.cancelled, got.err)
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.status != http.StatusOK {
+			t.Errorf("status = %d, want 200", got.status)
+		}
+		if got.cancelled {
+			t.Error("the request context was cancelled at the stop; an ordinary request finishes inside the grace")
+		}
+		if elapsed >= shutdownGrace {
+			t.Errorf("the request took %s, the length of the grace", elapsed.Round(time.Millisecond))
+		}
+	case <-time.After(shutdownGrace + time.Second):
+		t.Fatal("the ordinary request did not complete inside the grace")
+	}
+	select {
+	case code := <-b.done:
+		if code != 0 {
+			t.Errorf("serve exited %d", code)
+		}
+	case <-serveGiveUp(t):
+		t.Fatal("serve did not return")
+	}
+}
+
+type ordinaryResult struct {
+	status    int
+	cancelled bool
+	err       error
+}
+
+type ordinaryHold struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *ordinaryHold) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/shutdown-hold" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		close(h.entered)
+		<-h.release
+		time.Sleep(ordinaryRequestSettle)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]bool{
+			"cancelled": r.Context().Err() != nil,
+		})
+	})
 }
 
 type heldStream struct {

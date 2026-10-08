@@ -136,6 +136,13 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			// Client disconnected (background, navigated away,
 			// network blip). Unsubscribe runs via defer.
 			return
+		case <-s.eventStreamDone():
+			// The stop cancelled the serve context. The request
+			// context stays the client's: an ordinary request in
+			// flight keeps it and finishes inside the grace. This
+			// return is a finished stream, which the phone
+			// reconnects from.
+			return
 		case env, ok := <-sub.ch:
 			if !ok {
 				return
