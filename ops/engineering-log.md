@@ -38036,3 +38036,96 @@ The console's `GET /api/events` already ends, because `admin.Server.Serve`
 parents every console request on the serve context. That parent was
 already there, and the console handlers that read `r.Context()` were
 written to stop with it, so it stayed. The phone API does not copy it.
+
+## 2026-10-08 — backlog B270: the gain guard's temporary file uses the configured temp dir
+
+`JobSpec.soxArgsFrom` put `-G` first and gave sox no `--temp`. To guard,
+sox pre-scans into a temporary file. With no `--temp` that file is
+`tmpfile()` in the system temp directory, which no pre-flight budgets.
+When that volume is full, sox 14.4.2 prints `gain: error writing
+temporary file: No space left on device`, exits 0, and finishes a shorter
+FLAC. B264's length check then struck the source: three such jobs
+suppressed a good file for 30 days. The DSD chain already passed
+`--temp` for its Stage A scratch.
+
+Measured on this host with sox 14.4.2, before the change:
+
+- A direct-file job (`-V4 -G`, 90 s, 44.1 kHz stereo, to 176.4 kHz) logs
+  `libsox_i: tmpfile()` and holds one unlinked file. With `--temp DIR`
+  the same job logs `libsox_i: mkstemp, name=<dir>/libSoX.tmp.* (unlinked)`.
+  The directory listing stays empty. `lsof -s` reports the open file at
+  exactly 127,008,000 bytes: 90 × 176400 × 2 × 4. That is duration ×
+  target rate × channels × 4 (`sox_sample_t`). The file is at that size
+  on the last sample, while the output is still open
+  (`saw both open` at output 18,243,584 bytes).
+- The ffmpeg pipe (`-f f32le` into `sox --temp DIR -G -t raw`) holds the
+  same one file, the same size, in `--temp` only. The non-seekable input
+  is consumed as it arrives. There is no second source-rate buffer.
+- A 24 MB HFS+ image left with 1,048,576 bytes free, `--temp` on that
+  image and the output on a roomy disk, over a 20 s source: sox exited 0,
+  stderr was `sox FAIL gain: error writing temporary file: No space left
+  on device`, and the output was a finished 0.76 s FLAC (134,656 of
+  882,000 samples) whose STREAMINFO had been rewritten to the short
+  length. The `libSoX.tmp.*` name was gone. Free space after the exit
+  was still 1,048,576 bytes, below the guard's 28,224,000 byte need, so a
+  probe that only asks "is the volume full now?" misses the case and
+  "free space below the need" catches it.
+- `--temp` must name a directory that exists. A missing one is exit 2,
+  `can't create temporary file`, before any audio. `--temp` is a global
+  option and precedes the first effect; `-G --temp DIR` and
+  `--temp DIR -G` both work. The coded order is `--temp`, the scratch
+  directory, then `-G`.
+
+The 2026-09-07 S1 note (the DSD chain) said `-G` costs no scratch because
+a poll of `--temp` saw no file. `mkstemp` unlinks immediately, so a
+directory poll cannot see it. `lsof` is the measurement.
+
+What shipped:
+
+- Both sox routes pass `--temp` at `renderScratchDir(j.TempDir)`, the
+  directory the DSD scratch and the stale-scratch purge already use.
+  `Run` creates it with `mkdirScratch` before sox. The settings JSON is
+  the same string as before and contains no path. No schema bump.
+- `GuardTempBytes` is that formula for a PCM job and 0 for DSD.
+  `TempVolumeBytes` is the Stage A scratch when that is non-zero, else
+  the guard file. A lane holds one job, so the pre-flight budgets
+  `lanes × max(scratch, guard)` (`preflightTempVolume`) on the upscale
+  submit, the rendition submit, `roomForRendition` and the sweep. The
+  two figures stay separate: a FLAC still adds nothing to
+  `maxRenderScratch`.
+- The candidate queries read `duration` and `channels` for every row.
+  Upscale, optimize, the CLI and the on-demand spec copy them onto the
+  job, with `TempDir`.
+- A finished stream shorter than its source asks the temp volume. Free
+  space below the guard's need, or a 64 KiB write there that
+  `hostOutputFault` names, is an output fault (`reasonGuardTempShort`)
+  and strikes nothing. A short stream whose volume has room for the file
+  still strikes. A success on either route proves a scratch-volume
+  outage over, because the guard file was written there.
+
+Pins: `TestGuardTempBytesIsThePostRateInt32File`,
+`TestSoxArgsShape`, `TestSoxArgsFromSharesOneChain`,
+`TestRunPublishesOnlyAWholeRendition` (the 1 s probe still strikes; the
+1e9 s probe is the host's), `TestACutRenditionStrikesNothingAndAShortOneStrikes`,
+`TestAGainGuardWhoseTempVolumeCannotHoldItStrikesNothing` (real sox,
+temp on a full volume), `TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit`
+(the 1 s file enqueues), `TestListAutoOptimizeCandidatesReadsAPCMRowsDuration`.
+
+Review of #1164, the same day. The sweep probed the temp volume only
+while DSD caps were active. A PCM-only bridge left `scratchFree` at 0.
+A PCM candidate with a known duration has a positive
+`TempVolumeBytes`, so `drainCandidates` set `DiskFloorReached` and
+submitted nothing: PCM auto-optimize stopped. The probe now runs on
+every sweep (`RenderScratchDir` of the configured temp dir). A probe
+failure still skips the sweep. The batch (`preflightTempVolume`) and
+the on-demand room check (`roomForRendition`) already read free space
+whenever the hold is positive; the pool does not budget disk itself.
+The guard-room probe registers `defer os.Remove` and then
+`defer f.Close`, so the close runs first. The explicit Close on the
+write path stays the one whose error is returned, and `KeepOwner`
+stays so a root CLI gives the probe the directory's owner.
+
+Pins added: `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`
+(a PCM-only sweep with room submits; one byte under the floor does
+not; a probe error skips), `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
+`TestProbeTempDirRoomClosesBeforeItRemoves`.

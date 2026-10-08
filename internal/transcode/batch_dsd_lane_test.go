@@ -117,8 +117,8 @@ func TestBatchDSDJobsCarryChannelsAndDuration(t *testing.T) {
 	if sp := got["DSD/03.dff|pcm-v2-192000-24"]; sp.SourceChannels != 0 || sp.SourceDurationSec != 0 {
 		t.Errorf("unseeded geometry = %d ch / %.1f s, want 0 / 0", sp.SourceChannels, sp.SourceDurationSec)
 	}
-	// A PCM row never carries them either — the projection reads both for
-	// DSD rows only, exactly like AutoOptimizeCandidate.
+	// A PCM row seeded without a duration or a channel count reads 0.
+	// The projection reads both for every row.
 	if sp := got["DSD/04.flac|optimized-v2-48000-16"]; sp.SourceChannels != 0 || sp.SourceDurationSec != 0 {
 		t.Errorf("PCM row geometry = %d ch / %.1f s, want 0 / 0", sp.SourceChannels, sp.SourceDurationSec)
 	}

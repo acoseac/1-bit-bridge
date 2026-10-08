@@ -330,8 +330,9 @@ type JobSpec struct {
 // volume while it renders: int32 at the TARGET rate over the manifest's
 // duration, or the size-derived one when the manifest carries none
 // (dsdSizeDerivedDurationSec — stereo when the channel count is unknown).
-// 0 for a PCM job, which has no intermediate. The ONE derivation the
-// coordinator's pre-flight and the sweeper's running budget share.
+// 0 for a PCM job, which has no intermediate and holds GuardTempBytes
+// instead. The ONE derivation the coordinator's pre-flight and the
+// sweeper's running budget share, beside GuardTempBytes.
 func (j JobSpec) RenderScratchBytes() int64 {
 	if !j.SourceIsDSD {
 		return 0
@@ -345,6 +346,33 @@ func (j JobSpec) RenderScratchBytes() int64 {
 		ch = 2
 	}
 	return TempBytesForRender(ch, j.TargetSampleRate, d)
+}
+
+// GuardTempBytes is the file sox -G holds while a PCM job runs: one int32
+// sample per output frame (duration × target rate × channels × 4), measured
+// on both the direct-file route and the ffmpeg pipe. Zero for a DSD job,
+// which does not pass -G, and when the duration is unknown. A missing
+// channel count is stereo, the same assumption RenderScratchBytes makes.
+func (j JobSpec) GuardTempBytes() int64 {
+	if j.SourceIsDSD {
+		return 0
+	}
+	ch := j.SourceChannels
+	if ch <= 0 {
+		ch = 2
+	}
+	return TempBytesForRender(ch, j.TargetSampleRate, j.SourceDurationSec)
+}
+
+// TempVolumeBytes is what one job holds on the temp volume while it
+// writes. A job holds the DSD Stage A scratch or the PCM gain-guard file,
+// never both, so the larger of the two is the peak and adding them would
+// refuse a job that fits.
+func (j JobSpec) TempVolumeBytes() int64 {
+	if s := j.RenderScratchBytes(); s > 0 {
+		return s
+	}
+	return j.GuardTempBytes()
 }
 
 // VariantID returns the opaque identifier that uniquely names this
@@ -761,7 +789,14 @@ func (j JobSpec) soxArgsFrom(input []string, decoder string) (args []string, set
 	// RunSox can no longer recover finalPath by trimming the suffix.
 	finalPath = j.SidecarPath()
 	tmpPath = finalPath + "." + nextSidecarTmpToken() + sidecarTmpSuffix
-	args = append([]string{"-G"}, input...)
+	// --temp is global and must name a directory that exists before sox
+	// runs. -G keeps the post-rate signal in one int32 file (duration ×
+	// target rate × channels × 4) and, with no --temp, that file is
+	// tmpfile(3) in the system temp dir, which nothing budgets. The
+	// directory is the render scratch the DSD chain already uses, so one
+	// purge and one pre-flight cover both. It is not part of the settings
+	// blob: a path there would change a rendition's identity.
+	args = append([]string{"--temp", renderScratchDir(j.TempDir), "-G"}, input...)
 	args = append(args,
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
@@ -1022,6 +1057,13 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		input = soxStdinInputArgs(geo)
 	}
 	args, settings, finalPath, tmpPath := j.soxArgsFrom(input, route.String())
+	// sox --temp refuses a directory that is not there (exit 2, before any
+	// audio), and the gain-guard file lands in it. The same mkdir the DSD
+	// chain uses; a volume that will not take the directory is the host's.
+	scratchDir := renderScratchDir(j.TempDir)
+	if err := j.mkdirScratch(scratchDir); err != nil {
+		return RunResult{}, markOutputFault(outputScratch, scratchDir, fmt.Errorf("mkdir render scratch dir: %w", err))
+	}
 	// v1.4 source-mirrored layout: sidecars land under
 	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
 	// finalPath may NOT exist yet (first variant in a new album
@@ -1122,16 +1164,18 @@ func (j JobSpec) verifyRendition(ctx context.Context, route decodeRoute, geo sou
 		return err
 	}
 	if route != routeFFmpegPipe {
-		return j.renditionLengthDisagrees(probeDuration(ctx, j.SourceAbsPath), whole)
+		got := probeDuration(ctx, j.SourceAbsPath)
+		return j.guardTempShort(got, j.SourceChannels, j.renditionLengthDisagrees(got, whole))
 	}
 	// ffmpeg exits 0 on a truncated-but-openable source too, so the pipe's
 	// reference is what the container claims: a whole stream shorter than
 	// that is a partial decode. Nothing is committed on a mismatch, so the
 	// candidate re-flows once the source is whole — the same self-healing
 	// shape internal/analyze uses.
-	if produced := whole.seconds(); decodeLengthDisagrees(geo.Duration, produced) {
-		return fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
-			ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
+	produced := whole.seconds()
+	if decodeLengthDisagrees(geo.Duration, produced) {
+		return j.guardTempShort(geo.Duration, geo.Channels, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+			ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel))
 	}
 	return nil
 }

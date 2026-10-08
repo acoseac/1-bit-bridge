@@ -226,8 +226,8 @@ func TestSoxArgsFromSharesOneChain(t *testing.T) {
 		TargetSampleRate: 176400, TargetBits: 24, Quality: QualityVeryHigh,
 		OutputDir: t.TempDir(), Kind: JobKindUpscale,
 	}
-	direct, _, _, directTmp := j.soxArgsFrom([]string{j.SourceAbsPath}, "sox")
-	piped, _, _, pipedTmp := j.soxArgsFrom(
+	direct, directSettings, _, directTmp := j.soxArgsFrom([]string{j.SourceAbsPath}, "sox")
+	piped, pipedSettings, _, pipedTmp := j.soxArgsFrom(
 		soxStdinInputArgs(sourceGeometry{SampleRate: 44100, Channels: 2}), "ffmpeg+sox")
 
 	// Compare from the FLAC output marker onward, with each route's own temp
@@ -239,11 +239,30 @@ func TestSoxArgsFromSharesOneChain(t *testing.T) {
 	if !slices.Equal(d, p) {
 		t.Errorf("the effects chain must be identical on both routes\ndirect: %q\npiped:  %q", d, p)
 	}
-	if got := direct[1]; got != j.SourceAbsPath {
+	scratch := renderScratchDir(j.TempDir)
+	for _, args := range [][]string{direct, piped} {
+		if len(args) < 3 || args[0] != "--temp" || args[1] != scratch || args[2] != "-G" {
+			t.Errorf("argv head = %v, want --temp %s -G", args, scratch)
+		}
+	}
+	if got := direct[3]; got != j.SourceAbsPath {
 		t.Errorf("direct route input = %q, want the source path", got)
 	}
 	if !strings.Contains(strings.Join(piped, " "), "-t raw -e float -b 32 -L -r 44100 -c 2 -") {
 		t.Errorf("piped route must describe the headerless stream: %v", piped)
+	}
+	const wantDirect = `{"resampler":"sox","decoder":"sox","quality":"very-high","rateFlag":"-v","phase":"linear","targetRate":176400,"targetBits":24,"guard":true,"schemaVersion":"v2"}`
+	const wantPiped = `{"resampler":"sox","decoder":"ffmpeg+sox","quality":"very-high","rateFlag":"-v","phase":"linear","targetRate":176400,"targetBits":24,"guard":true,"schemaVersion":"v2"}`
+	if directSettings != wantDirect {
+		t.Errorf("direct settings = %s, want %s", directSettings, wantDirect)
+	}
+	if pipedSettings != wantPiped {
+		t.Errorf("piped settings = %s, want %s", pipedSettings, wantPiped)
+	}
+	for _, settings := range []string{directSettings, pipedSettings} {
+		if strings.Contains(settings, scratch) || strings.Contains(settings, "--temp") {
+			t.Errorf("settings names the temp dir: %s", settings)
+		}
 	}
 }
 
