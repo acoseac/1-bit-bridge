@@ -5415,6 +5415,53 @@ no failing test — which is the shape to expect in this area.
   `TestTheListenerUsesTheAPIDeadlines`,
   `TestTheListenerClosesAnIdleKeepAliveAndAStalledBody`,
   `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`.)
+- **The DLNA listener serves a generated stereo DSD silence, capped at
+  four streams** (2026-10-09, backlog B319). Pausing or stopping a
+  DSD256 stream on a Chord 2go docked to a Hugo 2 (MPD 0.21) makes the
+  Hugo 2 ring. A stereo DSD256 DSF of constant `0x69` stayed silent
+  (measured 2026-10-09). The app switches MPD onto this file instead of
+  a bare stop.
+  **`GET` and `HEAD /dlna/silence/dsd/<fs>.dsf`**, beside
+  `/dlna/silence.wav`. `<fs>` is 64·n × 44,100 or 64·n × 48,000 for
+  n ∈ {1, 2, 4, 8}. Any other segment is 404.
+  **The body is a 60 s stereo DSF, every data byte `0x69`**, pad of the
+  last 4096-byte block included. `0x00` is full-scale offset. Layout
+  matches `dsdtone.WriteDSF` (Sony DSF v1.01). Production does not
+  import `internal/dsdtone`. `ServeContent` reads a seeker over a shared
+  92-byte header and fills `0x69` in the read buffer. Nothing is written
+  to disk. `Content-Type` is `audio/x-dsf` before `ServeContent`.
+  **Four concurrent `GET`s, then 503.** One pause holds one stream for
+  about ten seconds. The slot is a non-blocking channel, released when
+  `ServeHTTP` returns. `HEAD`, a 404 and a 405 take no slot.
+  **A reader that stops reading holds its slot until the write ends.**
+  `WriteTimeout` stays unset (B220) so a track can stream. This GET
+  sets a 120 s deadline (`dsdSilenceWriteBound`, shortened in tests)
+  through `ResponseController` when the body starts: a real-time play
+  of the file plus read-ahead, and the app stops it after about ten
+  seconds. The response sends `Connection: close`. Go 1.26.6 still
+  clears a `ResponseController` deadline after the handler returns
+  (`conn.serve` → `SetWriteDeadline(time.Time{})`) when `WriteTimeout`
+  is 0, and the next request gets one only when `WriteTimeout` is
+  positive; `Connection: close` is sent anyway. Telemetry (on by
+  default) `Unwrap`s, or the deadline never reaches the socket.
+  **B220 and B162 are unchanged** (notify pool 8, 16 KiB headers,
+  `ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout` unset, page
+  1000). The cap limits concurrent silence streams, and the deadline
+  limits how long one stream may block.
+  **`dsdSilence` is listed exactly when the listener is up**, the same
+  gate as `dlnaServer`, between `dsdRender` and `favorites`. Public
+  mode does not advertise it. `ProtocolVersion` stays 1.
+  (`TestDSDSilenceHeaderAndSizeForEachRate`,
+  `TestDSDSilenceDataBytesAreTheSilenceByte`,
+  `TestDSDSilenceRangesAndHead`,
+  `TestDSDSilenceUnknownRateIs404`,
+  `TestDSDSilenceCapAnswers503AndFreesTheSlot`,
+  `TestDSDSilenceCapFreesTheSlotWhenTheClientDisconnects`,
+  `TestDSDSilence404DoesNotHoldASlot`,
+  `TestTheDLNAListenerServesDSDSilence`,
+  `TestDSDSilenceFFProbe`,
+  `TestAStalledSilenceReaderFreesItsSlot`,
+  `TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled`.)
 - **A service URL is kept only as a string that parses back to the scheme
   and host the policy judged** (2026-10-01, backlog B233). The nightly fuzz
   on f2bb02bd found `FuzzParseDeviceDescription` keeping

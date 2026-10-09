@@ -263,6 +263,15 @@ func (w *telemetryWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection. The silence
+// handler sets a per-response write deadline, and the listener wraps
+// every request in this writer when telemetry is on (the default).
+// Without Unwrap the deadline never reaches the socket, and a client
+// that stops reading holds a silence slot until the connection dies.
+func (w *telemetryWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // ReadFrom preserves the zero-copy `sendfile(2)` fast path Go's
 // HTTP server uses when the underlying writer implements
 // `io.ReaderFrom`. `http.ServeContent` (used by the DLNA file

@@ -37,6 +37,7 @@ var wantAllHealthFeatures = []string{
 	"dlnaArtwork",
 	"dlnaServer",
 	"dsdRender",
+	"dsdSilence",
 	"favorites",
 	"favoritesRevisions",
 	"firstIndexedAt",

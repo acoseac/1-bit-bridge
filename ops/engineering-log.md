@@ -39482,3 +39482,209 @@ FAIL	github.com/acoseac/1-bit-bridge/internal/manifest	0.411s
 ```
 
 The three lines were put back after the control.
+
+## 2026-10-09 — stereo DSD silence on the DLNA listener (backlog B319)
+
+A Chord 2go docked to a Hugo 2 (MPD 0.21) rings continuously when a
+DSD256 stream is paused or stopped. Measured the same day: serving a
+stereo DSD256 DSF of constant `0x69` (MPD's DSD silence byte), then
+`stop` 5 s later, stayed silent twice. Held silence was silent.
+Resuming music from held silence was clean. `0x00` is a full-scale
+offset and `0x96` is the other polarity; the measured byte is `0x69`.
+The iOS half (backlog B318) switches MPD onto this file. This change
+is the bridge half: the DLNA listener that MPD already fetches cast
+files from now serves the silence, and `/v1/health` says when it does.
+
+`GET` and `HEAD /dlna/silence/dsd/<fs>.dsf` mount beside
+`/dlna/silence.wav`. `<fs>` is the DSD rate in Hz, matched as the
+canonical decimal of exactly one of 64·n × 44,100 or 64·n × 48,000
+for n ∈ {1, 2, 4, 8}: 2822400, 5644800, 11289600, 22579200, 3072000,
+6144000, 12288000, 24576000. Anything else is 404, including 44100,
+1, a non-number, a leading zero, `.DSF`, and an extra segment. Other
+methods are 405. `Content-Type` is `audio/x-dsf` (`mimeDSF`), set
+before `http.ServeContent` so the sniffer leaves it.
+
+The body is a 60 s stereo DSF. The header is the `dsdtone.WriteDSF`
+layout (Sony DSF v1.01): `DSD ` chunk size 28, total file size,
+metadata pointer 0; `fmt ` chunk size 52, version 1, format id 0,
+channel type 2, 2 channels, the rate, 1 bit per sample, sample count
+= fs × 60, block size 4096, reserved 0; `data` size 12 + payload.
+Payload starts at offset 92. Blocks of 4096 alternate the two
+channels. `WriteDSF` zero-pads a short last block; this file pads
+with `0x69`, and the audio bytes are `0x69`, so the whole data region
+is that byte. Production does not import `internal/dsdtone`.
+
+At 2,822,400 Hz the sample count is 169,344,000, the raw audio is
+42,336,000 bytes and the padded payload is 42,336,256 (128 pad bytes
+per channel), total file 42,336,348. At 3,072,000 Hz the byte count
+divides 4096, so the pad is empty. At 24,576,000 Hz the payload is
+368,640,000 bytes and the file is 368,640,092. The reader is an
+`io.ReadSeeker` over a shared 92-byte header plus a fill of `0x69`.
+A request holds an offset. `ServeContent` supplies `Content-Length`,
+`HEAD` and `Range`.
+
+The listener is LAN-reachable and unauthenticated. Stereo bytes per
+second are fs/4: 5,644,800 at 22,579,200 Hz (about 5.6 MB/s) and
+6,144,000 at 24,576,000 Hz (about 6.1 MB/s). `DSDSilenceMaxStreams`
+is 4, about 24.6 MB/s of the larger family. One pause holds one
+stream for about ten seconds, so four covers a household, a second
+device and a retry, and bounds a flood. A `GET` past the cap is 503
+`dsd silence stream limit reached` and starts no body. The slot is a
+non-blocking channel on that handler, released when `ServeHTTP`
+returns. `HEAD`, 404 and 405 take no slot. No INFO line beyond the
+listener's existing telemetry.
+
+B220 / B162 (the entry above, "the DLNA listener bounds what one peer
+can start") stay as they are: notify pool 8, 16 KiB header read,
+`ReadTimeout` 60 s, `IdleTimeout` 120 s, server `WriteTimeout` unset,
+Browse/Search page 1000. The server write timeout stays unset so a
+renderer can stream a track. A silence `GET` is a different case: a
+client that sends it and then stops reading fills the socket buffer
+and holds a cap slot until the connection dies, and four such clients
+take the silence away (the app then falls back to the ringing stop).
+Each silence `GET` sets a 120 s write deadline
+(`dsdSilenceWriteBound`) through `http.ResponseController` when the
+body starts. 120 s covers a real-time play of the 60 s file plus
+read-ahead; the app stops the silence after about ten seconds. A test
+shortens the bound. The response sends `Connection: close`.
+
+Go 1.26.6 `net/http` (`server.go` `conn.serve`, after
+`finishRequest`) always calls `SetWriteDeadline(time.Time{})` on the
+connection. That clear is not gated on `WriteTimeout`. `readRequest`
+sets a write deadline for the next request only when `WriteTimeout`
+is positive. So with `WriteTimeout` 0 the server does clear a
+`ResponseController` deadline before the next request on a kept-alive
+connection. `Connection: close` is still sent, so the deadline cannot
+apply to a later request on this connection.
+
+The listener wraps every request in `telemetryWriter` when telemetry
+is on, which is the default (`EffectiveDLNATelemetryEnabled`).
+`ResponseController` walks `Unwrap`. Without it, `SetWriteDeadline`
+returns unsupported and the deadline never reaches the socket. The
+writer now unwraps to the inner `ResponseWriter`. `ServeContent`
+still writes through the telemetry wrapper. A recorder that cannot
+set a deadline still serves the body (the unit tests).
+
+The stream cap limits how many silence GETs run at once. The write
+deadline limits how long one of them may block. One DSD512 stereo
+stream still transfers about 5.6–6.1 MB/s.
+
+`/v1/health.features` appends `dsdSilence` on `s.dlnaEnabled`, the
+same gate as `dlnaServer`, after `dsdRender` so the list stays
+alpha-sorted (`dsdR` < `dsdS` < `f`). Public mode never starts the
+listener (`ShouldEnableDLNA`), so the flag is absent there. The
+feature-list capacity went from 32 to 33. Additive.
+`ProtocolVersion` stays 1. PROTOCOL.md documents the route; the
+`/v1` endpoint registry does not scan a DLNA path.
+
+ffprobe 7.x, when present, reads the 2,822,400 Hz file as
+`dsd_lsbf_planar`, channels 2, `sample_rate` `352800` (the DSD rate
+divided by 8, the byte rate), duration `60.000363`. The extra
+0.000363 s is the 256 pad bytes over the stereo byte rate 705,600.
+The `fmt ` chunk still says 2,822,400; the header test pins that.
+The ffprobe test accepts `352800` or `2822400` and a codec name
+containing `dsd`, and skips when ffprobe is not on PATH.
+
+Negative controls, each restored after the red:
+
+1. `fmt ` sample count written as `sampleCount+1`.
+```
+--- FAIL: TestDSDSilenceHeaderAndSizeForEachRate (0.00s)
+    --- FAIL: TestDSDSilenceHeaderAndSizeForEachRate/2822400 (0.00s)
+        silence_dsf_test.go:101: sample count 169344001, want 169344000
+```
+2. `dsdSilenceByte` set to `0x00`.
+```
+--- FAIL: TestDSDSilenceDataBytesAreTheSilenceByte (1.00s)
+    --- FAIL: TestDSDSilenceDataBytesAreTheSilenceByte/2822400 (0.04s)
+        silence_dsf_test.go:169: byte at 92 is not 0x69
+```
+3. An unknown path served the first built asset.
+```
+--- FAIL: TestDSDSilenceUnknownRateIs404 (0.46s)
+    --- FAIL: TestDSDSilenceUnknownRateIs404//dlna/silence/dsd/44100.dsf (0.03s)
+        silence_dsf_test.go:235: status 200
+```
+4. A full cap fell through and served.
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.00s)
+    silence_dsf_test.go:252: past the cap: status 200, want 503
+```
+5. The slot was taken and not released.
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.03s)
+    silence_dsf_test.go:260: after a stream ended: status 503, want 206
+--- FAIL: TestDSDSilenceCapFreesTheSlotWhenTheClientDisconnects (5.00s)
+    silence_dsf_test.go:288: after a client disconnect: status 503, want 206
+```
+6. The `dsdSilence` append removed.
+```
+--- FAIL: TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled (0.00s)
+    health_dlna_test.go:118: DLNA on: features [diagnosticsSummary dlnaServer variantBumpsIndex]
+```
+7. The append left ungated.
+```
+--- FAIL: TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled (0.01s)
+    health_dlna_test.go:122: DLNA off: features [diagnosticsSummary dsdSilence variantBumpsIndex]
+```
+8. The mount line removed.
+```
+--- FAIL: TestTheDLNAListenerServesDSDSilence (0.00s)
+    silence_dsf_test.go:331: status 404 body "404 page not found\n"
+```
+
+9. The per-response write deadline removed (`boundDSDSilenceWrite`
+a no-op). Four raw TCP clients sent `GET` for the DSD64 file and
+never read. The cap filled (a later range `GET` was 503). After the
+shortened deadline the slot stayed taken:
+```
+--- FAIL: TestAStalledSilenceReaderFreesItsSlot (6.51s)
+    silence_dsf_test.go:346: after the write deadline: status 503, want 200 or 206
+```
+With the deadline restored the same test passed (4.5 s): the later
+range `GET` was 200 or 206.
+
+Each line was put back after its control.
+
+CI's `test -race (rest)` on `200eb0a0` failed once, in 0.84 s:
+
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.84s)
+    silence_dsf_test.go:232: after a stream ended: status 503, want 206
+```
+
+The same test had passed on `14804260` and in the local `make check`.
+The slot is given back in a `defer` when `ServeHTTP` returns. The
+client can finish its copy on `ServeContent`'s last `Write`, before
+that defer runs, and the next `GET` still finds the cap full.
+Reproduced locally against the unfixed test: 0 of 200 with
+`-race -count=200 -run TestDSDSilenceCap` on an idle machine (45.907 s),
+0 of 200 of the same command with twelve cores busy (47.933 s, load
+average about 32), and 0 of 600 with
+`-race -count=200 -cpu=1,2,4` on
+`TestDSDSilenceCapAnswers503AndFreesTheSlot` alone (149.081 s). One
+core makes the window smaller, because the handler runs on through the
+defer before the client is scheduled. The failure on CI is that
+window.
+
+The slot stays held until `ServeHTTP` returns. Releasing it inside
+`ServeContent` would admit a fifth stream while the fourth handler is
+still writing. `releaseSlot` receives from the slot channel and then,
+when a test has installed it, calls
+`dsdSilenceSlotReleasedHookForTests` (`atomic.Pointer[func()]`, nil in
+production: one load on the way out of a `GET`). The cap test and the
+disconnect test install the hook before they end a stream, wait for
+one signal with a deadline, and check the status once. The disconnect
+test no longer polls. The stalled-reader test waits until four
+acquires (`dsdSilenceSlotAcquiredHookForTests`, the same shape, nil in
+production) and then polls until the cap reads 503. A probe in that
+poll that returns 200 or 206 has taken a slot, and that status can
+come back before `releaseSlot` runs. On `558006d2` the wait asked for
+`DSDSilenceMaxStreams` signals, so one of those probe releases could
+stand in for a stalled handler that was still holding its slot.
+CodeRabbit on that commit (review thread 4234878130). The four
+acquires come first, so the four stalled handlers are the ones
+holding the slots, and the release wait is `DSDSilenceMaxStreams`
+plus each such probe. The count of releases is exact. The hook's wake
+does not block: a full wake buffer drops the wake, and the waiter
+reads the count.

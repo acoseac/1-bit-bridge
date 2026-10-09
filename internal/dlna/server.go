@@ -521,6 +521,7 @@ func (s *Server) handler() http.Handler {
 //	POST /dlna/cm/control           ConnectionManager SOAP control
 //	GET/HEAD /dlna/file/{trackID}   file serve (with Range support)
 //	GET/HEAD /dlna/silence.wav      1s PCM silence asset (decoder-reset flush)
+//	GET/HEAD /dlna/silence/dsd/<fs>.dsf  60s stereo DSD silence (DSD pause)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cds/event  GENA stub (no-op success)
 //	SUBSCRIBE/UNSUBSCRIBE /dlna/cm/event   GENA stub (no-op success)
 //
@@ -594,6 +595,13 @@ func (s *Server) mountHandlers() {
 	// listener (same posture as `/dlna/file/`), serves regardless
 	// of whether SOAP control is wired.
 	s.mux.Handle(SilenceWAVPath, SilenceWAVHandler())
+
+	// DSD silence: a 60 s stereo DSF of 0x69 at one of the eight rates,
+	// generated as the request is read. The app switches MPD onto it
+	// instead of stopping a DSD cast, which is what makes a docked Hugo 2
+	// ring. Same unauthenticated listener as the WAV above. The handler
+	// caps concurrent bodies; this mount does not add a log line.
+	s.mux.Handle(DSDSilencePathPrefix, DSDSilenceHandler())
 
 	// GENA event handlers — accept SUBSCRIBE / UNSUBSCRIBE, set the
 	// SERVER header, and fire one best-effort initial NOTIFY. The

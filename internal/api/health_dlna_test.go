@@ -83,6 +83,34 @@ func TestHealthOmitsDLNAServerWhenDisabled(t *testing.T) {
 // any WithDLNA call must NOT advertise the capability. Defends
 // against an accidental flip of the zero-value's meaning.
 func TestHealthOmitsDLNAServerByDefault(t *testing.T) {
+	features := defaultHealthFeatures(t) // NO WithDLNA call
+	for _, f := range features {
+		if f == "dlnaServer" {
+			t.Errorf("default-constructed Server advertised dlnaServer; got %v", features)
+		}
+	}
+}
+
+// TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled is the same
+// gate as dlnaServer. Public mode never starts the listener, which is
+// WithDLNA(false) here, and a default Server is the same posture.
+func TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled(t *testing.T) {
+	on := fetchHealthFeaturesWithDLNA(t, true)
+	if !featureListed(on, "dsdSilence") || !featureListed(on, "dlnaServer") {
+		t.Fatalf("DLNA on: features %v", on)
+	}
+	off := fetchHealthFeaturesWithDLNA(t, false)
+	if featureListed(off, "dsdSilence") || featureListed(off, "dlnaServer") {
+		t.Fatalf("DLNA off: features %v", off)
+	}
+	features := defaultHealthFeatures(t)
+	if featureListed(features, "dsdSilence") {
+		t.Fatalf("default Server advertised dsdSilence; got %v", features)
+	}
+}
+
+func defaultHealthFeatures(t *testing.T) []string {
+	t.Helper()
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		LibraryRoots:  []string{tmp},
@@ -90,23 +118,26 @@ func TestHealthOmitsDLNAServerByDefault(t *testing.T) {
 		LibraryName:   "Test",
 	}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	srv := New(cfg, store, nil, "fp") // NO WithDLNA call
+	srv := New(cfg, store, nil, "fp")
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-
 	resp := authGet(t, hs, "/v1/health", "")
 	body := readAllOrFail(t, resp)
 	resp.Body.Close()
-
 	var got HealthResponse
 	if err := jsonUnmarshalForTest(body, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, f := range got.Features {
-		if f == "dlnaServer" {
-			t.Errorf("default-constructed Server advertised dlnaServer; got %v", got.Features)
+	return got.Features
+}
+
+func featureListed(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
 		}
 	}
+	return false
 }
 
 // TestHealthAdvertisesDLNAArtworkOnlyWithListenerAndArtworkDir drives the
