@@ -3895,8 +3895,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// overridable. nil-safe lifecycle: when disabled or setup fails,
 	// the returned wrapper's Stop is a no-op and `dlnaEnabled` is
 	// false. The `dlnaEnabled` flag flows into `apiSrv.WithDLNA(...)`
-	// below so /v1/health.features advertises `dlnaServer` in
-	// lockstep with the actual running listener.
+	// below so /v1/health.features advertises `dlnaServer` and
+	// `dsdSilence` in lockstep with the actual running listener.
 	// UPnP UPSTREAM ingestion + file-serving proxy. Opt-in via
 	// `upnpUpstream.enabled` in bridge.yaml. Walks each configured
 	// MediaServer's "Browse Folders" tree into the manifest at the

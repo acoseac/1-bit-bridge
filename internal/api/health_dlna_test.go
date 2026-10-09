@@ -109,6 +109,49 @@ func TestHealthOmitsDLNAServerByDefault(t *testing.T) {
 	}
 }
 
+// TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled is the same
+// gate as dlnaServer. Public mode never starts the listener, which is
+// WithDLNA(false) here, and a default Server is the same posture.
+func TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled(t *testing.T) {
+	on := fetchHealthFeaturesWithDLNA(t, true)
+	if !featureListed(on, "dsdSilence") || !featureListed(on, "dlnaServer") {
+		t.Fatalf("DLNA on: features %v", on)
+	}
+	off := fetchHealthFeaturesWithDLNA(t, false)
+	if featureListed(off, "dsdSilence") || featureListed(off, "dlnaServer") {
+		t.Fatalf("DLNA off: features %v", off)
+	}
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{tmp},
+		ListenAddress: ":7788",
+		LibraryName:   "Test",
+	}
+	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+	srv := New(cfg, store, nil, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if featureListed(got.Features, "dsdSilence") {
+		t.Fatalf("default Server advertised dsdSilence; got %v", got.Features)
+	}
+}
+
+func featureListed(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
 // TestHealthAdvertisesDLNAArtworkOnlyWithListenerAndArtworkDir drives the
 // real router for every corner of the `dlnaArtwork` AND-gate. iOS keys
 // emitting a renderer's `<upnp:albumArtURI>` on this flag, so a false

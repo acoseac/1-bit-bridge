@@ -1848,9 +1848,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 32 covers the current maximum
+	// appends in lex order. Capacity 33 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
+	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistListRevision +
@@ -1861,7 +1862,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 32)
+	feats := make([]string, 0, 33)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1931,9 +1932,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// the same live predicate the kind gate uses (upscale active AND the
 	// operator flag AND ffmpeg with the dsd_* decoders), so a client never
 	// sees the flag on a bridge that would answer 503. Alpha-sorts between
-	// `dlnaServer` and `favorites` (dl < ds < f).
+	// `dlnaServer` and `dsdSilence` (dl < dsdR < dsdS).
 	if s.dsdRenderActive() {
 		feats = append(feats, "dsdRender")
+	}
+	// `dsdSilence` advertises GET/HEAD /dlna/silence/dsd/<fs>.dsf, the
+	// stereo DSD silence a client plays instead of stopping a DSD cast.
+	// Same gate as `dlnaServer`: the route lives on the DLNA listener,
+	// which public mode never starts. Alpha-sorts between `dsdRender`
+	// and `favorites` (dsdR < dsdS < f).
+	if s.dlnaEnabled {
+		feats = append(feats, "dsdSilence")
 	}
 	// `favorites` advertises GET/PUT /v1/favorites (the user-wide track +
 	// album favorites backup singleton). Gated on the store being wired so

@@ -39482,3 +39482,126 @@ FAIL	github.com/acoseac/1-bit-bridge/internal/manifest	0.411s
 ```
 
 The three lines were put back after the control.
+
+## 2026-10-09 — stereo DSD silence on the DLNA listener (backlog B319)
+
+A Chord 2go docked to a Hugo 2 (MPD 0.21) rings continuously when a
+DSD256 stream is paused or stopped. Measured the same day: serving a
+stereo DSD256 DSF of constant `0x69` (MPD's DSD silence byte), then
+`stop` 5 s later, stayed silent twice. Held silence was silent.
+Resuming music from held silence was clean. `0x00` is a full-scale
+offset and `0x96` is the other polarity; the measured byte is `0x69`.
+The iOS half (backlog B318) switches MPD onto this file. This change
+is the bridge half: the listener MPD already fetches cast files from
+serves the silence, and `/v1/health` says when it does.
+
+`GET` and `HEAD /dlna/silence/dsd/<fs>.dsf` mount beside
+`/dlna/silence.wav`. `<fs>` is the DSD rate in Hz, matched as the
+canonical decimal of exactly one of 64·n × 44,100 or 64·n × 48,000
+for n ∈ {1, 2, 4, 8}: 2822400, 5644800, 11289600, 22579200, 3072000,
+6144000, 12288000, 24576000. Anything else is 404, including 44100,
+1, a non-number, a leading zero, `.DSF`, and an extra segment. Other
+methods are 405. `Content-Type` is `audio/x-dsf` (`mimeDSF`), set
+before `http.ServeContent` so the sniffer leaves it.
+
+The body is a 60 s stereo DSF. The header is the `dsdtone.WriteDSF`
+layout (Sony DSF v1.01): `DSD ` chunk size 28, total file size,
+metadata pointer 0; `fmt ` chunk size 52, version 1, format id 0,
+channel type 2, 2 channels, the rate, 1 bit per sample, sample count
+= fs × 60, block size 4096, reserved 0; `data` size 12 + payload.
+Payload starts at offset 92. Blocks of 4096 alternate the two
+channels. `WriteDSF` zero-pads a short last block; this file pads
+with `0x69`, and the audio bytes are `0x69`, so the whole data region
+is that byte. Production does not import `internal/dsdtone`.
+
+At 2,822,400 Hz the sample count is 169,344,000, the raw audio is
+42,336,000 bytes and the padded payload is 42,336,256 (128 pad bytes
+per channel), total file 42,336,348. At 3,072,000 Hz the byte count
+divides 4096, so the pad is empty. At 24,576,000 Hz the payload is
+368,640,000 bytes and the file is 368,640,092. The reader is an
+`io.ReadSeeker` over a shared 92-byte header plus a fill of `0x69`.
+A request holds an offset. `ServeContent` supplies `Content-Length`,
+`HEAD` and `Range`.
+
+The listener is LAN-reachable and unauthenticated. Stereo bytes per
+second are fs/4: 5,644,800 at 22,579,200 Hz (about 5.6 MB/s) and
+6,144,000 at 24,576,000 Hz (about 6.1 MB/s). `DSDSilenceMaxStreams`
+is 4, about 24.6 MB/s of the larger family. One pause holds one
+stream for about ten seconds, so four covers a household, a second
+device and a retry, and bounds a flood. A `GET` past the cap is 503
+`dsd silence stream limit reached` and starts no body. The slot is a
+non-blocking channel on that handler, released when `ServeHTTP`
+returns. `HEAD`, 404 and 405 take no slot. No INFO line beyond the
+listener's existing telemetry.
+
+B220 / B162 (the entry above, "the DLNA listener bounds what one peer
+can start") stay as they are: notify pool 8, 16 KiB header read,
+`ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout` unset,
+Browse/Search page 1000. A 60 s body needs the unset write deadline.
+Those bounds do not cap bandwidth; the stream cap does.
+
+`/v1/health.features` appends `dsdSilence` on `s.dlnaEnabled`, the
+same gate as `dlnaServer`, after `dsdRender` so the list stays
+alpha-sorted (`dsdR` < `dsdS` < `f`). Public mode never starts the
+listener (`ShouldEnableDLNA`), so the flag is absent there. The
+feature-list capacity went from 32 to 33. Additive.
+`ProtocolVersion` stays 1. PROTOCOL.md documents the route; the
+`/v1` endpoint registry does not scan a DLNA path.
+
+ffprobe 7.x, when present, reads the 2,822,400 Hz file as
+`dsd_lsbf_planar`, channels 2, `sample_rate` `352800` (the DSD rate
+divided by 8, the byte rate), duration `60.000363`. The extra
+0.000363 s is the 256 pad bytes over the stereo byte rate 705,600.
+The `fmt ` chunk still says 2,822,400; the header test pins that.
+The ffprobe test accepts `352800` or `2822400` and a codec name
+containing `dsd`, and skips when ffprobe is not on PATH.
+
+Negative controls, each restored after the red:
+
+1. `fmt ` sample count written as `sampleCount+1`.
+```
+--- FAIL: TestDSDSilenceHeaderAndSizeForEachRate (0.00s)
+    --- FAIL: TestDSDSilenceHeaderAndSizeForEachRate/2822400 (0.00s)
+        silence_dsf_test.go:101: sample count 169344001, want 169344000
+```
+2. `dsdSilenceByte` set to `0x00`.
+```
+--- FAIL: TestDSDSilenceDataBytesAreTheSilenceByte (1.00s)
+    --- FAIL: TestDSDSilenceDataBytesAreTheSilenceByte/2822400 (0.04s)
+        silence_dsf_test.go:169: byte at 92 is not 0x69
+```
+3. An unknown path served the first built asset.
+```
+--- FAIL: TestDSDSilenceUnknownRateIs404 (0.46s)
+    --- FAIL: TestDSDSilenceUnknownRateIs404//dlna/silence/dsd/44100.dsf (0.03s)
+        silence_dsf_test.go:235: status 200
+```
+4. A full cap fell through and served.
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.00s)
+    silence_dsf_test.go:252: past the cap: status 200, want 503
+```
+5. The slot was taken and not released.
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.03s)
+    silence_dsf_test.go:260: after a stream ended: status 503, want 206
+--- FAIL: TestDSDSilenceCapFreesTheSlotWhenTheClientDisconnects (5.00s)
+    silence_dsf_test.go:288: after a client disconnect: status 503, want 206
+```
+6. The `dsdSilence` append removed.
+```
+--- FAIL: TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled (0.00s)
+    health_dlna_test.go:118: DLNA on: features [diagnosticsSummary dlnaServer variantBumpsIndex]
+```
+7. The append left ungated.
+```
+--- FAIL: TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled (0.01s)
+    health_dlna_test.go:122: DLNA off: features [diagnosticsSummary dsdSilence variantBumpsIndex]
+```
+8. The mount line removed.
+```
+--- FAIL: TestTheDLNAListenerServesDSDSilence (0.00s)
+    silence_dsf_test.go:331: status 404 body "404 page not found\n"
+```
+
+Each line was put back after its control.

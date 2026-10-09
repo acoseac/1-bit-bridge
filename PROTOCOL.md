@@ -700,6 +700,16 @@ The bridge's opt-in DLNA MediaServer (`dlnaServer`) runs on its own LAN-only HTT
 
 Not on a public-mode bridge, ever: the DLNA listener does not start there (`ShouldEnableDLNA`), so neither `/dlna/file/` nor this route exists on the demo bridge or on any internet-reachable deployment. `ProtocolVersion` stays `1`.
 
+### DLNA listener: `GET /dlna/silence/dsd/{fs}.dsf` (additive; `dsdSilence`)
+
+The same LAN-only, unauthenticated DLNA listener serves a generated stereo DSD silence file. A client that is casting DSD to a renderer which rings when the stream stops (Chord 2go docked to a Hugo 2, MPD 0.21, measured 2026-10-09) switches playback to this file instead of sending a bare stop. The body is a 60-second stereo DSF whose every data byte is `0x69` (the DSD silence byte), including the padding that fills the last 4096-byte block of each channel. It is generated as the response is written: nothing is stored on disk and the full body is not allocated.
+
+**`GET /dlna/silence/dsd/{fs}.dsf`** (also `HEAD`; every other method answers `405`) where `{fs}` is the DSD sampling frequency in Hz, exactly one of `2822400`, `5644800`, `11289600`, `22579200`, `3072000`, `6144000`, `12288000`, `24576000` (64·n × 44,100 and 64·n × 48,000 for n ∈ {1, 2, 4, 8}). Any other segment, including `44100`, `1`, a non-number, a leading zero, or a different extension, is `404`. `Content-Type` is `audio/x-dsf`. `Range` is honoured (`206` with `Content-Range`); `HEAD` returns the same `Content-Length` and an empty body.
+
+The listener answers at most **4** concurrent silence bodies. A `GET` past that cap is `503` and starts no stream. The slot is released when the response finishes or the client disconnects. `HEAD` and a `404` do not take a slot. `ReadTimeout` (60 s), `IdleTimeout` (120 s), the 16 KiB header cap and the unset `WriteTimeout` are the listener's existing bounds; this cap is the bandwidth bound those do not provide (DSD512 stereo is about 5.6–6.1 MB/s).
+
+**Feature flag: `dsdSilence`** in `/v1/health` `features` (alpha-sorted between `dsdRender` and `favorites`). Present exactly when `dlnaServer` is: the DLNA listener is up. Absent in public mode, which refuses the listener. A client uses the flag to choose the silence pause and falls back to a plain stop when the flag is absent. `ProtocolVersion` stays `1`.
+
 ### `GET /v1/diagnostics` (additive; `diagnosticsSummary`)
 
 Counters and structured state for an operator-facing health view — **no log text**. Atomic-counter and sliding-window reads only: no SQLite queries, no subprocess spawns, so it is safe to poll.

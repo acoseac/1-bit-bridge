@@ -121,12 +121,12 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 		{
 			name:  "dlnaServer alone",
 			gates: []string{"dlna"},
-			want:  []string{"diagnosticsSummary", "dlnaServer", "variantBumpsIndex"},
+			want:  []string{"diagnosticsSummary", "dlnaServer", "dsdSilence", "variantBumpsIndex"},
 		},
 		{
 			name:  "dlnaArtwork sits between diagnosticsSummary and dlnaServer",
 			gates: []string{"dlna", "artworkDirs"},
-			want:  []string{"diagnosticsSummary", "dlnaArtwork", "dlnaServer", "variantBumpsIndex"},
+			want:  []string{"diagnosticsSummary", "dlnaArtwork", "dlnaServer", "dsdSilence", "variantBumpsIndex"},
 		},
 		{
 			name:  "an artwork dir without the DLNA listener advertises no dlnaArtwork",
@@ -139,6 +139,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want: []string{
 				"diagnosticsSummary",
 				"dlnaServer",
+				"dsdSilence",
 				"rendererDiscovery",
 				"variantBumpsIndex",
 			},
@@ -149,6 +150,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want: []string{
 				"diagnosticsSummary",
 				"dlnaServer",
+				"dsdSilence",
 				"pushEventsSupported",
 				"rendererDiscovery",
 				"variantBumpsIndex",
@@ -160,6 +162,7 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want: []string{
 				"diagnosticsSummary",
 				"dlnaServer",
+				"dsdSilence",
 				"pushEventsSupported",
 				"rendererDiscovery",
 				"upscaleCompleteEvents",
@@ -222,7 +225,7 @@ func simulateFeaturesList(gates []string) []string {
 		feats = append(feats, "dlnaArtwork")
 	}
 	if g("dlna") {
-		feats = append(feats, "dlnaServer")
+		feats = append(feats, "dlnaServer", "dsdSilence")
 	}
 	feats = appendUpscaleMidFeatures(feats, g)
 	feats = appendEventFeatures(feats, g)
