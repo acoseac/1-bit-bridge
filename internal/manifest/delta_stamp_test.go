@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -463,6 +464,134 @@ func TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAFailedRollbackDiscardsTheConnection pins that a ROLLBACK the
+// connection cannot finish does not return that connection to the pool.
+// The next checkout must be in autocommit: BEGIN succeeds. A failed
+// COMMIT whose follow-up rollback also fails takes the same path. A
+// follow-up rollback that lands leaves the connection checked out until
+// Rollback, after the prepared statement has closed.
+func TestAFailedRollbackDiscardsTheConnection(t *testing.T) {
+	errEndRefused := errors.New("end refused")
+	for _, name := range []string{"rollback", "commit"} {
+		t.Run(name, func(t *testing.T) {
+			s := openTempStore(t)
+			t.Cleanup(func() { s.Close() })
+			s.db.SetMaxOpenConns(1)
+			s.immediateOnEnd = func(string) error { return errEndRefused }
+			ctx := context.Background()
+			tx, err := s.beginImmediate(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stmt, err := tx.PrepareContext(ctx, "SELECT 1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "commit" {
+				if err := tx.Commit(); err == nil {
+					t.Fatal("commit succeeded")
+				}
+				// The upsert defers close the statement, then roll back.
+				if err := stmt.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := tx.Rollback(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := stmt.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := tx.Rollback(); err == nil {
+					t.Fatal("rollback succeeded")
+				}
+			}
+			if err := beginOnNextConn(t, s.db); err != nil {
+				t.Fatalf("next checkout is not in autocommit: %v", err)
+			}
+		})
+	}
+
+	// A failed COMMIT whose rollback lands stays checked out until
+	// Rollback, so the prepared statement closes first. The connection
+	// that comes back is in autocommit.
+	t.Run("commit then rollback", func(t *testing.T) {
+		s := openTempStore(t)
+		t.Cleanup(func() { s.Close() })
+		s.db.SetMaxOpenConns(1)
+		s.immediateOnEnd = func(stmt string) error {
+			if stmt == "COMMIT" {
+				return errEndRefused
+			}
+			return nil
+		}
+		ctx := context.Background()
+		tx, err := s.beginImmediate(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmt, err := tx.PrepareContext(ctx, "SELECT 1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err == nil {
+			t.Fatal("commit succeeded")
+		}
+		if err := stmt.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		if err := beginOnNextConn(t, s.db); err != nil {
+			t.Fatalf("next checkout is not in autocommit: %v", err)
+		}
+	})
+}
+
+// TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction is
+// the negative control: Close returns the connection while BEGIN IMMEDIATE
+// is still open, and the next checkout's BEGIN fails.
+func TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { s.Close() })
+	s.db.SetMaxOpenConns(1)
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "NOT SQL"); err == nil {
+		t.Fatal("bad SQL succeeded")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = beginOnNextConn(t, s.db)
+	if err == nil || !strings.Contains(err.Error(), "transaction") {
+		t.Fatalf("next BEGIN = %v, want a transaction error", err)
+	}
+}
+
+func beginOnNextConn(t *testing.T, db *sql.DB) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.ExecContext(ctx, "BEGIN")
+	if err == nil {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	}
+	return err
 }
 
 func openStampRacer(t *testing.T, path string) *sql.DB {

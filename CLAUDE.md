@@ -1279,6 +1279,15 @@ lost my library."
   the same database without it. Store-wide `_txlock=immediate` was not
   taken: the driver applies it to every non-readonly `Begin`, and these
   two are the transactions whose first statement is the stamp read.
+  A failed `ROLLBACK` discards the connection (`driver.ErrBadConn` from
+  `Conn.Raw`) before it would return to the pool. This driver's `IsValid`
+  stays true for a connection left inside `BEGIN IMMEDIATE`, so `Close`
+  alone hands that transaction, and its write lock, to the next checkout.
+  A failed `COMMIT` whose follow-up rollback also fails marks the
+  connection, and `Rollback` discards it after the prepared statement
+  has closed. Discarding while that statement is open panics in
+  `sqlite3_finalize`. The upserts register `Rollback` first and the
+  statement close second, so the close runs first.
   Every row of the commit carries that one stamp, so
   `indexed_at > since` takes the batch whole or not at all: a reader sees
   the commit atomically, and two rows at one value cannot arrive as a
@@ -1299,7 +1308,9 @@ lost my library."
   `TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark`,
   `TestAMassDeletePublishesAWatermarkThatMovedForward`,
   `TestAnUpsertClearsAWatermarkAboveTheRow`,
-  `TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp`.)
+  `TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp`,
+  `TestAFailedRollbackDiscardsTheConnection`,
+  `TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction`.)
 - **A writer that writes back a row it READ earlier writes it only while the
   row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
   compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,6 +109,12 @@ type Store struct {
 	// its stamp and before that upsert writes a row. Tests commit from a
 	// second connection in that window. Production leaves it nil.
 	afterDeltaStampRead func()
+
+	// immediateOnEnd, when set, runs before COMMIT and ROLLBACK on an
+	// immediateTx. A non-nil error skips that statement and leaves the
+	// transaction open. Tests use it to force an end the driver cannot
+	// finish. Production leaves it nil.
+	immediateOnEnd func(stmt string) error
 }
 
 // indexedAtAdvanceSQL is the `SET indexed_at = …` expression EVERY
@@ -3340,9 +3347,15 @@ type dbTx interface {
 // non-readonly Begin in the store. These upserts are the transactions
 // whose first statement is a read, so they begin the statement themselves.
 type immediateTx struct {
-	ctx  context.Context
-	conn *sql.Conn
-	done bool
+	ctx   context.Context
+	conn  *sql.Conn
+	done  bool
+	onEnd func(stmt string) error
+	// discard is set when COMMIT and the follow-up ROLLBACK both failed.
+	// Rollback drops the connection after the caller has closed statements.
+	// Dropping it sooner panics: sqlite3_finalize on a connection already
+	// closed.
+	discard bool
 }
 
 func (s *Store) beginImmediate(ctx context.Context) (*immediateTx, error) {
@@ -3354,7 +3367,7 @@ func (s *Store) beginImmediate(ctx context.Context) (*immediateTx, error) {
 		_ = conn.Close()
 		return nil, err
 	}
-	return &immediateTx{ctx: ctx, conn: conn}, nil
+	return &immediateTx{ctx: ctx, conn: conn, onEnd: s.immediateOnEnd}, nil
 }
 
 func (t *immediateTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -3373,7 +3386,17 @@ func (t *immediateTx) Commit() error {
 	if t.done || t.conn == nil {
 		return sql.ErrTxDone
 	}
-	if _, err := t.conn.ExecContext(t.ctx, "COMMIT"); err != nil {
+	if err := t.execEnd(t.ctx, "COMMIT"); err != nil {
+		// The transaction is still open. Roll it back. A rollback that
+		// also fails leaves BEGIN IMMEDIATE on the connection. Rollback
+		// discards it, after the caller closes prepared statements:
+		// discarding here would close the driver under a live statement,
+		// and sqlite3_finalize panics. A rollback that lands leaves the
+		// connection checked out for that same close.
+		if rerr := t.execEnd(context.Background(), "ROLLBACK"); rerr != nil {
+			t.discard = true
+		}
+		t.done = true
 		return err
 	}
 	t.done = true
@@ -3382,22 +3405,54 @@ func (t *immediateTx) Commit() error {
 
 // Rollback ends the transaction and returns the connection to the pool.
 // A Commit that already landed only closes the connection: the statements
-// prepared on it are closed by the caller first.
+// prepared on it are closed by the caller first. A ROLLBACK that fails
+// discards the connection. Close would return it while the transaction
+// is still open, and the next checkout would run inside that BEGIN
+// IMMEDIATE.
 func (t *immediateTx) Rollback() error {
 	if t.conn == nil {
 		return nil
 	}
-	var err error
 	if !t.done {
-		_, err = t.conn.ExecContext(context.Background(), "ROLLBACK")
+		err := t.execEnd(context.Background(), "ROLLBACK")
 		t.done = true
+		if err != nil {
+			t.discardConn()
+			return err
+		}
+	}
+	if t.discard {
+		t.discardConn()
+		return nil
 	}
 	cerr := t.conn.Close()
 	t.conn = nil
-	if err != nil {
-		return err
-	}
 	return cerr
+}
+
+// discardConn marks the pooled connection bad so database/sql closes it
+// instead of returning it. This driver's IsValid stays true for a
+// connection left inside BEGIN IMMEDIATE, so a failed rollback is not
+// enough on its own. Conn.Raw returns the error to the pool, and
+// driver.ErrBadConn is what makes the pool drop the connection.
+func (t *immediateTx) discardConn() {
+	if t.conn == nil {
+		return
+	}
+	_ = t.conn.Raw(func(any) error { return driver.ErrBadConn })
+	t.conn = nil
+}
+
+// execEnd runs COMMIT or ROLLBACK. A test hook that returns an error
+// skips the statement, so the BEGIN IMMEDIATE stays open.
+func (t *immediateTx) execEnd(ctx context.Context, stmt string) error {
+	if t.onEnd != nil {
+		if err := t.onEnd(stmt); err != nil {
+			return err
+		}
+	}
+	_, err := t.conn.ExecContext(ctx, stmt)
+	return err
 }
 
 // prepareTrackUpsert prepares the one INSERT both track upserts run.

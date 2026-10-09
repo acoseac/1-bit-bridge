@@ -38204,3 +38204,27 @@ The indexed_at sweep splits an assignment at the first `=`.
 holds both. The stamp benchmark's read transaction rolls back in the function
 that begins it. `TestAnUpsertClearsAWatermarkAboveTheRow` keeps its eight
 cases in helpers.
+
+## 2026-10-09 — a failed rollback discards the upsert connection (PR #1166)
+
+`immediateTx.Rollback` ran `ROLLBACK` and then `Conn.Close` when that
+statement returned an error. `Close` returns the connection to the pool.
+modernc's `IsValid` only checks that the handle is open, so a connection
+still inside `BEGIN IMMEDIATE` is valid and is reused. The next checkout
+runs inside that transaction and holds the write lock. `*sql.Tx` avoids
+this: a failed rollback is `driver.ErrBadConn`, and `putConn` closes that
+connection instead of pooling it. `Conn.Raw` returning `driver.ErrBadConn`
+is the same discard. The driver does not have to honour the error itself.
+
+`TestAFailedRollbackDiscardsTheConnection` skips `ROLLBACK` (and, on the
+commit path, `COMMIT` and the follow-up `ROLLBACK`) so the transaction
+stays open, with one connection in the pool. Both subtests failed with
+`cannot start a transaction within a transaction` while `Close` followed
+the error. After the discard, the next `BEGIN` succeeds. Discarding while a
+prepared statement is still open panics in `sqlite3_finalize` (the driver
+connection is already closed). `Commit` only marks that case. The upserts
+close the statement first, and `Rollback` discards. A `COMMIT` whose
+follow-up `ROLLBACK` lands leaves the connection checked out for that
+same close, and `Rollback` then returns it, in autocommit.
+`TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction`
+is that `Close` without the discard: the next `BEGIN` still fails.
