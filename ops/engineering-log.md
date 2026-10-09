@@ -39155,3 +39155,18 @@ ran the named tests with `-count=1`, and restored the file with
   Actual: only that test, reason "the library root this path belongs
   to is not configured". Stayed green:
   `TestRestoreRefusesAnEntryWhoseRecordedRootIsGone`.
+
+### Negative controls, round 3
+
+The control mutated `internal/trash/trash.go` on commit `6ce41940`,
+ran the named tests with `-count=1`, and restored the file with
+`git checkout HEAD -- internal/trash/trash.go`.
+
+- A file left in the trash after both writes fail is not named on the
+  result. The `noteLeftLibrary` call was removed from that arm. The
+  completed-trash call stayed. Predicted red:
+  `TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder`,
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+  Actual: those two. The handler left the row served, and the result's
+  `Paths` and `Dirs` were empty. Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
