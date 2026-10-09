@@ -8653,14 +8653,20 @@ its twin.** The top list is older, shorter, and read first.
   to `CreatedAt`. An orphan whose manifest does not parse stays on the
   directory mtime. Trash stays on the stamp directory name. The recorded
   field outranks a touched or back-dated meta mtime, and an idempotent
-  resend of a finished file does not move the activity.
+  resend of a finished file does not move the activity. An empty write to
+  a file that is still short does not refresh it either: `io.Copy` of an
+  empty reader returns 0 and no error, and that chunk leaves `.meta`
+  alone after the digest check and the sync. A zero-length file's first
+  empty chunk records the empty digest, which is what completes it.
   (`TestSweepKeepsASessionThatKeepsReceivingChunks`,
   `TestSweepRemovesASessionIdlePastTheTTL`,
   `TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
   `TestSweepCapFollowsALongerIdleTTL`,
   `TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
   `TestSweepTrustsRecordedActivityOverTheMetaMtime`,
-  `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`.)
+  `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`,
+  `TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`,
+  `TestAZeroLengthFileCompletesOnItsFirstEmptyChunk`.)
 - **Committed files are 0644** (the staged mode survives the rename), and trash
   age comes from the `<stamp>` DIRECTORY NAME — `os.Rename` preserves mtime, so
   an mtime-driven sweeper purges oldest-content-first the instant it lands.

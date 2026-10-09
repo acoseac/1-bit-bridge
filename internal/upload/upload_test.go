@@ -921,6 +921,83 @@ func TestSweepDoesNotRefreshActivityOnAnIdempotentResend(t *testing.T) {
 	}
 }
 
+// TestSweepRemovesASessionThatReceivedOnlyEmptyChunks: an empty reader
+// copies zero bytes and returns no error. That write must not move the
+// activity of a file that is still short, or a client that keeps sending
+// empty bodies holds the session until the age cap. The young sibling,
+// created inside the window, stays.
+func TestSweepRemovesASessionThatReceivedOnlyEmptyChunks(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+
+	idle := mustCreate(t, m, []FileDecl{{Path: "idle.flac", Size: 4}}, CreateOptions{})
+	now = start.Add(2 * time.Hour)
+	young := mustCreate(t, m, []FileDecl{{Path: "young.flac", Size: 1}}, CreateOptions{})
+
+	for hour := 1; hour <= 24; hour++ {
+		now = start.Add(time.Duration(hour) * time.Hour)
+		next, err := m.WriteChunk(idle.ID, fileID(t, idle, "idle.flac"), 0, bytes.NewReader(nil), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next != 0 {
+			t.Fatalf("empty chunk advanced the offset to %d", next)
+		}
+	}
+
+	now = start.Add(25 * time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d sessions, want 1 (the one that received no bytes)", n)
+	}
+	if _, err := m.Get(idle.ID); err == nil {
+		t.Fatal("the empty session was still there")
+	}
+	if _, err := m.Get(young.ID); err != nil {
+		t.Fatalf("young session: %v", err)
+	}
+}
+
+func TestAZeroLengthFileCompletesOnItsFirstEmptyChunk(t *testing.T) {
+	m, root := newTestManager(t)
+	s := mustCreate(t, m, []FileDecl{{Path: "empty.flac", Size: 0}}, CreateOptions{})
+	fid := fileID(t, s, "empty.flac")
+	next, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(nil), nil, 0)
+	if err != nil || next != 0 {
+		t.Fatalf("empty chunk = %d, %v; want 0, nil", next, err)
+	}
+	got, err := m.Get(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 1 || !got.Files[0].Complete {
+		t.Fatalf("complete = %v", got.Files)
+	}
+	sum := sha256.Sum256(nil)
+	want := hex.EncodeToString(sum[:])
+	if got.Files[0].SHA256 != want {
+		t.Fatalf("SHA256 = %q, want the empty digest %s", got.Files[0].SHA256, want)
+	}
+	res, err := m.Commit(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Committed != 1 || res.Failed != 0 {
+		t.Fatalf("commit committed=%d failed=%d", res.Committed, res.Failed)
+	}
+	info, err := os.Stat(filepath.Join(root, "empty.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("committed size = %d", info.Size())
+	}
+}
+
 func writeByte(t *testing.T, m *Manager, sid, fid string, offset int64) {
 	t.Helper()
 	if _, err := m.WriteChunk(sid, fid, offset, bytes.NewReader([]byte{'x'}), nil, 0); err != nil {

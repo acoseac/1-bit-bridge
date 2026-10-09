@@ -38423,7 +38423,9 @@ Pins: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
 `TestSweepCapFollowsALongerIdleTTL`,
 `TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
 `TestSweepTrustsRecordedActivityOverTheMetaMtime`,
-`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`.
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`,
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`,
+`TestAZeroLengthFileCompletesOnItsFirstEmptyChunk`.
 
 Negative controls, each a production-only mutation on `e23c3b9e`, restored
 with `git checkout HEAD` before the next. Predicted names are the ones
@@ -38469,3 +38471,26 @@ back-dated (`recorded activity: upload: session not found`).
 the later of `CreatedAt` and the mtime, and that test's `CreatedAt` is
 the write clock, so an older mtime does not move it. The ranking test is
 the one that separates the two clocks.
+
+An empty reader on a file that is still short is an accepted chunk:
+`io.Copy` returns 0 bytes and no error, and the persist path rewrote
+`.meta` with a fresh `UpdatedAt`. Repeated empty writes moved the
+activity forward, so the idle TTL never fired and only the seven-day cap
+reaped the session. Measured on `1fd1f0ea` before the skip:
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks` removed 0 sessions,
+want 1. The skip returns the unchanged offset after the digest check and
+`f.Sync`, and only when the chunk changes neither the offset, the
+recorded completion, nor the running hash. No stored hash and the marshal
+of a fresh hasher are the same progress, so a zero-byte copy does not
+count as a new hash. A zero-length file starts at offset 0 with nothing
+recorded; its first empty chunk sets the empty digest and is what
+completes it (`fileRecordedComplete`). A later empty write of that file
+takes the idempotent return.
+
+Negative control, a production-only mutation, restored before this
+record. Predicted red:
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`. Actual: that one,
+and nothing else in the package (`Sweep removed 0 sessions, want 1 (the
+one that received no bytes)`). The mutation stamped `UpdatedAt` on every
+accepted chunk again, the empty one included. The zero-length completion
+test stayed green.
