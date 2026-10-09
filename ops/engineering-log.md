@@ -39028,3 +39028,145 @@ The up-front hash put back into `createUploadSession` (the whole-file
 file and the declared digest present, including as its own field.
 Actual: those three (`create read the file`, `declared digest`,
 `digest field`).
+
+## 2026-10-09 — a trash restore follows the root the file was trashed under (backlog B177)
+
+`Restore` read the stored manifest path through `SplitRoot` of the roots
+configured now. With more than one root that path begins with the root's
+folder name; with one root it is the path within the root. After a
+collapse, `Music/Artist/Album/01.flac` was restored under an extra
+`Music/` folder and the outcome still said restored. After a second root
+was added, a file that had lived in a top folder named like the root was
+restored one level too high, because the new `SplitRoot` consumed that
+folder as the root name.
+
+Trash now writes `.<name>.bridge-root` beside the audio file, after the
+rename into the trash and before the success outcome. The JSON holds the
+absolute root `SplitRoot` returned and the path relative to that root.
+Restore builds the manifest path for the root count in force now from
+that pair and takes the destination from `Resolver.Resolve`, then checks
+that `SplitRoot` of the same path returns the recorded root and suffix.
+The basename in a multi-root path is the basename of the configured root
+that `EvalSymlinksOrClean` matches, which is the root the resolver
+indexes. A recorded root that matches no configured root answers
+`ErrRootUnavailable` and the file stays in the trash. A renamed root
+path is that refusal. A record that does not parse, whose root is not
+absolute, or whose root and suffix do not resolve back to themselves, is
+refused as unreadable. A record written under a different root than the
+one the file sits under keeps the older "restore it by hand" refusal.
+
+An entry with no sidecar was written before the root was recorded.
+
+- Its first segment equals the basename of the root the file sits under:
+  refused. That segment is the old multi-root prefix or a real folder of
+  that name, and the entry does not say which. The same refusal covers a
+  library that still has one root and a top folder named exactly like
+  that root. The file stays in the trash. List still shows it. Putting
+  it back is a move out of `.bridge-trash` by hand.
+- Its first segment equals another configured root's basename: the older
+  "different library root" refusal stays.
+- Otherwise the whole stored path is the path within the root. It is
+  restored under the root the file sits under, through the resolver, in
+  the current layout.
+
+The sidecar's name begins with a dot, so List and the sweep's byte count
+skip it. A successful restore or purge removes it before the empty stamp
+directory is pruned. The sidecar path that is written or removed is the
+trash directory joined with the relative remainder of the sidecar, and a
+remainder that leaves the trash directory is refused. A trash whose
+record cannot be written attempts to move the file back and fails that
+entry. When the move back succeeds, the empty stamp directory is removed.
+When it fails, the file remains in `.bridge-trash` and a warning is
+logged. That result still carries the spelled path and the folder, as a
+completed trash does, so the handler retires the row and rescans; a
+spelling that could not be read is a full scan. A file that came back
+records neither. No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+### Negative controls
+
+Each control mutated `internal/trash/restore.go` on commit `ffdc3f99`,
+ran the named tests with `-count=1`, and restored the file with
+`git checkout HEAD -- internal/trash/restore.go`. Predicted names are
+the ones that must go red; the others in the same `-run` must stay
+green.
+
+- The recorded root is ignored. A record that reads is restored by
+  `SplitRoot` of the stored manifest path joined onto the sitting root,
+  which is the defect. Predicted red:
+  `TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot`,
+  `TestRestoreAfterARootIsAddedKeepsAFolderNamedLikeTheRoot`,
+  `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder` (both
+  subtests), `TestRestoreRefusesAnEntryWhoseRecordedRootIsGone`,
+  `TestRestoreRefusesAnEntryRecordedUnderADifferentRoot`. Actual: those
+  five. The collapse and the added-root tests found the file missing at
+  the path under the surviving root and inside the folder named like the
+  root. The gone-root test and the different-root test both reported
+  restored. Both HTTP subtests reported the file missing at the right
+  place. Stayed green: `TestATornRootRecordIsRefused`,
+  `TestAnOldEntryWhosePathStartsWithTheRootNameIsRefused`,
+  `TestAnOldEntryThatNamesNoRootBasenameRestoresUnderTheRootItSitsUnder`,
+  `TestAnOldEntryUnderASingleRootRestores`,
+  `TestAnOldEntryNamingAnotherRootStaysRefused`,
+  `TestRestoreOnMultiRootReturnsThePathToItsOwnRoot`.
+- A recorded root that is not configured falls through to the legacy
+  placement. Predicted red:
+  `TestRestoreRefusesAnEntryWhoseRecordedRootIsGone`. Actual: only that
+  test, outcome restored. The collapse, added-root, different-root,
+  torn-record and four old-entry tests stayed green, and so did
+  `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder`.
+- The old-entry refusal for a path whose first segment is the sitting
+  root's basename is removed. Predicted red:
+  `TestAnOldEntryWhosePathStartsWithTheRootNameIsRefused`. Actual: only
+  that test, outcome restored. The other eight tests in that `-run`
+  stayed green.
+
+### Negative controls, round 2
+
+Each control mutated the named production file on commit `e0974648`,
+ran the named tests with `-count=1`, and restored the file with
+`git checkout HEAD --`. Predicted names are the ones that must go red.
+
+- The empty stamp is left after a failed root record whose file came
+  back. The `pruneEmptyStamp` call was removed from the successful
+  move-back arm in `trash.go`. Predicted red:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`. Actual:
+  only that test; the stamp directory was still under `.bridge-trash`.
+  Stayed green:
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+- A failed move-back reports the same reason as a successful one
+  (`originWriteFailed`). Predicted red:
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+  Actual: only that test, reason "could not record which library root
+  this file came from". Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
+- The sidecar is the sibling of whatever audio path it is given, with
+  no check that it stays in the trash. `sidecarUnder` returned
+  `originSidecar(audio)` immediately. Predicted red:
+  `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
+  `TestAnOriginRecordOutsideTheTrashIsNotRemoved`. Actual: those two.
+  The write landed beside the file outside the trash, and the remove
+  deleted that sidecar. Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`,
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`,
+  `TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot`.
+- A recorded root that is not an absolute path is accepted. The
+  `!filepath.IsAbs` term was removed from `checkOriginRecord`.
+  Predicted red: `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.
+  Actual: only that test, reason "the library root this path belongs
+  to is not configured". Stayed green:
+  `TestRestoreRefusesAnEntryWhoseRecordedRootIsGone`.
+
+### Negative controls, round 3
+
+The control mutated `internal/trash/trash.go` on commit `6ce41940`,
+ran the named tests with `-count=1`, and restored the file with
+`git checkout HEAD -- internal/trash/trash.go`.
+
+- A file left in the trash after both writes fail is not named on the
+  result. The `noteLeftLibrary` call was removed from that arm. The
+  completed-trash call stayed. Predicted red:
+  `TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder`,
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+  Actual: those two. The handler left the row served, and the result's
+  `Paths` and `Dirs` were empty. Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.

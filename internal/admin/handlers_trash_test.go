@@ -352,3 +352,126 @@ func TestTrashRefusesRoutedTracksItemized(t *testing.T) {
 		t.Error("the routed path has no outcome of its own")
 	}
 }
+
+func openTrashConsole(t *testing.T) (srv *Server, music string, h http.Handler) {
+	t.Helper()
+	srv, cfg, _ := newTestServer(t)
+	resetSpaceCacheForTest()
+	t.Cleanup(resetSpaceCacheForTest)
+	wireTrash(t, srv)
+	enableDelete(t, srv, true)
+	return srv, cfg.LibraryRoots[0], srv.Handler()
+}
+
+func postTrashThenRestore(t *testing.T, h http.Handler, path string, between func()) {
+	t.Helper()
+	var trashed map[string]any
+	if code := doJSON(t, h, "POST", "/api/library/trash",
+		map[string]any{"paths": []string{path}}, &trashed); code != http.StatusOK {
+		t.Fatalf("trash = %d (%v)", code, trashed)
+	}
+	if between != nil {
+		between()
+	}
+	var listed []map[string]any
+	doJSON(t, h, "GET", "/api/library/trash", nil, &listed)
+	if len(listed) != 1 {
+		t.Fatalf("listing = %v", listed)
+	}
+	var restored map[string]any
+	if code := doJSON(t, h, "POST", "/api/library/trash/restore",
+		map[string]any{"ids": []string{listed[0]["id"].(string)}}, &restored); code != http.StatusOK {
+		t.Fatalf("restore = %d (%v)", code, restored)
+	}
+}
+
+// TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder drives both
+// root-count flips through the restore handler. The file has to come back
+// where it was trashed from.
+func TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder(t *testing.T) {
+	t.Run("two roots become one", func(t *testing.T) {
+		srv, music, h := openTrashConsole(t)
+		nas := filepath.Join(t.TempDir(), "NAS")
+		if err := os.MkdirAll(nas, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		srv.deps.Scanner.SetRoots([]string{music, nas})
+		srv.deps.Resolver.SetRoots([]string{music, nas})
+		seedLibraryFile(t, music, "Artist/Album/01.flac", "audio!")
+		postTrashThenRestore(t, h, "Music/Artist/Album/01.flac", func() {
+			srv.deps.Scanner.SetRoots([]string{music})
+			srv.deps.Resolver.SetRoots([]string{music})
+		})
+		if _, err := os.Stat(filepath.Join(music, "Artist", "Album", "01.flac")); err != nil {
+			t.Fatalf("file not back under the surviving root: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(music, "Music", "Artist", "Album", "01.flac")); !os.IsNotExist(err) {
+			t.Fatalf("extra folder of the root's name: %v", err)
+		}
+	})
+
+	t.Run("one root becomes two", func(t *testing.T) {
+		srv, music, h := openTrashConsole(t)
+		seedLibraryFile(t, music, "Music/Artist/Album/01.flac", "audio!")
+		postTrashThenRestore(t, h, "Music/Artist/Album/01.flac", func() {
+			nas := filepath.Join(t.TempDir(), "NAS")
+			if err := os.MkdirAll(nas, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			srv.deps.Scanner.SetRoots([]string{music, nas})
+			srv.deps.Resolver.SetRoots([]string{music, nas})
+		})
+		if _, err := os.Stat(filepath.Join(music, "Music", "Artist", "Album", "01.flac")); err != nil {
+			t.Fatalf("file not back inside the folder named like the root: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(music, "Artist", "Album", "01.flac")); !os.IsNotExist(err) {
+			t.Fatalf("file landed a level too high: %v", err)
+		}
+	})
+}
+
+// A trash whose root record cannot be written, and whose file cannot be
+// moved back, has already left the library path. The handler must retire
+// that row and rescan the folder, the same as a trash that recorded its root.
+func TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder(t *testing.T) {
+	restore := trash.SetTrashWriteSeamsForTest(
+		func(string, string, string, string) error { return os.ErrInvalid },
+		func(string, string) error { return os.ErrInvalid },
+	)
+	t.Cleanup(restore)
+
+	srv, cfg, _ := newTestServer(t)
+	h := srv.Handler()
+	enableDelete(t, srv, true)
+	wireTrash(t, srv)
+	root := cfg.LibraryRoots[0]
+	seedLibraryFile(t, root, "Artist/Album/01.flac", "audio!")
+	seedLibraryFile(t, root, "Artist/Album/02.flac", "audio!")
+	tr := manifest.Track{Path: "Artist/Album/01.flac", Size: 6}
+	if err := srv.deps.Manifest.UpsertTrack(t.Context(), &tr); err != nil {
+		t.Fatal(err)
+	}
+
+	var res trashResultDTO
+	if code := doJSON(t, h, http.MethodPost, "/api/library/trash",
+		map[string]any{"paths": []string{"Artist/Album/01.flac"}}, &res); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if res.Failed != 1 || res.OK != 0 || len(res.Outcomes) != 1 ||
+		res.Outcomes[0].Status != "failed" || !strings.Contains(res.Outcomes[0].Reason, "still in the trash") {
+		t.Fatalf("outcome = %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Artist", "Album", "01.flac")); !os.IsNotExist(err) {
+		t.Fatalf("file still at the library path: %v", err)
+	}
+
+	got, err := srv.deps.Manifest.GetTrack(t.Context(), "Artist/Album/01.flac")
+	if err != nil || got != nil {
+		t.Fatalf("row still served: %+v %v", got, err)
+	}
+	srvBgScansWait(srv)
+	sib, err := srv.deps.Manifest.GetTrack(t.Context(), "Artist/Album/02.flac")
+	if err != nil || sib == nil {
+		t.Fatalf("folder was not rescanned: %+v %v", sib, err)
+	}
+}
