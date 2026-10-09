@@ -79,22 +79,23 @@ func TestUpsertBookletAvailabilityEtagLifecycle(t *testing.T) {
 func TestSetBookletTagAndBumpIndexWholeAlbumStrictAdvance(t *testing.T) {
 	s := openAtlasTestStore(t)
 	ctx := context.Background()
-	base := time.Unix(0, 1_700_000_000_000_000_000)
+	// An hour past OpenStore, so the shared stamp is base itself. One
+	// batch, so the unrelated track stays on that stamp when the album
+	// bump moves its siblings.
+	base := time.Now().Add(time.Hour)
 	s.now = func() time.Time { return base }
 
 	// Two sibling tracks on the release + one unrelated track.
-	for _, tr := range []*Track{
+	if err := s.UpsertTrackBatch(ctx, []*Track{
 		{Path: "A/01.flac", Size: 1, ModTime: time.Unix(1, 0), MusicBrainzAlbumID: bkRel1},
 		{Path: "A/02.flac", Size: 1, ModTime: time.Unix(1, 0), MusicBrainzAlbumID: bkRel1},
 		{Path: "B/01.flac", Size: 1, ModTime: time.Unix(1, 0), MusicBrainzAlbumID: bkRel2},
-	} {
-		if err := s.UpsertTrack(ctx, tr); err != nil {
-			t.Fatal(err)
-		}
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	// Freeze the clock at a PAST instant relative to the upsert stamps —
-	// the CASE-WHEN must still STRICTLY advance indexed_at.
+	// Freeze the clock an hour before the upsert stamp. The bump still
+	// lands one past the library watermark.
 	s.now = func() time.Time { return base.Add(-time.Hour) }
 	n, err := s.SetBookletTagAndBumpIndex(ctx, bkRel1, "tag-1")
 	if err != nil {

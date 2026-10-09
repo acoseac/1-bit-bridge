@@ -1266,20 +1266,51 @@ lost my library."
   the same expression, inside the write. The coverage start is read BEFORE
   the tombstone wipe: a stamp taken after it no longer sees the `deleted_at`
   the cursor may sit on, `DeltaSinceCovered` treats `since >= start` as
-  covered, and the wipe left no tombstones. Three deliberate exclusions —
-  the `UpsertTrack`/`UpsertTrackBatch` conflict arms, migration v34's
-  `post()`, and `StampExtractorVersionBatch` (not an `indexed_at` writer at
-  all). Don't "finish the job" by converting them. A bump-only writer uses
+  covered, and the wipe left no tombstones. The track upserts bind it too:
+  `readNextDeltaStamp` evaluates `selectNextDeltaStampSQL` once per
+  transaction, before any row of that transaction is written, and both the
+  fresh insert and the conflict arm store that integer. A 500-row batch
+  pays one read. Those two transactions are `BEGIN IMMEDIATE`, so the
+  write lock is reserved before the stamp read. A deferred transaction
+  that reads and then writes fails `SQLITE_BUSY_SNAPSHOT` when another
+  connection commits in between, and `busy_timeout` does not retry that
+  code. `s.mu` serializes writers in this process only. The data-dir lock
+  covers a second `bridge serve`; `bridge scan` and the other CLIs open
+  the same database without it. Store-wide `_txlock=immediate` was not
+  taken: the driver applies it to every non-readonly `Begin`, and these
+  two are the transactions whose first statement is the stamp read.
+  A failed `ROLLBACK` discards the connection (`driver.ErrBadConn` from
+  `Conn.Raw`) before it would return to the pool. This driver's `IsValid`
+  stays true for a connection left inside `BEGIN IMMEDIATE`, so `Close`
+  alone hands that transaction, and its write lock, to the next checkout.
+  A failed `COMMIT` whose follow-up rollback also fails marks the
+  connection, and `Rollback` discards it after the prepared statement
+  has closed. Discarding while that statement is open panics in
+  `sqlite3_finalize`. The upserts register `Rollback` first and the
+  statement close second, so the close runs first.
+  Every row of the commit carries that one stamp, so
+  `indexed_at > since` takes the batch whole or not at all: a reader sees
+  the commit atomically, and two rows at one value cannot arrive as a
+  prefix. `first_indexed_at` stays the scan clock. Two exclusions remain —
+  migration v34's `post()`, and `StampExtractorVersionBatch` (not an
+  `indexed_at` writer at all). Don't convert those. A bump-only writer uses
   `bumpIndexedAtByPathSQL`. `TestIndexedAtAdvanceIsShared` walks the named
   CONSTS and is blind to an inline literal in a function body — which is
   how #840 reintroduced the dead `CASE WHEN` form — so
   `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package
   and classifies each assignment against the SQL literal that contains it.
+  An `indexed_at` assignment that starts with `CASE` is hand-rolled,
+  with or without a space before `=`; `artwork_version`'s `CASE` later
+  in the same literal is a different column.
   (`TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm`,
   `TestADeleteInTheSameNanosecondReachesADelta`,
   `TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered`,
   `TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark`,
-  `TestAMassDeletePublishesAWatermarkThatMovedForward`.)
+  `TestAMassDeletePublishesAWatermarkThatMovedForward`,
+  `TestAnUpsertClearsAWatermarkAboveTheRow`,
+  `TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp`,
+  `TestAFailedRollbackDiscardsTheConnection`,
+  `TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction`.)
 - **A writer that writes back a row it READ earlier writes it only while the
   row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
   compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote
@@ -6255,6 +6286,29 @@ no failing test — which is the shape to expect in this area.
   it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
   installs — the two that never restart — left it false. An unreadable marker is
   NOT a refusal: failing closed there would block every install on the host.
+- **A Windows rollback moves the running exe aside before it renames
+  `.bak` into place** (2026-10-09, backlog B202). `RollbackBinary` on
+  Windows was one `os.Rename` of the backup onto `dst`. Both callers
+  run in this process (`Updater.Rollback`, `maybeRollbackOnBoot`), and
+  `stopServiceIfRunning` returns without stopping when this process is
+  the service, so that rename replaces the mapped image. Windows
+  answers "Access is denied". `swapBinary` already vacates a running
+  exe first (a rename of the image succeeds; a rename onto it does
+  not). The rollback does the same, then renames `.bak` onto the
+  vacated path, and renames the aside file back onto `dst` if that
+  rename fails. The aside file is the image this process still maps.
+  Windows will not delete it. `swapBinary` leaves its leftover on disk
+  as `.bak`, which is the rollback target. The rollback leftover is
+  the build being replaced, so it is not named `.bak`: `canRollback`
+  would stay true and the next rollback would restore the broken
+  build. A best-effort remove drops an earlier leftover when nothing
+  maps it; a refusal leaves `bridge.exe.rollback-<n>` beside the
+  binary, and the next vacate uses a new name so it never replaces
+  that leftover. A missing `dst` stays one rename of the backup onto
+  that path. Unix `RollbackBinary` is still one rename over the live
+  path. (`TestRollbackBinaryReplacesARunningExe`,
+  `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`,
+  `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`.)
 - **Booklet GC is skipped while a scan is in flight** — mid-rescan the release
   universe is transiently partial, so GC deletes every filesystem album's
   booklets and re-fetches them next cycle. An empty universe is a deliberate
@@ -7728,9 +7782,14 @@ mentions across the four `ops/audit-*.md` files.
   process`. The same evening that leg passed twice on main. macOS deletes
   an open file, so the TempDir cleanup there says nothing.
   `backupShutdownWait` (45 s) is a defer registered after the shared grace
-  wait, so on the way out it runs first. The parent cancel has already
-  cancelled the ticker. The wait returns when the goroutine does, which is
-  after `db.Close`. A wait that expires logs `shutdown: backup snapshot
+  wait, so on the way out it runs first. **It cancels `scanCtx` itself
+  before it waits** (backlog B311): on a stop the parent cancel has already
+  cancelled the ticker, but on an early error return (the admin port in
+  use) nothing has, and `defer scanCancel()` runs only after this defer.
+  Without that cancel every early exit sat out the whole 45 s (bridge
+  #1166's CI, run 37865927261, a port collision in
+  `TestServeRedeemsThePairingLinksCode`). **Don't drop it.** The wait
+  returns when the goroutine does, which is after `db.Close`. A wait that expires logs `shutdown: backup snapshot
   did not close its files within …` and teardown continues; the other
   writers keep the 5 s grace. `vacuumInto` also closes its connection
   before it removes a partial destination: the deferred `Close` used to

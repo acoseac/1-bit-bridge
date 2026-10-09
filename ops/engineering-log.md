@@ -38208,6 +38208,183 @@ registered after `launchServe`, so it runs before the drain; the other
 way round, the drain waits on a parked statement until the test
 deadline.
 
+## 2026-10-08 — track upserts stamp past the library watermark (backlog B303)
+
+`UpsertTrack` and `UpsertTrackBatch` wrote `indexed_at` from the clock on a
+fresh insert, and on conflict from `CASE WHEN tracks.indexed_at >=
+excluded.indexed_at THEN tracks.indexed_at + 1 ELSE excluded.indexed_at END`.
+That clears only the row's own previous value. A tombstone `deleted_at` or a
+deletion-journal coverage start strictly above that value, in the same
+nanosecond as the write, stored the clock. `indexed_at > since` then skipped
+the row. `TestAnUpsertClearsAWatermarkAboveTheRow` froze the clock at that
+watermark (an hour past `OpenStore`, so the v41 coverage seed sat behind the
+planted arm) and failed on all eight shapes — tombstone and coverage, conflict
+and fresh insert, one row and a batch — before the stamp moved. Each stored
+`indexed_at` equal to the watermark, and both `ListTracks` and `BuildManifest`
+omitted the path.
+
+The watermark read is cheap beside the upsert. On an Apple M3 Pro, a store of
+25,000 tracks, `ANALYZE` first (`BenchmarkUpsertStampCost`, `-benchtime 400ms`):
+
+- one `selectNextDeltaStampSQL`: 18,156 ns
+- 500 of those queries: 9.09 ms
+- 500 prepared `UPDATE`s of a bound `indexed_at`: 2.12 ms
+- the same 500 with `nextDeltaStampSQL` inside each statement: 2.83 ms (about
+  1.4 µs extra per row)
+- one 500-row `UpsertTrackBatch` of conflict updates: 3.97 s (one sample; the
+  op exceeded the bench window)
+
+A second timing of the same batch, then of 500 raw upsert execs, a
+`tags_json`-only update, the lyrics lookup and the commit, put the batch at
+2.86 s and 2.77 s warm. Under load the upsert execs and a tags-only update of
+the same 500 rows were the same order (about 10–11 s) while 500 lyrics
+lookups were 2–36 ms and the commit under 1 ms. The batch cost is rewriting
+`tags_json` and its `json_extract` indexes. The stamp is one 18 µs read.
+A full scan of 50,000 tracks is 100 such batches, about 1.8 ms of stamp
+queries.
+
+`readNextDeltaStamp` evaluates `selectNextDeltaStampSQL` once per transaction,
+after `Begin` and before any row is written, and both arms bind that integer.
+The conflict arm is `indexed_at = excluded.indexed_at`. Re-evaluating the
+subquery per row would see rows the same transaction already wrote and stamp
+each later row higher, in statement order. A shared stamp needs no order
+among the rows: a reader sees the commit atomically, and `indexed_at > since`
+takes every row of it or none. `first_indexed_at` stays the scan clock.
+`TestNoHandRolledIndexedAtBump` reports an `indexed_at` assignment whose
+right-hand side starts with `CASE`; `artwork_version`'s `CASE` later in the
+same literal is a different column. Migration v34's `post()` and
+`StampExtractorVersionBatch` stay as they were. `ProtocolVersion` stays 1.
+
+## 2026-10-09 — track upserts reserve the write lock before the stamp read (PR #1166)
+
+The stamp read made `UpsertTrack` and `UpsertTrackBatch` a deferred transaction
+whose first statement is a read. In WAL mode that transaction fails to upgrade
+with `SQLITE_BUSY_SNAPSHOT` (517, `database is locked (517)`) when another
+connection commits after the read. `busy_timeout` does not retry that code.
+`s.mu` serializes writers in this process. The data-dir lock
+(`lockServeDataDir`, `<dataDir>/server.lock`) covers a second `bridge serve`.
+`bridge scan` (`scanCmd`) opens the store without it, as do the other CLI
+writers. Before the stamp moved, the upsert's first statement was the INSERT,
+which reserved the write lock at once.
+
+`TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp` opens a second connection
+on the same file and, from a hook after the stamp read, inserts a tombstone.
+Both subtests failed with code 517 while that insert committed. The upserts
+now `BEGIN IMMEDIATE` on a checked-out connection before the read, so the
+second connection's insert is `SQLITE_BUSY` and the upsert commits. The driver
+ignores `sql.TxOptions.Isolation` and takes `_txlock` from the DSN for every
+non-readonly `Begin`. That was left store-wide off: these two are the
+transactions whose first statement is the stamp read.
+
+The indexed_at sweep splits an assignment at the first `=`.
+`indexed_at=CASE` (no space) is the same hand-rolled form as
+`indexed_at = CASE`. `TestTheIndexedAtSweepTellsAnAssignmentFromAComparison`
+holds both. The stamp benchmark's read transaction rolls back in the function
+that begins it. `TestAnUpsertClearsAWatermarkAboveTheRow` keeps its eight
+cases in helpers.
+
+## 2026-10-09 — a failed rollback discards the upsert connection (PR #1166)
+
+`immediateTx.Rollback` ran `ROLLBACK` and then `Conn.Close` when that
+statement returned an error. `Close` returns the connection to the pool.
+modernc's `IsValid` only checks that the handle is open, so a connection
+still inside `BEGIN IMMEDIATE` is valid and is reused. The next checkout
+runs inside that transaction and holds the write lock. `*sql.Tx` would
+not avoid this either: an explicit `Rollback` hands the driver's error to
+the pool, and `putConn` drops a connection only for `driver.ErrBadConn` or
+when the driver's `IsValid` says no. `Conn.Raw` returning
+`driver.ErrBadConn` is what discards it here, whatever the driver reports.
+
+`TestAFailedRollbackDiscardsTheConnection` skips `ROLLBACK` (and, on the
+commit path, `COMMIT` and the follow-up `ROLLBACK`) so the transaction
+stays open, with one connection in the pool. Both subtests failed with
+`cannot start a transaction within a transaction` while `Close` followed
+the error. After the discard, the next `BEGIN` succeeds. Discarding while a
+prepared statement is still open panics in `sqlite3_finalize` (the driver
+connection is already closed). `Commit` only marks that case. The upserts
+close the statement first, and `Rollback` discards. A `COMMIT` whose
+follow-up `ROLLBACK` lands leaves the connection checked out for that
+same close, and `Rollback` then returns it, in autocommit.
+`TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction`
+is that `Close` without the discard: the next `BEGIN` still fails.
+
+## 2026-10-09 — an early serve exit no longer waits out the backup ticker (backlog B311)
+
+B309's backup wait is a defer registered after `defer scanCancel()`, so
+it runs first. On a stop the parent context has already cancelled the
+ticker, and the wait returns as soon as the snapshot connection has
+closed. On an early error return nothing had cancelled `scanCtx`: the
+ticker stayed parked, and the wait sat out the whole
+`backupShutdownWait` (45 s) before teardown went on. Bridge #1166's CI
+(run 37865927261, `test -race (rest)`) showed it: an admin-port
+collision in `TestServeRedeemsThePairingLinksCode` (B313) exited serve
+with code 1, the case took 45.66 s, and stderr said `shutdown: backup
+snapshot did not close its files within 45s`, which named the wrong
+cause. An operator whose bridge fails to bind its admin port would also
+have waited 45 s for the exit.
+
+The defer now calls `scanCancel()` before it waits. A cancel is
+idempotent, so the stop path is unchanged, and no other top-level defer
+sits between the two registrations. `TestAnEarlyExitDoesNotWaitOutTheBackupTicker`
+holds the admin port with its own listener, so serve fails at the admin
+bind after the ticker has started. It waits for the exit with no bound
+of its own and requires the admin-bind error and no "did not close its
+files" line. It passed in 1.06 s with the fix. With the cancel removed
+it failed at 46.74 s, on that line.
+
+## 2026-10-09 — backlog B202: a Windows rollback cannot replace the running exe
+
+`RollbackBinary` in `swap_windows.go` was one `os.Rename` of
+`dst + ".bak"` onto `dst`, after the same SCM stop `swapBinary` uses.
+`stopServiceIfRunning` returns `(nil, nil)` when
+`svc.IsWindowsService()` is true, and both production callers run in
+this process: `Updater.Rollback` (the console's Roll back, which does
+not restart) and `maybeRollbackOnBoot`. The rename is `MoveFileEx`
+with `MOVEFILE_REPLACE_EXISTING`. `swapBinary`'s own comment records
+the split Windows makes: renaming the running exe aside updates the
+directory entry and the mapped image stays, and replacing that image
+in place fails. The 2026-09-30 ops review measured the rollback's
+failure on Windows 11 as "Access is denied".
+
+`TestRollbackBinary_Windows` writes two files and rolls back with no
+process running, so it stays green on the broken rename.
+`TestRollbackBinaryReplacesARunningExe` builds a small exe, starts it,
+and calls `RollbackBinary` on that path. On the unfixed code the
+rename returns the access error and the test fails. That commit is
+the first one on the PR, so the Windows leg shows it red before the
+fix.
+
+What shipped:
+
+- After the existing backup stat and SCM prelude,
+  `replaceRunningBinary` moves `dst` to `dst.rollback-<unix nano>`
+  (a name that does not exist, so the vacate is not itself a
+  replace), then renames the backup onto `dst`. If that rename
+  fails, the aside file is renamed back, and a failed restore
+  returns both errors. The three renames go through `renameFunc`.
+- The aside file is not `.bak`. `canRollback` is the presence of
+  that name, and the aside is the build being replaced. Leaving it
+  as `.bak` would make the next rollback restore the broken build.
+- `os.Remove` of the aside is best-effort. Windows will not delete a
+  mapped image, and a returned error would skip
+  `Updater.Rollback`'s state write after the bytes are already in
+  place. A refusal is one Warn. An earlier leftover is removed the
+  same way at the start of the next call, by a directory listing
+  (not a glob) of the `bridge.exe.rollback-` prefix. A leftover that
+  is still mapped keeps its name; the new vacate uses another, so
+  it does not try to replace the mapped file.
+- A missing `dst` is one rename of the backup onto that path, which
+  is what the old rollback did when there was nothing to replace.
+- Unix `RollbackBinary` is unchanged: one rename over the live path.
+
+Pins: `TestRollbackBinaryReplacesARunningExe` (Windows, the helper
+is running), `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`
+(an injected rename returns `EACCES` when the destination exists, so
+a rollback that renames the backup onto the running path first
+fails on every OS), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`,
+`TestRollbackReplaceOfAMissingDestinationIsOneRename`,
+`TestRollbackReplaceLeavesALeftoverItCannotRemove`.
+
 ## 2026-10-09 — a variant move keeps the file at both names across the row update (backlog B249, B251)
 
 B204 closed the window after `AllVariants` returns and before the tick
