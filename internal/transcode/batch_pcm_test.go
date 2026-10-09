@@ -554,3 +554,68 @@ func TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit(t *testing.T) {
 		t.Fatalf("1s file: SubmitPaths = %v, %+v; want it enqueued", err, res)
 	}
 }
+
+// TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart is the
+// one-volume window the two separate checks miss. One lane, one DSD
+// track: the rendition is larger than one scratch, so Stage C (one
+// scratch beside the rendition) is larger than the survey (two
+// scratches) and larger than the rendition alone. Free space sits in
+// that gap. The pool is built with two workers and then set to one:
+// two lanes reserve four scratches, which is already more than one
+// scratch beside this rendition, and the gap the test exists for
+// closes.
+func TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart(t *testing.T) {
+	const size int64 = 4_000_000
+	one := TempBytesForRender(2, 44100, 1)
+	two := SurveyScratchBytes(one)
+	projected := ProjectedSize(size, 2822400, 1, 44100, 16, DefaultCompressionFactor(16))
+	peak := SharedVolumeHold(projected, one, 0, 1)
+	if peak != RenditionHoldOnOneVolume(projected, one, two) {
+		t.Fatalf("one job, one lane: SharedVolumeHold %d, RenditionHoldOnOneVolume %d", peak, RenditionHoldOnOneVolume(projected, one, two))
+	}
+	needTwo := RequiredBytesWithMargin(two, DefaultDiskSafetyMargin)
+	needRendition := RequiredBytesWithMargin(projected, DefaultDiskSafetyMargin)
+	needPeak := RequiredBytesWithMargin(peak, DefaultDiskSafetyMargin)
+	free := needTwo
+	if needRendition > free || needTwo > free || needPeak <= free {
+		t.Fatalf("fixture window collapsed: free %d, two scratches %d, rendition %d, peak %d", free, needTwo, needRendition, needPeak)
+	}
+
+	s := openTempStoreForBatch(t)
+	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Album"}); err != nil {
+		t.Fatal(err)
+	}
+	rate, bits, isDSD := 2822400.0, 1, true
+	dur, ch := 1.0, 2
+	if err := s.UpsertTrack(context.Background(), &manifest.Track{
+		Path: "Album/01.dsf", Size: size, Codec: "DSF",
+		SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
+		Duration: &dur, Channels: &ch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
+	p.workers = 1
+	if c.laneCount() != 1 {
+		t.Fatalf("laneCount = %d, want 1", c.laneCount())
+	}
+	tempDir := t.TempDir()
+	outDir := t.TempDir()
+	c.WithDSDRender(capsFn(dsdCapsOn)).WithRenderTempDir(tempDir)
+	c.resolver = scannedResolver(s)
+	c.sameVolume = func(string, string) (bool, error) { return true, nil }
+	c.diskFree = func(string) (int64, error) { return free, nil }
+
+	_, err := c.SubmitOptimize(context.Background(), "Album", outDir)
+	var short *InsufficientDiskSpaceError
+	if !errors.As(err, &short) {
+		t.Fatalf("SubmitOptimize = %v, want InsufficientDiskSpaceError (one scratch beside the rendition does not fit)", err)
+	}
+	if short.Dir != renderScratchDir(tempDir) || short.ProjectedBytes != peak || short.AvailableBytes != free {
+		t.Errorf("refusal = dir %q projected %d available %d, want scratch dir, peak %d, free %d",
+			short.Dir, short.ProjectedBytes, short.AvailableBytes, peak, free)
+	}
+	if len(inflightKeys(p)) != 0 {
+		t.Errorf("refused batch enqueued %v", inflightKeys(p))
+	}
+}

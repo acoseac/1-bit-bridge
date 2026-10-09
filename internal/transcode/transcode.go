@@ -434,6 +434,34 @@ func RenditionHoldOnOneVolume(projected, oneScratch, temp int64) int64 {
 	return temp
 }
 
+// SharedVolumeHold is the peak a batch or a sweep holds when the rendition
+// directory and the scratch directory are one volume. totalProjected is
+// every sidecar this admission writes (a batch's sum, or this sweep
+// candidate's projection). maxScratch is the largest single Stage A file
+// and maxGuard the largest PCM gain-guard file. lanes is how many jobs
+// run at once.
+//
+// The survey holds lanes of two scratches, or the guard when it is
+// larger, before any rendition of this admission exists. Stage C holds
+// every rendition plus one scratch or guard per lane: the second scratch
+// is gone before the rendition is written. The peak is the larger of
+// those. Multiplying totalProjected by the lane count would reserve a
+// rendition per lane, and adding the rendition on top of both scratches
+// would reserve a file the survey and Stage C never hold together. For
+// one job and one lane this is RenditionHoldOnOneVolume.
+func SharedVolumeHold(totalProjected, maxScratch, maxGuard int64, lanes int) int64 {
+	survey := BytesForLanes(LaneTempBytes(maxScratch, maxGuard), lanes)
+	beside := maxScratch
+	if maxGuard > beside {
+		beside = maxGuard
+	}
+	stageC := saturatingSum(totalProjected, BytesForLanes(beside, lanes))
+	if stageC > survey {
+		return stageC
+	}
+	return survey
+}
+
 func saturatingSum(a, b int64) int64 {
 	if a < 0 {
 		a = 0

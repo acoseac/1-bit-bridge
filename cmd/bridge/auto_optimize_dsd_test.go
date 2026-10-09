@@ -292,6 +292,11 @@ func TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom(t *testing.T) {
 			}
 			return 1 << 50, nil
 		}
+		// The variants free figure and the scratch free figure are two
+		// volumes. Left to SameVolume, a host where / and the temp dir
+		// share a filesystem would grade the guard beside the rendition
+		// against the smaller of the two.
+		f.sweeper.sameVolume = func(string, string) (bool, error) { return false, nil }
 		return f
 	}
 
@@ -362,6 +367,10 @@ func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 			}
 			return 1 << 50, nil
 		}
+		// The two free figures are two volumes. A real SameVolume of
+		// /scratch and the temp dir is true on a host where they share
+		// one filesystem, which would grade them as one hold.
+		f.sweeper.sameVolume = func(string, string) (bool, error) { return false, nil }
 		return f
 	}
 
@@ -561,6 +570,46 @@ func checkSweptJobIDs(t *testing.T, f *autoOptimizeFixture, got map[string]trans
 // pcm kind at the family's 4x rate and 24 bits, on the background lane with
 // the sweeper's scratch dir, at the on-request quality, with the render facts
 // and source facts of the track row (the latter are what freshness compares).
+// TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart is the
+// sweep's copy of the batch window. One lane (the unwired default).
+// The rendition is larger than one scratch, so one scratch beside the
+// rendition is the peak, and it is larger than two scratches and larger
+// than the rendition alone. Free space sits in that gap, on both
+// directories, and sameVolume says they are one. The sweep stops
+// (DiskFloorReached) and enqueues nothing.
+func TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart(t *testing.T) {
+	const duration = 1.0
+	const size = 4_000_000
+	one := transcode.TempBytesForRender(2, 44100, duration)
+	two := transcode.SurveyScratchBytes(one)
+	projected := transcode.ProjectedSize(size, 2822400, 1, 44100, 16, transcode.DefaultCompressionFactor(16))
+	peak := transcode.SharedVolumeHold(projected, one, 0, 1)
+	const floor int64 = 100_000
+	free := two + floor
+	if free-projected < floor || free-two < floor || free-peak >= floor {
+		t.Fatalf("fixture window collapsed: free %d two %d projected %d peak %d floor %d", free, two, projected, peak, floor)
+	}
+
+	f := newAutoOptimizeFixture(t)
+	f.seedDSDTrack(t, "A/01.dsf", "DSF", 2822400, size, "", duration, 2)
+	f.sweeper.dsdCaps = func() transcode.DSDRenderCaps { return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: true} }
+	f.sweeper.tempDir = func() string { return t.TempDir() }
+	f.sweeper.minFreeBytes = func() int64 { return floor }
+	f.sweeper.sameVolume = func(string, string) (bool, error) { return true, nil }
+	f.sweeper.diskFree = func(string) (int64, error) { return free, nil }
+
+	counts := f.sweeper.sweepOnce(context.Background())
+	if counts == nil {
+		t.Fatal("sweepOnce returned nil")
+	}
+	if counts.Enqueued != 0 {
+		t.Errorf("Enqueued = %d, want 0 (one scratch beside the rendition does not fit)", counts.Enqueued)
+	}
+	if !counts.DiskFloorReached {
+		t.Error("DiskFloorReached = false, want true")
+	}
+}
+
 func checkFaithfulMoveJob(t *testing.T, f *autoOptimizeFixture, job transcode.JobSpec, rel string) {
 	t.Helper()
 	if job.Kind != transcode.JobKindPCMRender || job.TargetBits != 24 || job.TargetSampleRate != 176400 {

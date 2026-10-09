@@ -3714,15 +3714,22 @@ no failing test — which is the shape to expect in this area.
   `GuardTempBytes`, one `-G` file; DSD `GuardTempBytes` is 0 and the chain
   passes no `-G`. `LaneTempBytes` is the larger of the two. One lane runs
   one job, so adding the guard on top of the two scratches would refuse a
-  job that fits. The batch and the sweep multiply that hold by the lane
-  count through `BytesForLanes`, which saturates: `MaxInt64` times two
-  lanes wraps negative, and `DiskHasHeadroom` treats a non-positive budget
-  as no work. On one volume the on-demand peak is
-  `RenditionHoldOnOneVolume`, the survey's two scratches or one scratch
-  beside the rendition, whichever is larger. Adding the rendition on top
-  of both scratches refuses a job that fits. A short volume is
-  `api.ErrUpscaleNoRoom` on demand and `InsufficientDiskSpaceError` from
-  the batch, before enqueue, so the source is not struck. Album gain is
+  job that fits. When the rendition directory and the scratch directory
+  are different volumes, the batch and the sweep multiply that hold by
+  the lane count through `BytesForLanes`, which saturates: `MaxInt64`
+  times two lanes wraps negative, and `DiskHasHeadroom` treats a
+  non-positive budget as no work. On one volume the peak is the survey's
+  two scratches, or one scratch beside the rendition, whichever is
+  larger. On demand that is `RenditionHoldOnOneVolume`. The batch
+  (`preflightVolumes`, the rendition submit and the PCM submit) and the
+  sweep (`drainCandidates`) ask `SameVolume` and take `SharedVolumeHold`:
+  the survey's lanes of two scratches, or every rendition of the
+  admission plus one scratch per lane. Multiplying the whole rendition
+  total by the lane count would reserve a sidecar per lane; the sidecars
+  accumulate once. Adding the rendition on top of both scratches refuses
+  a job that fits. A short volume is `api.ErrUpscaleNoRoom` on demand,
+  `InsufficientDiskSpaceError` from the batch, and `DiskFloorReached`
+  from the sweep, before enqueue, so the source is not struck. Album gain is
   attached when the job runs, so the pre-flight cannot see whether this
   album has a mate and every DSD job reserves two. A solo album
   over-reserves by one file. A mate longer than the job can still
@@ -3732,7 +3739,9 @@ no failing test — which is the shape to expect in this area.
   `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`,
   `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
   `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
-  `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume`.)
+  `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume`,
+  `TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`,
+  `TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`.)
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,

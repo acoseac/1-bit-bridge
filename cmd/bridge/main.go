@@ -1077,10 +1077,12 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 // is queued: the variants volume for the projected rendition, and the temp
 // volume for what the job holds there (two DSD Stage A scratches while the
 // album survey runs, or a PCM job's gain-guard file). The batch and the
-// auto-optimize sweep check before they queue too. Where the two directories
-// share a volume the peak is the survey's two scratches, or one scratch
-// beside the rendition, whichever is larger — a PCM job holds its guard
-// beside the rendition. A probe that cannot read a volume refuses too.
+// auto-optimize sweep check before they queue too, through the same
+// one-volume peak (`SharedVolumeHold` counts a batch's sidecars once).
+// Where the two directories share a volume the peak is the survey's two
+// scratches, or one scratch beside the rendition, whichever is larger —
+// a PCM job holds its guard beside the rendition. A probe that cannot
+// read a volume refuses too.
 func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
 	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
 		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))

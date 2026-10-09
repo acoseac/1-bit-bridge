@@ -135,6 +135,13 @@ type Coordinator struct {
 	// = the OS temp dir), forwarded onto every DSD JobSpec and graded by
 	// the scratch pre-flight.
 	renderTempDir string
+	// diskFree, when set, replaces AvailableDiskSpaceNearest in the
+	// pre-flight so a test can name the free bytes. Nil is the real probe.
+	diskFree func(dir string) (int64, error)
+	// sameVolume, when set, replaces SameVolume. Nil asks the real one.
+	// A test that injects a different free figure for each directory sets
+	// this false: those directories are two volumes by the test's word.
+	sameVolume func(a, b string) (bool, error)
 
 	mu sync.Mutex
 	// liveBatches is the in-memory mirror of pending+running rows so
@@ -342,6 +349,24 @@ func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string
 	if checkDir == "" {
 		checkDir = c.dataDir
 	}
+	if c.diskFree != nil {
+		available, err = c.diskFree(checkDir)
+		if err != nil {
+			return 0, fmt.Errorf("%s: disk probe: %w", op, err)
+		}
+		if projected > 0 {
+			required := RequiredBytesWithMargin(projected, DefaultDiskSafetyMargin)
+			if required > available {
+				return 0, &InsufficientDiskSpaceError{
+					ProjectedBytes: projected,
+					RequiredBytes:  required,
+					AvailableBytes: available,
+					Dir:            checkDir,
+				}
+			}
+		}
+		return available, nil
+	}
 	_, available, err = DiskHasHeadroom(checkDir, projected, DefaultDiskSafetyMargin)
 	if err != nil {
 		var dskErr *InsufficientDiskSpaceError
@@ -363,6 +388,39 @@ func (c *Coordinator) preflightTempVolume(hold int64, op string) error {
 	}
 	_, err := c.diskPreflight(renderScratchDir(c.renderTempDir), BytesForLanes(hold, c.laneCount()), op+" (render scratch)")
 	return err
+}
+
+// preflightVolumes grades the rendition and the scratch. When the two
+// directories are different volumes the checks stay separate: the scratch
+// hold (two DSD files per lane, or one PCM guard) on the temp volume, and
+// the renditions on the output volume. When they are one volume the hold
+// is SharedVolumeHold, graded on the scratch directory (the same free
+// space). A SameVolume error refuses, the same as a probe that cannot be
+// read. hold of zero keeps the output check alone.
+func (c *Coordinator) preflightVolumes(outputDir string, totalProjected, maxScratch, maxGuard int64, op string) (int64, error) {
+	hold := LaneTempBytes(maxScratch, maxGuard)
+	scratchDir := renderScratchDir(c.renderTempDir)
+	checkDir := outputDir
+	if checkDir == "" {
+		checkDir = c.dataDir
+	}
+	if hold > 0 {
+		same := c.sameVolume
+		if same == nil {
+			same = SameVolume
+		}
+		shared, err := same(checkDir, scratchDir)
+		if err != nil {
+			return 0, fmt.Errorf("%s: disk probe: %w", op, err)
+		}
+		if shared {
+			return c.diskPreflight(scratchDir, SharedVolumeHold(totalProjected, maxScratch, maxGuard, c.laneCount()), op)
+		}
+	}
+	if err := c.preflightTempVolume(hold, op); err != nil {
+		return 0, err
+	}
+	return c.diskPreflight(outputDir, totalProjected, op)
 }
 
 // Submit walks every track under `path`, filters ineligible /
@@ -596,10 +654,7 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 	picked := c.buildUpscaleCandidates(path, projections, targetRate, targetBits)
 	cands, alreadyCovered, totalProjected := picked.cands, picked.alreadyCovered, picked.totalProjected
 
-	if err := c.preflightTempVolume(picked.maxGuardTemp, "submit"); err != nil {
-		return nil, err
-	}
-	available, err := c.diskPreflight(outputDir, totalProjected, "submit")
+	available, err := c.preflightVolumes(outputDir, totalProjected, 0, picked.maxGuardTemp, "submit")
 	if err != nil {
 		return nil, err
 	}
@@ -1137,23 +1192,11 @@ func (c *Coordinator) laneCount() int {
 // the batch row, the empty-batch short-circuit, the enqueue. `path` is the
 // batch row's display label, not a scope; `op` prefixes diagnostics.
 func (c *Coordinator) submitRenditionProjections(ctx context.Context, path string, picked optimizeCandidates, outputDir string, kind JobKind, targetBits int, op string) (*SubmitResult, error) {
-	// The scratch check FIRST, graded on the temp volume. A DSD render holds
-	// two int32 Stage A files at the target rate for the whole track while
-	// it surveys (its own, which Stage C still reads, and the mate's), and
-	// on the VPS it lives on a 23 GB root disk while the sidecars go to a
-	// B2 mount — the two volumes have nothing to do with each other, so
-	// neither check can stand in for the other.
-	// Times the lane count. A DSD job holds two Stage A scratches while it
-	// surveys an album mate (its own, which Stage C still reads, and the
-	// mate's). A PCM job holds one gain-guard file. A lane runs one job, so
-	// the peak is the larger of those, never their sum: adding them would
-	// refuse a batch whose jobs each fit. maxRenderScratch stays the single
-	// file; LaneTempBytes is what doubles it.
-	hold := LaneTempBytes(picked.maxRenderScratch, picked.maxGuardTemp)
-	if err := c.preflightTempVolume(hold, op); err != nil {
-		return nil, err
-	}
-	available, err := c.diskPreflight(outputDir, picked.totalProjected, op)
+	// Separate volumes stay separate: a DSD survey's two scratches (or a
+	// PCM guard) on the temp volume, the renditions on the output volume.
+	// One volume takes SharedVolumeHold, the survey or one scratch beside
+	// every rendition, whichever is larger.
+	available, err := c.preflightVolumes(outputDir, picked.totalProjected, picked.maxRenderScratch, picked.maxGuardTemp, op)
 	if err != nil {
 		return nil, err
 	}

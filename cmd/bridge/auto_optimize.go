@@ -74,6 +74,10 @@ type autoOptimizeSweeper struct {
 	// existing ancestor — the variants dir is created lazily, so a bare
 	// statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
+	// sameVolume, when set, replaces transcode.SameVolume. Nil asks the
+	// real one. A test that injects a different free figure per directory
+	// sets this false: those directories are two volumes by the test's word.
+	sameVolume func(a, b string) (bool, error)
 
 	// lanes is the pool's worker count — the number of renders that can
 	// hold Stage A scratch AT THE SAME TIME. The scratch check below is a
@@ -198,15 +202,28 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return nil
 	}
 
+	same := sw.sameVolume
+	if same == nil {
+		same = transcode.SameVolume
+	}
+	shared, verr := same(outputDir, scratchDir)
+	if verr != nil {
+		if ctx.Err() == nil {
+			logger.Warn("auto-optimize sweep: volume probe failed; skipping sweep",
+				"dir", outputDir, "err", verr)
+		}
+		return nil
+	}
+
 	counts := &admin.AutoOptimizeSweepCounts{
 		MinFreeBytes: sw.minFreeBytes(),
 		FreeBytes:    freeBytes,
 	}
 	// A drain reports true when the context was cancelled mid-drain.
-	if sw.drainCandidates(ctx, cands, transcode.JobKindOptimize, outputDir, freeBytes, scratchFree, counts) {
+	if sw.drainCandidates(ctx, cands, transcode.JobKindOptimize, outputDir, freeBytes, scratchFree, shared, counts) {
 		return nil
 	}
-	if sw.drainSupersededPCMRenditions(ctx, outputDir, freeBytes, scratchFree, counts) {
+	if sw.drainSupersededPCMRenditions(ctx, outputDir, freeBytes, scratchFree, shared, counts) {
 		return nil
 	}
 
@@ -354,7 +371,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, k
 // drainCandidates submits the planned candidates, maintaining the running
 // disk budget. Returns true when the context was cancelled mid-drain, so
 // the caller can discard partial counts (shutdown is not a sweep result).
-func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, kind transcode.JobKind, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, kind transcode.JobKind, outputDir string, freeBytes, scratchFree int64, shared bool, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
 	floor := counts.MinFreeBytes
 	var projectedTotal int64
 	defer func() { counts.ProjectedBytes = projectedTotal }()
@@ -378,7 +395,24 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			counts.ChangedSinceScan++
 			continue
 		}
-		if freeBytes-(projectedTotal+projected) < floor {
+		temp := spec.TempVolumeBytes()
+		if shared && temp > 0 {
+			// One volume. The peak is the survey's scratches per lane, or
+			// this rendition (plus the ones already admitted) beside one
+			// scratch per lane. Checking the two apart admits a job whose
+			// Stage C does not fit. Scratch is still freed per job, so
+			// earlier renditions stay in projectedTotal and this job's
+			// scratch is not added on top of theirs.
+			peak := transcode.SharedVolumeHold(projected, spec.RenderScratchBytes(), spec.GuardTempBytes(), sw.laneCount())
+			free := freeBytes
+			if scratchFree < free {
+				free = scratchFree
+			}
+			if free-(projectedTotal+peak) < floor {
+				counts.DiskFloorReached = true
+				return false
+			}
+		} else if freeBytes-(projectedTotal+projected) < floor {
 			// Running budget, not a point check: the on-demand path's
 			// per-batch diskPreflight can't bound a loop that runs forever.
 			// Stop rather than skip-and-continue — candidates are ordered
@@ -387,14 +421,12 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			// sneak past a floor a big one just hit.
 			counts.DiskFloorReached = true
 			return false
-		}
-		// The temp volume. A DSD render holds two Stage A scratches while it
-		// surveys; a PCM job holds one gain-guard file. TempVolumeBytes is
-		// that peak. A point check, not a running sum — scratch is freed per
-		// job, so the sweep's TOTAL is never held at once — but it is sized
-		// for every lane the pool can run concurrently, because that peak IS
-		// held at once. Stop rather than skip, for the same reason as above.
-		if scratch := transcode.BytesForLanes(spec.TempVolumeBytes(), sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
+		} else if scratch := transcode.BytesForLanes(temp, sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
+			// The temp volume, a different one from the renditions. A DSD
+			// render holds two Stage A scratches while it surveys; a PCM
+			// job holds one gain-guard file. A point check, not a running
+			// sum — scratch is freed per job — sized for every lane,
+			// because that peak is held at once.
 			counts.DiskFloorReached = true
 			return false
 		}
@@ -419,7 +451,7 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 // A sweep that already stopped — disk floor, full queue, cap spent — adds
 // nothing. The superseded row stays: a phone that downloaded it finds its
 // id and gain in the manifest, which lists the new one first.
-func (sw *autoOptimizeSweeper) drainSupersededPCMRenditions(ctx context.Context, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+func (sw *autoOptimizeSweeper) drainSupersededPCMRenditions(ctx context.Context, outputDir string, freeBytes, scratchFree int64, shared bool, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
 	budget := sw.maxPerSweep() - counts.Enqueued
 	if !sw.caps().Active() || counts.DiskFloorReached || counts.QueueSaturated || budget <= 0 {
 		return false
@@ -436,7 +468,7 @@ func (sw *autoOptimizeSweeper) drainSupersededPCMRenditions(ctx context.Context,
 	// here too, so the two passes together stay above the floor, and add it
 	// back afterwards — drainCandidates reports only its own projection.
 	compactProjected := counts.ProjectedBytes
-	aborted = sw.drainCandidates(ctx, cands, transcode.JobKindPCMRender, outputDir, freeBytes-compactProjected, scratchFree, counts)
+	aborted = sw.drainCandidates(ctx, cands, transcode.JobKindPCMRender, outputDir, freeBytes-compactProjected, scratchFree, shared, counts)
 	counts.ProjectedBytes += compactProjected
 	if n := counts.Enqueued - before; n > 0 && !aborted {
 		logger.Info("auto-optimize sweep: faithful renditions moved to the current DSD schema",
