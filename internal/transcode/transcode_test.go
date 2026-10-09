@@ -3,6 +3,7 @@ package transcode
 import (
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -256,8 +257,44 @@ func TestGuardTempBytesIsThePostRateInt32File(t *testing.T) {
 	if dsd.GuardTempBytes() != 0 {
 		t.Fatalf("DSD GuardTempBytes = %d, want 0", dsd.GuardTempBytes())
 	}
-	if scratch := dsd.RenderScratchBytes(); scratch == 0 || dsd.TempVolumeBytes() != scratch {
-		t.Fatalf("DSD temp volume = %d, scratch = %d", dsd.TempVolumeBytes(), scratch)
+	if scratch := dsd.RenderScratchBytes(); scratch == 0 || dsd.TempVolumeBytes() != scratch*2 {
+		t.Fatalf("DSD temp volume = %d, want two scratch files of %d", dsd.TempVolumeBytes(), scratch)
+	}
+}
+
+// TestALaneHoldsTwoDSDScratchesOrOnePCMGuard pins the budget arithmetic
+// the three pre-flights share. A size past MaxInt64/2 saturates rather
+// than wrapping negative, which the disk check reads as no work.
+func TestALaneHoldsTwoDSDScratchesOrOnePCMGuard(t *testing.T) {
+	if got := SurveyScratchBytes(0); got != 0 {
+		t.Fatalf("SurveyScratchBytes(0) = %d", got)
+	}
+	if got := SurveyScratchBytes(math.MaxInt64); got != math.MaxInt64 {
+		t.Fatalf("SurveyScratchBytes(MaxInt64) = %d, want MaxInt64", got)
+	}
+	if got := SurveyScratchBytes(math.MaxInt64/2 + 1); got != math.MaxInt64 {
+		t.Fatalf("SurveyScratchBytes past MaxInt64/2 = %d, want MaxInt64", got)
+	}
+	if got := LaneTempBytes(100, 50); got != 200 {
+		t.Fatalf("two scratches = %d, want 200", got)
+	}
+	if got := LaneTempBytes(100, 500); got != 500 {
+		t.Fatalf("guard larger than two scratches = %d, want 500", got)
+	}
+	if got := BytesForLanes(math.MaxInt64, 2); got != math.MaxInt64 {
+		t.Fatalf("two lanes of a saturated hold = %d, want MaxInt64", got)
+	}
+	// Survey holds two scratches before the rendition exists. Stage C
+	// holds one beside it. The peak is the larger, never the rendition
+	// added on top of both.
+	if got := RenditionHoldOnOneVolume(30, 100, 200); got != 200 {
+		t.Fatalf("survey peak = %d, want 200", got)
+	}
+	if got := RenditionHoldOnOneVolume(150, 100, 200); got != 250 {
+		t.Fatalf("stage C peak = %d, want 250", got)
+	}
+	if got := RenditionHoldOnOneVolume(10, 0, 40); got != 50 {
+		t.Fatalf("PCM guard beside the rendition = %d, want 50", got)
 	}
 }
 

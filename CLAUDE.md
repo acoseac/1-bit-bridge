@@ -3666,10 +3666,11 @@ no failing test — which is the shape to expect in this area.
   one file, on both routes. The file is unlinked at `mkstemp` / `tmpfile`,
   so a directory listing stays empty and an earlier poll of `--temp`
   (the DSD chain's S1 note) saw nothing. A DSD job passes no `-G`, so
-  `GuardTempBytes` is 0 and `TempVolumeBytes` is the Stage A scratch. One
-  lane holds one of the two, and the pre-flight budgets
-  `lanes × max(scratch, guard)` on the upscale submit, the rendition
-  submit, the on-demand room check and the sweep. The sweep reads that
+  `GuardTempBytes` is 0. One lane holds one job, and the pre-flight
+  budgets `lanes × max(scratch, guard)` on the upscale submit, the
+  rendition submit, the on-demand room check and the sweep. Since
+  backlog B210 that scratch is two Stage A files (the next bullet).
+  The sweep reads that
   volume's free space on every pass, a PCM-only bridge included: a known
   duration makes the guard budget positive, and a free figure left at 0
   is the disk floor, so no PCM job is submitted. A probe failure skips
@@ -3698,6 +3699,49 @@ no failing test — which is the shape to expect in this area.
   `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`,
   `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
   `TestProbeTempDirRoomClosesBeforeItRemoves`.)
+- **A DSD render holds two Stage A scratches while it surveys, and every
+  pre-flight reserves both** (2026-10-09, backlog B210). `renderDSD` keeps
+  its scratch from Stage A through Stage C. The survey runs after the
+  claim is released, and `MeasureDSDPeak` creates a second scratch in the
+  same directory for the mate decode. Freeing the first scratch before
+  the survey drops the file Stage C reads. Surveying before the claim is
+  released deadlocks: a render must not wait while it holds its own claim.
+  A 3 s stereo DSD64 optimize holds 4,233,600 bytes per file and 8,467,200
+  for the two, and the pre-flights reserved one file per lane, so a temp
+  volume with room for one and not two was admitted and ran out
+  mid-render. `TempVolumeBytes` for a DSD job is `SurveyScratchBytes`
+  (twice `RenderScratchBytes`, saturating at MaxInt64). A PCM job stays
+  `GuardTempBytes`, one `-G` file; DSD `GuardTempBytes` is 0 and the chain
+  passes no `-G`. `LaneTempBytes` is the larger of the two. One lane runs
+  one job, so adding the guard on top of the two scratches would refuse a
+  job that fits. When the rendition directory and the scratch directory
+  are different volumes, the batch and the sweep multiply that hold by
+  the lane count through `BytesForLanes`, which saturates: `MaxInt64`
+  times two lanes wraps negative, and `DiskHasHeadroom` treats a
+  non-positive budget as no work. On one volume the peak is the survey's
+  two scratches, or one scratch beside the rendition, whichever is
+  larger. On demand that is `RenditionHoldOnOneVolume`. The batch
+  (`preflightVolumes`, the rendition submit and the PCM submit) and the
+  sweep (`drainCandidates`) ask `SameVolume` and take `SharedVolumeHold`:
+  the survey's lanes of two scratches, or every rendition of the
+  admission plus one scratch per lane. Multiplying the whole rendition
+  total by the lane count would reserve a sidecar per lane; the sidecars
+  accumulate once. Adding the rendition on top of both scratches refuses
+  a job that fits. A short volume is `api.ErrUpscaleNoRoom` on demand,
+  `InsufficientDiskSpaceError` from the batch, and `DiskFloorReached`
+  from the sweep, before enqueue, so the source is not struck. Album gain is
+  attached when the job runs, so the pre-flight cannot see whether this
+  album has a mate and every DSD job reserves two. A solo album
+  over-reserves by one file. A mate longer than the job can still
+  overflow.
+  (`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`,
+  `TestGuardTempBytesIsThePostRateInt32File`,
+  `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`,
+  `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+  `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+  `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume`,
+  `TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`,
+  `TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`.)
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,
