@@ -38444,3 +38444,84 @@ volume with room for the two scratches queues; room for one refuses),
 `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
 `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` (the huge
 DSF's projected bytes are two scratches on each lane, saturated).
+
+Red first, from `883dd98b`, production only. `SurveyScratchBytes`
+returned the one file and dropped the MaxInt64/2 saturation, and
+`roomForRendition` returned nil. The pin run
+(`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`,
+`TestGuardTempBytesIsThePostRateInt32File`,
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`,
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume`) failed:
+
+- `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` — budgeted
+  one scratch file per lane (4611686018427387904).
+- `TestGuardTempBytesIsThePostRateInt32File` — DSD temp volume
+  127008000, want two scratch files of 127008000.
+- `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` —
+  `SurveyScratchBytes` past MaxInt64/2 = 4611686018427387904, want
+  MaxInt64. The saturation arm was part of the reverted helper, so
+  this stopped before the two-scratch assertion.
+- `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/room_for_one_scratch_file_and_not_two`
+  — DiskFloorReached=false, Enqueued=2.
+- `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/does_not_fit_once_two_lanes_can_hold_scratch_at_once`
+  — DiskFloorReached=false, Enqueued=2.
+- `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom` — all 13
+  subtests. The pre-flight never probed; refused cases queued.
+- `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition` —
+  temp volume 105840000, want two scratch files of 105840000.
+
+Inside the sweep, "scratch does not fit", "two scratch files fit one
+lane" and "one lane is the unwired shape" stayed green: one file is
+already short of half a file, and two files of free space still cover
+one. Restored with `git checkout HEAD -- internal/transcode/transcode.go
+cmd/bridge/main.go`. `git diff` was empty at `883dd98b`.
+
+Negative controls, each a production-only mutation, restored the same
+way before the next. Predicted name, then what actually failed.
+
+(a) `SurveyScratchBytes` returned one file and kept the saturation arm.
+Predicted: `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` and the sweep
+case "one file and not two refuses". Actual:
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` (two scratches = 100,
+want 200);
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/room_for_one_scratch_file_and_not_two`
+(DiskFloorReached=false, Enqueued=2); and, because every pre-flight
+reads that helper,
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/does_not_fit_once_two_lanes_can_hold_scratch_at_once`,
+`TestGuardTempBytesIsThePostRateInt32File` (DSD temp volume
+127008000, want two of 127008000),
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` (budgeted
+one scratch file per lane, 4611686018427387904),
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom/DSD,_room_for_one_scratch_file_and_not_two`
+(outcome 0, want 1),
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`
+(temp volume 105840000, want two scratch files of 105840000).
+
+(b) `roomForRendition` returned nil. Predicted:
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`. Actual: that
+test, all 13 subtests (the volumes were never probed; refused cases
+queued), and
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`
+(the two-file premise passed; all four enqueue cases came back
+queued after 0 probes). `internal/transcode` stayed green.
+
+(c) `RenditionHoldOnOneVolume` returned `projected + temp` and dropped
+the larger-of comparison. Predicted:
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`.
+Actual: that test (premise: projected 144179, two scratches
+211680000, peak 211824179, the rendition on top of both);
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` (survey peak = 230,
+want 200);
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom/DSD,_one_volume_with_room_for_two_scratches`
+(outcome 1, want 0: needs 233006597, 232848001 available).
+
+(d) The PCM arm of `RenditionHoldOnOneVolume` (`oneScratch <= 0`)
+reserved two guards. Predicted: the PCM case of
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`. Actual: only that test
+(PCM guard beside the rendition = 90, want 50). The two-scratch
+assertions ahead of it stayed green, and `cmd/bridge` stayed green.
+
+None of the four stayed green. The tree was restored to `883dd98b`
+after (d); this entry is the only change on top of it.
