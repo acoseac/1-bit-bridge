@@ -213,7 +213,6 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 	return res, nil
 }
 
-// locate finds the on-disk file for a (stamp, rel) pair across every root.
 func (m *Manager) statDest(path string) (os.FileInfo, error) {
 	if m.destStat != nil {
 		return m.destStat(path)
@@ -232,6 +231,7 @@ func existenceUnreadable(err error) string {
 	return "could not check whether a file is already at this path: " + err.Error()
 }
 
+// locate finds the on-disk file for a (stamp, rel) pair across every root.
 func (m *Manager) locate(stamp, rel string) (root, src string, ok bool) {
 	for _, r := range m.roots() {
 		p := filepath.Join(m.trashRoot(r), stamp, filepath.FromSlash(rel))
