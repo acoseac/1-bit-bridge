@@ -36,7 +36,6 @@ func newAnnouncingPool(t *testing.T, rels ...string) *announcingPool {
 	t.Helper()
 	log := loggingtest.Record(t)
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	for _, rel := range rels {
 		if err := store.UpsertTrack(context.Background(), &manifest.Track{
 			Path:    rel,

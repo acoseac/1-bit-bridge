@@ -17,7 +17,6 @@ import (
 // source keeps the version-agnostic rule.
 func TestAutoOptimizeCandidatesMoveDSDToTheCurrentSchema(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedDSDTrack(t, s, "D/old.dsf", "DSF", 2822400, "", 300, 2)
 	seedDSDTrack(t, s, "D/new.dsf", "DSF", 2822400, "", 300, 2)
@@ -52,7 +51,6 @@ func TestAutoOptimizeCandidatesMoveDSDToTheCurrentSchema(t *testing.T) {
 // asked for), and not at all while DSD renditions are off.
 func TestListSupersededPCMRenditions(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	current := "pcm-" + DSDRenditionSchemaVersion + "-176400-24"
 	fixtures := map[string][]string{
@@ -108,7 +106,6 @@ func TestListSupersededPCMRenditions(t *testing.T) {
 // Equal creation times fall back to the id, so the order is deterministic.
 func TestVariantsListTheNewestRenditionFirst(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedDSDTrack(t, s, "D/a.dsf", "DSF", 2822400, "", 300, 2)
 	seedDSDTrack(t, s, "D/tie.dsf", "DSF", 2822400, "", 300, 2)

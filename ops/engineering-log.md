@@ -39283,3 +39283,78 @@ failures. Observed, 0.854s:
 ```
 
 Both files were restored after the control.
+
+## 2026-10-09 — a test helper that opens a store closes it (backlog B314)
+
+`openTempStoreForBatch` (`internal/transcode/batch_test.go`) opened a
+store under `t.TempDir()` and returned it. Callers each added
+`t.Cleanup(func() { _ = s.Close() })`. A new test that missed that line
+left `bridge.db` open when the directory was removed. On Windows that
+fails the run (`The process cannot access the file because it is being
+used by another process`). B210's Windows leg of #1172, run
+37882497814, failed that way. macOS `RemoveAll` of an open file succeeds,
+so the same leak is silent here.
+
+`database/sql` `DB.Close` in go1.26.6 returns nil when the DB is already
+closed. Every caller of these helpers ignored the error. None closed the
+store at a point the test still needed it closed, so the per-caller
+lines could go. The helper registers the close after `TempDir`. Cleanups
+run last-registered first, so the close runs before the directory is
+removed.
+
+The same shape, same treatment:
+
+- `openTempStoreForPool` (`internal/transcode/pool_test.go`)
+- `openTempStore` (`internal/manifest/store_variants_test.go`)
+- `openBenchStore` (`internal/manifest/delta_stamp_bench_test.go`),
+  `b.Cleanup`, one caller (`BenchmarkUpsertStampCost`)
+
+211 caller cleanup lines dropped.
+
+Every other helper that returns an open `*manifest.Store` already
+registered the close (`newStore`, `openIngestTestStore`, `openGenStore`,
+the `cmd/bridge` fixtures, and the manifest package's own). A helper
+that opens a store and `defer`s `Close` before it returns was left: the
+store does not outlive the helper, and a defer runs before TempDir's
+cleanup. `auth.Store` and `adminauth.Store` helpers (`newTmpStore`,
+`reopenStore`, `newStore`, `emptyStore`, `ticketStore`, `runningBridge`)
+differ: they load a JSON file, hold no database, and have no `Close`.
+API fixtures that call `auth.OpenStore` are that shape.
+
+`TestAStoreHelperClosesBeforeItsTempDirGoes` (transcode, batch and pool;
+manifest, `openTempStore`) registers its check before the helper. That
+check runs after the helper's cleanup and requires
+`sql: database is closed`. An open store answers `CountTracks` with a
+nil error.
+
+Red, before the helper close, GOTOOLCHAIN=go1.26.6, `-count=1`:
+
+```
+--- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes (0.04s)
+    --- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes/batch (0.02s)
+        store_helper_close_test.go:36: store still open after the helper's cleanup: <nil>
+    --- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes/pool (0.02s)
+        store_helper_close_test.go:36: store still open after the helper's cleanup: <nil>
+FAIL	github.com/acoseac/1-bit-bridge/internal/transcode	0.522s
+--- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes (0.03s)
+    store_helper_close_test.go:24: store still open after the helper's cleanup: <nil>
+FAIL	github.com/acoseac/1-bit-bridge/internal/manifest	0.398s
+```
+
+The negative control removed the three helpers' `t.Cleanup` lines and
+left the caller lines dropped. Predicted: the same three failures.
+Observed, 8.9s:
+
+```
+--- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes (0.26s)
+    --- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes/batch (0.10s)
+        store_helper_close_test.go:36: store still open after the helper's cleanup: <nil>
+    --- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes/pool (0.16s)
+        store_helper_close_test.go:36: store still open after the helper's cleanup: <nil>
+FAIL	github.com/acoseac/1-bit-bridge/internal/transcode	0.776s
+--- FAIL: TestAStoreHelperClosesBeforeItsTempDirGoes (0.05s)
+    store_helper_close_test.go:24: store still open after the helper's cleanup: <nil>
+FAIL	github.com/acoseac/1-bit-bridge/internal/manifest	0.411s
+```
+
+The three lines were put back after the control.

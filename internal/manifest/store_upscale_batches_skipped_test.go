@@ -30,7 +30,6 @@ func findUpscaleBatchByID(t *testing.T, rows []UpscaleBatchRow, id uuid.UUID) Up
 // reads via raw SQL on the pre-v9 column set.
 func TestInsertUpscaleBatch_SkippedFilesRoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	cases := []struct {
 		name    string
@@ -78,7 +77,6 @@ func TestInsertUpscaleBatch_SkippedFilesRoundTrip(t *testing.T) {
 // field.
 func TestInsertUpscaleBatch_SkippedFilesDefaultsToZero(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	id := uuid.Must(uuid.NewRandom())
 	row := UpscaleBatchRow{

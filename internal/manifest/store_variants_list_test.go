@@ -13,7 +13,6 @@ import (
 // "Diana Krall/Live/01.flac" silently.
 func TestListVariantsByPathPrefix_exactPrefixOnly(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Diana Krall/Live/01.flac")
 	upsertParent(t, s, "Diana Krall/Live/02.flac")
@@ -61,7 +60,6 @@ func TestListVariantsByPathPrefix_exactPrefixOnly(t *testing.T) {
 // every `20...` album.
 func TestListVariantsByPathPrefix_likeEscape(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Albums/20%_Hits/01.flac")
 	upsertParent(t, s, "Albums/2020 Best/01.flac")
@@ -97,7 +95,6 @@ func TestListVariantsByPathPrefix_likeEscape(t *testing.T) {
 // has no matches.
 func TestListVariantsByPathPrefix_empty(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	rows, err := s.ListVariantsByPathPrefix(context.Background(), "Nothing/Here/")
 	if err != nil {
@@ -139,7 +136,6 @@ func TestListVariantsByPathPrefix_empty(t *testing.T) {
 // the acceptance adds case-sensitivity and nothing else.
 func TestListVariantsForPath_matchesAcrossNormalisationButNotCase(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/Album/01.flac")
 	if err := s.UpsertVariant(context.Background(), VariantRow{
@@ -176,7 +172,6 @@ func TestListVariantsForPath_matchesAcrossNormalisationButNotCase(t *testing.T) 
 // exist for the requested source path.
 func TestListVariantsForPath_empty(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	rows, err := s.ListVariantsForPath(context.Background(), "Music/Missing/track.flac")
 	if err != nil {

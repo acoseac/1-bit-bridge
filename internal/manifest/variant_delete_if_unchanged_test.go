@@ -50,7 +50,6 @@ func parentIndexedAt(t *testing.T, s *Store) int64 {
 // does, so a paired device sees the rendition go.
 func TestDeleteVariantIfUnchangedDeletesARowStillAsListed(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	listed := listedVariant(t, s)
 	before := parentIndexedAt(t, s)
 
@@ -119,7 +118,6 @@ func requireDeleteRefusedAfter(t *testing.T, change func(t *testing.T, s *Store,
 	t.Helper()
 	ctx := context.Background()
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	listed := listedVariant(t, s)
 	change(t, s, listed)
 	before := parentIndexedAt(t, s)

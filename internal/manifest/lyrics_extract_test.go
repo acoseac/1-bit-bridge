@@ -421,7 +421,6 @@ func TestLookupLyricsFoldsCaseUnambiguously(t *testing.T) {
 // the audio file on every scan for the rest of the library's life.
 func TestStaleRejectedLyricsRowIsDeleted(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	const p = "Music/A/rejected.flac"
 	upsertParent(t, s, p)

@@ -30,7 +30,6 @@ const (
 // passing through, and the artwork_version column splice.
 func TestStreamTrackMetaRefsUnderPrefix(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	local := "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	seedMetaTrack(t, s, "ArtistX/Album1/01.flac", uuidA, uuidB, uuidA)
@@ -80,7 +79,6 @@ func TestStreamTrackMetaRefsUnderPrefix(t *testing.T) {
 // musicBrainzAlbumIDs with local- excluded.
 func TestDistinctMBIDsUnderPrefix(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	local := "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	seedMetaTrack(t, s, "ArtistX/Album1/01.flac", uuidA, uuidB, uuidA)
@@ -127,7 +125,6 @@ func TestDistinctMBIDsUnderPrefix(t *testing.T) {
 // complete rows and out-of-prefix rows stay; indexed_at never moves.
 func TestResetEnrichedMissesUnderPrefix(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedMetaTrack(t, s, "ArtistX/Album1/01.flac", "", "", "") // incomplete, in prefix
 	// Complete means all THREE MBIDs — the predicate gained a release-MBID arm
@@ -199,7 +196,6 @@ func TestResetEnrichedMissesUnderPrefix(t *testing.T) {
 // unavailable rows only; available rows untouched.
 func TestResetBookletChecks(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	if err := s.UpsertBookletAvailability(ctx, uuidA, false, "", 0); err != nil {
@@ -238,7 +234,6 @@ func TestResetBookletChecks(t *testing.T) {
 // available/fetched split surfaces.
 func TestBookletStatesIn(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	if err := s.UpsertBookletAvailability(ctx, uuidA, true, "etag-a", 100); err != nil {

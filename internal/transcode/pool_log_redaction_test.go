@@ -47,7 +47,6 @@ func TestPoolLogsTheRedactedFailure(t *testing.T) {
 	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
 

@@ -26,7 +26,6 @@ import (
 
 func TestPoolEnqueueDeduplicates(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Single worker, and a runner stub that signals it started then
 	// blocks until the job context is cancelled — so the first job sits
@@ -86,7 +85,6 @@ func TestPoolEnqueueDeduplicates(t *testing.T) {
 
 func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Queue cap of 2, 1 worker. Concurrent enqueue fan-out
 	// drives the test instead of a serial loop: with N
@@ -161,7 +159,6 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 
 func TestPoolStopBlocksUntilWorkersDrain(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 2, 8)
 	for i := 0; i < 4; i++ {
@@ -192,7 +189,6 @@ func TestPoolStopBlocksUntilWorkersDrain(t *testing.T) {
 
 func TestPoolEnqueueAfterStopReturnsErrPoolClosed(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 1)
 	p.Stop()
@@ -279,7 +275,6 @@ func awaitAtLeast(t *testing.T, fires *atomic.Int64, n int64, what string) {
 //     the same flow.
 func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	p.fsyncFn = noopFsync
@@ -324,7 +319,6 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 // path without panicking on the nil callback.
 func TestPoolNilOnStateChangeDoesNotPanic(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
@@ -358,7 +352,6 @@ func TestPoolNilOnStateChangeDoesNotPanic(t *testing.T) {
 // style protection — the stateChangeMu RWMutex guards the swap.
 func TestPoolSetOnStateChangeIsRaceSafe(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 2, 8)
 	t.Cleanup(p.Stop)
@@ -433,7 +426,6 @@ func TestPoolSetOnStateChangeIsRaceSafe(t *testing.T) {
 //     completion channel for the second job.
 func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	p.jobTimeout = 50 * time.Millisecond
@@ -519,7 +511,6 @@ func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
 // no-torn-read contract under `-race`.
 func TestPoolActiveWorkersReflectsInflight(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	p.fsyncFn = noopFsync
@@ -597,7 +588,6 @@ func TestPoolActiveWorkersReflectsInflight(t *testing.T) {
 // branching had to preserve carefully.
 func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	// No t.Cleanup(p.Stop) — we Stop() explicitly mid-test.
@@ -643,7 +633,6 @@ func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
 // slot is reclaimed.
 func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
@@ -779,7 +768,6 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 // commit and miss the new variant.
 func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Seed the parent tracks row so UpsertVariant's FK constraint
 	// passes. The pool callback fires AFTER the variant insert
@@ -891,7 +879,6 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 // new callback, not a generalisation of this one.
 func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
@@ -944,7 +931,6 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 // without panicking on the nil slot.
 func TestPoolNilOnJobCompleteDoesNotPanic(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	seedTrackForPool(t, store, "Music/Album/no_cb.flac")
 
@@ -988,7 +974,6 @@ func TestPoolNilOnJobCompleteDoesNotPanic(t *testing.T) {
 // Mirrors TestPoolSetOnStateChangeIsRaceSafe.
 func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Seed parents for all 16 race-burst tracks so the success path
 	// runs to completion under FK constraints.
@@ -1104,6 +1089,8 @@ func openTempStoreForPool(t *testing.T) *manifest.Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// After TempDir, so this close runs before that directory is removed.
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

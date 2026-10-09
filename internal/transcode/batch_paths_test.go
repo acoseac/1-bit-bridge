@@ -76,7 +76,6 @@ func enqueuedPaths(p *Pool) []string {
 // the inflight set can be read before jobs drain.
 func TestSubmitPathsEnqueuesOnlyTheGivenSet(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, neighbour := seedSharedDirBatchFixture(t, s)
 
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -111,7 +110,6 @@ func TestSubmitPathsEnqueuesOnlyTheGivenSet(t *testing.T) {
 // without it a reader has to take on trust that the two forms differ.
 func TestSubmitPrefixSweepsTheWholeDirectory(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, neighbour := seedSharedDirBatchFixture(t, s)
 
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -133,7 +131,6 @@ func TestSubmitPrefixSweepsTheWholeDirectory(t *testing.T) {
 // one-track scope through SubmitPaths.
 func TestSubmitPathsHandlesASingleTrack(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirBatchFixture(t, s)
 
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -164,7 +161,6 @@ func TestSubmitPathsHandlesASingleTrack(t *testing.T) {
 // chosen, never in what is done with it.
 func TestSubmitPathsSharesTheEligibilityGates(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s) // 01 covered, 04 at target, 02+03 eligible
 
 	// The two submits need to see the SAME library, and they must not
@@ -215,7 +211,6 @@ func TestSubmitPathsSharesTheEligibilityGates(t *testing.T) {
 // optimize-eligible.
 func TestSubmitOptimizePathsEnqueuesOnlyTheGivenSet(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Shared"}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +247,6 @@ func TestSubmitOptimizePathsEnqueuesOnlyTheGivenSet(t *testing.T) {
 // the pool with a nonsense VariantID.
 func TestSubmitPathsValidatesTheTarget(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirBatchFixture(t, s)
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	t.Cleanup(p.Stop)
@@ -269,7 +263,6 @@ func TestSubmitPathsValidatesTheTarget(t *testing.T) {
 // a worker callback that will never fire.
 func TestSubmitPathsEmptyScopeCompletesImmediately(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	t.Cleanup(p.Stop)
 

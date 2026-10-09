@@ -47,7 +47,6 @@ func seedVariantKindFixture(t *testing.T, s *Store) {
 // upscale count and optimize count are computed independently.
 func TestListChildFolders_SplitsVariantCountsByKind(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedVariantKindFixture(t, s)
 
 	rows, err := s.ListChildFolders(context.Background(), "")
@@ -84,7 +83,6 @@ func TestListChildFolders_SplitsVariantCountsByKind(t *testing.T) {
 // for ANY variant kind — losing the discrimination.
 func TestListChildTracks_SplitsIsUpscaledIsOptimizedByKind(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedVariantKindFixture(t, s)
 
 	rows, err := s.ListChildTracks(context.Background(), "MusicA/Album1")
@@ -130,7 +128,6 @@ func TestListChildTracks_SplitsIsUpscaledIsOptimizedByKind(t *testing.T) {
 // as covered, silently zeroing the projected file count.
 func TestListTrackProjectionsUnderPrefix_KindScopedHasVariant(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s) // base seed: 2 upscale variants, no optimize
 
 	// Upscale projection: tracks with upscale variants ARE covered.
@@ -178,7 +175,6 @@ func TestListTrackProjectionsUnderPrefix_KindScopedHasVariant(t *testing.T) {
 // 'upscaled-%'` and return zero rows. We assert non-zero rows.
 func TestListTrackProjectionsUnderPrefix_BindingOrder(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	projs, err := s.ListTrackProjectionsUnderPrefix(context.Background(), "MusicA", VariantKindPrefixUpscaled)
@@ -196,7 +192,6 @@ func TestListTrackProjectionsUnderPrefix_BindingOrder(t *testing.T) {
 // variants.
 func TestCountVariantsByKind_classifiesPrefixesAndSumsSizes(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedVariantKindFixture(t, s)
 
 	got, err := s.CountVariantsByKind(context.Background())
@@ -222,7 +217,6 @@ func TestCountVariantsByKind_classifiesPrefixesAndSumsSizes(t *testing.T) {
 // surfaces drift instead of silently dropping the row.
 func TestCountVariantsByKind_unknownBucketSurfacesUnclassifiedRows(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertFolder(context.Background(), &Folder{Path: "X"}); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +254,6 @@ func TestCountVariantsByKind_unknownBucketSurfacesUnclassifiedRows(t *testing.T)
 // caller gets honest per-kind values.
 func TestRollupByPrefix_SplitsVariantSizesByKind(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedVariantKindFixture(t, s)
 
 	r, err := s.RollupByPrefix(context.Background(), "MusicA")

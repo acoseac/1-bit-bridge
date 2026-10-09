@@ -135,7 +135,6 @@ func TestSubmitOptimize_DSDNeedsWiredCaps(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := openTempStoreForBatch(t)
-			t.Cleanup(func() { _ = s.Close() })
 			seedDSDBatchFixture(t, s)
 			c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 			blockRunner(t, p)
@@ -177,7 +176,6 @@ func TestSubmitPCMRender_MixedAlbumSkipsNonDSD(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := openTempStoreForBatch(t)
-			t.Cleanup(func() { _ = s.Close() })
 			seedDSDBatchFixture(t, s)
 			c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 			blockRunner(t, p)
@@ -211,7 +209,6 @@ func TestSubmitPCMRender_MixedAlbumSkipsNonDSD(t *testing.T) {
 // prefix is `optimized-`, which the DSD family starts with).
 func TestSubmitPCMRender_CoverageIsThePCMPrefixOnly(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	seedVariantOn(t, s, "DSD/01.dsf", "pcm-v2-176400-24", 176400, 24)
 	seedVariantOn(t, s, "DSD/03.dff", "optimized-dsd-v2-48000-16", 48000, 16)
@@ -244,7 +241,6 @@ func TestSubmitPCMRender_CoverageIsThePCMPrefixOnly(t *testing.T) {
 // with its kind rather than sit pending for a callback that never comes.
 func TestSubmitPCMRender_EmptyBatchCompletesSynchronously(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	t.Cleanup(p.Stop)
@@ -266,7 +262,6 @@ func TestSubmitPCMRender_EmptyBatchCompletesSynchronously(t *testing.T) {
 // resolver, no JobSpec absolute paths, no batch.
 func TestSubmitPCMRender_RequiresResolver(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
 	c, err := NewCoordinator(p, s, t.TempDir(), nil, nil)
@@ -285,7 +280,6 @@ func TestSubmitPCMRender_RequiresResolver(t *testing.T) {
 // renders the set it was handed, not the folder around it.
 func TestSubmitPCMRenderPaths_EnqueuesOnlyTheGivenSet(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	blockRunner(t, p)
@@ -309,7 +303,6 @@ func TestSubmitPCMRenderPaths_EnqueuesOnlyTheGivenSet(t *testing.T) {
 // with. Read off the specs the workers receive.
 func TestEnqueuedDSDJobSpecsCarryTheRenderFacts(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	p := NewPool(s, 8, 16)
 	t.Cleanup(p.Stop)
@@ -375,7 +368,6 @@ func TestEnqueuedDSDJobSpecsCarryTheRenderFacts(t *testing.T) {
 // (0, 16) sentinel and can tell a pcm batch from either.
 func TestBatchRowsCarryTheirKind(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 	seedDSDBatchFixture(t, s)
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -430,7 +422,6 @@ func TestDSDSizeDerivedDurationSec(t *testing.T) {
 // 1.27 GB at 44.1 kHz, whatever the shorter neighbour needs.
 func TestBuildPCMRenderCandidates_ScratchIsTheLargestSingleJob(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	t.Cleanup(p.Stop)
 	c.WithDSDRender(capsFn(dsdCapsOn))
@@ -462,7 +453,6 @@ func TestBuildPCMRenderCandidates_ScratchIsTheLargestSingleJob(t *testing.T) {
 // the typed error names that directory rather than the sidecar volume.
 func TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	rate, bits, isDSD := 2822400.0, 1, true
 	if err := s.UpsertTrack(context.Background(), &manifest.Track{
 		Path: "Huge/01.dsf", Size: 1 << 60, Codec: "DSF", SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
@@ -504,7 +494,6 @@ func TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume(t *testing.T) {
 // the size.
 func TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	rate, bits := 44100.0, 16
 	huge, one := 1e9, 1.0
 	ch := 2
@@ -582,7 +571,6 @@ func TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart(t *testing.T) {
 	}
 
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Album"}); err != nil {
 		t.Fatal(err)
 	}

@@ -28,6 +28,8 @@ func openTempStoreForBatch(t *testing.T) *manifest.Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// After TempDir, so this close runs before that directory is removed.
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -188,7 +190,6 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 // AND not counted as covered).
 func TestSubmit_FiltersIneligibleAndCovered(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -251,7 +252,6 @@ func seedHugeTrack(t *testing.T, s *manifest.Store) {
 // dir cold-start case).
 func TestSubmit_RefusesOnInsufficientDiskSpace(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedHugeTrack(t, s)
 
 	p := NewPool(s, 1, 4)
@@ -276,7 +276,6 @@ func TestSubmit_RefusesOnInsufficientDiskSpace(t *testing.T) {
 // per-call outputDir.
 func TestSubmitOptimize_DiskCheckTargetsOutputDir(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedHugeTrack(t, s)
 
 	p := NewPool(s, 1, 4)
@@ -301,7 +300,6 @@ func TestSubmitOptimize_DiskCheckTargetsOutputDir(t *testing.T) {
 // the coordinator's dataDir graded, preserving pre-fix behaviour.
 func TestSubmit_DiskCheckFallsBackToDataDir(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedHugeTrack(t, s)
 
 	p := NewPool(s, 1, 4)
@@ -326,7 +324,6 @@ func TestSubmit_DiskCheckFallsBackToDataDir(t *testing.T) {
 // running, (b) at least one progress event was emitted.
 func TestSubmit_InsertsBatchRowAndPublishesProgress(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 
 	c, p, log := newTestCoordinatorWithStubbedPool(t, s)
@@ -366,7 +363,6 @@ func TestSubmit_InsertsBatchRowAndPublishesProgress(t *testing.T) {
 // TestCancel_TransitionsRow exercises the Cancel path.
 func TestCancel_TransitionsRow(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
@@ -401,7 +397,6 @@ func TestCancel_TransitionsRow(t *testing.T) {
 // run transitions to `interrupted` on the next NewCoordinator.
 func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	id := uuid.Must(uuid.NewRandom())
 	if err := s.InsertUpscaleBatch(context.Background(), manifest.UpscaleBatchRow{
@@ -434,7 +429,6 @@ func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 // throughputMinSamples gate.
 func TestThroughput_ReturnsZeroBeforeMinSamples(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
@@ -581,7 +575,6 @@ func TestRedactSoxErr_InteriorGarbagePreservesMessage(t *testing.T) {
 // eligibility. The sibling FLAC still enqueues.
 func TestSubmit_SkipsLossySources(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Mixed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +693,6 @@ func soxWithoutMP4() (SoxInfo, error) {
 func newALACGateFixture(t *testing.T) *Coordinator {
 	t.Helper()
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedALACAndFLAC(t, s)
 
 	p := NewPool(s, 1, 4)

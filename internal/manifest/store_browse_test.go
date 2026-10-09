@@ -104,7 +104,6 @@ func seedBrowseFixture(t *testing.T, s *Store) {
 // (MusicA, MusicB) returned, each carrying its subtree rollup.
 func TestListChildFolders_EmptyParentReturnsTopLevel(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	rows, err := s.ListChildFolders(context.Background(), "")
@@ -143,7 +142,6 @@ func TestListChildFolders_EmptyParentReturnsTopLevel(t *testing.T) {
 // children (no transitive descendants).
 func TestListChildFolders_NestedParentReturnsOneLevelOnly(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	rows, err := s.ListChildFolders(context.Background(), "MusicA")
@@ -171,7 +169,6 @@ func TestListChildFolders_NestedParentReturnsOneLevelOnly(t *testing.T) {
 // caller's UI should still try ListChildTracks at that level.
 func TestListChildFolders_DeepestLevelReturnsEmpty(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	rows, err := s.ListChildFolders(context.Background(), "MusicA/Album1")
@@ -188,7 +185,6 @@ func TestListChildFolders_DeepestLevelReturnsEmpty(t *testing.T) {
 // round-trip, and is_upscaled flips on a variant existence.
 func TestListChildTracks_PicksUpJSONFields(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	rows, err := s.ListChildTracks(context.Background(), "MusicA/Album1")
@@ -227,7 +223,6 @@ func TestListChildTracks_PicksUpJSONFields(t *testing.T) {
 // case rolls up across the entire library.
 func TestRollupByPrefix_EmptyMatchesAll(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	r, err := s.RollupByPrefix(context.Background(), "")
@@ -258,7 +253,6 @@ func TestRollupByPrefix_EmptyMatchesAll(t *testing.T) {
 // literally.
 func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	// The first folder has "_" where the second has "Q", so an unescaped
 	// LIKE prefix scan for the first matches both.
@@ -297,7 +291,6 @@ func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 // the two forms fails the test.
 func TestRollupAndCountByPrefix_ByteRangeMatchesLike(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	tagsJSON, _ := json.Marshal(map[string]any{"sampleRate": 44100.0, "bitsPerSample": 16, "codec": "FLAC"})
@@ -407,7 +400,6 @@ func TestRollupAndCountByPrefix_ByteRangeMatchesLike(t *testing.T) {
 // surfaces HasVariant correctly.
 func TestListTrackProjectionsUnderPrefix_FiltersDescendants(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	projs, err := s.ListTrackProjectionsUnderPrefix(context.Background(), "MusicA", VariantKindPrefixUpscaled)
@@ -441,7 +433,6 @@ func TestListTrackProjectionsUnderPrefix_FiltersDescendants(t *testing.T) {
 // disturbs the table interaction.
 func TestUpscaleBatchesTablePersistsUUID(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBrowseFixture(t, s)
 
 	id := uuid.Must(uuid.NewRandom())

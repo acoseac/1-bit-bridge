@@ -9933,6 +9933,24 @@ its twin.** The top list is older, shorter, and read first.
   `TestMain` fails the run when a test left any of the four changed: a test
   that calls `Init` without `resetOnce(t)` passes itself and every other
   test, and fails only there.
+- **A test helper that opens a store closes it in its own `t.Cleanup`.**
+  `openTempStoreForBatch` opened a SQLite store under `t.TempDir()` and
+  returned it; each caller was supposed to close it. A test that forgot
+  left `bridge.db` open when TempDir's cleanup removed the directory.
+  macOS deletes an open file and hides it; Windows fails the run with
+  "The process cannot access the file because it is being used by another
+  process" (B210, #1172, run 37882497814). The close is registered inside
+  the helper, after `TempDir`, so it runs first (cleanups are
+  last-registered first). `database/sql`'s `Close` returns nil when the
+  DB is already closed, so a second close is harmless; the callers of
+  these helpers only ignored that error, and those lines are gone. The
+  same close went into `openTempStoreForPool`, `openTempStore` and
+  `openBenchStore` (`b.Cleanup`). `TestAStoreHelperClosesBeforeItsTempDirGoes`
+  registers its check before the helper and requires
+  `sql: database is closed`. A helper that already closed, and one that
+  `defer`s `Close` before it returns, was left. An `auth.Store` or
+  `adminauth.Store` holds a JSON file it does not keep open and has no
+  `Close`.
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
   a `defer cancel()` plus a cancel-and-assert tail.** The tail runs only when
   the body completes: a `t.Fatalf` above it Goexits, the deferred cancel fires,

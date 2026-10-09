@@ -18,7 +18,6 @@ import (
 // the clock.
 func TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	setWatermarkArms(t, s, 30, 50, 40)
 
 	if got := stampAt(t, s, 45); got != 51 {
@@ -89,7 +88,6 @@ func TestEveryDeltaStampConstEmbedsNextDeltaStamp(t *testing.T) {
 
 func TestNextDeltaStampUsesTheWatermarkIndexes(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	setWatermarkArms(t, s, 30, 50, 40)
 	if _, err := s.db.Exec(`ANALYZE`); err != nil {
 		t.Fatal(err)
@@ -132,7 +130,6 @@ func TestNextDeltaStampUsesTheWatermarkIndexes(t *testing.T) {
 // strict `>` filter drops it.
 func TestADeleteInTheSameNanosecondReachesADelta(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	ctx := context.Background()
 	frozen := time.Now().Add(time.Hour)
 	s.now = func() time.Time { return frozen }
@@ -173,7 +170,6 @@ func TestADeleteInTheSameNanosecondReachesADelta(t *testing.T) {
 // the wipe, or a plain clock, reports the cursor covered.
 func TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	ctx := context.Background()
 	frozen := time.Now().Add(time.Hour)
 	s.now = func() time.Time { return frozen }
@@ -231,7 +227,6 @@ func TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered(t *testing.T) {
 // `indexed_at > since` drops the row.
 func TestAnIndexedAtBumpInTheSameNanosecondClearsATombstoneWatermark(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	frozen := time.Now().Add(time.Hour)
 	s.now = func() time.Time { return frozen }
 	const target = "A/target.flac"
@@ -340,7 +335,6 @@ var watermarkUpsertCases = []watermarkUpsertCase{
 func runWatermarkUpsertCase(t *testing.T, ctx context.Context, tc watermarkUpsertCase) {
 	t.Helper()
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	// An hour ahead of OpenStore, so the v41 coverage seed is
 	// behind the rows this case plants.
 	base := time.Now().Add(time.Hour)
@@ -436,7 +430,6 @@ func TestAnUpsertHoldsTheWriteLockBeforeItReadsTheStamp(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s := openTempStore(t)
-			t.Cleanup(func() { s.Close() })
 			base := time.Now().Add(time.Hour)
 			s.now = func() time.Time { return base }
 			if err := s.UpsertTrack(ctx, &Track{Path: "Music/A/a.flac", Size: 10, ModTime: base}); err != nil {
@@ -477,7 +470,6 @@ func TestAFailedRollbackDiscardsTheConnection(t *testing.T) {
 	for _, name := range []string{"rollback", "commit"} {
 		t.Run(name, func(t *testing.T) {
 			s := openTempStore(t)
-			t.Cleanup(func() { s.Close() })
 			s.db.SetMaxOpenConns(1)
 			s.immediateOnEnd = func(string) error { return errEndRefused }
 			ctx := context.Background()
@@ -519,7 +511,6 @@ func TestAFailedRollbackDiscardsTheConnection(t *testing.T) {
 	// that comes back is in autocommit.
 	t.Run("commit then rollback", func(t *testing.T) {
 		s := openTempStore(t)
-		t.Cleanup(func() { s.Close() })
 		s.db.SetMaxOpenConns(1)
 		s.immediateOnEnd = func(stmt string) error {
 			if stmt == "COMMIT" {
@@ -556,7 +547,6 @@ func TestAFailedRollbackDiscardsTheConnection(t *testing.T) {
 // is still open, and the next checkout's BEGIN fails.
 func TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { s.Close() })
 	s.db.SetMaxOpenConns(1)
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)

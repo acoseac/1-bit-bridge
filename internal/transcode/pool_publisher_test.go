@@ -59,7 +59,6 @@ import (
 // only (typically 0..few; well under the 32-goroutine slack).
 func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	const (
 		workers    = 4
@@ -262,7 +261,6 @@ func runBurstAndDrain(t *testing.T, p *Pool, done *atomic.Int64, n, pathStart in
 // equivalent to delivered ones.
 func TestPoolPublisherCoalescesStateChanges(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 1)
 	t.Cleanup(p.Stop)
@@ -339,7 +337,6 @@ func TestPoolPublisherCoalescesStateChanges(t *testing.T) {
 // channel + Stop() drain ordering eliminates the window.
 func TestPoolPublisherJobCompleteFidelity(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	const jobs = 100
 
@@ -425,7 +422,6 @@ func TestPoolPublisherJobCompleteFidelity(t *testing.T) {
 //  3. Stop() — must drain the buffered events before returning.
 func TestPoolPublisherStopDrainsBufferedEvents(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	const jobs = 50
 

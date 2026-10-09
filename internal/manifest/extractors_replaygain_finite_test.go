@@ -73,7 +73,6 @@ func TestPopulateFromTagMetadata_NonFiniteReplayGainOmitted(t *testing.T) {
 // batch — permanently, on every rescan.
 func TestUpsertTrackBatch_CommitsAroundFormerlyPoisonedTrack(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	poisoned := &Track{Path: "A/silence.flac", Size: 100, ModTime: time.Now()}

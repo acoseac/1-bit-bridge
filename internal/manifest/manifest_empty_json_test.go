@@ -17,7 +17,6 @@ import (
 // a nil Tracks field.
 func TestManifestEmptyTracksMarshalsAsArray(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	cases := []struct {
 		name string
