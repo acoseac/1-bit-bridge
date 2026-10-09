@@ -49,6 +49,13 @@ import (
 //     whole copy when it happens, so the statement checks the context
 //     itself once it is running: its INTO target is vacuumTarget, which
 //     refuses a cancelled snapshot before anything is copied.
+//
+// A cancel that lands in that last 64 KB still finishes the commit, and
+// the connection holds the snapshot file until the statement returns.
+// Serve waits for the backup ticker past the shared writer grace so that
+// file is closed before runServe returns (backlog B309). On the way out
+// of a failed copy the connection is closed before the partial file is
+// removed: on Windows a file this process still has open cannot be deleted.
 
 // snapshotSourceQuery opens the manifest database for VACUUM INTO: read-only,
 // so it cannot disturb the running writer, with SQLite's own busy wait kept
@@ -144,7 +151,18 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	// Close before either remove below. The deferred close runs after this
+	// function returns, and on Windows a file this process still has open
+	// cannot be deleted (backlog B309).
+	closed := false
+	closeDB := func() {
+		if closed {
+			return
+		}
+		closed = true
+		_ = db.Close()
+	}
+	defer closeDB()
 	call, id, end := startVacuumCall(ctx)
 	defer end()
 	err = retryWhileBusy(ctx, func() error {
@@ -172,6 +190,7 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 		// A failed VACUUM INTO can leave a partial/corrupt fragment on
 		// disk. Remove it so the snapshot dir doesn't accumulate broken
 		// DB files (and a later reader can't mistake one for a good copy).
+		closeDB()
 		_ = os.Remove(dstDB)
 		return err
 	}
@@ -183,6 +202,7 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	if err := os.Chmod(dstDB, 0o600); err != nil {
 		// Don't leave a 0644 copy of token-hash data behind if we
 		// couldn't lock it down — unlink it and surface the error.
+		closeDB()
 		_ = os.Remove(dstDB)
 		return err
 	}
