@@ -11,6 +11,21 @@ import (
 	"time"
 )
 
+// helperReadyReserve is what the ready wait leaves of the test
+// deadline for the kill, the Wait, and the temp-dir cleanup.
+const helperReadyReserve = 5 * time.Second
+
+// helperReadyGiveUp fires at the test deadline less helperReadyReserve.
+// With no deadline it is nil, and a select on it never fires.
+func helperReadyGiveUp(t *testing.T) <-chan time.Time {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	return time.After(time.Until(deadline.Add(-helperReadyReserve)))
+}
+
 // TestRollbackBinaryReplacesARunningExe is the rollback the console and
 // the boot path both run inside the bridge process. The SCM stop is
 // skipped when this process is the service, and the rename then replaces
@@ -18,6 +33,7 @@ import (
 // helper is a real process started from dst, so the image is mapped the
 // way bridge.exe is during those two callers.
 func TestRollbackBinaryReplacesARunningExe(t *testing.T) {
+	skipIfBridgeServiceRegistered(t)
 	dir := t.TempDir()
 	dst := buildSleepingExe(t, dir)
 	bak := dst + ".bak"
@@ -44,7 +60,9 @@ func TestRollbackBinaryReplacesARunningExe(t *testing.T) {
 		<-exited
 	})
 
-	deadline := time.Now().Add(10 * time.Second)
+	giveUp := helperReadyGiveUp(t)
+	poll := time.NewTicker(20 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		if _, err := os.Stat(ready); err == nil {
 			break
@@ -52,12 +70,10 @@ func TestRollbackBinaryReplacesARunningExe(t *testing.T) {
 		select {
 		case <-exited:
 			t.Fatal("helper exited before it became ready")
-		default:
-		}
-		if time.Now().After(deadline) {
+		case <-giveUp:
 			t.Fatal("helper never became ready")
+		case <-poll.C:
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 
 	if err := RollbackBinary(dst, ".bak"); err != nil {
