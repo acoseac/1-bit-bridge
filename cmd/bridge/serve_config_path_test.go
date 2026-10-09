@@ -141,11 +141,11 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}
 	// The admin port has to be known up front: `serve` prints the
 	// configured admin address, not the bound one, so :0 would be
-	// undiscoverable.
-	adminPort := freeLoopbackPort(t)
+	// undiscoverable. The listener stays open and is handed to serve.
+	admin := holdLoopback(t)
 	cfgPath := filepath.Join(cwd, "bridge.yaml")
-	body := fmt.Sprintf("libraryName: Before\nlibraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\n",
-		lib, filepath.Join(cwd, "data"), adminPort)
+	body := fmt.Sprintf("libraryName: Before\nlibraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n",
+		lib, filepath.Join(cwd, "data"), admin.addr)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +156,11 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		// No --config: the whole point.
-		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, stdout, stderr)
+		// No config path: the whole point. resolveConfigPath still finds
+		// ./bridge.yaml, which isolateConfigEnv put this process in.
+		done <- runServe(ctx, serveOpts{
+			addrOverride: "127.0.0.1:0", adminListener: admin.ln,
+		}, stdout, stderr)
 	}()
 	// Created HERE, before the drain is registered, though it is not used
 	// until the chdir further down. Cleanups run LIFO, so a t.TempDir
@@ -190,7 +193,7 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	// primitive for exactly this ("the process started" ≠ "the socket is
 	// bound", the PR #72 rationale behind actRestart's health probe).
 	waitForListening(t, stdout, exited, done, stderr)
-	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
+	waitForAdminReady(t, admin.addr, done, stderr)
 
 	// Move the process off the config's directory now that the bridge is
 	// up. Everything below must still find bridge.yaml, which is only
@@ -207,7 +210,7 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	// process leaves `scratch` before anything tries to remove it.
 	chdir(t, scratch)
 
-	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	adminBase := "http://" + admin.addr
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	// (1) A config mutation through the admin console must persist.
@@ -307,24 +310,33 @@ func snapshotCapturedBridgeYAML(t *testing.T, root string) bool {
 	return false
 }
 
+// heldLoopback is an ephemeral loopback listener kept open for the
+// rest of the test. A serve test writes addr into the config and hands
+// ln to serve, so the port cannot be taken between the two (backlog
+// B313). Call it before launchServe or drainServeOnCleanup: cleanups
+// run last-registered-first, and the drain has to finish before the
+// listener is closed.
+type heldLoopback struct {
+	ln   net.Listener
+	addr string
+}
+
+func holdLoopback(t *testing.T) heldLoopback {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return heldLoopback{ln: ln, addr: ln.Addr().String()}
+}
+
 // freeLoopbackPort reserves and immediately releases an ephemeral
-// loopback port, returning its number.
-//
-// This does pick the port BEFORE the bridge binds it, which is the
-// weaker half of this fixture — but `adminAddress: 127.0.0.1:0` is not
-// an option: serve prints the CONFIGURED admin address, not the bound
-// one, and the admin's own "console listening" line goes to slog's
-// default handler (the real stderr), not to the writers the test passes
-// in. There is no channel through which the bound admin port can be
-// discovered.
-//
-// Both failure modes of the gap are loud rather than silent. If nothing
-// takes the port, the bridge binds it and waitForAdminReady returns. If
-// something else grabs it first, the bridge's admin bind fails and
-// waitForAdminReady reports the serve exit; and in the pathological case
-// where the squatter is itself an HTTP listener, the test still fails —
-// its assertions are on THIS config file's contents and THIS data dir's
-// snapshots, which a stranger cannot produce.
+// loopback port, returning its number. It is for a port that is written
+// into a config and compared, never one a later serve or probe binds:
+// between this close and that bind another listener can take the number
+// (backlog B313). A port serve will bind is holdLoopback, handed in on
+// serveOpts.
 func freeLoopbackPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

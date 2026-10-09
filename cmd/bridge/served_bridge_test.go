@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -58,8 +57,14 @@ func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string), wi
 	if fill != nil {
 		fill(lib)
 	}
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
-	consoleAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
+	// Both listeners stay open and are handed to serve. A callback that
+	// replaces addrOverride replaces lanListener and lanPacket too: the
+	// address serve adopts has to be the one the override names, and the
+	// listener this holds otherwise stays open until the cleanup.
+	lan := holdLoopback(t)
+	admin := holdLoopback(t)
+	listenAddr := lan.addr
+	consoleAddr := admin.addr
 	configPath := filepath.Join(root, "bridge.yaml")
 	dataDir := filepath.Join(root, "data")
 	yamlText := "libraryRoots:\n  - " + lib + "\ndataDir: " + dataDir +
@@ -81,6 +86,8 @@ func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string), wi
 	opts := serveOpts{
 		configPath:        configPath,
 		addrOverride:      listenAddr,
+		lanListener:       lan.ln,
+		adminListener:     admin.ln,
 		autoOptimizeSwept: func() { b.autoOptimizeSweeps.Add(1) },
 	}
 	for _, set := range with {

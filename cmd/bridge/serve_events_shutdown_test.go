@@ -31,7 +31,10 @@ func TestEventStreamsEndWhenServeShutsDown(t *testing.T) {
 	// The HTTP/3 stream reaches serve on the UDP port of the listener's
 	// number, so that port has to be free too.
 	b := startConsoleBridge(t, "mdns:\n  enabled: false\n", nil, func(o *serveOpts) {
-		o.addrOverride = freeLoopbackTCPAndUDPAddr(t)
+		pair := holdLoopbackTCPAndUDP(t)
+		o.addrOverride = pair.addr
+		o.lanListener = pair.ln
+		o.lanPacket = pair.udp
 	})
 	token := mintedToken(t, b)
 

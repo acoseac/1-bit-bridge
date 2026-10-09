@@ -39170,3 +39170,38 @@ ran the named tests with `-count=1`, and restored the file with
   Actual: those two. The handler left the row served, and the result's
   `Paths` and `Dirs` were empty. Stayed green:
   `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
+
+## 2026-10-09 — a serve test hands serve its listeners (backlog B313)
+
+`freeLoopbackPort` bound `127.0.0.1:0`, closed the listener and returned
+the number. `freeLoopbackTCPAndUDPAddr` did the same for a port free on
+TCP and UDP. Between that close and serve's bind, another listener or an
+outgoing connection can take the port. Serve then exits
+`admin listen 127.0.0.1:<port>: bind: address already in use` (or the
+LAN `listen` line). Bridge #1166 CI, run 37865927261, `test -race
+(rest)`, lost `TestServeRedeemsThePairingLinksCode` on the admin port.
+B311 made that early exit return in about a second; the bind still
+failed. The same race is the HTTP/3 tests' TCP-and-UDP draw.
+
+A port that serve, a served bridge or a probe will bind stays open.
+`holdLoopback` and `holdLoopbackTCPAndUDP` keep the sockets, the test
+writes that address into the config as before, and `serveOpts` carries
+`adminListener`, `lanListener` and `lanPacket`. All three are nil in
+production. Serve adopts a handed listener only when its address is the
+one the config names (`--addr` for the LAN pair). A mismatch prints
+`listen <addr>: handed listener …` and returns 1, and the listener stays
+with the caller. A handed UDP socket with HTTP/3 disabled is the same
+refusal. `admin.Server.Serve` still listens itself; `ServeListener` is
+what the handed admin path calls, so the error stays
+`admin listen <addr>: …`. `freeLoopbackPort` remains for a number that
+is only written into a config and compared. The TCP-and-UDP draw remains
+for the unit tests that bind the number again themselves; the wrapper
+that closed and returned it to serve tests is gone.
+
+`TestAHandedListenerCannotBeTakenBeforeServeBinds` keeps both listeners,
+requires a second `Listen` on each address to fail, and requires serve
+to come up. A second `net.Listen` on a held port fails (no
+SO_REUSEPORT), so serve coming up is serve using the handed listener.
+`TestAHandedListenerOnAnotherAddressIsAStartupError` hands a listener
+whose address is not the config's and requires exit 1, the handed-listener
+line, and no banner.

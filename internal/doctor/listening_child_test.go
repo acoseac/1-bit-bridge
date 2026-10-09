@@ -215,7 +215,7 @@ func TestACollectionClosesAListenerNothingReferences(t *testing.T) {
 //
 // The port is drawn from 20000–32767, below every platform's ephemeral
 // range (Linux's starts at 32768, macOS's and Windows' at 49152), as
-// cmd/bridge's freeLoopbackTCPAndUDPAddr draws. An ephemeral port, once the
+// cmd/bridge's TCP-and-UDP port draw does. An ephemeral port, once the
 // collection frees it, could be handed to another process's bind or
 // connect before the rebind that looks at it.
 //
