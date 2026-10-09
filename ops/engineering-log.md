@@ -39243,3 +39243,26 @@ What shipped:
   and the User-Agent to the same 100 runes. The response and the fault
   keep the browse flag and the page counts and do not repeat the client
   fields. `remoteAddr` is the TCP peer and is left as it is.
+
+Negative controls, each a revert of that one bound on the committed
+tree, then the file restored. Predicted red, and that is what ran:
+
+- Skipping the slot (one goroutine per SUBSCRIBE again):
+  `TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify` grew by 190.
+- Removing the `clampPage` clip:
+  `TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest`
+  saw `NumberReturned` 1050 and a 639,011-byte body.
+- `Record` storing the strings as they arrived:
+  `TestTelemetryKeepsAHundredRunesOfEachHeader` stored 150 runes for
+  the User-Agent, Accept, Range and content-features header.
+- `MaxHeaderBytes` left unset:
+  `TestTheListenerRefusesAnOversizedHeader` answered 200, stored 8
+  entries and retained 7,426,312 bytes.
+- `ReadTimeout` and `IdleTimeout` left unset:
+  `TestTheListenerUsesTheAPIDeadlines` read 0s for both, and
+  `TestTheListenerClosesAnIdleKeepAliveAndAStalledBody` left the idle
+  keep-alive and the stalled body open (4.00 s).
+- The log lines writing the client fields whole and repeating them:
+  `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`
+  failed on the ObjectID, the Filter, the fault, the Browse response
+  and the Search response.
