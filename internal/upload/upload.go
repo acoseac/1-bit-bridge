@@ -376,7 +376,7 @@ func (m *Manager) view(doc sessionDoc) *Session {
 			Size:     f.Size,
 			Offset:   st.Offset,
 			SHA256:   st.SHA256,
-			Complete: st.Offset == f.Size,
+			Complete: fileRecordedComplete(st.Offset, f.Size, st.SHA256),
 		})
 	}
 	return s
@@ -440,6 +440,44 @@ func (m *Manager) List() ([]*Session, error) {
 	return out, nil
 }
 
+// fileRecordedComplete is an offset at the declared size. A zero-length
+// file is complete only once its finishing chunk has recorded the digest:
+// a missing meta reads as offset 0, which would otherwise look finished
+// before that chunk.
+func fileRecordedComplete(offset, size int64, sha string) bool {
+	if offset != size {
+		return false
+	}
+	if size == 0 && sha == "" {
+		return false
+	}
+	return true
+}
+
+// chunkProgressChanged reports whether next records a different offset,
+// completion, or running hash than prev. A zero-byte copy leaves the
+// hasher where resume left it: no stored state and the marshal of a
+// fresh hasher are the same progress, so that difference is not a change.
+func chunkProgressChanged(prev, next fileState) bool {
+	if next.Offset != prev.Offset || next.SHA256 != prev.SHA256 {
+		return true
+	}
+	return !sameHashProgress(prev.HashState, next.HashState)
+}
+
+func sameHashProgress(stored, next []byte) bool {
+	if bytes.Equal(stored, next) {
+		return true
+	}
+	initial, err := marshalHasher(sha256.New())
+	if err != nil {
+		return false
+	}
+	storedInitial := len(stored) == 0 || bytes.Equal(stored, initial)
+	nextInitial := len(next) == 0 || bytes.Equal(next, initial)
+	return storedInitial && nextInitial
+}
+
 // WriteChunk appends one chunk at offset.
 //
 // chunkDigest, when non-nil, is the expected raw SHA-256 of THIS chunk's bytes
@@ -471,8 +509,12 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	if offset != st.Offset {
 		return st.Offset, &OffsetMismatch{Actual: st.Offset}
 	}
-	if st.Offset >= fd.Size {
-		return st.Offset, nil // already complete; idempotent re-send
+	// Already recorded complete: an idempotent re-send leaves the offset
+	// and the activity where they are. A zero-length file starts at
+	// offset 0 with nothing recorded, so its first empty chunk falls
+	// through and writes the completion.
+	if st.Offset > fd.Size || fileRecordedComplete(st.Offset, fd.Size, st.SHA256) {
+		return st.Offset, nil
 	}
 
 	// io.LimitReader below already bounds what is WRITTEN to the declared
@@ -560,6 +602,16 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 			return st.Offset, err
 		}
 	}
+	// An accepted chunk that changes neither the offset, the completion,
+	// nor the running hash does not rewrite .meta. An empty reader is
+	// that chunk for a file that is still short: io.Copy returns 0 and
+	// no error, and a fresh UpdatedAt would hold the session until the
+	// age cap. A zero-length file's first empty chunk sets SHA256 and
+	// is recorded.
+	if !chunkProgressChanged(st, newState) {
+		return st.Offset, nil
+	}
+	newState.UpdatedAt = m.now().UTC()
 	b, err := json.Marshal(newState)
 	if err != nil {
 		return st.Offset, err
@@ -667,7 +719,7 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutcome, string) {
 	out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
 	st, err := m.readState(doc.Root, sid, fd.ID)
-	if err != nil || st.Offset != fd.Size {
+	if err != nil || !fileRecordedComplete(st.Offset, fd.Size, st.SHA256) {
 		out.Status, out.Reason = "failed", "incomplete"
 		return out, ""
 	}

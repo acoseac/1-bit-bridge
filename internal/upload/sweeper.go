@@ -13,12 +13,16 @@ import (
 // parse, orphans files a state-driven sweeper would never look at — and those
 // are exactly the ones nothing else will ever clean up.
 //
-// Age comes from the manifest's recorded CreatedAt, falling back to the
-// directory's own mtime only for the orphan case where no manifest parses.
-// It is never taken from a staged file's stat: see removeExpiredTrash for the
-// same rule stated where it bites hardest.
+// A readable session is idle once its last accepted chunk (fileState.UpdatedAt
+// on each file's meta; the manifest stays immutable) is older than SessionTTL.
+// A meta written before that field existed falls back to the meta file's
+// mtime, then to CreatedAt. The session also expires once CreatedAt is older
+// than sessionMaxAge, or older than SessionTTL when that window is longer.
+// An orphan whose manifest does not parse falls back to the directory's own
+// mtime against the idle window. Age is never taken from a staged payload's
+// stat: see removeExpiredTrash for the same rule stated where it bites hardest.
 func (m *Manager) Sweep() (removed int, err error) {
-	cutoff := m.now().Add(-m.cfg.SessionTTL)
+	now := m.now()
 	for _, root := range m.roots() {
 		base := filepath.Join(root, StagingDirName)
 		entries, rerr := os.ReadDir(base)
@@ -36,7 +40,7 @@ func (m *Manager) Sweep() (removed int, err error) {
 				_ = os.Remove(filepath.Join(base, e.Name()))
 				continue
 			}
-			if !m.sessionExpired(root, e, cutoff) {
+			if !m.sessionExpired(root, e, now) {
 				continue
 			}
 			if rmErr := m.removeSession(root, e.Name()); rmErr != nil {
@@ -51,19 +55,74 @@ func (m *Manager) Sweep() (removed int, err error) {
 	return removed, err
 }
 
-func (m *Manager) sessionExpired(root string, e os.DirEntry, cutoff time.Time) bool {
+// sessionMaxAge is the wall-clock bound on a session, whatever its last
+// chunk. The idle window is SessionTTL (default 24h). Without a bound, one
+// byte an hour holds staged bytes forever. Seven days is the library trash
+// window: uncommitted staged bytes do not outlive bytes the operator already
+// deleted. When SessionTTL is longer than this, the bound is SessionTTL, so
+// the bound never fires inside the idle window the operator set.
+const sessionMaxAge = 7 * 24 * time.Hour
+
+func (m *Manager) sessionExpired(root string, e os.DirEntry, now time.Time) bool {
+	idle := now.Add(-m.cfg.SessionTTL)
 	var doc sessionDoc
-	if rerr := readJSONFile(m.manifestPath(root, e.Name()), &doc); rerr == nil {
-		return doc.CreatedAt.Before(cutoff)
+	if rerr := readJSONFile(m.manifestPath(root, e.Name()), &doc); rerr != nil {
+		// No readable manifest: an orphan. Fall back to the directory's own
+		// mtime, which is meaningful here because the directory was created
+		// when the session started.
+		info, ierr := e.Info()
+		if ierr != nil {
+			return false
+		}
+		return info.ModTime().Before(idle)
 	}
-	// No readable manifest: an orphan. Fall back to the directory's own
-	// mtime, which is meaningful here because the directory was created when
-	// the session started.
-	info, ierr := e.Info()
-	if ierr != nil {
+	bound := sessionMaxAge
+	if m.cfg.SessionTTL > bound {
+		bound = m.cfg.SessionTTL
+	}
+	if !doc.CreatedAt.IsZero() && doc.CreatedAt.Before(now.Add(-bound)) {
+		return true
+	}
+	activity, ok := m.sessionActivity(root, e.Name(), doc)
+	if !ok {
 		return false
 	}
-	return info.ModTime().Before(cutoff)
+	return activity.Before(idle)
+}
+
+// sessionActivity is the latest accepted chunk across the session's files.
+// A zero UpdatedAt is a meta from before the field existed, and the file's
+// mtime stands in for it. A missing meta means that file has taken no chunk
+// yet. ok is false when a meta cannot be read: the idle check then stands
+// down, and the absolute cap above still applies.
+func (m *Manager) sessionActivity(root, sid string, doc sessionDoc) (time.Time, bool) {
+	latest := doc.CreatedAt
+	ok := true
+	for _, f := range doc.Files {
+		st, err := m.readState(root, sid, f.ID)
+		if err != nil {
+			ok = false
+			continue
+		}
+		if !st.UpdatedAt.IsZero() {
+			if st.UpdatedAt.After(latest) {
+				latest = st.UpdatedAt
+			}
+			continue
+		}
+		info, err := os.Stat(m.statePath(root, sid, f.ID))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			ok = false
+			continue
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest, ok
 }
 
 // RunSweeper runs one pass immediately, then on a ticker until ctx is done.

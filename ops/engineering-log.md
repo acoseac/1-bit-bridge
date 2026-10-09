@@ -38385,6 +38385,116 @@ fails on every OS), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`,
 `TestRollbackReplaceOfAMissingDestinationIsOneRename`,
 `TestRollbackReplaceLeavesALeftoverItCannotRemove`.
 
+## 2026-10-09 — backlog B213: an upload session ages from its last accepted chunk
+
+`sessionExpired` aged a readable session from `sessionDoc.CreatedAt` alone.
+A session created at T=0 that then received a chunk every hour was still
+CreatedAt-old, so at T=25h (the default 24h TTL) `Sweep` deleted the staging
+directory and the next `WriteChunk` returned `ErrNotFound`. Measured with
+the real sweeper and a fake clock before the fix: the hourly session and
+its idle sibling were both removed (`Sweep removed 2 sessions, want 1`).
+
+The stamp lives on `fileState.UpdatedAt`, written in the persist path of
+`WriteChunk`, the `.meta` every accepted chunk already rewrites. The
+manifest stays immutable (its comment: a chunk must not rewrite a manifest
+that may list two thousand entries). The idle window is still `SessionTTL`.
+An absolute cap of seven days, raised to `SessionTTL` when the operator set
+a longer idle window, still sweeps a session that keeps receiving bytes.
+Seven days is the library trash window: uncommitted staged bytes do not
+outlive bytes the operator already deleted, and a SACD-sized upload finishes
+inside a week at a poor relay rate. The accepted cost is an upload that
+stays active longer than that wall-clock bound, and longer than the
+configured idle window, must start a new session.
+
+A meta written before the field existed has a zero `UpdatedAt`. The sweeper
+then reads that meta file's mtime, else `CreatedAt`, so an in-flight upgrade
+is not swept at startup before the next chunk stamps the field. A recorded
+`UpdatedAt` outranks a touched or back-dated meta mtime. Aging from the meta
+mtime as the primary clock was rejected: `TestSweeperUsesManifestAgeNotFileMtime`
+back-dates the meta on purpose, and the trash rule exists because `os.Rename`
+preserves mtime. An orphan whose manifest does not parse stays on the
+directory mtime. Trash stays on the stamp directory name. An idempotent
+resend of a finished file returns before the persist and does not move the
+activity.
+
+Pins: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionIdlePastTheTTL`,
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepCapFollowsALongerIdleTTL`,
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`,
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`,
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`,
+`TestAZeroLengthFileCompletesOnItsFirstEmptyChunk`.
+
+Negative controls, each a production-only mutation on `e23c3b9e`, restored
+with `git checkout HEAD` before the next. Predicted names are the ones
+written down before the run.
+
+(a) A readable session aged from `CreatedAt` again (the absolute cap left
+in place). Predicted red: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`. Actual: those four.
+The hourly session was removed with its idle sibling (`Sweep removed 2
+sessions, want 1`). The cap test failed inside the cap (`Sweep = 1, want
+0`), because 167h is already past the 24h idle window. The pre-change meta
+test and the mtime-ranking test each removed both sessions.
+
+(b) The absolute cap removed (`sessionMaxAge` left declared so the cap
+test still compiles). Predicted red:
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepCapFollowsALongerIdleTTL`. Actual: those two (`past the cap
+Sweep removed 0, want 1` and `past the raised cap Sweep removed 0, want
+1`). The longer-TTL test depends on the cap: its last chunk is inside the
+14-day idle window.
+
+(c) A zero `UpdatedAt` no longer read the meta mtime. Predicted red:
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`. Actual: that one
+(`Sweep removed 2, want 1`).
+
+(d) An idempotent resend rewrote `UpdatedAt`. Predicted red:
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`. Actual: that one,
+and nothing else in the package (`Sweep removed 0, want 1`).
+
+(e) A meta file's mtime replaced a recorded `UpdatedAt`. Predicted red:
+`TestSweeperUsesManifestAgeNotFileMtime`,
+`TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionIdlePastTheTTL`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`,
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`. Actual red: the
+last four. The hourly, idle and resend tests stayed alive because the
+meta's wall-clock mtime is later than the fake clock. The ranking test
+swept the session whose `UpdatedAt` was recent and whose mtime had been
+back-dated (`recorded activity: upload: session not found`).
+`TestSweeperUsesManifestAgeNotFileMtime` stayed green: activity is still
+the later of `CreatedAt` and the mtime, and that test's `CreatedAt` is
+the write clock, so an older mtime does not move it. The ranking test is
+the one that separates the two clocks.
+
+An empty reader on a file that is still short is an accepted chunk:
+`io.Copy` returns 0 bytes and no error, and the persist path rewrote
+`.meta` with a fresh `UpdatedAt`. Repeated empty writes moved the
+activity forward, so the idle TTL never fired and only the seven-day cap
+reaped the session. Measured on `1fd1f0ea` before the skip:
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks` removed 0 sessions,
+want 1. The skip returns the unchanged offset after the digest check and
+`f.Sync`, and only when the chunk changes neither the offset, the
+recorded completion, nor the running hash. No stored hash and the marshal
+of a fresh hasher are the same progress, so a zero-byte copy does not
+count as a new hash. A zero-length file starts at offset 0 with nothing
+recorded; its first empty chunk sets the empty digest and is what
+completes it (`fileRecordedComplete`). A later empty write of that file
+takes the idempotent return.
+
+Negative control, a production-only mutation, restored before this
+record. Predicted red:
+`TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`. Actual: that one,
+and nothing else in the package (`Sweep removed 0 sessions, want 1 (the
+one that received no bytes)`). The mutation stamped `UpdatedAt` on every
+accepted chunk again, the empty one included. The zero-length completion
+test stayed green.
+
 ## 2026-10-09 — a variant move keeps the file at both names across the row update (backlog B249, B251)
 
 B204 closed the window after `AllVariants` returns and before the tick
