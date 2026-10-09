@@ -582,6 +582,7 @@ func TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart(t *testing.T) {
 	}
 
 	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Album"}); err != nil {
 		t.Fatal(err)
 	}
