@@ -3,6 +3,7 @@ package dlna
 import (
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,12 +47,11 @@ type TelemetryEntry struct {
 // to copy entries out. Writes (Record) take the lock for an O(1)
 // append-and-rotate.
 //
-// **Bounded by design.** Capacity defaults to 1000 entries. At ~200
-// bytes per entry that's ~200KB — trivial memory cost, vastly more
-// than enough for diagnostic context (the admin UI surfaces "last N
-// connections" rather than full history). Older entries are silently
-// evicted when capacity rolls over; consumers that need persistence
-// log to slog at Record time instead of relying on the ring.
+// **Bounded by design.** Capacity defaults to 1000 entries. Each stored
+// string is cut to dlnaLoggedFieldRunes, so one entry stays a few
+// hundred bytes. Older entries are silently evicted when capacity rolls
+// over; consumers that need persistence log to slog at Record time
+// instead of relying on the ring.
 type TelemetryStore struct {
 	mu       sync.Mutex
 	entries  []TelemetryEntry // ring buffer
@@ -81,6 +81,13 @@ func NewTelemetryStore(capacity int) *TelemetryStore {
 // Concurrent callers serialize; the lock is held briefly (just for
 // the index update + slot write).
 func (s *TelemetryStore) Record(entry TelemetryEntry) {
+	entry.Method = truncateRunes(entry.Method, dlnaLoggedFieldRunes)
+	entry.Path = truncateRunes(entry.Path, dlnaLoggedFieldRunes)
+	entry.UserAgent = truncateRunes(entry.UserAgent, dlnaLoggedFieldRunes)
+	entry.AcceptHeader = truncateRunes(entry.AcceptHeader, dlnaLoggedFieldRunes)
+	entry.RangeHeader = truncateRunes(entry.RangeHeader, dlnaLoggedFieldRunes)
+	entry.ContentFeaturesAccept = truncateRunes(entry.ContentFeaturesAccept, dlnaLoggedFieldRunes)
+	entry.RemoteAddr = truncateRunes(entry.RemoteAddr, dlnaLoggedFieldRunes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries[s.head] = entry
@@ -125,6 +132,24 @@ func (s *TelemetryStore) Len() int {
 
 // Capacity returns the ring's configured capacity.
 func (s *TelemetryStore) Capacity() int { return s.capacity }
+
+// truncateRunes returns s cut to at most n runes, on a rune boundary.
+// A string no longer than n bytes is returned as it is: every rune is
+// at least one byte, so that string cannot hold more than n runes.
+// n <= 0 leaves s unchanged. A string that is actually cut is copied,
+// so the caller can drop the rest of the original.
+func truncateRunes(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	for i := range s {
+		if n == 0 {
+			return strings.Clone(s[:i])
+		}
+		n--
+	}
+	return s
+}
 
 // -----------------------------------------------------------------------------
 // Middleware

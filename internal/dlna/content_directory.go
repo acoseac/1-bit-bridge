@@ -31,12 +31,12 @@ const upnpClassStorageFolder = "object.container.storageFolder"
 // breaking change for adapter implementations (bridge-side adapter
 // + any test stubs); think twice before extending.
 //
-// **No pagination today** — `ListTrackInfos` returns the entire
-// library in one slice. At the scale of our reference operator
-// libraries (50k tracks ≈ 5 MB of TrackInfo in memory) this is fine.
-// A v1.x follow-up will add (StartingIndex, RequestedCount) pagination
-// once the SOAP Browse handler accepts those arguments end-to-end
-// AND we have field reports of large-library responsiveness pain.
+// ListTrackInfos still returns the whole library. The SOAP Browse and
+// Search handlers slice that list (clampPage) and cap one response at
+// maxCDSPage entries. TotalMatches is the full count, so a control
+// point that pages collects every track. The 5 MB TrackInfo slice is
+// the list copy; the DIDL for an uncapped 50k-track browse was the
+// 43 MiB body.
 type LibrarySource interface {
 	// ListTrackInfos returns every track in the library, in stable order.
 	// Stable ordering is load-bearing for pagination correctness once it
@@ -839,8 +839,8 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 	case allTracksObjectID:
 		tracks := lib.ListTrackInfos()
 		// Apply pagination per the SOAP Browse arguments via the shared
-		// clamp (uint64-safe, RequestedCount==0 → "all"). See
-		// `clampPage`.
+		// clamp (uint64-safe; a RequestedCount of 0 is maxCDSPage). See
+		// clampPage.
 		startIdx, endIdx := clampPage(len(tracks), browse.StartingIndex, browse.RequestedCount)
 		slice := tracks[startIdx:endIdx]
 		didlElements = make([]string, 0, len(slice))
@@ -978,7 +978,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, emi
 		escapeXMLText(didlLite), numberReturned, total,
 	)
 	body2 := SOAPResponseEnvelope(ContentDirectoryServiceType, "Search", innerXML)
-	logSearchResponse(search, numberReturned, total, len(body2))
+	logSearchResponse(numberReturned, total, len(body2))
 
 	w.Header().Set("Content-Type", SOAPContentType)
 	w.Header().Set(SOAPResponseHeader, "")
@@ -1061,30 +1061,26 @@ func extractQuotedStrings(s string) []string {
 // logSearchRequest mirrors logBrowseRequest for the Search action,
 // sharing identical attribute keys (remoteAddr, userAgent,
 // startingIndex, requestedCount) so log aggregation can process Browse
-// and Search dispatches uniformly. UA truncated at 100 runes, same as
-// the Browse path.
+// and Search dispatches uniformly. Container, criteria, filter, sort
+// and the User-Agent are cut to dlnaLoggedFieldRunes. The response
+// line does not repeat the criteria or the container.
 func logSearchRequest(remoteAddr string, s searchAction, ua string) {
-	uaTrim := ua
-	if runes := []rune(uaTrim); len(runes) > 100 {
-		uaTrim = string(runes[:100])
-	}
 	packageLogger.Info("Search request",
 		slog.String("remoteAddr", remoteAddr),
-		slog.String("containerID", s.ContainerID),
-		slog.String("searchCriteria", s.SearchCriteria),
-		slog.String("filter", s.Filter),
+		slog.String("containerID", truncateRunes(s.ContainerID, dlnaLoggedFieldRunes)),
+		slog.String("searchCriteria", truncateRunes(s.SearchCriteria, dlnaLoggedFieldRunes)),
+		slog.String("filter", truncateRunes(s.Filter, dlnaLoggedFieldRunes)),
 		slog.Uint64("startingIndex", uint64(s.StartingIndex)),
 		slog.Uint64("requestedCount", uint64(s.RequestedCount)),
-		slog.String("sortCriteria", s.SortCriteria),
-		slog.String("userAgent", uaTrim),
+		slog.String("sortCriteria", truncateRunes(s.SortCriteria, dlnaLoggedFieldRunes)),
+		slog.String("userAgent", truncateRunes(ua, dlnaLoggedFieldRunes)),
 	)
 }
 
-// logSearchResponse mirrors logBrowseResponse for the Search action.
-func logSearchResponse(s searchAction, numberReturned, totalMatches, responseBytes int) {
+// logSearchResponse records the page the Search returned. The request
+// line already carries the criteria and the container.
+func logSearchResponse(numberReturned, totalMatches, responseBytes int) {
 	packageLogger.Info("Search response",
-		slog.String("containerID", s.ContainerID),
-		slog.String("searchCriteria", s.SearchCriteria),
 		slog.Int("numberReturned", numberReturned),
 		slog.Int("totalMatches", totalMatches),
 		slog.Int("responseBytes", responseBytes),
@@ -1101,31 +1097,27 @@ func logSearchResponse(s searchAction, numberReturned, totalMatches, responseByt
 // server.go); INFO level so it lands in `serve.log` by default
 // without requiring a debug-mode toggle.
 //
-// UA truncated at 100 runes defensively — pathological clients
-// sending unbounded UA strings would otherwise produce mile-long log
-// lines. 100 runes covers every real-world UA we've observed
-// (BubbleUPnP / 1-bit / Linn Kazoo / mPlayer Lite / Music Player
-// Daemon X.Y.Z all fit comfortably).
+// ObjectID, Filter, SortCriteria and the User-Agent are cut to
+// dlnaLoggedFieldRunes. 100 runes covers every real-world UA we've
+// observed (BubbleUPnP / 1-bit / Linn Kazoo / mPlayer Lite / Music
+// Player Daemon X.Y.Z all fit comfortably). The response and fault
+// lines keep the browse flag and the page counts; the request line
+// already named the object.
 //
 // Truncate by rune count (NOT bytes) so a multi-byte UTF-8 codepoint
-// in a hypothetical exotic UA string can't be cut mid-character,
-// which would corrupt the log line + produce invalid UTF-8 in
-// downstream JSON parsers consuming the slog handler's output. Per
-// CodeRabbit + Gemini on PR #312 round-1.
+// can't be cut mid-character, which would corrupt the log line and
+// produce invalid UTF-8 in downstream JSON parsers consuming the slog
+// handler's output. Per CodeRabbit + Gemini on PR #312 round-1.
 func logBrowseRequest(remoteAddr string, b browseAction, ua string) {
-	uaTrim := ua
-	if runes := []rune(uaTrim); len(runes) > 100 {
-		uaTrim = string(runes[:100])
-	}
 	packageLogger.Info("Browse request",
 		slog.String("remoteAddr", remoteAddr),
-		slog.String("objectID", b.ObjectID),
+		slog.String("objectID", truncateRunes(b.ObjectID, dlnaLoggedFieldRunes)),
 		slog.String("browseFlag", b.BrowseFlag),
-		slog.String("filter", b.Filter),
+		slog.String("filter", truncateRunes(b.Filter, dlnaLoggedFieldRunes)),
 		slog.Uint64("startingIndex", uint64(b.StartingIndex)),
 		slog.Uint64("requestedCount", uint64(b.RequestedCount)),
-		slog.String("sortCriteria", b.SortCriteria),
-		slog.String("userAgent", uaTrim),
+		slog.String("sortCriteria", truncateRunes(b.SortCriteria, dlnaLoggedFieldRunes)),
+		slog.String("userAgent", truncateRunes(ua, dlnaLoggedFieldRunes)),
 	)
 }
 
@@ -1137,7 +1129,6 @@ func logBrowseRequest(remoteAddr string, b browseAction, ua string) {
 // envelope exceeds its parser threshold). Per Gemini consult.
 func logBrowseResponse(b browseAction, numberReturned, totalMatches, responseBytes int) {
 	packageLogger.Info("Browse response",
-		slog.String("objectID", b.ObjectID),
 		slog.String("browseFlag", b.BrowseFlag),
 		slog.Int("numberReturned", numberReturned),
 		slog.Int("totalMatches", totalMatches),
@@ -1155,7 +1146,6 @@ func logBrowseResponse(b browseAction, numberReturned, totalMatches, responseByt
 // BrowseMetadata, so these are the arms most likely to be under a microscope.
 func logBrowseFault(b browseAction, errCode int) {
 	packageLogger.Info("Browse fault",
-		slog.String("objectID", b.ObjectID),
 		slog.String("browseFlag", b.BrowseFlag),
 		slog.Int("upnpErrorCode", errCode),
 	)
@@ -1187,7 +1177,7 @@ func browseFolderChildren(
 	if total == 0 {
 		return nil
 	}
-	// Shared pagination clamp (uint64-safe; RequestedCount==0 → "all").
+	// Shared pagination clamp (uint64-safe; a RequestedCount of 0 is maxCDSPage).
 	startIdx, endIdx := clampPage(total, browse.StartingIndex, browse.RequestedCount)
 
 	// Emit folder containers first, then tracks. Iterate the combined
@@ -1250,10 +1240,21 @@ func folderArtworkURL(folderIndex *FolderIndex, node FolderNode, emit didlEnv) s
 	return ArtworkURLFor(emit.serverURL, folderIndex.artworkKeyFor(node))
 }
 
-// clampPage computes the [lo, hi) slice window for a Browse response
-// honouring the SOAP StartingIndex / RequestedCount pagination
-// arguments. A RequestedCount of 0 means "return as many as possible"
-// (UPnP convention).
+// maxCDSPage is the most entries one Browse or Search response returns.
+// A RequestedCount of 0, or anything larger, is this many. 1000 is the
+// largest count a measured control point asks for in one request
+// (BubbleUPnP and foobar2000 playlist browse; JRiver's chunk is about
+// the same). The bridge ingest and the 1-bit app ask for 200, and
+// BubbleUPnP's folder browse asks for 16 then 500, so those requests
+// come back whole. A 50,000-track page was a 43 MiB body and about
+// 406 MiB of allocation; a page of 1000 is about a fiftieth of that.
+// TotalMatches stays the full set.
+const maxCDSPage = 1000
+
+// clampPage computes the [lo, hi) slice window for a Browse or Search
+// response honouring the SOAP StartingIndex / RequestedCount pagination
+// arguments. A RequestedCount of 0, or one past maxCDSPage, is clipped
+// to maxCDSPage. The caller still reports TotalMatches as the full set.
 //
 // Bound arithmetic runs in uint64 to defend against the int(uint32)
 // overflow a renderer could trigger with RequestedCount = 0xFFFFFFFF
@@ -1262,6 +1263,9 @@ func folderArtworkURL(folderIndex *FolderIndex, node FolderNode, emit didlEnv) s
 // CodeRabbit Major on PR #303 — extracted so the root / All Tracks /
 // folder-children arms share ONE implementation and can't drift.
 func clampPage(total int, startingIndex, requestedCount uint32) (lo, hi int) {
+	if requestedCount == 0 || requestedCount > maxCDSPage {
+		requestedCount = maxCDSPage
+	}
 	n := uint64(total)
 	startU := uint64(startingIndex)
 	if startU > n {

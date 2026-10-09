@@ -39283,3 +39283,127 @@ failures. Observed, 0.854s:
 ```
 
 Both files were restored after the control.
+
+## 2026-10-09 — the DLNA listener bounds what one peer can start (backlog B220, B162)
+
+The listener is unauthenticated. Five measurements from the 2026-09-30
+review, re-run on this tree before the bound (red tests, real
+`Server.Start` on loopback for the listener, the real SOAP handler for
+Browse, Search and the log lines):
+
+- 48 SUBSCRIBEs whose callbacks blocked grew the process by 190
+  goroutines. The review's larger flood was 6,000 SUBSCRIBEs, 15,409
+  goroutines and 80 MiB of stack.
+- A Browse of 1,050 tracks with RequestedCount 0 answered
+  `NumberReturned` 1050, `TotalMatches` 1050, body 639,011 bytes. The
+  review's 50,000-track browse built a 43 MiB body and allocated 406
+  MiB; eight at once took 1.7 GiB.
+- Eight GETs with a 900 KiB User-Agent answered 200, stored 8 telemetry
+  entries and retained 7,313,296 bytes after a GC. The review's 100
+  requests took the heap from 4 MiB to 92 MiB. A 150-rune User-Agent of
+  U+00E9 was stored as 150 runes.
+- `ReadTimeout` and `IdleTimeout` were 0 and `MaxHeaderBytes` was 0
+  (net/http's 1 MiB default). An idle keep-alive and a SOAP body that
+  stopped after one byte were both still open when a 2 s client read
+  gave up (4.01 s for the pair). The review left both open past 26 s.
+- Browse and Search INFO lines kept a 300-character ObjectID, Filter,
+  SortCriteria and SearchCriteria whole, and repeated ObjectID and
+  SearchCriteria on the response and the fault. The review's two 0.9 MB
+  requests wrote 2.46 MB of INFO lines.
+
+What shipped:
+
+- `acquireNotifySlot` is a semaphore of `genaNotifyPool` (8), taken in
+  the SUBSCRIBE handler after the B39 callback checks and released when
+  that delivery returns. A full pool drops the NOTIFY. The 200 has
+  already been written. A worker pool that exits on the notify context
+  was rejected: `newGENATestServer` cancels that context before any
+  SUBSCRIBE, and `notifyWG.Wait` would then hang. After the bound the
+  same 48 SUBSCRIBEs deliver 8 NOTIFYs. The process grows by 31 to 33
+  goroutines (the pool, the callbacks it is serving, and the accept
+  loop). Under `-race` one run reached 33, so the ceiling is the flood
+  size (48), which 190 still fails. The callbacks stay blocked until
+  the flood has been answered, then the test releases them and waits
+  on `notifyWG`: every accepted NOTIFY is in that group, and the
+  delivered count is what pins the pool.
+- `clampPage` clips a RequestedCount of 0 or past `maxCDSPage` (1000)
+  to 1000. `TotalMatches` stays the full set. 1000 is the largest count
+  a measured control point puts in one request (BubbleUPnP and
+  foobar2000 playlist browse; JRiver's chunk is about the same). The
+  bridge ingest and the 1-bit app ask for 200, and BubbleUPnP's folder
+  browse asks for 16 and then 500, so those requests come back whole.
+  A cap of 200 would shorten the 500 and the 1000. A cap of 1 would
+  make a paging client work and a client that asks for everything show
+  one track. The store still lists the library; the cap is the DIDL
+  window. After the bound the 1,050-track browse answers
+  `NumberReturned` 1000 and 608,611 bytes, and a client that pages by
+  `NumberReturned` collects each track once (the next page is the
+  remaining 50). Requests for 1, 200 and 1000 are returned whole.
+  Residual: mconnect browsing All Tracks with RequestedCount 0 may show
+  1000 unless it pages. Album folders are not shortened.
+- `Record` cuts every stored string with `truncateRunes` to
+  `dlnaLoggedFieldRunes` (100), on a rune boundary, so the 150-rune
+  User-Agent is stored as 100. The listener reads at most 16 KiB of
+  headers. net/http's `initialReadLimitSize` (Go 1.26.6) is
+  `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
+  `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
+  at 16 KiB. A header of 18 KiB, which a field of 16 KiB would still
+  admit, answers 431; an ordinary description GET answers 200. After
+  the bound the eight 900 KiB User-Agents answer 431, store nothing, and
+  the heap does not grow (one run, −81,304 bytes, which is GC noise).
+  Truncation alone would not make the status 431, and a post-GC heap
+  reading would not prove the header cap, so the test asserts both.
+- `ReadTimeout` is 60 s and `IdleTimeout` is 120 s. `WriteTimeout`
+  stays unset. With both shortened to 200 ms on that server only, the
+  idle keep-alive and the stalled body each closed inside the client's
+  2 s read. A stalled body whose handler has started writes an error
+  and then closes, so the close test drains bytes until the read
+  fails. A timeout with nothing further is still "left open".
+- The request lines cut ObjectID, Filter, SortCriteria, SearchCriteria
+  and the User-Agent to the same 100 runes. The response and the fault
+  keep the browse flag and the page counts and do not repeat the client
+  fields. `remoteAddr` is the TCP peer and is left as it is.
+
+Negative controls, each a revert of that one bound on the committed
+tree, then the file restored. Predicted red, and that is what ran:
+
+- Skipping the slot (one goroutine per SUBSCRIBE again):
+  `TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify` grew by 190.
+- Removing the `clampPage` clip:
+  `TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest`
+  saw `NumberReturned` 1050 and a 639,011-byte body.
+- `Record` storing the strings as they arrived:
+  `TestTelemetryKeepsAHundredRunesOfEachHeader` stored 150 runes for
+  the User-Agent, Accept, Range and content-features header.
+- `MaxHeaderBytes` left unset:
+  `TestTheListenerRefusesAnOversizedHeader` answered 200, stored 8
+  entries and retained 7,426,312 bytes.
+- `ReadTimeout` and `IdleTimeout` left unset:
+  `TestTheListenerUsesTheAPIDeadlines` read 0s for both, and
+  `TestTheListenerClosesAnIdleKeepAliveAndAStalledBody` left the idle
+  keep-alive and the stalled body open (4.00 s).
+- The log lines writing the client fields whole and repeating them:
+  `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`
+  failed on the ObjectID, the Filter, the fault, the Browse response
+  and the Search response.
+
+Review of #1177. `startLoopbackDLNA` skips only a Start error whose
+text begins `dlna: SSDP start:`; any other Start error fails the test.
+The counts a control point sends, and the walk that pages by
+`NumberReturned`, are
+`TestARequestedCountUpToThePageIsReturnedWhole` and
+`TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`.
+`truncateRunes` ranges the string: a string no longer than n bytes is
+returned as it is, and n <= 0 leaves it unchanged.
+
+A cut returned `s[:i]`, which shares the header's backing array, so a
+ring entry kept the rest of a request header however short the stored
+field was. `TestRecordReleasesTheRestOfACutHeader` failed while
+`unsafe.StringData` of the stored User-Agent equalled the original's
+("stored User-Agent shares the original header"). The cut now returns
+`strings.Clone` of that prefix. A string that is not cut is returned
+as it arrived: one no longer than n bytes, one of at most n runes, and
+n <= 0. The same test keeps those two fields on the original's memory.
+Negative control, the clone replaced by `s[:i]` and the test restored
+after: `TestRecordReleasesTheRestOfACutHeader` failed again on that
+same line.
