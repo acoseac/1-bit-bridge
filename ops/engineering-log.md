@@ -39205,3 +39205,31 @@ SO_REUSEPORT), so serve coming up is serve using the handed listener.
 `TestAHandedListenerOnAnotherAddressIsAStartupError` hands a listener
 whose address is not the config's and requires exit 1, the handed-listener
 line, and no banner.
+
+The negative control, after that commit, closed both listeners in
+`TestAHandedListenerCannotBeTakenBeforeServeBinds`, bound a squatter on
+each address, and launched serve with the port numbers alone.
+GOTOOLCHAIN=go1.26.6. Predicted: exit 1 before the banner, stderr
+`listen …: bind: address already in use` (the LAN bind returns before
+the admin error is selected). Observed, 0.10s:
+
+```
+serve exited with code 1 before it printed its startup banner
+stderr=listen 127.0.0.1:58619: listen tcp 127.0.0.1:58619: bind: address already in use
+```
+
+The file was restored after the control.
+
+Stress, same toolchain, `-race -count=8 -parallel=8` over the 22
+converted serve tests (176 runs). A background loop bound 1,500
+ephemeral TCP and UDP sockets and 400 draws in 20000–32767 between
+them. The package's tests do not call `t.Parallel`, so `-parallel` does
+not overlap them; the churner is what takes the ports. On main
+`0dcead53`, 494.854s, exit 1, six failures, each `address already in
+use`: `TestEventStreamsEndWhenServeShutsDown` twice (one on the admin
+port, one on the LAN port), `TestServeAnalysisPoolLineFollowsTheLiveGate`
+(`switched_on_without_a_usable_sox`), `TestAnEarlyExitDoesNotWaitOutTheBackupTicker`
+(the LAN bind, so the test never reached the admin bind it holds on
+purpose), `TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile`, and
+`TestServeRedeemsThePairingLinksCode`. On this branch, 519.504s, exit 0,
+no `address already in use`.
