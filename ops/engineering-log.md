@@ -39116,3 +39116,39 @@ green.
   `TestAnOldEntryWhosePathStartsWithTheRootNameIsRefused`. Actual: only
   that test, outcome restored. The other eight tests in that `-run`
   stayed green.
+
+### Negative controls, round 2
+
+Each control mutated the named production file on commit `e0974648`,
+ran the named tests with `-count=1`, and restored the file with
+`git checkout HEAD --`. Predicted names are the ones that must go red.
+
+- The empty stamp is left after a failed root record whose file came
+  back. The `pruneEmptyStamp` call was removed from the successful
+  move-back arm in `trash.go`. Predicted red:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`. Actual:
+  only that test; the stamp directory was still under `.bridge-trash`.
+  Stayed green:
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+- A failed move-back reports the same reason as a successful one
+  (`originWriteFailed`). Predicted red:
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`.
+  Actual: only that test, reason "could not record which library root
+  this file came from". Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
+- The sidecar is the sibling of whatever audio path it is given, with
+  no check that it stays in the trash. `sidecarUnder` returned
+  `originSidecar(audio)` immediately. Predicted red:
+  `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
+  `TestAnOriginRecordOutsideTheTrashIsNotRemoved`. Actual: those two.
+  The write landed beside the file outside the trash, and the remove
+  deleted that sidecar. Stayed green:
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`,
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`,
+  `TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot`.
+- A recorded root that is not an absolute path is accepted. The
+  `!filepath.IsAbs` term was removed from `checkOriginRecord`.
+  Predicted red: `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.
+  Actual: only that test, reason "the library root this path belongs
+  to is not configured". Stayed green:
+  `TestRestoreRefusesAnEntryWhoseRecordedRootIsGone`.
