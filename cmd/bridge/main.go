@@ -4933,6 +4933,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// had no production caller at all: the option was passed only by two
 		// tests, which is why they were green.
 		upload.WithReclaimable(trashMgr.Reclaimable))
+	// A restore and a commit of one path share the commit's destination lock.
+	// Trash is built first (the 507 needs it), so the bind is applied after
+	// the upload manager exists.
+	trash.WithDestinationLock(uploadMgr.LockDestination)(trashMgr)
 	// bgWriters-joined: the sweeper unlinks staged files inside a library
 	// root, so it must finish before Store.Close the same way every other
 	// background writer does.

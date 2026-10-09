@@ -124,6 +124,11 @@ type Manager struct {
 	// the fail-closed path without filling a disk.
 	freeBytes func(dir string) (int64, error)
 
+	// destStat is the existence check at a commit destination. Nil is
+	// os.Stat. A test injects a fault so a failed check can be told from
+	// "nothing there".
+	destStat func(path string) (os.FileInfo, error)
+
 	// reclaimable reports what a trash purge could return, for the NoSpace
 	// error. Wired to trash.Manager.Reclaimable in cmd/bridge; nil only in a
 	// test that does not care, in which case the 507 reports zero.
@@ -138,6 +143,12 @@ type Option func(*Manager)
 // WithFreeBytes overrides the disk probe.
 func WithFreeBytes(fn func(dir string) (int64, error)) Option {
 	return func(m *Manager) { m.freeBytes = fn }
+}
+
+// WithDestStat overrides the stat of a commit destination. Production leaves
+// it nil, which is os.Stat.
+func WithDestStat(fn func(path string) (os.FileInfo, error)) Option {
+	return func(m *Manager) { m.destStat = fn }
 }
 
 // WithClock overrides time.Now.
@@ -756,8 +767,16 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 	defer unlockDest()
 
 	if !doc.Overwrite {
-		if _, err := os.Stat(dest); err == nil {
+		_, err := m.statDest(dest)
+		switch {
+		case err == nil:
 			out.Status, out.Reason = "skipped", "a file already exists at this path"
+			return out, ""
+		case !errors.Is(err, fs.ErrNotExist):
+			// A failed check is not "nothing there". os.Rename replaces, so
+			// going ahead on EIO or ESTALE would overwrite a file the stat
+			// could not see.
+			out.Status, out.Reason = "failed", existenceUnreadable(err)
 			return out, ""
 		}
 	}
@@ -792,6 +811,31 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 // existence check below still runs against the real path, so nothing about
 // which file is written changes.
 func destLockKey(dest string) string { return strings.ToLower(dest) }
+
+// LockDestination serialises another writer with a commit of abs. The key is
+// destLockKey, so a restore and a commit of two case-spellings of one file
+// take one lock. The returned function releases it.
+func (m *Manager) LockDestination(abs string) func() {
+	return m.destLocks.lock(destLockKey(abs))
+}
+
+func (m *Manager) statDest(path string) (os.FileInfo, error) {
+	if m.destStat != nil {
+		return m.destStat(path)
+	}
+	return os.Stat(path)
+}
+
+// existenceUnreadable is the per-file reason when the destination could not
+// be stated. The absolute path stays off it: the outcome already names the
+// library-relative path, and a PathError would echo the root.
+func existenceUnreadable(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		err = pe.Err
+	}
+	return "could not check whether a file is already at this path: " + err.Error()
+}
 
 // openStagedFile opens a .part for positioned writing.
 //

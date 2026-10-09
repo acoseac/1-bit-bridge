@@ -32,4 +32,8 @@ func TestUploadReclaimableIsWiredInProduction(t *testing.T) {
 		t.Error("cmd/bridge does not pass upload.WithReclaimable — every 507 will answer " +
 			"reclaimableBytes: 0, which is the one value the field exists to be non-zero for")
 	}
+	if !strings.Contains(src, "trash.WithDestinationLock(uploadMgr.LockDestination)") {
+		t.Error("cmd/bridge does not bind the upload destination lock onto trash — " +
+			"a restore and a commit of one path can both pass the existence check and rename")
+	}
 }

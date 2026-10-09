@@ -1,6 +1,9 @@
 package trash
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -70,8 +73,31 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		if _, serr := os.Stat(dst); serr == nil {
+		// Held across the existence check and the rename, then released on
+		// every exit of this entry. A defer inside the loop would hold every
+		// earlier path until Restore returns.
+		unlock := func() {}
+		if m.destLock != nil {
+			unlock = m.destLock(dst)
+		}
+		locked := true
+		release := func() {
+			if locked {
+				unlock()
+				locked = false
+			}
+		}
+		_, serr = m.statDest(dst)
+		switch {
+		case serr == nil:
+			release()
 			out.Status, out.Reason = "failed", "a file already exists at the original path"
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		case !errors.Is(serr, fs.ErrNotExist):
+			release()
+			out.Status, out.Reason = "failed", existenceUnreadable(serr)
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
@@ -84,17 +110,20 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 		// 0o755, matching the upload commit path: this is the user's music,
 		// not the bridge's own state, and 0o700 would break a shared mount.
 		if mkErr := os.MkdirAll(filepath.Dir(dst), 0o755); mkErr != nil {
+			release()
 			out.Status, out.Reason = "failed", mkErr.Error()
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
 		if rnErr := atomicwrite.RenameWithRetry(src, dst); rnErr != nil {
+			release()
 			out.Status, out.Reason = "failed", rnErr.Error()
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
+		release()
 		if info, ierr := os.Stat(dst); ierr == nil {
 			out.Bytes = info.Size()
 			res.Bytes += info.Size()
@@ -127,15 +156,19 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 	return res, nil
 }
 
-// Purge permanently removes entries. An EMPTY id list purges everything —
-// that is the "empty trash" action, and it is the only thing that actually
-// frees space.
+// Purge permanently removes entries. A nil id list purges everything — that
+// is the "empty trash" action, and it is the only thing that actually frees
+// space. A present empty list purges nothing: len cannot tell the two apart,
+// and reading both as everything is how {"ids":[]} emptied the trash.
 func (m *Manager) Purge(ids []string) (*Result, error) {
 	if !m.on() {
 		return nil, ErrDisabled
 	}
 	res := &Result{}
-	if len(ids) == 0 {
+	if ids != nil && len(ids) == 0 {
+		return nil, fmt.Errorf("%w: no entries given", ErrInvalidPath)
+	}
+	if ids == nil {
 		entries, err := m.List()
 		if err != nil {
 			return nil, err
@@ -181,6 +214,24 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 }
 
 // locate finds the on-disk file for a (stamp, rel) pair across every root.
+func (m *Manager) statDest(path string) (os.FileInfo, error) {
+	if m.destStat != nil {
+		return m.destStat(path)
+	}
+	return os.Stat(path)
+}
+
+// existenceUnreadable is the per-file reason when the destination could not
+// be stated. The absolute path stays off it: the outcome already names the
+// library-relative path, and a PathError would echo the root.
+func existenceUnreadable(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		err = pe.Err
+	}
+	return "could not check whether a file is already at this path: " + err.Error()
+}
+
 func (m *Manager) locate(stamp, rel string) (root, src string, ok bool) {
 	for _, r := range m.roots() {
 		p := filepath.Join(m.trashRoot(r), stamp, filepath.FromSlash(rel))

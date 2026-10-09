@@ -174,6 +174,57 @@ func TestPurgeIsWhatActuallyReclaims(t *testing.T) {
 	}
 }
 
+// TestAnEmptyIDListDoesNotEmptyTheTrash — a present empty list is a scope,
+// and an empty scope is nothing. A bodyless DELETE is still "empty the trash".
+func TestAnEmptyIDListDoesNotEmptyTheTrash(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	wireTrash(t, srv)
+	enableDelete(t, srv, true)
+	root := cfg.LibraryRoots[0]
+	seedLibraryFile(t, root, "A/1.flac", "one")
+	seedLibraryFile(t, root, "A/2.flac", "two")
+	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash", map[string]any{
+		"paths": []string{"A/1.flac", "A/2.flac"},
+	}, nil); code != http.StatusOK {
+		t.Fatalf("trash = %d", code)
+	}
+	var before []trashEntryDTO
+	if code := doJSON(t, srv.Handler(), "GET", "/api/library/trash", nil, &before); code != http.StatusOK || len(before) != 2 {
+		t.Fatalf("list = %d, %d entries", code, len(before))
+	}
+	var errBody map[string]any
+	if code := doJSON(t, srv.Handler(), "DELETE", "/api/library/trash", map[string]any{"ids": []string{}}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("empty id list = %d (%v), want 400", code, errBody)
+	}
+	var after []trashEntryDTO
+	if code := doJSON(t, srv.Handler(), "GET", "/api/library/trash", nil, &after); code != http.StatusOK || len(after) != 2 {
+		t.Fatalf("after an empty id list the trash holds %d entries (status %d), want both", len(after), code)
+	}
+}
+
+// TestAPaddedPathDoesNotTrashTheUnpaddedFile — trimming a leading space
+// addressed a different file. Both spellings stay where they were.
+func TestAPaddedPathDoesNotTrashTheUnpaddedFile(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	wireTrash(t, srv)
+	enableDelete(t, srv, true)
+	root := cfg.LibraryRoots[0]
+	padded := seedLibraryFile(t, root, " Various/Album/01.flac", "PADDED")
+	plain := seedLibraryFile(t, root, "Various/Album/01.flac", "PLAIN")
+	var errBody map[string]any
+	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash", map[string]any{
+		"paths": []string{" Various/Album/01.flac"},
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("padded path = %d (%v), want 400", code, errBody)
+	}
+	if body, err := os.ReadFile(padded); err != nil || string(body) != "PADDED" {
+		t.Errorf("padded file = %q, %v", body, err)
+	}
+	if body, err := os.ReadFile(plain); err != nil || string(body) != "PLAIN" {
+		t.Errorf("unpadded file = %q, %v", body, err)
+	}
+}
+
 // TestTrashRefusesPathsOutsideTheRoot — the API layer must not be the only
 // thing standing between a hostile path and the filesystem, but it must also
 // not be the thing that lets one through.

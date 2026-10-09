@@ -138,6 +138,16 @@ type Manager struct {
 
 	reclaimMu sync.Mutex
 	reclaim   map[string]reclaimEntry
+
+	// destLock serialises a restore onto a path with an upload commit of the
+	// same path. Nil in tests that do not wire it; production binds the
+	// upload manager's destination lock, which is the one key both writers
+	// must share.
+	destLock func(abs string) func()
+	// destStat is the existence check at the restore destination. Nil is
+	// os.Stat. A test injects a fault so a failed check can be told from
+	// "nothing there".
+	destStat func(path string) (os.FileInfo, error)
 }
 
 type reclaimEntry struct {
@@ -150,6 +160,19 @@ type Option func(*Manager)
 
 // WithClock overrides time.Now.
 func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.now = fn } }
+
+// WithDestinationLock binds the lock an upload commit takes on a destination,
+// so a restore and a commit of one path cannot both pass the existence check
+// and then rename. The function returns the unlock.
+func WithDestinationLock(fn func(abs string) func()) Option {
+	return func(m *Manager) { m.destLock = fn }
+}
+
+// WithDestStat overrides the stat of a restore destination. Production leaves
+// it nil, which is os.Stat.
+func WithDestStat(fn func(path string) (os.FileInfo, error)) Option {
+	return func(m *Manager) { m.destStat = fn }
+}
 
 // New builds a Manager. `enabled` is read LIVE on every mutating call so the
 // setting hot-applies; a nil enabled means disabled, which is the safe
@@ -180,7 +203,13 @@ func (m *Manager) trashRoot(root string) string { return filepath.Join(root, Dir
 // themselves be targets — a delete of the trash via the delete endpoint would
 // be a loop, and a delete of staging would race a live upload.
 func validRel(rel string) (string, error) {
-	rel = strings.TrimPrefix(strings.TrimSpace(rel), "/")
+	// A padded path is a different name. Trimming it addressed the unpadded
+	// file, which on a volume that folds spaces is a different folder's
+	// track, and on one that does not is a file the request never named.
+	if rel != strings.TrimSpace(rel) {
+		return "", fmt.Errorf("%w: leading or trailing whitespace", ErrInvalidPath)
+	}
+	rel = strings.TrimPrefix(rel, "/")
 	if rel == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidPath)
 	}
@@ -255,6 +284,17 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 	res := &Result{}
 	dirs := map[string]struct{}{}
 	spellers := map[string]*fsutil.Speller{}
+
+	// A padded path is refused for the whole request, before anything moves.
+	// A per-file failure would still trash the other names in the batch, and
+	// the one the padding names is the one that must stay.
+	for _, raw := range rels {
+		if raw == strings.TrimSpace(raw) {
+			continue
+		}
+		_, err := validRel(raw)
+		return nil, err
+	}
 
 	for _, raw := range rels {
 		out := Outcome{Path: raw}
@@ -453,7 +493,12 @@ func (m *Manager) invalidateReclaim() {
 
 // splitID splits "<stamp>/<relPath>" and validates both halves.
 func splitID(id string) (stamp string, rel string, err error) {
-	stamp, rel, ok := strings.Cut(strings.TrimSpace(id), "/")
+	// An id is matched as given. Trimming it would restore or purge the
+	// unpadded path, which is the same class as trimming a delete path.
+	if id != strings.TrimSpace(id) {
+		return "", "", fmt.Errorf("%w: leading or trailing whitespace", ErrInvalidPath)
+	}
+	stamp, rel, ok := strings.Cut(id, "/")
 	if !ok {
 		return "", "", fmt.Errorf("%w: malformed id", ErrInvalidPath)
 	}

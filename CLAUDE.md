@@ -8731,6 +8731,37 @@ its twin.** The top list is older, shorter, and read first.
   whose delete of `artist/ALBUM/01.flac` retired no row and rescanned the
   folder a second time. The trash spells each path as its folders list it
   first (the B219 bullet under **Scanner**).
+- **A present empty trash-id list purges nothing** (2026-10-09, backlog B180).
+  `Purge(nil)` and a bodyless `DELETE /api/library/trash` still empty the
+  trash — that is the console's "Empty trash". `{"ids":[]}` is a present
+  scope, the same rule as `{"albumIds":[]}`: `Purge` returns
+  `ErrInvalidPath` ("no entries given") and the handler answers 400. The
+  gate is inside `Purge`, so a handler check in front of it would leave a
+  reverted `Purge` green. `{"ids":null}` and `{}` decode to nil and stay
+  purge-all. (`TestAnEmptyIDListDoesNotEmptyTheTrash`,
+  `TestPurgeOfAnEmptySliceRefuses`, `TestPurgeWithNoIDsEmptiesEverything`,
+  `TestPurgeIsWhatActuallyReclaims`.)
+- **A library path is never trimmed** (2026-10-09, backlog B178).
+  `validRel` and `splitID` refuse a path or id that `strings.TrimSpace`
+  would change, and `ValidateRelPath` refuses the same shape, so an upload
+  cannot create a file the trash API cannot name. The refusal is for the
+  whole trash request, before any move: one padded path answers 400 and
+  leaves every file where it was. A leading `/` is still stripped. A space
+  inside a segment (`Artist/ Album/01.flac`) is a different name and stays
+  accepted on both sides. (`TestAPaddedPathDoesNotTrashTheUnpaddedFile`,
+  `TestValidateRelPath`.)
+- **A destination that cannot be stated is not "nothing there"**
+  (2026-10-09, backlog B179). `commitOne` (when not overwriting) and
+  `Restore` proceed only on `fs.ErrNotExist`. Any other stat error fails
+  that file, with a reason that names the error and not the absolute path.
+  A directory at the path stays "already exists". `Restore` takes the
+  commit's destination lock (`LockDestination` / `WithDestinationLock`,
+  bound in `runServe` after the upload manager exists) and releases it
+  before the next entry — a `defer` inside the loop would hold every
+  earlier path until `Restore` returns. (`TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile`,
+  `TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile`,
+  `TestARestoreAndACommitToOnePathTakeTheSameDestinationLock`,
+  `TestUploadReclaimableIsWiredInProduction`.)
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`
