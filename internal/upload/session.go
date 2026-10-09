@@ -35,6 +35,12 @@ type fileDoc struct {
 	// Digest is an optional client-declared whole-file SHA-256, hex. When
 	// present it is verified as the final byte lands.
 	Digest string `json:"digest,omitempty"`
+	// Modified is the client's file mtime in unix milliseconds. Fingerprint
+	// is hex(sha256(head)) concatenated with hex(sha256(tail)). Both are
+	// empty on a session written before resume identity existed, and a
+	// session without them is not resumed.
+	Modified    int64  `json:"modified,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // fileState is the DURABLE offset, and it is the only offset that counts.

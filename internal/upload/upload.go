@@ -191,9 +191,11 @@ func (m *Manager) resolveRoot(want string) (string, error) {
 
 // FileDecl is one client-declared file at session create.
 type FileDecl struct {
-	Path   string
-	Size   int64
-	Digest string // optional hex SHA-256
+	Path        string
+	Size        int64
+	Digest      string // optional hex SHA-256 of the whole file
+	Modified    int64  // client file mtime, unix milliseconds; 0 means absent
+	Fingerprint string // optional hex(sha256(head))||hex(sha256(tail)), 128 chars
 }
 
 // CreateOptions are the per-session knobs a caller (ultimately the control
@@ -215,6 +217,12 @@ type FileStatus struct {
 	SHA256      string
 	Complete    bool
 	DuplicateOf string // an existing library path this looks like
+	// Digest, Modified and Fingerprint are what the client declared when
+	// the session was created. Digest is the whole-file check; the other
+	// two are the resume identity. SHA256 is the hash of bytes that landed.
+	Digest      string
+	Modified    int64
+	Fingerprint string
 }
 
 // RejectedFile is a declared file the session would not accept.
@@ -297,9 +305,22 @@ func (m *Manager) Create(decls []FileDecl, opts CreateOptions) (*Session, error)
 				continue
 			}
 		}
+		if d.Modified < 0 {
+			reject(clean, "negative modified")
+			continue
+		}
+		fp := d.Fingerprint
+		if fp != "" {
+			if _, err := hex.DecodeString(fp); err != nil || len(fp) != 128 {
+				reject(clean, "malformed fingerprint")
+				continue
+			}
+			fp = strings.ToLower(fp)
+		}
 		total += d.Size
 		doc.Files = append(doc.Files, fileDoc{
-			ID: newID(), RelPath: clean, Size: d.Size, Digest: strings.ToLower(d.Digest),
+			ID: newID(), RelPath: clean, Size: d.Size,
+			Digest: strings.ToLower(d.Digest), Modified: d.Modified, Fingerprint: fp,
 		})
 	}
 
@@ -371,12 +392,15 @@ func (m *Manager) view(doc sessionDoc) *Session {
 			logger.Warn("read upload file state", "session", doc.ID, "file", f.ID, "err", err)
 		}
 		s.Files = append(s.Files, FileStatus{
-			ID:       f.ID,
-			Path:     f.RelPath,
-			Size:     f.Size,
-			Offset:   st.Offset,
-			SHA256:   st.SHA256,
-			Complete: fileRecordedComplete(st.Offset, f.Size, st.SHA256),
+			ID:          f.ID,
+			Path:        f.RelPath,
+			Size:        f.Size,
+			Offset:      st.Offset,
+			SHA256:      st.SHA256,
+			Complete:    fileRecordedComplete(st.Offset, f.Size, st.SHA256),
+			Digest:      f.Digest,
+			Modified:    f.Modified,
+			Fingerprint: f.Fingerprint,
 		})
 	}
 	return s

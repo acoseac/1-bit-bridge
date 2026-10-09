@@ -38612,3 +38612,77 @@ moved-row test goes red again.
 No `ExtractorVersion` bump and no `ProtocolVersion` bump. The wire
 answer for a sidecar this request could not open is still 410
 `variant_missing_on_disk`.
+
+## 2026-10-09 — a resumed upload identifies the file, and the commit checks it (backlog B176)
+
+The console matched a stopped upload to a new pick by path and size
+(`sessionKey` / `findResumable` / `findFilesOnlyMatch` in
+`internal/admin/static/app.js`) and created the session with no
+whole-file digest. `WriteChunk` verifies `fileDoc.Digest` only when the
+client declared one. A file edited in place without its size changing
+therefore resumed: the staged prefix stayed the old version, the
+remainder was the new one, and each chunk's `Content-Digest` (#796)
+matched the bytes of that request. The running hash was of the splice.
+With an empty declared digest the completing chunk stored it and
+`Commit` reported `committed`.
+
+Measured through the real handlers, then removed so the suite does not
+keep asserting the defect. The probe created a 64-byte file with no
+digest, PUT 32 `A` bytes and then 32 `B` bytes, each with its own
+chunk digest, and the commit answered
+`committed: 1`. The library file was those 64 bytes. The package passed
+with that test in it.
+
+The session manifest now stores `modified` (`File.lastModified` in unix
+milliseconds) and `fingerprint` (`hex(sha256(head))` + `hex(sha256(tail))`,
+64 KiB at each end, 128 hex characters). Both are echoed on the file
+status the console lists. `sessionKey` includes them and returns null
+unless every entry has a positive modified and a 128-character
+fingerprint, so a session from before this change starts over. A new
+session also sends the whole-file SHA-256 as `digest`. The hash runs in
+the page, incrementally, and only when the session is created: a
+matching resume skips it. A second create of the same pick reuses the
+digest already computed. While it hashes, the progress panel is shown
+and the review panel stays. Stop and Cancel both abort the hash.
+
+The hash cost, 2026-10-09, node, the shipped `createSHA256` from
+`app.js`, 256 MiB of zeros read in 1 MiB pieces: the incremental hash
+alone took 3266 ms (82 MB/s) and `node:crypto` `createHash` alone, over
+the same pieces, 96 ms (about 2.8 GB/s). The two digests matched. The
+same hash yielding with `setTimeout(0)` every 8 MiB took 3241 ms. A
+1 GiB file is about 13 s at that rate and a 4 GB file about 50 s, paid
+once per new session. An earlier combined loop reported native as 0 ms
+because it timed `digest()` only, after the native hasher had already
+been updated inside the JavaScript loop.
+
+A same-size edit with a different mtime or a different head or tail
+does not resume. A session with no identity does not resume. A splice
+that keeps the mtime and the 64 KiB head and tail (a change in the
+middle of a file larger than 128 KiB) still matches, and the declared
+digest refuses the completing chunk: 400 `digest_mismatch`, the offset
+stays at the prefix, and the commit is `committed: 0`, `failed: 1`,
+with nothing written into the library
+(`TestASplicedUploadWithADeclaredDigestIsNotCommitted`). Create rejects
+a fingerprint that is not 128 hex characters and a negative modified.
+The chunk digest check is unchanged.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump. The fields are
+on the console's upload session, which the paired app does not decode.
+
+Negative controls, each a production-only mutation, restored before
+this record.
+
+The resume match put back to path and size. Predicted red:
+`TestASameSizeEditDoesNotResume`, with the four messages a same-size
+edit resumed, a file with the same mtime and a different head resumed,
+a session written before identity resumed, and a session written before
+identity still counted as the same files. Actual: those four.
+
+The whole-file comparison changed to `if false && fd.Digest != "" &&
+sum != fd.Digest`. Predicted red:
+`TestASplicedUploadWithADeclaredDigestIsNotCommitted` and
+`TestDeclaredDigestMismatchRefusesCompletion`. Predicted still green:
+`TestChunkDigestMismatchDoesNotAdvanceOffset`, which checks the chunk
+digest. Actual: the handler test's completing chunk was 200 with
+`complete: true`; the manager test got a nil error. The chunk-digest
+test passed.

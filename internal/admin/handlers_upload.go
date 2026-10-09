@@ -31,9 +31,11 @@ import (
 // --- wire DTOs -------------------------------------------------------------
 
 type uploadFileDeclDTO struct {
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	Digest string `json:"digest,omitempty"`
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	Digest      string `json:"digest,omitempty"`
+	Modified    int64  `json:"modified,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 type uploadCreateRequest struct {
@@ -55,6 +57,12 @@ type uploadFileDTO struct {
 	// legitimately on both an album and a compilation is a real library, and
 	// that is serve-time duplicate suppression's job, not upload's.
 	DuplicateOf string `json:"duplicateOf,omitempty"`
+	// Digest is the whole-file hash the client declared at create. Modified
+	// and Fingerprint are the resume identity. A session from before they
+	// existed omits both, and the console treats that as not resumable.
+	Digest      string `json:"digest,omitempty"`
+	Modified    int64  `json:"modified,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 type uploadRejectedDTO struct {
@@ -190,6 +198,9 @@ func uploadSessionDTOOf(s *upload.Session, dupes map[string]string) uploadSessio
 			SHA256:      f.SHA256,
 			Complete:    f.Complete,
 			DuplicateOf: dupes[manifest.UploadDupeKey(path.Base(f.Path), f.Size)],
+			Digest:      f.Digest,
+			Modified:    f.Modified,
+			Fingerprint: f.Fingerprint,
 		})
 	}
 	return out
@@ -209,7 +220,10 @@ func (s *Server) apiUploadCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	decls := make([]upload.FileDecl, 0, len(req.Files))
 	for _, f := range req.Files {
-		decls = append(decls, upload.FileDecl{Path: f.Path, Size: f.Size, Digest: f.Digest})
+		decls = append(decls, upload.FileDecl{
+			Path: f.Path, Size: f.Size, Digest: f.Digest,
+			Modified: f.Modified, Fingerprint: f.Fingerprint,
+		})
 	}
 	sess, err := m.Create(decls, upload.CreateOptions{
 		Root: req.Root, Overwrite: req.Overwrite, MaxBytes: req.MaxBytes,

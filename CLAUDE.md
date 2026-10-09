@@ -8720,6 +8720,35 @@ its twin.** The top list is older, shorter, and read first.
   `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`,
   `TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`,
   `TestAZeroLengthFileCompletesOnItsFirstEmptyChunk`.)
+- **A resumed upload matches a version of the file, and the commit checks
+  the whole file** (2026-10-09, backlog B176). The console matched a
+  stopped session to a new pick by path and size, and sent no whole-file
+  digest, so the check in `WriteChunk` (`fd.Digest != ""`) never ran.
+  A file retagged in place, same size, kept the staged prefix and took
+  the new bytes for the rest. Each chunk's `Content-Digest` matched the
+  bytes in that request, the running hash was of the splice, and with
+  nothing declared the commit reported `committed`. The bridge then
+  serves that file bit-exact. The session records, at create, the
+  client's `File.lastModified` in unix milliseconds (`modified`) and a
+  fingerprint, `hex(sha256(head))` concatenated with `hex(sha256(tail))`
+  over a 64 KiB window at each end (`fingerprint`, 128 hex characters).
+  `sessionKey` is path, size, modified and fingerprint, and it returns
+  null when any entry lacks a positive modified and a 128-character
+  fingerprint, so a session written before those fields, or a pick the
+  browser could not identify, starts over. The whole-file SHA-256 is
+  computed when a new session is created and sent as `digest`, which is
+  the check that already refuses a completing chunk whose running hash
+  disagrees. A resume of the same identity skips that hash. The hash is
+  incremental in the page (about 82 MB/s on 256 MiB in node, against
+  about 2.8 GB/s for `node:crypto` on the same bytes) and yields every
+  8 MiB. Chunk `Content-Digest` stays. A file whose middle changes while
+  its mtime, head and tail stay the same still resumes, and the declared
+  digest then refuses the splice: the offset does not advance, and the
+  commit is `failed` / `incomplete`. (`TestASameSizeEditDoesNotResume`,
+  `TestUploadSHA256MatchesNode`,
+  `TestCreateKeepsTheResumeIdentity`,
+  `TestASplicedUploadWithADeclaredDigestIsNotCommitted`,
+  `TestUploadSessionListsTheResumeIdentity`.)
 - **Committed files are 0644** (the staged mode survives the rename), and trash
   age comes from the `<stamp>` DIRECTORY NAME — `os.Rename` preserves mtime, so
   an mtime-driven sweeper purges oldest-content-first the instant it lands.
