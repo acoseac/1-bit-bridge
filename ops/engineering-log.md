@@ -38211,10 +38211,11 @@ cases in helpers.
 statement returned an error. `Close` returns the connection to the pool.
 modernc's `IsValid` only checks that the handle is open, so a connection
 still inside `BEGIN IMMEDIATE` is valid and is reused. The next checkout
-runs inside that transaction and holds the write lock. `*sql.Tx` avoids
-this: a failed rollback is `driver.ErrBadConn`, and `putConn` closes that
-connection instead of pooling it. `Conn.Raw` returning `driver.ErrBadConn`
-is the same discard. The driver does not have to honour the error itself.
+runs inside that transaction and holds the write lock. `*sql.Tx` would
+not avoid this either: an explicit `Rollback` hands the driver's error to
+the pool, and `putConn` drops a connection only for `driver.ErrBadConn` or
+when the driver's `IsValid` says no. `Conn.Raw` returning
+`driver.ErrBadConn` is what discards it here, whatever the driver reports.
 
 `TestAFailedRollbackDiscardsTheConnection` skips `ROLLBACK` (and, on the
 commit path, `COMMIT` and the follow-up `ROLLBACK`) so the transaction
