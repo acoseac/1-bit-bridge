@@ -23,26 +23,33 @@ func TestUnenrichedTracksOrdersByIndexedAtDesc(t *testing.T) {
 	// So `ORDER BY path ASC` (the pre-LIFO behaviour) would produce the OPPOSITE
 	// sequence at head/tail — a regression to it fails this test (rather than
 	// passing vacuously, which it would if newest also sorted first by path).
-	insert := func(ns int64, path string) {
+	insert := func(ns int64, paths ...string) {
 		s.now = func() time.Time { return time.Unix(0, ns) }
-		if err := s.UpsertTrack(ctx, &Track{Path: path, Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
-			t.Fatalf("UpsertTrack(%q): %v", path, err)
+		rows := make([]*Track, len(paths))
+		for i, p := range paths {
+			rows[i] = &Track{Path: p, Size: 1, ModTime: time.Unix(1, 0)}
+		}
+		if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+			t.Fatalf("UpsertTrackBatch(%v): %v", paths, err)
 		}
 	}
-	insert(1000, "Music/A/old.flac")    // oldest, sorts FIRST by path — disagrees with indexed_at DESC
-	insert(3000, "Music/M/b.flac")      // middle clock, tie with a.flac
-	insert(3000, "Music/M/a.flac")      // same clock as b.flac — tie-break case
-	insert(5000, "Music/Z/newest.flac") // newest, sorts LAST by path — disagrees with indexed_at DESC
+	// An hour past OpenStore, so each clock is the top watermark arm.
+	// Rows that must share a stamp go in one batch: a later transaction
+	// reads the earlier stamp and lands one past it.
+	base := time.Now().Add(time.Hour).UnixNano()
+	insert(base+1000, "Music/A/old.flac")                 // oldest, sorts FIRST by path
+	insert(base+3000, "Music/M/b.flac", "Music/M/a.flac") // one stamp, path tie-break
+	insert(base+5000, "Music/Z/newest.flac")              // newest, sorts LAST by path
 
 	got, err := s.UnenrichedTracks(ctx, 100)
 	if err != nil {
 		t.Fatalf("UnenrichedTracks: %v", err)
 	}
 	want := []string{
-		"Music/Z/newest.flac", // indexed_at 5000 (newest) — LAST alphabetically, FIRST by LIFO
-		"Music/M/a.flac",      // indexed_at 3000, path a < b (tie-break)
-		"Music/M/b.flac",      // indexed_at 3000
-		"Music/A/old.flac",    // indexed_at 1000 (oldest) — FIRST alphabetically, LAST by LIFO
+		"Music/Z/newest.flac", // newest clock — LAST alphabetically, FIRST by LIFO
+		"Music/M/a.flac",      // middle clock, path a < b (tie-break)
+		"Music/M/b.flac",      // same clock as a.flac
+		"Music/A/old.flac",    // oldest clock — FIRST alphabetically, LAST by LIFO
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d rows, want %d", len(got), len(want))
