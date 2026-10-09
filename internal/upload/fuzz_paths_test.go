@@ -81,6 +81,9 @@ func FuzzValidateRelPath(f *testing.F) {
 		if strings.HasPrefix(got, "/") {
 			t.Fatalf("accepted %q -> %q which is absolute", rel, got)
 		}
+		if got != strings.TrimSpace(got) {
+			t.Fatalf("accepted %q -> %q which leading or trailing whitespace would change", rel, got)
+		}
 		if got != path.Clean(got) {
 			t.Fatalf("accepted %q -> %q which is not in clean form (Clean gives %q)",
 				rel, got, path.Clean(got))

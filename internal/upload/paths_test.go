@@ -59,6 +59,8 @@ func TestValidateRelPath(t *testing.T) {
 		{"not reserved — COM10", "Artist/Album/COM10.flac", true},
 		{"trailing dot", "Artist/Album./x.flac", false},
 		{"trailing space", "Artist/Album /x.flac", false},
+		{"leading space", " Various/Album/01.flac", false},
+		{"trailing space on the path", "Artist/01.flac ", false},
 		{"colon", "Artist/Al:bum/x.flac", false},
 		{"question mark", "Artist/Album/x?.flac", false},
 		{"pipe", "Artist/Album/x|y.flac", false},
