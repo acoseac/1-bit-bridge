@@ -127,6 +127,8 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 		SidecarPath:   v.SidecarPath,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
+		SizeBytes:     v.SizeBytes,
+		CreatedAt:     v.CreatedAt,
 	}
 	if a.store == nil || a.variantsDir == nil {
 		return rec, nil
@@ -729,6 +731,23 @@ func (a *variantDeleterAdapter) ListVariantsForPath(ctx context.Context, sourceP
 
 func (a *variantDeleterAdapter) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
 	return a.store.DeleteVariant(ctx, sourcePath, variantID)
+}
+
+// DeleteVariantIfUnchanged deletes the looked-up row only while it still
+// records that snapshot. A miss is api.ErrVariantChanged: the row was
+// rewritten or is already gone, and the reap publishes nothing for it.
+func (a *variantDeleterAdapter) DeleteVariantIfUnchanged(ctx context.Context, rec api.VariantRecord) error {
+	err := a.store.DeleteVariantIfUnchanged(ctx, manifest.VariantRow{
+		SourcePath:  rec.SourcePath,
+		VariantID:   rec.VariantID,
+		SidecarPath: rec.SidecarPath,
+		SizeBytes:   rec.SizeBytes,
+		CreatedAt:   rec.CreatedAt,
+	})
+	if errors.Is(err, manifest.ErrVariantChanged) {
+		return api.ErrVariantChanged
+	}
+	return err
 }
 
 func variantSummariesFromRows(rows []manifest.VariantRow) []api.VariantSummary {

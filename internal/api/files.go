@@ -371,6 +371,17 @@ func writeNotAFile(w http.ResponseWriter, r *http.Request, clientPath, kind stri
 		"path is a "+kind+", not a file", clientPath, &fsutil.NotAFileError{Kind: kind})
 }
 
+// beforeVariantReap runs after the reap has copied the looked-up row and
+// before it deletes, so a test can rewrite that row in the window. The
+// argument is the snapshot the delete compares. Production leaves it nil.
+var beforeVariantReap func(rec VariantRecord)
+
+// SetBeforeVariantReapForTest installs beforeVariantReap. The test restores
+// nil when it finishes.
+func SetBeforeVariantReapForTest(fn func(VariantRecord)) {
+	beforeVariantReap = fn
+}
+
 // serveVariant resolves (clientPath, variantID) → on-disk sidecar
 // path and streams the bytes via http.ServeContent. The
 // freshness check happens here (not in the variant store) so the
@@ -527,12 +538,22 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 				// (iOS sends `share.normalize`d paths); the
 				// LookupVariant result carries the canonical
 				// row form that matches `Track.path` byte-
-				// identical and that DeleteVariant's
+				// identical and that the delete's
 				// `source_path = ?` predicate will hit.
 				// Falling back to the request values when the
 				// record didn't surface them (test stub
 				// returning a sparse record) keeps the cleanup
 				// path functional without a hard nil deref.
+				//
+				// The delete compares the snapshot this lookup
+				// returned (sidecar path, size, completion
+				// time). A move that rewrites the row after the
+				// lookup and before the open fails leaves a
+				// file at the new path; deleting by source and
+				// variant id alone would take that row
+				// (backlog B251). A miss publishes nothing and
+				// still answers 410: this request could not
+				// open the file it looked up.
 				canonSource := rec.SourcePath
 				if canonSource == "" {
 					canonSource = sourcePath
@@ -541,14 +562,26 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 				if canonVariant == "" {
 					canonVariant = variantID
 				}
-				if delErr := s.variantDeleter.DeleteVariant(cleanupCtx, canonSource, canonVariant); delErr != nil {
+				snapshot := *rec
+				snapshot.SourcePath = canonSource
+				snapshot.VariantID = canonVariant
+				if beforeVariantReap != nil {
+					beforeVariantReap(snapshot)
+				}
+				delErr := s.variantDeleter.DeleteVariantIfUnchanged(cleanupCtx, snapshot)
+				switch {
+				case errors.Is(delErr, ErrVariantChanged):
+					// Rewritten or already gone. Nothing to
+					// publish: the row this lookup read is
+					// not the row a delete would remove.
+				case delErr != nil:
 					LoggerFromContext(r.Context()).Warn(
 						"variant DB cleanup failed after sidecar miss",
 						slog.String("source_path", canonSource),
 						slog.String("variant_id", canonVariant),
 						slog.Any("err", delErr),
 					)
-				} else {
+				default:
 					publishUpscaleDeleted(s.EventPublisher(),
 						[]string{canonSource}, []string{canonVariant})
 				}

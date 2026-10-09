@@ -14,8 +14,10 @@ import "time"
 //
 //  1. Operator-driven DELETE /v1/upscale/variants (admin UI / iOS-future).
 //  2. Reactive serve-side cleanup: a `/v1/download?variant=...` GET
-//     observes the sidecar missing on disk, drops the DB row, and
-//     publishes the event so iOS clients reconcile immediately.
+//     observes the sidecar missing on disk, drops the DB row while it
+//     is still the row the lookup read, and publishes the event so iOS
+//     clients reconcile immediately. A row another writer changed since
+//     the lookup is left in place and publishes nothing.
 //  3. Periodic integrity sweep (1 h default ticker): the
 //     `internal/integrity.Watcher` walks `track_variants`, stats each
 //     sidecar, batches the misses into a single event per sweep.

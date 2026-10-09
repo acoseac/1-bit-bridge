@@ -44,6 +44,10 @@ type VariantLookup struct {
 	SizeBytes     int64
 	SourceMTimeNS int64
 	SourceSize    int64
+	// CreatedAt is the row's completion time. The serve reap compares it,
+	// with SizeBytes and SidecarPath, so a delete of the row it looked up
+	// misses a row another writer has since replaced (backlog B251).
+	CreatedAt int64
 }
 
 // Provider adapts the Scanner + Store pair to the api.ManifestProvider
@@ -275,6 +279,7 @@ func (p *Provider) LookupVariant(ctx context.Context, sourcePath, variantID stri
 		SizeBytes:     v.SizeBytes,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
+		CreatedAt:     v.CreatedAt,
 	}, nil
 }
 

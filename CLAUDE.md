@@ -4410,15 +4410,68 @@ no failing test — which is the shape to expect in this area.
   refusal of `variants move` while a bridge answers**: it would make the
   migration the console documents need downtime, and a probe is a guard,
   not mutual exclusion (the restore bullet under The CLI and the serve
-  wiring). `DeleteVariant` keeps its unconditional delete for the serve
-  reap and `DELETE /v1/upscale/variants` (the `upscale --gc` reverse
-  sweep's went with B250, the next bullet); its docblock said it had no
-  production callers (#156), false since #209. `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`
+  wiring). `DeleteVariant` keeps its unconditional delete for
+  `DELETE /v1/upscale/variants`. The serve reap deletes through
+  `DeleteVariantIfUnchanged` against the row it looked up (B251, two
+  bullets down); the `upscale --gc` reverse sweep's went with B250.
+  This docblock said the serve reap used the unconditional delete until
+  B251, and that `DeleteVariant` had no production callers (#156), false
+  since #209. `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`
   (cmd/bridge; two hand-removed sidecars are the positive control),
   `TestVariantWatcherKeepsARowThatChangedSinceItsListing`,
   `TestVariantWatcherSaysNothingAtWarnWhenEveryMissingRowChanged`,
   `TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged` (a case per
   writer and per compared column).
+- **A move puts the file at the destination before it moves the row, and
+  removes the source name only after the row points there** (2026-10-09,
+  backlog B249). `moveOneVariant` renamed (or copied, then removed) and
+  then updated `sidecar_path`. Between those the row named a path with no
+  file, and the canonical place under the variants directory was not the
+  destination, so a VariantWatcher tick that had already listed the
+  catalog read the row as gone at both places and deleted it. B204's
+  compare-and-delete cannot see that window: the row has not changed yet,
+  so the listed snapshot still matches the DELETE. The backlog's stress
+  (back-to-back ticks, a writer holding the store lock in 15 ms bursts)
+  lost 1,425 of 6,000 moved rows on main af4f4569 and 122 on #1137's
+  head. The suite proof is a hook between the second name and the row
+  update that runs one watcher tick: on the rename-then-update path it
+  deleted the moved row plus the two already-gone controls (3 of 40).
+  Now the destination is a hard link of the source, or a copy with an
+  fsync where the link fails (across volumes, where NTFS and every other
+  filesystem refuse the link), the row is updated, and only then is the
+  source name removed. The copy is a temp file in the destination's
+  directory, fsynced, then renamed over the destination. The rename
+  replaces the directory entry, so a destination that is a hard link of
+  another live sidecar keeps that sidecar's bytes, and a crash mid-copy
+  leaves the temp rather than a partial file under the final name. A
+  crash leaves two copies, which the next run adopts, rather than a row
+  whose file is already gone. **Same-file
+  first**, `os.SameFile` before any link or copy: a case-only spelling,
+  or a `--to` that is the variants directory through a symlink, is one
+  file, and removing the "source" would remove the only copy. Judging
+  SameFile after a link this call just made would skip removing the
+  extra name. `TestAWatcherTickBetweenTheFileAndTheRowKeepsTheMovedRow`
+  (the two gone rows are still deleted),
+  `TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt`,
+  `TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy`,
+  `TestAMoveCopiesWhenTheLinkCannotBeMade`,
+  `TestAMoveOntoAHardLinkOfAnotherSidecarLeavesThatSidecarsBytes`.
+- **…and the serve reap deletes the row it looked up** (2026-10-09,
+  backlog B251). `serveVariant` looked the row up, opened the path that
+  lookup captured, and on ENOENT deleted by source path and variant id.
+  A move that rewrites the row between the lookup and that delete takes
+  the moved row: the open still fails on the old path, and the
+  unconditional delete matches the new row. The reap now deletes through
+  `DeleteVariantIfUnchanged` against the snapshot the lookup returned
+  (sidecar path, size, completion time), filled with the request's
+  source and variant when the record left them empty. A miss
+  (`api.ErrVariantChanged`, the store's sentinel translated at the
+  wiring) publishes nothing and still answers 410
+  `variant_missing_on_disk`. An unchanged missing row is still deleted
+  and published. `DELETE /v1/upscale/variants` stays on the unconditional
+  `DeleteVariant`: that request names the row it means to remove.
+  `TestADownloadWhoseRowMovesBeforeTheReapKeepsIt`,
+  `TestADownloadOfAMissingSidecarStillDropsTheRow`.
 - **…and so does `upscale --gc`'s reverse sweep** (2026-10-02, backlog
   B250). `runGCReverseSweep` deleted the rows its classification judged
   missing through the unconditional `DeleteVariant`, so a row a `bridge
