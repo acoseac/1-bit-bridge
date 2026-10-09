@@ -255,6 +255,49 @@ func TestSessionResumesAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestCreateKeepsTheResumeIdentity(t *testing.T) {
+	m, _ := newTestManager(t)
+	fp := strings.Repeat("ab", 64)
+	s := mustCreate(t, m, []FileDecl{{
+		Path: "Album/01.flac", Size: 64,
+		Digest:      strings.Repeat("CD", 32),
+		Modified:    1_700_000_000_000,
+		Fingerprint: strings.ToUpper(fp),
+	}}, CreateOptions{})
+	f := s.Files[0]
+	if f.Digest != strings.Repeat("cd", 32) || f.Modified != 1_700_000_000_000 || f.Fingerprint != fp {
+		t.Fatalf("create view = %+v", f)
+	}
+	got, err := m.Get(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := got.Files[0]
+	if g.Digest != f.Digest || g.Modified != f.Modified || g.Fingerprint != f.Fingerprint {
+		t.Fatalf("reopened = %+v", g)
+	}
+}
+
+func TestCreateRejectsAMalformedFingerprint(t *testing.T) {
+	m, _ := newTestManager(t)
+	_, err := m.Create([]FileDecl{{
+		Path: "Album/01.flac", Size: 64, Fingerprint: "zz",
+	}}, CreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "malformed fingerprint") {
+		t.Fatalf("err = %v, want malformed fingerprint", err)
+	}
+}
+
+func TestCreateRejectsANegativeModified(t *testing.T) {
+	m, _ := newTestManager(t)
+	_, err := m.Create([]FileDecl{{
+		Path: "Album/01.flac", Size: 64, Modified: -1,
+	}}, CreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "negative modified") {
+		t.Fatalf("err = %v, want negative modified", err)
+	}
+}
+
 func TestDeclaredDigestMismatchRefusesCompletion(t *testing.T) {
 	m, _ := newTestManager(t)
 	body := []byte("the real bytes")

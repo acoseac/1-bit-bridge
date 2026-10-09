@@ -8764,6 +8764,37 @@ its twin.** The top list is older, shorter, and read first.
   `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`,
   `TestSweepRemovesASessionThatReceivedOnlyEmptyChunks`,
   `TestAZeroLengthFileCompletesOnItsFirstEmptyChunk`.)
+- **A resumed upload matches a version of the file** (2026-10-09, backlog
+  B176). The console matched a stopped session to a new pick by path and
+  size, and sent no whole-file digest, so the check in `WriteChunk`
+  (`fd.Digest != ""`) never ran. A file retagged in place, same size,
+  kept the staged prefix and took the new bytes for the rest. Each
+  chunk's `Content-Digest` matched the bytes in that request, the running
+  hash was of the splice, and with nothing declared the commit reported
+  `committed`. The bridge then serves that file bit-exact. The session
+  records, at create, the client's `File.lastModified` in unix
+  milliseconds (`modified`) and a fingerprint, `hex(sha256(head))`
+  concatenated with `hex(sha256(tail))` over a 64 KiB window at each end
+  (`fingerprint`, 128 hex characters). `sessionKey` is path, size,
+  modified and fingerprint, and it returns null when any entry lacks a
+  positive modified and a 128-character fingerprint, so a session written
+  before those fields, or a pick the browser could not identify, starts
+  over. The fingerprint is a 128 KiB read. The owner declined an up-front
+  whole-file hash (about 82 MB/s in the page, about 13 s per GB): a new
+  session declares no `digest`. A client that does declare one still gets
+  the completion check (`digest_mismatch`), and chunk `Content-Digest`
+  is unchanged. `modified` (`File.lastModified`) is a separate identity
+  field `sessionKey` checks, so an mtime change starts a new session on
+  its own. The fingerprint covers the head and the tail: a FLAC tag at
+  the head, a DSF or WAV tag at the tail, and an M4A `moov` at either
+  end. The residual is a change only in the middle, with the size and
+  the mtime preserved: that pick resumes, and with no declared digest the
+  splice commits. (`TestASameSizeEditDoesNotResume`,
+  `TestUploadSHA256MatchesNode`,
+  `TestANewSessionReadsOnlyTheFingerprint`,
+  `TestCreateKeepsTheResumeIdentity`,
+  `TestASplicedUploadWithADeclaredDigestIsNotCommitted`,
+  `TestUploadSessionListsTheResumeIdentity`.)
 - **Committed files are 0644** (the staged mode survives the rename), and trash
   age comes from the `<stamp>` DIRECTORY NAME — `os.Rename` preserves mtime, so
   an mtime-driven sweeper purges oldest-content-first the instant it lands.

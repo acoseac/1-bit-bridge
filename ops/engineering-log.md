@@ -38940,3 +38940,91 @@ outcome `" Various/Album/01.flac"` trashed (`ok: 1`, `bytes: 6`).
 `TestAPaddedPathDoesNotTrashTheUnpaddedFile` and
 `TestTrashRefusesPathsOutsideTheRoot` stayed green. Restored
 `internal/trash/trash.go`. The same test then passed.
+
+## 2026-10-09 — a resumed upload identifies the file (backlog B176)
+
+The console matched a stopped upload to a new pick by path and size
+(`sessionKey` / `findResumable` / `findFilesOnlyMatch` in
+`internal/admin/static/app.js`) and created the session with no
+whole-file digest. `WriteChunk` verifies `fileDoc.Digest` only when the
+client declared one. A file edited in place without its size changing
+therefore resumed: the staged prefix stayed the old version, the
+remainder was the new one, and each chunk's `Content-Digest` (#796)
+matched the bytes of that request. The running hash was of the splice.
+With an empty declared digest the completing chunk stored it and
+`Commit` reported `committed`.
+
+Measured through the real handlers, then removed so the suite does not
+keep asserting the defect. The probe created a 64-byte file with no
+digest, PUT 32 `A` bytes and then 32 `B` bytes, each with its own
+chunk digest, and the commit answered
+`committed: 1`. The library file was those 64 bytes. The package passed
+with that test in it.
+
+The session manifest now stores `modified` (`File.lastModified` in unix
+milliseconds) and `fingerprint` (`hex(sha256(head))` + `hex(sha256(tail))`,
+64 KiB at each end, 128 hex characters). Both are echoed on the file
+status the console lists. `sessionKey` includes them and returns null
+unless every entry has a positive modified and a 128-character
+fingerprint, so a session from before this change starts over.
+
+The first draft also hashed the whole file in the page and sent that
+SHA-256 as `digest`. The owner declined that pass the same day: at the
+rate below it is about 13 s per GB before any byte is uploaded, and a
+new session now declares no digest. The fingerprint stays. It is a
+128 KiB read of the head and the tail, so it covers a FLAC tag at the
+head, a DSF or WAV tag at the tail, and an M4A `moov` at either end.
+`modified` (`File.lastModified`) is a separate identity field
+`sessionKey` checks, so an mtime change starts a new session on its
+own. The residual is a change only in the middle, with the size and
+the mtime preserved: that pick resumes, and with no declared digest the
+splice commits. A client that does declare a digest still gets the completion
+check (`TestASplicedUploadWithADeclaredDigestIsNotCommitted`: 400
+`digest_mismatch`, the offset stays at the prefix, the commit is
+`committed: 0`, `failed: 1`, nothing written into the library). Chunk
+`Content-Digest` is unchanged. Create rejects a fingerprint that is not
+128 hex characters and a negative modified.
+
+The hash cost that led to the decision, 2026-10-09, node, the shipped
+`createSHA256` from `app.js`, 256 MiB of zeros read in 1 MiB pieces: the
+incremental hash alone took 3266 ms (82 MB/s) and `node:crypto`
+`createHash` alone, over the same pieces, 96 ms (about 2.8 GB/s). The
+two digests matched. The same hash yielding with `setTimeout(0)` every
+8 MiB took 3241 ms. A 1 GiB file is about 13 s at that rate and a 4 GB
+file about 50 s. An earlier combined loop reported native as 0 ms
+because it timed `digest()` only, after the native hasher had already
+been updated inside the JavaScript loop. That cost is the measurement,
+not what a new session pays. The console reads the fingerprint ranges
+and then starts
+(`TestANewSessionReadsOnlyTheFingerprint`).
+
+A same-size edit with a different mtime or a different head or tail
+does not resume. A session with no identity does not resume.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump. The fields are
+on the console's upload session, which the paired app does not decode.
+
+Negative controls, each a production-only mutation, restored before
+this record.
+
+The resume match put back to path and size. Predicted red:
+`TestASameSizeEditDoesNotResume`, with the four messages a same-size
+edit resumed, a file with the same mtime and a different head resumed,
+a session written before identity resumed, and a session written before
+identity still counted as the same files. Actual: those four.
+
+The whole-file comparison changed to `if false && fd.Digest != "" &&
+sum != fd.Digest`. Predicted red:
+`TestASplicedUploadWithADeclaredDigestIsNotCommitted` and
+`TestDeclaredDigestMismatchRefusesCompletion`. Predicted still green:
+`TestChunkDigestMismatchDoesNotAdvanceOffset`, which checks the chunk
+digest. Actual: the handler test's completing chunk was 200 with
+`complete: true`; the manager test got a nil error. The chunk-digest
+test passed.
+
+The up-front hash put back into `createUploadSession` (the whole-file
+`sha256File` pass, and `digest` on the create body). Predicted red:
+`TestANewSessionReadsOnlyTheFingerprint`, with the create reading the
+file and the declared digest present, including as its own field.
+Actual: those three (`create read the file`, `declared digest`,
+`digest field`).

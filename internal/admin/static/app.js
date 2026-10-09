@@ -1850,14 +1850,163 @@ async function refreshResumable() {
   banner.hidden = false;
 }
 
-// sessionKey is the identity two picks must share to be the same upload: every
-// path AND its size. Path alone would adopt a session whose files have since
-// changed on disk, splicing staged bytes onto content they do not belong to.
+// A pick can resume only when it carries a real lastModified and a 128-hex
+// fingerprint. A session written before that identity, or a pick that could
+// not be annotated, fails this and is not resumed.
+function uploadAbortError() {
+  const e = new Error("Upload stopped.");
+  e.code = "aborted";
+  return e;
+}
+
+// rotr is SHA-256's rotate. It sits here so createSHA256 does not nest it.
+function rotr(x, n) {
+  return ((x >>> n) | (x << (32 - n))) >>> 0;
+}
+
+// createSHA256 is an incremental SHA-256. The head/tail fingerprint goes
+// through it, so a browser without SubtleCrypto still tells two versions of
+// a same-sized file apart. crypto.subtle.digest needs its whole buffer at
+// once and is missing outside a secure context; the fingerprint is at most
+// 128 KiB.
+function createSHA256() {
+  const K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  const block = new Uint8Array(64);
+  let blockLen = 0;
+  let total = 0;
+
+  function processBlock(buf, offset) {
+    for (let i = 0; i < 16; i++) {
+      const j = offset + i * 4;
+      w[i] = ((buf[j] << 24) | (buf[j + 1] << 16) | (buf[j + 2] << 8) | buf[j + 3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)) >>> 0;
+      const s1 = (rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      const S0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+  }
+
+  return {
+    update(bytes) {
+      total += bytes.length;
+      let off = 0;
+      if (blockLen > 0) {
+        const n = Math.min(64 - blockLen, bytes.length);
+        block.set(bytes.subarray(0, n), blockLen);
+        blockLen += n;
+        off = n;
+        if (blockLen === 64) {
+          processBlock(block, 0);
+          blockLen = 0;
+        }
+      }
+      while (off + 64 <= bytes.length) {
+        processBlock(bytes, off);
+        off += 64;
+      }
+      if (off < bytes.length) {
+        block.set(bytes.subarray(off), 0);
+        blockLen = bytes.length - off;
+      }
+    },
+    hex() {
+      const bits = BigInt(total) * 8n;
+      const hi = Number((bits >> 32n) & 0xffffffffn);
+      const lo = Number(bits & 0xffffffffn);
+      block[blockLen] = 0x80;
+      blockLen++;
+      if (blockLen > 56) {
+        block.fill(0, blockLen);
+        processBlock(block, 0);
+        block.fill(0);
+      } else {
+        block.fill(0, blockLen);
+      }
+      const view = new DataView(block.buffer, block.byteOffset, 64);
+      view.setUint32(56, hi);
+      view.setUint32(60, lo);
+      processBlock(block, 0);
+      const words = [h0, h1, h2, h3, h4, h5, h6, h7];
+      let s = "";
+      for (const word of words) {
+        s += (word >>> 24).toString(16).padStart(2, "0");
+        s += ((word >>> 16) & 0xff).toString(16).padStart(2, "0");
+        s += ((word >>> 8) & 0xff).toString(16).padStart(2, "0");
+        s += (word & 0xff).toString(16).padStart(2, "0");
+      }
+      return s;
+    },
+  };
+}
+
+function sha256Bytes(bytes) {
+  const h = createSHA256();
+  h.update(bytes);
+  return h.hex();
+}
+
+async function fileFingerprint(file) {
+  const windowBytes = 65536;
+  const headN = Math.min(windowBytes, file.size);
+  const head = new Uint8Array(await file.slice(0, headN).arrayBuffer());
+  const tailStart = Math.max(0, file.size - windowBytes);
+  const tail = new Uint8Array(await file.slice(tailStart, file.size).arrayBuffer());
+  return sha256Bytes(head) + sha256Bytes(tail);
+}
+
+async function attachUploadIdentity(picked) {
+  for (const p of picked) {
+    if (!uploadState || uploadState.aborted) throw uploadAbortError();
+    p.modified = Math.trunc(p.file.lastModified);
+    p.fingerprint = await fileFingerprint(p.file);
+  }
+}
+
+function resumeIdentityComplete(entry) {
+  return typeof entry.modified === "number" && entry.modified > 0
+    && typeof entry.fingerprint === "string" && entry.fingerprint.length === 128;
+}
+
+// sessionKey is the identity two picks must share to be the same upload:
+// every path, its size, the file's lastModified, and a fingerprint of its
+// head and tail. Path and size alone would adopt staged bytes of a different
+// version of a same-sized file.
 function sessionKey(entries) {
-  return entries
-    .map((e) => `${e.path}\u0000${e.size}`)
-    .sort()
-    .join("\u0001");
+  const parts = [];
+  for (const e of entries) {
+    if (!resumeIdentityComplete(e)) return null;
+    parts.push(`${e.path}\u0000${e.size}\u0000${e.modified}\u0000${e.fingerprint}`);
+  }
+  // Code-unit order, not localeCompare: the key has to be the same in every
+  // browser locale, and localeCompare follows the operator's locale.
+  const ordered = [...parts];
+  ordered.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return ordered.join("\u0001");
 }
 
 // findResumable returns a staged session that matches BOTH the picked files and
@@ -1870,11 +2019,16 @@ function sessionKey(entries) {
 // destroys data. Treating it as part of the identity refuses both directions
 // rather than reasoning about which is safe.
 function findResumable(picked, overwrite) {
-  const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
+  const want = sessionKey(picked.map((p) => ({
+    path: p.path, size: p.file.size, modified: p.modified, fingerprint: p.fingerprint,
+  })));
+  if (want == null) return undefined;
   return resumableSessions.find(
     (s) =>
       !!s.overwrite === !!overwrite &&
-      sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
+      sessionKey(s.files.map((f) => ({
+        path: f.path, size: f.size, modified: f.modified, fingerprint: f.fingerprint,
+      }))) === want,
   );
 }
 
@@ -1882,9 +2036,14 @@ function findResumable(picked, overwrite) {
 // Without it the operator ticks a box, watches a full re-upload start, and has
 // no idea why the resume they were offered did not happen.
 function findFilesOnlyMatch(picked) {
-  const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
+  const want = sessionKey(picked.map((p) => ({
+    path: p.path, size: p.file.size, modified: p.modified, fingerprint: p.fingerprint,
+  })));
+  if (want == null) return undefined;
   return resumableSessions.find(
-    (s) => sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
+    (s) => sessionKey(s.files.map((f) => ({
+      path: f.path, size: f.size, modified: f.modified, fingerprint: f.fingerprint,
+    }))) === want,
   );
 }
 
@@ -2011,9 +2170,11 @@ async function startUpload() {
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
 
-    // Same files, same sizes as something already staged? Continue it rather
-    // than starting over. transferAll already skips complete files and resumes
-    // partial ones from their recorded offset, so nothing else changes.
+    // Same path, size, lastModified and head/tail fingerprint as something
+    // already staged? Continue it. A same-size edit starts over: the staged
+    // prefix belongs to the version the session recorded. transferAll skips
+    // complete files and resumes partial ones from their recorded offset.
+    await attachUploadIdentity(uploadState.picked);
     const existing = findResumable(uploadState.picked, overwrite);
     const isResumed = !!existing;
     if (!isResumed && findFilesOnlyMatch(uploadState.picked)) {
@@ -2085,11 +2246,21 @@ async function startUpload() {
   }
 }
 
+// createUploadSession records the resume identity already computed for each
+// pick. It does not hash the file. A whole-file digest is optional on the
+// server, and this console does not declare one.
 async function createUploadSession(picked, overwrite) {
-  return API.post("/api/upload/sessions", {
-    overwrite,
-    files: picked.map((p) => ({ path: p.path, size: p.file.size })),
-  });
+  const files = [];
+  for (const p of picked) {
+    if (!uploadState || uploadState.aborted) throw uploadAbortError();
+    files.push({
+      path: p.path,
+      size: p.file.size,
+      modified: p.modified > 0 ? p.modified : undefined,
+      fingerprint: p.fingerprint,
+    });
+  }
+  return API.post("/api/upload/sessions", { overwrite, files });
 }
 
 async function transferAll(session) {
@@ -2146,12 +2317,12 @@ async function transferAll(session) {
 
 // chunkDigestHeaders builds the RFC 9530 Content-Digest for one chunk.
 //
-// The server has always verified this header and skipped the check when it is
-// absent; nothing ever sent it, so uploads were size-verified but not
-// content-verified. Per chunk is the right granularity: SHA-256 has no
-// composable incremental API in the browser, so hashing a whole 900 MB file
-// client-side is not available — but every byte travels inside some chunk, so
-// verifying each one covers the file.
+// Each chunk is checked against the bytes in that request. That does not say
+// the chunks are one version of the file: a prefix from an earlier copy and a
+// tail from a later one both verify. The resume identity, the mtime and the
+// head/tail fingerprint, is what stops this console from continuing a session
+// of a different version. A client that declares a whole-file digest still
+// gets that check on the completing chunk; this console does not declare one.
 //
 // crypto.subtle exists only in a secure context. Both supported admin
 // deployments are one (loopback is potentially-trustworthy; public mode serves
@@ -2246,8 +2417,8 @@ function reportCommit(res) {
   if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
   if (uploadState?.digestUnavailable) {
     msg +=
-      " Note: this browser did not expose SHA-256, so chunks were checked for" +
-      " length but not content.";
+      " Note: this browser did not expose SHA-256 for chunk checks, so each" +
+      " chunk was checked for length only.";
   }
   uploadAwaitingScan = !!res.committed;
   showUploadResult(msg, !!res.committed);

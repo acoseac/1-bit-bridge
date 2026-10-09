@@ -430,3 +430,111 @@ func TestInsufficientSpaceReportsWhatTheTrashHolds(t *testing.T) {
 			"to reclaim at the moment there is", res["reclaimableBytes"], inTrash)
 	}
 }
+
+func TestASplicedUploadWithADeclaredDigestIsNotCommitted(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	enableUploads(t, srv)
+	h := srv.Handler()
+	whole := bytes.Repeat([]byte("B"), 64)
+	sum := sha256.Sum256(whole)
+	sess := createSession(t, srv, []map[string]any{{
+		"path":   "Album/01.flac",
+		"size":   64,
+		"digest": hex.EncodeToString(sum[:]),
+	}}, nil)
+	f := firstFile(t, sess)
+	sid, _ := sess["id"].(string)
+	fid, _ := f["id"].(string)
+	first := bytes.Repeat([]byte("A"), 32)
+	second := bytes.Repeat([]byte("B"), 32)
+	d1 := sha256.Sum256(first)
+	d2 := sha256.Sum256(second)
+	code, _ := putChunk(t, h, sid, fid, 0, first, d1[:])
+	if code != http.StatusOK {
+		t.Fatalf("first chunk = %d", code)
+	}
+	code, body := putChunk(t, h, sid, fid, 32, second, d2[:])
+	if code != http.StatusBadRequest || body["error"] != "digest_mismatch" {
+		t.Fatalf("completing chunk = %d %v, want 400 digest_mismatch", code, body)
+	}
+	var commit map[string]any
+	code = doJSON(t, h, "POST", "/api/upload/sessions/"+sid+"/commit", nil, &commit)
+	if code != http.StatusOK {
+		t.Fatalf("commit = %d %v", code, commit)
+	}
+	if commit["committed"] != float64(0) || commit["failed"] != float64(1) {
+		t.Fatalf("commit counts = %v, want committed 0 failed 1", commit)
+	}
+	dest := filepath.Join(cfg.LibraryRoots[0], "Album", "01.flac")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("spliced file landed in the library: %v", err)
+	}
+}
+
+func TestUploadSessionListsTheResumeIdentity(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	enableUploads(t, srv)
+	h := srv.Handler()
+	fp := strings.Repeat("ab", 64)
+	digest := strings.Repeat("cd", 32)
+	sess := createSession(t, srv, []map[string]any{{
+		"path":        "Album/01.flac",
+		"size":        64,
+		"digest":      strings.ToUpper(digest),
+		"modified":    1_700_000_000_000,
+		"fingerprint": strings.ToUpper(fp),
+	}}, nil)
+	f := firstFile(t, sess)
+	if f["digest"] != digest || f["fingerprint"] != fp || f["modified"] != float64(1_700_000_000_000) {
+		t.Fatalf("create file = %v", f)
+	}
+	var listed []map[string]any
+	code := doJSON(t, h, "GET", "/api/upload/sessions", nil, &listed)
+	if code != http.StatusOK || len(listed) != 1 {
+		t.Fatalf("list = %d %v", code, listed)
+	}
+	files, _ := listed[0]["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("listed files = %v", listed[0]["files"])
+	}
+	got, _ := files[0].(map[string]any)
+	if got["digest"] != digest || got["fingerprint"] != fp || got["modified"] != float64(1_700_000_000_000) {
+		t.Fatalf("listed file = %v", got)
+	}
+}
+
+func TestUploadCreateRejectsAMalformedFingerprint(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	enableUploads(t, srv)
+	var body map[string]any
+	code := doJSON(t, srv.Handler(), "POST", "/api/upload/sessions", map[string]any{
+		"files": []map[string]any{{
+			"path": "Album/01.flac", "size": 64, "fingerprint": "zz",
+		}},
+	}, &body)
+	if code != http.StatusBadRequest || body["error"] != "invalid_request" {
+		t.Fatalf("create = %d %v", code, body)
+	}
+	msg, _ := body["message"].(string)
+	if !strings.Contains(msg, "malformed fingerprint") {
+		t.Fatalf("message = %q", msg)
+	}
+}
+
+func TestUploadCreateRejectsANegativeModified(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	enableUploads(t, srv)
+	var body map[string]any
+	code := doJSON(t, srv.Handler(), "POST", "/api/upload/sessions", map[string]any{
+		"files": []map[string]any{{
+			"path": "Album/01.flac", "size": 64, "modified": -1,
+		}},
+	}, &body)
+	if code != http.StatusBadRequest || body["error"] != "invalid_request" {
+		t.Fatalf("create = %d %v", code, body)
+	}
+	msg, _ := body["message"].(string)
+	if !strings.Contains(msg, "negative modified") {
+		t.Fatalf("message = %q", msg)
+	}
+}
