@@ -38707,3 +38707,46 @@ No `ExtractorVersion` bump and no `ProtocolVersion` bump. The purge and
 delete answers stay the codes they already had: 400 `invalid_request`
 for a refused request, and a per-file outcome when one file's check
 fails.
+
+### Round 2 — padding is judged after the leading slash comes off
+
+In single-root mode `SplitRoot` accepts `"/ Various/Album/01.flac"`.
+`validRel` compared the raw string with `TrimSpace` before
+`TrimPrefix`, and that string equals `TrimSpace` of itself. After the
+one slash came off, the path was `" Various/Album/01.flac"`. `Trash`
+moved that file. `List` built an id whose stamp slash hid the space, and
+`splitID`'s check on the whole id does not see a space after the first
+slash. `validRel` on the path half then refused it, so Restore and
+`Purge(nil)` could not name the entry.
+
+`validRel` now removes one leading `/` and then refuses a path
+`TrimSpace` would change. `Trash` returns that error for the whole
+request, and only that error: any other `validRel` failure stays a
+per-file outcome, which is what keeps a traversal in the same request a
+200. `splitID` still checks the whole id, and the path half is
+`validRel`, so the order lives in one place.
+
+`ValidateRelPath` does not strip a leading slash. It refuses one as
+absolute, so `"/ Various/..."` is already rejected and there is no
+upload twin of the strip. Its padding check stays on the string as
+given.
+
+A space inside a segment (`"Various/ Album/01.flac"`) is that segment's
+name. `TrimSpace` of the whole path does not change it. Upload refuses a
+segment that ends in a space or a dot, which is what Windows strips, and
+accepts a leading space inside a segment. Refusing that leading space
+would make trash unable to name a file upload can create. The slash is
+the case that is different: the one strip turned a `TrimSpace`-clean
+request into a stored path with a leading space.
+
+On `86e22820`, before the fix, `TestALeadingSlashThenASpaceIsRefused`
+was red: `POST /api/library/trash` of `"/ Various/Album/01.flac"`
+answered 200 and trashed `" Various/Album/01.flac"`.
+
+The control, on `6ef1217a`, puts the padding check back in front of
+`TrimPrefix` in `validRel` only. Predicted red:
+`TestALeadingSlashThenASpaceIsRefused`. Actual: that test, status 200,
+outcome `" Various/Album/01.flac"` trashed (`ok: 1`, `bytes: 6`).
+`TestAPaddedPathDoesNotTrashTheUnpaddedFile` and
+`TestTrashRefusesPathsOutsideTheRoot` stayed green. Restored
+`internal/trash/trash.go`. The same test then passed.
