@@ -566,10 +566,6 @@ func checkSweptJobIDs(t *testing.T, f *autoOptimizeFixture, got map[string]trans
 	}
 }
 
-// checkFaithfulMoveJob asserts the faithful job the sweep built for rel: the
-// pcm kind at the family's 4x rate and 24 bits, on the background lane with
-// the sweeper's scratch dir, at the on-request quality, with the render facts
-// and source facts of the track row (the latter are what freshness compares).
 // TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart is the
 // sweep's copy of the batch window. One lane (the unwired default).
 // The rendition is larger than one scratch, so one scratch beside the
@@ -610,6 +606,10 @@ func TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart(t *testing.T
 	}
 }
 
+// checkFaithfulMoveJob asserts the faithful job the sweep built for rel: the
+// pcm kind at the family's 4x rate and 24 bits, on the background lane with
+// the sweeper's scratch dir, at the on-request quality, with the render facts
+// and source facts of the track row (the latter are what freshness compares).
 func checkFaithfulMoveJob(t *testing.T, f *autoOptimizeFixture, job transcode.JobSpec, rel string) {
 	t.Helper()
 	if job.Kind != transcode.JobKindPCMRender || job.TargetBits != 24 || job.TargetSampleRate != 176400 {

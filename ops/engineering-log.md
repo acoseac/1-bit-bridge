@@ -38524,4 +38524,53 @@ reserved two guards. Predicted: the PCM case of
 assertions ahead of it stayed green, and `cmd/bridge` stayed green.
 
 None of the four stayed green. The tree was restored to `883dd98b`
-after (d); this entry is the only change on top of it.
+after (d); `984e8568` recorded that and was the only change on top
+of it then.
+
+CodeRabbit's finding on the batch pre-flight was valid. On-demand
+already asked `SameVolume` and held `RenditionHoldOnOneVolume` (the
+survey's two scratches, or one scratch beside the rendition). The
+batch (`submitRenditionProjections`, through two separate probes)
+and the sweep (`drainCandidates`) checked scratch space and rendition
+space apart and never asked whether the two directories were one
+filesystem. A volume with room for two scratches and for the rendition
+alone was admitted when Stage C holds one scratch beside the rendition.
+
+`SharedVolumeHold` is that peak: lanes of two scratches (or the PCM
+guard, when it is larger), or every rendition of this admission plus
+one scratch or guard per lane, whichever is larger, saturated the way
+`BytesForLanes` saturates. For one job and one lane it is
+`RenditionHoldOnOneVolume`. Multiplying the whole rendition total by
+the lane count would reserve a sidecar per lane; adding the rendition
+on top of both scratches reserves a file the survey and Stage C never
+hold together. `preflightVolumes` (both submits) and `drainCandidates`
+ask `SameVolume`. A probe error fails closed. A short shared volume is
+`InsufficientDiskSpaceError` from the batch and `DiskFloorReached`
+from the sweep, before enqueue, so the source is not struck. Separate
+volumes stay separate.
+
+Red first, from `984e8568`, before the wiring. Predicted: both new
+tests admit the job. Actual:
+`TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`
+(SubmitOptimize returned nil) and
+`TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`
+(Enqueued=1, DiskFloorReached=false, projectedBytes=550000).
+
+Negative controls, after `ab2350a8`, each a production-only mutation,
+restored before the next. Predicted name, then what failed.
+
+(a) `preflightVolumes` kept the shared answer and still ran the two
+separate checks. Predicted:
+`TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`.
+Actual: only that test (`batch_pcm_test.go:612`, SubmitOptimize
+returned nil). The sweep test stayed green.
+
+(b) `drainCandidates` dropped the shared arm. Predicted:
+`TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`.
+Actual: only that test (Enqueued=1, DiskFloorReached=false, at
+`auto_optimize_dsd_test.go:606` and `:609`). The batch test stayed
+green.
+
+Neither stayed green. Restored with `git checkout HEAD --` on
+`internal/transcode/batch.go` and `cmd/bridge/auto_optimize.go`.
+`GOTOOLCHAIN=go1.26.6 make check` then exited 0.
