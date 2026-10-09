@@ -222,12 +222,50 @@ func TestDSDSilenceUnknownRateIs404(t *testing.T) {
 	}
 }
 
+// silenceReleaseWatch is signalled once each time a silence GET gives its
+// slot back. Install it before ending a stream: the release can happen
+// during the copy, before finishOne or cancelOne returns. The channel is
+// buffered so a release that already happened is kept, and the hook's
+// send does not block the handler after the slot is free.
+type silenceReleaseWatch struct {
+	ch chan struct{}
+}
+
+func watchSilenceSlotReleases(t *testing.T) *silenceReleaseWatch {
+	t.Helper()
+	w := &silenceReleaseWatch{ch: make(chan struct{}, 16)}
+	hook := func() {
+		select {
+		case w.ch <- struct{}{}:
+		default:
+		}
+	}
+	dsdSilenceSlotReleasedHookForTests.Store(&hook)
+	t.Cleanup(func() { dsdSilenceSlotReleasedHookForTests.Store(nil) })
+	return w
+}
+
+func (w *silenceReleaseWatch) await(t *testing.T, n int, budget time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	for got := 0; got < n; got++ {
+		select {
+		case <-w.ch:
+		case <-timer.C:
+			t.Fatalf("silence slot released %d of %d", got, n)
+		}
+	}
+}
+
 func TestDSDSilenceCapAnswers503AndFreesTheSlot(t *testing.T) {
 	client, u, held := fillSilenceCap(t)
 	if code := silenceStatus(t, client, http.MethodHead, u, ""); code != http.StatusOK {
 		t.Fatalf("HEAD while full: status %d, want 200", code)
 	}
+	released := watchSilenceSlotReleases(t)
 	held.finishOne()
+	released.await(t, 1, 5*time.Second)
 	if code := silenceStatus(t, client, http.MethodGet, u, "bytes=0-15"); code != http.StatusPartialContent {
 		t.Fatalf("after a stream ended: status %d, want 206", code)
 	}
@@ -235,17 +273,10 @@ func TestDSDSilenceCapAnswers503AndFreesTheSlot(t *testing.T) {
 
 func TestDSDSilenceCapFreesTheSlotWhenTheClientDisconnects(t *testing.T) {
 	client, u, held := fillSilenceCap(t)
+	released := watchSilenceSlotReleases(t)
 	held.cancelOne()
-	deadline := time.Now().Add(5 * time.Second)
-	var code int
-	for {
-		code = silenceStatus(t, client, http.MethodGet, u, "bytes=0-15")
-		if code == http.StatusPartialContent || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if code != http.StatusPartialContent {
+	released.await(t, 1, 5*time.Second)
+	if code := silenceStatus(t, client, http.MethodGet, u, "bytes=0-15"); code != http.StatusPartialContent {
 		t.Fatalf("after a client disconnect: status %d, want 206", code)
 	}
 }
@@ -317,6 +348,7 @@ func TestAStalledSilenceReaderFreesItsSlot(t *testing.T) {
 	}
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
+	released := watchSilenceSlotReleases(t)
 	conns := make([]net.Conn, DSDSilenceMaxStreams)
 	for i := range conns {
 		conns[i] = stallSilenceGET(t, srv.Listener.Addr().String())
@@ -339,9 +371,8 @@ func TestAStalledSilenceReaderFreesItsSlot(t *testing.T) {
 	}); code != http.StatusServiceUnavailable {
 		t.Fatalf("cap never filled: status %d, want 503", code)
 	}
-	code := waitSilenceStatus(t, client, u, 6*time.Second, func(code int) bool {
-		return code == http.StatusOK || code == http.StatusPartialContent
-	})
+	released.await(t, DSDSilenceMaxStreams, 8*time.Second)
+	code := silenceStatus(t, client, http.MethodGet, u, "bytes=0-15")
 	if code != http.StatusOK && code != http.StatusPartialContent {
 		t.Fatalf("after the write deadline: status %d, want 200 or 206", code)
 	}

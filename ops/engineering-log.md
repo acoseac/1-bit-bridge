@@ -39644,3 +39644,39 @@ With the deadline restored the same test passed (4.5 s): the later
 range `GET` was 200 or 206.
 
 Each line was put back after its control.
+
+CI's `test -race (rest)` on `200eb0a0` failed once, in 0.84 s:
+
+```
+--- FAIL: TestDSDSilenceCapAnswers503AndFreesTheSlot (0.84s)
+    silence_dsf_test.go:232: after a stream ended: status 503, want 206
+```
+
+The same test had passed on `14804260` and in the local `make check`.
+The slot is given back in a `defer` when `ServeHTTP` returns. The
+client can finish its copy on `ServeContent`'s last `Write`, before
+that defer runs, and the next `GET` still finds the cap full.
+Reproduced locally against the unfixed test: 0 of 200 with
+`-race -count=200 -run TestDSDSilenceCap` on an idle machine (45.907 s),
+0 of 200 of the same command with twelve cores busy (47.933 s, load
+average about 32), and 0 of 600 with
+`-race -count=200 -cpu=1,2,4` on
+`TestDSDSilenceCapAnswers503AndFreesTheSlot` alone (149.081 s). One
+core makes the window smaller, because the handler runs on through the
+defer before the client is scheduled. The failure on CI is that
+window.
+
+The slot stays held until `ServeHTTP` returns. Releasing it inside
+`ServeContent` would admit a fifth stream while the fourth handler is
+still writing. `releaseSlot` receives from the slot channel and then,
+when a test has installed it, calls
+`dsdSilenceSlotReleasedHookForTests` (`atomic.Pointer[func()]`, nil in
+production: one load on the way out of a `GET`). The cap test and the
+disconnect test install the hook before they end a stream, wait for
+one signal with a deadline, and check the status once. The disconnect
+test no longer polls. The stalled-reader test still waits 500 ms and
+polls until the cap reads 503 — those waits are about slots being
+taken — then waits for `DSDSilenceMaxStreams` release signals and
+checks the status once. The hook's send does not block: the channel
+is buffered, and a full buffer drops the signal rather than holding
+the handler after the slot is already free.

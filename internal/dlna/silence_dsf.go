@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -52,6 +53,15 @@ const (
 // Connection: close, so the deadline cannot apply to a later request on
 // this connection.
 var dsdSilenceWriteBound = 120 * time.Second
+
+// dsdSilenceSlotReleasedHookForTests, when non-nil, runs after a GET has
+// given its stream slot back. ServeContent can satisfy the client on the
+// last Write, before ServeHTTP returns and this release runs, so a test
+// that asks for the next stream the moment its copy returns races the
+// defer. Production leaves this nil: one atomic load on the way out of a
+// GET. The pointer is atomic so a test can clear it while a handler is
+// still returning. Tests restore it via t.Cleanup.
+var dsdSilenceSlotReleasedHookForTests atomic.Pointer[func()]
 
 // dsdSilenceRates is 64·n × 44,100 and 64·n × 48,000 for n in {1, 2, 4, 8}.
 var dsdSilenceRates = [...]uint32{
@@ -208,7 +218,7 @@ func (h *dsdSilenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		select {
 		case h.slots <- struct{}{}:
-			defer func() { <-h.slots }()
+			defer h.releaseSlot()
 		default:
 			http.Error(w, "dsd silence stream limit reached", http.StatusServiceUnavailable)
 			return
@@ -229,6 +239,16 @@ func (h *dsdSilenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		size:   asset.size,
 		done:   r.Context().Done(),
 	})
+}
+
+// releaseSlot returns a GET's stream slot, then tells a test the slot
+// is free. The signal follows the receive: releasing any earlier would
+// admit another stream while this handler is still writing.
+func (h *dsdSilenceHandler) releaseSlot() {
+	<-h.slots
+	if hook := dsdSilenceSlotReleasedHookForTests.Load(); hook != nil {
+		(*hook)()
+	}
 }
 
 // boundDSDSilenceWrite stops a GET that has stopped reading. A writer
