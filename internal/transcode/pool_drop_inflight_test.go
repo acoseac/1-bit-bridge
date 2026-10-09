@@ -15,7 +15,6 @@ import (
 // non-dropped path stays deduplicated.
 func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 16)
 	t.Cleanup(p.Stop)
@@ -83,7 +82,6 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 // silently match on variant_id segments instead.
 func TestDropInflightPredicateReceivesSourcePathOnly(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 16)
 	t.Cleanup(p.Stop)
@@ -128,7 +126,6 @@ func TestDropInflightPredicateReceivesSourcePathOnly(t *testing.T) {
 // passing nil returns 0 with no panic.
 func TestDropInflightNilPredicateNoOps(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
@@ -144,7 +141,6 @@ func TestDropInflightNilPredicateNoOps(t *testing.T) {
 // calls.
 func TestDropInflightEmptyMapReturnsZero(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)

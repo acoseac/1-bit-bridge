@@ -37,7 +37,6 @@ func terminalOrderSpec(t *testing.T) JobSpec {
 func newTerminalOrderPool(t *testing.T, seed bool) (*Pool, *manifest.Store) {
 	t.Helper()
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	if seed {
 		seedTrackForPool(t, store, terminalOrderRel)
 	}

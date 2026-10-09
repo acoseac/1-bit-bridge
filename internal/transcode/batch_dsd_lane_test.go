@@ -54,7 +54,6 @@ func specsFromBatch(t *testing.T, s *manifest.Store, want int) map[string]JobSpe
 // makes this change invisible to every pre-#863 deployment.
 func TestBatchDSDJobsRideTheBackgroundLane(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	got := specsFromBatch(t, s, 7)
 
@@ -95,7 +94,6 @@ func TestBatchDSDJobsRideTheBackgroundLane(t *testing.T) {
 // PR #863).
 func TestBatchDSDJobsCarryChannelsAndDuration(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
 	got := specsFromBatch(t, s, 7)
 

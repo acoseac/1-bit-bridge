@@ -55,7 +55,6 @@ func TestJobTimeoutFor(t *testing.T) {
 // TestPoolBackgroundOptimizeUsesUpscaleLane.
 func TestPoolPCMRenderUsesForegroundLane(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	p := NewPool(store, 1, 8)
 	p.fsyncFn = noopFsync
 	release := make(chan struct{})
@@ -94,7 +93,6 @@ func TestPoolPCMRenderUsesForegroundLane(t *testing.T) {
 // wire key: the admin grid needs it to say "DSD64 → 176.4/24".
 func TestActiveWorkersReportSourceIsDSD(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	p := NewPool(store, 2, 4)
 	t.Cleanup(p.Stop)
 	p.activeJobs[0].Store(&ActiveJob{SourceRel: "a.dsf", SourceIsDSD: true, SourceSampleRate: 2822400,
@@ -121,7 +119,6 @@ func TestActiveWorkersReportSourceIsDSD(t *testing.T) {
 // the widened budget, not the base.
 func TestProcessJobUsesTheWidenedTimeout(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	p := NewPool(store, 1, 4)
 	p.fsyncFn = noopFsync
 	p.jobTimeout = 20 * time.Millisecond

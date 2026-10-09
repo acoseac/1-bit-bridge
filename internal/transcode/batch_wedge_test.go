@@ -91,7 +91,6 @@ func wedgeCoordinator(t *testing.T, s *manifest.Store, fastPath string) (*Coordi
 // broken code whenever the runner is loaded.
 func TestSubmit_DedupDropAfterMidLoopCompletionDoesNotWedgeBatch(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s) // Album/02 + Album/03 are the eligible candidates.
 
 	// 02 runs and completes; 03 is claimed by a (simulated) overlapping batch.
@@ -156,7 +155,6 @@ func TestSubmit_DedupDropAfterMidLoopCompletionDoesNotWedgeBatch(t *testing.T) {
 // completeIfDrained a no-op rather than a clobber.
 func TestSubmit_QueueFullTerminalStatusSurvivesDrainedCheck(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 
 	c, p, _ := wedgeCoordinator(t, s, "")

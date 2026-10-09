@@ -20,7 +20,6 @@ import (
 // pattern, same callbacks.
 func TestPoolFsyncFailureSkipsUpsertAndFiresJobFailed(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Seed the parent track row so UpsertVariant's foreign-key
 	// constraint would otherwise be satisfied — proves the test
@@ -99,7 +98,6 @@ func TestPoolFsyncFailureSkipsUpsertAndFiresJobFailed(t *testing.T) {
 // jobComplete callback still fires after the fsync gate.
 func TestPoolFsyncSuccessReachesUpsert(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	seedTrackForPool(t, store, "Music/Album/healthy.flac")
 

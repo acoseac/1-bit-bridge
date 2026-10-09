@@ -26,7 +26,6 @@ type changedLibrary struct {
 func newChangedLibrary(t *testing.T, files map[string]manifest.Track) *changedLibrary {
 	t.Helper()
 	l := &changedLibrary{store: openTempStoreForBatch(t), root: t.TempDir()}
-	t.Cleanup(func() { _ = l.store.Close() })
 	for rel, tr := range files {
 		abs := filepath.Join(l.root, filepath.FromSlash(rel))
 		writeSource(t, abs, 4096)

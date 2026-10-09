@@ -70,7 +70,6 @@ func equalStrings(a, b []string) bool {
 // has to take the motivation on trust.
 func TestTrackProjectionsForPathsExcludesDirectoryNeighbours(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, neighbour := seedSharedDirFixture(t, s)
 
 	got, err := s.TrackProjectionsForPaths(context.Background(), target, VariantKindPrefixOptimized)
@@ -100,7 +99,6 @@ func TestTrackProjectionsForPathsExcludesDirectoryNeighbours(t *testing.T) {
 // "Generate variants" menu item never had anything to enqueue.
 func TestTrackProjectionsForPathsFindsASingleTrack(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirFixture(t, s)
 	one := target[:1]
 
@@ -130,7 +128,6 @@ func TestTrackProjectionsForPathsFindsASingleTrack(t *testing.T) {
 // against `upscaled-%` and return nothing, silently.
 func TestTrackProjectionsForPathsBindingOrder(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirFixture(t, s)
 
 	got, err := s.TrackProjectionsForPaths(context.Background(), target, VariantKindPrefixUpscaled)
@@ -148,7 +145,6 @@ func TestTrackProjectionsForPathsBindingOrder(t *testing.T) {
 // submit skips it as "already done".
 func TestTrackProjectionsForPathsKindScopedHasVariant(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirFixture(t, s)
 
 	if err := s.UpsertVariant(context.Background(), VariantRow{
@@ -187,7 +183,6 @@ func TestTrackProjectionsForPathsKindScopedHasVariant(t *testing.T) {
 // snapshot that other readers still hold.
 func TestTrackProjectionsForPathsIsOrderedAndDoesNotMutateInput(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, neighbour := seedSharedDirFixture(t, s)
 
 	// Reverse order, and interleave the two albums, so a
@@ -214,7 +209,6 @@ func TestTrackProjectionsForPathsIsOrderedAndDoesNotMutateInput(t *testing.T) {
 // submit is the ordinary case, not a client bug.
 func TestTrackProjectionsForPathsEmptyAndMissing(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	target, _ := seedSharedDirFixture(t, s)
 
 	empty, err := s.TrackProjectionsForPaths(context.Background(), nil, VariantKindPrefixUpscaled)
@@ -240,7 +234,6 @@ func TestTrackProjectionsForPathsEmptyAndMissing(t *testing.T) {
 // paths than trackProjectionChunk so at least two statements run.
 func TestTrackProjectionsForPathsSpansChunks(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	tags, err := json.Marshal(map[string]any{
 		"sampleRate": 44100.0, "bitsPerSample": 16, "isDSD": false, "codec": "FLAC",
 	})

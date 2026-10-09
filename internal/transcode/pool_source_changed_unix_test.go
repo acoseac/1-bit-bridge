@@ -71,7 +71,6 @@ func TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing(t *testing.T) {
 			t.Setenv("FAKE_SOX_RAN", ran)
 			t.Setenv("FAKE_SOX_CHANGE", "")
 			store := openTempStoreForPool(t)
-			t.Cleanup(func() { _ = store.Close() })
 			const rel = "Album/01.flac"
 			src := filepath.Join(t.TempDir(), "lib", "01.flac")
 			writeSource(t, src, 4096)

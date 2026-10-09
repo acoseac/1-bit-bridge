@@ -67,7 +67,6 @@ func blockingBatchCoordinator(t *testing.T, s *manifest.Store) (*Coordinator, ch
 // where everything was correctly deduped against an overlapping run.
 func TestSubmit_FullyDedupedBatchPersistsTotalFiles(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s) // Album/02 + Album/03 eligible
 
 	c, release := blockingBatchCoordinator(t, s)
@@ -96,7 +95,6 @@ func TestSubmit_FullyDedupedBatchPersistsTotalFiles(t *testing.T) {
 // self-heals.
 func TestSubmit_PartiallyDedupedBatchPersistsTotalFiles(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s)
 
 	// A track in a sub-folder so batch 1 can claim exactly one of the
@@ -150,7 +148,6 @@ func TestSubmit_PartiallyDedupedBatchPersistsTotalFiles(t *testing.T) {
 // so a stale row snapshot landing out of order must not raise it back.
 func TestUpdateUpscaleBatchProgress_TotalFilesIsMonotonic(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	id := uuid.New()
@@ -193,7 +190,6 @@ func TestUpdateUpscaleBatchProgress_TotalFilesIsMonotonic(t *testing.T) {
 // row and it sits `running` forever.
 func TestUpdateUpscaleBatchStatus_DoesNotResurrectTerminal(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	id := uuid.New()

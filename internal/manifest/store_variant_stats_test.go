@@ -33,7 +33,6 @@ func seedKindVariants(t *testing.T, s *Store, variants []VariantRow) {
 // frontend relies on.
 func TestVariantStatsByKind_PreseedsEmptyTable(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	got, err := s.VariantStatsByKind(context.Background())
 	if err != nil {
@@ -59,7 +58,6 @@ func TestVariantStatsByKind_PreseedsEmptyTable(t *testing.T) {
 // count, not DISTINCT-source).
 func TestVariantStatsByKind_SplitsByPrefix(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedKindVariants(t, s, []VariantRow{
 		{SourcePath: "A/01.flac", VariantID: "upscaled-v2-192000-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1000, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
@@ -85,7 +83,6 @@ func TestVariantStatsByKind_SplitsByPrefix(t *testing.T) {
 // the whole library.
 func TestRollupByPrefix_GlobalFastPathMatchesPrefixForm(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedKindVariants(t, s, []VariantRow{
 		{SourcePath: "A/01.flac", VariantID: "upscaled-v2-192000-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 192000, BitsPerSample: 24, SizeBytes: 1000, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},

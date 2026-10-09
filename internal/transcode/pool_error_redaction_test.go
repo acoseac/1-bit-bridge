@@ -101,7 +101,6 @@ func parentDirFsyncFailure(sidecar string) error {
 func failOneJob(t *testing.T, rel string, setup func(p *Pool)) (string, JobSpec) {
 	t.Helper()
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 	seedTrackForPool(t, store, rel)
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)

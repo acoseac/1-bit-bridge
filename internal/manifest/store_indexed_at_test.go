@@ -19,7 +19,6 @@ import (
 // for the track-write path.
 func TestUpsertTrackEqualClockStillAdvances(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	var initialIndexedAt int64
@@ -58,7 +57,6 @@ func TestUpsertTrackEqualClockStillAdvances(t *testing.T) {
 // TestUpsertVariantMonotonicGuard for the track-write path.
 func TestUpsertTrackMonotonicGuard(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	var initialIndexedAt int64
@@ -103,7 +101,6 @@ func TestUpsertTrackMonotonicGuard(t *testing.T) {
 // indexed_at > since then skips.
 func TestUpsertTrackBatchEqualClockEachRowAdvances(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	// An hour past OpenStore, so the v41 coverage seed sits behind t0.
 	// One batch, so every seed row takes that one stamp, which is t0.
@@ -162,7 +159,6 @@ func TestUpsertTrackBatchEqualClockEachRowAdvances(t *testing.T) {
 // the clock is the top arm.
 func TestUpsertTrackBatchFreshInsertUsesClock(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	t0 := time.Now().Add(time.Hour).UnixNano()
 	s.now = func() time.Time { return time.Unix(0, t0) }
@@ -293,7 +289,6 @@ func TestIndexedAtBumpsClearTheLibraryWideMax(t *testing.T) {
 	for _, b := range bumps {
 		t.Run(b.name, func(t *testing.T) {
 			s := openTempStore(t)
-			t.Cleanup(func() { _ = s.Close() })
 			ctx := context.Background()
 
 			// The target carries the MBIDs the album-wide writers key on.
@@ -403,7 +398,6 @@ func TestIndexedAtAdvanceIsShared(t *testing.T) {
 // why this test pins the clock instead of racing it.
 func TestLyricsBumpClearsLibraryWideMax(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	// An hour past OpenStore, so the seed upsert stores t0 and the
 	// planted library max sits above it.

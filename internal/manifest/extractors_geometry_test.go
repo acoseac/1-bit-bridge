@@ -35,7 +35,6 @@ func TestPCMGeometryReachesFormatDistribution(t *testing.T) {
 	writeMinimalMP3(t, mp3Path, map[string]string{"title": "x"})
 
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	cases := []struct {
 		logical string

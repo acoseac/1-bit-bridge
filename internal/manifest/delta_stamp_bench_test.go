@@ -19,7 +19,6 @@ import (
 // seeks in the upsert. A full scan is benchFullScanTracks/500 batches.
 func BenchmarkUpsertStampCost(b *testing.B) {
 	s := openBenchStore(b, benchTrackRows)
-	b.Cleanup(func() { s.Close() })
 	ctx := context.Background()
 	paths := benchPaths(500)
 	if _, err := s.db.Exec(`ANALYZE`); err != nil {
@@ -83,6 +82,8 @@ func openBenchStore(b *testing.B, n int) *Store {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// After TempDir, so this close runs before that directory is removed.
+	b.Cleanup(func() { _ = s.Close() })
 	// One statement. The later columns take their defaults.
 	if _, err := s.db.ExecContext(context.Background(), `
 		WITH RECURSIVE c(n) AS (
@@ -90,7 +91,6 @@ func openBenchStore(b *testing.B, n int) *Store {
 		)
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
 		SELECT 'Music/' || n || '.flac', 1, 1, x'7b7d', n FROM c`, n); err != nil {
-		s.Close()
 		b.Fatal(err)
 	}
 	return s

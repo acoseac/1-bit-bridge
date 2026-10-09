@@ -11,7 +11,6 @@ import (
 // codes. Seeds parent tracks (track_analysis has a FK to tracks).
 func TestKeyDistribution(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seed := func(path string, root *int, mode string) {
 		t.Helper()
@@ -59,7 +58,6 @@ func TestKeyDistribution(t *testing.T) {
 // an error) — the admin wheel then renders its "no analysed keys" state.
 func TestKeyDistributionEmpty(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	kd, err := s.KeyDistribution(context.Background())
 	if err != nil {

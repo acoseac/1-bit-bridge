@@ -54,7 +54,6 @@ func TestRoutesToForegroundLane(t *testing.T) {
 // routesToForegroundLane this fails on the optimizeJobs length.
 func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Zero workers is not allowed (NewPool floors at 1), so stop the
 	// pool's drain immediately and inspect the buffered channels.
@@ -132,7 +131,6 @@ func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
 // anything >= 2 is a starvation regression.
 func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// 1 worker, enough queue cap for the test's 6 jobs.
 	p := NewPool(store, 1, 16)
@@ -256,7 +254,6 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 // the realistic regime.
 func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 32)
 	p.fsyncFn = noopFsync
@@ -338,7 +335,6 @@ func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 // pending at Stop time.
 func TestPoolStopDrainsBothChannels(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 2, 16)
 	p.fsyncFn = noopFsync
@@ -411,7 +407,6 @@ func TestPoolStopDrainsBothChannels(t *testing.T) {
 // number; per-kind split would be a sibling field, not a retarget.
 func TestPoolStatsQueueLenIsCombinedDepth(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	p := NewPool(store, 1, 16)
 	p.fsyncFn = noopFsync

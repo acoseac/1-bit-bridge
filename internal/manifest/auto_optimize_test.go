@@ -80,7 +80,6 @@ func candidatePaths(t *testing.T, s *Store, limit int) []string {
 // sub-assertion below red.
 func TestListAutoOptimizeCandidatesSelectionContract(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	const (
@@ -213,7 +212,6 @@ func TestListAutoOptimizeCandidatesSelectionContract(t *testing.T) {
 // arbitrary path order.
 func TestListAutoOptimizeCandidatesOrderAndLimit(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	// Insert oldest-first so path order and indexed_at order disagree —
@@ -286,7 +284,6 @@ func TestListAutoOptimizeCandidatesOrderAndLimit(t *testing.T) {
 // MaxPerSweep and over-report the backlog).
 func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	const path = "Music/A/Album/reripped.flac"
@@ -334,7 +331,6 @@ func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
 // which the candidate query used to extract only for a DSD row.
 func TestListAutoOptimizeCandidatesReadsAPCMRowsDuration(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	rate, bits := 96000.0, 24
 	dur, ch := 90.0, 2
 	isDSD := false

@@ -14,7 +14,6 @@ import (
 // indexed_at-driven, not path-driven.
 func TestUnenrichedTracksOrdersByIndexedAtDesc(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	// Clock is injected per-insert so indexed_at is deterministic. The paths are
@@ -72,7 +71,6 @@ func TestUnenrichedTracksOrdersByIndexedAtDesc(t *testing.T) {
 // derivation against what enrichOne actually writes.
 func TestEnrichmentBreakdown(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	// pending: never marked enriched.
@@ -125,7 +123,6 @@ func TestEnrichmentBreakdown(t *testing.T) {
 // map would surface a 1970 "last enriched" timestamp).
 func TestEnrichmentBreakdownEmptyAndAllPending(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	pending, matched, missing, last, err := s.EnrichmentBreakdown(ctx)

@@ -44,7 +44,6 @@ func mustUpsertVariant(t *testing.T, s *Store, v VariantRow) {
 // seed is idempotent (the ladder may re-run it).
 func TestSeedDSDPeaksProfileSpelling(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedOptimizeTrack(t, s, "DSD/a.dsf", 2822400, 1, "DSF", true)
 	seedOptimizeTrack(t, s, "DSD/b.dsf", 2822400, 1, "DSF", true)
@@ -96,7 +95,6 @@ func TestSeedDSDPeaksProfileSpelling(t *testing.T) {
 // profile but no applied gain is not a DSD rendition and records nothing.
 func TestUpsertVariantRecordsTheRendersPeak(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedOptimizeTrack(t, s, "DSD/a.dsf", 2822400, 1, "DSF", true)
 	seedOptimizeTrack(t, s, "PCM/c.flac", 96000, 24, "FLAC", false)
@@ -123,7 +121,6 @@ func TestUpsertVariantRecordsTheRendersPeak(t *testing.T) {
 // list is chunked, so a list longer than one chunk still resolves.
 func TestFreshDSDPeaksIgnoresAStaleSource(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedOptimizeTrack(t, s, "DSD/a.dsf", 2822400, 1, "DSF", true)
 	m, sz := trackRowMTimeAndSize(t, s, "DSD/a.dsf")
@@ -155,7 +152,6 @@ func TestFreshDSDPeaksIgnoresAStaleSource(t *testing.T) {
 // its peak is found beside a well-formed one in the same call.
 func TestFreshDSDPeaksFindsAnIllFormedPath(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	const profile = "a1|compact|44100|-v"
 	paths := []string{"DSD/\xff\xfe.dsf", "DSD/b.dsf"}
@@ -179,7 +175,6 @@ func TestFreshDSDPeaksFindsAnIllFormedPath(t *testing.T) {
 
 func TestUpsertDSDPeakRefusesAMissingTrackOrBlankKey(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	if err := s.UpsertDSDPeak(ctx, DSDPeak{SourcePath: "gone.dsf", Profile: "a1|compact|44100|-v"}); err == nil {
 		t.Error("a peak for a track that is not in the library must fail (FK)")
@@ -193,7 +188,6 @@ func TestUpsertDSDPeakRefusesAMissingTrackOrBlankKey(t *testing.T) {
 // track_variants — a removed or renamed track takes its peaks with it.
 func TestDSDPeaksGoWithTheirTrack(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedOptimizeTrack(t, s, "DSD/a.dsf", 2822400, 1, "DSF", true)
 	m, sz := trackRowMTimeAndSize(t, s, "DSD/a.dsf")
 	if err := s.UpsertDSDPeak(context.Background(), DSDPeak{SourcePath: "DSD/a.dsf", Profile: "p", SourceMTimeNS: m, SourceSize: sz}); err != nil {
@@ -213,7 +207,6 @@ func TestDSDPeaksGoWithTheirTrack(t *testing.T) {
 // shows.
 func TestStreamDSDCatalogRefsIsTheCatalogsDSDRows(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedOptimizeTrack(t, s, "DSD/a.dsf", 2822400, 1, "DSF", true)
 	seedOptimizeTrack(t, s, "DSD/b.dff", 5644800, 1, "DFF", true)

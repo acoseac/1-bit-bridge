@@ -31,7 +31,6 @@ func batchStatus(t *testing.T, s *manifest.Store, id uuid.UUID) string {
 // fully-deduped batch immediately.
 func TestSubmit_OverlappingReSubmitDoesNotStickRunning(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedBatchFixture(t, s) // Album/02 + Album/03 are the eligible candidates.
 
 	// Blocking runner: jobs stay claimed in the pool's inflight map (never

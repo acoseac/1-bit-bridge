@@ -13,7 +13,6 @@ import (
 // level test below.
 func TestVariantCRUDRoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	// First need a parent track row — track_variants has a FK on it.
 	upsertParent(t, s, "Music/Album/01.flac")
@@ -71,7 +70,6 @@ func TestVariantCRUDRoundTrip(t *testing.T) {
 // for `bridge upscale --force` re-converting an existing variant.
 func TestUpsertVariantReplacesExisting(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 
@@ -114,7 +112,6 @@ func TestUpsertVariantReplacesExisting(t *testing.T) {
 // the bare track and iOS never sees the variant.
 func TestListTracksSplicesVariants(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	upsertParent(t, s, "Music/A/2.flac")
@@ -171,7 +168,6 @@ func TestListTracksSplicesVariants(t *testing.T) {
 // (because the row was already gone).
 func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	tempDir := t.TempDir()
 	upsertParent(t, s, "Music/A/1.flac")
@@ -224,7 +220,6 @@ func TestDeleteTrackRemovesSidecarFiles(t *testing.T) {
 // scanner needs the row gone regardless of disk state.
 func TestDeleteTrackToleratesMissingSidecar(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 
@@ -286,7 +281,6 @@ func TestVariantsHumanLabel(t *testing.T) {
 // time.Sleep — eliminates CI flakiness on slow runners.
 func TestUpsertVariantBumpsParentIndexedAt(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	// Inject a stepping clock AFTER UpsertTrack so the parent's
@@ -366,7 +360,6 @@ func TestUpsertVariantBumpsParentIndexedAt(t *testing.T) {
 // cause is in one of those two places.
 func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 
@@ -430,7 +423,6 @@ func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 // production callers, until 2026-10-02; it has had them since #209.
 func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 
@@ -494,7 +486,6 @@ func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 // would create false manifest churn (CodeRabbit + Gemini on PR #156).
 func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	var beforeIndexedAt int64
@@ -542,7 +533,6 @@ func TestDeleteVariantNoOpSkipsBump(t *testing.T) {
 // (Qodo PR #156 round 1 — monotonic; CodeRabbit round 2 — strict.)
 func TestUpsertVariantMonotonicGuard(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	var initialIndexedAt int64
@@ -596,7 +586,6 @@ func TestUpsertVariantMonotonicGuard(t *testing.T) {
 // change under `WHERE indexed_at > since`. (CodeRabbit on PR #156 round 2.)
 func TestUpsertVariantEqualClockStillAdvances(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	upsertParent(t, s, "Music/A/1.flac")
 	var initialIndexedAt int64
@@ -640,6 +629,8 @@ func openTempStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// After TempDir, so this close runs before that directory is removed.
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -664,7 +655,6 @@ func upsertParent(t *testing.T, s *Store, path string) {
 // no-op (no bump); a changed version bumps again.
 func TestSetArtworkVersionAndBumpIndex(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	const path = "Music/Arcade Fire/Everything Now/01.flac"
 	const mbid = "12aae8a7-e814-4c46-94d7-5c9e053bda5b"
@@ -762,7 +752,6 @@ func TestSetArtworkVersionAndBumpIndex(t *testing.T) {
 // retains it so the cover isn't needlessly re-fetched.
 func TestArtworkVersionClearedOnArtworkMBIDChange(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	const path = "Music/X/Y/01.flac"
 	const mbidA = "11111111-1111-1111-1111-111111111111"

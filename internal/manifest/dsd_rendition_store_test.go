@@ -60,7 +60,6 @@ func compressionColumn(t *testing.T, s *Store, path string) string {
 // attempt, outside the column-exists guard (the v30 lesson).
 func TestMigrationV43AddsColumnsIdempotently(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	for _, c := range []struct{ table, col string }{
@@ -116,7 +115,6 @@ func TestMigrationV43AddsColumnsIdempotently(t *testing.T) {
 // and a re-upsert without them CLEARS them (the DO UPDATE arm).
 func TestUpsertVariantRoundTripsGainColumns(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	const src = "Music/A/1.dsf"
 	upsertParent(t, s, src)
@@ -218,7 +216,6 @@ func TestUpsertVariantRoundTripsGainColumns(t *testing.T) {
 // all, and the pcm family carries its own label.
 func TestListTracksVariantsCarryAppliedGainDBOnlyWhenSet(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "Music/A/1.dsf")
 	upsertParent(t, s, "Music/A/2.flac")
@@ -293,7 +290,6 @@ func TestListTracksVariantsCarryAppliedGainDBOnlyWhenSet(t *testing.T) {
 // prefix IS the optimize prefix.
 func TestVariantKindBuckets_PCMAndOptimizedDSD(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedKindVariants(t, s, []VariantRow{
 		{SourcePath: "A/01.dsf", VariantID: "pcm-v2-176400-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 700, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
 		{SourcePath: "A/01.dsf", VariantID: "optimized-dsd-v2-44100-16", SidecarPath: "/tmp/a2.flac", Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 50, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
@@ -358,7 +354,6 @@ func dsdEligibilityFixture(t *testing.T, s *Store) []string {
 // variant is coverage regardless of caps.
 func TestEligibility_DSDRenderOptsAcrossHelpers(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	paths := dsdEligibilityFixture(t, s)
 
@@ -432,7 +427,6 @@ func TestEligibility_DSDRenderOptsAcrossHelpers(t *testing.T) {
 // while a `pcm-` variant is not.
 func TestListAutoOptimizeCandidates_DSDArm(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedDSDTrack(t, s, "D/01.dsf", "DSF", 2822400, "", 300.5, 2)
 	seedDSDTrack(t, s, "D/02.dff", "DFF", 2822400, "DST", 0, 0)
@@ -515,7 +509,6 @@ func TestListAutoOptimizeCandidates_DSDArm(t *testing.T) {
 // projected columns alone.
 func TestTrackProjectionCarriesCompression(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	seedDSDTrack(t, s, "D/01.dff", "DFF", 2822400, "DST", 0, 0)
 	seedDSDTrack(t, s, "D/02.dsf", "DSF", 2822400, "", 0, 0)
@@ -548,7 +541,6 @@ func TestTrackProjectionCarriesCompression(t *testing.T) {
 // back "" so the readers' sentinel derivation still applies to it.
 func TestInsertUpscaleBatchRoundTripsKind(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	pcm := UpscaleBatchRow{ID: uuid.New(), Path: "DSD", TargetRate: 176400, TargetBits: 24, Kind: "pcm",
 		Status: "pending", CreatedAt: 2, UpdatedAt: 2}

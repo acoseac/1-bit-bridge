@@ -26,7 +26,6 @@ func readIndexedAt(t *testing.T, s *Store, path string) int64 {
 // new waveformTag. Mirrors the variant bump contract.
 func TestUpsertAnalysisBumpsParentIndexedAt(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	upsertParent(t, s, "A/1.flac")
 
 	t1 := readIndexedAt(t, s, "A/1.flac") + (1 * time.Hour).Nanoseconds()
@@ -50,7 +49,6 @@ func TestUpsertAnalysisBumpsParentIndexedAt(t *testing.T) {
 // equality so a fresh timestamp alone is still a no-op.
 func TestUpsertAnalysisNoOpOnIdenticalRecompute(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	upsertParent(t, s, "A/1.flac")
 	ctx := context.Background()
 
@@ -98,7 +96,6 @@ func TestUpsertAnalysisNoOpOnIdenticalRecompute(t *testing.T) {
 // empty for tracks with no analysis row.
 func TestManifestSplicesWaveformTag(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 	upsertParent(t, s, "A/2.flac") // no analysis row
@@ -131,7 +128,6 @@ func TestManifestSplicesWaveformTag(t *testing.T) {
 // waveform sidecar file and cascades the analysis row.
 func TestDeleteTrackRemovesWaveformSidecar(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 
@@ -162,7 +158,6 @@ func TestDeleteTrackRemovesWaveformSidecar(t *testing.T) {
 // resolve it against the case-preserved manifest source_path.
 func TestLookupAnalysisCaseInsensitive(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "Artist/Album/01.flac")
 	if err := s.UpsertAnalysis(ctx, AnalysisRow{
@@ -188,7 +183,6 @@ func TestLookupAnalysisCaseInsensitive(t *testing.T) {
 // 404 spectrum_not_found while /v1/waveform worked for the same track.
 func TestLookupAnalysisCaseFoldCarriesSpectrum(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "Artist/Album/01.flac")
 	blob := []byte("1BSP-test-spectrum-blob")
@@ -232,7 +226,6 @@ func TestLookupAnalysisCaseFoldCarriesSpectrum(t *testing.T) {
 // narrower SELECT here is how the LookupAnalysis fallback bug happened.
 func TestAllAnalysisRowsCarriesSpectrum(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 	blob := []byte("1BSP-test-spectrum-blob")
@@ -262,7 +255,6 @@ func intptr(v int) *int         { return &v }
 // columns round-trip — present values read back, absent read back nil/"".
 func TestUpsertAnalysisPersistsKeyTempo(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 	upsertParent(t, s, "A/2.flac")
@@ -301,7 +293,6 @@ func TestUpsertAnalysisPersistsKeyTempo(t *testing.T) {
 // (no tag source) and BPM tag-absent-only (a curated BPM tag wins).
 func TestManifestSplicesKeyTempo(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	upsertParent(t, s, "A/1.flac")       // no tags
@@ -384,7 +375,6 @@ func TestManifestSplicesKeyTempo(t *testing.T) {
 // analysis-derived, so a curated BPM tag survives a round-trip.
 func TestSplicedKeyTempoNotPersistedOnRoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	upsertParent(t, s, "A/1.flac")       // no tags → all analysis-derived
@@ -444,7 +434,6 @@ func TestSplicedKeyTempoNotPersistedOnRoundTrip(t *testing.T) {
 // column round-trips — a present value reads back, nil reads back nil.
 func TestUpsertAnalysisPersistsLoudness(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 	upsertParent(t, s, "A/2.flac")
@@ -487,7 +476,6 @@ func TestUpsertAnalysisPersistsLoudness(t *testing.T) {
 // This is the v14→v16 backfill path: a wf1-era row gains its scalar.
 func TestUpsertAnalysisLoudnessBackfillBumps(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	upsertParent(t, s, "A/1.flac")
 
@@ -534,7 +522,6 @@ func TestUpsertAnalysisLoudnessBackfillBumps(t *testing.T) {
 // analysis present (→ tag), neither (→ nil).
 func TestManifestSplicesReplayGainTagAbsentOnly(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	// A/1: no tag — analysis should fill it.
@@ -586,7 +573,6 @@ func TestManifestSplicesReplayGainTagAbsentOnly(t *testing.T) {
 // Same class as TestUpsertTrackDoesNotPersistEnrichedField. (CodeRabbit #396.)
 func TestSplicedReplayGainNotPersistedOnRoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	upsertParent(t, s, "A/1.flac")       // no tag → analysis fills it

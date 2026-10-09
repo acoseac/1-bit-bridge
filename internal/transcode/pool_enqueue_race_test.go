@@ -27,7 +27,6 @@ import (
 // sails through, the buggy code panics within a few iterations.
 func TestPoolEnqueueRacingStopNoPanic(t *testing.T) {
 	store := openTempStoreForPool(t)
-	t.Cleanup(func() { _ = store.Close() })
 
 	// Fails immediately: workers drain + exit fast (no store write, no
 	// track seeding needed — processJob's failure path skips UpsertVariant).

@@ -298,7 +298,6 @@ func TestMeasureDSDPeakRefusesWhatRunRefuses(t *testing.T) {
 // neither.
 func TestPoolGivesDSDJobsTheAlbumGainerAndItsSurveyDeadline(t *testing.T) {
 	s := openTempStoreForBatch(t)
-	t.Cleanup(func() { _ = s.Close() })
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
 	p.fsyncFn = noopFsync

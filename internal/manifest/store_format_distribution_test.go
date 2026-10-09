@@ -45,7 +45,6 @@ type fmtKey struct {
 // the empty/zero "Unknown" group rather than being dropped.
 func TestFormatDistribution(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	insertFormatTrack(t, s, "A/01.flac", "FLAC", 44100, 16, false)
 	insertFormatTrack(t, s, "A/02.flac", "FLAC", 44100, 16, false)
@@ -105,7 +104,6 @@ func TestFormatDistribution(t *testing.T) {
 // "Master quality" block rather than empty bars.
 func TestFormatDistributionEmptyTable(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	groups, err := s.FormatDistribution(context.Background())
 	if err != nil {

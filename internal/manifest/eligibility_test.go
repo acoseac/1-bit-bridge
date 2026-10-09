@@ -39,7 +39,6 @@ func seedVariantFor(t *testing.T, s *Store, sourcePath, variantID string) {
 // fields, with nil pointers landing as SQL NULL (unknown preserved).
 func TestUpsertTrackStampsFormatColumns(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedFormatTrack(t, s, "A/hi.flac", "FLAC", 96000, 24, false)
 	var rate, bits, isDSD sql.NullInt64
@@ -95,7 +94,6 @@ func TestUpsertTrackStampsFormatColumns(t *testing.T) {
 // (the iOS delta-sync clock) must be byte-identical before/after.
 func TestBackfillFormatColumns(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedFormatTrack(t, s, "A/hi.flac", "FLAC", 96000, 24, false)
 	seedFormatTrack(t, s, "A/dsd.dsf", "DSF", 2822400, 1, true)
@@ -156,7 +154,6 @@ func TestBackfillFormatColumns(t *testing.T) {
 // arm; the optimize arm is target-independent).
 func TestEligibleCountsForFolders(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	// AtFloor: CD-quality FLAC — nothing for optimize (at the CarPlay
 	// floor), below the upscale target so upscale-eligible.
@@ -215,7 +212,6 @@ func TestEligibleCountsForFolders(t *testing.T) {
 // transposition would call it eligible.
 func TestEligibleCountsForFolders_bindingOrder(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedFormatTrack(t, s, "Bind/01.flac", "FLAC", 100, 200, false)
 
 	got, err := s.EligibleCountsForFolders(context.Background(), []string{"Bind"}, 200, 100, EligibilityOpts{})
@@ -242,7 +238,6 @@ func TestEligibleCountsForFolders_bindingOrder(t *testing.T) {
 // under a transposition.
 func TestEligibleCountsForPaths_bindingOrder(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	seedFormatTrack(t, s, "Bind/01.flac", "FLAC", 100, 200, false)
 
 	got, err := s.EligibleCountsForPaths(context.Background(), []string{"Bind/01.flac"}, 200, 100, EligibilityOpts{})
@@ -271,7 +266,6 @@ func TestEligibleCountsForPaths_bindingOrder(t *testing.T) {
 // the empty-prefix (whole library) branch.
 func TestEligibleRollupByPrefix(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedFormatTrack(t, s, "AtFloor/01.flac", "FLAC", 44100, 16, false)
 	seedFormatTrack(t, s, "HiRes/01.flac", "FLAC", 96000, 24, false)

@@ -15,7 +15,6 @@ import (
 // (a malformed DDL would have failed OpenStore).
 func TestMigrationV6_TableExists(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	var name string
 	err := s.db.QueryRow(
@@ -44,7 +43,6 @@ func TestMigrationV6_TableExists(t *testing.T) {
 // coordinator's Go-side validation drifts, the DB refuses the row.
 func TestMigrationV6_CheckConstraintRejectsInvalidStatus(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	row := UpscaleBatchRow{
 		ID:         uuid.Must(uuid.NewRandom()),
@@ -65,7 +63,6 @@ func TestMigrationV6_CheckConstraintRejectsInvalidStatus(t *testing.T) {
 // ship a GetUpscaleBatch helper (PR 3 introduces the full CRUD).
 func TestInsertUpscaleBatch_RoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	validStatuses := []string{
 		"pending", "running", "completed",
@@ -132,7 +129,6 @@ func TestInsertUpscaleBatch_RoundTrip(t *testing.T) {
 // otherwise revive it.
 func TestUpdateUpscaleBatchProgress_DoesNotResurrectTerminalStatus(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
 	for _, terminal := range []string{"completed", "failed", "cancelled", "interrupted"} {
@@ -190,7 +186,6 @@ func TestUpdateUpscaleBatchProgress_DoesNotResurrectTerminalStatus(t *testing.T)
 // not be touched (a `completed` batch must not be re-opened by boot).
 func TestRecoverInterruptedBatches_TransitionsPendingAndRunning(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	seedRows := map[string]uuid.UUID{
 		"pending":     uuid.Must(uuid.NewRandom()),
@@ -263,7 +258,6 @@ func TestRecoverInterruptedBatches_TransitionsPendingAndRunning(t *testing.T) {
 // call the helper multiple times across a fast crash cycle.
 func TestRecoverInterruptedBatches_Idempotent(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	id := uuid.Must(uuid.NewRandom())
 	now := time.Now().UnixNano()
@@ -291,7 +285,6 @@ func TestRecoverInterruptedBatches_Idempotent(t *testing.T) {
 // settings pair.
 func TestSetGetUpscaleTarget_RoundTrip(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	if err := s.SetUpscaleTarget(context.Background(), 192000, 24); err != nil {
 		t.Fatalf("SetUpscaleTarget: %v", err)
@@ -323,7 +316,6 @@ func TestSetGetUpscaleTarget_RoundTrip(t *testing.T) {
 // missing rows as a 0/0 target.
 func TestGetUpscaleTarget_UnsetReturnsSentinel(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	_, _, err := s.GetUpscaleTarget(context.Background())
 	if !errors.Is(err, ErrUpscaleTargetUnset) {
@@ -337,7 +329,6 @@ func TestGetUpscaleTarget_UnsetReturnsSentinel(t *testing.T) {
 // one key without the other would leave the pair desynchronised.
 func TestSetUpscaleTarget_RejectsInvalidValues(t *testing.T) {
 	s := openTempStore(t)
-	t.Cleanup(func() { _ = s.Close() })
 
 	cases := []struct {
 		name string
