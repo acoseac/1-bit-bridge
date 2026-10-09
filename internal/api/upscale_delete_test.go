@@ -140,6 +140,13 @@ func (s *stubVariantDeleter) ListVariantsForPath(ctx context.Context, sourcePath
 	return nil, nil
 }
 
+// DeleteVariantIfUnchanged records the same key DeleteVariant does. The
+// stub has no row to compare, and the tests that count a reap read that
+// key whichever method the reap calls.
+func (s *stubVariantDeleter) DeleteVariantIfUnchanged(ctx context.Context, rec VariantRecord) error {
+	return s.DeleteVariant(ctx, rec.SourcePath, rec.VariantID)
+}
+
 func (s *stubVariantDeleter) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

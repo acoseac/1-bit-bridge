@@ -3,19 +3,29 @@
 // One subcommand today:
 //   - `bridge variants move --to <path>` — walk every track_variants
 //     row, recompute its new sidecar path under <path> using the
-//     source-mirrored layout, move the file (os.Rename fast-path on
-//     same filesystem, copy+unlink fallback on EXDEV), update the
-//     DB row, report progress.
+//     source-mirrored layout, place the file there while the source
+//     name still exists, update the DB row, then remove the source
+//     name, and report progress.
 //
 // Crash-safety contract: each row's operation is independently
-// idempotent. If the file move succeeds but the DB update fails,
-// the old DB row still points at the OLD path (which no longer
-// exists on disk) — `bridge upscale --gc`'s reverse sweep will
-// reconcile. If the file move succeeds AND DB update succeeds,
-// the new state is on disk + in DB. Re-running `bridge variants
-// move --to <samepath>` after a partial run resumes cleanly: rows
-// already pointing at <path> are skipped via the destination-stat
-// precheck.
+// idempotent. The destination holds the bytes before the row moves,
+// and the source name is removed only after the row points at the
+// destination, so a crash leaves two copies rather than a row whose
+// file is already gone. A crash after the second name exists and
+// before the row is updated is resumed by the next run: one file
+// under two names updates the row and leaves the old name (the
+// orphan sweep reaps a hard link), and a copied second inode is
+// copied again and the source name removed after the update. The
+// copy is a temp file in the destination's directory, fsynced, then
+// renamed over the destination, so the final name appears only
+// complete and a name that shares an inode with another file is
+// replaced as a directory entry. A crash mid-copy leaves the temp.
+// A crash after the update and before that removal leaves the extra
+// name for the same sweep. Rows already pointing at the destination
+// are skipped because the recomputed path equals the recorded one.
+// Two paths that are one file (a case-only spelling, a --to that is
+// a link to the variants directory) update the row and remove
+// nothing: removing the source name would remove the only copy.
 //
 // FK pre-check: variants whose parent `tracks` row is gone are
 // skipped with a warning. CASCADE on track delete would have
@@ -24,8 +34,9 @@
 //
 // Run as root (the usual way to move the variants onto a new disk,
 // whose mount point root owns), a move keeps what it moves the
-// service's, as mv does: a renamed sidecar keeps its owner by itself, a
-// copied one is given the owner of the file it replaces (copyAndFsync),
+// service's, as mv does: a linked sidecar keeps its owner by itself
+// (it is the same inode), a copied one is given the owner of the file
+// it replaces (copyAndFsync),
 // the --to directory it creates the owner of the variants directory it
 // replaces (fsutil.MkdirAllLike), and an album directory beneath the
 // owner of the directory it is created in (fsutil.MkdirAll). Before,
@@ -36,16 +47,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
-	"syscall"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -206,26 +217,35 @@ func computeNewSidecarPath(toDir string, v manifest.VariantRow) string {
 	return transcode.VariantSidecarPath(toDir, v.SourcePath, v.VariantID)
 }
 
-// moveOneVariant runs the per-row move pipeline:
-//  1. Stat source — surface missing-on-disk variants via a clear error.
-//  2. mkdir destination parent.
-//  3. Try os.Rename (atomic on same fs).
-//  4. On EXDEV, copy + fsync + unlink.
-//  5. UpdateVariantSidecarPath in DB.
+// linkSidecar names the destination as another directory entry of the
+// source file. A test points it at a function that fails so the copy
+// path runs where a hard link cannot be made.
+var linkSidecar = os.Link
+
+// moveBeforeRowUpdate runs after the file step and before the row
+// update. Nil in production. The suite runs a watcher tick here.
+var moveBeforeRowUpdate func()
+
+// moveOneVariant places the sidecar at newPath and then records that
+// path. The destination name exists before the row moves, and the
+// source name is removed only after the row points at the destination,
+// so a crash leaves two copies rather than a row whose file is already
+// gone. Two paths that name one file update the row and remove nothing.
 //
-// Idempotent: re-running over a row whose file already moved AND DB
-// already updated returns nil (computeNewSidecarPath == v.SidecarPath).
-// Re-running over a partial state (file moved, DB not yet updated)
-// detects the destination-already-present case and just updates the
-// DB row.
+// A crash between the second name and the row update leaves both
+// copies. The next run sees one file under two names and updates the
+// row without removing the old name, or copies again when the second
+// name is another inode and removes the source name after the update.
+// The copy is renamed into place, so an existing destination is
+// replaced as a directory entry: a hard link of another file keeps
+// that file's bytes.
+// A crash after the update leaves the extra name for the orphan sweep.
+// A source already gone with the destination present (a crash of an
+// older rename) updates the row and removes nothing.
 func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.VariantRow, newPath string) error {
-	// Stat source. If missing, this variant is orphaned on disk;
-	// caller's `bridge upscale --gc` reverse sweep will clean it up.
-	// We don't try to recover here — surface and skip.
-	if _, err := os.Stat(v.SidecarPath); err != nil {
+	srcInfo, err := os.Stat(v.SidecarPath)
+	if err != nil {
 		if os.IsNotExist(err) {
-			// If destination ALREADY exists (interrupted move), just
-			// fix up the DB row.
 			if _, derr := os.Stat(newPath); derr == nil {
 				return store.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, newPath)
 			}
@@ -238,60 +258,89 @@ func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.Varia
 		return fmt.Errorf("mkdir destination parent: %w", err)
 	}
 
-	// Atomic rename (same filesystem). Returns EXDEV (or
-	// linkerr.Err == syscall.EXDEV) when source + dest live on
-	// different filesystems; fall through to copy+unlink.
-	if err := os.Rename(v.SidecarPath, newPath); err == nil {
-		return store.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, newPath)
-	} else if !isCrossDeviceError(err) {
-		return fmt.Errorf("rename: %w", err)
+	// SameFile is asked before any link or copy. It is true for one
+	// directory entry spelled two ways and for two hard-link names of
+	// one inode. A link this call is about to make must not be judged
+	// that way, or the source name would be left in place on purpose
+	// and the destination would be the only name the row records.
+	removeSource := false
+	dstInfo, err := os.Stat(newPath)
+	switch {
+	case err == nil && os.SameFile(srcInfo, dstInfo):
+	case err == nil:
+		if err := copyAndFsync(v.SidecarPath, newPath); err != nil {
+			return fmt.Errorf("copy: %w", err)
+		}
+		removeSource = true
+	case os.IsNotExist(err):
+		if err := linkSidecar(v.SidecarPath, newPath); err != nil {
+			if err := copyAndFsync(v.SidecarPath, newPath); err != nil {
+				return fmt.Errorf("copy: %w", err)
+			}
+		}
+		removeSource = true
+	default:
+		return fmt.Errorf("stat destination: %w", err)
 	}
 
-	// Cross-device path: copy + fsync + unlink source.
-	if err := copyAndFsync(v.SidecarPath, newPath); err != nil {
-		return fmt.Errorf("copy: %w", err)
+	if moveBeforeRowUpdate != nil {
+		moveBeforeRowUpdate()
 	}
-	if err := os.Remove(v.SidecarPath); err != nil {
-		// Copy succeeded; leaving old file on disk is recoverable
-		// via `bridge upscale --gc`. DB update goes ahead.
-		fmt.Fprintf(os.Stderr, "warning: copy succeeded but unlink failed: %v\n", err)
+	if err := store.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, newPath); err != nil {
+		return err
 	}
-	return store.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, newPath)
+	if !removeSource {
+		return nil
+	}
+	if err := os.Remove(v.SidecarPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: row updated but unlink of the source name failed: %v\n", err)
+	}
+	return nil
 }
 
-// copyAndFsync streams source → destination + fsyncs the
-// destination file before close. Used for cross-device moves where
-// os.Rename fails with EXDEV.
+// copyAndFsync streams the source into a temp file in the destination's
+// directory, fsyncs it, and renames it over dst. Both copy sites use it:
+// a destination that already exists as a different file, and a link that
+// failed. The rename replaces the directory entry. It does not truncate
+// an inode another name still points at, and the final name never holds
+// a partial copy.
 //
-// **Close() error explicitly checked** (Gemini medium on PR D2):
-// pre-fix a `defer out.Close()` swallowed any error returned by
-// the close itself, which on a write-opened file may reveal
-// flush failures that Sync() might have missed. The explicit
-// Close + check pattern surfaces those. The defer is retained as
-// a backstop on early returns from the Copy / Sync error paths
-// so the FD isn't leaked even when we already have a different
-// error to surface — Close() on an already-closed file is a
-// documented no-op for *os.File.
+// Close's error is checked. A deferred Close remains for the paths that
+// return before that, and a deferred Remove drops the temp unless the
+// rename has landed. Close on an already-closed file is a no-op.
+//
+// The copy stands in for src, which the move then unlinks. Run as root
+// it keeps src's owner, as a rename would have. A new file is created
+// 0644, as before; a file being replaced keeps that file's permission
+// bits on the new inode.
 func copyAndFsync(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+
+	replacing, err := os.Lstat(dst)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	out, tmp, err := openMoveCopy(filepath.Dir(dst), src)
 	if err != nil {
 		return err
 	}
-	// Defer is the backstop for early-return error paths below;
-	// the explicit Close at the success tail is what catches
-	// flush-on-close errors.
+	// Remove is registered first so it runs after Close. The temp name
+	// is dropped unless the rename has published it.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
 	defer out.Close()
-	// The copy stands in for src, which the move then unlinks: run as
-	// root it keeps src's owner, as a rename would have. KeepOwner reads
-	// the owner of the entry at the path it is given, and that entry is
-	// src here.
-	if err := fsutil.KeepOwner(out, src); err != nil {
-		return err
+	if replacing != nil && replacing.Mode().IsRegular() {
+		if err := out.Chmod(replacing.Mode().Perm()); err != nil {
+			return err
+		}
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		return err
@@ -302,43 +351,38 @@ func copyAndFsync(src, dst string) error {
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close destination: %w", err)
 	}
+	if err := atomicwrite.RenameWithRetry(tmp, dst); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
-// isCrossDeviceError detects the EXDEV (cross-device link) error
-// that os.Rename returns when source and destination live on
-// different filesystems.
-//
-// Primary path: `errors.Is(err, syscall.EXDEV)` — the canonical
-// Go-typed comparison that survives error wrapping AND localized
-// OS error strings (Gemini medium on PR D2). Windows uses a
-// different errno (`ERROR_NOT_SAME_DEVICE` = 0x11) which surfaces
-// via syscall.Errno; checked separately so the same code path works
-// across Unix + Windows.
-//
-// Substring fallback retained for environments where the error gets
-// flattened through `errors.New(err.Error())` somewhere upstream
-// (defensive — should not happen with stdlib `os.Rename`).
-func isCrossDeviceError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, syscall.EXDEV) {
-		return true
-	}
-	// 0x11 is ERROR_NOT_SAME_DEVICE on Windows but EEXIST on Unix — only treat
-	// it as cross-device on Windows so a Unix EEXIST (e.g. a non-empty-dir
-	// rename target) isn't mis-routed into the copy+unlink path.
-	if runtime.GOOS == "windows" {
-		const errNotSameDevice = syscall.Errno(0x11)
-		if errors.Is(err, errNotSameDevice) {
-			return true
+// openMoveCopy creates an empty 0644 file in dir whose name ends in
+// .tmp, so a crash leftover is the sidecar sweep's scratch and not a
+// rendition under its final name. It gives the new file the owner of
+// ownerPath: KeepOwner reads the entry at that path, and the copy stands
+// in for the source the move then unlinks.
+func openMoveCopy(dir, ownerPath string) (*os.File, string, error) {
+	var rnd [8]byte
+	for range 100 {
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return nil, "", err
 		}
+		name := filepath.Join(dir, ".bridge-move-"+hex.EncodeToString(rnd[:])+".tmp")
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			if !os.IsExist(err) {
+				return nil, "", err
+			}
+			continue
+		}
+		if err := fsutil.KeepOwner(f, ownerPath); err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
+			return nil, "", err
+		}
+		return f, name, nil
 	}
-	// Defensive substring fallback for already-flattened errors.
-	s := err.Error()
-	return strings.Contains(s, "cross-device") ||
-		strings.Contains(s, "EXDEV") ||
-		strings.Contains(s, "different file system") ||
-		strings.Contains(s, "different disk drive")
+	return nil, "", fmt.Errorf("create temp copy in %s", dir)
 }
