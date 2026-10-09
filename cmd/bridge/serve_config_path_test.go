@@ -265,29 +265,69 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}
 }
 
-// waitForAdminReady blocks until the admin console's listener accepts on
-// addr. Delegates to waitForListen (200ms cadence, ctx-aware DialContext)
-// rather than sleeping, in rounds of a second, and between them reports a
-// serve goroutine that already exited, whose exit code is the real story
-// (a failed admin bind, a config refusal), instead of waiting on a socket
-// that will never bind. A console that never binds fails the test when
-// serve's waits give up (serveGiveUp): it binds after the boot's disk
-// writes, which have no bound a starved host keeps to (B63).
+// waitForAdminReady blocks until the admin console answers an HTTP
+// request on addr. A dial is not enough: a test that hands serve a
+// listener it already bound has a port that accepts before
+// ServeListener, and the console has not answered yet. GET /healthz
+// is unauthenticated and any response counts. Between attempts it
+// reports a serve goroutine that already exited, whose exit code is
+// the real story (a failed admin bind, a config refusal). A console
+// that never answers fails the test when serve's waits give up
+// (serveGiveUp): it binds after the boot's disk writes, which have no
+// bound a starved host keeps to (B63, B313).
 func waitForAdminReady(t *testing.T, addr string, done <-chan int, stderr *safeBuffer) {
+	t.Helper()
+	giveUp := serveGiveUpTime(t)
+	for !adminConsoleResponded(addr) {
+		select {
+		case code := <-done:
+			t.Fatalf("serve exited with code %d before the admin console answered %s; stderr=%s",
+				code, addr, stderr.String())
+		case <-time.After(50 * time.Millisecond):
+		}
+		if !giveUp.IsZero() && time.Now().After(giveUp) {
+			t.Fatalf("admin console never answered %s before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+				addr, stderr.String(), serveStacks())
+		}
+	}
+}
+
+// waitForPortAccepting is the dial waitForAdminReady used to be. The
+// API listener speaks TLS, so /healthz is the wrong probe there.
+func waitForPortAccepting(t *testing.T, addr string, done <-chan int, stderr *safeBuffer) {
 	t.Helper()
 	giveUp := serveGiveUpTime(t)
 	for !waitForListen(addr, time.Second) {
 		select {
 		case code := <-done:
-			t.Fatalf("serve exited with code %d before the admin console bound %s; stderr=%s",
+			t.Fatalf("serve exited with code %d before %s accepted; stderr=%s",
 				code, addr, stderr.String())
 		default:
 		}
 		if !giveUp.IsZero() && time.Now().After(giveUp) {
-			t.Fatalf("admin console never bound %s before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+			t.Fatalf("%s never accepted before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
 				addr, stderr.String(), serveStacks())
 		}
 	}
+}
+
+// adminConsoleResponded reports whether GET /healthz got any HTTP
+// response. A refused connection and a client that gives up are both
+// not yet.
+func adminConsoleResponded(addr string) bool {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get("http://" + probeLoopbackAddr(addr) + "/healthz")
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return true
 }
 
 // snapshotCapturedBridgeYAML reports whether any snapshot under root

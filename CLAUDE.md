@@ -10159,8 +10159,18 @@ its twin.** The top list is older, shorter, and read first.
   the caller. Nil is production, which listens itself. `admin.Server.Serve`
   still listens; `ServeListener` is the handed path. `freeLoopbackPort`
   remains for a port that is only written into a config and compared.
+  A handed UDP socket is validated before the LAN TCP listen
+  (`refuseHandedPacket`): HTTP/3 disabled with a socket handed in, or an
+  address that is not the config's, returns 1 while nothing is bound. A
+  return after that listen closes the listener this function bound.
+  `waitForAdminReady` is GET /healthz, any response, and retries until
+  one arrives or serve exits. A dial is not readiness: a handed admin
+  listener already accepts before ServeListener. The API port stays a
+  dial (`waitForPortAccepting`); it speaks TLS.
   (`TestAHandedListenerCannotBeTakenBeforeServeBinds`,
-  `TestAHandedListenerOnAnotherAddressIsAStartupError`.)
+  `TestAHandedListenerOnAnotherAddressIsAStartupError`,
+  `TestARefusedHandedUDPSocketLeavesTheLANPortFree`,
+  `TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener`.)
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
 - **A test asserting that a message NAMES A PATH must not substring-match the

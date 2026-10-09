@@ -2523,6 +2523,11 @@ type serveOpts struct {
 	adminListener net.Listener
 	lanListener   net.Listener
 	lanPacket     *net.UDPConn
+	// beforeAdminServe runs immediately before ServeListener on the
+	// handed admin path. Nil in production. A test holds serve there,
+	// where the port already accepts and the console does not yet
+	// (backlog B313).
+	beforeAdminServe func()
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -2547,6 +2552,20 @@ func adoptHandedPacket(conn *net.UDPConn, want string) (*net.UDPConn, error) {
 		return nil, fmt.Errorf("handed UDP socket %s is not %s", got, want)
 	}
 	return conn, nil
+}
+
+// refuseHandedPacket reports why a handed UDP socket cannot be adopted.
+// The LAN TCP listen comes after this, so a refusal holds no listener
+// (backlog B313). A nil socket is the production path.
+func refuseHandedPacket(conn *net.UDPConn, listenAddress string, http3Disabled bool) error {
+	if conn == nil {
+		return nil
+	}
+	if http3Disabled {
+		return fmt.Errorf("handed UDP socket with HTTP/3 disabled")
+	}
+	_, err := adoptHandedPacket(conn, listenAddress)
+	return err
 }
 
 // adminListenAddress is the address Serve binds when no listener is
@@ -5432,11 +5451,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 				adminErr <- fmt.Errorf("admin listen %s: %w", want, aerr)
 				return
 			}
+			if opts.beforeAdminServe != nil {
+				opts.beforeAdminServe()
+			}
 			adminErr <- adminSrv.ServeListener(adminCtx, lis)
 			return
 		}
 		adminErr <- adminSrv.Serve(adminCtx)
 	}()
+	// A handed UDP socket is refused before this listen. Returning
+	// afterwards leaves the port open: ServeTLS has not taken the
+	// listener yet (backlog B313).
+	if err := refuseHandedPacket(opts.lanPacket, cfg.ListenAddress, cfg.DisableHTTP3); err != nil {
+		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+		return 1
+	}
 	// Listen first so we can report the actual bound address (useful when
 	// cfg.ListenAddress is ":0" — which test code uses). A test that
 	// already holds the listener hands it in, and it is used only when
@@ -5561,11 +5590,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 
 	var lanH3 *lanHTTP3
 
-	if cfg.DisableHTTP3 && opts.lanPacket != nil {
-		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress,
-			fmt.Errorf("handed UDP socket with HTTP/3 disabled"))
-		return 1
-	}
 	if !cfg.DisableHTTP3 {
 		// 1. Resilient LAN Listener. A test that already holds the UDP
 		// socket of this address hands it in; anything else is a startup
@@ -5610,6 +5634,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 		udpConn, err := adoptHandedPacket(opts.lanPacket, cfg.ListenAddress)
 		if err != nil {
+			// Checked before the TCP listen. Close the listener this
+			// function bound so a refusal here does not leave the port
+			// taken (backlog B313).
+			_ = lis.Close()
 			fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
 			return 1
 		}
