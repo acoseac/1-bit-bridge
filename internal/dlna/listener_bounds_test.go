@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,7 +53,12 @@ func startLoopbackDLNA(t *testing.T, cfg ServerConfig, tune func(*Server)) *Serv
 	})
 	if err := s.Start(ctx); err != nil {
 		cancel()
-		t.Skipf("Start failed (SSDP on this host): %v", err)
+		// A host that cannot join the loopback multicast group fails
+		// here. An HTTP bind failure is a broken test, so it fails.
+		if strings.HasPrefix(err.Error(), "dlna: SSDP start:") {
+			t.Skipf("SSDP did not start: %v", err)
+		}
+		t.Fatalf("Start: %v", err)
 	}
 	return s
 }
@@ -65,6 +71,8 @@ func TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify(t *testing.T) {
 	s := startLoopbackDLNA(t, ServerConfig{}, nil)
 
 	block := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(block) }) }
 	var got atomic.Int32
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.Add(1)
@@ -72,7 +80,7 @@ func TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(sink.Close)
-	t.Cleanup(func() { close(block) })
+	t.Cleanup(release)
 
 	n := genaNotifyPool * 6
 	client := &http.Client{
@@ -110,23 +118,17 @@ func TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify(t *testing.T) {
 		t.Fatalf("goroutines after %d SUBSCRIBEs grew by %d (pool %d)", n, delta, genaNotifyPool)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	var stable int32
-	for {
-		cur := got.Load()
-		runtime.Gosched()
-		if cur > 0 && cur == got.Load() {
-			stable = cur
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("NOTIFY count did not settle (last %d)", got.Load())
-		}
+	// The callbacks hold the pool's slots until every SUBSCRIBE has
+	// been answered, so a finished NOTIFY cannot free a slot for a
+	// later one. Releasing them and waiting on the notify group is
+	// the delivery count: every accepted NOTIFY is in that group.
+	release()
+	s.notifyWG.Wait()
+	delivered := got.Load()
+	if delivered == 0 || delivered > int32(genaNotifyPool) {
+		t.Fatalf("delivered %d NOTIFYs, pool is %d", delivered, genaNotifyPool)
 	}
-	if stable > int32(genaNotifyPool) {
-		t.Fatalf("delivered %d NOTIFYs, pool is %d", stable, genaNotifyPool)
-	}
-	t.Logf("goroutines +%d after %d SUBSCRIBEs, delivered %d", delta, n, stable)
+	t.Logf("goroutines +%d after %d SUBSCRIBEs, delivered %d", delta, n, delivered)
 }
 
 // TestTheListenerUsesTheAPIDeadlines reads the listener's deadlines
@@ -144,6 +146,9 @@ func TestTheListenerUsesTheAPIDeadlines(t *testing.T) {
 	}
 	if s.httpServer.MaxHeaderBytes != dlnaMaxHeaderBytes {
 		t.Errorf("MaxHeaderBytes = %d, want %d", s.httpServer.MaxHeaderBytes, dlnaMaxHeaderBytes)
+	}
+	if s.httpServer.MaxHeaderBytes+dlnaHeaderReadSlop != dlnaMaxHeaderRead {
+		t.Errorf("header read limit = %d, want %d", s.httpServer.MaxHeaderBytes+dlnaHeaderReadSlop, dlnaMaxHeaderRead)
 	}
 	if s.httpServer.WriteTimeout != 0 {
 		t.Errorf("WriteTimeout = %s, want unset", s.httpServer.WriteTimeout)
@@ -290,6 +295,37 @@ func heapAlloc() uint64 {
 
 func oversizedUserAgentStatus(t *testing.T, addr string) int {
 	t.Helper()
+	code, _ := rawHeaderStatus(t, addr, 900<<10)
+	return code
+}
+
+// TestAHeaderPastTheReadLimitIsRefusedAndAnOrdinaryOneIsAnswered sends
+// one description GET and one header block larger than the read limit
+// but smaller than MaxHeaderBytes plus the bufio lookahead would have
+// been at 16 KiB. The ordinary request is answered. The long one is 431.
+func TestAHeaderPastTheReadLimitIsRefusedAndAnOrdinaryOneIsAnswered(t *testing.T) {
+	s := startLoopbackDLNA(t, ServerConfig{}, nil)
+	resp, err := http.Get("http://" + s.cfg.ListenAddress + "/dlna/description.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ordinary status %d", resp.StatusCode)
+	}
+	code, n := rawHeaderStatus(t, s.cfg.ListenAddress, 18<<10)
+	// 18 KiB of User-Agent plus the request framing sits past the 16 KiB
+	// read and inside the 20 KiB a 16 KiB MaxHeaderBytes would still admit.
+	if n <= dlnaMaxHeaderRead || n >= dlnaMaxHeaderRead+dlnaHeaderReadSlop {
+		t.Fatalf("probe is %d bytes; want it between %d and %d", n, dlnaMaxHeaderRead, dlnaMaxHeaderRead+dlnaHeaderReadSlop)
+	}
+	if code != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("status %d for a %d-byte header block", code, n)
+	}
+}
+
+func rawHeaderStatus(t *testing.T, addr string, uaLen int) (code, nbytes int) {
+	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -298,7 +334,8 @@ func oversizedUserAgentStatus(t *testing.T, addr string) int {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "GET /dlna/description.xml HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: close\r\n\r\n",
-		addr, strings.Repeat("U", 900<<10))
+		addr, strings.Repeat("U", uaLen))
+	nbytes = buf.Len()
 	_, _ = conn.Write(buf.Bytes())
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
@@ -308,9 +345,9 @@ func oversizedUserAgentStatus(t *testing.T, addr string) int {
 	if len(fields) < 2 {
 		t.Fatalf("status line %q", line)
 	}
-	code, err := strconv.Atoi(fields[1])
+	code, err = strconv.Atoi(fields[1])
 	if err != nil {
 		t.Fatalf("status %q: %v", fields[1], err)
 	}
-	return code
+	return code, nbytes
 }

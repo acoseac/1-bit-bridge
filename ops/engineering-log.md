@@ -39209,8 +39209,10 @@ What shipped:
   same 48 SUBSCRIBEs deliver 8 NOTIFYs. The process grows by 31 to 33
   goroutines (the pool, the callbacks it is serving, and the accept
   loop). Under `-race` one run reached 33, so the ceiling is the flood
-  size (48), which 190 still fails, and the delivered count is what
-  pins the pool.
+  size (48), which 190 still fails. The callbacks stay blocked until
+  the flood has been answered, then the test releases them and waits
+  on `notifyWG`: every accepted NOTIFY is in that group, and the
+  delivered count is what pins the pool.
 - `clampPage` clips a RequestedCount of 0 or past `maxCDSPage` (1000)
   to 1000. `TotalMatches` stays the full set. 1000 is the largest count
   a measured control point puts in one request (BubbleUPnP and
@@ -39228,8 +39230,13 @@ What shipped:
   1000 unless it pages. Album folders are not shortened.
 - `Record` cuts every stored string with `truncateRunes` to
   `dlnaLoggedFieldRunes` (100), on a rune boundary, so the 150-rune
-  User-Agent is stored as 100. `MaxHeaderBytes` is 16 KiB. After the
-  bound the eight 900 KiB User-Agents answer 431, store nothing, and
+  User-Agent is stored as 100. The listener reads at most 16 KiB of
+  headers. net/http's `initialReadLimitSize` (Go 1.26.6) is
+  `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
+  `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
+  at 16 KiB. A header of 18 KiB, which a field of 16 KiB would still
+  admit, answers 431; an ordinary description GET answers 200. After
+  the bound the eight 900 KiB User-Agents answer 431, store nothing, and
   the heap does not grow (one run, −81,304 bytes, which is GC noise).
   Truncation alone would not make the status 431, and a post-GC heap
   reading would not prove the header cap, so the test asserts both.
@@ -39266,3 +39273,12 @@ tree, then the file restored. Predicted red, and that is what ran:
   `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`
   failed on the ObjectID, the Filter, the fault, the Browse response
   and the Search response.
+
+Review of #1177. `startLoopbackDLNA` skips only a Start error whose
+text begins `dlna: SSDP start:`; any other Start error fails the test.
+The counts a control point sends, and the walk that pages by
+`NumberReturned`, are
+`TestARequestedCountUpToThePageIsReturnedWhole` and
+`TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`.
+`truncateRunes` ranges the string: a string no longer than n bytes is
+returned as it is, and n <= 0 leaves it unchanged.

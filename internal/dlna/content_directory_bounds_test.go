@@ -9,32 +9,37 @@ import (
 	"testing"
 )
 
-// TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest
-// asks for every track the way a RequestedCount of 0 does, then walks
-// StartingIndex forward by NumberReturned. Each track is collected once.
-func TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest(t *testing.T) {
-	const total = 1050
-	tracks := make([]TrackInfo, total)
+const cappedCatalogSize = 1050
+
+// cappedCatalogHandler serves cappedCatalogSize tracks titled "Cap NNNN".
+func cappedCatalogHandler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	tracks := make([]TrackInfo, cappedCatalogSize)
 	for i := range tracks {
 		tracks[i] = testTrack(fmt.Sprintf("trk%04d", i), fmt.Sprintf("Cap %04d", i))
 	}
-	lib := newTestLib(tracks...)
-	h := ContentDirectoryHandler(lib, staticServerURL("http://127.0.0.1:9"))
+	return ContentDirectoryHandler(newTestLib(tracks...), staticServerURL("http://127.0.0.1:9"))
+}
 
-	browse := func(start, count uint32) string {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		h(rec, buildBrowseRequest(t, allTracksObjectID, "BrowseDirectChildren", start, count))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("browse status %d", rec.Code)
-		}
-		return rec.Body.String()
+func browseCapped(t *testing.T, h http.HandlerFunc, start, count uint32) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h(rec, buildBrowseRequest(t, allTracksObjectID, "BrowseDirectChildren", start, count))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("browse status %d", rec.Code)
 	}
-	body := browse(0, 0)
-	n, tot, upd := soapCounts(t, body)
-	if n != maxCDSPage || tot != total || upd != 1 {
+	return rec.Body.String()
+}
+
+// TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest
+// asks for every track the way a RequestedCount of 0 does. Browse and
+// Search each return one page, and TotalMatches stays the whole set.
+func TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest(t *testing.T) {
+	h := cappedCatalogHandler(t)
+	n, tot, upd := soapCounts(t, browseCapped(t, h, 0, 0))
+	if n != maxCDSPage || tot != cappedCatalogSize || upd != 1 {
 		t.Fatalf("Browse RequestedCount=0 NumberReturned=%d TotalMatches=%d UpdateID=%d, want %d, %d, 1",
-			n, tot, upd, maxCDSPage, total)
+			n, tot, upd, maxCDSPage, cappedCatalogSize)
 	}
 
 	rec := httptest.NewRecorder()
@@ -43,44 +48,60 @@ func TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest(t *testin
 		t.Fatalf("search status %d", rec.Code)
 	}
 	sn, st, su := soapCounts(t, rec.Body.String())
-	if sn != maxCDSPage || st != total || su != 1 {
+	if sn != maxCDSPage || st != cappedCatalogSize || su != 1 {
 		t.Fatalf("Search RequestedCount=0 NumberReturned=%d TotalMatches=%d UpdateID=%d, want %d, %d, 1",
-			sn, st, su, maxCDSPage, total)
+			sn, st, su, maxCDSPage, cappedCatalogSize)
 	}
+}
 
+// TestARequestedCountUpToThePageIsReturnedWhole checks the counts a
+// control point actually sends: 1, the app's 200, and the page itself.
+func TestARequestedCountUpToThePageIsReturnedWhole(t *testing.T) {
+	h := cappedCatalogHandler(t)
 	for _, count := range []uint32{1, 200, 1000} {
-		page := browse(0, count)
-		pn, pt, pu := soapCounts(t, page)
-		if pn != int(count) || pt != total || pu != 1 {
+		pn, pt, pu := soapCounts(t, browseCapped(t, h, 0, count))
+		if pn != int(count) || pt != cappedCatalogSize || pu != 1 {
 			t.Errorf("RequestedCount %d NumberReturned=%d TotalMatches=%d UpdateID=%d", count, pn, pt, pu)
 		}
 	}
+}
 
+// TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce walks
+// StartingIndex forward by NumberReturned and requires each id once.
+func TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce(t *testing.T) {
+	h := cappedCatalogHandler(t)
 	seen := map[string]int{}
 	start := uint32(0)
 	for pages := 0; pages < 8; pages++ {
-		page := browse(start, 0)
-		pn, pt, _ := soapCounts(t, page)
-		if pt != total {
-			t.Fatalf("page at %d TotalMatches=%d", start, pt)
-		}
-		ids := didlItemIDs(page)
-		if len(ids) != pn {
-			t.Fatalf("page at %d has %d item ids, NumberReturned=%d", start, len(ids), pn)
-		}
-		for _, id := range ids {
-			seen[id]++
-		}
-		if pn == 0 {
+		pn, pt := noteCappedPage(t, seen, browseCapped(t, h, start, 0), start)
+		if pn == 0 || int(start)+pn >= pt {
 			break
 		}
 		start += uint32(pn)
-		if int(start) >= pt {
-			break
-		}
 	}
-	if len(seen) != total {
-		t.Fatalf("collected %d tracks, want %d", len(seen), total)
+	requireEachIDOnce(t, seen, cappedCatalogSize)
+}
+
+func noteCappedPage(t *testing.T, seen map[string]int, page string, start uint32) (numberReturned, totalMatches int) {
+	t.Helper()
+	numberReturned, totalMatches, _ = soapCounts(t, page)
+	if totalMatches != cappedCatalogSize {
+		t.Fatalf("page at %d TotalMatches=%d", start, totalMatches)
+	}
+	ids := didlItemIDs(page)
+	if len(ids) != numberReturned {
+		t.Fatalf("page at %d has %d item ids, NumberReturned=%d", start, len(ids), numberReturned)
+	}
+	for _, id := range ids {
+		seen[id]++
+	}
+	return numberReturned, totalMatches
+}
+
+func requireEachIDOnce(t *testing.T, seen map[string]int, want int) {
+	t.Helper()
+	if len(seen) != want {
+		t.Fatalf("collected %d tracks, want %d", len(seen), want)
 	}
 	for id, c := range seen {
 		if c != 1 {

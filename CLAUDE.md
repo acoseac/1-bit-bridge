@@ -5380,9 +5380,12 @@ no failing test — which is the shape to expect in this area.
   GETs with a 900 KiB User-Agent answered 200, stored 8 entries and
   retained 7,313,296 bytes (the review: 100 such requests, heap 4 MiB to
   92 MiB). `truncateRunes` cuts every stored string to
-  `dlnaLoggedFieldRunes` (100), on a rune boundary. `MaxHeaderBytes` is
-  `dlnaMaxHeaderBytes` (16 KiB). A larger header is 431 and is not
-  stored; after the bound the same eight requests answered 431, stored
+  `dlnaLoggedFieldRunes` (100), on a rune boundary. The listener reads
+  at most 16 KiB of headers. net/http's `initialReadLimitSize` (Go
+  1.26.6) is `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
+  `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
+  at 16 KiB. A header block past that read is 431 and is not stored;
+  after the bound the same eight requests answered 431, stored
   nothing, and the heap did not grow. The SOAP body stays on its own
   1 MiB cap.
   **ReadTimeout is 60 s and IdleTimeout is 120 s, the API server's
@@ -5401,8 +5404,11 @@ no failing test — which is the shape to expect in this area.
   counts. `remoteAddr` is the TCP peer and stays as it is.
   (`TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify`,
   `TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest`,
+  `TestARequestedCountUpToThePageIsReturnedWhole`,
+  `TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`,
   `TestTelemetryKeepsAHundredRunesOfEachHeader`,
   `TestTheListenerRefusesAnOversizedHeader`,
+  `TestAHeaderPastTheReadLimitIsRefusedAndAnOrdinaryOneIsAnswered`,
   `TestTheListenerUsesTheAPIDeadlines`,
   `TestTheListenerClosesAnIdleKeepAliveAndAStalledBody`,
   `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`.)

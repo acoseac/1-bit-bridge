@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 // TelemetryEntry is one captured renderer-connection record. Lives in
@@ -136,22 +135,18 @@ func (s *TelemetryStore) Capacity() int { return s.capacity }
 // truncateRunes returns s cut to at most n runes, on a rune boundary.
 // A string no longer than n bytes is returned as it is: every rune is
 // at least one byte, so that string cannot hold more than n runes.
+// n <= 0 leaves s unchanged.
 func truncateRunes(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	i := 0
-	for range n {
-		_, size := utf8.DecodeRuneInString(s[i:])
-		if size <= 0 {
-			break
+	for i := range s {
+		if n == 0 {
+			return s[:i]
 		}
-		i += size
-		if i >= len(s) {
-			return s
-		}
+		n--
 	}
-	return s[:i]
+	return s
 }
 
 // -----------------------------------------------------------------------------
