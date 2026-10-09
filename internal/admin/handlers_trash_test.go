@@ -225,6 +225,30 @@ func TestAPaddedPathDoesNotTrashTheUnpaddedFile(t *testing.T) {
 	}
 }
 
+// TestALeadingSlashThenASpaceIsRefused — a leading slash is removed after
+// the padding check, so "/ Various/..." was a different name that then
+// could not be restored.
+func TestALeadingSlashThenASpaceIsRefused(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	wireTrash(t, srv)
+	enableDelete(t, srv, true)
+	root := cfg.LibraryRoots[0]
+	padded := seedLibraryFile(t, root, " Various/Album/01.flac", "PADDED")
+	plain := seedLibraryFile(t, root, "Various/Album/01.flac", "PLAIN")
+	var errBody map[string]any
+	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash", map[string]any{
+		"paths": []string{"/ Various/Album/01.flac"},
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("slash then space = %d (%v), want 400", code, errBody)
+	}
+	if body, err := os.ReadFile(padded); err != nil || string(body) != "PADDED" {
+		t.Errorf("padded file = %q, %v", body, err)
+	}
+	if body, err := os.ReadFile(plain); err != nil || string(body) != "PLAIN" {
+		t.Errorf("unpadded file = %q, %v", body, err)
+	}
+}
+
 // TestTrashRefusesPathsOutsideTheRoot — the API layer must not be the only
 // thing standing between a hostile path and the filesystem, but it must also
 // not be the thing that lets one through.
