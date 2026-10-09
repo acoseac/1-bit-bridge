@@ -47,10 +47,15 @@ func requireASecondServeChangesNothing(t *testing.T, ownPorts bool) {
 		t.Fatal(err)
 	}
 	dataDir := filepath.Join(dir, "data")
-	adminAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
+	lan, admin := holdLoopback(t), holdLoopback(t)
+	adminAddr := admin.addr
 	liveCfg := writeServeConfig(t, filepath.Join(dir, "live.yaml"), lib, dataDir,
-		freeLoopbackTCPAndUDPAddr(t), adminAddr)
-	live := bootServe(t, "--config", liveCfg)
+		lan.addr, adminAddr)
+	live := launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, serveOpts{
+			configPath: liveCfg, lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
+	})
 	waitForAdminReady(t, adminAddr, live.done, live.stderr)
 	before := recordLiveBridge(t, liveCfg, dataDir)
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -38,7 +37,8 @@ func TestAnEarlyExitDoesNotWaitOutTheBackupTicker(t *testing.T) {
 	}
 	defer held.Close()
 
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
+	lan := holdLoopback(t)
+	listenAddr := lan.addr
 	configPath := filepath.Join(root, "bridge.yaml")
 	yamlText := "libraryRoots:\n  - " + lib + "\ndataDir: " + dataDir +
 		"\nadminAddress: " + held.Addr().String() + "\n"
@@ -52,7 +52,9 @@ func TestAnEarlyExitDoesNotWaitOutTheBackupTicker(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- runServe(ctx, serveOpts{configPath: configPath, addrOverride: listenAddr}, stdout, stderr)
+		done <- runServe(ctx, serveOpts{
+			configPath: configPath, addrOverride: listenAddr, lanListener: lan.ln,
+		}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 

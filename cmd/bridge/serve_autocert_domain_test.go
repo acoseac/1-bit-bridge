@@ -78,7 +78,7 @@ func TestServePublishesNoAutocertDomainCredential(t *testing.T) {
 	console := newLiveConsole(ports.admin)
 	apiAddr := "127.0.0.1:" + strconv.Itoa(ports.api)
 	waitForAdminReady(t, console.addr, done, stderr)
-	waitForAdminReady(t, apiAddr, done, stderr)
+	waitForPortAccepting(t, apiAddr, done, stderr)
 	want := "https://bridge.example.test:" + strconv.Itoa(ports.api)
 
 	// What any caller sees, a token or none.

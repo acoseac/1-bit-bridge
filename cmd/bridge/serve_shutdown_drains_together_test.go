@@ -45,7 +45,8 @@ func TestServeShutdownDrainsTheTailnetBesideTheLAN(t *testing.T) {
 	node.h3TLS = serverTLS
 	node.bind = func(int) (net.PacketConn, error) { return net.ListenPacket("udp", "127.0.0.1:0") }
 	node.listen = func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
-	addr := freeLoopbackTCPAndUDPAddr(t)
+	pair := holdLoopbackTCPAndUDP(t)
+	addr := pair.addr
 	cfgPath, dataDir := writeTsnetLANConfig(t)
 	stderr := &safeBuffer{}
 	// serve prints this once its LAN HTTP/3 server is up; nothing is held.
@@ -61,7 +62,11 @@ func TestServeShutdownDrainsTheTailnetBesideTheLAN(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: addr, tsnetNode: node, wrapAPIHandler: wrap},
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: addr,
+			lanListener: pair.ln, lanPacket: pair.udp,
+			tsnetNode: node, wrapAPIHandler: wrap,
+		},
 			&holdingWriter{buf: &safeBuffer{}, holds: []*printHold{up}},
 			&holdingWriter{buf: stderr, holds: []*printHold{lanGaveUp, tailnetGaveUp}})
 	}()

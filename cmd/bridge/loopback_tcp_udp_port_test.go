@@ -21,22 +21,37 @@ const (
 	tcpAndUDPDraws  = 20
 )
 
-// freeLoopbackTCPAndUDPAddr is a loopback address for serve to bind twice:
-// its LAN HTTPS listener takes the TCP port and its HTTP/3 server the UDP
-// port of the same number, and a test that speaks HTTP/3 to serve has to
-// know that one, which serve prints nowhere. The number is released before
-// serve binds it, as freeLoopbackPort's is, but no allocator hands out
-// numbers in tcpAndUDPPortLo..tcpAndUDPPortHi, so only an explicit bind can
-// take it meanwhile. That fails as loudly: a TCP port taken fails serve's
-// listen, and a UDP one leaves the HTTP/3 request unanswered, which
-// waitForServe reports.
-func freeLoopbackTCPAndUDPAddr(t *testing.T) string {
+// heldLoopbackPair is a loopback address bound on TCP and UDP, still open.
+// A serve test that speaks HTTP/3 hands both sockets to serve: the number
+// is one serve prints nowhere, and releasing it before the bind is the
+// race a later listener wins (backlog B313).
+type heldLoopbackPair struct {
+	ln   net.Listener
+	udp  *net.UDPConn
+	addr string
+}
+
+// holdLoopbackTCPAndUDP binds one loopback port on TCP and UDP and keeps
+// both sockets open for the rest of the test. Call it before launchServe
+// (or before drainServeOnCleanup) so the drain runs before the sockets
+// are closed.
+func holdLoopbackTCPAndUDP(t *testing.T) heldLoopbackPair {
 	t.Helper()
-	addr, err := drawLoopbackTCPAndUDPAddr()
+	ln, pc, addr, err := openLoopbackTCPAndUDPIn(tcpAndUDPPortLo, tcpAndUDPPortHi, tcpAndUDPDraws)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return addr
+	udp, ok := pc.(*net.UDPConn)
+	if !ok {
+		_ = ln.Close()
+		_ = pc.Close()
+		t.Fatalf("UDP socket is %T, want *net.UDPConn", pc)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = udp.Close()
+	})
+	return heldLoopbackPair{ln: ln, udp: udp, addr: addr}
 }
 
 // drawLoopbackTCPAndUDPAddr is a loopback address whose port was free on
@@ -59,8 +74,22 @@ func drawLoopbackTCPAndUDPAddr() (string, error) {
 
 // drawLoopbackTCPAndUDPAddrIn is drawLoopbackTCPAndUDPAddr over [lo, hi],
 // with draws tries. It fails naming every address it tried and the error
-// each one got.
+// each one got. The sockets are closed before the address is returned:
+// the draw tests bind the number again themselves. A serve test keeps
+// them open through holdLoopbackTCPAndUDP.
 func drawLoopbackTCPAndUDPAddrIn(lo, hi, draws int) (string, error) {
+	lis, pc, addr, err := openLoopbackTCPAndUDPIn(lo, hi, draws)
+	if err != nil {
+		return "", err
+	}
+	_ = lis.Close()
+	_ = pc.Close()
+	return addr, nil
+}
+
+// openLoopbackTCPAndUDPIn binds one address in [lo, hi] on TCP and UDP and
+// returns both sockets open. It fails naming every address it tried.
+func openLoopbackTCPAndUDPIn(lo, hi, draws int) (net.Listener, net.PacketConn, string, error) {
 	refused := make([]string, 0, draws)
 	for range draws {
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(lo+rand.IntN(hi-lo+1)))
@@ -70,15 +99,14 @@ func drawLoopbackTCPAndUDPAddrIn(lo, hi, draws int) (string, error) {
 			continue
 		}
 		pc, err := net.ListenPacket("udp", addr)
-		_ = lis.Close()
 		if err != nil {
+			_ = lis.Close()
 			refused = append(refused, err.Error())
 			continue
 		}
-		_ = pc.Close()
-		return addr, nil
+		return lis, pc, addr, nil
 	}
-	return "", fmt.Errorf("no loopback port in %d..%d free on both TCP and UDP in %d draws: %s",
+	return nil, nil, "", fmt.Errorf("no loopback port in %d..%d free on both TCP and UDP in %d draws: %s",
 		lo, hi, draws, strings.Join(refused, "; "))
 }
 

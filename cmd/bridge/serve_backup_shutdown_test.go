@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -50,8 +49,9 @@ func TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile(t *testing.T) {
 	// the collation stops, with the snapshot file already created.
 	backuptest.WriteSource(t, filepath.Join(dataDir, "bridge.db"))
 
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
-	consoleAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
+	lan, admin := holdLoopback(t), holdLoopback(t)
+	listenAddr := lan.addr
+	consoleAddr := admin.addr
 	configPath := filepath.Join(root, "bridge.yaml")
 	yamlText := "libraryRoots:\n  - " + lib + "\ndataDir: " + dataDir +
 		"\nadminAddress: " + consoleAddr + "\n"
@@ -61,7 +61,10 @@ func TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile(t *testing.T) {
 
 	park := sqlitetest.ArmUntil(t, serveGiveUpTime(t))
 	b := launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
-		return runServe(ctx, serveOpts{configPath: configPath, addrOverride: listenAddr}, stdout, stderr)
+		return runServe(ctx, serveOpts{
+			configPath: configPath, addrOverride: listenAddr,
+			lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
 	})
 	// Armed before the launch, so the snapshot parks during boot. The
 	// drain is registered inside launchServe; this cleanup is after it

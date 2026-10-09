@@ -39170,3 +39170,116 @@ ran the named tests with `-count=1`, and restored the file with
   Actual: those two. The handler left the row served, and the result's
   `Paths` and `Dirs` were empty. Stayed green:
   `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
+
+## 2026-10-09 — a serve test hands serve its listeners (backlog B313)
+
+`freeLoopbackPort` bound `127.0.0.1:0`, closed the listener and returned
+the number. `freeLoopbackTCPAndUDPAddr` did the same for a port free on
+TCP and UDP. Between that close and serve's bind, another listener or an
+outgoing connection can take the port. Serve then exits
+`admin listen 127.0.0.1:<port>: bind: address already in use` (or the
+LAN `listen` line). Bridge #1166 CI, run 37865927261, `test -race
+(rest)`, lost `TestServeRedeemsThePairingLinksCode` on the admin port.
+B311 made that early exit return in about a second; the bind still
+failed. The same race is the HTTP/3 tests' TCP-and-UDP draw.
+
+A port that serve, a served bridge or a probe will bind stays open.
+`holdLoopback` and `holdLoopbackTCPAndUDP` keep the sockets, the test
+writes that address into the config as before, and `serveOpts` carries
+`adminListener`, `lanListener` and `lanPacket`. All three are nil in
+production. Serve adopts a handed listener only when its address is the
+one the config names (`--addr` for the LAN pair). A mismatch prints
+`listen <addr>: handed listener …` and returns 1, and the listener stays
+with the caller. A handed UDP socket with HTTP/3 disabled is the same
+refusal. `admin.Server.Serve` still listens itself; `ServeListener` is
+what the handed admin path calls, so the error stays
+`admin listen <addr>: …`. `freeLoopbackPort` remains for a number that
+is only written into a config and compared. The TCP-and-UDP draw remains
+for the unit tests that bind the number again themselves; the wrapper
+that closed and returned it to serve tests is gone.
+
+`TestAHandedListenerCannotBeTakenBeforeServeBinds` keeps both listeners,
+requires a second `Listen` on each address to fail, and requires serve
+to come up. A second `net.Listen` on a held port fails (no
+SO_REUSEPORT), so serve coming up is serve using the handed listener.
+`TestAHandedListenerOnAnotherAddressIsAStartupError` hands a listener
+whose address is not the config's and requires exit 1, the handed-listener
+line, and no banner.
+
+The negative control, after that commit, closed both listeners in
+`TestAHandedListenerCannotBeTakenBeforeServeBinds`, bound a squatter on
+each address, and launched serve with the port numbers alone.
+GOTOOLCHAIN=go1.26.6. Predicted: exit 1 before the banner, stderr
+`listen …: bind: address already in use` (the LAN bind returns before
+the admin error is selected). Observed, 0.10s:
+
+```
+serve exited with code 1 before it printed its startup banner
+stderr=listen 127.0.0.1:58619: listen tcp 127.0.0.1:58619: bind: address already in use
+```
+
+The file was restored after the control.
+
+Stress, same toolchain, `-race -count=8 -parallel=8` over the 22
+converted serve tests (176 runs). A background loop bound 1,500
+ephemeral TCP and UDP sockets and 400 draws in 20000–32767 between
+them. The package's tests do not call `t.Parallel`, so `-parallel` does
+not overlap them; the churner is what takes the ports. On main
+`0dcead53`, 494.854s, exit 1, six failures, each `address already in
+use`: `TestEventStreamsEndWhenServeShutsDown` twice (one on the admin
+port, one on the LAN port), `TestServeAnalysisPoolLineFollowsTheLiveGate`
+(`switched_on_without_a_usable_sox`), `TestAnEarlyExitDoesNotWaitOutTheBackupTicker`
+(the LAN bind, so the test never reached the admin bind it holds on
+purpose), `TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile`, and
+`TestServeRedeemsThePairingLinksCode`. On this branch, 519.504s, exit 0,
+no `address already in use`.
+
+A handed UDP socket was refused after the LAN TCP listen. Both refusals
+(the address does not match, and HTTP/3 disabled with a socket handed
+in) returned 1 before ServeTLS owned that listener, so a port serve had
+bound itself stayed taken. `refuseHandedPacket` runs before that
+listen, and a refusal then holds nothing and prints no banner. The
+adopt after the listen still closes the listener if it fails. Admin
+readiness was a dial. A test that hands serve a listener it already
+bound has a port that accepts before ServeListener, so the dial
+returned with the console not serving. `waitForAdminReady` is now GET
+/healthz; any HTTP response counts, and it retries until one arrives
+or serve exits. The API port stays a dial (`waitForPortAccepting`); it
+speaks TLS. `beforeAdminServe` runs immediately before ServeListener
+on the handed path, nil in production.
+
+Red, before that change, GOTOOLCHAIN=go1.26.6, `-count=1`. Predicted:
+the LAN port serve bound cannot be bound again after either UDP
+refusal, and the dial returns while serve is held before
+ServeListener. Observed, 0.945s:
+
+```
+--- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree (0.17s)
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address (0.11s)
+        LAN port 127.0.0.1:60395 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60395: bind: address already in use
+            listen 127.0.0.1:60395: handed UDP socket 127.0.0.1:51214 is not 127.0.0.1:60395
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/http3_disabled (0.06s)
+        LAN port 127.0.0.1:60399 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60399: bind: address already in use
+            listen 127.0.0.1:60399: handed UDP socket with HTTP/3 disabled
+--- FAIL: TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener (0.08s)
+    the admin readiness check returned before ServeListener
+```
+
+The negative control, after the commit, removed the early check,
+restored both returns after the listen with no close, and put
+`waitForAdminReady` back on the dial. Predicted: the same three
+failures. Observed, 0.854s:
+
+```
+--- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree (0.21s)
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address (0.12s)
+        LAN port 127.0.0.1:60839 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60839: bind: address already in use
+            listen 127.0.0.1:60839: handed UDP socket 127.0.0.1:49477 is not 127.0.0.1:60839
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/http3_disabled (0.09s)
+        LAN port 127.0.0.1:60843 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60843: bind: address already in use
+            listen 127.0.0.1:60843: handed UDP socket with HTTP/3 disabled
+--- FAIL: TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener (0.11s)
+    the admin readiness check returned before ServeListener
+```
+
+Both files were restored after the control.

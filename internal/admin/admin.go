@@ -2005,6 +2005,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
+	return s.ServeListener(ctx, lis)
+}
+
+// ServeListener serves the console on lis, which the caller already
+// bound, and blocks until ctx is done. Serve is the production path and
+// listens itself. cmd/bridge's boot tests bind the port first and hand
+// the listener over, so nothing can take it between the choice and the
+// bind (backlog B313).
+func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	s.boundAdminAddr = lis.Addr().String()
 	// Public-mode direct-TLS path (PR 3): wrap the TCP listener
 	// in tls.NewListener using the cmd-side certManager's

@@ -2513,6 +2513,69 @@ type serveOpts struct {
 	// the cache kept that "no sox" for its 30 s (backlog B105). Per
 	// invocation for tailscaleCLI's reason.
 	soxProbe func(context.Context) (transcode.SoxInfo, error)
+	// adminListener, lanListener and lanPacket are listeners a test
+	// already bound, so the port cannot be taken between the choice and
+	// serve's own bind. Nil in production. Serve adopts one only when
+	// its address is the address the config (or --addr, for the LAN
+	// pair) names; a mismatch is a startup error and the listener stays
+	// with the caller. Per invocation for tailscaleCLI's reason
+	// (backlog B313).
+	adminListener net.Listener
+	lanListener   net.Listener
+	lanPacket     *net.UDPConn
+	// beforeAdminServe runs immediately before ServeListener on the
+	// handed admin path. Nil in production. A test holds serve there,
+	// where the port already accepts and the console does not yet
+	// (backlog B313).
+	beforeAdminServe func()
+}
+
+// adoptHandedListener returns lis when it is nil or when its address is
+// want. A listener bound on another address is an error: serving there
+// would answer a port the config does not name.
+func adoptHandedListener(lis net.Listener, want string) (net.Listener, error) {
+	if lis == nil {
+		return nil, nil
+	}
+	if got := lis.Addr().String(); got != want {
+		return nil, fmt.Errorf("handed listener %s is not %s", got, want)
+	}
+	return lis, nil
+}
+
+// adoptHandedPacket is adoptHandedListener for the LAN HTTP/3 socket.
+func adoptHandedPacket(conn *net.UDPConn, want string) (*net.UDPConn, error) {
+	if conn == nil {
+		return nil, nil
+	}
+	if got := conn.LocalAddr().String(); got != want {
+		return nil, fmt.Errorf("handed UDP socket %s is not %s", got, want)
+	}
+	return conn, nil
+}
+
+// refuseHandedPacket reports why a handed UDP socket cannot be adopted.
+// The LAN TCP listen comes after this, so a refusal holds no listener
+// (backlog B313). A nil socket is the production path.
+func refuseHandedPacket(conn *net.UDPConn, listenAddress string, http3Disabled bool) error {
+	if conn == nil {
+		return nil
+	}
+	if http3Disabled {
+		return fmt.Errorf("handed UDP socket with HTTP/3 disabled")
+	}
+	_, err := adoptHandedPacket(conn, listenAddress)
+	return err
+}
+
+// adminListenAddress is the address Serve binds when no listener is
+// handed to it: the configured admin address, or the default when that
+// is empty.
+func adminListenAddress(cfg *config.Config) string {
+	if cfg == nil || cfg.AdminAddress == "" {
+		return config.DefaultAdminAddress
+	}
+	return cfg.AdminAddress
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -5381,14 +5444,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
+		if opts.adminListener != nil {
+			want := adminListenAddress(cfg)
+			lis, aerr := adoptHandedListener(opts.adminListener, want)
+			if aerr != nil {
+				adminErr <- fmt.Errorf("admin listen %s: %w", want, aerr)
+				return
+			}
+			if opts.beforeAdminServe != nil {
+				opts.beforeAdminServe()
+			}
+			adminErr <- adminSrv.ServeListener(adminCtx, lis)
+			return
+		}
 		adminErr <- adminSrv.Serve(adminCtx)
 	}()
+	// A handed UDP socket is refused before this listen. Returning
+	// afterwards leaves the port open: ServeTLS has not taken the
+	// listener yet (backlog B313).
+	if err := refuseHandedPacket(opts.lanPacket, cfg.ListenAddress, cfg.DisableHTTP3); err != nil {
+		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+		return 1
+	}
 	// Listen first so we can report the actual bound address (useful when
-	// cfg.ListenAddress is ":0" — which test code uses).
-	lis, err := net.Listen("tcp", cfg.ListenAddress)
+	// cfg.ListenAddress is ":0" — which test code uses). A test that
+	// already holds the listener hands it in, and it is used only when
+	// it is this address.
+	lis, err := adoptHandedListener(opts.lanListener, cfg.ListenAddress)
 	if err != nil {
 		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
 		return 1
+	}
+	if lis == nil {
+		lis, err = net.Listen("tcp", cfg.ListenAddress)
+		if err != nil {
+			fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+			return 1
+		}
 	}
 	// The image's HEALTHCHECK (`bridge health`) connects and closes before
 	// any ClientHello, and net/http logs every failed handshake: one line
@@ -5499,49 +5591,68 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	var lanH3 *lanHTTP3
 
 	if !cfg.DisableHTTP3 {
-		// 1. Resilient LAN Listener
-		udpAddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddress)
-		if err != nil {
-			logger.Warn("Failed to resolve UDP address, bypassing HTTP/3", "err", err)
-		} else {
-			udpConn, err := net.ListenUDP("udp", udpAddr)
-			if err != nil {
-				logger.Warn("Failed to bind LAN UDP socket, running HTTP/2 only", "err", err)
+		// 1. Resilient LAN Listener. A test that already holds the UDP
+		// socket of this address hands it in; anything else is a startup
+		// error, and a socket serve binds itself keeps today's warn and
+		// the HTTP/2-only fallback.
+		serveLANHTTP3 := func(udpConn *net.UDPConn) {
+			// Expand the UDP window to accommodate heavy FLAC/PCM streaming arrays
+			const socketBufferSize = 2500 * 1024 // 2.5 MB
+			if err := udpConn.SetReadBuffer(socketBufferSize); err != nil {
+				logger.Debug("Could not expand UDP read buffer size", "err", err)
+			}
+			if err := udpConn.SetWriteBuffer(socketBufferSize); err != nil {
+				logger.Debug("Could not expand UDP write buffer size", "err", err)
+			}
+
+			var lanTLSConfig *tls.Config
+			if tlsConfig != nil {
+				lanTLSConfig = tlsConfig.Clone()
+				lanTLSConfig.NextProtos = []string{"h3"} // Force HTTP/3 ALPN exclusively
+				lanTLSConfig.MinVersion = tls.VersionTLS13
+			}
+
+			if lanTLSConfig != nil {
+				lanH3 = &lanHTTP3{
+					srv: &http3.Server{
+						Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
+						TLSConfig: lanTLSConfig,
+						// No ConnContext. The event streams select on
+						// the serve context (EndEventStreamsWhen). A
+						// connection that closes still ends its
+						// request: quic-go parents each request on
+						// the QUIC connection's own context.
+					},
+					conn:   udpConn,
+					stderr: stderr,
+				}
+				go lanH3.serve()
 			} else {
-				// Expand the UDP window to accommodate heavy FLAC/PCM streaming arrays
-				const socketBufferSize = 2500 * 1024 // 2.5 MB
-				if err := udpConn.SetReadBuffer(socketBufferSize); err != nil {
-					logger.Debug("Could not expand UDP read buffer size", "err", err)
-				}
-				if err := udpConn.SetWriteBuffer(socketBufferSize); err != nil {
-					logger.Debug("Could not expand UDP write buffer size", "err", err)
-				}
-
-				var lanTLSConfig *tls.Config
-				if tlsConfig != nil {
-					lanTLSConfig = tlsConfig.Clone()
-					lanTLSConfig.NextProtos = []string{"h3"} // Force HTTP/3 ALPN exclusively
-					lanTLSConfig.MinVersion = tls.VersionTLS13
-				}
-
-				if lanTLSConfig != nil {
-					lanH3 = &lanHTTP3{
-						srv: &http3.Server{
-							Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
-							TLSConfig: lanTLSConfig,
-							// No ConnContext. The event streams select on
-							// the serve context (EndEventStreamsWhen). A
-							// connection that closes still ends its
-							// request: quic-go parents each request on
-							// the QUIC connection's own context.
-						},
-						conn:   udpConn,
-						stderr: stderr,
-					}
-					go lanH3.serve()
+				logger.Warn("LAN TLS configuration is missing; bypassing LAN HTTP/3 initialization")
+				_ = udpConn.Close()
+			}
+		}
+		udpConn, err := adoptHandedPacket(opts.lanPacket, cfg.ListenAddress)
+		if err != nil {
+			// Checked before the TCP listen. Close the listener this
+			// function bound so a refusal here does not leave the port
+			// taken (backlog B313).
+			_ = lis.Close()
+			fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+			return 1
+		}
+		if udpConn != nil {
+			serveLANHTTP3(udpConn)
+		} else {
+			udpAddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddress)
+			if err != nil {
+				logger.Warn("Failed to resolve UDP address, bypassing HTTP/3", "err", err)
+			} else {
+				udpConn, err = net.ListenUDP("udp", udpAddr)
+				if err != nil {
+					logger.Warn("Failed to bind LAN UDP socket, running HTTP/2 only", "err", err)
 				} else {
-					logger.Warn("LAN TLS configuration is missing; bypassing LAN HTTP/3 initialization")
-					_ = udpConn.Close()
+					serveLANHTTP3(udpConn)
 				}
 			}
 		}
