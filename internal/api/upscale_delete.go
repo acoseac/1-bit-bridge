@@ -63,6 +63,13 @@ type VariantDeleter interface {
 	ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantSummary, error)
 	ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantSummary, error)
 	DeleteVariant(ctx context.Context, sourcePath, variantID string) error
+	// DeleteVariantIfUnchanged deletes the row only while it still records
+	// rec's sidecar path, size and completion time. A row another writer
+	// changed since the lookup — a move, a render, an adoption — is left
+	// in place, and the error is ErrVariantChanged. DELETE
+	// /v1/upscale/variants keeps DeleteVariant: that request names the row
+	// it means to remove.
+	DeleteVariantIfUnchanged(ctx context.Context, rec VariantRecord) error
 	// LocateVariantSidecar says where this row's file actually is, so the
 	// unlink acts on the file rather than on the row's CLAIM about it.
 	// Required rather than an optional capability: there is one production

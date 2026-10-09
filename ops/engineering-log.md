@@ -38207,3 +38207,111 @@ at 25.7 s, exit 0, and neither grace line. The disarm cleanup is
 registered after `launchServe`, so it runs before the drain; the other
 way round, the drain waits on a parked statement until the test
 deadline.
+
+## 2026-10-09 — a variant move keeps the file at both names across the row update (backlog B249, B251)
+
+B204 closed the window after `AllVariants` returns and before the tick
+deletes: the DELETE compares the listed sidecar path, size and
+`created_at`. It does not close a window inside `moveOneVariant`, and it
+does not close the serve reap, which deleted by source path and variant
+id. Both lose a row whose file is intact.
+
+### B249 — the file left before the row moved
+
+`moveOneVariant` renamed the sidecar (or copied it and removed the
+source) and then called `UpdateVariantSidecarPath`. Between those the
+row still named the old path, which no longer held the file, and the
+canonical place under the variants directory was not the destination.
+A VariantWatcher tick that had listed the catalog in that window
+classified the row as gone at both places. The listed snapshot still
+matched, so `DeleteVariantIfUnchanged` deleted it. The backlog's stress
+(back-to-back ticks, a writer holding the store lock in 15 ms bursts)
+lost 1,425 of 6,000 moved rows on main af4f4569 and 122 on #1137's head.
+This session did not re-run that 6,000-row loop. The suite proof is one
+tick parked between the file step and the row update.
+
+`TestAWatcherTickBetweenTheFileAndTheRowKeepsTheMovedRow` moves one of
+forty rows on a second store, the CLI's shape, and the hook runs
+`runOneVariantSweep` while the source name is already gone and the row
+still points at it. Red first, on that rename-then-update body: the
+report deleted 3 (the moved row and the two sidecars removed by hand),
+and the moved row was gone. The mass-delete floor is 10, so 3 of 40
+proceeds.
+
+The fix places the destination name first. `os.SameFile` is asked before
+any link or copy: a case-only spelling, or a `--to` that is the variants
+directory through a symlink, is one directory entry, and removing the
+source name would remove the only copy. Otherwise the destination is a
+hard link (`os.Link` keeps the owner). Where the link fails — across
+volumes; NTFS hard links fail the same way — `copyAndFsync` writes the
+second copy. The row is updated only once both names exist (or the one
+file has been recognised). The source name is removed after the update.
+An update that fails returns with both copies still there. A crash
+between the second name and the update leaves two copies; the next run
+sees one file under two names and updates the row without removing the
+old name, or copies again when the second name is another inode. A crash
+after the update leaves the extra name for the orphan sweep. A source
+already gone with the destination present, the crash of an older rename,
+still updates the row and removes nothing.
+
+Judging `os.SameFile` after a link this call just made would see one
+inode and skip the unlink, leaving the extra name on every successful
+move. A destination that already exists and is a different file (an
+interrupted copy) is overwritten by `copyAndFsync` and the source is
+still removed after the update.
+
+After the fix the same test keeps the moved row at the destination, and
+the two gone rows are still deleted (`deleted` equals 2).
+`TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt` points `--to` at the
+variants directory through a symlink and requires the one file to remain.
+`TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy` flips the first
+letter of the sidecar base and skips on a volume that tells the two
+spellings apart. `TestAMoveCopiesWhenTheLinkCannotBeMade` forces
+`linkSidecar` to fail; the hook sees both files, and after the move the
+source name is gone and the row points at the copy.
+`TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated` stayed green:
+that hook runs after the listing, by which time the new algorithm has
+already updated the row, so the compare-and-delete misses.
+
+The negative control puts the source removal back before the update. The
+hook test goes red again (`deleted` 3, the moved row gone).
+
+### B251 — the download deleted the row it had looked up
+
+`serveVariant` looks the variant up, and on ENOENT from the path that
+lookup captured it deleted by `(source_path, variant_id)`. A move that
+commits between the lookup and that delete rewrites `sidecar_path` and
+removes the old name. The open of the captured path is still ENOENT, and
+`DeleteVariant` matches the new row. B249 does not close this: the open
+uses the path captured at lookup, whatever the move does afterwards.
+
+The reap now copies the looked-up record (sidecar path, size, completion
+time; empty source or variant filled from the request) and deletes
+through `DeleteVariantIfUnchanged`. The production adapter translates
+`manifest.ErrVariantChanged` to `api.ErrVariantChanged` and does not
+turn a miss into a nil error: a nil error is what publishes
+`upscale.deleted`. A miss warns nothing, publishes nothing, and the
+request still answers 410 `variant_missing_on_disk`. An unchanged
+missing row is still deleted and published. `DELETE /v1/upscale/variants`
+stays on the unconditional delete.
+
+`TestADownloadWhoseRowMovesBeforeTheReapKeepsIt` uses the real
+`variantStoreAdapter` and `variantDeleterAdapter`. The source file's
+mtime and size are stamped on the row, so the freshness gate does not
+answer `variant_stale` before the open. The variants directory holds a
+decoy rendition, so `SidecarStoreState` is available; an empty directory
+would skip the reap and the survival assertion would pass on the old
+delete. The row's own sidecar is not created. The hook rewrites
+`sidecar_path` after the snapshot is taken and before the delete. Red
+first, while the reap still called `DeleteVariant`: 410, and the row was
+gone (`moved row: <nil>`). After the switch the row remains at the new
+path and the status is still 410.
+`TestADownloadOfAMissingSidecarStillDropsTheRow` is the positive
+control: no hook, the unchanged missing row is deleted.
+
+The negative control puts the unconditional `DeleteVariant` back. The
+moved-row test goes red again.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump. The wire
+answer for a sidecar this request could not open is still 410
+`variant_missing_on_disk`.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,4 +218,142 @@ func requireRowsGone(t *testing.T, store *manifest.Store, gone []manifest.Varian
 			t.Errorf("control: the row of %s, whose sidecar is gone at both locations, was kept (row %v, err %v)", v.SourcePath, row, err)
 		}
 	}
+}
+
+// TestAWatcherTickBetweenTheFileAndTheRowKeepsTheMovedRow is the window
+// the compare-and-delete cannot see. The tick runs after the file step
+// and before the row update. A file that has already left the recorded
+// path is judged gone, and the snapshot still matches the DELETE. The
+// two hand-removed sidecars are the positive control.
+func TestAWatcherTickBetweenTheFileAndTheRowKeepsTheMovedRow(t *testing.T) {
+	m := newMoveShape(t)
+	prev := moveBeforeRowUpdate
+	t.Cleanup(func() { moveBeforeRowUpdate = prev })
+	row := m.moved[0]
+	var report integrity.SweepReport
+	moveBeforeRowUpdate = func() {
+		report, _ = runOneVariantSweep(t, m.store, &integrityVariantListerAdapter{store: m.store}, m.dir)
+	}
+	newPath := computeNewSidecarPath(m.to, row)
+	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
+		t.Fatal(err)
+	}
+	requireMovedRowsAt(t, m.store, []manifest.VariantRow{row}, m.to)
+	requireRowsGone(t, m.store, m.gone)
+	if report.Deleted != len(m.gone) {
+		t.Fatalf("sweep deleted %d rows, want the %d hand-removed ones", report.Deleted, len(m.gone))
+	}
+}
+
+// TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt: a --to that follows
+// a link back to the variants directory is another spelling of the file.
+// Removing the source name would remove the only copy.
+func TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt(t *testing.T) {
+	m := newMoveShape(t)
+	link := filepath.Join(t.TempDir(), "variants-link")
+	if err := os.Symlink(m.dir, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	row := m.moved[0]
+	newPath := computeNewSidecarPath(link, row)
+	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(row.SidecarPath); err != nil {
+		t.Fatalf("the only copy is gone: %v", err)
+	}
+	got, err := m.store.GetVariant(context.Background(), row.SourcePath, row.VariantID)
+	if err != nil || got == nil {
+		t.Fatalf("row: %v", err)
+	}
+	if got.SidecarPath != newPath {
+		t.Fatalf("sidecar_path = %q, want %q", got.SidecarPath, newPath)
+	}
+}
+
+// TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy is the
+// case-insensitive volume's form of the same-file guard.
+func TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy(t *testing.T) {
+	m := newMoveShape(t)
+	probe := filepath.Join(m.dir, "CaseProbe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(m.dir, "caseprobe")); err != nil {
+		t.Skip("this volume tells the two spellings apart")
+	}
+	row := m.moved[0]
+	base := filepath.Base(row.SidecarPath)
+	flippedRunes := []rune(base)
+	flippedAt := -1
+	for i, r := range flippedRunes {
+		switch {
+		case r >= 'a' && r <= 'z':
+			flippedRunes[i] = r - 'a' + 'A'
+			flippedAt = i
+		case r >= 'A' && r <= 'Z':
+			flippedRunes[i] = r - 'A' + 'a'
+			flippedAt = i
+		}
+		if flippedAt >= 0 {
+			break
+		}
+	}
+	if flippedAt < 0 {
+		t.Fatal("filename has no letter to flip")
+	}
+	flipped := string(flippedRunes)
+	newPath := filepath.Join(filepath.Dir(row.SidecarPath), flipped)
+	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(row.SidecarPath); err != nil {
+		t.Fatalf("the only copy is gone: %v", err)
+	}
+	got, err := m.store.GetVariant(context.Background(), row.SourcePath, row.VariantID)
+	if err != nil || got == nil {
+		t.Fatalf("row: %v", err)
+	}
+	if got.SidecarPath != newPath {
+		t.Fatalf("sidecar_path = %q, want %q", got.SidecarPath, newPath)
+	}
+}
+
+// TestAMoveCopiesWhenTheLinkCannotBeMade keeps the source name until
+// the row points at the destination. A link that fails copies, and the
+// source name is removed only after the update.
+func TestAMoveCopiesWhenTheLinkCannotBeMade(t *testing.T) {
+	m := newMoveShape(t)
+	prevLink := linkSidecar
+	prevHook := moveBeforeRowUpdate
+	t.Cleanup(func() {
+		linkSidecar = prevLink
+		moveBeforeRowUpdate = prevHook
+	})
+	linkSidecar = func(string, string) error { return errors.New("cross-device") }
+	row := m.moved[0]
+	newPath := computeNewSidecarPath(m.to, row)
+	sawBoth := false
+	moveBeforeRowUpdate = func() {
+		if _, err := os.Stat(row.SidecarPath); err != nil {
+			t.Errorf("source name gone before the row update: %v", err)
+		}
+		if _, err := os.Stat(newPath); err != nil {
+			t.Errorf("destination missing before the row update: %v", err)
+		}
+		sawBoth = true
+	}
+	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if !sawBoth {
+		t.Fatal("the hook did not run")
+	}
+	if _, err := os.Stat(row.SidecarPath); !os.IsNotExist(err) {
+		t.Fatalf("source name remains after the update: %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatal(err)
+	}
+	requireMovedRowsAt(t, m.store, []manifest.VariantRow{row}, m.to)
 }

@@ -280,6 +280,13 @@ var ErrUpscaleQueueFull = errors.New("upscale queue is full")
 // integrity package hands them.
 var ErrVariantSidecarUnavailable = errors.New("variant sidecar unavailable")
 
+// ErrVariantChanged is the serve reap's reading of a conditional delete
+// that matched no row: the row it looked up was rewritten or removed
+// before the delete. The request deletes nothing and publishes nothing.
+// manifest.ErrVariantChanged is translated to this at the wiring point
+// so the api package does not import the store.
+var ErrVariantChanged = errors.New("variant changed since it was looked up")
+
 // VariantStore is the optional interface the `?variant=<id>` branch
 // of /v1/download uses to look up a variant's cached metadata.
 // Nil-safe — when `s.variantStore` is nil the download handler
@@ -335,6 +342,11 @@ type VariantRecord struct {
 	SidecarPath   string
 	SourceMTimeNS int64
 	SourceSize    int64
+	// SizeBytes and CreatedAt are the sidecar size and the row's
+	// completion time as looked up. The reactive reap deletes only while
+	// the row still records these, with SidecarPath (backlog B251).
+	SizeBytes int64
+	CreatedAt int64
 }
 
 // SessionTracker is the optional interface serveFile uses to record
