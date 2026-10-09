@@ -38088,7 +38088,8 @@ What shipped:
   the same string as before and contains no path. No schema bump.
 - `GuardTempBytes` is that formula for a PCM job and 0 for DSD.
   `TempVolumeBytes` is the Stage A scratch when that is non-zero, else
-  the guard file. A lane holds one job, so the pre-flight budgets
+  the guard file. B210 later budgets two of those Stage A files; the PCM
+  guard stays one. A lane holds one job, so the pre-flight budgets
   `lanes × max(scratch, guard)` (`preflightTempVolume`) on the upscale
   submit, the rendition submit, `roomForRendition` and the sweep. The
   two figures stay separate: a FLAC still adds nothing to
@@ -38612,6 +38613,195 @@ moved-row test goes red again.
 No `ExtractorVersion` bump and no `ProtocolVersion` bump. The wire
 answer for a sidecar this request could not open is still 410
 `variant_missing_on_disk`.
+
+## 2026-10-09 — a DSD render reserves two scratch files per lane (backlog B210)
+
+A DSD render holds two Stage A files at once while it surveys its album.
+`renderDSD` writes its scratch, releases its claim, then `renderGain`
+calls the album survey. `MeasureDSDPeak` creates a second scratch in the
+same directory and removes it when the mate measurement returns. Stage C
+reads the first scratch after that survey, so freeing it first drops the
+file the render still needs. Moving the survey ahead of the claim release
+deadlocks: a render must not wait while it holds its own claim, and a
+survey that waits on a mate must not hold one. The order that ships is
+the one that stays deadlock-free, and the two files overlap for the mate
+decode.
+
+`TempBytesForRender` for a 3 s stereo file at 176.4 kHz is 4,233,600
+bytes. Two files are 8,467,200. The batch, the auto-optimize sweep and
+the on-demand room check each reserved one file per lane (B270's
+`lanes × max(scratch, guard)`). A temp volume with room for one file and
+not two was admitted and ran out mid-render. The on-demand path already
+checked one `TempVolumeBytes` (B264 and B270); the remaining hole was
+the count, not a missing check.
+
+What shipped:
+
+- `TempVolumeBytes` for a DSD job is `SurveyScratchBytes`, twice
+  `RenderScratchBytes`, saturating at MaxInt64. A size past MaxInt64/2
+  doubled and then multiplied by two lanes wraps negative, and
+  `DiskHasHeadroom` treats a non-positive budget as no work. A PCM job
+  stays `GuardTempBytes`. DSD `GuardTempBytes` is 0 and the chain passes
+  no `-G`, so the guard is not added on top of the two scratches.
+- `LaneTempBytes` is the larger of two scratches and one guard. One lane
+  runs one job. The batch passes that hold to `preflightTempVolume`,
+  which multiplies by `laneCount` through `BytesForLanes`. The sweep
+  does the same with `TempVolumeBytes`. `maxRenderScratch` stays the
+  single-file figure.
+- On one volume the on-demand peak is `RenditionHoldOnOneVolume`: the
+  survey's two scratches, or one scratch beside the rendition, whichever
+  is larger. Adding the rendition on top of both scratches refuses a job
+  that fits. Separate volumes still probe the rendition and then
+  `TempVolumeBytes`. A short volume is `api.ErrUpscaleNoRoom` on demand
+  and `InsufficientDiskSpaceError` from the batch, before enqueue, so
+  the source is not struck.
+- Album gain is attached when the job runs (`Pool` injects
+  `JobSpec.AlbumGain`; the enqueue spec does not carry it), so the
+  pre-flight cannot see whether this album has a mate. Every DSD job
+  reserves two. A solo album over-reserves by one file. A mate longer
+  than the job can still overflow; the measured overlap is two copies of
+  the job's own scratch.
+
+Pins: `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`,
+`TestGuardTempBytesIsThePostRateInt32File` (a DSD job's temp budget is
+two scratch files), `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`
+(room for one file and not two refuses; two files fit one lane and
+refuse once two lanes can hold them),
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition` (one
+volume with room for the two scratches queues; room for one refuses),
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` (the huge
+DSF's projected bytes are two scratches on each lane, saturated).
+
+Red first, from `883dd98b`, production only. `SurveyScratchBytes`
+returned the one file and dropped the MaxInt64/2 saturation, and
+`roomForRendition` returned nil. The pin run
+(`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`,
+`TestGuardTempBytesIsThePostRateInt32File`,
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`,
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume`) failed:
+
+- `TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` — budgeted
+  one scratch file per lane (4611686018427387904).
+- `TestGuardTempBytesIsThePostRateInt32File` — DSD temp volume
+  127008000, want two scratch files of 127008000.
+- `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` —
+  `SurveyScratchBytes` past MaxInt64/2 = 4611686018427387904, want
+  MaxInt64. The saturation arm was part of the reverted helper, so
+  this stopped before the two-scratch assertion.
+- `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/room_for_one_scratch_file_and_not_two`
+  — DiskFloorReached=false, Enqueued=2.
+- `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/does_not_fit_once_two_lanes_can_hold_scratch_at_once`
+  — DiskFloorReached=false, Enqueued=2.
+- `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom` — all 13
+  subtests. The pre-flight never probed; refused cases queued.
+- `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition` —
+  temp volume 105840000, want two scratch files of 105840000.
+
+Inside the sweep, "scratch does not fit", "two scratch files fit one
+lane" and "one lane is the unwired shape" stayed green: one file is
+already short of half a file, and two files of free space still cover
+one. Restored with `git checkout HEAD -- internal/transcode/transcode.go
+cmd/bridge/main.go`. `git diff` was empty at `883dd98b`.
+
+Negative controls, each a production-only mutation, restored the same
+way before the next. Predicted name, then what actually failed.
+
+(a) `SurveyScratchBytes` returned one file and kept the saturation arm.
+Predicted: `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` and the sweep
+case "one file and not two refuses". Actual:
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` (two scratches = 100,
+want 200);
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/room_for_one_scratch_file_and_not_two`
+(DiskFloorReached=false, Enqueued=2); and, because every pre-flight
+reads that helper,
+`TestAutoOptimizeSweepStopsWhenScratchDoesNotFit/does_not_fit_once_two_lanes_can_hold_scratch_at_once`,
+`TestGuardTempBytesIsThePostRateInt32File` (DSD temp volume
+127008000, want two of 127008000),
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` (budgeted
+one scratch file per lane, 4611686018427387904),
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom/DSD,_room_for_one_scratch_file_and_not_two`
+(outcome 0, want 1),
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`
+(temp volume 105840000, want two scratch files of 105840000).
+
+(b) `roomForRendition` returned nil. Predicted:
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`. Actual: that
+test, all 13 subtests (the volumes were never probed; refused cases
+queued), and
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`
+(the two-file premise passed; all four enqueue cases came back
+queued after 0 probes). `internal/transcode` stayed green.
+
+(c) `RenditionHoldOnOneVolume` returned `projected + temp` and dropped
+the larger-of comparison. Predicted:
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`.
+Actual: that test (premise: projected 144179, two scratches
+211680000, peak 211824179, the rendition on top of both);
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard` (survey peak = 230,
+want 200);
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom/DSD,_one_volume_with_room_for_two_scratches`
+(outcome 1, want 0: needs 233006597, 232848001 available).
+
+(d) The PCM arm of `RenditionHoldOnOneVolume` (`oneScratch <= 0`)
+reserved two guards. Predicted: the PCM case of
+`TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`. Actual: only that test
+(PCM guard beside the rendition = 90, want 50). The two-scratch
+assertions ahead of it stayed green, and `cmd/bridge` stayed green.
+
+None of the four stayed green. The tree was restored to `883dd98b`
+after (d); `984e8568` recorded that and was the only change on top
+of it then.
+
+CodeRabbit's finding on the batch pre-flight was valid. On-demand
+already asked `SameVolume` and held `RenditionHoldOnOneVolume` (the
+survey's two scratches, or one scratch beside the rendition). The
+batch (`submitRenditionProjections`, through two separate probes)
+and the sweep (`drainCandidates`) checked scratch space and rendition
+space apart and never asked whether the two directories were one
+filesystem. A volume with room for two scratches and for the rendition
+alone was admitted when Stage C holds one scratch beside the rendition.
+
+`SharedVolumeHold` is that peak: lanes of two scratches (or the PCM
+guard, when it is larger), or every rendition of this admission plus
+one scratch or guard per lane, whichever is larger, saturated the way
+`BytesForLanes` saturates. For one job and one lane it is
+`RenditionHoldOnOneVolume`. Multiplying the whole rendition total by
+the lane count would reserve a sidecar per lane; adding the rendition
+on top of both scratches reserves a file the survey and Stage C never
+hold together. `preflightVolumes` (both submits) and `drainCandidates`
+ask `SameVolume`. A probe error fails closed. A short shared volume is
+`InsufficientDiskSpaceError` from the batch and `DiskFloorReached`
+from the sweep, before enqueue, so the source is not struck. Separate
+volumes stay separate.
+
+Red first, from `984e8568`, before the wiring. Predicted: both new
+tests admit the job. Actual:
+`TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`
+(SubmitOptimize returned nil) and
+`TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`
+(Enqueued=1, DiskFloorReached=false, projectedBytes=550000).
+
+Negative controls, after `ab2350a8`, each a production-only mutation,
+restored before the next. Predicted name, then what failed.
+
+(a) `preflightVolumes` kept the shared answer and still ran the two
+separate checks. Predicted:
+`TestSubmitOptimizeRefusesASharedVolumeThatFitsEachHoldApart`.
+Actual: only that test (`batch_pcm_test.go:612`, SubmitOptimize
+returned nil). The sweep test stayed green.
+
+(b) `drainCandidates` dropped the shared arm. Predicted:
+`TestAutoOptimizeSweepRefusesASharedVolumeThatFitsEachHoldApart`.
+Actual: only that test (Enqueued=1, DiskFloorReached=false, at
+`auto_optimize_dsd_test.go:606` and `:609`). The batch test stayed
+green.
+
+Neither stayed green. Restored with `git checkout HEAD --` on
+`internal/transcode/batch.go` and `cmd/bridge/auto_optimize.go`.
+`GOTOOLCHAIN=go1.26.6 make check` then exited 0.
 
 ## 2026-10-09 — trash and upload commit fail closed (backlog B180, B178, B179)
 

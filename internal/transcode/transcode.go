@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,14 +366,113 @@ func (j JobSpec) GuardTempBytes() int64 {
 }
 
 // TempVolumeBytes is what one job holds on the temp volume while it
-// writes. A job holds the DSD Stage A scratch or the PCM gain-guard file,
-// never both, so the larger of the two is the peak and adding them would
-// refuse a job that fits.
+// writes. A DSD render holds two Stage A scratches while it surveys an
+// album mate: its own, which Stage C still reads, and the mate's. A PCM
+// job holds one gain-guard file. A job never holds both kinds, so the
+// larger is the peak and adding them would refuse a job that fits.
 func (j JobSpec) TempVolumeBytes() int64 {
 	if s := j.RenderScratchBytes(); s > 0 {
-		return s
+		return SurveyScratchBytes(s)
 	}
 	return j.GuardTempBytes()
+}
+
+// SurveyScratchBytes is the two Stage A files a DSD render holds at once
+// while it surveys an album mate. A non-positive size stays 0. A size past
+// MaxInt64/2 saturates: a wrapped product is negative, and a negative
+// budget is what the disk check reads as no work.
+func SurveyScratchBytes(one int64) int64 {
+	if one <= 0 {
+		return 0
+	}
+	if one > math.MaxInt64/2 {
+		return math.MaxInt64
+	}
+	return one * 2
+}
+
+// LaneTempBytes is what one lane holds on the temp volume. scratch is one
+// Stage A file (RenderScratchBytes); guard is one PCM gain-guard file.
+// A lane runs one job, so the peak is two DSD scratches or the guard,
+// whichever is larger.
+func LaneTempBytes(scratch, guard int64) int64 {
+	held := SurveyScratchBytes(scratch)
+	if guard > held {
+		return guard
+	}
+	return held
+}
+
+// BytesForLanes is a per-lane hold times the lane count, saturating at
+// MaxInt64. A wrapped product is negative, and a negative budget is what
+// the disk check reads as no work.
+func BytesForLanes(hold int64, lanes int) int64 {
+	if hold <= 0 || lanes <= 0 {
+		return 0
+	}
+	if int64(lanes) > math.MaxInt64/hold {
+		return math.MaxInt64
+	}
+	return hold * int64(lanes)
+}
+
+// RenditionHoldOnOneVolume is the peak a job holds when the rendition and
+// the temp files share a volume. oneScratch is one Stage A file and temp
+// is TempVolumeBytes (two of those files, or the PCM guard). A DSD survey
+// holds the two scratches before the rendition exists; Stage C holds one
+// scratch beside the rendition. A PCM job holds its guard beside the
+// rendition. The peak is the larger of those, never the rendition added
+// on top of both scratches.
+func RenditionHoldOnOneVolume(projected, oneScratch, temp int64) int64 {
+	if oneScratch <= 0 {
+		return saturatingSum(projected, temp)
+	}
+	stageC := saturatingSum(oneScratch, projected)
+	if stageC > temp {
+		return stageC
+	}
+	return temp
+}
+
+// SharedVolumeHold is the peak a batch or a sweep holds when the rendition
+// directory and the scratch directory are one volume. totalProjected is
+// every sidecar this admission writes (a batch's sum, or this sweep
+// candidate's projection). maxScratch is the largest single Stage A file
+// and maxGuard the largest PCM gain-guard file. lanes is how many jobs
+// run at once.
+//
+// The survey holds lanes of two scratches, or the guard when it is
+// larger, before any rendition of this admission exists. Stage C holds
+// every rendition plus one scratch or guard per lane: the second scratch
+// is gone before the rendition is written. The peak is the larger of
+// those. Multiplying totalProjected by the lane count would reserve a
+// rendition per lane, and adding the rendition on top of both scratches
+// would reserve a file the survey and Stage C never hold together. For
+// one job and one lane this is RenditionHoldOnOneVolume.
+func SharedVolumeHold(totalProjected, maxScratch, maxGuard int64, lanes int) int64 {
+	survey := BytesForLanes(LaneTempBytes(maxScratch, maxGuard), lanes)
+	beside := maxScratch
+	if maxGuard > beside {
+		beside = maxGuard
+	}
+	stageC := saturatingSum(totalProjected, BytesForLanes(beside, lanes))
+	if stageC > survey {
+		return stageC
+	}
+	return survey
+}
+
+func saturatingSum(a, b int64) int64 {
+	if a < 0 {
+		a = 0
+	}
+	if b <= 0 {
+		return a
+	}
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // VariantID returns the opaque identifier that uniquely names this
