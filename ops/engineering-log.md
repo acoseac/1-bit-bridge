@@ -38803,6 +38803,144 @@ Neither stayed green. Restored with `git checkout HEAD --` on
 `internal/transcode/batch.go` and `cmd/bridge/auto_optimize.go`.
 `GOTOOLCHAIN=go1.26.6 make check` then exited 0.
 
+## 2026-10-09 — trash and upload commit fail closed (backlog B180, B178, B179)
+
+Three ways a trash or upload request treated a missing answer as permission
+to change a file. Each fix is in the function that does the work, so a
+handler that returned early would have left the function green.
+
+### B180 — a present empty id list is not "purge everything"
+
+`Purge` expanded whenever `len(ids) == 0`. A nil list and a decoded
+`{"ids":[]}` are the same length, and the bodyless DELETE the console
+sends (no body, `ContentLength` 0) leaves the decoded slice nil. The
+empty slice purged every entry.
+
+`Purge` now returns `ErrInvalidPath` ("no entries given") when the slice
+is non-nil and empty. A nil list still lists every entry and purges it.
+`{"ids":null}` and `{}` decode as nil, so they stay the empty-trash
+action. The handler already maps `ErrInvalidPath` to 400; it does not
+check the list itself.
+
+### B178 — a path is not trimmed into a different name
+
+`validRel` and `splitID` ran `strings.TrimSpace` before they judged the
+path. A delete of `" Various/Album/01.flac"` addressed
+`Various/Album/01.flac`. Both now refuse a string `TrimSpace` would
+change, and `Trash` returns that error before any move, so one padded
+name in a batch moves nothing. A leading `/` is still stripped. A space
+inside a segment is a different string from `TrimSpace` of the whole
+path, and both validators still accept it.
+
+`ValidateRelPath` refused a trailing space on a segment and accepted a
+leading space on the path. It now refuses a path `TrimSpace` would
+change, so an upload cannot create a file the trash API then refuses to
+name. The accepted-path fuzz property requires the kept path to equal
+`TrimSpace` of itself.
+
+### B179 — a stat that is not "not found" is not room to replace
+
+`commitOne`, when the session does not overwrite, and `Restore` both
+went ahead unless `os.Stat` returned nil. Any other error, including a
+read of the destination that did not complete, fell through to the
+rename. Both now proceed only on `fs.ErrNotExist`. A nil error stays
+"a file already exists". Any other error is a per-file `failed` whose
+reason is the error after a `*fs.PathError` is unwrapped, so the
+absolute destination is not in it. An overwrite commit still skips the
+check.
+
+`Restore` took none of the commit's destination locks, so the two could
+pass the check and rename one path together. `LockDestination` is the
+commit lock. `WithDestinationLock` binds it after both managers exist
+(`upload.WithReclaimable` needs the trash manager first). The unlock
+runs before the next entry, including before the size stat after a
+successful rename. A nil lock, which the unit fixtures leave, restores
+without one.
+
+### Negative controls
+
+Each control mutated production code on commit 2031296e, ran the named
+tests with `-count=1`, and restored the file. Predicted names are the
+ones that must go red; the others in the same `-run` must stay green.
+
+- B180. `Purge` expands on `len(ids) == 0` and the empty-slice refusal
+  is gone. Predicted red: `TestAnEmptyIDListDoesNotEmptyTheTrash`,
+  `TestPurgeOfAnEmptySliceRefuses`. Actual: those two. The handler
+  answered 200 and reported both entries purged; `Purge([]string{})`
+  returned nil. `TestPurgeWithNoIDsEmptiesEverything` and
+  `TestPurgeIsWhatActuallyReclaims` stayed green.
+- B178. `validRel` assigns `strings.TrimSpace` again, and the pre-loop
+  that returns before any move is removed. Restoring the trim alone
+  leaves that loop in place: it sees the raw padded string, `validRel`
+  then succeeds, and the function returns before a move, which is a
+  200 that changes nothing. Removing the loop is what lets the trim
+  reach the file. Predicted red:
+  `TestAPaddedPathDoesNotTrashTheUnpaddedFile`. Actual: that test, with
+  status 200 and an outcome of `Various/Album/01.flac` trashed.
+  `TestTrashRefusesPathsOutsideTheRoot` and
+  `TestTrashRejectsTraversalAndDotSegments` stayed green.
+- B179, the stat. `commitOne` and `Restore` proceed on any stat error.
+  Predicted red: `TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile`,
+  `TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile`. Actual: both.
+  The commit reported `Committed: 1` and the restore `OK: 1`.
+  `TestARestoreAndACommitToOnePathTakeTheSameDestinationLock`,
+  `TestCommitSkipsCollisionsUnlessOverwriteRequested` and
+  `TestRestoreRefusesToClobberAnExistingFile` stayed green.
+- B179, the lock. `Restore` does not call the destination lock.
+  Predicted red:
+  `TestARestoreAndACommitToOnePathTakeTheSameDestinationLock`. Actual:
+  that test, in 0.03s, "commit checked the destination while restore
+  held it". The 50ms wait was long enough; it was not lengthened.
+  `TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile` stayed green.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump. The purge and
+delete answers stay the codes they already had: 400 `invalid_request`
+for a refused request, and a per-file outcome when one file's check
+fails.
+
+### Round 2 — padding is judged after the leading slash comes off
+
+In single-root mode `SplitRoot` accepts `"/ Various/Album/01.flac"`.
+`validRel` compared the raw string with `TrimSpace` before
+`TrimPrefix`, and that string equals `TrimSpace` of itself. After the
+one slash came off, the path was `" Various/Album/01.flac"`. `Trash`
+moved that file. `List` built an id whose stamp slash hid the space, and
+`splitID`'s check on the whole id does not see a space after the first
+slash. `validRel` on the path half then refused it, so Restore and
+`Purge(nil)` could not name the entry.
+
+`validRel` now removes one leading `/` and then refuses a path
+`TrimSpace` would change. `Trash` returns that error for the whole
+request, and only that error: any other `validRel` failure stays a
+per-file outcome, which is what keeps a traversal in the same request a
+200. `splitID` still checks the whole id, and the path half is
+`validRel`, so the order lives in one place.
+
+`ValidateRelPath` does not strip a leading slash. It refuses one as
+absolute, so `"/ Various/..."` is already rejected and there is no
+upload twin of the strip. Its padding check stays on the string as
+given.
+
+A space inside a segment (`"Various/ Album/01.flac"`) is that segment's
+name. `TrimSpace` of the whole path does not change it. Upload refuses a
+segment that ends in a space or a dot, which is what Windows strips, and
+accepts a leading space inside a segment. Refusing that leading space
+would make trash unable to name a file upload can create. The slash is
+the case that is different: the one strip turned a `TrimSpace`-clean
+request into a stored path with a leading space.
+
+On `86e22820`, before the fix, `TestALeadingSlashThenASpaceIsRefused`
+was red: `POST /api/library/trash` of `"/ Various/Album/01.flac"`
+answered 200 and trashed `" Various/Album/01.flac"`.
+
+The control, on `6ef1217a`, puts the padding check back in front of
+`TrimPrefix` in `validRel` only. Predicted red:
+`TestALeadingSlashThenASpaceIsRefused`. Actual: that test, status 200,
+outcome `" Various/Album/01.flac"` trashed (`ok: 1`, `bytes: 6`).
+`TestAPaddedPathDoesNotTrashTheUnpaddedFile` and
+`TestTrashRefusesPathsOutsideTheRoot` stayed green. Restored
+`internal/trash/trash.go`. The same test then passed.
+
 ## 2026-10-09 — a resumed upload identifies the file (backlog B176)
 
 The console matched a stopped upload to a new pick by path and size

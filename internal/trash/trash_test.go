@@ -9,6 +9,7 @@ import (
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 func newTestManager(t *testing.T, opts ...Option) (*Manager, string) {
@@ -204,6 +205,38 @@ func TestRestoreRecreatesMissingParentDirs(t *testing.T) {
 	}
 }
 
+func TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
+	m, root := newTestManager(t, WithDestStat(fsutil.StatIOFault))
+	seed(t, root, "A/x.flac", "LIVE")
+	if _, err := m.Trash("", []string{"A/x.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(root, "A", "x.flac")
+	if err := os.WriteFile(dst, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := m.List()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("list = %v, %d entries", err, len(entries))
+	}
+	res, err := m.Restore([]string{entries[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 || res.OK != 0 {
+		t.Fatalf("restore = %+v, want the one entry failed", res)
+	}
+	if err := fsutil.RejectUnreadableReason(res.Outcomes[0].Reason, root); err != nil {
+		t.Error(err)
+	}
+	if body, err := os.ReadFile(dst); err != nil || string(body) != "ORIGINAL" {
+		t.Errorf("destination = %q, %v", body, err)
+	}
+	if left, _ := m.List(); len(left) != 1 {
+		t.Errorf("trash holds %d entries after a failed restore, want 1", len(left))
+	}
+}
+
 func TestRestoreRefusesToClobberAnExistingFile(t *testing.T) {
 	m, root := newTestManager(t)
 	seed(t, root, "A/x.flac", "original")
@@ -241,6 +274,20 @@ func TestPurgeReclaimsAndReportsBytes(t *testing.T) {
 	}
 	if got := m.Reclaimable(root); got != 0 {
 		t.Errorf("Reclaimable = %d after a full purge", got)
+	}
+}
+
+func TestPurgeOfAnEmptySliceRefuses(t *testing.T) {
+	m, root := newTestManager(t)
+	seed(t, root, "A/1.flac", "xx")
+	if _, err := m.Trash("", []string{"A/1.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Purge([]string{}); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("Purge of an empty slice = %v, want ErrInvalidPath", err)
+	}
+	if got, _ := m.List(); len(got) != 1 {
+		t.Fatalf("empty slice purged %d entries, want the one left", 1-len(got))
 	}
 }
 

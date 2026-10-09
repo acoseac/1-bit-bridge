@@ -116,6 +116,14 @@ func ValidateRelPath(rel string) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidPath)
 	}
+	// A padded path is a different name. Trimming it would write the unpadded
+	// file, which the trash API then refuses to delete — the two validators
+	// have to agree about a path TrimSpace would change. A leading slash is
+	// refused below as absolute, not stripped, so the check stays on the
+	// string as given: "/ Various/..." never becomes " Various/...".
+	if rel != strings.TrimSpace(rel) {
+		return "", fmt.Errorf("%w: leading or trailing whitespace", ErrInvalidPath)
+	}
 	if len(rel) > maxRelPathBytes {
 		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidPath, maxRelPathBytes)
 	}

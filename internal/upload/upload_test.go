@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 const roomyDisk = int64(1) << 40
@@ -528,6 +530,33 @@ func TestCommitIsSameFilesystemRename(t *testing.T) {
 	}
 	if len(res.ScanDirs) != 1 || res.ScanDirs[0] != "Artist/Album" {
 		t.Errorf("ScanDirs = %v, want [Artist/Album]", res.ScanDirs)
+	}
+}
+
+func TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
+	m, root := newTestManager(t, WithDestStat(fsutil.StatIOFault))
+	dest := filepath.Join(root, "Artist", "01.flac")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("NEWDATA!")
+	s := mustCreate(t, m, []FileDecl{{Path: "Artist/01.flac", Size: int64(len(body))}}, CreateOptions{})
+	writeAll(t, m, s.ID, s.Files[0].ID, body, 1024)
+	res, err := m.Commit(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 || res.Committed != 0 || res.Skipped != 0 {
+		t.Fatalf("commit = %+v, want the file failed", res)
+	}
+	if err := fsutil.RejectUnreadableReason(res.Outcomes[0].Reason, dest); err != nil {
+		t.Error(err)
+	}
+	if got, err := os.ReadFile(dest); err != nil || string(got) != "ORIGINAL" {
+		t.Errorf("destination = %q, %v", got, err)
 	}
 }
 
