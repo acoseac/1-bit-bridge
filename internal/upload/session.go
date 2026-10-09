@@ -50,6 +50,10 @@ type fileState struct {
 	Offset    int64  `json:"offset"`
 	HashState []byte `json:"hashState,omitempty"`
 	SHA256    string `json:"sha256,omitempty"`
+	// UpdatedAt is the clock of the last accepted chunk. The sweeper ages a
+	// session from it. A meta written before the field existed leaves it
+	// zero, and the sweeper then reads the meta file's mtime.
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
 }
 
 func newID() string {

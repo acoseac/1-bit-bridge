@@ -8642,6 +8642,25 @@ its twin.** The top list is older, shorter, and read first.
   back to the recorded offset. Locks are refcounted per `(session, file)`; a
   session-wide lock passes every locking test while quietly serialising a folder
   upload.
+- **An upload session is aged from its last accepted chunk** (2026-10-09,
+  backlog B213). `fileState.UpdatedAt` is stamped on the `.meta` the chunk
+  already rewrites; the manifest stays immutable. The idle window is
+  `SessionTTL` (default 24h). An absolute cap of seven days, or the
+  configured TTL when that is longer, still sweeps a session that keeps
+  receiving bytes: uncommitted staged bytes do not outlive the library trash
+  window, and a longer idle window the operator set is honoured. A meta
+  written before the field existed falls back to that meta file's mtime, then
+  to `CreatedAt`. An orphan whose manifest does not parse stays on the
+  directory mtime. Trash stays on the stamp directory name. The recorded
+  field outranks a touched or back-dated meta mtime, and an idempotent
+  resend of a finished file does not move the activity.
+  (`TestSweepKeepsASessionThatKeepsReceivingChunks`,
+  `TestSweepRemovesASessionIdlePastTheTTL`,
+  `TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+  `TestSweepCapFollowsALongerIdleTTL`,
+  `TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
+  `TestSweepTrustsRecordedActivityOverTheMetaMtime`,
+  `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`.)
 - **Committed files are 0644** (the staged mode survives the rename), and trash
   age comes from the `<stamp>` DIRECTORY NAME — `os.Rename` preserves mtime, so
   an mtime-driven sweeper purges oldest-content-first the instant it lands.

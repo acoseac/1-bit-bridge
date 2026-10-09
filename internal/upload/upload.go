@@ -546,7 +546,7 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 
 	next := st.Offset + written
-	newState := fileState{Offset: next}
+	newState := fileState{Offset: next, UpdatedAt: m.now().UTC()}
 	if next >= fd.Size {
 		sum := hex.EncodeToString(h.Sum(nil))
 		if fd.Digest != "" && sum != fd.Digest {

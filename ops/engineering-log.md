@@ -38384,3 +38384,43 @@ a rollback that renames the backup onto the running path first
 fails on every OS), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`,
 `TestRollbackReplaceOfAMissingDestinationIsOneRename`,
 `TestRollbackReplaceLeavesALeftoverItCannotRemove`.
+
+## 2026-10-09 — backlog B213: an upload session ages from its last accepted chunk
+
+`sessionExpired` aged a readable session from `sessionDoc.CreatedAt` alone.
+A session created at T=0 that then received a chunk every hour was still
+CreatedAt-old, so at T=25h (the default 24h TTL) `Sweep` deleted the staging
+directory and the next `WriteChunk` returned `ErrNotFound`. Measured with
+the real sweeper and a fake clock before the fix: the hourly session and
+its idle sibling were both removed (`Sweep removed 2 sessions, want 1`).
+
+The stamp lives on `fileState.UpdatedAt`, written in the persist path of
+`WriteChunk`, the `.meta` every accepted chunk already rewrites. The
+manifest stays immutable (its comment: a chunk must not rewrite a manifest
+that may list two thousand entries). The idle window is still `SessionTTL`.
+An absolute cap of seven days, raised to `SessionTTL` when the operator set
+a longer idle window, still sweeps a session that keeps receiving bytes.
+Seven days is the library trash window: uncommitted staged bytes do not
+outlive bytes the operator already deleted, and a SACD-sized upload finishes
+inside a week at a poor relay rate. The accepted cost is an upload that
+stays active longer than that wall-clock bound, and longer than the
+configured idle window, must start a new session.
+
+A meta written before the field existed has a zero `UpdatedAt`. The sweeper
+then reads that meta file's mtime, else `CreatedAt`, so an in-flight upgrade
+is not swept at startup before the next chunk stamps the field. A recorded
+`UpdatedAt` outranks a touched or back-dated meta mtime. Aging from the meta
+mtime as the primary clock was rejected: `TestSweeperUsesManifestAgeNotFileMtime`
+back-dates the meta on purpose, and the trash rule exists because `os.Rename`
+preserves mtime. An orphan whose manifest does not parse stays on the
+directory mtime. Trash stays on the stamp directory name. An idempotent
+resend of a finished file returns before the persist and does not move the
+activity.
+
+Pins: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionIdlePastTheTTL`,
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepCapFollowsALongerIdleTTL`,
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`,
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`.

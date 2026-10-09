@@ -664,8 +664,10 @@ func TestSweeperUsesManifestAgeNotFileMtime(t *testing.T) {
 	s := mustCreate(t, m, []FileDecl{{Path: "x.flac", Size: 4}}, CreateOptions{})
 	writeAll(t, m, s.ID, s.Files[0].ID, []byte("data"), 4)
 
-	// Back-date every FILE in the session. A stat-driven sweeper would reap
-	// it; a manifest-driven one must not, because the session is minutes old.
+	// Back-date every FILE in the session, the meta included. The recorded
+	// UpdatedAt on that meta is the write clock, so a back-dated mtime must
+	// not reap the session. A sweeper that aged from the payload's stat, or
+	// from the meta's mtime ahead of the recorded field, would.
 	dir := m.sessionDir(root, s.ID)
 	entries, _ := os.ReadDir(dir)
 	old := now.Add(-72 * time.Hour)
@@ -682,6 +684,286 @@ func TestSweeperUsesManifestAgeNotFileMtime(t *testing.T) {
 	}
 	if _, err := m.Get(s.ID); err != nil {
 		t.Fatalf("a fresh session was swept because its staged FILES were back-dated: %v", err)
+	}
+}
+
+// TestSweepKeepsASessionThatKeepsReceivingChunks is the defect: a session
+// created at T=0 that accepts one byte an hour is still receiving data at
+// hour 25, and the idle window is 24h. The idle sibling, last written at
+// T=0, is swept. The young sibling, created at hour 2, is kept. The second
+// file of the active session was written only at T=0; the session stays
+// because the later file is the activity.
+func TestSweepKeepsASessionThatKeepsReceivingChunks(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+
+	active := mustCreate(t, m, []FileDecl{
+		{Path: "a.flac", Size: 26},
+		{Path: "b.flac", Size: 1},
+	}, CreateOptions{})
+	idle := mustCreate(t, m, []FileDecl{{Path: "idle.flac", Size: 1}}, CreateOptions{})
+	writeByte(t, m, active.ID, fileID(t, active, "a.flac"), 0)
+	writeByte(t, m, active.ID, fileID(t, active, "b.flac"), 0)
+	writeByte(t, m, idle.ID, fileID(t, idle, "idle.flac"), 0)
+
+	for hour := 1; hour <= 24; hour++ {
+		now = start.Add(time.Duration(hour) * time.Hour)
+		writeByte(t, m, active.ID, fileID(t, active, "a.flac"), int64(hour))
+	}
+	now = start.Add(2 * time.Hour)
+	young := mustCreate(t, m, []FileDecl{{Path: "young.flac", Size: 1}}, CreateOptions{})
+	writeByte(t, m, young.ID, fileID(t, young, "young.flac"), 0)
+
+	now = start.Add(25 * time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d sessions, want 1 (the idle one)", n)
+	}
+	if _, err := m.Get(active.ID); err != nil {
+		t.Fatalf("active session: %v", err)
+	}
+	if _, err := m.Get(young.ID); err != nil {
+		t.Fatalf("young session: %v", err)
+	}
+	if _, err := m.Get(idle.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("idle session: %v, want ErrNotFound", err)
+	}
+	writeByte(t, m, active.ID, fileID(t, active, "a.flac"), 25)
+}
+
+// TestSweepRemovesASessionIdlePastTheTTL is the control for the hourly
+// case. A session last written at T=0 is kept at 23h and at exactly 24h,
+// and swept one nanosecond later.
+func TestSweepRemovesASessionIdlePastTheTTL(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+	s := mustCreate(t, m, []FileDecl{{Path: "a.flac", Size: 1}}, CreateOptions{})
+	writeByte(t, m, s.ID, fileID(t, s, "a.flac"), 0)
+
+	now = start.Add(23 * time.Hour)
+	if n, err := m.Sweep(); err != nil || n != 0 {
+		t.Fatalf("at 23h Sweep = %d, %v; want 0, nil", n, err)
+	}
+	now = start.Add(DefaultSessionTTL)
+	if n, err := m.Sweep(); err != nil || n != 0 {
+		t.Fatalf("at exactly the TTL Sweep = %d, %v; want 0, nil", n, err)
+	}
+	now = start.Add(DefaultSessionTTL + time.Nanosecond)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d, want 1", n)
+	}
+	if _, err := m.Get(s.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive pins the wall
+// clock bound. A chunk every hour through the last hour inside the cap
+// keeps the session. One hour past the cap, with the last chunk two hours
+// old, the session is swept and the next chunk is ErrNotFound.
+func TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive(t *testing.T) {
+	if sessionMaxAge != 7*24*time.Hour {
+		t.Fatalf("sessionMaxAge = %s, tests assume 7 days", sessionMaxAge)
+	}
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+	last := int64(sessionMaxAge/time.Hour) - 1 // offset of the chunk at cap-1h
+	s := mustCreate(t, m, []FileDecl{{Path: "a.flac", Size: last + 1}}, CreateOptions{})
+	fid := fileID(t, s, "a.flac")
+	for hour := int64(0); hour <= last; hour++ {
+		now = start.Add(time.Duration(hour) * time.Hour)
+		writeByte(t, m, s.ID, fid, hour)
+	}
+	now = start.Add(sessionMaxAge - time.Hour)
+	if n, err := m.Sweep(); err != nil || n != 0 {
+		t.Fatalf("inside the cap Sweep = %d, %v; want 0, nil", n, err)
+	}
+	now = start.Add(sessionMaxAge + time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("past the cap Sweep removed %d, want 1", n)
+	}
+	if _, err := m.WriteChunk(s.ID, fid, last+1, bytes.NewReader([]byte{'x'}), nil, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("WriteChunk after the cap = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSweepCapFollowsALongerIdleTTL: an operator who sets the idle window
+// to 14 days keeps a session that is still inside that window, including
+// one older than seven days. Past the longer window the cap still sweeps
+// a session whose last chunk is recent.
+func TestSweepCapFollowsALongerIdleTTL(t *testing.T) {
+	ttl := 14 * 24 * time.Hour
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	root := t.TempDir()
+	m := NewManager(Config{SessionTTL: ttl}, func() []string { return []string{root} },
+		WithFreeBytes(func(string) (int64, error) { return roomyDisk, nil }),
+		WithClock(func() time.Time { return now }))
+	s := mustCreate(t, m, []FileDecl{{Path: "a.flac", Size: 3}}, CreateOptions{})
+	fid := fileID(t, s, "a.flac")
+	writeByte(t, m, s.ID, fid, 0)
+	now = start.Add(8 * 24 * time.Hour)
+	writeByte(t, m, s.ID, fid, 1)
+	if n, err := m.Sweep(); err != nil || n != 0 {
+		t.Fatalf("day 8 of a 14-day window Sweep = %d, %v; want 0, nil", n, err)
+	}
+	now = start.Add(13 * 24 * time.Hour)
+	writeByte(t, m, s.ID, fid, 2)
+	now = start.Add(ttl + time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("past the raised cap Sweep removed %d, want 1", n)
+	}
+}
+
+// TestSweepReadsMetaMtimeWhenNoActivityWasRecorded covers a meta written
+// before updatedAt existed. The kept session's meta is an hour old; the
+// swept session's meta is as old as CreatedAt.
+func TestSweepReadsMetaMtimeWhenNoActivityWasRecorded(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+	kept := mustCreate(t, m, []FileDecl{{Path: "kept.flac", Size: 1}}, CreateOptions{})
+	swept := mustCreate(t, m, []FileDecl{{Path: "swept.flac", Size: 1}}, CreateOptions{})
+	writeByte(t, m, kept.ID, fileID(t, kept, "kept.flac"), 0)
+	writeByte(t, m, swept.ID, fileID(t, swept, "swept.flac"), 0)
+	dropRecordedActivity(t, m, kept, "kept.flac")
+	dropRecordedActivity(t, m, swept, "swept.flac")
+	chtimes(t, m.statePath(kept.Root, kept.ID, fileID(t, kept, "kept.flac")), start.Add(47*time.Hour))
+	chtimes(t, m.statePath(swept.Root, swept.ID, fileID(t, swept, "swept.flac")), start)
+
+	now = start.Add(48 * time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d, want 1", n)
+	}
+	if _, err := m.Get(kept.ID); err != nil {
+		t.Fatalf("recent meta: %v", err)
+	}
+	if _, err := m.Get(swept.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old meta: %v, want ErrNotFound", err)
+	}
+}
+
+// TestSweepTrustsRecordedActivityOverTheMetaMtime: a touched meta does not
+// extend a session whose last accepted chunk is past the idle window, and
+// a back-dated meta does not reap a session whose recorded activity is recent.
+func TestSweepTrustsRecordedActivityOverTheMetaMtime(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+	abandoned := mustCreate(t, m, []FileDecl{{Path: "old.flac", Size: 1}}, CreateOptions{})
+	active := mustCreate(t, m, []FileDecl{{Path: "new.flac", Size: 2}}, CreateOptions{})
+	writeByte(t, m, abandoned.ID, fileID(t, abandoned, "old.flac"), 0)
+	writeByte(t, m, active.ID, fileID(t, active, "new.flac"), 0)
+	now = start.Add(29 * time.Hour)
+	writeByte(t, m, active.ID, fileID(t, active, "new.flac"), 1)
+	chtimes(t, m.statePath(abandoned.Root, abandoned.ID, fileID(t, abandoned, "old.flac")), start.Add(30*time.Hour))
+	chtimes(t, m.statePath(active.Root, active.ID, fileID(t, active, "new.flac")), start)
+
+	now = start.Add(30 * time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d, want 1", n)
+	}
+	if _, err := m.Get(active.ID); err != nil {
+		t.Fatalf("recorded activity: %v", err)
+	}
+	if _, err := m.Get(abandoned.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("touched meta: %v, want ErrNotFound", err)
+	}
+}
+
+// TestSweepDoesNotRefreshActivityOnAnIdempotentResend: a completed file
+// re-sent inside the idle window does not move the activity, so the session
+// is swept from the chunk that finished it.
+func TestSweepDoesNotRefreshActivityOnAnIdempotentResend(t *testing.T) {
+	start := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := start
+	m, _ := newTestManager(t, WithClock(func() time.Time { return now }))
+	s := mustCreate(t, m, []FileDecl{{Path: "a.flac", Size: 1}}, CreateOptions{})
+	fid := fileID(t, s, "a.flac")
+	writeByte(t, m, s.ID, fid, 0)
+	now = start.Add(23 * time.Hour)
+	if next, err := m.WriteChunk(s.ID, fid, 1, bytes.NewReader([]byte{'x'}), nil, 0); err != nil || next != 1 {
+		t.Fatalf("idempotent resend = %d, %v; want 1, nil", next, err)
+	}
+	now = start.Add(25 * time.Hour)
+	n, err := m.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("Sweep removed %d, want 1", n)
+	}
+}
+
+func writeByte(t *testing.T, m *Manager, sid, fid string, offset int64) {
+	t.Helper()
+	if _, err := m.WriteChunk(sid, fid, offset, bytes.NewReader([]byte{'x'}), nil, 0); err != nil {
+		t.Fatalf("chunk at %d: %v", offset, err)
+	}
+}
+
+func fileID(t *testing.T, s *Session, path string) string {
+	t.Helper()
+	for _, f := range s.Files {
+		if f.Path == path {
+			return f.ID
+		}
+	}
+	t.Fatalf("session %s has no %s", s.ID, path)
+	return ""
+}
+
+func dropRecordedActivity(t *testing.T, m *Manager, s *Session, path string) {
+	t.Helper()
+	meta := m.statePath(s.Root, s.ID, fileID(t, s, path))
+	raw, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "updatedAt")
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func chtimes(t *testing.T, path string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
 	}
 }
 
