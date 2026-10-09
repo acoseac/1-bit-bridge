@@ -39233,3 +39233,53 @@ port, one on the LAN port), `TestServeAnalysisPoolLineFollowsTheLiveGate`
 purpose), `TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile`, and
 `TestServeRedeemsThePairingLinksCode`. On this branch, 519.504s, exit 0,
 no `address already in use`.
+
+A handed UDP socket was refused after the LAN TCP listen. Both refusals
+(the address does not match, and HTTP/3 disabled with a socket handed
+in) returned 1 before ServeTLS owned that listener, so a port serve had
+bound itself stayed taken. `refuseHandedPacket` runs before that
+listen, and a refusal then holds nothing and prints no banner. The
+adopt after the listen still closes the listener if it fails. Admin
+readiness was a dial. A test that hands serve a listener it already
+bound has a port that accepts before ServeListener, so the dial
+returned with the console not serving. `waitForAdminReady` is now GET
+/healthz; any HTTP response counts, and it retries until one arrives
+or serve exits. The API port stays a dial (`waitForPortAccepting`); it
+speaks TLS. `beforeAdminServe` runs immediately before ServeListener
+on the handed path, nil in production.
+
+Red, before that change, GOTOOLCHAIN=go1.26.6, `-count=1`. Predicted:
+the LAN port serve bound cannot be bound again after either UDP
+refusal, and the dial returns while serve is held before
+ServeListener. Observed, 0.945s:
+
+```
+--- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree (0.17s)
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address (0.11s)
+        LAN port 127.0.0.1:60395 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60395: bind: address already in use
+            listen 127.0.0.1:60395: handed UDP socket 127.0.0.1:51214 is not 127.0.0.1:60395
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/http3_disabled (0.06s)
+        LAN port 127.0.0.1:60399 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60399: bind: address already in use
+            listen 127.0.0.1:60399: handed UDP socket with HTTP/3 disabled
+--- FAIL: TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener (0.08s)
+    the admin readiness check returned before ServeListener
+```
+
+The negative control, after the commit, removed the early check,
+restored both returns after the listen with no close, and put
+`waitForAdminReady` back on the dial. Predicted: the same three
+failures. Observed, 0.854s:
+
+```
+--- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree (0.21s)
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address (0.12s)
+        LAN port 127.0.0.1:60839 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60839: bind: address already in use
+            listen 127.0.0.1:60839: handed UDP socket 127.0.0.1:49477 is not 127.0.0.1:60839
+    --- FAIL: TestARefusedHandedUDPSocketLeavesTheLANPortFree/http3_disabled (0.09s)
+        LAN port 127.0.0.1:60843 stayed taken after serve refused the UDP socket: listen tcp 127.0.0.1:60843: bind: address already in use
+            listen 127.0.0.1:60843: handed UDP socket with HTTP/3 disabled
+--- FAIL: TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener (0.11s)
+    the admin readiness check returned before ServeListener
+```
+
+Both files were restored after the control.
