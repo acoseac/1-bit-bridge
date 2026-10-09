@@ -47,12 +47,12 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	dataDir := filepath.Join(dir, "data")
-	apiPort, adminPort := freeLoopbackPort(t), freeLoopbackPort(t)
+	lan, admin := holdLoopback(t), holdLoopback(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	// listenAddress lives in the config rather than on --addr because
 	// `bridge health` reads it from there, as the image's HEALTHCHECK does.
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nlistenAddress: 127.0.0.1:%d\nadminAddress: 127.0.0.1:%d\n",
-		lib, dataDir, apiPort, adminPort)
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nlistenAddress: %s\nadminAddress: %s\n",
+		lib, dataDir, lan.addr, admin.addr)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,9 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath}, stdout, stderr)
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	addr, _ := waitForListening(t, stdout, exited, done, stderr)

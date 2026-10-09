@@ -34,10 +34,10 @@ func TestServeRedeemsThePairingLinksCode(t *testing.T) {
 	if err := os.MkdirAll(lib, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	apiPort, adminPort := freeLoopbackPort(t), freeLoopbackPort(t)
+	lan, admin := holdLoopback(t), holdLoopback(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\n",
-		lib, filepath.Join(dir, "data"), adminPort)
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n",
+		lib, filepath.Join(dir, "data"), admin.addr)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -48,15 +48,17 @@ func TestServeRedeemsThePairingLinksCode(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath,
-			"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: lan.addr,
+			lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	addr, _ := waitForListening(t, stdout, exited, done, stderr)
-	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
+	waitForAdminReady(t, admin.addr, done, stderr)
 
 	mint := pairViaAdmin(t, ctx, &http.Client{Timeout: 10 * time.Second},
-		fmt.Sprintf("http://127.0.0.1:%d/api/tokens", adminPort),
+		"http://"+admin.addr+"/api/tokens",
 		`{"name":"boot test"}`, http.StatusCreated, stderr)
 	items := linkQueryItems(t, mint.PairURL)
 	linkToken, code := items["token"], items["code"]

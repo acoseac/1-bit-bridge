@@ -7783,10 +7783,10 @@ mentions across the four `ops/audit-*.md` files.
   goroutine when it returns: a held handler would keep the port bound,
   and the launcher menu's next start would fall back to HTTP/2.
   `Shutdown`'s error is printed only once it has returned, so nothing
-  reaches stderr after runServe has. The boot tests hold a LAN request
-  through `serveOpts.wrapAPIHandler`, and pre-pick a port free on TCP
-  and UDP both (`freeLoopbackTCPAndUDPAddr`), because serve prints no
-  UDP address.
+  reaches stderr after runServe has.   The boot tests hold a LAN request
+  through `serveOpts.wrapAPIHandler`, and hand serve a TCP listener and
+  a UDP socket on one port (`holdLoopbackTCPAndUDP`), because serve
+  prints no UDP address.
 - **An event stream ends when shutdown starts, and an ordinary request
   keeps the grace** (2026-10-08, backlog B216). `http.Server.Shutdown`
   closes idle connections and does not cancel a handler.
@@ -10200,7 +10200,7 @@ its twin.** The top list is older, shorter, and read first.
   the class on any Mac**: `hdiutil create -fs MS-DOS` keeps 2 s mtimes, and
   `TMPDIR` on it puts every `t.TempDir()` there.
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
-  `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
+  `drawLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP
   each from a cursor of its own (macOS does the same for TCP; Linux draws both
   at random), so asking an allocator again tests the NEXT number, not another
@@ -10216,9 +10216,37 @@ its twin.** The top list is older, shorter, and read first.
   sockets.** Random numbers are independent draws, and 20000–32767 lies below
   every target platform's ephemeral range (Linux 32768, Windows and macOS
   49152), so no allocator can hand the number out before serve binds it:
-  30,000 calls on six runners rejected no draw. A failure names every address
+  30,000 calls on six runners rejected no draw.   A failure names every address
   tried and its error; the old message said only "20 draws", which is why
   finding this took a probe on the runner.
+- **A serve test hands serve its listeners, never a closed port's number**
+  (2026-10-09, backlog B313). `freeLoopbackPort` and
+  `drawLoopbackTCPAndUDPAddr` bind `127.0.0.1:0` (or a drawn number), read
+  the port and close. Between that close and serve's own bind another
+  listener takes the number, and serve exits `address already in use`.
+  Bridge #1166 CI (run 37865927261, `test -race (rest)`) lost
+  `TestServeRedeemsThePairingLinksCode` that way on the admin port; the
+  same close-then-reuse is what the HTTP/3 tests did with the TCP-and-UDP
+  draw. A port serve, a served bridge or a probe will bind stays open
+  (`holdLoopback`, `holdLoopbackTCPAndUDP`) and is handed in on
+  `serveOpts` (`adminListener`, `lanListener`, `lanPacket`). Serve adopts
+  one only when `Addr` is the address the config names (`--addr` for the
+  LAN pair); a mismatch is a startup error and the listener stays with
+  the caller. Nil is production, which listens itself. `admin.Server.Serve`
+  still listens; `ServeListener` is the handed path. `freeLoopbackPort`
+  remains for a port that is only written into a config and compared.
+  A handed UDP socket is validated before the LAN TCP listen
+  (`refuseHandedPacket`): HTTP/3 disabled with a socket handed in, or an
+  address that is not the config's, returns 1 while nothing is bound. A
+  return after that listen closes the listener this function bound.
+  `waitForAdminReady` is GET /healthz, any response, and retries until
+  one arrives or serve exits. A dial is not readiness: a handed admin
+  listener already accepts before ServeListener. The API port stays a
+  dial (`waitForPortAccepting`); it speaks TLS.
+  (`TestAHandedListenerCannotBeTakenBeforeServeBinds`,
+  `TestAHandedListenerOnAnotherAddressIsAStartupError`,
+  `TestARefusedHandedUDPSocketLeavesTheLANPortFree`,
+  `TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener`.)
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
 - **A test asserting that a message NAMES A PATH must not substring-match the

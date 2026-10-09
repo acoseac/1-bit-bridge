@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -105,17 +107,21 @@ func requireServeReportsARefusal(t *testing.T, integrityYAML string, seed func(d
 	dataDir, variantsDir := filepath.Join(dir, "data"), filepath.Join(dir, "variants")
 	seed(dataDir, variantsDir)
 
-	adminPort := freeLoopbackPort(t)
+	admin := holdLoopback(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\n"+
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n"+
 		"upscale:\n    variantsDir: %s\nintegrity:\n    %s\n",
-		lib, dataDir, adminPort, variantsDir, integrityYAML)
+		lib, dataDir, admin.addr, variantsDir, integrityYAML)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	served := bootServe(t, "--config", cfgPath, "--addr", "127.0.0.1:0")
-	adminAddr := fmt.Sprintf("127.0.0.1:%d", adminPort)
+	served := launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: "127.0.0.1:0", adminListener: admin.ln,
+		}, stdout, stderr)
+	})
+	adminAddr := admin.addr
 	waitForAdminReady(t, adminAddr, served.done, served.stderr)
 
 	client := &http.Client{Timeout: 10 * time.Second}

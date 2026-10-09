@@ -46,7 +46,8 @@ const (
 // finds out only when its idle timeout fires.
 func TestServeShutdownIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
 	route := newHeldRoute()
-	addr := freeLoopbackTCPAndUDPAddr(t)
+	pair := holdLoopbackTCPAndUDP(t)
+	addr := pair.addr
 	cfgPath, dataDir := writeLANConfig(t, "127.0.0.1:0")
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
 	// serve prints this once its LAN HTTP/3 server is up; nothing is held.
@@ -56,8 +57,10 @@ func TestServeShutdownIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testin
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: addr, wrapAPIHandler: route.wrap},
-			&holdingWriter{buf: stdout, holds: []*printHold{up}}, stderr)
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: addr,
+			lanListener: pair.ln, lanPacket: pair.udp, wrapAPIHandler: route.wrap,
+		}, &holdingWriter{buf: stdout, holds: []*printHold{up}}, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	// Registered after the drain, so it runs before it: a failing run lets
@@ -90,7 +93,8 @@ func TestServeShutdownIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testin
 // server's only drainer.
 func TestServeErrorExitIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
 	route := newHeldRoute()
-	addr := freeLoopbackTCPAndUDPAddr(t)
+	pair := holdLoopbackTCPAndUDP(t)
+	addr := pair.addr
 	cfgPath, dataDir := writeLANConfig(t, takenAddress(t))
 	stderr := &safeBuffer{}
 	// serve prints its exit reason before its teardown; holding that print
@@ -101,8 +105,10 @@ func TestServeErrorExitIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testi
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: addr, wrapAPIHandler: route.wrap},
-			&safeBuffer{}, &holdingWriter{buf: stderr, holds: []*printHold{exit}})
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: addr,
+			lanListener: pair.ln, lanPacket: pair.udp, wrapAPIHandler: route.wrap,
+		}, &safeBuffer{}, &holdingWriter{buf: stderr, holds: []*printHold{exit}})
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	t.Cleanup(route.release.open)

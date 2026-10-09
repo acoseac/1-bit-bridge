@@ -44,13 +44,12 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	}
 	// Both ports must be real: ReachableEndpoints answers nil for a
 	// `:0` listen address (no port a URL could carry), which would make
-	// health and the QR trivially agree on an empty list. Reserved and
-	// released up front — the weaker half of this fixture, for the
-	// reasons freeLoopbackPort records.
-	apiPort, adminPort := freeLoopbackPort(t), freeLoopbackPort(t)
+	// health and the QR trivially agree on an empty list. The listeners
+	// stay open and are handed to serve (backlog B313).
+	lan, admin := holdLoopback(t), holdLoopback(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\ncustomEndpoints:\n  - %s\n",
-		lib, filepath.Join(dir, "data"), adminPort, custom)
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\ncustomEndpoints:\n  - %s\n",
+		lib, filepath.Join(dir, "data"), admin.addr, custom)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +60,10 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath,
-			"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: lan.addr,
+			lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
 	}()
 	// Shutdown is a cleanup, not a tail — the reasoning, and why `exited`
 	// rather than `done`, is in drainServeOnCleanup. This test is where
@@ -70,7 +71,7 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	// three boot tests cannot drift apart again.
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	addr, _ := waitForListening(t, stdout, exited, done, stderr)
-	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
+	waitForAdminReady(t, admin.addr, done, stderr)
 
 	// What the phone sees.
 	tlsClient := &http.Client{
@@ -95,7 +96,7 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	// What the QR bakes. The primary is one health does NOT list, so
 	// the relation to assert is exact: [primary] + health.endpoints.
 	const primary = "https://primary.example.test:7788"
-	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	adminBase := "http://" + admin.addr
 	client := &http.Client{Timeout: 10 * time.Second}
 	mint := pairViaAdmin(t, ctx, client, adminBase+"/api/tokens",
 		`{"name":"boot test","url":"`+primary+`"}`, http.StatusCreated, stderr)
