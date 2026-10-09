@@ -39565,8 +39565,9 @@ writer now unwraps to the inner `ResponseWriter`. `ServeContent`
 still writes through the telemetry wrapper. A recorder that cannot
 set a deadline still serves the body (the unit tests).
 
-Those listener bounds do not cap bandwidth; the stream cap and this
-deadline do.
+The stream cap limits how many silence GETs run at once. The write
+deadline limits how long one of them may block. One DSD512 stereo
+stream still transfers about 5.6–6.1 MB/s.
 
 `/v1/health.features` appends `dsdSilence` on `s.dlnaEnabled`, the
 same gate as `dlnaServer`, after `dsdRender` so the list stays
@@ -39674,9 +39675,16 @@ when a test has installed it, calls
 production: one load on the way out of a `GET`). The cap test and the
 disconnect test install the hook before they end a stream, wait for
 one signal with a deadline, and check the status once. The disconnect
-test no longer polls. The stalled-reader test still waits 500 ms and
-polls until the cap reads 503 — those waits are about slots being
-taken — then waits for `DSDSilenceMaxStreams` release signals and
-checks the status once. The hook's send does not block: the channel
-is buffered, and a full buffer drops the signal rather than holding
-the handler after the slot is already free.
+test no longer polls. The stalled-reader test waits until four
+acquires (`dsdSilenceSlotAcquiredHookForTests`, the same shape, nil in
+production) and then polls until the cap reads 503. A probe in that
+poll that returns 200 or 206 has taken a slot, and that status can
+come back before `releaseSlot` runs. On `558006d2` the wait asked for
+`DSDSilenceMaxStreams` signals, so one of those probe releases could
+stand in for a stalled handler that was still holding its slot.
+CodeRabbit on that commit (review thread 4234878130). The four
+acquires come first, so the four stalled handlers are the ones
+holding the slots, and the release wait is `DSDSilenceMaxStreams`
+plus each such probe. The count of releases is exact. The hook's wake
+does not block: a full wake buffer drops the wake, and the waiter
+reads the count.

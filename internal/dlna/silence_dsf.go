@@ -63,6 +63,13 @@ var dsdSilenceWriteBound = 120 * time.Second
 // still returning. Tests restore it via t.Cleanup.
 var dsdSilenceSlotReleasedHookForTests atomic.Pointer[func()]
 
+// dsdSilenceSlotAcquiredHookForTests, when non-nil, runs after a GET has
+// taken its stream slot and before the body is written. The stalled-reader
+// test waits on this instead of sleeping: a GET probe sent before the
+// stalled handlers hold their slots takes one of those slots itself.
+// Production leaves this nil: one atomic load on the way into a GET.
+var dsdSilenceSlotAcquiredHookForTests atomic.Pointer[func()]
+
 // dsdSilenceRates is 64·n × 44,100 and 64·n × 48,000 for n in {1, 2, 4, 8}.
 var dsdSilenceRates = [...]uint32{
 	2822400, 5644800, 11289600, 22579200,
@@ -219,6 +226,7 @@ func (h *dsdSilenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case h.slots <- struct{}{}:
 			defer h.releaseSlot()
+			noteDSDSilenceSlotAcquired()
 		default:
 			http.Error(w, "dsd silence stream limit reached", http.StatusServiceUnavailable)
 			return
@@ -239,6 +247,12 @@ func (h *dsdSilenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		size:   asset.size,
 		done:   r.Context().Done(),
 	})
+}
+
+func noteDSDSilenceSlotAcquired() {
+	if hook := dsdSilenceSlotAcquiredHookForTests.Load(); hook != nil {
+		(*hook)()
+	}
 }
 
 // releaseSlot returns a GET's stream slot, then tells a test the slot

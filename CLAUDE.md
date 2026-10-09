@@ -5446,7 +5446,8 @@ no failing test — which is the shape to expect in this area.
   default) `Unwrap`s, or the deadline never reaches the socket.
   **B220 and B162 are unchanged** (notify pool 8, 16 KiB headers,
   `ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout` unset, page
-  1000). The cap and this deadline are the bandwidth bounds.
+  1000). The cap limits concurrent silence streams, and the deadline
+  limits how long one stream may block.
   **`dsdSilence` is listed exactly when the listener is up**, the same
   gate as `dlnaServer`, between `dsdRender` and `favorites`. Public
   mode does not advertise it. `ProtocolVersion` stays 1.

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -222,38 +223,63 @@ func TestDSDSilenceUnknownRateIs404(t *testing.T) {
 	}
 }
 
-// silenceReleaseWatch is signalled once each time a silence GET gives its
-// slot back. Install it before ending a stream: the release can happen
-// during the copy, before finishOne or cancelOne returns. The channel is
-// buffered so a release that already happened is kept, and the hook's
-// send does not block the handler after the slot is free.
-type silenceReleaseWatch struct {
-	ch chan struct{}
+// silenceSlotWatch counts slot acquires or releases. Install it before
+// the handlers run: a release can happen during the copy, before
+// finishOne or cancelOne returns. The count is exact. The channel only
+// wakes the waiter; a full buffer drops the wake, so the handler is not
+// held after the slot is free.
+type silenceSlotWatch struct {
+	mu   sync.Mutex
+	n    int
+	ch   chan struct{}
+	what string
 }
 
-func watchSilenceSlotReleases(t *testing.T) *silenceReleaseWatch {
+func watchSilenceSlotReleases(t *testing.T) *silenceSlotWatch {
 	t.Helper()
-	w := &silenceReleaseWatch{ch: make(chan struct{}, 16)}
+	return watchSilenceSlotHook(t, &dsdSilenceSlotReleasedHookForTests, "released")
+}
+
+func watchSilenceSlotAcquires(t *testing.T) *silenceSlotWatch {
+	t.Helper()
+	return watchSilenceSlotHook(t, &dsdSilenceSlotAcquiredHookForTests, "taken")
+}
+
+func watchSilenceSlotHook(t *testing.T, dest *atomic.Pointer[func()], what string) *silenceSlotWatch {
+	t.Helper()
+	w := &silenceSlotWatch{ch: make(chan struct{}, 1), what: what}
 	hook := func() {
+		w.mu.Lock()
+		w.n++
+		w.mu.Unlock()
 		select {
 		case w.ch <- struct{}{}:
 		default:
 		}
 	}
-	dsdSilenceSlotReleasedHookForTests.Store(&hook)
-	t.Cleanup(func() { dsdSilenceSlotReleasedHookForTests.Store(nil) })
+	dest.Store(&hook)
+	t.Cleanup(func() { dest.Store(nil) })
 	return w
 }
 
-func (w *silenceReleaseWatch) await(t *testing.T, n int, budget time.Duration) {
+func (w *silenceSlotWatch) await(t *testing.T, n int, budget time.Duration) {
 	t.Helper()
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
-	for got := 0; got < n; got++ {
+	for {
+		w.mu.Lock()
+		got := w.n
+		w.mu.Unlock()
+		if got >= n {
+			return
+		}
 		select {
 		case <-w.ch:
 		case <-timer.C:
-			t.Fatalf("silence slot released %d of %d", got, n)
+			w.mu.Lock()
+			got = w.n
+			w.mu.Unlock()
+			t.Fatalf("silence slot %s %d of %d", w.what, got, n)
 		}
 	}
 }
@@ -348,14 +374,12 @@ func TestAStalledSilenceReaderFreesItsSlot(t *testing.T) {
 	}
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
+	acquired := watchSilenceSlotAcquires(t)
 	released := watchSilenceSlotReleases(t)
 	conns := make([]net.Conn, DSDSilenceMaxStreams)
 	for i := range conns {
 		conns[i] = stallSilenceGET(t, srv.Listener.Addr().String())
 	}
-	// The four handlers take their slots before the probe. A probe that
-	// arrives first would occupy a slot and the cap would never read full.
-	time.Sleep(500 * time.Millisecond)
 	t.Cleanup(func() {
 		for _, c := range conns {
 			if c != nil {
@@ -363,15 +387,26 @@ func TestAStalledSilenceReaderFreesItsSlot(t *testing.T) {
 			}
 		}
 	})
+	// Four acquires means the four stalled handlers hold the slots. A
+	// GET sent before that can take one of them.
+	acquired.await(t, DSDSilenceMaxStreams, 5*time.Second)
 
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	u := srv.URL + "/dlna/silence/dsd/2822400.dsf"
+	// A probe that returns 200 or 206 took a slot a stalled handler had
+	// already given back. That status can come back before releaseSlot,
+	// so those releases are part of the wait along with the four stalls.
+	var probeOK int
 	if code := waitSilenceStatus(t, client, u, 2*time.Second, func(code int) bool {
+		if code == http.StatusOK || code == http.StatusPartialContent {
+			probeOK++
+			return false
+		}
 		return code == http.StatusServiceUnavailable
 	}); code != http.StatusServiceUnavailable {
 		t.Fatalf("cap never filled: status %d, want 503", code)
 	}
-	released.await(t, DSDSilenceMaxStreams, 8*time.Second)
+	released.await(t, DSDSilenceMaxStreams+probeOK, 8*time.Second)
 	code := silenceStatus(t, client, http.MethodGet, u, "bytes=0-15")
 	if code != http.StatusOK && code != http.StatusPartialContent {
 		t.Fatalf("after the write deadline: status %d, want 200 or 206", code)
