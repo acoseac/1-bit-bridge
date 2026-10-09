@@ -310,10 +310,9 @@ func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.Varia
 // rename has landed. Close on an already-closed file is a no-op.
 //
 // The copy stands in for src, which the move then unlinks. Run as root
-// it keeps src's owner, as a rename would have. KeepOwner reads the owner
-// of the entry at the path it is given, and that entry is src here. A new
-// file is created 0644, as before; a file being replaced keeps that
-// file's permission bits on the new inode.
+// it keeps src's owner, as a rename would have. A new file is created
+// 0644, as before; a file being replaced keeps that file's permission
+// bits on the new inode.
 func copyAndFsync(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -325,7 +324,7 @@ func copyAndFsync(src, dst string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	out, tmp, err := openMoveCopy(filepath.Dir(dst))
+	out, tmp, err := openMoveCopy(filepath.Dir(dst), src)
 	if err != nil {
 		return err
 	}
@@ -342,9 +341,6 @@ func copyAndFsync(src, dst string) error {
 		if err := out.Chmod(replacing.Mode().Perm()); err != nil {
 			return err
 		}
-	}
-	if err := fsutil.KeepOwner(out, src); err != nil {
-		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		return err
@@ -364,8 +360,10 @@ func copyAndFsync(src, dst string) error {
 
 // openMoveCopy creates an empty 0644 file in dir whose name ends in
 // .tmp, so a crash leftover is the sidecar sweep's scratch and not a
-// rendition under its final name.
-func openMoveCopy(dir string) (*os.File, string, error) {
+// rendition under its final name. It gives the new file the owner of
+// ownerPath: KeepOwner reads the entry at that path, and the copy stands
+// in for the source the move then unlinks.
+func openMoveCopy(dir, ownerPath string) (*os.File, string, error) {
 	var rnd [8]byte
 	for range 100 {
 		if _, err := rand.Read(rnd[:]); err != nil {
@@ -373,12 +371,18 @@ func openMoveCopy(dir string) (*os.File, string, error) {
 		}
 		name := filepath.Join(dir, ".bridge-move-"+hex.EncodeToString(rnd[:])+".tmp")
 		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err == nil {
-			return f, name, nil
+		if err != nil {
+			if !os.IsExist(err) {
+				return nil, "", err
+			}
+			continue
 		}
-		if !os.IsExist(err) {
+		if err := fsutil.KeepOwner(f, ownerPath); err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
 			return nil, "", err
 		}
+		return f, name, nil
 	}
 	return nil, "", fmt.Errorf("create temp copy in %s", dir)
 }
