@@ -440,11 +440,6 @@ func (m *Manager) List() ([]*Session, error) {
 	return out, nil
 }
 
-// WriteChunk appends one chunk at offset.
-//
-// chunkDigest, when non-nil, is the expected raw SHA-256 of THIS chunk's bytes
-// (RFC 9530 Content-Digest). A mismatch leaves the offset untouched so the
-// client simply re-sends.
 // fileRecordedComplete is an offset at the declared size. A zero-length
 // file is complete only once its finishing chunk has recorded the digest:
 // a missing meta reads as offset 0, which would otherwise look finished
@@ -483,6 +478,11 @@ func sameHashProgress(stored, next []byte) bool {
 	return storedInitial && nextInitial
 }
 
+// WriteChunk appends one chunk at offset.
+//
+// chunkDigest, when non-nil, is the expected raw SHA-256 of THIS chunk's bytes
+// (RFC 9530 Content-Digest). A mismatch leaves the offset untouched so the
+// client simply re-sends.
 func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDigest []byte, contentLength int64) (int64, error) {
 	doc, err := m.findSession(sid)
 	if err != nil {
