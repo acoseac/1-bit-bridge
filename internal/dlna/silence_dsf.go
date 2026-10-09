@@ -37,6 +37,22 @@ const (
 	dsdSilenceHdrLen  = 92
 )
 
+// dsdSilenceWriteBound is how long one silence GET may block in a write.
+// The listener leaves Server.WriteTimeout unset so a renderer can stream
+// a track (B220). A client that sends this GET and then stops reading
+// fills the socket buffer and would hold a cap slot until the connection
+// died; four such clients take the silence away. 120 s covers a real-time
+// play of the 60 s file plus read-ahead. The app stops the silence after
+// about ten seconds. A test shortens the bound.
+//
+// Go 1.26.6 clears a ResponseController deadline after the handler
+// returns (net/http conn.serve calls SetWriteDeadline(time.Time{})) even
+// when WriteTimeout is 0, and the next request is given a write deadline
+// only when WriteTimeout is positive. The silence response still sends
+// Connection: close, so the deadline cannot apply to a later request on
+// this connection.
+var dsdSilenceWriteBound = 120 * time.Second
+
 // dsdSilenceRates is 64·n × 44,100 and 64·n × 48,000 for n in {1, 2, 4, 8}.
 var dsdSilenceRates = [...]uint32{
 	2822400, 5644800, 11289600, 22579200,
@@ -94,22 +110,23 @@ func buildDSFSilenceHeader(fs uint32) (header []byte, total int64) {
 }
 
 // dsdSilenceFile is the virtual DSF. Read fills payload bytes with 0x69
-// and never allocates the body.
+// and never allocates the body. done is the request context's cancel
+// signal; the handler does not store the context.
 type dsdSilenceFile struct {
 	header []byte
 	size   int64
 	off    int64
-	ctx    context.Context
+	done   <-chan struct{}
 }
 
 func (f *dsdSilenceFile) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if f.ctx != nil {
-		if err := f.ctx.Err(); err != nil {
-			return 0, err
-		}
+	select {
+	case <-f.done:
+		return 0, context.Canceled
+	default:
 	}
 	if f.off >= f.size {
 		return 0, io.EOF
@@ -200,10 +217,23 @@ func (h *dsdSilenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mimeDSF)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("transferMode.dlna.org", "Streaming")
+	// close so the write deadline, set on this connection, cannot apply
+	// to a later request. See dsdSilenceWriteBound.
+	w.Header().Set("Connection", "close")
+	if r.Method == http.MethodGet {
+		boundDSDSilenceWrite(w)
+	}
 	name := strconv.FormatUint(uint64(asset.fs), 10) + ".dsf"
 	http.ServeContent(w, r, name, time.Time{}, &dsdSilenceFile{
 		header: asset.header,
 		size:   asset.size,
-		ctx:    r.Context(),
+		done:   r.Context().Done(),
 	})
+}
+
+// boundDSDSilenceWrite stops a GET that has stopped reading. A writer
+// that cannot set a deadline (the recorder the unit tests use) still
+// serves the body.
+func boundDSDSilenceWrite(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(dsdSilenceWriteBound))
 }

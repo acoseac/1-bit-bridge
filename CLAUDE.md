@@ -5418,50 +5418,38 @@ no failing test — which is the shape to expect in this area.
 - **The DLNA listener serves a generated stereo DSD silence, capped at
   four streams** (2026-10-09, backlog B319). Pausing or stopping a
   DSD256 stream on a Chord 2go docked to a Hugo 2 (MPD 0.21) makes the
-  Hugo 2 ring. Serving a stereo DSD256 DSF of constant `0x69` and then
-  stopping stayed silent (measured 2026-10-09). The app switches MPD
-  onto this file instead of a bare stop, so the listener MPD already
-  fetches from serves it.
+  Hugo 2 ring. A stereo DSD256 DSF of constant `0x69` stayed silent
+  (measured 2026-10-09). The app switches MPD onto this file instead of
+  a bare stop.
   **`GET` and `HEAD /dlna/silence/dsd/<fs>.dsf`**, beside
-  `/dlna/silence.wav`. `<fs>` is the DSD rate in Hz, exactly one of
-  64·n × 44,100 or 64·n × 48,000 for n ∈ {1, 2, 4, 8}: `2822400`,
-  `5644800`, `11289600`, `22579200`, `3072000`, `6144000`, `12288000`,
-  `24576000`. Any other segment is 404 (a PCM rate, `1`, a non-number,
-  a leading zero, a different extension, an extra path segment).
-  **The body is a 60 s stereo DSF, every data byte `0x69`**, including
-  the bytes that pad the last 4096-byte block of each channel. `0x69`
-  is the byte that was measured; `0x00` is full-scale offset. Layout
-  matches `dsdtone.WriteDSF`'s field values (Sony DSF v1.01): `DSD `
-  (28), `fmt ` (version 1, format id 0, channel type 2, 2 channels, the
-  rate, 1 bit, sample count = fs × 60, block size 4096), then `data`
-  as 4096-byte blocks alternating the two channels. Production does
-  not import `internal/dsdtone`.
-  **Generated as the response is read.** `http.ServeContent` reads an
-  `io.ReadSeeker` that holds an offset and a shared 92-byte header.
-  The payload is filled with `0x69` in the read buffer. Nothing is
-  written to disk and the body (up to ~369 MB at 24,576,000 Hz) is
-  never allocated. `Content-Type` is `audio/x-dsf`, set before
-  `ServeContent` so the sniffer does not replace it. `Range` and
-  `HEAD` are `ServeContent`'s.
-  **Four concurrent `GET`s, then 503.** Stereo DSD512 at 22,579,200 Hz
-  is 5,644,800 B/s; at 24,576,000 Hz it is 6,144,000 B/s. Four of the
-  larger family is about 24.6 MB/s. One pause holds one stream for
-  about ten seconds, so four covers a household, a second device and a
-  retry, and bounds an unauthenticated flood. The slot is a
-  non-blocking channel on the handler, released when `ServeHTTP`
-  returns (the copy finished, or the client disconnected). `HEAD`, a
-  404 and a 405 take no slot. The listener adds no INFO line of its
-  own; the telemetry middleware already records the request.
-  **B220 and B162 are unchanged.** `genaNotifyPool` 8, header read
-  16 KiB, `ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout`
-  unset, Browse/Search page 1000. A 60 s body needs the unset write
-  deadline. Those bounds do not cap bandwidth; this cap does.
-  **`/v1/health.features` lists `dsdSilence` exactly when the DLNA
-  listener is up**, the same `dlnaEnabled` gate as `dlnaServer`,
-  alpha-sorted between `dsdRender` and `favorites`. Public mode never
-  starts the listener, so it does not advertise the flag. The client
-  falls back to a plain stop when the flag is absent. Additive:
-  `ProtocolVersion` stays 1.
+  `/dlna/silence.wav`. `<fs>` is 64·n × 44,100 or 64·n × 48,000 for
+  n ∈ {1, 2, 4, 8}. Any other segment is 404.
+  **The body is a 60 s stereo DSF, every data byte `0x69`**, pad of the
+  last 4096-byte block included. `0x00` is full-scale offset. Layout
+  matches `dsdtone.WriteDSF` (Sony DSF v1.01). Production does not
+  import `internal/dsdtone`. `ServeContent` reads a seeker over a shared
+  92-byte header and fills `0x69` in the read buffer. Nothing is written
+  to disk. `Content-Type` is `audio/x-dsf` before `ServeContent`.
+  **Four concurrent `GET`s, then 503.** One pause holds one stream for
+  about ten seconds. The slot is a non-blocking channel, released when
+  `ServeHTTP` returns. `HEAD`, a 404 and a 405 take no slot.
+  **A reader that stops reading holds its slot until the write ends.**
+  `WriteTimeout` stays unset (B220) so a track can stream. This GET
+  sets a 120 s deadline (`dsdSilenceWriteBound`, shortened in tests)
+  through `ResponseController` when the body starts: a real-time play
+  of the file plus read-ahead, and the app stops it after about ten
+  seconds. The response sends `Connection: close`. Go 1.26.6 still
+  clears a `ResponseController` deadline after the handler returns
+  (`conn.serve` → `SetWriteDeadline(time.Time{})`) when `WriteTimeout`
+  is 0, and the next request gets one only when `WriteTimeout` is
+  positive; `Connection: close` is sent anyway. Telemetry (on by
+  default) `Unwrap`s, or the deadline never reaches the socket.
+  **B220 and B162 are unchanged** (notify pool 8, 16 KiB headers,
+  `ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout` unset, page
+  1000). The cap and this deadline are the bandwidth bounds.
+  **`dsdSilence` is listed exactly when the listener is up**, the same
+  gate as `dlnaServer`, between `dsdRender` and `favorites`. Public
+  mode does not advertise it. `ProtocolVersion` stays 1.
   (`TestDSDSilenceHeaderAndSizeForEachRate`,
   `TestDSDSilenceDataBytesAreTheSilenceByte`,
   `TestDSDSilenceRangesAndHead`,
@@ -5471,6 +5459,7 @@ no failing test — which is the shape to expect in this area.
   `TestDSDSilence404DoesNotHoldASlot`,
   `TestTheDLNAListenerServesDSDSilence`,
   `TestDSDSilenceFFProbe`,
+  `TestAStalledSilenceReaderFreesItsSlot`,
   `TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled`.)
 - **A service URL is kept only as a string that parses back to the scheme
   and host the policy judged** (2026-10-01, backlog B233). The nightly fuzz

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,91 +37,120 @@ func TestDSDSilenceHeaderAndSizeForEachRate(t *testing.T) {
 	h := DSDSilenceHandler()
 	for _, fs := range dsdSilenceSpecRates {
 		t.Run(strconv.FormatUint(uint64(fs), 10), func(t *testing.T) {
-			sampleCount, payload, total := dsdSilenceSpec(fs)
-			path := "/dlna/silence/dsd/" + strconv.FormatUint(uint64(fs), 10) + ".dsf"
-
-			head := silenceDo(t, h, http.MethodHead, path, "")
-			if head.Code != http.StatusOK {
-				t.Fatalf("HEAD status %d", head.Code)
-			}
-			if head.Body.Len() != 0 {
-				t.Fatalf("HEAD body %d bytes", head.Body.Len())
-			}
-			if got := head.Result().ContentLength; got != total {
-				t.Fatalf("HEAD Content-Length %d, want %d", got, total)
-			}
-			if ct := head.Header().Get("Content-Type"); ct != "audio/x-dsf" {
-				t.Fatalf("Content-Type %q", ct)
-			}
-
-			hdr := silenceDo(t, h, http.MethodGet, path, "bytes=0-91")
-			if hdr.Code != http.StatusPartialContent {
-				t.Fatalf("header range status %d", hdr.Code)
-			}
-			b := hdr.Body.Bytes()
-			if len(b) != 92 {
-				t.Fatalf("header range len %d", len(b))
-			}
-			if string(b[0:4]) != "DSD " {
-				t.Fatalf("DSD magic %q", b[0:4])
-			}
-			if got := binary.LittleEndian.Uint64(b[4:12]); got != 28 {
-				t.Fatalf("DSD chunk size %d", got)
-			}
-			if got := binary.LittleEndian.Uint64(b[12:20]); got != uint64(total) {
-				t.Fatalf("total file size %d, want %d", got, total)
-			}
-			if got := binary.LittleEndian.Uint64(b[20:28]); got != 0 {
-				t.Fatalf("metadata pointer %d", got)
-			}
-			if string(b[28:32]) != "fmt " {
-				t.Fatalf("fmt magic %q", b[28:32])
-			}
-			if got := binary.LittleEndian.Uint64(b[32:40]); got != 52 {
-				t.Fatalf("fmt chunk size %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[40:44]); got != 1 {
-				t.Fatalf("version %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[44:48]); got != 0 {
-				t.Fatalf("format id %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[48:52]); got != 2 {
-				t.Fatalf("channel type %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[52:56]); got != 2 {
-				t.Fatalf("channels %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[56:60]); got != fs {
-				t.Fatalf("fs %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[60:64]); got != 1 {
-				t.Fatalf("bits %d", got)
-			}
-			if got := binary.LittleEndian.Uint64(b[64:72]); got != sampleCount {
-				t.Fatalf("sample count %d, want %d", got, sampleCount)
-			}
-			if got := binary.LittleEndian.Uint32(b[72:76]); got != 4096 {
-				t.Fatalf("block size %d", got)
-			}
-			if got := binary.LittleEndian.Uint32(b[76:80]); got != 0 {
-				t.Fatalf("reserved %d", got)
-			}
-			if string(b[80:84]) != "data" {
-				t.Fatalf("data magic %q", b[80:84])
-			}
-			if got := binary.LittleEndian.Uint64(b[84:92]); got != uint64(12+payload) {
-				t.Fatalf("data chunk size %d, want %d", got, 12+payload)
-			}
-
-			raw := int64(fs) * 60 / 8 * 2
-			if fs == 2822400 && payload <= raw {
-				t.Fatalf("DSD64 44.1 payload %d is not longer than the raw sample bytes %d", payload, raw)
-			}
-			if fs == 3072000 && payload != raw {
-				t.Fatalf("DSD64 48 kHz payload %d, raw %d: the 48 kHz family divides the block", payload, raw)
-			}
+			checkDSDSilenceRate(t, h, fs)
 		})
+	}
+}
+
+func checkDSDSilenceRate(t *testing.T, h http.Handler, fs uint32) {
+	t.Helper()
+	sampleCount, payload, total := dsdSilenceSpec(fs)
+	path := "/dlna/silence/dsd/" + strconv.FormatUint(uint64(fs), 10) + ".dsf"
+	head := silenceDo(t, h, http.MethodHead, path, "")
+	requireSilenceHead(t, head, total)
+	if ct := head.Header().Get("Content-Type"); ct != "audio/x-dsf" {
+		t.Fatalf("Content-Type %q", ct)
+	}
+	hdr := silenceDo(t, h, http.MethodGet, path, "bytes=0-91")
+	if hdr.Code != http.StatusPartialContent {
+		t.Fatalf("header range status %d", hdr.Code)
+	}
+	b := hdr.Body.Bytes()
+	if len(b) != 92 {
+		t.Fatalf("header range len %d", len(b))
+	}
+	checkDSDChunk(t, b, total)
+	checkFmtChunk(t, b, fs, sampleCount)
+	checkDataChunk(t, b, payload)
+	checkSilencePadding(t, fs, payload)
+}
+
+func checkDSDChunk(t *testing.T, b []byte, total int64) {
+	t.Helper()
+	checkMagic(t, b[0:4], "DSD ", "DSD magic")
+	checkU64(t, b[4:12], 28, "DSD chunk size")
+	checkU64Want(t, b[12:20], uint64(total), "total file size")
+	checkU64(t, b[20:28], 0, "metadata pointer")
+}
+
+func checkFmtChunk(t *testing.T, b []byte, fs uint32, sampleCount uint64) {
+	t.Helper()
+	checkMagic(t, b[28:32], "fmt ", "fmt magic")
+	checkU64(t, b[32:40], 52, "fmt chunk size")
+	for _, f := range []struct {
+		off  int
+		want uint32
+		name string
+	}{
+		{40, 1, "version"},
+		{44, 0, "format id"},
+		{48, 2, "channel type"},
+		{52, 2, "channels"},
+		{56, fs, "fs"},
+		{60, 1, "bits"},
+		{72, 4096, "block size"},
+		{76, 0, "reserved"},
+	} {
+		checkU32(t, b[f.off:f.off+4], f.want, f.name)
+	}
+	checkU64Want(t, b[64:72], sampleCount, "sample count")
+}
+
+func checkDataChunk(t *testing.T, b []byte, payload int64) {
+	t.Helper()
+	checkMagic(t, b[80:84], "data", "data magic")
+	checkU64Want(t, b[84:92], uint64(12+payload), "data chunk size")
+}
+
+func checkSilencePadding(t *testing.T, fs uint32, payload int64) {
+	t.Helper()
+	raw := int64(fs) * 60 / 8 * 2
+	if fs == 2822400 && payload <= raw {
+		t.Fatalf("DSD64 44.1 payload %d is not longer than the raw sample bytes %d", payload, raw)
+	}
+	if fs == 3072000 && payload != raw {
+		t.Fatalf("DSD64 48 kHz payload %d, raw %d: the 48 kHz family divides the block", payload, raw)
+	}
+}
+
+func checkMagic(t *testing.T, got []byte, want, name string) {
+	t.Helper()
+	if string(got) != want {
+		t.Fatalf("%s %q", name, got)
+	}
+}
+
+func checkU32(t *testing.T, b []byte, want uint32, name string) {
+	t.Helper()
+	if got := binary.LittleEndian.Uint32(b); got != want {
+		t.Fatalf("%s %d", name, got)
+	}
+}
+
+func checkU64(t *testing.T, b []byte, want uint64, name string) {
+	t.Helper()
+	if got := binary.LittleEndian.Uint64(b); got != want {
+		t.Fatalf("%s %d", name, got)
+	}
+}
+
+func checkU64Want(t *testing.T, b []byte, want uint64, name string) {
+	t.Helper()
+	if got := binary.LittleEndian.Uint64(b); got != want {
+		t.Fatalf("%s %d, want %d", name, got, want)
+	}
+}
+
+func requireSilenceHead(t *testing.T, rec *httptest.ResponseRecorder, total int64) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HEAD status %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("HEAD body %d bytes", rec.Body.Len())
+	}
+	if got := rec.Result().ContentLength; got != total {
+		t.Fatalf("HEAD Content-Length %d, want %d", got, total)
 	}
 }
 
@@ -133,44 +163,7 @@ func TestDSDSilenceDataBytesAreTheSilenceByte(t *testing.T) {
 		t.Run(strconv.FormatUint(uint64(fs), 10), func(t *testing.T) {
 			_, payload, total := dsdSilenceSpec(fs)
 			u := srv.URL + "/dlna/silence/dsd/" + strconv.FormatUint(uint64(fs), 10) + ".dsf"
-			resp, err := client.Get(u)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status %d", resp.StatusCode)
-			}
-			if resp.ContentLength != total {
-				t.Fatalf("Content-Length %d, want %d", resp.ContentLength, total)
-			}
-			buf := make([]byte, 1<<20)
-			var n int64
-			var dataBad int64 = -1
-			for {
-				nr, rerr := resp.Body.Read(buf)
-				for i := 0; i < nr; i++ {
-					if n >= 92 && buf[i] != 0x69 && dataBad < 0 {
-						dataBad = n
-					}
-					n++
-				}
-				if rerr == io.EOF {
-					break
-				}
-				if rerr != nil {
-					t.Fatal(rerr)
-				}
-			}
-			if n != total {
-				t.Fatalf("read %d, want %d", n, total)
-			}
-			if dataBad >= 0 {
-				t.Fatalf("byte at %d is not 0x69", dataBad)
-			}
-			if n-92 != payload {
-				t.Fatalf("payload %d, want %d", n-92, payload)
-			}
+			requireSilenceBytes(t, client, u, payload, total)
 		})
 	}
 }
@@ -206,16 +199,7 @@ func TestDSDSilenceRangesAndHead(t *testing.T) {
 		t.Fatalf("last bytes %x", got)
 	}
 
-	head := silenceDo(t, h, http.MethodHead, path, "")
-	if head.Code != http.StatusOK {
-		t.Fatalf("HEAD status %d", head.Code)
-	}
-	if head.Body.Len() != 0 {
-		t.Fatalf("HEAD body %d", head.Body.Len())
-	}
-	if got := head.Result().ContentLength; got != total {
-		t.Fatalf("HEAD length %d, want %d", got, total)
-	}
+	requireSilenceHead(t, silenceDo(t, h, http.MethodHead, path, ""), total)
 }
 
 func TestDSDSilenceUnknownRateIs404(t *testing.T) {
@@ -239,22 +223,10 @@ func TestDSDSilenceUnknownRateIs404(t *testing.T) {
 }
 
 func TestDSDSilenceCapAnswers503AndFreesTheSlot(t *testing.T) {
-	h := DSDSilenceHandler()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	u := srv.URL + "/dlna/silence/dsd/2822400.dsf"
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-
-	held := startParkedSilence(t, client, u, DSDSilenceMaxStreams)
-	t.Cleanup(held.stop)
-
-	if code := silenceStatus(t, client, http.MethodGet, u, ""); code != http.StatusServiceUnavailable {
-		t.Fatalf("past the cap: status %d, want 503", code)
-	}
+	client, u, held := fillSilenceCap(t)
 	if code := silenceStatus(t, client, http.MethodHead, u, ""); code != http.StatusOK {
 		t.Fatalf("HEAD while full: status %d, want 200", code)
 	}
-
 	held.finishOne()
 	if code := silenceStatus(t, client, http.MethodGet, u, "bytes=0-15"); code != http.StatusPartialContent {
 		t.Fatalf("after a stream ended: status %d, want 206", code)
@@ -262,18 +234,7 @@ func TestDSDSilenceCapAnswers503AndFreesTheSlot(t *testing.T) {
 }
 
 func TestDSDSilenceCapFreesTheSlotWhenTheClientDisconnects(t *testing.T) {
-	h := DSDSilenceHandler()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	u := srv.URL + "/dlna/silence/dsd/2822400.dsf"
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-
-	held := startParkedSilence(t, client, u, DSDSilenceMaxStreams)
-	t.Cleanup(held.stop)
-
-	if code := silenceStatus(t, client, http.MethodGet, u, ""); code != http.StatusServiceUnavailable {
-		t.Fatalf("past the cap: status %d, want 503", code)
-	}
+	client, u, held := fillSilenceCap(t)
 	held.cancelOne()
 	deadline := time.Now().Add(5 * time.Second)
 	var code int
@@ -335,6 +296,81 @@ func TestTheDLNAListenerServesDSDSilence(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "audio/x-dsf" {
 		t.Fatalf("Content-Type %q", ct)
+	}
+}
+
+func TestAStalledSilenceReaderFreesItsSlot(t *testing.T) {
+	prev := dsdSilenceWriteBound
+	dsdSilenceWriteBound = 3 * time.Second
+	t.Cleanup(func() { dsdSilenceWriteBound = prev })
+
+	s, err := NewServer(ServerConfig{
+		Library:        newTestLib(testTrack("t1", "Test Track")),
+		UDN:            "uuid:test-dsd-silence-stall",
+		FriendlyName:   "Test",
+		ListenAddress:  ":7790",
+		ServerURL:      "http://127.0.0.1:7790",
+		TelemetryStore: NewTelemetryStore(8),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+	conns := make([]net.Conn, DSDSilenceMaxStreams)
+	for i := range conns {
+		conns[i] = stallSilenceGET(t, srv.Listener.Addr().String())
+	}
+	// The four handlers take their slots before the probe. A probe that
+	// arrives first would occupy a slot and the cap would never read full.
+	time.Sleep(500 * time.Millisecond)
+	t.Cleanup(func() {
+		for _, c := range conns {
+			if c != nil {
+				c.Close()
+			}
+		}
+	})
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	u := srv.URL + "/dlna/silence/dsd/2822400.dsf"
+	if code := waitSilenceStatus(t, client, u, 2*time.Second, func(code int) bool {
+		return code == http.StatusServiceUnavailable
+	}); code != http.StatusServiceUnavailable {
+		t.Fatalf("cap never filled: status %d, want 503", code)
+	}
+	code := waitSilenceStatus(t, client, u, 6*time.Second, func(code int) bool {
+		return code == http.StatusOK || code == http.StatusPartialContent
+	})
+	if code != http.StatusOK && code != http.StatusPartialContent {
+		t.Fatalf("after the write deadline: status %d, want 200 or 206", code)
+	}
+}
+
+func stallSilenceGET(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := "GET /dlna/silence/dsd/2822400.dsf HTTP/1.1\r\nHost: " + addr + "\r\n\r\n"
+	if _, err := io.WriteString(c, req); err != nil {
+		c.Close()
+		t.Fatal(err)
+	}
+	return c
+}
+
+func waitSilenceStatus(t *testing.T, client *http.Client, u string, budget time.Duration, done func(int) bool) int {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	code := 0
+	for {
+		code = silenceStatus(t, client, http.MethodGet, u, "bytes=0-15")
+		if done(code) || time.Now().After(deadline) {
+			return code
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -439,6 +475,11 @@ type parkedSilence struct {
 	stop   func()
 }
 
+type parked struct {
+	i    int
+	body io.ReadCloser
+}
+
 func startParkedSilence(t *testing.T, client *http.Client, u string, n int) *parkedSilence {
 	t.Helper()
 	p := &parkedSilence{
@@ -446,8 +487,27 @@ func startParkedSilence(t *testing.T, client *http.Client, u string, n int) *par
 		cancel: make([]context.CancelFunc, n),
 		body:   make([]io.ReadCloser, n),
 	}
+	p.stop = stopParkedSilence(p)
+	ctxs := make([]context.Context, n)
+	for i := 0; i < n; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.cancel[i] = cancel
+		ctxs[i] = ctx
+	}
+	var wg sync.WaitGroup
+	ready := make(chan parked, n)
+	errc := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go fetchParkedSilence(&wg, client, u, ctxs[i], i, ready, errc)
+	}
+	awaitParkedSilence(p, &wg, ready, errc, n)
+	return p
+}
+
+func stopParkedSilence(p *parkedSilence) func() {
 	var once sync.Once
-	p.stop = func() {
+	return func() {
 		once.Do(func() {
 			for i := range p.cancel {
 				if p.cancel[i] != nil {
@@ -459,46 +519,35 @@ func startParkedSilence(t *testing.T, client *http.Client, u string, n int) *par
 			}
 		})
 	}
-	ctxs := make([]context.Context, n)
-	for i := 0; i < n; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		p.cancel[i] = cancel
-		ctxs[i] = ctx
+}
+
+func fetchParkedSilence(wg *sync.WaitGroup, client *http.Client, u string, ctx context.Context, i int, ready chan<- parked, errc chan<- error) {
+	defer wg.Done()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		errc <- err
+		return
 	}
-	var wg sync.WaitGroup
-	type parked struct {
-		i    int
-		body io.ReadCloser
+	resp, err := client.Do(req)
+	if err != nil {
+		errc <- err
+		return
 	}
-	ready := make(chan parked, n)
-	errc := make(chan error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			req, err := http.NewRequestWithContext(ctxs[i], http.MethodGet, u, nil)
-			if err != nil {
-				errc <- err
-				return
-			}
-			resp, err := client.Do(req)
-			if err != nil {
-				errc <- err
-				return
-			}
-			if resp.StatusCode != http.StatusOK {
-				resp.Body.Close()
-				errc <- errStatus(resp.StatusCode)
-				return
-			}
-			if _, err := io.ReadFull(resp.Body, make([]byte, 32<<10)); err != nil {
-				resp.Body.Close()
-				errc <- err
-				return
-			}
-			ready <- parked{i, resp.Body}
-		}(i)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		errc <- errStatus(resp.StatusCode)
+		return
 	}
+	if _, err := io.ReadFull(resp.Body, make([]byte, 32<<10)); err != nil {
+		resp.Body.Close()
+		errc <- err
+		return
+	}
+	ready <- parked{i, resp.Body}
+}
+
+func awaitParkedSilence(p *parkedSilence, wg *sync.WaitGroup, ready <-chan parked, errc <-chan error, n int) {
+	p.t.Helper()
 	got := 0
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
@@ -510,14 +559,73 @@ func startParkedSilence(t *testing.T, client *http.Client, u string, n int) *par
 		case err := <-errc:
 			p.stop()
 			wg.Wait()
-			t.Fatal(err)
+			p.t.Fatal(err)
 		case <-deadline.C:
 			p.stop()
 			wg.Wait()
-			t.Fatalf("parked %d of %d silence streams", got, n)
+			p.t.Fatalf("parked %d of %d silence streams", got, n)
 		}
 	}
-	return p
+}
+
+func fillSilenceCap(t *testing.T) (*http.Client, string, *parkedSilence) {
+	t.Helper()
+	srv := httptest.NewServer(DSDSilenceHandler())
+	t.Cleanup(srv.Close)
+	u := srv.URL + "/dlna/silence/dsd/2822400.dsf"
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	held := startParkedSilence(t, client, u, DSDSilenceMaxStreams)
+	t.Cleanup(held.stop)
+	if code := silenceStatus(t, client, http.MethodGet, u, ""); code != http.StatusServiceUnavailable {
+		t.Fatalf("past the cap: status %d, want 503", code)
+	}
+	return client, u, held
+}
+
+func requireSilenceBytes(t *testing.T, client *http.Client, u string, payload, total int64) {
+	t.Helper()
+	resp, err := client.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if resp.ContentLength != total {
+		t.Fatalf("Content-Length %d, want %d", resp.ContentLength, total)
+	}
+	n, dataBad := readSilenceBody(t, resp.Body)
+	if n != total {
+		t.Fatalf("read %d, want %d", n, total)
+	}
+	if dataBad >= 0 {
+		t.Fatalf("byte at %d is not 0x69", dataBad)
+	}
+	if n-92 != payload {
+		t.Fatalf("payload %d, want %d", n-92, payload)
+	}
+}
+
+func readSilenceBody(t *testing.T, r io.Reader) (n, dataBad int64) {
+	t.Helper()
+	dataBad = -1
+	buf := make([]byte, 1<<20)
+	for {
+		nr, rerr := r.Read(buf)
+		for i := 0; i < nr; i++ {
+			if n >= 92 && buf[i] != 0x69 && dataBad < 0 {
+				dataBad = n
+			}
+			n++
+		}
+		if rerr == io.EOF {
+			return n, dataBad
+		}
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+	}
 }
 
 func (p *parkedSilence) finishOne() {

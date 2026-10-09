@@ -83,28 +83,10 @@ func TestHealthOmitsDLNAServerWhenDisabled(t *testing.T) {
 // any WithDLNA call must NOT advertise the capability. Defends
 // against an accidental flip of the zero-value's meaning.
 func TestHealthOmitsDLNAServerByDefault(t *testing.T) {
-	tmp := t.TempDir()
-	cfg := &config.Config{
-		LibraryRoots:  []string{tmp},
-		ListenAddress: ":7788",
-		LibraryName:   "Test",
-	}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	srv := New(cfg, store, nil, "fp") // NO WithDLNA call
-	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(hs.Close)
-
-	resp := authGet(t, hs, "/v1/health", "")
-	body := readAllOrFail(t, resp)
-	resp.Body.Close()
-
-	var got HealthResponse
-	if err := jsonUnmarshalForTest(body, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	for _, f := range got.Features {
+	features := defaultHealthFeatures(t) // NO WithDLNA call
+	for _, f := range features {
 		if f == "dlnaServer" {
-			t.Errorf("default-constructed Server advertised dlnaServer; got %v", got.Features)
+			t.Errorf("default-constructed Server advertised dlnaServer; got %v", features)
 		}
 	}
 }
@@ -121,6 +103,14 @@ func TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled(t *testing.T) {
 	if featureListed(off, "dsdSilence") || featureListed(off, "dlnaServer") {
 		t.Fatalf("DLNA off: features %v", off)
 	}
+	features := defaultHealthFeatures(t)
+	if featureListed(features, "dsdSilence") {
+		t.Fatalf("default Server advertised dsdSilence; got %v", features)
+	}
+}
+
+func defaultHealthFeatures(t *testing.T) []string {
+	t.Helper()
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		LibraryRoots:  []string{tmp},
@@ -138,9 +128,7 @@ func TestHealthAdvertisesDSDSilenceExactlyWhenDLNAIsEnabled(t *testing.T) {
 	if err := jsonUnmarshalForTest(body, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if featureListed(got.Features, "dsdSilence") {
-		t.Fatalf("default Server advertised dsdSilence; got %v", got.Features)
-	}
+	return got.Features
 }
 
 func featureListed(features []string, name string) bool {

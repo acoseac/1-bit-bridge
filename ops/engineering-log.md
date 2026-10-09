@@ -39536,9 +39536,37 @@ listener's existing telemetry.
 
 B220 / B162 (the entry above, "the DLNA listener bounds what one peer
 can start") stay as they are: notify pool 8, 16 KiB header read,
-`ReadTimeout` 60 s, `IdleTimeout` 120 s, `WriteTimeout` unset,
-Browse/Search page 1000. A 60 s body needs the unset write deadline.
-Those bounds do not cap bandwidth; the stream cap does.
+`ReadTimeout` 60 s, `IdleTimeout` 120 s, server `WriteTimeout` unset,
+Browse/Search page 1000. The server write timeout stays unset so a
+renderer can stream a track. A silence `GET` is a different case: a
+client that sends it and then stops reading fills the socket buffer
+and holds a cap slot until the connection dies, and four such clients
+take the silence away (the app then falls back to the ringing stop).
+Each silence `GET` sets a 120 s write deadline
+(`dsdSilenceWriteBound`) through `http.ResponseController` when the
+body starts. 120 s covers a real-time play of the 60 s file plus
+read-ahead; the app stops the silence after about ten seconds. A test
+shortens the bound. The response sends `Connection: close`.
+
+Go 1.26.6 `net/http` (`server.go` `conn.serve`, after
+`finishRequest`) always calls `SetWriteDeadline(time.Time{})` on the
+connection. That clear is not gated on `WriteTimeout`. `readRequest`
+sets a write deadline for the next request only when `WriteTimeout`
+is positive. So with `WriteTimeout` 0 the server does clear a
+`ResponseController` deadline before the next request on a kept-alive
+connection. `Connection: close` is still sent, so the deadline cannot
+apply to a later request on this connection.
+
+The listener wraps every request in `telemetryWriter` when telemetry
+is on, which is the default (`EffectiveDLNATelemetryEnabled`).
+`ResponseController` walks `Unwrap`. Without it, `SetWriteDeadline`
+returns unsupported and the deadline never reaches the socket. The
+writer now unwraps to the inner `ResponseWriter`. `ServeContent`
+still writes through the telemetry wrapper. A recorder that cannot
+set a deadline still serves the body (the unit tests).
+
+Those listener bounds do not cap bandwidth; the stream cap and this
+deadline do.
 
 `/v1/health.features` appends `dsdSilence` on `s.dlnaEnabled`, the
 same gate as `dlnaServer`, after `dsdRender` so the list stays
@@ -39603,5 +39631,16 @@ Negative controls, each restored after the red:
 --- FAIL: TestTheDLNAListenerServesDSDSilence (0.00s)
     silence_dsf_test.go:331: status 404 body "404 page not found\n"
 ```
+
+9. The per-response write deadline removed (`boundDSDSilenceWrite`
+a no-op). Four raw TCP clients sent `GET` for the DSD64 file and
+never read. The cap filled (a later range `GET` was 503). After the
+shortened deadline the slot stayed taken:
+```
+--- FAIL: TestAStalledSilenceReaderFreesItsSlot (6.51s)
+    silence_dsf_test.go:346: after the write deadline: status 503, want 200 or 206
+```
+With the deadline restored the same test passed (4.5 s): the later
+range `GET` was 200 or 206.
 
 Each line was put back after its control.
