@@ -9,6 +9,7 @@ import (
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 func newTestManager(t *testing.T, opts ...Option) (*Manager, string) {
@@ -205,9 +206,7 @@ func TestRestoreRecreatesMissingParentDirs(t *testing.T) {
 }
 
 func TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
-	m, root := newTestManager(t, WithDestStat(func(string) (os.FileInfo, error) {
-		return nil, &os.PathError{Op: "stat", Path: "hidden", Err: errors.New("input/output error")}
-	}))
+	m, root := newTestManager(t, WithDestStat(fsutil.StatIOFault))
 	seed(t, root, "A/x.flac", "LIVE")
 	if _, err := m.Trash("", []string{"A/x.flac"}); err != nil {
 		t.Fatal(err)
@@ -227,11 +226,8 @@ func TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
 	if res.Failed != 1 || res.OK != 0 {
 		t.Fatalf("restore = %+v, want the one entry failed", res)
 	}
-	if !strings.Contains(res.Outcomes[0].Reason, "could not check whether a file is already at this path") {
-		t.Errorf("reason = %q", res.Outcomes[0].Reason)
-	}
-	if strings.Contains(res.Outcomes[0].Reason, root) {
-		t.Errorf("reason names the absolute root: %q", res.Outcomes[0].Reason)
+	if err := fsutil.RejectUnreadableReason(res.Outcomes[0].Reason, root); err != nil {
+		t.Error(err)
 	}
 	if body, err := os.ReadFile(dst); err != nil || string(body) != "ORIGINAL" {
 		t.Errorf("destination = %q, %v", body, err)

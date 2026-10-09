@@ -205,30 +205,20 @@ func TestAnEmptyIDListDoesNotEmptyTheTrash(t *testing.T) {
 // TestAPaddedPathDoesNotTrashTheUnpaddedFile — trimming a leading space
 // addressed a different file. Both spellings stay where they were.
 func TestAPaddedPathDoesNotTrashTheUnpaddedFile(t *testing.T) {
-	srv, cfg, _ := newTestServer(t)
-	wireTrash(t, srv)
-	enableDelete(t, srv, true)
-	root := cfg.LibraryRoots[0]
-	padded := seedLibraryFile(t, root, " Various/Album/01.flac", "PADDED")
-	plain := seedLibraryFile(t, root, "Various/Album/01.flac", "PLAIN")
-	var errBody map[string]any
-	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash", map[string]any{
-		"paths": []string{" Various/Album/01.flac"},
-	}, &errBody); code != http.StatusBadRequest {
-		t.Fatalf("padded path = %d (%v), want 400", code, errBody)
-	}
-	if body, err := os.ReadFile(padded); err != nil || string(body) != "PADDED" {
-		t.Errorf("padded file = %q, %v", body, err)
-	}
-	if body, err := os.ReadFile(plain); err != nil || string(body) != "PLAIN" {
-		t.Errorf("unpadded file = %q, %v", body, err)
-	}
+	refusePaddedTrash(t, " Various/Album/01.flac", "padded path")
 }
 
 // TestALeadingSlashThenASpaceIsRefused — a leading slash is removed after
 // the padding check, so "/ Various/..." was a different name that then
 // could not be restored.
 func TestALeadingSlashThenASpaceIsRefused(t *testing.T) {
+	refusePaddedTrash(t, "/ Various/Album/01.flac", "slash then space")
+}
+
+// refusePaddedTrash posts one path and requires 400, with both seeded
+// spellings still holding their bytes.
+func refusePaddedTrash(t *testing.T, posted, label string) {
+	t.Helper()
 	srv, cfg, _ := newTestServer(t)
 	wireTrash(t, srv)
 	enableDelete(t, srv, true)
@@ -237,9 +227,9 @@ func TestALeadingSlashThenASpaceIsRefused(t *testing.T) {
 	plain := seedLibraryFile(t, root, "Various/Album/01.flac", "PLAIN")
 	var errBody map[string]any
 	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash", map[string]any{
-		"paths": []string{"/ Various/Album/01.flac"},
+		"paths": []string{posted},
 	}, &errBody); code != http.StatusBadRequest {
-		t.Fatalf("slash then space = %d (%v), want 400", code, errBody)
+		t.Fatalf("%s = %d (%v), want 400", label, code, errBody)
 	}
 	if body, err := os.ReadFile(padded); err != nil || string(body) != "PADDED" {
 		t.Errorf("padded file = %q, %v", body, err)

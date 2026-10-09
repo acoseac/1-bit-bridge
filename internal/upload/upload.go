@@ -767,16 +767,15 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 	defer unlockDest()
 
 	if !doc.Overwrite {
-		_, err := m.statDest(dest)
-		switch {
-		case err == nil:
+		// A failed check is not "nothing there". os.Rename replaces, so
+		// going ahead on EIO or ESTALE would overwrite a file the stat
+		// could not see.
+		switch presence, reason := fsutil.StatDestination(m.destStat, dest); presence {
+		case fsutil.DestPresent:
 			out.Status, out.Reason = "skipped", "a file already exists at this path"
 			return out, ""
-		case !errors.Is(err, fs.ErrNotExist):
-			// A failed check is not "nothing there". os.Rename replaces, so
-			// going ahead on EIO or ESTALE would overwrite a file the stat
-			// could not see.
-			out.Status, out.Reason = "failed", existenceUnreadable(err)
+		case fsutil.DestUnreadable:
+			out.Status, out.Reason = "failed", reason
 			return out, ""
 		}
 	}
@@ -817,24 +816,6 @@ func destLockKey(dest string) string { return strings.ToLower(dest) }
 // take one lock. The returned function releases it.
 func (m *Manager) LockDestination(abs string) func() {
 	return m.destLocks.lock(destLockKey(abs))
-}
-
-func (m *Manager) statDest(path string) (os.FileInfo, error) {
-	if m.destStat != nil {
-		return m.destStat(path)
-	}
-	return os.Stat(path)
-}
-
-// existenceUnreadable is the per-file reason when the destination could not
-// be stated. The absolute path stays off it: the outcome already names the
-// library-relative path, and a PathError would echo the root.
-func existenceUnreadable(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) && pe.Err != nil {
-		err = pe.Err
-	}
-	return "could not check whether a file is already at this path: " + err.Error()
 }
 
 // openStagedFile opens a .part for positioned writing.

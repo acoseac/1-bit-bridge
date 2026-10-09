@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 const roomyDisk = int64(1) << 40
@@ -489,9 +491,7 @@ func TestCommitIsSameFilesystemRename(t *testing.T) {
 }
 
 func TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
-	m, root := newTestManager(t, WithDestStat(func(string) (os.FileInfo, error) {
-		return nil, &os.PathError{Op: "stat", Path: "hidden", Err: errors.New("input/output error")}
-	}))
+	m, root := newTestManager(t, WithDestStat(fsutil.StatIOFault))
 	dest := filepath.Join(root, "Artist", "01.flac")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		t.Fatal(err)
@@ -509,11 +509,8 @@ func TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile(t *testing.T) {
 	if res.Failed != 1 || res.Committed != 0 || res.Skipped != 0 {
 		t.Fatalf("commit = %+v, want the file failed", res)
 	}
-	if !strings.Contains(res.Outcomes[0].Reason, "could not check whether a file is already at this path") {
-		t.Errorf("reason = %q", res.Outcomes[0].Reason)
-	}
-	if strings.Contains(res.Outcomes[0].Reason, dest) {
-		t.Errorf("reason names the absolute path: %q", res.Outcomes[0].Reason)
+	if err := fsutil.RejectUnreadableReason(res.Outcomes[0].Reason, dest); err != nil {
+		t.Error(err)
 	}
 	if got, err := os.ReadFile(dest); err != nil || string(got) != "ORIGINAL" {
 		t.Errorf("destination = %q, %v", got, err)

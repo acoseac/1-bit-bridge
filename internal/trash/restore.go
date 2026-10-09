@@ -1,9 +1,7 @@
 package trash
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -87,17 +85,16 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 				locked = false
 			}
 		}
-		_, serr = m.statDest(dst)
-		switch {
-		case serr == nil:
+		switch presence, reason := fsutil.StatDestination(m.destStat, dst); presence {
+		case fsutil.DestPresent:
 			release()
 			out.Status, out.Reason = "failed", "a file already exists at the original path"
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
-		case !errors.Is(serr, fs.ErrNotExist):
+		case fsutil.DestUnreadable:
 			release()
-			out.Status, out.Reason = "failed", existenceUnreadable(serr)
+			out.Status, out.Reason = "failed", reason
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
@@ -211,24 +208,6 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 	}
 	m.invalidateReclaim()
 	return res, nil
-}
-
-func (m *Manager) statDest(path string) (os.FileInfo, error) {
-	if m.destStat != nil {
-		return m.destStat(path)
-	}
-	return os.Stat(path)
-}
-
-// existenceUnreadable is the per-file reason when the destination could not
-// be stated. The absolute path stays off it: the outcome already names the
-// library-relative path, and a PathError would echo the root.
-func existenceUnreadable(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) && pe.Err != nil {
-		err = pe.Err
-	}
-	return "could not check whether a file is already at this path: " + err.Error()
 }
 
 // locate finds the on-disk file for a (stamp, rel) pair across every root.
