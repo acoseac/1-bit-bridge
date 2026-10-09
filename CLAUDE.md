@@ -6208,6 +6208,29 @@ no failing test — which is the shape to expect in this area.
   it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
   installs — the two that never restart — left it false. An unreadable marker is
   NOT a refusal: failing closed there would block every install on the host.
+- **A Windows rollback moves the running exe aside before it renames
+  `.bak` into place** (2026-10-09, backlog B202). `RollbackBinary` on
+  Windows was one `os.Rename` of the backup onto `dst`. Both callers
+  run in this process (`Updater.Rollback`, `maybeRollbackOnBoot`), and
+  `stopServiceIfRunning` returns without stopping when this process is
+  the service, so that rename replaces the mapped image. Windows
+  answers "Access is denied". `swapBinary` already vacates a running
+  exe first (a rename of the image succeeds; a rename onto it does
+  not). The rollback does the same, then renames `.bak` onto the
+  vacated path, and renames the aside file back onto `dst` if that
+  rename fails. The aside file is the image this process still maps.
+  Windows will not delete it. `swapBinary` leaves its leftover on disk
+  as `.bak`, which is the rollback target. The rollback leftover is
+  the build being replaced, so it is not named `.bak`: `canRollback`
+  would stay true and the next rollback would restore the broken
+  build. A best-effort remove drops an earlier leftover when nothing
+  maps it; a refusal leaves `bridge.exe.rollback-<n>` beside the
+  binary, and the next vacate uses a new name so it never replaces
+  that leftover. A missing `dst` stays one rename of the backup onto
+  that path. Unix `RollbackBinary` is still one rename over the live
+  path. (`TestRollbackBinaryReplacesARunningExe`,
+  `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`,
+  `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`.)
 - **Booklet GC is skipped while a scan is in flight** — mid-rescan the release
   universe is transiently partial, so GC deletes every filesystem album's
   booklets and re-fetches them next cycle. An empty universe is a deliberate

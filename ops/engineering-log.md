@@ -38129,3 +38129,56 @@ Pins added: `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`
 (a PCM-only sweep with room submits; one byte under the floor does
 not; a probe error skips), `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
 `TestProbeTempDirRoomClosesBeforeItRemoves`.
+
+## 2026-10-09 — backlog B202: a Windows rollback cannot replace the running exe
+
+`RollbackBinary` in `swap_windows.go` was one `os.Rename` of
+`dst + ".bak"` onto `dst`, after the same SCM stop `swapBinary` uses.
+`stopServiceIfRunning` returns `(nil, nil)` when
+`svc.IsWindowsService()` is true, and both production callers run in
+this process: `Updater.Rollback` (the console's Roll back, which does
+not restart) and `maybeRollbackOnBoot`. The rename is `MoveFileEx`
+with `MOVEFILE_REPLACE_EXISTING`. `swapBinary`'s own comment records
+the split Windows makes: renaming the running exe aside updates the
+directory entry and the mapped image stays, and replacing that image
+in place fails. The 2026-09-30 ops review measured the rollback's
+failure on Windows 11 as "Access is denied".
+
+`TestRollbackBinary_Windows` writes two files and rolls back with no
+process running, so it stays green on the broken rename.
+`TestRollbackBinaryReplacesARunningExe` builds a small exe, starts it,
+and calls `RollbackBinary` on that path. On the unfixed code the
+rename returns the access error and the test fails. That commit is
+the first one on the PR, so the Windows leg shows it red before the
+fix.
+
+What shipped:
+
+- After the existing backup stat and SCM prelude,
+  `replaceRunningBinary` moves `dst` to `dst.rollback-<unix nano>`
+  (a name that does not exist, so the vacate is not itself a
+  replace), then renames the backup onto `dst`. If that rename
+  fails, the aside file is renamed back, and a failed restore
+  returns both errors. The three renames go through `renameFunc`.
+- The aside file is not `.bak`. `canRollback` is the presence of
+  that name, and the aside is the build being replaced. Leaving it
+  as `.bak` would make the next rollback restore the broken build.
+- `os.Remove` of the aside is best-effort. Windows will not delete a
+  mapped image, and a returned error would skip
+  `Updater.Rollback`'s state write after the bytes are already in
+  place. A refusal is one Warn. An earlier leftover is removed the
+  same way at the start of the next call, by a directory listing
+  (not a glob) of the `bridge.exe.rollback-` prefix. A leftover that
+  is still mapped keeps its name; the new vacate uses another, so
+  it does not try to replace the mapped file.
+- A missing `dst` is one rename of the backup onto that path, which
+  is what the old rollback did when there was nothing to replace.
+- Unix `RollbackBinary` is unchanged: one rename over the live path.
+
+Pins: `TestRollbackBinaryReplacesARunningExe` (Windows, the helper
+is running), `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`
+(an injected rename returns `EACCES` when the destination exists, so
+a rollback that renames the backup onto the running path first
+fails on every OS), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`,
+`TestRollbackReplaceOfAMissingDestinationIsOneRename`,
+`TestRollbackReplaceLeavesALeftoverItCannotRemove`.

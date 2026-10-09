@@ -276,9 +276,11 @@ func waitServiceStopped(s *mgr.Service, timeout time.Duration) error {
 	return fmt.Errorf("service did not stop within %s", timeout)
 }
 
-// RollbackBinary restores dst.bak → dst. Mirror of swap_unix.go's
-// implementation, with the same SCM-stop coordination as
-// swapBinary.
+// RollbackBinary restores dst.bak → dst, with the same SCM-stop
+// coordination as swapBinary. The restore itself is not the Unix
+// rename: Windows refuses to replace a mapped running image, and both
+// callers run inside the process that maps dst. replaceRunningBinary
+// moves that image aside first.
 func RollbackBinary(dst, backupExt string) error {
 	bak := dst + backupExt
 	if _, err := os.Stat(bak); err != nil {
@@ -298,10 +300,7 @@ func RollbackBinary(dst, backupExt string) error {
 		return fmt.Errorf("stop SCM service: %w", stoppedErr)
 	}
 
-	if err := os.Rename(bak, dst); err != nil {
-		return fmt.Errorf("rollback rename %s -> %s: %w", bak, dst, err)
-	}
-	return nil
+	return replaceRunningBinary(dst, bak)
 }
 
 // RemoveBackup deletes dst.bak. Same semantics as the Unix
