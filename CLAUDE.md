@@ -7684,16 +7684,53 @@ mentions across the four `ops/audit-*.md` files.
   4,000 random cancels, each a whole copy. The INTO target is a Go SQL
   function (`vacuumTarget`), which SQLite evaluates once the statement
   runs and before `OP_Vacuum` copies anything, and which refuses a
-  cancelled snapshot. What is left is a cancel in the commit's last
-  64 KB. **Don't raise the source's cache, don't give the snapshot
-  SQLite's busy wait back, and don't Ping before the VACUUM** (a Ping is
-  a statement that waits on the lock too, and the first attempt is the
-  probe). Any statement that must stop on a cancel meets the same three.
+  cancelled snapshot. What is left of the statement is a cancel in the
+  commit's last 64 KB, which keeps the output file open until the
+  statement returns (the next bullet). **Don't raise the source's cache,
+  don't give the snapshot SQLite's busy wait back, and don't Ping before
+  the VACUUM** (a Ping is a statement that waits on the lock too, and the
+  first attempt is the probe). Any statement that must stop on a cancel
+  meets the same three.
   `TestASnapshotCancelledAsItsVacuumStartsCopiesNothing`,
   `TestASnapshotWaitingOnALockedSourceStopsForItsCancel` (beside its
   control, `TestASnapshotStillWaitsOutABriefLock`) and
   `TestASnapshotWritesItsCopyWhileItCopies` were each red on the old code,
   and each turns red alone when its fix is taken out.
+- **Shutdown waits for the backup ticker to close its snapshot file, past
+  the shared writer grace** (2026-10-09, backlog B309). The ticker is
+  joined on `bgWriters`, and that join gives up after `shutdownGrace`
+  (5 s). A startup snapshot is `VACUUM INTO` on the serve context. A
+  cancel in the commit's last 64 KB finishes the copy, and the connection
+  holds `data/backups/<stamp>/bridge.db` until the statement returns and
+  `Close` runs. B216 shortened the HTTP drain from a full grace (an event
+  stream held `Shutdown`) to about a second, so the overlap in which that
+  commit could finish before serve returned shrank with it. On the Windows
+  leg of #1166 (run 37847678515) `TestServeBakesHealthEndpointsIntoThePairingQR`
+  and `TestServeProjectionFollowsTheLiveUpscaleGate` then failed TempDir
+  cleanup: `unlinkat …\data\backups\2026-10-08T21-43-21Z\bridge.db: The
+  process cannot access the file because it is being used by another
+  process`. The same evening that leg passed twice on main. macOS deletes
+  an open file, so the TempDir cleanup there says nothing.
+  `backupShutdownWait` (45 s) is a defer registered after the shared grace
+  wait, so on the way out it runs first. The parent cancel has already
+  cancelled the ticker. The wait returns when the goroutine does, which is
+  after `db.Close`. A wait that expires logs `shutdown: backup snapshot
+  did not close its files within …` and teardown continues; the other
+  writers keep the 5 s grace. `vacuumInto` also closes its connection
+  before it removes a partial destination: the deferred `Close` used to
+  run after `os.Remove`, and on Windows that remove fails while the handle
+  is open. `TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile` parks
+  the startup VACUUM (`backuptest.WriteSource` before serve,
+  `sqlitetest.ArmUntil`), requires this process still has the snapshot
+  `bridge.db` open (device and inode of each `/dev/fd` name on macOS,
+  `/proc/self/fd` on Linux, an exclusive open on Windows; names only,
+  because `os.ReadDir` of `/dev/fd` fails the call with `fstatat`'s
+  EBADF when a descriptor closes between the listing and its stat),
+  cancels, and requires serve still running
+  25 s later — past the drain, the shared grace and the store close's 5 s
+  busy wait. With the wait removed, the same test exited 0 in 5.16 s
+  while that file was open and logged `background writers did not drain
+  within grace`.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows

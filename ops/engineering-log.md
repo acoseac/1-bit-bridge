@@ -38130,6 +38130,84 @@ Pins added: `TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom`
 not; a probe error skips), `TestAutoOptimizeSweepProbesTheScratchVolumeOnEverySweep`,
 `TestProbeTempDirRoomClosesBeforeItRemoves`.
 
+## 2026-10-09 — a shutdown waits for the startup snapshot to close its file (backlog B309)
+
+On the Windows leg of #1166 (run 37847678515) two serve tests failed
+TempDir cleanup after `runServe` returned:
+`TestServeBakesHealthEndpointsIntoThePairingQR` and
+`TestServeProjectionFollowsTheLiveUpscaleGate`, both
+`unlinkat …\data\backups\2026-10-08T21-43-21Z\bridge.db: The process
+cannot access the file because it is being used by another process`.
+The stamp is `backup.timestampLayout`, so the file is a snapshot, not
+the live database. That PR (B303) does not touch backups. The same
+evening the Windows leg passed twice on main, so the window is a race.
+
+The backup ticker starts on every serve (#769) and the boot pass
+snapshots when nothing in `data/backups` is younger than 24 h, which a
+fresh TempDir never is. `vacuumInto` is `VACUUM INTO` on `scanCtx`. A
+cancel is `sqlite3_interrupt`, which the commit of the last 64 KB does
+not read (B63). The connection holds the destination until the statement
+returns and `Close` runs. The ticker is on `bgWriters`, and that join
+gives up after `shutdownGrace` (5 s) and prints `background writers did
+not drain within grace`. Serve then returns with the snapshot file
+open. On Windows the test process is still alive, so TempDir's
+`RemoveAll` gets `ERROR_SHARING_VIOLATION`. On macOS an open file
+unlinks, so the same run is green.
+
+B216 is what made the race common. Before it, an event stream held
+`http.Server.Shutdown` for the whole grace, and the ticker was already
+cancelled, so the uninterruptible commit had that overlap plus the
+writer grace. After it the drain is the HTTP/2 GOAWAY wait, about a
+second on a quiet serve, and the writer grace is the only wait left.
+A commit that used to finish inside the longer drain now outlives
+`runServe`. The park below shows the grace itself is the give-up: with
+the dedicated wait removed, serve exited 0 in 5.16 s while
+`data/backups/<stamp>/bridge.db` was still open in this process, and
+stderr was that grace line.
+
+`backupShutdownWait` (45 s) is a defer registered after the shared grace
+wait, so it runs first. The parent cancel has already cancelled the
+ticker. The wait returns when the goroutine does, which is after
+`db.Close`. If it expires, serve logs `shutdown: backup snapshot did
+not close its files within 45s` and continues; the other writers keep
+the 5 s grace. Closing the handle from another goroutine does not
+release it: `sql.DB.Close` waits for the connection `ExecContext` holds,
+and `sqlite3_close` while a statement is active is `SQLITE_BUSY`. A
+parked collation holds the sqlite mutex, so a close from outside the
+callback is not a path. `modernc.org/sqlite`'s `Backup.Step` is on the
+unexported `*conn`, so it is not a replacement for `VACUUM INTO`.
+Shrinking `cache_size` further does not close a statement the grace has
+already abandoned.
+
+`vacuumInto` also closed after `os.Remove` of a failed copy. On Windows
+that remove fails while the handle is open. The connection is closed
+first now. That is the finished-statement case; the CI failure is the
+statement the grace abandoned.
+
+`TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile` seeds the
+manifest with `backuptest.WriteSource` before serve, arms
+`sqlitetest.ArmUntil` for the serve deadline, and boots a real serve.
+The startup VACUUM rebuilds the non-BINARY index and parks with the
+snapshot file already created; the console is already listening. The
+hold is this process's own fd: a POSIX lock cannot see it. On macOS
+`readlink` of `/dev/fd/N` is `EINVAL` (26 fds, every one), and
+`os.ReadDir` of `/dev/fd` fails the whole call with `fstatat`'s `EBADF`
+when a descriptor closes between the listing and its stat (the full
+race suite, 1.29 s, before the snapshot was judged; the kqueue
+watcher's `libraryFiles` already lists names only for that reason). The
+hold opens `/dev/fd`, reads names, and `Fstat`s each descriptor,
+skipping one already closed, and matches the snapshot's device and
+inode. Linux reads `/proc/self/fd` the same way (names, then the link).
+Windows asks with an exclusive `CreateFile` (share mode 0), which is
+the delete's own check.
+The test cancels and requires serve still running 25 s later, past the
+drain, the shared grace and the store close's 5 s busy wait
+(`busy_timeout(5000)`). With the wait in place the same test returned
+at 25.7 s, exit 0, and neither grace line. The disarm cleanup is
+registered after `launchServe`, so it runs before the drain; the other
+way round, the drain waits on a parked statement until the test
+deadline.
+
 ## 2026-10-08 — track upserts stamp past the library watermark (backlog B303)
 
 `UpsertTrack` and `UpsertTrackBatch` wrote `indexed_at` from the clock on a
