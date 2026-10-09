@@ -7712,9 +7712,14 @@ mentions across the four `ops/audit-*.md` files.
   process`. The same evening that leg passed twice on main. macOS deletes
   an open file, so the TempDir cleanup there says nothing.
   `backupShutdownWait` (45 s) is a defer registered after the shared grace
-  wait, so on the way out it runs first. The parent cancel has already
-  cancelled the ticker. The wait returns when the goroutine does, which is
-  after `db.Close`. A wait that expires logs `shutdown: backup snapshot
+  wait, so on the way out it runs first. **It cancels `scanCtx` itself
+  before it waits** (backlog B311): on a stop the parent cancel has already
+  cancelled the ticker, but on an early error return (the admin port in
+  use) nothing has, and `defer scanCancel()` runs only after this defer.
+  Without that cancel every early exit sat out the whole 45 s (bridge
+  #1166's CI, run 37865927261, a port collision in
+  `TestServeRedeemsThePairingLinksCode`). **Don't drop it.** The wait
+  returns when the goroutine does, which is after `db.Close`. A wait that expires logs `shutdown: backup snapshot
   did not close its files within …` and teardown continues; the other
   writers keep the 5 s grace. `vacuumInto` also closes its connection
   before it removes a partial destination: the deferred `Close` used to

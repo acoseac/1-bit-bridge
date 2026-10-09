@@ -38307,3 +38307,27 @@ follow-up `ROLLBACK` lands leaves the connection checked out for that
 same close, and `Rollback` then returns it, in autocommit.
 `TestClosingAfterAFailedRollbackLeavesTheNextUserInsideTheTransaction`
 is that `Close` without the discard: the next `BEGIN` still fails.
+
+## 2026-10-09 — an early serve exit no longer waits out the backup ticker (backlog B311)
+
+B309's backup wait is a defer registered after `defer scanCancel()`, so
+it runs first. On a stop the parent context has already cancelled the
+ticker, and the wait returns as soon as the snapshot connection has
+closed. On an early error return nothing had cancelled `scanCtx`: the
+ticker stayed parked, and the wait sat out the whole
+`backupShutdownWait` (45 s) before teardown went on. Bridge #1166's CI
+(run 37865927261, `test -race (rest)`) showed it: an admin-port
+collision in `TestServeRedeemsThePairingLinksCode` (B313) exited serve
+with code 1, the case took 45.66 s, and stderr said `shutdown: backup
+snapshot did not close its files within 45s`, which named the wrong
+cause. An operator whose bridge fails to bind its admin port would also
+have waited 45 s for the exit.
+
+The defer now calls `scanCancel()` before it waits. A cancel is
+idempotent, so the stop path is unchanged, and no other top-level defer
+sits between the two registrations. `TestAnEarlyExitDoesNotWaitOutTheBackupTicker`
+holds the admin port with its own listener, so serve fails at the admin
+bind after the ticker has started. It waits for the exit with no bound
+of its own and requires the admin-bind error and no "did not close its
+files" line. It passed in 1.06 s with the fix. With the cancel removed
+it failed at 46.74 s, on that line.

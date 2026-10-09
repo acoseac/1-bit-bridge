@@ -3307,9 +3307,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			backupRearm, stdout, stderr, backupRunState)
 	}()
 	// Registered after the shared grace wait, so on the way out it runs
-	// before that wait. The ticker is already cancelled (scanCtx's parent);
-	// this waits until its snapshot connection has closed the output file.
+	// before that wait, and it waits until the ticker's snapshot connection
+	// has closed the output file.
+	//
+	// It cancels scanCtx itself first. On a stop the parent is already
+	// cancelled, but on an early error return (the admin port in use, say)
+	// nothing has cancelled it yet, and `defer scanCancel()` above runs only
+	// after this defer. Without this cancel the ticker stayed parked and every
+	// early exit sat out the whole backupShutdownWait (backlog B311).
 	defer func() {
+		scanCancel()
 		timer := time.NewTimer(backupShutdownWait)
 		defer timer.Stop()
 		select {
