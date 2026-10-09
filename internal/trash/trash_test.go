@@ -1,8 +1,8 @@
 package trash
 
 import (
+	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -811,6 +811,24 @@ func wantAbsent(t *testing.T, path string) {
 	}
 }
 
+func trashOne(t *testing.T, m *Manager, root, rel, clientPath, body string) Entry {
+	t.Helper()
+	seed(t, root, rel, body)
+	if res, err := m.Trash("", []string{clientPath}); err != nil || res.OK != 1 {
+		t.Fatalf("trash: ok=%v err=%v", res, err)
+	}
+	return mustSoleTrashed(t, m)
+}
+
+func mustRestore(t *testing.T, m *Manager, id string) *Result {
+	t.Helper()
+	res, err := m.Restore([]string{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
 // TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot — two
 // roots become one. The stored path still begins with the root's folder
 // name. Restore has to put the file back under that root, beside Artist,
@@ -818,16 +836,10 @@ func wantAbsent(t *testing.T, path string) {
 func TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot(t *testing.T) {
 	m, resolver, box, roots := newLiveManager(t, "Music", "NAS")
 	music := roots[0]
-	seed(t, music, "Artist/Album/01.flac", "audio")
-	if res, err := m.Trash("", []string{"Music/Artist/Album/01.flac"}); err != nil || res.OK != 1 {
-		t.Fatalf("trash: ok=%v err=%v", res, err)
-	}
+	e := trashOne(t, m, music, "Artist/Album/01.flac", "Music/Artist/Album/01.flac", "audio")
 	box.set(resolver, music)
 
-	res, err := m.Restore([]string{mustSoleTrashed(t, m).ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, e.ID)
 	if res.Failed != 0 || res.OK != 1 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -844,20 +856,14 @@ func TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot(t *testin
 func TestRestoreAfterARootIsAddedKeepsAFolderNamedLikeTheRoot(t *testing.T) {
 	m, resolver, box, roots := newLiveManager(t, "Music")
 	music := roots[0]
-	seed(t, music, "Music/Artist/Album/01.flac", "audio")
-	if res, err := m.Trash("", []string{"Music/Artist/Album/01.flac"}); err != nil || res.OK != 1 {
-		t.Fatalf("trash: ok=%v err=%v", res, err)
-	}
+	e := trashOne(t, m, music, "Music/Artist/Album/01.flac", "Music/Artist/Album/01.flac", "audio")
 	nas := filepath.Join(filepath.Dir(music), "NAS")
 	if err := os.MkdirAll(nas, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	box.set(resolver, music, nas)
 
-	res, err := m.Restore([]string{mustSoleTrashed(t, m).ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, e.ID)
 	if res.Failed != 0 || res.OK != 1 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -870,17 +876,14 @@ func TestRestoreAfterARootIsAddedKeepsAFolderNamedLikeTheRoot(t *testing.T) {
 func TestRestoreRefusesAnEntryWhoseRecordedRootIsGone(t *testing.T) {
 	m, _, _, roots := newLiveManager(t, "Music")
 	music := roots[0]
-	seed(t, music, "Artist/Album/01.flac", "audio")
-	if res, err := m.Trash("", []string{"Artist/Album/01.flac"}); err != nil || res.OK != 1 {
-		t.Fatalf("trash: ok=%v err=%v", res, err)
-	}
-	e := mustSoleTrashed(t, m)
-	overwriteRootRecord(t, trashedAudio(e), `{"root":"/library/roots/that/are/gone","rel":"Artist/Album/01.flac"}`)
-
-	res, err := m.Restore([]string{e.ID})
+	e := trashOne(t, m, music, "Artist/Album/01.flac", "Artist/Album/01.flac", "audio")
+	gone, err := json.Marshal(originRecord{Root: filepath.Join(t.TempDir(), "gone-root"), Rel: "Artist/Album/01.flac"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	overwriteRootRecord(t, trashedAudio(e), string(gone))
+
+	res := mustRestore(t, m, e.ID)
 	if res.Failed != 1 || res.OK != 0 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -898,17 +901,14 @@ func TestRestoreRefusesAnEntryWhoseRecordedRootIsGone(t *testing.T) {
 func TestRestoreRefusesAnEntryRecordedUnderADifferentRoot(t *testing.T) {
 	m, _, _, roots := newLiveManager(t, "Music", "NAS")
 	music, nas := roots[0], roots[1]
-	seed(t, music, "Artist/Album/01.flac", "audio")
-	if res, err := m.Trash("", []string{"Music/Artist/Album/01.flac"}); err != nil || res.OK != 1 {
-		t.Fatalf("trash: ok=%v err=%v", res, err)
-	}
-	e := mustSoleTrashed(t, m)
-	overwriteRootRecord(t, trashedAudio(e), fmt.Sprintf(`{"root":%q,"rel":"Artist/Album/01.flac"}`, nas))
-
-	res, err := m.Restore([]string{e.ID})
+	e := trashOne(t, m, music, "Artist/Album/01.flac", "Music/Artist/Album/01.flac", "audio")
+	recorded, err := json.Marshal(originRecord{Root: nas, Rel: "Artist/Album/01.flac"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	overwriteRootRecord(t, trashedAudio(e), string(recorded))
+
+	res := mustRestore(t, m, e.ID)
 	if res.Failed != 1 || !strings.Contains(res.Outcomes[0].Reason, "different library root") {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -925,10 +925,7 @@ func TestAnOldEntryWhosePathStartsWithTheRootNameIsRefused(t *testing.T) {
 	music := roots[0]
 	id := plantOldEntry(t, music, "Music/Artist/Album/01.flac", "audio")
 
-	res, err := m.Restore([]string{id})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, id)
 	if res.Failed != 1 || res.OK != 0 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -956,10 +953,7 @@ func TestAnOldEntryThatNamesNoRootBasenameRestoresUnderTheRootItSitsUnder(t *tes
 	}
 	box.set(resolver, music, nas)
 
-	res, err := m.Restore([]string{id})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, id)
 	if res.Failed != 0 || res.OK != 1 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -976,10 +970,7 @@ func TestAnOldEntryUnderASingleRootRestores(t *testing.T) {
 	music := roots[0]
 	id := plantOldEntry(t, music, "Artist/Album/01.flac", "audio")
 
-	res, err := m.Restore([]string{id})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, id)
 	if res.Failed != 0 || res.OK != 1 {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -993,10 +984,7 @@ func TestAnOldEntryNamingAnotherRootStaysRefused(t *testing.T) {
 	nas := roots[1]
 	id := plantOldEntry(t, nas, "Music/Artist/01.flac", "audio")
 
-	res, err := m.Restore([]string{id})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := mustRestore(t, m, id)
 	if res.Failed != 1 || !strings.Contains(res.Outcomes[0].Reason, "different library root") {
 		t.Fatalf("restore = %+v", res.Outcomes)
 	}
@@ -1010,19 +998,124 @@ func TestAnOldEntryNamingAnotherRootStaysRefused(t *testing.T) {
 func TestATornRootRecordIsRefused(t *testing.T) {
 	m, _, _, roots := newLiveManager(t, "Music")
 	music := roots[0]
-	seed(t, music, "Artist/Album/01.flac", "audio")
-	if res, err := m.Trash("", []string{"Artist/Album/01.flac"}); err != nil || res.OK != 1 {
-		t.Fatalf("trash: ok=%v err=%v", res, err)
-	}
-	e := mustSoleTrashed(t, m)
+	e := trashOne(t, m, music, "Artist/Album/01.flac", "Artist/Album/01.flac", "audio")
 	overwriteRootRecord(t, trashedAudio(e), "{")
 
-	res, err := m.Restore([]string{e.ID})
+	res := mustRestore(t, m, e.ID)
+	if res.Failed != 1 || !strings.Contains(res.Outcomes[0].Reason, "cannot be read") {
+		t.Fatalf("restore = %+v", res.Outcomes)
+	}
+	wantAbsent(t, filepath.Join(music, "Artist", "Album", "01.flac"))
+}
+
+func failOriginWrite(t *testing.T) {
+	t.Helper()
+	prev := writeOrigin
+	writeOrigin = func(string, string, string, string) error { return errors.New("full") }
+	t.Cleanup(func() { writeOrigin = prev })
+}
+
+func failMoveBack(t *testing.T) {
+	t.Helper()
+	prev := moveBack
+	moveBack = func(string, string) error { return errors.New("busy") }
+	t.Cleanup(func() { moveBack = prev })
+}
+
+// TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp — the record could
+// not be written, the file is back where it was, and the stamp directory is
+// gone.
+func TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp(t *testing.T) {
+	failOriginWrite(t)
+	m, root := newTestManager(t)
+	seed(t, root, "Artist/Album/01.flac", "audio")
+	res, err := m.Trash("", []string{"Artist/Album/01.flac"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Failed != 1 || res.OK != 0 || res.Outcomes[0].Reason != originWriteFailed {
+		t.Fatalf("trash = %+v", res.Outcomes)
+	}
+	wantFile(t, filepath.Join(root, "Artist", "Album", "01.flac"), "audio")
+	stamps, err := os.ReadDir(filepath.Join(root, DirName))
+	if err != nil || len(stamps) != 0 {
+		t.Fatalf("stamp dir = %v (%v)", stamps, err)
+	}
+}
+
+// TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash — the
+// record could not be written and the file could not be moved back. It
+// stays in the trash, and the reason says so.
+func TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash(t *testing.T) {
+	failOriginWrite(t)
+	failMoveBack(t)
+	m, root := newTestManager(t)
+	seed(t, root, "Artist/Album/01.flac", "audio")
+	res, err := m.Trash("", []string{"Artist/Album/01.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 || res.OK != 0 || res.Outcomes[0].Reason != originLeftInTrash {
+		t.Fatalf("trash = %+v", res.Outcomes)
+	}
+	wantAbsent(t, filepath.Join(root, "Artist", "Album", "01.flac"))
+	if got := mustSoleTrashed(t, m); got.OriginalPath != "Artist/Album/01.flac" {
+		t.Fatalf("trash listing = %+v", got)
+	}
+}
+
+// TestAnOriginRecordOutsideTheTrashIsNotWritten — a sidecar is written only
+// under the trash directory.
+func TestAnOriginRecordOutsideTheTrashIsNotWritten(t *testing.T) {
+	trashDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "01.flac")
+	if err := os.WriteFile(outside, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := writeOriginRecord(trashDir, outside, root, "Artist/01.flac"); err == nil {
+		t.Fatal("wrote a root record outside the trash")
+	}
+	wantAbsent(t, originSidecar(outside))
+	entries, err := os.ReadDir(trashDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("trash dir = %v (%v)", entries, err)
+	}
+}
+
+// TestAnOriginRecordOutsideTheTrashIsNotRemoved — removing a record does
+// not touch a sidecar that sits outside the trash directory.
+func TestAnOriginRecordOutsideTheTrashIsNotRemoved(t *testing.T) {
+	trashDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "01.flac")
+	if err := os.WriteFile(outside, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	side := originSidecar(outside)
+	if err := os.WriteFile(side, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeOriginRecord(trashDir, outside)
+	if _, err := os.Stat(side); err != nil {
+		t.Fatalf("sidecar outside the trash: %v", err)
+	}
+}
+
+// TestARecordedRootThatIsNotAbsoluteCannotBeRead — a root that is not an
+// absolute path is an unreadable record. It is a different refusal from a
+// root that is absolute and no longer configured.
+func TestARecordedRootThatIsNotAbsoluteCannotBeRead(t *testing.T) {
+	m, _, _, roots := newLiveManager(t, "Music")
+	music := roots[0]
+	e := trashOne(t, m, music, "Artist/Album/01.flac", "Artist/Album/01.flac", "audio")
+	overwriteRootRecord(t, trashedAudio(e), `{"root":"library/roots/that/are/gone","rel":"Artist/Album/01.flac"}`)
+
+	res := mustRestore(t, m, e.ID)
 	if res.Failed != 1 || !strings.Contains(res.Outcomes[0].Reason, "cannot be read") {
 		t.Fatalf("restore = %+v", res.Outcomes)
+	}
+	if strings.Contains(res.Outcomes[0].Reason, "not configured") {
+		t.Fatalf("reason = %q", res.Outcomes[0].Reason)
 	}
 	wantAbsent(t, filepath.Join(music, "Artist", "Album", "01.flac"))
 }

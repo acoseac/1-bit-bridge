@@ -8875,8 +8875,16 @@ its twin.** The top list is older, shorter, and read first.
   one root, and one whose path begins with its root's name, is put back
   by hand from `.bridge-trash`. The sidecar's name begins with a dot, so
   List and the sweep's byte count skip it, and a successful restore or
-  purge removes it before the empty stamp is pruned. A trash whose
-  record cannot be written moves the file back.
+  purge removes it before the empty stamp is pruned. The sidecar path
+  that is written or removed is the trash directory joined with the
+  relative remainder of the sidecar, and a remainder that leaves the
+  trash directory is refused. A recorded root that is not an absolute
+  path is an unreadable record. A trash whose record cannot be written
+  attempts to move the file back. When that move succeeds, the empty
+  stamp directory is removed and the entry fails with the record reason.
+  When the move back fails, the file stays in `.bridge-trash`, a warning
+  is logged, and the entry fails with a reason that says it is still in
+  the trash.
   (`TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot`,
   `TestRestoreAfterARootIsAddedKeepsAFolderNamedLikeTheRoot`,
   `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder`,
@@ -8884,7 +8892,12 @@ its twin.** The top list is older, shorter, and read first.
   `TestRestoreRefusesAnEntryRecordedUnderADifferentRoot`,
   `TestAnOldEntryWhosePathStartsWithTheRootNameIsRefused`,
   `TestAnOldEntryThatNamesNoRootBasenameRestoresUnderTheRootItSitsUnder`,
-  `TestATornRootRecordIsRefused`.)
+  `TestATornRootRecordIsRefused`,
+  `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`,
+  `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`,
+  `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
+  `TestAnOriginRecordOutsideTheTrashIsNotRemoved`,
+  `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.)
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`

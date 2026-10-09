@@ -21,10 +21,27 @@ type originRecord struct {
 
 const originWriteFailed = "could not record which library root this file came from"
 
+const originLeftInTrash = "could not record which library root this file came from, and the file is still in the trash"
+
 // originSidecar sits beside the trashed audio file. Its name begins with a
 // dot, which validRel refuses, so List can never hand it out as an entry.
 func originSidecar(audio string) string {
 	return filepath.Join(filepath.Dir(audio), "."+filepath.Base(audio)+".bridge-root")
+}
+
+// sidecarUnder is the only path a root record is written or removed at.
+// It is the trash directory joined with the remainder of the sidecar, and
+// a remainder that leaves the trash directory is refused. originSidecar
+// alone is a sibling of whatever audio path it is given.
+func sidecarUnder(trashDir, audio string) (string, error) {
+	if trashDir == "" || !filepath.IsAbs(trashDir) {
+		return "", errors.New("trash: root record")
+	}
+	rel, err := filepath.Rel(trashDir, originSidecar(audio))
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", errors.New("trash: root record")
+	}
+	return filepath.Join(trashDir, rel), nil
 }
 
 func hiddenTrashPath(rel string) bool {
@@ -36,7 +53,7 @@ func hiddenTrashPath(rel string) bool {
 	return false
 }
 
-func writeOriginRecord(audio, root, rel string) error {
+func writeOriginRecord(trashDir, audio, root, rel string) error {
 	rec := originRecord{Root: root, Rel: rel}
 	if err := checkOriginRecord(rec); err != nil {
 		return err
@@ -45,9 +62,13 @@ func writeOriginRecord(audio, root, rel string) error {
 	if err != nil {
 		return err
 	}
+	side, err := sidecarUnder(trashDir, audio)
+	if err != nil {
+		return err
+	}
 	// The temp name starts with a dot so a crash mid-write leaves something
 	// List and the sweep count both skip.
-	return atomicwrite.WriteBytes(originSidecar(audio), data, ".bridge-root-*")
+	return atomicwrite.WriteBytes(side, data, ".bridge-root-*")
 }
 
 func readOriginRecord(path string) (originRecord, error) {
@@ -80,6 +101,10 @@ func checkOriginRecord(rec originRecord) error {
 	return nil
 }
 
-func removeOriginRecord(audio string) {
-	_ = os.Remove(originSidecar(audio))
+func removeOriginRecord(trashDir, audio string) {
+	side, err := sidecarUnder(trashDir, audio)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(side)
 }

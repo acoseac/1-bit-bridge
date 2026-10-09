@@ -39071,9 +39071,13 @@ An entry with no sidecar was written before the root was recorded.
 
 The sidecar's name begins with a dot, so List and the sweep's byte count
 skip it. A successful restore or purge removes it before the empty stamp
-directory is pruned. A trash whose record cannot be written moves the
-file back and fails that entry. No `ExtractorVersion` bump and no
-`ProtocolVersion` bump.
+directory is pruned. The sidecar path that is written or removed is the
+trash directory joined with the relative remainder of the sidecar, and a
+remainder that leaves the trash directory is refused. A trash whose
+record cannot be written attempts to move the file back and fails that
+entry. When the move back succeeds, the empty stamp directory is removed.
+When it fails, the file remains in `.bridge-trash` and a warning is
+logged. No `ExtractorVersion` bump and no `ProtocolVersion` bump.
 
 ### Negative controls
 

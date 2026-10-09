@@ -46,6 +46,14 @@ import (
 
 var logger = logging.Component("trash")
 
+// writeOrigin and moveBack are the two calls after a file has moved into
+// the trash. Tests replace them for the window in which the root record
+// fails. Production leaves them as the functions named.
+var (
+	writeOrigin = writeOriginRecord
+	moveBack    = atomicwrite.RenameWithRetry
+)
+
 // DirName is the per-root trash directory. The leading dot is load-bearing.
 const DirName = ".bridge-trash"
 
@@ -387,13 +395,19 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 		// The root and the path below it, as the resolver read them. A later
 		// restore resolves that pair under the layout the library has then.
 		// A trash without the record is an old entry, which restore can read
-		// only when the stored path has one reading, so a failed write moves
-		// the file back.
-		if werr := writeOriginRecord(dst, root, suffix); werr != nil {
-			if backErr := atomicwrite.RenameWithRetry(dst, src); backErr != nil {
+		// only when the stored path has one reading, so a failed write
+		// attempts to move the file back. When that move succeeds, the empty
+		// stamp is removed. When it does not, the file stays in the trash.
+		if writeOrigin(m.trashRoot(root), dst, root, suffix) != nil {
+			if moveBack(dst, src) != nil {
 				logger.Warn("trash: the file could not be moved back after its root record failed", "path", rel)
+				out.Status, out.Reason = "failed", originLeftInTrash
+			} else {
+				if root != "" {
+					m.pruneEmptyStamp(root, stamp)
+				}
+				out.Status, out.Reason = "failed", originWriteFailed
 			}
-			out.Status, out.Reason = "failed", originWriteFailed
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue

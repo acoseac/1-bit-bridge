@@ -130,7 +130,7 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			dirs[d] = struct{}{}
 		}
 		res.Outcomes = append(res.Outcomes, out)
-		removeOriginRecord(src)
+		removeOriginRecord(m.trashRoot(root), src)
 		m.pruneEmptyStamp(root, stamp)
 	}
 	for d := range dirs {
@@ -188,7 +188,7 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		removeOriginRecord(src)
+		removeOriginRecord(m.trashRoot(root), src)
 		out.Status = "purged"
 		res.OK++
 		res.Bytes += out.Bytes
