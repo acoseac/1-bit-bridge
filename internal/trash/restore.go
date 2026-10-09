@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -40,31 +41,17 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		// Where it goes back to. `rel` is manifest-form, so on a multi-root
-		// bridge its leading segment names the root and must be CONSUMED —
-		// joining `rel` whole onto `root` was the restore half of the same
-		// wrong-root bug Trash had, and it wrote into <root>/<rootBasename>/…
-		splitRoot, suffix, serr := m.split.SplitRoot(rel)
-		if serr != nil {
-			out.Status, out.Reason = "failed", ErrRootUnavailable.Error()
+		// The destination is the path the file had under the root it was
+		// trashed from, resolved for the root count in force now. An entry
+		// written before that root was recorded is restored only when its
+		// stored path has one reading.
+		dst, client, suffix, reason := m.restorePlace(root, rel, src)
+		if reason != "" {
+			out.Status, out.Reason = "failed", reason
 			res.Failed++
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		// The root the file is SITTING under and the root the path CLAIMS
-		// have to agree. They can only differ for an entry trashed by the
-		// pre-fix code on a multi-root bridge, where the two were the same
-		// mistake; guessing which one the operator meant would move a file
-		// between libraries. Refuse and say so — the file stays in the trash
-		// directory, where it can still be retrieved by hand.
-		if fsutil.EvalSymlinksOrClean(splitRoot) != fsutil.EvalSymlinksOrClean(root) {
-			out.Status, out.Reason = "failed",
-				"this entry was trashed under a different library root than its path names; restore it by hand"
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		dst := filepath.Join(root, filepath.FromSlash(suffix))
 		if fsutil.IsUnderAny(dst, []string{root}) == "" {
 			out.Status, out.Reason = "failed", "resolves outside the library root"
 			res.Failed++
@@ -130,7 +117,7 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 		// and the rename above lands in the folder that spelling opens, so a
 		// rescan under the recorded spelling indexed the folder's every file
 		// a second time (backlog B219).
-		spelled, spellErr := spellRel(spellers, root, rel, suffix)
+		spelled, spellErr := spellRel(spellers, root, client, suffix)
 		if spellErr != nil {
 			res.FullScan = true
 			logger.Warn("trash: the restored path's spelling on disk cannot be read; the library will be rescanned",
@@ -143,6 +130,7 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			dirs[d] = struct{}{}
 		}
 		res.Outcomes = append(res.Outcomes, out)
+		removeOriginRecord(src)
 		m.pruneEmptyStamp(root, stamp)
 	}
 	for d := range dirs {
@@ -200,6 +188,7 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
+		removeOriginRecord(src)
 		out.Status = "purged"
 		res.OK++
 		res.Bytes += out.Bytes
@@ -290,6 +279,9 @@ func (m *Manager) Sweep() (purged int, freed int64, err error) {
 				if werr != nil || d.IsDir() {
 					return nil //nolint:nilerr // count what we can
 				}
+				if rel, rerr := filepath.Rel(dir, p); rerr == nil && hiddenTrashPath(filepath.ToSlash(rel)) {
+					return nil
+				}
 				if info, ierr := d.Info(); ierr == nil {
 					bytes += info.Size()
 					n++
@@ -332,4 +324,93 @@ func (m *Manager) RunSweeper(ctx interface{ Done() <-chan struct{} }, every time
 			}
 		}
 	}
+}
+
+const (
+	differentRootReason   = "this entry was trashed under a different library root than its path names; restore it by hand"
+	legacyAmbiguousReason = "this entry was trashed before its library root was recorded, and its path begins with that root's name; restore it by hand"
+	unreadableRecord      = "the record of which library root this file came from cannot be read"
+)
+
+// restorePlace names the absolute destination, the manifest path under the
+// current root count, and the path relative to the root. A non-empty reason
+// refuses the entry and leaves the file in the trash.
+func (m *Manager) restorePlace(sitting, stored, src string) (dst, client, suffix, reason string) {
+	rec, err := readOriginRecord(originSidecar(src))
+	if err != nil && !os.IsNotExist(err) {
+		return "", "", "", unreadableRecord
+	}
+	if err == nil {
+		return m.placeFromRecord(sitting, rec)
+	}
+	return m.placeLegacy(sitting, stored)
+}
+
+func (m *Manager) configuredRoot(recorded string) (string, bool) {
+	want := fsutil.EvalSymlinksOrClean(recorded)
+	for _, r := range m.roots() {
+		if fsutil.EvalSymlinksOrClean(r) == want {
+			return r, true
+		}
+	}
+	return "", false
+}
+
+// manifestClientPath is the path a client names under the root count in
+// force now: the suffix alone with one root, and that root's basename plus
+// the suffix with more than one. root is a configured root the recorded
+// path resolved to, so its basename is the one the resolver indexes.
+func manifestClientPath(roots []string, root, rel string) string {
+	rel = strings.Trim(rel, "/")
+	if len(roots) <= 1 {
+		return rel
+	}
+	base := filepath.Base(root)
+	if rel == "" {
+		return base
+	}
+	return base + "/" + rel
+}
+
+func (m *Manager) placeFromRecord(sitting string, rec originRecord) (dst, client, suffix, reason string) {
+	configured, ok := m.configuredRoot(rec.Root)
+	if !ok {
+		return "", "", "", ErrRootUnavailable.Error()
+	}
+	if fsutil.EvalSymlinksOrClean(configured) != fsutil.EvalSymlinksOrClean(sitting) {
+		return "", "", "", differentRootReason
+	}
+	client = manifestClientPath(m.roots(), configured, rec.Rel)
+	abs, err := m.split.Resolve(client)
+	if err != nil {
+		return "", "", "", unreadableRecord
+	}
+	gotRoot, gotSuffix, err := m.split.SplitRoot(client)
+	if err != nil || fsutil.EvalSymlinksOrClean(gotRoot) != fsutil.EvalSymlinksOrClean(rec.Root) || path.Clean(gotSuffix) != path.Clean(rec.Rel) {
+		return "", "", "", unreadableRecord
+	}
+	return abs, client, rec.Rel, ""
+}
+
+func (m *Manager) placeLegacy(sitting, stored string) (dst, client, suffix, reason string) {
+	head, _, _ := strings.Cut(stored, "/")
+	roots := m.roots()
+	if head == filepath.Base(sitting) {
+		return "", "", "", legacyAmbiguousReason
+	}
+	for _, r := range roots {
+		if filepath.Base(r) == head && fsutil.EvalSymlinksOrClean(r) != fsutil.EvalSymlinksOrClean(sitting) {
+			return "", "", "", differentRootReason
+		}
+	}
+	client = manifestClientPath(roots, sitting, stored)
+	abs, err := m.split.Resolve(client)
+	if err != nil {
+		return "", "", "", ErrRootUnavailable.Error()
+	}
+	gotRoot, gotSuffix, err := m.split.SplitRoot(client)
+	if err != nil || fsutil.EvalSymlinksOrClean(gotRoot) != fsutil.EvalSymlinksOrClean(sitting) || path.Clean(gotSuffix) != path.Clean(stored) {
+		return "", "", "", ErrRootUnavailable.Error()
+	}
+	return abs, client, stored, ""
 }

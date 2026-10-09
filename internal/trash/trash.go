@@ -85,6 +85,10 @@ var (
 // defect, not the fix.
 type RootSplitter interface {
 	SplitRoot(clientPath string) (root, suffix string, err error)
+	// Resolve returns the absolute path SplitRoot's root and suffix name.
+	// A restore builds the manifest path for the root count in force now
+	// and resolves it through this, the same computation SplitRoot uses.
+	Resolve(clientPath string) (string, error)
 }
 
 // Entry is one trashed file.
@@ -380,6 +384,20 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
+		// The root and the path below it, as the resolver read them. A later
+		// restore resolves that pair under the layout the library has then.
+		// A trash without the record is an old entry, which restore can read
+		// only when the stored path has one reading, so a failed write moves
+		// the file back.
+		if werr := writeOriginRecord(dst, root, suffix); werr != nil {
+			if backErr := atomicwrite.RenameWithRetry(dst, src); backErr != nil {
+				logger.Warn("trash: the file could not be moved back after its root record failed", "path", rel)
+			}
+			out.Status, out.Reason = "failed", originWriteFailed
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
 		if spellErr != nil {
 			res.FullScan = true
 			logger.Warn("trash: the path's spelling on disk cannot be read; the library will be rescanned",
@@ -436,6 +454,9 @@ func (m *Manager) List() ([]Entry, error) {
 					return nil
 				}
 				relSlash := filepath.ToSlash(rel)
+				if hiddenTrashPath(relSlash) {
+					return nil
+				}
 				out = append(out, Entry{
 					ID:           sd.Name() + "/" + relSlash,
 					OriginalPath: relSlash,
