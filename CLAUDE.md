@@ -9948,7 +9948,7 @@ its twin.** The top list is older, shorter, and read first.
   `openBenchStore` (`b.Cleanup`). `TestAStoreHelperClosesBeforeItsTempDirGoes`
   registers its check before the helper and requires
   `sql: database is closed`. A helper that already closed, and one that
-  `defer`s `Close` before it returns, was left. An `auth.Store` or
+  `defer`s `Close` before it returns, were left. An `auth.Store` or
   `adminauth.Store` holds a JSON file it does not keep open and has no
   `Close`.
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
