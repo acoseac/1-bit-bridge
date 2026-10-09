@@ -38834,11 +38834,13 @@ The first draft also hashed the whole file in the page and sent that
 SHA-256 as `digest`. The owner declined that pass the same day: at the
 rate below it is about 13 s per GB before any byte is uploaded, and a
 new session now declares no digest. The fingerprint stays. It is a
-128 KiB read, so it covers a FLAC tag at the head, a DSF or WAV tag at
-the tail, an M4A `moov` at either end, and any mtime change. The
-residual is a change only in the middle, with the size and the mtime
-preserved: that pick resumes, and with no declared digest the splice
-commits. A client that does declare a digest still gets the completion
+128 KiB read of the head and the tail, so it covers a FLAC tag at the
+head, a DSF or WAV tag at the tail, and an M4A `moov` at either end.
+`modified` (`File.lastModified`) is a separate identity field
+`sessionKey` checks, so an mtime change starts a new session on its
+own. The residual is a change only in the middle, with the size and
+the mtime preserved: that pick resumes, and with no declared digest the
+splice commits. A client that does declare a digest still gets the completion
 check (`TestASplicedUploadWithADeclaredDigestIsNotCommitted`: 400
 `digest_mismatch`, the offset stays at the prefix, the commit is
 `committed: 0`, `failed: 1`, nothing written into the library). Chunk

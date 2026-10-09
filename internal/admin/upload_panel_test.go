@@ -399,7 +399,8 @@ func TestResumeMatchesOnPathAndSizeNotPathAlone(t *testing.T) {
 	if !strings.Contains(body, ".size") {
 		t.Error("sessionKey ignores size, so a changed file would still match a staged session")
 	}
-	if !strings.Contains(body, ".sort()") {
+	// The call takes a code-unit comparator, so the needle includes the argument.
+	if !strings.Contains(body, ".sort(") {
 		t.Error("sessionKey does not sort, so pick order would decide whether a resume matches")
 	}
 }

@@ -8783,9 +8783,11 @@ its twin.** The top list is older, shorter, and read first.
   whole-file hash (about 82 MB/s in the page, about 13 s per GB): a new
   session declares no `digest`. A client that does declare one still gets
   the completion check (`digest_mismatch`), and chunk `Content-Digest`
-  is unchanged. What the fingerprint covers: a FLAC tag at the head, a
-  DSF or WAV tag at the tail, an M4A `moov` at either end, and any mtime
-  change. The residual is a change only in the middle, with the size and
+  is unchanged. `modified` (`File.lastModified`) is a separate identity
+  field `sessionKey` checks, so an mtime change starts a new session on
+  its own. The fingerprint covers the head and the tail: a FLAC tag at
+  the head, a DSF or WAV tag at the tail, and an M4A `moov` at either
+  end. The residual is a change only in the middle, with the size and
   the mtime preserved: that pick resumes, and with no declared digest the
   splice commits. (`TestASameSizeEditDoesNotResume`,
   `TestUploadSHA256MatchesNode`,

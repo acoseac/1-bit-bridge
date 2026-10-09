@@ -71,7 +71,7 @@ process.stdout.write("ok\n");
 // records; the console does not hash the whole file.
 func TestUploadSHA256MatchesNode(t *testing.T) {
 	runUploadClient(t, []string{
-		"createSHA256", "sha256Bytes", "fileFingerprint", "attachUploadIdentity",
+		"rotr", "createSHA256", "sha256Bytes", "fileFingerprint", "attachUploadIdentity",
 	}, `import { createHash } from "node:crypto";
 let uploadState = { aborted: false };
 `, `
@@ -120,7 +120,7 @@ process.stdout.write("ok\n");
 // bytes read before the create are the 64 KiB head and the 64 KiB tail.
 func TestANewSessionReadsOnlyTheFingerprint(t *testing.T) {
 	js := readFile(t, "static/app.js")
-	names := []string{"createSHA256", "sha256Bytes", "uploadAbortError"}
+	names := []string{"rotr", "createSHA256", "sha256Bytes", "uploadAbortError"}
 	if _, ok := extractJSFunctionIfPresent(js, "sha256File"); ok {
 		names = append(names, "sha256File")
 	}

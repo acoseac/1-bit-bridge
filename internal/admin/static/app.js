@@ -1859,6 +1859,11 @@ function uploadAbortError() {
   return e;
 }
 
+// rotr is SHA-256's rotate. It sits here so createSHA256 does not nest it.
+function rotr(x, n) {
+  return ((x >>> n) | (x << (32 - n))) >>> 0;
+}
+
 // createSHA256 is an incremental SHA-256. The head/tail fingerprint goes
 // through it, so a browser without SubtleCrypto still tells two versions of
 // a same-sized file apart. crypto.subtle.digest needs its whole buffer at
@@ -1875,9 +1880,6 @@ function createSHA256() {
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ]);
-  function rotr(x, n) {
-    return ((x >>> n) | (x << (32 - n))) >>> 0;
-  }
   let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
   let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
   const w = new Uint32Array(64);
@@ -2000,7 +2002,11 @@ function sessionKey(entries) {
     if (!resumeIdentityComplete(e)) return null;
     parts.push(`${e.path}\u0000${e.size}\u0000${e.modified}\u0000${e.fingerprint}`);
   }
-  return parts.sort().join("\u0001");
+  // Code-unit order, not localeCompare: the key has to be the same in every
+  // browser locale, and localeCompare follows the operator's locale.
+  const ordered = [...parts];
+  ordered.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return ordered.join("\u0001");
 }
 
 // findResumable returns a staged session that matches BOTH the picked files and
