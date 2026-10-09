@@ -235,6 +235,9 @@ func Test_clampPage(t *testing.T) {
 		wantLo, wantHi int
 	}{
 		{"zero_count_returns_all", 10, 0, 0, 0, 10},
+		{"zero_count_caps_at_page", 1500, 0, 0, 0, maxCDSPage},
+		{"count_above_page_caps", 1500, 0, 5000, 0, maxCDSPage},
+		{"count_of_page_is_whole", 1500, 0, 1000, 0, maxCDSPage},
 		{"count_within_range", 10, 0, 3, 0, 3},
 		{"offset_plus_count", 10, 2, 3, 2, 5},
 		{"count_exceeds_remaining_clamps", 10, 8, 100, 8, 10},

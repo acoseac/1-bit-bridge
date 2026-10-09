@@ -39170,3 +39170,76 @@ ran the named tests with `-count=1`, and restored the file with
   Actual: those two. The handler left the row served, and the result's
   `Paths` and `Dirs` were empty. Stayed green:
   `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`.
+
+## 2026-10-09 — the DLNA listener bounds what one peer can start (backlog B220, B162)
+
+The listener is unauthenticated. Five measurements from the 2026-09-30
+review, re-run on this tree before the bound (red tests, real
+`Server.Start` on loopback for the listener, the real SOAP handler for
+Browse, Search and the log lines):
+
+- 48 SUBSCRIBEs whose callbacks blocked grew the process by 190
+  goroutines. The review's larger flood was 6,000 SUBSCRIBEs, 15,409
+  goroutines and 80 MiB of stack.
+- A Browse of 1,050 tracks with RequestedCount 0 answered
+  `NumberReturned` 1050, `TotalMatches` 1050, body 639,011 bytes. The
+  review's 50,000-track browse built a 43 MiB body and allocated 406
+  MiB; eight at once took 1.7 GiB.
+- Eight GETs with a 900 KiB User-Agent answered 200, stored 8 telemetry
+  entries and retained 7,313,296 bytes after a GC. The review's 100
+  requests took the heap from 4 MiB to 92 MiB. A 150-rune User-Agent of
+  U+00E9 was stored as 150 runes.
+- `ReadTimeout` and `IdleTimeout` were 0 and `MaxHeaderBytes` was 0
+  (net/http's 1 MiB default). An idle keep-alive and a SOAP body that
+  stopped after one byte were both still open when a 2 s client read
+  gave up (4.01 s for the pair). The review left both open past 26 s.
+- Browse and Search INFO lines kept a 300-character ObjectID, Filter,
+  SortCriteria and SearchCriteria whole, and repeated ObjectID and
+  SearchCriteria on the response and the fault. The review's two 0.9 MB
+  requests wrote 2.46 MB of INFO lines.
+
+What shipped:
+
+- `acquireNotifySlot` is a semaphore of `genaNotifyPool` (8), taken in
+  the SUBSCRIBE handler after the B39 callback checks and released when
+  that delivery returns. A full pool drops the NOTIFY. The 200 has
+  already been written. A worker pool that exits on the notify context
+  was rejected: `newGENATestServer` cancels that context before any
+  SUBSCRIBE, and `notifyWG.Wait` would then hang. After the bound the
+  same 48 SUBSCRIBEs deliver 8 NOTIFYs. The process grows by 31 to 33
+  goroutines (the pool, the callbacks it is serving, and the accept
+  loop). Under `-race` one run reached 33, so the ceiling is the flood
+  size (48), which 190 still fails, and the delivered count is what
+  pins the pool.
+- `clampPage` clips a RequestedCount of 0 or past `maxCDSPage` (1000)
+  to 1000. `TotalMatches` stays the full set. 1000 is the largest count
+  a measured control point puts in one request (BubbleUPnP and
+  foobar2000 playlist browse; JRiver's chunk is about the same). The
+  bridge ingest and the 1-bit app ask for 200, and BubbleUPnP's folder
+  browse asks for 16 and then 500, so those requests come back whole.
+  A cap of 200 would shorten the 500 and the 1000. A cap of 1 would
+  make a paging client work and a client that asks for everything show
+  one track. The store still lists the library; the cap is the DIDL
+  window. After the bound the 1,050-track browse answers
+  `NumberReturned` 1000 and 608,611 bytes, and a client that pages by
+  `NumberReturned` collects each track once (the next page is the
+  remaining 50). Requests for 1, 200 and 1000 are returned whole.
+  Residual: mconnect browsing All Tracks with RequestedCount 0 may show
+  1000 unless it pages. Album folders are not shortened.
+- `Record` cuts every stored string with `truncateRunes` to
+  `dlnaLoggedFieldRunes` (100), on a rune boundary, so the 150-rune
+  User-Agent is stored as 100. `MaxHeaderBytes` is 16 KiB. After the
+  bound the eight 900 KiB User-Agents answer 431, store nothing, and
+  the heap does not grow (one run, −81,304 bytes, which is GC noise).
+  Truncation alone would not make the status 431, and a post-GC heap
+  reading would not prove the header cap, so the test asserts both.
+- `ReadTimeout` is 60 s and `IdleTimeout` is 120 s. `WriteTimeout`
+  stays unset. With both shortened to 200 ms on that server only, the
+  idle keep-alive and the stalled body each closed inside the client's
+  2 s read. A stalled body whose handler has started writes an error
+  and then closes, so the close test drains bytes until the read
+  fails. A timeout with nothing further is still "left open".
+- The request lines cut ObjectID, Filter, SortCriteria, SearchCriteria
+  and the User-Agent to the same 100 runes. The response and the fault
+  keep the browse flag and the page counts and do not repeat the client
+  fields. `remoteAddr` is the TCP peer and is left as it is.
