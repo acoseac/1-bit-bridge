@@ -1859,11 +1859,11 @@ function uploadAbortError() {
   return e;
 }
 
-// createSHA256 is an incremental SHA-256. crypto.subtle.digest needs the
-// whole file in one buffer, which a multi-gigabyte DSF cannot spare, and it
-// is missing outside a secure context. The whole-file digest and the
-// head/tail fingerprint both go through this so a browser without SubtleCrypto
-// still refuses a spliced resume.
+// createSHA256 is an incremental SHA-256. The head/tail fingerprint goes
+// through it, so a browser without SubtleCrypto still tells two versions of
+// a same-sized file apart. crypto.subtle.digest needs its whole buffer at
+// once and is missing outside a secure context; the fingerprint is at most
+// 128 KiB.
 function createSHA256() {
   const K = new Uint32Array([
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -1965,30 +1965,6 @@ function createSHA256() {
 function sha256Bytes(bytes) {
   const h = createSHA256();
   h.update(bytes);
-  return h.hex();
-}
-
-async function sha256File(file, onProgress) {
-  const chunkBytes = 1024 * 1024;
-  const yieldBytes = 8 * 1024 * 1024;
-  const h = createSHA256();
-  let done = 0;
-  let sinceYield = 0;
-  while (done < file.size) {
-    if (!uploadState || uploadState.aborted) throw uploadAbortError();
-    const n = Math.min(chunkBytes, file.size - done);
-    const buf = new Uint8Array(await file.slice(done, done + n).arrayBuffer());
-    if (buf.length === 0) throw new Error("could not read " + (file.name || "the file"));
-    h.update(buf);
-    done += buf.length;
-    sinceYield += buf.length;
-    if (onProgress) onProgress(done, file.size);
-    if (sinceYield >= yieldBytes) {
-      sinceYield = 0;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-  }
-  if (!uploadState || uploadState.aborted) throw uploadAbortError();
   return h.hex();
 }
 
@@ -2264,27 +2240,18 @@ async function startUpload() {
   }
 }
 
+// createUploadSession records the resume identity already computed for each
+// pick. It does not hash the file. A whole-file digest is optional on the
+// server, and this console does not declare one.
 async function createUploadSession(picked, overwrite) {
-  const hashing = picked.some((p) => !p.digest);
-  const progress = document.getElementById("upload-progress");
-  if (hashing && progress) progress.hidden = false;
   const files = [];
   for (const p of picked) {
     if (!uploadState || uploadState.aborted) throw uploadAbortError();
-    if (!p.digest) {
-      setText("upload-status", `Checking ${p.path} — 0 of ${formatBytes(p.file.size)}`);
-      p.digest = await sha256File(p.file, (done, total) => {
-        setText("upload-status", `Checking ${p.path} — ${formatBytes(done)} of ${formatBytes(total)}`);
-        const bar = document.getElementById("upload-bar");
-        if (bar && total > 0) bar.value = Math.round((done / total) * 100);
-      });
-    }
     files.push({
       path: p.path,
       size: p.file.size,
       modified: p.modified > 0 ? p.modified : undefined,
       fingerprint: p.fingerprint,
-      digest: p.digest,
     });
   }
   return API.post("/api/upload/sessions", { overwrite, files });
@@ -2346,8 +2313,10 @@ async function transferAll(session) {
 //
 // Each chunk is checked against the bytes in that request. That does not say
 // the chunks are one version of the file: a prefix from an earlier copy and a
-// tail from a later one both verify. The whole-file digest recorded when the
-// session starts is what refuses that splice.
+// tail from a later one both verify. The resume identity, the mtime and the
+// head/tail fingerprint, is what stops this console from continuing a session
+// of a different version. A client that declares a whole-file digest still
+// gets that check on the completing chunk; this console does not declare one.
 //
 // crypto.subtle exists only in a secure context. Both supported admin
 // deployments are one (loopback is potentially-trustworthy; public mode serves
@@ -2443,8 +2412,7 @@ function reportCommit(res) {
   if (uploadState?.digestUnavailable) {
     msg +=
       " Note: this browser did not expose SHA-256 for chunk checks, so each" +
-      " chunk was checked for length only. The whole file is still checked" +
-      " against the digest recorded when the upload started.";
+      " chunk was checked for length only.";
   }
   uploadAwaitingScan = !!res.committed;
   showUploadResult(msg, !!res.committed);

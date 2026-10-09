@@ -66,32 +66,14 @@ process.stdout.write("ok\n");
 	}
 }
 
-// TestUploadSHA256MatchesNode runs the shipped hasher and the session
-// create against node:crypto. The console sends that digest so a resumed
-// upload of a different version of the same-sized file fails the server's
-// existing whole-file check.
+// TestUploadSHA256MatchesNode runs the shipped hasher and the head/tail
+// fingerprint against node:crypto. The fingerprint is what a new session
+// records; the console does not hash the whole file.
 func TestUploadSHA256MatchesNode(t *testing.T) {
 	runUploadClient(t, []string{
-		"createSHA256", "sha256Bytes", "sha256File", "fileFingerprint",
-		"uploadAbortError", "attachUploadIdentity", "createUploadSession",
+		"createSHA256", "sha256Bytes", "fileFingerprint", "attachUploadIdentity",
 	}, `import { createHash } from "node:crypto";
 let uploadState = { aborted: false };
-function setText() {}
-function formatBytes(n) { return String(n); }
-const els = {};
-const document = {
-  getElementById(id) {
-    if (!els[id]) els[id] = { hidden: true, value: 0 };
-    return els[id];
-  },
-};
-const posted = [];
-const API = {
-  async post(_url, body) {
-    posted.push(body);
-    return { id: "s", files: body.files };
-  },
-};
 `, `
 function nodeHash(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -113,8 +95,6 @@ for (const n of [63, 64, 65, 200]) {
 const big = new Uint8Array(70000);
 for (let i = 0; i < big.length; i++) big[i] = (i * 13 + 7) & 255;
 const file = new File([big], "01.flac", { lastModified: 1700000000000 });
-const digest = await sha256File(file);
-check(digest === nodeHash(big), "file digest");
 const fp = await fileFingerprint(file);
 check(fp === nodeHash(big.subarray(0, 65536)) + nodeHash(big.subarray(big.length - 65536)), "fingerprint");
 const small = new File([abc], "a.flac", { lastModified: 5 });
@@ -127,21 +107,70 @@ const picked = [{ path: "Album/01.flac", file }];
 await attachUploadIdentity(picked);
 check(picked[0].modified === 1700000000000, "modified");
 check(picked[0].fingerprint === fp, "attached fingerprint");
+if (errors.length) {
+  process.stderr.write(errors.join("\n") + "\n");
+  process.exit(1);
+}
+process.stdout.write("ok\n");
+`)
+}
+
+// TestANewSessionReadsOnlyTheFingerprint runs the shipped identity and
+// session create. A new session declares no whole-file digest, and the
+// bytes read before the create are the 64 KiB head and the 64 KiB tail.
+func TestANewSessionReadsOnlyTheFingerprint(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	names := []string{"createSHA256", "sha256Bytes", "uploadAbortError"}
+	if _, ok := extractJSFunctionIfPresent(js, "sha256File"); ok {
+		names = append(names, "sha256File")
+	}
+	names = append(names, "fileFingerprint", "attachUploadIdentity", "createUploadSession")
+	runUploadClient(t, names, `
+let uploadState = { aborted: false };
+const posted = [];
+const API = {
+  async post(_url, body) {
+    posted.push(body);
+    return { id: "s", files: body.files };
+  },
+};
+`, `
+const errors = [];
+function check(cond, msg) { if (!cond) errors.push(msg); }
+const size = 200000;
+const bytes = new Uint8Array(size);
+for (let i = 0; i < size; i++) bytes[i] = (i * 13 + 7) & 255;
+const file = new File([bytes], "01.flac", { lastModified: 1700000000000 });
+const reads = [];
+const slice = file.slice.bind(file);
+file.slice = (start, end) => {
+  reads.push([start == null ? 0 : start, end == null ? file.size : end]);
+  return slice(start, end);
+};
+const windowBytes = 65536;
+const fingerprintRanges = [
+  [0, windowBytes],
+  [size - windowBytes, size],
+];
+function sameRange(a, b) { return a[0] === b[0] && a[1] === b[1]; }
+const picked = [{ path: "Album/01.flac", file }];
+await attachUploadIdentity(picked);
+check(reads.length === fingerprintRanges.length, "fingerprint read count " + reads.length);
+check(reads.every((r, i) => sameRange(r, fingerprintRanges[i])), "fingerprint ranges " + JSON.stringify(reads));
+const beforeCreate = reads.length;
 await createUploadSession(picked, false);
+check(reads.length === beforeCreate, "create read the file");
 const declared = posted[0].files[0];
-check(declared.digest === digest, "declared digest");
-check(declared.fingerprint === fp, "declared fingerprint");
+check(declared.digest === undefined, "declared digest");
+check(!Object.hasOwn(declared, "digest"), "digest field");
+check(declared.fingerprint === picked[0].fingerprint, "declared fingerprint");
 check(declared.modified === 1700000000000, "declared modified");
-check(els["upload-progress"] && els["upload-progress"].hidden === false, "progress shown");
-check(els["upload-review"] === undefined, "review left alone");
-picked[0].file = new File([abc], "01.flac", { lastModified: 1700000000000 });
-await createUploadSession(picked, false);
-check(posted[1].files[0].digest === digest, "digest not recomputed");
-const fresh = [{ path: "Album/02.flac", file: new File([abc], "02.flac", { lastModified: 9 }) }];
+const fresh = [{ path: "Album/02.flac", file: new File([bytes], "02.flac", { lastModified: 9 }) }];
 uploadState.aborted = true;
 let aborted = false;
 try { await createUploadSession(fresh, false); } catch (e) { aborted = e && e.code === "aborted"; }
-check(aborted, "abort during hash");
+check(aborted, "abort before create");
+check(posted.length === 1, "aborted create posted");
 if (errors.length) {
   process.stderr.write(errors.join("\n") + "\n");
   process.exit(1);

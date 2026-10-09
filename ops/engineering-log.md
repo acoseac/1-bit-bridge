@@ -38613,7 +38613,7 @@ No `ExtractorVersion` bump and no `ProtocolVersion` bump. The wire
 answer for a sidecar this request could not open is still 410
 `variant_missing_on_disk`.
 
-## 2026-10-09 — a resumed upload identifies the file, and the commit checks it (backlog B176)
+## 2026-10-09 — a resumed upload identifies the file (backlog B176)
 
 The console matched a stopped upload to a new pick by path and size
 (`sessionKey` / `findResumable` / `findFilesOnlyMatch` in
@@ -38638,33 +38638,38 @@ milliseconds) and `fingerprint` (`hex(sha256(head))` + `hex(sha256(tail))`,
 64 KiB at each end, 128 hex characters). Both are echoed on the file
 status the console lists. `sessionKey` includes them and returns null
 unless every entry has a positive modified and a 128-character
-fingerprint, so a session from before this change starts over. A new
-session also sends the whole-file SHA-256 as `digest`. The hash runs in
-the page, incrementally, and only when the session is created: a
-matching resume skips it. A second create of the same pick reuses the
-digest already computed. While it hashes, the progress panel is shown
-and the review panel stays. Stop and Cancel both abort the hash.
+fingerprint, so a session from before this change starts over.
 
-The hash cost, 2026-10-09, node, the shipped `createSHA256` from
-`app.js`, 256 MiB of zeros read in 1 MiB pieces: the incremental hash
-alone took 3266 ms (82 MB/s) and `node:crypto` `createHash` alone, over
-the same pieces, 96 ms (about 2.8 GB/s). The two digests matched. The
-same hash yielding with `setTimeout(0)` every 8 MiB took 3241 ms. A
-1 GiB file is about 13 s at that rate and a 4 GB file about 50 s, paid
-once per new session. An earlier combined loop reported native as 0 ms
+The first draft also hashed the whole file in the page and sent that
+SHA-256 as `digest`. The owner declined that pass the same day: at the
+rate below it is about 13 s per GB before any byte is uploaded, and a
+new session now declares no digest. The fingerprint stays. It is a
+128 KiB read, so it covers a FLAC tag at the head, a DSF or WAV tag at
+the tail, an M4A `moov` at either end, and any mtime change. The
+residual is a change only in the middle, with the size and the mtime
+preserved: that pick resumes, and with no declared digest the splice
+commits. A client that does declare a digest still gets the completion
+check (`TestASplicedUploadWithADeclaredDigestIsNotCommitted`: 400
+`digest_mismatch`, the offset stays at the prefix, the commit is
+`committed: 0`, `failed: 1`, nothing written into the library). Chunk
+`Content-Digest` is unchanged. Create rejects a fingerprint that is not
+128 hex characters and a negative modified.
+
+The hash cost that led to the decision, 2026-10-09, node, the shipped
+`createSHA256` from `app.js`, 256 MiB of zeros read in 1 MiB pieces: the
+incremental hash alone took 3266 ms (82 MB/s) and `node:crypto`
+`createHash` alone, over the same pieces, 96 ms (about 2.8 GB/s). The
+two digests matched. The same hash yielding with `setTimeout(0)` every
+8 MiB took 3241 ms. A 1 GiB file is about 13 s at that rate and a 4 GB
+file about 50 s. An earlier combined loop reported native as 0 ms
 because it timed `digest()` only, after the native hasher had already
-been updated inside the JavaScript loop.
+been updated inside the JavaScript loop. That cost is the measurement,
+not what a new session pays. The console reads the fingerprint ranges
+and then starts
+(`TestANewSessionReadsOnlyTheFingerprint`).
 
 A same-size edit with a different mtime or a different head or tail
-does not resume. A session with no identity does not resume. A splice
-that keeps the mtime and the 64 KiB head and tail (a change in the
-middle of a file larger than 128 KiB) still matches, and the declared
-digest refuses the completing chunk: 400 `digest_mismatch`, the offset
-stays at the prefix, and the commit is `committed: 0`, `failed: 1`,
-with nothing written into the library
-(`TestASplicedUploadWithADeclaredDigestIsNotCommitted`). Create rejects
-a fingerprint that is not 128 hex characters and a negative modified.
-The chunk digest check is unchanged.
+does not resume. A session with no identity does not resume.
 
 No `ExtractorVersion` bump and no `ProtocolVersion` bump. The fields are
 on the console's upload session, which the paired app does not decode.
@@ -38686,3 +38691,10 @@ sum != fd.Digest`. Predicted red:
 digest. Actual: the handler test's completing chunk was 200 with
 `complete: true`; the manager test got a nil error. The chunk-digest
 test passed.
+
+The up-front hash put back into `createUploadSession` (the whole-file
+`sha256File` pass, and `digest` on the create body). Predicted red:
+`TestANewSessionReadsOnlyTheFingerprint`, with the create reading the
+file and the declared digest present, including as its own field.
+Actual: those three (`create read the file`, `declared digest`,
+`digest field`).
