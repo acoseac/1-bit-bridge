@@ -38088,7 +38088,8 @@ What shipped:
   the same string as before and contains no path. No schema bump.
 - `GuardTempBytes` is that formula for a PCM job and 0 for DSD.
   `TempVolumeBytes` is the Stage A scratch when that is non-zero, else
-  the guard file. A lane holds one job, so the pre-flight budgets
+  the guard file. B210 later budgets two of those Stage A files; the PCM
+  guard stays one. A lane holds one job, so the pre-flight budgets
   `lanes × max(scratch, guard)` (`preflightTempVolume`) on the upscale
   submit, the rendition submit, `roomForRendition` and the sweep. The
   two figures stay separate: a FLAC still adds nothing to
@@ -38384,3 +38385,62 @@ a rollback that renames the backup onto the running path first
 fails on every OS), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`,
 `TestRollbackReplaceOfAMissingDestinationIsOneRename`,
 `TestRollbackReplaceLeavesALeftoverItCannotRemove`.
+
+## 2026-10-09 — a DSD render reserves two scratch files per lane (backlog B210)
+
+A DSD render holds two Stage A files at once while it surveys its album.
+`renderDSD` writes its scratch, releases its claim, then `renderGain`
+calls the album survey. `MeasureDSDPeak` creates a second scratch in the
+same directory and removes it when the mate measurement returns. Stage C
+reads the first scratch after that survey, so freeing it first drops the
+file the render still needs. Moving the survey ahead of the claim release
+deadlocks: a render must not wait while it holds its own claim, and a
+survey that waits on a mate must not hold one. The order that ships is
+the one that stays deadlock-free, and the two files overlap for the mate
+decode.
+
+`TempBytesForRender` for a 3 s stereo file at 176.4 kHz is 4,233,600
+bytes. Two files are 8,467,200. The batch, the auto-optimize sweep and
+the on-demand room check each reserved one file per lane (B270's
+`lanes × max(scratch, guard)`). A temp volume with room for one file and
+not two was admitted and ran out mid-render. The on-demand path already
+checked one `TempVolumeBytes` (B264 and B270); the remaining hole was
+the count, not a missing check.
+
+What shipped:
+
+- `TempVolumeBytes` for a DSD job is `SurveyScratchBytes`, twice
+  `RenderScratchBytes`, saturating at MaxInt64. A size past MaxInt64/2
+  doubled and then multiplied by two lanes wraps negative, and
+  `DiskHasHeadroom` treats a non-positive budget as no work. A PCM job
+  stays `GuardTempBytes`. DSD `GuardTempBytes` is 0 and the chain passes
+  no `-G`, so the guard is not added on top of the two scratches.
+- `LaneTempBytes` is the larger of two scratches and one guard. One lane
+  runs one job. The batch passes that hold to `preflightTempVolume`,
+  which multiplies by `laneCount` through `BytesForLanes`. The sweep
+  does the same with `TempVolumeBytes`. `maxRenderScratch` stays the
+  single-file figure.
+- On one volume the on-demand peak is `RenditionHoldOnOneVolume`: the
+  survey's two scratches, or one scratch beside the rendition, whichever
+  is larger. Adding the rendition on top of both scratches refuses a job
+  that fits. Separate volumes still probe the rendition and then
+  `TempVolumeBytes`. A short volume is `api.ErrUpscaleNoRoom` on demand
+  and `InsufficientDiskSpaceError` from the batch, before enqueue, so
+  the source is not struck.
+- Album gain is attached when the job runs (`Pool` injects
+  `JobSpec.AlbumGain`; the enqueue spec does not carry it), so the
+  pre-flight cannot see whether this album has a mate. Every DSD job
+  reserves two. A solo album over-reserves by one file. A mate longer
+  than the job can still overflow; the measured overlap is two copies of
+  the job's own scratch.
+
+Pins: `TestALaneHoldsTwoDSDScratchesOrOnePCMGuard`,
+`TestGuardTempBytesIsThePostRateInt32File` (a DSD job's temp budget is
+two scratch files), `TestAutoOptimizeSweepStopsWhenScratchDoesNotFit`
+(room for one file and not two refuses; two files fit one lane and
+refuse once two lanes can hold them),
+`TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition` (one
+volume with room for the two scratches queues; room for one refuses),
+`TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+`TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume` (the huge
+DSF's projected bytes are two scratches on each lane, saturated).

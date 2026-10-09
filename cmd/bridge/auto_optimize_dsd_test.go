@@ -336,11 +336,11 @@ func TestAutoOptimizeSweepSubmitsAPCMJobWhenTheTempVolumeHasRoom(t *testing.T) {
 // TestAutoOptimizeSweepStopsWhenScratchDoesNotFit pins the second disk
 // budget: a DSD job whose Stage A scratch would push the scratch volume
 // under the floor STOPS the sweep (DiskFloorReached), and the same job
-// enqueues when the scratch fits. The check is a point check — scratch is
-// freed per job, so the sweep's TOTAL is never held at once — sized for
-// the number of lanes the pool can run CONCURRENTLY, because that peak
-// is. At one lane two identical jobs both fit when one does; at two they
-// do not, which is the last pair of subtests.
+// enqueues when the scratch fits. A render holds TWO of those files while
+// it surveys its album. The check is a point check — scratch is freed per
+// job, so the sweep's TOTAL is never held at once — sized for the number
+// of lanes the pool can run CONCURRENTLY, because that peak is. At one
+// lane two identical jobs both fit when one does; at two they do not.
 func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 	const floor = 100 << 20
 	const durationSec = 300.0
@@ -378,8 +378,20 @@ func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 			t.Errorf("Enqueued = %d (submitted %d), want 0", counts.Enqueued, f.submitted.count())
 		}
 	})
-	t.Run("scratch fits both", func(t *testing.T) {
+	// Room for one Stage A file and not the second the survey writes
+	// beside it. One lane, so a budget of a single file would enqueue.
+	t.Run("room for one scratch file and not two", func(t *testing.T) {
 		f := seed(t, floor+perJob+perJob/2)
+		counts := f.sweeper.sweepOnce(context.Background())
+		if counts == nil {
+			t.Fatal("sweepOnce returned nil")
+		}
+		if !counts.DiskFloorReached || counts.Enqueued != 0 {
+			t.Errorf("DiskFloorReached=%v Enqueued=%d, want true / 0 (one file fits, two do not)", counts.DiskFloorReached, counts.Enqueued)
+		}
+	})
+	t.Run("two scratch files fit one lane", func(t *testing.T) {
+		f := seed(t, floor+2*perJob+perJob/2)
 		counts := f.sweeper.sweepOnce(context.Background())
 		if counts == nil {
 			t.Fatal("sweepOnce returned nil")
@@ -392,27 +404,25 @@ func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 		}
 	})
 	// The same free space, with the pool able to run TWO renders at once:
-	// both would hold Stage A scratch simultaneously, so the point check
-	// has to be sized for the lane count or two individually-fitting jobs
-	// together breach the floor and a job that was already admitted fails
-	// mid-render (CodeRabbit on PR #863).
+	// each holds two Stage A files, so the point check has to be sized for
+	// the lane count or two individually-fitting jobs together breach the
+	// floor and a job that was already admitted fails mid-render.
 	t.Run("does not fit once two lanes can hold scratch at once", func(t *testing.T) {
-		f := seed(t, floor+perJob+perJob/2)
+		f := seed(t, floor+2*perJob+perJob/2)
 		f.sweeper.lanes = func() int { return 2 }
 		counts := f.sweeper.sweepOnce(context.Background())
 		if counts == nil {
 			t.Fatal("sweepOnce returned nil")
 		}
 		if !counts.DiskFloorReached {
-			t.Error("DiskFloorReached = false, want true (two concurrent renders need 2× the scratch)")
+			t.Error("DiskFloorReached = false, want true (two lanes each hold two scratch files)")
 		}
 		if counts.Enqueued != 0 {
 			t.Errorf("Enqueued = %d, want 0 — swept %v", counts.Enqueued, strings.Join(sweptPaths(f), ", "))
 		}
 	})
-	// A lane count of one (or an unwired probe) is the pre-#863 shape.
 	t.Run("one lane is the unwired shape", func(t *testing.T) {
-		f := seed(t, floor+perJob+perJob/2)
+		f := seed(t, floor+2*perJob+perJob/2)
 		f.sweeper.lanes = func() int { return 1 }
 		counts := f.sweeper.sweepOnce(context.Background())
 		if counts == nil {

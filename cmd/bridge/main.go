@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -1076,11 +1075,12 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 
 // roomForRendition refuses a job whose volumes have no room for it, before it
 // is queued: the variants volume for the projected rendition, and the temp
-// volume for the file the job holds there (a DSD render's Stage A scratch,
-// or a PCM job's gain-guard file). The batch and the auto-optimize sweep
-// check before they queue too. A job holds that file while it writes the
-// rendition, so where the two directories are on one volume it needs the
-// sum there. A probe that cannot read a volume refuses too.
+// volume for what the job holds there (two DSD Stage A scratches while the
+// album survey runs, or a PCM job's gain-guard file). The batch and the
+// auto-optimize sweep check before they queue too. Where the two directories
+// share a volume the peak is the survey's two scratches, or one scratch
+// beside the rendition, whichever is larger — a PCM job holds its guard
+// beside the rendition. A probe that cannot read a volume refuses too.
 func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
 	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
 		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
@@ -1098,11 +1098,7 @@ func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error 
 		return fmt.Errorf("check free space for the rendition: %w", err)
 	}
 	if shared {
-		need := projected + scratch
-		if need < projected { // ProjectedSize saturates at MaxInt64; a wrapped sum would pass
-			need = math.MaxInt64
-		}
-		return a.roomOn(spec.OutputDir, need)
+		return a.roomOn(spec.OutputDir, transcode.RenditionHoldOnOneVolume(projected, spec.RenderScratchBytes(), scratch))
 	}
 	if err := a.roomOn(spec.OutputDir, projected); err != nil {
 		return err

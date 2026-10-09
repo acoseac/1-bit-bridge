@@ -485,6 +485,16 @@ func TestSubmitPCMRender_ScratchPreflightGradesTheTempVolume(t *testing.T) {
 	if rows := batchRows(t, s); len(rows) != 0 {
 		t.Errorf("a refused pre-flight must not leave a batch row: %+v", rows)
 	}
+	one := (JobSpec{
+		SourceIsDSD: true, SourceSize: 1 << 60, SourceSampleRate: 2822400, TargetSampleRate: 176400,
+	}).RenderScratchBytes()
+	want := BytesForLanes(SurveyScratchBytes(one), c.laneCount())
+	if dskErr.ProjectedBytes != want {
+		t.Errorf("projected %d, want %d (two scratch files on each of %d lanes)", dskErr.ProjectedBytes, want, c.laneCount())
+	}
+	if oneBudget := BytesForLanes(one, c.laneCount()); dskErr.ProjectedBytes == oneBudget {
+		t.Errorf("budgeted one scratch file per lane (%d)", oneBudget)
+	}
 }
 
 // TestSubmitRefusesAPCMJobWhoseGainGuardDoesNotFit refuses a PCM upscale

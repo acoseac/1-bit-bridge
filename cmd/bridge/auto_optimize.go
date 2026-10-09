@@ -388,13 +388,13 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			counts.DiskFloorReached = true
 			return false
 		}
-		// The temp volume, for a DSD render's scratch or a PCM job's
-		// gain-guard file. A point check, not a
-		// running sum — scratch is freed per job, so the sweep's TOTAL is
-		// never held at once — but it is sized for every lane the pool can
-		// run concurrently, because that peak IS held at once. Stop rather
-		// than skip, for the same reason as above.
-		if scratch := spec.TempVolumeBytes() * int64(sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
+		// The temp volume. A DSD render holds two Stage A scratches while it
+		// surveys; a PCM job holds one gain-guard file. TempVolumeBytes is
+		// that peak. A point check, not a running sum — scratch is freed per
+		// job, so the sweep's TOTAL is never held at once — but it is sized
+		// for every lane the pool can run concurrently, because that peak IS
+		// held at once. Stop rather than skip, for the same reason as above.
+		if scratch := transcode.BytesForLanes(spec.TempVolumeBytes(), sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
 			counts.DiskFloorReached = true
 			return false
 		}
