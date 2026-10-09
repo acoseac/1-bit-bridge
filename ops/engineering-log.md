@@ -38434,8 +38434,18 @@ still updates the row and removes nothing.
 Judging `os.SameFile` after a link this call just made would see one
 inode and skip the unlink, leaving the extra name on every successful
 move. A destination that already exists and is a different file (an
-interrupted copy) is overwritten by `copyAndFsync` and the source is
-still removed after the update.
+interrupted copy) is replaced by renaming a temp copy over it, and the
+source is still removed after the update. Opening that name with
+`O_TRUNC` rewrote the inode: a destination that was a hard link of
+another live sidecar lost that sidecar's bytes under every name.
+`copyAndFsync` writes a temp file in the destination's directory,
+fsyncs it, and `RenameWithRetry`s it over the destination, so the
+rename replaces the directory entry. A crash mid-copy leaves the
+`.tmp` scratch. The owner stays the source's, and a regular file
+being replaced keeps its permission bits on the new inode.
+`TestAMoveOntoAHardLinkOfAnotherSidecarLeavesThatSidecarsBytes` links
+the destination onto another sidecar and requires those bytes
+unchanged; on the truncating copy they became the source file.
 
 After the fix the same test keeps the moved row at the destination, and
 the two gone rows are still deleted (`deleted` equals 2).

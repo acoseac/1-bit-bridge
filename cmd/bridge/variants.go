@@ -15,8 +15,12 @@
 // before the row is updated is resumed by the next run: one file
 // under two names updates the row and leaves the old name (the
 // orphan sweep reaps a hard link), and a copied second inode is
-// copied again and the source name removed after the update. A
-// crash after the update and before that removal leaves the extra
+// copied again and the source name removed after the update. The
+// copy is a temp file in the destination's directory, fsynced, then
+// renamed over the destination, so the final name appears only
+// complete and a name that shares an inode with another file is
+// replaced as a directory entry. A crash mid-copy leaves the temp.
+// A crash after the update and before that removal leaves the extra
 // name for the same sweep. Rows already pointing at the destination
 // are skipped because the recomputed path equals the recorded one.
 // Two paths that are one file (a case-only spelling, a --to that is
@@ -43,6 +47,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -50,6 +56,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -229,6 +236,9 @@ var moveBeforeRowUpdate func()
 // copies. The next run sees one file under two names and updates the
 // row without removing the old name, or copies again when the second
 // name is another inode and removes the source name after the update.
+// The copy is renamed into place, so an existing destination is
+// replaced as a directory entry: a hard link of another file keeps
+// that file's bytes.
 // A crash after the update leaves the extra name for the orphan sweep.
 // A source already gone with the destination present (a crash of an
 // older rename) updates the row and removes nothing.
@@ -288,36 +298,51 @@ func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.Varia
 	return nil
 }
 
-// copyAndFsync streams source → destination + fsyncs the
-// destination file before close. Used when a hard link cannot be made.
+// copyAndFsync streams the source into a temp file in the destination's
+// directory, fsyncs it, and renames it over dst. Both copy sites use it:
+// a destination that already exists as a different file, and a link that
+// failed. The rename replaces the directory entry. It does not truncate
+// an inode another name still points at, and the final name never holds
+// a partial copy.
 //
-// **Close() error explicitly checked** (Gemini medium on PR D2):
-// pre-fix a `defer out.Close()` swallowed any error returned by
-// the close itself, which on a write-opened file may reveal
-// flush failures that Sync() might have missed. The explicit
-// Close + check pattern surfaces those. The defer is retained as
-// a backstop on early returns from the Copy / Sync error paths
-// so the FD isn't leaked even when we already have a different
-// error to surface — Close() on an already-closed file is a
-// documented no-op for *os.File.
+// Close's error is checked. A deferred Close remains for the paths that
+// return before that, and a deferred Remove drops the temp unless the
+// rename has landed. Close on an already-closed file is a no-op.
+//
+// The copy stands in for src, which the move then unlinks. Run as root
+// it keeps src's owner, as a rename would have. KeepOwner reads the owner
+// of the entry at the path it is given, and that entry is src here. A new
+// file is created 0644, as before; a file being replaced keeps that
+// file's permission bits on the new inode.
 func copyAndFsync(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+
+	replacing, err := os.Lstat(dst)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	out, tmp, err := openMoveCopy(filepath.Dir(dst))
 	if err != nil {
 		return err
 	}
-	// Defer is the backstop for early-return error paths below;
-	// the explicit Close at the success tail is what catches
-	// flush-on-close errors.
+	// Remove is registered first so it runs after Close. The temp name
+	// is dropped unless the rename has published it.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
 	defer out.Close()
-	// The copy stands in for src, which the move then unlinks: run as
-	// root it keeps src's owner, as a rename would have. KeepOwner reads
-	// the owner of the entry at the path it is given, and that entry is
-	// src here.
+	if replacing != nil && replacing.Mode().IsRegular() {
+		if err := out.Chmod(replacing.Mode().Perm()); err != nil {
+			return err
+		}
+	}
 	if err := fsutil.KeepOwner(out, src); err != nil {
 		return err
 	}
@@ -330,5 +355,30 @@ func copyAndFsync(src, dst string) error {
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close destination: %w", err)
 	}
+	if err := atomicwrite.RenameWithRetry(tmp, dst); err != nil {
+		return err
+	}
+	committed = true
 	return nil
+}
+
+// openMoveCopy creates an empty 0644 file in dir whose name ends in
+// .tmp, so a crash leftover is the sidecar sweep's scratch and not a
+// rendition under its final name.
+func openMoveCopy(dir string) (*os.File, string, error) {
+	var rnd [8]byte
+	for range 100 {
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, ".bridge-move-"+hex.EncodeToString(rnd[:])+".tmp")
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("create temp copy in %s", dir)
 }

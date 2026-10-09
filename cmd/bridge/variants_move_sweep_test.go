@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -256,19 +257,7 @@ func TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt(t *testing.T) {
 	}
 	row := m.moved[0]
 	newPath := computeNewSidecarPath(link, row)
-	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(row.SidecarPath); err != nil {
-		t.Fatalf("the only copy is gone: %v", err)
-	}
-	got, err := m.store.GetVariant(context.Background(), row.SourcePath, row.VariantID)
-	if err != nil || got == nil {
-		t.Fatalf("row: %v", err)
-	}
-	if got.SidecarPath != newPath {
-		t.Fatalf("sidecar_path = %q, want %q", got.SidecarPath, newPath)
-	}
+	requireOnlyCopyAndMovedRow(t, m, row, newPath)
 }
 
 // TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy is the
@@ -304,6 +293,14 @@ func TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy(t *testing.T) {
 	}
 	flipped := string(flippedRunes)
 	newPath := filepath.Join(filepath.Dir(row.SidecarPath), flipped)
+	requireOnlyCopyAndMovedRow(t, m, row, newPath)
+}
+
+// requireOnlyCopyAndMovedRow is the shared tail of the two same-file
+// moves: the one inode is still there under the source name, and the
+// row records the destination spelling.
+func requireOnlyCopyAndMovedRow(t *testing.T, m moveShape, row manifest.VariantRow, newPath string) {
+	t.Helper()
 	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
 		t.Fatal(err)
 	}
@@ -356,4 +353,53 @@ func TestAMoveCopiesWhenTheLinkCannotBeMade(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireMovedRowsAt(t, m.store, []manifest.VariantRow{row}, m.to)
+}
+
+// TestAMoveOntoAHardLinkOfAnotherSidecarLeavesThatSidecarsBytes: the
+// destination name is a second name of another live sidecar. Replacing
+// that name must not rewrite the inode the other name still points at.
+func TestAMoveOntoAHardLinkOfAnotherSidecarLeavesThatSidecarsBytes(t *testing.T) {
+	m := newMoveShape(t)
+	row := m.moved[0]
+	other := m.moved[1]
+	otherBytes := []byte("other-live-sidecar")
+	if err := os.WriteFile(other.SidecarPath, otherBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newPath := computeNewSidecarPath(m.to, row)
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other.SidecarPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	srcBytes, err := os.ReadFile(row.SidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := moveOneVariant(context.Background(), m.mover, row, newPath); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(other.SidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, otherBytes) {
+		t.Fatalf("the other sidecar's bytes changed to %q", got)
+	}
+	dest, err := os.ReadFile(newPath)
+	if err != nil || !bytes.Equal(dest, srcBytes) {
+		t.Fatalf("destination = %q (%v), want the source bytes", dest, err)
+	}
+	otherInfo, err := os.Stat(other.SidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destInfo, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(otherInfo, destInfo) {
+		t.Fatal("the destination still shares the other sidecar's inode")
+	}
 }

@@ -4439,8 +4439,13 @@ no failing test — which is the shape to expect in this area.
   Now the destination is a hard link of the source, or a copy with an
   fsync where the link fails (across volumes, where NTFS and every other
   filesystem refuse the link), the row is updated, and only then is the
-  source name removed. A crash leaves two copies, which the next run
-  adopts, rather than a row whose file is already gone. **Same-file
+  source name removed. The copy is a temp file in the destination's
+  directory, fsynced, then renamed over the destination. The rename
+  replaces the directory entry, so a destination that is a hard link of
+  another live sidecar keeps that sidecar's bytes, and a crash mid-copy
+  leaves the temp rather than a partial file under the final name. A
+  crash leaves two copies, which the next run adopts, rather than a row
+  whose file is already gone. **Same-file
   first**, `os.SameFile` before any link or copy: a case-only spelling,
   or a `--to` that is the variants directory through a symlink, is one
   file, and removing the "source" would remove the only copy. Judging
@@ -4449,7 +4454,8 @@ no failing test — which is the shape to expect in this area.
   (the two gone rows are still deleted),
   `TestAMoveOntoTheSameFileUpdatesTheRowAndKeepsIt`,
   `TestAMoveToAnotherSpellingOfTheSameFileKeepsTheOnlyCopy`,
-  `TestAMoveCopiesWhenTheLinkCannotBeMade`.
+  `TestAMoveCopiesWhenTheLinkCannotBeMade`,
+  `TestAMoveOntoAHardLinkOfAnotherSidecarLeavesThatSidecarsBytes`.
 - **…and the serve reap deletes the row it looked up** (2026-10-09,
   backlog B251). `serveVariant` looked the row up, opened the path that
   lookup captured, and on ENOENT deleted by source path and variant id.

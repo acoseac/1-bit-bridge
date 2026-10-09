@@ -125,6 +125,22 @@ func (d *reapDownload) get(t *testing.T) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
+// missingRow is the shared tail of the two reap downloads: the client
+// gets 410 variant_missing_on_disk, and the row is whatever the reap
+// left.
+func (d *reapDownload) missingRow(t *testing.T) *manifest.VariantRow {
+	t.Helper()
+	status, body := d.get(t)
+	if status != http.StatusGone || !strings.Contains(body, "variant_missing_on_disk") {
+		t.Fatalf("status %d body %s", status, body)
+	}
+	got, err := d.store.GetVariant(context.Background(), d.source, d.variant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 // TestADownloadWhoseRowMovesBeforeTheReapKeepsIt is the window the
 // compare-and-delete of a listed row does not cover: the download looks
 // the row up, a move rewrites it, then the open of the path captured at
@@ -141,14 +157,7 @@ func TestADownloadWhoseRowMovesBeforeTheReapKeepsIt(t *testing.T) {
 			t.Errorf("rewrite: %v", err)
 		}
 	})
-	status, body := d.get(t)
-	if status != http.StatusGone || !strings.Contains(body, "variant_missing_on_disk") {
-		t.Fatalf("status %d body %s", status, body)
-	}
-	got, err := d.store.GetVariant(context.Background(), d.source, d.variant)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := d.missingRow(t)
 	if got == nil || got.SidecarPath != d.newPath {
 		t.Fatalf("moved row: %+v", got)
 	}
@@ -159,15 +168,7 @@ func TestADownloadWhoseRowMovesBeforeTheReapKeepsIt(t *testing.T) {
 // the row goes and the client gets the same 410.
 func TestADownloadOfAMissingSidecarStillDropsTheRow(t *testing.T) {
 	d := newReapDownload(t)
-	status, body := d.get(t)
-	if status != http.StatusGone || !strings.Contains(body, "variant_missing_on_disk") {
-		t.Fatalf("status %d body %s", status, body)
-	}
-	got, err := d.store.GetVariant(context.Background(), d.source, d.variant)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
+	if got := d.missingRow(t); got != nil {
 		t.Fatalf("the missing sidecar's row was kept: %+v", got)
 	}
 }
