@@ -23,6 +23,37 @@ import (
 // SUBSCRIBE. One attempt, no retries.
 const genaInitialNotifyTimeout = 5 * time.Second
 
+const (
+	// How many initial NOTIFY deliveries may be in flight at once.
+	genaNotifyPool = 8
+
+	// How long the listener waits for request headers.
+	dlnaReadHeaderTimeout = 10 * time.Second
+
+	// How long the listener waits for a whole request, body included.
+	// WriteTimeout stays unset: a renderer streams for as long as the
+	// file takes.
+	dlnaReadTimeout = 60 * time.Second
+
+	// How long a keep-alive connection may sit idle after a response.
+	dlnaIdleTimeout = 120 * time.Second
+
+	// Extra bytes net/http reads past MaxHeaderBytes. Go 1.26.6's
+	// initialReadLimitSize adds this bufio lookahead.
+	dlnaHeaderReadSlop = 4096
+
+	// Largest header block the listener reads. A SOAP or GENA request
+	// is a few kilobytes; the net/http default of 1 MiB is not.
+	dlnaMaxHeaderRead = 16 << 10
+
+	// MaxHeaderBytes that makes dlnaMaxHeaderRead the read limit,
+	// once dlnaHeaderReadSlop is added.
+	dlnaMaxHeaderBytes = dlnaMaxHeaderRead - dlnaHeaderReadSlop
+
+	// Longest client-supplied string this package stores or logs, in runes.
+	dlnaLoggedFieldRunes = 100
+)
+
 // packageLogger is the package-scoped slog handler. Mirrors the
 // convention from `internal/admin`, `internal/api`, `internal/auth`,
 // `internal/config`, `internal/enrich`, `internal/integrity` (CLAUDE.md
@@ -191,6 +222,14 @@ type Server struct {
 	notifyCancel context.CancelFunc
 	notifyWG     sync.WaitGroup
 	notifyClient *http.Client
+	// notifySlots bounds how many initial NOTIFYs are in flight. A full
+	// pool drops that NOTIFY. The SUBSCRIBE has already answered 200.
+	notifySlots     chan struct{}
+	notifySlotsOnce sync.Once
+	// readTimeout and idleTimeout replace the production deadlines when
+	// a test sets them before Start. Zero keeps the production value.
+	readTimeout time.Duration
+	idleTimeout time.Duration
 
 	// Observation state for the callback-vs-source divergence warning
 	// (see callbackHostMatchesSource) and the host-local refusal warning
@@ -292,10 +331,22 @@ func (s *Server) Start(ctx context.Context) error {
 
 	handler := s.handler()
 
+	readTO := dlnaReadTimeout
+	idleTO := dlnaIdleTimeout
+	if s.readTimeout > 0 {
+		readTO = s.readTimeout
+	}
+	if s.idleTimeout > 0 {
+		idleTO = s.idleTimeout
+	}
+	// WriteTimeout stays unset: a renderer streams for as long as the file takes.
 	s.httpServer = &http.Server{
 		Addr:              s.cfg.ListenAddress,
 		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second, // defensive against slowloris-style attacks
+		ReadHeaderTimeout: dlnaReadHeaderTimeout,
+		ReadTimeout:       readTO,
+		IdleTimeout:       idleTO,
+		MaxHeaderBytes:    dlnaMaxHeaderBytes,
 	}
 
 	// Eagerly bind the listener so config errors (e.g. port already
@@ -637,12 +688,16 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 		// send, as a nil context always made NewRequestWithContext fail.
 		return
 	}
+	if !s.acquireNotifySlot() {
+		return
+	}
 
 	body := initialNotifyBody(service)
 	ctx := discovery.WithDialApproval(s.notifyCtx, discovery.SubscribedFrom(subscriberAddr(remoteAddr)))
 	s.notifyWG.Add(1)
 	go func() {
 		defer s.notifyWG.Done()
+		defer func() { <-s.notifySlots }()
 		req, err := http.NewRequestWithContext(ctx, "NOTIFY", target, strings.NewReader(body))
 		if err != nil {
 			return
@@ -661,6 +716,20 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 		}
 		_ = resp.Body.Close()
 	}()
+}
+
+// acquireNotifySlot takes one of the genaNotifyPool in-flight slots.
+// A full pool returns false and the caller drops the NOTIFY.
+func (s *Server) acquireNotifySlot() bool {
+	s.notifySlotsOnce.Do(func() {
+		s.notifySlots = make(chan struct{}, genaNotifyPool)
+	})
+	select {
+	case s.notifySlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // firstCallbackURL extracts the first `<...>`-delimited URL from a GENA

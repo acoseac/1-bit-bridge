@@ -5339,6 +5339,82 @@ no failing test — which is the shape to expect in this area.
   home-pc has not been updated since before #818. The evidence needs a LAN
   bridge with `dlna.enabled` running the observer for a release. The iOS app
   subscribes to nothing (`subscribeGENA` is a stub), so no Mirror-PR.
+- **The DLNA listener bounds the work one unauthenticated peer can start**
+  (2026-10-09, backlog B220, B162). Five holes, each measured on the real
+  listener before the bound.
+  **The initial NOTIFY comes from a pool of `genaNotifyPool` (8).**
+  `fireInitialNotify` used to start one goroutine per SUBSCRIBE. Forty-eight
+  SUBSCRIBEs whose callbacks blocked grew the process by 190 goroutines
+  (the 2026-09-30 review: 6,000 SUBSCRIBEs, 15,409 goroutines, 80 MiB of
+  stack). `acquireNotifySlot` takes a slot before the spawn and drops the
+  NOTIFY when the pool is full. The SUBSCRIBE has already answered 200;
+  the initial NOTIFY stays best-effort. The B39 callback checks, and the
+  return for a nil notify context, run before the slot is taken. `Stop`
+  still cancels the notify context first and then waits the group. After
+  the bound the same flood delivers 8 NOTIFYs and grows the process by
+  31 to 33 goroutines (the pool, the callbacks it is serving, and the
+  accept loop). A long-lived worker that exits when the notify context
+  is already cancelled would hang `newGENATestServer`, which cancels that
+  context before any SUBSCRIBE: the slot is a semaphore, acquired in the
+  handler, released when the delivery returns.
+  **Browse and Search return at most `maxCDSPage` (1000) entries.**
+  `clampPage` treated RequestedCount 0 as the whole result. A browse of
+  1,050 tracks answered `NumberReturned` 1050 in a 639,011-byte body (the
+  review: 50,000 tracks, a 43 MiB body, 406 MiB allocated, eight at once
+  1.7 GiB). A count of 0 or past 1000 is clipped to 1000 before the
+  existing window arithmetic. `TotalMatches` stays the full set and
+  `UpdateID` stays 1, so a control point that advances
+  `StartingIndex` by `NumberReturned` collects every track. 1000 is the
+  largest count a measured control point puts in one request (BubbleUPnP
+  and foobar2000 playlist browse; JRiver's chunk is about the same). The
+  bridge ingest and the 1-bit app ask for 200 (`DefaultPageSize`,
+  `UPnPBrowsePager.defaultPageSize`), and BubbleUPnP's folder browse asks
+  for 16 and then 500, so those requests come back whole. A page of 200
+  would shorten the 500 and the 1000. The store still lists the library;
+  the cap is the DIDL window. **Residual**: mconnect browsing All Tracks
+  with RequestedCount 0 may show 1000 unless it pages. Album folders and
+  the page sizes clients send are unchanged.
+  **The telemetry ring keeps 100 runes of each string, and a header past
+  16 KiB is refused.** `Record` stored whatever the request carried, and
+  the listener left `MaxHeaderBytes` at net/http's 1 MiB default. Eight
+  GETs with a 900 KiB User-Agent answered 200, stored 8 entries and
+  retained 7,313,296 bytes (the review: 100 such requests, heap 4 MiB to
+  92 MiB). `truncateRunes` cuts every stored string to
+  `dlnaLoggedFieldRunes` (100), on a rune boundary. A cut is a copy
+  (`strings.Clone`), so the entry does not keep the rest of the header;
+  a string that already fits is stored as it arrived. The listener reads
+  at most 16 KiB of headers. net/http's `initialReadLimitSize` (Go
+  1.26.6) is `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
+  `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
+  at 16 KiB. A header block past that read is 431 and is not stored;
+  after the bound the same eight requests answered 431, stored
+  nothing, and the heap did not grow. The SOAP body stays on its own
+  1 MiB cap.
+  **ReadTimeout is 60 s and IdleTimeout is 120 s, the API server's
+  deadlines.** The listener set only `ReadHeaderTimeout`. An idle
+  keep-alive and a SOAP body that stopped after one byte were both still
+  open when the client's 2 s read gave up (4.01 s for the pair; the
+  review left both open past 26 s). `WriteTimeout` stays unset: a
+  renderer streams, as `/v1/download` does. A per-server override is
+  what the close test shortens; production uses the consts.
+  **Browse and Search INFO lines cut the client fields to those 100
+  runes, on the request line only.** ObjectID, Filter, SortCriteria and
+  SearchCriteria were logged whole, and ObjectID and SearchCriteria were
+  logged again on the response and the fault (the review: two 0.9 MB
+  requests wrote 2.46 MB of INFO lines, and the log file is not rotated
+  on macOS or Windows). The response keeps the browse flag and the page
+  counts. `remoteAddr` is the TCP peer and stays as it is.
+  (`TestASubscribeFloodDoesNotSpawnAGoroutinePerNotify`,
+  `TestBrowseAndSearchCapAZeroRequestedCountAndAClientCanPageTheRest`,
+  `TestARequestedCountUpToThePageIsReturnedWhole`,
+  `TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`,
+  `TestTelemetryKeepsAHundredRunesOfEachHeader`,
+  `TestRecordReleasesTheRestOfACutHeader`,
+  `TestTheListenerRefusesAnOversizedHeader`,
+  `TestAHeaderPastTheReadLimitIsRefusedAndAnOrdinaryOneIsAnswered`,
+  `TestTheListenerUsesTheAPIDeadlines`,
+  `TestTheListenerClosesAnIdleKeepAliveAndAStalledBody`,
+  `TestBrowseAndSearchLogsTruncateClientFieldsAndDoNotRepeatThem`.)
 - **A service URL is kept only as a string that parses back to the scheme
   and host the policy judged** (2026-10-01, backlog B233). The nightly fuzz
   on f2bb02bd found `FuzzParseDeviceDescription` keeping
