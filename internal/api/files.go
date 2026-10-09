@@ -371,6 +371,17 @@ func writeNotAFile(w http.ResponseWriter, r *http.Request, clientPath, kind stri
 		"path is a "+kind+", not a file", clientPath, &fsutil.NotAFileError{Kind: kind})
 }
 
+// beforeVariantReap runs after the reap has copied the looked-up row and
+// before it deletes, so a test can rewrite that row in the window. The
+// argument is the snapshot the delete compares. Production leaves it nil.
+var beforeVariantReap func(rec VariantRecord)
+
+// SetBeforeVariantReapForTest installs beforeVariantReap. The test restores
+// nil when it finishes.
+func SetBeforeVariantReapForTest(fn func(VariantRecord)) {
+	beforeVariantReap = fn
+}
+
 // serveVariant resolves (clientPath, variantID) → on-disk sidecar
 // path and streams the bytes via http.ServeContent. The
 // freshness check happens here (not in the variant store) so the
@@ -387,17 +398,6 @@ func writeNotAFile(w http.ResponseWriter, r *http.Request, clientPath, kind stri
 // It reads the store and never the upscale gate: switching upscaling
 // off stops new renditions and withdraws none (WithUpscale, backlog
 // B108).
-// beforeVariantReap runs after the reap has copied the looked-up row and
-// before it deletes, so a test can rewrite that row in the window. The
-// argument is the snapshot the delete compares. Production leaves it nil.
-var beforeVariantReap func(rec VariantRecord)
-
-// SetBeforeVariantReapForTest installs beforeVariantReap. The test restores
-// nil when it finishes.
-func SetBeforeVariantReapForTest(fn func(VariantRecord)) {
-	beforeVariantReap = fn
-}
-
 func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath string, sourceInfo os.FileInfo, variantID string) {
 	if s.variantStore == nil {
 		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
