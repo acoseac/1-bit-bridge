@@ -7,6 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
 // swapBinary's rename-trick has to work against an unwritten file
@@ -15,7 +19,29 @@ import (
 // (needs a real Service installed); these tests hit the file-system
 // pieces without standing up SCM.
 
+// skipIfBridgeServiceRegistered skips when a bridge service is
+// registered. swapBinary and RollbackBinary both call
+// stopServiceIfRunning, which stops a running service and restarts
+// it afterwards. A restart that fails leaves that service down.
+// A connect that fails, and a service that is not registered, are
+// what production treats as nothing to stop, so those runs continue.
+func skipIfBridgeServiceRegistered(t *testing.T) {
+	t.Helper()
+	m, err := mgr.Connect()
+	if err != nil {
+		return
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(packaging.ServiceLabel)
+	if err != nil {
+		return
+	}
+	s.Close()
+	t.Skip("a bridge service is registered on this machine; this test would stop it")
+}
+
 func TestSwapWindows_RenameTrick(t *testing.T) {
+	skipIfBridgeServiceRegistered(t)
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "bridge.exe")
 	new := filepath.Join(dir, "extracted-bridge.exe")
@@ -47,6 +73,7 @@ func TestSwapWindows_RenameTrick(t *testing.T) {
 }
 
 func TestSwapWindows_RollbackOverwritesExistingBak(t *testing.T) {
+	skipIfBridgeServiceRegistered(t)
 	// A prior cycle left a stale .bak. swapBinary should overwrite
 	// it on the dst → bak rename — never accumulate multiple
 	// .bak files.
@@ -75,6 +102,7 @@ func TestSwapWindows_RollbackOverwritesExistingBak(t *testing.T) {
 }
 
 func TestRollbackBinary_Windows(t *testing.T) {
+	skipIfBridgeServiceRegistered(t)
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "bridge.exe")
 	bak := dst + ".bak"
