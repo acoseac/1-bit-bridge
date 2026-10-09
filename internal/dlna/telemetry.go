@@ -3,6 +3,7 @@ package dlna
 import (
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -135,14 +136,15 @@ func (s *TelemetryStore) Capacity() int { return s.capacity }
 // truncateRunes returns s cut to at most n runes, on a rune boundary.
 // A string no longer than n bytes is returned as it is: every rune is
 // at least one byte, so that string cannot hold more than n runes.
-// n <= 0 leaves s unchanged.
+// n <= 0 leaves s unchanged. A string that is actually cut is copied,
+// so the caller can drop the rest of the original.
 func truncateRunes(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
 	for i := range s {
 		if n == 0 {
-			return s[:i]
+			return strings.Clone(s[:i])
 		}
 		n--
 	}

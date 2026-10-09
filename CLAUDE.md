@@ -5380,7 +5380,9 @@ no failing test — which is the shape to expect in this area.
   GETs with a 900 KiB User-Agent answered 200, stored 8 entries and
   retained 7,313,296 bytes (the review: 100 such requests, heap 4 MiB to
   92 MiB). `truncateRunes` cuts every stored string to
-  `dlnaLoggedFieldRunes` (100), on a rune boundary. The listener reads
+  `dlnaLoggedFieldRunes` (100), on a rune boundary. A cut is a copy
+  (`strings.Clone`), so the entry does not keep the rest of the header;
+  a string that already fits is stored as it arrived. The listener reads
   at most 16 KiB of headers. net/http's `initialReadLimitSize` (Go
   1.26.6) is `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
   `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
@@ -5407,6 +5409,7 @@ no failing test — which is the shape to expect in this area.
   `TestARequestedCountUpToThePageIsReturnedWhole`,
   `TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`,
   `TestTelemetryKeepsAHundredRunesOfEachHeader`,
+  `TestRecordReleasesTheRestOfACutHeader`,
   `TestTheListenerRefusesAnOversizedHeader`,
   `TestAHeaderPastTheReadLimitIsRefusedAndAnOrdinaryOneIsAnswered`,
   `TestTheListenerUsesTheAPIDeadlines`,

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // startLoopbackDLNA boots a real listener on 127.0.0.1 with its SSDP
@@ -261,6 +262,39 @@ func TestTelemetryKeepsAHundredRunesOfEachHeader(t *testing.T) {
 	checkRunes("Accept", e.AcceptHeader, accept)
 	checkRunes("Range", e.RangeHeader, rng)
 	checkRunes("ContentFeatures", e.ContentFeaturesAccept, features)
+}
+
+// TestRecordReleasesTheRestOfACutHeader stores a header past the rune
+// cut. The stored field is its own string, so the request's value is
+// not kept for the life of the ring. A field that fits is the string
+// Record was given.
+func TestRecordReleasesTheRestOfACutHeader(t *testing.T) {
+	full := strings.Repeat("é", dlnaLoggedFieldRunes+50)
+	short := strings.Repeat("a", 40)
+	fitsInRunes := strings.Repeat("é", 60)
+	store := NewTelemetryStore(1)
+	store.Record(TelemetryEntry{
+		UserAgent: full,
+		Method:    short,
+		Path:      fitsInRunes,
+	})
+	snap := store.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("stored %d entries", len(snap))
+	}
+	got := snap[0].UserAgent
+	if unsafe.StringData(got) == unsafe.StringData(full) {
+		t.Fatal("stored User-Agent shares the original header")
+	}
+	if utf8.RuneCountInString(got) != dlnaLoggedFieldRunes || !strings.HasPrefix(full, got) {
+		t.Fatalf("stored %q, want the first %d runes of the header", got, dlnaLoggedFieldRunes)
+	}
+	if unsafe.StringData(snap[0].Method) != unsafe.StringData(short) {
+		t.Fatal("a field within the cut was copied")
+	}
+	if unsafe.StringData(snap[0].Path) != unsafe.StringData(fitsInRunes) {
+		t.Fatal("a field within the cut was copied")
+	}
 }
 
 // TestTheListenerRefusesAnOversizedHeader sends a User-Agent the default

@@ -39282,3 +39282,15 @@ The counts a control point sends, and the walk that pages by
 `TestAClientPagingByNumberReturnedCollectsEveryCappedTrackOnce`.
 `truncateRunes` ranges the string: a string no longer than n bytes is
 returned as it is, and n <= 0 leaves it unchanged.
+
+A cut returned `s[:i]`, which shares the header's backing array, so a
+ring entry kept the rest of a request header however short the stored
+field was. `TestRecordReleasesTheRestOfACutHeader` failed while
+`unsafe.StringData` of the stored User-Agent equalled the original's
+("stored User-Agent shares the original header"). The cut now returns
+`strings.Clone` of that prefix. A string that is not cut is returned
+as it arrived: one no longer than n bytes, one of at most n runes, and
+n <= 0. The same test keeps those two fields on the original's memory.
+Negative control, the clone replaced by `s[:i]` and the test restored
+after: `TestRecordReleasesTheRestOfACutHeader` failed again on that
+same line.
