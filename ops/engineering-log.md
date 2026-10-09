@@ -38612,3 +38612,98 @@ moved-row test goes red again.
 No `ExtractorVersion` bump and no `ProtocolVersion` bump. The wire
 answer for a sidecar this request could not open is still 410
 `variant_missing_on_disk`.
+
+## 2026-10-09 — trash and upload commit fail closed (backlog B180, B178, B179)
+
+Three ways a trash or upload request treated a missing answer as permission
+to change a file. Each fix is in the function that does the work, so a
+handler that returned early would have left the function green.
+
+### B180 — a present empty id list is not "purge everything"
+
+`Purge` expanded whenever `len(ids) == 0`. A nil list and a decoded
+`{"ids":[]}` are the same length, and the bodyless DELETE the console
+sends (no body, `ContentLength` 0) leaves the decoded slice nil. The
+empty slice purged every entry.
+
+`Purge` now returns `ErrInvalidPath` ("no entries given") when the slice
+is non-nil and empty. A nil list still lists every entry and purges it.
+`{"ids":null}` and `{}` decode as nil, so they stay the empty-trash
+action. The handler already maps `ErrInvalidPath` to 400; it does not
+check the list itself.
+
+### B178 — a path is not trimmed into a different name
+
+`validRel` and `splitID` ran `strings.TrimSpace` before they judged the
+path. A delete of `" Various/Album/01.flac"` addressed
+`Various/Album/01.flac`. Both now refuse a string `TrimSpace` would
+change, and `Trash` returns that error before any move, so one padded
+name in a batch moves nothing. A leading `/` is still stripped. A space
+inside a segment is a different string from `TrimSpace` of the whole
+path, and both validators still accept it.
+
+`ValidateRelPath` refused a trailing space on a segment and accepted a
+leading space on the path. It now refuses a path `TrimSpace` would
+change, so an upload cannot create a file the trash API then refuses to
+name. The accepted-path fuzz property requires the kept path to equal
+`TrimSpace` of itself.
+
+### B179 — a stat that is not "not found" is not room to replace
+
+`commitOne`, when the session does not overwrite, and `Restore` both
+went ahead unless `os.Stat` returned nil. Any other error, including a
+read of the destination that did not complete, fell through to the
+rename. Both now proceed only on `fs.ErrNotExist`. A nil error stays
+"a file already exists". Any other error is a per-file `failed` whose
+reason is the error after a `*fs.PathError` is unwrapped, so the
+absolute destination is not in it. An overwrite commit still skips the
+check.
+
+`Restore` took none of the commit's destination locks, so the two could
+pass the check and rename one path together. `LockDestination` is the
+commit lock. `WithDestinationLock` binds it after both managers exist
+(`upload.WithReclaimable` needs the trash manager first). The unlock
+runs before the next entry, including before the size stat after a
+successful rename. A nil lock, which the unit fixtures leave, restores
+without one.
+
+### Negative controls
+
+Each control mutated production code on commit 2031296e, ran the named
+tests with `-count=1`, and restored the file. Predicted names are the
+ones that must go red; the others in the same `-run` must stay green.
+
+- B180. `Purge` expands on `len(ids) == 0` and the empty-slice refusal
+  is gone. Predicted red: `TestAnEmptyIDListDoesNotEmptyTheTrash`,
+  `TestPurgeOfAnEmptySliceRefuses`. Actual: those two. The handler
+  answered 200 and reported both entries purged; `Purge([]string{})`
+  returned nil. `TestPurgeWithNoIDsEmptiesEverything` and
+  `TestPurgeIsWhatActuallyReclaims` stayed green.
+- B178. `validRel` assigns `strings.TrimSpace` again, and the pre-loop
+  that returns before any move is removed. Restoring the trim alone
+  leaves that loop in place: it sees the raw padded string, `validRel`
+  then succeeds, and the function returns before a move, which is a
+  200 that changes nothing. Removing the loop is what lets the trim
+  reach the file. Predicted red:
+  `TestAPaddedPathDoesNotTrashTheUnpaddedFile`. Actual: that test, with
+  status 200 and an outcome of `Various/Album/01.flac` trashed.
+  `TestTrashRefusesPathsOutsideTheRoot` and
+  `TestTrashRejectsTraversalAndDotSegments` stayed green.
+- B179, the stat. `commitOne` and `Restore` proceed on any stat error.
+  Predicted red: `TestACommitWhoseExistenceCheckHitsEIOLeavesTheFile`,
+  `TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile`. Actual: both.
+  The commit reported `Committed: 1` and the restore `OK: 1`.
+  `TestARestoreAndACommitToOnePathTakeTheSameDestinationLock`,
+  `TestCommitSkipsCollisionsUnlessOverwriteRequested` and
+  `TestRestoreRefusesToClobberAnExistingFile` stayed green.
+- B179, the lock. `Restore` does not call the destination lock.
+  Predicted red:
+  `TestARestoreAndACommitToOnePathTakeTheSameDestinationLock`. Actual:
+  that test, in 0.03s, "commit checked the destination while restore
+  held it". The 50ms wait was long enough; it was not lengthened.
+  `TestARestoreWhoseExistenceCheckHitsEIOLeavesTheFile` stayed green.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump. The purge and
+delete answers stay the codes they already had: 400 `invalid_request`
+for a refused request, and a per-file outcome when one file's check
+fails.
