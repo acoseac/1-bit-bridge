@@ -39492,8 +39492,8 @@ stereo DSD256 DSF of constant `0x69` (MPD's DSD silence byte), then
 Resuming music from held silence was clean. `0x00` is a full-scale
 offset and `0x96` is the other polarity; the measured byte is `0x69`.
 The iOS half (backlog B318) switches MPD onto this file. This change
-is the bridge half: the listener MPD already fetches cast files from
-serves the silence, and `/v1/health` says when it does.
+is the bridge half: the DLNA listener that MPD already fetches cast
+files from now serves the silence, and `/v1/health` says when it does.
 
 `GET` and `HEAD /dlna/silence/dsd/<fs>.dsf` mount beside
 `/dlna/silence.wav`. `<fs>` is the DSD rate in Hz, matched as the
