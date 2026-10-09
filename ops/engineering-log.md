@@ -38424,3 +38424,48 @@ Pins: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
 `TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
 `TestSweepTrustsRecordedActivityOverTheMetaMtime`,
 `TestSweepDoesNotRefreshActivityOnAnIdempotentResend`.
+
+Negative controls, each a production-only mutation on `e23c3b9e`, restored
+with `git checkout HEAD` before the next. Predicted names are the ones
+written down before the run.
+
+(a) A readable session aged from `CreatedAt` again (the absolute cap left
+in place). Predicted red: `TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`. Actual: those four.
+The hourly session was removed with its idle sibling (`Sweep removed 2
+sessions, want 1`). The cap test failed inside the cap (`Sweep = 1, want
+0`), because 167h is already past the 24h idle window. The pre-change meta
+test and the mtime-ranking test each removed both sessions.
+
+(b) The absolute cap removed (`sessionMaxAge` left declared so the cap
+test still compiles). Predicted red:
+`TestSweepRemovesASessionPastTheAgeCapWhileItIsStillActive`,
+`TestSweepCapFollowsALongerIdleTTL`. Actual: those two (`past the cap
+Sweep removed 0, want 1` and `past the raised cap Sweep removed 0, want
+1`). The longer-TTL test depends on the cap: its last chunk is inside the
+14-day idle window.
+
+(c) A zero `UpdatedAt` no longer read the meta mtime. Predicted red:
+`TestSweepReadsMetaMtimeWhenNoActivityWasRecorded`. Actual: that one
+(`Sweep removed 2, want 1`).
+
+(d) An idempotent resend rewrote `UpdatedAt`. Predicted red:
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`. Actual: that one,
+and nothing else in the package (`Sweep removed 0, want 1`).
+
+(e) A meta file's mtime replaced a recorded `UpdatedAt`. Predicted red:
+`TestSweeperUsesManifestAgeNotFileMtime`,
+`TestSweepKeepsASessionThatKeepsReceivingChunks`,
+`TestSweepRemovesASessionIdlePastTheTTL`,
+`TestSweepTrustsRecordedActivityOverTheMetaMtime`,
+`TestSweepDoesNotRefreshActivityOnAnIdempotentResend`. Actual red: the
+last four. The hourly, idle and resend tests stayed alive because the
+meta's wall-clock mtime is later than the fake clock. The ranking test
+swept the session whose `UpdatedAt` was recent and whose mtime had been
+back-dated (`recorded activity: upload: session not found`).
+`TestSweeperUsesManifestAgeNotFileMtime` stayed green: activity is still
+the later of `CreatedAt` and the mtime, and that test's `CreatedAt` is
+the write clock, so an older mtime does not move it. The ranking test is
+the one that separates the two clocks.
