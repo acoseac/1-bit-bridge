@@ -429,3 +429,49 @@ func TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder(t *testing.T) 
 		}
 	})
 }
+
+// A trash whose root record cannot be written, and whose file cannot be
+// moved back, has already left the library path. The handler must retire
+// that row and rescan the folder, the same as a trash that recorded its root.
+func TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder(t *testing.T) {
+	restore := trash.SetTrashWriteSeamsForTest(
+		func(string, string, string, string) error { return os.ErrInvalid },
+		func(string, string) error { return os.ErrInvalid },
+	)
+	t.Cleanup(restore)
+
+	srv, cfg, _ := newTestServer(t)
+	h := srv.Handler()
+	enableDelete(t, srv, true)
+	wireTrash(t, srv)
+	root := cfg.LibraryRoots[0]
+	seedLibraryFile(t, root, "Artist/Album/01.flac", "audio!")
+	seedLibraryFile(t, root, "Artist/Album/02.flac", "audio!")
+	tr := manifest.Track{Path: "Artist/Album/01.flac", Size: 6}
+	if err := srv.deps.Manifest.UpsertTrack(t.Context(), &tr); err != nil {
+		t.Fatal(err)
+	}
+
+	var res trashResultDTO
+	if code := doJSON(t, h, http.MethodPost, "/api/library/trash",
+		map[string]any{"paths": []string{"Artist/Album/01.flac"}}, &res); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if res.Failed != 1 || res.OK != 0 || len(res.Outcomes) != 1 ||
+		res.Outcomes[0].Status != "failed" || !strings.Contains(res.Outcomes[0].Reason, "still in the trash") {
+		t.Fatalf("outcome = %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Artist", "Album", "01.flac")); !os.IsNotExist(err) {
+		t.Fatalf("file still at the library path: %v", err)
+	}
+
+	got, err := srv.deps.Manifest.GetTrack(t.Context(), "Artist/Album/01.flac")
+	if err != nil || got != nil {
+		t.Fatalf("row still served: %+v %v", got, err)
+	}
+	srvBgScansWait(srv)
+	sib, err := srv.deps.Manifest.GetTrack(t.Context(), "Artist/Album/02.flac")
+	if err != nil || sib == nil {
+		t.Fatalf("folder was not rescanned: %+v %v", sib, err)
+	}
+}

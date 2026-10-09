@@ -54,6 +54,26 @@ var (
 	moveBack    = atomicwrite.RenameWithRetry
 )
 
+// SetTrashWriteSeamsForTest replaces the root-record writer and the move
+// back, and returns the function that restores both. A nil argument leaves
+// that seam as it is. The seams are process-global, so a test that calls
+// this must not run in parallel.
+func SetTrashWriteSeamsForTest(
+	origin func(trashDir, audio, root, rel string) error,
+	back func(from, to string) error,
+) (restore func()) {
+	prevOrigin, prevBack := writeOrigin, moveBack
+	if origin != nil {
+		writeOrigin = origin
+	}
+	if back != nil {
+		moveBack = back
+	}
+	return func() {
+		writeOrigin, moveBack = prevOrigin, prevBack
+	}
+}
+
 // DirName is the per-root trash directory. The leading dot is load-bearing.
 const DirName = ".bridge-trash"
 
@@ -287,6 +307,22 @@ func spellRel(spellers map[string]*fsutil.Speller, root, rel, suffix string) (st
 	return rel[:len(rel)-len(suffix)] + spelled, nil
 }
 
+// noteLeftLibrary records a file that is no longer at its library path.
+// Paths is what the handler retires; the directory is the folder it
+// rescans. A spelling that could not be read is a full scan, and the path
+// kept is the one the client named.
+func noteLeftLibrary(res *Result, dirs map[string]struct{}, spelled string, spellErr error, rel string) {
+	if spellErr != nil {
+		res.FullScan = true
+		logger.Warn("trash: the path's spelling on disk cannot be read; the library will be rescanned",
+			"path", rel, "err", spellErr)
+	}
+	res.Paths = append(res.Paths, spelled)
+	if d := path.Dir(spelled); d != "." {
+		dirs[d] = struct{}{}
+	}
+}
+
 // Trash moves the given library-relative paths into the trash.
 //
 // `rootWant` constrains rather than selects: each path names its own root (see
@@ -402,6 +438,11 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			if moveBack(dst, src) != nil {
 				logger.Warn("trash: the file could not be moved back after its root record failed", "path", rel)
 				out.Status, out.Reason = "failed", originLeftInTrash
+				// The file has already left the library path. The handler
+				// retires and rescans from the same fields a completed trash
+				// sets. A file that came back does not: its row still names
+				// a file that is there.
+				noteLeftLibrary(res, dirs, spelled, spellErr, rel)
 			} else {
 				if root != "" {
 					m.pruneEmptyStamp(root, stamp)
@@ -412,18 +453,10 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		if spellErr != nil {
-			res.FullScan = true
-			logger.Warn("trash: the path's spelling on disk cannot be read; the library will be rescanned",
-				"path", rel, "err", spellErr)
-		}
+		noteLeftLibrary(res, dirs, spelled, spellErr, rel)
 		out.Status, out.Bytes = "trashed", info.Size()
 		res.OK++
 		res.Bytes += info.Size()
-		res.Paths = append(res.Paths, spelled)
-		if d := path.Dir(spelled); d != "." {
-			dirs[d] = struct{}{}
-		}
 		res.Outcomes = append(res.Outcomes, out)
 	}
 	for d := range dirs {

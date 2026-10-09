@@ -1036,6 +1036,9 @@ func TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp(t *testing.T) {
 	if res.Failed != 1 || res.OK != 0 || res.Outcomes[0].Reason != originWriteFailed {
 		t.Fatalf("trash = %+v", res.Outcomes)
 	}
+	if len(res.Paths) != 0 || len(res.Dirs) != 0 || res.FullScan {
+		t.Fatalf("a file that came back was recorded as gone: %+v", res)
+	}
 	wantFile(t, filepath.Join(root, "Artist", "Album", "01.flac"), "audio")
 	stamps, err := os.ReadDir(filepath.Join(root, DirName))
 	if err != nil || len(stamps) != 0 {
@@ -1057,6 +1060,10 @@ func TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash(t *testing.T
 	}
 	if res.Failed != 1 || res.OK != 0 || res.Outcomes[0].Reason != originLeftInTrash {
 		t.Fatalf("trash = %+v", res.Outcomes)
+	}
+	if len(res.Paths) != 1 || res.Paths[0] != "Artist/Album/01.flac" ||
+		len(res.Dirs) != 1 || res.Dirs[0] != "Artist/Album" || res.FullScan {
+		t.Fatalf("result = %+v", res)
 	}
 	wantAbsent(t, filepath.Join(root, "Artist", "Album", "01.flac"))
 	if got := mustSoleTrashed(t, m); got.OriginalPath != "Artist/Album/01.flac" {

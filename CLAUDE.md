@@ -8884,7 +8884,10 @@ its twin.** The top list is older, shorter, and read first.
   stamp directory is removed and the entry fails with the record reason.
   When the move back fails, the file stays in `.bridge-trash`, a warning
   is logged, and the entry fails with a reason that says it is still in
-  the trash.
+  the trash. That result still carries the spelled path and the folder,
+  as a completed trash does, so the handler retires the row and rescans;
+  a spelling that could not be read is a full scan. A file that came back
+  records neither.
   (`TestRestoreAfterARootCollapsePutsTheFileBackUnderTheSurvivingRoot`,
   `TestRestoreAfterARootIsAddedKeepsAFolderNamedLikeTheRoot`,
   `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder`,
@@ -8895,6 +8898,7 @@ its twin.** The top list is older, shorter, and read first.
   `TestATornRootRecordIsRefused`,
   `TestAFailedRootRecordMovesTheFileBackAndRemovesTheStamp`,
   `TestAFailedRootRecordWhoseMoveBackFailsLeavesTheFileInTheTrash`,
+  `TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder`,
   `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
   `TestAnOriginRecordOutsideTheTrashIsNotRemoved`,
   `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.)

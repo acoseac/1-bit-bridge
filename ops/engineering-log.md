@@ -39077,7 +39077,10 @@ remainder that leaves the trash directory is refused. A trash whose
 record cannot be written attempts to move the file back and fails that
 entry. When the move back succeeds, the empty stamp directory is removed.
 When it fails, the file remains in `.bridge-trash` and a warning is
-logged. No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+logged. That result still carries the spelled path and the folder, as a
+completed trash does, so the handler retires the row and rescans; a
+spelling that could not be read is a full scan. A file that came back
+records neither. No `ExtractorVersion` bump and no `ProtocolVersion` bump.
 
 ### Negative controls
 
