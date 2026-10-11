@@ -3670,13 +3670,27 @@ no failing test — which is the shape to expect in this area.
   settings option, `validateUpscaleTarget`, `SetUpscaleTarget`,
   `EffectiveTargetBits`): a build whose STREAMINFO is 32 publishes that
   file, and one that falls back fails the job. DSD optimize targets 16 and
-  the PCM render targets 24, both through the same check. A mismatch is the
-  run's failure and strikes the source, as a wrong rate does: three strikes
-  suppress that file from every rendition kind for 30 days.
+  the PCM render targets 24, both through the same check. The publish is
+  refused, the file is labelled from STREAMINFO, and a depth fallback is a
+  host fact: no strike, one report. `depthMismatchError` wraps
+  `ErrRenditionIncomplete` (a batch still drains on that error) and
+  `processJob` classifies it by type, after an unwritable output and before
+  a changed source: counted and announced, `RecordVariantFailure` not
+  called. The outage is keyed on the depth asked for. The first job Warns
+  (`FLAC32EncodeFix` when that depth is 32: set the target to 24, or
+  install a sox that can encode 32-bit FLAC); later jobs of that depth are
+  Debug. A published file proves only the depth its STREAMINFO names, so a
+  16-bit success does not end a 32-bit streak. A wrong rate keeps its
+  strike: sox writes ordinary rates, and that mismatch is the pipeline.
+  A config that names 32 still loads. `bridge doctor`'s `flac-32-bit` line
+  probes only when the target is 32 and warns, never fails, with the same
+  sentence. Three fallback jobs leave the source unstruck; a later job at
+  a depth the writer can make publishes.
   `TestRunPublishesOnlyAWholeRendition` ("another bit depth"),
   `TestARenditionOfAnotherBitDepthIsNotPublished`,
   `TestAWholeRenditionIsLabelledFromItsStream`,
-  `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`.
+  `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`,
+  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitOnTheHost`.
 - **A PCM job's `-G` file lands in the configured temp dir, and a short
   rendition whose temp volume cannot hold it is the host's** (2026-10-08,
   backlog B270). `soxArgsFrom` puts `--temp` and `renderScratchDir` ahead

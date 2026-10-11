@@ -12,19 +12,19 @@ import (
 // reported by the first one's Warn alone.
 const outageRewarnAfter = 24 * time.Hour
 
-// outageStreaks is the per-key streak record behind the pool's two reports of
-// jobs that failed for a fact about this HOST rather than their source: the
-// tools it lacks (toolOutages) and the output directories it cannot write
-// (outputOutages). It is the M-SEARCH rule (discovery.SendFailureLog) applied
+// outageStreaks is the per-key streak record behind the pool's reports of
+// jobs that failed for a fact about this HOST rather than their source: a
+// tool it lacks (toolOutages), an output directory it will not let a job
+// write (outputOutages), and a FLAC bit depth its sox cannot encode
+// (depthOutages). It is the M-SEARCH rule (discovery.SendFailureLog) applied
 // per key: a key's streak starts with the first job that fails for it, counts
 // every job after, and ends when a job proves the key over. Its owner reports
 // the start at Warn (and again after outageRewarnAfter of silence), the jobs
 // between at Debug, and the end at Info, so a queue of 5,000 jobs behind one
 // fault logs one Warn instead of 5,000.
 //
-// One record for both reports, so the two cannot drift on when a streak
-// warns or ends; each report keeps its own keys, its own proof and its own
-// words.
+// One record for the reports, so they cannot drift on when a streak warns or
+// ends; each report keeps its own keys, its own proof and its own words.
 type outageStreaks[K comparable, F any] struct {
 	mu   sync.Mutex
 	open map[K]*outageStreak[F]

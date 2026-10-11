@@ -325,7 +325,7 @@ func TestRun_FullReportShape(t *testing.T) {
 		"platform", "config-file", "config-dir", "tls-cert", "tls-cert-sans",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
-		watchLimitRow, "audio-toolchain", "dsd-render-toolchain",
+		watchLimitRow, "audio-toolchain", "flac-32-bit", "dsd-render-toolchain",
 		"fingerprint-toolchain", "log-file-size", "sidecar-paths",
 		"variants-index",
 	}

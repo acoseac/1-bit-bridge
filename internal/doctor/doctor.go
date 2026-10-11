@@ -67,6 +67,9 @@ const (
 	checkNameServiceManager = "service-manager"
 	checkNameBrowserOpener  = "browser-opener"
 	checkNameAudioToolchain = "audio-toolchain"
+	// checkNameFLAC32 is the probe of whether this host's sox can write a
+	// 32-bit FLAC, asked only when the upscale target is 32.
+	checkNameFLAC32 = "flac-32-bit"
 	// checkNameDSDRenderToolchain is the ffmpeg-decoder check behind the
 	// DSD → PCM renditions (`upscale.dsdRender.enabled`).
 	checkNameDSDRenderToolchain = "dsd-render-toolchain"
@@ -226,6 +229,12 @@ type Deps struct {
 	// job at runtime). Both false → the check is a no-op "not enabled".
 	UpscaleEnabled  bool
 	AnalysisEnabled bool
+	// UpscaleTargetBits is the resolved upscale bit depth
+	// (config.UpscaleConfig.EffectiveTargetBits). Zero means no config
+	// was loaded, and checkFLAC32Bit then skips the probe. 32 is the
+	// only value that runs it: a target the host's sox cannot encode
+	// warns, and the config still loads.
+	UpscaleTargetBits int
 
 	// DSDRenderEnabled mirrors cfg.Upscale.DSDRender.Enabled (folded with
 	// cfg.Upscale.Enabled by the caller — the master toggle covers it).
@@ -356,6 +365,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkBrowserOpener,
 		checkWatchLimit,
 		checkAudioToolchain,
+		checkFLAC32Bit,
 		checkDSDRenderToolchain,
 		checkFingerprintToolchain,
 		checkLogSize,
@@ -1232,6 +1242,9 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 var (
 	probeSox      = transcode.ProbeSox
 	missingFFmpeg = transcode.MissingFFmpegBinaries
+	// probeFLAC32 is the test seam for checkFLAC32Bit. Production MUST NOT
+	// mutate it.
+	probeFLAC32 = transcode.CanEncodeFLAC32
 )
 
 // checkAudioToolchain verifies the sox dependency for the offline-decode
@@ -1291,6 +1304,32 @@ func checkAudioToolchain(ctx context.Context, d Deps) Check {
 		return ok(checkNameAudioToolchain, fmt.Sprintf("sox %s, FLAC supported", info.Version))
 	}
 	return ok(checkNameAudioToolchain, "sox present, FLAC supported")
+}
+
+// checkFLAC32Bit warns when the upscale target is 32-bit and this host's sox
+// cannot write a FLAC whose STREAMINFO names 32 bits. sox 14.4.2 exits 0
+// after that refusal and writes a shallower stream, so every such job would
+// fail. The warning names the same fix as the pool's outage report. A target
+// that is not 32, including an unloaded config (0), is ok and runs no probe.
+// A cancelled check is ok rather than a false warning about the host. The
+// config is not refused: a loaded target of 32 must keep loading.
+func checkFLAC32Bit(ctx context.Context, d Deps) Check {
+	if d.UpscaleTargetBits != 32 {
+		if d.UpscaleTargetBits == 0 {
+			return ok(checkNameFLAC32, "not targeting 32-bit FLAC")
+		}
+		return ok(checkNameFLAC32, fmt.Sprintf("target is %d-bit", d.UpscaleTargetBits))
+	}
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	can, err := probeFLAC32(pctx)
+	if ctx.Err() != nil {
+		return ok(checkNameFLAC32, "32-bit FLAC probe was interrupted")
+	}
+	if err != nil || !can {
+		return warn(checkNameFLAC32, "sox cannot encode 32-bit FLAC", transcode.FLAC32EncodeFix)
+	}
+	return ok(checkNameFLAC32, "sox encodes 32-bit FLAC")
 }
 
 // libraryHasALAC asks the manifest whether any indexed track is ALAC.

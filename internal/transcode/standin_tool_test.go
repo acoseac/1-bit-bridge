@@ -195,10 +195,12 @@ func checkStruck(t *testing.T, a *announcingPool, rel string, announced []string
 // TestRunPublishesOnlyAWholeRendition drives Run with a sox that exits 0
 // whatever it wrote, on every platform. Only the positive control may be
 // published. A stream cut short (what a full volume left) is the output
-// side's fault, which strikes nothing; the rest is the run's, which strikes:
-// a stream the tool finished at a length the source disagrees with while
-// the temp volume can hold the -G file, at another rate, at another bit
-// depth, or no FLAC at all. The same short stream is the temp volume's
+// side's fault, which strikes nothing. A stream at another bit depth is the
+// host's sox: Run still refuses it, and the pool strikes nothing (the pool
+// test). The rest is the run's, which strikes: a stream the tool finished
+// at a length the source disagrees with while the temp volume can hold the
+// -G file, at another rate, or no FLAC at all. The same short stream is the
+// temp volume's
 // when the probed duration asks for a guard file larger than the free
 // space.
 func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
@@ -243,6 +245,9 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 				want = tc.rendition
 			}
 			checkRunVerdict(t, spec, err, want, tc.outputs)
+			if _, marked := depthMismatch(err); marked != (tc.name == "another bit depth") {
+				t.Errorf("depth mismatch classified = %v", marked)
+			}
 			if !tc.published {
 				return
 			}
@@ -287,21 +292,57 @@ func TestACutRenditionStrikesNothingAndAShortOneStrikes(t *testing.T) {
 
 // TestARenditionOfAnotherBitDepthIsNotPublished is the pool's half of the
 // mislabel. The stand-in sox exits 0 after writing a whole 16-bit stream at
-// the rate and length a 24-bit job asked for. Three such jobs fail and
-// strike the source, the same as a stream at another rate, and no row
-// records 24-bit samples over that file.
+// the rate and length a 32-bit job asked for, which is what sox 14.4.2 does
+// after "flac can't encode to 32-bit". Three such jobs fail, strike nothing,
+// and log the outage once. A later job whose target is the depth the writer
+// can make publishes that file.
 func TestARenditionOfAnotherBitDepthIsNotPublished(t *testing.T) {
 	body := flactest.Stream(176400, 2, 16, flactest.Block, 0)
 	standInsWriting(t, body, "0.023220\n")
 	spec := sourceFile(t, "Album/01.flac")
+	spec.TargetBits = 32
 	a := newAnnouncingPool(t, spec.SourceLibraryRel)
-	checkStruck(t, a, spec.SourceLibraryRel, a.run(t, spec, 3), true)
+	announced := a.run(t, spec, 3)
+	for i, line := range announced {
+		if !strings.HasPrefix(line, "failed:") {
+			t.Fatalf("job %d announced %q, want a failure", i, line)
+		}
+	}
+	suppressed, records := a.strikes(t, spec.SourceLibraryRel)
+	if suppressed != 0 || records != 0 {
+		t.Fatalf("%d suppressed, %d strike record(s); want the source unstruck", suppressed, records)
+	}
+	warns := a.lines("WARN", logDepthMismatch)
+	if len(warns) != 1 || !strings.Contains(warns[0], FLAC32EncodeFix) {
+		t.Fatalf("depth outage warns = %q, want one naming the fix", warns)
+	}
+	if n := len(a.lines("DEBUG", logDepthMismatch)); n != 2 {
+		t.Fatalf("depth outage debug lines = %d, want 2", n)
+	}
+	if n := len(a.lines("WARN", "pool: sox failed")); n != 0 {
+		t.Fatalf("strike warns = %d, want 0", n)
+	}
 	rows, err := a.store.ListVariantsForPath(context.Background(), spec.SourceLibraryRel)
 	if err != nil {
 		t.Fatalf("ListVariantsForPath: %v", err)
 	}
 	if len(rows) != 0 {
-		t.Fatalf("stored %d variant(s) at %d-bit; want none", len(rows), rows[0].BitsPerSample)
+		t.Fatalf("stored %d variant(s); want none", len(rows))
+	}
+	spec16 := spec
+	spec16.TargetBits = 16
+	if announced = a.run(t, spec16, 1); len(announced) != 1 || announced[0] != "done" {
+		t.Fatalf("16-bit job announced %v, want done", announced)
+	}
+	rows, err = a.store.ListVariantsForPath(context.Background(), spec.SourceLibraryRel)
+	if err != nil {
+		t.Fatalf("ListVariantsForPath: %v", err)
+	}
+	if len(rows) != 1 || rows[0].BitsPerSample != 16 {
+		t.Fatalf("published %+v, want one 16-bit row", rows)
+	}
+	if n := len(a.lines("INFO", logDepthBack)); n != 0 {
+		t.Fatalf("a 16-bit publish ended the 32-bit outage (%d info lines)", n)
 	}
 }
 

@@ -249,6 +249,10 @@ type Pool struct {
 	// write, the same way (output_fault.go). The zero value is ready.
 	outputs outputOutages
 
+	// depths reports a sox that wrote a shallower FLAC than the job asked
+	// for, once per asked depth (depth_mismatch.go). The zero value is ready.
+	depths depthOutages
+
 	// Coalescing publisher (CLAUDE.md: "Bounded SSE publisher
 	// goroutine for transcode events"). Replaces the prior pattern
 	// of spawning a fresh `go fire()` goroutine per state transition,
@@ -1379,6 +1383,16 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			p.outputs.fail(fault, job.spec.SourceLibraryRel, msg)
 			return
 		}
+		// A finished FLAC shallower than the job asked for is the host's
+		// sox, not the file: sox 14.4.2 refuses 32-bit FLAC on every input,
+		// exits 0, and writes a shallower stream. Counted and announced, no
+		// strike, one report per asked depth (depth_mismatch.go). A wrong
+		// rate stays on the strike path below: sox writes ordinary rates,
+		// so that mismatch is the pipeline, not a host-wide encode refusal.
+		if mismatch, ok := depthMismatch(err); ok {
+			p.depths.fail(mismatch.wrote, mismatch.asked, job.spec.SourceLibraryRel, msg)
+			return
+		}
 		// A source that changed after its row was written, found by Run
 		// before it rendered or before it published (source_version.go), is
 		// a fact about the file's VERSION: the job failed, and is counted and
@@ -1401,7 +1415,8 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// excluded by the closed check above, the timeout exit is
 		// excluded because a deadline says as much about a hung mount as
 		// about the source, and a missing tool, an output directory this
-		// host refuses and a changed source by the three exits just above.
+		// host refuses, a FLAC bit depth its sox cannot encode and a
+		// changed source by the exits just above.
 		// A failed job writes no variant row, so without
 		// this the candidate queries re-select the same doomed source on
 		// every sweep, forever. Suppression needs `variantFailureThreshold`
@@ -1425,8 +1440,11 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	}
 	// The run's chain started every tool it needed and saw them through, so
 	// any outage of those tools is over. Here rather than after the commit:
-	// a fsync or store failure below says nothing about the tools.
+	// a fsync or store failure below says nothing about the tools. A
+	// published depth ends only the outage of that depth: a 16-bit file
+	// does not prove this host can encode 32-bit FLAC.
 	p.outages.proven(settings)
+	p.depths.proven(bits)
 
 	sidecarPath := job.spec.SidecarPath()
 
