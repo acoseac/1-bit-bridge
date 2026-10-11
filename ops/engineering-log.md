@@ -39688,3 +39688,68 @@ holding the slots, and the release wait is `DSDSilenceMaxStreams`
 plus each such probe. The count of releases is exact. The hook's wake
 does not block: a full wake buffer drops the wake, and the waiter
 reads the count.
+
+## 2026-10-11 — a rendition is labelled from the bit depth its STREAMINFO names (backlog B271)
+
+sox's FLAC writer cannot write 32 bits. It falls back and still exits 0, so a
+job targeting 32-bit published a shallower file under a 32-bit label. B264's
+completeness check (`wholeRendition`) compared the sample rate and required a
+whole stream, and the pool recorded `BitsPerSample: job.spec.TargetBits`.
+
+### Measured (this Mac)
+
+Homebrew sox 14.4.2_6, linked to libFLAC 1.5.0 (`libFLAC.14.dylib`,
+compatibility version 15.0.0). `sox --version` prints `SoX v` and nothing
+after it; the version is the Cellar formula. libFLAC 1.5.0 can encode 32-bit
+FLAC; sox 14.4.2's own handler refuses before that.
+
+| Source | Request | Exit | STREAMINFO |
+|---|---|---|---|
+| 16-bit, 44.1 kHz | `-b 16` | 0 | 16 |
+| 16-bit, 44.1 kHz | `-b 24` | 0 | 24 |
+| 16-bit, 44.1 kHz | `-b 32` | 0 | 16, stderr `sox WARN formats: flac can't encode to 32-bit`; `metaflac --show-bps` 16; the file was the same size as the 16-bit encode (5245 bytes) |
+| 24-bit, 96 kHz | `-b 32` | 0 | 24, the same warning |
+
+The fallback is the source depth, so a check that assumed "32 becomes 16"
+would miss the second row. The comparison reads STREAMINFO.
+
+### Red, before the comparison
+
+A stand-in sox (`standInsWriting`) wrote a whole 16-bit FLAC at 176.4 kHz,
+one block, and exited 0. The job asked for 24. `Run` published it.
+`TestRunPublishesOnlyAWholeRendition/another_bit_depth` returned a nil error.
+Through the pool, `TestARenditionOfAnotherBitDepthIsNotPublished` announced
+`done`, struck nothing, and stored one variant labelled 24-bit.
+
+### The fix
+
+`wholeRendition` returns `ErrRenditionIncomplete` when
+`bitsPerSample != TargetBits`, immediately after the rate check and before
+`s.whole()`. `Run` and `renderStageC` both call it, and each copies
+`whole.info.bitsPerSample` onto `RunResult.BitsPerSample`. The pool records
+that depth on the variant row and the completion event when it is non-zero.
+A runner that did not read a file (the test stubs) reports 0, and the row
+keeps the job's target.
+
+A mismatch is the run's failure, the same path as a wrong rate: it strikes
+the source. `variantFailureThreshold` is 3 and `variantFailureTTL` is 30
+days, and a suppression covers every rendition kind of that file. The test
+runs the job three times, which is what reaches the suppression.
+
+32 stays an accepted upscale target. The places that offer it are `bridge
+upscale --target-bits`, the settings `<option value="32">`, both
+`validateUpscaleTarget` copies (the API and the batch coordinator),
+`SetUpscaleTarget`, and `EffectiveTargetBits`. Optimize and the DSD render do
+not offer it: `optimizeTargetBits` is 16 and `pcmRenderTargetBits` is 24, and
+both publish through `wholeRendition`. Refusing 32 on every host would reject
+a sox that writes a 32-bit STREAMINFO. A writer that does publishes the file;
+a writer that falls back fails the job.
+
+### Control
+
+With the comparison removed and the labelling left in place, both tests
+failed again. `Run` published. The pool announced `done` three times, struck
+nothing, and stored one variant at 16-bit: the row took STREAMINFO, and the
+variant id still named the 24-bit target. The comparison is what keeps that
+id off a shallower file. The comparison was put back, and the same tests
+passed.

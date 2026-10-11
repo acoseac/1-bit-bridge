@@ -1325,6 +1325,13 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// one that can drift.
 	res, err := p.runner(jobCtx, spec)
 	size, settings := res.SizeBytes, res.Settings
+	// A published file is labelled from the depth its STREAMINFO names
+	// (RunResult.BitsPerSample). A runner that did not read a file reports
+	// 0, and the row keeps the job's target.
+	bits := job.spec.TargetBits
+	if res.BitsPerSample > 0 {
+		bits = res.BitsPerSample
+	}
 	if err != nil {
 		// Drop cancellation noise — Stop() during graceful shutdown
 		// shouldn't count a failure or announce one.
@@ -1477,7 +1484,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		SidecarPath:   sidecarPath,
 		Format:        "flac",
 		SampleRate:    job.spec.TargetSampleRate,
-		BitsPerSample: job.spec.TargetBits,
+		BitsPerSample: bits,
 		SizeBytes:     size,
 		SourceMTimeNS: job.spec.SourceMTimeNS,
 		SourceSize:    job.spec.SourceSize,
@@ -1548,7 +1555,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		path:            job.spec.SourceLibraryRel,
 		variantID:       job.spec.VariantID(),
 		sampleRate:      job.spec.TargetSampleRate,
-		bitsPerSample:   job.spec.TargetBits,
+		bitsPerSample:   bits,
 		completedAt:     completedAt,
 		durationSeconds: completedAt.Sub(startedAt).Seconds(),
 		batchID:         job.spec.BatchID,

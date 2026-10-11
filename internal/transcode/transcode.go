@@ -1235,7 +1235,8 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 			return RunResult{}, err
 		}
 	}
-	if err := j.verifyRendition(ctx, route, geo, tmpPath, sidecarDir); err != nil {
+	whole, err := j.verifyRendition(ctx, route, geo, tmpPath, sidecarDir)
+	if err != nil {
 		return RunResult{}, err
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
@@ -1250,22 +1251,24 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		"path", j.SourceLibraryRel,
 		"variant", j.VariantID(),
 		"sidecar_bytes", size)
-	return RunResult{SizeBytes: size, Settings: settings}, nil
+	return RunResult{SizeBytes: size, Settings: settings, BitsPerSample: whole.info.bitsPerSample}, nil
 }
 
 // verifyRendition proves the rendition sox wrote at tmpPath whole before
-// Run publishes it. sox exits 0 after a write it could not make (a variants
-// volume that filled, or its own -G temporary file), so its exit status says
-// nothing about the file: it is read, and published only whole, at the
-// length its source implies (rendition_complete.go).
-func (j JobSpec) verifyRendition(ctx context.Context, route decodeRoute, geo sourceGeometry, tmpPath, sidecarDir string) error {
+// Run publishes it, and returns the stream it read so the published row
+// is labelled from that file's STREAMINFO. sox exits 0 after a write it
+// could not make (a variants volume that filled, or its own -G temporary
+// file), so its exit status says nothing about the file: it is read, and
+// published only whole, at the length and bit depth its job asked for
+// (rendition_complete.go).
+func (j JobSpec) verifyRendition(ctx context.Context, route decodeRoute, geo sourceGeometry, tmpPath, sidecarDir string) (flacStream, error) {
 	whole, err := j.wholeRendition(tmpPath, sidecarDir)
 	if err != nil {
-		return err
+		return flacStream{}, err
 	}
 	if route != routeFFmpegPipe {
 		got := probeDuration(ctx, j.SourceAbsPath)
-		return j.guardTempShort(got, j.SourceChannels, j.renditionLengthDisagrees(got, whole))
+		return whole, j.guardTempShort(got, j.SourceChannels, j.renditionLengthDisagrees(got, whole))
 	}
 	// ffmpeg exits 0 on a truncated-but-openable source too, so the pipe's
 	// reference is what the container claims: a whole stream shorter than
@@ -1274,10 +1277,10 @@ func (j JobSpec) verifyRendition(ctx context.Context, route decodeRoute, geo sou
 	// shape internal/analyze uses.
 	produced := whole.seconds()
 	if decodeLengthDisagrees(geo.Duration, produced) {
-		return j.guardTempShort(geo.Duration, geo.Channels, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+		return flacStream{}, j.guardTempShort(geo.Duration, geo.Channels, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
 			ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel))
 	}
-	return nil
+	return whole, nil
 }
 
 // SoxInfo is the result of ProbeSox: where sox lives, its version, and —

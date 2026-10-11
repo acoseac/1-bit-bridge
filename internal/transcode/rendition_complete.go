@@ -35,7 +35,10 @@ import (
 // expected length into it before the audio, and only a finished stream
 // rewrites it). A stream is whole when it ends with an intact frame at the
 // sample its STREAMINFO declares; a whole stream must then hold the length
-// its source implies (the route's own reference: renderLength).
+// its source implies (the route's own reference: renderLength). Its
+// STREAMINFO bit depth must be the depth the job asked for. sox 14.4.2
+// exits 0 after "flac can't encode to 32-bit" and writes a shallower
+// stream (backlog B271).
 //
 // A stream cut short is a write the tool made that failed. Nothing in a
 // source can make a write fail, but its size can (a file larger than the
@@ -68,10 +71,13 @@ const outputProbeBytes = 64 << 10
 // wholeRendition reads the FLAC a render's tool wrote at path, in the
 // sidecar directory dir, and returns what it holds when it is the whole
 // rendition j asked for: a stream the tool finished, at the job's target
-// rate (the length is judged at that rate). A stream cut short is the output
-// side's answer (cutOutput); anything else wraps ErrRenditionIncomplete. The
-// bit depth is not this check's: it says nothing about whether the stream
-// is whole.
+// rate and bit depth (the length is judged at that rate). A stream cut
+// short is the output side's answer (cutOutput). A stream at another rate
+// or bit depth wraps ErrRenditionIncomplete and is the run's failure, so
+// the source is struck, as a file at another rate already was. The depth
+// is compared before the stream is asked whether it is whole, beside the
+// rate, so a file the writer finished at the wrong depth is not reported
+// as a cut.
 func (j JobSpec) wholeRendition(path, dir string) (flacStream, error) {
 	s, err := readFLACStream(path)
 	if err != nil {
@@ -83,6 +89,10 @@ func (j JobSpec) wholeRendition(path, dir string) (flacStream, error) {
 	if s.info.sampleRate != j.TargetSampleRate {
 		return flacStream{}, fmt.Errorf("%w: the tool wrote %d Hz, the job asked for %d Hz (%s)",
 			ErrRenditionIncomplete, s.info.sampleRate, j.TargetSampleRate, j.SourceLibraryRel)
+	}
+	if s.info.bitsPerSample != j.TargetBits {
+		return flacStream{}, fmt.Errorf("%w: the tool wrote %d-bit samples, the job asked for %d (%s)",
+			ErrRenditionIncomplete, s.info.bitsPerSample, j.TargetBits, j.SourceLibraryRel)
 	}
 	if !s.whole() {
 		return flacStream{}, cutOutput(outputVariants, dir, path,

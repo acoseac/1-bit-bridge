@@ -3655,6 +3655,28 @@ no failing test — which is the shape to expect in this area.
   `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`,
   `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
+- **…and the published file's bit depth is the depth its STREAMINFO names,
+  compared with the job's target before the publish** (2026-10-11, backlog
+  B271). B264's check compared the rate and the frame, and the pool recorded
+  `job.spec.TargetBits`. sox 14.4.2 exits 0 after `flac can't encode to
+  32-bit` and writes a shallower stream: on this Mac (Homebrew sox
+  14.4.2_6, libFLAC 1.5.0) a 16-bit source came back 16-bit and a 24-bit
+  source came back 24-bit, both with that warning. `wholeRendition` refuses
+  when `bitsPerSample` disagrees with `TargetBits`, beside the rate check
+  and before `s.whole()`, so `Run` and `renderDSD` both see it. The row and
+  the completion event take `RunResult.BitsPerSample` (the stream that
+  passed); a stub that reports 0 keeps the job's target. **32 stays
+  accepted** wherever an upscale target is chosen (the CLI flag, the
+  settings option, `validateUpscaleTarget`, `SetUpscaleTarget`,
+  `EffectiveTargetBits`): a build whose STREAMINFO is 32 publishes that
+  file, and one that falls back fails the job. DSD optimize targets 16 and
+  the PCM render targets 24, both through the same check. A mismatch is the
+  run's failure and strikes the source, as a wrong rate does: three strikes
+  suppress that file from every rendition kind for 30 days.
+  `TestRunPublishesOnlyAWholeRendition` ("another bit depth"),
+  `TestARenditionOfAnotherBitDepthIsNotPublished`,
+  `TestAWholeRenditionIsLabelledFromItsStream`,
+  `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`.
 - **A PCM job's `-G` file lands in the configured temp dir, and a short
   rendition whose temp volume cannot hold it is the host's** (2026-10-08,
   backlog B270). `soxArgsFrom` puts `--temp` and `renderScratchDir` ahead

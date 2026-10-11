@@ -197,9 +197,10 @@ func checkStruck(t *testing.T, a *announcingPool, rel string, announced []string
 // published. A stream cut short (what a full volume left) is the output
 // side's fault, which strikes nothing; the rest is the run's, which strikes:
 // a stream the tool finished at a length the source disagrees with while
-// the temp volume can hold the -G file, at another rate, or no FLAC at
-// all. The same short stream is the temp volume's when the probed
-// duration asks for a guard file larger than the free space.
+// the temp volume can hold the -G file, at another rate, at another bit
+// depth, or no FLAC at all. The same short stream is the temp volume's
+// when the probed duration asks for a guard file larger than the free
+// space.
 func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 	block := flactest.Stream(176400, 2, 24, flactest.Block, 0)
 	// One block at 176.4 kHz is 4096/176400 s; ffprobe prints six decimals,
@@ -226,17 +227,32 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 		{name: "whole, longer than the source", rendition: flactest.Stream(176400, 2, 24, 3*flactest.Block, 0),
 			probe: blockSeconds},
 		{name: "another rate", rendition: flactest.Stream(44100, 2, 24, flactest.Block, 0)},
+		// Whole, the asked rate, the asked length, and 16-bit samples where
+		// the job asked for 24. sox 14.4.2 does this for a 32-bit target:
+		// it warns, exits 0, and writes a shallower stream (backlog B271).
+		{name: "another bit depth", rendition: flactest.Stream(176400, 2, 16, flactest.Block, 0),
+			probe: blockSeconds},
 		{name: "not FLAC", rendition: []byte("fLaC")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			standInsWriting(t, tc.rendition, tc.probe)
 			spec := sourceFile(t, "Album/01.flac") // sox-direct, to 176.4 kHz / 24 bit
-			_, err := Run(context.Background(), spec)
+			res, err := Run(context.Background(), spec)
 			var want []byte
 			if tc.published {
 				want = tc.rendition
 			}
 			checkRunVerdict(t, spec, err, want, tc.outputs)
+			if !tc.published {
+				return
+			}
+			stream, rerr := readFLACStream(spec.SidecarPath())
+			if rerr != nil {
+				t.Fatalf("read published stream: %v", rerr)
+			}
+			if res.BitsPerSample != stream.info.bitsPerSample {
+				t.Fatalf("RunResult.BitsPerSample = %d, STREAMINFO = %d", res.BitsPerSample, stream.info.bitsPerSample)
+			}
 		})
 	}
 }
@@ -266,5 +282,52 @@ func TestACutRenditionStrikesNothingAndAShortOneStrikes(t *testing.T) {
 			a := newAnnouncingPool(t, spec.SourceLibraryRel)
 			checkStruck(t, a, spec.SourceLibraryRel, a.run(t, spec, 3), tc.struck)
 		})
+	}
+}
+
+// TestARenditionOfAnotherBitDepthIsNotPublished is the pool's half of the
+// mislabel. The stand-in sox exits 0 after writing a whole 16-bit stream at
+// the rate and length a 24-bit job asked for. Three such jobs fail and
+// strike the source, the same as a stream at another rate, and no row
+// records 24-bit samples over that file.
+func TestARenditionOfAnotherBitDepthIsNotPublished(t *testing.T) {
+	body := flactest.Stream(176400, 2, 16, flactest.Block, 0)
+	standInsWriting(t, body, "0.023220\n")
+	spec := sourceFile(t, "Album/01.flac")
+	a := newAnnouncingPool(t, spec.SourceLibraryRel)
+	checkStruck(t, a, spec.SourceLibraryRel, a.run(t, spec, 3), true)
+	rows, err := a.store.ListVariantsForPath(context.Background(), spec.SourceLibraryRel)
+	if err != nil {
+		t.Fatalf("ListVariantsForPath: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("stored %d variant(s) at %d-bit; want none", len(rows), rows[0].BitsPerSample)
+	}
+}
+
+// TestAWholeRenditionIsLabelledFromItsStream publishes a 24-bit file a
+// 24-bit job asked for and records the depth STREAMINFO names, which is
+// the depth the job asked for.
+func TestAWholeRenditionIsLabelledFromItsStream(t *testing.T) {
+	body := flactest.Stream(176400, 2, 24, flactest.Block, 0)
+	standInsWriting(t, body, "0.023220\n")
+	spec := sourceFile(t, "Album/01.flac")
+	a := newAnnouncingPool(t, spec.SourceLibraryRel)
+	if announced := a.run(t, spec, 1); len(announced) != 1 || announced[0] != "done" {
+		t.Fatalf("announced %v, want done", announced)
+	}
+	rows, err := a.store.ListVariantsForPath(context.Background(), spec.SourceLibraryRel)
+	if err != nil {
+		t.Fatalf("ListVariantsForPath: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("stored %d variant(s), want 1", len(rows))
+	}
+	stream, err := readFLACStream(rows[0].SidecarPath)
+	if err != nil {
+		t.Fatalf("read published stream: %v", err)
+	}
+	if rows[0].BitsPerSample != stream.info.bitsPerSample || rows[0].BitsPerSample != spec.TargetBits {
+		t.Fatalf("row bits = %d, STREAMINFO = %d, target = %d", rows[0].BitsPerSample, stream.info.bitsPerSample, spec.TargetBits)
 	}
 }

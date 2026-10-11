@@ -83,6 +83,10 @@ type RunResult struct {
 	// the writer can record the peak for the album-level gain beside the
 	// rendition (manifest.VariantRow.PeakProfile). Empty for PCM jobs.
 	PeakProfile string
+	// BitsPerSample is the depth STREAMINFO of the published file names.
+	// The pool records it. Zero means the runner did not read a file (a
+	// test stub); the pool then records the job's target.
+	BitsPerSample int
 }
 
 const (
@@ -639,25 +643,25 @@ func (j JobSpec) renderGain(ctx context.Context, truePeakUnity *float64) (gain f
 // so the rendition is read (rendition_complete.go). Its gain and dither keep
 // the scratch's length to the sample, so a whole rendition holds exactly what
 // the scratch held (measured, backlog B264).
-func (j JobSpec) renderStageC(ctx context.Context, scratchDir, scratchPath, tmpPath, sidecarDir string, gain float64, scratchSamples uint64) error {
+func (j JobSpec) renderStageC(ctx context.Context, scratchDir, scratchPath, tmpPath, sidecarDir string, gain float64, scratchSamples uint64) (flacStream, error) {
 	stageC := exec.CommandContext(ctx, resolveBin(func() (string, error) { return soxLookPath("sox") }, "sox"),
 		j.dsdStageCArgs(scratchDir, scratchPath, tmpPath, dsdPreAttenuationDB+gain)...)
 	out, err := stageC.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+		return flacStream{}, fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
 	}
 	if soxReportedClipping(string(out)) {
-		return fmt.Errorf("%w in stage C (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(string(out)))
+		return flacStream{}, fmt.Errorf("%w in stage C (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(string(out)))
 	}
 	whole, err := j.wholeRendition(tmpPath, sidecarDir)
 	if err != nil {
-		return err
+		return flacStream{}, err
 	}
 	if scratchSamples > 0 && whole.held != scratchSamples {
-		return fmt.Errorf("%w: the scratch holds %d samples, the rendition %d (%s)",
+		return flacStream{}, fmt.Errorf("%w: the scratch holds %d samples, the rendition %d (%s)",
 			ErrRenditionIncomplete, scratchSamples, whole.held, j.SourceLibraryRel)
 	}
-	return nil
+	return whole, nil
 }
 
 // renderDSD is the DSD branch of Run — see the chain docblock at the top of
@@ -733,7 +737,8 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	}
 
 	// Stage C — undo the pre-attenuation, apply the gain, dither, publish.
-	if err := j.renderStageC(ctx, scratchDir, scratchPath, tmpPath, sidecarDir, gain, scratchSamples); err != nil {
+	whole, err := j.renderStageC(ctx, scratchDir, scratchPath, tmpPath, sidecarDir, gain, scratchSamples)
+	if err != nil {
 		return RunResult{}, err
 	}
 	settings, err := j.dsdSettings(geo, gain, truePeakUnity, gainScope, trackGain)
@@ -752,5 +757,6 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 		"gain_scope", gainScope,
 		"sidecar_bytes", size)
 	return RunResult{SizeBytes: size, Settings: settings, AppliedGainDB: &gain,
-		TruePeakDBTP: truePeakUnity, PeakProfile: j.DSDPeakProfile()}, nil
+		TruePeakDBTP: truePeakUnity, PeakProfile: j.DSDPeakProfile(),
+		BitsPerSample: whole.info.bitsPerSample}, nil
 }
