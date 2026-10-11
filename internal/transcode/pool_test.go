@@ -872,6 +872,50 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 	}
 }
 
+// TestPoolLabelsARenditionFromTheDepthTheRunnerRead records the depth the
+// runner read, when it read one, ahead of the job's target. A stub that
+// reports 0 keeps the target (TestPoolFiresOnJobCompleteAfterUpsertVariant).
+func TestPoolLabelsARenditionFromTheDepthTheRunnerRead(t *testing.T) {
+	store := openTempStoreForPool(t)
+	seedTrackForPool(t, store, "Music/Album/01.flac")
+	p := NewPool(store, 1, 4)
+	t.Cleanup(p.Stop)
+	p.fsyncFn = noopFsync
+	p.runner = func(context.Context, JobSpec) (RunResult, error) {
+		return RunResult{SizeBytes: 42, BitsPerSample: 16}, nil
+	}
+	gotCh := make(chan int, 1)
+	p.SetOnJobComplete(func(_, _ string, _, bitsPerSample int, _ float64, _ uuid.UUID, _ time.Time) {
+		gotCh <- bitsPerSample
+	})
+	spec := JobSpec{
+		SourceLibraryRel: "Music/Album/01.flac",
+		SourceAbsPath:    "/dev/null/missing",
+		TargetSampleRate: 192000,
+		TargetBits:       24,
+		Quality:          QualityVeryHigh,
+		OutputDir:        t.TempDir(),
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	select {
+	case got := <-gotCh:
+		if got != 16 {
+			t.Fatalf("completion bits = %d, want 16 (the depth the runner read)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onJobComplete never fired")
+	}
+	row, err := store.GetVariant(context.Background(), spec.SourceLibraryRel, spec.VariantID())
+	if err != nil {
+		t.Fatalf("GetVariant: %v", err)
+	}
+	if row.BitsPerSample != 16 {
+		t.Fatalf("row bits = %d, want 16", row.BitsPerSample)
+	}
+}
+
 // TestPoolDoesNotFireOnJobCompleteOnFailure pins the success-only
 // emission contract for v1. A sox failure / store failure must NOT
 // fire onJobComplete — iOS learns about failures via the stats push,

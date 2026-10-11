@@ -54,9 +54,12 @@ import (
 //     reader and ffmpeg or ffprobe is missing.
 //
 // Everything else keeps its strike: a tool that ran and refused the file is
-// what the debounce is for. A job that fails for want of a tool is still
-// counted and announced, so its batch row and its jobFailed event say what
-// happened; what it does not do is sideline the file.
+// what the debounce is for, except a finished FLAC shallower than the job
+// asked for. That refusal is of a bit depth, and sox 14.4.2 makes it on
+// every input when the target is 32, so depthMismatch classifies it and it
+// strikes nothing (depth_mismatch.go). A job that fails for want of a tool
+// is still counted and announced, so its batch row and its jobFailed event
+// say what happened; what it does not do is sideline the file.
 
 // Tool names in the outage report, and the keys a successful job's chain is
 // matched against (toolsProvenBy).
@@ -194,7 +197,8 @@ func toolsProvenBy(settings string) []string {
 // tool's outage starts, one Info when a job proves the tool back, and the jobs
 // between at Debug. A queue of 5,000 jobs (the default QueueCap) behind a
 // missing sox logged 5,000 identical WARNs; it logs one. The streaks are kept
-// by outageStreaks, which the output report (outputOutages) shares.
+// by outageStreaks, which the output report (outputOutages) and the FLAC
+// bit-depth report (depthOutages) share.
 //
 // Keyed per tool because tools come and go apart: with ffmpeg missing and sox
 // present, a FLAC job succeeds between two DSD failures, and ending every

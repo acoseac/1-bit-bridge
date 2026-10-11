@@ -1863,8 +1863,14 @@ type UpscaleConfig struct {
 	// TargetBits is the output bit depth. 24 (the default) is the
 	// sweet spot for FLAC: lower ceiling than 32-bit float but
 	// 96 dB above the audible noise floor and well below any
-	// realistic dither quantisation noise. 32-bit-int output is
-	// supported for completeness but rarely a sonic improvement.
+	// realistic dither quantisation noise. 16 and 32 are accepted.
+	// A job whose file is not that depth is not published: sox
+	// 14.4.2 exits 0 after refusing to encode 32-bit FLAC and writes
+	// a shallower stream. That fallback fails the job and strikes
+	// nothing — it is the host's sox, not the file (backlog B271).
+	// A build that writes 32-bit STREAMINFO still publishes it.
+	// A config that names 32 still loads: refusing it here would
+	// stop a running service. bridge doctor warns instead.
 	TargetBits int `yaml:"targetBits,omitempty"`
 
 	// VariantsDir lets operators relocate upscaled FLAC sidecars off

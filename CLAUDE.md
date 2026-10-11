@@ -3655,6 +3655,65 @@ no failing test — which is the shape to expect in this area.
   `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`,
   `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
+- **…and the published file's bit depth is the depth its STREAMINFO names,
+  compared with the job's target before the publish** (2026-10-11, backlog
+  B271). B264's check compared the rate and the frame, and the pool recorded
+  `job.spec.TargetBits`. sox 14.4.2 exits 0 after `flac can't encode to
+  32-bit` and writes a shallower stream: on this Mac (Homebrew sox
+  14.4.2_6, libFLAC 1.5.0) a 16-bit source came back 16-bit and a 24-bit
+  source came back 24-bit, both with that warning. `wholeRendition` asks
+  whether the stream is whole after the rate check and before it compares
+  `bitsPerSample` with `TargetBits`, so `Run` and `renderDSD` both see
+  it. A truncated stream at the wrong depth is a cut (`cutOutput`, the
+  output-fault probe). Only a whole stream at the wrong depth is the host
+  fact. The row and
+  the completion event take `RunResult.BitsPerSample` (the stream that
+  passed); a stub that reports 0 keeps the job's target. **32 stays
+  accepted** wherever an upscale target is chosen (the CLI flag, the
+  settings option, `validateUpscaleTarget`, `SetUpscaleTarget`,
+  `EffectiveTargetBits`): a build whose STREAMINFO is 32 publishes that
+  file, and one that falls back fails the job. DSD optimize targets 16 and
+  the PCM render targets 24, both through the same check.   The publish is
+  refused, the file is labelled from STREAMINFO, and a depth fallback is a
+  host fact: no strike, one report, and not planned at all while the host's
+  sox cannot encode the depth. A 32-bit planning pass asks `PlanFLAC32`
+  once, cached for 30s: the batch planner (`submitUpscaleProjections`, so
+  the API batch and the console batch both refuse before a row is inserted)
+  and the CLI (`runUpscaleBatch`, before the walk). `(false, nil)` enqueues
+  nothing, reports once through the same outage (`FLAC32EncodeFix`), and
+  the CLI exits non-zero with that sentence; the console's submit body is
+  that error. A probe error is not a refusal, and a host whose sox gains
+  the depth is planned again at the next pass, with no restart. On-demand
+  single-track enqueue stays on the per-job backstop. The auto-optimize
+  sweeper never plans 32 (compact is 16, the faithful DSD render is 24),
+  and the startup seed only writes the target. `depthMismatchError` wraps
+  `ErrRenditionIncomplete` (a batch still drains on that error) and
+  `processJob` classifies it by type, after an unwritable output and before
+  a changed source: counted and announced, `RecordVariantFailure` not
+  called. The outage is keyed on the depth asked for. The first job Warns
+  (`FLAC32EncodeFix` when that depth is 32: set the target to 24, or
+  install a sox that can encode 32-bit FLAC); later jobs of that depth are
+  Debug. A published file proves only the depth its STREAMINFO names, so a
+  16-bit success does not end a 32-bit streak. A wrong rate keeps its
+  strike: sox writes ordinary rates, and that mismatch is the pipeline.
+  A config that names 32 still loads. `bridge doctor`'s `flac-32-bit` line
+  probes only when the target is 32 and warns, never fails. A probe that
+  ran and measured a shallower or missing file warns with the same
+  sentence. A probe that did not measure (its deadline, a missing sox, a
+  setup failure) warns that the check could not run, with the error and
+  without that sentence. A cancelled check stays ok. Three fallback jobs leave the source unstruck; a later job at
+  a depth the writer can make publishes.
+  `TestRunPublishesOnlyAWholeRendition` ("another bit depth", "cut short, another bit depth"),
+  `TestARenditionOfAnotherBitDepthIsNotPublished`,
+  `TestAWholeRenditionIsLabelledFromItsStream`,
+  `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`,
+  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitSkipsTheProbeUnlessTheTargetIs32`,
+  `TestAFLAC32ProbeThatDidNotRunIsInconclusive`, `TestCheckFLAC32BitOnTheHost`,
+  `TestA32BitBatchIsNotPlannedWhenTheHostCannotEncodeIt`,
+  `TestA32BitProbeThatDidNotRunStillPlans`,
+  `TestUpscaleCLIRefuses32BitWhenTheHostCannotEncodeIt`,
+  `TestFLAC32PlanningProbeIsCachedForAShortLifetime`,
+  `TestACancelledFLAC32ProbeIsNotCached`.
 - **A PCM job's `-G` file lands in the configured temp dir, and a short
   rendition whose temp volume cannot hold it is the host's** (2026-10-08,
   backlog B270). `soxArgsFrom` puts `--temp` and `renderScratchDir` ahead

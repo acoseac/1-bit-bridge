@@ -39688,3 +39688,210 @@ holding the slots, and the release wait is `DSDSilenceMaxStreams`
 plus each such probe. The count of releases is exact. The hook's wake
 does not block: a full wake buffer drops the wake, and the waiter
 reads the count.
+
+## 2026-10-11 — a rendition is labelled from the bit depth its STREAMINFO names (backlog B271)
+
+sox's FLAC writer cannot write 32 bits. It falls back and still exits 0, so a
+job targeting 32-bit published a shallower file under a 32-bit label. B264's
+completeness check (`wholeRendition`) compared the sample rate and required a
+whole stream, and the pool recorded `BitsPerSample: job.spec.TargetBits`.
+
+### Measured (this Mac)
+
+Homebrew sox 14.4.2_6, linked to libFLAC 1.5.0 (`libFLAC.14.dylib`,
+compatibility version 15.0.0). `sox --version` prints `SoX v` and nothing
+after it; the version is the Cellar formula. libFLAC 1.5.0 can encode 32-bit
+FLAC; sox 14.4.2's own handler refuses before that.
+
+| Source | Request | Exit | STREAMINFO |
+|---|---|---|---|
+| 16-bit, 44.1 kHz | `-b 16` | 0 | 16 |
+| 16-bit, 44.1 kHz | `-b 24` | 0 | 24 |
+| 16-bit, 44.1 kHz | `-b 32` | 0 | 16, stderr `sox WARN formats: flac can't encode to 32-bit`; `metaflac --show-bps` 16; the file was the same size as the 16-bit encode (5245 bytes) |
+| 24-bit, 96 kHz | `-b 32` | 0 | 24, the same warning |
+
+The fallback is the source depth, so a check that assumed "32 becomes 16"
+would miss the second row. The comparison reads STREAMINFO.
+
+### Red, before the comparison
+
+A stand-in sox (`standInsWriting`) wrote a whole 16-bit FLAC at 176.4 kHz,
+one block, and exited 0. The job asked for 24. `Run` published it.
+`TestRunPublishesOnlyAWholeRendition/another_bit_depth` returned a nil error.
+Through the pool, `TestARenditionOfAnotherBitDepthIsNotPublished` announced
+`done`, struck nothing, and stored one variant labelled 24-bit.
+
+### The fix
+
+`wholeRendition` returns `ErrRenditionIncomplete` when
+`bitsPerSample != TargetBits`, immediately after the rate check and before
+`s.whole()`. `Run` and `renderStageC` both call it, and each copies
+`whole.info.bitsPerSample` onto `RunResult.BitsPerSample`. The pool records
+that depth on the variant row and the completion event when it is non-zero.
+A runner that did not read a file (the test stubs) reports 0, and the row
+keeps the job's target.
+
+A mismatch refuses the publish. The depth arm is classified apart from a
+wrong rate: see the entry below. A rate mismatch still strikes.
+
+32 stays an accepted upscale target. The places that offer it are `bridge
+upscale --target-bits`, the settings `<option value="32">`, both
+`validateUpscaleTarget` copies (the API and the batch coordinator),
+`SetUpscaleTarget`, and `EffectiveTargetBits`. Optimize and the DSD render do
+not offer it: `optimizeTargetBits` is 16 and `pcmRenderTargetBits` is 24, and
+both publish through `wholeRendition`. Refusing 32 on every host would reject
+a sox that writes a 32-bit STREAMINFO. A writer that does publishes the file;
+a writer that falls back fails the job.
+
+### Control
+
+With the comparison removed and the labelling left in place, both tests
+failed again. `Run` published. The pool announced `done` three times, struck
+nothing, and stored one variant at 16-bit: the row took STREAMINFO, and the
+variant id still named the 24-bit target. The comparison is what keeps that
+id off a shallower file. The comparison was put back, and the same tests
+passed.
+
+## 2026-10-11 — a FLAC bit-depth fallback is the host's sox, so it strikes nothing (backlog B271)
+
+The comparison above wrapped the depth mismatch in `ErrRenditionIncomplete`,
+and `processJob` struck the source. Three strikes suppress that file from
+every rendition kind for 30 days. sox 14.4.2 refuses 32-bit FLAC on every
+input and exits 0, so a host whose target is 32 would fail every job and,
+after three sweeps, suppress the library from 16-bit optimize and 24-bit DSD
+renders as well, for 30 days past any fix. Before the comparison such a host
+published mislabelled files. After it, with the strike left in place, the
+host would stop rendering.
+
+### Classification
+
+`depthMismatchError` wraps `ErrRenditionIncomplete`. `Error` returns the
+inner text and `Unwrap` returns the inner error, so a batch still drains on
+`errors.Is`. `processJob` classifies by `errors.As`, after the unwritable
+output and before `ErrSourceChanged`. `failedEnd` is already set, so the job
+is counted and announced, and the return is before `RecordVariantFailure`.
+
+The outage is keyed on the depth asked for. The first job of a depth Warns;
+later jobs of that depth are Debug. When the asked depth is 32 the note is
+`FLAC32EncodeFix` ("set the target to 24, or install a sox that can encode
+32-bit FLAC"). A published file proves only the depth its STREAMINFO names,
+so a 16-bit success does not end a 32-bit streak.
+
+A rate mismatch stays a strike. sox writes ordinary rates; a wrong rate is
+the pipeline or the file. The depth fallback is the host fact because sox
+14.4.2 refuses 32-bit FLAC on every input.
+
+32 stays an accepted target, and a config that names 32 still loads. Refusing
+it in validation would stop a running service. `bridge doctor` adds
+`flac-32-bit`. It probes only when the resolved target is 32: ok when
+STREAMINFO comes back 32, warn (never fail) when the encode is not 32-bit or
+the probe errors, including a missing sox, with the same sentence. A target
+other than 32, and a doctor run with no loaded config, skip the probe. A
+cancelled parent context is ok ("32-bit FLAC probe was interrupted"). The
+probe directory is `fsutil.Mkdir` on a unique name under the OS temp dir:
+the job-writer owner sweep refuses `os.MkdirTemp` in this package.
+
+### Red
+
+With the classifier unwired, three jobs whose writer fell back to 16-bit
+while the job asked for 32 failed
+`TestARenditionOfAnotherBitDepthIsNotPublished`: `1 suppressed, 1 strike
+record(s); want the source unstruck`.
+
+### Doctor line on this Mac
+
+Homebrew sox 14.4.2_6, the same build as the measurement above.
+`TestCheckFLAC32BitOnTheHost` logged:
+
+`warn: sox cannot encode 32-bit FLAC — set the target to 24, or install a sox that can encode 32-bit FLAC`
+
+### Control
+
+The classifier's return was taken out, so the mismatch fell through to
+`RecordVariantFailure`. The same pool test failed again at the strike
+assertion (`1 suppressed, 1 strike record(s)`). The return was put back by
+hand, and the test passed. The broken control was not committed.
+
+Taking the strike away also took away the only thing that stopped a sweep
+from rendering the same file again. The next entry gates the planning.
+
+## 2026-10-12 — a 32-bit rendition is not planned while the host cannot encode it (backlog B271)
+
+Round 2's classification is right, and it reopened the treadmill
+`processJob` already names: a failed job writes no variant row, so the
+candidate queries re-select the same source on every pass. A missing tool
+fails in milliseconds. A depth fallback is found only after a full render.
+On a host whose target is 32 and whose sox is 14.4.2, every pass would
+render every eligible file and refuse every one.
+
+### Where the gate sits
+
+`submitUpscaleProjections` asks `PlanFLAC32` when the target is 32, before
+the candidate walk and before the batch row. `Submit` and `SubmitPaths`
+both end there, so the API batch and the console batch share it. The CLI
+asks once in `runUpscaleBatch`, before `ListTracks`, and only for an
+upscale whose resolved depth is 32. `(false, nil)` enqueues nothing.
+`ReportFLAC32Refusal` notes the pool's depth outage (the CLI's own streak
+when it has no pool), so the first refusal Warns with `FLAC32EncodeFix` and
+a later one of the same depth is Debug. The CLI also prints that sentence
+and exits 1. The console submit writes the error text, which is the same
+sentence. The answer is cached for 30 seconds. A probe error, including
+`ErrSoxMissing` and a cancelled context, is not cached as a refusal and the
+pass plans as before. A host whose sox learns the depth is planned again
+after the window, with no restart. The per-job classifier stays: a probe
+that passed and a render that still fell back, and an on-demand single
+track.
+
+Not gated, on purpose. `EnqueueOne` is that on-demand track. The
+auto-optimize sweeper's compact tier is 16-bit and its faithful DSD render
+is 24-bit. The startup seed writes the stored target and enqueues nothing.
+Optimize and PCM batches target 16 and 24. Doctor already warns when the
+target is 32; its probe error stays a warning, which is a different
+question from planning.
+
+### Red
+
+With the gate unwired, `TestA32BitBatchIsNotPlannedWhenTheHostCannotEncodeIt`
+failed `Submit = <nil>, want ErrFLAC32Unencodable`, and
+`TestUpscaleCLIRefuses32BitWhenTheHostCannotEncodeIt` failed `exit 0, want
+non-zero; stderr=""`. The probe stub said no. Neither test forks sox.
+
+### Control
+
+The batch refusal was bypassed (`false &&` on the error check) and the same
+test failed `Submit = <nil>, enqueued 1, want the refusal and nothing
+queued`. The check was put back by hand, and the test passed. The bypass
+was not committed.
+
+## 2026-10-12 — a probe that did not measure is not a measured no, and a cut stream is a cut (backlog B271)
+
+CodeRabbit on #1183, three findings on the round-2 code. The two CodeQL
+log-injection alerts on the depth outage stay: the message is a constant
+and the path is an slog attribute.
+
+### The probe
+
+`checkFLAC32Bit` treated every probe error as "sox cannot encode 32-bit
+FLAC" and attached `FLAC32EncodeFix`. A five-second timeout, a missing
+sox, and a synth that failed before an encode are not a measurement.
+Those warn `32-bit FLAC probe could not run`, with the error as the hint
+and without the fix sentence. `(false, nil)` keeps the measured-no
+warning and the fix. A cancelled parent stays ok. With the split still
+the old `err != nil || !can` arm,
+`TestAFLAC32ProbeThatDidNotRunIsInconclusive` failed on all three:
+`Summary:sox cannot encode 32-bit FLAC` and the fix as the hint.
+`TestCheckFLAC32Bit` keeps the measured yes, the measured no, and the
+cancelled parent. The target-gating cases moved to
+`TestCheckFLAC32BitSkipsTheProbeUnlessTheTargetIs32`, which is what
+drops the old function under Sonar's complexity limit.
+
+### The order
+
+`wholeRendition` compared the bit depth before `s.whole()`. A truncated
+16-bit stream for a 24-bit job was a depth mismatch, so it never reached
+`cutOutput`. Completeness now comes after the rate check and before the
+depth. Only a whole stream at the wrong depth is `depthMismatchError`.
+Before the swap, `TestRunPublishesOnlyAWholeRendition` /
+`cut short, another bit depth` failed `the output side's fault = false,
+want true` and `depth mismatch classified = true`. After it, that case
+is a cut and `another bit depth` is still the host fact.

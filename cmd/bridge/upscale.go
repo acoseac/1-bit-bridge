@@ -690,9 +690,22 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// gate. A probe FAILURE leaves the zero value, whose FormatsKnown=false
 	// makes CanDecode fail open — the documented posture everywhere else.
 	// bootstrapTranscodeCmd's soxCLIReady has already run by here, so this
-	// is the second and last fork-exec of sox for the command.
+	// is the second fork-exec of sox for the command. A 32-bit upscale
+	// asks the encode probe once more, before the walk.
 	if info, perr := transcode.ProbeSox(ctx); perr == nil {
 		p.soxInfo = info
+	}
+	// A 32-bit target this host's sox cannot write is refused before the
+	// walk, once per run. Optimize and the PCM render target 16 and 24.
+	// A probe that did not run falls through: soxCLIReady already refused
+	// a missing sox, and a cancelled context is not a fact about the host.
+	if p.targetBits == 32 && p.kind != transcode.JobKindOptimize && p.kind != transcode.JobKindPCMRender {
+		can, perr := transcode.PlanFLAC32(ctx)
+		if perr == nil && !can {
+			fmt.Fprintln(stderr, transcode.ErrFLAC32Unencodable.Error())
+			transcode.ReportFLAC32Refusal(nil, "")
+			return 1
+		}
 	}
 	allTracks, err := store.ListTracks(ctx, nil)
 	if err != nil {
