@@ -35,11 +35,13 @@ import (
 // expected length into it before the audio, and only a finished stream
 // rewrites it). A stream is whole when it ends with an intact frame at the
 // sample its STREAMINFO declares; a whole stream must then hold the length
-// its source implies (the route's own reference: renderLength). Its
-// STREAMINFO bit depth must be the depth the job asked for. sox 14.4.2
-// exits 0 after "flac can't encode to 32-bit" and writes a shallower
-// stream; the publish is refused and the pool strikes nothing, because
-// that fallback is the host's sox (backlog B271, depth_mismatch.go).
+// its source implies (the route's own reference: renderLength). A whole
+// stream's STREAMINFO bit depth must be the depth the job asked for.
+// sox 14.4.2 exits 0 after "flac can't encode to 32-bit" and writes a
+// shallower whole stream; the publish is refused and the pool strikes
+// nothing, because that fallback is the host's sox (backlog B271,
+// depth_mismatch.go). A stream cut short is a cut even when that file is
+// also the wrong depth.
 //
 // A stream cut short is a write the tool made that failed. Nothing in a
 // source can make a write fail, but its size can (a file larger than the
@@ -75,12 +77,11 @@ const outputProbeBytes = 64 << 10
 // rate and bit depth (the length is judged at that rate). A stream cut
 // short is the output side's answer (cutOutput). A stream at another rate
 // wraps ErrRenditionIncomplete and is the run's failure, so the source is
-// struck. A stream at another bit depth wraps the same error inside
-// depthMismatchError: the publish is still refused, and the pool treats
-// the fallback as the host's sox, which strikes nothing (depth_mismatch.go).
-// The depth is compared before the stream is asked whether it is whole,
-// beside the rate, so a file the writer finished at the wrong depth is not
-// reported as a cut.
+// struck. Completeness is asked before the depth: a truncated stream at
+// the wrong depth is a cut, with the output-fault probe. Only a whole
+// stream at another bit depth wraps the same incomplete error inside
+// depthMismatchError. The publish is still refused, and the pool treats
+// that fallback as the host's sox, which strikes nothing (depth_mismatch.go).
 func (j JobSpec) wholeRendition(path, dir string) (flacStream, error) {
 	s, err := readFLACStream(path)
 	if err != nil {
@@ -93,14 +94,14 @@ func (j JobSpec) wholeRendition(path, dir string) (flacStream, error) {
 		return flacStream{}, fmt.Errorf("%w: the tool wrote %d Hz, the job asked for %d Hz (%s)",
 			ErrRenditionIncomplete, s.info.sampleRate, j.TargetSampleRate, j.SourceLibraryRel)
 	}
+	if !s.whole() {
+		return flacStream{}, cutOutput(outputVariants, dir, path,
+			fmt.Errorf("%w: %w (%s)", ErrRenditionIncomplete, s.cut(), j.SourceLibraryRel))
+	}
 	if s.info.bitsPerSample != j.TargetBits {
 		return flacStream{}, markDepthMismatch(s.info.bitsPerSample, j.TargetBits,
 			fmt.Errorf("%w: the tool wrote %d-bit samples, the job asked for %d (%s)",
 				ErrRenditionIncomplete, s.info.bitsPerSample, j.TargetBits, j.SourceLibraryRel))
-	}
-	if !s.whole() {
-		return flacStream{}, cutOutput(outputVariants, dir, path,
-			fmt.Errorf("%w: %w (%s)", ErrRenditionIncomplete, s.cut(), j.SourceLibraryRel))
 	}
 	return s, nil
 }

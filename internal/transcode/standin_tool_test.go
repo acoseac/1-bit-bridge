@@ -205,6 +205,7 @@ func checkStruck(t *testing.T, a *announcingPool, rel string, announced []string
 // space.
 func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 	block := flactest.Stream(176400, 2, 24, flactest.Block, 0)
+	shallow := flactest.Stream(176400, 2, 16, flactest.Block, 0)
 	// One block at 176.4 kHz is 4096/176400 s; ffprobe prints six decimals,
 	// and the value alone (probeDuration asks it for no key).
 	const blockSeconds = "0.023220\n"
@@ -219,6 +220,9 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 		{name: "whole, at the source's length", rendition: block, probe: blockSeconds, published: true},
 		{name: "whole, ffprobe missing (no verdict on the length)", rendition: block, published: true},
 		{name: "cut short", rendition: block[:len(block)-5], probe: blockSeconds, outputs: true},
+		// Truncated and shallower than the job asked. Completeness is the
+		// cut path; only a whole stream at the wrong depth is the host's sox.
+		{name: "cut short, another bit depth", rendition: shallow[:len(shallow)-5], probe: blockSeconds, outputs: true},
 		{name: "cut short, ffprobe missing", rendition: block[:len(block)-1], outputs: true},
 		{name: "whole, shorter than the source", rendition: block, probe: "1.000000\n"},
 		// 1e9 s at 176.4 kHz stereo is more than any temp volume holds, so

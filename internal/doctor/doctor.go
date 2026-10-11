@@ -1309,10 +1309,14 @@ func checkAudioToolchain(ctx context.Context, d Deps) Check {
 // checkFLAC32Bit warns when the upscale target is 32-bit and this host's sox
 // cannot write a FLAC whose STREAMINFO names 32 bits. sox 14.4.2 exits 0
 // after that refusal and writes a shallower stream, so every such job would
-// fail. The warning names the same fix as the pool's outage report. A target
-// that is not 32, including an unloaded config (0), is ok and runs no probe.
-// A cancelled check is ok rather than a false warning about the host. The
-// config is not refused: a loaded target of 32 must keep loading.
+// fail. That warning, and only that one, names the same fix as the pool's
+// outage report: the probe ran and measured a shallower or missing file.
+// A probe that did not measure (the deadline, a missing sox, a setup
+// failure) warns that the check could not run, with the error and without
+// the fix. A target that is not 32, including an unloaded config (0), is ok
+// and runs no probe. A cancelled check is ok rather than a false warning
+// about the host. The config is not refused: a loaded target of 32 must
+// keep loading.
 func checkFLAC32Bit(ctx context.Context, d Deps) Check {
 	if d.UpscaleTargetBits != 32 {
 		if d.UpscaleTargetBits == 0 {
@@ -1326,7 +1330,10 @@ func checkFLAC32Bit(ctx context.Context, d Deps) Check {
 	if ctx.Err() != nil {
 		return ok(checkNameFLAC32, "32-bit FLAC probe was interrupted")
 	}
-	if err != nil || !can {
+	if err != nil {
+		return warn(checkNameFLAC32, "32-bit FLAC probe could not run", err.Error())
+	}
+	if !can {
 		return warn(checkNameFLAC32, "sox cannot encode 32-bit FLAC", transcode.FLAC32EncodeFix)
 	}
 	return ok(checkNameFLAC32, "sox encodes 32-bit FLAC")

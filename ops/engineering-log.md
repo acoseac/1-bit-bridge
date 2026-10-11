@@ -39862,3 +39862,36 @@ The batch refusal was bypassed (`false &&` on the error check) and the same
 test failed `Submit = <nil>, enqueued 1, want the refusal and nothing
 queued`. The check was put back by hand, and the test passed. The bypass
 was not committed.
+
+## 2026-10-12 — a probe that did not measure is not a measured no, and a cut stream is a cut (backlog B271)
+
+CodeRabbit on #1183, three findings on the round-2 code. The two CodeQL
+log-injection alerts on the depth outage stay: the message is a constant
+and the path is an slog attribute.
+
+### The probe
+
+`checkFLAC32Bit` treated every probe error as "sox cannot encode 32-bit
+FLAC" and attached `FLAC32EncodeFix`. A five-second timeout, a missing
+sox, and a synth that failed before an encode are not a measurement.
+Those warn `32-bit FLAC probe could not run`, with the error as the hint
+and without the fix sentence. `(false, nil)` keeps the measured-no
+warning and the fix. A cancelled parent stays ok. With the split still
+the old `err != nil || !can` arm,
+`TestAFLAC32ProbeThatDidNotRunIsInconclusive` failed on all three:
+`Summary:sox cannot encode 32-bit FLAC` and the fix as the hint.
+`TestCheckFLAC32Bit` keeps the measured yes, the measured no, and the
+cancelled parent. The target-gating cases moved to
+`TestCheckFLAC32BitSkipsTheProbeUnlessTheTargetIs32`, which is what
+drops the old function under Sonar's complexity limit.
+
+### The order
+
+`wholeRendition` compared the bit depth before `s.whole()`. A truncated
+16-bit stream for a 24-bit job was a depth mismatch, so it never reached
+`cutOutput`. Completeness now comes after the rate check and before the
+depth. Only a whole stream at the wrong depth is `depthMismatchError`.
+Before the swap, `TestRunPublishesOnlyAWholeRendition` /
+`cut short, another bit depth` failed `the output side's fault = false,
+want true` and `depth mismatch classified = true`. After it, that case
+is a cut and `another bit depth` is still the host fact.

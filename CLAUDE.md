@@ -3661,9 +3661,12 @@ no failing test — which is the shape to expect in this area.
   `job.spec.TargetBits`. sox 14.4.2 exits 0 after `flac can't encode to
   32-bit` and writes a shallower stream: on this Mac (Homebrew sox
   14.4.2_6, libFLAC 1.5.0) a 16-bit source came back 16-bit and a 24-bit
-  source came back 24-bit, both with that warning. `wholeRendition` refuses
-  when `bitsPerSample` disagrees with `TargetBits`, beside the rate check
-  and before `s.whole()`, so `Run` and `renderDSD` both see it. The row and
+  source came back 24-bit, both with that warning. `wholeRendition` asks
+  whether the stream is whole after the rate check and before it compares
+  `bitsPerSample` with `TargetBits`, so `Run` and `renderDSD` both see
+  it. A truncated stream at the wrong depth is a cut (`cutOutput`, the
+  output-fault probe). Only a whole stream at the wrong depth is the host
+  fact. The row and
   the completion event take `RunResult.BitsPerSample` (the stream that
   passed); a stub that reports 0 keeps the job's target. **32 stays
   accepted** wherever an upscale target is chosen (the CLI flag, the
@@ -3694,14 +3697,18 @@ no failing test — which is the shape to expect in this area.
   16-bit success does not end a 32-bit streak. A wrong rate keeps its
   strike: sox writes ordinary rates, and that mismatch is the pipeline.
   A config that names 32 still loads. `bridge doctor`'s `flac-32-bit` line
-  probes only when the target is 32 and warns, never fails, with the same
-  sentence. Three fallback jobs leave the source unstruck; a later job at
+  probes only when the target is 32 and warns, never fails. A probe that
+  ran and measured a shallower or missing file warns with the same
+  sentence. A probe that did not measure (its deadline, a missing sox, a
+  setup failure) warns that the check could not run, with the error and
+  without that sentence. A cancelled check stays ok. Three fallback jobs leave the source unstruck; a later job at
   a depth the writer can make publishes.
-  `TestRunPublishesOnlyAWholeRendition` ("another bit depth"),
+  `TestRunPublishesOnlyAWholeRendition` ("another bit depth", "cut short, another bit depth"),
   `TestARenditionOfAnotherBitDepthIsNotPublished`,
   `TestAWholeRenditionIsLabelledFromItsStream`,
   `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`,
-  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitOnTheHost`,
+  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitSkipsTheProbeUnlessTheTargetIs32`,
+  `TestAFLAC32ProbeThatDidNotRunIsInconclusive`, `TestCheckFLAC32BitOnTheHost`,
   `TestA32BitBatchIsNotPlannedWhenTheHostCannotEncodeIt`,
   `TestA32BitProbeThatDidNotRunStillPlans`,
   `TestUpscaleCLIRefuses32BitWhenTheHostCannotEncodeIt`,
