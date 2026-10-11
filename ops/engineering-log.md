@@ -39811,3 +39811,54 @@ The classifier's return was taken out, so the mismatch fell through to
 `RecordVariantFailure`. The same pool test failed again at the strike
 assertion (`1 suppressed, 1 strike record(s)`). The return was put back by
 hand, and the test passed. The broken control was not committed.
+
+Taking the strike away also took away the only thing that stopped a sweep
+from rendering the same file again. The next entry gates the planning.
+
+## 2026-10-12 — a 32-bit rendition is not planned while the host cannot encode it (backlog B271)
+
+Round 2's classification is right, and it reopened the treadmill
+`processJob` already names: a failed job writes no variant row, so the
+candidate queries re-select the same source on every pass. A missing tool
+fails in milliseconds. A depth fallback is found only after a full render.
+On a host whose target is 32 and whose sox is 14.4.2, every pass would
+render every eligible file and refuse every one.
+
+### Where the gate sits
+
+`submitUpscaleProjections` asks `PlanFLAC32` when the target is 32, before
+the candidate walk and before the batch row. `Submit` and `SubmitPaths`
+both end there, so the API batch and the console batch share it. The CLI
+asks once in `runUpscaleBatch`, before `ListTracks`, and only for an
+upscale whose resolved depth is 32. `(false, nil)` enqueues nothing.
+`ReportFLAC32Refusal` notes the pool's depth outage (the CLI's own streak
+when it has no pool), so the first refusal Warns with `FLAC32EncodeFix` and
+a later one of the same depth is Debug. The CLI also prints that sentence
+and exits 1. The console submit writes the error text, which is the same
+sentence. The answer is cached for 30 seconds. A probe error, including
+`ErrSoxMissing` and a cancelled context, is not cached as a refusal and the
+pass plans as before. A host whose sox learns the depth is planned again
+after the window, with no restart. The per-job classifier stays: a probe
+that passed and a render that still fell back, and an on-demand single
+track.
+
+Not gated, on purpose. `EnqueueOne` is that on-demand track. The
+auto-optimize sweeper's compact tier is 16-bit and its faithful DSD render
+is 24-bit. The startup seed writes the stored target and enqueues nothing.
+Optimize and PCM batches target 16 and 24. Doctor already warns when the
+target is 32; its probe error stays a warning, which is a different
+question from planning.
+
+### Red
+
+With the gate unwired, `TestA32BitBatchIsNotPlannedWhenTheHostCannotEncodeIt`
+failed `Submit = <nil>, want ErrFLAC32Unencodable`, and
+`TestUpscaleCLIRefuses32BitWhenTheHostCannotEncodeIt` failed `exit 0, want
+non-zero; stderr=""`. The probe stub said no. Neither test forks sox.
+
+### Control
+
+The batch refusal was bypassed (`false &&` on the error check) and the same
+test failed `Submit = <nil>, enqueued 1, want the refusal and nothing
+queued`. The check was put back by hand, and the test passed. The bypass
+was not committed.

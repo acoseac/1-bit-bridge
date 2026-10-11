@@ -3670,9 +3670,20 @@ no failing test — which is the shape to expect in this area.
   settings option, `validateUpscaleTarget`, `SetUpscaleTarget`,
   `EffectiveTargetBits`): a build whose STREAMINFO is 32 publishes that
   file, and one that falls back fails the job. DSD optimize targets 16 and
-  the PCM render targets 24, both through the same check. The publish is
+  the PCM render targets 24, both through the same check.   The publish is
   refused, the file is labelled from STREAMINFO, and a depth fallback is a
-  host fact: no strike, one report. `depthMismatchError` wraps
+  host fact: no strike, one report, and not planned at all while the host's
+  sox cannot encode the depth. A 32-bit planning pass asks `PlanFLAC32`
+  once, cached for 30s: the batch planner (`submitUpscaleProjections`, so
+  the API batch and the console batch both refuse before a row is inserted)
+  and the CLI (`runUpscaleBatch`, before the walk). `(false, nil)` enqueues
+  nothing, reports once through the same outage (`FLAC32EncodeFix`), and
+  the CLI exits non-zero with that sentence; the console's submit body is
+  that error. A probe error is not a refusal, and a host whose sox gains
+  the depth is planned again at the next pass, with no restart. On-demand
+  single-track enqueue stays on the per-job backstop. The auto-optimize
+  sweeper never plans 32 (compact is 16, the faithful DSD render is 24),
+  and the startup seed only writes the target. `depthMismatchError` wraps
   `ErrRenditionIncomplete` (a batch still drains on that error) and
   `processJob` classifies it by type, after an unwritable output and before
   a changed source: counted and announced, `RecordVariantFailure` not
@@ -3690,7 +3701,12 @@ no failing test — which is the shape to expect in this area.
   `TestARenditionOfAnotherBitDepthIsNotPublished`,
   `TestAWholeRenditionIsLabelledFromItsStream`,
   `TestPoolLabelsARenditionFromTheDepthTheRunnerRead`,
-  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitOnTheHost`.
+  `TestCheckFLAC32Bit`, `TestCheckFLAC32BitOnTheHost`,
+  `TestA32BitBatchIsNotPlannedWhenTheHostCannotEncodeIt`,
+  `TestA32BitProbeThatDidNotRunStillPlans`,
+  `TestUpscaleCLIRefuses32BitWhenTheHostCannotEncodeIt`,
+  `TestFLAC32PlanningProbeIsCachedForAShortLifetime`,
+  `TestACancelledFLAC32ProbeIsNotCached`.
 - **A PCM job's `-G` file lands in the configured temp dir, and a short
   rendition whose temp volume cannot hold it is the host's** (2026-10-08,
   backlog B270). `soxArgsFrom` puts `--temp` and `renderScratchDir` ahead

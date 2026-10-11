@@ -640,6 +640,25 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 	return out
 }
 
+// refuseUnencodable32 asks the cached 32-bit probe once per planning pass.
+// False with a nil error enqueues nothing and reports the outage. A probe
+// that did not run is not a refusal: missing sox stays on the tool path.
+func (c *Coordinator) refuseUnencodable32(ctx context.Context, targetBits int, path string) error {
+	if targetBits != 32 {
+		return nil
+	}
+	can, err := PlanFLAC32(ctx)
+	if err != nil || can {
+		return nil
+	}
+	var depths *depthOutages
+	if c.pool != nil {
+		depths = &c.pool.depths
+	}
+	ReportFLAC32Refusal(depths, path)
+	return ErrFLAC32Unencodable
+}
+
 // submitUpscaleProjections is everything Submit and SubmitPaths share:
 // filter, project size, disk pre-flight, batch row, enqueue. `path` is
 // the display label for the batch row, NOT a scope — the scope was
@@ -651,6 +670,9 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 // the only one still inline in its submit function, which is what made
 // that function the largest thing in this package.
 func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string, projections []manifest.TrackProjection, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
+	if err := c.refuseUnencodable32(ctx, targetBits, path); errors.Is(err, ErrFLAC32Unencodable) {
+		return nil, err
+	}
 	picked := c.buildUpscaleCandidates(path, projections, targetRate, targetBits)
 	cands, alreadyCovered, totalProjected := picked.cands, picked.alreadyCovered, picked.totalProjected
 

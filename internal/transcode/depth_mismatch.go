@@ -9,15 +9,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // FLAC32EncodeFix is what an operator does when this host's sox cannot write
-// a 32-bit FLAC. The pool's outage report and the doctor line share it, so
-// the two cannot drift.
+// a 32-bit FLAC. The pool's outage report, the planner's refusal and the
+// doctor line share it, so the three cannot drift.
 const FLAC32EncodeFix = "set the target to 24, or install a sox that can encode 32-bit FLAC"
+
+// ErrFLAC32Unencodable is a planner's refusal: this host's sox cannot write
+// 32-bit FLAC, so the pass enqueues nothing. A probe that did not run is a
+// different error and is not this one.
+var ErrFLAC32Unencodable = errors.New("sox cannot encode 32-bit FLAC — " + FLAC32EncodeFix)
 
 // logDepthMismatch is the one Warn a bit-depth outage logs, and the Debug
 // line every later job of that outage logs under.
@@ -170,6 +176,68 @@ func flac32ProbeDir() (string, error) {
 		}
 	}
 	return "", errors.New("flac 32-bit probe: temp directory exists")
+}
+
+// flac32AnswerTTL is how long a planning pass reuses one probe. A sweep
+// asks once for the pass, and the passes inside the window share it. A
+// host whose sox learns the depth is planned again at the next pass
+// after the window, with no restart.
+const flac32AnswerTTL = 30 * time.Second
+
+// flac32Probe is the encode probe the cache asks. Tests replace it and
+// restore it. Production leaves it as CanEncodeFLAC32.
+var flac32Probe = CanEncodeFLAC32
+
+// PlanFLAC32 is what a 32-bit planning pass asks. Tests replace it and
+// restore it, so a test never forks this host's sox. Production caches
+// the probe for flac32AnswerTTL.
+var PlanFLAC32 = askFLAC32Cached
+
+type flac32Answer struct {
+	mu   sync.Mutex
+	at   time.Time
+	can  bool
+	err  error
+	have bool
+}
+
+var flac32Answers flac32Answer
+
+// plannerDepths is the streak a planner with no pool reports through,
+// which is the CLI: one process, one Warn.
+var plannerDepths depthOutages
+
+func askFLAC32Cached(ctx context.Context) (bool, error) {
+	flac32Answers.mu.Lock()
+	if flac32Answers.have && time.Since(flac32Answers.at) < flac32AnswerTTL {
+		can, err := flac32Answers.can, flac32Answers.err
+		flac32Answers.mu.Unlock()
+		return can, err
+	}
+	flac32Answers.mu.Unlock()
+
+	can, err := flac32Probe(ctx)
+	// A cancelled probe is not a fact about the host. The next pass asks.
+	if ctx.Err() != nil {
+		return can, err
+	}
+	flac32Answers.mu.Lock()
+	flac32Answers.at = time.Now()
+	flac32Answers.can = can
+	flac32Answers.err = err
+	flac32Answers.have = true
+	flac32Answers.mu.Unlock()
+	return can, err
+}
+
+// ReportFLAC32Refusal notes that a planner enqueued nothing at 32 bits.
+// The pool's own streak is what a long-lived planner notes, so a later
+// job of that depth does not warn again; a nil depths is the CLI's streak.
+func ReportFLAC32Refusal(depths *depthOutages, path string) {
+	if depths == nil {
+		depths = &plannerDepths
+	}
+	depths.fail(0, 32, path, ErrFLAC32Unencodable.Error())
 }
 
 // clipProbe keeps a failed synth's output off a long doctor line.
