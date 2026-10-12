@@ -1759,6 +1759,24 @@ lost my library."
   asks the guards for what it reads, and refuses any other reader;
   `TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime` fails the day dhowden
   stops counting up, and the renaming bound can go then.
+- **An ID3 genre is expanded only while it holds a handful of numeric
+  references** (2026-10-12, backlog B246). dhowden's `metadataID3v2.Genre`
+  expands one `(n)` reference per pass and copies the string each time
+  (`id3v2genre`, unexported; the bridge reaches it only through `Genre()`).
+  A TCON of 4,000 copies of `(0)` took 6.5 s, and the unfixed
+  `genreFromTag` path 7.8 s. `genreFromTag` is the one call, from
+  `populateFromTagMetadata` and from `containerText.applyUnder`. When the
+  raw TCON (v2.3/v2.4) or TCO (v2.2) holds more than `maxID3v2GenreRefs`
+  (32) `(digits)` groups it returns "" and does not call `Genre()`. A
+  count at or under the bound stores `strings.TrimSpace(m.Genre())`, so a
+  real tag is unchanged. The vendored module is not patched. **No
+  `ExtractorVersion` bump**: a well-formed genre is byte-identical, and an
+  over-budget frame was not a genre anyone tagged. The app twin is B239
+  (linear in what the parser reads). The app's `GenreNormalizer` joins
+  references differently; the bridge still stores dhowden's expansion for
+  a normal tag.
+  (`TestAnID3GenreOfThousandsOfReferencesFinishesAtOnce`,
+  `TestAnOrdinaryID3GenreIsWhatDhowdenReturns`.)
 - **An Ogg FLAC stream's tags are read from its own header packets, as a .flac
   file's are** (2026-09-29, backlog B102). dhowden's `ReadOGGTags` looks only for a
   `\x03vorbis` or `OpusTags` packet, and a FLAC stream in Ogg carries its comments as
@@ -5212,6 +5230,39 @@ no failing test — which is the shape to expect in this area.
   what the other side says about it (here, backlog B78). (This bullet also
   said the later dials of a HOSTNAME control URL were not covered; the next
   bullet covers them.)
+- **A host that, decoded, holds a Unicode control character or whitespace
+  is malformed, and it is refused before any other kind** (2026-10-12,
+  backlog B246; the app's twin is acoseac/1-bit#2042). `classifyHost` asks
+  `hostIsMalformed` on the original host, before the trailing-dot trim and
+  before `ParseAddr`. `unicode.IsControl` or `unicode.IsSpace` is the
+  kind `hostMalformed`. The character is never stripped so the remainder
+  can be classified: `127.0.0.1` plus U+0085 stays malformed, and a strip
+  would call it this machine. Go's `url.Parse` already refuses an ASCII
+  control or space in a host. What reaches the classifier is the non-ASCII
+  set (U+0085, U+00A0, U+2028, U+3000). **An ASCII space inside an IPv6
+  zone whose head parses as an address is kept**: Windows names the
+  adapter `Wi-Fi 4`, and `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack`
+  requires `http://[fe80::1%25Wi-Fi%204]:8080/d.xml`. A control or any
+  other space in that zone is still malformed. A `%` whose head is not an
+  IP is not a zone (the `%25` name). `hostKindAllowed` refuses the kind.
+  `isFetchableURL` refuses it, so `fetchableLocation` reads such a
+  LOCATION as absent. `resolveServiceURL` returns
+  `errServiceURLMalformedHost` before `isFetchableURL` and again in the
+  kind switch. `LocationPermittedBy` refuses it even when the packet came
+  from loopback, ahead of the localhost arm that would otherwise keep a
+  name it cannot parse. `OperatorChose` approves only this machine and
+  link-local, so a malformed manual URL approves nothing.
+  `callbackHostAllowed` already refuses one: it is not an address
+  `ParseAddr` accepts. **Fullwidth digits (`１２７．０．０．１`) and a
+  literal `%25` are not this kind.** IDNA maps the fullwidth host to
+  `127.0.0.1`; `%25` decodes to a name holding `%`. Both stay elsewhere,
+  and `refuseUnapprovedHostLocal` is the backstop that stops the dial.
+  Do not drop that dial check because the string check now exists.
+  (`TestAHostWithAControlOrASpaceIsMalformed`,
+  `TestAMalformedHostIsNeverStrippedBeforeItIsClassified`,
+  `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne`,
+  `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck`,
+  `Test_callbackHostAllowed`.)
 - **…and every LATER request to a device dials under the approval its URL
   came with, because a NAME in it resolves again at each dial** (backlog B36,
   2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, then on
@@ -8304,7 +8355,7 @@ mentions across the four `ops/audit-*.md` files.
   server's `ErrorLog()`, which runs the same function, leaked it too.
   `RedactPeers` now also takes the address after `->`, and **every other
   place the line repeats an address a word or an arrow named as a peer**
-  (`redactRepeats`, never inside a longer address): net's accept ignores a
+  (one walk of the line, never inside a longer address): net's accept ignores a
   failed getsockname (fd_unix.go, fd_windows.go), and a socket error with
   no local end names the peer alone, `read tcp <peer>: …`, where only the
   words earlier in the line say what it is. **A lone address can also be
@@ -8333,6 +8384,22 @@ mentions across the four `ops/audit-*.md` files.
   `ErrorLog` names a renderer in a panic line (the privacy page's
   disclosed DLNA exception), and the console's plain-HTTP modes see only
   loopback peers (a proxy's, in public mode).
+- **`RedactPeers` walks the line once** (2026-10-12, backlog B246). The
+  previous form scanned the whole line once per distinct address a word
+  or an arrow had named. 40,000 distinct peers took 5.7 s. The addresses
+  are collected, then one walk copies each named span and replaces a
+  later repeat of the same text only where it stands alone (the previous
+  byte does not continue an address, and the next byte is not a digit),
+  which is what keeps `10.0.0.2:5000` from eating `10.0.0.2:50001` or
+  `110.0.0.2:5000`. **The finder is a direct walk of the same pattern as
+  `peerAddr`, not `FindAll`**: under the race detector the regexp
+  interpreter spent 1.3 s of a 1.3 s call on those 40,000 matches, so a
+  one-second bound could not hold while `FindAll` ran. `peerAddr` stays
+  the spec; `peerAddressSpans` must return its group 2.
+  `TestPeerAddressSpansMatchThePattern` is that lockstep.
+  `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` is the bound (under
+  1 s, every peer replaced, idempotent). The app twin is B239's linear
+  parse.
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as

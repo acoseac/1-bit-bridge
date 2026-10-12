@@ -64,7 +64,7 @@ func (c containerText) applyUnder(t *Track, id3 tag.Metadata) {
 		tagTitle = strings.TrimSpace(id3.Title())
 		tagArtist = strings.TrimSpace(id3.Artist())
 		tagAlbum = strings.TrimSpace(id3.Album())
-		tagGenre = strings.TrimSpace(id3.Genre())
+		tagGenre = genreFromTag(id3)
 	}
 	if c.title != "" && tagTitle == "" {
 		t.Title = c.title

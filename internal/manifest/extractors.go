@@ -1130,7 +1130,7 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	if v := strings.TrimSpace(m.Album()); v != "" {
 		t.Album = v
 	}
-	if v := strings.TrimSpace(m.Genre()); v != "" {
+	if v := genreFromTag(m); v != "" {
 		t.Genre = v
 	}
 	// **Pointer-zero correctness pass** (PR-B): `dhowden/tag` returns

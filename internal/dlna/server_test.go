@@ -410,6 +410,12 @@ func Test_callbackHostAllowed(t *testing.T) {
 		{"ipv6_unspecified", "::", "[::]:5", false},
 		{"localhost_name", "localhost", "127.0.0.1:5", false},
 		{"numeric_spelling", "127.1", "127.0.0.1:5", false},
+		// A decoded host that holds a control or a space is not an address.
+		// Stripping the mark would leave a host this table already allows.
+		{"malformed_nel_on_loopback", "127.0.0.1\u0085", "127.0.0.1:5", false},
+		{"malformed_nbsp", "192.168.1.4\u00a0", "192.168.1.4:5", false},
+		{"malformed_line_separator", "example.com\u2028", "8.8.8.8:5", false},
+		{"malformed_ideographic_space", "example.com\u3000", "8.8.8.8:5", false},
 		// A cloud metadata address, never: the NOTIFY's dial check refuses
 		// every connect to one (#1074), so the guard refuses it first.
 		{"metadata_from_itself", "169.254.169.254", "169.254.169.254:5", false},

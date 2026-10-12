@@ -40252,3 +40252,41 @@ The forward sweep asks `integrity.VariantsDirChanged` before it unlinks and befo
 ### Control
 
 The four identity checks were removed and those tests were run again. Both `runGC` tests unlinked the files the sweep had listed and reported the reverse-sweep refusal. Both `analyze --gc` tests exited 0 after removing two orphan sidecars. The checks were restored with the editor. The broken state was not committed.
+
+## 2026-10-12 — bound the ID3 genre expansion and peer redaction, and refuse a malformed host (backlog B246)
+
+Two parsers were quadratic on crafted input, and a URL host that decodes to a Unicode control or space was classified as an ordinary host. The app twins are B239 (the genre bound and the linear parse) and acoseac/1-bit#2042 (the malformed host).
+
+### ID3 genre
+
+dhowden/tag's `metadataID3v2.Genre` expands one `(digits)` reference per pass and copies the string each time. It is unexported. The bridge reaches it only through `m.Genre()`, from `populateFromTagMetadata` and `container_text.applyUnder`. Measured on a v2.3 TCON of `(0)` repeated, then `Genre()`: 200 references 9.5 ms, 800 73 ms, 2,000 785 ms, 4,000 6.54 s (output 23,999 bytes). The module was not patched. `genreFromTag` counts every `(digits)` group in the raw TCO or TCON frame and, past `maxID3v2GenreRefs` (32), returns "" without calling `Genre()`. A real tag's handful of references still stores `strings.TrimSpace(m.Genre())`. An over-budget genre is empty, so container text may supply one. No `ExtractorVersion` bump: a well-formed file's genre is unchanged.
+
+`TestAnID3GenreOfThousandsOfReferencesFinishesAtOnce` (4,000 references, under 1 s, empty genre). `TestAnOrdinaryID3GenreIsWhatDhowdenReturns` (`(17)`, `Rock`, `(9)(0)`, `Live (2024)`, `Jazz (17)`).
+
+The first red run, before the bound, failed in 7.76 s.
+
+### Peer redaction
+
+`handshakelog.RedactPeers` found every peer with `FindAll` and then scanned the whole line once per distinct address. 40,000 distinct peers took 5.66 s. The addresses are collected, then one walk copies each named span and replaces a later repeat only where it stands alone, so `10.0.0.2:5000` does not eat `10.0.0.2:50001` or `110.0.0.2:5000`.
+
+A first linear form still called `peerAddr.FindAllStringSubmatchIndex`. Under the race detector that call alone was 1.25 s of a 1.33 s `RedactPeers` on the same 40,000 peers (line length 874,606), so the one-second bound could not hold while the regexp interpreter ran. `peerAddressSpans` walks the same pattern by hand. `peerAddr` stays the spec. `TestPeerAddressSpansMatchThePattern` requires the spans to equal group 2. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` is the bound (under 1 s, every peer replaced, idempotent). After the scanner, that test and `TestRedactPeers` / `TestRedactPeersInASocketError` passed under `-race` in 1.56 s for the package filter.
+
+### Malformed hosts
+
+`classifyHost` asks `hostIsMalformed` on the host as decoded, before the trailing-dot trim and before any other kind. A host that holds a Unicode control or whitespace is `hostMalformed` and is refused. The character is never stripped. Go's `url.Parse` already refuses ASCII controls. The new check is the non-ASCII ones (U+0085, U+00A0, U+2028, U+3000).
+
+An ASCII space inside an IPv6 zone is kept. Go's `url.Parse` accepts `%20` in a zone, and a Windows adapter name is `Wi-Fi 4`. `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack` keeps `http://[fe80::1%25Wi-Fi%204]:8080/d.xml`. `splitIPZone` splits only when the head parses as an IP. The head allows no space. The zone allows U+0020 and nothing else. A control or any other space in the zone is still malformed. A `%` whose head is not an IP (`%25` in a name) is judged as the whole host. The app's `hostIsMalformed` flags a zone space too; the bridge keeps the zone the existing round-trip test already keeps. A non-ASCII escape inside a zone does not parse (`invalid URL escape "%C2"`); the decoded string `fe80::1%en0` plus U+00A0 is still refused.
+
+Refused at `hostKindAllowed`, `isFetchableURL` (so an SSDP LOCATION is absent), `resolveServiceURL` (`errServiceURLMalformedHost`, before the fetchable check and in the kind switch), and `LocationPermittedBy` even for a loopback source. `OperatorChose` approves only this machine and link-local. `callbackHostAllowed` already refuses a host `netip.ParseAddr` does not take; rows for the four scalars were added to `Test_callbackHostAllowed`. Fullwidth digits (`１２７．０．０．１`) and a literal `%25` are not this kind: IDNA maps the fullwidth host to `127.0.0.1`, and the dial-time check (`refuseUnapprovedHostLocal`) is what refuses that address. `TestAHostWithAControlOrASpaceIsMalformed`, `TestAMalformedHostIsNeverStrippedBeforeItIsClassified`, `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne`, `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck`.
+
+### Control
+
+Each fix was taken out, the new test was run, and the fix was put back with the editor. The broken state was not committed.
+
+The genre bound's comparison was inverted to `< 0`, so `Genre()` always ran. `TestAnID3GenreOfThousandsOfReferencesFinishesAtOnce` failed in 6.80 s (`genre expansion took 6.802523792s, want under 1s`).
+
+`RedactPeers` was put back to `FindAll` plus one `redactRepeats` scan per address. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` failed in 4.90 s (`RedactPeers took 4.889565583s, want under 1s`). The first red run, before any linear form, was 5.66 s.
+
+`hostIsMalformed` was made to return false. `TestAHostWithAControlOrASpaceIsMalformed` reported `host "192.168.1.20\u0085" is not malformed`. `TestAMalformedHostIsNeverStrippedBeforeItIsClassified` classified the marked loopback as elsewhere. `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne` found the host fetchable. `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck` kept a decoded zone holding U+00A0.
+
+After the three restores, the same tests passed: the genre pair in 0.475 s, the redact filter in 0.263 s, and the malformed-host filter in 0.293 s.
