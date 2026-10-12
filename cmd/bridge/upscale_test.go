@@ -154,7 +154,7 @@ func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("inventory unexpected: exit=%d", exitCode)
 	}
-	removed, kept, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, inv, gcStartAfterTheGrace())
+	removed, kept, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, inv, gcStartAfterTheGrace(), "", nil)
 	if exitCode != 0 || failed != 0 {
 		t.Fatalf("sweep unexpected: exit=%d failed=%d", exitCode, failed)
 	}

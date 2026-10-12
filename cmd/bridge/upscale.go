@@ -864,8 +864,10 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // was last modified at least integrity.OrphanGracePeriod before start, the
 // instant runGC began, before it listed the catalog (gcReclaimTally.reclaim).
 // Returns `(removed, kept, failed, exitCode, renditionsUnlinked)` —
-// `exitCode != 0` signals a SIGINT, or an inventory it refused, and runGC
-// bails immediately. renditionsUnlinked counts the renditions by name
+// `exitCode != 0` signals a SIGINT, an inventory it refused, or a directory
+// that is no longer the one startDir was taken from, and runGC bails
+// immediately, deleting no row. A nil startDir skips that check: callers
+// that hand the sweep an inventory and no directory. renditionsUnlinked counts the renditions by name
 // (SidecarInventory.OrphanIsRendition) this run's own unlink removed:
 // never one whose unlink failed, and never one already gone (ENOENT, a
 // success to the exit code), since a volume unmounted between the
@@ -888,7 +890,7 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // counted. An inventory whose two lists do not pair up is refused before
 // anything is removed (integrity.SidecarInventory.CheckPaired), never
 // indexed past its end nor unlinked by the configured spelling.
-func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory, start time.Time) (int, int, int, int, int) {
+func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory, start time.Time, outputDir string, startDir os.FileInfo) (int, int, int, int, int) {
 	var (
 		tally              gcReclaimTally
 		renditionsUnlinked int
@@ -903,6 +905,13 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integr
 		// it finished the list. CodeRabbit Major on PR #217.
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
+			return tally.removed, inv.Known, tally.failed, 1, renditionsUnlinked
+		}
+		if gcBeforeForwardUnlink != nil {
+			gcBeforeForwardUnlink(i)
+		}
+		if changed := gcDirChanged(outputDir, startDir); changed != "" {
+			fmt.Fprintf(stderr, "GC forward sweep: %s\n", gcUnlinkRefusal(changed, outputDir, tally.removed > 0))
 			return tally.removed, inv.Known, tally.failed, 1, renditionsUnlinked
 		}
 		if tally.reclaim(stderr, "", path, inv.OrphanWalkedPaths[i], start) && inv.OrphanIsRendition(i) {
@@ -1386,6 +1395,33 @@ var gcAfterClassifiedRow func(sourcePath string, verdict integrity.SidecarVerdic
 // counted the renditions it unlinked.
 var gcBeforeReverseDirCheck func()
 
+// gcBeforeForwardSweep runs after the inventory guards and before the
+// forward sweep unlinks. Nil in production.
+var gcBeforeForwardSweep func()
+
+// gcBeforeForwardUnlink runs before each forward-sweep unlink, with the
+// orphan's index. Nil in production.
+var gcBeforeForwardUnlink func(index int)
+
+// gcDirChanged is "" while dir is still the directory start was taken
+// from. A nil start skips the check.
+func gcDirChanged(dir string, start os.FileInfo) string {
+	if start == nil {
+		return ""
+	}
+	return integrity.VariantsDirChanged(dir, start)
+}
+
+// gcUnlinkRefusal is the refusal a forward sweep prints when the directory
+// is no longer the one the sweep began on.
+func gcUnlinkRefusal(changed, dir string, unlinkedAny bool) string {
+	what := "Nothing was unlinked and no row was removed."
+	if unlinkedAny {
+		what = "Nothing further was unlinked and no row was removed."
+	}
+	return fmt.Sprintf("%s (%q). %s", changed, dir, what)
+}
+
 // classifyGCRows classifies every row against the variants directory
 // start was taken from. A row that reads missing is kept only while that
 // directory is still there (integrity.VariantsDirChanged, the watcher's
@@ -1755,7 +1791,14 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, 
 		}
 	}
 
-	_, _, failed, exitCode, renditionsUnlinked := runGCForwardSweep(ctx, stdout, stderr, inv, start)
+	if gcBeforeForwardSweep != nil {
+		gcBeforeForwardSweep()
+	}
+	if changed := integrity.VariantsDirChanged(outputDir, startDir); changed != "" {
+		fmt.Fprintf(stderr, "GC forward sweep: %s\n", gcUnlinkRefusal(changed, outputDir, false))
+		return 1
+	}
+	_, _, failed, exitCode, renditionsUnlinked := runGCForwardSweep(ctx, stdout, stderr, inv, start, outputDir, startDir)
 	if exitCode != 0 {
 		return exitCode
 	}

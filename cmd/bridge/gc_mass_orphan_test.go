@@ -361,7 +361,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	removed, _, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace())
+	removed, _, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if failed != 0 || exitCode != 0 {
 		t.Fatalf("a file that vanished before the unlink counted as a failure (failed=%d exit=%d): %s",
 			failed, exitCode, stderr.String())
@@ -385,7 +385,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	stderr.Reset()
 	_, _, failed, _, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
 		integrity.SidecarInventory{OrphanPaths: []string{sub, bad}, OrphanWalkedPaths: []string{sub, bad}},
-		gcStartAfterTheGrace())
+		gcStartAfterTheGrace(), "", nil)
 	if failed != 1 {
 		t.Errorf("failed=%d, want 1 (the path no stat can read): %s", failed, stderr.String())
 	}

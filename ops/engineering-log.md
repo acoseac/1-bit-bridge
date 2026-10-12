@@ -40069,3 +40069,17 @@ Before the identity checks, through the real `runGC`, with the directory renamed
 ### Control
 
 The identity re-check inside `gcCheckOutputDirBeforeReverseSweep` was removed and `TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify` was run again. The sweep deleted the four missing rows (5 left of 9) and exited 0. The check was restored with `git checkout`. The broken state was not left in the tree.
+
+## 2026-10-12 — a GC forward sweep unlinks only while the directory is still the one the sweep began on (backlog B336)
+
+`runGC` asked `integrity.VariantsDirChanged` as each row read missing and again before the reverse sweep. The forward sweep unlinks by the paths the inventory walked, and that check did not run before those unlinks. `analyze --gc` had the same window between its inventory and its unlinks, and exited 0 after them.
+
+### The fix
+
+The forward sweep asks `integrity.VariantsDirChanged` before it unlinks and before each unlink. A changed identity refuses: nothing further is unlinked and no catalog row is deleted. `analyze --gc` takes `fsutil.DirIdentity` before its inventory and asks the same check before it unlinks and before each unlink, and that refusal exits non-zero. `optimize --gc` and `render --gc` call `runGC`. No wire change.
+
+`TestRunGCRefusesAForwardSweepOnAReplacedDirectory`, `TestRunGCRefusesAForwardSweepReplacedAfterTheFirstUnlink`, `TestAnalyzeGCRefusesASweepOnAReplacedDirectory`, `TestAnalyzeGCRefusesASweepReplacedAfterTheFirstUnlink`.
+
+### Control
+
+The four identity checks were removed and those tests were run again. Both `runGC` tests unlinked the files the sweep had listed and reported the reverse-sweep refusal. Both `analyze --gc` tests exited 0 after removing two orphan sidecars. The checks were restored with the editor. The broken state was not committed.

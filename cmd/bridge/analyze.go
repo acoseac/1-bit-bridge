@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -352,6 +353,11 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 		fmt.Fprintf(stdout, "analyze --gc: no waveform dir at %s; nothing to do\n", outputDir)
 		return 0
 	}
+	startDir, idErr := fsutil.DirIdentity(outputDir)
+	if idErr != nil {
+		fmt.Fprintf(stderr, "analyze --gc: refusing to run — cannot open waveform directory (%q): %v. Nothing was unlinked and no row was removed.\n", outputDir, idErr)
+		return 1
+	}
 
 	// One classification pass, shared with `upscale --gc` and the doctor's
 	// variants-index check, so the three cannot disagree about what a tree
@@ -425,7 +431,14 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 		}
 	}
 
-	tally, code := removeAnalysisGCFiles(ctx, stderr, inv, start)
+	if analyzeGCBeforeSweep != nil {
+		analyzeGCBeforeSweep()
+	}
+	if changed := gcWaveformDirChanged(outputDir, startDir); changed != "" {
+		fmt.Fprintf(stderr, "analyze --gc: %s\n", gcUnlinkRefusal(changed, outputDir, false))
+		return 1
+	}
+	tally, code := removeAnalysisGCFiles(ctx, stderr, inv, start, outputDir, startDir)
 	if code != 0 {
 		return code
 	}
@@ -441,6 +454,20 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 	return 0
 }
 
+// analyzeGCBeforeSweep runs after the inventory guards and before
+// analyze --gc unlinks. Nil in production.
+var analyzeGCBeforeSweep func()
+
+// analyzeGCBeforeUnlink runs before each analyze --gc unlink, with a flat
+// index across scratch files and then orphans. Nil in production.
+var analyzeGCBeforeUnlink func(index int)
+
+// gcWaveformDirChanged is gcDirChanged with the variants-directory wording
+// read as the waveform directory.
+func gcWaveformDirChanged(dir string, start os.FileInfo) string {
+	return strings.ReplaceAll(gcDirChanged(dir, start), "variants directory", "waveform directory")
+}
+
 // removeAnalysisGCFiles removes the scratch files and orphans an analyze
 // --gc inventory listed, each only if, asked again just before its unlink,
 // it is still a file and was last modified at least
@@ -450,11 +477,12 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 // status to stop with, 0 to go on: 130 when ctx ended the loop, with the
 // files before it already gone, and 1 when it refused an inventory whose
 // listed and walked paths do not pair up
-// (integrity.SidecarInventory.CheckPaired), before removing anything. It
-// reads only the walked paths, so an unpaired inventory would not panic
-// here; it would remove whatever the walked lists hold and report the
-// rest as never there, which is the silent shape the check exists to
-// refuse.
+// (integrity.SidecarInventory.CheckPaired), before removing anything, or
+// when the directory is no longer the one startDir was taken from. A nil
+// startDir skips that check. It reads only the walked paths, so an
+// unpaired inventory would not panic here; it would remove whatever the
+// walked lists hold and report the rest as never there, which is the
+// silent shape the check exists to refuse.
 //
 // The scratch half is removed whatever the catalog says, and stays outside
 // the ratio: a `.waveform.bin.tmp` is this sweep's own half-written litter,
@@ -469,18 +497,27 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 // a symlink, repointed between the walk and the unlinks, the configured
 // spelling reaches a tree the guard never counted. A base name is the
 // same under both.
-func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory, start time.Time) (tally gcReclaimTally, code int) {
+func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory, start time.Time, outputDir string, startDir os.FileInfo) (tally gcReclaimTally, code int) {
 	if err := inv.CheckPaired(); err != nil {
 		fmt.Fprintf(stderr, "analyze --gc: refusing to run — %v. Nothing was removed.\n", err)
 		return tally, 1
 	}
+	n := 0
 	for _, set := range [][]string{inv.ScratchWalkedPaths, inv.OrphanWalkedPaths} {
 		for _, path := range set {
 			if ctx.Err() != nil {
 				fmt.Fprintln(stderr, "analyze --gc: interrupted")
 				return tally, 130
 			}
+			if analyzeGCBeforeUnlink != nil {
+				analyzeGCBeforeUnlink(n)
+			}
+			if changed := gcWaveformDirChanged(outputDir, startDir); changed != "" {
+				fmt.Fprintf(stderr, "analyze --gc: %s\n", gcUnlinkRefusal(changed, outputDir, tally.removed > 0))
+				return tally, 1
+			}
 			tally.reclaim(stderr, "analyze --gc: ", filepath.Base(path), path, start)
+			n++
 		}
 	}
 	return tally, 0
