@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -456,7 +457,19 @@ func checkPortAs(t *testing.T, uid, port, bridge int) Check {
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	args := []string{"-test.run=^" + t.Name() + "$"}
+	// The child's checkPort runs under realProbeUsesTheTestDeadline, which
+	// reads t.Deadline(): started without -test.timeout the child has none
+	// and keeps the 2s production bound, so a slow lsof on a loaded runner
+	// would still degrade its verdict. Hand it this test's time, less a
+	// reserve so the child reports its own hang first (the
+	// stand_in_pid_test.go pattern; CodeRabbit on #1195).
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - 10*time.Second; left > 0 {
+			args = append(args, fmt.Sprintf("-test.timeout=%s", left))
+		}
+	}
+	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
 		childUIDEnv+"="+strconv.Itoa(uid))
 	var stderr bytes.Buffer
