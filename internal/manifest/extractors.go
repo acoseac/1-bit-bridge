@@ -540,7 +540,20 @@ var Ext = map[string]bool{
 // full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
 // other row re-extracts byte-identical and rides the version-stamp leg; SACD
 // ISO virtual rows re-expand as on every bump. ProtocolVersion stays 1.
-const ExtractorVersion = 23
+//
+// v24 — a repeated Vorbis comment for GENRE, ALBUM, COMPOSER, CONDUCTOR or
+// WORK is joined with "; " (backlog B328). dhowden's map keeps the last
+// value, so a FLAC the app reads as "Rock; Pop" arrived from the bridge as
+// "Pop". The join is the app's VorbisCommentParser rule: empty values
+// skipped before they count, comment order kept, 64 values per comment
+// block, a later block appended. TITLE stays dhowden's last value; the
+// first non-empty TITLE is only the explicit verdict's. ARTIST and
+// ALBUMARTIST were already joined and stay uncapped. Only a row whose
+// joined field differs from the value it stored takes the full-upsert leg
+// (its enrichment re-queued once) and is the iOS delta. Every other row
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO
+// virtual rows re-expand as on every bump. ProtocolVersion stays 1.
+const ExtractorVersion = 24
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1511,16 +1524,19 @@ func skipID3v2(r io.ReadSeeker) error {
 	return nil
 }
 
-// applyFLACMultiValueArtists scans the FLAC's Vorbis Comment block for
-// repeated `ARTIST` / `ALBUMARTIST` entries (which dhowden/tag's
-// last-wins map collapses to a single value) and overrides
-// `t.Artist` / `t.AlbumArtist` with a `"; "`-joined string when
-// multi-value is detected. The separator matches the iOS-side
-// `VorbisCommentParser.appendMulti` convention so the iOS picker /
-// upsert split logic activates without any wire-protocol change.
+// applyFLACMultiValueArtists scans every FLAC Vorbis comment block for
+// repeated ARTIST, ALBUMARTIST, ALBUM, GENRE, COMPOSER, CONDUCTOR and
+// WORK entries (which dhowden/tag's last-wins map collapses to a single
+// value) and overrides those fields with a "; "-joined string when the
+// walk collected at least one non-empty value. The separator, the
+// per-block cap of 64 and the append across later blocks match
+// VorbisCommentParser.MultiValueFields, so the phone's genre split and
+// album identity see the same string. ARTIST and ALBUMARTIST stay
+// uncapped. TITLE is not joined: the first non-empty TITLE feeds only
+// the explicit-content verdict.
 //
 // Cost: parses the block header for every metadata block (cheap —
-// 4 bytes each) and the BODY of only the Vorbis Comment block.
+// 4 bytes each) and the BODY of every Vorbis Comment block.
 // Every other block is SEEKED past using the length its header
 // declares, so a PICTURE block's 5–25 MiB never crosses the wire
 // here.
@@ -1534,10 +1550,13 @@ func skipID3v2(r io.ReadSeeker) error {
 // drains, because `*io.LimitedReader` is never an io.Seeker.
 //
 // Best-effort: malformed / corrupt FLAC streams silently no-op
-// rather than failing the scan. Single-value tags also no-op (the
-// dhowden-populated value is correct in that case). Non-FLAC
-// formats are NOT covered by this helper — ID3v2 TPE1 multi-value
-// (MP3 / DSF / M4A) is a deferred follow-up.
+// rather than failing the scan. A single non-empty value is written,
+// which is the string dhowden kept when it kept that value; a trailing
+// empty that left dhowden's map empty is overridden by the non-empty
+// one. A parse error after an earlier block still applies what that
+// block collected. Non-FLAC formats are NOT covered by this helper —
+// ID3v2 TPE1 multi-value (MP3 / DSF / M4A) is a deferred follow-up,
+// and so is a plain Ogg Vorbis or Opus comment packet.
 func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 	// Skip a leading ID3v2 tag if some tagger prepended one (out of
 	// spec but common); otherwise the fLaC magic check below fails and
@@ -1554,10 +1573,18 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 	if string(magic[:]) != "fLaC" {
 		return
 	}
+	// Accumulators span every comment block. The five capped fields
+	// reset their counts at each block; artists do not, and neither do
+	// the first-non-empty title and advisory flags.
+	var artists, albumArtists []string
+	var albums, genres, composers, conductors, works []string
+	var advisory, explicitField, tagTitle string
+	var sawAdvisory, sawExplicit, sawTitle bool
+	var sawComment bool
 	for {
 		block, err := meta.New(r)
 		if err != nil {
-			return
+			break
 		}
 		if block.Type == meta.TypeVorbisComment {
 			// NOT block.Parse(): mewkiz's parseVorbisComment allocates
@@ -1604,15 +1631,16 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			// never parsePicture. CodeRabbit on #981.)
 			tags, perr := parseVorbisCommentBounded(r, block.Length)
 			if perr != nil {
-				return
+				break
 			}
-			var artists, albumArtists []string
-			var advisory, explicitField, tagTitle string
-			var sawAdvisory, sawExplicit, sawTitle bool
+			sawComment = true
+			var nAlbum, nGenre, nComposer, nConductor, nWork int
 			for _, tg := range tags {
 				switch strings.ToLower(tg[0]) {
 				case "title":
 					// The first non-empty TITLE. dhowden's map keeps the last.
+					// It is the explicit verdict's title, not t.Title: the
+					// app joins TITLE and the bridge does not.
 					if !sawTitle && strings.TrimSpace(tg[1]) != "" {
 						tagTitle = tg[1]
 						sawTitle = true
@@ -1621,6 +1649,16 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 					if v := strings.TrimSpace(tg[1]); v != "" {
 						artists = append(artists, v)
 					}
+				case "album":
+					albums = appendVorbisField(albums, &nAlbum, tg[1])
+				case "genre":
+					genres = appendVorbisField(genres, &nGenre, tg[1])
+				case "composer":
+					composers = appendVorbisField(composers, &nComposer, tg[1])
+				case "conductor":
+					conductors = appendVorbisField(conductors, &nConductor, tg[1])
+				case "work":
+					works = appendVorbisField(works, &nWork, tg[1])
 				case "syncedlyrics", "synced lyrics", "lrc":
 					if c, ok := lyrics.TextCandidate(tg[1], "", true, 0); ok {
 						t.lyricsCandidates = append(t.lyricsCandidates, c)
@@ -1658,33 +1696,14 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 					}
 				}
 			}
-			// Override whenever we found at least one non-empty entry
-			// in the raw block. Catches the edge case where dhowden
-			// saw `ARTIST=Name` followed by `ARTIST=` (a trailing
-			// empty multi-value): dhowden's last-wins map stored "",
-			// `populateFromTagMetadata` skipped the empty assignment,
-			// and `t.Artist` was left at whatever the path-derived
-			// fallback produced. Our multi-value pass filters empties
-			// out per segment, so a single non-empty entry in
-			// `artists` is the correct ground-truth result —
-			// asserting it over dhowden's possibly-empty value is
-			// strictly an improvement. Gemini medium on PR #208.
-			if len(artists) > 0 {
-				t.Artist = strings.Join(artists, "; ")
+			// parseVorbisCommentBounded already consumed this body and
+			// left the reader on the next header. A block flagged last
+			// ends the metadata; reading on would parse an audio frame
+			// as a header.
+			if block.IsLast {
+				break
 			}
-			if len(albumArtists) > 0 {
-				t.AlbumArtist = strings.Join(albumArtists, "; ")
-			}
-			// The comment block is the in-order reader. Title is the
-			// block's first TITLE when it has one, otherwise the
-			// path-derived title. A walk that failed above leaves the
-			// verdict populate recorded.
-			t.Explicit = ExplicitVerdict(ExplicitSignals{
-				ItunesAdvisory: advisory,
-				Explicit:       explicitField,
-				Title:          explicitTrackTitle(tagTitle, t.Title),
-			})
-			return
+			continue
 		}
 		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) — SEEK
 		// past the body, do not drain it.
@@ -1722,12 +1741,65 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 		// exists for (Gemini on #981). Fail-open on a seek error, like every
 		// other bail here.
 		if _, serr := r.Seek(block.Length, io.SeekCurrent); serr != nil {
-			return
+			break
 		}
 		if block.IsLast {
-			return
+			break
 		}
 	}
+	// Applied once, after every block. Override whenever the walk found
+	// at least one non-empty value. A trailing empty (`ARTIST=Name`
+	// then `ARTIST=`) leaves dhowden's last-wins map empty, and
+	// populateFromTagMetadata skips that assignment, so the path-derived
+	// fallback would otherwise stay. Filtering empties per segment makes
+	// a single non-empty value the ground truth. Gemini medium on PR #208.
+	// An empty slice leaves dhowden's value. A walk that parsed no
+	// comment leaves the explicit verdict populate recorded.
+	if len(artists) > 0 {
+		t.Artist = strings.Join(artists, "; ")
+	}
+	if len(albumArtists) > 0 {
+		t.AlbumArtist = strings.Join(albumArtists, "; ")
+	}
+	if len(albums) > 0 {
+		t.Album = strings.Join(albums, "; ")
+	}
+	if len(genres) > 0 {
+		t.Genre = strings.Join(genres, "; ")
+	}
+	if len(composers) > 0 {
+		t.Composer = strings.Join(composers, "; ")
+	}
+	if len(conductors) > 0 {
+		t.Conductor = strings.Join(conductors, "; ")
+	}
+	if len(works) > 0 {
+		t.Work = strings.Join(works, "; ")
+	}
+	if sawComment {
+		t.Explicit = ExplicitVerdict(ExplicitSignals{
+			ItunesAdvisory: advisory,
+			Explicit:       explicitField,
+			Title:          explicitTrackTitle(tagTitle, t.Title),
+		})
+	}
+}
+
+// maxVorbisValuesPerField is VorbisCommentParser.maxValuesPerField: a cap
+// per comment block, not per file. appendVorbisField skips an empty value
+// before the value counts toward it.
+const maxVorbisValuesPerField = 64
+
+// appendVorbisField keeps a trimmed value while this block still has a
+// free slot. Whitespace-only is empty and does not consume one. The caller
+// resets kept at each comment block, so a later block appends another 64.
+func appendVorbisField(dst []string, kept *int, value string) []string {
+	v := strings.TrimSpace(value)
+	if v == "" || *kept >= maxVorbisValuesPerField {
+		return dst
+	}
+	*kept++
+	return append(dst, v)
 }
 
 // errVorbisCommentOverrun reports a VORBIS_COMMENT body whose declared
