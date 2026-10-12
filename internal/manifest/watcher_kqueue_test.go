@@ -101,11 +101,34 @@ func makeAlbums(t *testing.T, dir string, n, files int) []string {
 	return albums
 }
 
+// releaseSettle is how long a count may wait for a release that was still
+// closing descriptors when the sync folder became watched. It sits well
+// inside reconcileEvery (30s): a poll that waited out a reconcile could let
+// that pass close a watch the test meant to catch still open.
+const releaseSettle = 2 * time.Second
+
+// settleLibraryFiles polls until the open files on root equal want, or
+// releaseSettle has passed, and returns the last count either way. A
+// descriptor the release left open stays above want and the deadline fails
+// the caller.
+func settleLibraryFiles(t *testing.T, root string, want int) int {
+	t.Helper()
+	deadline := time.Now().Add(releaseSettle)
+	var got int
+	for {
+		got = libraryFiles(t, root)
+		if got == want || !time.Now().Before(deadline) {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // syncWatcher makes an empty folder named for i in root and waits until the
-// watcher watches it. fsnotify sends events in the order it reads them, the
-// watcher handles them in that order, and the folder is watched only once
-// its Create is handled, so by then every event that came before it has been
-// handled too. The folder holds one open file.
+// watcher watches it. On kqueue the folder is added from flushPendingAdds,
+// which receive runs before it handles the event that woke it, so the folder
+// being watched does not mean that event's release has closed its
+// descriptors. The folder holds one open file.
 func syncWatcher(t *testing.T, w *Watcher, root string, i int) {
 	t.Helper()
 	name := fmt.Sprintf("zz-sync-%d", i)
@@ -138,10 +161,106 @@ func TestKqueueWatcherReleasesARenamedFoldersFiles(t *testing.T) {
 			albums[i] = a + "r"
 		}
 		syncWatcher(t, w, libDir, round)
-		// Each round adds the sync folder, and nothing else.
-		if got, want := libraryFiles(t, libDir), base+round; got != want {
+		// Each round adds the sync folder, and nothing else. The folder can
+		// be watched while the rename's release is still closing, so the
+		// count waits out that close and still wants the exact total.
+		if got, want := settleLibraryFiles(t, libDir, base+round), base+round; got != want {
 			t.Fatalf("after round %d of renaming 10 folders of 12 files the watcher holds %d open files on the library, want %d", round, got, want)
 		}
+	}
+}
+
+// TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses holds the first
+// release after the sync folder's Create has been handled. receive flushes
+// that folder's watch before it handles the event, so the folder is watched
+// while the release still has the renamed folder's descriptors open.
+// fsnotify has already closed the renamed path itself; the count can therefore
+// equal the settled total (the missing directory and the sync folder cancel)
+// and must not be read as proof the release has finished. A count that has
+// already lost the renamed folder's files has.
+func TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses(t *testing.T) {
+	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
+	albums := makeAlbums(t, filepath.Join(libDir, "Artist"), 2, 4)
+	const syncName = "zz-sync-hold"
+	created := make(chan struct{})
+	holding := make(chan struct{})
+	letGo := make(chan struct{})
+	var released atomic.Bool
+	release := func() {
+		if released.CompareAndSwap(false, true) {
+			close(letGo)
+		}
+	}
+	var sawCreate atomic.Bool
+	w.afterEventForTests = func(ev fsnotify.Event) {
+		if !ev.Has(fsnotify.Create) || filepath.Base(ev.Name) != syncName {
+			return
+		}
+		if sawCreate.CompareAndSwap(false, true) {
+			close(created)
+		}
+	}
+	var held atomic.Bool
+	w.beforeReleaseForTests = func(paths []string) {
+		if len(paths) == 0 || !sawCreate.Load() {
+			return
+		}
+		if !held.CompareAndSwap(false, true) {
+			return
+		}
+		close(holding)
+		<-letGo
+	}
+	startWatcher(t, w)
+	t.Cleanup(release)
+	base := libraryFiles(t, libDir)
+	if err := os.Mkdir(filepath.Join(libDir, syncName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-created:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("the sync folder's create was never handled")
+	}
+	if err := os.Rename(albums[0], albums[0]+"r"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-holding:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("no release followed the rename")
+	}
+	if !watched(w, syncName) {
+		t.Fatal("the sync folder was not watched while a release still had its descriptors open")
+	}
+	if got := libraryFiles(t, libDir); got < base-1 {
+		t.Fatalf("while the release was held the watcher had %d open files on the library, base %d: the renamed folder's watches were already closed", got, base)
+	}
+	release()
+	if settled, want := settleLibraryFiles(t, libDir, base+1), base+1; settled != want {
+		t.Fatalf("after the release, %d open files on the library, want %d", settled, want)
+	}
+}
+
+// TestALeakedWatchPerRenameDoesNotSettle plants one descriptor per directory
+// release and requires the settle poll to miss the exact count. The account
+// has forgotten the path, so the 30s reconcile does not close it inside the
+// 2s poll.
+func TestALeakedWatchPerRenameDoesNotSettle(t *testing.T) {
+	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
+	albums := makeAlbums(t, filepath.Join(libDir, "Artist"), 4, 3)
+	w.leakOneWatchForTests = true
+	startWatcher(t, w)
+	base := libraryFiles(t, libDir)
+	for _, a := range albums {
+		if err := os.Rename(a, a+"r"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncWatcher(t, w, libDir, 0)
+	want := base + 1
+	if got := settleLibraryFiles(t, libDir, want); got == want {
+		t.Fatalf("a leaked watch per rename settled at %d open files", got)
 	}
 }
 
@@ -207,8 +326,9 @@ func TestKqueueWatcherReleasesAFolderFsnotifyDroppedWithoutAnEvent(t *testing.T)
 	if !dropped.Load() {
 		t.Fatal("fsnotify sent no Rename for the renamed folder, so there was nothing to drop")
 	}
-	// Two passes that end after the sync: the second starts after it, and
-	// every event before the sync was handled before it.
+	// Two reconcile passes that finish after the sync folder is watched.
+	// The folder being watched does not mean the event that flushed its
+	// add has been handled; the passes release a watch fsnotify dropped.
 	for i := 0; i < 2; i++ {
 		select {
 		case <-passes:

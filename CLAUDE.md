@@ -2193,6 +2193,22 @@ lost my library."
   `TestKqueueWatcherLeavesTheProcessOpenFiles` (children that lower their own
   hard limit to 160: on main each could no longer open a file once the watcher
   had run).
+- **A folder on the watch list is watched before the event that flushed it
+  is handled** (2026-10-13, backlog B337). `receive` flushes pending adds
+  before `handleEvent`. On kqueue a new folder is added from that flush, so
+  `WatchList` can name it while that event's `releaseTree` has not closed
+  the descriptors fsnotify kept (`remove(name, false)` closes only the
+  renamed path). `TestKqueueWatcherReleasesARenamedFoldersFiles` waits until
+  the open-file count equals the exact settled total, for `releaseSettle`
+  (2s), inside `reconcileEvery` (30s). A descriptor left open stays above
+  that total and fails the deadline
+  (`TestALeakedWatchPerRenameDoesNotSettle`: one per directory release, the
+  account already having forgotten the path).
+  `TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses` holds the release
+  after the sync folder's Create has been handled and samples while `Remove`
+  has not run. That sample can already equal the settled total: fsnotify has
+  closed the renamed path, and the new watches are not open yet. The wait
+  still fails when a descriptor is left open.
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.**
   `WalkDir` orders by base name and visits a directory before its children, so
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —

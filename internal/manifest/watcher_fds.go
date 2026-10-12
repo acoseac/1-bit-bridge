@@ -500,7 +500,16 @@ func (wt *Watcher) accountEvent(ev fsnotify.Event) {
 // watches from fsnotify. fsnotify answers a path it no longer watches with an
 // error, which says nothing here.
 func (wt *Watcher) releaseTree(p string) {
-	for _, q := range wt.fds.release(p) {
+	paths := wt.fds.release(p)
+	if hook := wt.beforeReleaseForTests; hook != nil {
+		hook(paths)
+	}
+	// The account has already forgotten every path. Skipping the last
+	// Remove leaves that descriptor open, and reconcile cannot see it.
+	if wt.leakOneWatchForTests && len(paths) > 1 {
+		paths = paths[:len(paths)-1]
+	}
+	for _, q := range paths {
 		_ = wt.w.Remove(q)
 	}
 }
