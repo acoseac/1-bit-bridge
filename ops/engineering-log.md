@@ -40422,9 +40422,9 @@ gated on euid: none of the three is a symlink in any supported layout, so a
 link there is an attack when root and a mistake otherwise, and both deserve
 a clear refusal over a silent follow. `Precreate` still stages the create
 path; its `O_EXCL` closes the narrow create-time race a check-then-open
-leaves. Opening the database itself through `os.Root` is not possible here:
-modernc's VFS opens the path string with its own `os.OpenFile`, so there is
-no `*at` fd to hand it; the pre-open refusal is the whole fix.
+leaves. The refusal closes a link planted before the store opens, the
+measured case; it is a check before SQLite's own open, not part of it, and
+the follow-up is tracked privately as backlog B346 (CodeRabbit on #1193).
 
 ### Red first
 

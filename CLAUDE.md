@@ -3709,7 +3709,8 @@ no failing test — which is the shape to expect in this area.
   the guard removed; `TestOpenStoreOpensARealExistingDatabase` is the
   positive control). The lock file already opens through `os.OpenRoot`
   (#1140); the TLS pair and `tokens.json` resist through their own
-  precreate / atomic-rename-in-place.
+  precreate / atomic-rename-in-place. The refusal is a check before
+  SQLite's own open, not part of it; the follow-up is backlog B346.
 - **…and a rendition is published only WHOLE, read from its frames, whatever
   the tool's exit status** (2026-10-02, backlog B264). sox 14.4.2 does not
   fail when a write to its output fails: it prints "error writing output file:
