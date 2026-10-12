@@ -3709,8 +3709,31 @@ no failing test — which is the shape to expect in this area.
   the guard removed; `TestOpenStoreOpensARealExistingDatabase` is the
   positive control). The lock file already opens through `os.OpenRoot`
   (#1140); the TLS pair and `tokens.json` resist through their own
-  precreate / atomic-rename-in-place. The refusal is a check before
-  SQLite's own open, not part of it; the follow-up is backlog B346.
+  precreate / atomic-rename-in-place. The Lstat is the refusal for a link
+  present when `OpenStore` starts.
+- **…and that refusal holds through SQLite's own open of the database,
+  `-wal` and `-shm`** (2026-10-12, backlog B346). modernc.org/sqlite
+  v1.60.1 (SQLite 3.53.4) never sets `SQLITE_OPEN_NOFOLLOW`, and the
+  amalgamation has no `nofollow` URI key, so `nofollow=1` does not change
+  the open (measured: a final-component symlink is still followed, the
+  decoy created). The unix VFS already opens with `O_NOFOLLOW`, but its
+  full-pathname resolves every symlink component and the pager keeps the
+  resolved path, so the open then sees a regular file. `OpenStore`
+  registers a private copy of the default VFS (`storeVFSName`) whose
+  full-pathname only absolutizes (`filepath.Abs` + `filepath.Clean`) and
+  passes `vfs=` on its DSN. The pager opens the name it was given;
+  `O_NOFOLLOW` refuses the final component of the database, `-wal` and
+  `-shm`. A parent that is a symlink still opens, because the kernel
+  follows parents (`TestOpenStoreOpensADatabaseWhoseParentIsASymlink`).
+  `-journal` is not opened in WAL mode, so a link swapped in there is not
+  written through; one present at the start is still the Lstat refusal.
+  Windows `winOpen` does not pass `FILE_FLAG_OPEN_REPARSE_POINT`, and its
+  full-pathname is `GetFullPathNameW`, so `OpenStore` does not install
+  this VFS there; the Lstat check remains that platform's refusal, and
+  the swap test skips, as B262's does. A ping or migrate that fails while one of the four paths
+  is a symlink returns `errStoreSymlink` and the base name only.
+  (`TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen`, red with `vfs=`
+  left off the DSN: the decoy was created.)
 - **…and a rendition is published only WHOLE, read from its frames, whatever
   the tool's exit status** (2026-10-02, backlog B264). sox 14.4.2 does not
   fail when a write to its output fails: it prints "error writing output file:

@@ -40423,8 +40423,8 @@ link there is an attack when root and a mistake otherwise, and both deserve
 a clear refusal over a silent follow. `Precreate` still stages the create
 path; its `O_EXCL` closes the narrow create-time race a check-then-open
 leaves. The refusal closes a link planted before the store opens, the
-measured case; it is a check before SQLite's own open, not part of it, and
-the follow-up is tracked privately as backlog B346 (CodeRabbit on #1193).
+measured case. It is the check for a link present when `OpenStore` starts.
+The open itself is backlog B346, recorded below.
 
 ### Red first
 
@@ -40507,3 +40507,64 @@ aggregate meets the 50-run bar. Before the helper the same loop failed 50
 of 50, each with `lsof port probe timed out after 2s`.
 `TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly` still ends inside
 5s and names `2s`.
+
+## 2026-10-12 — OpenStore's own open refuses a final-component symlink (backlog B346)
+
+Follow-up to B262 (#1193). Named only as B346 while unfixed. This entry is
+its record now that the fix ships.
+
+### What was measured
+
+modernc.org/sqlite v1.60.1 (SQLite 3.53.4) never sets `SQLITE_OPEN_NOFOLLOW`,
+and the amalgamation has no `nofollow` URI key. A database opened through
+the default VFS with `nofollow=1` on the DSN still followed a
+final-component symlink at `bridge.db` and created the decoy (4096 bytes).
+The same open with a private VFS whose full-pathname only absolutizes
+(`filepath.Abs` + `filepath.Clean`) returned `unable to open database file
+(14)` and left the decoy absent, for a link at the database, at `-wal`, and
+at `-shm`. A real file opened. A parent directory that is a symlink opened,
+and the file landed in the directory the link names. A link only at
+`-journal` was not opened: WAL mode never opens that file, the decoy stayed
+absent, and the open succeeded. The default VFS already refuses a link at
+`-wal` once the main file's path is not rewritten, because the unix VFS
+opens with `O_NOFOLLOW`.
+
+### The cause
+
+`_unixOpen` and `_unixOpenSharedMemory` always OR `O_NOFOLLOW`.
+`_unixFullPathname` walks every symlink component and, when it followed
+one, the pager keeps the resolved path unless `SQLITE_OPEN_NOFOLLOW` is
+set. The open then sees a regular file. There is no public DSN key that
+sets the flag, and setting it would also refuse a data directory that is
+itself a symlink, which a supported layout is.
+
+### The fix
+
+`OpenStore` registers a copy of the default VFS under `bridgenf`
+(`storeVFSName`), replaces only `xFullPathname`, and passes `vfs=bridgenf`
+on its DSN. The pager opens the name it was given. `O_NOFOLLOW` refuses
+the final component of the database, `-wal` and `-shm`. The pre-open Lstat
+stays, so a link present when `OpenStore` starts is still
+`errStoreSymlink` and the base name only. A ping or a migrate that fails
+while one of the four paths is a symlink returns that same refusal: a
+fresh empty file does not fail at ping, and the `-wal` / `-shm` open is
+the migrate's `user_version` read. Windows `winOpen` does not pass
+`FILE_FLAG_OPEN_REPARSE_POINT`, and its full-pathname is
+`GetFullPathNameW`, so `OpenStore` does not install this VFS there. The
+Lstat check remains that platform's refusal.
+
+### Red first
+
+`TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen` plants the link after
+the Lstat and before `sql.Open`, through the real `OpenStore`. With `vfs=`
+left off the DSN, `link_at_bridge.db` failed because the decoy was created.
+Restoring `vfs=` made that subtest pass. `-wal` and `-shm` must be
+`errStoreSymlink` with the decoy absent. `-journal` only requires the decoy
+to stay absent. `TestOpenStoreOpensADatabaseWhoseParentIsASymlink` is the
+parent-directory control. B262's planted-before-open tests stay green.
+
+### What remains
+
+On Windows the open still follows a final-component symlink; the swap test
+skips, as B262's does. `-journal` is covered by the Lstat and by WAL mode
+never opening it, not by `O_NOFOLLOW`.

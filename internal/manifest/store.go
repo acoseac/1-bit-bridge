@@ -202,31 +202,88 @@ const bumpIndexedAtByPathSQL = `
 // never gets root's.
 //
 // errStoreSymlink is returned (wrapped) when OpenStore finds a symlink at
-// the database file or either sidecar; tests match it with errors.Is.
+// the database file or a sidecar; tests match it with errors.Is. The
+// message names the base name only, never the link's target.
 var errStoreSymlink = errors.New("refusing to open the store through a symlink")
 
-// A symlink at the database or a sidecar (-wal, -shm, -journal) is refused before SQLite
-// opens it. Precreate below creates the main file O_EXCL, which already
-// refuses a link there — but only when the file is MISSING: os.Lstat of a
-// symlink succeeds without following it, so the ErrNotExist gate skips
-// Precreate, and sql.Open then opens the link's target. Run as root over an
-// install another user owns, that writes the database wherever the data
-// dir's owner aimed the link; SQLite opens -wal/-shm by their own paths, so
-// a link at either follows the same way. None of the three is a symlink in
-// any supported layout, so one is refused outright (backlog B262).
+// openStoreBeforeSQLite runs after the symlink check and before SQLite
+// opens the files. Nil in production.
+var (
+	openStoreHookMu       sync.Mutex
+	openStoreBeforeSQLite func(path string)
+)
+
+func setOpenStoreBeforeSQLite(fn func(string)) func() {
+	openStoreHookMu.Lock()
+	prev := openStoreBeforeSQLite
+	openStoreBeforeSQLite = fn
+	openStoreHookMu.Unlock()
+	return func() {
+		openStoreHookMu.Lock()
+		openStoreBeforeSQLite = prev
+		openStoreHookMu.Unlock()
+	}
+}
+
+func callOpenStoreBeforeSQLite(path string) {
+	openStoreHookMu.Lock()
+	fn := openStoreBeforeSQLite
+	openStoreHookMu.Unlock()
+	if fn != nil {
+		fn(path)
+	}
+}
+
+func storeOpenPaths(path string) []string {
+	return []string{path, path + "-wal", path + "-shm", path + "-journal"}
+}
+
+// storeOpenErr returns the symlink refusal when one of the store files is
+// a symlink. Otherwise it returns err, prefixed with what when what is set.
+func storeOpenErr(path, what string, err error) error {
+	if name, ok := symlinkAtStore(path); ok {
+		return fmt.Errorf("%w at %s", errStoreSymlink, name)
+	}
+	if what == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// symlinkAtStore reports the base name of a symlink at the database or a
+// sidecar, when one is there.
+func symlinkAtStore(path string) (string, bool) {
+	for _, p := range storeOpenPaths(path) {
+		fi, err := os.Lstat(p)
+		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return filepath.Base(p), true
+		}
+	}
+	return "", false
+}
+
+// A symlink at the database or a sidecar (-wal, -shm, -journal) is refused.
+// The check below catches one present when OpenStore starts. The open uses
+// storeVFSName, so on unix a final-component symlink at the database, -wal
+// or -shm is also refused by SQLite's own open (O_NOFOLLOW). -journal is
+// not opened in WAL mode. None of the four is a symlink in any supported
+// layout (backlog B262, B346).
 func OpenStore(path string) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
 	}
-	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("%w at %s", errStoreSymlink, filepath.Base(p))
-		}
+	if name, ok := symlinkAtStore(path); ok {
+		return nil, fmt.Errorf("%w at %s", errStoreSymlink, name)
 	}
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		if err := fsutil.Precreate(path, 0o644, path); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("create the store's file: %w", err)
 		}
+	}
+	callOpenStoreBeforeSQLite(path)
+	vfsQuery, err := storeVFSQuery()
+	if err != nil {
+		return nil, fmt.Errorf("register store vfs: %w", err)
 	}
 	// synchronous(NORMAL) is SQLite's documented pairing for WAL: commits
 	// stop fsyncing the WAL (only checkpoints sync), and corruption stays
@@ -237,7 +294,7 @@ func OpenStore(path string) (*Store, error) {
 	// fsyncs EVERY commit, which on Windows means ~30 single-row writes/s
 	// (FlushFileBuffers) — a 29x test-suite penalty and a real tax on the
 	// per-track write paths (MarkEnriched, touchDevice) on Windows hosts.
-	uri := dsn.File(path, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)")
+	uri := dsn.File(path, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"+vfsQuery)
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -247,12 +304,12 @@ func OpenStore(path string) (*Store, error) {
 	// standard database/sql connection pool.
 	if err := db.Ping(); err != nil {
 		db.Close() // release the handle + background goroutines; mirrors the migrate() error path below
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, storeOpenErr(path, "ping sqlite", err)
 	}
 	s := &Store{db: db, now: time.Now, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, storeOpenErr(path, "", err)
 	}
 	// Probe FTS5 availability once. migrate() has created tracks_fts iff
 	// FTS5 is compiled in; the result is fixed for the process lifetime,
