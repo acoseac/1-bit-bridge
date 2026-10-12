@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestARunningProcessHasNotExited is the control every other answer rests
@@ -26,23 +25,8 @@ import (
 // an exited one. So on Linux the last answer must also rest on /proc having
 // seen `sleep` asleep.
 func TestARunningProcessHasNotExited(t *testing.T) {
-	cmd := exec.Command("sleep", "60")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	pid := cmd.Process.Pid
-	var why string
-	for i := 0; i < 50; i++ {
-		var exited bool
-		if exited, why = Exited(pid); exited {
-			t.Fatalf("Exited(%d) = true (%s) for a process that is still running", pid, why)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	pid := startUntilKilled(t, exec.Command("sleep", "60"))
+	why := assertStaysRunning(t, pid)
 	if runtime.GOOS == "linux" && !strings.Contains(why, "state S") {
 		t.Errorf("Exited(%d) = false, %q after 500 ms; on Linux the answer should rest on /proc "+
 			"reading `sleep` asleep (state S)", pid, why)

@@ -34,22 +34,8 @@ func TestHelperSleep(t *testing.T) {
 // the wait.
 func TestARunningProcessHasNotExited(t *testing.T) {
 	cmd, _ := helperSleep(t, true)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	pid := cmd.Process.Pid
-	var why string
-	for i := 0; i < 50; i++ {
-		var exited bool
-		if exited, why = Exited(pid); exited {
-			t.Fatalf("Exited(%d) = true (%s) for a process that is still running", pid, why)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	pid := startUntilKilled(t, cmd)
+	why := assertStaysRunning(t, pid)
 	if !strings.Contains(why, "WAIT_TIMEOUT") {
 		t.Errorf("Exited(%d) = false, %q after 500 ms; the answer should rest on WAIT_TIMEOUT", pid, why)
 	}
