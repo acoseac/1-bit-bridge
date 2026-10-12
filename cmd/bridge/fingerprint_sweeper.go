@@ -573,23 +573,7 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	defer cancel()
 	fp, err := s.fingerprintFile(fileCtx, c.absPath)
 	if err != nil {
-		if ctx.Err() != nil {
-			return false
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			logger.Warn(msgFpcalcTimedOut, "path", c.path, "after", s.fpcalcBudget().String())
-			return false
-		}
-		if !errors.Is(err, acoustid.ErrUnreadable) {
-			logger.Warn("fingerprint: decode", "path", c.path, "err", err)
-		}
-		// A file that cannot be decoded is a property of the FILE, so record
-		// the miss and stop re-decoding it every sweep. A timeout is not:
-		// it is as likely to be a hung mount as the file, and caching it
-		// would skip that file for the life of the process.
-		if errors.Is(err, acoustid.ErrUnreadable) {
-			s.cache.Set(key, acoustid.Outcome{})
-		}
+		s.noteDecodeErr(ctx, key, c.path, err)
 		return false
 	}
 
@@ -663,6 +647,26 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 		logger.Warn("fingerprint: record provenance", "path", c.path, "err", err)
 	}
 	return true
+}
+
+// noteDecodeErr logs and records one failed decode. ctx is the SWEEP
+// context, not the file's: a sweep cancelled during the decode is shutdown,
+// which is neither logged as a timeout nor cached as a miss.
+//
+// A file that cannot be decoded is a property of the FILE, so its miss is
+// recorded and the file is not re-decoded every sweep. A timeout is not: it
+// is as likely to be a hung mount as the file, and caching it would skip
+// that file for the life of the process.
+func (s *fingerprintSweeper) noteDecodeErr(ctx context.Context, key acoustid.Key, path string, err error) {
+	switch {
+	case ctx.Err() != nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		logger.Warn(msgFpcalcTimedOut, "path", path, "after", s.fpcalcBudget().String())
+	case errors.Is(err, acoustid.ErrUnreadable):
+		s.cache.Set(key, acoustid.Outcome{})
+	default:
+		logger.Warn("fingerprint: decode", "path", path, "err", err)
+	}
 }
 
 // fingerprintFile decodes one file. The indirection is the fpcalc test seam;
