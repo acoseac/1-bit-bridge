@@ -30,7 +30,10 @@ import (
 // that way. os.Stat takes no context, so a hung — as opposed to dropped —
 // network mount would block the single goroutine that drives all enrichment,
 // and shutdown would then wait out the whole bgWriters grace window. Here the
-// same hang costs one worker.
+// same hang is one file's decode: fingerprintDecodeTimeout kills that fpcalc
+// and the sweep continues with the next file. A child stuck in
+// uninterruptible sleep still outlives the signal, which is what
+// sweeperDrainGrace is for.
 //
 // # What it is allowed to write
 //
@@ -63,6 +66,10 @@ type fingerprintSweeper struct {
 	workers   int
 	maxPerRun int
 	length    time.Duration
+	// decodeTimeout is the wall-clock bound on one fpcalc. Zero means
+	// fingerprintDecodeTimeout. A test sets a short one; production leaves
+	// it zero so the bound is not a package variable a test can race.
+	decodeTimeout time.Duration
 
 	// pacer serialises AcoustID requests across workers. The politeness
 	// contract is per-key, not per-worker, so a pool that paced individually
@@ -518,6 +525,32 @@ func waitForWorkers(ctx context.Context, grace time.Duration, done <-chan struct
 // healthy sweep is never subject to it.
 const sweeperDrainGrace = 30 * time.Second
 
+// fingerprintDecodeTimeout is how long one fpcalc may run. Measured on
+// fpcalc 1.6.1 (2026-10-12): the default -length 120 window of a 192 kHz
+// 24-bit FLAC took 0.39 s, and a 30-minute FLAC under the same -length
+// took 0.11 s, because the decode stops at the window. The wait that
+// matters is the read before that decode. A network mount fetches the
+// whole object, and a 30-minute hi-res file can be about a gigabyte, so
+// a bound near the measured decode or near the 120 s of audio would time
+// out a slow read on every sweep. Ten minutes is the same cap a transcode
+// or analysis job gets for a tool that can spin, and it leaves room for
+// that read. A file that needs longer is offered again next sweep: the
+// timeout is logged and not cached.
+const fingerprintDecodeTimeout = 10 * time.Minute
+
+// msgFpcalcTimedOut is the one line a file that used up
+// fingerprintDecodeTimeout logs. A decode error is a different line; a
+// timeout is not one.
+const msgFpcalcTimedOut = "fingerprint: fpcalc timed out"
+
+// fpcalcBudget is the wall-clock bound for this sweeper's fpcalc calls.
+func (s *fingerprintSweeper) fpcalcBudget() time.Duration {
+	if s.decodeTimeout > 0 {
+		return s.decodeTimeout
+	}
+	return fingerprintDecodeTimeout
+}
+
 // fingerprintOne decodes, looks up, and records one track. Returns true when
 // the gate accepted a match.
 func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bool {
@@ -533,16 +566,14 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 		return false
 	}
 
-	fp, err := s.fingerprintFile(ctx, c.absPath)
+	// The sweep context stays the parent. A per-file timeout is what bounds
+	// one fpcalc; cancelling the parent is shutdown, and that must not be
+	// logged as a timeout or cached as a miss.
+	fileCtx, cancel := context.WithTimeout(ctx, s.fpcalcBudget())
+	defer cancel()
+	fp, err := s.fingerprintFile(fileCtx, c.absPath)
 	if err != nil {
-		if ctx.Err() == nil && !errors.Is(err, acoustid.ErrUnreadable) {
-			logger.Warn("fingerprint: decode", "path", c.path, "err", err)
-		}
-		// A file that cannot be decoded is a property of the FILE, so record
-		// the miss and stop re-decoding it every sweep.
-		if errors.Is(err, acoustid.ErrUnreadable) {
-			s.cache.Set(key, acoustid.Outcome{})
-		}
+		s.noteDecodeErr(ctx, key, c.path, err)
 		return false
 	}
 
@@ -616,6 +647,26 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 		logger.Warn("fingerprint: record provenance", "path", c.path, "err", err)
 	}
 	return true
+}
+
+// noteDecodeErr logs and records one failed decode. ctx is the SWEEP
+// context, not the file's: a sweep cancelled during the decode is shutdown,
+// which is neither logged as a timeout nor cached as a miss.
+//
+// A file that cannot be decoded is a property of the FILE, so its miss is
+// recorded and the file is not re-decoded every sweep. A timeout is not: it
+// is as likely to be a hung mount as the file, and caching it would skip
+// that file for the life of the process.
+func (s *fingerprintSweeper) noteDecodeErr(ctx context.Context, key acoustid.Key, path string, err error) {
+	switch {
+	case ctx.Err() != nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		logger.Warn(msgFpcalcTimedOut, "path", path, "after", s.fpcalcBudget().String())
+	case errors.Is(err, acoustid.ErrUnreadable):
+		s.cache.Set(key, acoustid.Outcome{})
+	default:
+		logger.Warn("fingerprint: decode", "path", path, "err", err)
+	}
 }
 
 // fingerprintFile decodes one file. The indirection is the fpcalc test seam;
