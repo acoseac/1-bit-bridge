@@ -80,3 +80,99 @@ func TestOpenStoreOpensARealExistingDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen plants the link after
+// OpenStore's own check and before SQLite opens the files, through the real
+// OpenStore. The database, -wal and -shm must come back as the symlink
+// refusal, and the decoy must not be created. -journal is not opened in WAL
+// mode; that case only requires the decoy to stay absent.
+func TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs privilege on Windows; the data dir is the bridge's own")
+	}
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		t.Run("link at bridge.db"+suffix, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "data")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dbPath := DefaultDBPath(dir)
+			decoy := filepath.Join(root, "decoy-target")
+			link := dbPath + suffix
+			restore := setOpenStoreBeforeSQLite(func(p string) {
+				if p != dbPath {
+					return
+				}
+				if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("remove %s: %v", filepath.Base(link), err)
+					return
+				}
+				if err := os.Symlink(decoy, link); err != nil {
+					t.Errorf("symlink %s: %v", filepath.Base(link), err)
+				}
+			})
+			t.Cleanup(restore)
+
+			s, err := OpenStore(dbPath)
+			if s != nil {
+				s.Close()
+			}
+			if _, statErr := os.Lstat(decoy); statErr == nil {
+				t.Fatalf("the symlink at %s was followed: its target was created", filepath.Base(link))
+			}
+			if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the planted symlink at %s was disturbed (err=%v)", filepath.Base(link), lerr)
+			}
+			if suffix == "-journal" {
+				if err != nil && !errors.Is(err, errStoreSymlink) {
+					t.Fatalf("journal link: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("OpenStore opened through the symlink swapped in at %s", filepath.Base(link))
+			}
+			if !errors.Is(err, errStoreSymlink) {
+				t.Fatalf("error at %s was %v, want the symlink refusal", filepath.Base(link), err)
+			}
+		})
+	}
+}
+
+// TestOpenStoreOpensADatabaseWhoseParentIsASymlink pins that a data
+// directory which is a symlink still opens, and the database file lands in
+// the directory the link names.
+func TestOpenStoreOpensADatabaseWhoseParentIsASymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("directory symlink: " + err.Error())
+	}
+	path := filepath.Join(link, "bridge.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("open through a linked directory: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("the database file itself is a symlink")
+	}
+	atTarget, err := os.Lstat(filepath.Join(real, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(opened, atTarget) {
+		t.Fatal("the file opened through the link is not the file in the target directory")
+	}
+}
