@@ -3124,34 +3124,38 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 }
 
 // caseOnlyRenames returns the subset of `before` paths that are absent
-// from `seen` EXACTLY but present after Unicode case-folding — the
-// signature of a case-only rename (Album→album) on a case-insensitive
-// filesystem. The walker records the on-disk (new) case, so the fresh
+// from `seen` EXACTLY but present after renameFold — a case-only rename
+// (Album→album) on a case-insensitive filesystem, or two spellings of
+// one name. The walker records the on-disk spelling, so the fresh
 // row is upserted under the new spelling this same pass; the stale
 // old-case row must be reaped NOW — left to the missing_count
 // threshold it would shadow the new row in /v1/manifest for up to
 // `threshold` scans, with both rows serving the same physical file.
 //
-// The fold is pathFold, the same fold the store's unicode_lower()
-// SQL function applies (sqlfunc.go): a Unicode case fold, then NFC.
+// The fold is renameFold (sqlfunc.go): NFC, then the Unicode
+// lowercase pathFold uses. A case difference and a composition
+// difference (NFC "Café" beside NFD "Café", U+0130 beside
+// I+U+0307) are one folder. A plain "i" beside U+0130 is not.
 // A stored path that fold-matches a seen entry refers to a file the
 // walker DID enumerate this pass, so reaping it can't confuse a
 // transient partial enumeration with a rename — the threshold's
 // silent-enumeration protection stays intact for genuinely-unseen
-// paths. GetTrack stays exact-key (pinned by
-// store_lookup_case_test.go); the fold applies ONLY to this
-// deletion-pass filter.
+// paths. An exact spelling in seen is skipped here; two names the
+// walk saw both of are left alone. The errored-subtree check stays
+// in the deletion loop, ahead of this map. GetTrack stays exact-key
+// (pinned by store_lookup_case_test.go); the fold applies ONLY to
+// this deletion-pass filter.
 func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
 	seenFolded := make(map[string]struct{}, len(seen))
 	for p := range seen {
-		seenFolded[pathFold(p)] = struct{}{}
+		seenFolded[renameFold(p)] = struct{}{}
 	}
 	renames := make(map[string]struct{})
 	for p := range before {
 		if _, ok := seen[p]; ok {
 			continue
 		}
-		if _, ok := seenFolded[pathFold(p)]; ok {
+		if _, ok := seenFolded[renameFold(p)]; ok {
 			renames[p] = struct{}{}
 		}
 	}

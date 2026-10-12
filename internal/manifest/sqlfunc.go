@@ -97,11 +97,30 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 }
 
 // pathFold is the fold unicode_lower applies: a Unicode case fold,
-// then NFC. The scanner's in-memory date map and its case-only
-// rename pairing use it, so they agree with the subtree lookup,
-// which asks the SQL function.
+// then NFC. The scanner's in-memory date map uses it, so a date
+// copied across a rename agrees with the subtree lookup, which asks
+// the SQL function. The deletion pass's rename pairing uses
+// renameFold; TestRenameFoldMatchesPathFold holds the two to one
+// answer on the spellings that pairing treats as one folder.
 func pathFold(s string) string {
 	return NFCCompose(cases.Lower(language.Und).String(s))
+}
+
+// renameFold is the deletion pass's name key. It NFC-composes first,
+// then applies the same Unicode lowercase pathFold uses
+// (cases.Lower, language.Und). Composing first is the order
+// integrity.KnownSidecarKey uses. strings.ToLower maps a rune at a
+// time and does not commute with decomposition, so U+0130 lowercased
+// before composition is a different key from I followed by U+0307.
+//
+// The lowercase here is cases.Lower, the mapping pathFold and
+// unicode_lower use, rather than strings.ToLower. The simple mapping
+// turns U+0130 into a plain "i", so strings.ToLower after NFC keys
+// "İstanbul" and "istanbul" as one name. Those are two directories
+// on APFS. cases.Lower turns U+0130 into "i" plus U+0307, the same
+// key as the decomposed spelling and a different key from a plain "i".
+func renameFold(s string) string {
+	return cases.Lower(language.Und).String(NFCCompose(s))
 }
 
 // NFCCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8

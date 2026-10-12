@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"database/sql/driver"
+	"strings"
 	"testing"
 )
 
@@ -40,5 +41,30 @@ func TestUnicodeLowerScalar_NFCComposes(t *testing.T) {
 				t.Errorf("unicodeLowerScalar(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRenameFoldMatchesPathFold holds the deletion pass's compose-first
+// key to the date map's fold, and holds U+0130 apart from a plain "i".
+// strings.ToLower applied before NFC splits the dotted pair; applied
+// after NFC it joins that pair and also joins it to a plain "i".
+func TestRenameFoldMatchesPathFold(t *testing.T) {
+	pairs := [][2]string{
+		{"Caf\u00e9/song.flac", "Cafe\u0301/song.flac"},
+		{"İstanbul/song.flac", "I\u0307stanbul/song.flac"},
+	}
+	for _, p := range pairs {
+		if renameFold(p[0]) != renameFold(p[1]) {
+			t.Errorf("renameFold split %q and %q", p[0], p[1])
+		}
+		if renameFold(p[0]) != pathFold(p[0]) || renameFold(p[1]) != pathFold(p[1]) {
+			t.Errorf("renameFold diverged from pathFold for %q / %q", p[0], p[1])
+		}
+	}
+	if renameFold("İstanbul/song.flac") == renameFold("istanbul/song.flac") {
+		t.Error("renameFold equated U+0130 with a plain i")
+	}
+	if strings.ToLower("İ") == strings.ToLower("I\u0307") {
+		t.Fatal("premise: strings.ToLower already equates the dotted pair")
 	}
 }
