@@ -96,7 +96,16 @@ func TestWalkableRootDescendsALinkedRoot(t *testing.T) {
 	chain := filepath.Join(base, "chained")
 	symlinkOrSkip(t, link, chain)
 
-	for _, root := range []string{link, chain} {
+	roots := []string{link, chain}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, root := range roots {
+			logWalkableRootAnswers(t, root)
+		}
+	})
+	for _, root := range roots {
 		// The defect, measured the way the scanner walked: one entry.
 		var raw []string
 		_ = filepath.WalkDir(root, func(p string, _ fs.DirEntry, _ error) error {
@@ -108,6 +117,117 @@ func TestWalkableRootDescendsALinkedRoot(t *testing.T) {
 		}
 
 		requireWalksLibraryTree(t, root)
+	}
+}
+
+// logWalkableRootAnswers prints the two stats whose disagreement made a
+// link chain read as unreachable (backlog B257). os.Lstat of the path with
+// a trailing separator, and os.Stat of the root, each with its error and mode.
+func logWalkableRootAnswers(t *testing.T, root string) {
+	t.Helper()
+	slash := root + string(filepath.Separator)
+	info, err := os.Lstat(slash)
+	t.Logf("os.Lstat(%q) err=%v mode=%v", slash, err, modeOf(info))
+	info, err = os.Stat(root)
+	t.Logf("os.Stat(%q) err=%v mode=%v", root, err, modeOf(info))
+}
+
+func modeOf(info fs.FileInfo) fs.FileMode {
+	if info == nil {
+		return 0
+	}
+	return info.Mode()
+}
+
+// errSlashLstat is the error a test makes the trailing-slash Lstat return.
+var errSlashLstat = errors.New("trailing-slash lstat")
+
+// TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees is the CI
+// flake made repeatable. os.Lstat(chain+"/") answered "not a directory"
+// while os.Stat(chain) answered a directory, and WalkableRoot refused the
+// root. The target is a directory, so the root walks, under the configured
+// spelling.
+func TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees(t *testing.T) {
+	target := libraryTree(t)
+	base := t.TempDir()
+	link := filepath.Join(base, "music")
+	symlinkOrSkip(t, target, link)
+	chain := filepath.Join(base, "chained")
+	symlinkOrSkip(t, link, chain)
+
+	t.Run("not a directory", func(t *testing.T) {
+		walkableRootSlashLstat = func(string) (fs.FileInfo, error) {
+			return stubInfo(0o644), nil
+		}
+		t.Cleanup(func() { walkableRootSlashLstat = nil })
+		requireConfiguredWalk(t, chain)
+	})
+	t.Run("an error", func(t *testing.T) {
+		walkableRootSlashLstat = func(string) (fs.FileInfo, error) {
+			return nil, errSlashLstat
+		}
+		t.Cleanup(func() { walkableRootSlashLstat = nil })
+		requireConfiguredWalk(t, chain)
+	})
+}
+
+func requireConfiguredWalk(t *testing.T, chain string) {
+	t.Helper()
+	want := chain + string(filepath.Separator)
+	got, err := WalkableRoot(chain)
+	if err != nil || got != want {
+		t.Fatalf("WalkableRoot(%s) = %q, %v; want %q", chain, got, err, want)
+	}
+	requireWalksLibraryTree(t, chain)
+}
+
+// TestWalkableRootRefusesAChainThatDoesNotNameADirectory keeps the refusals
+// the disagreement fallback must not open: a chain that ends at a file, and
+// a chain that ends nowhere.
+func TestWalkableRootRefusesAChainThatDoesNotNameADirectory(t *testing.T) {
+	base := t.TempDir()
+
+	file := filepath.Join(base, "track.flac")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileLink := filepath.Join(base, "file-link")
+	symlinkOrSkip(t, file, fileLink)
+	fileChain := filepath.Join(base, "file-chain")
+	symlinkOrSkip(t, fileLink, fileChain)
+	if got, err := WalkableRoot(fileChain); err != nil || got != fileChain {
+		t.Fatalf("chain to a file: WalkableRoot = %q, %v; want %q", got, err, fileChain)
+	}
+
+	missing := filepath.Join(base, "gone")
+	dangling := filepath.Join(base, "dangling")
+	symlinkOrSkip(t, missing, dangling)
+	broken := filepath.Join(base, "broken")
+	symlinkOrSkip(t, dangling, broken)
+	got, err := WalkableRoot(broken)
+	if got != "" || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("broken chain: WalkableRoot = %q, %v; want empty and not exist", got, err)
+	}
+}
+
+// TestWalkableRootKeepsTheSlashLstatErrorWhenTheChainDoesNotResolve is the
+// error half of a separator that does not lead in. The trailing-slash Lstat
+// fails, and resolving the root does not name a directory, so the Lstat
+// error is the answer.
+func TestWalkableRootKeepsTheSlashLstatErrorWhenTheChainDoesNotResolve(t *testing.T) {
+	root := filepath.Join("vol", "Music")
+	walkableRootSlashLstat = func(string) (fs.FileInfo, error) {
+		return nil, errSlashLstat
+	}
+	t.Cleanup(func() { walkableRootSlashLstat = nil })
+	dir := stubInfo(fs.ModeDir | 0o755)
+	junction := stubInfo(fs.ModeIrregular)
+	got, err := walkableRoot(root,
+		func(string) (fs.FileInfo, error) { return junction, nil },
+		func(string) (fs.FileInfo, error) { return dir, nil },
+	)
+	if got != "" || !errors.Is(err, errSlashLstat) {
+		t.Fatalf("WalkableRoot = %q, %v; want the trailing-slash error", got, err)
 	}
 }
 

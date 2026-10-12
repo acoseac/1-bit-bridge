@@ -858,6 +858,27 @@ lost my library."
   became a link rewrites nothing, and one whose root was always a link
   indexes its library for the first time (a whole-library delta and
   enrichment, once).
+- **…and a link chain whose trailing-slash Lstat disagrees with Stat is
+  still walked, under the configured spelling** (2026-10-12, backlog B257).
+  `os.Lstat(root+"/")` has answered "not a directory" while `os.Stat(root)`
+  answered a directory, once on CI macos-26-arm64, for a link to a link
+  (`TestWalkableRootDescendsALinkedRoot`: `links to a directory the walk
+  cannot enter`). The root then read as unreachable for that scan and its
+  rows were spared. When those two answers disagree — the trailing-slash
+  Lstat is not a directory, or it returns an error, while Stat of the same
+  root is a directory — `WalkableRoot` resolves the chain with
+  `ResolveLinks` and, when that names a directory, returns the configured
+  root with a separator appended. The resolved path decides walkability
+  only. It is never the path the walk is given, so every path below the
+  root keeps the configured spelling. When the two answers agree, the chain
+  is not resolved. A chain that ends at a file, a broken chain, and a
+  separator that does not lead into a directory still refuse, as before.
+  The disagreement is injected by `walkableRootSlashLstat` (nil in
+  production). `TestWalkableRootDescendsALinkedRoot` logs both answers,
+  each with its error and mode, when it fails.
+  (`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees`,
+  `TestWalkableRootRefusesAChainThatDoesNotNameADirectory`,
+  `TestWalkableRootKeepsTheSlashLstatErrorWhenTheChainDoesNotResolve`.)
 - **A subtree scan OF the root runs the clean-empty guard Scan runs, and a
   line about a linked root names what it links to** (2026-09-28). The
   owning-root audit answers a SUBTREE that is not there; nothing covered the
