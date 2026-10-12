@@ -21,7 +21,7 @@ func TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs privilege on Windows; the data dir is the bridge's own")
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		t.Run("link at bridge.db"+suffix, func(t *testing.T) {
 			root := t.TempDir()
 			dir := filepath.Join(root, "data")

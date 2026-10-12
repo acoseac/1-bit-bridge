@@ -205,7 +205,7 @@ const bumpIndexedAtByPathSQL = `
 // the database file or either sidecar; tests match it with errors.Is.
 var errStoreSymlink = errors.New("refusing to open the store through a symlink")
 
-// A symlink at the database or either sidecar is refused before SQLite
+// A symlink at the database or a sidecar (-wal, -shm, -journal) is refused before SQLite
 // opens it. Precreate below creates the main file O_EXCL, which already
 // refuses a link there — but only when the file is MISSING: os.Lstat of a
 // symlink succeeds without following it, so the ErrNotExist gate skips
@@ -218,7 +218,7 @@ func OpenStore(path string) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
 	}
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
 		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%w at %s", errStoreSymlink, filepath.Base(p))
 		}
