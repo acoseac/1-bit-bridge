@@ -257,6 +257,35 @@ func TestALockThatCannotBeTakenFallsBackToTheProbe(t *testing.T) {
 	})
 }
 
+// TestARestoreOverAnUnlockedServeRefusesWithTheProbe is a serve whose
+// lock failed for a reason other than contention: it keeps serving, and
+// holds no lock. Once that block is gone a restore takes the lock. The
+// admin port is fixed and the serve is answering on it, so the restore
+// must still refuse with the probe's message.
+func TestARestoreOverAnUnlockedServeRefusesWithTheProbe(t *testing.T) {
+	adminAddr := "127.0.0.1:" + closedLoopbackPort(t)
+	cfgPath, dataDir, snap := seedRestorableInstall(t, adminAddr)
+	blockDataDirLock(t, dataDir)
+	served := bootServe(t, "--config", cfgPath)
+	if s := served.stderr.String(); !strings.Contains(s, "could not lock") {
+		t.Fatalf("serve did not start unlocked\nstderr:\n%s", s)
+	}
+	waitForAdminReady(t, adminAddr, served.done, served.stderr)
+	if err := os.Remove(filepath.Join(dataDir, serveLockFileName)); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lockServeDataDir(dataDir)
+	if err != nil {
+		t.Fatalf("the lock was not takeable once the block was gone: %v", err)
+	}
+	release()
+
+	code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
+	if code == 0 || !strings.Contains(stderr, "a bridge is answering on "+adminAddr) {
+		t.Fatalf("restore wrote under an unlocked serve, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
 func TestAFreeLockLetsRestoreProceedOnAnEphemeralAdminPort(t *testing.T) {
 	cfgPath, _, snap := seedRestorableInstall(t, "127.0.0.1:0")
 	code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
@@ -288,13 +317,14 @@ func TestAKilledDataDirHolderDoesNotBlockRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = &strings.Builder{}
+	holderErr := &strings.Builder{}
+	cmd.Stderr = holderErr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("holder did not start: %v\nstderr:\n%s", err, holderErr.String())
 	}
 	t.Cleanup(func() {
 		if cmd.Process != nil {
@@ -305,7 +335,7 @@ func TestAKilledDataDirHolderDoesNotBlockRestore(t *testing.T) {
 	})
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil || !strings.Contains(line, "holding") {
-		t.Fatalf("holder did not take the lock (%q, %v)", line, err)
+		t.Fatalf("holder did not take the lock (%q, %v)\nstderr:\n%s", line, err, holderErr.String())
 	}
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
@@ -333,6 +363,8 @@ func TestAKilledDataDirHolderDoesNotBlockRestore(t *testing.T) {
 func waitForRestorePrompt(t *testing.T, stderr *safeBuffer, done <-chan int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
 	for time.Now().Before(deadline) {
 		if strings.Contains(stderr.String(), "Type 'yes' to continue:") {
 			return
@@ -340,7 +372,7 @@ func waitForRestorePrompt(t *testing.T, stderr *safeBuffer, done <-chan int) {
 		select {
 		case code := <-done:
 			t.Fatalf("restore exited %d before the prompt\nstderr:\n%s", code, stderr.String())
-		case <-time.After(10 * time.Millisecond):
+		case <-tick.C:
 		}
 	}
 	t.Fatalf("restore never prompted\nstderr:\n%s", stderr.String())

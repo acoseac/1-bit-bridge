@@ -7700,7 +7700,15 @@ mentions across the four `ops/audit-*.md` files.
   `server.pid` records when it records one. Any other error from the lock
   means it could not be taken (a filesystem that keeps no locks, a
   permissions error, a directory where the lock file goes); those commands
-  then keep the admin-port probe, both times, and its message. A killed
+  then keep the admin-port probe, both times, and its message. The lock
+  is the guarantee between these commands and a serve. The probe stays as
+  a second guard against a serve that continued after a lock error other
+  than contention and therefore holds none: when the lock was taken and
+  the admin port is fixed, both probes still run and a bridge that answers
+  is refused with the probe's message
+  (`TestARestoreOverAnUnlockedServeRefusesWithTheProbe`). An ephemeral
+  admin port cannot be probed; the lock alone decides there
+  (`TestAFreeLockLetsRestoreProceedOnAnEphemeralAdminPort`). A killed
   holder does not block the next restore: the kernel drops the lock with
   the process (`TestAKilledDataDirHolderDoesNotBlockRestore`, and
   `TestALockDiesWithTheProcessThatHeldIt`). This bullet said until

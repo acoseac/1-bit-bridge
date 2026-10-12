@@ -56,7 +56,9 @@ func (e *serveDataDirHeldError) Error() string {
 // means no lock could be taken (a filesystem that keeps no locks, a lock
 // file this user cannot open). Serve warns and continues, since a lock
 // that cannot be taken must not stop a bridge from starting; restore and
-// clear-missing fall back to the admin-port probe. release is never nil,
+// clear-missing fall back to the admin-port probe, and they also probe a
+// fixed admin port when this lock was taken (probeAdminBesideTheLock).
+// release is never nil,
 // and does nothing when no lock was taken.
 //
 // A kernel lock, not a lock FILE. The kernel drops it with the process
@@ -131,8 +133,10 @@ func recordedServePID(dataDir string) int {
 // fallback means the lock could not be taken at all (a filesystem that
 // keeps no locks, a permissions error, a directory where the lock file
 // goes). The caller then keeps the admin-port probe. A taken lock is
-// held across the caller's confirmation prompt and its last write.
-// release is never nil.
+// held across the caller's confirmation prompt and its last write, and
+// the caller still probes a fixed admin port (probeAdminBesideTheLock):
+// a serve that continued after a lock error other than contention holds
+// no lock. release is never nil.
 func holdDataDirForMutation(dataDir, cmd string, stderr io.Writer) (release func(), fallback, refused bool) {
 	release, err := lockServeDataDir(dataDir)
 	if err == nil {

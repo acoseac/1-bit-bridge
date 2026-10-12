@@ -96,14 +96,18 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 
 	// Hold the data-dir lock for the whole run, including the confirmation
 	// wait. This is a two-table DELETE from a second process, and Store.mu
-	// serialises writers within one process only. When the lock cannot be
-	// taken, fall back to the admin-port probe, twice.
+	// serialises writers within one process only. The admin-port probe
+	// still runs when that port is fixed, including while this command
+	// holds the lock: a serve that continued after a lock error other than
+	// contention holds none. An ephemeral admin port cannot be probed; the
+	// lock alone decides. When the lock cannot be taken, the probe runs
+	// either way.
 	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, cmdNameManifestClearMissing, stderr)
 	defer releaseLock()
 	if refused {
 		return 1
 	}
-	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 
@@ -124,9 +128,8 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 		}
 	}
 
-	// The probe's second look, only on the fallback where the lock was not
-	// taken.
-	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
+	// The probe's second look, on the same rule as the first.
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 

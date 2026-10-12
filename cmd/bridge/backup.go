@@ -127,14 +127,16 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	// Hold the data-dir lock for the whole run, including the confirmation
 	// wait. backup.Restore unlinks the live -wal and -shm and renames a
 	// fresh bridge.db over the open one; a serve that starts at the prompt
-	// is refused by the lock rather than by a probe of the admin port.
-	// When the lock cannot be taken, fall back to that probe, twice.
+	// is refused by the lock. The admin-port probe still runs when that
+	// port is fixed, including while this command holds the lock: a serve
+	// that continued after a lock error other than contention holds none.
+	// An ephemeral admin port cannot be probed; the lock alone decides.
 	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, "restore", stderr)
 	defer releaseLock()
 	if refused {
 		return 1
 	}
-	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 
@@ -156,9 +158,11 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 	}
 
-	// The probe's second look, only on the fallback where the lock was not
-	// taken: a bridge can have started while the prompt waited.
-	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	// The probe's second look, on the same rule as the first. On the
+	// fallback a bridge can have started while the prompt waited. With
+	// the lock held, an unlocked serve can have bound its admin port in
+	// that window.
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 

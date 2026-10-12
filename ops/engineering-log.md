@@ -40023,3 +40023,29 @@ The lock take was removed from `restoreCmd` only and
 `TestAHeldDataDirLockRefusesRestoreAndClearMissing` was run again.
 Restore proceeded (exit 0) while the lock was held. The take was put
 back by hand. The broken state was not committed.
+
+### Round 2 — the probe stays beside a taken lock
+
+`runServe` continues when `lockServeDataDir` fails for a reason other
+than contention, and that serve holds no lock. `holdDataDirForMutation`
+then returns `fallback == false`, and both commands skipped
+`refuseIfBridgeMayBeRunning`. A later restore that took the lock wrote
+under that live serve. `probeAdminBesideTheLock` keeps both probes when
+the lock was taken and the admin port is fixed, and skips them only when
+the lock was taken and the admin port is ephemeral. The lock stays the
+guarantee between commands. The probe is the second guard against an
+unlocked serve.
+
+`TestARestoreOverAnUnlockedServeRefusesWithTheProbe` was red before the
+probe stayed: a serve started with `server.lock` as a directory (the
+lock error is not contention), the directory was removed, the lock was
+taken and released, and restore finished with exit 0, stdout `Restore
+complete`, and an empty stderr, while the admin was answering.
+`TestAFreeLockLetsRestoreProceedOnAnEphemeralAdminPort` stays the
+exception: a free lock on `127.0.0.1:0` proceeds, and the command does
+not say `no fixed port`.
+
+The probe-when-locked arm was removed (`return fallback` only) and the
+new test was run again. Restore finished with exit 0 and an empty stderr
+while the unlocked serve was answering. The arm was put back by hand.
+The broken state was not committed.
