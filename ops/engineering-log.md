@@ -40049,3 +40049,112 @@ The probe-when-locked arm was removed (`return fallback` only) and the
 new test was run again. Restore finished with exit 0 and an empty stderr
 while the unlocked serve was answering. The arm was put back by hand.
 The broken state was not committed.
+
+## 2026-10-12 — one fpcalc gets its own deadline (backlog B214)
+
+`fingerprintOne` called `acoustid.Compute` on the sweep context.
+`acoustid.Compute` starts fpcalc with `exec.CommandContext`, and nothing
+gave that context a deadline. `fingerprintAll` waits for every worker, and
+the wait has a bound only after the sweep context is cancelled
+(`sweeperDrainGrace`, 30 s). The default pool is one worker, so one fpcalc
+that never returned held the sweep until shutdown and the next file never
+started.
+
+### Measured (this Mac, 2026-10-12)
+
+Homebrew `/opt/homebrew/bin/fpcalc` reports
+`fpcalc version 1.6.1 (FFmpeg Lavc63.1.101)`. Files generated with
+sox and encoded with ffmpeg `-c:a flac -compression_level 5`, under
+`~/Library/Developer/bridge-cursor-b214/fpcalc-time/` (scratch, not in the
+repo). Wall time is `/usr/bin/time -p`.
+
+| File | fpcalc | Wall |
+|---|---|---|
+| 192 kHz 24-bit stereo WAV, 120 s, 132 MB | `-json -length 120` | 0.21 s (user 0.19) |
+| 44.1 kHz 16-bit WAV, 1800 s, 303 MB | `-json -length 120` | 0.07 s |
+| same 1800 s WAV | `-json -length 10` | 0.04 s |
+| 192 kHz 24-bit FLAC, 120 s, 25 MB | `-json -length 120` | 0.39 s (user 0.37) |
+| 44.1 kHz 16-bit FLAC, 1800 s, 128 MB | `-json -length 120` | 0.11 s |
+
+The fingerprint strings for the 120 s hi-res file and the 30-minute file
+under `-length 120` are almost the same length (WAV 2726 vs 2711 characters;
+FLAC the same pair). `-length 10` on the 30-minute WAV is 179 characters.
+The decode stops at the window. The JSON `duration` field is the file
+length (1800.0 on the 30-minute files), not the window.
+
+Local CPU of the window is a fraction of a second. That is the wrong size
+for the bound. A network mount reads the whole object before decode (the
+`LengthSeconds` and `ComputeFromPrefix` docblocks; rclone's default
+vfs-read-chunk-size of 128 MiB is larger than a music file). The longest
+eligible track is 30 minutes (`MaxTrackSeconds` 1800). A 30-minute hi-res
+FLAC can be about a gigabyte. At 1–2 MB/s that read is minutes.
+
+### Bound
+
+`fingerprintDecodeTimeout` is 10 minutes, the same cap
+`internal/analyze` and `internal/transcode` give a job (`defaultJobTimeout`).
+A zero `decodeTimeout` on the sweeper means that constant, so production
+wiring is unchanged and a test sets a short one without a package variable.
+The timeout wraps only the fpcalc call. The AcoustID lookup already has its
+own HTTP timeout. `length` stays the audio window (`-length`), separate
+from the wall clock.
+
+Rejected: a bound near the measured 0.39 s. It would kill every cold read
+off a NAS. Rejected: 120 s of wall clock, the length of the audio window.
+A large object on a slow link can take longer than that and still be a
+read, not a hang, and the 30-minute file's fingerprint was the same work
+as the 120 s file's. Rejected: about 2 minutes (enough for ~128 MiB at
+1 MB/s). A ~1 GB hi-res file at 1–2 MB/s would time out on every sweep and
+never be fingerprinted. Rejected: leaving the call unbounded, which is the
+defect.
+
+A file that needs longer than ten minutes is offered again on the next
+sweep (default 6 h). The timeout is logged and not cached.
+
+### What a timeout does
+
+`Compute` returns `ctx.Err()` when the context is done, before it wraps a
+non-zero exit as `ErrUnreadable`. `fingerprintOne` asks the parent first.
+A cancelled parent is shutdown: no log, no cache. `DeadlineExceeded` on
+the file context, with the parent still live, logs
+`fingerprint: fpcalc timed out` once, with the library-relative path, and
+returns. It does not `cache.Set` and does not `SetAcoustIDNoMatch`. Caching
+it would skip the file for the life of the process, keyed on path, size
+and mtime. `ErrUnreadable` is still cached as a miss: that is a property
+of the file.
+
+fpcalc 1.6.1 is a real binary, not a shell wrapper, so
+`exec.CommandContext`'s kill of the direct child is the kill. A process
+group (`Setpgid`, the tailscale CLI's treatment) would matter if a shell
+sat between the sweeper and fpcalc. The stand-in is the test binary
+itself, on `PATH` as `fpcalc`, with no shell. A child in uninterruptible
+sleep still outlives SIGKILL until the driver unblocks, and the sweep
+stays held for that one file. That residual is what `sweeperDrainGrace`
+already covers at shutdown. The timeout bounds an interruptible hang: a
+FIFO, a select that never returns, a spin, a pathological input.
+
+### Red
+
+`TestAHungFpcalcDoesNotHoldTheSweep` leaves `compute` nil and calls
+`fingerprintAll` with one worker. The stand-in writes its pid and blocks
+in `select{}` for `hang.flac`, and writes a marker and prints an empty
+fingerprint for `next.flac` so the lookup is never reached. With the
+`context.WithTimeout` removed and `decodeTimeout` at 200 ms, the test's
+own 5 s bound fired:
+
+`TestAHungFpcalcDoesNotHoldTheSweep (5.04s): one hung fpcalc held the sweep past 5s`
+
+The failure path kills the stand-in so the process does not outlive the
+test. With the timeout restored the same test passed in 0.84 s: the next
+file's marker was written, the stand-in pid had exited, the parent context
+was still live, one Warn named `Album/hang.flac`, no `fingerprint: decode`
+line, no absolute path in any line, and the hung key was absent from the
+cache.
+
+### Control
+
+After the commit that adds the timeout, those lines are removed from
+`fingerprintOne` and `TestAHungFpcalcDoesNotHoldTheSweep` is run again.
+It has to fail inside its own 5 s bound. The lines are put back by hand.
+The broken state is not committed. The measured line from that run is
+recorded with this entry once the run has happened.
