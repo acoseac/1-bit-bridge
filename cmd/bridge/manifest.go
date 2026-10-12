@@ -94,11 +94,20 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 	fmt.Fprintf(stdout, "Config:   %s\n", resolvedCfgPath)
 	fmt.Fprintf(stdout, "Database: %s\n", dbPath)
 
-	// Refuse while a bridge is up. This is a two-table DELETE from a SECOND
-	// process, and Store.mu serialises writers within one process only —
-	// busy_timeout is a retry, not a serializer. enrichmentRetryCmd and
-	// tryLibraryViaAdmin both refuse the same state for the same reason.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
+	// Hold the data-dir lock for the whole run, including the confirmation
+	// wait. This is a two-table DELETE from a second process, and Store.mu
+	// serialises writers within one process only. The admin-port probe
+	// still runs when that port is fixed, including while this command
+	// holds the lock: a serve that continued after a lock error other than
+	// contention holds none. An ephemeral admin port cannot be probed; the
+	// lock alone decides. When the lock cannot be taken, the probe runs
+	// either way.
+	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, cmdNameManifestClearMissing, stderr)
+	defer releaseLock()
+	if refused {
+		return 1
+	}
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 
@@ -119,8 +128,8 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 		}
 	}
 
-	// Re-probe after the confirmation wait — same reason as restore's.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
+	// The probe's second look, on the same rule as the first.
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 

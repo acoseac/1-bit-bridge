@@ -124,13 +124,19 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 2
 	}
 
-	// Refuse while a bridge is up. backup.Restore unlinks the live -wal and
-	// -shm and renames a fresh bridge.db over the open one; with a writer
-	// running that is the WAL/main mismatch this command's own docblock
-	// describes as silent corruption. Every sibling CLI mutator gates the
-	// same way — tryLibraryViaAdmin and enrichmentRetryCmd both refuse on a
-	// reachable bridge — and this is the most destructive of the three.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	// Hold the data-dir lock for the whole run, including the confirmation
+	// wait. backup.Restore unlinks the live -wal and -shm and renames a
+	// fresh bridge.db over the open one; a serve that starts at the prompt
+	// is refused by the lock. The admin-port probe still runs when that
+	// port is fixed, including while this command holds the lock: a serve
+	// that continued after a lock error other than contention holds none.
+	// An ephemeral admin port cannot be probed; the lock alone decides.
+	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, "restore", stderr)
+	defer releaseLock()
+	if refused {
+		return 1
+	}
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 
@@ -152,10 +158,11 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 	}
 
-	// Re-probe: a bridge can have started while the prompt waited. See
-	// refuseIfBridgeMayBeRunning's docblock for why this narrows the window
-	// rather than closing it. (CodeRabbit, PR #856.)
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	// The probe's second look, on the same rule as the first. On the
+	// fallback a bridge can have started while the prompt waited. With
+	// the lock held, an unlocked serve can have bound its admin port in
+	// that window.
+	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 

@@ -7688,17 +7688,34 @@ mentions across the four `ops/audit-*.md` files.
   the check), `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed`, and
   fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
   `TestALockDiesWithTheProcessThatHeldIt`.
-- **A write gate on a second process is a GUARD, not mutual exclusion — say
-  which.** `bridge restore` and `bridge manifest clear-missing` mutate the store
-  from a second process, where `Store.mu` does not reach and `busy_timeout` is a
-  retry rather than a serializer. Both now refuse while a bridge answers on the
-  admin port, probing again immediately before the destructive call because one
-  can start while a confirmation prompt waits. That NARROWS the window; closing
-  it needs them to hold the lock `bridge serve` holds (the bullet above), which
-  they do not take. This bullet said until 2026-10-02 that such a lock was
-  deliberately not added because a stale lockfile after an unclean exit blocks
-  `restore` at exactly the moment an operator needs `restore`: true of a lock
-  FILE, and not of serve's kernel lock, which goes with its process.
+- **`bridge restore` and `bridge manifest clear-missing` hold the data-dir
+  lock for the whole run.** Both mutate the store from a second process,
+  where `Store.mu` does not reach and `busy_timeout` is a retry rather than
+  a serializer. Each takes `lockServeDataDir` (the kernel lock `bridge
+  serve` holds, the bullet above) before it reads the store or writes, and
+  releases it only after the last write, so a serve started during the
+  confirmation prompt, or one whose admin address is ephemeral, is refused:
+  the lock does not depend on the admin port. A `*serveDataDirHeldError` is
+  the refusal, and the message is the lock's own, which names the pid
+  `server.pid` records when it records one. Any other error from the lock
+  means it could not be taken (a filesystem that keeps no locks, a
+  permissions error, a directory where the lock file goes); those commands
+  then keep the admin-port probe, both times, and its message. The lock
+  is the guarantee between these commands and a serve. The probe stays as
+  a second guard against a serve that continued after a lock error other
+  than contention and therefore holds none: when the lock was taken and
+  the admin port is fixed, both probes still run and a bridge that answers
+  is refused with the probe's message
+  (`TestARestoreOverAnUnlockedServeRefusesWithTheProbe`). An ephemeral
+  admin port cannot be probed; the lock alone decides there
+  (`TestAFreeLockLetsRestoreProceedOnAnEphemeralAdminPort`). A killed
+  holder does not block the next restore: the kernel drops the lock with
+  the process (`TestAKilledDataDirHolderDoesNotBlockRestore`, and
+  `TestALockDiesWithTheProcessThatHeldIt`). This bullet said until
+  2026-10-12 that the two commands only probed the admin port, and until
+  2026-10-02 that an interprocess lock was declined because a stale lockfile
+  after an unclean exit blocks `restore` at exactly the moment an operator
+  needs `restore`: true of a lock FILE, and not of this kernel lock.
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
   It fails closed on anything but connection-refused, which is right; but
   `adminAddress: …:0` names no port to dial, so the default produced "a bridge

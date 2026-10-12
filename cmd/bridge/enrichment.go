@@ -610,26 +610,36 @@ func adminPortIsFixed(cfg *config.Config) bool {
 	return n >= 1 && n <= 65535
 }
 
-// refuseIfBridgeMayBeRunning is the shared write gate for the CLI commands
-// that mutate the store from a SECOND process. Returns true when the caller
-// must refuse; it has already explained why on stderr.
+// probeAdminBesideTheLock reports whether the admin-port probe still runs.
+// It always runs when the lock could not be taken. When the lock was taken
+// it still runs on a fixed admin port, so a serve that continued after a
+// lock error other than contention — and therefore holds no lock — is
+// refused when it answers. An ephemeral admin port cannot be probed; the
+// lock alone decides there.
+func probeAdminBesideTheLock(fallback bool, cfg *config.Config) bool {
+	return fallback || adminPortIsFixed(cfg)
+}
+
+// refuseIfBridgeMayBeRunning is the admin-port write gate. Returns true
+// when the caller must refuse; it has already explained why on stderr.
 //
-// Store.mu serialises writers within one process only, and busy_timeout is a
-// retry rather than a serializer, so "is anything else running?" is the
-// question these commands have to answer before touching the database.
-// The check runs TWICE on the prompting commands: once up front so an operator
-// on a running bridge is told immediately rather than after typing a
-// confirmation, and once right before the destructive call, because a bridge
-// can start while the prompt waits.
-//
-// The second probe NARROWS that window to the microseconds between it and the
-// call; it does not close it. Closing it needs an interprocess lock that
-// `bridge serve` also holds — deliberately not added here: a lockfile's own
-// failure mode is a stale lock after an unclean exit, which blocks restore at
-// exactly the moment an operator needs restore, and the daemon-side half is a
-// change to the serve path that this fix has no business making. The honest
-// summary is that this is a guard, not mutual exclusion, and the prompt still
-// says to stop the service.
+// `bridge restore` and `bridge manifest clear-missing` call it through
+// probeAdminBesideTheLock: whenever the data-dir lock could not be taken,
+// and whenever it was taken on a fixed admin port. A lock another open
+// holds is refused by the lock's own message and never reaches here. An
+// ephemeral admin port is probed only when the lock could not be taken;
+// this function then refuses because the port cannot be dialed. When the
+// lock was taken on that port, the caller skips the probe and the lock
+// alone decides. The check still runs twice, once up front and once right
+// before the destructive call. On the fallback a bridge can start while
+// the prompt waits. With the lock held, a serve that continued after a
+// lock error other than contention can bind its admin port in that
+// window, and the second probe is what sees it. The lock is the guarantee
+// between commands. The probe is the second guard against that unlocked
+// serve. A lock FILE was the objection recorded against holding one here:
+// a stale file after an unclean exit would block restore when it is
+// needed. This gate stays for the unlocked serve and for the case where
+// the kernel lock itself cannot be taken.
 func refuseIfBridgeMayBeRunning(ctx context.Context, cfg *config.Config, cmd string, stderr io.Writer) bool {
 	addr := adminAddrOf(cfg)
 	if !adminPortIsFixed(cfg) {
