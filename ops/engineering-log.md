@@ -40139,22 +40139,36 @@ FIFO, a select that never returns, a spin, a pathological input.
 `fingerprintAll` with one worker. The stand-in writes its pid and blocks
 in `select{}` for `hang.flac`, and writes a marker and prints an empty
 fingerprint for `next.flac` so the lookup is never reached. With the
-`context.WithTimeout` removed and `decodeTimeout` at 200 ms, the test's
-own 5 s bound fired:
+`context.WithTimeout` removed and the test's own bound at 5 s, the bound
+fired:
 
 `TestAHungFpcalcDoesNotHoldTheSweep (5.04s): one hung fpcalc held the sweep past 5s`
 
 The failure path kills the stand-in so the process does not outlive the
-test. With the timeout restored the same test passed in 0.84 s: the next
-file's marker was written, the stand-in pid had exited, the parent context
-was still live, one Warn named `Album/hang.flac`, no `fingerprint: decode`
-line, no absolute path in any line, and the hung key was absent from the
-cache.
+test. With the timeout restored, and the binary still warm from that run,
+the same test passed in 0.84 s: the next file's marker was written, the
+stand-in pid had exited, the parent context was still live, one Warn named
+`Album/hang.flac`, no `fingerprint: decode` line, no absolute path in any
+line, and the hung key was absent from the cache.
+
+A cold start of this package's test binary takes 0.83 s to write that pid
+file (0.95 s for the race binary, 0.085 s once the pages are warm). A
+200 ms `decodeTimeout` kills the child before the write, the sweep
+continues, and the assertion that the child is gone cannot run. The test's
+budget is 5 s, and its bound is 15 s. With that budget the test passed in
+5.71 s.
 
 ### Control
 
-After the commit that adds the timeout, those lines are removed from
-`fingerprintOne` and `TestAHungFpcalcDoesNotHoldTheSweep` is run again.
-It has to fail inside its own 5 s bound. The lines are put back by hand.
-The broken state is not committed. The measured line from that run is
-recorded with this entry once the run has happened.
+On the committed tree (`dee858cb`), the `context.WithTimeout` in
+`fingerprintOne` was removed and the test was run again:
+
+`TestAHungFpcalcDoesNotHoldTheSweep (5.04s): one hung fpcalc held the sweep past 5s`
+
+After the test budget moved to 5 s and the bound to 15 s, the timeout was
+removed again:
+
+`TestAHungFpcalcDoesNotHoldTheSweep (15.04s): one hung fpcalc held the sweep past 15s`
+
+The timeout was put back by hand each time. The broken state was not
+committed.

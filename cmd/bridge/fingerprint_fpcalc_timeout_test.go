@@ -137,11 +137,15 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 
 	const rel = "Album/hang.flac"
 	hangKey := acoustid.Key{Path: rel, Size: 1, MTimeNS: 1}
+	// A cold race binary of this package takes about a second to reach
+	// the pid write. The budget has to outlast that start and still
+	// finish inside the 15s bound below; a sweep with no budget blocks
+	// until that bound.
 	s := &fingerprintSweeper{
 		cache:         acoustid.NewCache(8),
 		workers:       1,
 		length:        time.Second,
-		decodeTimeout: 200 * time.Millisecond,
+		decodeTimeout: 5 * time.Second,
 	}
 	ctx := context.Background()
 	done := make(chan struct{})
@@ -154,13 +158,13 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		killStandIn(pidFile)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
 		}
-		t.Fatal("one hung fpcalc held the sweep past 5s")
+		t.Fatal("one hung fpcalc held the sweep past 15s")
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("sweep context: %v", ctx.Err())
