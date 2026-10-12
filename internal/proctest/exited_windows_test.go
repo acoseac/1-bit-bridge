@@ -62,11 +62,13 @@ func TestAReapedProcessHasExited(t *testing.T) {
 // Zero, a negative value, and a value past MaxUint32 are refused before
 // any call, so the cast cannot truncate one into a pid that exists. The
 // refusal text is that early return's, which is what shows no system call
-// was made. On a 32-bit int the wide value wraps to a value that is
-// refused anyway.
+// was made. The wide value is built from an int64 variable, as in the Unix
+// twin, so the file compiles where int is 32 bits (windows/386): a constant
+// past MaxInt32 is a compile error there, and the run-time conversion wraps
+// to 0, which is refused anyway.
 func TestExitedAsksNothingAboutAValueThatIsNotAPID(t *testing.T) {
-	tooWide := int(uint64(math.MaxUint32) + 1)
-	for _, pid := range []int{0, -1, tooWide} {
+	wide := int64(math.MaxUint32) + 1
+	for _, pid := range []int{0, -1, int(wide)} {
 		exited, why := Exited(pid)
 		if exited || !strings.Contains(why, "is not a process id") {
 			t.Errorf("Exited(%d) = %v, %q; want false and a refusal", pid, exited, why)
