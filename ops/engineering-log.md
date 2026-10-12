@@ -40364,3 +40364,84 @@ The zone arm was put back to stopping at the first `]`, and restored with the ed
 The timing fixture was first `"from [0%"` with no leading space. Against that broken walk it passed in 0.00 s, because only the first prefix is an introducer. With the space, the same broken walk took 2.77 s (`peerAddressSpans took 2.765831958s, want under 1s`).
 
 After the restore, the redact, span, timing and fuzz-seed filter passed in 0.533 s for the package.
+
+## 2026-10-12 — OpenStore refuses a symlink at the database or a sidecar (backlog B262)
+
+Filed by the B208 session (#1140) and named only as B262 while unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured
+
+A Linux bridge built from `main` at `70776bbb` (`CGO_ENABLED=0`), run on a
+LAN test host, on a data dir an unprivileged user owns — the realistic shape
+is `sudo bridge serve` beside a service install, or a root container over a
+bind mount the host user owns. The owner pre-planted a symlink at each
+data-dir file, each aimed at a decoy directory the owner could not write
+(root-owned, `0700`). Root then ran `init`, `serve`, `pair` and `backup`.
+A decoy target that appears is a file the root process wrote THROUGH the
+owner's link, outside the dir the owner controls.
+
+| data-dir file | writer | verdict |
+|---|---|---|
+| `bridge.db` | `manifest.OpenStore` → SQLite (modernc) | **followed** — 376 KB of database written to the decoy, owner root |
+| `bridge.db-wal` / `-shm` | SQLite, opened by their own paths | **followed** (0 B / 32 KiB at the decoy) |
+| `server.lock` | the data-dir lock (`os.OpenRoot`, #1140) | resisted |
+| `server.crt` / `server.key` | the TLS mint | resisted (real files written in place) |
+| `tokens.json` | the token store | resisted (real file in place) |
+
+The lock resisting is the control: the measurement discriminates, so the
+three database follows are real. The db, `-wal` and `-shm` are the one
+root-run writer that still followed a planted link.
+
+### The cause
+
+`OpenStore` already stages the database with `fsutil.Precreate`, which
+creates the file `O_EXCL` and so wraps `os.ErrExist` on a symlink and writes
+nothing through it. But `Precreate` is reached only inside
+
+```go
+if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) { … Precreate … }
+```
+
+and `os.Lstat` does not follow a symlink: on a planted (dangling) link it
+returns the link's own `FileInfo` and no error, so the `fs.ErrNotExist` gate
+is false, `Precreate` is skipped, and `sql.Open` opens `path` — which the OS
+resolves through the link to the decoy. SQLite opens `-wal`/`-shm` by
+`path+"-wal"` / `"-shm"`, so a link at either follows the same way; in
+isolation (a real `bridge.db`, a link only at `-wal`) SQLite's own open
+fails `unable to open database file`, so the measured, written-through case
+is the main file, with the sidecars following whenever the main file does.
+
+### The fix
+
+`OpenStore` now `os.Lstat`s `path`, `path+"-wal"` and `path+"-shm"` before
+`sql.Open` and returns `errStoreSymlink` (wrapped, the base name only, never
+the link's target) for any `ModeSymlink`. The refusal is unconditional, not
+gated on euid: none of the three is a symlink in any supported layout, so a
+link there is an attack when root and a mistake otherwise, and both deserve
+a clear refusal over a silent follow. `Precreate` still stages the create
+path; its `O_EXCL` closes the narrow create-time race a check-then-open
+leaves. The refusal closes a link planted before the store opens, the
+measured case; it is a check before SQLite's own open, not part of it, and
+the follow-up is tracked privately as backlog B346 (CodeRabbit on #1193).
+
+### Red first
+
+`TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar` plants a symlink at
+each of the three paths and asserts `OpenStore` returns `errStoreSymlink`,
+the decoy target is not created, and the link is left undisturbed. With the
+guard loop removed (the `errStoreSymlink` var kept so the package builds):
+`bridge.db` opened through the link; `-wal` and `-shm` returned SQLite's
+`unable to open database file (14)`, not the refusal — all three red. With
+the guard, all three pass. `TestOpenStoreOpensARealExistingDatabase` is the
+positive control: a real (non-link) database still opens, created and
+reopened, and is never a symlink. On Windows the symlink subtest skips
+(creating one needs privilege and the data dir is the bridge's own).
+
+### Not audited here
+
+The artwork and waveform cache writers and the pid file, which B262 also
+names, were not exercised by this run's empty library. They open through the
+cache helpers rather than `sql.Open`; a follow-up measures whether any opens
+a fixed data-dir path directly, as `OpenStore` did.

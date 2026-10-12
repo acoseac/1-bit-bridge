@@ -200,9 +200,28 @@ const bumpIndexedAtByPathSQL = `
 // gives both the database file's owner whenever it opens them as root
 // (robustFchown, measured through modernc), so a store the service owns
 // never gets root's.
+//
+// errStoreSymlink is returned (wrapped) when OpenStore finds a symlink at
+// the database file or either sidecar; tests match it with errors.Is.
+var errStoreSymlink = errors.New("refusing to open the store through a symlink")
+
+// A symlink at the database or a sidecar (-wal, -shm, -journal) is refused before SQLite
+// opens it. Precreate below creates the main file O_EXCL, which already
+// refuses a link there — but only when the file is MISSING: os.Lstat of a
+// symlink succeeds without following it, so the ErrNotExist gate skips
+// Precreate, and sql.Open then opens the link's target. Run as root over an
+// install another user owns, that writes the database wherever the data
+// dir's owner aimed the link; SQLite opens -wal/-shm by their own paths, so
+// a link at either follows the same way. None of the three is a symlink in
+// any supported layout, so one is refused outright (backlog B262).
 func OpenStore(path string) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w at %s", errStoreSymlink, filepath.Base(p))
+		}
 	}
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		if err := fsutil.Precreate(path, 0o644, path); err != nil && !errors.Is(err, fs.ErrExist) {
