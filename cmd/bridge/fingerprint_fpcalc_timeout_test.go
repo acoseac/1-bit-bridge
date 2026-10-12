@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/proctest"
 	"github.com/acoseac/1-bit-bridge/internal/standintest"
 )
 
@@ -137,7 +138,7 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 		t.Fatalf("the file after the hang was not fingerprinted: %v", err)
 	}
 	pid := readStandInPID(t, pidFile)
-	if gone, how := standInExited(pid); !gone {
+	if gone, how := proctest.Exited(pid); !gone {
 		t.Fatalf("fpcalc %d still running (%s)", pid, how)
 	}
 	timedOut := rec.Failures(msgFpcalcTimedOut)
