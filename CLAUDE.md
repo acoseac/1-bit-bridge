@@ -1217,12 +1217,13 @@ lost my library."
  generation it loaded, and only when the library is already in the saved
  form. A subtree scan looks each insert up and does not clear. The
  subtree fold is one `unicode_lower` lookup on
- `idx_tracks_path_unicode_lower`. The in-memory date map and the
- case-only rename pairing fold with `pathFold`, the same case-fold-then-NFC
- `unicode_lower` applies, so a decomposed name and its precomposed
- spelling take one date on a full scan and a subtree scan. An
- accent-encoding rename is reaped the same way, and both spellings left
- in place are not (`TestCaseOnlyRenames`). A failed
+ `idx_tracks_path_unicode_lower`. The in-memory date map folds with
+ `pathFold`, the case-fold-then-NFC `unicode_lower` applies. The rename
+ pairing folds with `renameFold` (NFC, then that same lowercase), held
+ to the same answer by `TestRenameFoldMatchesPathFold`, so a decomposed
+ name and its precomposed spelling take one date on a full scan and a
+ subtree scan and the unseen spelling is reaped. Both spellings left in
+ place are not (`TestCaseOnlyRenames`). A failed
  or cancelled wipe rolls that transaction back, so it does not delete
  dates an earlier flip still has pending. A save that fails after the
  wipe commits retargets that generation at the form the library still
@@ -1478,10 +1479,19 @@ lost my library."
   per path. **Don't respell inside `ScanSubtree`**: its
   deletion scope is a byte range over the spelling it is handed, and the
   watcher and the rescanner hand it the walk's own. Rows an older build
-  already wrote heal at full scans, measured at the production threshold:
-  the case-only rename reap takes the case variants at the next one, and
-  the composition variants, which that reap does not relate, go at the
-  third. Tests: `TestAnUploadRescanIndexesNoSecondSpellingOfTheFolder`,
+  already wrote heal at the next full scan. The rename reap takes the
+  case variants and the composition variants (NFC beside NFD, U+0130
+  beside I+U+0307) on that scan: `renameFold` composes first, then the
+  Unicode lowercase `pathFold` uses (backlog B267, 2026-10-12). A plain
+  "i" beside U+0130 is a different folder and stays for the missing-count
+  threshold. Two spellings the walk saw both of stay. An errored subtree
+  is spared before the reap. The 2026-10-02 measurement that composition
+  variants waited until the third scan described the fold before it
+  composed. Tests: `TestScannerReapsTheUnseenCompositionOfOneFolder`,
+  `TestScannerLeavesAPlainIBesideDottedCapitalI`,
+  `TestScannerLeavesBothCompositionSiblings`,
+  `TestScannerSparesCompositionTwinUnderWalkErrorSubtree`,
+  `TestAnUploadRescanIndexesNoSecondSpellingOfTheFolder`,
   `TestAnUploadThroughALinkedFolderIsIndexedWhereTheWalkFindsIt`,
   `TestAnUploadOfOneFolderUnderTwoSpellingsScansItOnce`,
   `TestATrackTrashedUnderAnotherSpellingLeavesNoSecondSpelling`,

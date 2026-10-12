@@ -329,3 +329,34 @@ func TestScannerSparesCaseTwinUnderWalkErrorSubtree(t *testing.T) {
 		t.Error("twin/song.flac was wiped (it walked cleanly and must survive)")
 	}
 }
+
+// TestScannerSparesCompositionTwinUnderWalkErrorSubtree is the
+// composition twin of the case-twin guard. Two directories whose
+// names differ only by composition fold to one key, so an errored
+// walk of one looks like a rename of the other. The errored subtree
+// is spared. A volume that stores one spelling of the name cannot
+// stage the fixture.
+func TestScannerSparesCompositionTwinUnderWalkErrorSubtree(t *testing.T) {
+	root := t.TempDir()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0000 doesn't block the walk, so the transient error can't be simulated")
+	}
+	const nfd, nfc = "Cafe\u0301", "Caf\u00e9"
+	if !stageBothNames(t, root, nfd, nfc) {
+		t.Skip("volume stores one spelling of this name")
+	}
+	seedTrackDirs(t, filepath.Join(root, nfd), filepath.Join(root, nfc))
+
+	s, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "first scan")
+	mustIndexed(t, s, nfd+"/song.flac", nfc+"/song.flac")
+
+	breakWalk(t, filepath.Join(root, nfd))
+	scanOnce(t, sc, "second scan")
+	if got, _ := s.GetTrack(context.Background(), nfd+"/song.flac"); got == nil {
+		t.Error(nfd + "/song.flac was reaped as a rename despite its subtree hitting a walk error")
+	}
+	if got, _ := s.GetTrack(context.Background(), nfc+"/song.flac"); got == nil {
+		t.Error(nfc + "/song.flac was wiped (it walked cleanly and must survive)")
+	}
+}
