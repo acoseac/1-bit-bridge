@@ -982,6 +982,11 @@ func TestPeerAddressSpansMatchThePattern(t *testing.T) {
 		"client [fe80::7%Wi-Fi 4]:50000",
 		"from 10.0.0.2:5000 and 10.0.0.2:50001 and 110.0.0.2:5000",
 		"from 10.1.2.3:4\nclient 10.1.2.3:5",
+		// A ']' inside the zone. The pattern ends at the first ']' that
+		// ':' and a digit follow, so "[0%]]:0" is one address.
+		"from [0%]]:0",
+		"from [0%]:x]:1",
+		"from [ab%\n]:1",
 	}
 	var b strings.Builder
 	for i := 0; i < 32; i++ {
@@ -1027,5 +1032,25 @@ func TestRedactPeersOfThousandsOfPeersFinishesAtOnce(t *testing.T) {
 	}
 	if again := RedactPeers(got); again != got {
 		t.Fatal("RedactPeers is not idempotent on its own output")
+	}
+}
+
+// TestALineOfUnclosedZonePrefixesFinishesAtOnce is the bound on a zone
+// that never closes. A space before each "from [0%" is what makes it an
+// introducer; looking forward from each of those for the ']' a port
+// follows walks the tail once per prefix. The closing bracket comes from
+// one backward pass, so thousands of those prefixes finish under a second
+// and match nothing.
+func TestALineOfUnclosedZonePrefixesFinishesAtOnce(t *testing.T) {
+	const prefixes = 40000
+	const open = " from [0%"
+	line := strings.Repeat(open, prefixes)
+	start := time.Now()
+	got := peerAddressSpans(line)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("peerAddressSpans took %s, want under 1s", elapsed)
+	}
+	if len(got) != 0 {
+		t.Fatalf("found %d spans in a line with no port", len(got))
 	}
 }

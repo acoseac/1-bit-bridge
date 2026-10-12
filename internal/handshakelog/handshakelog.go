@@ -136,9 +136,14 @@ var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) |->)((?:\d{1
 // the same bytes peerAddr's second group captures; TestPeerAddressSpansMatchThePattern
 // is what keeps the two from drifting.
 func peerAddressSpans(line string) [][2]int {
+	// The zone's closing bracket is resolved from this table, not by
+	// scanning forward from each "%". A line of " from [0%" prefixes
+	// (the space is what makes each one an introducer) would otherwise
+	// walk its own tail once per prefix.
+	zoneClose := nextZoneClose(line)
 	var spans [][2]int
 	for i := 0; i < len(line); {
-		start, end, ok := peerAddressAt(line, i)
+		start, end, ok := peerAddressAt(line, i, zoneClose)
 		if !ok {
 			i++
 			continue
@@ -149,12 +154,40 @@ func peerAddressSpans(line string) [][2]int {
 	return spans
 }
 
+// nextZoneClose reports, for each byte, the index of the next ']' at or
+// after it that a ':' and a digit follow, or -1 when a newline comes
+// first. peerAddr's zone is %[^\n]*? and ends at that bracket: the first
+// ']' a port follows, which may sit after another ']' inside the zone
+// ("[0%]]:0"). One backward pass, so each lookup is O(1).
+func nextZoneClose(line string) []int {
+	next := make([]int, len(line))
+	closeAt := -1
+	for i := len(line) - 1; i >= 0; i-- {
+		if line[i] == '\n' {
+			closeAt = -1
+			next[i] = -1
+			continue
+		}
+		if zoneBracket(line, i) {
+			closeAt = i
+		}
+		next[i] = closeAt
+	}
+	return next
+}
+
+// zoneBracket reports whether i is the ']' of "]:<digit>", the end of a
+// zone in peerAddr.
+func zoneBracket(line string, i int) bool {
+	return i+2 < len(line) && line[i] == ']' && line[i+1] == ':' && line[i+2] >= '0' && line[i+2] <= '9'
+}
+
 // peerAddressAt reports the address a peer-naming word or "->" introduces
 // at i. The word matches only at the start of the line or after the same
-// ASCII space the pattern's \s matches.
-func peerAddressAt(line string, i int) (start, end int, ok bool) {
+// ASCII space the pattern's \s matches. zoneClose is nextZoneClose's table.
+func peerAddressAt(line string, i int, zoneClose []int) (start, end int, ok bool) {
 	if i+1 < len(line) && line[i] == '-' && line[i+1] == '>' {
-		if end, ok = peerHostPort(line, i+2); ok {
+		if end, ok = peerHostPort(line, i+2, zoneClose); ok {
 			return i + 2, end, true
 		}
 		return 0, 0, false
@@ -173,7 +206,7 @@ func peerAddressAt(line string, i int) (start, end int, ok bool) {
 	default:
 		return 0, 0, false
 	}
-	if end, ok = peerHostPort(line, i+word); ok {
+	if end, ok = peerHostPort(line, i+word, zoneClose); ok {
 		return i + word, end, true
 	}
 	return 0, 0, false
@@ -187,11 +220,11 @@ func re2Space(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
 }
 
-func peerHostPort(line string, i int) (int, bool) {
+func peerHostPort(line string, i int, zoneClose []int) (int, bool) {
 	if end, ok := ipv4Port(line, i); ok {
 		return end, true
 	}
-	return ipv6Port(line, i)
+	return ipv6Port(line, i, zoneClose)
 }
 
 func ipv4Port(line string, i int) (int, bool) {
@@ -226,7 +259,7 @@ func ipv4Port(line string, i int) (int, bool) {
 	return j, true
 }
 
-func ipv6Port(line string, i int) (int, bool) {
+func ipv6Port(line string, i int, zoneClose []int) (int, bool) {
 	if i >= len(line) || line[i] != '[' {
 		return 0, false
 	}
@@ -239,10 +272,15 @@ func ipv6Port(line string, i int) (int, bool) {
 		return 0, false
 	}
 	if j < len(line) && line[j] == '%' {
+		// The zone runs to the first ']' that a port follows, and it
+		// may contain ']' itself. zoneClose[j] is that bracket, or -1
+		// when a newline comes first. Scanning ahead from here would
+		// repeat the tail for every open " from [0%".
 		j++
-		for j < len(line) && line[j] != ']' && line[j] != '\n' {
-			j++
+		if j >= len(line) || zoneClose[j] < 0 {
+			return 0, false
 		}
+		j = zoneClose[j]
 	}
 	if j >= len(line) || line[j] != ']' {
 		return 0, false

@@ -8404,12 +8404,23 @@ mentions across the four `ops/audit-*.md` files.
   `110.0.0.2:5000`. **The finder is a direct walk of the same pattern as
   `peerAddr`, not `FindAll`**: under the race detector the regexp
   interpreter spent 1.3 s of a 1.3 s call on those 40,000 matches, so a
-  one-second bound could not hold while `FindAll` ran. `peerAddr` stays
+  one-second bound could not hold while `FindAll` ran.   `peerAddr` stays
   the spec; `peerAddressSpans` must return its group 2.
+  **The zone is `%[^\n]*?` and ends at the first `]` that `:` and a
+  digit follow, so a zone may contain `]`.** `from [0%]]:0` is one
+  address. Stopping at the first `]` misses it: `FuzzPeerAddressSpansMatchThePattern`
+  found that in under a second, and the seed is committed.
+  `nextZoneClose` is one backward pass per line — each byte's next
+  `]:digit`, or -1 when a newline comes first — and the zone looks that
+  end up in O(1). Scanning forward from every open ` from [0%` walks the
+  tail once per prefix (40,000 of them, 2.77 s). A newline ends the
+  reachable close, so `[ab%\n]:1` is not an address. Without a `%` the
+  `]` is still the next byte.
   `TestPeerAddressSpansMatchThePattern` is that lockstep.
   `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` is the bound (under
-  1 s, every peer replaced, idempotent). The app twin is B239's linear
-  parse.
+  1 s, every peer replaced, idempotent).
+  `TestALineOfUnclosedZonePrefixesFinishesAtOnce` is the unclosed-zone
+  bound. The app twin is B239's linear parse.
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as

@@ -40342,3 +40342,25 @@ The genre bound's comparison was inverted to `< 0`, so `Genre()` always ran. `Te
 `hostIsMalformed` was made to return false. `TestAHostWithAControlOrASpaceIsMalformed` reported `host "192.168.1.20\u0085" is not malformed`. `TestAMalformedHostIsNeverStrippedBeforeItIsClassified` classified the marked loopback as elsewhere. `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne` found the host fetchable. `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck` kept a decoded zone holding U+00A0.
 
 After the three restores, the same tests passed: the genre pair in 0.475 s, the redact filter in 0.263 s, and the malformed-host filter in 0.293 s.
+
+## 2026-10-12 — a peer zone may contain ']' and the close is one backward pass (backlog B246)
+
+`FuzzPeerAddressSpansMatchThePattern` (added on this branch, seed `testdata/fuzz/FuzzPeerAddressSpansMatchThePattern/76a2748f884ef598`) failed in under a second on `from [0%]]:0`. `peerAddr`'s zone is `%[^\n]*?` and ends at the first `]` that `:` and a digit follow, so the zone may contain `]`. The hand walk stopped at the first `]` and required `:` immediately, so it found no address where the pattern found one. The genre bound and the malformed-host refusal were left as they are.
+
+`nextZoneClose` is one backward pass per line. `zoneClose[j]` is the index of the next `]` at or after `j` that `:` and a digit follow, or -1 when a newline comes first. After `%`, `ipv6Port` looks that index up. Without a `%` the `]` is still the next byte, so a later `]:digit` is not skipped into. A newline resets the reachable close, so `from [ab%\n]:1` is not an address. `[0%]:x]:1` ends at the later `]:1`. An empty zone (`[0%]:1`) records the `]` that sits on the byte after `%`. The table is O(n) once; each zone end is O(1). The outer walk still advances one byte on a miss and jumps to the match end on a hit, and it enters the zone only at an introducer (`from `, `client `, `serving `, `->`).
+
+Scanning forward from each `%` for that `]` is the quadratic. It only runs when each prefix is an introducer. Concatenated `from [0%from [0%…` has `%` before every later `from `, so only the first prefix enters `ipv6Port` and a forward scan stays linear. A newline between prefixes stops the scan at the next line, which is linear too. The shape that repeats the tail is a non-newline space before each `from ` and no `]` and no newline in the zone: `" from [0%"` repeated.
+
+`TestALineOfUnclosedZonePrefixesFinishesAtOnce` repeats that 40,000 times and bounds `peerAddressSpans` at 1 s, with zero spans. On the linear walk it finished in 0.00 s. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` (40,000 IPv4 peers) finished in 0.04 s. `TestPeerAddressSpansMatchThePattern` gained `from [0%]]:0`, `from [0%]:x]:1` and `from [ab%\n]:1`.
+
+The fuzzer was run with `-fuzztime=5m -fuzzminimizetime=1s`. The minimizetime flag is required: the default is 60 s, and a target that is still finding coverage spends that window minimizing at 0 execs/sec and still says PASS. This run fuzzed for 5 m 0 s (29,416,744 execs, 274 new interesting inputs), then sat at 0/sec for the 1 s minimize of the last interesting input, and passed. No new failing input.
+
+### Control
+
+The zone arm was put back to stopping at the first `]`, and restored with the editor. The broken state was not committed.
+
+`TestPeerAddressSpansMatchThePattern` failed on `from [0%]]:0` (`spans 0, pattern matches 1`). The committed seed failed the same way (`walk found 0 spans, the pattern 1`).
+
+The timing fixture was first `"from [0%"` with no leading space. Against that broken walk it passed in 0.00 s, because only the first prefix is an introducer. With the space, the same broken walk took 2.77 s (`peerAddressSpans took 2.765831958s, want under 1s`).
+
+After the restore, the redact, span, timing and fuzz-seed filter passed in 0.533 s for the package.
