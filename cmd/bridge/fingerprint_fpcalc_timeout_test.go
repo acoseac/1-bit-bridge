@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/standintest"
 )
 
 // fpcalcStandInEnv re-execs the test binary as fpcalc. TestMain checks it
@@ -56,46 +55,12 @@ func runFpcalcStandIn() int {
 // name fpcalc, and nothing else, so LookPath cannot find a real fpcalc.
 func installFpcalcStandIn(t *testing.T, pidFile, nextFile string) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	bin := t.TempDir()
-	name := "fpcalc"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	dst := filepath.Join(bin, name)
-	// A hard link of the running binary cannot be removed while the test
-	// binary is mapped, which fails TempDir cleanup on Windows. Copy there,
-	// and wherever the link itself fails.
-	if runtime.GOOS == "windows" || os.Link(exe, dst) != nil {
-		copyFpcalcStandIn(t, exe, dst)
-	}
+	standintest.Install(t, bin, "fpcalc")
 	t.Setenv("PATH", bin)
 	t.Setenv(fpcalcStandInEnv, "1")
 	t.Setenv(fpcalcStandInPID, pidFile)
 	t.Setenv(fpcalcStandInNext, nextFile)
-}
-
-func copyFpcalcStandIn(t *testing.T, src, dst string) {
-	t.Helper()
-	in, err := os.Open(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		t.Fatal(err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestFpcalcBudgetDefaultsToTenMinutes pins the production bound. A test
