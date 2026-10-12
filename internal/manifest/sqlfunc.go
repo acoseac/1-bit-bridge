@@ -119,8 +119,14 @@ func pathFold(s string) string {
 // "İstanbul" and "istanbul" as one name. Those are two directories
 // on APFS. cases.Lower turns U+0130 into "i" plus U+0307, the same
 // key as the decomposed spelling and a different key from a plain "i".
+//
+// It composes again after the lowercase: lowercasing can leave a
+// sequence that is not NFC. U+03A1 U+0313 (capital rho, psili) has no
+// precomposed form, but its lowercase U+03C1 U+0313 composes to U+1FE4,
+// so without the second compose those two spellings of one name would
+// key apart here while pathFold keys them together.
 func renameFold(s string) string {
-	return cases.Lower(language.Und).String(NFCCompose(s))
+	return NFCCompose(cases.Lower(language.Und).String(NFCCompose(s)))
 }
 
 // NFCCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8

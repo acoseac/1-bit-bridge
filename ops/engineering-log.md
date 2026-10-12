@@ -40258,7 +40258,7 @@ The four identity checks were removed and those tests were run again. Both `runG
 B267 was filed on 2026-10-02, when `caseOnlyRenames` folded case only.
 At threshold 3 a case duplicate was gone after the first full scan and
 an NFD duplicate of an NFC row only after the third. #1158 (2026-10-08)
-then pointed the reap at `pathFold` (a Unicode case fold, then NFC).
+then pointed the reap at `pathFold` (a Unicode lowercase, `cases.Lower`, then NFC).
 Measured on this Mac on 2026-10-12, before any further change, the real
 scanner at threshold 3 already reaped both pairs on the scan after the
 stale row was planted: café NFC beside NFD, and U+0130 beside I+U+0307.

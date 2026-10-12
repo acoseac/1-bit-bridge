@@ -52,6 +52,9 @@ func TestRenameFoldMatchesPathFold(t *testing.T) {
 	pairs := [][2]string{
 		{"Caf\u00e9/song.flac", "Cafe\u0301/song.flac"},
 		{"İstanbul/song.flac", "I\u0307stanbul/song.flac"},
+		// Lowercase can leave a sequence that is not NFC: capital rho and
+		// psili has no precomposed form, its lowercase composes to U+1FE4.
+		{"\u03A1\u0313/song.flac", "\u1FE4/song.flac"},
 	}
 	for _, p := range pairs {
 		if renameFold(p[0]) != renameFold(p[1]) {
