@@ -3066,6 +3066,28 @@ no failing test — which is the shape to expect in this area.
   persist; a lookup error is a fact about the upstream and must not sideline a
   file. Retry must clear the in-process cache AND the SQLite rows, or everything
   answered this session stays suppressed until a restart.
+- **One fpcalc gets its own deadline, and a file that uses it up stays eligible**
+  (2026-10-12, backlog B214). `fingerprintOne` called `acoustid.Compute` on the
+  sweep context, and `fingerprintAll` waits for its workers with no budget of
+  its own, so one fpcalc that never returned held the sweep until shutdown.
+  The default pool is one worker, so the next file never started. Each file
+  now runs fpcalc under `context.WithTimeout` of `fingerprintDecodeTimeout`
+  (10 minutes; a test sets `decodeTimeout`). Measured on fpcalc 1.6.1: the
+  default `-length` 120 window of a 192 kHz 24-bit FLAC took 0.39 s, and a
+  30-minute FLAC under the same `-length` took 0.11 s, because the decode
+  stops at the window. The wait that matters is the read of the whole object
+  on a network mount, so a bound near that decode, or near the 120 s of
+  audio, would time out a slow read on every sweep. Ten minutes is the cap a
+  transcode or analysis job already gives a tool that can spin.
+  `exec.CommandContext` kills the direct child. A child in uninterruptible
+  sleep still outlives the signal, which is what `sweeperDrainGrace` is for.
+  A timeout logs once (`fingerprint: fpcalc timed out`, the library-relative
+  path) and is neither cached nor written as a no-match: a hung mount and a
+  pathological file look the same from here, and the next sweep offers the
+  file again. A real decode failure (`ErrUnreadable`) is still cached as a
+  miss. A cancelled parent is shutdown and logs nothing.
+  (`TestAHungFpcalcDoesNotHoldTheSweep`,
+  `TestFpcalcBudgetDefaultsToTenMinutes`.)
 - **The local-artist veto lives in `internal/enrich`, not `internal/acoustid`**
   (import cycle), only ever SUBTRACTS, and its junk-tag list is closed and tiny.
   An all-digits ALBUM title is NOT junk though an all-digits artist is:
@@ -4435,7 +4457,7 @@ no failing test — which is the shape to expect in this area.
   check walked that directory and found no sidecars, and the tick deleted
   the rows: 39 of 40, through the real watcher. The tick keeps the probe's
   view of the directory (`VariantsDirBlock.Info`) and asks
-  `variantsDirChanged` as each row reads as missing (`classify`: the one
+  `VariantsDirChanged` as each row reads as missing (`classify`: the one
   verdict that leads to a deletion, so a tick whose rows are where they
   belong pays nothing, and a volume that goes and comes back inside the
   pass is seen if it is still gone when a missing read's check runs), and
@@ -4468,8 +4490,7 @@ no failing test — which is the shape to expect in this area.
   `TestVariantWatcherRefusesATickWhoseVolumeGoesAfterItsLastMissingRow`,
   `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
   `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
-  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
-  `upscale --gc` re-checks health but not identity (B224). **Pass two
+  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Pass two
   asks `LocateSidecar` again just before each delete** (`classifyRow`, the
   one per-row verdict both passes use) and deletes only a row still at
   neither location: the checks see a change they observe and nothing
@@ -4481,6 +4502,7 @@ no failing test — which is the shape to expect in this area.
   is a volume that is gone again at that recheck. A mountpoint that already
   held an entry when a tick STARTED was open here too, until the next
   bullet.
+- **…and `upscale --gc` deletes a row only while the variants directory is still the directory it classified** (2026-10-12, backlog B224). `runGC` classified every row, then asked health again before the reverse sweep. A volume unmounted during classification onto a directory that still holds a rendition, with fewer than ten rows left to read as missing, passed the relocation floor and the health re-check, and the reverse sweep deleted those rows while their files sat on the volume. A volume that went and came back during classification matched again at the end, and only a check as each row read missing saw the gap. The Empty exception (`forwardRemoved > 0` or `--allow-mass-delete`) compared no identity, so a directory replaced after the forward sweep was one this run had emptied. `runGC` now takes `fsutil.DirIdentity` before `classifyGCRows`, re-checks it as each row reads missing (`integrity.VariantsDirChanged`, the watcher's check), and re-checks it in `gcCheckOutputDirBeforeReverseSweep` before the Empty exception. A changed identity refuses the sweep and deletes nothing. `TestRunGCRefusesASweepWhoseVolumeIsUnmountedDuringClassification`, `TestRunGCRefusesASweepWhoseVolumeWentAndCameBackDuringClassification`, `TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify`. The empty mountpoint the health check already refuses stays refused (`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`). `optimize --gc` and `render --gc` call `runGC`.
 - **…and the probe counts RENDITIONS, not entries: a variants directory
   holding none is what an unmounted volume looks like, whatever else it
   holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a
