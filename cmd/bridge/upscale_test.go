@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -600,7 +601,12 @@ func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows, tc.removed, tc.allow)
+			dir := tc.setup(t)
+			var start os.FileInfo
+			if id, err := fsutil.DirIdentity(dir); err == nil {
+				start = id
+			}
+			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, dir, tc.rows, tc.removed, tc.allow, start)
 			if rc != tc.wantRC {
 				t.Fatalf("gcCheckOutputDirBeforeReverseSweep rc = %d, want %d (stderr=%s)", rc, tc.wantRC, stderr.String())
 			}

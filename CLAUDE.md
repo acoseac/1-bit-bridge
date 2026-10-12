@@ -4414,7 +4414,7 @@ no failing test — which is the shape to expect in this area.
   check walked that directory and found no sidecars, and the tick deleted
   the rows: 39 of 40, through the real watcher. The tick keeps the probe's
   view of the directory (`VariantsDirBlock.Info`) and asks
-  `variantsDirChanged` as each row reads as missing (`classify`: the one
+  `VariantsDirChanged` as each row reads as missing (`classify`: the one
   verdict that leads to a deletion, so a tick whose rows are where they
   belong pays nothing, and a volume that goes and comes back inside the
   pass is seen if it is still gone when a missing read's check runs), and
@@ -4447,8 +4447,7 @@ no failing test — which is the shape to expect in this area.
   `TestVariantWatcherRefusesATickWhoseVolumeGoesAfterItsLastMissingRow`,
   `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
   `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
-  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
-  `upscale --gc` re-checks health but not identity (B224). **Pass two
+  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Pass two
   asks `LocateSidecar` again just before each delete** (`classifyRow`, the
   one per-row verdict both passes use) and deletes only a row still at
   neither location: the checks see a change they observe and nothing
@@ -4460,6 +4459,7 @@ no failing test — which is the shape to expect in this area.
   is a volume that is gone again at that recheck. A mountpoint that already
   held an entry when a tick STARTED was open here too, until the next
   bullet.
+- **…and `upscale --gc` deletes a row only while the variants directory is still the directory it classified** (2026-10-12, backlog B224). `runGC` classified every row, then asked health again before the reverse sweep. A volume unmounted during classification onto a directory that still holds a rendition, with fewer than ten rows left to read as missing, passed the relocation floor and the health re-check, and the reverse sweep deleted those rows while their files sat on the volume. A volume that went and came back during classification matched again at the end, and only a check as each row read missing saw the gap. The Empty exception (`forwardRemoved > 0` or `--allow-mass-delete`) compared no identity, so a directory replaced after the forward sweep was one this run had emptied. `runGC` now takes `fsutil.DirIdentity` before `classifyGCRows`, re-checks it as each row reads missing (`integrity.VariantsDirChanged`, the watcher's check), and re-checks it in `gcCheckOutputDirBeforeReverseSweep` before the Empty exception. A changed identity refuses the sweep and deletes nothing. `TestRunGCRefusesASweepWhoseVolumeIsUnmountedDuringClassification`, `TestRunGCRefusesASweepWhoseVolumeWentAndCameBackDuringClassification`, `TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify`. The empty mountpoint the health check already refuses stays refused (`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`). `optimize --gc` and `render --gc` call `runGC`.
 - **…and the probe counts RENDITIONS, not entries: a variants directory
   holding none is what an unmounted volume looks like, whatever else it
   holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a

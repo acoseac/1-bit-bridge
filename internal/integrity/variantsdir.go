@@ -83,7 +83,7 @@ type VariantsDirBlock struct {
 	// handle it read them with, so it and Empty (or a healthy
 	// Reason) are about one directory: set when Reason is "" or Empty
 	// is true, nil otherwise. A later check compares it with the
-	// directory at the path then (variantsDirChanged; the variant
+	// directory at the path then (VariantsDirChanged; the variant
 	// delete handler's SidecarStoreState), since a clean unmount
 	// leaves the path naming the local directory under the
 	// mountpoint, which is another directory (backlog B203).
@@ -118,10 +118,18 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	return VariantsDirBlock{Reason: "variants directory holds no rendition", Empty: true, Info: scan.root}
 }
 
-// variantsDirChanged reports why dir no longer names the directory start
+// VariantsDirReplaced is the answer VariantsDirChanged gives when the path
+// still names a directory and that directory is not the one start was
+// taken from. A directory that went missing, or that cannot be opened,
+// is a different answer: the sweep's health check already words those.
+const VariantsDirReplaced = "the variants directory is no longer the directory this sweep began on"
+
+// VariantsDirChanged reports why dir no longer names the directory start
 // observed, or "" while it does. VariantWatcher.tick asks it after the
 // probe that began the tick (VariantsDirSweepBlock, whose Info is start):
 // as each row reads as missing, and once more before it deletes anything.
+// upscale --gc asks it the same way: as each row reads missing, and again
+// in gcCheckOutputDirBeforeReverseSweep before that sweep deletes a row.
 //
 // The probe at the start of a tick proves the volume was mounted then and
 // says nothing about the rows classified after it: a clean unmount during
@@ -138,7 +146,7 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 //
 // "" for an empty dir: the watcher probes nothing then (a nil or empty
 // provider disables the mount-loss guard), so there is nothing to compare.
-func variantsDirChanged(dir string, start os.FileInfo) string {
+func VariantsDirChanged(dir string, start os.FileInfo) string {
 	if dir == "" {
 		return ""
 	}
@@ -149,7 +157,7 @@ func variantsDirChanged(dir string, start os.FileInfo) string {
 	case err != nil:
 		return fmt.Sprintf("cannot open variants directory during the sweep: %v", err)
 	case !os.SameFile(start, now):
-		return "the variants directory is no longer the directory this sweep began on"
+		return VariantsDirReplaced
 	}
 	return ""
 }
