@@ -3128,10 +3128,21 @@ no failing test — which is the shape to expect in this area.
   A timeout logs once (`fingerprint: fpcalc timed out`, the library-relative
   path) and is neither cached nor written as a no-match: a hung mount and a
   pathological file look the same from here, and the next sweep offers the
-  file again. A real decode failure (`ErrUnreadable`) is still cached as a
-  miss. A cancelled parent is shutdown and logs nothing.
+  file again. **The timeout is the per-file deadline, whatever error the
+  decode returned** (2026-10-13, backlog B349). `Cmd.Wait` prefers the
+  process exit over the context error, so on Windows `TerminateProcess`
+  comes back as `exit status 1` and does not wrap `context.DeadlineExceeded`.
+  A start still inside `CreateProcess` when the deadline passes — the first
+  run of a copied `fpcalc.exe`, which Defender scans — can return that start
+  error, or `ErrUnreadable` when `Compute` wraps it while `ctx.Err()` is
+  still nil. `noteDecodeErr` asks the file context (`fileBudgetExpired`):
+  `Err` is `DeadlineExceeded`, or `Deadline()` is already in the past. The
+  timer that sets `Err` can be late on a loaded host. `ErrUnreadable` is
+  still cached as a miss when the budget has not expired. A cancelled parent
+  stays silent, including when the file deadline has also passed.
   (`TestAHungFpcalcDoesNotHoldTheSweep`,
-  `TestFpcalcBudgetDefaultsToTenMinutes`.)
+  `TestFpcalcBudgetDefaultsToTenMinutes`,
+  `TestNoteDecodeErrCachesOnlyAnUnreadableFile`.)
 - **The local-artist veto lives in `internal/enrich`, not `internal/acoustid`**
   (import cycle), only ever SUBTRACTS, and its junk-tag list is closed and tiny.
   An all-digits ALBUM title is NOT junk though an all-digits artist is:

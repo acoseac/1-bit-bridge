@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -82,9 +84,9 @@ func TestFpcalcBudgetDefaultsToTenMinutes(t *testing.T) {
 
 // TestAHungFpcalcDoesNotHoldTheSweep runs the real sweeper with compute left
 // nil, so fingerprintOne calls acoustid.Compute. The first file's fpcalc
-// never returns. The sweep must finish, the child must be gone, the next
-// file must have been fingerprinted, and the hung file must not be cached
-// as a miss.
+// never returns. The sweep must finish, a child that wrote its pid must be
+// gone, the next file must have been fingerprinted, and the hung file must
+// not be cached as a miss.
 func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	rec := loggingtest.Record(t)
 	dir := t.TempDir()
@@ -99,13 +101,18 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	pidFile := filepath.Join(dir, "pid")
 	nextFile := filepath.Join(dir, "next-ran")
 	installFpcalcStandIn(t, pidFile, nextFile)
+	// The stand-in on Windows is a copy of this binary. Its first start can
+	// sit in CreateProcess while that new exe is scanned, longer than the
+	// budget below, so the hang case never reaches its pid write. This start
+	// pays that cost first.
+	warmFpcalcStandIn(t)
 
 	const rel = "Album/hang.flac"
 	hangKey := acoustid.Key{Path: rel, Size: 1, MTimeNS: 1}
-	// A cold race binary of this package takes about a second to reach
-	// the pid write. The budget has to outlast that start and still
-	// finish inside the 15s bound below; a sweep with no budget blocks
-	// until that bound.
+	// Once the executable has been started, a cold race binary of this
+	// package takes about a second to reach the pid write. The budget has
+	// to outlast that start and still finish inside the 15s bound below; a
+	// sweep with no budget blocks until that bound.
 	s := &fingerprintSweeper{
 		cache:         acoustid.NewCache(8),
 		workers:       1,
@@ -137,9 +144,16 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	if _, err := os.Stat(nextFile); err != nil {
 		t.Fatalf("the file after the hang was not fingerprinted: %v", err)
 	}
-	pid := readStandInPID(t, pidFile)
-	if gone, how := proctest.Exited(pid); !gone {
-		t.Fatalf("fpcalc %d still running (%s)", pid, how)
+	// A pid the stand-in wrote names a process the budget killed. A start the
+	// budget ended before that write leaves no pid. The timeout line below
+	// is what says the budget ended that decode.
+	if _, err := os.Stat(pidFile); err == nil {
+		pid := readStandInPID(t, pidFile)
+		if gone, how := proctest.Exited(pid); !gone {
+			t.Fatalf("fpcalc %d still running (%s)", pid, how)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
 	timedOut := rec.Failures(msgFpcalcTimedOut)
 	if len(timedOut) != 1 || !strings.Contains(timedOut[0], rel) {
@@ -155,6 +169,25 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	}
 	if _, ok := s.cache.Get(hangKey); ok {
 		t.Fatal("a timed-out file was cached as a miss")
+	}
+}
+
+// warmFpcalcStandIn starts the stand-in once and waits for it to exit, so a
+// copied executable's first-run scan is outside the per-file budget. The hang
+// case is the second start. Exit 2 is the stand-in's answer for a path that
+// is neither the hang file nor the next file.
+func warmFpcalcStandIn(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "fpcalc", "warm.flac")
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("fpcalc stand-in did not start: %v", err)
+	}
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		t.Fatalf("fpcalc stand-in: %v", err)
 	}
 }
 

@@ -40631,3 +40631,74 @@ The same thirty-run loop under the same eleven busy loops, after the
 fix, failed 0 of 30 and finished in 27s. Sibling counts stay exact:
 `TestKqueueWatcherOpensAFolderMovedInOnce` and the dropped-event reconcile
 test were left on their own assertions.
+
+## 2026-10-13 — An fpcalc that ended after its budget is a timeout (backlog B349)
+
+### What was wrong
+
+`noteDecodeErr` (`cmd/bridge/fingerprint_sweeper.go`) logged
+`fingerprint: fpcalc timed out` only when the error wrapped
+`context.DeadlineExceeded`. It was handed the sweep context, not the
+per-file context. `Cmd.Wait` prefers the process exit over the context
+error (`os/exec`, Go 1.26.6 `exec.go` Wait: the exit error wins when the
+process has one). On Windows `TerminateProcess` leaves exit code 1, so
+the error is `exit status 1` and does not wrap the deadline.
+`acoustid.Compute` returns `ctx.Err()` only when that error is already
+set. Until the context timer runs, `Deadline()` can be in the past while
+`Err()` is still nil, and `Compute` then wraps the exit or the start
+error as `ErrUnreadable`. That arm caches a miss and logs nothing.
+
+Two windows-latest failures of `TestAHungFpcalcDoesNotHoldTheSweep`, on
+PRs that touch no fingerprint code. Gate run 38303811536 (PR #1195,
+B338) died at the timeout assertion: `timeout lines = [], want one
+naming Album/hang.flac`. Gate run 38319746601 (PR #1197, B337) died
+earlier, at 8.40s: `open …\pid: The system cannot find the file
+specified`. The stand-in writes its pid only after it has started and
+reached the hang case (`runFpcalcStandIn`). `standintest.Install` copies
+the test binary to `fpcalc.exe` on Windows. The first start of that copy
+can sit in `CreateProcess` while Defender scans it, past the test's 5s
+budget, so the process never reaches the write. `exec.CommandContext`
+starts `watchCtx` only after `StartProcess` returns, so a deadline during
+that start does not kill anything until the start returns. The error
+that comes back is a start or kill error, or `ErrUnreadable`, not
+`DeadlineExceeded`. The test then required the pid file to exist.
+
+### The fix
+
+`fingerprintOne` passes the per-file context into `noteDecodeErr`. After
+the sweep-cancel arm, a file whose budget has expired is a timeout
+whatever error carries it, and it is not cached. `fileBudgetExpired` is
+true when the file context's `Err` is `DeadlineExceeded` or its
+`Deadline()` is already in the past. `ErrUnreadable` stays a cached miss
+only while that budget has not expired. A cancelled sweep stays silent
+even when the file deadline has also passed.
+
+`TestAHungFpcalcDoesNotHoldTheSweep` starts the copied stand-in once
+(`warm.flac`, which exits 2) before the 5s hang, so the first-scan cost
+is outside the budget. The 5s budget and the 15s bound are unchanged.
+When the pid file exists, the child must have exited. When it does not,
+the timeout line naming `Album/hang.flac` is still required: a missing
+pid is a start the budget ended before the write, not a sweep that held.
+
+### Red first
+
+`TestNoteDecodeErrCachesOnlyAnUnreadableFile` gained three cases that
+fail on the old switch, on macOS, with the new parameter ignored:
+
+- `exit status 1` and a file context whose deadline is already past:
+  logged `fingerprint: decode`, no timeout line.
+- `exec: canceling Cmd: TerminateProcess` and a context whose deadline
+  is past while `Err` is still nil: the same decode line.
+- `ErrUnreadable` on an expired file context: cached as a miss, no
+  timeout line.
+
+A cancelled sweep whose file budget has also expired stays silent, which
+pins the parent check first. The existing timeout, unreadable, and
+other-error rows are unchanged. With `fileBudgetExpired` restored, the
+table passes. Reverting the classification (the deadline check and the
+`DeadlineExceeded` arm left as the error check alone) turns the three
+new cases red again; restoring it turns them green.
+
+`TestAHungFpcalcDoesNotHoldTheSweep` still requires one timeout line
+naming `Album/hang.flac`, no `fingerprint: decode` line, the hang key
+uncached, the next file fingerprinted, and the sweep back inside 15s.
