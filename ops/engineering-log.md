@@ -40304,3 +40304,63 @@ The dotted-capital-i subtest still reaped. `cases.Lower("İ")` is already
 "i" plus U+0307, so that pair does not need the composition step. The
 `NFCCompose` call was put back by hand. The broken state was not
 committed.
+
+## 2026-10-12 — bound the ID3 genre expansion and peer redaction, and refuse a malformed host (backlog B246)
+
+Two parsers were quadratic on crafted input, and a URL host that decodes to a Unicode control or space was classified as an ordinary host. The app twins are B239 (the genre bound and the linear parse) and acoseac/1-bit#2042 (the malformed host).
+
+### ID3 genre
+
+dhowden/tag's `metadataID3v2.Genre` expands one `(digits)` reference per pass and copies the string each time. It is unexported. The bridge reaches it only through `m.Genre()`, from `populateFromTagMetadata` and `container_text.applyUnder`. Measured on a v2.3 TCON of `(0)` repeated, then `Genre()`: 200 references 9.5 ms, 800 73 ms, 2,000 785 ms, 4,000 6.54 s (output 23,999 bytes). The module was not patched. `genreFromTag` counts every `(digits)` group in the raw TCO or TCON frame and, past `maxID3v2GenreRefs` (32), returns "" without calling `Genre()`. A real tag's handful of references still stores `strings.TrimSpace(m.Genre())`. An over-budget genre is empty, so container text may supply one. No `ExtractorVersion` bump: a well-formed file's genre is unchanged.
+
+`TestAnID3GenreOfThousandsOfReferencesFinishesAtOnce` (4,000 references, under 1 s, empty genre). `TestAnOrdinaryID3GenreIsWhatDhowdenReturns` (`(17)`, `Rock`, `(9)(0)`, `Live (2024)`, `Jazz (17)`).
+
+The first red run, before the bound, failed in 7.76 s.
+
+### Peer redaction
+
+`handshakelog.RedactPeers` found every peer with `FindAll` and then scanned the whole line once per distinct address. 40,000 distinct peers took 5.66 s. The addresses are collected, then one walk copies each named span and replaces a later repeat only where it stands alone, so `10.0.0.2:5000` does not eat `10.0.0.2:50001` or `110.0.0.2:5000`.
+
+A first linear form still called `peerAddr.FindAllStringSubmatchIndex`. Under the race detector that call alone was 1.25 s of a 1.33 s `RedactPeers` on the same 40,000 peers (line length 874,606), so the one-second bound could not hold while the regexp interpreter ran. `peerAddressSpans` walks the same pattern by hand. `peerAddr` stays the spec. `TestPeerAddressSpansMatchThePattern` requires the spans to equal group 2. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` is the bound (under 1 s, every peer replaced, idempotent). After the scanner, that test and `TestRedactPeers` / `TestRedactPeersInASocketError` passed under `-race` in 1.56 s for the package filter.
+
+### Malformed hosts
+
+`classifyHost` asks `hostIsMalformed` on the host as decoded, before the trailing-dot trim and before any other kind. A host that holds a Unicode control or whitespace is `hostMalformed` and is refused. The character is never stripped. Go's `url.Parse` already refuses ASCII controls. The new check is the non-ASCII ones (U+0085, U+00A0, U+2028, U+3000).
+
+An ASCII space inside an IPv6 zone is kept. Go's `url.Parse` accepts `%20` in a zone, and a Windows adapter name is `Wi-Fi 4`. `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack` keeps `http://[fe80::1%25Wi-Fi%204]:8080/d.xml`. `splitIPZone` splits only when the head parses as an IP. The head allows no space. The zone allows U+0020 and nothing else. A control or any other space in the zone is still malformed. A `%` whose head is not an IP (`%25` in a name) is judged as the whole host. The app's `hostIsMalformed` flags a zone space too; the bridge keeps the zone the existing round-trip test already keeps. A non-ASCII escape inside a zone does not parse (`invalid URL escape "%C2"`); the decoded string `fe80::1%en0` plus U+00A0 is still refused.
+
+Refused at `hostKindAllowed`, `isFetchableURL` (so an SSDP LOCATION is absent), `resolveServiceURL` (`errServiceURLMalformedHost`, before the fetchable check and in the kind switch), and `LocationPermittedBy` even for a loopback source. `OperatorChose` approves only this machine and link-local. `callbackHostAllowed` already refuses a host `netip.ParseAddr` does not take; rows for the four scalars were added to `Test_callbackHostAllowed`. Fullwidth digits (`１２７．０．０．１`) and a literal `%25` are not this kind: IDNA maps the fullwidth host to `127.0.0.1`, and the dial-time check (`refuseUnapprovedHostLocal`) is what refuses that address. `TestAHostWithAControlOrASpaceIsMalformed`, `TestAMalformedHostIsNeverStrippedBeforeItIsClassified`, `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne`, `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck`.
+
+### Control
+
+Each fix was taken out, the new test was run, and the fix was put back with the editor. The broken state was not committed.
+
+The genre bound's comparison was inverted to `< 0`, so `Genre()` always ran. `TestAnID3GenreOfThousandsOfReferencesFinishesAtOnce` failed in 6.80 s (`genre expansion took 6.802523792s, want under 1s`).
+
+`RedactPeers` was put back to `FindAll` plus one `redactRepeats` scan per address. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` failed in 4.90 s (`RedactPeers took 4.889565583s, want under 1s`). The first red run, before any linear form, was 5.66 s.
+
+`hostIsMalformed` was made to return false. `TestAHostWithAControlOrASpaceIsMalformed` reported `host "192.168.1.20\u0085" is not malformed`. `TestAMalformedHostIsNeverStrippedBeforeItIsClassified` classified the marked loopback as elsewhere. `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne` found the host fetchable. `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck` kept a decoded zone holding U+00A0.
+
+After the three restores, the same tests passed: the genre pair in 0.475 s, the redact filter in 0.263 s, and the malformed-host filter in 0.293 s.
+
+## 2026-10-12 — a peer zone may contain ']' and the close is one backward pass (backlog B246)
+
+`FuzzPeerAddressSpansMatchThePattern` (added on this branch, seed `testdata/fuzz/FuzzPeerAddressSpansMatchThePattern/76a2748f884ef598`) failed in under a second on `from [0%]]:0`. `peerAddr`'s zone is `%[^\n]*?` and ends at the first `]` that `:` and a digit follow, so the zone may contain `]`. The hand walk stopped at the first `]` and required `:` immediately, so it found no address where the pattern found one. The genre bound and the malformed-host refusal were left as they are.
+
+`nextZoneClose` is one backward pass per line. `zoneClose[j]` is the index of the next `]` at or after `j` that `:` and a digit follow, or -1 when a newline comes first. After `%`, `ipv6Port` looks that index up. Without a `%` the `]` is still the next byte, so a later `]:digit` is not skipped into. A newline resets the reachable close, so `from [ab%\n]:1` is not an address. `[0%]:x]:1` ends at the later `]:1`. An empty zone (`[0%]:1`) records the `]` that sits on the byte after `%`. The table is O(n) once; each zone end is O(1). The outer walk still advances one byte on a miss and jumps to the match end on a hit, and it enters the zone only at an introducer (`from `, `client `, `serving `, `->`).
+
+Scanning forward from each `%` for that `]` is the quadratic. It only runs when each prefix is an introducer. Concatenated `from [0%from [0%…` has `%` before every later `from `, so only the first prefix enters `ipv6Port` and a forward scan stays linear. A newline between prefixes stops the scan at the next line, which is linear too. The shape that repeats the tail is a non-newline space before each `from ` and no `]` and no newline in the zone: `" from [0%"` repeated.
+
+`TestALineOfUnclosedZonePrefixesFinishesAtOnce` repeats that 40,000 times and bounds `peerAddressSpans` at 1 s, with zero spans. On the linear walk it finished in 0.00 s. `TestRedactPeersOfThousandsOfPeersFinishesAtOnce` (40,000 IPv4 peers) finished in 0.04 s. `TestPeerAddressSpansMatchThePattern` gained `from [0%]]:0`, `from [0%]:x]:1` and `from [ab%\n]:1`.
+
+The fuzzer was run with `-fuzztime=5m -fuzzminimizetime=1s`. The minimizetime flag is required: the default is 60 s, and a target that is still finding coverage spends that window minimizing at 0 execs/sec and still says PASS. This run fuzzed for 5 m 0 s (29,416,744 execs, 274 new interesting inputs), then sat at 0/sec for the 1 s minimize of the last interesting input, and passed. No new failing input.
+
+### Control
+
+The zone arm was put back to stopping at the first `]`, and restored with the editor. The broken state was not committed.
+
+`TestPeerAddressSpansMatchThePattern` failed on `from [0%]]:0` (`spans 0, pattern matches 1`). The committed seed failed the same way (`walk found 0 spans, the pattern 1`).
+
+The timing fixture was first `"from [0%"` with no leading space. Against that broken walk it passed in 0.00 s, because only the first prefix is an introducer. With the space, the same broken walk took 2.77 s (`peerAddressSpans took 2.765831958s, want under 1s`).
+
+After the restore, the redact, span, timing and fuzz-seed filter passed in 0.533 s for the package.

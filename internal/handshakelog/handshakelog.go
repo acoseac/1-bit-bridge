@@ -129,6 +129,181 @@ const ClientPlaceholder = "<client address>"
 // and says nothing about who connected.
 var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) |->)((?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+(?:%[^\n]*?)?\]):\d+)`)
 
+// peerAddressSpans returns the address half of every peerAddr match, in
+// order. It is that pattern walked directly: FindAll on it is linear, and
+// under the race detector a line of 40,000 peers spent 1.3s inside the
+// regexp interpreter before a single address was replaced. The spans are
+// the same bytes peerAddr's second group captures; TestPeerAddressSpansMatchThePattern
+// is what keeps the two from drifting.
+func peerAddressSpans(line string) [][2]int {
+	// The zone's closing bracket is resolved from this table, not by
+	// scanning forward from each "%". A line of " from [0%" prefixes
+	// (the space is what makes each one an introducer) would otherwise
+	// walk its own tail once per prefix.
+	zoneClose := nextZoneClose(line)
+	var spans [][2]int
+	for i := 0; i < len(line); {
+		start, end, ok := peerAddressAt(line, i, zoneClose)
+		if !ok {
+			i++
+			continue
+		}
+		spans = append(spans, [2]int{start, end})
+		i = end
+	}
+	return spans
+}
+
+// nextZoneClose reports, for each byte, the index of the next ']' at or
+// after it that a ':' and a digit follow, or -1 when a newline comes
+// first. peerAddr's zone is %[^\n]*? and ends at that bracket: the first
+// ']' a port follows, which may sit after another ']' inside the zone
+// ("[0%]]:0"). One backward pass, so each lookup is O(1).
+func nextZoneClose(line string) []int {
+	next := make([]int, len(line))
+	closeAt := -1
+	for i := len(line) - 1; i >= 0; i-- {
+		if line[i] == '\n' {
+			closeAt = -1
+			next[i] = -1
+			continue
+		}
+		if zoneBracket(line, i) {
+			closeAt = i
+		}
+		next[i] = closeAt
+	}
+	return next
+}
+
+// zoneBracket reports whether i is the ']' of "]:<digit>", the end of a
+// zone in peerAddr.
+func zoneBracket(line string, i int) bool {
+	return i+2 < len(line) && line[i] == ']' && line[i+1] == ':' && line[i+2] >= '0' && line[i+2] <= '9'
+}
+
+// peerAddressAt reports the address a peer-naming word or "->" introduces
+// at i. The word matches only at the start of the line or after the same
+// ASCII space the pattern's \s matches. zoneClose is nextZoneClose's table.
+func peerAddressAt(line string, i int, zoneClose []int) (start, end int, ok bool) {
+	if i+1 < len(line) && line[i] == '-' && line[i+1] == '>' {
+		if end, ok = peerHostPort(line, i+2, zoneClose); ok {
+			return i + 2, end, true
+		}
+		return 0, 0, false
+	}
+	if i > 0 && !re2Space(line[i-1]) {
+		return 0, 0, false
+	}
+	word := 0
+	switch {
+	case hasWord(line, i, "from "):
+		word = len("from ")
+	case hasWord(line, i, "client "):
+		word = len("client ")
+	case hasWord(line, i, "serving "):
+		word = len("serving ")
+	default:
+		return 0, 0, false
+	}
+	if end, ok = peerHostPort(line, i+word, zoneClose); ok {
+		return i + word, end, true
+	}
+	return 0, 0, false
+}
+
+func hasWord(line string, i int, word string) bool {
+	return i+len(word) <= len(line) && line[i:i+len(word)] == word
+}
+
+func re2Space(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
+}
+
+func peerHostPort(line string, i int, zoneClose []int) (int, bool) {
+	if end, ok := ipv4Port(line, i); ok {
+		return end, true
+	}
+	return ipv6Port(line, i, zoneClose)
+}
+
+func ipv4Port(line string, i int) (int, bool) {
+	j := i
+	for octet := 0; octet < 4; octet++ {
+		start := j
+		for n := 0; n < 3 && j < len(line) && line[j] >= '0' && line[j] <= '9'; n++ {
+			j++
+		}
+		if j == start {
+			return 0, false
+		}
+		if octet < 3 {
+			if j >= len(line) || line[j] != '.' {
+				return 0, false
+			}
+			j++
+			continue
+		}
+		if j >= len(line) || line[j] != ':' {
+			return 0, false
+		}
+		j++
+	}
+	port := j
+	for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+		j++
+	}
+	if j == port {
+		return 0, false
+	}
+	return j, true
+}
+
+func ipv6Port(line string, i int, zoneClose []int) (int, bool) {
+	if i >= len(line) || line[i] != '[' {
+		return 0, false
+	}
+	j := i + 1
+	class := j
+	for j < len(line) && isIPv6Class(line[j]) {
+		j++
+	}
+	if j == class {
+		return 0, false
+	}
+	if j < len(line) && line[j] == '%' {
+		// The zone runs to the first ']' that a port follows, and it
+		// may contain ']' itself. zoneClose[j] is that bracket, or -1
+		// when a newline comes first. Scanning ahead from here would
+		// repeat the tail for every open " from [0%".
+		j++
+		if j >= len(line) || zoneClose[j] < 0 {
+			return 0, false
+		}
+		j = zoneClose[j]
+	}
+	if j >= len(line) || line[j] != ']' {
+		return 0, false
+	}
+	j++
+	if j >= len(line) || line[j] != ':' {
+		return 0, false
+	}
+	j++
+	port := j
+	for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+		j++
+	}
+	if j == port {
+		return 0, false
+	}
+	return j, true
+}
+
+func isIPv6Class(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f') || c == ':' || c == '.'
+}
+
 // RedactPeers returns line with each peer address in it replaced by
 // ClientPlaceholder: the one after a word that names a peer, the one after
 // the "->" of a socket error, and every other place the line repeats an
@@ -142,39 +317,122 @@ var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) |->)((?:\d{1
 // the LOCAL end (gVisor's socket has no remote address left after a reset),
 // and then no word names it, so it stays.
 func RedactPeers(line string) string {
-	found := peerAddr.FindAllStringSubmatch(line, -1)
-	if found == nil {
+	spans := peerAddressSpans(line)
+	if len(spans) == 0 {
 		return line
 	}
-	line = peerAddr.ReplaceAllString(line, "${1}"+ClientPlaceholder)
-	for _, m := range found {
-		line = redactRepeats(line, m[2])
+	// The addresses a word or an arrow named, then one walk. Scanning the
+	// line once per address is quadratic: 40,000 distinct peers took 5.7s.
+	// A span the finder already named is copied out by its index. The walk
+	// looks only at what that pass left, which is where a socket error
+	// repeats the peer with no word in front of it.
+	root := &peerNode{}
+	for _, sp := range spans {
+		root.insert(line[sp[0]:sp[1]])
 	}
-	return line
-}
-
-// redactRepeats replaces each place line holds the peer address addr on
-// its own, not as part of a longer address: never after a digit or a dot
-// (10.0.0.2:5000 inside 110.0.0.2:5000), never before a digit (inside
-// 10.0.0.2:50001).
-func redactRepeats(line, addr string) string {
 	var b strings.Builder
-	for {
-		i := strings.Index(line, addr)
-		if i < 0 {
-			b.WriteString(line)
-			return b.String()
+	b.Grow(len(line))
+	mi := 0
+	for i := 0; i < len(line); {
+		for mi < len(spans) && spans[mi][0] < i {
+			mi++
 		}
-		end := i + len(addr)
-		if (i > 0 && continuesAnAddress(line[i-1])) || (end < len(line) && isDigit(line[end])) {
-			b.WriteString(line[:i+1])
-			line = line[i+1:]
+		if mi < len(spans) && spans[mi][0] == i {
+			b.WriteString(ClientPlaceholder)
+			i = spans[mi][1]
+			mi++
 			continue
 		}
-		b.WriteString(line[:i])
-		b.WriteString(ClientPlaceholder)
-		line = line[end:]
+		if end, ok := root.longest(line, i); ok {
+			b.WriteString(ClientPlaceholder)
+			i = end
+			continue
+		}
+		// Copy the run that cannot start an address, up to the next
+		// span. A digit or a bracket is where the next address could.
+		j := i + 1
+		limit := len(line)
+		if mi < len(spans) && spans[mi][0] < limit {
+			limit = spans[mi][0]
+		}
+		for j < limit {
+			c := line[j]
+			if (c >= '0' && c <= '9') || c == '[' {
+				break
+			}
+			j++
+		}
+		b.WriteString(line[i:j])
+		i = j
 	}
+	return b.String()
+}
+
+// peerNode is one byte of a peer address. Children are a short list: an
+// address is digits, dots, brackets and a zone, so a node rarely has more
+// than a handful, and a map per byte would allocate one per character of
+// every address.
+type peerNode struct {
+	edges    []peerEdge
+	terminal bool
+}
+
+type peerEdge struct {
+	c    byte
+	node *peerNode
+}
+
+func (n *peerNode) insert(addr string) {
+	cur := n
+	for i := 0; i < len(addr); i++ {
+		c := addr[i]
+		var child *peerNode
+		for _, e := range cur.edges {
+			if e.c == c {
+				child = e.node
+				break
+			}
+		}
+		if child == nil {
+			child = &peerNode{}
+			cur.edges = append(cur.edges, peerEdge{c: c, node: child})
+		}
+		cur = child
+	}
+	cur.terminal = true
+}
+
+// longest is the end of the longest address in the trie that starts at i
+// and stands on its own: not the tail of a longer address (a digit or a
+// dot just before it), and not a prefix of a longer one (a digit just
+// after it). 10.0.0.2:5000 inside 110.0.0.2:5000 or 10.0.0.2:50001 stays.
+func (n *peerNode) longest(line string, i int) (int, bool) {
+	if i > 0 && continuesAnAddress(line[i-1]) {
+		return 0, false
+	}
+	cur := n
+	last := -1
+	for j := i; j < len(line); j++ {
+		var child *peerNode
+		c := line[j]
+		for _, e := range cur.edges {
+			if e.c == c {
+				child = e.node
+				break
+			}
+		}
+		if child == nil {
+			break
+		}
+		cur = child
+		if cur.terminal && (j+1 == len(line) || !isDigit(line[j+1])) {
+			last = j + 1
+		}
+	}
+	if last < 0 {
+		return 0, false
+	}
+	return last, true
 }
 
 // continuesAnAddress reports whether c, just before an address, would make

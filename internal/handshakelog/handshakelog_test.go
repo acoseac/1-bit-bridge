@@ -969,3 +969,88 @@ func TestErrorLogRedactsAndDropsNothing(t *testing.T) {
 		t.Errorf("ErrorLog wrote\n%q\nwant\n%q", got, want)
 	}
 }
+
+// TestPeerAddressSpansMatchThePattern keeps the direct walk on the same
+// bytes as peerAddr. A line here is one the redaction tests already judge
+// by its output, plus a short run of the timing fixture.
+func TestPeerAddressSpansMatchThePattern(t *testing.T) {
+	lines := []string{
+		"http: TLS handshake error from 10.0.0.2:5000: EOF",
+		"read tcp 127.0.0.1:7788->10.0.0.2:5000: i/o timeout",
+		"read tcp 10.0.0.2:5000: connection reset by peer",
+		"from [fe80::7%eth0]:50000 serving [fe80::1%25]:9",
+		"client [fe80::7%Wi-Fi 4]:50000",
+		"from 10.0.0.2:5000 and 10.0.0.2:50001 and 110.0.0.2:5000",
+		"from 10.1.2.3:4\nclient 10.1.2.3:5",
+		// A ']' inside the zone. The pattern ends at the first ']' that
+		// ':' and a digit follow, so "[0%]]:0" is one address.
+		"from [0%]]:0",
+		"from [0%]:x]:1",
+		"from [ab%\n]:1",
+	}
+	var b strings.Builder
+	for i := 0; i < 32; i++ {
+		fmt.Fprintf(&b, "from %d.%d.%d.%d:%d ", (i>>24)&0xff, (i>>16)&0xff, (i>>8)&0xff, i&0xff, 10000+i)
+	}
+	lines = append(lines, b.String())
+	for _, line := range lines {
+		got := peerAddressSpans(line)
+		wantMatches := peerAddr.FindAllStringSubmatchIndex(line, -1)
+		if len(got) != len(wantMatches) {
+			t.Fatalf("spans %d, pattern matches %d\nline %q", len(got), len(wantMatches), line)
+		}
+		for i, m := range wantMatches {
+			if len(m) < 6 || got[i][0] != m[4] || got[i][1] != m[5] {
+				t.Fatalf("span %d = %v, pattern group %q in %q", i, got[i], line[m[4]:m[5]], line)
+			}
+		}
+	}
+}
+
+// TestRedactPeersOfThousandsOfPeersFinishesAtOnce is the bound on
+// RedactPeers. Replacing each matched address with its own scan of the
+// line is quadratic in the number of peers: 20,000 distinct peers took
+// 2.0s, so 40,000 is several seconds. One walk over the line finishes
+// well under a second. The placeholder count is what says the walk
+// still redacted, rather than returning the line untouched.
+func TestRedactPeersOfThousandsOfPeersFinishesAtOnce(t *testing.T) {
+	const peers = 40000
+	var b strings.Builder
+	b.Grow(peers * 24)
+	for i := 0; i < peers; i++ {
+		fmt.Fprintf(&b, "from %d.%d.%d.%d:%d ",
+			(i>>24)&0xff, (i>>16)&0xff, (i>>8)&0xff, i&0xff, 10000+(i%50000))
+	}
+	line := b.String()
+	start := time.Now()
+	got := RedactPeers(line)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("RedactPeers took %s, want under 1s", elapsed)
+	}
+	if n := strings.Count(got, ClientPlaceholder); n != peers {
+		t.Fatalf("redacted %d peers, want %d", n, peers)
+	}
+	if again := RedactPeers(got); again != got {
+		t.Fatal("RedactPeers is not idempotent on its own output")
+	}
+}
+
+// TestALineOfUnclosedZonePrefixesFinishesAtOnce is the bound on a zone
+// that never closes. A space before each "from [0%" is what makes it an
+// introducer; looking forward from each of those for the ']' a port
+// follows walks the tail once per prefix. The closing bracket comes from
+// one backward pass, so thousands of those prefixes finish under a second
+// and match nothing.
+func TestALineOfUnclosedZonePrefixesFinishesAtOnce(t *testing.T) {
+	const prefixes = 40000
+	const open = " from [0%"
+	line := strings.Repeat(open, prefixes)
+	start := time.Now()
+	got := peerAddressSpans(line)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("peerAddressSpans took %s, want under 1s", elapsed)
+	}
+	if len(got) != 0 {
+		t.Fatalf("found %d spans in a line with no port", len(got))
+	}
+}

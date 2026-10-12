@@ -99,6 +99,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // DescriptionSource says where a device description's URL came from, which
@@ -151,6 +152,13 @@ var errServiceURLNumericHost = errors.New("host ends in a number but is not an I
 // on a cloud metadata address (cloudMetadataAddrs), whatever the source.
 var errServiceURLCloudMetadata = errors.New("names a cloud metadata address, which no device serves on")
 
+// errServiceURLMalformedHost is resolveServiceURL's refusal of a host that,
+// as decoded, holds a Unicode control character or whitespace. No name that
+// can be dialed carries one, and stripping it would classify the prefix
+// (a loopback address with a trailing NEL). Mirrors the iOS app's
+// UPnPURLPolicy.hostIsMalformed (acoseac/1-bit#2042).
+var errServiceURLMalformedHost = errors.New("host holds a control character or whitespace")
+
 // errServiceURLDoesNotParseBack is resolveServiceURL's refusal of a service
 // URL whose string does not parse back to the scheme and host it was judged
 // on, whatever the source (backlog B233). Every later reader (the caches,
@@ -188,6 +196,16 @@ const (
 	// and whatever approved the request, the announcing packet's own
 	// address included.
 	hostMetadata
+	// hostMalformed is a host that, decoded, holds a Unicode control
+	// character or whitespace. Go's url.Parse already refuses the ASCII
+	// ones outside an IPv6 zone; the C1 controls and the Unicode spaces
+	// reach here. An ASCII space inside a zone is a Windows adapter
+	// name ("Wi-Fi 4") and is not this kind. It is refused wherever a
+	// host is judged, and the character is never stripped so the rest
+	// can be classified. Fullwidth digits and a literal %25 are not
+	// this kind: the dial check is what stops a resolver from mapping
+	// them onto this machine.
+	hostMalformed
 )
 
 // cloudMetadataAddrs are the addresses cloud providers serve instance
@@ -250,7 +268,16 @@ func isCloudMetadataAddr(a netip.Addr) bool {
 // classifyHost reads a URL host (url.URL.Hostname, so an IPv6 literal comes
 // without brackets and with its zone) and returns its kind and, for an IP
 // literal, its address, unmapped. One trailing dot (the DNS root) is ignored.
+// A host that holds a control character or whitespace is malformed on the
+// string as decoded, before the trim and before any other reading: the
+// character is not stripped. An ASCII space inside an IPv6 zone is the
+// exception: Windows names an adapter "Wi-Fi 4", and that zone is a real
+// link-local host. A control or a non-ASCII space in the zone is still
+// malformed.
 func classifyHost(host string) (hostKind, netip.Addr) {
+	if hostIsMalformed(host) {
+		return hostMalformed, netip.Addr{}
+	}
 	h := strings.TrimSuffix(host, ".")
 	if a, err := netip.ParseAddr(h); err == nil {
 		a = a.Unmap()
@@ -265,6 +292,46 @@ func classifyHost(host string) (hostKind, netip.Addr) {
 		return hostNumericSpelling, netip.Addr{}
 	}
 	return hostElsewhere, netip.Addr{}
+}
+
+// hostIsMalformed reports whether host, as decoded, holds a Unicode control
+// character (category Cc) or whitespace. Mirrors UPnPURLPolicy.hostIsMalformed.
+func hostIsMalformed(host string) bool {
+	head, zone, zoned := splitIPZone(host)
+	if zoned {
+		return textIsMalformed(head, false) || textIsMalformed(zone, true)
+	}
+	return textIsMalformed(host, false)
+}
+
+// splitIPZone splits host at the first % when the part before it is an IP
+// literal, which is the only place a % introduces a zone. A % in a name
+// (the %25 case) is not a zone: the whole host is judged together.
+func splitIPZone(host string) (head, zone string, ok bool) {
+	i := strings.IndexByte(host, '%')
+	if i < 0 {
+		return host, "", false
+	}
+	head, zone = host[:i], host[i+1:]
+	if _, err := netip.ParseAddr(head); err != nil {
+		return host, "", false
+	}
+	return head, zone, true
+}
+
+// textIsMalformed reports a control character or whitespace. allowASCIISpace
+// is the Windows-zone exception: an adapter name may hold U+0020, and
+// nothing else that unicode.IsSpace or unicode.IsControl names.
+func textIsMalformed(s string, allowASCIISpace bool) bool {
+	for _, r := range s {
+		if allowASCIISpace && r == ' ' {
+			continue
+		}
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // addrKind is the kind of an address, which must be unmapped: a cloud
@@ -304,23 +371,27 @@ func endsInANumber(label string) bool {
 
 // hostKindAllowed reports whether a URL host of kind k may be used where the
 // reference host (the description URL's, for a service URL) is of kind ref:
-// always for a host elsewhere, never for a numeric spelling or a cloud
-// metadata address, and for this machine or a link-local address only from a
-// reference of the same kind. Mirrors UPnPURLPolicy.hostKindAllowed in the
-// iOS app (iOS #1998).
+// always for a host elsewhere, never for a numeric spelling, a cloud
+// metadata address or a malformed host, and for this machine or a
+// link-local address only from a reference of the same kind. A malformed
+// reference allows nothing of that kind either: the comparison is the
+// service's own kind. Mirrors UPnPURLPolicy.hostKindAllowed in the iOS app
+// (iOS #1998, malformed since acoseac/1-bit#2042).
 func hostKindAllowed(k, ref hostKind) bool {
 	switch k {
 	case hostElsewhere:
 		return true
-	case hostNumericSpelling, hostMetadata:
+	case hostNumericSpelling, hostMetadata, hostMalformed:
 		return false
 	}
 	return k == ref
 }
 
 // isFetchableURL reports whether u is http or https (in any case) with a
-// non-empty host: the one kind of URL the bridge fetches, or dispatches SOAP
-// to, on a device's say-so. Mirrors UPnPURLPolicy.isFetchable.
+// non-empty host that is not malformed: the one kind of URL the bridge
+// fetches, or dispatches SOAP to, on a device's say-so. A host that holds a
+// control character or whitespace is not fetchable, so an SSDP LOCATION
+// carrying one is absent. Mirrors UPnPURLPolicy.isFetchable.
 //
 // The host is read with url.URL.Hostname, NEVER url.URL.Host. `http:///x`
 // has neither, and Go's client refuses it ("no Host in request URL"). But
@@ -336,7 +407,11 @@ func isFetchableURL(u *url.URL) bool {
 	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
 		return false
 	}
-	return u.Hostname() != ""
+	host := u.Hostname()
+	if host == "" || hostIsMalformed(host) {
+		return false
+	}
+	return true
 }
 
 // sharesHost reports whether u names the same host as ref, compared
@@ -414,6 +489,9 @@ func resolveServiceURL(base *url.URL, raw string, source DescriptionSource) (str
 		return "", err
 	}
 	abs := base.ResolveReference(resolved)
+	if kind, _ := classifyHost(abs.Hostname()); kind == hostMalformed {
+		return "", errServiceURLMalformedHost
+	}
 	if !isFetchableURL(abs) {
 		return "", errServiceURLNotFetchable
 	}
@@ -422,6 +500,8 @@ func resolveServiceURL(base *url.URL, raw string, source DescriptionSource) (str
 	}
 	kind, _ := classifyHost(abs.Hostname())
 	switch kind {
+	case hostMalformed:
+		return "", errServiceURLMalformedHost
 	case hostNumericSpelling:
 		return "", errServiceURLNumericHost
 	case hostMetadata:
@@ -495,7 +575,7 @@ func LocationPermittedBy(location string, ap DialApproval) string {
 	switch kind {
 	case hostElsewhere:
 		return location
-	case hostNumericSpelling, hostMetadata:
+	case hostNumericSpelling, hostMetadata, hostMalformed:
 		return ""
 	}
 	if !addr.IsValid() { // a localhost name
