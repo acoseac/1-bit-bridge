@@ -40193,6 +40193,52 @@ removed again:
 The timeout was put back by hand each time. The broken state was not
 committed.
 
+## 2026-10-12 — a link chain whose trailing-slash Lstat disagrees with Stat still walks (backlog B257)
+
+`TestWalkableRootDescendsALinkedRoot` failed once on CI macos-26-arm64
+(run 36995744004, attempt 1, image macos-26-arm64 20260907.0351; again on
+run 37001458007, attempt 1). For a link to a link,
+`WalkableRoot` answered `links to a directory the walk cannot enter`
+(`walkroot_test.go:110`). `os.Lstat(chain+"/")` had answered "not a
+directory" while `os.Stat(chain)` answered a directory. The flake did not
+reproduce on this Mac (the same test has passed hundreds of times here).
+A root that reads as unreachable is spared: Scan logs `root unreachable`
+and deletes nothing. The library is missing for that scan.
+
+The disagreement is now a seam. `walkableRootSlashLstat` (nil in
+production) replaces only the trailing-slash Lstat. Before the fallback,
+`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees` failed
+both subtests on a real link chain whose target is a directory:
+
+```
+not a directory: WalkableRoot(chain) = "", walk chain: links to a directory the walk cannot enter
+an error:        WalkableRoot(chain) = "", trailing-slash lstat
+```
+
+When Stat of the root is a directory and that Lstat disagrees,
+`WalkableRoot` follows the chain with `ResolveLinks` and, when the
+resolved path is a directory, returns the configured root with a separator
+appended. `os.Stat` of the resolved path is the real stat, so a test stub
+that answers a directory for every path cannot turn a failed resolution
+into a walk. The resolved spelling is not the walk path: `walkedNames`
+still requires every visited path to sit under the configured root.
+When the two answers agree, the chain is not resolved. A chain that ends
+at a file is returned unchanged. A broken chain is `fs.ErrNotExist`. A
+trailing-slash error whose chain does not resolve is that error. The
+Windows-junction row that injects a separator which does not lead in still
+answers `ErrRootNotEntered`.
+
+`TestWalkableRootDescendsALinkedRoot` logs `os.Lstat(root+"/")` and
+`os.Stat(root)`, each with its error and mode, when the test fails, for
+the single link and for the chain. No workflow change and no CI loop.
+
+### Control
+
+The `chainResolvesToDir` arm was removed and
+`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees` was run
+again. Both subtests failed as they did before the fallback. The arm was
+put back by hand. The broken state was not committed.
+
 ## 2026-10-12 — a GC forward sweep unlinks only while the directory is still the one the sweep began on (backlog B336)
 
 `runGC` asked `integrity.VariantsDirChanged` as each row read missing and again before the reverse sweep. The forward sweep unlinks by the paths the inventory walked, and that check did not run before those unlinks. `analyze --gc` had the same window between its inventory and its unlinks, and exited 0 after them.
