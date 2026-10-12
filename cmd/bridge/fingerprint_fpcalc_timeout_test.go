@@ -40,7 +40,6 @@ func runFpcalcStandIn() int {
 			_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644)
 		}
 		select {}
-		return 0
 	case "next.flac":
 		if next := os.Getenv(fpcalcStandInNext); next != "" {
 			_ = os.WriteFile(next, []byte("ran"), 0o644)
