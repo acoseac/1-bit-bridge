@@ -568,12 +568,14 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 
 	// The sweep context stays the parent. A per-file timeout is what bounds
 	// one fpcalc; cancelling the parent is shutdown, and that must not be
-	// logged as a timeout or cached as a miss.
+	// logged as a timeout or cached as a miss. noteDecodeErr sees this
+	// file's context: the budget is the deadline, and the error the decode
+	// returns often is not.
 	fileCtx, cancel := context.WithTimeout(ctx, s.fpcalcBudget())
 	defer cancel()
 	fp, err := s.fingerprintFile(fileCtx, c.absPath)
 	if err != nil {
-		s.noteDecodeErr(ctx, key, c.path, err)
+		s.noteDecodeErr(ctx, fileCtx, key, c.path, err)
 		return false
 	}
 
@@ -650,23 +652,43 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 }
 
 // noteDecodeErr logs and records one failed decode. ctx is the SWEEP
-// context, not the file's: a sweep cancelled during the decode is shutdown,
-// which is neither logged as a timeout nor cached as a miss.
+// context. fileCtx is that file's budget. A sweep cancelled during the
+// decode is shutdown, which is neither logged as a timeout nor cached as
+// a miss, even when the file's deadline has also passed.
 //
-// A file that cannot be decoded is a property of the FILE, so its miss is
-// recorded and the file is not re-decoded every sweep. A timeout is not: it
-// is as likely to be a hung mount as the file, and caching it would skip
-// that file for the life of the process.
-func (s *fingerprintSweeper) noteDecodeErr(ctx context.Context, key acoustid.Key, path string, err error) {
+// A decode that ended after its budget is a timeout whatever error carries
+// it. Cmd.Wait prefers the process exit over the context error, so a kill
+// comes back as an exit status, and a start that fails after the deadline
+// can come back as that start error or as ErrUnreadable. Neither is cached:
+// a timeout is as likely to be a hung mount as the file. A file that cannot
+// be decoded inside its budget is a property of the file, so that miss is
+// recorded.
+func (s *fingerprintSweeper) noteDecodeErr(ctx, fileCtx context.Context, key acoustid.Key, path string, err error) {
 	switch {
 	case ctx.Err() != nil:
-	case errors.Is(err, context.DeadlineExceeded):
+	case fileBudgetExpired(fileCtx) || errors.Is(err, context.DeadlineExceeded):
 		logger.Warn(msgFpcalcTimedOut, "path", path, "after", s.fpcalcBudget().String())
 	case errors.Is(err, acoustid.ErrUnreadable):
 		s.cache.Set(key, acoustid.Outcome{})
 	default:
 		logger.Warn("fingerprint: decode", "path", path, "err", err)
 	}
+}
+
+// fileBudgetExpired reports whether fileCtx's deadline has passed. Err is
+// DeadlineExceeded once the timer has run. The deadline itself is the fact
+// when that timer has not: the wall clock can be past it while Err is still
+// nil, and the decode's error then carries the process exit or the start
+// failure.
+func fileBudgetExpired(fileCtx context.Context) bool {
+	if fileCtx == nil {
+		return false
+	}
+	if errors.Is(fileCtx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	dl, ok := fileCtx.Deadline()
+	return ok && !time.Now().Before(dl)
 }
 
 // fingerprintFile decodes one file. The indirection is the fpcalc test seam;
