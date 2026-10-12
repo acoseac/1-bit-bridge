@@ -40252,3 +40252,55 @@ The forward sweep asks `integrity.VariantsDirChanged` before it unlinks and befo
 ### Control
 
 The four identity checks were removed and those tests were run again. Both `runGC` tests unlinked the files the sweep had listed and reported the reverse-sweep refusal. Both `analyze --gc` tests exited 0 after removing two orphan sidecars. The checks were restored with the editor. The broken state was not committed.
+
+## 2026-10-12 — the rename reap composes before it lowercases (backlog B267)
+
+B267 was filed on 2026-10-02, when `caseOnlyRenames` folded case only.
+At threshold 3 a case duplicate was gone after the first full scan and
+an NFD duplicate of an NFC row only after the third. #1158 (2026-10-08)
+then pointed the reap at `pathFold` (a Unicode lowercase, `cases.Lower`, then NFC).
+Measured on this Mac on 2026-10-12, before any further change, the real
+scanner at threshold 3 already reaped both pairs on the scan after the
+stale row was planted: café NFC beside NFD, and U+0130 beside I+U+0307.
+
+`pathFold` and `cases.Lower(NFCCompose(s))` agree for every scalar, and
+each agrees with the scalar's canonical decomposition (pathMiss=0,
+simpleMiss=0, nfcThenSplit=0, keyDiff=0). `strings.ToLower` does not.
+Applied before NFC it splits U+0130 from I+U+0307 (`equal=false`).
+Applied after NFC it joins that pair and also joins U+0130 to a plain
+"i" (`pathFold` of the two equal=false, `strings.ToLower(NFC)` equal=true).
+APFS creates both `İstanbul` and `istanbul` as directories, so a reap
+keyed by `strings.ToLower` after NFC would delete one folder's rows
+because the walk saw the other.
+
+`renameFold` is NFC, then `cases.Lower(language.Und)`, the lowercase
+`pathFold` and `unicode_lower` use. The date map stays on `pathFold`.
+`TestRenameFoldMatchesPathFold` holds the two to one answer on café and
+on the dotted capital I, and holds U+0130 apart from a plain "i".
+The deletion loop is unchanged: `isUnderErroredSubtree` is evaluated
+before the rename map, an exact spelling in `seen` is skipped, and two
+names the walk saw both of are left. No `ExtractorVersion` bump.
+
+`TestScannerLeavesBothCompositionSiblings` and
+`TestScannerSparesCompositionTwinUnderWalkErrorSubtree` skip where the
+volume stores one spelling of the name (this Mac). They run where both
+spellings can be staged.
+
+### Control
+
+`renameFold` was reduced to `cases.Lower` with the `NFCCompose` call
+removed, and the package tests were run:
+
+```
+--- FAIL: TestCaseOnlyRenames/accent-encoding_rename_flagged (0.00s)
+    scanner_case_rename_test.go:116: caseOnlyRenames = [], want [Café/01.flac]
+--- FAIL: TestScannerReapsTheUnseenCompositionOfOneFolder/cafe (0.04s)
+    scanner_nfc_rename_test.go:45: "Café/song.flac" still in the manifest
+--- FAIL: TestRenameFoldMatchesPathFold (0.00s)
+    sqlfunc_nfc_test.go:58: renameFold split "Café/song.flac" and "Café/song.flac"
+```
+
+The dotted-capital-i subtest still reaped. `cases.Lower("İ")` is already
+"i" plus U+0307, so that pair does not need the composition step. The
+`NFCCompose` call was put back by hand. The broken state was not
+committed.

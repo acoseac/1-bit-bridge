@@ -10,9 +10,9 @@ import (
 // (Album→album) leaves the walker seeing the NEW case while the
 // beforeSet still carries the old one — the old-case row must be
 // reaped immediately rather than shadow the new row in /v1/manifest
-// until missing_count hits the delete threshold. The fold matches the
-// store's unicode_lower() SQL function (pathFold). Unit-level on
-// purpose: a full case-insensitive-FS
+// until missing_count hits the delete threshold. The fold is
+// renameFold: NFC, then the Unicode lowercase pathFold uses.
+// Unit-level on purpose: a full case-insensitive-FS
 // integration test isn't portable (Linux CI filesystems are
 // case-sensitive), and GetTrack stays exact-key (pinned by
 // store_lookup_case_test.go).
@@ -57,6 +57,24 @@ func TestCaseOnlyRenames(t *testing.T) {
 			name:   "both accent encodings live — nothing flagged",
 			before: []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
 			seen:   []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
+			want:   nil,
+		},
+		{
+			name:   "dotted capital i rename flagged",
+			before: []string{"İstanbul/01.flac"},
+			seen:   []string{"I\u0307stanbul/01.flac"},
+			want:   []string{"İstanbul/01.flac"},
+		},
+		{
+			name:   "both dotted spellings live — nothing flagged",
+			before: []string{"İstanbul/01.flac", "I\u0307stanbul/01.flac"},
+			seen:   []string{"İstanbul/01.flac", "I\u0307stanbul/01.flac"},
+			want:   nil,
+		},
+		{
+			name:   "plain i is not a rename of dotted capital i",
+			before: []string{"İstanbul/01.flac"},
+			seen:   []string{"istanbul/01.flac"},
 			want:   nil,
 		},
 		{
