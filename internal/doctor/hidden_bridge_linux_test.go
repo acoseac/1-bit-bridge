@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -260,6 +261,7 @@ func TestPortCheckFailsAPortAHiddenBridgeIsRuledOutOfByItsHolder(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, _ := startUndumpable(t, false)
 	port := bindPort(t)
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, bridge))
@@ -286,6 +288,7 @@ func TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, port := startUndumpable(t, true)
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, bridge))
 	if c.Status != OK {
@@ -308,6 +311,7 @@ func TestChosenPortRefusalOfAPortAHiddenBridgeIsRuledOutOf(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, _ := startUndumpable(t, false)
 	c := checkChosenPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, bridge))
 	if c.Status != Fail {
@@ -391,6 +395,9 @@ func runPortCheck(t *testing.T, spec string) {
 		fmt.Fprintln(os.Stderr, "bad port-check spec:", spec)
 		os.Exit(1)
 	}
+	// The child is a fresh process, so a probeLimit set in the parent
+	// does not reach this checkPort.
+	realProbeUsesTheTestDeadline(t)
 	if err := json.NewEncoder(os.Stdout).Encode(checkPort(t.Context(), "port-test", port, pidFile)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -450,7 +457,19 @@ func checkPortAs(t *testing.T, uid, port, bridge int) Check {
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	args := []string{"-test.run=^" + t.Name() + "$"}
+	// The child's checkPort runs under realProbeUsesTheTestDeadline, which
+	// reads t.Deadline(): started without -test.timeout the child has none
+	// and keeps the 2s production bound, so a slow lsof on a loaded runner
+	// would still degrade its verdict. Hand it this test's time, less a
+	// reserve so the child reports its own hang first (the
+	// stand_in_pid_test.go pattern; CodeRabbit on #1195).
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - 10*time.Second; left > 0 {
+			args = append(args, fmt.Sprintf("-test.timeout=%s", left))
+		}
+	}
+	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
 		childUIDEnv+"="+strconv.Itoa(uid))
 	var stderr bytes.Buffer

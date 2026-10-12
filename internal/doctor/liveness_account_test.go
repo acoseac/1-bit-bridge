@@ -91,6 +91,7 @@ func unseenVerdict(ruledOut bool) Status {
 // leaves, and a verdict that follows it: where the account rules the
 // bridge out, the port is another process's and FAILs.
 func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
+	realProbeUsesTheTestDeadline(t)
 	account, ruledOut := realHolderAccount(t)
 	withHiddenListener(t, false, nil)
 	ppid := os.Getppid()
@@ -130,6 +131,7 @@ func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
 // TestHiddenListenerOfThisUserOnTheKernel now pins the new one, beside the
 // tables listing the listener as this user's.
 func TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf(t *testing.T) {
+	realProbeUsesTheTestDeadline(t)
 	_, ruledOut := realHolderAccount(t)
 	port := bindPort(t)
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, os.Getppid()))
@@ -158,6 +160,7 @@ func TestPortCheckFailsAPortTheLiveBridgeListensBeside(t *testing.T) {
 	if mode := os.Getenv(listeningChildEnv); mode != "" {
 		runListeningChild(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, bridgePort := startListeningChild(t, "listen")
 	account, ruledOut := ownListenerAccount(t, bridge, bridgePort)
 	port, pidFile := bindPort(t), writePIDFile(t, bridge)
@@ -188,6 +191,7 @@ func TestPortCheckFailsAPortTheLiveBridgeListensBeside(t *testing.T) {
 // says to stop the holder instead; where lsof only names the holder, the
 // bridge may still be listening unseen, and stopping it stays on offer.
 func TestChosenPortRefusalOfAPortTheProbeSawAnotherHold(t *testing.T) {
+	realProbeUsesTheTestDeadline(t)
 	account, ruledOut := realHolderAccount(t)
 	ppid := os.Getppid()
 	pidFile := writePIDFile(t, ppid)

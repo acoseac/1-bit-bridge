@@ -43,6 +43,14 @@ import (
 // output at all.
 const probeTimeout = 2 * time.Second
 
+// probeLimit is how long an lsof probe may run. Production returns
+// probeTimeout. A test that calls the real lsof replaces it with the time
+// the test has left, so a loaded runner does not turn a slow lsof into a
+// failed verdict (backlog B338). The production 2s bound stays: systemctl
+// reads probeTimeout directly, and the timeout-contract tests leave this
+// at the default. Production code MUST NOT mutate it.
+var probeLimit = func() time.Duration { return probeTimeout }
+
 // Status is the outcome of a single check.
 type Status string
 

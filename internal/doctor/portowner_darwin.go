@@ -40,9 +40,10 @@ import (
 // Where no lsof resolved there is nothing to ask, since lsof is the reader
 // here; macOS ships it in its base system, so a Mac reaches that only with
 // lsof removed. A run that fails is an error, which leaves lsof's first
-// account as it was (procSecondOpinion). It is bounded by probeTimeout
-// around ctx, as the first run is: lsof stat()s mount points before it looks
-// at any process, and a wedged network mount would hold it.
+// account as it was (procSecondOpinion). It is bounded by probeLimit around
+// ctx, as the first run is (probeTimeout in production): lsof stat()s mount
+// points before it looks at any process, and a wedged network mount would
+// hold it.
 func pidListensOnPort(ctx context.Context, port, pid int) (bool, ownerSighting, error) {
 	if lsofPath == "" {
 		return false, ownerSighting{saw: nothingElseMatches}, nil
@@ -52,7 +53,7 @@ func pidListensOnPort(ctx context.Context, port, pid int) (bool, ownerSighting, 
 	if pid <= 0 {
 		return false, ownerSighting{saw: fmt.Sprintf("there is no pid %d to ask lsof about", pid)}, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, probeLimit())
 	defer cancel()
 	out, err := lsofCommand(probeCtx, lsofPath, "-nP", "-a", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:LISTEN", "-F", "n").Output()
 	if err != nil {

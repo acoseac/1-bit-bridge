@@ -33,6 +33,10 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		// probe sees it listening: lsof on macOS and Linux, /proc on Linux
 		// without lsof, GetExtendedTcpTable on Windows.
 		{"the recorded bridge seen listening", func(t *testing.T) (int, string) {
+			// The real lsof. A loaded runner misses the production 2s
+			// bound and checkChosenPort then fails a port this process
+			// holds (backlog B338).
+			realProbeUsesTheTestDeadline(t)
 			return bindPort(t), writePIDFile(t, os.Getpid())
 		}, OK, OK},
 		// The stand-in is not the holder, and the probe is forced to a miss

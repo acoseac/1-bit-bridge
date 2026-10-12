@@ -28,6 +28,7 @@ func TestOwnListenersOnTheKernel(t *testing.T) {
 	if !lsofResolved() {
 		t.Skip("no lsof on this Mac, and lsof is what reads a pid's listeners here")
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, own := startListeningChild(t, "listen")
 	bridge6, own6 := startListeningChild(t, "listen6")
 	idle, _ := startListeningChild(t, "idle")
@@ -107,13 +108,16 @@ func TestABlindedLsofRulesNoBridgeOut(t *testing.T) {
 		return exec.CommandContext(ctx, sandboxExec, append([]string{"-p", profile, name}, args...)...)
 	}
 	// The premise, measured rather than assumed: the sandbox hides the
-	// bridge's listener from lsof and says nothing about it. Bounded by
-	// probeTimeout, as every production run of lsof is.
-	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
+	// bridge's listener from lsof and says nothing about it. The same
+	// bound the checks below give the real lsof (probeTimeout unless this
+	// test has the time left to give it more).
+	realProbeUsesTheTestDeadline(t)
+	limit := probeLimit()
+	ctx, cancel := context.WithTimeout(t.Context(), limit)
 	defer cancel()
 	out, err := lsofCommand(ctx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(own), "-sTCP:LISTEN", "-t").CombinedOutput()
 	if ctx.Err() != nil {
-		t.Skipf("the sandboxed lsof did not answer within %s: %v", probeTimeout, err)
+		t.Skipf("the sandboxed lsof did not answer within %s: %v", limit, err)
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || len(out) != 0 {

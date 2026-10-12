@@ -117,8 +117,8 @@ func TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly(t *testing.T) {
 	if err == nil {
 		t.Fatal("a timed-out probe must return an error")
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("local timeout should be reported as such, got %v", err)
+	if !strings.Contains(err.Error(), "timed out after "+probeTimeout.String()) {
+		t.Errorf("local timeout should name the production bound %s, got %v", probeTimeout, err)
 	}
 	if strings.Contains(err.Error(), "caller") {
 		t.Errorf("local timeout wrongly attributed to the caller: %v", err)

@@ -40445,3 +40445,65 @@ The artwork and waveform cache writers and the pid file, which B262 also
 names, were not exercised by this run's empty library. They open through the
 cache helpers rather than `sql.Open`; a follow-up measures whether any opens
 a fixed data-dir path directly, as `OpenStore` did.
+
+## 2026-10-12 — a doctor test that calls the real lsof does not race the 2s probe bound (backlog B338)
+
+### What broke
+
+`TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening` / "the recorded
+bridge seen listening" binds a loopback port, records this process's pid, and
+asks the real lsof. `isPIDListeningOnPort` wraps that lsof in `probeTimeout`
+(2s). On a loaded runner the probe returns `lsof port probe timed out after
+2s: context deadline exceeded`, and `checkChosenPort` (`OwnPIDPortsUnknown`)
+fails the port. Gate run 38249354429, job `test -race (rest)`, at `71a10585`,
+failed `chosen_port_test.go` that way on a change that touches no doctor code.
+
+Reproduced on this Mac under a 700-thread CPU hog: 50 of 50 runs failed, each
+with `lsof port probe timed out after 2s: context deadline exceeded`
+(`chosen_port_test.go:83`, `OwnPIDPortsUnknown=true: got fail … want ok`).
+Twelve busy processes did not: lsof stayed under 60 ms. The production bound
+is unchanged.
+
+### The fix
+
+`probeLimit` is the duration an lsof probe may run. Production returns
+`probeTimeout`. `realProbeUsesTheTestDeadline` replaces it, for that test,
+with the time the test has left when that is longer than 2s, and with 2s
+otherwise. `isPIDListeningOnPort` and macOS `pidListensOnPort` read it once
+per call, so the timeout and the "timed out after" message name the same
+duration. `systemctl --user show-environment` keeps `probeTimeout`. The
+timeout-contract tests (`TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly`
+and the caller-cancel twins) do not call the helper, so a sleep stand-in
+still ends at 2s and the message still says `timed out after 2s`.
+
+The same helper is on every other test that calls the real lsof and asserts
+a verdict a timeout would change: `TestPortCheck_OwnPIDMatches`, the four
+real-probe rows in `liveness_account_test.go`, macOS `TestOwnListenersOnTheKernel`
+and `TestABlindedLsofRulesNoBridgeOut`, and the Linux hidden-bridge checks
+that call `checkPort` / `checkChosenPort` in process. `runPortCheck` calls
+it too, because that child is a fresh process and a `probeLimit` set in the
+parent does not reach it (`checkPortAs`, the other-uid and cgroup rows).
+`parentListens` and the sandboxed-lsof premise ask lsof for `probeLimit()`
+rather than the const, so they do not skip at 2s after a caller has extended
+the bound.
+
+### Left on the production bound
+
+Stubbed lsof (`withLsofAnswering`, `withOwnerProbe`, `stubLsofWithSleep`),
+Linux `/proc` with lsof removed (`withoutLsof`, `pidListensOnPort` on Linux),
+Windows `GetExtendedTcpTable`, and `checkPort` with an empty pid file do not
+exec lsof. `sockDiagTimeout` and the acoustid fpcalc bound are different
+clocks. `TestHiddenListenerOfThisUserOnTheKernel` and
+`TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries` read the socket
+tables and `/proc/<pid>/status`, not lsof.
+
+### Proof
+
+Under the same 700-thread hog,
+`TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening` passed 59 of
+59 with 0 failures: 22, then 30, then 7, each run stopped before a single
+50-count finished because a real lsof takes minutes under that load. That
+aggregate meets the 50-run bar. Before the helper the same loop failed 50
+of 50, each with `lsof port probe timed out after 2s`.
+`TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly` still ends inside
+5s and names `2s`.

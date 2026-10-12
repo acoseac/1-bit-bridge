@@ -58,8 +58,9 @@ var lsofCommand = exec.CommandContext
 // behind another process's row. Exec'ing the resolved ABSOLUTE path (not
 // the bare "lsof" name) defends against a PATH-injected binary.
 //
-// **Bounded by probeTimeout wrapped around the INCOMING ctx.** lsof stat()s
-// mount points while building its device cache, so a wedged network mount —
+// **Bounded by probeLimit wrapped around the INCOMING ctx.** Production
+// returns probeTimeout. lsof stat()s mount points while building its device
+// cache, so a wedged network mount —
 // the rclone FUSE mount the production VPS runs its library on is exactly
 // that shape — used to hang `bridge doctor` indefinitely, and hold the admin
 // console's `GET /api/doctor` goroutine past client disconnect.
@@ -82,7 +83,8 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, owner
 		seen.saw = "this host has no lsof, and " + seen.account()
 		return false, seen, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	limit := probeLimit()
+	probeCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	out, err := lsofCommand(probeCtx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
@@ -100,7 +102,7 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, owner
 			return false, ownerSighting{}, fmt.Errorf("lsof port probe aborted by caller: %w", callerErr)
 		}
 		if ctxErr := probeCtx.Err(); ctxErr != nil {
-			return false, ownerSighting{}, fmt.Errorf("lsof port probe timed out after %s: %w", probeTimeout, ctxErr)
+			return false, ownerSighting{}, fmt.Errorf("lsof port probe timed out after %s: %w", limit, ctxErr)
 		}
 		// lsof exit code 1 means it ran but matched nothing (the common
 		// case when the port's owner isn't visible to us) — that's "not
