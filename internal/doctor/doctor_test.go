@@ -204,6 +204,7 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil && runtime.GOOS != "linux" {
 		t.Skip("the pid match needs lsof off Linux, and it isn't on PATH here")
 	}
+	realProbeUsesTheTestDeadline(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

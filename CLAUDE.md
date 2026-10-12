@@ -10425,7 +10425,11 @@ its twin.** The top list is older, shorter, and read first.
   (the rescanner, the sweep passes, the album-gain render, sqlitetest's
   `Arm` in internal/backup and internal/manifest), loggingtest's 3 s
   `Park.Wait`, the tsnet front's unit tests, and clients' per-request
-  timeouts.
+  timeouts. **A doctor test that calls the real lsof gives the probe the time
+  the test has left** (`probeLimit`, `realProbeUsesTheTestDeadline`) and
+  does not race the production 2s bound (backlog B338, 2026-10-12).
+  Lengthening `probeTimeout` would hold `bridge doctor` on a wedged mount,
+  and the timeout-contract tests leave the default so they still end at 2s.
 - **…and a watcher test waits for the watcher's walk, a watch and a row
   the same way** (2026-09-29, backlog B104). The watcher tests slept 100
   or 150 ms for Run's initial walk and gave the row 3 s, and a file created

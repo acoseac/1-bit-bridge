@@ -260,6 +260,7 @@ func TestPortCheckFailsAPortAHiddenBridgeIsRuledOutOfByItsHolder(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, _ := startUndumpable(t, false)
 	port := bindPort(t)
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, bridge))
@@ -286,6 +287,7 @@ func TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, port := startUndumpable(t, true)
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, bridge))
 	if c.Status != OK {
@@ -308,6 +310,7 @@ func TestChosenPortRefusalOfAPortAHiddenBridgeIsRuledOutOf(t *testing.T) {
 	if mode := os.Getenv(undumpableChildEnv); mode != "" {
 		runUndumpable(mode)
 	}
+	realProbeUsesTheTestDeadline(t)
 	bridge, _ := startUndumpable(t, false)
 	c := checkChosenPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, bridge))
 	if c.Status != Fail {
@@ -391,6 +394,9 @@ func runPortCheck(t *testing.T, spec string) {
 		fmt.Fprintln(os.Stderr, "bad port-check spec:", spec)
 		os.Exit(1)
 	}
+	// The child is a fresh process, so a probeLimit set in the parent
+	// does not reach this checkPort.
+	realProbeUsesTheTestDeadline(t)
 	if err := json.NewEncoder(os.Stdout).Encode(checkPort(t.Context(), "port-test", port, pidFile)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
