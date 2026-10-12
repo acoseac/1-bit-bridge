@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -163,7 +164,14 @@ func TestTheReverseGuardCountsOnlyTheRenditionsThisRunUnlinked(t *testing.T) {
 	if unlinked != 0 {
 		t.Errorf("the sweep counted %d renditions unlinked; every one was gone before its unlink", unlinked)
 	}
-	if rc := gcCheckOutputDirBeforeReverseSweep(&stderr, dir, 40, unlinked, false); rc == 0 {
+	// The empty directory at the path is the one this check is asked
+	// about: its own identity, so the refusal is the health check's
+	// (this run unlinked no rendition), not a directory that changed.
+	start, err := fsutil.DirIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc := gcCheckOutputDirBeforeReverseSweep(&stderr, dir, 40, unlinked, false, start); rc == 0 {
 		t.Errorf("the reverse guard passed a mountpoint holding no rendition that this run emptied of nothing\n%s", stderr.String())
 	}
 }
