@@ -1791,11 +1791,16 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 const maxVorbisValuesPerField = 64
 
 // appendVorbisField keeps a trimmed value while this block still has a
-// free slot. Whitespace-only is empty and does not consume one. The caller
-// resets kept at each comment block, so a later block appends another 64.
+// free slot. The cap is checked before trimming: a value past it is
+// skipped whether or not it is empty. Whitespace-only is empty and does
+// not consume a slot. The caller resets kept at each comment block, so a
+// later block appends another 64.
 func appendVorbisField(dst []string, kept *int, value string) []string {
+	if *kept >= maxVorbisValuesPerField {
+		return dst
+	}
 	v := strings.TrimSpace(value)
-	if v == "" || *kept >= maxVorbisValuesPerField {
+	if v == "" {
 		return dst
 	}
 	*kept++

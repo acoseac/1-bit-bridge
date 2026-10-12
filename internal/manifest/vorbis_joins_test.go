@@ -72,6 +72,91 @@ func flacBlocks(t *testing.T, blocks ...[][2]string) Track {
 	return extractFile(t, p)
 }
 
+// vorbisJoinSrc is which fixture builder a join case uses. The expected
+// strings stay in the case table, written as the app's output.
+type vorbisJoinSrc int
+
+const (
+	vorbisPairs vorbisJoinSrc = iota
+	vorbisBlocks
+	vorbisOggFLAC
+	vorbisOgg
+	vorbisOpus
+)
+
+// vorbisJoinCase is one subtest. wants is the assertion list: each pair
+// is a Track field and the string the app would store.
+type vorbisJoinCase struct {
+	name   string
+	src    vorbisJoinSrc
+	tags   [][2]string
+	blocks [][][2]string
+	wants  [][2]string
+}
+
+func (c vorbisJoinCase) track(t *testing.T) Track {
+	t.Helper()
+	switch c.src {
+	case vorbisPairs:
+		return flacAt(t, c.tags...)
+	case vorbisBlocks:
+		return flacBlocks(t, c.blocks...)
+	case vorbisOggFLAC:
+		return extractBytesAs(t, "a.oga", oggFLACFile(255, 2,
+			commentBlock(false, "GENRE=Rock"),
+			commentBlock(true, "GENRE=Pop"),
+		))
+	case vorbisOgg:
+		return extractBytesAs(t, "a.ogg", joinPages(oggLogicalStream(3, 255,
+			vorbisIdent(), vorbisCommentPacket("GENRE=Rock", "GENRE=Pop"), []byte{0, 1, 2})...))
+	case vorbisOpus:
+		return extractBytesAs(t, "a.ogg", joinPages(oggLogicalStream(4, 255,
+			append([]byte("OpusHead"), make([]byte, 11)...),
+			opusCommentPacket("GENRE=Rock", "GENRE=Pop"), []byte{0, 1, 2})...))
+	default:
+		t.Fatalf("unknown vorbis fixture %d", c.src)
+		return Track{}
+	}
+}
+
+func vorbisTrackField(tr Track, field string) (string, bool) {
+	switch field {
+	case "Genre":
+		return tr.Genre, true
+	case "Album":
+		return tr.Album, true
+	case "Composer":
+		return tr.Composer, true
+	case "Conductor":
+		return tr.Conductor, true
+	case "Work":
+		return tr.Work, true
+	case "Title":
+		return tr.Title, true
+	case "Artist":
+		return tr.Artist, true
+	default:
+		return "", false
+	}
+}
+
+func assertVorbisField(t *testing.T, tr Track, field, want string) {
+	t.Helper()
+	got, ok := vorbisTrackField(tr, field)
+	if !ok {
+		t.Fatalf("unknown field %s", field)
+	}
+	if got == want {
+		return
+	}
+	// A joined cap is hundreds of bytes. The separator count names which
+	// end was dropped; the comparison above is still the whole string.
+	if strings.Count(want, "; ") > 8 {
+		t.Fatalf("%s has %d separators, want %d", field, strings.Count(got, "; "), strings.Count(want, "; "))
+	}
+	t.Fatalf("%s = %q, want %q", field, got, want)
+}
+
 // TestVorbisJoinsMatchTheAppsMultiValueRule is backlog B328. A FLAC with
 // GENRE=Rock and GENRE=Pop is "Rock; Pop" in the app and was "Pop" from
 // the bridge, because dhowden keeps one value per name. GENRE, ALBUM,
@@ -79,124 +164,123 @@ func flacBlocks(t *testing.T, blocks ...[][2]string) Track {
 // keeps dhowden's last title, and the first non-empty TITLE is only the
 // explicit-content verdict's. ARTIST stays joined with no per-block cap.
 func TestVorbisJoinsMatchTheAppsMultiValueRule(t *testing.T) {
-	t.Run("two genres", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"GENRE", "Rock"}, [2]string{"GENRE", "Pop"})
-		if tr.Genre != "Rock; Pop" {
-			t.Fatalf("Genre = %q, want %q", tr.Genre, "Rock; Pop")
-		}
-	})
-	t.Run("two albums", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"ALBUM", "Studio"}, [2]string{"ALBUM", "Live"})
-		if tr.Album != "Studio; Live" {
-			t.Fatalf("Album = %q, want %q", tr.Album, "Studio; Live")
-		}
-	})
-	t.Run("composer conductor and work", func(t *testing.T) {
-		tr := flacAt(t,
-			[2]string{"COMPOSER", "Bach"}, [2]string{"COMPOSER", "Mozart"},
-			[2]string{"CONDUCTOR", "Abbado"}, [2]string{"CONDUCTOR", "Rattle"},
-			[2]string{"WORK", "Mass"}, [2]string{"WORK", "Requiem"},
-		)
-		if tr.Composer != "Bach; Mozart" || tr.Conductor != "Abbado; Rattle" || tr.Work != "Mass; Requiem" {
-			t.Fatalf("composer/conductor/work = %q / %q / %q", tr.Composer, tr.Conductor, tr.Work)
-		}
-	})
-	t.Run("an empty value is skipped", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"GENRE", "Rock"}, [2]string{"GENRE", "  "}, [2]string{"GENRE", "Pop"})
-		if tr.Genre != "Rock; Pop" {
-			t.Fatalf("Genre = %q, want %q", tr.Genre, "Rock; Pop")
-		}
-	})
-	t.Run("whitespace is trimmed", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"GENRE", " Rock "}, [2]string{"GENRE", "\tPop\n"})
-		if tr.Genre != "Rock; Pop" {
-			t.Fatalf("Genre = %q, want %q", tr.Genre, "Rock; Pop")
-		}
-	})
-	t.Run("values are not de-duplicated", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"GENRE", "Rock"}, [2]string{"GENRE", "Rock"})
-		if tr.Genre != "Rock; Rock" {
-			t.Fatalf("Genre = %q, want %q", tr.Genre, "Rock; Rock")
-		}
-	})
-	t.Run("a single value stays itself", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"GENRE", "Rock"})
-		if tr.Genre != "Rock" {
-			t.Fatalf("Genre = %q, want Rock", tr.Genre)
-		}
-	})
-	t.Run("the 65th value of a block is dropped", func(t *testing.T) {
-		tr := flacAt(t, numberedField("GENRE", "g", 65)...)
-		want := appJoined("g", 64) // g0 .. g63; g64 is past the cap
-		if tr.Genre != want {
-			t.Fatalf("Genre has %d separators, want 63 (g0..g63)", strings.Count(tr.Genre, "; "))
-		}
-	})
-	t.Run("an empty value does not consume a cap slot", func(t *testing.T) {
-		// 63 non-empty, then an empty, then the 64th non-empty. Counting
-		// the empty toward the cap would drop g63.
-		tags := numberedField("GENRE", "g", 63)
-		tags = append(tags, [2]string{"GENRE", ""}, [2]string{"GENRE", "g63"})
-		tr := flacAt(t, tags...)
-		if tr.Genre != appJoined("g", 64) {
-			t.Fatalf("Genre has %d separators, want 63 (g0..g63, the empty skipped)", strings.Count(tr.Genre, "; "))
-		}
-	})
-	t.Run("a later comment block is appended", func(t *testing.T) {
-		tr := flacBlocks(t,
-			[][2]string{{"GENRE", "Rock"}, {"ALBUM", "Studio"}},
-			[][2]string{{"GENRE", "Pop"}, {"ALBUM", "Live"}},
-		)
-		if tr.Genre != "Rock; Pop" || tr.Album != "Studio; Live" {
-			t.Fatalf("genre/album = %q / %q", tr.Genre, tr.Album)
-		}
-	})
-	t.Run("the cap is per comment block", func(t *testing.T) {
-		// Two blocks of 65. The app keeps 64 from each and appends, so
-		// the file holds g0..g63 and then h0..h63. A cap across the file
-		// would stop at g63.
-		tr := flacBlocks(t, numberedField("GENRE", "g", 65), numberedField("GENRE", "h", 65))
-		want := appJoined("g", 64) + "; " + appJoined("h", 64)
-		if tr.Genre != want {
-			t.Fatalf("Genre has %d separators, want 127 (64+64)", strings.Count(tr.Genre, "; "))
-		}
-	})
-	t.Run("an ogg flac stream joins the same way", func(t *testing.T) {
-		tr := extractBytesAs(t, "a.oga", oggFLACFile(255, 2,
-			commentBlock(false, "GENRE=Rock"),
-			commentBlock(true, "GENRE=Pop"),
-		))
-		if tr.Genre != "Rock; Pop" {
-			t.Fatalf("Genre = %q, want %q", tr.Genre, "Rock; Pop")
-		}
-	})
-	t.Run("a title is not joined", func(t *testing.T) {
-		tr := flacAt(t, [2]string{"TITLE", "First"}, [2]string{"TITLE", "Second"})
-		if tr.Title != "Second" {
-			t.Fatalf("Title = %q, want Second (dhowden's last value; the app would join)", tr.Title)
-		}
-	})
-	t.Run("artists stay uncapped", func(t *testing.T) {
-		tr := flacAt(t, numberedField("ARTIST", "a", 65)...)
-		if tr.Artist != appJoined("a", 65) {
-			t.Fatalf("Artist has %d separators, want 64 (no per-block cap)", strings.Count(tr.Artist, "; "))
-		}
-	})
-	t.Run("plain ogg vorbis keeps the last value", func(t *testing.T) {
-		tr := extractBytesAs(t, "a.ogg", joinPages(oggLogicalStream(3, 255,
-			vorbisIdent(), vorbisCommentPacket("GENRE=Rock", "GENRE=Pop"), []byte{0, 1, 2})...))
-		if tr.Genre != "Pop" {
-			t.Fatalf("Genre = %q, want Pop (the comment packet is not re-read)", tr.Genre)
-		}
-	})
-	t.Run("opus keeps the last value", func(t *testing.T) {
-		tr := extractBytesAs(t, "a.ogg", joinPages(oggLogicalStream(4, 255,
-			append([]byte("OpusHead"), make([]byte, 11)...),
-			opusCommentPacket("GENRE=Rock", "GENRE=Pop"), []byte{0, 1, 2})...))
-		if tr.Genre != "Pop" {
-			t.Fatalf("Genre = %q, want Pop (the comment packet is not re-read)", tr.Genre)
-		}
-	})
+	g64 := appJoined("g", 64) // g0 .. g63; g64 is past the cap
+	// 63 non-empty, then an empty, then the 64th non-empty. Counting
+	// the empty toward the cap would drop g63.
+	emptySlot := append(numberedField("GENRE", "g", 63),
+		[2]string{"GENRE", ""}, [2]string{"GENRE", "g63"})
+	// Two blocks of 65. The app keeps 64 from each and appends, so the
+	// file holds g0..g63 and then h0..h63. A cap across the file would
+	// stop at g63.
+	perBlock := g64 + "; " + appJoined("h", 64)
+	cases := []vorbisJoinCase{
+		{
+			name: "two genres", src: vorbisPairs,
+			tags:  [][2]string{{"GENRE", "Rock"}, {"GENRE", "Pop"}},
+			wants: [][2]string{{"Genre", "Rock; Pop"}},
+		},
+		{
+			name: "two albums", src: vorbisPairs,
+			tags:  [][2]string{{"ALBUM", "Studio"}, {"ALBUM", "Live"}},
+			wants: [][2]string{{"Album", "Studio; Live"}},
+		},
+		{
+			name: "composer conductor and work", src: vorbisPairs,
+			tags: [][2]string{
+				{"COMPOSER", "Bach"}, {"COMPOSER", "Mozart"},
+				{"CONDUCTOR", "Abbado"}, {"CONDUCTOR", "Rattle"},
+				{"WORK", "Mass"}, {"WORK", "Requiem"},
+			},
+			wants: [][2]string{
+				{"Composer", "Bach; Mozart"},
+				{"Conductor", "Abbado; Rattle"},
+				{"Work", "Mass; Requiem"},
+			},
+		},
+		{
+			name: "an empty value is skipped", src: vorbisPairs,
+			tags: [][2]string{
+				{"GENRE", "Rock"}, {"GENRE", "  "}, {"GENRE", "Pop"},
+			},
+			wants: [][2]string{{"Genre", "Rock; Pop"}},
+		},
+		{
+			name: "whitespace is trimmed", src: vorbisPairs,
+			tags: [][2]string{
+				{"GENRE", " Rock "}, {"GENRE", "\tPop\n"},
+			},
+			wants: [][2]string{{"Genre", "Rock; Pop"}},
+		},
+		{
+			name: "values are not de-duplicated", src: vorbisPairs,
+			tags:  [][2]string{{"GENRE", "Rock"}, {"GENRE", "Rock"}},
+			wants: [][2]string{{"Genre", "Rock; Rock"}},
+		},
+		{
+			name: "a single value stays itself", src: vorbisPairs,
+			tags:  [][2]string{{"GENRE", "Rock"}},
+			wants: [][2]string{{"Genre", "Rock"}},
+		},
+		{
+			name: "the 65th value of a block is dropped", src: vorbisPairs,
+			tags:  numberedField("GENRE", "g", 65),
+			wants: [][2]string{{"Genre", g64}},
+		},
+		{
+			name: "an empty value does not consume a cap slot", src: vorbisPairs,
+			tags:  emptySlot,
+			wants: [][2]string{{"Genre", g64}},
+		},
+		{
+			name: "a later comment block is appended", src: vorbisBlocks,
+			blocks: [][][2]string{
+				{{"GENRE", "Rock"}, {"ALBUM", "Studio"}},
+				{{"GENRE", "Pop"}, {"ALBUM", "Live"}},
+			},
+			wants: [][2]string{{"Genre", "Rock; Pop"}, {"Album", "Studio; Live"}},
+		},
+		{
+			name: "the cap is per comment block", src: vorbisBlocks,
+			blocks: [][][2]string{
+				numberedField("GENRE", "g", 65),
+				numberedField("GENRE", "h", 65),
+			},
+			wants: [][2]string{{"Genre", perBlock}},
+		},
+		{
+			name:  "an ogg flac stream joins the same way",
+			src:   vorbisOggFLAC,
+			wants: [][2]string{{"Genre", "Rock; Pop"}},
+		},
+		{
+			name: "a title is not joined", src: vorbisPairs,
+			tags:  [][2]string{{"TITLE", "First"}, {"TITLE", "Second"}},
+			wants: [][2]string{{"Title", "Second"}},
+		},
+		{
+			name: "artists stay uncapped", src: vorbisPairs,
+			tags:  numberedField("ARTIST", "a", 65),
+			wants: [][2]string{{"Artist", appJoined("a", 65)}},
+		},
+		{
+			name:  "plain ogg vorbis keeps the last value",
+			src:   vorbisOgg,
+			wants: [][2]string{{"Genre", "Pop"}},
+		},
+		{
+			name:  "opus keeps the last value",
+			src:   vorbisOpus,
+			wants: [][2]string{{"Genre", "Pop"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := tc.track(t)
+			for _, w := range tc.wants {
+				assertVorbisField(t, tr, w[0], w[1])
+			}
+		})
+	}
 }
 
 // TestScanner_V24_AJoinedGenreJoinsTheDelta_ASingleGenreOnlyStamps is the
@@ -212,14 +296,21 @@ func TestScanner_V24_AJoinedGenreJoinsTheDelta_ASingleGenreOnlyStamps(t *testing
 		}
 		return p
 	}
-	writeMinimalFLACPairs(t, mkdir("A/01.flac"), 44100, 16, [][2]string{
-		{"TITLE", "One"}, {"ALBUM", "Alpha"}, {"ARTIST", "X"}, {"TRACKNUMBER", "1"},
-		{"GENRE", "Rock"}, {"GENRE", "Pop"},
-	})
-	writeMinimalFLACPairs(t, mkdir("A/02.flac"), 44100, 16, [][2]string{
-		{"TITLE", "Two"}, {"ALBUM", "Alpha"}, {"ARTIST", "X"}, {"TRACKNUMBER", "2"},
-		{"GENRE", "Rock"},
-	})
+	for _, f := range []struct {
+		rel  string
+		tags [][2]string
+	}{
+		{"A/01.flac", [][2]string{
+			{"TITLE", "One"}, {"ALBUM", "Alpha"}, {"ARTIST", "X"}, {"TRACKNUMBER", "1"},
+			{"GENRE", "Rock"}, {"GENRE", "Pop"},
+		}},
+		{"A/02.flac", [][2]string{
+			{"TITLE", "Two"}, {"ALBUM", "Alpha"}, {"ARTIST", "X"}, {"TRACKNUMBER", "2"},
+			{"GENRE", "Rock"},
+		}},
+	} {
+		writeMinimalFLACPairs(t, mkdir(f.rel), 44100, 16, f.tags)
+	}
 
 	store, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "initial")
