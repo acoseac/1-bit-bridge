@@ -49,6 +49,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -1264,7 +1265,16 @@ func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv
 // as there: the operator saying every rendition was deleted on purpose,
 // the one case the directory alone cannot tell from an unmount. Until
 // B223 no flag reached this refusal at all (#941).
-func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount, forwardRemoved int, allowMassDelete bool) int {
+//
+// start is the directory classification began on (fsutil.DirIdentity).
+// The Empty waiver and a directory that looks healthy both apply only
+// while the path still names that directory: a volume unmounted onto a
+// directory that holds a rendition, or replaced after the forward sweep
+// by an empty one this run would otherwise explain, is a different
+// directory and the sweep deletes nothing (backlog B224). A path that
+// went missing, or that cannot be opened, falls through to the health
+// check below, which already words those.
+func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount, forwardRemoved int, allowMassDelete bool, start os.FileInfo) int {
 	if rowCount == 0 {
 		// LEGITIMATELY-empty case (no upscales ever generated on
 		// this bridge); the forward sweep's walk treats a missing
@@ -1272,6 +1282,10 @@ func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowC
 		// protects against mass-delete when there's something to
 		// lose.
 		return 0
+	}
+	if changed := integrity.VariantsDirChanged(outputDir, start); changed == integrity.VariantsDirReplaced {
+		fmt.Fprintf(stderr, "GC reverse sweep: %s (%q). Nothing further was unlinked and no row was removed.\n", changed, outputDir)
+		return 1
 	}
 	block := integrity.VariantsDirSweepBlock(outputDir)
 	if block.Reason == "" {
@@ -1360,7 +1374,25 @@ type gcUnknown struct {
 	err error
 }
 
-func classifyGCRows(outputDir string, rows []manifest.VariantRow) gcRowVerdicts {
+// gcAfterClassifiedRow runs after classifyGCRows has accepted a row. A
+// missing row is accepted only once the variants directory is still the
+// one the sweep began on. Nil in production. Tests swap that directory
+// here, the way the watcher's mount hooks swap it during a tick.
+var gcAfterClassifiedRow func(sourcePath string, verdict integrity.SidecarVerdict)
+
+// gcBeforeReverseDirCheck runs after the forward sweep returns and before
+// gcCheckOutputDirBeforeReverseSweep. Nil in production. Tests replace the
+// directory here, after classification and after the forward sweep has
+// counted the renditions it unlinked.
+var gcBeforeReverseDirCheck func()
+
+// classifyGCRows classifies every row against the variants directory
+// start was taken from. A row that reads missing is kept only while that
+// directory is still there (integrity.VariantsDirChanged, the watcher's
+// check): the row that sees the change is not counted missing, and the
+// reason comes back so the sweep deletes nothing. "" means every row was
+// classified.
+func classifyGCRows(outputDir string, rows []manifest.VariantRow, start os.FileInfo) (gcRowVerdicts, string) {
 	var v gcRowVerdicts
 	for _, r := range rows {
 		loc := integrity.LocateSidecar(outputDir, integrity.VariantSnapshot{
@@ -1376,10 +1408,16 @@ func classifyGCRows(outputDir string, rows []manifest.VariantRow) gcRowVerdicts 
 		case integrity.SidecarUnknown:
 			v.unknown = append(v.unknown, gcUnknown{row: r, err: loc.Err})
 		case integrity.SidecarMissing:
+			if changed := integrity.VariantsDirChanged(outputDir, start); changed != "" {
+				return v, changed
+			}
 			v.missing = append(v.missing, r)
 		}
+		if gcAfterClassifiedRow != nil {
+			gcAfterClassifiedRow(r.SourcePath, loc.Verdict)
+		}
 	}
-	return v
+	return v, ""
 }
 
 // gcRefuseRelocationInProgress is the relocation guard as a pre-flight
@@ -1661,10 +1699,27 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, 
 	// tree as 10,248 orphans and unlink the lot (2026-09-20).
 	known := integrity.KnownSidecarSet(outputDir, integritySnapshotsFromRows(allRows))
 
+	// The directory classification judges, taken from an open handle before
+	// the first row. A volume that goes during the classification, or that
+	// goes and comes back, is a different directory by the time a later row
+	// reads as missing, and the reverse sweep deletes nothing classified
+	// against the one that left (backlog B224).
+	startDir, err := fsutil.DirIdentity(outputDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "GC: refusing to run — cannot open variants directory (%q): %v. Nothing was unlinked and no row was removed.\n", outputDir, err)
+		return 1
+	}
+
 	// Classify every row and ask the relocation guard BEFORE the forward
 	// sweep unlinks anything — see gcRowVerdicts for why the order is
-	// load-bearing.
-	verdicts := classifyGCRows(outputDir, allRows)
+	// load-bearing. A change of directory stops the classification where
+	// the watcher stops a tick: before the row that saw it is counted
+	// missing, and before anything is unlinked.
+	verdicts, changed := classifyGCRows(outputDir, allRows, startDir)
+	if changed != "" {
+		fmt.Fprintf(stderr, "GC: refusing to run — %s (%q). Nothing was unlinked and no row was removed.\n", changed, outputDir)
+		return 1
+	}
 	if code := gcRefuseRelocationInProgress(stderr, outputDir, verdicts, len(allRows), opts); code != 0 {
 		return code
 	}
@@ -1704,12 +1759,15 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, 
 	if exitCode != 0 {
 		return exitCode
 	}
+	if gcBeforeReverseDirCheck != nil {
+		gcBeforeReverseDirCheck()
+	}
 
 	// The reverse guard is told how many renditions the forward sweep just
 	// unlinked: a variants directory this run emptied of renditions is
 	// explained, an unmounted one is not. See
 	// gcCheckOutputDirBeforeReverseSweep.
-	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), renditionsUnlinked, opts.allowMassDelete); exitCode != 0 {
+	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), renditionsUnlinked, opts.allowMassDelete, startDir); exitCode != 0 {
 		return exitCode
 	}
 

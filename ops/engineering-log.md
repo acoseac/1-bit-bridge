@@ -40049,3 +40049,23 @@ The probe-when-locked arm was removed (`return fallback` only) and the
 new test was run again. Restore finished with exit 0 and an empty stderr
 while the unlocked serve was answering. The arm was put back by hand.
 The broken state was not committed.
+
+## 2026-10-12 — upscale --gc deletes a row only while the variants directory is still the one it classified (backlog B224)
+
+`runGC` classified every row, then asked `VariantsDirSweepBlock` again before the reverse sweep. A directory that still holds a rendition looks healthy, and fewer than ten newly-missing rows sit under `MassDeleteRefusal`'s floor of ten, so those rows were deleted while their files sat on the volume the sweep had been classifying. A volume that went and came back matched again at the end. The Empty exception (`forwardRemoved > 0` or `--allow-mass-delete`) compared no identity, so a directory replaced after the forward sweep was treated as one this run had emptied.
+
+### Red
+
+Before the identity checks, through the real `runGC`, with the directory renamed aside and a new one made at the path:
+
+- eight present rows, the path replaced after the first row was classified by a directory holding a rendition: 7 deleted, 1 left (`TestRunGCRefusesASweepWhoseVolumeIsUnmountedDuringClassification`)
+- the same eight, the path replaced after the first and restored after the fifth: 4 deleted (`TestRunGCRefusesASweepWhoseVolumeWentAndCameBackDuringClassification`)
+- five present, four missing, one aged rendition orphan unlinked by the forward sweep, then the path replaced by an empty directory: 4 deleted, 5 left (`TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify`)
+
+### The fix
+
+`runGC` takes `fsutil.DirIdentity` before `classifyGCRows`. A row that reads missing is kept only while `integrity.VariantsDirChanged` (the watcher's check, now exported) still names that directory. The row that sees the change is not counted missing, and the sweep returns before it unlinks anything. `gcCheckOutputDirBeforeReverseSweep` asks the same check before the Empty exception. A path that went missing, or that cannot be opened, still falls through to the health wording (`VariantsDirReplaced` is only the same-file sentence). The empty mountpoint the health check already refuses stays refused (`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`). `optimize --gc` and `render --gc` call `runGC`. No wire change. Follow-up B336.
+
+### Control
+
+The identity re-check inside `gcCheckOutputDirBeforeReverseSweep` was removed and `TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify` was run again. The sweep deleted the four missing rows (5 left of 9) and exited 0. The check was restored with `git checkout`. The broken state was not left in the tree.

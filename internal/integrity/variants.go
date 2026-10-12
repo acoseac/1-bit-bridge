@@ -420,7 +420,7 @@ func (w *VariantWatcher) currentVariantsDir() string {
 // NewVariantWatcher and VariantsDirSweepBlockReason. Refuses as the
 // same kind, deleting nothing, when the path stops naming the
 // directory that probe saw before the tick deletes: a volume
-// unmounted during the tick (classify, variantsDirChanged).
+// unmounted during the tick (classify, VariantsDirChanged).
 //
 // Two passes over the snapshot. The first classifies every row with
 // LocateSidecar and applies the ADOPTIONS as it goes (a relocated
@@ -475,7 +475,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// keeps what the probe saw (start) and asks again that the path
 	// still names that directory: as each row reads as missing, and
 	// once more before it deletes anything (backlog B203; see
-	// variantsDirChanged).
+	// VariantsDirChanged).
 	var start os.FileInfo
 	if dir != "" {
 		block := VariantsDirSweepBlock(dir)
@@ -537,7 +537,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// (deleteMissing, DeleteVariantIfUnchanged): a row another writer
 	// changed since the listing, `bridge variants move` above all, is a row
 	// this tick never judged, whatever its listed verdict (backlog B204).
-	if changed := variantsDirChanged(dir, start); changed != "" {
+	if changed := VariantsDirChanged(dir, start); changed != "" {
 		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
 	w.noteProceeding(dir, len(rows), len(missing))
@@ -607,7 +607,7 @@ func (w *VariantWatcher) classify(ctx context.Context, dir string, start os.File
 		if !gone {
 			continue
 		}
-		if changed := variantsDirChanged(dir, start); changed != "" {
+		if changed := VariantsDirChanged(dir, start); changed != "" {
 			return missing, changed, false
 		}
 		missing = append(missing, r)
