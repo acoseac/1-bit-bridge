@@ -3690,6 +3690,26 @@ no failing test — which is the shape to expect in this area.
   `TestMarkOutputFaultReturnsEveryOtherErrorAsItIs`,
   `TestMarkOutputFaultReadsWhatTheOSReports`; the positive control is still
   `TestAToolThatRanAndRefusedTheFileStillStrikesIt`.
+- **`OpenStore` refuses a symlink at the database or either sidecar before
+  SQLite opens it** (2026-10-12, backlog B262; measured on a Linux host as
+  root over an install another user owns). `fsutil.Precreate` creates the
+  main file `O_EXCL`, so it already refuses a link there — but only when the
+  file is MISSING, because the `os.Lstat(path); errors.Is(err, fs.ErrNotExist)`
+  gate that reaches it is false for a symlink (`Lstat` does not follow one),
+  so a planted link SKIPPED `Precreate` and `sql.Open` opened the link's
+  target; as root that wrote the database wherever the data dir's owner
+  aimed it, and SQLite opened `-wal`/`-shm` by their own paths, so a link at
+  either followed the same way (the main file was followed in the field;
+  the sidecars erased SQLite's own open as `unable to open database file`).
+  `OpenStore` now `os.Lstat`s all three and refuses a `ModeSymlink` outright
+  (`errStoreSymlink`): none of the three is a symlink in any supported
+  layout. **Don't restore the Precreate-gated-on-ErrNotExist shape without
+  this guard, and don't echo the link's target into the error** — the base
+  name only (`TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`, red via
+  the guard removed; `TestOpenStoreOpensARealExistingDatabase` is the
+  positive control). The lock file already opens through `os.OpenRoot`
+  (#1140); the TLS pair and `tokens.json` resist through their own
+  precreate / atomic-rename-in-place.
 - **…and a rendition is published only WHOLE, read from its frames, whatever
   the tool's exit status** (2026-10-02, backlog B264). sox 14.4.2 does not
   fail when a write to its output fails: it prints "error writing output file:
