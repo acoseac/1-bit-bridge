@@ -39895,3 +39895,75 @@ Before the swap, `TestRunPublishesOnlyAWholeRendition` /
 `cut short, another bit depth` failed `the output side's fault = false,
 want true` and `depth mismatch classified = true`. After it, that case
 is a cut and `another bit depth` is still the host fact.
+
+## 2026-10-12 — repeated Vorbis comments for genre, album, composer, conductor and work are joined (backlog B328)
+
+The app's `VorbisCommentParser.MultiValueFields` joins every non-empty
+value of a repeated Vorbis comment with `"; "`. dhowden/tag keeps one
+map entry, last wins, and `populateFromTagMetadata` stored that last
+value for Album, Genre, Composer, Conductor and Work. A FLAC with
+`GENRE=Rock` and `GENRE=Pop` was "Rock; Pop" over SMB and "Pop" from the
+bridge. GENRE is the field that shows up twice in real tags; ALBUM is
+the field that keys albums.
+
+`applyFLACMultiValueArtists` already walks the comment block with
+`parseVorbisCommentBounded` and joins ARTIST and ALBUMARTIST. The five
+fields join in that same walk. Empty values are dropped before they
+count toward a cap of 64 per comment block (`maxVorbisValuesPerField`).
+Order is the comment's order. Values are not de-duplicated. A later
+comment block is appended with `"; "`. Trim is `strings.TrimSpace`.
+The walk used to return after the first comment block; it now continues
+until the last block, a parse error or a seek error. A non-Vorbis block
+is still seeked by its length. On an error after an earlier block, what
+was collected is applied. A single non-empty value overrides dhowden,
+including when dhowden's last value was empty and populate skipped it.
+
+A joined album is one album title. `dupes.Resolve` keeps the trimmed
+Album string whole, and `albumID` hashes that string. The `"; "` split
+is artists only. `librarycat.genreSegments` splits the stored genre on
+`;` and NUL, so "Rock; Pop" is two genre groups. `composerSegments`
+also splits on `/`. Conductor and Work are not segmented.
+
+ExtractorVersion 24. The next startup scan re-reads every file once.
+The version-stale diff-guard stamps a row whose joined fields already
+match; a row whose genre or album (or composer, conductor, work)
+changes takes the full upsert and is re-queued for enrichment once.
+SACD ISO virtual rows re-expand, as on every bump. ProtocolVersion
+stays 1. The wire names Album, Genre, Composer, Conductor and Work are
+unchanged, so there is no Mirror-PR.
+
+### Remaining differences from the app
+
+TITLE is not joined. `t.Title` stays dhowden's last value. The first
+non-empty TITLE is only the explicit-content verdict's input.
+ARTIST and ALBUMARTIST stay uncapped; the app caps each at 64 per
+block. Continuing the walk does join artists from later comment blocks,
+still with no cap. A plain Ogg Vorbis or Opus file has only dhowden's
+map, so a repeated comment stays the last value. Ogg FLAC is different:
+its header packets are joined into a FLAC metadata stream and then take
+this walk. ID3 and MP4 are unchanged (`stringOf` still returns the first
+non-empty). Trim is `strings.TrimSpace`, the bridge's mirror of
+`.whitespacesAndNewlines`. Neither side de-duplicates. Lyrics comments
+in a later block now reach the candidate list, because the walk no
+longer stops at the first block.
+
+### Red
+
+Before the join, `TestVorbisJoinsMatchTheAppsMultiValueRule` failed on
+the app's strings: two genres stored "Pop", two albums "Live", composer
+/ conductor / work the last name, 65 values stored one value (0
+separators, want 63), two blocks of 65 stored one value (want 127
+separators), and an Ogg FLAC stream stored "Pop".
+`TestScanner_V24_AJoinedGenreJoinsTheDelta_ASingleGenreOnlyStamps`
+left the two-genre row at "Pop" and did not advance its `indexed_at`.
+The single-value genre, the unjoined title, the uncapped 65 artists,
+and the plain Ogg Vorbis and Opus last-value pins were already green.
+
+### Control
+
+The genre arm of the walk was left on dhowden's last value and the same
+two tests were run. Every genre case went red (`Genre = "Pop"`), the
+two-block case kept the joined album (`"Pop" / "Studio; Live"`), and
+the album, composer, conductor, work, title, artist and plain-Ogg pins
+stayed green. The arm was restored by hand. The broken state was not
+committed.

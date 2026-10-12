@@ -1630,10 +1630,13 @@ lost my library."
   was already drawn and paid for in #165, whose docblock on the STREAMINFO walk
   says `Skip()` "CONSUMES the bytes from the underlying reader, NOT JUST THE
   BUFIO BUFFER"; PR #208 then reintroduced it 30 lines from the walk that does
-  it right. **Latent, not live, and the reason is worth knowing**: the walk
-  returns at `TypeVorbisComment`, so it only drains blocks BEFORE it, and the
-  canonical `flac`/`metaflac` layout puts the comment block first (measured 0/4
-  on real files). A fixture in that order proves nothing — the pin puts PICTURE
+  it right.   **Latent, not live, and the reason is worth knowing**: until
+  ExtractorVersion 24 the walk returned at the first `TypeVorbisComment`, so
+  a `Skip()` would only have drained blocks BEFORE it, and the canonical
+  `flac`/`metaflac` layout puts the comment block first (measured 0/4
+  on real files). The walk now continues through later comment blocks and
+  still SEEKS every other block, a PICTURE after the first comment included.
+  A fixture in comment-first order proves nothing — the pin puts PICTURE
   first.
 - **A picture dhowden reads is guarded by walking the file AS DHOWDEN DOES, at the
   one `tag.ReadFrom` call, for every extension** (2026-09-29, backlog B99).
@@ -1996,6 +1999,36 @@ lost my library."
   `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`).
   SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
   stays 1.
+- **A repeated Vorbis comment for GENRE, ALBUM, COMPOSER, CONDUCTOR or
+  WORK is joined with `"; "`** (ExtractorVersion 24, backlog B328).
+  dhowden's map keeps the last value, so a FLAC the app reads as
+  "Rock; Pop" arrived from the bridge as "Pop". The join is
+  `VorbisCommentParser.MultiValueFields`: empty values (whitespace-only
+  after `strings.TrimSpace`, the mirror of `.whitespacesAndNewlines`)
+  are skipped before they count, comment order is kept, there is no
+  de-duplication, each comment block keeps 64 values, and a later block
+  is appended with the same `"; "`. The walk is
+  `applyFLACMultiValueArtists`, which now continues past the first
+  comment block (a non-Vorbis block is still seeked, a parse error
+  applies what an earlier block collected, and no comment parsed leaves
+  the explicit verdict populate recorded). One non-empty value overrides
+  dhowden, including when dhowden's last value was empty. **TITLE is not
+  joined**: `t.Title` stays dhowden's last value, and the first
+  non-empty TITLE is only the explicit verdict's. **ARTIST and
+  ALBUMARTIST stay uncapped** (the app caps them at 64 per block); later
+  blocks now join them too, because the same walk continues. A plain Ogg
+  Vorbis or Opus file still takes dhowden's last value; Ogg FLAC is the
+  joined metadata and takes the same walk. ID3 and MP4 are unchanged.
+  A joined album string is one album title: `dupes.Resolve` and
+  `albumID` use the whole string, and the `"; "` split is artists only.
+  `genreSegments` splits that string on `;`, so "Rock; Pop" is two genre
+  groups; `composerSegments` splits on `;` and `/` as well. Conductor
+  and Work are stored whole. A row whose joined field differs takes the
+  full upsert; every other row is stamped. SACD ISO virtual rows
+  re-expand, as on every bump. `ProtocolVersion` stays 1. No wire-field
+  rename, so no Mirror-PR.
+  (`TestVorbisJoinsMatchTheAppsMultiValueRule`,
+  `TestScanner_V24_AJoinedGenreJoinsTheDelta_ASingleGenreOnlyStamps`.)
 - **`normaliseRawTagKey` canonicalizes a LEADING `0xA9` before `ToLower`.**
   dhowden surfaces MP4 ilst atoms under a single-byte `\xa9day` key, which is
   invalid UTF-8, and `ToLower` rewrites it to U+FFFD — so source-literal `©day`
