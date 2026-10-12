@@ -3045,6 +3045,28 @@ no failing test — which is the shape to expect in this area.
   persist; a lookup error is a fact about the upstream and must not sideline a
   file. Retry must clear the in-process cache AND the SQLite rows, or everything
   answered this session stays suppressed until a restart.
+- **One fpcalc gets its own deadline, and a file that uses it up stays eligible**
+  (2026-10-12, backlog B214). `fingerprintOne` called `acoustid.Compute` on the
+  sweep context, and `fingerprintAll` waits for its workers with no budget of
+  its own, so one fpcalc that never returned held the sweep until shutdown.
+  The default pool is one worker, so the next file never started. Each file
+  now runs fpcalc under `context.WithTimeout` of `fingerprintDecodeTimeout`
+  (10 minutes; a test sets `decodeTimeout`). Measured on fpcalc 1.6.1: the
+  default `-length` 120 window of a 192 kHz 24-bit FLAC took 0.39 s, and a
+  30-minute FLAC under the same `-length` took 0.11 s, because the decode
+  stops at the window. The wait that matters is the read of the whole object
+  on a network mount, so a bound near that decode, or near the 120 s of
+  audio, would time out a slow read on every sweep. Ten minutes is the cap a
+  transcode or analysis job already gives a tool that can spin.
+  `exec.CommandContext` kills the direct child. A child in uninterruptible
+  sleep still outlives the signal, which is what `sweeperDrainGrace` is for.
+  A timeout logs once (`fingerprint: fpcalc timed out`, the library-relative
+  path) and is neither cached nor written as a no-match: a hung mount and a
+  pathological file look the same from here, and the next sweep offers the
+  file again. A real decode failure (`ErrUnreadable`) is still cached as a
+  miss. A cancelled parent is shutdown and logs nothing.
+  (`TestAHungFpcalcDoesNotHoldTheSweep`,
+  `TestFpcalcBudgetDefaultsToTenMinutes`.)
 - **The local-artist veto lives in `internal/enrich`, not `internal/acoustid`**
   (import cycle), only ever SUBTRACTS, and its junk-tag list is closed and tiny.
   An all-digits ALBUM title is NOT junk though an all-digits artist is:

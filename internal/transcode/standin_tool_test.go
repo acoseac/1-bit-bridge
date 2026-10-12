@@ -5,14 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/flactest"
+	"github.com/acoseac/1-bit-bridge/internal/standintest"
 )
 
 // The test binary stands in for sox and ffprobe, on every platform: a copy
@@ -79,49 +78,13 @@ func runStandInTool(dir, tool string, args []string) int {
 // and as ffprobe, and returns the directory that scripts them.
 func standInToolsScripted(t *testing.T) (script string) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	bin, script := t.TempDir(), t.TempDir()
-	windows := runtime.GOOS == "windows"
-	suffix := ""
-	if windows {
-		suffix = ".exe"
-	}
-	for _, tool := range []string{"sox", "ffprobe"} {
-		dst := filepath.Join(bin, tool+suffix)
-		// A copy on Windows: a hard link to the running test binary cannot
-		// be deleted while it runs, so TempDir's cleanup fails on it.
-		if windows || os.Link(exe, dst) != nil {
-			copyFileForTest(t, exe, dst)
-		}
-	}
+	standintest.Install(t, bin, "sox", "ffprobe")
 	t.Setenv("PATH", bin)
 	t.Setenv(standInToolEnv, script)
 	resetFFmpegSnapshotForTest()
 	t.Cleanup(resetFFmpegSnapshotForTest)
 	return script
-}
-
-func copyFileForTest(t *testing.T, src, dst string) {
-	t.Helper()
-	in, err := os.Open(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		t.Fatal(err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // writeScript writes one of the stand-ins' scripts.
