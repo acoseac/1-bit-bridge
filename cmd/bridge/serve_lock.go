@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,14 +20,17 @@ import (
 // path beside the old holder.
 const serveLockFileName = "server.lock"
 
-// serveDataDirHeldError is lockServeDataDir's answer when another `bridge
-// serve` holds the data dir's lock: in another process, or in this one
-// (the launcher menu and the tests run serve in-process).
+// serveDataDirHeldError is lockServeDataDir's answer when another open
+// holds the data dir's lock: a serve, a restore, or a clear-missing, in
+// another process or in this one (the launcher menu and the tests run
+// serve in-process). The message names a serve, which is what writes
+// server.pid. A holder that writes none is still this error, with pid 0.
 type serveDataDirHeldError struct {
 	dataDir string
-	// pid is the pid server.pid names, 0 when it names none. The holder
-	// writes server.pid after it takes the lock, so this is the holder's
-	// unless that write failed (it is not fatal).
+	// pid is the pid server.pid names, 0 when it names none. A serve
+	// writes that file after it takes the lock. A restore or a
+	// clear-missing does not, so a refusal while one of those holds the
+	// lock names a pid only when an earlier serve left the file.
 	pid int
 }
 
@@ -47,17 +51,19 @@ func (e *serveDataDirHeldError) Error() string {
 // and rewritten tokens.json, and a second serve on ports of its own never
 // failed at all (backlog B208).
 //
-// It answers a *serveDataDirHeldError when another serve holds the lock,
-// which is the one answer that refuses. Any other error means no lock
-// could be taken (a filesystem that keeps no locks, a lock file this user
-// cannot open): the caller warns and serves without the check, since a
-// lock that cannot be taken must not stop a bridge from starting. release
-// is never nil, and does nothing when no lock was taken.
+// It answers a *serveDataDirHeldError when another open holds the lock.
+// For `bridge serve` that is the one answer that refuses. Any other error
+// means no lock could be taken (a filesystem that keeps no locks, a lock
+// file this user cannot open). Serve warns and continues, since a lock
+// that cannot be taken must not stop a bridge from starting; restore and
+// clear-missing fall back to the admin-port probe. release is never nil,
+// and does nothing when no lock was taken.
 //
-// A kernel lock, not a lock FILE, which this repo declines for `bridge
-// restore` because one left by a crash would block restore just when it is
-// needed: the kernel drops this lock with the process however it exits, so
-// a supervisor's restart after a SIGKILL finds it free.
+// A kernel lock, not a lock FILE. The kernel drops it with the process
+// however it exits, so a killed holder does not block the next serve,
+// restore, or clear-missing. `bridge restore` and `bridge manifest
+// clear-missing` hold this same lock for their whole run
+// (holdDataDirForMutation).
 func lockServeDataDir(dataDir string) (release func(), err error) {
 	release = func() {
 		// Nothing to release: no lock has been taken.
@@ -116,4 +122,27 @@ func recordedServePID(dataDir string) int {
 		return 0
 	}
 	return pid
+}
+
+// holdDataDirForMutation takes the serve data-dir lock for a command that
+// writes the store from a second process, and keeps it until release.
+// refused means another open already holds the lock: the refusal is the
+// lock's own message, already written to stderr, and the caller stops.
+// fallback means the lock could not be taken at all (a filesystem that
+// keeps no locks, a permissions error, a directory where the lock file
+// goes). The caller then keeps the admin-port probe. A taken lock is
+// held across the caller's confirmation prompt and its last write.
+// release is never nil.
+func holdDataDirForMutation(dataDir, cmd string, stderr io.Writer) (release func(), fallback, refused bool) {
+	release, err := lockServeDataDir(dataDir)
+	if err == nil {
+		return release, false, false
+	}
+	var held *serveDataDirHeldError
+	if errors.As(err, &held) {
+		fmt.Fprintf(stderr, "%s: %s.\n", cmd, held.Error())
+		fmt.Fprintln(stderr, "Stop it first, then re-run this command.")
+		return release, false, true
+	}
+	return release, true, false
 }

@@ -124,13 +124,17 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 2
 	}
 
-	// Refuse while a bridge is up. backup.Restore unlinks the live -wal and
-	// -shm and renames a fresh bridge.db over the open one; with a writer
-	// running that is the WAL/main mismatch this command's own docblock
-	// describes as silent corruption. Every sibling CLI mutator gates the
-	// same way — tryLibraryViaAdmin and enrichmentRetryCmd both refuse on a
-	// reachable bridge — and this is the most destructive of the three.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	// Hold the data-dir lock for the whole run, including the confirmation
+	// wait. backup.Restore unlinks the live -wal and -shm and renames a
+	// fresh bridge.db over the open one; a serve that starts at the prompt
+	// is refused by the lock rather than by a probe of the admin port.
+	// When the lock cannot be taken, fall back to that probe, twice.
+	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, "restore", stderr)
+	defer releaseLock()
+	if refused {
+		return 1
+	}
+	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 
@@ -152,10 +156,9 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 	}
 
-	// Re-probe: a bridge can have started while the prompt waited. See
-	// refuseIfBridgeMayBeRunning's docblock for why this narrows the window
-	// rather than closing it. (CodeRabbit, PR #856.)
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+	// The probe's second look, only on the fallback where the lock was not
+	// taken: a bridge can have started while the prompt waited.
+	if fallback && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
 

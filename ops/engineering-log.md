@@ -39967,3 +39967,59 @@ two-block case kept the joined album (`"Pop" / "Studio; Live"`), and
 the album, composer, conductor, work, title, artist and plain-Ogg pins
 stayed green. The arm was restored by hand. The broken state was not
 committed.
+
+## 2026-10-12 — restore and clear-missing hold the data-dir lock (backlog B261)
+
+`bridge restore` and `bridge manifest clear-missing` write the store from
+a second process. They refused only while a bridge answered on the admin
+port, and probed again immediately before the write. A serve started
+during the confirmation prompt, or one whose admin address is ephemeral,
+was not refused: `adminAddress: 127.0.0.1:0` names no port to dial, and
+the second probe is a check-then-act. The objection to an interprocess
+lock was a stale lock FILE after an unclean exit. `lockServeDataDir` is
+a kernel lock (`flock` / `LockFileEx` on the open `server.lock`). The
+kernel drops it with the process, a SIGKILL included, which
+`TestALockDiesWithTheProcessThatHeldIt` already measured.
+
+Both commands now take that lock after the config loads and release it
+after the last write, so it is held through the confirmation prompt. A
+`*serveDataDirHeldError` is the refusal, and the message is the lock's
+own, which names the pid `server.pid` records when it records one. Any
+other error from the lock means it could not be taken. Those commands
+then keep the admin-port probe, both times, and its message.
+
+### Red
+
+On main, before the lock take:
+`TestAHeldDataDirLockRefusesRestoreAndClearMissing` restored with exit 0
+and an empty stderr while this process held the data-dir lock.
+`TestRestoreHoldsTheDataDirLockThroughThePrompt` took the lock itself
+while restore waited at `Type 'yes' to continue:`.
+`TestAServeStartedWhileRestoreHoldsTheLockRefuses` started serve (exit 0,
+`listening on`) while restore waited at that prompt.
+`TestAFreeLockLetsRestoreProceedOnAnEphemeralAdminPort` refused with
+`no fixed port` on a data dir nothing else held.
+
+### Fallback
+
+`TestALockThatCannotBeTakenFallsBackToTheProbe` was already green on
+main and stays green. A directory standing where `server.lock` goes is
+the case serve already uses for a lock that cannot be taken. An answering
+admin keeps `a bridge is answering on`. Nothing listening lets restore
+finish. An ephemeral admin port keeps `no fixed port` and does not say a
+bridge is answering.
+
+### A killed holder
+
+`TestAKilledDataDirHolderDoesNotBlockRestore` was green on main, because
+restore did not look at the lock, and stays green. A child takes
+`lockServeDataDir`, the parent SIGKILLs it, and restore completes. The
+retry is only while the refusal still says `already running`, up to 5s,
+the lag Windows may take to drop a lock whose holder went.
+
+### Control
+
+The lock take was removed from `restoreCmd` only and
+`TestAHeldDataDirLockRefusesRestoreAndClearMissing` was run again.
+Restore proceeded (exit 0) while the lock was held. The take was put
+back by hand. The broken state was not committed.
