@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -34,6 +35,10 @@ func gcClearDirHooks(t *testing.T) {
 	t.Cleanup(func() {
 		gcAfterClassifiedRow = nil
 		gcBeforeReverseDirCheck = nil
+		gcBeforeForwardSweep = nil
+		gcBeforeForwardUnlink = nil
+		analyzeGCBeforeSweep = nil
+		analyzeGCBeforeUnlink = nil
 	})
 }
 
@@ -253,5 +258,187 @@ func TestRunGCRefusesAnEmptyExceptionOnADirectoryItDidNotClassify(t *testing.T) 
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("file on the volume %s: %v", source, err)
 		}
+	}
+}
+
+// gcPlantAgedOrphans replaces dir and writes paths there, older than the
+// forward sweep's grace.
+func gcPlantAgedOrphans(t *testing.T, dir string, paths ...string) {
+	t.Helper()
+	gcUnmountVolume(t, dir)
+	for _, p := range paths {
+		writeFixtureFile(t, p, 80)
+	}
+	ageFiles(t, paths...)
+}
+
+func gcForwardOrphans(t *testing.T, store *manifest.Store, dir string) []string {
+	t.Helper()
+	gcSeedVariant(t, store, dir, "Artist/Known/01.flac", true)
+	var orphans []string
+	for _, source := range []string{"Artist/Orphan/a.flac", "Artist/Orphan/b.flac"} {
+		p := transcode.VariantSidecarPath(dir, source, gcIdentityVariant)
+		writeFixtureFile(t, p, 80)
+		orphans = append(orphans, p)
+	}
+	ageFiles(t, orphans...)
+	return orphans
+}
+
+func gcRequireForwardRefusal(t *testing.T, rc int, stdout, stderr string, wants ...string) {
+	t.Helper()
+	if rc == 0 {
+		t.Fatalf("sweep exited 0\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	for _, want := range wants {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestRunGCRefusesAForwardSweepOnAReplacedDirectory(t *testing.T) {
+	gcClearDirHooks(t)
+	dir := t.TempDir()
+	store := gcIdentityStore(t)
+	orphans := gcForwardOrphans(t, store, dir)
+	gcBeforeForwardSweep = func() {
+		gcPlantAgedOrphans(t, dir, orphans...)
+	}
+
+	rc, stdout, stderr := gcRunIdentity(t, store, dir)
+	gcRequireKept(t, store, 1, stderr)
+	gcRequireForwardRefusal(t, rc, stdout, stderr,
+		"GC forward sweep:",
+		"Nothing was unlinked and no row was removed.",
+	)
+	if strings.Contains(stderr, "Nothing further was unlinked") {
+		t.Errorf("refused after an unlink:\n%s", stderr)
+	}
+	for _, p := range orphans {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("file in the replacement %s: %v", p, err)
+		}
+	}
+}
+
+func TestRunGCRefusesAForwardSweepReplacedAfterTheFirstUnlink(t *testing.T) {
+	gcClearDirHooks(t)
+	dir := t.TempDir()
+	store := gcIdentityStore(t)
+	orphans := gcForwardOrphans(t, store, dir)
+	gcBeforeForwardUnlink = func(index int) {
+		if index != 1 {
+			return
+		}
+		gcPlantAgedOrphans(t, dir, orphans...)
+	}
+
+	rc, stdout, stderr := gcRunIdentity(t, store, dir)
+	gcRequireKept(t, store, 1, stderr)
+	gcRequireForwardRefusal(t, rc, stdout, stderr,
+		"GC forward sweep:",
+		"Nothing further was unlinked and no row was removed.",
+	)
+	if _, err := os.Stat(orphans[1]); err != nil {
+		t.Errorf("next file in the replacement: %v", err)
+	}
+}
+
+func gcSeedWaveform(t *testing.T, store *manifest.Store, dir, source string) string {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 100, ModTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
+	writeFixtureFile(t, p, 50)
+	if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
+		SourcePath: source, WaveformPath: p, WaveformTag: "tag1",
+		WaveformSize: 50, SourceMTimeNS: 1, SourceSize: 100,
+		SchemaVersion: "wf1", CreatedAt: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func gcWaveformOrphans(t *testing.T, store *manifest.Store, dir string) []string {
+	t.Helper()
+	gcSeedWaveform(t, store, dir, "Artist/Known/01.flac")
+	var orphans []string
+	for _, source := range []string{"Artist/Orphan/a.flac", "Artist/Orphan/b.flac"} {
+		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
+		writeFixtureFile(t, p, 80)
+		orphans = append(orphans, p)
+	}
+	ageFiles(t, orphans...)
+	return orphans
+}
+
+func gcAnalysisCount(t *testing.T, store *manifest.Store) int {
+	t.Helper()
+	rows, err := store.AllAnalysisRows(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(rows)
+}
+
+func gcRunAnalyzeIdentity(t *testing.T, store *manifest.Store, dir string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	rc := runAnalyzeGC(context.Background(), &stdout, &stderr, store, dir, analyzeGCOptions{})
+	return rc, stdout.String(), stderr.String()
+}
+
+func TestAnalyzeGCRefusesASweepOnAReplacedDirectory(t *testing.T) {
+	gcClearDirHooks(t)
+	dir := t.TempDir()
+	store := gcIdentityStore(t)
+	orphans := gcWaveformOrphans(t, store, dir)
+	analyzeGCBeforeSweep = func() {
+		gcPlantAgedOrphans(t, dir, orphans...)
+	}
+
+	rc, stdout, stderr := gcRunAnalyzeIdentity(t, store, dir)
+	if got := gcAnalysisCount(t, store); got != 1 {
+		t.Fatalf("%d analysis rows, want 1\n%s", got, stderr)
+	}
+	gcRequireForwardRefusal(t, rc, stdout, stderr,
+		"analyze --gc:",
+		"waveform directory is no longer the directory this sweep began on",
+		"Nothing was unlinked and no row was removed.",
+	)
+	for _, p := range orphans {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("file in the replacement %s: %v", p, err)
+		}
+	}
+}
+
+func TestAnalyzeGCRefusesASweepReplacedAfterTheFirstUnlink(t *testing.T) {
+	gcClearDirHooks(t)
+	dir := t.TempDir()
+	store := gcIdentityStore(t)
+	orphans := gcWaveformOrphans(t, store, dir)
+	analyzeGCBeforeUnlink = func(index int) {
+		if index != 1 {
+			return
+		}
+		gcPlantAgedOrphans(t, dir, orphans...)
+	}
+
+	rc, stdout, stderr := gcRunAnalyzeIdentity(t, store, dir)
+	if got := gcAnalysisCount(t, store); got != 1 {
+		t.Fatalf("%d analysis rows, want 1\n%s", got, stderr)
+	}
+	gcRequireForwardRefusal(t, rc, stdout, stderr,
+		"analyze --gc:",
+		"waveform directory is no longer the directory this sweep began on",
+		"Nothing further was unlinked and no row was removed.",
+	)
+	if _, err := os.Stat(orphans[1]); err != nil {
+		t.Errorf("next file in the replacement: %v", err)
 	}
 }

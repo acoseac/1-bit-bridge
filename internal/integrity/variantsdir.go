@@ -128,8 +128,10 @@ const VariantsDirReplaced = "the variants directory is no longer the directory t
 // observed, or "" while it does. VariantWatcher.tick asks it after the
 // probe that began the tick (VariantsDirSweepBlock, whose Info is start):
 // as each row reads as missing, and once more before it deletes anything.
-// upscale --gc asks it the same way: as each row reads missing, and again
-// in gcCheckOutputDirBeforeReverseSweep before that sweep deletes a row.
+// upscale --gc asks it as each row reads missing, before the forward sweep
+// unlinks and before each unlink, and again in
+// gcCheckOutputDirBeforeReverseSweep before that sweep deletes a row.
+// analyze --gc asks it before it unlinks and before each unlink.
 //
 // The probe at the start of a tick proves the volume was mounted then and
 // says nothing about the rows classified after it: a clean unmount during

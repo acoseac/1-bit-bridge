@@ -113,7 +113,7 @@ func TestAGCForwardSweepCountsAnUnlinkTheFilesystemRefuses(t *testing.T) {
 	inv := integrity.SidecarInventory{Files: 1, Orphans: 1, OrphanPaths: []string{held}, OrphanWalkedPaths: []string{held}}
 
 	var stderr bytes.Buffer
-	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace())
+	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if removed != 0 || failed != 1 || code != 0 {
 		t.Errorf("upscale --gc: removed %d, failed %d, exit %d, want 0, 1, 0", removed, failed, code)
 	}
@@ -121,7 +121,7 @@ func TestAGCForwardSweepCountsAnUnlinkTheFilesystemRefuses(t *testing.T) {
 		t.Errorf("upscale --gc named no failure: %q", stderr.String())
 	}
 	stderr.Reset()
-	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace())
+	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if tally.removed != 0 || tally.failed != 1 || code != 0 {
 		t.Errorf("analyze --gc: removed %d, failed %d, exit %d, want 0, 1, 0", tally.removed, tally.failed, code)
 	}

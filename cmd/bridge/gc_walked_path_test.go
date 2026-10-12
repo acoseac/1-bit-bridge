@@ -59,7 +59,7 @@ func TestUpscaleGCForwardSweepUnlinksTheWalkedPath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv, gcStartAfterTheGrace())
+	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if removed != 1 || failed != 0 || code != 0 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 1, 0, 0\nstderr: %s", removed, failed, code, stderr.String())
 	}
@@ -87,7 +87,7 @@ func TestAnalyzeGCUnlinksTheWalkedPaths(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace())
+	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if tally.removed != 2 || tally.failed != 0 || code != 0 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 2, 0, 0\nstderr: %s", tally.removed, tally.failed, code, stderr.String())
 	}
@@ -114,7 +114,7 @@ func TestUpscaleGCForwardSweepRefusesAnUnpairedInventory(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv, gcStartAfterTheGrace())
+	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if removed != 0 || failed != 0 || code != 1 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 0, 0, 1\nstderr: %s", removed, failed, code, stderr.String())
 	}
@@ -141,7 +141,7 @@ func TestAnalyzeGCRefusesAnUnpairedInventory(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace())
+	tally, code := removeAnalysisGCFiles(context.Background(), &stderr, inv, gcStartAfterTheGrace(), "", nil)
 	if tally.removed != 0 || tally.failed != 0 || code != 1 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 0, 0, 1\nstderr: %s", tally.removed, tally.failed, code, stderr.String())
 	}
