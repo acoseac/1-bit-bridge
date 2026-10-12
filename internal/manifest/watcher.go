@@ -114,10 +114,20 @@ type Watcher struct {
 	// fsnotify had never sent the event: a test stands in that way for an
 	// event fsnotify swallows (a folder renamed while its listing changed
 	// drops the folder's watch and sends nothing). afterReconcileForTests
-	// fires after each reconcile pass. Both per instance and set before Run
-	// starts, for afterDispatchHookForTests' reason; nil in production.
+	// fires after each reconcile pass. beforeReleaseForTests fires from
+	// releaseTree after the account has forgotten the paths and before
+	// their descriptors are closed. afterEventForTests fires at the end of
+	// handleEvent. leakOneWatchForTests leaves the last path of a release
+	// unclosed after the account has forgotten it, so a later reconcile
+	// does not close it either. Each is per instance and set before Run
+	// starts, for afterDispatchHookForTests' reason; nil and false in
+	// production. The hooks run on Run's goroutine and must not call back
+	// into the watcher.
 	dropEventForTests      func(fsnotify.Event) bool
 	afterReconcileForTests func()
+	beforeReleaseForTests  func([]string)
+	afterEventForTests     func(fsnotify.Event)
+	leakOneWatchForTests   bool
 }
 
 // rootAlias pairs the directory a linked configured root resolves to with
@@ -283,6 +293,9 @@ func (wt *Watcher) loop(ctx context.Context) error {
 // receive handles one event fsnotify sent. fsnotify sends an event only
 // after it has watched every new folder it sent a Create for before, so the
 // folders waiting for their watch can have it first (flushPendingAdds).
+// That watch lands before this event is handled, so a waiter that returns
+// when the folder appears on WatchList returns while this event's release
+// has not closed its descriptors yet.
 func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
 	wt.flushPendingAdds()
 	if drop := wt.dropEventForTests; drop != nil && drop(ev) {
@@ -596,6 +609,9 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 	// ScanSubtree finds under a configured root.
 	dir := filepath.Dir(wt.configuredName(ev.Name))
 	wt.scheduleScan(ctx, dir)
+	if hook := wt.afterEventForTests; hook != nil {
+		hook(ev)
+	}
 }
 
 // scheduleScan resets / arms a debounce timer for `dir`. Multiple

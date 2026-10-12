@@ -40568,3 +40568,66 @@ parent-directory control. B262's planted-before-open tests stay green.
 On Windows the open still follows a final-component symlink; the swap test
 skips, as B262's does. `-journal` is covered by the Lstat and by WAL mode
 never opening it, not by `O_NOFOLLOW`.
+
+## 2026-10-13 — the kqueue rename count waits out the release that is still closing (backlog B337)
+
+### What broke
+
+`TestKqueueWatcherReleasesARenamedFoldersFiles` (`internal/manifest/watcher_kqueue_test.go`)
+renames 10 folders of 12 files, then `syncWatcher` makes `zz-sync-N` and
+waits until `watched` sees it on `WatchList`, then `libraryFiles` wants
+`base+round`. Gate run 38185099203 (2026-10-11) and bridge #1186 run
+38247010885 at `8328bd2d` (2026-10-12) both read 135 where 134 was wanted
+at round 2. Bridge #1196 (B346, no watcher code) gate run 38313673184,
+`test (macos-latest)`, did the same on 2026-10-13. Each passed on rerun.
+
+`syncWatcher` returns when the folder is on `WatchList`. On kqueue the
+Create handler only calls `fds.wait` (`watcher.go`, the kqueue Create arm).
+The folder is added later, from `flushPendingAdds`. `receive` calls that
+flush before `handleEvent`, so the folder is watched while the event that
+woke the flush is still unhandled. A leftover Rename of a renamed folder
+is that event. fsnotify's `readEvents` has already closed only that path
+(`remove(name, false)`); the entries it kept stay open until
+`releaseTree` calls `w.Remove` (`watcher_fds.go`). A count taken in that
+window is one descriptor high. The exact assertion is what catches a leak
+of one descriptor per rename, so it stays exact.
+
+Thirty runs of the test under eleven busy loops on this Mac (12 CPUs)
+stayed green, 0 failures in 28s. The window is the tail of `Remove` on
+the Run goroutine, shorter than `libraryFiles`' walk of `/dev/fd` unless
+the goroutine is preempted inside it.
+
+### The fix
+
+`TestKqueueWatcherReleasesARenamedFoldersFiles` polls `libraryFiles` until
+it equals `base+round` or `releaseSettle` (2s) passes, then still wants
+the exact total. Two seconds sits inside `reconcileEvery` (30s). A
+descriptor the release left open stays above the total and the deadline
+fails the test.
+
+`beforeReleaseForTests` runs from `releaseTree` after the account has
+forgotten the paths and before `Remove`. `afterEventForTests` runs at the
+end of `handleEvent`. `leakOneWatchForTests` drops the last path of a
+release after the forget, so reconcile cannot close it. All three are
+per instance, set before `Run`, nil and false in production, and the
+hooks run on Run's goroutine.
+
+`TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses` handles the sync
+folder's Create, then renames one album and holds the first release. While
+the hold is inside `releaseTree`, the sync folder is on `WatchList` and
+the open-file count is at least `base-1` (fsnotify has already closed the
+renamed path). After the hold, the count settles at `base+1`. The count
+during the hold can already equal that settled total, so the test does
+not treat inequality with it as the signal. It treats the folder being
+watched while `Remove` has not run.
+
+`TestALeakedWatchPerRenameDoesNotSettle` sets the leak, renames four
+folders, and fails if the 2s poll hits `base+1`. With the leak planted in
+`TestKqueueWatcherReleasesARenamedFoldersFiles` itself, round 1 read 143
+open files where 133 was wanted (ten folders, one descriptor each) and
+failed at 2.35s. The plant was taken back out.
+
+The same thirty-run loop under the same eleven busy loops, after the
+fix, failed 0 of 30 and finished in 27s. Sibling counts stay exact:
+`TestKqueueWatcherOpensAFolderMovedInOnce` and the dropped-event reconcile
+test were left on their own assertions.
