@@ -40855,3 +40855,206 @@ every live file on, and restores. Before the change it failed on all
 five (the four files and `bridge.db`); with it, it passes. Control:
 with the up-front check disabled (`if false && …`), the same five
 assertions go red; restored.
+
+## 2026-10-13 — FTS deletes address the row through tracks_fts_row (backlog B268)
+
+`tracks_fts` is a standalone FTS5 table (path, title, artist, album;
+unicode61 remove_diacritics 2). The v7 delete trigger, and the v8
+trigger that replaced the update arm, both ran
+`DELETE FROM tracks_fts WHERE path = old.path`. A prefix delete and
+`WipeFilesystemTracks` fire that statement once per row.
+
+### Cause
+
+modernc.org/sqlite v1.60.1 is SQLite 3.53.4. `_fts5BestIndexMethod`
+does not treat equality on column 0 as a lookup. `EXPLAIN QUERY PLAN`
+of `DELETE FROM tracks_fts WHERE path = ?` is
+`SCAN tracks_fts VIRTUAL TABLE INDEX 0:`. The same statement with
+`WHERE rowid = ?` is `INDEX 0:=`. A `MATCH` is `INDEX 0:M4`.
+`CREATE INDEX` on the virtual table is rejected. On the 25,000-row
+template a missing path still cost about 5 ms, and scanning every FTS
+rowid cost 6 ms, so the path predicate was reading the whole table.
+
+### Before
+
+Template: 25,000 rows, 6,238,208 bytes, seeded in 524 ms. Load at the
+start of that run: `4:36 up 11 days, 8:22, 2 users, load averages:
+1.54 1.46 1.68`.
+
+Direct deletes of one FTS row, 25,000-row table: path p50 258 µs at
+1,000 rows present in the predicate's scan, 1.035 ms at 5,000, 4.876 ms
+at 25,000. The rowid form stayed near 100 µs and was 48 µs at 25,000.
+
+Bulk `DELETE FROM tracks` of a path range, with `tracks_fts_ad` in
+place:
+
+| rows | elapsed | tracks left | fts left |
+|---|---|---|---|
+| 1,000 | 4.936 s | 24,000 | 24,000 |
+| 5,000 | 23.365 s | 20,000 | 20,000 |
+| 20,000 | 1 m 4.818 s | 5,000 | 5,000 |
+
+Dropping `tracks_fts_ad` made the same deletes 1 ms, 4 ms and 14 ms,
+and left `tracks_fts` at 25,000. Dropping only `tracks_fts_au` or only
+`tracks_fts_ai` left the 1,000-row delete at about 5.2 s. A 1,000-row
+`tags_json` update through v8 took 5.352 s and moved `MAX(rowid)` from
+25,000 to 26,000. The same statement writing the bytes already stored
+took 5.357 s. A single tags update, 40 times, was p50 5.317 ms. A wipe
+of a 5,000-row store with the delete trigger took 2.668 s
+(`fts_left=0`); without it the wipe printed `elapsed=0s` and left all
+5,000 FTS rows.
+
+A prototype map (no `WHEN`) on the same template rebuilt in 20 ms.
+Deletes then took 6 ms, 32 ms and 131 ms. A single tags update through
+that trigger was p50 86 µs, and the FTS rowid moved (11 to 25,001).
+`EXPLAIN` of the mapped delete is `INDEX 0:=` plus
+`SEARCH tracks_fts_row USING PRIMARY KEY`. `VACUUM` and `VACUUM INTO`
+moved 0 of the sampled rowids. Search order for `zephyr` was
+`a/000000.flac,a/000001.flac` before an unrelated delete and after the
+map. `PRAGMA user_version` set inside a transaction read 55, 0 after
+rollback, 55 after commit.
+
+### What shipped
+
+Migration v55, `internal/manifest/fts_row_map.go`. v7 and v8 are not
+rewritten. The post step probes for `tracks_fts` and returns when it is
+absent. Otherwise one connection, `BEGIN IMMEDIATE`, re-reads
+`user_version`, and a version already at 55 rolls back without touching
+the map. Below 55 it drops the three FTS triggers, creates
+
+```
+tracks_fts_row (path TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL UNIQUE) WITHOUT ROWID
+```
+
+and fills it with `INSERT … SELECT path, rowid FROM tracks_fts`. A
+`UNIQUE` failure rolls back only that statement, so the surrounding
+transaction stays open and the map is empty; that is an inconsistency
+and the rebuild runs. The census is one select:
+`COUNT(tracks) = COUNT(tracks_fts) = COUNT(tracks_fts_row)`, every map
+path exists in `tracks`, every track path has a map row. Any miss logs
+one Warn, `tracks_fts row map rebuilt`, with those five counts and no
+paths, then `DELETE FROM tracks_fts`, the v7 backfill (each extract
+inside `CASE WHEN json_valid`), and a refill of the map. A second miss
+returns the error. The transaction rolls back and `user_version` stays
+54. On a pass it creates the three triggers and stamps
+`user_version = 55` before `COMMIT`. A failed `ROLLBACK` returns
+`driver.ErrBadConn` from `Conn.Raw` before the connection goes back to
+the pool.
+
+`tracks_fts_ad` deletes by the mapped rowid, then deletes the map row.
+`tracks_fts_ai` inserts the FTS row and records `last_insert_rowid()`
+in the same trigger. `tracks_fts_au` stays `AFTER UPDATE OF path,
+tags_json`. Its `WHEN` is true when the path changed, when either
+`tags_json` fails `json_valid`, or when the title, artist or album the
+insert writes would change. Each comparison uses
+`COALESCE(CASE WHEN json_valid(…) THEN json_extract(…) END, '')`.
+
+### Writers of tracks_fts
+
+Grep of `*.go` for `INSERT INTO tracks_fts` and `DELETE FROM tracks_fts`:
+
+- `store.go` v7, the historical DDL: the three trigger bodies and the
+  backfill `INSERT … SELECT` from `tracks`. That backfill runs only when
+  `tracks_fts` is empty, and it runs before v55 exists. v55 then fills
+  the map from the rows it left.
+- `store.go` v8, the replacement `tracks_fts_au` body. v55 drops it
+  before the map fill.
+- `fts_row_map.go`, the rebuild `INSERT`, which runs while the triggers
+  are dropped, and the refill of `tracks_fts_row` in the same function
+  before the new triggers are created.
+- The v55 trigger bodies, which write `tracks_fts` and `tracks_fts_row`
+  in one trigger.
+- `fts_row_map_test.go`, which inserts or deletes an FTS row only on a
+  database rewound to version 54, so the next `OpenStore` rebuilds.
+
+No admin, doctor or CLI statement writes `tracks_fts`. Nothing issues
+FTS5 `'optimize'` or `'merge'`. The word `optimize` in this tree is the
+CarPlay variant id.
+
+### WHEN and malformed JSON
+
+`json_valid(X'FFFF')` returns 0 and does not raise.
+`json_extract(X'FFFF', '$.title')` raises
+`SQL logic error: malformed JSON`. A `WHERE` that asks `json_valid` first
+does not raise, and a trigger `WHEN` of that shape with body
+`SELECT RAISE(IGNORE)` does not raise. On a real `OpenStore` database the
+three MBID expression indexes (`idx_tracks_artwork_mbid`,
+`idx_tracks_artist_mbid`, `idx_tracks_release_mbid`) call `json_extract`
+on every `tags_json` assignment, so `UPDATE tracks SET tags_json = X'FFFF'`
+is refused while they exist. Every writer in this process stores
+`tags_json` through `json.Marshal` (`marshalForStorage`). A stored row
+therefore cannot make the trigger's read of `old.tags_json` raise. With
+those indexes dropped, the `CASE` trigger accepts the blob and a later
+plain `UPDATE` of valid JSON replaces the FTS document; search for the
+new title hits that path. The upsert conflict arm's `artwork_version`
+clause extracts the old blob with an unguarded `json_extract`, so
+`UpsertTrack` cannot repair a planted blob. That clause was left as it
+is. On valid JSON the `CASE` expression equals
+`COALESCE(json_extract(...), '')`.
+
+### Red first
+
+`TestFTSDeleteAddressesTheRowMap` was written before v55 existed.
+`GOTOOLCHAIN=go1.26.6 go test -count=1 -timeout 3m -run TestFTSDeleteAddressesTheRowMap .`
+failed in 0.35 s. The delete trigger keyed on path
+(`DELETE FROM tracks_fts WHERE path = 'Album/000000.flac'`), the update
+trigger's `WHEN` neither read the stored title nor guarded invalid JSON,
+the insert trigger did not record the FTS rowid, and the plan was
+`SCAN tracks_fts VIRTUAL TABLE INDEX 0:` where the pin wants
+`INDEX 0:=` and `SEARCH tracks_fts_row USING PRIMARY KEY`.
+
+### Control
+
+After the rowid form was green, `tracks_fts_ad` was edited back to
+`DELETE FROM tracks_fts WHERE path = old.path`. The same test failed
+in 0.42 s:
+
+```
+fts delete keys on path: DELETE FROM tracks_fts WHERE path = 'Album/000000.flac'
+plan = "SCAN tracks_fts VIRTUAL TABLE INDEX 0:", want a rowid equality (INDEX 0:=)
+plan = "SCAN tracks_fts VIRTUAL TABLE INDEX 0:", want the map's primary key
+```
+
+The rowid delete was restored with the editor. The broken line was not
+committed. The restored test passed in 0.765 s.
+
+### After
+
+Same 25,000-row template, production `WHEN` included. Load:
+`5:33 up 11 days, 9:18, 2 users, load averages: 1.75 1.62 1.47`.
+Installing the map took 28 ms. The timed statement is only the
+`DELETE` or `UPDATE`.
+
+| statement | rows | elapsed | fts max rowid | counts |
+|---|---|---|---|---|
+| delete | 1,000 | 7 ms | | 24,000 / 24,000 / 24,000 |
+| delete | 5,000 | 32 ms | | 20,000 / 20,000 / 20,000 |
+| delete | 20,000 | 132 ms | | 5,000 / 5,000 / 5,000 |
+| MBID-only tags update | 1,000 | 4 ms | 25,000 → 25,000 | 25,000 each |
+| title tags update | 1,000 | 25 ms | 25,000 → 26,000 | 25,000 each |
+
+The counts column is tracks, `tracks_fts`, `tracks_fts_row`.
+
+### Tests
+
+`TestFTSDeleteAddressesTheRowMap` pins the trigger text and the plan.
+`TestFTSCountsStayEqualAndMatchStaysRight` covers a prefix delete, a
+whole wipe, a title change (the FTS rowid moves), an MBID-only change
+(the `WHEN` skips and the rowid stays), a same-bytes upsert, and a path
+rename. A holder row is inserted before the rename so SQLite cannot
+reuse the deleted row's rowid, which it does when that rowid was the
+largest. `TestAnInvalidTagsJSONStillUpdates` is the JSON finding above.
+A fresh store and a v54 store with rows end consistent at v55.
+A v54 store with a duplicate FTS path, an orphan FTS row, or a track
+missing its FTS row each rebuilds and ends consistent; the rebuild line
+names no path. An error injected after the map fill leaves version 54,
+the old path-equality triggers, and no map table; the next open
+completes. Two openers share one migration: the first blocks after it
+has set the uncommitted version, the second begins only then, sees 55,
+and leaves the map. The overlap uses the migration hooks, not a sleep.
+The existing search tests pass unchanged. No `ProtocolVersion` bump.
+Search SQL is unchanged.
+
+An older binary's ladder stops before v55, so it does not re-run v7 or
+v8. The new triggers are SQL and fire for that binary. Search does not
+read the map.
