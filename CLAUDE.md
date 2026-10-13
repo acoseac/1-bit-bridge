@@ -7919,8 +7919,10 @@ mentions across the four `ops/audit-*.md` files.
   account is copied unchanged. A file that does not parse fails the
   restore before any write, so a live account is not replaced and a
   missing one is not created. Login tickets stay out of the bundle.
-  Both files are written at `0600` by the same `writeBytes` the other
-  copies use (`fsutil.KeepOwner`, one chown). The CLI, the serve ticker
+  Both files are written at `0600` by the same `writeFrom` the other
+  copies use (`fsutil.KeepOwner`, one chown). **`writeFrom` streams an
+  `io.Reader`: never read a copy's source whole** — Restore copies
+  `bridge.db` through it, and a whole read held the database in memory. The CLI, the serve ticker
   and the console snapshot all name them through `buildBackupSources`
   and `buildRestoreTargets`.
   (`TestRestoreBringsTheConsoleAccountBackSignedOut`,
@@ -7930,7 +7932,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestRestoreRefusesAConsoleAccountThatDoesNotParse`,
   `TestSignedOutFileKeepsTheAccountAndDropsSessions`,
   `TestBuildBackupSourcesNamesTheConsoleAccountAndHarvestState`,
-  `TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState`.)
+  `TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState`,
+  `TestCopyFileStreamsRatherThanReadingTheFileWhole`.)
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
   It fails closed on anything but connection-refused, which is right; but
   `adminAddress: …:0` names no port to dial, so the default produced "a bridge

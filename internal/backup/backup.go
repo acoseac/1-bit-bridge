@@ -40,6 +40,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -619,17 +620,14 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 		return err
 	}
 	defer in.Close()
-	data, err := io.ReadAll(in)
-	if err != nil {
-		return err
-	}
-	return writeBytes(dstPath, data, mode)
+	return writeFrom(dstPath, in, mode)
 }
 
-// writeBytes is copyFile's commit: one temp file, one KeepOwner, then
-// rename onto dstPath. restoreAdminAuth uses it so the signed-out
-// account is a single write.
-func writeBytes(dstPath string, data []byte, mode os.FileMode) error {
+// writeFrom is copyFile's commit: one temp file, one KeepOwner, then
+// rename onto dstPath. It streams r, so Restore's database copy never
+// holds the file in memory. restoreAdminAuth hands it the signed-out
+// account through bytes.NewReader, so that account is a single write.
+func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".bridge-bak-*")
 	if err != nil {
 		return err
@@ -650,7 +648,7 @@ func writeBytes(dstPath string, data []byte, mode os.FileMode) error {
 		return err
 	}
 
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -682,7 +680,7 @@ func restoreAdminAuth(srcPath, dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 	}
-	if err := writeBytes(dstPath, out, 0o600); err != nil {
+	if err := writeFrom(dstPath, bytes.NewReader(out), 0o600); err != nil {
 		return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 	}
 	return nil

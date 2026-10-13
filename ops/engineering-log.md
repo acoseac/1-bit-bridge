@@ -40799,11 +40799,11 @@ short-lived, and each is its own file.
 
 ### The write
 
-`copyFile` reads the source and `writeBytes` stages one temp, calls
-`fsutil.KeepOwner`, syncs, chmods `0600` and renames. The console
-account goes through `writeBytes` on the signed-out bytes, so it is
-one chown, the same as `tokens.json`. The harvest file is an ordinary
-copy. `SchemaVersion` stays 1: both files are optional. The CLI, the
+`copyFile` opens the source and `writeFrom` streams it into one temp,
+calls `fsutil.KeepOwner`, syncs, chmods `0600` and renames. The
+console account goes through `writeFrom` on the signed-out bytes
+(`bytes.NewReader`), so it is one chown, the same as `tokens.json`.
+The harvest file is an ordinary copy. `SchemaVersion` stays 1: both files are optional. The CLI, the
 periodic ticker and the console's "Snapshot now" all build sources
 and targets in `buildBackupSources` / `buildRestoreTargets`, so the
 three cannot list different files.
@@ -40822,3 +40822,16 @@ compares the harvest file byte for byte.
 `TestRestoreOfASnapshotWithoutTheConsoleAccountLeavesItAlone` restores
 a snapshot that never captured the account and leaves a live file
 untouched, and creates none where there was none.
+
+### Review: the copy streams
+
+The first cut split the write out by reading the source whole
+(`io.ReadAll`) and handing the bytes to the commit. Restore copies
+`bridge.db` through `copyFile`, and that file can run to gigabytes, so
+a restore would have held the whole database in memory (Gemini on
+PR #1200). The commit, `writeFrom`, takes an `io.Reader`: `copyFile`
+passes the open file and the console account passes its signed-out
+bytes. `TestCopyFileStreamsRatherThanReadingTheFileWhole` copies a
+sparse 64 MiB file and bounds what the copy allocates at an eighth of
+it. Against the `io.ReadAll` version it fails (165,360,168 bytes
+allocated); with `writeFrom` it passes.
