@@ -28,41 +28,32 @@ func TestAContainerHostnameLeavesTheWantSetAndTheDoctor(t *testing.T) {
 	}
 
 	t.Run("generated", func(t *testing.T) {
-		restore := advertise.SetHostProbeForTest(
-			func() (string, error) { return "0123456789ab", nil },
-			func() bool { return true },
-		)
-		t.Cleanup(restore)
-		if opts := certSANOptions(cfg); opts.Hostname != "" {
-			t.Fatalf("Hostname = %q", opts.Hostname)
-		}
+		probeAdvertisedHost(t, cfg, "0123456789ab", "", true)
 		c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps(cfgPath)), "pairing-url")
 		if c.Status != doctor.Warn || c.Hint != advertise.PairingNeedsEndpoint {
 			t.Fatalf("pairing-url: status %v summary %q hint %q", c.Status, c.Summary, c.Hint)
 		}
 	})
 	t.Run("chosen", func(t *testing.T) {
-		restore := advertise.SetHostProbeForTest(
-			func() (string, error) { return "musicbox", nil },
-			func() bool { return true },
-		)
-		t.Cleanup(restore)
-		if opts := certSANOptions(cfg); opts.Hostname != "musicbox" {
-			t.Fatalf("Hostname = %q", opts.Hostname)
-		}
+		probeAdvertisedHost(t, cfg, "musicbox", "musicbox", true)
 		c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps(cfgPath)), "pairing-url")
 		if c.Status != doctor.OK || c.Summary != "pairing QR dials https://musicbox.local:7788" {
 			t.Fatalf("pairing-url: status %v summary %q hint %q", c.Status, c.Summary, c.Hint)
 		}
 	})
 	t.Run("outside", func(t *testing.T) {
-		restore := advertise.SetHostProbeForTest(
-			func() (string, error) { return "0123456789ab", nil },
-			func() bool { return false },
-		)
-		t.Cleanup(restore)
-		if opts := certSANOptions(cfg); opts.Hostname != "0123456789ab" {
-			t.Fatalf("Hostname = %q", opts.Hostname)
-		}
+		probeAdvertisedHost(t, cfg, "0123456789ab", "0123456789ab", false)
 	})
+}
+
+func probeAdvertisedHost(t *testing.T, cfg *config.Config, host, want string, inside bool) {
+	t.Helper()
+	restore := advertise.SetHostProbeForTest(
+		func() (string, error) { return host, nil },
+		func() bool { return inside },
+	)
+	t.Cleanup(restore)
+	if opts := certSANOptions(cfg); opts.Hostname != want {
+		t.Fatalf("Hostname = %q", opts.Hostname)
+	}
 }

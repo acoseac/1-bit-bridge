@@ -143,8 +143,15 @@ func TestDoctorCertSANsAreUnwiredWithoutAConfig(t *testing.T) {
 // Asserted structurally: every call site names certSANOptions, and none
 // of them reaches for the advertise gatherers directly.
 func TestCertSANOptionsIsWhatEveryCertPathMints(t *testing.T) {
-	// The gather's own output, so the assertion below is about a helper
-	// that really produces a SAN set rather than a name.
+	assertCertSANOptionsReadsThisHost(t)
+	assertCertPathsCallCertSANOptions(t)
+}
+
+// assertCertSANOptionsReadsThisHost checks the gather's own output, so
+// the assertion is about a helper that really produces a SAN set rather
+// than a name.
+func assertCertSANOptionsReadsThisHost(t *testing.T) {
+	t.Helper()
 	opts := certSANOptions(&config.Config{CustomEndpoints: []string{"https://bridge.example.test:7788"}})
 	if !containsName(opts.ExtraDNSNames, "bridge.example.test") {
 		t.Fatalf("certSANOptions dropped the custom endpoint host: %v", opts.ExtraDNSNames)
@@ -159,13 +166,17 @@ func TestCertSANOptionsIsWhatEveryCertPathMints(t *testing.T) {
 			t.Errorf("certSANOptions Hostname = %q, want this host's %q", opts.Hostname, host)
 		}
 	}
+}
 
+// assertCertPathsCallCertSANOptions requires every cert path to name
+// certSANOptions. readPackageFile blanks comments AND string literals,
+// for the reason this package's other scan guards record: the commentary
+// beside a rule names the identifiers the rule forbids, so an
+// unstripped scan finds its own explanation. Both anchors below
+// are identifiers, which survive the strip.
+func assertCertPathsCallCertSANOptions(t *testing.T) {
+	t.Helper()
 	for _, file := range []string{"main.go", "init.go", "cert.go", "doctor.go"} {
-		// readPackageFile blanks comments AND string literals, for the
-		// reason this package's other scan guards record: the commentary
-		// beside a rule names the identifiers the rule forbids, so an
-		// unstripped scan finds its own explanation. Both anchors below
-		// are identifiers, which survive the strip.
 		src := readPackageFile(t, file)
 		if !strings.Contains(src, "certSANOptions(") {
 			t.Errorf("%s does not go through certSANOptions", file)

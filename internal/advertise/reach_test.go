@@ -107,36 +107,28 @@ func TestAChosenHostnameInsideDockerIsPublished(t *testing.T) {
 }
 
 func TestCertHostnameOmitsAGeneratedContainerName(t *testing.T) {
-	t.Run("generated", func(t *testing.T) {
-		restore := SetHostProbeForTest(
-			func() (string, error) { return "0123456789ab", nil },
-			func() bool { return true },
-		)
-		t.Cleanup(restore)
-		if got := CertHostname(); got != "" {
-			t.Fatalf("CertHostname = %q", got)
-		}
-	})
-	t.Run("chosen", func(t *testing.T) {
-		restore := SetHostProbeForTest(
-			func() (string, error) { return "musicbox", nil },
-			func() bool { return true },
-		)
-		t.Cleanup(restore)
-		if got := CertHostname(); got != "musicbox" {
-			t.Fatalf("CertHostname = %q", got)
-		}
-	})
-	t.Run("outside", func(t *testing.T) {
-		restore := SetHostProbeForTest(
-			func() (string, error) { return "0123456789ab", nil },
-			func() bool { return false },
-		)
-		t.Cleanup(restore)
-		if got := CertHostname(); got != "0123456789ab" {
-			t.Fatalf("CertHostname = %q", got)
-		}
-	})
+	cases := []struct {
+		name   string
+		host   string
+		inside bool
+		want   string
+	}{
+		{name: "generated", host: "0123456789ab", inside: true, want: ""},
+		{name: "chosen", host: "musicbox", inside: true, want: "musicbox"},
+		{name: "outside", host: "0123456789ab", inside: false, want: "0123456789ab"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := SetHostProbeForTest(
+				func() (string, error) { return tc.host, nil },
+				func() bool { return tc.inside },
+			)
+			t.Cleanup(restore)
+			if got := CertHostname(); got != tc.want {
+				t.Fatalf("CertHostname = %q", got)
+			}
+		})
+	}
 }
 
 func TestADefaultDockerBridgeAddressInsideDockerIsNotPublished(t *testing.T) {

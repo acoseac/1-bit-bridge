@@ -324,6 +324,38 @@ func ensurePrimaryFirst(primary string, alternates []string) []string {
 	return out
 }
 
+// publicBridgeURL is the public-mode primary. The second result is
+// false when that mode names neither a domain nor a custom endpoint,
+// and the caller then keeps the LAN primary.
+func publicBridgeURL(cfg *config.Config, port string) (string, bool) {
+	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+		if declared := declaredEndpointForHost(cfg.CustomEndpoints, d); declared != "" {
+			return explicitHTTPSPort(declared), true
+		}
+		// Emit the port EXPLICITLY, including :443. The iOS app
+		// (≤ the build that fixes this) defaults a port-less bridge
+		// URL to 7788 (the LAN listenAddress default), which dials
+		// the wrong port on a public bridge and times out. Baking
+		// the real port into the dial URL + QR sidesteps that on
+		// already-shipped apps; newer apps keep working too.
+		return httpsScheme + d + ":" + port, true
+	}
+	// Left VERBATIM, unlike the declared-endpoint branch above. That
+	// one replaces a form that always named its port, so dropping
+	// the port there would re-open the iOS 7788 bug; this one has
+	// returned the operator's string unchanged since it was written,
+	// and it is reached only with NO autocert domain — a state
+	// Validate refuses in public mode. Normalising a path nothing
+	// takes, to fix a bug on it, is a behaviour change with no
+	// deployment behind it.
+	for _, e := range cfg.CustomEndpoints {
+		if e = strings.TrimSpace(e); e != "" {
+			return e, true
+		}
+	}
+	return "", false
+}
+
 // defaultBridgeURL is the best-guess URL the admin UI pre-fills in the
 // pairing modal.
 //
@@ -367,30 +399,8 @@ func defaultBridgeURL(cfg *config.Config) string {
 		port = "7788"
 	}
 	if cfg.IsPublic() {
-		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
-			if declared := declaredEndpointForHost(cfg.CustomEndpoints, d); declared != "" {
-				return explicitHTTPSPort(declared)
-			}
-			// Emit the port EXPLICITLY, including :443. The iOS app
-			// (≤ the build that fixes this) defaults a port-less bridge
-			// URL to 7788 (the LAN listenAddress default), which dials
-			// the wrong port on a public bridge and times out. Baking
-			// the real port into the dial URL + QR sidesteps that on
-			// already-shipped apps; newer apps keep working too.
-			return httpsScheme + d + ":" + port
-		}
-		// Left VERBATIM, unlike the declared-endpoint branch above. That
-		// one replaces a form that always named its port, so dropping
-		// the port there would re-open the iOS 7788 bug; this one has
-		// returned the operator's string unchanged since it was written,
-		// and it is reached only with NO autocert domain — a state
-		// Validate refuses in public mode. Normalising a path nothing
-		// takes, to fix a bug on it, is a behaviour change with no
-		// deployment behind it.
-		for _, e := range cfg.CustomEndpoints {
-			if e = strings.TrimSpace(e); e != "" {
-				return e
-			}
+		if u, ok := publicBridgeURL(cfg, port); ok {
+			return u
 		}
 	}
 	host, docker := advertise.PairingHost()

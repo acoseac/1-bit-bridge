@@ -76,35 +76,32 @@ type errHost string
 
 func (e errHost) Error() string { return string(e) }
 
+func refuseUndialableMint(t *testing.T, h http.Handler, srv *Server, body map[string]string) {
+	t.Helper()
+	var apiErr struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	code := doJSON(t, h, "POST", "/api/tokens", body, &apiErr)
+	if code != http.StatusBadRequest || apiErr.Error != "pairing-url" {
+		t.Fatalf("mint %v: status %d error %q message %q", body, code, apiErr.Error, apiErr.Message)
+	}
+	if apiErr.Message != advertise.PairingNeedsEndpoint {
+		t.Fatalf("message = %q", apiErr.Message)
+	}
+	if n := len(srv.deps.Auth.List()); n != 0 {
+		t.Fatalf("mint wrote %d tokens", n)
+	}
+}
+
 func TestAContainerMintRefusesAnUndialableURL(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
 	containerProbe(t, "0123456789ab", true)
 
-	var apiErr struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
-	}
-	refuse := func(body map[string]string) {
-		t.Helper()
-		apiErr = struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-		}{}
-		code := doJSON(t, h, "POST", "/api/tokens", body, &apiErr)
-		if code != http.StatusBadRequest || apiErr.Error != "pairing-url" {
-			t.Fatalf("mint %v: status %d error %q message %q", body, code, apiErr.Error, apiErr.Message)
-		}
-		if apiErr.Message != advertise.PairingNeedsEndpoint {
-			t.Fatalf("message = %q", apiErr.Message)
-		}
-		if n := len(srv.deps.Auth.List()); n != 0 {
-			t.Fatalf("mint wrote %d tokens", n)
-		}
-	}
-	refuse(map[string]string{"name": "iPhone"})
-	refuse(map[string]string{"name": "iPhone", "url": "https://localhost:7788"})
-	refuse(map[string]string{"name": "iPhone", "url": "https://0123456789ab.local:7788"})
+	refuseUndialableMint(t, h, srv, map[string]string{"name": "iPhone"})
+	refuseUndialableMint(t, h, srv, map[string]string{"name": "iPhone", "url": "https://localhost:7788"})
+	refuseUndialableMint(t, h, srv, map[string]string{"name": "iPhone", "url": "https://0123456789ab.local:7788"})
 
 	var mint pairResult
 	code := doJSON(t, h, "POST", "/api/tokens", map[string]string{
@@ -119,10 +116,10 @@ func TestAContainerMintRefusesAnUndialableURL(t *testing.T) {
 		t.Fatalf("tokens = %+v", toks)
 	}
 
-	apiErr = struct {
+	var apiErr struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
-	}{}
+	}
 	code = doJSON(t, h, "POST", "/api/tokens/"+mint.ID+"/rotate", map[string]string{
 		"url": "https://localhost:7788",
 	}, &apiErr)

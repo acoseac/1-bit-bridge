@@ -17,6 +17,7 @@ const PairingNeedsEndpoint = "set BRIDGE_CUSTOM_ENDPOINTS to this host's address
 var containerID = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 var (
+	// 172.17.0.0/16 is Docker's default bridge. Safe to name: the walk drops it only while /.dockerenv is present.
 	dockerBridge = mustCIDR("172.17.0.0/16")
 	ulaRange     = mustCIDR("fc00::/7")
 )
@@ -126,6 +127,42 @@ func omitFromWalk(iface net.Interface, ip net.IP, docker bool) bool {
 	return false
 }
 
+// skipInterface reports whether the walk passes over this interface
+// before it looks at the addresses.
+func skipInterface(iface net.Interface) bool {
+	if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		return true
+	}
+	// Windows Hyper-V / WSL / VirtualBox / VMware host
+	// virtual switches enumerate as up interfaces with
+	// 192.168.x.1 host-only IPs. iOS can't route to them,
+	// and shipping them in /v1/health just produces red
+	// "request timed out" rows in the device's endpoint
+	// list. Drop at the source.
+	return isVirtualSwitchInterface(iface.Name)
+}
+
+// skipAddress reports whether the walk passes over this address.
+// ok is false when the address could not be read as an IP, and that
+// case returns before the IP is used.
+func skipAddress(iface net.Interface, ip net.IP, ok, docker bool) bool {
+	if !ok || ip.IsLoopback() {
+		return true
+	}
+	// Link-local addresses (IPv4 169.254/16, IPv6 fe80::/10)
+	// are NOT useful across-device — IPv4 link-local only
+	// appears when DHCP failed, and IPv6 fe80:: requires a
+	// `%zone-id` the bridge can't emit for a remote client.
+	// Shipping them in `/v1/health` just pollutes the iOS
+	// selector with URLs that will always fail. mDNS still
+	// advertises link-local on purpose for its own transport
+	// — that's a different use case.
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+	return omitFromWalk(iface, ip, docker)
+}
+
 // eachUsableAddr visits every address Endpoints and the SAN walk both
 // judge: up, not loopback, not a virtual switch, not link-local, and
 // not an address omitFromWalk drops. It returns false when the
@@ -138,39 +175,15 @@ func eachUsableAddr(fn func(net.Interface, net.IP)) bool {
 	}
 	docker := inDocker()
 	for _, ia := range ifaces {
-		iface := ia.iface
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if isVirtualSwitchInterface(iface.Name) {
-			// Windows Hyper-V / WSL / VirtualBox / VMware host
-			// virtual switches enumerate as up interfaces with
-			// 192.168.x.1 host-only IPs. iOS can't route to them,
-			// and shipping them in /v1/health just produces red
-			// "request timed out" rows in the device's endpoint
-			// list. Drop at the source.
+		if skipInterface(ia.iface) {
 			continue
 		}
 		for _, addr := range ia.addrs {
 			ip, ok := ipFromAddr(addr)
-			if !ok || ip.IsLoopback() {
+			if skipAddress(ia.iface, ip, ok, docker) {
 				continue
 			}
-			// Link-local addresses (IPv4 169.254/16, IPv6 fe80::/10)
-			// are NOT useful across-device — IPv4 link-local only
-			// appears when DHCP failed, and IPv6 fe80:: requires a
-			// `%zone-id` the bridge can't emit for a remote client.
-			// Shipping them in `/v1/health` just pollutes the iOS
-			// selector with URLs that will always fail. mDNS still
-			// advertises link-local on purpose for its own transport
-			// — that's a different use case.
-			if ip.IsLinkLocalUnicast() {
-				continue
-			}
-			if omitFromWalk(iface, ip, docker) {
-				continue
-			}
-			fn(iface, ip)
+			fn(ia.iface, ip)
 		}
 	}
 	return true
