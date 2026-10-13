@@ -15,10 +15,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
-// libraryRootWalks names every function in the bridge that hands
-// filepath.WalkDir a directory that can be a configured library root. Each
-// must start the walk from WalkableRoot's answer: it calls WalkableRoot
-// itself, or calls the helper of its own file named here, which does.
+// libraryRootWalks names every function in the bridge that walks a directory
+// that can be a configured library root. Each must start the walk from
+// WalkableRoot's answer: it calls WalkableRoot itself, or calls the helper
+// of its own file named here, which does. The walk of that answer is
+// fsutil.WalkConfigured.
 //
 // Walked as the root the config names, a root that is a link to a directory
 // was one entry that is not a directory. That is how the scanner indexed
@@ -36,8 +37,12 @@ var libraryRootWalks = map[string]string{
 }
 
 // otherTreeWalks names every other function that walks a directory tree,
-// with what it walks: none of them is ever handed a library root.
+// with what it walks. WalkConfigured and the chain walk it uses are the
+// implementation behind WalkableRoot's answer; the callers above are what
+// start from WalkableRoot.
 var otherTreeWalks = map[string]string{
+	"internal/fsutil/walkroot.go WalkConfigured":           "the path WalkableRoot returned; a separator path whose chain names a directory is read there and reported under that path",
+	"internal/fsutil/walkroot.go walkResolvedChain":        "the directory a separator path's link chain names, reported under the configured path",
 	"internal/doctor/cgroup.go findCgroups":                "the cgroup2 mount",
 	"internal/trash/restore.go (*Manager).pruneEmptyStamp": "one stamp directory of a root's trash, below the root",
 	"internal/trash/restore.go (*Manager).Sweep":           "one stamp directory of a root's trash, below the root",
@@ -49,12 +54,12 @@ var otherTreeWalks = map[string]string{
 }
 
 // TestEveryWalkOfALibraryRootStartsFromWalkableRoot sweeps the bridge's
-// production code for every call of filepath.WalkDir, filepath.Walk and
-// fs.WalkDir, and requires each calling function to be named in one of the
-// two tables above: a walk nobody has classified is the one that repeats the
-// defect. A library-root walk must reach WalkableRoot. A table entry that
-// matches no call fails too, so the tables cannot keep describing code that
-// has moved.
+// production code for every call of filepath.WalkDir, filepath.Walk,
+// fs.WalkDir and fsutil.WalkConfigured, and requires each calling function
+// to be named in one of the two tables above: a walk nobody has classified
+// is the one that repeats the defect. A library-root walk must reach
+// WalkableRoot. A table entry that matches no call fails too, so the tables
+// cannot keep describing code that has moved.
 //
 // It sees that the function reaches WalkableRoot, not that the answer is the
 // path it walks; the tests of each walk (TestScanner_ALinkedRootIsWalkedThrough
@@ -183,14 +188,15 @@ func (s *treeWalkSweep) parse(root, path string) error {
 	fsutilName, _ := importName(file, "github.com/acoseac/1-bit-bridge/internal/fsutil")
 	filepathName, hasFilepath := importName(file, "path/filepath")
 	fsName, hasFS := importName(file, "io/fs")
-	if !hasFilepath && !hasFS {
+	if !hasFilepath && !hasFS && fsutilName == "" {
 		return nil
 	}
 	for _, decl := range file.Decls {
 		walks := false
 		ast.Inspect(decl, func(n ast.Node) bool {
 			walks = walks || (hasFilepath && (isSelectorCall(n, filepathName, "WalkDir") || isSelectorCall(n, filepathName, "Walk"))) ||
-				(hasFS && isSelectorCall(n, fsName, "WalkDir"))
+				(hasFS && isSelectorCall(n, fsName, "WalkDir")) ||
+				(fsutilName != "" && isSelectorCall(n, fsutilName, "WalkConfigured"))
 			return !walks
 		})
 		if !walks {

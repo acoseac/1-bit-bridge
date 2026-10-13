@@ -849,7 +849,8 @@ lost my library."
   walk follows a folder only when it IS a root, so it enqueues nothing the
   manifest does not hold. `TestEveryWalkOfALibraryRootStartsFromWalkableRoot`
   requires every production function that calls `filepath.WalkDir`,
-  `filepath.Walk` or `fs.WalkDir` to be classified: the five root walks
+  `filepath.Walk`, `fs.WalkDir` or `fsutil.WalkConfigured` to be classified:
+  the five root walks
   (`walkRoot`, `ScanSubtree`, the watcher's `addTree`, the doctor's
   `countDirs`, the upscale folder walk) must reach `WalkableRoot`, and every
   other names what it walks. It sees the call, not that its answer is what
@@ -879,6 +880,32 @@ lost my library."
   (`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees`,
   `TestWalkableRootRefusesAChainThatDoesNotNameADirectory`,
   `TestWalkableRootKeepsTheSlashLstatErrorWhenTheChainDoesNotResolve`.)
+- **The walk of the string `WalkableRoot` returns is `WalkConfigured`**
+  (2026-10-13, backlog B358). `filepath.WalkDir` Lstats that string itself
+  and, when the Lstat is not a directory, invokes the callback for the root
+  and returns without reading it. On the CI image that produced the
+  disagreement above, that second Lstat answered "not a directory" after
+  `WalkableRoot` had already returned the separator path, and the walk
+  visited nothing (`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees`,
+  run 38348380982). A walk that sees the root and nothing under it is an
+  empty library to the scanner. `WalkConfigured`, when the path ends in a
+  separator and `ResolveLinks` names a directory, walks that directory and
+  reports every path under the configured spelling, the root callback
+  included. The resolved directory keeps a trailing separator when removing
+  it would leave nothing or only a volume name, so a chain that resolves to
+  the filesystem root is walked at that root (`resolvedWalkRoot`). Removing
+  the separator from that root leaves nothing, or the volume name, and the
+  volume name is that drive's current directory
+  (`TestAChainThatResolvesToTheVolumeRootIsWalkedThere`; the chain resolves
+  through `resolveLinksForWalk` and the walk through `walkResolvedDirectory`,
+  so the test does not list the volume). When that resolution does not name
+  a directory, the callback is invoked once for the Lstat of the string, which is what
+  `filepath.WalkDir` does for a file and for an Lstat that fails. The five
+  root walks use it: `walkRoot`, `ScanSubtree`, the watcher's walk, the
+  doctor's directory count, and the upscale folder walk. The watcher still
+  registers watches at the resolved directory when `EvalSymlinks` names
+  one; `WalkConfigured` is then a plain `WalkDir` of that directory. No
+  `ExtractorVersion` bump.
 - **A subtree scan OF the root runs the clean-empty guard Scan runs, and a
   line about a linked root names what it links to** (2026-09-28). The
   owning-root audit answers a SUBTREE that is not there; nothing covered the

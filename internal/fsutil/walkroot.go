@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrRootNotEntered is the cause, inside an *fs.PathError, of WalkableRoot's
@@ -44,7 +45,8 @@ var ErrRootNotEntered = errors.New("links to a directory the walk cannot enter")
 // configured spelling, and a multi-root basename stays the configured root's,
 // never its target's. The callback is handed the returned string itself for
 // the root entry, so a caller that tells the root apart by string identity
-// compares against the returned path, not against root.
+// compares against the returned path, not against root. WalkConfigured is
+// that walk.
 //
 // filepath.EvalSymlinks is not the path the walk is given: since Go 1.23 it
 // resolves no Windows junction and no mounted folder, which are not
@@ -60,7 +62,11 @@ var ErrRootNotEntered = errors.New("links to a directory the walk cannot enter")
 // while Stat of the same root answered a directory (backlog B257, a link to
 // a link on CI). The chain is resolved, and when that names a directory the
 // walk is still given root with a separator appended. When the two answers
-// agree, the chain is not resolved.
+// agree, the chain is not resolved. WalkConfigured then reads that resolved
+// directory and reports every path under the separator path. filepath.WalkDir
+// of the separator path is a second Lstat, and that Lstat has answered "not
+// a directory" after WalkableRoot had already returned the separator path,
+// so the callback saw the root and nothing below it (backlog B358).
 //
 // An ordinary directory, and anything that is not a directory even through a
 // link, is returned unchanged, so those walks are exactly what they were.
@@ -110,7 +116,7 @@ func walkableRoot(root string, lstat, stat func(string) (fs.FileInfo, error)) (s
 	// Stat already said this root is a directory. The trailing-slash Lstat
 	// disagreed (not a directory, or an error). A link chain can do that
 	// while the target is a directory. Resolve the chain and decide from
-	// the resolved directory. The walk still starts at walkPath, the
+	// the resolved directory. The string returned is still walkPath, the
 	// configured spelling. os.Stat of the resolved path is the real stat:
 	// the stat passed in stands for the root, and a test stub that answers
 	// a directory for every path must not turn a failed resolution into a walk.
@@ -128,12 +134,141 @@ func walkableRoot(root string, lstat, stat func(string) (fs.FileInfo, error)) (s
 // chainResolvesToDir reports whether root, followed through every link,
 // names a directory. The path it resolves is never what the walk is given.
 func chainResolvesToDir(root string) bool {
-	resolved, err := ResolveLinks(root)
+	_, ok := resolvedDirectory(root)
+	return ok
+}
+
+// resolveLinksForWalk, when set, is ResolveLinks for resolvedDirectory.
+// Nil in production. A test sets it so a chain resolves to a volume root
+// without the walk listing that volume.
+var resolveLinksForWalk func(string) (string, error)
+
+// walkResolvedDirectory, when set, walks the directory the chain resolved
+// to. Nil in production, which uses filepath.WalkDir. A test sets it so
+// that walk does not list a volume root.
+var walkResolvedDirectory func(string, fs.WalkDirFunc) error
+
+// resolvedDirectory is the directory ResolveLinks names for root, when it
+// names one. The stat is os.Stat of that path, never the root's stat.
+func resolvedDirectory(root string) (string, bool) {
+	resolve := ResolveLinks
+	if resolveLinksForWalk != nil {
+		resolve = resolveLinksForWalk
+	}
+	resolved, err := resolve(root)
 	if err != nil {
-		return false
+		return "", false
 	}
 	info, err := os.Stat(resolved)
-	return err == nil && info.IsDir()
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return resolved, true
+}
+
+// WalkConfigured walks walkPath, the string WalkableRoot returned.
+// A directory is filepath.WalkDir of that string. A path that ends in a
+// separator, whose chain names a directory, is read at that directory, and
+// every path the callback sees is spelled under walkPath: the root entry is
+// walkPath itself, and each path below it is filepath.Join of walkPath and
+// the path relative to the resolved directory. filepath.WalkDir of the
+// separator path is not used for that case. Its own Lstat of the path has
+// answered "not a directory" for a chain WalkableRoot had accepted, and the
+// callback then saw the root alone. Anything else is one callback for the
+// Lstat of walkPath, which is what filepath.WalkDir does for a file and for
+// an Lstat that fails.
+func WalkConfigured(walkPath string, fn fs.WalkDirFunc) error {
+	if walked, err := walkResolvedChain(walkPath, fn); walked {
+		return err
+	}
+	info, err := lstatWalkPath(walkPath, os.Lstat)
+	if err == nil && info != nil && info.IsDir() {
+		return filepath.WalkDir(walkPath, fn)
+	}
+	return walkLstatAnswer(walkPath, info, err, fn)
+}
+
+// walkResolvedChain walks the directory a separator path's chain names.
+// walked is false when walkPath does not end in a separator, when trimming
+// the separator leaves nothing or only a volume name, or when the chain
+// does not name a directory: the caller then walks walkPath itself.
+// The resolved directory is trimmed the same way, so a chain that names
+// the volume root is walked there.
+func walkResolvedChain(walkPath string, fn fs.WalkDirFunc) (bool, error) {
+	root := strings.TrimRight(walkPath, string(filepath.Separator))
+	// "/" trims to nothing, and a volume root ("D:\") trims to the volume
+	// name. ResolveLinks of either is not that directory.
+	if root == walkPath || root == "" || root == filepath.VolumeName(walkPath) {
+		return false, nil
+	}
+	resolved, ok := resolvedDirectory(root)
+	if !ok {
+		return false, nil
+	}
+	resolved = resolvedWalkRoot(resolved)
+	report := func(path string, d fs.DirEntry, err error) error {
+		reported, repErr := pathUnder(walkPath, resolved, path)
+		if repErr != nil {
+			return repErr
+		}
+		return fn(reported, d, err)
+	}
+	if walkResolvedDirectory != nil {
+		err := walkResolvedDirectory(resolved, report)
+		return true, err
+	}
+	err := filepath.WalkDir(resolved, report)
+	return true, err
+}
+
+// resolvedWalkRoot is resolved with a trailing separator removed, except
+// when that removal leaves nothing or only a volume name. A chain that
+// names the volume root is walked there: trimming the separator off it
+// leaves nothing, or the volume name, and the volume name is that drive's
+// current directory.
+func resolvedWalkRoot(resolved string) string {
+	trimmed := strings.TrimRight(resolved, string(filepath.Separator))
+	if trimmed == "" || trimmed == filepath.VolumeName(resolved) {
+		return resolved
+	}
+	return trimmed
+}
+
+// pathUnder is path spelled under walkPath. The root entry is walkPath
+// itself, so a caller that compares the root callback with the string
+// WalkableRoot returned still matches.
+func pathUnder(walkPath, resolved, path string) (string, error) {
+	if path == resolved {
+		return walkPath, nil
+	}
+	rel, err := filepath.Rel(resolved, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", &fs.PathError{Op: "walk", Path: path, Err: fs.ErrInvalid}
+	}
+	return filepath.Join(walkPath, rel), nil
+}
+
+// walkLstatAnswer invokes fn once for the Lstat of walkPath and drops
+// SkipDir and SkipAll, as filepath.WalkDir does when the root is not a
+// directory or the Lstat fails.
+func walkLstatAnswer(walkPath string, info fs.FileInfo, err error, fn fs.WalkDirFunc) error {
+	if err != nil || info == nil {
+		if err == nil {
+			err = &fs.PathError{Op: "lstat", Path: walkPath, Err: fs.ErrInvalid}
+		}
+		err = fn(walkPath, nil, err)
+	} else {
+		err = fn(walkPath, fs.FileInfoToDirEntry(info), nil)
+	}
+	// Identity, as filepath.WalkDir compares these sentinels. A wrapped
+	// SkipDir is not a skip there, and it is not a skip here.
+	if err == fs.SkipDir || err == fs.SkipAll { //nolint:errorlint
+		return nil
+	}
+	return err
 }
 
 // lstatWalkPath is the trailing-slash Lstat. The package seam replaces it

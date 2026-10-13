@@ -41566,3 +41566,65 @@ mutex. `startWatcher` arms it before the loop goroutine starts.
 `TestADeletedFlushSignalStillWatchesANewFolder` deletes the file, waits
 until the same name is back, then makes one folder and wants that folder
 watched as one more open file. After the watcher stops the name is gone.
+
+## 2026-10-13 — a separator path WalkableRoot accepted is walked at the directory its chain names (backlog B358)
+
+`TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees` visited
+nothing once on CI macos-26-arm64 (run 38348380982, job 115134948994).
+`WalkableRoot` had returned `chain/`. The test's "not a directory" subtest
+forces `walkableRootSlashLstat` to a non-directory, then walked that string
+with `filepath.WalkDir`. Go 1.26.6's `WalkDir` Lstats its root and, when
+that Lstat is not a directory, calls the callback for the root and returns
+without `ReadDir` (`path/filepath/path.go`). `walkedNames` skips the root,
+so the visit list is empty and the walk error is nil, which is the CI
+message. The same image is the one B257 measured, where
+`os.Lstat(chain+"/")` answered "not a directory" while `os.Stat(chain)`
+answered a directory. Production `walkRoot`, `ScanSubtree`, the watcher,
+the doctor and the upscale folder walk handed `WalkableRoot`'s answer to
+`filepath.WalkDir`, so a chain `WalkableRoot` had accepted could be read
+as an empty library.
+
+On this host (darwin 27.0.0) that empty visit did not recur. Thirty idle
+iterations of the seam sequence walked three names each time, and the walk
+root's mode was a directory. Thirty cold `unix.Lstat` calls of a fresh
+`chain/` were a directory on the first lookup and the second, and the
+`/var/folders` and `/private/var/folders` spellings agreed. The Go
+file-symlink example (`ln -s dir/../file`, then Lstat of the link with a
+trailing slash) was "not a directory" on both lookups, 30 of 30: Darwin 27
+applies the trailing-slash restriction on the first lookup, where Go's
+`os/root_test.go` documents Darwin 25.4 answering the first and refusing
+the second. Under CPU load (twelve `yes` processes), the disagreement test
+passed 30 of 30.
+
+`WalkConfigured` is the walk of the string `WalkableRoot` returns. A path
+that ends in a separator, whose `ResolveLinks` names a directory, is read
+at that directory, and every path the callback sees is spelled under the
+configured string, the root callback included. The five callers use it.
+`walkedNames` uses it too, so the existing disagreement test pins the
+rewrite on a host whose own Lstat of `chain/` is a directory. A separator
+that trims to nothing (`/`) or to a volume name (`D:\`) stays on the Lstat
+walk: `ResolveLinks` of either is not that directory.
+
+Negative control: `walkResolvedChain` returned false immediately. Both
+subtests failed. "not a directory" visited `[]`. "an error" stopped on
+`trailing-slash lstat`. The failure log's real `os.Lstat(chain/)` was a
+directory (`drwxr-xr-x`), so a fall-through to `filepath.WalkDir` would
+have stayed green on this host. The rewrite was restored by hand before
+the commit.
+
+The resolved directory was trimmed unconditionally. A chain that resolves
+to the volume root was then walked at the empty string, from `/`, or at
+`C:`, from `C:\`, and `C:` is that drive's current directory.
+`resolvedWalkRoot` trims only when the result is non-empty and is not the
+volume name. `TestAChainThatResolvesToTheVolumeRootIsWalkedThere` answers
+`ResolveLinks` through `resolveLinksForWalk` and the walk through
+`walkResolvedDirectory`, so the volume is not listed. Before the trim the
+walk was asked for the empty string on this host, where the volume root is
+`/`. `pathUnder` still reported a child under the configured spelling,
+because it compared against that trimmed string. After the trim the walk
+is asked for `/`, the root callback is the configured path, and the child
+is that path joined with the name `filepath.Rel` returns against the
+volume root. `walkLstatAnswer` keeps `==` for `SkipDir` and `SkipAll`, the
+comparison `filepath.WalkDir` uses: a wrapped skip is not a skip there.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump.

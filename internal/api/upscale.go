@@ -312,7 +312,7 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+redactWalkErr(walkErr))
 			return
 		}
-		walkErr = filepath.WalkDir(walkFrom, func(p string, d os.DirEntry, walkErr error) error {
+		walkErr = fsutil.WalkConfigured(walkFrom, func(p string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				// Log the path that failed so the operator has
 				// something to act on. Returning the error

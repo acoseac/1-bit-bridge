@@ -662,7 +662,7 @@ func walkWatchTree(root string, isConfiguredRoot bool, visit func(path string, d
 		// surfaces" rule above.
 		return "", err
 	}
-	return rootWatch, filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
+	return rootWatch, fsutil.WalkConfigured(walkFrom, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == walkFrom {
 				// Failure to even open the root — surface so the
