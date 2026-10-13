@@ -41400,12 +41400,17 @@ option. The console request would then sit behind whatever the walk
 still had left, which on a large library is minutes, and a test that
 parks the scan inside the extract hook cannot take that lock: the hook
 runs on the scan that already holds it. Cancel-and-wait drains only the
-extracts already in flight. `CommitRootChange` cancels, waits until that
-scan has released the lock, cancels once more so a scan that won the
-epoch race and is blocked on the lock returns without reading the roots,
-then runs the wipe or the prefix delete and `SetRoots`. The useful scan
-the handler starts is stored into the in-flight slot while the lock is
-held, and the finishing scan's compare-and-swap does not clear it.
+extracts already in flight. `CommitRootChange` cancels the scan that
+holds the lock and waits until that scan has released it. A scan
+registers as in flight only once it holds the lock, so one waiting on
+the lock is not cancelled: it loaded the epoch before the wait, and the
+epoch check returns `context.Canceled` before it reads the roots. The
+second cancel, after the lock, cancelled only a scan that had published
+while waiting, and that publish no longer happens, so the second cancel
+is gone. Then the wipe or the prefix delete and `SetRoots` run. The
+useful scan the handler starts stores itself only once it takes the
+lock after the change returns, and the finishing scan clears the slot
+with compare-and-swap before it unlocks.
 
 A wipe or prefix delete that fails still starts a scan. The in-flight
 one was cancelled, and the roots did not move, so that scan is what
@@ -41432,3 +41437,12 @@ tests failed on every shape (`go test -count=1`):
   through the handler
 
 The serialisation was restored and the same run passed.
+
+`beginCancellable` ran before the lock, so a second scan replaced the
+one holding the lock in the single in-flight slot.
+`TestAWaitingScanDoesNotHideTheScanARootChangeCancels` failed on that
+registration (`go test -count=1`): at 30s, `root change did not return
+while a scan waited on the lock`. Publishing after the epoch check,
+still under the lock, makes the same test pass. Putting the publish
+back before the lock turns it red again on that same line, and that
+move was restored.

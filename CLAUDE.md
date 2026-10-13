@@ -1513,18 +1513,21 @@ lost my library."
   the change would block the console request for the rest of a multi-minute
   walk, and it deadlocks a scan parked in the extract hook (the hook runs
   while the scan holds the lock). `Scanner.CommitRootChange` bumps an
-  epoch, cancels the in-flight scan, waits for the lock, cancels again so
-  a scan that published itself and is waiting on the lock leaves without
-  reading the roots, then runs the wipe or prefix delete, the config save
-  and `SetRoots`. The handler's post-change scan starts inside that call
-  and is not cancelled: the finishing scan clears the slot with
-  compare-and-swap. A cancelled scan reports `context.Canceled` and does
-  not log it as a failed background, initial or periodic scan. Rows the
+  epoch, cancels the scan that holds the scanner lock, and waits for that
+  lock. A scan registers as in flight only once it holds the scanner lock,
+  so a scan waiting on the lock is not the one cancelled: it sees the new
+  epoch and returns without reading the roots. Then the wipe or prefix
+  delete, the config save and `SetRoots` run. The handler's post-change
+  scan starts inside that call and is not cancelled: the finishing scan
+  clears the slot with compare-and-swap before it unlocks. A cancelled
+  scan reports `context.Canceled` and does not log it as a failed
+  background, initial or periodic scan. Rows the
   cancelled scan already committed are removed by the wipe or the prefix
   delete, which run after the scan returns. The request holds the admin
   lock for that drain; it does not hold the store lock while it waits.
   (`TestARootChangeDuringAScanDoesNotLeaveTheOldRows`,
-  `TestARootChangeThroughTheHandlerDoesNotLeaveTheOldRows`.)
+  `TestARootChangeThroughTheHandlerDoesNotLeaveTheOldRows`,
+  `TestAWaitingScanDoesNotHideTheScanARootChangeCancels`.)
 - **`wal_checkpoint(TRUNCATE)` runs AFTER `VACUUM`, never only before.** In WAL
   mode the vacuum's own output lands in the WAL, so without the post-checkpoint
   the file does not shrink by a byte and peak disk RISES. Measured: 5,623,808 →

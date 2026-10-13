@@ -140,3 +140,158 @@ func runRootChangeDuringScan(t *testing.T, initial, withFiles, present, absent [
 		}
 	}
 }
+
+// TestAWaitingScanDoesNotHideTheScanARootChangeCancels parks scan A on the
+// extract hook, then starts scan B and holds it at the scanner lock. A root
+// change must cancel A. A scan that has not taken the lock must not be the
+// one the change cancels, or the change waits out A.
+func TestAWaitingScanDoesNotHideTheScanARootChangeCancels(t *testing.T) {
+	store, sc, abs := openThreeRootLibrary(t)
+	defer store.Close()
+
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	parked, scanDone := sc.StartParkedScanForTests(releaseCh)
+	t.Cleanup(func() { sc.SetAfterExtractHookForTests(nil) })
+	wait := &rootChangeJoin{release: release, scanDone: scanDone}
+	defer wait.finish(t)
+
+	waitForSignal(t, parked, "scan did not reach the extract hook")
+
+	atLock := make(chan struct{})
+	var once sync.Once
+	sc.SetBeforeScanLockForTests(func() { once.Do(func() { close(atLock) }) })
+	t.Cleanup(func() { sc.SetBeforeScanLockForTests(nil) })
+	wait.bDone = startBlockedScan(sc)
+	waitForSignal(t, atLock, "second scan did not reach the lock")
+
+	wait.changed = dropRootWhileScanning(t, store, sc, abs)
+	waitForSignal(t, wait.changed, "root change did not return while a scan waited on the lock")
+
+	release()
+	waitScanOutcome(t, scanDone, "parked scan did not finish")
+	waitScanOutcome(t, wait.bDone, "waiting scan did not finish")
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertRootChangePaths(t, store,
+		[]string{"Keep/Album/01.flac", "Other/Album/01.flac"},
+		[]string{"Drop/Album/01.flac"})
+}
+
+type rootChangeJoin struct {
+	release  func()
+	scanDone <-chan error
+	bDone    <-chan error
+	changed  <-chan struct{}
+}
+
+func (w *rootChangeJoin) finish(t *testing.T) {
+	t.Helper()
+	w.release()
+	waitScanOutcome(t, w.scanDone, "parked scan did not finish")
+	if w.bDone != nil {
+		waitScanOutcome(t, w.bDone, "waiting scan did not finish")
+	}
+	if w.changed != nil {
+		waitForSignal(t, w.changed, "root change did not return while a scan waited on the lock")
+	}
+}
+
+func openThreeRootLibrary(t *testing.T) (*Store, *Scanner, map[string]string) {
+	t.Helper()
+	base := t.TempDir()
+	abs := map[string]string{}
+	var roots []string
+	for _, name := range []string{"Keep", "Drop", "Other"} {
+		dir := filepath.Join(base, name)
+		abs[name] = dir
+		album := filepath.Join(dir, "Album")
+		if err := os.MkdirAll(album, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(album, "01.flac"), []byte("not-a-real-flac"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		roots = append(roots, dir)
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := NewScanner(roots, store, "")
+	sc.SetDeleteThreshold(3)
+	return store, sc, abs
+}
+
+func startBlockedScan(sc *Scanner) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := sc.Scan(context.Background())
+		done <- err
+		close(done)
+	}()
+	return done
+}
+
+func dropRootWhileScanning(t *testing.T, store *Store, sc *Scanner, abs map[string]string) <-chan struct{} {
+	t.Helper()
+	changed := make(chan struct{})
+	go func() {
+		sc.CommitRootChange(func() {
+			if _, err := store.DeleteTracksByPrefix(context.Background(), "Drop/"); err != nil {
+				t.Errorf("root change: %v", err)
+			}
+			sc.SetRoots([]string{abs["Keep"], abs["Other"]})
+		})
+		close(changed)
+	}()
+	return changed
+}
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, timeoutMsg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(30 * time.Second):
+		t.Fatal(timeoutMsg)
+	}
+}
+
+func waitScanOutcome(t *testing.T, done <-chan error, timeoutMsg string) {
+	t.Helper()
+	select {
+	case err, ok := <-done:
+		if !ok {
+			return
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal(timeoutMsg)
+	}
+}
+
+func assertRootChangePaths(t *testing.T, store *Store, present, absent []string) {
+	t.Helper()
+	got, err := store.TrackPaths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, p := range got {
+		have[p] = true
+	}
+	for _, p := range present {
+		if !have[p] {
+			t.Errorf("missing %s in %v", p, got)
+		}
+	}
+	for _, p := range absent {
+		if have[p] {
+			t.Errorf("still present %s in %v", p, got)
+		}
+	}
+}

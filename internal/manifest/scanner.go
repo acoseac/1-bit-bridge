@@ -203,13 +203,17 @@ type Scanner struct {
 	// rootEpoch moves before a root change. A scan loads it before taking
 	// mu and leaves without reading the roots when it has moved.
 	rootEpoch atomic.Uint64
-	// inflight is the scan that holds mu, or the one waiting to take it.
-	// CommitRootChange cancels it. Cleared by that scan's own stop, with
-	// compare-and-swap, so a newer scan's slot stays.
+	// inflight is the scan that holds mu. A scan stores it only after
+	// taking the lock and clears it before unlocking. CommitRootChange
+	// cancels it. Cleared with compare-and-swap, so a newer scan's slot
+	// stays.
 	inflight atomic.Pointer[inflightScan]
 	// afterExtractHook is the per-scanner test hook. Nil falls through to
 	// afterExtractHookForTests.
 	afterExtractHook atomic.Pointer[func(string)]
+	// beforeScanLock runs immediately before Scan or ScanSubtree takes mu.
+	// Nil in production.
+	beforeScanLock atomic.Pointer[func()]
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
@@ -401,8 +405,10 @@ func (s *Scanner) SetRoots(roots []string) {
 }
 
 // beginCancellable publishes a child of parent so CommitRootChange can
-// cancel this scan without cancelling the serve-wide scan context. stop
-// clears the slot only when it is still this run.
+// cancel this scan without cancelling the serve-wide scan context. The
+// caller holds mu. stop clears the slot only when it is still this run,
+// and the caller defers stop ahead of the unlock so the slot is clear
+// before another scan can take the lock.
 func (s *Scanner) beginCancellable(parent context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	run := &inflightScan{ctx: ctx, cancel: cancel}
@@ -441,6 +447,26 @@ func (s *Scanner) SetAfterExtractHookForTests(hook func(string)) {
 		return
 	}
 	s.afterExtractHook.Store(&hook)
+}
+
+// SetBeforeScanLockForTests installs a hook that runs immediately before
+// Scan or ScanSubtree takes the scanner lock. A nil hook clears it.
+// Production does not call this.
+func (s *Scanner) SetBeforeScanLockForTests(hook func()) {
+	if hook == nil {
+		s.beforeScanLock.Store(nil)
+		return
+	}
+	s.beforeScanLock.Store(&hook)
+}
+
+// noteBeforeScanLock runs the test hook, if one is set.
+func (s *Scanner) noteBeforeScanLock() {
+	hook := s.beforeScanLock.Load()
+	if hook == nil || *hook == nil {
+		return
+	}
+	(*hook)()
 }
 
 // StartParkedScanForTests installs the after-extract hook and starts Scan.
@@ -495,11 +521,12 @@ func (s *Scanner) abandonedForRootChange(ctx context.Context, epoch uint64) erro
 }
 
 // CommitRootChange runs fn only after a scan that already read the roots
-// has stopped writing. It cancels that scan and waits for the scanner
-// lock, which the scan holds until its workers have joined. fn then
-// deletes or wipes and calls SetRoots. A scan that takes the lock
-// afterwards sees the new epoch and returns without walking. The useful
-// scan fn starts is left running: this does not cancel again after fn.
+// has stopped writing. It cancels the scan that holds the lock and waits
+// for that lock. A scan registers as in flight only once it holds the
+// lock, so one waiting on the lock is not cancelled: it loaded the epoch
+// before the wait, and the epoch check returns context.Canceled before
+// it reads the roots. fn then deletes or wipes and calls SetRoots. This
+// does not cancel again after fn.
 func (s *Scanner) CommitRootChange(fn func()) {
 	if fn == nil {
 		return
@@ -508,7 +535,6 @@ func (s *Scanner) CommitRootChange(fn func()) {
 	s.cancelInFlightScan()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cancelInFlightScan()
 	fn()
 }
 
@@ -696,16 +722,19 @@ func (s *Scanner) setScanRootBase(roots []string, multiRoot bool) {
 // reads this for its "scanning · X tracks" hint, and the older meaning
 // would briefly over-report on a crash mid-batch.
 func (s *Scanner) Scan(ctx context.Context) (int, error) {
-	ctx, stop := s.beginCancellable(ctx)
-	defer stop()
 	epoch := s.rootEpoch.Load()
+	s.noteBeforeScanLock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Before scanning and activeScans, so a scan a root change has
-	// already superseded does not count as running.
+	// already superseded does not count as running. The publish follows
+	// the check and still precedes every read of the roots: the lock is
+	// held, so a root change cannot move the epoch in between.
 	if err := s.abandonedForRootChange(ctx, epoch); err != nil {
 		return 0, err
 	}
+	ctx, stop := s.beginCancellable(ctx)
+	defer stop()
 	s.scanning.Store(true)
 	s.progress.Store(0)
 	// Seed the stall clock at the start so the walk's lead-in (which
@@ -2370,14 +2399,18 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 // writer goroutine. A subtree scan that resolves to no audio
 // files is a fast no-op.
 func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
-	ctx, stop := s.beginCancellable(ctx)
-	defer stop()
 	epoch := s.rootEpoch.Load()
+	s.noteBeforeScanLock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Before scanning and activeScans, so a scan a root change has
+	// already superseded does not count as running. The publish follows
+	// the check and still precedes every read of the roots.
 	if err := s.abandonedForRootChange(ctx, epoch); err != nil {
 		return 0, err
 	}
+	ctx, stop := s.beginCancellable(ctx)
+	defer stop()
 	// Same per-scan reset rationale as Scan(): each subtree scan starts
 	// with a fresh folder-art single-flight cache and directory listings,
 	// and counts its own unread files.

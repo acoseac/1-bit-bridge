@@ -53,8 +53,11 @@ const (
 	errMsgPersistedNeedsRestart = "so the persisted value cannot take effect until a restart"
 
 	// scanAfterFailedRootWipe is the scan started when a root change
-	// cancelled the walk and the wipe or the prefix delete then failed.
+	// cancelled the walk and the wipe then failed.
 	scanAfterFailedRootWipe = "scan after a failed root wipe"
+	// scanAfterFailedPrefixDelete is the scan started when a root change
+	// cancelled the walk and the prefix delete then failed.
+	scanAfterFailedPrefixDelete = "scan after a failed prefix delete"
 )
 
 // cfgAbort lets a config-mutation fn passed to CfgHolder.Update carry
@@ -1895,7 +1898,7 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 		}
 		carryGen = gen
 	} else if _, err := s.deps.Manifest.DeleteTracksByPrefix(r.Context(), removedBasename+"/"); err != nil {
-		s.spawnBackgroundScan(scanAfterFailedRootWipe)
+		s.spawnBackgroundScan(scanAfterFailedPrefixDelete)
 		writeError(w, http.StatusInternalServerError, "delete-tracks", err.Error())
 		return
 	}
