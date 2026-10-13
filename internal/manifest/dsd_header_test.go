@@ -64,6 +64,54 @@ func TestReadDFFAudioHeaderIgnoresATrailingID3(t *testing.T) {
 	}
 }
 
+func TestAHeaderWithNoAudioDataIsMalformed(t *testing.T) {
+	raw := dsfHeaderBytes(2, 2822400, 1, 1000, 4096, 12)
+	h, err := ReadDSFAudioHeader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.DataBytes != 0 {
+		t.Fatalf("data bytes %d", h.DataBytes)
+	}
+	if err := h.Check(); !errors.Is(err, ErrDSFAudioMalformed) {
+		t.Fatalf("check: %v", err)
+	}
+}
+
+func TestAZeroPayloadDFFNamesNoDuration(t *testing.T) {
+	var body bytes.Buffer
+	if err := dsdtone.WriteDFF(&body, 2822400, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	h, err := ReadDFFAudioHeader(bytes.NewReader(body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := h.DurationSec(); ok {
+		t.Fatalf("duration %.6f", d)
+	}
+}
+
+func TestAnUnknownDFFCompressionNamesNoDuration(t *testing.T) {
+	raw := dffWithCompression(t, "MP4 ")
+	// PROP's declared size is odd, so the chunk is padded before DSD.
+	raw = append(raw, 0)
+	chunk := make([]byte, 12)
+	copy(chunk, "DSD ")
+	var size [8]byte
+	size[5] = 0x15
+	size[6] = 0x8c // 1_411_200 bytes, 2 s of stereo DSD64
+	copy(chunk[4:], size[:])
+	raw = append(raw, chunk...)
+	h, err := ReadDFFAudioHeader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := h.DurationSec(); ok {
+		t.Fatalf("unknown compression reported %.6f", d)
+	}
+}
+
 func TestReadDFFAudioHeaderLeavesDSTWithoutAChunkDuration(t *testing.T) {
 	raw := dffWithCompression(t, "DST ")
 	h, err := ReadDFFAudioHeader(bytes.NewReader(raw))
@@ -76,6 +124,34 @@ func TestReadDFFAudioHeaderLeavesDSTWithoutAChunkDuration(t *testing.T) {
 	if _, ok := h.DurationSec(); ok {
 		t.Fatal("DST reported a chunk duration")
 	}
+}
+
+func dsfHeaderBytes(channels, rate, bits uint32, samples uint64, block uint32, dataSize uint64) []byte {
+	buf := make([]byte, 92)
+	copy(buf[0:4], "DSD ")
+	buf[4] = 28
+	copy(buf[28:32], "fmt ")
+	buf[32] = 52
+	putLE32(buf[52:56], channels)
+	putLE32(buf[56:60], rate)
+	putLE32(buf[60:64], bits)
+	putLE64(buf[64:72], samples)
+	putLE32(buf[72:76], block)
+	copy(buf[80:84], "data")
+	putLE64(buf[84:92], dataSize)
+	return buf
+}
+
+func putLE32(b []byte, n uint32) {
+	b[0] = byte(n)
+	b[1] = byte(n >> 8)
+	b[2] = byte(n >> 16)
+	b[3] = byte(n >> 24)
+}
+
+func putLE64(b []byte, n uint64) {
+	putLE32(b[0:4], uint32(n))
+	putLE32(b[4:8], uint32(n>>32))
 }
 
 func dffWithCompression(t *testing.T, fourcc string) []byte {

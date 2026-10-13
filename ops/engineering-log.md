@@ -41723,3 +41723,40 @@ and `TestDSFShortDecodeFixtures/header_overstates_the_data_by_3s`
 failed because the survey returned nil. The two well-formed rows of
 that test stayed green. The early returns were removed before the
 commit.
+
+## 2026-10-13 — a malformed DSF mate is remembered once (backlog B241)
+
+`LengthIncompleteFile` stays the short decode. A malformed DSF header
+does not satisfy it, which is what the first commit's test comment
+asked for: the two errors stay distinct, and an output fault that wraps
+either one stays the volume. The album survey was still asking only
+`LengthIncompleteFile`, so a malformed mate was measured and logged on
+every render in its album. `RepeatedFileFact` is the wider predicate:
+a short decode or `ErrDSFAudioMalformed`, and false for an output
+fault. The survey stores both in the same path, size and mtime map and
+logs the first one. The render strikes a malformed source on the v39
+path. `unwritableOutput`, `unavailableTool` and `depthMismatch` all
+decline that error, and it returns from `decodeAndMeasure` before Stage
+A, so it is not marked as an output fault.
+
+A DSF data chunk that declares no audio used to pass `Check` when the
+sample count was within one block of zero, because `0 % channels` is 0.
+`payloadPerChannel` now refuses `DataBytes == 0`.
+
+A DFF payload of no bytes made `DurationSec` return `0, true`, which
+turned the completeness check off. An unknown `CMPR` was timed as
+uncompressed. Both now report no duration, and `ReadDFFAudioHeader`
+returns that header with no error, so the caller keeps the probed
+duration. Absent `CMPR` stays uncompressed. Analysis calls `Check` and
+keeps ffprobe when it fails, so a header that overstates its data does
+not fail a decodable file as truncated.
+
+Before the fix, `TestAMalformedMateIsMeasuredOnceAcrossTwoRenders`
+measured and logged the mate twice. `TestAHeaderWithNoAudioDataIsMalformed`
+saw `Check` return nil. `TestAZeroPayloadDFFNamesNoDuration` reported
+duration 0. `TestAnUnknownDFFCompressionNamesNoDuration` reported
+2.001270 s. `TestAMalformedDSFHeaderIsNotTheAnalysisReference` took the
+header duration 1.023 s. `TestADFFWithNoPayloadKeepsTheProbedDuration`
+returned 0. The unknown-compression caller returned an unexpected EOF
+until the fixture padded the odd PROP chunk; after that it would have
+reported the chunk duration, and with the reader fixed it keeps the probe.

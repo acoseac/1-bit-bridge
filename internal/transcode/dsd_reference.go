@@ -14,7 +14,8 @@ import (
 // decoded. A DSF is the fmt sample count over the sampling frequency. An
 // uncompressed DFF is the DSD chunk's declared payload. A file whose
 // leading bytes are not that container keeps ffprobe when it reported
-// one and the manifest otherwise, as DST and every other source do.
+// one and the manifest otherwise, as DST, a DFF payload of no bytes, a
+// compression other than absent or DSD, and every other source do.
 func (j JobSpec) dsdReferenceDuration(probed float64) (float64, error) {
 	switch strings.ToLower(filepath.Ext(j.SourceAbsPath)) {
 	case ".dsf":

@@ -102,11 +102,12 @@ type Resolver struct {
 	mu     sync.Mutex // guards ix, claims and short
 	ix     *index
 	claims map[claimKey]*claim
-	// short remembers a mate whose decode finished at a different length
-	// than its container. The key is the mate spec's path, size and mtime,
-	// the facts SpecFor stamps from the track row. A changed file misses
-	// it. A cancelled context, a deadline, an output fault and any other
-	// error are not entered. The map lives for the process.
+	// short remembers a mate a later render would only measure again: a
+	// decode that finished at a different length than its container, or a
+	// malformed DSF header. The key is the mate spec's path, size and
+	// mtime, the facts SpecFor stamps from the track row. A changed file
+	// misses it. A cancelled context, a deadline, an output fault and any
+	// other error are not entered. The map lives for the process.
 	short map[shortKey]struct{}
 }
 
@@ -118,9 +119,11 @@ type shortKey struct {
 	mtime int64
 }
 
-// errMateDecodesShort is a remembered length-incomplete decode. It wraps
+// errMateDecodesShort is a remembered file fact. It wraps
 // ErrFFmpegDecodeIncomplete so the survey leaves the mate out of the album,
 // and it is not logged: the line was written when the failure was remembered.
+// A malformed DSF header is stored in the same map and returns this sentinel
+// on the next render.
 var errMateDecodesShort = fmt.Errorf("album gain: album-mate decodes short: %w", transcode.ErrFFmpegDecodeIncomplete)
 
 var _ transcode.AlbumGainer = (*Resolver)(nil)
@@ -351,9 +354,9 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 		return ctx.Err()
 	}
 	s.gaveUp[path] = true
-	// A length-incomplete file is logged when it is first remembered.
-	// A later render uses that memory and does not log it again.
-	if transcode.LengthIncompleteFile(err) {
+	// A file fact is logged when it is first remembered. A later render
+	// uses that memory and does not log it again.
+	if transcode.RepeatedFileFact(err) {
 		return nil
 	}
 	logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
@@ -404,10 +407,10 @@ func (r *Resolver) measure(ctx context.Context, path string, like transcode.JobS
 		// tempDir, and measureClaimed logs this error: the redaction a
 		// failed job's own message gets, by the mate's spec.
 		redacted := spec.RedactError(err)
-		// Remember only a finished decode that disagreed with the container,
+		// Remember a fact about the file a later render would only repeat,
 		// and only while this call was not cancelled. The line is this
 		// failure's; a later render in the process finds the memory.
-		if ctx.Err() == nil && transcode.LengthIncompleteFile(err) {
+		if ctx.Err() == nil && transcode.RepeatedFileFact(err) {
 			r.rememberShort(spec)
 			logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
 				"path", like.SourceLibraryRel, "mate", path, "err", redacted)

@@ -77,8 +77,9 @@ func ReadDSFAudioHeader(r io.Reader) (DSFAudioHeader, error) {
 }
 
 // Check refuses a header whose per-channel data bytes and sample count
-// differ by more than one block. A truncated file keeps both fields in
-// agreement and is not this error.
+// differ by more than one block, and a data chunk that declares no
+// audio. A truncated file keeps both fields in agreement and is not
+// this error.
 func (h DSFAudioHeader) Check() error {
 	if h.SampleRate == 0 || h.SampleCount <= 0 || h.Channels < 1 || h.BlockSize == 0 {
 		return errDSFMalformed("")
@@ -99,7 +100,7 @@ func (h DSFAudioHeader) Check() error {
 }
 
 func (h DSFAudioHeader) payloadPerChannel() (uint64, bool) {
-	if h.Channels < 1 || h.DataBytes%uint64(h.Channels) != 0 {
+	if h.Channels < 1 || h.DataBytes == 0 || h.DataBytes%uint64(h.Channels) != 0 {
 		return 0, false
 	}
 	return h.DataBytes / uint64(h.Channels), true
@@ -107,23 +108,43 @@ func (h DSFAudioHeader) payloadPerChannel() (uint64, bool) {
 
 // DFFAudioHeader is the duration an uncompressed DSDIFF names in its DSD
 // chunk, or the mark that the file is DST. The DSD chunk's byte length is
-// not a DST file's playing time.
+// not a DST file's playing time. A compression other than absent or DSD,
+// and a payload of no bytes, are not a duration either.
 type DFFAudioHeader struct {
-	SampleRate uint32
-	Channels   int
-	DataBytes  uint64
-	DST        bool
-	haveDSD    bool
+	SampleRate  uint32
+	Channels    int
+	DataBytes   uint64
+	DST         bool
+	haveDSD     bool
+	compression dffCompression
 }
 
-// DurationSec is the DSD chunk's declared payload, in seconds. DST and a
+// DurationSec is the DSD chunk's declared payload, in seconds. DST, a
+// compression other than absent or DSD, a payload of no bytes, and a
 // header that has not named a rate, a channel count and a DSD chunk
 // report false.
 func (h DFFAudioHeader) DurationSec() (float64, bool) {
-	if h.DST || !h.haveDSD || h.SampleRate == 0 || h.Channels < 1 {
+	if h.DST || !h.referenceCompression() || !h.haveDSD || h.SampleRate == 0 || h.Channels < 1 || h.DataBytes == 0 {
 		return 0, false
 	}
 	return float64(h.DataBytes) * 8 / (float64(h.Channels) * float64(h.SampleRate)), true
+}
+
+// referenceCompression is the absent case, which means uncompressed, and an
+// explicit DSD compression. Anything else is not a completeness reference.
+func (h DFFAudioHeader) referenceCompression() bool {
+	return h.compression == dffCompressionAbsent || h.compression == dffCompressionUncompressed
+}
+
+// answered is true once the header has decided whether it names a duration.
+func (h DFFAudioHeader) answered() bool {
+	if h.DST || !h.referenceCompression() {
+		return true
+	}
+	if _, ok := h.DurationSec(); ok {
+		return true
+	}
+	return h.haveDSD && h.DataBytes == 0 && h.SampleRate != 0 && h.Channels >= 1
 }
 
 const (
@@ -157,10 +178,7 @@ func ReadDFFAudioHeader(r io.ReadSeeker) (DFFAudioHeader, error) {
 }
 
 func (h DFFAudioHeader) finish(err error) (DFFAudioHeader, error) {
-	if h.DST {
-		return h, nil
-	}
-	if _, ok := h.DurationSec(); ok {
+	if h.answered() {
 		return h, nil
 	}
 	return DFFAudioHeader{}, fmt.Errorf("dff audio header: %w", err)
@@ -187,11 +205,7 @@ func (h *DFFAudioHeader) takeDFFChunk(r io.ReadSeeker, id string, size uint64) (
 			return false, err
 		}
 	}
-	if h.DST {
-		return true, nil
-	}
-	_, ok := h.DurationSec()
-	return ok, nil
+	return h.answered(), nil
 }
 
 func (h *DFFAudioHeader) readDFFProp(r io.ReadSeeker, size uint64) error {
@@ -214,6 +228,7 @@ func (h *DFFAudioHeader) readDFFProp(r io.ReadSeeker, size uint64) error {
 	if info.haveCHNL {
 		h.Channels = info.channels
 	}
+	h.compression = info.compression
 	if info.compression == dffCompressionDST {
 		h.DST = true
 	}

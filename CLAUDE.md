@@ -3489,15 +3489,19 @@ no failing test — which is the shape to expect in this area.
     peak's freshness uses. The next render in the album uses the memory: it
     does not decode the file and it does not log it. The line is written when
     the failure is first remembered. A changed size or mtime is measured
-    again. A cancelled context, a deadline, an output fault and any other
-    error are not remembered. A restart measures the file once more. The
+    again. A cancelled context, a deadline and an output fault are not
+    remembered. A malformed DSF header is remembered on this same map
+    (`RepeatedFileFact`). `LengthIncompleteFile` stays the short decode.
+    A restart measures the file once more. The
     mate still does not constrain the album. **Don't write the memory into
     the variant-strike table**: the file's own v2 render already strikes a
     length-incomplete decode, and a survey failure must not add a strike.
     (`TestAShortMateIsMeasuredOnceAcrossTwoRenders`,
+    `TestAMalformedMateIsMeasuredOnceAcrossTwoRenders`,
     `TestAChangedShortMateIsMeasuredAgain`,
     `TestATransientMateFailureIsMeasuredAgain`,
-    `TestLengthIncompleteFileIsTheDecodeAndNotAnOutputFault`.)
+    `TestLengthIncompleteFileIsTheDecodeAndNotAnOutputFault`,
+    `TestRepeatedFileFactKeepsAMalformedHeaderDistinct`.)
   - **A DSF's completeness reference is its fmt sample count, and an
     uncompressed DFF's is the DSD chunk's declared payload** (2026-10-13,
     backlog B241). ffprobe's container duration counts every byte from the
@@ -3507,12 +3511,17 @@ no failing test — which is the shape to expect in this area.
     `JobSpec.dsdReferenceDuration` reads that header from the file being
     decoded, before Stage A, and `decodeAndMeasure` uses it for the render
     and the album survey. A DSF whose sample count and data-chunk size
-    disagree by more than one block is malformed
-    (`manifest.ErrDSFAudioMalformed`) and is a file fact, so part 1's
-    short-mate memory does not keep it. DST stays on ffprobe's duration: a
+    disagree by more than one block, and a data chunk that declares no
+    audio, is malformed (`manifest.ErrDSFAudioMalformed`). The survey
+    remembers that mate through `RepeatedFileFact`. The render strikes it
+    on the v39 path: the error is not an output fault, a missing tool, a
+    depth mismatch or a short decode. A DFF payload of no bytes, and a
+    compression other than absent or `DSD `, is no reference, so the
+    caller keeps the probed duration. DST stays on ffprobe's duration: a
     synthetic DST stream reports none, and the DSD chunk's byte length is
     the playing time of an uncompressed stream. Analysis uses the same
-    header on the ffmpeg path when sox cannot open the file.
+    header on the ffmpeg path when sox cannot open the file, and a header
+    that fails `Check` is not a reference there.
     `verifyRendition` never sees a DSF or a DFF: those routes return from
     `renderDSD`. A strike written under the old reference stores no error
     class (v39 is count, time, size and mtime). After this ships, the
@@ -3520,7 +3529,13 @@ no failing test — which is the shape to expect in this area.
     (`TestACompleteDSFWithATrailingID3PassesTheRenderAndTheSurvey`,
     `TestADSFTruncatedMidDataIsRefused`,
     `TestADSFHeaderThatDisagreesWithItsDataChunkIsMalformed`,
-    `TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey`.)
+    `TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey`,
+    `TestAHeaderWithNoAudioDataIsMalformed`,
+    `TestAZeroPayloadDFFNamesNoDuration`,
+    `TestAnUnknownDFFCompressionNamesNoDuration`,
+    `TestADFFWithNoPayloadKeepsTheProbedDuration`,
+    `TestAnUnknownDFFCompressionKeepsTheProbedDuration`,
+    `TestAMalformedDSFHeaderIsNotTheAnalysisReference`.)
   - **A survey reads the store again after it takes a claim, and before it
     measures.** Its pass's read can be minutes old by then, because it
     measures mates one after another, and another survey may have measured,

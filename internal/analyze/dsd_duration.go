@@ -10,8 +10,9 @@ import (
 )
 
 // containerDuration is the duration a DSF or an uncompressed DFF names
-// in its own header. DST, a file that is neither, and a header that
-// cannot be read return false so the caller keeps ffprobe's duration.
+// in its own header. DST, a file that is neither, a header that cannot
+// be read, and a DSF header that fails Check return false so the caller
+// keeps ffprobe's duration.
 func containerDuration(path string) (float64, bool) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".dsf":
@@ -31,6 +32,9 @@ func dsfContainerDuration(path string) (float64, bool) {
 	defer f.Close()
 	h, err := manifest.ReadDSFAudioHeader(f)
 	if err != nil {
+		return 0, false
+	}
+	if err := h.Check(); err != nil {
 		return 0, false
 	}
 	d := h.DurationSec()

@@ -26,24 +26,7 @@ func TestACompleteDSFWithATrailingID3PassesTheRenderAndTheSurvey(t *testing.T) {
 	samples := int64(secs) * dsfSilenceRate
 	writeSilenceDSF(t, path, samples, samples)
 	appendDSFTrailer(t, path, id3WithBody(1_500_000))
-
-	probed, produced, surveyErr := surveyDecodeLengths(t, path, 99)
-	if surveyErr != nil {
-		t.Fatalf("survey: %v (ffprobe %.3fs, produced %.3fs)", surveyErr, probed, produced)
-	}
-	if math.Abs(produced-float64(secs)) > 0.05 {
-		t.Fatalf("produced %.3fs, fmt %.3fs (ffprobe %.3fs)", produced, float64(secs), probed)
-	}
-	if err := renderDSDFile(t, path, 99); err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if _, err := analyze.RunAnalysis(context.Background(), analyze.AnalyzeSpec{
-		SourceAbsPath:    path,
-		SourceLibraryRel: filepath.Base(path),
-		OutputDir:        t.TempDir(),
-	}); err != nil {
-		t.Fatalf("analysis: %v", err)
-	}
+	wantACompleteFile(t, path, float64(secs), "fmt")
 }
 
 // TestADSFTruncatedMidDataIsRefused cuts a complete DSF inside its data
@@ -79,8 +62,21 @@ func TestADSFHeaderThatDisagreesWithItsDataChunkIsMalformed(t *testing.T) {
 	if !dsfHeaderMalformed(surveyErr) {
 		t.Fatalf("survey: %v", surveyErr)
 	}
-	if err := renderDSDFile(t, path, float64(declared)/dsfSilenceRate); !dsfHeaderMalformed(err) {
+	err := renderDSDFile(t, path, float64(declared)/dsfSilenceRate)
+	if !dsfHeaderMalformed(err) {
 		t.Fatalf("render: %v", err)
+	}
+	if LengthIncompleteFile(err) {
+		t.Fatal("a malformed header is a short decode")
+	}
+	if _, ok := unwritableOutput(err); ok {
+		t.Fatal("a malformed header is an output fault")
+	}
+	if _, ok := unavailableTool(err); ok {
+		t.Fatal("a malformed header is a missing tool")
+	}
+	if _, ok := depthMismatch(err); ok {
+		t.Fatal("a malformed header is a bit-depth mismatch")
 	}
 }
 
@@ -94,13 +90,17 @@ func TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey(t *testing
 	path := filepath.Join(t.TempDir(), "art.dff")
 	writeSilenceDFF(t, path, secs)
 	appendDFFID3(t, path, 1_500_000)
+	wantACompleteFile(t, path, float64(secs), "chunk")
+}
 
+func wantACompleteFile(t *testing.T, path string, secs float64, reference string) {
+	t.Helper()
 	probed, produced, surveyErr := surveyDecodeLengths(t, path, 99)
 	if surveyErr != nil {
 		t.Fatalf("survey: %v (ffprobe %.3fs, produced %.3fs)", surveyErr, probed, produced)
 	}
-	if math.Abs(produced-float64(secs)) > 0.05 {
-		t.Fatalf("produced %.3fs, chunk %.3fs (ffprobe %.3fs)", produced, float64(secs), probed)
+	if math.Abs(produced-secs) > 0.05 {
+		t.Fatalf("produced %.3fs, %s %.3fs (ffprobe %.3fs)", produced, reference, secs, probed)
 	}
 	if err := renderDSDFile(t, path, 99); err != nil {
 		t.Fatalf("render: %v", err)
@@ -115,8 +115,8 @@ func TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey(t *testing
 }
 
 // dsfHeaderMalformed is the refusal for a DSF whose sample count and data
-// chunk disagree. It is not a short decode: a short decode is remembered
-// for an album mate, and a malformed header is a fact about the file.
+// chunk disagree. LengthIncompleteFile stays false for it. The album
+// survey remembers it through RepeatedFileFact.
 func dsfHeaderMalformed(err error) bool {
 	return err != nil && !errors.Is(err, ErrFFmpegDecodeIncomplete) &&
 		bytes.Contains([]byte(err.Error()), []byte("malformed"))

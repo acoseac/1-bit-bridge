@@ -295,8 +295,9 @@ func decodeArgs(srcAbs string, channels int) []string {
 // cheap probe, so the expensive streaming decode never has to fail and
 // retry. expectedSec is sox `--i -D` on the sox path. On the ffmpeg path
 // it is a DSF or uncompressed DFF header when that header names a
-// duration, and ffprobe `format=duration` otherwise. 0 means unknown and
-// the truncation check is skipped. primingAllowance is aacPrimingAllowance when
+// duration, and ffprobe `format=duration` otherwise. A DSF header that
+// fails Check does not name one. 0 means unknown and the truncation
+// check is skipped. primingAllowance is aacPrimingAllowance when
 // the ffmpeg path's codec is AAC, and 0 on the sox path: sox's own duration
 // already matches the samples it decodes, MP3 encoder delay included.
 func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64, float64) {

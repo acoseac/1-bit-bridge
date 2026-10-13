@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -43,6 +45,36 @@ func TestAShortMateIsMeasuredOnceAcrossTwoRenders(t *testing.T) {
 	}
 	if n := gainLines(logs.String()); n != 1 {
 		t.Errorf("the short mate was logged %d times, want 1:\n%s", n, logs.String())
+	}
+}
+
+// TestAMalformedMateIsMeasuredOnceAcrossTwoRenders: a DSF whose sample
+// count and data chunk disagree is a fact about that file. Two renders
+// of its album measure it once and log it once. The error stays distinct
+// from a short decode.
+func TestAMalformedMateIsMeasuredOnceAcrossTwoRenders(t *testing.T) {
+	var logs bytes.Buffer
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&logs, nil)))
+	refs := album(3)
+	h := newHarness(t, refs...)
+	mate := refs[1].Path
+	h.meas.errs[mate] = fmt.Errorf("%w (%s)", manifest.ErrDSFAudioMalformed, mate)
+	h.meas.peaks[refs[2].Path] = fp(-5.0)
+	if transcode.LengthIncompleteFile(h.meas.errs[mate]) {
+		t.Fatal("a malformed header is a short decode")
+	}
+	j := compactSpec(refs[0].Path, dsd64)
+	for n := 0; n < 2; n++ {
+		g, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0))
+		if err != nil || !ok || g != 4.0 {
+			t.Fatalf("render %d: gain=%.1f ok=%v err=%v, want 4.0 from the measurable tracks", n, g, ok, err)
+		}
+	}
+	if n := h.meas.callCount(mate); n != 1 {
+		t.Errorf("the malformed mate was measured %d times, want 1", n)
+	}
+	if n := gainLines(logs.String()); n != 1 {
+		t.Errorf("the malformed mate was logged %d times, want 1:\n%s", n, logs.String())
 	}
 }
 
