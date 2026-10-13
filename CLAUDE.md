@@ -150,7 +150,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`, as `restart.request`, which also makes serve exit with `supervision.RestartExitCode` (75) where a stop exits 0: launchd and the Windows SCM relaunch only the former (B201, under **Config, settings and process lifecycle**).
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets). An event stream is not one of those handlers. `GET /v1/events` and the pairing event stream select on the serve context the stop cancels first (`Server.EndEventStreamsWhen`), so they return as a finished stream. Ordinary requests keep the context net/http gives them and finish inside the grace: a manifest page, a favorites or playlist write, an artwork read. The console's own server still parents every request, which is what already ends `GET /api/events`. A download still occupies the grace, because `ServeContent` does not read the request context.
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
-- **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
+- **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID. A root add or remove goes through `Scanner.CommitRootChange`, which cancels a scan that already read the previous roots and waits for it to stop writing before the wipe and `SetRoots`.
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo; the one exception, on this repo only, is a change to `CLAUDE.md` alone (**Development workflow**, step 1), and a rule that describes code lands in the PR that changes the code.
 
@@ -1504,6 +1504,30 @@ lost my library."
   `WipeAllTracks`** — the latter CASCADE-deletes `upnp_track_routing`,
   destroying an entire upstream library and its cached enrichment on a mere
   root-count toggle. The folder wipe is part of it (folders flip form too).
+- **A root add or remove is serialised with the scanner by cancelling the
+  scan that already read the previous roots and waiting for it to stop
+  writing** (2026-10-13, backlog B183). `Scan` and `ScanSubtree` snapshot
+  the roots under the scanner lock and keep that snapshot for the walk, so
+  a `SetRoots` during the walk does not stop the old paths being written
+  back after the wipe or the prefix delete. Holding the scanner lock across
+  the change would block the console request for the rest of a multi-minute
+  walk, and it deadlocks a scan parked in the extract hook (the hook runs
+  while the scan holds the lock). `Scanner.CommitRootChange` bumps an
+  epoch, cancels the scan that holds the scanner lock, and waits for that
+  lock. A scan registers as in flight only once it holds the scanner lock,
+  so a scan waiting on the lock is not the one cancelled: it sees the new
+  epoch and returns without reading the roots. Then the wipe or prefix
+  delete, the config save and `SetRoots` run. The handler's post-change
+  scan starts inside that call and is not cancelled: the finishing scan
+  clears the slot with compare-and-swap before it unlocks. A cancelled
+  scan reports `context.Canceled` and does not log it as a failed
+  background, initial or periodic scan. Rows the
+  cancelled scan already committed are removed by the wipe or the prefix
+  delete, which run after the scan returns. The request holds the admin
+  lock for that drain; it does not hold the store lock while it waits.
+  (`TestARootChangeDuringAScanDoesNotLeaveTheOldRows`,
+  `TestARootChangeThroughTheHandlerDoesNotLeaveTheOldRows`,
+  `TestAWaitingScanDoesNotHideTheScanARootChangeCancels`.)
 - **`wal_checkpoint(TRUNCATE)` runs AFTER `VACUUM`, never only before.** In WAL
   mode the vacuum's own output lands in the WAL, so without the post-checkpoint
   the file does not shrink by a byte and peak disk RISES. Measured: 5,623,808 →
