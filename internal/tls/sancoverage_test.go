@@ -1,22 +1,15 @@
 package tls
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	cryptotls "crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/tls/tlstest"
 )
 
 // mintCert writes a cert+key pair under a fresh temp dir with the given
@@ -283,66 +276,6 @@ func TestVerifyKeyPairIsServesOwnAnswer(t *testing.T) {
 	}
 }
 
-// writeCASignedCert writes a leaf signed by a throwaway CA. The leaf's
-// own key does not sign it, which is the shape a control plane places
-// on disk (a Let's Encrypt wildcard) and the shape bridge cert rotate
-// must not be told to replace.
-func writeCASignedCert(t *testing.T, certPath, keyPath string, dnsNames []string) {
-	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	caTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Test CA"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(200 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leafTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(2),
-		Subject:               pkix.Name{CommonName: dnsNames[0]},
-		DNSNames:              dnsNames,
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(100 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
-	keyDER, err := x509.MarshalECPrivateKey(leafKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // tenantWildcardWant is a hosted tenant's advertised names: the
 // container hostname, which a wildcard does not cover, and the tenant
 // host the wildcard does.
@@ -360,7 +293,7 @@ func tenantWildcardWant() GenerateOptions {
 func TestAWildcardCertTheBridgeDidNotMintLogsNoRotationWarning(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := DefaultPaths(dir)
-	writeCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	tlstest.WriteCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
 	rec := loggingtest.Record(t)
 	if _, _, err := LoadOrGenerateWithOptions(certPath, keyPath, tenantWildcardWant()); err != nil {
 		t.Fatal(err)
@@ -411,7 +344,7 @@ func TestAStaleSelfSignedCertStillLogsTheRotationWarning(t *testing.T) {
 func TestALeftmostWildcardCoversOneLabel(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := DefaultPaths(dir)
-	writeCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	tlstest.WriteCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
 	cov, err := InspectSANCoverage(certPath, GenerateOptions{
 		ExtraDNSNames: []string{
 			"abc.cloud.1-bit.app",
@@ -448,7 +381,7 @@ func TestALeftmostWildcardCoversOneLabel(t *testing.T) {
 func TestAPartialLabelWildcardCoversNothing(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := DefaultPaths(dir)
-	writeCASignedCert(t, certPath, keyPath, []string{"a*.cloud.1-bit.app", "*a.cloud.1-bit.app", "*.*.example.com"})
+	tlstest.WriteCASignedCert(t, certPath, keyPath, []string{"a*.cloud.1-bit.app", "*a.cloud.1-bit.app", "*.*.example.com"})
 	cov, err := InspectSANCoverage(certPath, GenerateOptions{
 		ExtraDNSNames: []string{"ab.cloud.1-bit.app", "xa.cloud.1-bit.app", "a.b.example.com"},
 	})
