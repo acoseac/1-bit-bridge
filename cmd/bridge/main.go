@@ -3343,7 +3343,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 
 	// Periodic state-snapshot ticker. Captures bridge.db / tokens.json /
-	// cert / key / config into <dataDir>/backups/<timestamp>/ at the
+	// cert / key / config / adminauth.json / atlas-harvest.json into
+	// <dataDir>/backups/<timestamp>/ at the
 	// configured cadence (default 24h). Uses the same scanCtx as the
 	// other periodic workers so a SIGINT cancels it cleanly. Snapshots
 	// are best-effort — failures are logged but never crash serve.

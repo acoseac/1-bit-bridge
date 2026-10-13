@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -896,6 +898,207 @@ func TestSnapshotSkipsMissingOptionalFiles(t *testing.T) {
 	// Other files still captured.
 	if !pathExists(t, filepath.Join(dst, "server.crt")) {
 		t.Errorf("snapshot should still contain server.crt")
+	}
+}
+
+// A backup of a public bridge restores the console account into a fresh
+// data dir, and the restored account has no live session. The snapshot
+// itself still holds the session that was current when it was taken.
+func TestRestoreBringsTheConsoleAccountBackSignedOut(t *testing.T) {
+	adminauth.SetTestHashCost(bcrypt.MinCost)
+	t.Cleanup(func() { adminauth.SetTestHashCost(0) })
+
+	live := t.TempDir()
+	src := primeLiveState(t, live)
+	authPath := filepath.Join(live, adminauth.FileName)
+	store, err := adminauth.OpenStore(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, err := store.MintInitial("operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSession("operator"); err != nil {
+		t.Fatal(err)
+	}
+	if store.SessionCount() != 1 {
+		t.Fatalf("live sessions = %d, want 1", store.SessionCount())
+	}
+	src.AdminAuth = authPath
+
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapAuth := filepath.Join(snap, backup.AdminAuthFileName)
+	if !pathExists(t, snapAuth) {
+		t.Fatalf("snapshot missing %s", backup.AdminAuthFileName)
+	}
+	var snapFile struct {
+		Sessions map[string]json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(readBytes(t, snapAuth), &snapFile); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapFile.Sessions) != 1 {
+		t.Fatalf("snapshot sessions = %d, want the live one kept in the bundle", len(snapFile.Sessions))
+	}
+
+	restoredPath := filepath.Join(t.TempDir(), adminauth.FileName)
+	if err := backup.Restore(snap, backup.Targets{AdminAuth: restoredPath}); err != nil {
+		t.Fatal(err)
+	}
+	if backup.AdminAuthFileName != adminauth.FileName {
+		t.Fatalf("backup names %q, the store names %q", backup.AdminAuthFileName, adminauth.FileName)
+	}
+	restored, err := adminauth.OpenStore(restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restored.IsInitialised() || restored.Username() != "operator" {
+		t.Fatalf("restored account %q initialised %v", restored.Username(), restored.IsInitialised())
+	}
+	if err := restored.Verify("operator", password); err != nil {
+		t.Fatalf("restored password: %v", err)
+	}
+	if restored.SessionCount() != 0 {
+		t.Fatalf("restored sessions = %d, want none", restored.SessionCount())
+	}
+	var got struct {
+		Sessions          map[string]json.RawMessage `json:"sessions"`
+		SessionsRevokedAt *time.Time                 `json:"sessionsRevokedAt"`
+	}
+	if err := json.Unmarshal(readBytes(t, restoredPath), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 0 {
+		t.Fatalf("restored file still lists %d sessions", len(got.Sessions))
+	}
+	if got.SessionsRevokedAt == nil || got.SessionsRevokedAt.IsZero() {
+		t.Fatal("restored file has no sign-out marker")
+	}
+	if runtime.GOOS != "windows" {
+		if gotMode := mode(t, restoredPath); gotMode&0o777 != 0o600 {
+			t.Errorf("restored adminauth mode = %o, want 0600", gotMode&0o777)
+		}
+	}
+}
+
+// A snapshot taken before the console account was part of the bundle
+// restores the files it lists and leaves a live account where it was.
+func TestRestoreOfASnapshotWithoutTheConsoleAccountLeavesItAlone(t *testing.T) {
+	live := t.TempDir()
+	src := primeLiveState(t, live)
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m backup.Manifest
+	if err := json.Unmarshal(readBytes(t, filepath.Join(snap, backup.ManifestFile)), &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range m.Files {
+		if name == backup.AdminAuthFileName {
+			t.Fatalf("snapshot lists %s without a source", name)
+		}
+	}
+
+	authPath := filepath.Join(live, adminauth.FileName)
+	const body = `{"user":{"username":"kept","passwordHash":"h"}}` + "\n"
+	if err := os.WriteFile(authPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(t.TempDir(), adminauth.FileName)
+	if err := backup.Restore(snap, backup.Targets{
+		TokensJSON: filepath.Join(t.TempDir(), "tokens.json"),
+		AdminAuth:  fresh,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(t, fresh) {
+		t.Fatal("restore invented a console account the snapshot does not hold")
+	}
+	if err := backup.Restore(snap, backup.Targets{AdminAuth: authPath}); err != nil {
+		t.Fatal(err)
+	}
+	if string(readBytes(t, authPath)) != body {
+		t.Fatalf("restore replaced a live account from a snapshot that has none: %s", readBytes(t, authPath))
+	}
+}
+
+// The harvest credential and its cursor come back byte for byte. They
+// are not re-derived from the manifest database.
+func TestRestoreRoundTripsTheHarvestState(t *testing.T) {
+	live := t.TempDir()
+	src := primeLiveState(t, live)
+	body := []byte("{\"token\":\"secret\",\"resultCursor\":\"cur-9\"}\n")
+	src.AtlasHarvest = filepath.Join(live, backup.AtlasHarvestFileName)
+	if err := os.WriteFile(src.AtlasHarvest, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readBytes(t, filepath.Join(snap, backup.AtlasHarvestFileName))) != string(body) {
+		t.Fatal("snapshot harvest state differs from the live file")
+	}
+	restored := filepath.Join(t.TempDir(), backup.AtlasHarvestFileName)
+	if err := backup.Restore(snap, backup.Targets{AtlasHarvest: restored}); err != nil {
+		t.Fatal(err)
+	}
+	if string(readBytes(t, restored)) != string(body) {
+		t.Fatal("restored harvest state differs from the snapshot")
+	}
+	if runtime.GOOS != "windows" {
+		if gotMode := mode(t, restored); gotMode&0o777 != 0o600 {
+			t.Errorf("restored harvest state mode = %o, want 0600", gotMode&0o777)
+		}
+	}
+}
+
+// A loopback install, and a public install that has not stored a harvest
+// credential, snapshot without those files.
+func TestSnapshotSkipsAMissingConsoleAccountAndHarvestState(t *testing.T) {
+	live := t.TempDir()
+	src := primeLiveState(t, live)
+	src.AdminAuth = filepath.Join(live, adminauth.FileName)
+	src.AtlasHarvest = filepath.Join(live, backup.AtlasHarvestFileName)
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(t, filepath.Join(snap, backup.AdminAuthFileName)) || pathExists(t, filepath.Join(snap, backup.AtlasHarvestFileName)) {
+		t.Fatal("snapshot captured a file that is not on disk")
+	}
+}
+
+// A console account the snapshot cannot parse fails the restore before
+// any target is written.
+func TestRestoreRefusesAConsoleAccountThatDoesNotParse(t *testing.T) {
+	snap := t.TempDir()
+	if err := os.WriteFile(filepath.Join(snap, backup.AdminAuthFileName), []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotManifest(t, snap, backup.AdminAuthFileName)
+	target := filepath.Join(t.TempDir(), adminauth.FileName)
+	if err := os.WriteFile(target, []byte("{\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := backup.Restore(snap, backup.Targets{AdminAuth: target})
+	if err == nil {
+		t.Fatal("restore accepted a console account that does not parse")
+	}
+	if string(readBytes(t, target)) != "{\n}\n" {
+		t.Fatalf("restore wrote over the live file: %s", readBytes(t, target))
+	}
+	missing := filepath.Join(t.TempDir(), adminauth.FileName)
+	if err := backup.Restore(snap, backup.Targets{AdminAuth: missing}); err == nil {
+		t.Fatal("restore accepted a console account that does not parse")
+	}
+	if pathExists(t, missing) {
+		t.Fatal("restore created a console account from a file that does not parse")
 	}
 }
 
