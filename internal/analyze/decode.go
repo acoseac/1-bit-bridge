@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -108,29 +109,60 @@ func ffmpegDecodeArgs(srcAbs string, channels int) []string {
 	}
 }
 
-// ffprobeChannels reads the source channel count via ffprobe's first audio
-// stream. Same (channels, ok) contract as probeChannels' sox path: a value
-// outside 1..maxAnalysisChannels (or any probe failure) yields (1, false) so
-// the caller decodes mono and SKIPS loudness rather than trusting a guess.
-func ffprobeChannels(ctx context.Context, srcAbs string) (int, bool) {
+// ffprobeAudioInfo is what one ffprobe run reports about a source: the first
+// audio stream's codec and channel count, and the container duration.
+type ffprobeAudioInfo struct {
+	codec      string
+	channels   int
+	channelsOK bool
+	duration   float64
+}
+
+// ffprobeAudio reads the first audio stream's codec_name and channels and
+// the container's format=duration in ONE ffprobe run. It replaced three
+// separate runs, three process spawns per file on the ffmpeg path (Gemini
+// on #1205). Each field keeps its old failure contract: a channel count
+// outside 1..maxAnalysisChannels, or any probe failure, leaves channels
+// (1, false), so the caller decodes mono and skips loudness rather than
+// trusting a guess; an empty codec means primingAllowanceFor grants
+// nothing; and a duration of 0 means "unknown, skip the truncation check",
+// so a probe miss can never block a complete file.
+func ffprobeAudio(ctx context.Context, srcAbs string) ffprobeAudioInfo {
+	info := ffprobeAudioInfo{channels: 1}
 	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
 		"-v", "error", "-select_streams", "a:0",
-		"-show_entries", "stream=channels",
-		"-of", "default=nw=1:nk=1", srcAbs).Output()
+		"-show_entries", "stream=codec_name,channels:format=duration",
+		"-of", "json", srcAbs).Output()
 	if err != nil {
-		return 1, false
+		return info
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || n < 1 || n > maxAnalysisChannels {
-		return 1, false
+	var doc struct {
+		Streams []struct {
+			CodecName string `json:"codec_name"`
+			Channels  int    `json:"channels"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
 	}
-	return n, true
+	if json.Unmarshal(out, &doc) != nil {
+		return info
+	}
+	info.duration = parseDuration([]byte(doc.Format.Duration))
+	if len(doc.Streams) == 0 {
+		return info
+	}
+	info.codec = strings.TrimSpace(doc.Streams[0].CodecName)
+	if n := doc.Streams[0].Channels; n >= 1 && n <= maxAnalysisChannels {
+		info.channels, info.channelsOK = n, true
+	}
+	return info
 }
 
 // parseDuration parses a probe's seconds-as-float stdout, returning 0 for any
 // invalid value (parse error, "N/A", non-positive, or non-finite) so the caller
 // treats it as "duration unknown, skip the truncation check" rather than
-// rejecting. Shared by ffprobeDuration + soxDuration so both probes stay in
+// rejecting. Shared by ffprobeAudio + soxDuration so both probes stay in
 // lockstep on the validity rule.
 func parseDuration(out []byte) float64 {
 	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
@@ -138,21 +170,6 @@ func parseDuration(out []byte) float64 {
 		return 0
 	}
 	return d
-}
-
-// ffprobeDuration reads the container duration (seconds) via ffprobe's
-// format=duration. Returns 0 on ANY failure — the caller treats 0 as "duration
-// unknown, skip the truncation check" rather than rejecting, so a probe miss
-// can never block a legitimately-complete file. Only called on the ffmpeg
-// fallback path (m4a/mp4 containers, which carry a format duration).
-func ffprobeDuration(ctx context.Context, srcAbs string) float64 {
-	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
-		"-v", "error", "-show_entries", "format=duration",
-		"-of", "default=nw=1:nk=1", srcAbs).Output()
-	if err != nil {
-		return 0
-	}
-	return parseDuration(out)
 }
 
 // soxDuration reads the source duration (seconds) via `sox --i -D` for the sox
@@ -177,29 +194,59 @@ func soxDuration(ctx context.Context, srcAbs string) float64 {
 }
 
 // minDecodedFraction is the lower bound on (decoded length / probed duration)
-// for a decode to be accepted. Below it the source is treated as truncated.
-// 0.90 leaves generous headroom for legitimate encoder-delay/padding,
-// container-duration rounding, and VBR estimate drift (all sub-second / sub-1%
-// in practice) while still catching a real truncation — the field-reported case
-// decoded ~58% of its declared duration.
+// for a decode to be accepted, before a codec's priming allowance. 0.90
+// leaves headroom for container-duration rounding and VBR estimate drift on
+// a file of ordinary length, and still catches a real truncation: the
+// field-reported case decoded about 58% of its declared duration. Apple
+// AAC's encoder delay is a constant tens of milliseconds, which is most of
+// a sub-second clip, so that gap is aacPrimingAllowance rather than a wider
+// ratio.
 const minDecodedFraction = 0.90
 
-// decodedShortOfDuration reports whether a CLEAN decode that produced
-// totalFrames at AnalysisSampleRate fell materially short of the probed
-// expectedSec — the signature of a truncated-but-openable source the decoder
-// concealed and exited 0 on (ffmpeg conceals a mid-stream error; sox exits 0
-// after a FLAC LOST_SYNC). Returns false (no rejection) when expectedSec <= 0
-// (duration unknown — commit as before). A glitchy-but-COMPLETE file decodes to
-// full length and passes, so a mid-stream FLAC glitch that resyncs to EOF is
-// NOT treadmilled — that case is exactly why this is a duration check and not
-// stderr-error matching, which fires identically on truncated and resynced-
-// complete files.
-func decodedShortOfDuration(expectedSec float64, totalFrames int64) bool {
+// aacPrimingAllowance is added to the ratio slack for an AAC decode.
+// Apple AAC's container duration counts encoder delay and padding the
+// decoder strips. Measured on complete files: 66.1 ms on the 116 ms
+// iTunes fixture (2112 samples of priming plus 803 of padding) and 57–68 ms
+// on afconvert clips from 0.1 s to 5 s. 80 ms sits above that gap. A 60%
+// byte cut of the same files still fails: the probe keeps the container
+// duration and the decode is empty or far shorter, a gap of at least 116 ms.
+const aacPrimingAllowance = 0.08
+
+// primingAllowanceFor returns aacPrimingAllowance for an AAC stream and 0
+// for every other codec, including a probe that named nothing. ALAC shares
+// the m4a container and the ffmpeg path and its measured gap is 0, so the
+// allowance is the codec name, not the extension and not the decoder.
+func primingAllowanceFor(codec string) float64 {
+	if strings.EqualFold(codec, "aac") {
+		return aacPrimingAllowance
+	}
+	return 0
+}
+
+// decodedShortOfDuration reports whether a clean decode that produced
+// totalFrames at AnalysisSampleRate fell short of expectedSec by more than
+// the ratio slack plus primingAllowance. primingAllowance is the codec's
+// encoder delay and padding (aacPrimingAllowance for AAC, 0 otherwise).
+// Returns false when expectedSec <= 0: an unknown duration commits as
+// before. Returns true for zero frames against a known duration. A
+// shortfall equal to the allowed slack is accepted. A
+// glitchy-but-complete file decodes to full length and passes, so a
+// mid-stream FLAC glitch that resyncs to EOF is committed — that case is
+// why this is a duration check and not stderr matching, which fires the
+// same way on a truncated file and a resynced complete one.
+func decodedShortOfDuration(expectedSec float64, totalFrames int64, primingAllowance float64) bool {
 	if expectedSec <= 0 {
 		return false
 	}
+	// A known duration with nothing decoded is never complete. Under about
+	// 88.9 ms the AAC allowance alone covers the whole probed duration, so
+	// the ratio would accept an empty decode and store an empty waveform.
+	if totalFrames <= 0 {
+		return true
+	}
 	decodedSec := float64(totalFrames) / float64(AnalysisSampleRate)
-	return decodedSec < expectedSec*minDecodedFraction
+	allowed := expectedSec*(1-minDecodedFraction) + primingAllowance
+	return expectedSec-decodedSec > allowed
 }
 
 // decodeCommand returns the binary + argv for the chosen decoder.
@@ -241,21 +288,24 @@ func decodeArgs(srcAbs string, channels int) []string {
 // includes every AAC/m4a file (no sox AAC handler) — and the ffmpeg toolchain
 // is present, it re-probes via ffprobe and selects ffmpeg for the decode.
 //
-// Returns (channels, ok, tool, expectedSec): ok==false means the channel count
-// is unknown, so the caller decodes mono and SKIPS loudness rather than trusting
-// a guessed layout (a wrong guess would silently store a biased ReplayGain). The
-// decision is made HERE, off the cheap probe, so the expensive streaming decode
-// never has to fail-and-retry. expectedSec is the probed duration (sox `--i -D`
-// on the sox path, ffprobe `format=duration` on the ffmpeg path) used by
-// decodeFrames to reject a truncated decode; 0 means "unknown, skip the check".
-func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64) {
+// Returns (channels, ok, tool, expectedSec, primingAllowance). ok==false
+// means the channel count is unknown, so the caller decodes mono and skips
+// loudness rather than trusting a guessed layout (a wrong guess would
+// silently store a biased ReplayGain). The decision is made here, off the
+// cheap probe, so the expensive streaming decode never has to fail and
+// retry. expectedSec is the probed duration (sox `--i -D` on the sox path,
+// ffprobe `format=duration` on the ffmpeg path); 0 means unknown and the
+// truncation check is skipped. primingAllowance is aacPrimingAllowance when
+// the ffmpeg path's codec is AAC, and 0 on the sox path: sox's own duration
+// already matches the samples it decodes, MP3 encoder delay included.
+func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64, float64) {
 	if out, err := exec.CommandContext(ctx, resolveBin(soxLookPath, "sox"), "--i", "-c", srcAbs).Output(); err == nil {
 		if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && n >= 1 && n <= maxAnalysisChannels {
 			// Probe the sox duration off the same cheap pre-decode step so
 			// decodeFrames can reject a truncated source (e.g. a FLAC that sox
 			// opens via its intact STREAMINFO header, decodes ~half, and exits 0
 			// on LOST_SYNC). 0 on probe miss → no check (commit as before).
-			return n, true, decoderSox, soxDuration(ctx, srcAbs)
+			return n, true, decoderSox, soxDuration(ctx, srcAbs), 0
 		}
 		// sox answered but with an unparseable / out-of-range count — fall
 		// through to the ffmpeg path (it may still decode cleanly).
@@ -264,15 +314,13 @@ func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, 
 		// Probe the duration once here (off the same cheap pre-decode step) so
 		// decodeFrames can spot a truncated-but-openable source after a clean
 		// ffmpeg exit. 0 on probe miss → no truncation check (commit as before).
-		dur := ffprobeDuration(ctx, srcAbs)
-		if n, ok := ffprobeChannels(ctx, srcAbs); ok {
-			return n, true, decoderFFmpeg, dur
-		}
-		// ffmpeg present but the channel probe failed: decode mono via ffmpeg
-		// + skip loudness (same contract as the sox channelsOK=false path).
-		return 1, false, decoderFFmpeg, dur
+		p := ffprobeAudio(ctx, srcAbs)
+		// A failed channel probe decodes mono via ffmpeg and skips loudness
+		// (same contract as the sox channelsOK=false path): p.channels is 1
+		// and p.channelsOK false then.
+		return p.channels, p.channelsOK, decoderFFmpeg, p.duration, primingAllowanceFor(p.codec)
 	}
-	return 1, false, decoderSox, 0
+	return 1, false, decoderSox, 0, 0
 }
 
 // decodeFrames runs sox to decode srcAbs to `channels`-channel 48 kHz
@@ -296,17 +344,17 @@ func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, 
 //
 // **ffmpeg truncation guard**: ffmpeg can exit 0 after concealing a
 // mid-stream decode error, so a truncated-but-openable faststart m4a would
-// otherwise return (partialFrames, nil). When expectedSec > 0 (the ffmpeg
-// path's ffprobe duration), a decode that falls materially short of it is
-// rejected as truncated (decodedShortOfDuration) so nothing is committed and
-// the candidate re-flows until fully uploaded. sox callers pass expectedSec==0
-// and are unaffected.
-func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoderTool, expectedSec float64, onFrame func(frame []float64)) (totalFrames int64, err error) {
+// otherwise return (partialFrames, nil). When expectedSec > 0, a decode
+// whose shortfall exceeds the ratio slack plus primingAllowance is rejected
+// as truncated (decodedShortOfDuration) so nothing is committed and the
+// candidate re-flows until fully uploaded. Both decoders pass the duration
+// their probe reported. primingAllowance is 0 except for AAC.
+func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoderTool, expectedSec, primingAllowance float64, onFrame func(frame []float64)) (totalFrames int64, err error) {
 	if channels < 1 {
 		channels = 1
 	}
 	name, args := decodeCommand(tool, srcAbs, channels)
-	return decodeFramesWith(ctx, tool, name, args, srcAbs, channels, expectedSec, onFrame)
+	return decodeFramesWith(ctx, tool, name, args, srcAbs, channels, expectedSec, primingAllowance, onFrame)
 }
 
 // decodeFramesWith is decodeFrames with the decoder argv supplied by the
@@ -315,7 +363,7 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoder
 // process-reaping, the redacted stderr and the truncation guard in one
 // place. `tool` labels errors; `args` must emit the same headerless
 // little-endian float32 stream decodeArgs does.
-func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args []string, srcAbs string, channels int, expectedSec float64, onFrame func(frame []float64)) (totalFrames int64, err error) {
+func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args []string, srcAbs string, channels int, expectedSec, primingAllowance float64, onFrame func(frame []float64)) (totalFrames int64, err error) {
 	if channels < 1 {
 		channels = 1
 	}
@@ -387,9 +435,11 @@ func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args [
 	// message names both durations because it is what the operator sees —
 	// it is persisted as the failure reason and rendered in the console's
 	// unreadable list, not just logged.
-	if decodedShortOfDuration(expectedSec, totalFrames) {
+	if decodedShortOfDuration(expectedSec, totalFrames, primingAllowance) {
+		// Three decimal places: one decimal rounds 0.050 and 0.116 both to
+		// 0.1 and the message states a contradiction.
 		return totalFrames, markUnreadable(fmt.Errorf(
-			"%s: decoded %.1fs of %.1fs probed — source appears truncated",
+			"%s: decoded %.3fs of %.3fs probed — source appears truncated",
 			tool, float64(totalFrames)/float64(AnalysisSampleRate), expectedSec))
 	}
 	return totalFrames, nil

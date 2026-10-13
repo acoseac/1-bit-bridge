@@ -41258,3 +41258,129 @@ read the container marker. The doctor coverage tests
 `TestAMissingCustomHostStillWarnsAfterTheContainerNameLeft` stayed
 green: they pass the want-set in directly. Both gates were restored and
 the same run passed.
+
+## 2026-10-13 — short AAC clips are not struck as truncated (backlog B192)
+
+`internal/manifest/testdata/m4a/itunes_aac_pop.m4a` failed analysis on a
+pre-v0.2.1 Docker run with `ffmpeg: decoded 0.1s of 0.1s probed — source
+appears truncated`. The file is 116 ms of AAC. Three strikes then suppress
+analysis for 7 days. The message rounded both durations to one decimal, so
+0.050 and 0.116 both printed as 0.1.
+
+### The complete-file measurements
+
+Analysis rate is 48 kHz. AAC and ALAC are probed with ffprobe format
+duration and decoded with the analysis ffmpeg argv (`-ac` the file's
+channels, `-ar 48000`, `f32le`). MP3 and FLAC are probed with `sox --i -D`
+and decoded with sox to the same raw format, which is the path
+`probeChannels` takes when sox has a handler. Host tools: Homebrew ffmpeg
+9.0.2 and sox 14.4.2. afconvert is `/usr/bin/afconvert` and is a
+measurement only; the tests do not require it.
+
+| clip | probed | decoded | gap | ratio | under 0.90 |
+|---|---|---|---|---|---|
+| itunes_aac_pop.m4a | 0.116100 | 0.050000 | −66.1 ms | 0.431 | yes |
+| afconvert AAC 0.1 s | 0.162540 | 0.100000 | −62.5 ms | 0.615 | yes |
+| afconvert AAC 0.5 s | 0.557279 | 0.500000 | −57.3 ms | 0.897 | yes |
+| afconvert AAC 1 s | 1.068118 | 1.000000 | −68.1 ms | 0.936 | no |
+| afconvert AAC 5 s | 5.061950 | 5.000000 | −62.0 ms | 0.988 | no |
+| ffmpeg AAC, edit list on, 0.1/0.5/1/5 s | nominal | nominal | 0 | 1 | no |
+| ffmpeg AAC, `-use_editlist 0` | nominal + ~23 ms | same | ~0 | 1 | no |
+| ffmpeg ALAC, same four lengths | nominal | nominal | 0 | 1 | no |
+| lame MP3, sox probe and sox decode | 0.130 / 0.548 / 1.044 / 5.041 | same | ~0 | 1 | no |
+| sox FLAC, same four lengths | nominal | nominal | 0 | 1 | no |
+
+The iTunes gap is the whole of the encoder delay, not the priming samples
+alone. iTunSMPB at byte 885 is `00000000 00000840 00000323
+000000000000089D`: priming 0x840 = 2112 samples (0.047891 s, the file's
+`start_time`), padding 0x323 = 803 samples (0.018209 s), valid samples
+0x89D = 2205 (exactly 0.050000 s). (2112+2205+803)/44100 = 0.116100, the
+probed duration. afconvert's gap is 57–68 ms across 0.1–5 s, the same
+2112-sample delay plus a frame of remainder (AAC frame = 1024 samples at
+44.1 kHz, 23.2 ms). The extra past the 10% slack is 54.5 ms on the iTunes
+file and 46.3 ms on the 0.1 s afconvert clip. The 0.5 s clip needs 1.6 ms
+past the slack. The 1 s and 5 s clips already pass 0.90.
+
+### Why an allowance, and why 80 ms
+
+A floor that skips the ratio below about 0.7 s would accept the truncation
+the guard exists for. A 60% byte cut of `itunes_aac_pop.m4a` still probes
+0.116 s and decodes to 0 samples, exit 0 (gap 116 ms). The same cut of the
+0.1 s afconvert clip probes 0.163 s and decodes to 0 (gap 163 ms). Longer
+Apple cuts stay exit 0 with the probe unchanged and a decode of 0.045 s,
+0.370 s and 2.785 s. ffmpeg AAC and ALAC byte cuts exit 183 and are already
+a decoder verdict. A header that claims 5 s over 3 s of audio is a 2 s gap.
+
+`aacPrimingAllowance` is 0.08 s, added to the existing slack:
+`expected - decoded > expected*0.10 + allowance`. 80 ms sits above the
+54.5 ms the iTunes file needs past the slack (allowed slack 91.6 ms,
+shortfall 66.1 ms) and below the 116 ms empty decode. The allowance is
+granted only when ffprobe's `codec_name` is `aac`, compared without regard
+to case. ALAC is also `.m4a` and also takes the ffmpeg path, and its gap
+is 0, so an allowance on the container or on the ffmpeg path would widen
+the bar for a codec that does not need it. A codec probe that fails grants
+0. The sox path grants 0: lame's encoder delay is in both the sox duration
+and the sox decode, so a complete MP3 does not trip the ratio. A shortfall
+equal to the slack is still accepted, which keeps the old 100 s rows
+(exactly 90% is not short).
+
+What a duration check cannot close: a synthetic AAC whose probe is
+0.1 s and whose decode is 0.06 s is a 40 ms gap, inside 10 ms of slack plus
+80 ms. It is pinned as not short when the allowance is on, and short when
+the allowance is 0. The 0.1 s truncation that must fail is the measured
+byte cut, which decodes to nothing.
+
+### The album survey
+
+`internal/albumgain` does not call `decodedShortOfDuration`. A short DSD
+mate is `transcode.ErrFFmpegDecodeIncomplete` against `durationTolerance`
+0.02, two-sided, in `decodeLengthDisagrees`. AAC is lossy and is not
+rendered. ALAC's measured gap is 0, so that 2% bar is left as it is.
+
+### The message
+
+`%.1f` became `%.3f`. The iTunes failure now reads `decoded 0.050s of
+0.116s probed`. The string is persisted as `analysis_fail_reason` and
+shown in the console's unreadable list. `markUnreadable` stays unprefixed.
+
+### Review fixes
+
+- **An empty decode never passes** (CodeRabbit on #1205). Under about
+  88.9 ms the AAC allowance alone covers the whole probed duration
+  (`0.1×d + 0.08 ≥ d`), so a clean zero-frame decode was accepted and an
+  empty waveform could be stored. `decodedShortOfDuration` now returns
+  true for zero frames against a known duration. Red first: the 88.8 ms
+  and 40 ms empty-decode rows were accepted before the change.
+- **One ffprobe run, not three** (Gemini on #1205). The ffmpeg path ran
+  ffprobe for the duration, the codec and the channel count, three
+  process spawns per file. `ffprobeAudio` reads all three in one JSON run,
+  with each field's old failure contract. Pinned on the iTunes fixture
+  (aac, 2 channels, 0.1161 s) and on a missing file (the zero contract).
+
+### Tests
+
+`TestShortClips` analyses the committed iTunes file (accepted) and a 60%
+byte cut of it (unreadable, and the error contains `truncated`). It also
+synthesises 0.1/0.5/1/5 s WAV tones and encodes FLAC with sox, AAC and
+ALAC with ffmpeg, and MP3 with libmp3lame when that encoder is present.
+Each complete file is accepted. Each 60% byte cut is unreadable. The lame
+cut is the duration verdict: sox still reports the Xing duration and the
+decode is short. sox's own MP3 writer is not used, because a prefix cut of
+that file makes `sox --i -D` recount the remaining frames, so the ratio
+sees a shorter complete file. `TestDecodedShortOfDuration` carries the
+iTunes and afconvert rows, the 5-over-3 header lie, the 60% content rows
+at 0.5/1/5 s, and the 40 ms residual at 0.1 s.
+`TestPrimingAllowanceIsAACOnly` requires `aac` and `AAC` to take the
+allowance and `alac`, `mp3`, `flac`, an empty name and `pcm_s16le` to
+take 0.
+
+### Red first and the control
+
+With `aacPrimingAllowance` at 0 the iTunes row and the two afconvert rows
+are short, and `TestShortClips/itunes-116ms` fails
+`ffmpeg: decoded 0.050s of 0.116s probed — source appears truncated`.
+Restoring 0.08 makes that file pass and leaves the byte cut failing.
+Removing the allowance again (the constant back at 0, the comparison
+unchanged) turns the same fixture red; 0.08 is restored after that run.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump.

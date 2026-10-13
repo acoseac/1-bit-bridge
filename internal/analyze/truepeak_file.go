@@ -37,7 +37,7 @@ func TruePeakDBTP(ctx context.Context, srcAbs string, channels int) (dbTP float6
 	}
 	meter := newTruePeakMeter(channels)
 	if _, err := decodeFramesWith(ctx, decoderSox, resolveBin(soxLookPath, "sox"),
-		nativeRateDecodeArgs(srcAbs, channels), srcAbs, channels, 0, meter.addFrame); err != nil {
+		nativeRateDecodeArgs(srcAbs, channels), srcAbs, channels, 0, 0, meter.addFrame); err != nil {
 		return 0, false, err
 	}
 	dbTP, ok = meter.truePeakDB()

@@ -96,9 +96,9 @@ var ErrSourceUnreadable = errors.New("source unreadable")
 // every message with "source unreadable: ", and these messages are not
 // internal: they are logged verbatim, persisted as
 // `tracks.analysis_fail_reason`, and rendered in the console's
-// unreadable list. "decoded 51.5s of 357.2s probed — source appears
-// truncated" already says what happened, in the words the operator has
-// been reading in the journal; the classification is for the code.
+// unreadable list. "decoded 51.500s of 357.200s probed — source appears
+// truncated" already says what happened, seconds to the millisecond; the
+// classification is for the code.
 func markUnreadable(err error) error { return unreadableSource{err} }
 
 // unreadableSource carries the classification beside an error while

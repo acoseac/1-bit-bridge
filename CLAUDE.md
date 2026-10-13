@@ -3598,6 +3598,37 @@ no failing test — which is the shape to expect in this area.
   empirically disproven: `-xerror` also fails a glitchy-but-COMPLETE file
   (permanent treadmill), and sox stderr markers cannot distinguish truncation
   from a resynced complete file.
+- **AAC encoder delay is an absolute allowance on that ratio, and the
+  failure names both durations to the millisecond** (2026-10-13, backlog
+  B192). Apple AAC's container duration counts priming and padding the
+  decoder strips. `itunes_aac_pop.m4a` (116 ms) probes 0.116 s and decodes
+  to 0.050 s: iTunSMPB is 2112 samples of priming, 803 of padding and 2205
+  valid. afconvert clips from 0.1 s to 5 s are short by 57–68 ms, so the
+  0.90 bar fails a complete Apple AAC file under about 0.6 s. ffmpeg AAC
+  with its edit list, ALAC, FLAC and MP3 (sox duration against the sox
+  decode) match. A duration floor under that 0.6 s would accept a 60% byte
+  cut of the same Apple files: the probe stays at the container duration
+  and the decode is empty, exit 0. `aacPrimingAllowance` is 80 ms, added to
+  the 10% slack (`shortfall > expected*0.10 + allowance`), and only when
+  ffprobe's codec name is `aac`. ALAC shares the m4a container and the
+  ffmpeg path and its gap is 0, so the allowance is the codec name. A probe
+  that names nothing grants 0. The sox path grants 0, because its duration
+  already matches the samples it writes. A shortfall equal to the slack is
+  still accepted. A header that claims 5 s over 3 s of audio fails, and so
+  does a 60% byte cut at 0.5 s, 1 s and 5 s. A synthetic 0.1 s AAC whose
+  decode is 40 ms short of a 0.1 s probe sits inside 80 ms; that shape is
+  the residual a duration check cannot separate from priming, and the 0.1 s
+  cut that is pinned decodes to nothing while the probe stays. The album
+  survey does not use this bar. Its check is `durationTolerance` 0.02,
+  two-sided, on DSD mates, and AAC is not rendered there. The text is
+  `decoded %.3fs of %.3fs probed`, so 0.050 and 0.116 are not both printed
+  as 0.1. **Zero frames against a known duration always fail**: under about
+  88.9 ms the allowance alone covers the whole probe, so without that rule an
+  empty decode would store an empty waveform (CodeRabbit on #1205). The
+  ffmpeg path probes codec, channels and duration in ONE ffprobe run
+  (`ffprobeAudio`). No `ExtractorVersion` bump.
+  (`TestShortClips`, `TestDecodedShortOfDuration`,
+  `TestPrimingAllowanceIsAACOnly`.)
 - **…and a source that will NEVER decode stops being offered, on the decoder's
   own verdict.** A failed analysis writes no `track_analysis` row and every
   candidate query selects tracks that LACK a fresh waveform, so a truncated
