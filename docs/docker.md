@@ -47,6 +47,18 @@ up. Pair iOS against `https://<host>:7788` with the fingerprint from
   host bind-mount. A bind-mount like `./data:/data` is created root-owned, so
   the non-root process can't write its config/DB/cert into it; a named volume
   inherits the image's writable `/data`.
+- **Give the container a fixed hostname, and name the address the phone
+  dials.** Docker's default hostname is 12 hex digits of the container id
+  and changes when the container is recreated. The shipped `compose.yaml`
+  sets `hostname: 1-bit-bridge`. Set `BRIDGE_CUSTOM_ENDPOINTS` to
+  `https://<host>:7788`, where `<host>` is this machine's address and
+  `7788` is the published port. An empty value leaves a list already
+  stored in `bridge.yaml` unchanged. While `/.dockerenv` is present, the
+  bridge leaves that generated hostname and `172.17.0.0/16` out of
+  `/v1/health` and out of the pairing QR. With no custom endpoint, the
+  devices page and `bridge doctor` say to set `BRIDGE_CUSTOM_ENDPOINTS`.
+  A phone already paired from a QR that used the container id keeps that
+  saved address until the share is edited or the phone is paired again.
 
 Not cloning the repo? Here is the committed `compose.yaml` to drop next to an
 `.env` of your own (Compose auto-loads a sibling `.env` for the `${…}` values):
@@ -56,6 +68,7 @@ services:
   bridge:
     image: ghcr.io/acoseac/1-bit-bridge:latest
     container_name: 1-bit-bridge
+    hostname: 1-bit-bridge
     restart: unless-stopped
     ports:
       - "7788:7788/tcp"
@@ -70,6 +83,9 @@ services:
       BRIDGE_ANALYSIS_ENABLED: "${BRIDGE_ANALYSIS_ENABLED:-false}"
       BRIDGE_DISABLE_HTTP3: "${BRIDGE_DISABLE_HTTP3:-false}"
       TZ: "${TZ:-UTC}"
+      # https://<host>:7788 — this machine's address and the published port.
+      # Empty leaves a list already stored in bridge.yaml unchanged.
+      BRIDGE_CUSTOM_ENDPOINTS: "${BRIDGE_CUSTOM_ENDPOINTS:-}"
 volumes:
   bridge-state:
 ```
@@ -173,6 +189,7 @@ hand-tuned YAML, or to see the pairing fingerprint printed up front:
 
 ```sh
 docker run --rm -it \
+    --hostname 1-bit-bridge \
     -v 1-bit-bridge-state:/data \
     -v ~/music:/library:ro \
     1-bit-bridge:dev \
@@ -233,6 +250,7 @@ if present:
 ```sh
 docker run -d \
     --name 1-bit-bridge \
+    --hostname 1-bit-bridge \
     --restart unless-stopped \
     -p 7788:7788/tcp \
     -p 7788:7788/udp \
@@ -305,6 +323,7 @@ services:
   bridge:
     image: ghcr.io/acoseac/1-bit-bridge:latest
     container_name: 1-bit-bridge
+    hostname: 1-bit-bridge
     restart: unless-stopped
     ports:
       - "7788:7788/tcp"
@@ -355,7 +374,7 @@ bridge boots normally and disables it with one line in the log. Run
 Flip either feature on with an env var (idiomatic for containers):
 
 ```sh
-docker run -d --name 1-bit-bridge --restart unless-stopped \
+docker run -d --name 1-bit-bridge --hostname 1-bit-bridge --restart unless-stopped \
     -p 7788:7788/tcp -p 7788:7788/udp \
     -v ~/music:/library:ro \
     -v 1-bit-bridge-state:/data \
@@ -490,6 +509,7 @@ single time, so capture it:
 
 ```sh
 docker run --rm -it \
+    --hostname 1-bit-bridge \
     -v 1-bit-bridge-state:/data \
     -v ~/music:/library:ro \
     1-bit-bridge:dev \
@@ -505,7 +525,7 @@ allow it with `--sysctl net.ipv4.ip_unprivileged_port_start=0`, and
 publish `443` (TCP + UDP for HTTP/3):
 
 ```sh
-docker run -d --name 1-bit-bridge --restart unless-stopped \
+docker run -d --name 1-bit-bridge --hostname 1-bit-bridge --restart unless-stopped \
     --sysctl net.ipv4.ip_unprivileged_port_start=0 \
     -p 443:443/tcp -p 443:443/udp \
     -v 1-bit-bridge-state:/data \
@@ -549,6 +569,7 @@ services:
   bridge:
     image: ghcr.io/acoseac/1-bit-bridge:latest
     container_name: 1-bit-bridge
+    hostname: 1-bit-bridge
     sysctls:
       # let the non-root user bind :443 for the ACME TLS-ALPN-01 challenge
       net.ipv4.ip_unprivileged_port_start: "0"
@@ -657,7 +678,7 @@ Then start with a Tailscale auth key (generate a reusable/ephemeral key at
 `login.tailscale.com` → Settings → Keys):
 
 ```sh
-docker run -d --name 1-bit-bridge --restart unless-stopped \
+docker run -d --name 1-bit-bridge --hostname 1-bit-bridge --restart unless-stopped \
     -e TS_AUTHKEY=tskey-auth-xxxxxxxxxxxxxxxxxx \
     -v 1-bit-bridge-state:/data \
     -v ~/music:/library:ro \

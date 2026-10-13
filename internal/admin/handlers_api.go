@@ -1939,9 +1939,12 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name-required", "name must not be empty")
 		return
 	}
-	if req.URL == "" {
-		req.URL = defaultBridgeURL(cfg)
+	url, refusal := resolvePairingURL(cfg, req.URL)
+	if refusal != "" {
+		writeError(w, http.StatusBadRequest, "pairing-url", refusal)
+		return
 	}
+	req.URL = url
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

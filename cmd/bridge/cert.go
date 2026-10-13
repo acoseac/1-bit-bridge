@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -260,7 +259,7 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 // TTL-cached for 30 s process-wide (see internal/advertise) — the same
 // probe `/v1/health` runs per request.
 func certSANOptions(cfg *config.Config) servertls.GenerateOptions {
-	hostname, _ := os.Hostname()
+	hostname := advertise.CertHostname()
 	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
 	return servertls.GenerateOptions{
 		Hostname:      hostname,

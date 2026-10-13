@@ -41186,3 +41186,75 @@ those, so three strikes suppress that file's v2 rendition for 30 days.
 That rule is left as it is.
 
 No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+## 2026-10-13 — advertised endpoints drop a container id, docker0, and a point-to-point ULA (backlog B189, B199, B229)
+
+`/v1/health` and the certificate want-set share the interface walk and
+do not share its result. A container whose hostname is the first 12 hex
+digits of its id, and whose eth0 address is `172.17.0.2`, published both.
+The stale-SAN warning then named that id, because the want-set asked the
+certificate for a name that changes on every recreate. A point-to-point
+ULA outside Tailscale's range took the same path: health advertised it
+and the want-set asked for it, and a renumbered tunnel kept the warning
+alive.
+
+The marker is `/.dockerenv`, together with a hostname whose short label
+is `^[0-9a-f]{12}$`. Cgroup equality is the wrong check: in a private
+cgroup namespace `/proc/1/cgroup` is `0::/` and the id is not there.
+`172.17.0.0/16` leaves both walks only while that marker is present.
+`192.168`, `10/8`, and any other `172.16/12` slice stay. A
+point-to-point address in `fc00::/7` leaves after Tailscale
+classification, so `fd7a:115c:a1e0::/48` stays on the certificate path.
+Wintun has no point-to-point flag and stays. `customEndpoints` stays
+additive in loopback mode.
+
+In loopback mode the console accepts only a loopback Host, so the
+pairing handler cannot read the published-port host the browser used.
+When the hostname is unpublished and `customEndpoints` is empty, the QR
+primary is empty. The devices page, mint, rotate, and `bridge doctor`'s
+`pairing-url` line share one sentence: set `BRIDGE_CUSTOM_ENDPOINTS` to
+this host's address. The first non-loopback custom endpoint is the
+primary when the list has one. A failed hostname read outside a
+detected container still uses localhost.
+
+A name that leaves the want-set stops being missing, so the startup
+warning and `tls-cert-sans` go quiet for the container id. A certificate
+that still lacks a custom host still warns. `MintedByBridge` stays in
+the gate. The pin is unchanged. A phone already paired to the old
+container-id URL keeps that saved primary until the share is edited or
+the phone is paired again.
+
+`compose.yaml` sets `hostname: 1-bit-bridge`. `BRIDGE_CUSTOM_ENDPOINTS`
+is documented as `https://<host>:7788`. An empty override is a no-op
+(`applyEnvOverrides` ignores an empty value), so an unset `.env` leaves
+a stored list alone. `tailscale.hostname: onebit-bridge` in
+`docs/docker.md` is the tsnet node name and is unchanged.
+
+### Red first
+
+With `OmitContainerHostname` ignoring its container flag and the
+`172.17.0.0/16` arm of `omitFromWalk` forced off, these tests failed
+(`go test -count=1`):
+
+- `TestATwelveHexNameBesideDockerenvIsNotPublished` published
+  `https://0123456789ab.local:7788`
+- `TestCertHostnameOmitsAGeneratedContainerName` returned
+  `0123456789ab`
+- `TestADefaultDockerBridgeAddressInsideDockerIsNotPublished` published
+  `https://172.17.0.2:7788`
+- `TestACustomEndpointKeepsAnAddressTheWalkSkipped` classified
+  `https://172.17.0.2:7788` as LAN, so the custom copy was deduped away
+- `TestDefaultBridgeURLDoesNotBakeAGeneratedContainerName` returned
+  `https://0123456789ab.local:7788`
+- `TestAContainerMintRefusesAnUndialableURL` minted with status 201
+- `TestTheDevicesPageSaysToSetCustomEndpoints` prefilled
+  `https://0123456789ab.local:7788`
+- `TestAContainerHostnameLeavesTheWantSetAndTheDoctor` kept Hostname
+  `0123456789ab`
+
+`TestAPointToPointULAIsNotPublished` stayed green: that filter does not
+read the container marker. The doctor coverage tests
+`TestAWantSetThatDroppedAContainerNameIsCovered` and
+`TestAMissingCustomHostStillWarnsAfterTheContainerNameLeft` stayed
+green: they pass the want-set in directly. Both gates were restored and
+the same run passed.

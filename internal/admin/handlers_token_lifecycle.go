@@ -57,9 +57,12 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	if !decodeOptionalJSONBody(w, r, &req) {
 		return
 	}
-	if req.URL == "" {
-		req.URL = defaultBridgeURL(cfg)
+	url, refusal := resolvePairingURL(cfg, req.URL)
+	if refusal != "" {
+		writeError(w, http.StatusBadRequest, "pairing-url", refusal)
+		return
 	}
+	req.URL = url
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

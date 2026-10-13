@@ -9,10 +9,10 @@ import (
 
 // TestEndpointsIncludesHost asserts that a non-empty host override
 // produces a `<shortHostname>.local` URL in the result set. The
-// function is hard to test more than this without mocking
-// net.Interfaces (which is deliberately unmocked here so we catch a
-// real-world regression), so the contract-level tests live in
-// sub-functions below.
+// function reads the host's interfaces when the seam is left at its
+// default, so a regression on a real NIC still shows up here. Tests
+// that need a chosen address replace enumerateIfaces. The
+// contract-level tests live in the functions below.
 func TestEndpointsIncludesHost(t *testing.T) {
 	eps := Endpoints(Params{Port: 7788, HostOverride: "testhost"})
 	var found bool

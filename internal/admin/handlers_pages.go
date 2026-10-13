@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -442,9 +443,13 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 			ClientVersion: t.LastClientVersion,
 		})
 	}
+	dial := defaultBridgeURL(cfg)
 	data := map[string]any{
 		"Tokens":     rows,
-		"DefaultURL": defaultBridgeURL(cfg),
+		"DefaultURL": dial,
+	}
+	if dial == "" {
+		data["PairingHint"] = advertise.PairingNeedsEndpoint
 	}
 	// Console sign-ins, for the "Sign out all other sessions" panel the
 	// template renders in public mode, the one mode with sessions.

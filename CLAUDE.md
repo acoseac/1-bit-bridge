@@ -2605,6 +2605,37 @@ lost my library."
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
   already cover. Never emit `host=.local` — fall back to `localhost.local`.
+- **A container id, the default docker0 address, and a point-to-point ULA
+  stay out of the lists a phone dials** (2026-10-13, backlog B189, B199,
+  B229). `/v1/health` endpoints and the certificate want-set share one
+  walk (`eachUsableAddr`, `omitFromWalk`). Docker's generated hostname is
+  exactly 12 lowercase hex digits after the cut at the first dot, and it
+  is unpublished only while `/.dockerenv` exists: `advertise.Endpoints`
+  drops `https://<id>.local:<port>`, and `CertHostname` leaves the
+  want-set without the bare id and without `<id>.local`. A name the
+  operator set stays, inside Docker included. A 12-hex name on a host
+  with no marker stays. Setting the hostname to 12 hex digits inside
+  Docker is the accepted miss. `172.17.0.0/16` leaves both walks only
+  while that marker exists. A `192.168` address, a `10/8` address, and a
+  Compose network on another `172.16/12` slice stay. After Tailscale
+  classification, a point-to-point address in `fc00::/7` outside
+  `fd7a:115c:a1e0::/48` leaves both walks. The classifier runs first, so
+  a Tailscale ULA on a point-to-point interface stays on the certificate
+  path; health still publishes Tailscale from the provider. Wintun
+  carries no point-to-point flag and stays. A ULA on a physical
+  interface stays. An address written in `customEndpoints` is still
+  published, and in loopback mode that list stays additive.
+  (`TestATwelveHexNameBesideDockerenvIsNotPublished`,
+  `TestATwelveHexNameWithoutDockerenvIsPublished`,
+  `TestAChosenHostnameInsideDockerIsPublished`,
+  `TestCertHostnameOmitsAGeneratedContainerName`,
+  `TestADefaultDockerBridgeAddressInsideDockerIsNotPublished`,
+  `TestALanAddressInsideDockerIsPublished`,
+  `TestAPointToPointULAIsNotPublished`,
+  `TestATailscaleULAOnAPointToPointInterfaceStaysOnTheTailscalePath`,
+  `TestAULAOnAPhysicalInterfaceIsPublished`,
+  `TestAWintunShapedULAIsPublished`,
+  `TestACustomEndpointKeepsAnAddressTheWalkSkipped`.)
 - **The Bonjour instance name is ONE DNS label, 63 bytes, and hashicorp/mdns
   does not check it** (#1046). The instance is the library name:
   `NewMDNSService` takes a longer one, `Advertise` succeeds, serve prints
@@ -9039,6 +9070,34 @@ its twin.** The top list is older, shorter, and read first.
   `TestALeftmostWildcardCoversOneLabel`,
   `TestAPartialLabelWildcardCoversNothing`,
   `TestACertTheBridgeDidNotMintIsNotToldToRotate`.)
+- **The pairing QR carries an address a phone can dial, and a name that
+  left the want-set stops the stale-SAN warning** (2026-10-13, backlog
+  B189, B199, B229). `certSANOptions` takes `advertise.CertHostname`.
+  `InspectSANCoverage` reports names in the want-set the certificate
+  lacks, so a container id that left the want-set is no longer missing:
+  the startup warning and `tls-cert-sans` go quiet for it. A certificate
+  that still lacks a custom host still warns. `MintedByBridge` stays in
+  the gate. `localhost` stays on the certificate. In loopback mode
+  `loopbackHostOnly` accepts only a loopback Host, so the pairing
+  handler never sees the published-port host a browser used, and that
+  Host is not written into the QR. When the hostname is the generated
+  container id and `customEndpoints` is empty, `defaultBridgeURL`
+  returns empty. The devices page, a refused mint, a refused rotate, and
+  `bridge doctor`'s `pairing-url` line share
+  `advertise.PairingNeedsEndpoint`. The first custom endpoint whose host
+  is not loopback becomes the primary. A failed hostname read on a host
+  that is not a detected container still uses localhost, the
+  same-machine path. A phone already paired to the old container-id URL
+  keeps that saved primary until the share is edited or the phone is
+  paired again.
+  (`TestCertHostnameOmitsAGeneratedContainerName`,
+  `TestAWantSetThatDroppedAContainerNameIsCovered`,
+  `TestAMissingCustomHostStillWarnsAfterTheContainerNameLeft`,
+  `TestDefaultBridgeURLDoesNotBakeAGeneratedContainerName`,
+  `TestAContainerMintRefusesAnUndialableURL`,
+  `TestTheDevicesPageSaysToSetCustomEndpoints`,
+  `TestPairingURLWarnsWhenTheContainerHasNoDialAddress`,
+  `TestAContainerHostnameLeavesTheWantSetAndTheDoctor`.)
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing
