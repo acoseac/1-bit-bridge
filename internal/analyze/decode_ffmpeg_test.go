@@ -79,6 +79,11 @@ func TestDecodedShortOfDuration(t *testing.T) {
 		{"itunes aac without priming", 0.1161, frames(0.050), 0, true},
 		// The same probe with an empty decode is the 60% byte cut.
 		{"itunes aac empty decode", 0.1161, 0, aacPrimingAllowance, true},
+		// Under about 88.9 ms the AAC allowance covers the whole probed
+		// duration, so only the zero-frame rule rejects an empty decode
+		// (CodeRabbit on #1205).
+		{"aac 88.8ms empty decode", 0.0888, 0, aacPrimingAllowance, true},
+		{"aac 40ms empty decode", 0.040, 0, aacPrimingAllowance, true},
 		// afconvert 0.1 s and 0.5 s sit under the 90% line and inside 80 ms.
 		{"afconvert 0.1s", 0.162540, frames(0.100), aacPrimingAllowance, false},
 		{"afconvert 0.5s", 0.557279, frames(0.500), aacPrimingAllowance, false},
@@ -112,10 +117,29 @@ func TestDecodedShortOfDuration(t *testing.T) {
 // The probe-channel tests above discard probeChannels' fourth return, so a
 // regression that made the duration probe always return 0 would silently
 // disable the ffmpeg truncation guard (decodedShortOfDuration short-circuits on
-// expectedSec <= 0) with no failing test. This pins that ffprobeDuration — the
+// expectedSec <= 0) with no failing test. This pins that ffprobeAudio — the
 // source of expectedSec on the ffmpeg path — surfaces a positive, correct
 // duration. Requires ffprobe (+ sox to synthesize a known-length source);
 // skipped where either is absent (the macOS/Linux CI gate has both).
+// TestFFprobeAudioReadsCodecChannelsAndDurationInOneRun pins the single
+// probe on the iTunes fixture: codec aac (which grants the priming
+// allowance), 2 channels (loudness is measured, not skipped), and the
+// container's 0.1161 s. One run replaced three (Gemini on #1205).
+func TestFFprobeAudioReadsCodecChannelsAndDurationInOneRun(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	src := filepath.Join("..", "manifest", "testdata", "m4a", "itunes_aac_pop.m4a")
+	got := ffprobeAudio(context.Background(), src)
+	if got.codec != "aac" || got.channels != 2 || !got.channelsOK || math.Abs(got.duration-0.1161) > 0.0005 {
+		t.Fatalf("ffprobeAudio(itunes fixture) = %+v, want codec aac, 2 channels (ok), duration 0.1161 s", got)
+	}
+	missing := ffprobeAudio(context.Background(), filepath.Join(t.TempDir(), "absent.m4a"))
+	if missing.codec != "" || missing.channels != 1 || missing.channelsOK || missing.duration != 0 {
+		t.Fatalf("ffprobeAudio(missing file) = %+v, want the zero contract: no codec, (1, false), duration 0", missing)
+	}
+}
+
 func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe not installed")
@@ -128,9 +152,9 @@ func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 		"synth", "3", "sine", "440").CombinedOutput(); err != nil {
 		t.Skipf("sox synth: %v\n%s", err, out)
 	}
-	got := ffprobeDuration(context.Background(), src)
+	got := ffprobeAudio(context.Background(), src).duration
 	if got < 2.5 || got > 3.5 {
-		t.Errorf("ffprobeDuration(3s tone) = %.3f, want ~3.0 — a positive duration MUST be surfaced or the ffmpeg truncation guard is silently disabled", got)
+		t.Errorf("ffprobeAudio(3s tone).duration = %.3f, want ~3.0 — a positive duration MUST be surfaced or the ffmpeg truncation guard is silently disabled", got)
 	}
 }
 

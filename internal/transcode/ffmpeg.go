@@ -210,7 +210,7 @@ type sourceGeometry struct {
 // at an invented rate. Duration is optional: 0 means "unknown", and the
 // caller then skips the completeness check rather than rejecting, so a probe
 // miss can never block a legitimately-complete file (the same contract
-// internal/analyze's ffprobeDuration documents).
+// internal/analyze's ffprobeAudio documents).
 func probeSourceGeometry(ctx context.Context, srcAbs string) (sourceGeometry, error) {
 	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
 		"-v", "error",

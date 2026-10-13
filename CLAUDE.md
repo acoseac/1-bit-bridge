@@ -3622,7 +3622,11 @@ no failing test — which is the shape to expect in this area.
   survey does not use this bar. Its check is `durationTolerance` 0.02,
   two-sided, on DSD mates, and AAC is not rendered there. The text is
   `decoded %.3fs of %.3fs probed`, so 0.050 and 0.116 are not both printed
-  as 0.1. No `ExtractorVersion` bump.
+  as 0.1. **Zero frames against a known duration always fail**: under about
+  88.9 ms the allowance alone covers the whole probe, so without that rule an
+  empty decode would store an empty waveform (CodeRabbit on #1205). The
+  ffmpeg path probes codec, channels and duration in ONE ffprobe run
+  (`ffprobeAudio`). No `ExtractorVersion` bump.
   (`TestShortClips`, `TestDecodedShortOfDuration`,
   `TestPrimingAllowanceIsAACOnly`.)
 - **…and a source that will NEVER decode stops being offered, on the decoder's

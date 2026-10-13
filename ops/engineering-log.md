@@ -41324,7 +41324,7 @@ and the sox decode, so a complete MP3 does not trip the ratio. A shortfall
 equal to the slack is still accepted, which keeps the old 100 s rows
 (exactly 90% is not short).
 
-The residual a duration check cannot close: a synthetic AAC whose probe is
+What a duration check cannot close: a synthetic AAC whose probe is
 0.1 s and whose decode is 0.06 s is a 40 ms gap, inside 10 ms of slack plus
 80 ms. It is pinned as not short when the allowance is on, and short when
 the allowance is 0. The 0.1 s truncation that must fail is the measured
@@ -41342,6 +41342,20 @@ rendered. ALAC's measured gap is 0, so that 2% bar is left as it is.
 `%.1f` became `%.3f`. The iTunes failure now reads `decoded 0.050s of
 0.116s probed`. The string is persisted as `analysis_fail_reason` and
 shown in the console's unreadable list. `markUnreadable` stays unprefixed.
+
+### Review fixes
+
+- **An empty decode never passes** (CodeRabbit on #1205). Under about
+  88.9 ms the AAC allowance alone covers the whole probed duration
+  (`0.1×d + 0.08 ≥ d`), so a clean zero-frame decode was accepted and an
+  empty waveform could be stored. `decodedShortOfDuration` now returns
+  true for zero frames against a known duration. Red first: the 88.8 ms
+  and 40 ms empty-decode rows were accepted before the change.
+- **One ffprobe run, not three** (Gemini on #1205). The ffmpeg path ran
+  ffprobe for the duration, the codec and the channel count, three
+  process spawns per file. `ffprobeAudio` reads all three in one JSON run,
+  with each field's old failure contract. Pinned on the iTunes fixture
+  (aac, 2 channels, 0.1161 s) and on a missing file (the zero contract).
 
 ### Tests
 
