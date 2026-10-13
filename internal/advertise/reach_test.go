@@ -2,6 +2,9 @@ package advertise
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -262,5 +265,37 @@ func TestACustomEndpointKeepsAnAddressTheWalkSkipped(t *testing.T) {
 	ips := GatherCertSANIPs(CertSANConfig{CustomEndpoints: custom})
 	if !hasIP(ips, "172.17.0.2") || !hasIP(ips, ula) {
 		t.Fatalf("custom addresses missing from the want-set: %v", ips)
+	}
+}
+
+// TestADockerMarkerThatCannotBeReadKeepsTheContainerRules pins that only a
+// missing /.dockerenv means "not in a container". A stat that fails another
+// way (here a permission error) reads as a container, so a generated
+// hostname cannot reach the pairing QR (CodeRabbit on #1204).
+func TestADockerMarkerThatCannotBeReadKeepsTheContainerRules(t *testing.T) {
+	dir := t.TempDir()
+	if dockerMarkerAt(filepath.Join(dir, "missing")) {
+		t.Fatal("a missing marker read as a container")
+	}
+	present := filepath.Join(dir, "dockerenv")
+	if err := os.WriteFile(present, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !dockerMarkerAt(present) {
+		t.Fatal("a present marker did not read as a container")
+	}
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a directory without search permission refuses a stat only for a non-root Unix user")
+	}
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if !dockerMarkerAt(filepath.Join(locked, "dockerenv")) {
+		t.Fatal("a marker whose stat failed with a permission error read as no container")
 	}
 }

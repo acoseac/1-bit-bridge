@@ -1,6 +1,8 @@
 package advertise
 
 import (
+	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"regexp"
@@ -65,8 +67,16 @@ func readInterfaces() ([]ifaceAddr, error) {
 }
 
 func dockerMarker() bool {
-	_, err := os.Stat("/.dockerenv")
-	return err == nil
+	return dockerMarkerAt("/.dockerenv")
+}
+
+// dockerMarkerAt reports whether path marks a container. Only "not there"
+// means no container. Any other stat error (a permission or I/O failure)
+// keeps the container rules on: their mistake is a missing alternate,
+// while the other side's is a pairing QR that names the phone itself.
+func dockerMarkerAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }
 
 // SetHostProbeForTest replaces the hostname and container-marker reads
