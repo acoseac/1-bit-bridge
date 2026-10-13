@@ -88,28 +88,11 @@ func runRootChangeDuringScan(t *testing.T, initial, withFiles, present, absent [
 	release := func() { closeRemoval.Do(func() { close(removalDone) }) }
 	defer release()
 
-	parked := make(chan struct{})
-	var once sync.Once
-	sc.SetAfterExtractHookForTests(func(string) {
-		once.Do(func() {
-			close(parked)
-			select {
-			case <-sc.InFlightScanDone():
-			case <-removalDone:
-			}
-		})
-	})
+	parked, scanDone := sc.StartParkedScanForTests(removalDone)
 	t.Cleanup(func() { sc.SetAfterExtractHookForTests(nil) })
-
-	scanFinished := make(chan struct{})
-	var scanErr error
-	go func() {
-		_, scanErr = sc.Scan(context.Background())
-		close(scanFinished)
-	}()
 	defer func() {
 		select {
-		case <-scanFinished:
+		case <-scanDone:
 		case <-time.After(5 * time.Second):
 		}
 	}()
@@ -125,8 +108,9 @@ func runRootChangeDuringScan(t *testing.T, initial, withFiles, present, absent [
 		}
 	})
 	release()
+	var scanErr error
 	select {
-	case <-scanFinished:
+	case scanErr = <-scanDone:
 	case <-time.After(30 * time.Second):
 		t.Fatal("parked scan did not finish")
 	}

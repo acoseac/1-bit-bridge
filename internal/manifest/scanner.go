@@ -443,6 +443,32 @@ func (s *Scanner) SetAfterExtractHookForTests(hook func(string)) {
 	s.afterExtractHook.Store(&hook)
 }
 
+// StartParkedScanForTests installs the after-extract hook and starts Scan.
+// parked closes when the hook runs. The hook then waits until that scan's
+// context is cancelled or release is closed. done receives Scan's error
+// and is then closed, so a second wait returns at once. Production code
+// must not call this.
+func (s *Scanner) StartParkedScanForTests(release <-chan struct{}) (parked <-chan struct{}, done <-chan error) {
+	parkedCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	var once sync.Once
+	s.SetAfterExtractHookForTests(func(string) {
+		once.Do(func() {
+			close(parkedCh)
+			select {
+			case <-s.InFlightScanDone():
+			case <-release:
+			}
+		})
+	})
+	go func() {
+		_, err := s.Scan(context.Background())
+		errCh <- err
+		close(errCh)
+	}()
+	return parkedCh, errCh
+}
+
 func (s *Scanner) callExtractHook(abs string) {
 	if p := s.afterExtractHook.Load(); p != nil {
 		if hook := *p; hook != nil {

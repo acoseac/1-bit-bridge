@@ -35,6 +35,46 @@ func TestARootChangeThroughTheHandlerDoesNotLeaveTheOldRows(t *testing.T) {
 
 func runHandlerRootChange(t *testing.T, kind string, present, absent []string) {
 	t.Helper()
+	srv, h, extra := stageHandlerRootLibrary(t, kind)
+
+	removalDone := make(chan struct{})
+	var closeRemoval sync.Once
+	release := func() { closeRemoval.Do(func() { close(removalDone) }) }
+	t.Cleanup(release)
+
+	sc := srv.deps.Scanner
+	parked, scanDone := sc.StartParkedScanForTests(removalDone)
+	t.Cleanup(func() { sc.SetAfterExtractHookForTests(nil) })
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-scanDone:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("scan did not reach the extract hook")
+	}
+
+	requestHandlerRootChange(t, h, kind, extra)
+	release()
+	var scanErr error
+	select {
+	case scanErr = <-scanDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("parked scan did not finish")
+	}
+	if scanErr != nil && !errors.Is(scanErr, context.Canceled) {
+		t.Fatal(scanErr)
+	}
+	waitForBackgroundScans(t, srv)
+	assertHandlerTrackPaths(t, srv, present, absent)
+}
+
+func stageHandlerRootLibrary(t *testing.T, kind string) (*Server, http.Handler, string) {
+	t.Helper()
 	srv, cfg, _ := newTestServer(t)
 	music := cfg.LibraryRoots[0]
 	srv.deps.Scanner.SetDeleteThreshold(3)
@@ -73,45 +113,11 @@ func runHandlerRootChange(t *testing.T, kind string, present, absent []string) {
 	default:
 		t.Fatalf("unknown kind %s", kind)
 	}
+	return srv, h, extra
+}
 
-	removalDone := make(chan struct{})
-	var closeRemoval sync.Once
-	release := func() { closeRemoval.Do(func() { close(removalDone) }) }
-	t.Cleanup(release)
-
-	sc := srv.deps.Scanner
-	parked := make(chan struct{})
-	var once sync.Once
-	sc.SetAfterExtractHookForTests(func(string) {
-		once.Do(func() {
-			close(parked)
-			select {
-			case <-sc.InFlightScanDone():
-			case <-removalDone:
-			}
-		})
-	})
-	t.Cleanup(func() { sc.SetAfterExtractHookForTests(nil) })
-
-	scanFinished := make(chan struct{})
-	var scanErr error
-	go func() {
-		_, scanErr = sc.Scan(context.Background())
-		close(scanFinished)
-	}()
-	t.Cleanup(func() {
-		release()
-		select {
-		case <-scanFinished:
-		case <-time.After(5 * time.Second):
-		}
-	})
-	select {
-	case <-parked:
-	case <-time.After(30 * time.Second):
-		t.Fatal("scan did not reach the extract hook")
-	}
-
+func requestHandlerRootChange(t *testing.T, h http.Handler, kind, extra string) {
+	t.Helper()
 	switch kind {
 	case "collapse", "remove":
 		if code := doJSON(t, h, http.MethodDelete, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusNoContent {
@@ -122,17 +128,10 @@ func runHandlerRootChange(t *testing.T, kind string, present, absent []string) {
 			t.Fatalf("add: status %d", code)
 		}
 	}
-	release()
-	select {
-	case <-scanFinished:
-	case <-time.After(30 * time.Second):
-		t.Fatal("parked scan did not finish")
-	}
-	if scanErr != nil && !errors.Is(scanErr, context.Canceled) {
-		t.Fatal(scanErr)
-	}
-	waitForBackgroundScans(t, srv)
+}
 
+func assertHandlerTrackPaths(t *testing.T, srv *Server, present, absent []string) {
+	t.Helper()
 	got, err := srv.deps.Manifest.TrackPaths(context.Background())
 	if err != nil {
 		t.Fatal(err)
