@@ -183,10 +183,12 @@ func soxReportedClipping(stderr string) bool {
 	return strings.Contains(strings.ToLower(stderr), "clipped")
 }
 
-// dsdExpectedDurationSec is the completeness guard's reference: ffprobe's
-// container duration when it reported one, else the manifest's. Without the
-// fallback a probe that reports 0 makes decodeLengthDisagrees vacuous, and a
-// half-decoded DSD would publish.
+// dsdExpectedDurationSec is the completeness reference for a source whose
+// container header is not the reference: DST, and anything that is not a
+// DSF or an uncompressed DFF. ffprobe's container duration when it
+// reported one, else the manifest's. Without the fallback a probe that
+// reports 0 makes decodeLengthDisagrees vacuous, and a half-decoded
+// source would publish.
 func dsdExpectedDurationSec(probed, manifest float64) float64 {
 	if probed > 0 {
 		return probed
@@ -539,6 +541,10 @@ func (j JobSpec) dsdGeometry(ctx context.Context) (sourceGeometry, error) {
 // stops reading, so a full scratch volume ends in ffmpeg's broken pipe or a
 // short scratch, which a source that decoded short also leaves.
 func (j JobSpec) decodeAndMeasure(ctx context.Context, geo sourceGeometry, scratchDir, scratchPath string) (*float64, uint64, error) {
+	expected, err := j.dsdReferenceDuration(geo.Duration)
+	if err != nil {
+		return nil, 0, err
+	}
 	// Stage A — decode at unity (×0.5 on the pipe), decimate into the scratch.
 	soxStderr, err := runFFmpegPipe(ctx, j.dsdStageAArgs(geo, scratchDir, scratchPath), ffmpegDSDDecodeArgs(j.SourceAbsPath))
 	if err != nil {
@@ -550,7 +556,6 @@ func (j JobSpec) decodeAndMeasure(ctx context.Context, geo sourceGeometry, scrat
 	if soxReportedClipping(soxStderr) {
 		return nil, 0, fmt.Errorf("%w in stage A (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(soxStderr))
 	}
-	expected := dsdExpectedDurationSec(geo.Duration, j.SourceDurationSec)
 	samples := soxFileSamples(ctx, scratchPath)
 	if produced := float64(samples) / float64(j.TargetSampleRate); decodeLengthDisagrees(expected, produced) {
 		return nil, 0, scratchOutput(scratchDir, scratchPath, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",

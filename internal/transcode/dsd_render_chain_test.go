@@ -138,6 +138,18 @@ func TestDSDExpectedDurationFallsBackToManifest(t *testing.T) {
 	}
 }
 
+func TestAStandInDSFKeepsTheProbedDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stand-in.dsf")
+	if err := os.WriteFile(path, make([]byte, 128), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := JobSpec{SourceAbsPath: path, SourceLibraryRel: "Album/stand-in.dsf", SourceDurationSec: 3}
+	got, err := j.dsdReferenceDuration(1)
+	if err != nil || got != 1 {
+		t.Fatalf("dsdReferenceDuration = %v, %v; want the probe", got, err)
+	}
+}
+
 func TestValidateDSDGeometry(t *testing.T) {
 	pcm64 := JobSpec{Kind: JobKindPCMRender, SourceSampleRate: 2822400, SourceChannels: 2, TargetSampleRate: 176400, SourceLibraryRel: "a.dsf"}
 	cases := []struct {

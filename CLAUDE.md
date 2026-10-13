@@ -3498,6 +3498,29 @@ no failing test — which is the shape to expect in this area.
     `TestAChangedShortMateIsMeasuredAgain`,
     `TestATransientMateFailureIsMeasuredAgain`,
     `TestLengthIncompleteFileIsTheDecodeAndNotAnOutputFault`.)
+  - **A DSF's completeness reference is its fmt sample count, and an
+    uncompressed DFF's is the DSD chunk's declared payload** (2026-10-13,
+    backlog B241). ffprobe's container duration counts every byte from the
+    data chunk to EOF, so a trailing ID3 chunk is audio to it. A complete
+    file then fails the 2% bar, and a file cut inside the data chunk,
+    whose header still names the whole sample count, is accepted.
+    `JobSpec.dsdReferenceDuration` reads that header from the file being
+    decoded, before Stage A, and `decodeAndMeasure` uses it for the render
+    and the album survey. A DSF whose sample count and data-chunk size
+    disagree by more than one block is malformed
+    (`manifest.ErrDSFAudioMalformed`) and is a file fact, so part 1's
+    short-mate memory does not keep it. DST stays on ffprobe's duration: a
+    synthetic DST stream reports none, and the DSD chunk's byte length is
+    the playing time of an uncompressed stream. Analysis uses the same
+    header on the ffmpeg path when sox cannot open the file.
+    `verifyRendition` never sees a DSF or a DFF: those routes return from
+    `renderDSD`. A strike written under the old reference stores no error
+    class (v39 is count, time, size and mtime). After this ships, the
+    operator clears those rows with `POST /api/upscale/failures/retry`.
+    (`TestACompleteDSFWithATrailingID3PassesTheRenderAndTheSurvey`,
+    `TestADSFTruncatedMidDataIsRefused`,
+    `TestADSFHeaderThatDisagreesWithItsDataChunkIsMalformed`,
+    `TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey`.)
   - **A survey reads the store again after it takes a claim, and before it
     measures.** Its pass's read can be minutes old by then, because it
     measures mates one after another, and another survey may have measured,
