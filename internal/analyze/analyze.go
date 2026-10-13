@@ -310,7 +310,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// (full interleaved frame — channel-aware R128). channelsOK is false
 	// when sox couldn't report the layout; we still decode (mono) for the
 	// waveform but skip loudness so a biased value is never stored.
-	channels, channelsOK, tool, expectedSec := probeChannels(ctx, spec.SourceAbsPath)
+	channels, channelsOK, tool, expectedSec, primingAllowance := probeChannels(ctx, spec.SourceAbsPath)
 	pk := newPeaker(waveformBucketSamples)
 	// Allocate the loudness meter only when the channel layout is known — it
 	// holds a multi-second sliding K-weighting window (~150 KB), and every
@@ -328,7 +328,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// honestly.
 	tp := newTruePeakMeter(channels)
 	dr := newDRMeter(channels)
-	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, func(frame []float64) {
+	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, primingAllowance, func(frame []float64) {
 		mono := downmixFrame(frame)
 		pk.add(mono)
 		if channelsOK {

@@ -27,7 +27,7 @@ import (
 type unreadableTrackRow struct {
 	Path string `json:"path"`
 	// Reason is the decoder's own message — for the case this exists for,
-	// "sox: decoded 51.5s of 357.2s probed — source appears truncated".
+	// "sox: decoded 51.500s of 357.200s probed — source appears truncated".
 	// Already redacted of absolute paths where it was produced
 	// (analyze.decodeFramesWith), which is what makes it safe to render on
 	// a page that promises library-relative paths.

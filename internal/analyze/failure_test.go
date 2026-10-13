@@ -91,14 +91,14 @@ func TestATruncatedDecodeIsClassifiedUnreadable(t *testing.T) {
 	// 8 bytes = 2 float32 samples = 2 mono frames, against 60s probed.
 	_, err := decodeFramesWith(context.Background(), decoderSox, "sh",
 		[]string{"-c", "printf '\\0\\0\\0\\0\\0\\0\\0\\0'"},
-		"/library/Artist/Album/06. Jasper Sea.flac", 1, 60, func([]float64) {})
+		"/library/Artist/Album/06. Jasper Sea.flac", 1, 60, 0, func([]float64) {})
 	if err == nil {
 		t.Fatal("a decode two frames long against a 60s probe was accepted")
 	}
 	if !SourceUnreadable(err) {
 		t.Errorf("truncation verdict %q was not classified as a property of the file", err)
 	}
-	if !containsAll(err.Error(), "truncated", "60.0s") {
+	if !containsAll(err.Error(), "truncated", "60.000s") {
 		t.Errorf("message = %q, want it to still name the probed duration — it is what "+
 			"the operator reads in the journal and in the console list", err)
 	}
@@ -115,7 +115,7 @@ func TestADecoderKilledMidStreamIsNotTheFilesFault(t *testing.T) {
 	}
 	_, err := decodeFramesWith(context.Background(), decoderSox, "sh",
 		[]string{"-c", "kill -9 $$"},
-		"/library/Artist/Album/06. Jasper Sea.flac", 1, 60, func([]float64) {})
+		"/library/Artist/Album/06. Jasper Sea.flac", 1, 60, 0, func([]float64) {})
 	if err == nil {
 		t.Fatal("expected an error from a killed decoder")
 	}
@@ -130,7 +130,7 @@ func TestADecoderKilledMidStreamIsNotTheFilesFault(t *testing.T) {
 func TestARefusedInputIsClassifiedUnreadable(t *testing.T) {
 	_, err := decodeFramesWith(context.Background(), decoderSox, "sh",
 		[]string{"-c", "echo 'FAIL formats: bad header' >&2; exit 2"},
-		"/library/Artist/Album/06. Jasper Sea.flac", 1, 0, func([]float64) {})
+		"/library/Artist/Album/06. Jasper Sea.flac", 1, 0, 0, func([]float64) {})
 	if err == nil {
 		t.Fatal("expected an error from a refusing decoder")
 	}
