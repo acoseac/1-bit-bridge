@@ -41417,3 +41417,18 @@ and the cancel replaced it.
 No wire change. `ProtocolVersion` stays 1. The deleters are unchanged:
 `RecordFirstIndexedCarryAndWipe` on a form flip, `DeleteTracksByPrefix`
 on a prefix that stays multi-root, never `WipeAllTracks`.
+
+### Red first
+
+With `CommitRootChange` reduced to a direct call of its function, both
+tests failed on every shape (`go test -count=1`):
+
+- collapse left `Drop/Album/01.flac` and `Keep/Album/01.flac` beside
+  `Album/01.flac`, and through the handler `Music/Album/01.flac` and
+  `Extra/Album/01.flac` beside `Album/01.flac`
+- remove left `Drop/Album/01.flac` beside the two survivors, and through
+  the handler `Extra/Album/01.flac`
+- add left `Album/01.flac` beside the two multi-root paths, and the same
+  through the handler
+
+The serialisation was restored and the same run passed.
