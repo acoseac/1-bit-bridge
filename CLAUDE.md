@@ -7917,19 +7917,24 @@ mentions across the four `ops/audit-*.md` files.
   `nextSignOut` (now, or one nanosecond past the stored marker when the
   clock does not). That is the store's own sign-out. A file with no
   account is copied unchanged. A file that does not parse fails the
-  restore before any write, so a live account is not replaced and a
-  missing one is not created. Login tickets stay out of the bundle.
-  Both files are written at `0600` by the same `writeFrom` the other
-  copies use (`fsutil.KeepOwner`, one chown). **`writeFrom` streams an
-  `io.Reader`: never read a copy's source whole** — Restore copies
-  `bridge.db` through it, and a whole read held the database in memory. The CLI, the serve ticker
-  and the console snapshot all name them through `buildBackupSources`
-  and `buildRestoreTargets`.
+  restore before ANY file is written, so a live account is not replaced
+  and a missing one is not created. **Sign the account out before the
+  loop, never at its turn in it**: the manifest lists it after
+  `bridge.db`, the token store, the TLS pair and `bridge.yaml`, and a
+  check at its turn left a half-restored install. Login tickets stay
+  out of the bundle. Both files are written at `0600` by the same
+  `writeFrom` the other copies use (`fsutil.KeepOwner`, one chown).
+  **`writeFrom` streams an `io.Reader`: never read a copy's source
+  whole** — Restore copies `bridge.db` through it, and a whole read held
+  the database in memory. The CLI, the serve ticker and the console
+  snapshot all name them through `buildBackupSources` and
+  `buildRestoreTargets`.
   (`TestRestoreBringsTheConsoleAccountBackSignedOut`,
   `TestRestoreOfASnapshotWithoutTheConsoleAccountLeavesItAlone`,
   `TestRestoreRoundTripsTheHarvestState`,
   `TestSnapshotSkipsAMissingConsoleAccountAndHarvestState`,
   `TestRestoreRefusesAConsoleAccountThatDoesNotParse`,
+  `TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile`,
   `TestSignedOutFileKeepsTheAccountAndDropsSessions`,
   `TestBuildBackupSourcesNamesTheConsoleAccountAndHarvestState`,
   `TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState`,

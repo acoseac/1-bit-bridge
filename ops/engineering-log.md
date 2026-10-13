@@ -40835,3 +40835,23 @@ bytes. `TestCopyFileStreamsRatherThanReadingTheFileWhole` copies a
 sparse 64 MiB file and bounds what the copy allocates at an eighth of
 it. Against the `io.ReadAll` version it fails (165,360,168 bytes
 allocated); with `writeFrom` it passes.
+
+### Review: the account is checked before any write
+
+The engineering note above said a console account that does not parse
+fails the restore before any write. It held only for the account file:
+Restore walks the manifest in order, `Snapshot` lists the account after
+`bridge.db`, `tokens.json`, the TLS pair and `bridge.yaml`, and the
+account was signed out when the loop reached it, after those four had
+been replaced (CodeRabbit on PR #1200).
+`TestRestoreRefusesAConsoleAccountThatDoesNotParse` could not see it,
+because its snapshot holds the account alone. Restore now signs the
+account out before the loop (`signedOutAdminAuth`) and the loop writes
+those bytes; a snapshot that lists the account but changed in between
+is refused rather than written empty.
+`TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile`
+snapshots a full install with an account that does not parse, moves
+every live file on, and restores. Before the change it failed on all
+five (the four files and `bridge.db`); with it, it passes. Control:
+with the up-front check disabled (`if false && …`), the same five
+assertions go red; restored.

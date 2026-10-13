@@ -1104,6 +1104,80 @@ func TestRestoreRefusesAConsoleAccountThatDoesNotParse(t *testing.T) {
 
 // LooksLikeSnapshotDir is the CLI's pre-flight; an arbitrary
 // directory must be rejected, a real snapshot accepted.
+// TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile pins
+// that a console account that does not parse fails the restore before ANY
+// file is written. Snapshot lists the account after bridge.db, the token
+// store, the TLS pair and bridge.yaml, so a check made when the loop
+// reached it came after those four were replaced and left a half-restored
+// install (CodeRabbit on PR #1200). TestRestoreRefusesAConsoleAccountThat
+// DoesNotParse could not see it: its snapshot holds the account alone.
+func TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	src.AdminAuth = filepath.Join(dataDir, adminauth.FileName)
+	if err := os.WriteFile(src.AdminAuth, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// The live install moves on after the snapshot, so a restore that
+	// wrote anything shows.
+	live := map[string][]byte{
+		src.TokensJSON: []byte(`[{"live":true}]`),
+		src.ServerCert: []byte("live cert"),
+		src.ServerKey:  []byte("live key"),
+		src.BridgeYAML: []byte("libraryRoots:\n  - /live\n"),
+		src.AdminAuth:  []byte("{\n}\n"),
+	}
+	for p, b := range live {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", dsn.File(src.ManifestDB, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE after_snapshot (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create after_snapshot: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = backup.Restore(snap, backup.Targets{
+		ManifestDB: src.ManifestDB,
+		TokensJSON: src.TokensJSON,
+		ServerCert: src.ServerCert,
+		ServerKey:  src.ServerKey,
+		BridgeYAML: src.BridgeYAML,
+		AdminAuth:  src.AdminAuth,
+	})
+	if err == nil {
+		t.Fatal("restore accepted a console account that does not parse")
+	}
+	for p, want := range live {
+		if got := readBytes(t, p); string(got) != string(want) {
+			t.Errorf("restore replaced %s before refusing the account: %q", filepath.Base(p), got)
+		}
+	}
+	db, err = sql.Open("sqlite", dsn.File(src.ManifestDB, ""))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'after_snapshot'`).Scan(&n); err != nil {
+		t.Fatalf("read the live database: %v", err)
+	}
+	if n != 1 {
+		t.Error("restore replaced bridge.db before refusing the account")
+	}
+}
+
 func TestLooksLikeSnapshotDir(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)

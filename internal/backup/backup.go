@@ -48,6 +48,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -235,7 +236,9 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // previously-restored files are NOT rolled back, but each individual
 // target stays internally consistent. In practice the whole-dir
 // snapshot was atomic (created in one Snapshot call) so a partial
-// restore is the most useful failure mode anyway.
+// restore is the most useful failure mode anyway. The console account is
+// the exception: it is rewritten, not copied, and one that does not parse
+// fails the restore before any file is written (signedOutAdminAuth).
 func Restore(snapshotDir string, dst Targets) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -259,6 +262,19 @@ func Restore(snapshotDir string, dst Targets) error {
 		"bridge.yaml":        dst.BridgeYAML,
 		AdminAuthFileName:    dst.AdminAuth,
 		AtlasHarvestFileName: dst.AtlasHarvest,
+	}
+	// Sign the console account out before the loop. The manifest lists it
+	// after bridge.db, the token store, the TLS pair and bridge.yaml, so a
+	// check made when the loop reached it came after those were replaced,
+	// and an account that does not parse left a half-restored install
+	// (CodeRabbit on PR #1200).
+	var account []byte
+	accountRead := false
+	if dst.AdminAuth != "" && slices.Contains(m.Files, AdminAuthFileName) {
+		account, accountRead, err = signedOutAdminAuth(filepath.Join(snapshotDir, AdminAuthFileName))
+		if err != nil {
+			return err
+		}
 	}
 	for _, name := range m.Files {
 		target, ok := mapping[name]
@@ -288,11 +304,14 @@ func Restore(snapshotDir string, dst Targets) error {
 			return fmt.Errorf("create dir for %s: %w", name, err)
 		}
 		if name == AdminAuthFileName {
-			// One write of the signed-out account. copyFile would land the
-			// live sessions, and a second write to strip them would hand
-			// the file to its owner twice.
-			if err := restoreAdminAuth(srcPath, target); err != nil {
-				return err
+			// One write of the account signed out before the loop. copyFile
+			// would land the live sessions, and a second write to strip
+			// them would hand the file to its owner twice.
+			if !accountRead {
+				return fmt.Errorf("restore %s: the snapshot changed during the restore", AdminAuthFileName)
+			}
+			if err := writeFrom(target, bytes.NewReader(account), 0o600); err != nil {
+				return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 			}
 			continue
 		}
@@ -625,8 +644,8 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 
 // writeFrom is copyFile's commit: one temp file, one KeepOwner, then
 // rename onto dstPath. It streams r, so Restore's database copy never
-// holds the file in memory. restoreAdminAuth hands it the signed-out
-// account through bytes.NewReader, so that account is a single write.
+// holds the file in memory. Restore hands it the signed-out account
+// through bytes.NewReader, so that account is a single write.
 func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".bridge-bak-*")
 	if err != nil {
@@ -669,21 +688,24 @@ func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 	return nil
 }
 
-// restoreAdminAuth writes the console account with its sessions signed
-// out. A file that does not parse is not written.
-func restoreAdminAuth(srcPath, dstPath string) error {
+// signedOutAdminAuth reads a snapshot's console account and returns it
+// with its sessions signed out (adminauth.SignedOutFile). Restore calls it
+// before its loop, so an account that does not parse fails the restore
+// before any file is written. read is false when the snapshot lists the
+// file but does not hold it; the loop skips such a file the same way.
+func signedOutAdminAuth(srcPath string) (out []byte, read bool, err error) {
 	raw, err := os.ReadFile(srcPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+		return nil, false, fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 	}
-	out, _, err := adminauth.SignedOutFile(raw, time.Now())
+	out, _, err = adminauth.SignedOutFile(raw, time.Now())
 	if err != nil {
-		return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+		return nil, false, fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 	}
-	if err := writeFrom(dstPath, bytes.NewReader(out), 0o600); err != nil {
-		return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
-	}
-	return nil
+	return out, true, nil
 }
 
 // writeManifest commits the snapshot metadata ATOMICALLY — temp file in
