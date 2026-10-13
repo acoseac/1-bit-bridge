@@ -1,12 +1,22 @@
 package tls
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	cryptotls "crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // mintCert writes a cert+key pair under a fresh temp dir with the given
@@ -270,5 +280,188 @@ func TestVerifyKeyPairIsServesOwnAnswer(t *testing.T) {
 	// reading it was not enough.
 	if _, err := Inspect(aCert); err != nil {
 		t.Errorf("Inspect on the mismatched pair's cert: %v", err)
+	}
+}
+
+// writeCASignedCert writes a leaf signed by a throwaway CA. The leaf's
+// own key does not sign it, which is the shape a control plane places
+// on disk (a Let's Encrypt wildcard) and the shape bridge cert rotate
+// must not be told to replace.
+func writeCASignedCert(t *testing.T, certPath, keyPath string, dnsNames []string) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(200 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: dnsNames[0]},
+		DNSNames:              dnsNames,
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(100 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tenantWildcardWant is a hosted tenant's advertised names: the
+// container hostname, which a wildcard does not cover, and the tenant
+// host the wildcard does.
+func tenantWildcardWant() GenerateOptions {
+	return GenerateOptions{
+		Hostname:      "bridge-7f3a",
+		ExtraDNSNames: []string{"abc.cloud.1-bit.app"},
+	}
+}
+
+// TestAWildcardCertTheBridgeDidNotMintLogsNoRotationWarning is the
+// tenant start. The on-disk pair is a CA leaf for *.cloud.1-bit.app.
+// Advising bridge cert rotate would replace that pair with one this
+// process minted and break every pin.
+func TestAWildcardCertTheBridgeDidNotMintLogsNoRotationWarning(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	writeCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	rec := loggingtest.Record(t)
+	if _, _, err := LoadOrGenerateWithOptions(certPath, keyPath, tenantWildcardWant()); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range rec.Failures() {
+		if strings.Contains(line, "cert SANs are stale") || strings.Contains(line, RotationRemediation) {
+			t.Errorf("startup advised rotation for a certificate this bridge did not mint: %s", line)
+		}
+	}
+}
+
+// TestAStaleSelfSignedCertStillLogsTheRotationWarning is the host-move
+// case the warning exists for. A pair this process minted, whose names
+// no longer match what the host advertises, still says to rotate.
+func TestAStaleSelfSignedCertStillLogsTheRotationWarning(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	if err := GenerateWithOptions(certPath, keyPath, GenerateOptions{Hostname: "oldhost"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := loggingtest.Record(t)
+	if _, _, err := LoadOrGenerateWithOptions(certPath, keyPath, GenerateOptions{
+		Hostname:      "newhost",
+		ExtraDNSNames: []string{"newhost.example.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, line := range rec.Failures() {
+		if strings.Contains(line, "cert SANs are stale") && strings.Contains(line, RotationRemediation) {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a stale certificate this bridge minted logged %v", rec.Failures())
+	}
+	cov, err := InspectSANCoverage(certPath, GenerateOptions{Hostname: "oldhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cov.MintedByBridge {
+		t.Fatal("a certificate GenerateWithOptions wrote was not reported as minted here")
+	}
+}
+
+// TestALeftmostWildcardCoversOneLabel is RFC 6125 section 6.4.3: the
+// wildcard is the whole leftmost label, and it matches exactly one.
+func TestALeftmostWildcardCoversOneLabel(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	writeCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	cov, err := InspectSANCoverage(certPath, GenerateOptions{
+		ExtraDNSNames: []string{
+			"abc.cloud.1-bit.app",
+			"ABC.Cloud.1-bit.app",
+			"cloud.1-bit.app",
+			"a.b.cloud.1-bit.app",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := map[string]bool{}
+	for _, n := range cov.MissingDNS {
+		missing[n] = true
+	}
+	for _, covered := range []string{"abc.cloud.1-bit.app", "ABC.Cloud.1-bit.app"} {
+		if missing[covered] {
+			t.Errorf("%s listed missing under *.cloud.1-bit.app: %v", covered, cov.MissingDNS)
+		}
+	}
+	for _, uncovered := range []string{"cloud.1-bit.app", "a.b.cloud.1-bit.app", "localhost"} {
+		if !missing[uncovered] {
+			t.Errorf("%s was treated as covered: %v", uncovered, cov.MissingDNS)
+		}
+	}
+	if cov.MintedByBridge {
+		t.Error("a CA leaf was reported as minted by this bridge")
+	}
+}
+
+// TestAPartialLabelWildcardCoversNothing refuses a*.example and a
+// wildcard that is not the whole leftmost label. filepath.Match would
+// accept the first.
+func TestAPartialLabelWildcardCoversNothing(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	writeCASignedCert(t, certPath, keyPath, []string{"a*.cloud.1-bit.app", "*a.cloud.1-bit.app", "*.*.example.com"})
+	cov, err := InspectSANCoverage(certPath, GenerateOptions{
+		ExtraDNSNames: []string{"ab.cloud.1-bit.app", "xa.cloud.1-bit.app", "a.b.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := map[string]bool{}
+	for _, n := range cov.MissingDNS {
+		missing[n] = true
+	}
+	for _, name := range []string{"ab.cloud.1-bit.app", "xa.cloud.1-bit.app", "a.b.example.com"} {
+		if !missing[name] {
+			t.Errorf("%s was treated as covered by a partial wildcard: %v", name, cov.MissingDNS)
+		}
 	}
 }

@@ -9,6 +9,15 @@
 // arrives after paired devices have already pinned a cert that will
 // fail TLS for the endpoints it does not cover, and the operator wants
 // to know before that.
+//
+// Rotation is advised only for a certificate this process minted.
+// GenerateWithOptions signs the leaf with its own key. A CA-issued
+// certificate, including a wildcard a control plane placed on disk, is
+// signed by the issuer, and `bridge cert rotate` would replace it with
+// a new self-signed pair. DNS coverage of that certificate still honors
+// one leftmost-label wildcard (RFC 6125 section 6.4.3); the hostname
+// and localhost the want-set always adds are not covered by it, which
+// is why the minted check is what silences the warning.
 package tls
 
 import (
@@ -87,11 +96,17 @@ const NotYetValidRemediation = "clients reject a certificate before its NotBefor
 // cert template adds unconditionally included — so `len(WantDNS)` reads
 // as "names this cert has to cover" in an operator-facing summary.
 // Missing* are the subset the cert lacks, in Want* order.
+//
+// MintedByBridge is true when the certificate's own public key verifies
+// its signature. That is how GenerateWithOptions signs (the parent and
+// the leaf are the same template). A CA leaf is false, and neither
+// surface advises rotation for it.
 type SANCoverage struct {
-	WantDNS    []string
-	WantIPs    []net.IP
-	MissingDNS []string
-	MissingIPs []net.IP
+	WantDNS        []string
+	WantIPs        []net.IP
+	MissingDNS     []string
+	MissingIPs     []net.IP
+	MintedByBridge bool
 }
 
 // Covered reports whether the cert carries every wanted SAN.
@@ -129,12 +144,28 @@ func InspectSANCoverage(certPath string, opts GenerateOptions) (SANCoverage, err
 		return SANCoverage{}, fmt.Errorf("parse: %w", err)
 	}
 	cov := SANCoverage{
-		WantDNS: mergeDNSNames(opts.Hostname, opts.ExtraDNSNames),
-		WantIPs: mergeIPs(opts.ExtraIPs),
+		WantDNS:        mergeDNSNames(opts.Hostname, opts.ExtraDNSNames),
+		WantIPs:        mergeIPs(opts.ExtraIPs),
+		MintedByBridge: signedByOwnKey(parsed),
 	}
 	cov.MissingDNS = stringDiff(cov.WantDNS, parsed.DNSNames)
 	cov.MissingIPs = ipDiff(cov.WantIPs, parsed.IPAddresses)
 	return cov, nil
+}
+
+// signedByOwnKey reports whether cert's public key verifies its
+// signature. A certificate minted here does: CreateCertificate is
+// called with the same template as parent and leaf.
+//
+// CheckSignatureFrom is the wrong question. It rejects a version-3
+// certificate that sets BasicConstraintsValid and leaves IsCA false,
+// and the mint sets both, so that call fails on every certificate this
+// bridge creates as well as on a CA leaf.
+func signedByOwnKey(cert *x509.Certificate) bool {
+	if cert == nil || len(cert.RawTBSCertificate) == 0 || len(cert.Signature) == 0 {
+		return false
+	}
+	return cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil
 }
 
 // logIfSANsStale warns at startup when the on-disk cert doesn't cover
@@ -148,7 +179,11 @@ func InspectSANCoverage(certPath string, opts GenerateOptions) (SANCoverage, err
 // Why warn rather than rotate: see InspectSANCoverage.
 func logIfSANsStale(certPath string, opts GenerateOptions) {
 	cov, err := InspectSANCoverage(certPath, opts)
-	if err != nil || cov.Covered() {
+	// A certificate this process did not mint is left alone even when
+	// names are missing. The want-set always includes localhost and the
+	// host name, which a wildcard leaf does not cover, and the repair
+	// this warning names replaces the pair.
+	if err != nil || cov.Covered() || !cov.MintedByBridge {
 		return
 	}
 	logger.Warn(
@@ -159,20 +194,47 @@ func logIfSANsStale(certPath string, opts GenerateOptions) {
 }
 
 // stringDiff returns elements in `want` that aren't in `got`, case-
-// insensitively. Order preserves `want`. Used by InspectSANCoverage to
-// list missing DNS SAN names.
+// insensitively, and that no single leftmost-label wildcard in `got`
+// covers. Order preserves `want`. Used by InspectSANCoverage to list
+// missing DNS SAN names.
 func stringDiff(want, got []string) []string {
-	have := make(map[string]bool, len(got))
-	for _, g := range got {
-		have[strings.ToLower(g)] = true
-	}
 	var miss []string
 	for _, w := range want {
-		if !have[strings.ToLower(w)] {
+		if !dnsNameCovered(w, got) {
 			miss = append(miss, w)
 		}
 	}
 	return miss
+}
+
+// dnsNameCovered reports whether want is a case-insensitive exact
+// member of got, or covered by a wildcard in got.
+func dnsNameCovered(want string, got []string) bool {
+	w := strings.ToLower(want)
+	for _, g := range got {
+		g = strings.ToLower(g)
+		if g == w || wildcardLabelCovers(g, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardLabelCovers reports whether pattern covers name. Both are
+// already lowercased. RFC 6125 section 6.4.3: the wildcard is the
+// entire leftmost label and matches exactly one label. A pattern whose
+// star is not that whole label (a*.example, *a.example, *.*.example)
+// covers nothing.
+func wildcardLabelCovers(pattern, name string) bool {
+	star, rest, ok := strings.Cut(pattern, ".")
+	if !ok || star != "*" || rest == "" || strings.ContainsRune(rest, '*') {
+		return false
+	}
+	label, suffix, ok := strings.Cut(name, ".")
+	if !ok || label == "" || strings.ContainsRune(label, '*') {
+		return false
+	}
+	return suffix == rest
 }
 
 func ipDiff(want, got []net.IP) []net.IP {

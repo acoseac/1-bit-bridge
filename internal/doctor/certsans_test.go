@@ -114,6 +114,90 @@ func TestCheckTLSCertSANs_MatchingCertIsOK(t *testing.T) {
 	}
 }
 
+// TestACertTheBridgeDidNotMintIsNotToldToRotate is an unmanaged install
+// whose on-disk pair is a CA wildcard. Doctor and the startup warning
+// share the decision, so this check must not end in bridge cert rotate
+// either: that command mints a new self-signed pair over the CA leaf.
+func TestACertTheBridgeDidNotMintIsNotToldToRotate(t *testing.T) {
+	dataDir := t.TempDir()
+	certPath, keyPath := servertls.DefaultPaths(dataDir)
+	writeCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	c := checkTLSCertSANs(t.Context(), Deps{
+		DataDir: dataDir,
+		CertSANs: func(context.Context) servertls.GenerateOptions {
+			return servertls.GenerateOptions{
+				Hostname:      "bridge-7f3a",
+				ExtraDNSNames: []string{"abc.cloud.1-bit.app"},
+			}
+		},
+	})
+	if c.Status != OK {
+		t.Fatalf("status = %q, want ok (summary %q, hint %q)", c.Status, c.Summary, c.Hint)
+	}
+	if strings.Contains(c.Summary, "bridge cert rotate") || strings.Contains(c.Hint, servertls.RotationRemediation) {
+		t.Fatalf("a certificate this bridge did not mint was told to rotate: summary %q hint %q", c.Summary, c.Hint)
+	}
+}
+
+// writeCASignedCert writes a leaf whose signature is the CA's, not its
+// own. Same shape as the tls package's fixture; doctor tests cannot
+// import that helper.
+func writeCASignedCert(t *testing.T, certPath, keyPath string, dnsNames []string) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(200 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: dnsNames[0]},
+		DNSNames:              dnsNames,
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(100 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestCheckTLSCertSANs_SkipsWhenThereIsNothingToCompare — each of these
 // is a state where a verdict would be an invention, and the check has
 // to stay quiet rather than warn a first-run operator about a cert that
