@@ -5,8 +5,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -116,18 +118,44 @@ type Watcher struct {
 	// drops the folder's watch and sends nothing). afterReconcileForTests
 	// fires after each reconcile pass. beforeReleaseForTests fires from
 	// releaseTree after the account has forgotten the paths and before
-	// their descriptors are closed. afterEventForTests fires at the end of
-	// handleEvent. leakOneWatchForTests leaves the last path of a release
-	// unclosed after the account has forgotten it, so a later reconcile
-	// does not close it either. Each is per instance and set before Run
-	// starts, for afterDispatchHookForTests' reason; nil and false in
-	// production. The hooks run on Run's goroutine and must not call back
-	// into the watcher.
+	// their descriptors are closed. afterReleaseForTests fires after those
+	// Removes return, with the path the event named. afterEventForTests
+	// fires at the end of handleEvent. leakOneWatchForTests leaves the last
+	// path of a release unclosed after the account has forgotten it, so a
+	// later reconcile does not close it either. Each is per instance and
+	// set before Run starts, for afterDispatchHookForTests' reason; nil and
+	// false in production. The hooks run on Run's goroutine and must not
+	// call back into the watcher.
 	dropEventForTests      func(fsnotify.Event) bool
 	afterReconcileForTests func()
 	beforeReleaseForTests  func([]string)
+	afterReleaseForTests   func(string)
 	afterEventForTests     func(fsnotify.Event)
 	leakOneWatchForTests   bool
+
+	// immediateFlushForTests writes the signal in the same turn as the event
+	// that recorded the folder, before the loop blocks. The folder is
+	// watched when that write's event is read. The double-open test sets
+	// it. Production waits deferredAddWait. Set before Run; false there.
+	immediateFlushForTests bool
+
+	// loopGate is idle while Run's loop waits for an event and busy while
+	// it handles one. Idle says this handling has returned. A rename still
+	// queued in the kernel is a later event. It does nothing unless a test
+	// arms it before Run.
+	loopGate loopGate
+
+	// flushFile is a regular file outside the library. On kqueue the quiet
+	// timer writes it instead of watching a new folder from the timer: the
+	// write's event is what watches the folder, and that event is read only
+	// after fsnotify has finished the watch it was opening. Nil when this
+	// watcher does not account for open files, or when the file could not
+	// be made (the timer then watches the folder directly).
+	flushFile *os.File
+	// flushPath is the name openFlushSignal published, empty until the
+	// watch is registered and again after the file is closed. The loop
+	// writes it and a test reads it.
+	flushPath atomic.Value
 }
 
 // rootAlias pairs the directory a linked configured root resolves to with
@@ -234,12 +262,15 @@ func (wt *Watcher) watchRoots(roots []string) bool {
 
 // loop handles fsnotify's events and errors until ctx is done or fsnotify
 // closes them. Where fsnotify holds an open file per watched entry it also
-// adds the new folders waiting for their watch once deferredAddWait has
-// passed with no event (quiet), reconciles the account on its schedule,
-// and, once the watches are released, waits for ctx alone, so a scan an
-// event already asked for still runs and still finishes before the caller
-// closes the store. Elsewhere quiet and reconcile stay nil, and the loop is
-// what it was.
+// reconciles the account on its schedule and, once deferredAddWait has
+// passed with no library event, writes a file outside the library. That
+// write is read only after fsnotify has finished the watch it was opening,
+// and the event is what asks for the folders that were waiting. Once the
+// watches are released, the loop waits for ctx alone, so a scan an event
+// already asked for still runs and still finishes before the caller closes
+// the store. Elsewhere quiet and reconcile stay nil, and the loop is what
+// it was: inotify and ReadDirectoryChangesW never open the signal file,
+// because fds is nil there, and a new folder is watched from its Create.
 func (wt *Watcher) loop(ctx context.Context) error {
 	events, errs := wt.w.Events, wt.w.Errors
 	// quiet is wait's channel while new folders wait for their watch, nil
@@ -255,7 +286,13 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		wait = time.NewTimer(wt.deferredAddWait)
 		wait.Stop()
 		defer wait.Stop()
+		wt.openFlushSignal()
+		defer wt.closeFlushSignal()
 	}
+	// flushAsked is set when the quiet timer has written the signal and the
+	// event that watches the waiting folders has not been read yet. Arming
+	// the timer again before that event would write on every tick.
+	var flushAsked bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -265,43 +302,261 @@ func (wt *Watcher) loop(ctx context.Context) error {
 				return nil
 			}
 			quiet = nil
+			flushAsked = false
+			wt.loopGate.enter()
 			wt.receive(ctx, ev)
 		case err, ok := <-errs:
 			if !ok {
 				return nil
 			}
 			quiet = nil
+			flushAsked = false
+			wt.loopGate.enter()
 			wt.flushPendingAdds()
 			watcherLogger.Warn("fsnotify error", "err", err)
 		case <-quiet:
 			quiet = nil
-			wt.flushPendingAdds()
+			wt.loopGate.enter()
+			flushAsked = wt.askFlush()
 		case <-reconcile:
+			wt.loopGate.enter()
 			wt.reconcileWatches()
+		}
+		wt.loopGate.leave()
+		if !flushAsked && wt.flushNowForTests() {
+			flushAsked = true
 		}
 		switch {
 		case wt.fds == nil:
 		case wt.fds.off:
 			events, errs, quiet, reconcile = nil, nil, nil, nil
-		case quiet == nil && len(wt.fds.pending) > 0:
+		case quiet == nil && !flushAsked && len(wt.fds.pending) > 0:
 			wait.Reset(wt.deferredAddWait)
 			quiet = wait.C
 		}
 	}
 }
 
-// receive handles one event fsnotify sent. fsnotify sends an event only
-// after it has watched every new folder it sent a Create for before, so the
-// folders waiting for their watch can have it first (flushPendingAdds).
-// That watch lands before this event is handled, so a waiter that returns
-// when the folder appears on WatchList returns while this event's release
-// has not closed its descriptors yet.
+// receive handles one event fsnotify sent. A library event is read only
+// after fsnotify has watched every new folder it sent a Create for before
+// that event, so the folders waiting for their watch can have it first.
+// A write of the file openFlushSignal watches is that event: it watches
+// those folders and returns before any library handling. A Remove or
+// Rename of the file replaces it and leaves the folders waiting, because
+// watching them from this event is the race the file exists to avoid.
 func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
+	if wt.ownFlushEvent(ev) {
+		return
+	}
 	wt.flushPendingAdds()
 	if drop := wt.dropEventForTests; drop != nil && drop(ev) {
 		return
 	}
 	wt.handleEvent(ctx, ev)
+}
+
+// ownFlushEvent reports whether ev names the signal file. A write watches
+// the folders that are waiting. A removal replaces the file. Any other
+// event for it is ignored, so a change of mode does not scan the temp
+// directory.
+func (wt *Watcher) ownFlushEvent(ev fsnotify.Event) bool {
+	path := wt.signalPath()
+	if path == "" || filepath.Clean(ev.Name) != filepath.Clean(path) {
+		return false
+	}
+	if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+		wt.replaceFlushSignal()
+		return true
+	}
+	if ev.Has(fsnotify.Write) {
+		wt.flushPendingAdds()
+	}
+	return true
+}
+
+// flushSignalName is one file in the temp directory for this process. The
+// watcher has no data directory to put it in, and a library root would
+// count the file as a library descriptor and scan its parent. A crash
+// leaves this name; the next open of this process removes it first, and
+// another process has another pid.
+func flushSignalName() string {
+	return filepath.Join(os.TempDir(), "bridge-watch-flush-"+strconv.Itoa(os.Getpid()))
+}
+
+// openFlushSignal watches a regular file outside the library. The quiet
+// timer writes that file; it does not watch a library folder itself. The
+// name is published only after the watch is registered.
+func (wt *Watcher) openFlushSignal() {
+	name := flushSignalName()
+	os.Remove(name)
+	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return
+	}
+	// The file is new, so KeepOwner gives it the temp directory's owner
+	// when this process is root. The job-writer sweep requires that call
+	// in the function that creates the file. A chown that fails leaves
+	// nothing, and the timer flushes directly.
+	if err := fsutil.KeepOwner(f, f.Name()); err != nil {
+		f.Close()
+		os.Remove(name)
+		return
+	}
+	if err := wt.w.Add(name); err != nil {
+		f.Close()
+		os.Remove(name)
+		return
+	}
+	wt.flushFile = f
+	wt.setSignalPath(name)
+}
+
+// flushFileCurrent reports whether the open signal is the file at its
+// path. A write to an unlinked descriptor succeeds and wakes nothing, so
+// the path is asked as well as the descriptor.
+func (wt *Watcher) flushFileCurrent() bool {
+	f := wt.flushFile
+	if f == nil {
+		return false
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	onDisk, err := os.Lstat(wt.signalPath())
+	if err != nil {
+		return false
+	}
+	return os.SameFile(opened, onDisk)
+}
+
+// replaceFlushSignal closes the signal and opens it again under the same
+// name. A watch fsnotify already dropped is not an error.
+func (wt *Watcher) replaceFlushSignal() {
+	wt.closeFlushSignal()
+	wt.openFlushSignal()
+}
+
+// askFlush writes the signal file so its event watches the folders that
+// are waiting. It reports whether that write is what will watch them. A
+// file that is gone is replaced first. A write that still does not land
+// watches them here, and the timer may run again.
+func (wt *Watcher) askFlush() bool {
+	if !wt.flushFileCurrent() {
+		wt.replaceFlushSignal()
+	}
+	if !wt.flushFileCurrent() {
+		wt.flushPendingAdds()
+		return false
+	}
+	if _, err := wt.flushFile.WriteAt([]byte{1}, 0); err != nil {
+		wt.replaceFlushSignal()
+		if !wt.flushFileCurrent() || writeFlush(wt.flushFile) != nil {
+			wt.flushPendingAdds()
+			return false
+		}
+	}
+	return true
+}
+
+// writeFlush writes one byte at the start of the signal file.
+func writeFlush(f *os.File) error {
+	_, err := f.WriteAt([]byte{1}, 0)
+	return err
+}
+
+// flushNowForTests asks for a waiting folder before the loop blocks again.
+// The double-open test sets immediateFlushForTests. Production waits
+// deferredAddWait. It reports whether the signal write is what will watch
+// the folder.
+func (wt *Watcher) flushNowForTests() bool {
+	if !wt.immediateFlushForTests || wt.fds == nil || wt.fds.off || len(wt.fds.pending) == 0 {
+		return false
+	}
+	wt.loopGate.enter()
+	asked := wt.askFlush()
+	wt.loopGate.leave()
+	return asked
+}
+
+// closeFlushSignal removes the signal file. Run's loop defers it, and a
+// replacement closes the one it is about to open again. The watch is
+// dropped first so this removal is not read as the file disappearing.
+func (wt *Watcher) closeFlushSignal() {
+	name := wt.signalPath()
+	wt.setSignalPath("")
+	if wt.flushFile != nil {
+		wt.flushFile.Close()
+		wt.flushFile = nil
+	}
+	if name != "" {
+		_ = wt.w.Remove(name)
+		os.Remove(name)
+	}
+}
+
+func (wt *Watcher) signalPath() string {
+	p, _ := wt.flushPath.Load().(string)
+	return p
+}
+
+func (wt *Watcher) setSignalPath(p string) {
+	wt.flushPath.Store(p)
+}
+
+// loopGate is idle while Run's loop waits for an event. enabled is set
+// before Run and is not written again. Production leaves it false, so
+// enter and leave do not take the lock.
+type loopGate struct {
+	enabled bool
+	mu      sync.Mutex
+	busy    bool
+	idle    chan struct{}
+}
+
+func (g *loopGate) enter() {
+	if !g.enabled {
+		return
+	}
+	g.mu.Lock()
+	g.busy = true
+	g.idle = nil
+	g.mu.Unlock()
+}
+
+func (g *loopGate) leave() {
+	if !g.enabled {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.busy {
+		return
+	}
+	g.busy = false
+	if g.idle != nil {
+		close(g.idle)
+		g.idle = nil
+	}
+}
+
+// waitIdle returns when the loop is between events. Called from a test,
+// never from the loop. With the gate off it returns at once.
+func (g *loopGate) waitIdle() {
+	if !g.enabled {
+		return
+	}
+	g.mu.Lock()
+	if !g.busy {
+		g.mu.Unlock()
+		return
+	}
+	if g.idle == nil {
+		g.idle = make(chan struct{})
+	}
+	ch := g.idle
+	g.mu.Unlock()
+	<-ch
 }
 
 // addTree adds a watch on every directory of the tree at root, as

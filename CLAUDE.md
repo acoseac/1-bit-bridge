@@ -2222,17 +2222,66 @@ lost my library."
   before `handleEvent`. On kqueue a new folder is added from that flush, so
   `WatchList` can name it while that event's `releaseTree` has not closed
   the descriptors fsnotify kept (`remove(name, false)` closes only the
-  renamed path). `TestKqueueWatcherReleasesARenamedFoldersFiles` waits until
-  the open-file count equals the exact settled total, for `releaseSettle`
-  (2s), inside `reconcileEvery` (30s). A descriptor left open stays above
-  that total and fails the deadline
+  renamed path). `TestKqueueWatcherReleasesARenamedFoldersFiles` waits for
+  `afterReleaseForTests` of each renamed path. `releaseTree` fires that
+  hook after `Remove` returns, and the test then wants the exact open-file
+  total. The only bound is the suite deadline. kqueue does not order that
+  rename against a
+  later create, and `internalWatch` of the new path opens the directory
+  before the old descriptor is closed, so a count taken when the loop is
+  merely idle can be one high for that directory. A descriptor left open
+  after the hook stays above the total
   (`TestALeakedWatchPerRenameDoesNotSettle`: one per directory release, the
-  account already having forgotten the path).
+  account already having forgotten the path, counted after the same hook).
   `TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses` holds the release
   after the sync folder's Create has been handled and samples while `Remove`
   has not run. That sample can already equal the settled total: fsnotify has
-  closed the renamed path, and the new watches are not open yet. The wait
+  closed the renamed path, and the new watches are not open yet. After the
+  hold the test waits until the loop is idle and counts once. The wait
   still fails when a descriptor is left open.
+- **A quiet kqueue flush writes a file outside the library, and that
+  file's event is what watches the waiting folder** (2026-10-13, backlog
+  B361). The 250 ms timer used to call `flushPendingAdds` itself. `Add`
+  and fsnotify's `internalWatch` can both pass `byPath` before either
+  reaches `watches.add`. `add` overwrites the path's descriptor and does
+  not close the one it replaced, so the first stays open in the `wd` map.
+  `Close` and reconcile close only the descriptor the path map still
+  names. An empty folder leaks exactly one. A rename that has not been
+  read yet is also one high, for a different reason: the new path's
+  directory is already open and the old directory descriptor is still
+  open, and `Remove` closes it. The CI count 136 against 135
+  (`TestKqueueWatcherReleasesARenamedFoldersFiles` on macos-latest, run
+  38367213087) stayed one high for the whole 2 s poll B337 added, which
+  cannot tell the two apart. A longer poll does not close a descriptor
+  nothing releases, and it is the wrong wait for a release that has not
+  been read. The rename test waits for `afterReleaseForTests`. The timer
+  writes one byte of a file `openFlushSignal` creates outside the
+  library and gives it `fsutil.KeepOwner` while it is open. A chown that
+  fails removes the file. `register`'s `Kevent` does not drain, so the
+  write's event is read after `internalWatch` returns. A write of that
+  file flushes and returns before `handleEvent`. `libraryFiles` does not
+  count that file. When the write cannot be made, the timer flushes
+  directly. `flushAsked` keeps the timer from arming again until that
+  event arrives. The file exists only where `fds` is set, which is
+  kqueue. inotify and ReadDirectoryChangesW keep the loop they had: no
+  signal file, and a new folder is watched from its Create. The watcher
+  has no data directory, so the file is
+  `bridge-watch-flush-<pid>` in the temp directory. Close removes it. A
+  crash leaves that one name, and the next open of this process removes
+  it first. A write to a file that is gone succeeds and wakes nothing, so
+  the timer stats the path before it writes. A Remove or Rename of the
+  path replaces the file and leaves the waiting folders pending; the
+  next write of the new file is what watches them. A replacement that
+  cannot be made flushes directly. `loopGate` does nothing unless a test
+  arms it before Run, so production pays a bool read per event.
+  `TestKqueueFlushDoesNotOpenAFolderTwice` writes the signal in the same
+  turn (`immediateFlushForTests`, false in production) for forty empty
+  folders, one at a time, at `GOMAXPROCS` 1, and wants one open file
+  each. A direct flush from that turn held 42 or 43 where 41 was wanted,
+  9 runs of 20. The signal write held 41, 20 runs of 20.
+  `TestADeletedFlushSignalStillWatchesANewFolder` deletes the file and
+  wants the same name back, then one new folder watched as one open
+  file.
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.**
   `WalkDir` orders by base name and visits a directory before its children, so
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —

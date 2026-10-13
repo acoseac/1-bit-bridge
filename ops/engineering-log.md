@@ -41446,3 +41446,123 @@ while a scan waited on the lock`. Publishing after the epoch check,
 still under the lock, makes the same test pass. Putting the publish
 back before the lock turns it red again on that same line, and that
 move was restored.
+
+## 2026-10-13 — the kqueue rename count waits for the release, and a quiet flush does not open a folder twice (backlog B361)
+
+### What broke
+
+`TestKqueueWatcherReleasesARenamedFoldersFiles` polls `libraryFiles` for
+`releaseSettle` (2s) and then wants the exact total. On #1205's gate
+(run 38367213087, job 115195099699, `macos-latest`, head `2d92d585`, a
+PR that does not touch the watcher) round 3 read 136 open files where
+135 was wanted. The job was re-run and passed. A planted leak of one
+descriptor per renamed folder reads about 143 against 133, so the
+sighting is one descriptor, held for the whole poll.
+
+Two paths leave the count one high, and the poll cannot tell them apart.
+
+A quiet flush calls `Add` while fsnotify's `readEvents` is inside
+`internalWatch`. Both pass `watches.byPath` before either reaches
+`watches.add`. `add` (`backend_kqueue.go`) stores the new descriptor
+under the path and does not close the one it replaced, so the first
+stays in the `wd` map. `Close` and `reconcileWatches` close only the
+descriptor the path map still names. The first watch of a new directory
+does not set `NOTE_WRITE`, so an empty folder leaks exactly one
+descriptor. The 250 ms timer is that flush: after the sync folder's
+Create the test makes no further library event, and `register`'s
+`Kevent` does not drain the queue, so `Add` and `internalWatch` overlap.
+
+A rename that has not been read yet is one high for a different reason.
+`sendCreateIfNew` of the new path calls `internalWatch` before the
+Rename event's `releaseTree` runs `Remove`. `internalWatch` of a
+directory opens that directory and not its children. `libraryFiles`
+counts descriptors by device and inode, so the old directory descriptor
+and the new one are two opens of one inode. kqueue does not order that
+Rename against a later Create. B337's idle wait returns when the loop
+has finished the sync folder, which can be before the Rename is read.
+`Remove` is synchronous (`unix.Close` before it returns), so the extra
+descriptor is gone once `releaseTree` returns.
+
+Thirty runs of the 2 s poll under sixteen busy loops on this Mac stayed
+green. The same load against the idle wait failed once: round 3, 136
+against 135, at 0.87 s. Twenty further runs and twelve under `-race`
+stayed green, and a three-second recount planted for that mismatch never
+fired, so that one sample was not held long enough to say whether the
+descriptor would have closed.
+
+### The fix
+
+`afterReleaseForTests` fires from `releaseTree` after the `Remove` loop,
+with the path the event named. It is per instance, set before `Run`, nil
+in production, and runs on Run's goroutine. The rename test records each
+path on a buffered channel and returns only once every renamed folder
+has been released. The bound is the suite deadline (`watchGiveUp`). The
+exact count stays. The sync folder is created after that wait, so its
+`Add` does not overlap an album rename's `internalWatch`.
+
+The quiet timer no longer calls `flushPendingAdds`. `openFlushSignal`
+creates a regular file outside the library, calls `fsutil.KeepOwner` on
+the open file (the job-writer sweep's rule for every `os.CreateTemp` in
+this package; a chown that fails removes the file), and watches it. The timer
+writes one byte (`WriteAt`, so the file stays one byte). `receive` sees
+that path, flushes the pending folders, and returns before
+`handleEvent`. `flushAsked` keeps the timer from arming again until that
+event arrives. A write that fails, or a watcher that could not make the
+file, flushes in the timer case as before. `libraryFiles` walks the
+library root, so the signal file is not in the count. `loop` removes the
+file when it returns.
+
+### Tests
+
+`TestKqueueFlushDoesNotOpenAFolderTwice` sets `immediateFlushForTests`
+(false in production) and `GOMAXPROCS(1)`, makes forty empty folders one
+at a time, and wants `base+40`. With `askFlush` calling `flushPendingAdds`
+in that same turn, 9 of 20 runs read 42 or 43 where 41 was wanted. With
+the signal write, 20 of 20 read 41.
+
+Skipping the `Remove` loop (`_ = q`) and leaving `afterReleaseForTests`
+in place fails the rename test on the count: round 1, 253 open files
+where 133 was wanted, in 0.35 s. Restoring `_ = wt.w.Remove(q)` makes
+the same test pass. Thirty runs under the same sixteen busy loops, after
+that restore, passed in 26.3 s.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+## 2026-10-13 — the kqueue flush signal is replaced when it disappears (backlog B361)
+
+The signal file is opened only where the watcher accounts for open files.
+`NewWatcher` sets `fds` only when `kqueueBackend` is true, and `loop` calls
+`openFlushSignal` only inside `if wt.fds != nil`. On Linux and Windows
+`fds` stays nil, `receive`'s `flushPendingAdds` is a no-op, and a new
+folder is still watched from its Create. The production NUC and the Linux
+deployments keep that loop.
+
+The watcher is constructed with a scanner and a debounce and has no data
+directory, so the file cannot live beside the database. It also cannot
+live under a library root: `libraryFiles` would count it, and a write
+would scan the parent. The name is `bridge-watch-flush-<pid>` in the
+temp directory, opened `O_RDWR|O_CREATE|O_EXCL` after removing that name,
+with `fsutil.KeepOwner` on the open file. `closeFlushSignal` drops the
+watch and removes the file when the loop returns, before `Run`'s
+`w.Close`. A crash leaves that one name. The next open of this process
+removes it first. Another process's file has another pid and is left
+alone.
+
+A write to a file that was unlinked while this process still holds it
+succeeds and wakes nothing (`NOTE_DELETE` already fired). `askFlush`
+stats the open file against the path before it writes. A missing path,
+a different file, or a write error replaces the signal. A Remove or
+Rename of the path does the same and does not watch the waiting folders
+from that event: `readEvents` has already closed the watch, and watching
+from the handler is the race the file exists to avoid. The folders stay
+pending. The next write of the new file watches them. When the
+replacement cannot be made, `askFlush` watches them directly and returns
+false, so the timer can arm again.
+
+`loopGate` does nothing unless a test sets `enabled` before `Run`.
+Production leaves it false and pays one bool read per event, with no
+mutex. `startWatcher` arms it before the loop goroutine starts.
+
+`TestADeletedFlushSignalStillWatchesANewFolder` deletes the file, waits
+until the same name is back, then makes one folder and wants that folder
+watched as one more open file. After the watcher stops the name is gone.

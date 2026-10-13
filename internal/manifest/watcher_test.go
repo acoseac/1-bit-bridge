@@ -106,6 +106,9 @@ func startWatcher(t *testing.T, w *Watcher) {
 	t.Helper()
 	walked := make(chan struct{})
 	w.afterInitialWalkHookForTests = func() { close(walked) }
+	// The idle gate is read on every event. Production leaves it off.
+	// A test that waits for idle arms it here, before the loop starts.
+	w.loopGate.enabled = true
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = w.Run(ctx) }()
