@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -135,6 +136,77 @@ func TestScanner_ABumpOverReconciledRowsOnlyStampsThem(t *testing.T) {
 		}
 		if v := trackColumn(t, store, p, "extractor_version"); v != int64(ExtractorVersion) {
 			t.Errorf("%s: extractor_version = %d, want %d", p, v, ExtractorVersion)
+		}
+	}
+}
+
+// TestScanner_APreRecordingYearFilledFromTheAlbumDoesNotChurn is backlog
+// B342's proof that the year pass, not the extractor, owns a composition
+// date. The folder is the Ellipses shape: seven tracks tagged 2022 and
+// five tagged 1654, the second copy of track 03 among the five. The first
+// scan fills 1654 from the album's 2022. A later scan of the same files,
+// and a re-extract after an extractor-version rewind, leave indexed_at and
+// enriched_at where that fill put them. OriginalYear stays unset: the pass
+// has no field for it.
+func TestScanner_APreRecordingYearFilledFromTheAlbumDoesNotChurn(t *testing.T) {
+	root := t.TempDir()
+	store, sc := newScanFixture(t, root)
+	var rels []string
+	for i := 1; i <= 7; i++ {
+		rel := fmt.Sprintf("Kobekina/Ellipses/%02d.flac", i)
+		libraryFLAC(t, root, rel, bandTags(fmt.Sprintf("Track %02d", i), "Anastasia Kobekina", "Ellipses", "2022"))
+		rels = append(rels, rel)
+	}
+	for _, name := range []string{
+		"08.flac", "09.flac", "10.flac", "11.flac",
+		"03. Bachianas Brasileiras_ No. 5.flac",
+	} {
+		rel := "Kobekina/Ellipses/" + name
+		libraryFLAC(t, root, rel, bandTags(name, "Anastasia Kobekina", "Ellipses", "1654"))
+		rels = append(rels, rel)
+	}
+	scanOnce(t, sc, "index")
+
+	requireFilled := func(label string) {
+		t.Helper()
+		for _, rel := range rels {
+			tr := readTrack(t, store, rel)
+			if tr.Year == nil || *tr.Year != 2022 {
+				t.Errorf("%s: %s year %s, want 2022", label, rel, intPtrString(tr.Year))
+			}
+			if tr.OriginalYear != nil {
+				t.Errorf("%s: %s original year %s, want unset", label, rel, intPtrString(tr.OriginalYear))
+			}
+		}
+	}
+	requireFilled("the first scan")
+
+	before := make(map[string]int64, len(rels))
+	enriched := make(map[string]int64, len(rels))
+	for _, rel := range rels {
+		before[rel] = trackIndexedAt(t, store, rel)
+		enriched[rel] = enrichedAtOf(t, store, rel)
+	}
+	scanOnce(t, sc, "the rescan")
+	requireFilled("the rescan")
+	if moved := movedRows(t, store, before); len(moved) != 0 {
+		t.Errorf("rows moved by a rescan of the reconciled folder: %v", moved)
+	}
+	for _, rel := range rels {
+		if at := enrichedAtOf(t, store, rel); at != enriched[rel] {
+			t.Errorf("%s: enriched_at = %d, want %d", rel, at, enriched[rel])
+		}
+	}
+
+	beforeBump := rewindAll(t, store)
+	scanOnce(t, sc, "the bump")
+	requireFilled("after the bump")
+	if moved := movedRows(t, store, beforeBump); len(moved) != 0 {
+		t.Errorf("rows moved by a re-extract of the reconciled folder: %v", moved)
+	}
+	for _, rel := range rels {
+		if at := enrichedAtOf(t, store, rel); at != 1 {
+			t.Errorf("%s: enriched_at = %d, want 1", rel, at)
 		}
 	}
 }

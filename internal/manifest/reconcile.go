@@ -94,9 +94,11 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 }
 
 // reconcileYears finds physical albums — tracks that share a directory AND
-// an album title — where some tracks carry a year and others are MISSING
-// one, and fills the missing years from the group's dominant year. One
-// untagged track (no year) otherwise splits into its own album row on iOS
+// an album title — and fills a missing year from the group's dominant
+// year. A missing year is an absent one. A year before firstPhonographYear
+// is a composition date, and it is missing too when the same group has a
+// recording year. One untagged track (no year) otherwise splits into its
+// own album row on iOS
 // (album identity = `normalize(albumArtist)|normalize(album)|year`), exactly
 // the field-reported Alphaville "[A] Eternally Yours Bonus-EP" case where a
 // single bonus track lost its year tag.
@@ -105,50 +107,102 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 //   - DIRECTORY-scoped: the same (directory, normalized album) grouping —
 //     NEVER crosses directories (classical box-set + distinct-same-name
 //     protection).
-//   - FILL-MISSING only: a present-but-DIFFERENT year is LEFT ALONE. It may
-//     be a deliberate per-track value, and overwriting it is a sharper,
-//     riskier call than filling an absent one. We only fill years that are
-//     absent (nil) or non-positive (the bridge's year=0 "tag absent"
-//     sentinel, which iOS already treats as nil).
+//   - FILL-MISSING only. Absent (nil) and non-positive (the year=0
+//     "tag absent" sentinel) years are filled. When the group has any
+//     year of firstPhonographYear or later, the dominant year is taken
+//     over those recording years alone, and every earlier year takes it
+//     too. A group with no such year fills only the absent ones from the
+//     dominant present year, and the early years stay. A year of
+//     firstPhonographYear or later is left as tagged, so 1974 beside
+//     2022 stays a split.
 //   - DOMINANT existing value, not MusicBrainz — preserve the user's tags.
+//     Composition dates do not vote once a recording year is present.
+//     A tie goes to the larger year.
 //
 // Returns only the targets needing a fill (Year set to the dominant value),
 // sorted by path for deterministic output. Pure — no I/O.
 func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := groupByAlbumKey(tracks)
-
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
-		if len(idxs) < 2 {
-			continue // a lone track can't borrow a year from a sibling
-		}
-		years := make([]*int, len(idxs))
-		anyMissing := false
-		for n, i := range idxs {
-			years[n] = tracks[i].Year
-			if !hasYear(tracks[i].Year) {
-				anyMissing = true
-			}
-		}
-		if !anyMissing {
-			continue // every track already has a year — do no harm
-		}
-		dom, ok := dominantYear(years)
-		if !ok {
-			continue // no present year to fill from
-		}
-		for _, i := range idxs {
-			if hasYear(tracks[i].Year) {
-				continue
-			}
-			fix := tracks[i]
-			y := dom // fresh per fix; never alias the loop/group value
-			fix.Year = &y
-			changed = append(changed, fix)
+		changed = append(changed, fillMissingYears(tracks, idxs)...)
+	}
+	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
+	return changed
+}
+
+// firstPhonographYear is the year of Edison's phonograph, the first
+// machine that recorded sound and played it back. A year before it in a
+// recording's DATE tag is a composition date. Phonautograph recordings
+// from the 1850s and 1860 could not be played back, so no recording a
+// release carries predates this year.
+const firstPhonographYear = 1877
+
+// yearFill is the year a missing track in the group takes. fillEarly is
+// set when that year is a recording year, so a composition date takes it
+// too. A group with no recording year fills from its present years.
+func yearFill(years []*int) (dominant int, fillEarly bool, ok bool) {
+	dominant, ok = dominantYear(yearsThatVote(years))
+	if !ok {
+		return 0, false, false
+	}
+	return dominant, dominant >= firstPhonographYear, true
+}
+
+// yearsThatVote are the recording years when the group has any, and
+// every present year when it does not.
+func yearsThatVote(years []*int) []*int {
+	if rec := recordingYears(years); len(rec) > 0 {
+		return rec
+	}
+	return years
+}
+
+// recordingYears are the present years of firstPhonographYear or later.
+func recordingYears(years []*int) []*int {
+	var out []*int
+	for _, y := range years {
+		if hasYear(y) && *y >= firstPhonographYear {
+			out = append(out, y)
 		}
 	}
+	return out
+}
 
-	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
+// yearTakesFill reports whether y may take the group's fill year. A nil
+// or non-positive year may. A year before firstPhonographYear may when
+// the group has a recording year. A later year stays as tagged.
+func yearTakesFill(y *int, fillEarly bool) bool {
+	if !hasYear(y) {
+		return true
+	}
+	return fillEarly && *y < firstPhonographYear
+}
+
+// fillMissingYears returns the tracks in one directory-and-album group
+// whose year yearTakesFill says can take the group's fill year.
+func fillMissingYears(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
+	if len(idxs) < 2 {
+		return nil
+	}
+	years := make([]*int, len(idxs))
+	for n, i := range idxs {
+		years[n] = tracks[i].Year
+	}
+	dom, fillEarly, ok := yearFill(years)
+	if !ok {
+		return nil
+	}
+	var changed []ReconcileTarget
+	for _, i := range idxs {
+		if !yearTakesFill(tracks[i].Year, fillEarly) {
+			continue
+		}
+		fix := tracks[i]
+		y := dom // fresh per fix; never alias the loop/group value
+		fix.Year = &y
+		changed = append(changed, fix)
+	}
 	return changed
 }
 
