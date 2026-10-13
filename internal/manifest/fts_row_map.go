@@ -16,6 +16,12 @@ import (
 // has committed leaves the map alone.
 const ftsRowMapVersion = 55
 
+// setFTSRowMapVersion stamps ftsRowMapVersion inside the migration's
+// transaction. PRAGMA takes no bound parameter, so the statement is a
+// constant literal rather than a format of the number;
+// TestSetFTSRowMapVersionMatchesTheVersion keeps the two equal.
+const setFTSRowMapVersion = `PRAGMA user_version = 55`
+
 // The hooks and counters exist so a test can overlap two opens, and so it
 // can fail the migration after the map is filled and still inside the
 // transaction. They are nil in production.
@@ -82,7 +88,7 @@ func migrateFTSRowMap(db *sql.DB) error {
 	if err := installFTSRowMap(ctx, conn); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, ftsRowMapVersion)); err != nil {
+	if _, err := conn.ExecContext(ctx, setFTSRowMapVersion); err != nil {
 		return fmt.Errorf("tracks_fts row map version: %w", err)
 	}
 	if hook := ftsRowMapBeforeCommit; hook != nil {
@@ -218,7 +224,7 @@ func rebuildFTSFromTracks(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
-type censusQuery interface {
+type censusQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
@@ -230,7 +236,7 @@ func (c ftsCensus) consistent() bool {
 	return c.tracks == c.fts && c.fts == c.mapped && c.mapWithoutTrack == 0 && c.trackWithoutMap == 0
 }
 
-func readFTSCensus(ctx context.Context, q censusQuery) (ftsCensus, error) {
+func readFTSCensus(ctx context.Context, q censusQuerier) (ftsCensus, error) {
 	var c ftsCensus
 	err := q.QueryRowContext(ctx, `
 		SELECT

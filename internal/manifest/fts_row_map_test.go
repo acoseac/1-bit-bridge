@@ -67,6 +67,9 @@ func seedPlainTracks(t *testing.T, s *Store, n int) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A no-op once Commit has run; it ends the transaction when a
+	// t.Fatal below stops the seed early.
+	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.Prepare(`INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		sample_rate, bits_per_sample, is_dsd, codec, extractor_version, audio_md5,
 		compression, folder_art_key, extract_refused, first_indexed_at)
@@ -151,53 +154,33 @@ func TestFTSCountsStayEqualAndMatchStaysRight(t *testing.T) {
 	putTrack(t, s, &Track{Path: "AlbumA/02.flac", Title: "Zephyr Beta", Artist: "A", Album: "L"})
 	putTrack(t, s, &Track{Path: "AlbumB/01.flac", Title: "OnlyOther", Artist: "B", Album: "M"})
 	order := searchPaths(t, s, "zephyr")
-	if again := searchPaths(t, s, "zephyr"); !slices.Equal(order, again) {
-		t.Fatalf("order %v then %v", order, again)
-	}
+	requireSearch(t, s, "zephyr", order, "a repeat search")
 	if len(order) != 2 {
 		t.Fatalf("zephyr hits = %v", order)
 	}
 
 	id := mappedRowID(t, s, "AlbumA/01.flac")
 	putTrack(t, s, &Track{Path: "AlbumA/01.flac", Title: "Zephyr Alpha", Artist: "A", Album: "L"})
-	if got := mappedRowID(t, s, "AlbumA/01.flac"); got != id {
-		t.Fatalf("same-bytes upsert moved the fts rowid %d -> %d", id, got)
-	}
-	if got := searchPaths(t, s, "zephyr"); !slices.Equal(order, got) {
-		t.Fatalf("order after same-bytes upsert = %v, want %v", got, order)
-	}
+	requireRowIDKept(t, s, "AlbumA/01.flac", id, "same-bytes upsert")
+	requireSearch(t, s, "zephyr", order, "after same-bytes upsert")
 	requireConsistent(t, s)
 
 	putTrack(t, s, &Track{
 		Path: "AlbumA/01.flac", Title: "Zephyr Alpha", Artist: "A", Album: "L",
 		MusicBrainzAlbumID: "11111111-1111-1111-1111-111111111111",
 	})
-	if got := mappedRowID(t, s, "AlbumA/01.flac"); got != id {
-		t.Fatalf("mbid-only update moved the fts rowid %d -> %d", id, got)
-	}
-	if got := searchPaths(t, s, "zephyr"); !slices.Equal(order, got) {
-		t.Fatalf("order after mbid update = %v, want %v", got, order)
-	}
+	requireRowIDKept(t, s, "AlbumA/01.flac", id, "mbid-only update")
+	requireSearch(t, s, "zephyr", order, "after mbid update")
 	requireConsistent(t, s)
 
-	if _, err := s.DeleteTracksByPrefix(ctx, "AlbumB"); err != nil {
-		t.Fatal(err)
-	}
-	if got := searchPaths(t, s, "zephyr"); !slices.Equal(order, got) {
-		t.Fatalf("order after an unrelated delete = %v, want %v", got, order)
-	}
-	if got := searchPaths(t, s, "onlyother"); len(got) != 0 {
-		t.Fatalf("deleted track still matches: %v", got)
-	}
+	mustDeletePrefix(ctx, t, s, "AlbumB")
+	requireSearch(t, s, "zephyr", order, "after an unrelated delete")
+	requireSearch(t, s, "onlyother", nil, "a deleted track")
 	requireConsistent(t, s)
 
 	putTrack(t, s, &Track{Path: "AlbumA/01.flac", Title: "Zephyr Alpha Revised", Artist: "A", Album: "L"})
-	if got := mappedRowID(t, s, "AlbumA/01.flac"); got == id {
-		t.Fatal("a title change left the fts rowid in place")
-	}
-	if got := searchPaths(t, s, "revised"); !slices.Equal(got, []string{"AlbumA/01.flac"}) {
-		t.Fatalf("revised hits = %v", got)
-	}
+	requireRowIDMoved(t, s, "AlbumA/01.flac", id, "a title change")
+	requireSearch(t, s, "revised", []string{"AlbumA/01.flac"}, "after a title change")
 	requireConsistent(t, s)
 
 	// A row that is the highest FTS rowid is reused by the insert the
@@ -208,28 +191,18 @@ func TestFTSCountsStayEqualAndMatchStaysRight(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE tracks SET path = ? WHERE path = ?`, "AlbumA/01-renamed.flac", "AlbumA/01.flac"); err != nil {
 		t.Fatal(err)
 	}
-	var oldN int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks_fts_row WHERE path = ?`, "AlbumA/01.flac").Scan(&oldN); err != nil {
-		t.Fatal(err)
+	if n := queryCount(t, s, `SELECT COUNT(*) FROM tracks_fts_row WHERE path = ?`, "AlbumA/01.flac"); n != 0 {
+		t.Fatalf("old path still mapped, count %d", n)
 	}
-	if oldN != 0 {
-		t.Fatalf("old path still mapped, count %d", oldN)
-	}
-	if got := mappedRowID(t, s, "AlbumA/01-renamed.flac"); got == beforeRename {
-		t.Fatal("a path rename left the fts rowid in place")
-	}
+	requireRowIDMoved(t, s, "AlbumA/01-renamed.flac", beforeRename, "a path rename")
 	renamed := searchPaths(t, s, "zephyr")
 	if !slices.Contains(renamed, "AlbumA/01-renamed.flac") || slices.Contains(renamed, "AlbumA/01.flac") {
 		t.Fatalf("zephyr after rename = %v", renamed)
 	}
 	requireConsistent(t, s)
 
-	if _, err := s.DeleteTracksByPrefix(ctx, "AlbumA"); err != nil {
-		t.Fatal(err)
-	}
-	if got := searchPaths(t, s, "zephyr"); len(got) != 0 {
-		t.Fatalf("prefix delete left %v", got)
-	}
+	mustDeletePrefix(ctx, t, s, "AlbumA")
+	requireSearch(t, s, "zephyr", nil, "after a prefix delete")
 	requireConsistent(t, s)
 
 	putTrack(t, s, &Track{Path: "AlbumC/01.flac", Title: "After", Artist: "C", Album: "N"})
@@ -237,12 +210,60 @@ func TestFTSCountsStayEqualAndMatchStaysRight(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireConsistent(t, s)
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&n); err != nil {
+	if n := countRows(t, s, "tracks"); n != 0 {
+		t.Fatalf("wipe left %d tracks", n)
+	}
+}
+
+// requireSearch fails unless a MATCH for q returns want, in order. A nil
+// want means no hits.
+func requireSearch(t *testing.T, s *Store, q string, want []string, when string) {
+	t.Helper()
+	if got := searchPaths(t, s, q); !slices.Equal(got, want) {
+		t.Fatalf("%q %s = %v, want %v", q, when, got, want)
+	}
+}
+
+// requireRowIDKept fails if path's FTS row moved off id.
+func requireRowIDKept(t *testing.T, s *Store, path string, id int64, what string) {
+	t.Helper()
+	if got := mappedRowID(t, s, path); got != id {
+		t.Fatalf("%s moved the fts rowid %d -> %d", what, id, got)
+	}
+}
+
+// requireRowIDMoved fails if path's FTS row is still id: the trigger did
+// not rewrite the document.
+func requireRowIDMoved(t *testing.T, s *Store, path string, id int64, what string) {
+	t.Helper()
+	if mappedRowID(t, s, path) == id {
+		t.Fatalf("%s left the fts rowid in place", what)
+	}
+}
+
+func mustDeletePrefix(ctx context.Context, t *testing.T, s *Store, prefix string) {
+	t.Helper()
+	if _, err := s.DeleteTracksByPrefix(ctx, prefix); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("wipe left %d tracks", n)
+}
+
+// queryCount runs a COUNT(*) query with arguments; countRows (in
+// retention_test.go) counts a whole table.
+func queryCount(t *testing.T, s *Store, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestSetFTSRowMapVersionMatchesTheVersion keeps the literal PRAGMA the
+// migration stamps equal to ftsRowMapVersion.
+func TestSetFTSRowMapVersionMatchesTheVersion(t *testing.T) {
+	if want := fmt.Sprintf("PRAGMA user_version = %d", ftsRowMapVersion); setFTSRowMapVersion != want {
+		t.Fatalf("setFTSRowMapVersion = %q, want %q", setFTSRowMapVersion, want)
 	}
 }
 
@@ -548,7 +569,7 @@ func requireConsistent(t *testing.T, s *Store) {
 	}
 }
 
-func userVersion(t *testing.T, db censusQuery) int {
+func userVersion(t *testing.T, db censusQuerier) int {
 	t.Helper()
 	var v int
 	if err := db.QueryRowContext(context.Background(), `PRAGMA user_version`).Scan(&v); err != nil {
