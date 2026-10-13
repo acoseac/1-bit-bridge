@@ -157,7 +157,9 @@ func installFTSRowMap(ctx context.Context, conn *sql.Conn) error {
 // body runs instead of skipping a document that may be stale.
 // json_extract raises on malformed JSON in this SQLite, so each
 // extract sits inside a json_valid CASE. On valid JSON the value is
-// the same as COALESCE(json_extract(...), '').
+// the same as v7's expression:
+//
+//	COALESCE(json_extract(...), '')
 const ftsRowMapTriggers = `
 CREATE TRIGGER tracks_fts_ai AFTER INSERT ON tracks BEGIN
   INSERT INTO tracks_fts(path, title, artist, album) VALUES (
