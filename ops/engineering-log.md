@@ -41135,3 +41135,54 @@ fail again (`go test -count=1`). The startup line is
 `missing_dns=[localhost bridge-7f3a bridge-7f3a.local]`: the tenant
 name is covered and the rotation warning still fires. Both returns
 were restored. The top-of-file invariant list has no SAN twin.
+
+## 2026-10-13 — a short album-mate decode is remembered for the process (backlog B241)
+
+A sweep on the operator bridge logged the same album-gain warning once
+per render for DSF tracks whose decode came back 2–4 s short of the
+recorded duration. None of those tracks had a v2 rendition yet. The
+survey measures each mate with the render's own Stages A and B, and a
+failed measurement leaves the mate out of the album and is tried again
+by the next render.
+
+### What the synthetic files do
+
+Three DSF files written by `dsdtone.WriteDSF` (stereo, 0x69, DSD64),
+measured with the host sox and ffmpeg through `decodeAndMeasure` and
+`analyze.RunAnalysis` (`TestDSFShortDecodeFixtures`):
+
+| file | declared | data | ffprobe | produced | survey | analysis |
+|---|---|---|---|---|---|---|
+| fmt sample count 3 s past the data chunk | 43.000 s | 40.000 s | 40.008 s | 40.008 s | pass | pass |
+| honest 1 s, last block zero-padded | 1.000 s | 1.000 s | 1.010 s | 1.000 s | pass | pass |
+| the same, with an ID3v2.3 tag after the data | 1.000 s | 1.000 s | 1.010 s | 1.000 s | pass | pass |
+
+ffprobe follows the data chunk. The extra 0.008 s on the first file is
+the last-block pad, which the decoder reads because the declared sample
+count extends past it. The survey's reference is that probed duration
+(`dsdExpectedDurationSec`), so a lying fmt sample count never reaches
+the 2% bar. The last-block pad on a 1 s file is 0.010 s, under 2%. It
+exceeds 2% only below about 0.58 s. `durationTolerance` stays 0.02.
+These files are not the field's 2–4 s shortfall.
+
+### The memory
+
+`albumgain.Resolver` keeps a map for the process. The key is the mate
+spec's path, size and mtime after `SpecFor`, which production stamps
+from the track row. An entry is written only for
+`transcode.ErrFFmpegDecodeIncomplete` while the call's context is still
+live. `LengthIncompleteFile` returns false for an `outputFaultError`
+that wraps the same sentinel, so a scratch volume that cut the decode
+short is not remembered. A cancelled context, a deadline and any other
+error are not remembered. A later render in the album finds the entry,
+leaves the mate out of the album, and does not decode or log it. The
+warning is written when the failure is first remembered. A new size or
+mtime misses the key. A restart measures the file once.
+
+The variant-strike table is not written by the survey. The file's own
+v2 render still is: `processJob` strikes every runner error it has not
+classified as the host's, and a length-incomplete decode is none of
+those, so three strikes suppress that file's v2 rendition for 30 days.
+That rule is left as it is.
+
+No `ExtractorVersion` bump and no `ProtocolVersion` bump.

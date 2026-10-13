@@ -38,6 +38,18 @@ import (
 // once the source is whole.
 var ErrFFmpegDecodeIncomplete = errors.New("ffmpeg decode length disagrees with the source duration")
 
+// LengthIncompleteFile reports a decode that finished at a different length
+// than the source container, which is a fact about that file. An output
+// fault that wraps the same error is a fact about the scratch volume: the
+// decode was cut short because the write failed, and this returns false.
+func LengthIncompleteFile(err error) bool {
+	var out *outputFaultError
+	if errors.As(err, &out) {
+		return false
+	}
+	return errors.Is(err, ErrFFmpegDecodeIncomplete)
+}
+
 // ffmpegLookPath / ffprobeLookPath are the seams tests override to force the
 // ffmpeg toolchain present or absent without depending on the host having it.
 // Production code MUST NOT mutate them (the renameFunc / soxLookPath
