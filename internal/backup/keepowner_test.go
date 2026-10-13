@@ -1,6 +1,7 @@
 package backup_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -59,6 +60,62 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	}
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
+	})
+}
+
+// The console account and the harvest state take the same single chown
+// as the files the snapshot already copied. A second write to sign the
+// console out would show the account twice.
+func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
+	}
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	src.AdminAuth = filepath.Join(dataDir, backup.AdminAuthFileName)
+	src.AtlasHarvest = filepath.Join(dataDir, backup.AtlasHarvestFileName)
+	if err := os.WriteFile(src.AdminAuth, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src.AtlasHarvest, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
+	defer restore()
+
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	wantSnapshot := []string{
+		filepath.Join(dataDir, backup.BackupsDirName),
+		snap,
+		filepath.Join(snap, backup.ManifestDBFileName),
+		filepath.Join(snap, "tokens.json"),
+		filepath.Join(snap, "server.crt"),
+		filepath.Join(snap, "server.key"),
+		filepath.Join(snap, "bridge.yaml"),
+		filepath.Join(snap, backup.AdminAuthFileName),
+		filepath.Join(snap, backup.AtlasHarvestFileName),
+		filepath.Join(snap, backup.ManifestFile),
+	}
+	assertGivenAway(t, changes(), wantSnapshot)
+
+	before := len(changes())
+	if err := backup.Restore(snap, backup.Targets{
+		ManifestDB:   src.ManifestDB,
+		TokensJSON:   src.TokensJSON,
+		ServerCert:   src.ServerCert,
+		ServerKey:    src.ServerKey,
+		BridgeYAML:   src.BridgeYAML,
+		AdminAuth:    src.AdminAuth,
+		AtlasHarvest: src.AtlasHarvest,
+	}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	assertGivenAway(t, changes()[before:], []string{
+		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
+		src.AdminAuth, src.AtlasHarvest,
 	})
 }
 

@@ -3,8 +3,11 @@
 // A snapshot bundles every file an operator would otherwise have to
 // re-pair / re-scan to recover after corruption: the manifest SQLite
 // database (`bridge.db`), the token store (`tokens.json`), the TLS
-// material (`server.crt` + `server.key`), and the live config
-// (`bridge.yaml`). The snapshot also writes a small `manifest.json`
+// material (`server.crt` + `server.key`), the live config
+// (`bridge.yaml`), the public-mode console account (`adminauth.json`,
+// when one exists), and the Atlas harvest credential and sync cursor
+// (`atlas-harvest.json`, when one is stored). The snapshot also writes
+// a small `manifest.json`
 // describing the bridge version and protocol version that produced it
 // — Restore refuses incompatible snapshots so a future schema change
 // doesn't get silently rolled back into.
@@ -31,10 +34,13 @@
 // (fsutil.Precreate). Before, a root snapshot was root's 0700, which the
 // service's own prune could not remove, and a root restore left the
 // config, the database, the token store and the TLS pair root's 0600,
-// so the service could not start.
+// so the service could not start. The console account and the harvest
+// state take that same write. Restore keeps the console account and
+// signs its sessions out (adminauth.SignedOutFile) in that one write.
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,10 +48,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -65,6 +73,16 @@ const ManifestFile = "manifest.json"
 // extracted so a future rename only happens once across Capture,
 // captured-list emission, and Restore.
 const ManifestDBFileName = "bridge.db"
+
+// AdminAuthFileName is the public-mode console account. Snapshot copies
+// the file as stored. Restore rewrites it so the account stays and its
+// sessions do not (adminauth.SignedOutFile).
+const AdminAuthFileName = "adminauth.json"
+
+// AtlasHarvestFileName is the Atlas harvest credential and its sync
+// cursor. Snapshot and restore copy it byte for byte. A missing file is
+// skipped, the same way tokens.json is.
+const AtlasHarvestFileName = "atlas-harvest.json"
 
 // BackupsDirName is the dir under `dataDir` that holds snapshots.
 const BackupsDirName = "backups"
@@ -104,12 +122,14 @@ type Manifest struct {
 // `bridge init`'d install hasn't pair'd anyone yet, so `tokens.json`
 // may not exist.
 type Sources struct {
-	DataDir    string // required — where `<dataDir>/backups/<stamp>/` is created
-	ManifestDB string // typically `<dataDir>/bridge.db`
-	TokensJSON string // typically `<dataDir>/tokens.json`
-	ServerCert string // typically `<dataDir>/server.crt`
-	ServerKey  string // typically `<dataDir>/server.key`
-	BridgeYAML string // path to the bridge config file
+	DataDir      string // required — where `<dataDir>/backups/<stamp>/` is created
+	ManifestDB   string // typically `<dataDir>/bridge.db`
+	TokensJSON   string // typically `<dataDir>/tokens.json`
+	ServerCert   string // typically `<dataDir>/server.crt`
+	ServerKey    string // typically `<dataDir>/server.key`
+	BridgeYAML   string // path to the bridge config file
+	AdminAuth    string // typically `<dataDir>/adminauth.json`; absent on a loopback install
+	AtlasHarvest string // typically `<dataDir>/atlas-harvest.json`; absent until a harvest credential is stored
 }
 
 // Targets points at where each restored file should land. Mirrors
@@ -117,11 +137,13 @@ type Sources struct {
 // caller can choose to exclude e.g. `bridge.yaml` if they want to
 // keep the live config untouched).
 type Targets struct {
-	ManifestDB string
-	TokensJSON string
-	ServerCert string
-	ServerKey  string
-	BridgeYAML string
+	ManifestDB   string
+	TokensJSON   string
+	ServerCert   string
+	ServerKey    string
+	BridgeYAML   string
+	AdminAuth    string
+	AtlasHarvest string
 }
 
 // Snapshot captures every present file in `src` into a fresh
@@ -174,6 +196,8 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		{src.ServerCert, "server.crt"},
 		{src.ServerKey, "server.key"},
 		{src.BridgeYAML, "bridge.yaml"},
+		{src.AdminAuth, AdminAuthFileName},
+		{src.AtlasHarvest, AtlasHarvestFileName},
 	} {
 		if pair.src == "" {
 			continue
@@ -212,7 +236,9 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // previously-restored files are NOT rolled back, but each individual
 // target stays internally consistent. In practice the whole-dir
 // snapshot was atomic (created in one Snapshot call) so a partial
-// restore is the most useful failure mode anyway.
+// restore is the most useful failure mode anyway. The console account is
+// the exception: it is rewritten, not copied, and one that does not parse
+// fails the restore before any file is written (signedOutAdminAuth).
 func Restore(snapshotDir string, dst Targets) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -229,11 +255,26 @@ func Restore(snapshotDir string, dst Targets) error {
 	// snapshot are skipped silently (the snapshot just didn't
 	// capture that one).
 	mapping := map[string]string{
-		ManifestDBFileName: dst.ManifestDB,
-		"tokens.json":      dst.TokensJSON,
-		"server.crt":       dst.ServerCert,
-		"server.key":       dst.ServerKey,
-		"bridge.yaml":      dst.BridgeYAML,
+		ManifestDBFileName:   dst.ManifestDB,
+		"tokens.json":        dst.TokensJSON,
+		"server.crt":         dst.ServerCert,
+		"server.key":         dst.ServerKey,
+		"bridge.yaml":        dst.BridgeYAML,
+		AdminAuthFileName:    dst.AdminAuth,
+		AtlasHarvestFileName: dst.AtlasHarvest,
+	}
+	// Sign the console account out before the loop. The manifest lists it
+	// after bridge.db, the token store, the TLS pair and bridge.yaml, so a
+	// check made when the loop reached it came after those were replaced,
+	// and an account that does not parse left a half-restored install
+	// (CodeRabbit on PR #1200).
+	var account []byte
+	accountRead := false
+	if dst.AdminAuth != "" && slices.Contains(m.Files, AdminAuthFileName) {
+		account, accountRead, err = signedOutAdminAuth(filepath.Join(snapshotDir, AdminAuthFileName))
+		if err != nil {
+			return err
+		}
 	}
 	for _, name := range m.Files {
 		target, ok := mapping[name]
@@ -261,6 +302,18 @@ func Restore(snapshotDir string, dst Targets) error {
 		var mode os.FileMode = 0o600
 		if err := fsutil.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("create dir for %s: %w", name, err)
+		}
+		if name == AdminAuthFileName {
+			// One write of the account signed out before the loop. copyFile
+			// would land the live sessions, and a second write to strip
+			// them would hand the file to its owner twice.
+			if !accountRead {
+				return fmt.Errorf("restore %s: the snapshot changed during the restore", AdminAuthFileName)
+			}
+			if err := writeFrom(target, bytes.NewReader(account), 0o600); err != nil {
+				return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+			}
+			continue
 		}
 		if name == ManifestDBFileName {
 			// Drop the live pre-restore WAL/SHM BEFORE overwriting the
@@ -586,7 +639,14 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 		return err
 	}
 	defer in.Close()
+	return writeFrom(dstPath, in, mode)
+}
 
+// writeFrom is copyFile's commit: one temp file, one KeepOwner, then
+// rename onto dstPath. It streams r, so Restore's database copy never
+// holds the file in memory. Restore hands it the signed-out account
+// through bytes.NewReader, so that account is a single write.
+func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".bridge-bak-*")
 	if err != nil {
 		return err
@@ -607,7 +667,7 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 		return err
 	}
 
-	if _, err := io.Copy(tmp, in); err != nil {
+	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -626,6 +686,26 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 	}
 	committed = true
 	return nil
+}
+
+// signedOutAdminAuth reads a snapshot's console account and returns it
+// with its sessions signed out (adminauth.SignedOutFile). Restore calls it
+// before its loop, so an account that does not parse fails the restore
+// before any file is written. read is false when the snapshot lists the
+// file but does not hold it; the loop skips such a file the same way.
+func signedOutAdminAuth(srcPath string) (out []byte, read bool, err error) {
+	raw, err := os.ReadFile(srcPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+	}
+	out, _, err = adminauth.SignedOutFile(raw, time.Now())
+	if err != nil {
+		return nil, false, fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+	}
+	return out, true, nil
 }
 
 // writeManifest commits the snapshot metadata ATOMICALLY — temp file in

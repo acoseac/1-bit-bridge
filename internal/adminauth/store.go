@@ -646,6 +646,36 @@ func nextSignOut(now, last time.Time) *time.Time {
 	return &at
 }
 
+// SignedOutFile returns adminauth.json bytes that keep the account and
+// carry a fresh sign-out: no sessions, and a sessionsRevokedAt that is
+// new relative to the marker the file already holds.
+//
+// load keeps every session the file still lists and treats a copied
+// marker as already seen, so a restore that copied the file whole would
+// sign the console back in. now is the clock the new marker is taken from.
+//
+// changed is false when the file holds no account (empty, or not a
+// credential). The caller copies those bytes as they are. A file that
+// does not parse returns an error; the caller must not write it.
+func SignedOutFile(raw []byte, now time.Time) (out []byte, changed bool, err error) {
+	c, err := parseStoreBytes(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	if c.user == nil {
+		return raw, false, nil
+	}
+	out, err = json.MarshalIndent(storeFile{
+		User:              c.user,
+		SessionsRevokedAt: nextSignOut(now, c.revokedAt),
+	}, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	out = append(out, '\n')
+	return out, true, nil
+}
+
 // tookOwnSignOutLocked is this process taking the sign-out it has just
 // written: its own sessions end, and the marker is one it has seen, so
 // reading it back ends nothing it holds by then. No log line, unlike a
@@ -1423,15 +1453,23 @@ func readStoreFile(path string) (storeContents, error) {
 		return storeContents{}, fmt.Errorf("read adminauth store: %w", err)
 	}
 	stamp := fileStamp{known: true, info: info}
-	if len(raw) == 0 {
-		return storeContents{raw: raw, stamp: stamp}, nil
+	c, err := parseStoreBytes(raw)
+	if err != nil {
+		return storeContents{}, err
 	}
-	// Two shapes. The envelope is current; a bare userRecord is what
-	// every install before sessions were persisted has on disk. The
-	// discriminator is a top-level "passwordHash", which only the
-	// legacy shape has — checked rather than guessed from a failed
-	// unmarshal, because encoding/json ignores unknown fields and would
-	// happily decode the legacy file into an all-nil envelope.
+	c.stamp = stamp
+	return c, nil
+}
+
+// parseStoreBytes reads an adminauth.json body. An empty body is an
+// empty store. The discriminator is a top-level "passwordHash", which
+// only the legacy bare userRecord has — checked rather than guessed
+// from a failed unmarshal, because encoding/json ignores unknown fields
+// and would happily decode the legacy file into an all-nil envelope.
+func parseStoreBytes(raw []byte) (storeContents, error) {
+	if len(raw) == 0 {
+		return storeContents{raw: raw}, nil
+	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
@@ -1443,13 +1481,13 @@ func readStoreFile(path string) (storeContents, error) {
 		}
 		// No sessions to restore, and the next write upgrades the file
 		// in place. Nothing to migrate explicitly.
-		return storeContents{raw: raw, stamp: stamp, user: &rec}, nil
+		return storeContents{raw: raw, user: &rec}, nil
 	}
 	var sf storeFile
 	if err := json.Unmarshal(raw, &sf); err != nil {
 		return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
 	}
-	c := storeContents{raw: raw, stamp: stamp, user: sf.User, sessions: sf.Sessions}
+	c := storeContents{raw: raw, user: sf.User, sessions: sf.Sessions}
 	if sf.SessionsRevokedAt != nil {
 		c.revokedAt = *sf.SessionsRevokedAt
 	}

@@ -40756,6 +40756,106 @@ the warning names an absolute directory: WARN disk probe: directory missing; pro
 The attributes were restored with the editor. The broken line was not
 committed.
 
+## 2026-10-13 — a backup restores the public console account, signed out (backlog B200)
+
+### What was missing
+
+`backup.Snapshot` copied `bridge.db` (`VACUUM INTO`), `tokens.json`,
+`server.crt`, `server.key` and `bridge.yaml`. `adminauth.json` stayed
+in the data dir. Restoring a public bridge onto a new host brought the
+library, the pairings and the pin back, and the console account did
+not: `MintInitial` refuses a store that already holds an account, and
+a store with no file has none, so the operator set the password again.
+
+`atlas-harvest.json` is the other file the data dir holds that the
+manifest database does not. `atlasharvest.State` is the harvest token,
+the Atlas base, its expiry, `ResultCursor`, `LastSubmitAt`,
+`LastBookletCheckAt` and `PendingCovers`. The harvested rows are in
+`bridge.db`, which the snapshot already has. A missing file starts
+empty and the app provisions the credential again; the cursor is not
+rebuilt from the database, so the next harvest re-walks. The file is
+the same kind of secret as `tokens.json` (0600, not the manifest). It
+belongs in the bundle, copied as stored. An install with no harvest
+file, and a snapshot taken before this change, omit it, and restore
+skips a mapped file the snapshot does not list.
+
+### Sessions
+
+Restoring the account is the point: username, bcrypt hash,
+`passwordChangedAt`. Restoring the live session map is not. `load`
+keeps the sessions the file holds and takes a `sessionsRevokedAt` it
+reads as already seen, so a byte copy of a signed-in console would
+sign the restored host in. `SignOutEverywhere` is the store's own
+write, and it confirms the file after a settle of about a second; a
+second write would also chown the file twice. Restore therefore
+rewrites once. `adminauth.SignedOutFile` parses with the same
+`parseStoreBytes` `readStoreFile` uses (an empty file, `{}`, and a
+legacy bare `passwordHash` record), keeps the user, omits `sessions`,
+and sets `sessionsRevokedAt` with `nextSignOut`. A file with no user
+is returned unchanged. A file that does not parse returns the error
+and restore writes nothing. Login tickets
+(`adminauth-ticket-<sha256>.json`) stay out: they are single-use and
+short-lived, and each is its own file.
+
+### The write
+
+`copyFile` opens the source and `writeFrom` streams it into one temp,
+calls `fsutil.KeepOwner`, syncs, chmods `0600` and renames. The
+console account goes through `writeFrom` on the signed-out bytes
+(`bytes.NewReader`), so it is one chown, the same as `tokens.json`.
+The harvest file is an ordinary copy. `SchemaVersion` stays 1: both files are optional. The CLI, the
+periodic ticker and the console's "Snapshot now" all build sources
+and targets in `buildBackupSources` / `buildRestoreTargets`, so the
+three cannot list different files.
+
+### Red first
+
+`TestRestoreBringsTheConsoleAccountBackSignedOut` mints an account,
+creates a session, snapshots and restores into a fresh data dir. With
+`adminauth.json` left out of `Snapshot`'s pair list it fails
+`snapshot missing adminauth.json` (`go test -count=1`). Putting
+`{src.AdminAuth, AdminAuthFileName}` back makes it pass: the account
+verifies, `SessionCount` is 0, the restored file has no `sessions` and
+a non-zero `sessionsRevokedAt`, mode `0600`. Taking that pair out
+again fails the same assertion. `TestRestoreRoundTripsTheHarvestState`
+compares the harvest file byte for byte.
+`TestRestoreOfASnapshotWithoutTheConsoleAccountLeavesItAlone` restores
+a snapshot that never captured the account and leaves a live file
+untouched, and creates none where there was none.
+
+### Review: the copy streams
+
+The first cut split the write out by reading the source whole
+(`io.ReadAll`) and handing the bytes to the commit. Restore copies
+`bridge.db` through `copyFile`, and that file can run to gigabytes, so
+a restore would have held the whole database in memory (Gemini on
+PR #1200). The commit, `writeFrom`, takes an `io.Reader`: `copyFile`
+passes the open file and the console account passes its signed-out
+bytes. `TestCopyFileStreamsRatherThanReadingTheFileWhole` copies a
+sparse 64 MiB file and bounds what the copy allocates at an eighth of
+it. Against the `io.ReadAll` version it fails (165,360,168 bytes
+allocated); with `writeFrom` it passes.
+
+### Review: the account is checked before any write
+
+The engineering note above said a console account that does not parse
+fails the restore before any write. It held only for the account file:
+Restore walks the manifest in order, `Snapshot` lists the account after
+`bridge.db`, `tokens.json`, the TLS pair and `bridge.yaml`, and the
+account was signed out when the loop reached it, after those four had
+been replaced (CodeRabbit on PR #1200).
+`TestRestoreRefusesAConsoleAccountThatDoesNotParse` could not see it,
+because its snapshot holds the account alone. Restore now signs the
+account out before the loop (`signedOutAdminAuth`) and the loop writes
+those bytes; a snapshot that lists the account but changed in between
+is refused rather than written empty.
+`TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile`
+snapshots a full install with an account that does not parse, moves
+every live file on, and restores. Before the change it failed on all
+five (the four files and `bridge.db`); with it, it passes. Control:
+with the up-front check disabled (`if false && …`), the same five
+assertions go red; restored.
+
 ## 2026-10-13 — FTS deletes address the row through tracks_fts_row (backlog B268)
 
 `tracks_fts` is a standalone FTS5 table (path, title, artist, album;

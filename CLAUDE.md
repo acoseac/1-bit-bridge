@@ -7925,6 +7925,53 @@ mentions across the four `ops/audit-*.md` files.
   2026-10-02 that an interprocess lock was declined because a stale lockfile
   after an unclean exit blocks `restore` at exactly the moment an operator
   needs `restore`: true of a lock FILE, and not of this kernel lock.
+- **A snapshot captures the console account and the harvest state, and
+  restore brings the account back signed out** (2026-10-13, backlog
+  B200). The bundle was `bridge.db`, `tokens.json`, the TLS pair and
+  `bridge.yaml`. A public console's `adminauth.json` (username, bcrypt
+  hash, `passwordChangedAt`) lived only in the data dir, so a restored
+  bridge had no account and the operator set the password again.
+  `atlas-harvest.json` is the other file of that shape: the harvest
+  token and the result cursor, last submit, booklet check and pending
+  covers (`atlasharvest.State`). Harvested rows are already in the
+  manifest database. Without the file the restored bridge still serves
+  them, and the harvest waits until the app provisions a credential
+  again and the cursor starts over. The file is small, secret-grade
+  like the token store, and is not re-derived, so the snapshot copies
+  it byte for byte. Both files are optional: a missing source is
+  skipped (`os.ErrNotExist`), an older snapshot whose `Files` list
+  omits one restores exactly as it did, and a loopback install with no
+  account is unchanged. Schema stays 1.
+  **Sessions are not restored.** `load` keeps every session the file
+  still holds and treats a copied `sessionsRevokedAt` as already seen,
+  so a byte copy of a signed-in console signs the restored host in.
+  Restore rewrites the file once, through `adminauth.SignedOutFile`:
+  the account stays, `sessions` is omitted, and the marker moves with
+  `nextSignOut` (now, or one nanosecond past the stored marker when the
+  clock does not). That is the store's own sign-out. A file with no
+  account is copied unchanged. A file that does not parse fails the
+  restore before ANY file is written, so a live account is not replaced
+  and a missing one is not created. **Sign the account out before the
+  loop, never at its turn in it**: the manifest lists it after
+  `bridge.db`, the token store, the TLS pair and `bridge.yaml`, and a
+  check at its turn left a half-restored install. Login tickets stay
+  out of the bundle. Both files are written at `0600` by the same
+  `writeFrom` the other copies use (`fsutil.KeepOwner`, one chown).
+  **`writeFrom` streams an `io.Reader`: never read a copy's source
+  whole** — Restore copies `bridge.db` through it, and a whole read held
+  the database in memory. The CLI, the serve ticker and the console
+  snapshot all name them through `buildBackupSources` and
+  `buildRestoreTargets`.
+  (`TestRestoreBringsTheConsoleAccountBackSignedOut`,
+  `TestRestoreOfASnapshotWithoutTheConsoleAccountLeavesItAlone`,
+  `TestRestoreRoundTripsTheHarvestState`,
+  `TestSnapshotSkipsAMissingConsoleAccountAndHarvestState`,
+  `TestRestoreRefusesAConsoleAccountThatDoesNotParse`,
+  `TestRestoreRefusesAnUnparseableConsoleAccountBeforeWritingAnyFile`,
+  `TestSignedOutFileKeepsTheAccountAndDropsSessions`,
+  `TestBuildBackupSourcesNamesTheConsoleAccountAndHarvestState`,
+  `TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState`,
+  `TestCopyFileStreamsRatherThanReadingTheFileWhole`.)
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
   It fails closed on anything but connection-refused, which is right; but
   `adminAddress: …:0` names no port to dial, so the default produced "a bridge

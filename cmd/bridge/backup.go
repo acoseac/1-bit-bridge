@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -23,9 +24,11 @@ import (
 // Safe to run while `bridge serve` is up: SQLite's `VACUUM INTO` on
 // a WAL-mode database produces an atomic clean copy without locking
 // out the running process. The other captured files (tokens.json,
-// cert/key, config) are read normally — a write race with serve is
-// harmless for these because they're mutated rarely (token mint /
-// revoke) and atomically (temp + rename in the auth store).
+// cert/key, config, adminauth.json when the console has an account,
+// atlas-harvest.json when a harvest credential is stored) are read
+// normally — a write race with serve is harmless for these because
+// they're mutated rarely and atomically (temp + rename). A restore
+// brings the console account back and signs its sessions out.
 func backupCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -184,12 +187,14 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)
 	}
 	return backup.Sources{
-		DataDir:    cfg.DataDir,
-		ManifestDB: manifest.DefaultDBPath(cfg.DataDir),
-		TokensJSON: filepath.Join(cfg.DataDir, tokensFileName),
-		ServerCert: certPath,
-		ServerKey:  keyPath,
-		BridgeYAML: configPath,
+		DataDir:      cfg.DataDir,
+		ManifestDB:   manifest.DefaultDBPath(cfg.DataDir),
+		TokensJSON:   filepath.Join(cfg.DataDir, tokensFileName),
+		ServerCert:   certPath,
+		ServerKey:    keyPath,
+		BridgeYAML:   configPath,
+		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
+		AtlasHarvest: harvestStatePath(cfg.DataDir),
 	}
 }
 
@@ -342,10 +347,12 @@ func buildRestoreTargets(cfg *config.Config, configPath string) backup.Targets {
 		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)
 	}
 	return backup.Targets{
-		ManifestDB: manifest.DefaultDBPath(cfg.DataDir),
-		TokensJSON: filepath.Join(cfg.DataDir, tokensFileName),
-		ServerCert: certPath,
-		ServerKey:  keyPath,
-		BridgeYAML: configPath,
+		ManifestDB:   manifest.DefaultDBPath(cfg.DataDir),
+		TokensJSON:   filepath.Join(cfg.DataDir, tokensFileName),
+		ServerCert:   certPath,
+		ServerKey:    keyPath,
+		BridgeYAML:   configPath,
+		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
+		AtlasHarvest: harvestStatePath(cfg.DataDir),
 	}
 }
