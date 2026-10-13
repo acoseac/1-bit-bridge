@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // dsfSilenceRate is DSD64: 64 × 44.1 kHz. A byte of 0x69 is DSD silence
@@ -23,9 +25,10 @@ const dsfSilenceRate = 2822400
 
 // TestDSFShortDecodeFixtures measures three synthetic DSF files through the
 // album survey's decode (MeasureDSDPeak's Stages A and B) and through
-// analysis. The lengths are what decides whether a short decode is the
-// file's header or the decoder. A well-formed file that fails here is a
-// decoder bug; the completeness tolerance stays where it is.
+// analysis. A header that disagrees with its data chunk by more than one
+// block is malformed. A zero pad inside the last block, or a small ID3
+// chunk after the data, stays inside the 2% bar. ffprobe still follows
+// the data chunk.
 func TestDSFShortDecodeFixtures(t *testing.T) {
 	requireDSDToolchain(t)
 	dir := t.TempDir()
@@ -72,18 +75,27 @@ func TestDSFShortDecodeFixtures(t *testing.T) {
 			})
 			t.Logf("header %.3fs data %.3fs ffprobe %.3fs produced %.3fs survey=%v analysis=%v",
 				headerSec, dataSec, probed, produced, errText(surveyErr), errText(analysisErr))
-			// ffprobe follows the data chunk. An fmt sample count past that
-			// chunk does not become the survey's reference, and a zero pad
-			// inside the last block, or an ID3 chunk after the data, does
-			// not fail the 2% bar. A 2–4s shortfall is a different file.
+			// ffprobe follows the data chunk. A header past that chunk by
+			// more than one block is malformed, and a zero pad inside the
+			// last block, or an ID3 chunk after the data, does not fail
+			// the 2% bar.
 			if math.Abs(probed-dataSec) > 0.05 {
 				t.Errorf("ffprobe %.3fs, data %.3fs", probed, dataSec)
 			}
-			if surveyErr != nil {
-				t.Errorf("survey decode: %v", surveyErr)
-			}
-			if math.Abs(produced-dataSec) > 0.05 {
-				t.Errorf("produced %.3fs, data %.3fs", produced, dataSec)
+			if !tc.wellFormed {
+				if !errors.Is(surveyErr, manifest.ErrDSFAudioMalformed) {
+					t.Errorf("survey: %v", surveyErr)
+				}
+				if errors.Is(surveyErr, ErrFFmpegDecodeIncomplete) {
+					t.Errorf("malformed header reported as a short decode: %v", surveyErr)
+				}
+			} else {
+				if surveyErr != nil {
+					t.Errorf("survey decode: %v", surveyErr)
+				}
+				if math.Abs(produced-dataSec) > 0.05 {
+					t.Errorf("produced %.3fs, data %.3fs", produced, dataSec)
+				}
 			}
 			if analysisErr != nil {
 				t.Errorf("analysis: %v", analysisErr)
@@ -119,7 +131,14 @@ func writeSilenceDSF(t *testing.T, path string, samples, declared int64) {
 // to cover it. The fmt sample count is left as written.
 func appendDSFID3(t *testing.T, path string) {
 	t.Helper()
-	tag := minimalID3v23()
+	appendDSFTrailer(t, path, minimalID3v23())
+}
+
+// appendDSFTrailer points the DSF metadata pointer at trailer, written
+// after the data chunk, and extends the header's file-size field to cover
+// it. The fmt sample count is left as written.
+func appendDSFTrailer(t *testing.T, path string, trailer []byte) {
+	t.Helper()
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +150,7 @@ func appendDSFID3(t *testing.T, path string) {
 	}
 	old := info.Size()
 	var field [8]byte
-	binary.LittleEndian.PutUint64(field[:], uint64(old)+uint64(len(tag)))
+	binary.LittleEndian.PutUint64(field[:], uint64(old)+uint64(len(trailer)))
 	if _, err := f.WriteAt(field[:], 12); err != nil {
 		t.Fatal(err)
 	}
@@ -139,10 +158,10 @@ func appendDSFID3(t *testing.T, path string) {
 	if _, err := f.WriteAt(field[:], 20); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Seek(0, os.SEEK_END); err != nil {
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Write(tag); err != nil {
+	if _, err := f.Write(trailer); err != nil {
 		t.Fatal(err)
 	}
 }

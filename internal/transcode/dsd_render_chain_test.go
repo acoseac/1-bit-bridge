@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsdtest"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
 )
 
@@ -135,6 +136,51 @@ func TestDSDExpectedDurationFallsBackToManifest(t *testing.T) {
 	}
 	if decodeLengthDisagrees(dsdExpectedDurationSec(0, 0), 30) {
 		t.Error("with no reference at all the guard is skipped (documented), not inverted")
+	}
+}
+
+func TestADFFWithNoPayloadKeepsTheProbedDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.dff")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = dsdtone.WriteDFF(f, dsfSilenceRate, 2, nil)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := JobSpec{SourceAbsPath: path, SourceLibraryRel: "Album/empty.dff", SourceDurationSec: 4}
+	got, err := j.dsdReferenceDuration(4)
+	if err != nil || got != 4 {
+		t.Fatalf("dsdReferenceDuration = %v, %v; want the probe", got, err)
+	}
+}
+
+func TestAnUnknownDFFCompressionKeepsTheProbedDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "odd.dff")
+	raw := dsdtest.Form("MP4 ", 1_411_200)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := JobSpec{SourceAbsPath: path, SourceLibraryRel: "Album/odd.dff", SourceDurationSec: 7}
+	got, err := j.dsdReferenceDuration(7)
+	if err != nil || got != 7 {
+		t.Fatalf("dsdReferenceDuration = %v, %v; want the probe", got, err)
+	}
+}
+
+func TestAStandInDSFKeepsTheProbedDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stand-in.dsf")
+	if err := os.WriteFile(path, make([]byte, 128), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := JobSpec{SourceAbsPath: path, SourceLibraryRel: "Album/stand-in.dsf", SourceDurationSec: 3}
+	got, err := j.dsdReferenceDuration(1)
+	if err != nil || got != 1 {
+		t.Fatalf("dsdReferenceDuration = %v, %v; want the probe", got, err)
 	}
 }
 

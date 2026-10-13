@@ -41645,6 +41645,154 @@ The duplicate assertion uses `dupes.KeyFor` after the fill. Two copies of track 
 
 Negative control for this revision: `yearsThatVote` returned every present year, so `dominantYear` counted the composition dates again. Predicted red, because the early year is then the dominant and the fill of years before 1877 stays shut: `/minority-recording-year` (seven 1654s outvote five 2022s), `/two-recording-years` (four 1720s outvote three 2019s), `/recording-year-tie` (three 1685s outvote the tied 2018s and 2020s). Predicted still green: ellipses (seven 2022s still outvote five 1654s), all-early, the two plausible years, both boundaries, the other folder, a nil beside an early year, the duplicate key, the scanner no-churn, and `TestReconcileYears`. Run with that filter's condition forced false: exactly those three subtests went red (each early year came back `changed=false` at its composition date), the scanner still logged `filled missing album years tracks=5` and `stamped=5 rewritten=0`, and the predicted-green cases stayed green. The filter was restored. A group whose only years are composition dates still fills nothing but the missing ones, which is what keeps that album from being rewritten on every full scan.
 
+## 2026-10-13 — a DSF completeness check reads the fmt sample count (backlog B241)
+
+The 38 album mates the part-1 memory was written for are complete files.
+A read-only look at the operator library on 2026-10-13: the fmt sample
+count matches the data chunk. `John Legend/Get Lifted/01-Prelude.dsf`
+is 45.747 s in the header and 45.755 s in the data chunk, and ffprobe
+reports 48.055 s. The overstatement is the trailing ID3 chunk's bytes
+divided by the byte rate, within 11.2 ms of that, and the worst ID3 in
+the set is 2.9 MB, 4.12 s. A short DSD64 track with a large cover then
+fails `durationTolerance` (0.02). The same reference is what the track's
+own v2 render uses, so those files are struck by the v39 debounce.
+
+ffprobe 9.0.2 on a synthetic 10 s stereo DSD64, written the way
+`mkdsf-repro.py` writes one: no ID3 probes 10.008 s and decodes 10.000 s;
+a 1.5 MB ID3 probes 12.134 s on the stream and the format and decodes
+10.000 s; the file truncated mid-data probes 5.944 s and decodes 5.944 s.
+The guard then refuses the complete file and accepts the truncated one.
+
+### The reference
+
+`decodeAndMeasure` asks `dsdReferenceDuration` before Stage A. A `.dsf`
+is `manifest.ReadDSFAudioHeader`: sample count divided by the sampling
+frequency. The data-chunk size is checked against that count, one block
+(4096 bytes per channel) of padding allowed, because `WriteDSF` pads the
+last block and ffmpeg honours the sample count. A larger disagreement is
+`ErrDSFAudioMalformed`. A file whose leading bytes are not a DSF
+keeps the probed duration: the length tests render a stand-in named
+`.dsf` whose bytes no tool reads. An open that fails is the open's
+error. An uncompressed `.dff` is
+`ReadDFFAudioHeader`: the DSD chunk's declared payload length, in bytes,
+times 8, over channels times rate. The declared length is used when the
+payload does not fit the file, so a short decode is still refused. DST
+stays on `dsdExpectedDurationSec` (ffprobe, else the manifest). A fake
+DST chunk (CMPR `DST `, audio chunk `DST `, FRTE claiming 2 s) makes
+ffprobe print no duration, and the DSD chunk's byte length is the
+playing time of an uncompressed stream. A valid DST bitstream was not
+generated.
+
+The same header replaces ffprobe on analysis's ffmpeg path
+(`containerDuration` inside `probeChannels`). Sox's duration, when sox
+can read the file, is left as it is. A malformed DSF still supplies its
+declared duration there, so a large shortfall fails as truncated.
+`verifyRendition` is unchanged: a DSD source returns from `renderDSD`
+before that check, and a `.dsf` that does not take the DSD route is
+`ErrDSDDecodeUnavailable`.
+
+The extractor is unchanged. `ReadDSFAudioHeader` reads the 92-byte
+header and does not replace `extractDSFFromReader`. No
+`ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+### DFF
+
+An uncompressed DFF has the same flaw, measured on the same ffprobe
+with a synthetic 2 s stereo DSD64 (chunk duration 2.000000) and a
+1.5 MB ID3. With the ID3 chunk inside the FRM8 form, and with it
+appended after the form, format and stream duration are both 4.125882.
+A plain file, and one that also carries a tiny FRTE, reports 2.000000.
+The reference is the DSD chunk's declared payload.
+
+### Strikes
+
+`variant_fail_count` records the count, the time, the size and the
+mtime. It records no error class, so a strike from the old reference
+cannot be told from a file that fails for another reason. Clearing by
+class would need a column these rows do not have. v48's one-time expiry
+of every suppression is not repeated. After the deploy the operator
+presses the console's retry-failures control, `POST
+/api/upscale/failures/retry`, which runs
+`ClearVariantFailuresUnderPrefix`.
+
+### Tests, red first
+
+On the ffprobe reference, before the header reader was wired:
+
+- `TestACompleteDSFWithATrailingID3PassesTheRenderAndTheSurvey`: source
+  12.134 s, produced 10.000 s.
+- `TestADSFTruncatedMidDataIsRefused`: survey returned nil.
+- `TestADSFHeaderThatDisagreesWithItsDataChunkIsMalformed`: survey
+  returned nil.
+- `TestAnUncompressedDFFWithATrailingID3PassesTheRenderAndTheSurvey`:
+  source 4.126 s, produced 2.000 s.
+
+All four pass with the header reference, and so does the render of each
+complete file and its analysis. The 3 s overstatement in
+`TestDSFShortDecodeFixtures` is now the malformed refusal. ffprobe still
+follows the data chunk there (40.008 s against 40.000 s of audio).
+
+Negative control: `dsdReferenceDuration` returned
+`dsdExpectedDurationSec` immediately, and `containerDuration` returned
+no duration. The four tests above failed again with the same numbers,
+and `TestDSFShortDecodeFixtures/header_overstates_the_data_by_3s`
+failed because the survey returned nil. The two well-formed rows of
+that test stayed green. The early returns were removed before the
+commit.
+
+## 2026-10-13 — a malformed DSF mate is remembered once (backlog B241)
+
+`LengthIncompleteFile` stays the short decode. A malformed DSF header
+does not satisfy it, which is what the first commit's test comment
+asked for: the two errors stay distinct, and an output fault that wraps
+either one stays the volume. The album survey was still asking only
+`LengthIncompleteFile`, so a malformed mate was measured and logged on
+every render in its album. `RepeatedFileFact` is the wider predicate:
+a short decode or `ErrDSFAudioMalformed`, and false for an output
+fault. The survey stores both in the same path, size and mtime map and
+logs the first one. The render strikes a malformed source on the v39
+path. `unwritableOutput`, `unavailableTool` and `depthMismatch` all
+decline that error, and it returns from `decodeAndMeasure` before Stage
+A, so it is not marked as an output fault.
+
+A DSF data chunk that declares no audio used to pass `Check` when the
+sample count was within one block of zero, because `0 % channels` is 0.
+`payloadPerChannel` now refuses `DataBytes == 0`.
+
+A DFF payload of no bytes made `DurationSec` return `0, true`, which
+turned the completeness check off. An unknown `CMPR` was timed as
+uncompressed. Both now report no duration, and `ReadDFFAudioHeader`
+returns that header with no error, so the caller keeps the probed
+duration. Absent `CMPR` stays uncompressed. Analysis calls `Check` and
+keeps ffprobe when it fails, so a header that overstates its data does
+not fail a decodable file as truncated.
+
+Before the fix, `TestAMalformedMateIsMeasuredOnceAcrossTwoRenders`
+measured and logged the mate twice. `TestAHeaderWithNoAudioDataIsMalformed`
+saw `Check` return nil. `TestAZeroPayloadDFFNamesNoDuration` reported
+duration 0. `TestAnUnknownDFFCompressionNamesNoDuration` reported
+2.001270 s. `TestAMalformedDSFHeaderIsNotTheAnalysisReference` took the
+header duration 1.023 s. `TestADFFWithNoPayloadKeepsTheProbedDuration`
+returned 0. The unknown-compression caller returned an unexpected EOF
+until the fixture padded the odd PROP chunk; after that it would have
+reported the chunk duration, and with the reader fixed it keeps the probe.
+
+## 2026-10-13 — the DFF compression fixture is one builder (backlog B241)
+
+SonarCloud measured 4.2% duplication on the new code, above its 3% gate.
+The two hand-rolled FRM8 builders (`dffWithCompression` in the manifest
+tests and `unknownCompressionDFF` in the transcode tests) were the same
+form. `internal/dsdtest.Form` is the one builder, sized with
+`encoding/binary`. The silence writers stay in the transcode tests: each
+is one call of `dsdtone`, and moving them does not remove a second copy.
+The album-survey pair of two-render checks is one helper.
+
+The Windows `internal/manifest` failure on `dc1fa7af` (gate run
+38436649717, attempt 1) printed the package `FAIL` after 241s and no
+`--- FAIL` and no panic. The log's last lines are scanner tests, and the
+new header tests are in-memory readers with no `os.Exit`, no `log.Fatal`,
+and no `TempDir`. Attempt 2 of that run passed the same commit.
+
 ## 2026-10-13 — a client that leaves is not a server error (backlog B364)
 
 The 1-bit Cloud journal since 2026-10-01 recorded four `GET /v1/playlists` and `/v1/smart-playlists` requests, on three tenants, as `ERROR request failed | context canceled` plus an access line at `status 500`, at 0–15 ms (2026-10-06 18:20Z, 2026-10-09 13:31Z, 2026-10-09 20:24Z, 2026-10-13 12:45Z). The handler's store read uses the request context. The client closing the connection cancels that context, the store returns `context.Canceled`, and `writeErrorLog` logged every status at or above 500 at Error and then wrote that status. `requestLogging` copied the written status onto the access line and raised a 5xx to Error.

@@ -293,9 +293,11 @@ func decodeArgs(srcAbs string, channels int) []string {
 // loudness rather than trusting a guessed layout (a wrong guess would
 // silently store a biased ReplayGain). The decision is made here, off the
 // cheap probe, so the expensive streaming decode never has to fail and
-// retry. expectedSec is the probed duration (sox `--i -D` on the sox path,
-// ffprobe `format=duration` on the ffmpeg path); 0 means unknown and the
-// truncation check is skipped. primingAllowance is aacPrimingAllowance when
+// retry. expectedSec is sox `--i -D` on the sox path. On the ffmpeg path
+// it is a DSF or uncompressed DFF header when that header names a
+// duration, and ffprobe `format=duration` otherwise. A DSF header that
+// fails Check does not name one. 0 means unknown and the truncation
+// check is skipped. primingAllowance is aacPrimingAllowance when
 // the ffmpeg path's codec is AAC, and 0 on the sox path: sox's own duration
 // already matches the samples it decodes, MP3 encoder delay included.
 func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, float64, float64) {
@@ -315,10 +317,14 @@ func probeChannels(ctx context.Context, srcAbs string) (int, bool, decoderTool, 
 		// decodeFrames can spot a truncated-but-openable source after a clean
 		// ffmpeg exit. 0 on probe miss → no truncation check (commit as before).
 		p := ffprobeAudio(ctx, srcAbs)
+		expected := p.duration
+		if d, ok := containerDuration(srcAbs); ok {
+			expected = d
+		}
 		// A failed channel probe decodes mono via ffmpeg and skips loudness
 		// (same contract as the sox channelsOK=false path): p.channels is 1
 		// and p.channelsOK false then.
-		return p.channels, p.channelsOK, decoderFFmpeg, p.duration, primingAllowanceFor(p.codec)
+		return p.channels, p.channelsOK, decoderFFmpeg, expected, primingAllowanceFor(p.codec)
 	}
 	return 1, false, decoderSox, 0, 0
 }
