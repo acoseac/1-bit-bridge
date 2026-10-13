@@ -82,6 +82,9 @@ func TestDSFShortDecodeFixtures(t *testing.T) {
 			if surveyErr != nil {
 				t.Errorf("survey decode: %v", surveyErr)
 			}
+			if math.Abs(produced-dataSec) > 0.05 {
+				t.Errorf("produced %.3fs, data %.3fs", produced, dataSec)
+			}
 			if analysisErr != nil {
 				t.Errorf("analysis: %v", analysisErr)
 			}
