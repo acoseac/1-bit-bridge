@@ -29,8 +29,9 @@ const (
 )
 
 // runFpcalcStandIn is the fpcalc a hung-file test puts on PATH. A file named
-// hang.flac writes its pid and never returns. next.flac writes a marker and
-// prints a fingerprint the gate refuses, so the lookup is never reached.
+// hang.flac writes its pid and sleeps, so the parent's deadline is what ends
+// it. next.flac writes a marker and prints a fingerprint the gate refuses,
+// so the lookup is never reached.
 func runFpcalcStandIn() int {
 	path := ""
 	if len(os.Args) > 0 {
@@ -41,7 +42,12 @@ func runFpcalcStandIn() int {
 		if pidPath := os.Getenv(fpcalcStandInPID); pidPath != "" {
 			_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644)
 		}
-		select {}
+		// Sleep arms a timer before this goroutine parks. A bare select
+		// with no case does not, and the runtime then aborts the process
+		// when no other timer is queued.
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "next.flac":
 		if next := os.Getenv(fpcalcStandInNext); next != "" {
 			_ = os.WriteFile(next, []byte("ran"), 0o644)
@@ -121,6 +127,7 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	}
 	ctx := context.Background()
 	done := make(chan struct{})
+	started := time.Now()
 	go func() {
 		s.fingerprintAll(ctx, []candidate{
 			{path: rel, absPath: hangAbs, size: 1, mtimeNS: 1},
@@ -141,12 +148,19 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("sweep context: %v", ctx.Err())
 	}
+	assertHungFpcalcOutcome(t, rec, s, time.Since(started), rel, hangAbs, nextFile, pidFile, hangKey)
+}
+
+// assertHungFpcalcOutcome checks the sweep that returned. The next file ran,
+// a pid the stand-in wrote names a process the budget killed, and the hung
+// file was not cached. The timeout line is required only once the sweep has
+// used that budget: a return while the budget is still ahead is a stand-in
+// that exited, and that decode is not a timeout.
+func assertHungFpcalcOutcome(t *testing.T, rec *loggingtest.Recorder, s *fingerprintSweeper, elapsed time.Duration, rel, hangAbs, nextFile, pidFile string, hangKey acoustid.Key) {
+	t.Helper()
 	if _, err := os.Stat(nextFile); err != nil {
 		t.Fatalf("the file after the hang was not fingerprinted: %v", err)
 	}
-	// A pid the stand-in wrote names a process the budget killed. A start the
-	// budget ended before that write leaves no pid. The timeout line below
-	// is what says the budget ended that decode.
 	if _, err := os.Stat(pidFile); err == nil {
 		pid := readStandInPID(t, pidFile)
 		if gone, how := proctest.Exited(pid); !gone {
@@ -156,6 +170,10 @@ func TestAHungFpcalcDoesNotHoldTheSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	timedOut := rec.Failures(msgFpcalcTimedOut)
+	if hungSweepReturnedEarly(elapsed, s.decodeTimeout) {
+		t.Fatalf("the stand-in did not hang (sweep returned in %s, budget %s); timeout lines = %q",
+			elapsed.Round(time.Millisecond), s.decodeTimeout, timedOut)
+	}
 	if len(timedOut) != 1 || !strings.Contains(timedOut[0], rel) {
 		t.Fatalf("timeout lines = %q, want one naming %s", timedOut, rel)
 	}
@@ -188,6 +206,36 @@ func warmFpcalcStandIn(t *testing.T) {
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		t.Fatalf("fpcalc stand-in: %v", err)
+	}
+}
+
+// hungSweepReturnedEarly reports a sweep that came back while the per-file
+// budget was still ahead by more than a second. That return is a stand-in
+// that exited, not a decode the budget ended. The second is what the
+// timeout line asserts.
+func hungSweepReturnedEarly(elapsed, budget time.Duration) bool {
+	const slack = time.Second
+	return budget > slack && elapsed+slack < budget
+}
+
+// TestHungSweepReturnedEarly pins the windows-latest duration. Gate run
+// 38385471196 attempt 1 failed this package's hang test in 0.78s against
+// its 5s budget, with no timeout line.
+func TestHungSweepReturnedEarly(t *testing.T) {
+	cases := []struct {
+		elapsed, budget time.Duration
+		early           bool
+	}{
+		{780 * time.Millisecond, 5 * time.Second, true},
+		{4*time.Second - time.Millisecond, 5 * time.Second, true},
+		{4 * time.Second, 5 * time.Second, false},
+		{5 * time.Second, 5 * time.Second, false},
+		{6 * time.Second, 5 * time.Second, false},
+	}
+	for _, tc := range cases {
+		if got := hungSweepReturnedEarly(tc.elapsed, tc.budget); got != tc.early {
+			t.Fatalf("elapsed %s budget %s: early = %v, want %v", tc.elapsed, tc.budget, got, tc.early)
+		}
 	}
 }
 

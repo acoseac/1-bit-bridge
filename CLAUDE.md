@@ -3291,6 +3291,17 @@ no failing test — which is the shape to expect in this area.
   timer that sets `Err` can be late on a loaded host. `ErrUnreadable` is
   still cached as a miss when the budget has not expired. A cancelled parent
   stays silent, including when the file deadline has also passed.
+  **The stand-in that plays a hung fpcalc blocks on a timer** (2026-10-13,
+  backlog B363). A bare `select` with no case parks with nothing queued.
+  The runtime aborts that process when no timer is on a processor yet
+  (`all goroutines are asleep - deadlock!`, exit status 2). The sweep
+  then sees a failed decode while the budget is still ahead, caches
+  `ErrUnreadable`, and logs no timeout line. windows-latest gate run
+  38385471196 attempt 1 failed `TestAHungFpcalcDoesNotHoldTheSweep` in
+  0.78s with an empty timeout list. The hang sleeps, which arms a timer
+  before the goroutine parks. The test requires the sweep to have used
+  the budget before it requires the timeout line. A decode that ends
+  while the budget is still ahead stays a failed decode.
   (`TestAHungFpcalcDoesNotHoldTheSweep`,
   `TestFpcalcBudgetDefaultsToTenMinutes`,
   `TestNoteDecodeErrCachesOnlyAnUnreadableFile`.)
