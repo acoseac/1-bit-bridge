@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,34 +102,27 @@ func makeAlbums(t *testing.T, dir string, n, files int) []string {
 	return albums
 }
 
-// releaseSettle is how long a count may wait for a release that was still
-// closing descriptors when the sync folder became watched. It sits well
-// inside reconcileEvery (30s): a poll that waited out a reconcile could let
-// that pass close a watch the test meant to catch still open.
-const releaseSettle = 2 * time.Second
-
-// settleLibraryFiles polls until the open files on root equal want, or
-// releaseSettle has passed, and returns the last count either way. A
-// descriptor the release left open stays above want and the deadline fails
-// the caller.
-func settleLibraryFiles(t *testing.T, root string, want int) int {
+// waitUntilWatcherIdle waits until Run's loop is between events. The bound
+// is the suite's own timeout. A rename still sitting in the kernel is not
+// this wait.
+func waitUntilWatcherIdle(t *testing.T, w *Watcher) {
 	t.Helper()
-	deadline := time.Now().Add(releaseSettle)
-	var got int
-	for {
-		got = libraryFiles(t, root)
-		if got == want || !time.Now().Before(deadline) {
-			return got
-		}
-		time.Sleep(20 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		w.loopGate.waitIdle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("the watcher did not finish the event it was handling")
 	}
 }
 
 // syncWatcher makes an empty folder named for i in root and waits until the
-// watcher watches it. On kqueue the folder is added from flushPendingAdds,
-// which receive runs before it handles the event that woke it, so the folder
-// being watched does not mean that event's release has closed its
-// descriptors. The folder holds one open file.
+// loop has finished the handling that watched it. The folder holds one open
+// file. A rename's descriptors close in releaseTree; the test that counts
+// after a rename waits for afterRelease, which this helper does not.
 func syncWatcher(t *testing.T, w *Watcher, root string, i int) {
 	t.Helper()
 	name := fmt.Sprintf("zz-sync-%d", i)
@@ -137,6 +131,39 @@ func syncWatcher(t *testing.T, w *Watcher, root string, i int) {
 	}
 	watchWaitUntil(t, func() bool { return watched(w, name) }, nil,
 		"the watcher never watched the folder made to sync with it")
+	waitUntilWatcherIdle(t, w)
+}
+
+// noteReleases records each path releaseTree has finished removing. The
+// send does not block Run's goroutine. Set before Run.
+func noteReleases(w *Watcher) <-chan string {
+	ch := make(chan string, 1024)
+	w.afterReleaseForTests = func(p string) {
+		select {
+		case ch <- p:
+		default:
+		}
+	}
+	return ch
+}
+
+// waitForReleases returns once releaseTree has removed each path. The only
+// bound is the suite's own timeout.
+func waitForReleases(t *testing.T, ch <-chan string, paths []string) {
+	t.Helper()
+	need := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		need[filepath.Clean(p)] = struct{}{}
+	}
+	giveUp := watchGiveUp(t, watchWaitReserve)
+	for len(need) > 0 {
+		select {
+		case p := <-ch:
+			delete(need, filepath.Clean(p))
+		case <-giveUp:
+			t.Fatalf("the watcher released %d of %d renamed folders", len(paths)-len(need), len(paths))
+		}
+	}
 }
 
 // TestKqueueWatcherReleasesARenamedFoldersFiles: renaming album folders in
@@ -146,26 +173,33 @@ func syncWatcher(t *testing.T, w *Watcher, root string, i int) {
 // folder asked for while fsnotify watches it itself is opened twice, one of
 // the two descriptors lost to fsnotify for good. Measured on main with this
 // test: 130 more open files every round of renaming ten folders of twelve
-// files, one per file and one per folder.
+// files, one per file and one per folder. The count waits until each
+// renamed folder's release has returned. kqueue does not order that event
+// against a later create, and the new path's watch is already open, so an
+// earlier count is one high for the old directory descriptor.
 func TestKqueueWatcherReleasesARenamedFoldersFiles(t *testing.T) {
 	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
 	albums := makeAlbums(t, filepath.Join(libDir, "Artist"), 10, 12)
+	released := noteReleases(w)
 	startWatcher(t, w)
 	base := libraryFiles(t, libDir)
 
 	for round := 1; round <= 3; round++ {
+		from := append([]string(nil), albums...)
 		for i, a := range albums {
 			if err := os.Rename(a, a+"r"); err != nil {
 				t.Fatal(err)
 			}
 			albums[i] = a + "r"
 		}
+		waitForReleases(t, released, from)
 		syncWatcher(t, w, libDir, round)
-		// Each round adds the sync folder, and nothing else. The folder can
-		// be watched while the rename's release is still closing, so the
-		// count waits out that close and still wants the exact total.
-		if got, want := settleLibraryFiles(t, libDir, base+round), base+round; got != want {
-			t.Fatalf("after round %d of renaming 10 folders of 12 files the watcher holds %d open files on the library, want %d", round, got, want)
+		// Each round adds the sync folder, and nothing else. The release
+		// signal has already returned, and the count still wants the exact
+		// total, so a descriptor Remove did not close stays visible.
+		if got, want := libraryFiles(t, libDir), base+round; got != want {
+			t.Fatalf("after round %d of renaming %d folders of %d files the watcher holds %d open files on the library, want %d",
+				round, len(albums), 12, got, want)
 		}
 	}
 }
@@ -237,19 +271,21 @@ func TestKqueueWatcherSamplesARenameBeforeItsReleaseCloses(t *testing.T) {
 		t.Fatalf("while the release was held the watcher had %d open files on the library, base %d: the renamed folder's watches were already closed", got, base)
 	}
 	release()
-	if settled, want := settleLibraryFiles(t, libDir, base+1), base+1; settled != want {
-		t.Fatalf("after the release, %d open files on the library, want %d", settled, want)
+	waitUntilWatcherIdle(t, w)
+	if got, want := libraryFiles(t, libDir), base+1; got != want {
+		t.Fatalf("after the release, %d open files on the library, want %d", got, want)
 	}
 }
 
 // TestALeakedWatchPerRenameDoesNotSettle plants one descriptor per directory
-// release and requires the settle poll to miss the exact count. The account
-// has forgotten the path, so the 30s reconcile does not close it inside the
-// 2s poll.
+// release and requires the count after that release to still see it. The
+// account has forgotten the path, so the 30s reconcile does not close it,
+// and the exact count stays above the settled total.
 func TestALeakedWatchPerRenameDoesNotSettle(t *testing.T) {
 	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
 	albums := makeAlbums(t, filepath.Join(libDir, "Artist"), 4, 3)
 	w.leakOneWatchForTests = true
+	released := noteReleases(w)
 	startWatcher(t, w)
 	base := libraryFiles(t, libDir)
 	for _, a := range albums {
@@ -257,10 +293,42 @@ func TestALeakedWatchPerRenameDoesNotSettle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	waitForReleases(t, released, albums)
 	syncWatcher(t, w, libDir, 0)
 	want := base + 1
-	if got := settleLibraryFiles(t, libDir, want); got == want {
+	if got := libraryFiles(t, libDir); got == want {
 		t.Fatalf("a leaked watch per rename settled at %d open files", got)
+	}
+}
+
+// TestKqueueFlushDoesNotOpenAFolderTwice asks for each new empty folder
+// before the loop blocks again, and the next folder is made only once the
+// previous one is watched, so no later library event flushes the add.
+// The ask writes a file outside the library. The folder is watched when
+// that file's event is read, after fsnotify has finished opening the
+// folder. Each folder is one open file. A second open, which fsnotify
+// loses track of, stays in the count. GOMAXPROCS is 1, the scheduling
+// where a direct watch of the folder from this turn kept an extra
+// descriptor (the CI runner's 136 against 135).
+func TestKqueueFlushDoesNotOpenAFolderTwice(t *testing.T) {
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
+	w.immediateFlushForTests = true
+	startWatcher(t, w)
+	base := libraryFiles(t, libDir)
+	const n = 40
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("empty%02d", i)
+		if err := os.Mkdir(filepath.Join(libDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		watchWaitUntil(t, func() bool { return watched(w, name) }, nil,
+			"the watcher never watched a new folder")
+	}
+	waitUntilWatcherIdle(t, w)
+	if got, want := libraryFiles(t, libDir), base+n; got != want {
+		t.Fatalf("after %d empty folders, the watcher holds %d open files on the library, want %d", n, got, want)
 	}
 }
 

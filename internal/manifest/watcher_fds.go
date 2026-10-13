@@ -38,7 +38,9 @@ import (
 // loses track of the other, which nothing closes, Close included (measured:
 // 9 or 10 of every 10 new folders). So a new folder is watched once fsnotify
 // has sent a later event, which it sends only after watching the folder
-// itself, or after a quiet spell (deferredAddWait). And it reconciles, for
+// itself. A quiet spell writes a file outside the library, and that file's
+// event, read once the watch being opened has finished, is what asks for
+// the folder (deferredAddWait). And it reconciles, for
 // the folder fsnotify drops without sending anything (reconcileWatches).
 
 // watchShareOfProcess and watchShareOfSystem divide the open-file limits into
@@ -61,13 +63,13 @@ const (
 	watchShareOfSystem  = 4
 )
 
-// deferredAddWait is how long a new folder waits for fsnotify to send a later
-// event before the watcher asks for it anyway (see flushPendingAdds). fsnotify
-// watches the folder itself in microseconds after sending its Create, so a
-// quarter second leaves it ample time; it is kept under the shortest scan
-// debounce (a second), so the folder is watched before the scan its Create
-// asked for walks it, and nothing that lands in it after that scan goes
-// unseen.
+// deferredAddWait is how long a new folder waits for a later library event
+// before the watcher writes the file whose event asks for the folder (see
+// flushPendingAdds). The wait is not what keeps the two opens apart: the
+// event is read only after fsnotify has finished the watch it was opening.
+// It is kept under the shortest scan debounce (a second), so the folder is
+// watched before the scan its Create asked for walks it, and nothing that
+// lands in it after that scan goes unseen.
 const deferredAddWait = 250 * time.Millisecond
 
 // reconcileEvery is how often the watcher compares the folders it listed
@@ -444,14 +446,16 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 	return plan, rootWatch, err
 }
 
-// flushPendingAdds watches the new folders that wait for it. Run calls it as
-// soon as fsnotify has sent another event (or an error), which it sends only
-// after it has watched, itself, every folder it sent a Create for before: a
-// folder asked for while fsnotify watches it was opened twice, and fsnotify
-// kept track of one of the two descriptors only (measured: 9 or 10 of every
-// 10 new folders, each a descriptor nothing closes, Close included). With no
-// event to come, Run calls it after deferredAddWait. A folder that has gone,
-// or cannot be read, is left to the scan its Create asked for.
+// flushPendingAdds watches the new folders that wait for it. Run calls it
+// from an event (or an error). A library event is sent only after fsnotify
+// has watched, itself, every folder it sent a Create for before that send. A
+// folder asked for while fsnotify is still opening it was opened twice, and
+// fsnotify kept track of one of the two descriptors only (measured: 9 or 10
+// of every 10 new folders, each a descriptor nothing closes, Close
+// included). With no library event to come, the quiet timer writes a file
+// outside the library; that file's event is read after the open in progress
+// has finished, and it is what calls this. A folder that has gone, or cannot
+// be read, is left to the scan its Create asked for.
 func (wt *Watcher) flushPendingAdds() {
 	f := wt.fds
 	if f == nil || f.off || len(f.pending) == 0 {
@@ -511,6 +515,9 @@ func (wt *Watcher) releaseTree(p string) {
 	}
 	for _, q := range paths {
 		_ = wt.w.Remove(q)
+	}
+	if hook := wt.afterReleaseForTests; hook != nil {
+		hook(p)
 	}
 }
 
