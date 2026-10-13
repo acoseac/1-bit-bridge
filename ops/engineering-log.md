@@ -41806,3 +41806,61 @@ Shutdown of an ordinary `/v1` handler is that live-context case. `cmd/bridge` bu
 `writeFileErrorLog` classifies the original error and logs `redactWalkErr`'s text, so a path is still redacted. `GetBooklet` used to log `booklet lookup` at Error and write 500 beside that; it now calls `writeErrorLog`, so a canceled lookup takes the same rule and a real lookup failure is still Error at 500. The UPnP routing lookup in `serveFile` returns through `writeErrorLog` only when the client has gone; a database fault still logs `upnp routing lookup failed` and falls through. The search keystroke path, the manifest stream before and after the first byte, and `logProbeFault` already return without a 500 and were left. A panic the recoverer turns into 500, and an `OpenAsFile` or walk error that does not come from the request context, stay Error and 500.
 
 Negative control: `clientWentAway` returned false. Predicted red: `TestAClientAbortIsLoggedAsInfoWithStatus499` (both lines `level=ERROR`, `status=500`) and `TestAClientAbortThroughWriteFileErrorLogRecords499` (status 500, `err="stat: context canceled"`). Predicted still green: `TestAServerDeadlineStaysAServerError`, `TestACancelWhileTheRequestIsLiveStaysAServerError`, `TestAClientAbortDoesNotRewriteA4xx`. The run matched that split. The predicate was restored.
+
+## 2026-10-13 — a hung fpcalc stand-in must block on a timer (backlog B363)
+
+### What was wrong
+
+`TestAHungFpcalcDoesNotHoldTheSweep` still failed on windows-latest after
+B349. Gate run 38385471196 attempt 1, job `test (windows-latest)`, commit
+`97a7c6ef` (PR #1206, which does not touch the fingerprint sweep):
+
+```
+--- FAIL: TestAHungFpcalcDoesNotHoldTheSweep (0.78s)
+    fingerprint_fpcalc_timeout_test.go:160: timeout lines = [], want one naming Album/hang.flac
+```
+
+Attempt 2 of that run was cancelled during cache extract and is not this
+failure. The 0.78s is the test's own timer. The 5s budget was not used.
+The sweep returned, the next file was fingerprinted, and there was no
+timeout line.
+
+`noteDecodeErr` already treats a fired deadline as a timeout, whatever
+error the kill produced, including Windows `exit status 1`. A decode that
+ends while the file deadline is still ahead is `ErrUnreadable` and is
+cached with no line. The log capture is not the race: the recorder stores
+the record inside `Handle` before the warn returns, and the test reads it
+only after the sweep's `done` channel is closed.
+
+The hang arm was `select {}` after the pid write. That parks the only
+user goroutine with nothing queued. Go 1.26.6 `checkdead`
+(`src/runtime/proc.go`) returns when any processor has a timer in its
+heap, and otherwise throws `all goroutines are asleep - deadlock!`
+(exit status 2). A process that dies that way, before the deadline, is a
+failed decode. On this Mac, 30 starts of the old stand-in were all still
+running at 500ms: a timer was already queued. The Windows failure is that
+check when the heap is still empty. A start error inside the budget is
+the same classification, and the test must not call it a timeout.
+
+### The fix
+
+`runFpcalcStandIn` sleeps for an hour in a loop. `time.Sleep` arms a
+timer before the goroutine parks, so the deadlock detector cannot abort
+the process. The parent's `CommandContext` deadline still kills it.
+`noteDecodeErr` is unchanged.
+
+`TestAHungFpcalcDoesNotHoldTheSweep` requires the sweep to have used the
+budget before it requires the timeout line. `hungSweepReturnedEarly` is
+true when the return is more than a second short of the budget. The
+recorded 0.78s against 5s is that case, and the failure names the elapsed
+time. A return that used the budget and still has no timeout line fails
+on the line itself.
+
+### The control
+
+`TestHungSweepReturnedEarly` wants early for 780ms and for one
+millisecond under four seconds, and not early at four, five, and six
+seconds, all against a five-second budget. Replacing the sleep with
+`select {}` stayed up for 30 of 30 half-second waits on this Mac, so the
+local suite cannot show that revert red. The duration check is what
+fails the recorded Windows shape.
