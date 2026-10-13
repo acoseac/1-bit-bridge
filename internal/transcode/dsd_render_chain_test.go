@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsdtest"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
 )
 
@@ -160,7 +161,7 @@ func TestADFFWithNoPayloadKeepsTheProbedDuration(t *testing.T) {
 
 func TestAnUnknownDFFCompressionKeepsTheProbedDuration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "odd.dff")
-	raw := unknownCompressionDFF()
+	raw := dsdtest.Form("MP4 ", 1_411_200)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -169,41 +170,6 @@ func TestAnUnknownDFFCompressionKeepsTheProbedDuration(t *testing.T) {
 	if err != nil || got != 7 {
 		t.Fatalf("dsdReferenceDuration = %v, %v; want the probe", got, err)
 	}
-}
-
-func unknownCompressionDFF() []byte {
-	be := func(n uint64) []byte {
-		var b [8]byte
-		b[0] = byte(n >> 56)
-		b[1] = byte(n >> 48)
-		b[2] = byte(n >> 40)
-		b[3] = byte(n >> 32)
-		b[4] = byte(n >> 24)
-		b[5] = byte(n >> 16)
-		b[6] = byte(n >> 8)
-		b[7] = byte(n)
-		return b[:]
-	}
-	fs := append([]byte("FS  "), be(4)...)
-	fs = append(fs, 0x00, 0x2b, 0x11, 0x00)
-	chnl := append([]byte("CHNL"), be(6)...)
-	chnl = append(chnl, 0, 2, 'S', 'L', 'F', 'T')
-	cmprBody := append([]byte("MP4 "), 0)
-	cmpr := append([]byte("CMPR"), be(uint64(len(cmprBody)))...)
-	cmpr = append(cmpr, cmprBody...)
-	propBody := append([]byte("SND "), fs...)
-	propBody = append(propBody, chnl...)
-	propBody = append(propBody, cmpr...)
-	prop := append([]byte("PROP"), be(uint64(len(propBody)))...)
-	prop = append(prop, propBody...)
-	if len(propBody)%2 == 1 {
-		prop = append(prop, 0)
-	}
-	dsd := append([]byte("DSD "), be(1411200)...)
-	form := append([]byte("FRM8"), be(uint64(4+len(prop)+len(dsd)))...)
-	form = append(form, "DSD "...)
-	form = append(form, prop...)
-	return append(form, dsd...)
 }
 
 func TestAStandInDSFKeepsTheProbedDuration(t *testing.T) {

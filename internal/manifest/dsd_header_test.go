@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsdtest"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
 )
 
@@ -93,16 +94,7 @@ func TestAZeroPayloadDFFNamesNoDuration(t *testing.T) {
 }
 
 func TestAnUnknownDFFCompressionNamesNoDuration(t *testing.T) {
-	raw := dffWithCompression(t, "MP4 ")
-	// PROP's declared size is odd, so the chunk is padded before DSD.
-	raw = append(raw, 0)
-	chunk := make([]byte, 12)
-	copy(chunk, "DSD ")
-	var size [8]byte
-	size[5] = 0x15
-	size[6] = 0x8c // 1_411_200 bytes, 2 s of stereo DSD64
-	copy(chunk[4:], size[:])
-	raw = append(raw, chunk...)
+	raw := dsdtest.Form("MP4 ", 1_411_200)
 	h, err := ReadDFFAudioHeader(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +105,7 @@ func TestAnUnknownDFFCompressionNamesNoDuration(t *testing.T) {
 }
 
 func TestReadDFFAudioHeaderLeavesDSTWithoutAChunkDuration(t *testing.T) {
-	raw := dffWithCompression(t, "DST ")
+	raw := dsdtest.Form("DST ", -1)
 	h, err := ReadDFFAudioHeader(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -152,35 +144,4 @@ func putLE32(b []byte, n uint32) {
 func putLE64(b []byte, n uint64) {
 	putLE32(b[0:4], uint32(n))
 	putLE32(b[4:8], uint32(n>>32))
-}
-
-func dffWithCompression(t *testing.T, fourcc string) []byte {
-	t.Helper()
-	be := func(n uint64) []byte {
-		var b [8]byte
-		b[0] = byte(n >> 56)
-		b[1] = byte(n >> 48)
-		b[2] = byte(n >> 40)
-		b[3] = byte(n >> 32)
-		b[4] = byte(n >> 24)
-		b[5] = byte(n >> 16)
-		b[6] = byte(n >> 8)
-		b[7] = byte(n)
-		return b[:]
-	}
-	fs := append([]byte("FS  "), be(4)...)
-	fs = append(fs, 0x00, 0x2b, 0x11, 0x00) // 2_822_400
-	chnl := append([]byte("CHNL"), be(6)...)
-	chnl = append(chnl, 0, 2, 'S', 'L', 'F', 'T')
-	cmprBody := append([]byte(fourcc), 0)
-	cmpr := append([]byte("CMPR"), be(uint64(len(cmprBody)))...)
-	cmpr = append(cmpr, cmprBody...)
-	propBody := append([]byte("SND "), fs...)
-	propBody = append(propBody, chnl...)
-	propBody = append(propBody, cmpr...)
-	prop := append([]byte("PROP"), be(uint64(len(propBody)))...)
-	prop = append(prop, propBody...)
-	form := append([]byte("FRM8"), be(uint64(4+len(prop)))...)
-	form = append(form, "DSD "...)
-	return append(form, prop...)
 }

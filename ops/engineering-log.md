@@ -41776,3 +41776,19 @@ header duration 1.023 s. `TestADFFWithNoPayloadKeepsTheProbedDuration`
 returned 0. The unknown-compression caller returned an unexpected EOF
 until the fixture padded the odd PROP chunk; after that it would have
 reported the chunk duration, and with the reader fixed it keeps the probe.
+
+## 2026-10-13 — the DFF compression fixture is one builder (backlog B241)
+
+SonarCloud measured 4.2% duplication on the new code, above its 3% gate.
+The two hand-rolled FRM8 builders (`dffWithCompression` in the manifest
+tests and `unknownCompressionDFF` in the transcode tests) were the same
+form. `internal/dsdtest.Form` is the one builder, sized with
+`encoding/binary`. The silence writers stay in the transcode tests: each
+is one call of `dsdtone`, and moving them does not remove a second copy.
+The album-survey pair of two-render checks is one helper.
+
+The Windows `internal/manifest` failure on `dc1fa7af` (gate run
+38436649717, attempt 1) printed the package `FAIL` after 241s and no
+`--- FAIL` and no panic. The log's last lines are scanner tests, and the
+new header tests are in-memory readers with no `os.Exit`, no `log.Fatal`,
+and no `TempDir`. Attempt 2 of that run passed the same commit.
