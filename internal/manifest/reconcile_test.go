@@ -1,6 +1,11 @@
 package manifest
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/dupes"
+)
 
 func TestReconcileAlbumArtists(t *testing.T) {
 	mk := func(path, album, aa string) ReconcileTarget {
@@ -301,5 +306,169 @@ func TestReconcileYears(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// compositionAlbum is one directory-and-album group. years are written in
+// track order; a second copy of a track is another year in the same group.
+func compositionAlbum(dir, album string, years ...int) []ReconcileTarget {
+	out := make([]ReconcileTarget, 0, len(years))
+	for i, y := range years {
+		yy := y
+		out = append(out, ReconcileTarget{
+			Path:        fmt.Sprintf("%s/%02d.flac", dir, i+1),
+			Album:       album,
+			AlbumArtist: "Artist",
+			Year:        &yy,
+		})
+	}
+	return out
+}
+
+// yearAfterReconcile is the year path holds once reconcileYears has run.
+// A path the pass does not return keeps the year it was given.
+func yearAfterReconcile(tracks []ReconcileTarget, path string) (year int, changed bool) {
+	for _, c := range reconcileYears(tracks) {
+		if c.Path != path {
+			continue
+		}
+		if c.Year == nil {
+			return 0, true
+		}
+		return *c.Year, true
+	}
+	for _, tr := range tracks {
+		if tr.Path == path && tr.Year != nil {
+			return *tr.Year, false
+		}
+	}
+	return 0, false
+}
+
+func requireYear(t *testing.T, tracks []ReconcileTarget, path string, want int, wantChanged bool) {
+	t.Helper()
+	got, changed := yearAfterReconcile(tracks, path)
+	if got != want || changed != wantChanged {
+		t.Errorf("%s: year %d changed=%v, want %d changed=%v", path, got, changed, want, wantChanged)
+	}
+}
+
+// TestReconcileYearsTreatsACompositionDateAsMissing is backlog B342.
+// A year before the first recorded sound is a composition date when the
+// same folder's album already has a recording year. The pass fills it
+// from that dominant year. A folder whose years are all earlier keeps
+// them, and a year of 1877 or later is left as it was tagged.
+func TestReconcileYearsTreatsACompositionDateAsMissing(t *testing.T) {
+	t.Run("ellipses", func(t *testing.T) {
+		// Seven tracks tagged 2022 and five tagged 1654, the second copy
+		// of track 03 among the five.
+		tracks := compositionAlbum("Anastasia Kobekina/Ellipses", "Ellipses",
+			2022, 2022, 2022, 2022, 2022, 2022, 2022,
+			1654, 1654, 1654, 1654, 1654)
+		tracks[11].Path = "Anastasia Kobekina/Ellipses/03. Bachianas Brasileiras_ No. 5.flac"
+		for _, tr := range tracks {
+			requireYear(t, tracks, tr.Path, 2022, tr.Year != nil && *tr.Year == 1654)
+		}
+	})
+
+	t.Run("all-early", func(t *testing.T) {
+		tracks := compositionAlbum("Composer/Suite", "Suite", 1654, 1654, 1654)
+		for _, tr := range tracks {
+			requireYear(t, tracks, tr.Path, 1654, false)
+		}
+	})
+
+	t.Run("two-plausible-years", func(t *testing.T) {
+		tracks := compositionAlbum("Band/Album", "Album", 1974, 2022, 2022)
+		requireYear(t, tracks, tracks[0].Path, 1974, false)
+		requireYear(t, tracks, tracks[1].Path, 2022, false)
+		requireYear(t, tracks, tracks[2].Path, 2022, false)
+	})
+
+	t.Run("boundary-1876", func(t *testing.T) {
+		tracks := compositionAlbum("Band/Album", "Album", 1876, 2022)
+		requireYear(t, tracks, tracks[0].Path, 2022, true)
+		requireYear(t, tracks, tracks[1].Path, 2022, false)
+	})
+
+	t.Run("boundary-1877", func(t *testing.T) {
+		tracks := compositionAlbum("Band/Album", "Album", 1877, 2022)
+		requireYear(t, tracks, tracks[0].Path, 1877, false)
+		requireYear(t, tracks, tracks[1].Path, 2022, false)
+	})
+
+	t.Run("other-folder", func(t *testing.T) {
+		here := compositionAlbum("Artist/Ellipses", "Ellipses", 2022, 2022, 1654)
+		there := compositionAlbum("Other/Ellipses", "Ellipses", 1998, 1998)
+		tracks := append(here, there...)
+		requireYear(t, tracks, here[2].Path, 2022, true)
+		requireYear(t, tracks, there[0].Path, 1998, false)
+		requireYear(t, tracks, there[1].Path, 1998, false)
+	})
+
+	t.Run("missing-beside-an-early-year", func(t *testing.T) {
+		tracks := compositionAlbum("Composer/Suite", "Suite", 1654, 1654, 1654)
+		tracks[2].Year = nil
+		requireYear(t, tracks, tracks[0].Path, 1654, false)
+		requireYear(t, tracks, tracks[1].Path, 1654, false)
+		requireYear(t, tracks, tracks[2].Path, 1654, true)
+	})
+
+	t.Run("minority-recording-year", func(t *testing.T) {
+		// Five composition dates outvote two recording years, so the
+		// dominant year is still 1654 and nothing is filled.
+		tracks := compositionAlbum("Composer/Suite", "Suite", 1654, 1654, 1654, 1654, 1654, 2022, 2022)
+		for _, tr := range tracks {
+			want := 1654
+			if tr.Year != nil && *tr.Year == 2022 {
+				want = 2022
+			}
+			requireYear(t, tracks, tr.Path, want, false)
+		}
+	})
+}
+
+// TestAFilledYearLeavesTheDuplicateKeyToTheExistingRule pins that the
+// year fill does not grow a second duplicate rule. Two copies of track
+// 03 with the same title share dupes.KeyFor once their years agree. A
+// title that still contains an underscore stays a different key.
+func TestAFilledYearLeavesTheDuplicateKeyToTheExistingRule(t *testing.T) {
+	// Three recording years outvote the two composition dates, which is
+	// the Ellipses shape the fill acts on. The two 1654s are both copies
+	// of track 03.
+	tracks := compositionAlbum("Anastasia Kobekina/Ellipses", "Ellipses", 2022, 2022, 2022, 1654, 1654)
+	tracks[0].Path = "Anastasia Kobekina/Ellipses/03.flac"
+	tracks[3].Path = "Anastasia Kobekina/Ellipses/03. Bachianas Brasileiras No. 5.flac"
+	tracks[4].Path = "Anastasia Kobekina/Ellipses/03. Bachianas Brasileiras_ No. 5.flac"
+	title := "Bachianas Brasileiras No. 5"
+	yearOf := map[string]int{}
+	for _, tr := range tracks {
+		y, _ := yearAfterReconcile(tracks, tr.Path)
+		yearOf[tr.Path] = y
+	}
+	row := func(path, trackTitle string) dupes.Row {
+		return dupes.Row{
+			Path:        path,
+			Title:       trackTitle,
+			Album:       "Ellipses",
+			AlbumArtist: "Artist",
+			Year:        yearOf[path],
+			Disc:        1,
+			DiscTagged:  true,
+			Track:       3,
+			TrackTagged: true,
+		}
+	}
+	if yearOf[tracks[3].Path] != 2022 || yearOf[tracks[4].Path] != 2022 {
+		t.Fatalf("composition-date copies stayed at %d and %d, want the album's 2022", yearOf[tracks[3].Path], yearOf[tracks[4].Path])
+	}
+	served := row(tracks[0].Path, title)
+	copy := row(tracks[3].Path, title)
+	if dupes.KeyFor(served) != dupes.KeyFor(copy) {
+		t.Errorf("same title, disc and track after the year fill: keys %v and %v", dupes.KeyFor(served), dupes.KeyFor(copy))
+	}
+	underscore := row(tracks[4].Path, "Bachianas Brasileiras_ No. 5")
+	if dupes.KeyFor(underscore) == dupes.KeyFor(served) {
+		t.Errorf("a title that keeps its underscore shares the served copy's key %v", dupes.KeyFor(served))
 	}
 }

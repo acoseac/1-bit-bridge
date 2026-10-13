@@ -94,9 +94,10 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 }
 
 // reconcileYears finds physical albums — tracks that share a directory AND
-// an album title — where some tracks carry a year and others are MISSING
-// one, and fills the missing years from the group's dominant year. One
-// untagged track (no year) otherwise splits into its own album row on iOS
+// an album title — and fills a missing year from the group's dominant
+// year. A missing year is an absent one, or a composition date beside a
+// recording year (firstRecordedSoundYear). One untagged track (no year)
+// otherwise splits into its own album row on iOS
 // (album identity = `normalize(albumArtist)|normalize(album)|year`), exactly
 // the field-reported Alphaville "[A] Eternally Yours Bonus-EP" case where a
 // single bonus track lost its year tag.
@@ -105,50 +106,69 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 //   - DIRECTORY-scoped: the same (directory, normalized album) grouping —
 //     NEVER crosses directories (classical box-set + distinct-same-name
 //     protection).
-//   - FILL-MISSING only: a present-but-DIFFERENT year is LEFT ALONE. It may
-//     be a deliberate per-track value, and overwriting it is a sharper,
-//     riskier call than filling an absent one. We only fill years that are
-//     absent (nil) or non-positive (the bridge's year=0 "tag absent"
-//     sentinel, which iOS already treats as nil).
+//   - FILL-MISSING only. Absent (nil) and non-positive (the year=0
+//     "tag absent" sentinel) years are filled from the group's dominant
+//     present year. A year before firstRecordedSoundYear counts as
+//     missing only when that dominant year is firstRecordedSoundYear or
+//     later: the early year is a composition date beside a recording.
+//     A group whose dominant year is itself earlier keeps those years.
+//     A year of firstRecordedSoundYear or later is left as tagged, so
+//     1974 beside 2022 stays a split.
 //   - DOMINANT existing value, not MusicBrainz — preserve the user's tags.
+//     Early years still vote, so a majority of composition dates is the
+//     group's year.
 //
 // Returns only the targets needing a fill (Year set to the dominant value),
 // sorted by path for deterministic output. Pure — no I/O.
 func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := groupByAlbumKey(tracks)
-
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
-		if len(idxs) < 2 {
-			continue // a lone track can't borrow a year from a sibling
-		}
-		years := make([]*int, len(idxs))
-		anyMissing := false
-		for n, i := range idxs {
-			years[n] = tracks[i].Year
-			if !hasYear(tracks[i].Year) {
-				anyMissing = true
-			}
-		}
-		if !anyMissing {
-			continue // every track already has a year — do no harm
-		}
-		dom, ok := dominantYear(years)
-		if !ok {
-			continue // no present year to fill from
-		}
-		for _, i := range idxs {
-			if hasYear(tracks[i].Year) {
-				continue
-			}
-			fix := tracks[i]
-			y := dom // fresh per fix; never alias the loop/group value
-			fix.Year = &y
-			changed = append(changed, fix)
-		}
+		changed = append(changed, fillMissingYears(tracks, idxs)...)
 	}
-
 	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
+	return changed
+}
+
+// firstRecordedSoundYear is the year of the first recorded sound. A year
+// before it in a recording's DATE tag is a composition date.
+const firstRecordedSoundYear = 1877
+
+// yearCountsAsMissing reports whether y may take dominant. A nil or
+// non-positive year is missing. A year before firstRecordedSoundYear is
+// missing when dominant is a recording year. A group whose dominant year
+// is itself earlier keeps that year, and a later year is never missing.
+func yearCountsAsMissing(y *int, dominant int) bool {
+	if !hasYear(y) {
+		return true
+	}
+	return *y < firstRecordedSoundYear && dominant >= firstRecordedSoundYear
+}
+
+// fillMissingYears returns the tracks in one directory-and-album group
+// whose year yearCountsAsMissing says can take the group's dominant year.
+func fillMissingYears(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
+	if len(idxs) < 2 {
+		return nil
+	}
+	years := make([]*int, len(idxs))
+	for n, i := range idxs {
+		years[n] = tracks[i].Year
+	}
+	dom, ok := dominantYear(years)
+	if !ok {
+		return nil
+	}
+	var changed []ReconcileTarget
+	for _, i := range idxs {
+		if !yearCountsAsMissing(tracks[i].Year, dom) {
+			continue
+		}
+		fix := tracks[i]
+		y := dom // fresh per fix; never alias the loop/group value
+		fix.Year = &y
+		changed = append(changed, fix)
+	}
 	return changed
 }
 
