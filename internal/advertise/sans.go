@@ -5,6 +5,11 @@
 // at first-mint or `bridge cert rotate` time, so iOS clients can
 // handshake against any URL the bridge advertises in /v1/health.
 //
+// The walk leaves out the same addresses Endpoints leaves out (a
+// container's default bridge, a point-to-point ULA). Tailscale
+// addresses stay in this walk: health publishes them from the
+// provider, and the certificate has to name them too.
+//
 // Loopback IPs (127.0.0.1, ::1, 0.0.0.0) are NOT included here — the
 // `internal/tls.mergeIPs` helper unconditionally adds them. We only
 // emit the operator-relevant extras.
@@ -58,27 +63,9 @@ func GatherCertSANIPs(cfg CertSANConfig) []net.IP {
 		out = append(out, ip)
 	}
 
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			if isVirtualSwitchInterface(iface.Name) {
-				continue
-			}
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				ip, ok := ipFromAddr(addr)
-				if !ok || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-					continue
-				}
-				add(ip)
-			}
-		}
-	}
+	eachUsableAddr(func(_ net.Interface, ip net.IP) {
+		add(ip)
+	})
 
 	for _, ip := range GetTailscaleIPs() {
 		add(ip)

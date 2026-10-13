@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
@@ -148,8 +149,15 @@ func TestCertSANOptionsIsWhatEveryCertPathMints(t *testing.T) {
 	if !containsName(opts.ExtraDNSNames, "bridge.example.test") {
 		t.Fatalf("certSANOptions dropped the custom endpoint host: %v", opts.ExtraDNSNames)
 	}
-	if host, _ := os.Hostname(); host != "" && opts.Hostname != host {
-		t.Errorf("certSANOptions Hostname = %q, want this host's %q", opts.Hostname, host)
+	if host, _ := os.Hostname(); host != "" {
+		_, statErr := os.Stat("/.dockerenv")
+		if advertise.OmitContainerHostname(host, statErr == nil) {
+			if opts.Hostname != "" {
+				t.Errorf("certSANOptions passed the container hostname %q", host)
+			}
+		} else if opts.Hostname != host {
+			t.Errorf("certSANOptions Hostname = %q, want this host's %q", opts.Hostname, host)
+		}
 	}
 
 	for _, file := range []string{"main.go", "init.go", "cert.go", "doctor.go"} {

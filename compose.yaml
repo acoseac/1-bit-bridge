@@ -23,6 +23,9 @@ services:
     # Comment out the `image:` line above and uncomment this:
     # build: .
     container_name: 1-bit-bridge
+    # Docker's default hostname is 12 hex digits of the container id and
+    # changes on every recreate. A fixed name is what mDNS can publish.
+    hostname: 1-bit-bridge
     restart: unless-stopped
     ports:
       - "7788:7788/tcp"
@@ -56,6 +59,10 @@ services:
       BRIDGE_DISABLE_HTTP3: "${BRIDGE_DISABLE_HTTP3:-false}"
       # Local timezone for the auto-updater quiet-hours window.
       TZ: "${TZ:-UTC}"
+      # Address the phone dials: this machine, published port.
+      # Example: BRIDGE_CUSTOM_ENDPOINTS=https://<host>:7788
+      # Empty leaves a list already stored in bridge.yaml unchanged.
+      BRIDGE_CUSTOM_ENDPOINTS: "${BRIDGE_CUSTOM_ENDPOINTS:-}"
 
 volumes:
   bridge-state:

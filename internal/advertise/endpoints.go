@@ -17,7 +17,6 @@ package advertise
 import (
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"strings"
 )
@@ -141,66 +140,31 @@ func Endpoints(p Params) []Endpoint {
 	}
 	out := make([]Endpoint, 0, 8)
 
-	ifaces, err := net.Interfaces()
-	if err == nil {
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			if isVirtualSwitchInterface(iface.Name) {
-				// Windows Hyper-V / WSL / VirtualBox / VMware host
-				// virtual switches enumerate as up interfaces with
-				// 192.168.x.1 host-only IPs. iOS can't route to them,
-				// and shipping them in /v1/health just produces red
-				// "request timed out" rows in the device's endpoint
-				// list. Drop at the source.
-				continue
-			}
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				ip, ok := ipFromAddr(addr)
-				if !ok || ip.IsLoopback() {
-					continue
-				}
-				// Link-local addresses (IPv4 169.254/16, IPv6 fe80::/10)
-				// are NOT useful across-device — IPv4 link-local only
-				// appears when DHCP failed, and IPv6 fe80:: requires a
-				// `%zone-id` the bridge can't emit for a remote client.
-				// Shipping them in `/v1/health` just pollutes the iOS
-				// selector with URLs that will always fail. mDNS still
-				// advertises link-local on purpose for its own transport
-				// — that's a different use case.
-				if ip.IsLinkLocalUnicast() {
-					continue
-				}
-				class := classify(iface, ip)
-				// Tailscale-classed IPs (CGNAT 100.64/10, ULA
-				// fd7a:115c:a1e0::/48) are NEVER emitted by this
-				// package — they flow through the api-layer provider
-				// path so cli/tsnet modes use one consistent source.
-				// See Params docblock.
-				if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
-					continue
-				}
-				out = append(out, Endpoint{
-					URL:   fmt.Sprintf("https://%s:%d", ipHostForURL(ip), port),
-					Class: class,
-				})
-			}
+	eachUsableAddr(func(iface net.Interface, ip net.IP) {
+		class := classify(iface, ip)
+		// Tailscale-classed IPs (CGNAT 100.64/10, ULA
+		// fd7a:115c:a1e0::/48) are NEVER emitted by this
+		// package — they flow through the api-layer provider
+		// path so cli/tsnet modes use one consistent source.
+		// See Params docblock.
+		if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
+			return
 		}
-	}
+		out = append(out, Endpoint{
+			URL:   fmt.Sprintf("https://%s:%d", ipHostForURL(ip), port),
+			Class: class,
+		})
+	})
 
 	// Hostname resolution for the mDNS `.local` form. Short-label only
 	// — macOS/Linux hostnames may carry an FQDN that doesn't round-trip
-	// through mDNS.
+	// through mDNS. A detected container's generated id is left out:
+	// the phone cannot resolve it.
 	host := p.HostOverride
 	if host == "" {
-		host, _ = os.Hostname()
+		host, _ = hostnameFunc()
 	}
-	if host != "" {
+	if host != "" && !OmitContainerHostname(host, inDocker()) {
 		if i := strings.IndexByte(host, '.'); i > 0 {
 			host = host[:i]
 		}

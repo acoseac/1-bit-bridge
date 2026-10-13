@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -352,8 +351,16 @@ func ensurePrimaryFirst(primary string, alternates []string) []string {
 //
 // **Loopback / LAN mode** (historical): `https://<hostname>.local:<port>`.
 // Users on networks where mDNS is flaky override in the modal input.
-// Falls back to "localhost" if os.Hostname errors, which still works for
-// same-machine simulator pairing.
+// When the hostname cannot be read, and this process is not a detected
+// container, the fallback is https://localhost:<port>, which still works
+// for same-machine simulator pairing.
+//
+// A detected container whose hostname is the generated id has no such
+// fallback. The console only ever sees a loopback Host, so the request
+// cannot name the published address. With no customEndpoints entry a
+// phone could dial, this returns an empty string and the pairing page
+// says to set BRIDGE_CUSTOM_ENDPOINTS. When that list does hold a
+// non-loopback URL, that URL is the primary.
 func defaultBridgeURL(cfg *config.Config) string {
 	_, port, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil || port == "" {
@@ -386,8 +393,14 @@ func defaultBridgeURL(cfg *config.Config) string {
 			}
 		}
 	}
-	host, err := os.Hostname()
-	if err != nil || host == "" {
+	host, docker := advertise.PairingHost()
+	if docker && (host == "" || advertise.OmitContainerHostname(host, true)) {
+		if u := firstDialableCustom(cfg.CustomEndpoints); u != "" {
+			return explicitHTTPSPort(u)
+		}
+		return ""
+	}
+	if host == "" {
 		host = "localhost"
 	}
 	// macOS hostnames already carry the `.local` suffix (e.g.
@@ -395,6 +408,51 @@ func defaultBridgeURL(cfg *config.Config) string {
 	// on `.local` would be wrong for non-mDNS networks, so only append
 	// if the hostname doesn't already contain a dot.
 	return fmt.Sprintf("https://%s:%s", ensureMDNSHost(host), port)
+}
+
+// DialURL is the address the pairing QR would dial. bridge doctor asks
+// it the same question the page does.
+func DialURL(cfg *config.Config) string {
+	return defaultBridgeURL(cfg)
+}
+
+// firstDialableCustom is the first custom endpoint whose host is not
+// loopback. A loopback entry would put the phone's own name in the QR.
+func firstDialableCustom(list []string) string {
+	for _, raw := range list {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		h := endpointHost(raw)
+		if h == "" || loopbackHostname(h) {
+			continue
+		}
+		return raw
+	}
+	return ""
+}
+
+// resolvePairingURL fills an empty URL from the QR primary, then refuses
+// a result a phone on a detected container cannot dial. The refusal is
+// the shared sentence. Outside a container the historical primary is
+// returned as before, localhost fallback included.
+func resolvePairingURL(cfg *config.Config, raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = defaultBridgeURL(cfg)
+	}
+	if raw == "" {
+		return "", advertise.PairingNeedsEndpoint
+	}
+	_, docker := advertise.PairingHost()
+	if docker {
+		h := endpointHost(raw)
+		if h == "" || loopbackHostname(h) || advertise.OmitContainerHostname(h, true) {
+			return "", advertise.PairingNeedsEndpoint
+		}
+	}
+	return raw, ""
 }
 
 // pairFingerprint resolves the cert fingerprint to bake into the pairing

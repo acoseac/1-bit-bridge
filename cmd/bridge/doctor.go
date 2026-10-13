@@ -328,6 +328,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 			d.CertSANs = func(context.Context) servertls.GenerateOptions {
 				return certSANOptions(cfg)
 			}
+			d.PairingPrimary = func() (string, bool) {
+				u := admin.DialURL(cfg)
+				return u, u != ""
+			}
 			d.LibraryRoots = cfg.LibraryRoots
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled

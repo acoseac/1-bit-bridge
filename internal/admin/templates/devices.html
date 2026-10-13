@@ -86,9 +86,13 @@
       <label>
         Bridge URL iOS will dial
         <input name="url" type="url" value="{{.Data.DefaultURL}}" required>
+        {{if .Data.PairingHint}}
+        <small class="hint warn">{{.Data.PairingHint}}</small>
+        {{else}}
         <small class="hint">
           Default is <code>&lt;hostname&gt;.local</code> — override with a LAN IP if mDNS is flaky.
         </small>
+        {{end}}
       </label>
       <div class="actions">
         <button type="button" class="btn" data-close>Cancel</button>

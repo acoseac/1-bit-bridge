@@ -324,6 +324,7 @@ func TestRun_FullReportShape(t *testing.T) {
 	}
 	wantNames := []string{
 		"platform", "config-file", "config-dir", "tls-cert", "tls-cert-sans",
+		"pairing-url",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
 		watchLimitRow, "audio-toolchain", "flac-32-bit", "dsd-render-toolchain",
