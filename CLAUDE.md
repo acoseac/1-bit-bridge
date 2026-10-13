@@ -1107,6 +1107,26 @@ lost my library."
   folders is the year fill by release id (`reconcileYearsByMBID`), bounded to
   strays (at most three year-0 tracks under one release); this bullet said
   none did until 2026-09-29.
+- **A year before the phonograph is a composition date beside a recording
+  year** (2026-10-13, backlog B342). `firstPhonographYear` is 1877, the
+  year of Edison's phonograph, the first machine that recorded sound and
+  played it back. Phonautograph recordings from the 1850s and 1860 could
+  not be played back, so no recording a release carries predates it. In
+  `reconcileYears` only, when a directory-and-album group has any year of
+  1877 or later, the dominant recording year is `dominantYear` over those
+  years alone (a tie goes to the larger year), and every missing year and
+  every year from 1 through 1876 takes it. A group with no year of 1877
+  or later keeps the earlier fill: the dominant present year fills only
+  the missing ones, and the early years stay. A year of 1877 or later
+  stays as tagged, so 1974 beside 2022 remains a split. The pass leaves
+  `OriginalYear` unset. Grouping, `dupes.albumID` and
+  `reconcileYearsByMBID` stay as they are, and `ProtocolVersion` stays 1.
+  Extraction stays as it is and `ExtractorVersion` stays 24: `Scan`'s
+  tail already runs the pass over every group (`streamReconcileTargets`),
+  so a library that already stores these years is filled on the next full
+  scan. `reExtractUnchanged` holds a re-read the pass would rewrite
+  (`TestScanner_APreRecordingYearFilledFromTheAlbumDoesNotChurn`). A
+  subtree scan runs no pass, so healing waits for the next full scan.
 - **A version-stale re-read that a reconciliation pass would rewrite is
   judged by the passes, at the scan's tail, with every such re-read in
   place** (2026-09-29, backlog B188). The passes REWRITE values a file
