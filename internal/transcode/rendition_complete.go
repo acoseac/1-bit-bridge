@@ -248,7 +248,7 @@ func (j JobSpec) guardTempShort(sourceSec float64, channels int, err error) erro
 		return err
 	}
 	dir := renderScratchDir(j.TempDir)
-	if free, ferr := AvailableDiskSpaceNearest(dir); ferr == nil && free < need {
+	if free, ferr := AvailableDiskSpaceNearest(dir, ProbeRoleScratch); ferr == nil && free < need {
 		return &outputFaultError{
 			fault: outputFault{where: outputScratch, kind: outputFull, dir: dir, reason: reasonGuardTempShort},
 			err:   err,

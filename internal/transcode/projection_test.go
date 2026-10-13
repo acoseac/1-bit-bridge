@@ -180,7 +180,7 @@ func TestRequiredBytesWithMargin(t *testing.T) {
 func TestDiskHasHeadroom_UsesRequiredBytesWithMargin(t *testing.T) {
 	dir := t.TempDir()
 	const projected = math.MaxInt64
-	_, _, err := DiskHasHeadroom(dir, projected, DefaultDiskSafetyMargin)
+	_, _, err := DiskHasHeadroom(dir, projected, DefaultDiskSafetyMargin, ProbeRoleVariants)
 	var dskErr *InsufficientDiskSpaceError
 	if !errors.As(err, &dskErr) {
 		t.Fatalf("err = %v, want *InsufficientDiskSpaceError", err)
@@ -195,7 +195,7 @@ func TestDiskHasHeadroom_UsesRequiredBytesWithMargin(t *testing.T) {
 // numeric value.
 func TestDiskHasHeadroom_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	ok, free, err := DiskHasHeadroom(dir, 0, DefaultDiskSafetyMargin)
+	ok, free, err := DiskHasHeadroom(dir, 0, DefaultDiskSafetyMargin, ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("DiskHasHeadroom: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestDiskHasHeadroom_HappyPath(t *testing.T) {
 func TestDiskHasHeadroom_RefusalCarriesError(t *testing.T) {
 	dir := t.TempDir()
 	const projected = math.MaxInt64
-	ok, free, err := DiskHasHeadroom(dir, projected, DefaultDiskSafetyMargin)
+	ok, free, err := DiskHasHeadroom(dir, projected, DefaultDiskSafetyMargin, ProbeRoleVariants)
 	if ok {
 		t.Fatalf("ok = true with projected = MaxInt64")
 	}
@@ -241,7 +241,7 @@ func TestDiskHasHeadroom_RefusalCarriesError(t *testing.T) {
 // bytes calculation and falsely approve a batch.
 func TestDiskHasHeadroom_NegativeMarginClamped(t *testing.T) {
 	dir := t.TempDir()
-	ok, _, err := DiskHasHeadroom(dir, 1, -1.5)
+	ok, _, err := DiskHasHeadroom(dir, 1, -1.5, ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("DiskHasHeadroom: %v", err)
 	}
@@ -295,7 +295,7 @@ func abs64(x int64) int64 {
 func TestAvailableDiskSpaceNearest_MissingLeaf(t *testing.T) {
 	base := t.TempDir()
 	missing := filepath.Join(base, "variants", "deep", "not-created-yet")
-	free, err := AvailableDiskSpaceNearest(missing)
+	free, err := AvailableDiskSpaceNearest(missing, ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("AvailableDiskSpaceNearest(%q): %v", missing, err)
 	}
@@ -308,7 +308,7 @@ func TestAvailableDiskSpaceNearest_MissingLeaf(t *testing.T) {
 // existing directory is graded directly.
 func TestAvailableDiskSpaceNearest_ExistingDir(t *testing.T) {
 	dir := t.TempDir()
-	free, err := AvailableDiskSpaceNearest(dir)
+	free, err := AvailableDiskSpaceNearest(dir, ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("AvailableDiskSpaceNearest(%q): %v", dir, err)
 	}
@@ -322,8 +322,8 @@ func TestAvailableDiskSpaceNearest_ExistingDir(t *testing.T) {
 // the volume root (the filepath.Dir fixed point) and stats that —
 // no infinite loop, no error on a healthy root.
 func TestAvailableDiskSpaceNearest_TerminatesAtRoot(t *testing.T) {
-	free, err := AvailableDiskSpaceNearest(string(filepath.Separator) + filepath.Join(
-		"no-such-dir-zz9-plural-alpha", "x", "y"))
+	free, err := AvailableDiskSpaceNearest(string(filepath.Separator)+filepath.Join(
+		"no-such-dir-zz9-plural-alpha", "x", "y"), ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("AvailableDiskSpaceNearest: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestAvailableDiskSpaceNearest_NonNotExistErrorSurfaces(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
-	if _, err := AvailableDiskSpaceNearest(target); err == nil {
+	if _, err := AvailableDiskSpaceNearest(target, ProbeRoleVariants); err == nil {
 		t.Fatalf("want an error surfaced for the unreachable configured dir, got nil (walked to an ancestor volume instead)")
 	}
 }

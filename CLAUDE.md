@@ -8966,6 +8966,19 @@ its twin.** The top list is older, shorter, and read first.
   lines naming a track) is now what the page describes. **A new log line
   that names a library file uses the relative path; one that cannot is a
   page change in the same release.**
+- **The disk probe's missing-directory warning names the directory by
+  its role, never by its path** (2026-10-13, backlog B273).
+  `AvailableDiskSpaceNearest` walks to the nearest existing ancestor
+  when the directory is not there yet and Warns, so an operator can see
+  the check is grading the parent volume. That line carried the absolute
+  directory and the ancestor (`"dir"`, `"ancestor"`). It keeps the same
+  message and logs `role` only: `ProbeRoleVariants`, `ProbeRoleScratch`,
+  `ProbeRoleData`, `ProbeRoleLibrary`, `ProbeRoleUpload`; an empty role
+  is `"directory"`. Callers that probe on every request keep
+  `NearestExistingDir` and log nothing (`quietDiskFree`). The platform
+  probes' returned errors still quote the path they failed to stat;
+  they are not this line. The privacy page is unchanged.
+  (`TestAShortRenditionWhoseScratchIsGoneNamesNoAbsoluteDirectory`.)
 - **CodeQL's `go/log-injection` is a false positive BY CONSTRUCTION and will
   regenerate.** Both slog handlers quote the value and escape `\n`/`\r`, every
   flagged site passes a structured attribute, and `internal/` contains no

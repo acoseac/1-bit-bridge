@@ -4441,7 +4441,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 					}
 					return config.DefaultAutoOptimizeMinFreeBytes
 				},
-				diskFree: transcode.AvailableDiskSpaceNearest,
+				// diskFree stays nil: probeFree names the variants dir and the
+				// scratch by role. A test sets diskFree.
 				lanes: func() int {
 					if live := cfgHolder.Load(); live != nil {
 						return live.Upscale.EffectiveWorkers()
@@ -5117,7 +5118,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// because internal/manifest cannot import internal/transcode (the
 		// dependency runs the other way) and internal/admin deliberately
 		// imports neither.
-		DBFreeBytes:         transcode.AvailableDiskSpaceNearest,
+		DBFreeBytes: func(dir string) (int64, error) {
+			return transcode.AvailableDiskSpaceNearest(dir, transcode.ProbeRoleData)
+		},
 		FingerprintDegraded: fingerprintDegradedReason,
 		// Fan-out over every cadence loop. Captured by value: the slice
 		// is fully appended by this point (every sweeper is wired above),
@@ -5295,7 +5298,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Nearest-existing-ancestor probe: the variants dir is created
 		// lazily, so a bare statfs on it would ENOENT before the first
 		// sidecar lands.
-		AvailableDiskSpace: transcode.AvailableDiskSpaceNearest,
+		AvailableDiskSpace: func(dir string) (int64, error) {
+			return transcode.AvailableDiskSpaceNearest(dir, transcode.ProbeRoleVariants)
+		},
 		// CarPlay-optimize deps closures, WIRED vs ACTIVE split. These two
 		// answer only "is the feature wired on this bridge" — the pool
 		// exists, which is a boot fact and cannot change — while

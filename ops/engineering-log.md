@@ -40702,3 +40702,56 @@ new cases red again; restoring it turns them green.
 `TestAHungFpcalcDoesNotHoldTheSweep` still requires one timeout line
 naming `Album/hang.flac`, no `fingerprint: decode` line, the hang key
 uncached, the next file fingerprinted, and the sweep back inside 15s.
+
+## 2026-10-13 — the disk probe's missing-directory warning names a role, not a path (backlog B273)
+
+`AvailableDiskSpaceNearest` (`internal/transcode/projection.go`) Warns
+when the directory it was asked to grade does not exist and the walk
+stops at an ancestor. The line was the only log in the probe:
+
+```
+WARN disk probe: directory missing; probing nearest existing ancestor dir=<absolute> ancestor=<absolute>
+```
+
+`NearestExistingDir` logs nothing. The POSIX and Windows probes return
+`statfs %q`, `stat %q`, `GetDiskFreeSpaceEx %q` and the matching
+volume-id errors when a stat fails. Those strings are errors a caller
+may log later; they were left as they are. B264 (#1145) recorded
+CodeRabbit asking for this change and left the warning's text as it
+was on main. What that change did was stop the on-demand pre-flight
+from calling the warning probe (`quietDiskFree`).
+
+### Red first
+
+`TestAShortRenditionWhoseScratchIsGoneNamesNoAbsoluteDirectory`
+(`//go:build !windows`) runs the real pool and `Run`. A stand-in sox
+writes a whole 48 kHz 16-bit FLAC of one block and removes the
+`--temp` scratch. A stand-in ffprobe reports duration 100, so the
+rendition is short and `guardTempShort` probes the scratch. Before
+the fix the captured warning named `…/1-bit-bridge-render` and its
+parent, and the test failed on that line.
+
+### The fix
+
+The warning keeps the same message and logs `role` only. Callers pass
+`ProbeRoleVariants` ("variants dir"), `ProbeRoleScratch` ("scratch"),
+`ProbeRoleData` ("data dir"), `ProbeRoleLibrary` ("library root") or
+`ProbeRoleUpload` ("upload staging"). An empty role logs `directory`.
+`DiskHasHeadroom` and the batch pre-flight take the role through. The
+sweeper's production probe is `probeFree`, which calls
+`AvailableDiskSpaceNearest` with the role; a test's `diskFree` stub
+stays `func(dir string) (int64, error)`. The admin free-space and
+database-size closures wrap the probe the same way. `guardTempShort`
+passes `ProbeRoleScratch`. The privacy page is unchanged.
+
+### Control
+
+The absolute `dir` and `ancestor` attributes were put back beside
+`role`. The same test failed:
+
+```
+the warning names an absolute directory: WARN disk probe: directory missing; probing nearest existing ancestor dir=/var/folders/…/1-bit-bridge-render ancestor=/var/folders/… role=scratch
+```
+
+The attributes were restored with the editor. The broken line was not
+committed.
