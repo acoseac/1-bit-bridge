@@ -69,10 +69,9 @@ type autoOptimizeSweeper struct {
 	minFreeBytes func() int64
 
 	// diskFree is the free-space probe, injectable so the disk-floor
-	// branch is testable without filling a real volume. Production wires
-	// transcode.AvailableDiskSpaceNearest (which walks to the nearest
-	// existing ancestor — the variants dir is created lazily, so a bare
-	// statfs would ENOENT).
+	// branch is testable without filling a real volume. Nil uses
+	// transcode.AvailableDiskSpaceNearest with the directory's role
+	// (the variants dir is created lazily, so a bare statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
 	// sameVolume, when set, replaces transcode.SameVolume. Nil asks the
 	// real one. A test that injects a different free figure per directory
@@ -128,6 +127,16 @@ func (sw *autoOptimizeSweeper) renderTempDir() string {
 	return sw.tempDir()
 }
 
+// probeFree grades dir. A test's diskFree answers without a role. Production
+// leaves diskFree nil and names the directory by role in the missing-directory
+// warning.
+func (sw *autoOptimizeSweeper) probeFree(dir, role string) (int64, error) {
+	if sw.diskFree != nil {
+		return sw.diskFree(dir)
+	}
+	return transcode.AvailableDiskSpaceNearest(dir, role)
+}
+
 // eligibilityOpts is the SQL form of the DSD-render caps the candidate
 // query takes (manifest cannot import transcode). The zero caps fold to
 // the zero opts, under which the query is byte-identical to pre-v43.
@@ -169,7 +178,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	}
 
 	outputDir := sw.outputDir()
-	freeBytes, derr := sw.diskFree(outputDir)
+	freeBytes, derr := sw.probeFree(outputDir, transcode.ProbeRoleVariants)
 	if derr != nil {
 		// Fail CLOSED. Without a free-space reading there is no way to
 		// honour minFreeBytes, and the failure mode of guessing wrong is
@@ -187,13 +196,11 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	// known duration has a positive TempVolumeBytes, and a free figure
 	// left at 0 reads as the disk floor and submits nothing. Same
 	// fail-CLOSED rule as the sidecar volume: with no reading there is
-	// no honouring the floor. The probe is the SAME nearest-existing-ancestor
-	// closure the sidecar volume uses
-	// (transcode.AvailableDiskSpaceNearest, wired in cmd/bridge/main.go),
+	// no honouring the floor. probeFree asks AvailableDiskSpaceNearest,
 	// so a scratch directory that does not exist yet — it is created by
 	// the first render — is graded by its parent volume, never a skip.
 	scratchDir := transcode.RenderScratchDir(sw.renderTempDir())
-	scratchFree, serr := sw.diskFree(scratchDir)
+	scratchFree, serr := sw.probeFree(scratchDir, transcode.ProbeRoleScratch)
 	if serr != nil {
 		if ctx.Err() == nil {
 			logger.Warn("auto-optimize sweep: render scratch disk probe failed; skipping sweep",
