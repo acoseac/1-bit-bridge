@@ -99,10 +99,29 @@ type Resolver struct {
 
 	rebuildMu sync.Mutex // serialises index rebuilds
 
-	mu     sync.Mutex // guards ix and claims
+	mu     sync.Mutex // guards ix, claims and short
 	ix     *index
 	claims map[claimKey]*claim
+	// short remembers a mate whose decode finished at a different length
+	// than its container. The key is the mate spec's path, size and mtime,
+	// the facts SpecFor stamps from the track row. A changed file misses
+	// it. A cancelled context, a deadline, an output fault and any other
+	// error are not entered. The map lives for the process.
+	short map[shortKey]struct{}
 }
+
+// shortKey is one version of one file. Size and mtime are the track row's,
+// which is what a peak's freshness is judged against.
+type shortKey struct {
+	path  string
+	size  int64
+	mtime int64
+}
+
+// errMateDecodesShort is a remembered length-incomplete decode. It wraps
+// ErrFFmpegDecodeIncomplete so the survey leaves the mate out of the album,
+// and it is not logged: the line was written when the failure was remembered.
+var errMateDecodesShort = fmt.Errorf("album gain: album-mate decodes short: %w", transcode.ErrFFmpegDecodeIncomplete)
 
 var _ transcode.AlbumGainer = (*Resolver)(nil)
 
@@ -120,7 +139,7 @@ func New(cfg Config) (*Resolver, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Resolver{cfg: cfg, claims: map[claimKey]*claim{}}, nil
+	return &Resolver{cfg: cfg, claims: map[claimKey]*claim{}, short: map[shortKey]struct{}{}}, nil
 }
 
 // Invalidate drops the album index; the next render rebuilds it. Called
@@ -228,7 +247,8 @@ func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *fl
 		}
 		// Read again: a claim can resolve without leaving a peak (its
 		// holder failed or gave up), and the next pass then measures that
-		// mate here.
+		// mate here. A length-incomplete decode is already remembered, so
+		// that measurement is the memory and does not decode the file.
 	}
 }
 
@@ -331,6 +351,11 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 		return ctx.Err()
 	}
 	s.gaveUp[path] = true
+	// A length-incomplete file is logged when it is first remembered.
+	// A later render uses that memory and does not log it again.
+	if transcode.LengthIncompleteFile(err) {
+		return nil
+	}
 	logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
 		"path", s.j.SourceLibraryRel, "mate", path, "err", err)
 	return nil
@@ -370,15 +395,40 @@ func (r *Resolver) measure(ctx context.Context, path string, like transcode.JobS
 	if got := spec.DSDPeakProfile(); got != profile {
 		return nil, fmt.Errorf("album gain: %s would be measured on %q, not %q", path, got, profile)
 	}
+	if r.knownShort(spec) {
+		return nil, errMateDecodesShort
+	}
 	tp, err := r.cfg.Measure(ctx, spec)
 	if err != nil {
 		// A mate's decode names its absolute path and the scratch under the
 		// tempDir, and measureClaimed logs this error: the redaction a
 		// failed job's own message gets, by the mate's spec.
-		return nil, spec.RedactError(err)
+		redacted := spec.RedactError(err)
+		// Remember only a finished decode that disagreed with the container,
+		// and only while this call was not cancelled. The line is this
+		// failure's; a later render in the process finds the memory.
+		if ctx.Err() == nil && transcode.LengthIncompleteFile(err) {
+			r.rememberShort(spec)
+			logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
+				"path", like.SourceLibraryRel, "mate", path, "err", redacted)
+		}
+		return nil, redacted
 	}
 	r.record(ctx, spec, profile, tp)
 	return tp, nil
+}
+
+func (r *Resolver) knownShort(spec transcode.JobSpec) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.short[shortKey{spec.SourceLibraryRel, spec.SourceSize, spec.SourceMTimeNS}]
+	return ok
+}
+
+func (r *Resolver) rememberShort(spec transcode.JobSpec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.short[shortKey{spec.SourceLibraryRel, spec.SourceSize, spec.SourceMTimeNS}] = struct{}{}
 }
 
 // record stores a measurement. A failure is logged and otherwise ignored:

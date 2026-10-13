@@ -3380,8 +3380,24 @@ no failing test — which is the shape to expect in this area.
     survey claim across a wait, and don't release a claim anywhere but on
     every exit.**
   - A waiter whose claim resolved without a peak measures that mate itself,
-    because the holder's failure may have been transient. Only the waiter's OWN
-    failed measurement leaves the mate out of the album.
+    because the holder's failure may have been transient. A length-incomplete
+    decode is remembered, so that measurement is the memory. Only the waiter's
+    OWN failed measurement leaves the mate out of the album.
+  - **A mate whose decode finished short of its container is remembered for
+    the process, keyed on the mate spec's path, size and mtime** (2026-10-13,
+    backlog B241). `SpecFor` stamps those from the track row, the same facts a
+    peak's freshness uses. The next render in the album uses the memory: it
+    does not decode the file and it does not log it. The line is written when
+    the failure is first remembered. A changed size or mtime is measured
+    again. A cancelled context, a deadline, an output fault and any other
+    error are not remembered. A restart measures the file once more. The
+    mate still does not constrain the album. **Don't write the memory into
+    the variant-strike table**: the file's own v2 render already strikes a
+    length-incomplete decode, and a survey failure must not add a strike.
+    (`TestAShortMateIsMeasuredOnceAcrossTwoRenders`,
+    `TestAChangedShortMateIsMeasuredAgain`,
+    `TestATransientMateFailureIsMeasuredAgain`,
+    `TestLengthIncompleteFileIsTheDecodeAndNotAnOutputFault`.)
   - **A survey reads the store again after it takes a claim, and before it
     measures.** Its pass's read can be minutes old by then, because it
     measures mates one after another, and another survey may have measured,
