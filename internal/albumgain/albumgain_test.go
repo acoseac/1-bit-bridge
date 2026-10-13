@@ -166,6 +166,15 @@ func newHarness(t *testing.T, refs ...manifest.CatalogRef) *harness {
 			s := like
 			s.SourceLibraryRel, s.SourceAbsPath, s.SourceSampleRate = path, "/lib/"+path, rate
 			s.AlbumGain = nil
+			// Production stamps the mate's row, which a peak's freshness
+			// and the short-decode memory are both keyed on.
+			for i := range h.cat.refs {
+				if h.cat.refs[i].Path == path {
+					s.SourceSize = h.cat.refs[i].Size
+					s.SourceMTimeNS = h.cat.refs[i].MTimeNS
+					break
+				}
+			}
 			return s, nil
 		},
 		Measure: h.meas.measure,
@@ -359,8 +368,8 @@ func TestAlbumGainMeasuresEachMissingMateOnceAndRecordsIt(t *testing.T) {
 		t.Fatalf("recorded %d peaks, want the 2 measured", len(h.peaks.upserts))
 	}
 	for _, u := range h.peaks.upserts {
-		if u.Profile != j.DSDPeakProfile() || u.SourceMTimeNS != 7 || u.SourceSize != 9 || u.MeasuredAt != h.now.UnixNano() {
-			t.Errorf("recorded row %+v: want the job's profile, the album-mate's source facts, and now", u)
+		if u.Profile != j.DSDPeakProfile() || u.SourceMTimeNS != 1 || u.SourceSize != 1<<20 || u.MeasuredAt != h.now.UnixNano() {
+			t.Errorf("recorded row %+v: want the job's profile, the album-mate's size and mtime, and now", u)
 		}
 	}
 }
