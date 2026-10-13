@@ -83,10 +83,11 @@ func TestManagedDoesNotSilenceTheRestOfThePreflight(t *testing.T) {
 // They answer differently on purpose. An expired certificate is a
 // deadline after which every paired device stops connecting, and the
 // tenant has to know even though the control plane is who rotates it.
-// Stale SANs are the opposite: the tenant reaches its bridge over the
-// autocert domain, whose Let's Encrypt certificate the SNI switcher
-// serves instead of this one, and the only remedy named is a shell
-// command they cannot run.
+// Stale SANs are the opposite on a hosted bridge: the control plane
+// owns rotation, and the remedy this check names is a shell command
+// the tenant cannot run. The on-disk pair may be the wildcard the
+// tenant serves. An unmanaged install withholds that same rotation
+// advice when the certificate's own key did not sign it.
 //
 // Both halves are driven with a real expired cert, so neither arm can
 // pass because nothing was checked.

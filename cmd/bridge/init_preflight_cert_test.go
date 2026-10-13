@@ -180,10 +180,9 @@ func TestInitPreflightLeavesAFirstInstallUnwired(t *testing.T) {
 // same install, and the one the helper copied its neighbours without.
 //
 // `bridge doctor` sets Deps.Managed from the loaded config, and
-// checkTLSCertSANs skips on it: a hosted tenant reaches its bridge over
-// the autocert domain, whose Let's Encrypt certificate the SNI switcher
-// serves instead of the self-signed pair, and the only remedy that
-// check names is a shell command the tenant cannot run. The preflight
+// checkTLSCertSANs skips on it: the control plane owns rotation, and
+// the remedy that check names is a shell command the tenant cannot
+// run. The on-disk pair may be the certificate the tenant serves. The preflight
 // read the cert PATHS and the SAN want-set from the config on disk and
 // then graded them as if the bridge were self-hosted, so a re-init of a
 // managed install printed advice for somebody else's console.
