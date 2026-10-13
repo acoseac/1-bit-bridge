@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // ffmpeg-fallback decode for sources sox cannot read.
@@ -48,6 +50,18 @@ func LengthIncompleteFile(err error) bool {
 		return false
 	}
 	return errors.Is(err, ErrFFmpegDecodeIncomplete)
+}
+
+// RepeatedFileFact reports an error a later render of the same file
+// version would only repeat. A length-incomplete decode and a malformed
+// DSF header are facts about the file. LengthIncompleteFile stays the
+// short decode, so a malformed header is not one. An output fault is the
+// volume, including one that wraps either fact.
+func RepeatedFileFact(err error) bool {
+	if _, ok := unwritableOutput(err); ok {
+		return false
+	}
+	return LengthIncompleteFile(err) || errors.Is(err, manifest.ErrDSFAudioMalformed)
 }
 
 // ffmpegLookPath / ffprobeLookPath are the seams tests override to force the

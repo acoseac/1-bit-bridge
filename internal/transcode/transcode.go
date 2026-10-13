@@ -265,9 +265,11 @@ type JobSpec struct {
 	// SourceChannels is the channel count when known (DSD renders need it
 	// to size scratch and validate the decoder's geometry); 0 if unknown.
 	SourceChannels int
-	// SourceDurationSec is the manifest's duration when known; the DSD
-	// render's completeness guard falls back to it when ffprobe reports
-	// 0, and the pool's per-job timeout is derived from it. 0 if unknown.
+	// SourceDurationSec is the manifest's duration when known. A DSF and
+	// an uncompressed DFF take their completeness reference from the
+	// container header; this field is the fallback when that header is
+	// not the reference (DST, and a probe of 0 on any other source), and
+	// the pool's per-job timeout is derived from it. 0 if unknown.
 	SourceDurationSec float64
 	// SourceCompression is the manifest's compression tag ("DST" for
 	// DST-compressed DSDIFF), forwarded so the pool can budget a DST
