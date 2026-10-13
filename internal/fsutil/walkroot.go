@@ -138,10 +138,24 @@ func chainResolvesToDir(root string) bool {
 	return ok
 }
 
+// resolveLinksForWalk, when set, is ResolveLinks for resolvedDirectory.
+// Nil in production. A test sets it so a chain resolves to a volume root
+// without the walk listing that volume.
+var resolveLinksForWalk func(string) (string, error)
+
+// walkResolvedDirectory, when set, walks the directory the chain resolved
+// to. Nil in production, which uses filepath.WalkDir. A test sets it so
+// that walk does not list a volume root.
+var walkResolvedDirectory func(string, fs.WalkDirFunc) error
+
 // resolvedDirectory is the directory ResolveLinks names for root, when it
 // names one. The stat is os.Stat of that path, never the root's stat.
 func resolvedDirectory(root string) (string, bool) {
-	resolved, err := ResolveLinks(root)
+	resolve := ResolveLinks
+	if resolveLinksForWalk != nil {
+		resolve = resolveLinksForWalk
+	}
+	resolved, err := resolve(root)
 	if err != nil {
 		return "", false
 	}
@@ -178,6 +192,8 @@ func WalkConfigured(walkPath string, fn fs.WalkDirFunc) error {
 // walked is false when walkPath does not end in a separator, when trimming
 // the separator leaves nothing or only a volume name, or when the chain
 // does not name a directory: the caller then walks walkPath itself.
+// The resolved directory is trimmed the same way, so a chain that names
+// the volume root is walked there.
 func walkResolvedChain(walkPath string, fn fs.WalkDirFunc) (bool, error) {
 	root := strings.TrimRight(walkPath, string(filepath.Separator))
 	// "/" trims to nothing, and a volume root ("D:\") trims to the volume
@@ -189,15 +205,33 @@ func walkResolvedChain(walkPath string, fn fs.WalkDirFunc) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	resolved = strings.TrimRight(resolved, string(filepath.Separator))
-	err := filepath.WalkDir(resolved, func(path string, d fs.DirEntry, err error) error {
+	resolved = resolvedWalkRoot(resolved)
+	report := func(path string, d fs.DirEntry, err error) error {
 		reported, repErr := pathUnder(walkPath, resolved, path)
 		if repErr != nil {
 			return repErr
 		}
 		return fn(reported, d, err)
-	})
+	}
+	if walkResolvedDirectory != nil {
+		err := walkResolvedDirectory(resolved, report)
+		return true, err
+	}
+	err := filepath.WalkDir(resolved, report)
 	return true, err
+}
+
+// resolvedWalkRoot is resolved with a trailing separator removed, except
+// when that removal leaves nothing or only a volume name. A chain that
+// names the volume root is walked there: trimming the separator off it
+// leaves nothing, or the volume name, and the volume name is that drive's
+// current directory.
+func resolvedWalkRoot(resolved string) string {
+	trimmed := strings.TrimRight(resolved, string(filepath.Separator))
+	if trimmed == "" || trimmed == filepath.VolumeName(resolved) {
+		return resolved
+	}
+	return trimmed
 }
 
 // pathUnder is path spelled under walkPath. The root entry is walkPath
@@ -229,7 +263,9 @@ func walkLstatAnswer(walkPath string, info fs.FileInfo, err error, fn fs.WalkDir
 	} else {
 		err = fn(walkPath, fs.FileInfoToDirEntry(info), nil)
 	}
-	if err == fs.SkipDir || err == fs.SkipAll {
+	// Identity, as filepath.WalkDir compares these sentinels. A wrapped
+	// SkipDir is not a skip there, and it is not a skip here.
+	if err == fs.SkipDir || err == fs.SkipAll { //nolint:errorlint
 		return nil
 	}
 	return err

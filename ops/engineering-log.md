@@ -41612,4 +41612,19 @@ directory (`drwxr-xr-x`), so a fall-through to `filepath.WalkDir` would
 have stayed green on this host. The rewrite was restored by hand before
 the commit.
 
+The resolved directory was trimmed unconditionally. A chain that resolves
+to the volume root was then walked at the empty string, from `/`, or at
+`C:`, from `C:\`, and `C:` is that drive's current directory.
+`resolvedWalkRoot` trims only when the result is non-empty and is not the
+volume name. `TestAChainThatResolvesToTheVolumeRootIsWalkedThere` answers
+`ResolveLinks` through `resolveLinksForWalk` and the walk through
+`walkResolvedDirectory`, so the volume is not listed. Before the trim the
+walk was asked for the empty string on this host, where the volume root is
+`/`. `pathUnder` still reported a child under the configured spelling,
+because it compared against that trimmed string. After the trim the walk
+is asked for `/`, the root callback is the configured path, and the child
+is that path joined with the name `filepath.Rel` returns against the
+volume root. `walkLstatAnswer` keeps `==` for `SkipDir` and `SkipAll`, the
+comparison `filepath.WalkDir` uses: a wrapped skip is not a skip there.
+
 No `ExtractorVersion` bump and no `ProtocolVersion` bump.

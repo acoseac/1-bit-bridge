@@ -891,8 +891,15 @@ lost my library."
   empty library to the scanner. `WalkConfigured`, when the path ends in a
   separator and `ResolveLinks` names a directory, walks that directory and
   reports every path under the configured spelling, the root callback
-  included. When that resolution does not name a directory, the callback
-  is invoked once for the Lstat of the string, which is what
+  included. The resolved directory keeps a trailing separator when removing
+  it would leave nothing or only a volume name, so a chain that resolves to
+  the filesystem root is walked at that root (`resolvedWalkRoot`). Removing
+  the separator from that root leaves nothing, or the volume name, and the
+  volume name is that drive's current directory
+  (`TestAChainThatResolvesToTheVolumeRootIsWalkedThere`; the chain resolves
+  through `resolveLinksForWalk` and the walk through `walkResolvedDirectory`,
+  so the test does not list the volume). When that resolution does not name
+  a directory, the callback is invoked once for the Lstat of the string, which is what
   `filepath.WalkDir` does for a file and for an Lstat that fails. The five
   root walks use it: `walkRoot`, `ScanSubtree`, the watcher's walk, the
   doctor's directory count, and the upscale folder walk. The watcher still

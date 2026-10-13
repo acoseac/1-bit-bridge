@@ -155,6 +155,67 @@ func TestWalkConfiguredKeepsAVolumeRootOnTheLstatWalk(t *testing.T) {
 	requireWalksLibraryTree(t, dir+slash)
 }
 
+// TestAChainThatResolvesToTheVolumeRootIsWalkedThere is the trim of the
+// directory the chain names. A chain that names the volume root is walked
+// there. Trimming the separator off that root leaves nothing, or only the
+// volume name, and the volume name is that drive's current directory.
+// resolveLinksForWalk answers the volume root, and walkResolvedDirectory
+// records the path it is asked to walk, so the volume is not listed.
+func TestAChainThatResolvesToTheVolumeRootIsWalkedThere(t *testing.T) {
+	chain := filepath.Join(t.TempDir(), "chain")
+	if err := os.Mkdir(chain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vol := volumeRootOf(chain)
+	resolveLinksForWalk = func(string) (string, error) { return vol, nil }
+	var asked string
+	walkResolvedDirectory = func(root string, fn fs.WalkDirFunc) error {
+		asked = root
+		if err := fn(root, fs.FileInfoToDirEntry(stubInfo(fs.ModeDir|0o755)), nil); err != nil {
+			return err
+		}
+		child := filepath.Join(root, "Artist")
+		return fn(child, fs.FileInfoToDirEntry(stubInfo(0o644)), nil)
+	}
+	t.Cleanup(func() {
+		resolveLinksForWalk = nil
+		walkResolvedDirectory = nil
+	})
+
+	walkPath := chain + string(filepath.Separator)
+	var got []string
+	walked, err := walkResolvedChain(walkPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d == nil {
+			return errors.New("nil entry")
+		}
+		got = append(got, path)
+		return nil
+	})
+	if asked != vol {
+		t.Fatalf("walked %q, want the volume root %q (err %v)", asked, vol, err)
+	}
+	if !walked || err != nil {
+		t.Fatalf("walkResolvedChain = %v, %v", walked, err)
+	}
+	want := []string{walkPath, filepath.Join(walkPath, "Artist")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("reported %q, want %q", got, want)
+	}
+}
+
+// volumeRootOf is the root of the volume that holds dir. On Unix that is
+// the separator. On Windows it is the drive letter plus a separator.
+func volumeRootOf(dir string) string {
+	vol := filepath.VolumeName(dir)
+	if vol == "" {
+		return string(filepath.Separator)
+	}
+	return vol + string(filepath.Separator)
+}
+
 // errSlashLstat is the error a test makes the trailing-slash Lstat return.
 var errSlashLstat = errors.New("trailing-slash lstat")
 
