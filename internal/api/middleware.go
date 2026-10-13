@@ -169,9 +169,27 @@ func (s *statusWriter) Unwrap() http.ResponseWriter {
 	return s.ResponseWriter
 }
 
+// accessLogLevel is the level of the access line. statusClientClosedRequest
+// sits in the 4xx range and would otherwise warn; a client that closed
+// the connection is the same fact as a finished request, so it stays Info.
+// A status the handler never wrote is 0 and stays Info.
+func accessLogLevel(status int) slog.Level {
+	switch {
+	case status == statusClientClosedRequest:
+		return slog.LevelInfo
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
 // requestLogging wraps the mux with a per-request log line and a request_id
 // propagated through context.Context. Emits one slog record per request
-// on completion at level INFO (2xx/3xx), WARN (4xx), or ERROR (5xx).
+// on completion at level INFO (2xx/3xx, and a client abort recorded as
+// statusClientClosedRequest), WARN (4xx), or ERROR (5xx).
 //
 // Only r.URL.Path is logged, never r.URL.RawQuery — query strings on
 // the bridge frequently carry filesystem paths (?path=/Music/...) that
@@ -219,13 +237,7 @@ func requestLogging(next http.Handler) http.Handler {
 		// the connection or that crash before responding), record the
 		// status as 0 rather than misleadingly stamping 200.
 		status := sw.status
-		level := slog.LevelInfo
-		switch {
-		case status >= 500:
-			level = slog.LevelError
-		case status >= 400:
-			level = slog.LevelWarn
-		}
+		level := accessLogLevel(status)
 		duration := time.Since(start)
 		proto := transportProto(r)
 		reqLogger.LogAttrs(ctx, level, "http",

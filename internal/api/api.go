@@ -2792,20 +2792,19 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 // 5xx → Error (server-side fault worth surfacing in alerting). Without
 // this split, alerting on slog.Error counts would fire on every 400
 // "bad JSON" and drown the real signals — caught by gemini bot review
-// on PR #191.
+// on PR #191. A 5xx whose error is this request's context being
+// canceled is the client closing the connection: it is logged at Info
+// and recorded as statusClientClosedRequest, so it is not a server
+// error. A deadline the server set, and a canceled error whose request
+// context is still live, stay Error at the status the caller passed.
 //
 // err is the original Go error, logged but not surfaced on the wire. May
 // be nil — in that case the message is still emitted (so the helper works
 // at sites where the failure is a state check, not a wrapped error).
 func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, userMsg string, err error) {
 	if err != nil {
-		l := LoggerFromContext(r.Context())
-		switch {
-		case status >= 500:
-			l.Error("request failed", "code", code, "status", status, "err", err)
-		default:
-			l.Warn("request failed", "code", code, "status", status, "err", err)
-		}
+		status = statusForRequestFailure(r, status, err)
+		logRequestFailed(r, status, code, err)
 	}
 	writeError(w, status, code, userMsg)
 }
@@ -2819,15 +2818,61 @@ func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, use
 // relatively.
 func writeFileErrorLog(w http.ResponseWriter, r *http.Request, status int, code, userMsg, libraryPath string, err error) {
 	if err != nil {
-		l := LoggerFromContext(r.Context())
-		attrs := []any{"code", code, "status", status, "path", libraryPath, "err", redactWalkErr(err)}
-		if status >= 500 {
-			l.Error("request failed", attrs...)
-		} else {
-			l.Warn("request failed", attrs...)
-		}
+		status = statusForRequestFailure(r, status, err)
+		logRequestFailed(r, status, code, redactWalkErr(err), "path", libraryPath)
 	}
 	writeError(w, status, code, userMsg)
+}
+
+// statusClientClosedRequest is the status a client abort is recorded
+// under. nginx uses 499 for a client that closed the connection before
+// the response was read. The body may still be written; the client has
+// stopped reading, and the code is not a protocol response the app
+// decodes. ProtocolVersion stays 1.
+const statusClientClosedRequest = 499
+
+// clientWentAway reports that err is the request context being canceled
+// because the client closed the connection. net/http cancels that
+// context on close. The API servers do not parent an ordinary request
+// on the serve context, so a serve stop does not cancel it; a deadline
+// the server set is context.DeadlineExceeded and fails the first check.
+// A canceled error while the request context is still live fails the
+// second.
+func clientWentAway(r *http.Request, err error) bool {
+	if r == nil || !errors.Is(err, context.Canceled) {
+		return false
+	}
+	return errors.Is(r.Context().Err(), context.Canceled)
+}
+
+// statusForRequestFailure keeps the caller's status except when a 5xx
+// is a client abort, which is recorded as statusClientClosedRequest.
+// A 4xx stays a 4xx.
+func statusForRequestFailure(r *http.Request, status int, err error) int {
+	if status >= http.StatusInternalServerError && clientWentAway(r, err) {
+		return statusClientClosedRequest
+	}
+	return status
+}
+
+// logRequestFailed writes the request-failed line. loggedErr is the
+// value under the err attribute: the original error, or the redacted
+// text writeFileErrorLog already computed. A client abort is Info, the
+// same level as a finished request, so it is visible at the default
+// log level and is not an alert.
+func logRequestFailed(r *http.Request, status int, code string, loggedErr any, extra ...any) {
+	l := LoggerFromContext(r.Context())
+	args := make([]any, 0, 6+len(extra))
+	args = append(args, "code", code, "status", status, "err", loggedErr)
+	args = append(args, extra...)
+	switch {
+	case status == statusClientClosedRequest:
+		l.Info("request failed", args...)
+	case status >= http.StatusInternalServerError:
+		l.Error("request failed", args...)
+	default:
+		l.Warn("request failed", args...)
+	}
 }
 
 // nilIfZeroTime is what makes `omitempty` mean what it says on a time field.
