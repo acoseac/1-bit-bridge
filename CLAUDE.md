@@ -6780,6 +6780,39 @@ no failing test — which is the shape to expect in this area.
   real assertion for the wrong reason. Keep a threshold INLINED where a
   derived variant renumbers placeholders by replacing the first `?`. (#965)
 
+- **Never key an FTS5 delete on a non-rowid column.** `tracks_fts` is a
+  standalone FTS5 table. An equality on `path` is a full scan
+  (`SCAN tracks_fts VIRTUAL TABLE INDEX 0:`); a `rowid` equality is a
+  constant-cost lookup (`INDEX 0:=`). `CREATE INDEX` on the virtual table
+  is rejected. `tracks_fts_ad` is what a prefix delete and
+  `WipeFilesystemTracks` pay once per row, so
+  `DELETE FROM tracks_fts WHERE path = old.path` made a 1,000-row delete
+  take about 5 s and a 20,000-row delete about a minute (25,000-row
+  store, sqlite 3.53.4). Migration v55 records the FTS rowid in
+  `tracks_fts_row` (`path` PRIMARY KEY, `fts_rowid` UNIQUE, WITHOUT
+  ROWID) inside the same trigger that inserts the FTS row
+  (`last_insert_rowid()`). `tracks_fts_ad` and `tracks_fts_au` delete
+  with `WHERE rowid = (SELECT fts_rowid FROM tracks_fts_row WHERE path =
+  old.path)` and then delete the map row. The update trigger stays
+  `AFTER UPDATE OF path, tags_json`. Its `WHEN` compares the path and the
+  title, artist and album the insert writes; each `json_extract` sits
+  inside `CASE WHEN json_valid`, because `json_extract` raises on
+  malformed JSON. On the JSON this process stores the `CASE` value is
+  the unguarded `COALESCE(json_extract(...), '')`. An MBID-only write
+  leaves the FTS rowid where it is. A direct writer of `tracks_fts` —
+  the v7 backfill, and the v55 rebuild — refills the map in the same
+  transaction, before these triggers exist. A writer that inserts
+  through `tracks` gets the map from the trigger. FTS5 `optimize` and
+  `merge` are not called here. After the fill, one census requires
+  `COUNT(tracks) = COUNT(tracks_fts) = COUNT(tracks_fts_row)`, every map
+  path in `tracks`, and every track path in the map. Any miss rebuilds:
+  empty `tracks_fts`, the v7 backfill, refill the map, check again. A
+  second miss rolls the transaction back. The rebuild logs the counts
+  and no paths. The whole step is one `BEGIN IMMEDIATE` that also stamps
+  `user_version`, so a crash leaves version 54 and the old triggers.
+  (`TestFTSDeleteAddressesTheRowMap`,
+  `TestFTSCountsStayEqualAndMatchStaysRight`, the v54 reopen tests.)
+
 ### Database compaction and retention
 
 The compact / reap / reclaim trio (#819 / #822 / #829) landed in one day and

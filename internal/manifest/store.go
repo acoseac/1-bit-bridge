@@ -2446,6 +2446,17 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		// v55 deletes an FTS row by the rowid tracks_fts_row recorded.
+		// The work is one immediate transaction in post, which also
+		// stamps user_version, so a crash rolls the triggers back with it.
+		version: ftsRowMapVersion,
+		name:    "tracks_fts_row (fts delete by rowid)",
+		sql:     `-- probe-gated; runs in post()`,
+		post: func(db *sql.DB) error {
+			return migrateFTSRowMap(db)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
