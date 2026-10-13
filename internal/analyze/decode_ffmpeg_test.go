@@ -113,14 +113,6 @@ func TestDecodedShortOfDuration(t *testing.T) {
 	}
 }
 
-// TestFFprobeDuration_SurfacesPositiveDuration guards the expectedSec contract.
-// The probe-channel tests above discard probeChannels' fourth return, so a
-// regression that made the duration probe always return 0 would silently
-// disable the ffmpeg truncation guard (decodedShortOfDuration short-circuits on
-// expectedSec <= 0) with no failing test. This pins that ffprobeAudio — the
-// source of expectedSec on the ffmpeg path — surfaces a positive, correct
-// duration. Requires ffprobe (+ sox to synthesize a known-length source);
-// skipped where either is absent (the macOS/Linux CI gate has both).
 // TestFFprobeAudioReadsCodecChannelsAndDurationInOneRun pins the single
 // probe on the iTunes fixture: codec aac (which grants the priming
 // allowance), 2 channels (loudness is measured, not skipped), and the
@@ -140,6 +132,14 @@ func TestFFprobeAudioReadsCodecChannelsAndDurationInOneRun(t *testing.T) {
 	}
 }
 
+// TestFFprobeDuration_SurfacesPositiveDuration guards the expectedSec contract.
+// The probe-channel tests above discard probeChannels' fourth return, so a
+// regression that made the duration probe always return 0 would silently
+// disable the ffmpeg truncation guard (decodedShortOfDuration short-circuits on
+// expectedSec <= 0) with no failing test. This pins that ffprobeAudio — the
+// source of expectedSec on the ffmpeg path — surfaces a positive, correct
+// duration. Requires ffprobe (+ sox to synthesize a known-length source);
+// skipped where either is absent (the macOS/Linux CI gate has both).
 func TestFFprobeDuration_SurfacesPositiveDuration(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe not installed")
