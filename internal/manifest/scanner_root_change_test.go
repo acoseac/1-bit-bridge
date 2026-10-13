@@ -121,24 +121,7 @@ func runRootChangeDuringScan(t *testing.T, initial, withFiles, present, absent [
 		t.Fatal(err)
 	}
 
-	got, err := store.TrackPaths(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	have := map[string]bool{}
-	for _, p := range got {
-		have[p] = true
-	}
-	for _, p := range present {
-		if !have[p] {
-			t.Errorf("missing %s in %v", p, got)
-		}
-	}
-	for _, p := range absent {
-		if have[p] {
-			t.Errorf("still present %s in %v", p, got)
-		}
-	}
+	assertRootChangePaths(t, store, present, absent)
 }
 
 // TestAWaitingScanDoesNotHideTheScanARootChangeCancels parks scan A on the
