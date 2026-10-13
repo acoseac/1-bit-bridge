@@ -344,7 +344,7 @@ type SubmitResult struct {
 // errors.As it for the 507 mapping); `op` prefixes only genuine probe
 // failures, which callers must treat as "can't check, refuse" —
 // silently proceeding risks a disk-full mid-batch.
-func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string) (available int64, err error) {
+func (c *Coordinator) diskPreflight(outputDir string, projected int64, op, role string) (available int64, err error) {
 	checkDir := outputDir
 	if checkDir == "" {
 		checkDir = c.dataDir
@@ -367,7 +367,7 @@ func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string
 		}
 		return available, nil
 	}
-	_, available, err = DiskHasHeadroom(checkDir, projected, DefaultDiskSafetyMargin)
+	_, available, err = DiskHasHeadroom(checkDir, projected, DefaultDiskSafetyMargin, role)
 	if err != nil {
 		var dskErr *InsufficientDiskSpaceError
 		if errors.As(err, &dskErr) {
@@ -386,7 +386,7 @@ func (c *Coordinator) preflightTempVolume(hold int64, op string) error {
 	if hold <= 0 {
 		return nil
 	}
-	_, err := c.diskPreflight(renderScratchDir(c.renderTempDir), BytesForLanes(hold, c.laneCount()), op+" (render scratch)")
+	_, err := c.diskPreflight(renderScratchDir(c.renderTempDir), BytesForLanes(hold, c.laneCount()), op+" (render scratch)", ProbeRoleScratch)
 	return err
 }
 
@@ -414,13 +414,17 @@ func (c *Coordinator) preflightVolumes(outputDir string, totalProjected, maxScra
 			return 0, fmt.Errorf("%s: disk probe: %w", op, err)
 		}
 		if shared {
-			return c.diskPreflight(scratchDir, SharedVolumeHold(totalProjected, maxScratch, maxGuard, c.laneCount()), op)
+			return c.diskPreflight(scratchDir, SharedVolumeHold(totalProjected, maxScratch, maxGuard, c.laneCount()), op, ProbeRoleScratch)
 		}
 	}
 	if err := c.preflightTempVolume(hold, op); err != nil {
 		return 0, err
 	}
-	return c.diskPreflight(outputDir, totalProjected, op)
+	role := ProbeRoleVariants
+	if outputDir == "" {
+		role = ProbeRoleData
+	}
+	return c.diskPreflight(outputDir, totalProjected, op, role)
 }
 
 // Submit walks every track under `path`, filters ineligible /

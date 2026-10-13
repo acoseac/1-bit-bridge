@@ -8,5 +8,5 @@ import "github.com/acoseac/1-bit-bridge/internal/transcode"
 // statfs on a path that does not exist yet would ENOENT rather than report the
 // volume.
 func defaultFreeBytes(dir string) (int64, error) {
-	return transcode.AvailableDiskSpaceNearest(dir)
+	return transcode.AvailableDiskSpaceNearest(dir, transcode.ProbeRoleUpload)
 }

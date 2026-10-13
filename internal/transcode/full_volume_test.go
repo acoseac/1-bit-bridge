@@ -73,7 +73,7 @@ func smallVolume(t *testing.T, sizeMB int) string {
 // about leave bytes free.
 func fillVolume(t *testing.T, dir string, leave int64) {
 	t.Helper()
-	free, err := AvailableDiskSpaceNearest(dir)
+	free, err := AvailableDiskSpaceNearest(dir, ProbeRoleVariants)
 	if err != nil {
 		t.Fatalf("free space of %s: %v", dir, err)
 	}

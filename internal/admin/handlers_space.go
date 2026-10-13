@@ -90,7 +90,7 @@ func (s *Server) apiLibrarySpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if free, err := transcode.AvailableDiskSpaceNearest(root); err == nil {
+	if free, err := transcode.AvailableDiskSpaceNearest(root, transcode.ProbeRoleLibrary); err == nil {
 		out.FreeBytes, out.Probed = free, true
 		// Capacity is what makes a fill bar mean something. Without it the
 		// only available denominator is indexed library bytes, which on a

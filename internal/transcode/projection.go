@@ -116,6 +116,16 @@ func ProjectedSize(
 	return int64(math.Round(projected))
 }
 
+// Roles the missing-directory warning uses. A caller passes the one
+// that matches the directory it is grading.
+const (
+	ProbeRoleVariants = "variants dir"
+	ProbeRoleScratch  = "scratch"
+	ProbeRoleData     = "data dir"
+	ProbeRoleLibrary  = "library root"
+	ProbeRoleUpload   = "upload staging"
+)
+
 // AvailableDiskSpaceNearest probes the free space for `dir`, falling
 // back to the closest EXISTING ancestor when `dir` itself doesn't
 // exist yet. The variants dir is created lazily (sox writes the first
@@ -130,13 +140,18 @@ func ProjectedSize(
 // point (`/` on POSIX, `C:\` on Windows). A missing configured dir is
 // logged at Warn — on a host whose variants volume failed to mount,
 // that line is the operator's signal that the check is now grading
-// the wrong (parent) volume.
-func AvailableDiskSpaceNearest(dir string) (int64, error) {
+// the wrong (parent) volume. It names the directory by role (variants
+// dir, scratch, data dir) and says it is missing. It does not name
+// the path.
+func AvailableDiskSpaceNearest(dir, role string) (int64, error) {
 	dir = filepath.Clean(dir)
 	probe := NearestExistingDir(dir)
 	if probe != dir {
+		if role == "" {
+			role = "directory"
+		}
 		logger.Warn("disk probe: directory missing; probing nearest existing ancestor",
-			"dir", dir, "ancestor", probe)
+			"role", role)
 	}
 	return AvailableDiskSpace(probe)
 }
@@ -235,11 +250,11 @@ func (e *InsufficientDiskSpaceError) Unwrap() error { return ErrInsufficientDisk
 // (Statfs failure on an existing path) surface as the returned
 // `err`; callers should treat those as "can't check, refuse the
 // batch" — silently proceeding risks a disk-full mid-batch.
-func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok bool, freeBytes int64, err error) {
+func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64, role string) (ok bool, freeBytes int64, err error) {
 	if projectedBytes <= 0 {
 		// No work projected — pair with a successful disk probe so
 		// callers always get a meaningful freeBytes value.
-		freeBytes, err = AvailableDiskSpaceNearest(dir)
+		freeBytes, err = AvailableDiskSpaceNearest(dir, role)
 		if err != nil {
 			return false, 0, err
 		}
@@ -248,7 +263,7 @@ func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64) (ok
 	if safetyMargin < 0 || math.IsNaN(safetyMargin) {
 		safetyMargin = 0
 	}
-	freeBytes, err = AvailableDiskSpaceNearest(dir)
+	freeBytes, err = AvailableDiskSpaceNearest(dir, role)
 	if err != nil {
 		return false, 0, err
 	}
