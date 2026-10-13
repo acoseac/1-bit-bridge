@@ -18,6 +18,7 @@ import (
 	"time"
 
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
+	"github.com/acoseac/1-bit-bridge/internal/tls/tlstest"
 )
 
 // certFixture mints a cert+key pair in a fresh data dir with the given
@@ -111,6 +112,31 @@ func TestCheckTLSCertSANs_MatchingCertIsOK(t *testing.T) {
 	// can tell a real all-clear from a vacuous one.
 	if !strings.Contains(c.Summary, "covers all") {
 		t.Errorf("summary = %q, want it to say what it covered", c.Summary)
+	}
+}
+
+// TestACertTheBridgeDidNotMintIsNotToldToRotate is an unmanaged install
+// whose on-disk pair is a CA wildcard. Doctor and the startup warning
+// share the decision, so this check must not end in bridge cert rotate
+// either: that command mints a new self-signed pair over the CA leaf.
+func TestACertTheBridgeDidNotMintIsNotToldToRotate(t *testing.T) {
+	dataDir := t.TempDir()
+	certPath, keyPath := servertls.DefaultPaths(dataDir)
+	tlstest.WriteCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	c := checkTLSCertSANs(t.Context(), Deps{
+		DataDir: dataDir,
+		CertSANs: func(context.Context) servertls.GenerateOptions {
+			return servertls.GenerateOptions{
+				Hostname:      "bridge-7f3a",
+				ExtraDNSNames: []string{"abc.cloud.1-bit.app"},
+			}
+		},
+	})
+	if c.Status != OK {
+		t.Fatalf("status = %q, want ok (summary %q, hint %q)", c.Status, c.Summary, c.Hint)
+	}
+	if strings.Contains(c.Summary, "bridge cert rotate") || strings.Contains(c.Hint, servertls.RotationRemediation) {
+		t.Fatalf("a certificate this bridge did not mint was told to rotate: summary %q hint %q", c.Summary, c.Hint)
 	}
 }
 

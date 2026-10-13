@@ -41059,6 +41059,83 @@ An older binary's ladder stops before v55, so it does not re-run v7 or
 v8. The new triggers are SQL and fire for that binary. Search does not
 read the map.
 
+## 2026-10-13 — a wildcard the bridge did not mint is not told to rotate (backlog B232)
+
+`logIfSANsStale` and `bridge doctor`'s `tls-cert-sans` share
+`InspectSANCoverage`. The comparison was exact DNS names. A tenant
+certificate with `*.cloud.1-bit.app` therefore listed the tenant host
+and `localhost` as missing, and every start logged `cert SANs are
+stale` with `RotationRemediation`. `bridge cert rotate` mints a fresh
+self-signed pair and replaces whatever is on disk.
+
+### The signal
+
+A certificate is one this bridge minted when its own public key
+verifies its signature: `Certificate.CheckSignature` over
+`RawTBSCertificate` (`signedByOwnKey`). `GenerateWithOptions` calls
+`CreateCertificate` with the same template as parent and leaf, so that
+check holds for a pair minted here and fails for a CA leaf.
+`SANCoverage.MintedByBridge` records it. `logIfSANsStale` returns
+without a warning when it is false. The unmanaged doctor path returns
+ok, "certificate was not minted by this bridge — rotation is not
+advised", after the covered case so a fully covered certificate still
+says "covers all".
+
+`CheckSignatureFrom(cert)` is the wrong call. It rejects a version-3
+certificate with `BasicConstraintsValid` and `IsCA` false, and the mint
+sets both, so it fails on every certificate this bridge creates as well
+as on a CA leaf. Issuer-equals-subject is a consequence of the same
+mint and was not the check. The CN `1-bit Bridge` is a label. Managed
+is a deployment posture: the doctor's managed skip stays, because the
+reader has no shell, and it is not the startup signal, because a
+managed bridge can still hold a stale pair this process minted.
+`LoadOrGenerateWithOptions` only knows the files existed. A managed
+bridge whose on-disk certificate is still a stale self-signed pair
+still warns at startup while doctor skips; that split is
+`TestManagedReportsExpiryButNotStaleSANs`.
+
+### The wildcard
+
+`stringDiff` treats a DNS name as covered by an exact match or by one
+leftmost label that is exactly `*` (RFC 6125 §6.4.3).
+`*.cloud.1-bit.app` covers `abc.cloud.1-bit.app`. It covers neither
+`cloud.1-bit.app`, nor `a.b.cloud.1-bit.app`, nor a partial label
+(`a*.example`, `*a.example`). Matching is case-insensitive. IP
+addresses stay exact. `mergeDNSNames` always adds `localhost` and, for
+a real host name, that name plus `<short>.local`. A wildcard does not
+cover those, so wildcard matching alone still logs the rotation
+warning. The minted check is what silences it. A stale self-signed
+pair after a host move or a new custom endpoint still warns on both
+surfaces.
+
+The 2026-09-21 record above is unchanged: that warning is still the
+right one for a pair this bridge minted.
+
+### Red first
+
+`TestAWildcardCertTheBridgeDidNotMintLogsNoRotationWarning` writes a
+local CA and a leaf whose only DNS SAN is `*.cloud.1-bit.app`, then
+calls `LoadOrGenerateWithOptions` with hostname `bridge-7f3a` and extra
+name `abc.cloud.1-bit.app`. The log is `loggingtest.Record`. On the
+exact comparison it fails with `cert SANs are stale` and
+`missing_dns=[localhost bridge-7f3a bridge-7f3a.local abc.cloud.1-bit.app]`.
+`TestACertTheBridgeDidNotMintIsNotToldToRotate` is the doctor half:
+status warn, hint ending in `RotationRemediation`.
+`TestAStaleSelfSignedCertStillLogsTheRotationWarning` mints with
+`GenerateWithOptions` for `oldhost` and reloads for `newhost`; the
+warning stays, and `MintedByBridge` is true.
+`TestALeftmostWildcardCoversOneLabel` and
+`TestAPartialLabelWildcardCoversNothing` pin the label rule.
+
+### Control
+
+With wildcard matching left in place and the `!MintedByBridge` returns
+removed from `logIfSANsStale` and `checkTLSCertSANs`, the two tests
+fail again (`go test -count=1`). The startup line is
+`missing_dns=[localhost bridge-7f3a bridge-7f3a.local]`: the tenant
+name is covered and the rotation warning still fires. Both returns
+were restored. The top-of-file invariant list has no SAN twin.
+
 ## 2026-10-13 — a short album-mate decode is remembered for the process (backlog B241)
 
 A sweep on the operator bridge logged the same album-gain warning once

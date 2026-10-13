@@ -42,13 +42,12 @@ func checkTLSCertSANs(ctx context.Context, d Deps) Check {
 	if d.Managed {
 		// Unlike the expiry half — which is a deadline after which
 		// every paired device stops working, and which a tenant needs
-		// to escalate — this one is both unactionable and mostly moot
-		// on a hosted bridge: the control plane owns rotation, and
-		// clients reach the tenant over its autocert domain, whose
-		// Let's Encrypt cert the SNI switcher serves instead of this
-		// one. A warning naming `bridge cert rotate` to a reader with
-		// no shell is the unactionable-preflight shape Deps.Managed
-		// exists to avoid.
+		// to escalate — this one is unactionable on a hosted bridge:
+		// the control plane owns rotation, and the reader has no shell.
+		// The on-disk pair may itself be the Let's Encrypt wildcard the
+		// tenant serves. Naming `bridge cert rotate` would tell the
+		// reader to replace it. An unmanaged install makes that same
+		// decision from the certificate, below.
 		return ok(checkNameTLSCertSANs, "certificate is the host's — check skipped")
 	}
 	if d.CertSANs == nil {
@@ -79,6 +78,13 @@ func checkTLSCertSANs(ctx context.Context, d Deps) Check {
 	if cov.Covered() {
 		return ok(checkNameTLSCertSANs, fmt.Sprintf("covers all %d name(s) and %d address(es) this bridge advertises",
 			len(cov.WantDNS), len(cov.WantIPs)))
+	}
+	if !cov.MintedByBridge {
+		// The startup warning uses this same field. A CA leaf can leave
+		// the host name uncovered (a wildcard matches one leftmost
+		// label, and the want-set always adds localhost and the host
+		// name) without being a pair `bridge cert rotate` should replace.
+		return ok(checkNameTLSCertSANs, "certificate was not minted by this bridge — rotation is not advised")
 	}
 	return warn(checkNameTLSCertSANs, sansSummary(cov), sansHint(cov))
 }

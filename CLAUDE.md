@@ -9007,11 +9007,38 @@ its twin.** The top list is older, shorter, and read first.
   `InspectSANCoverage`) because `LoadX509KeyPair` does: a key-first or
   `Bag Attributes` PEM loads at serve time and read as "unreadable" on both
   doctor lines. `tls-cert-sans` skips on a managed
-  bridge (the control plane owns rotation and the tenant reaches it over the
-  autocert domain); **expiry does not** — `TestManagedReportsExpiryButNotStaleSANs`
+  bridge (the control plane owns rotation and the reader has no shell);
+  **expiry does not** — `TestManagedReportsExpiryButNotStaleSANs`
   pins the split, which was prose in a docblock and nothing else. `--fix` does
   NOT rotate: that invalidates every pin and is an operator decision with a
   device in hand.
+  **Rotation is advised only for a certificate this bridge minted**
+  (2026-10-13, backlog B232). `MintedByBridge` is true when the
+  certificate's own public key verifies its signature
+  (`Certificate.CheckSignature` on `RawTBSCertificate`).
+  `GenerateWithOptions` passes the same template as parent and leaf to
+  `CreateCertificate`, so a pair minted here verifies that way. A CA leaf
+  does not. `CheckSignatureFrom` rejects a version-3 certificate with
+  `BasicConstraintsValid` and `IsCA` false, and the mint sets both, so
+  that call fails on every certificate this bridge creates.
+  `LoadOrGenerateWithOptions` only knows the files existed: a wildcard a
+  control plane placed and a previous mint both exist. Managed is a
+  posture, and the doctor's managed skip stays because the reader has no
+  shell; it is not the startup signal, because a managed bridge can still
+  hold a stale pair this process minted. `logIfSANsStale` and the
+  unmanaged doctor path both stay quiet when `MintedByBridge` is false.
+  DNS coverage honors one leftmost label (RFC 6125 §6.4.3):
+  `*.cloud.1-bit.app` covers `abc.cloud.1-bit.app`, and it covers neither
+  the apex, nor `a.b.cloud.1-bit.app`, nor a partial label (`a*.example`).
+  The want-set always adds `localhost` and the host name, which that
+  wildcard does not cover, so the minted check is what silences the
+  warning. A stale self-signed pair after a host move or a new custom
+  endpoint still warns on both surfaces.
+  (`TestAWildcardCertTheBridgeDidNotMintLogsNoRotationWarning`,
+  `TestAStaleSelfSignedCertStillLogsTheRotationWarning`,
+  `TestALeftmostWildcardCoversOneLabel`,
+  `TestAPartialLabelWildcardCoversNothing`,
+  `TestACertTheBridgeDidNotMintIsNotToldToRotate`.)
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing
