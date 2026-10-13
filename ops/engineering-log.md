@@ -41384,3 +41384,36 @@ Removing the allowance again (the constant back at 0, the comparison
 unchanged) turns the same fixture red; 0.08 is restored after that run.
 
 No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+## 2026-10-13 — a root change waits until the scan that read the old roots has stopped writing (backlog B183)
+
+`POST /api/roots` and `DELETE /api/roots` deleted or wiped, then called
+`SetRoots`, while a full scan could still be walking the roots it had
+snapshotted at the start. That scan wrote the removed root's rows back,
+and on a collapse it also wrote the surviving root in the old multi-root
+form. The scan's own deletion pass used the old root set, so it did not
+reap them. The next scan counted them missing. At the production
+missing-count threshold of 3 they stayed through two more scans.
+
+Holding the scanner lock for the rest of the change was the other
+option. The console request would then sit behind whatever the walk
+still had left, which on a large library is minutes, and a test that
+parks the scan inside the extract hook cannot take that lock: the hook
+runs on the scan that already holds it. Cancel-and-wait drains only the
+extracts already in flight. `CommitRootChange` cancels, waits until that
+scan has released the lock, cancels once more so a scan that won the
+epoch race and is blocked on the lock returns without reading the roots,
+then runs the wipe or the prefix delete and `SetRoots`. The useful scan
+the handler starts is stored into the in-flight slot while the lock is
+held, and the finishing scan's compare-and-swap does not clear it.
+
+A wipe or prefix delete that fails still starts a scan. The in-flight
+one was cancelled, and the roots did not move, so that scan is what
+redoes the walk. A save that fails after a successful wipe still starts
+the compensating scan it started before, including an add that was
+already multi-root: that save used to leave the in-flight scan running,
+and the cancel replaced it.
+
+No wire change. `ProtocolVersion` stays 1. The deleters are unchanged:
+`RecordFirstIndexedCarryAndWipe` on a form flip, `DeleteTracksByPrefix`
+on a prefix that stays multi-root, never `WipeAllTracks`.

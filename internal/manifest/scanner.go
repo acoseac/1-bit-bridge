@@ -39,8 +39,17 @@ var scanLogger = logging.Component("scanner")
 // test so the recover branch can be exercised without depending on a
 // specific dhowden/tag failure mode (which varies by version + file
 // shape). Production cost: one nil-check per file, negligible against
-// the actual extract work. Strictly internal to the package.
+// the actual extract work. Strictly internal to the package. A hook set
+// on the scanner with SetAfterExtractHookForTests runs instead, so two
+// packages' tests do not share this variable.
 var afterExtractHookForTests func(absPath string)
+
+// inflightScan is one Scan or ScanSubtree, cancelled when a root change
+// cannot let that walk keep writing.
+type inflightScan struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
 
 // scanBatchSize is the per-transaction track-upsert batch size used by
 // the scanner's writer goroutine. SQLite's per-transaction fsync
@@ -75,9 +84,10 @@ type pathInfo struct {
 // native filesystem access. On Unix it's a no-op.
 //
 // Roots are hot-swappable via SetRoots so the admin console can add or
-// remove a library root without restarting the server. Each Scan() takes a
-// snapshot of the roots at entry so a mid-flight edit doesn't re-enter the
-// walk with a different set — the new roots apply on the next scan.
+// remove a library root without restarting the server. A scan that has
+// read the roots keeps that snapshot for its walk. A root change that
+// must not let that walk write afterwards goes through CommitRootChange,
+// which cancels the scan and waits for it to leave before the roots move.
 type Scanner struct {
 	roots atomic.Pointer[[]string]
 	store *Store
@@ -189,6 +199,17 @@ type Scanner struct {
 	// so a future admin-console live tune doesn't race the scanner's
 	// deletion pass; today it's set once at boot.
 	deleteThreshold atomic.Int64
+
+	// rootEpoch moves before a root change. A scan loads it before taking
+	// mu and leaves without reading the roots when it has moved.
+	rootEpoch atomic.Uint64
+	// inflight is the scan that holds mu, or the one waiting to take it.
+	// CommitRootChange cancels it. Cleared by that scan's own stop, with
+	// compare-and-swap, so a newer scan's slot stays.
+	inflight atomic.Pointer[inflightScan]
+	// afterExtractHook is the per-scanner test hook. Nil falls through to
+	// afterExtractHookForTests.
+	afterExtractHook atomic.Pointer[func(string)]
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
@@ -370,13 +391,105 @@ func NewScanner(roots []string, store *Store, artworkCacheDir string) *Scanner {
 	return s
 }
 
-// SetRoots atomically replaces the scanner's library roots. The change takes
-// effect on the next Scan — an in-flight walk continues with its original
-// snapshot. Caller should trigger a scan (or wait for the periodic tick) for
-// the new roots to land in the manifest.
+// SetRoots atomically replaces the scanner's library roots. A scan that
+// has already read the roots keeps that snapshot. Callers that change the
+// roots while a scan may be running use CommitRootChange, which cancels
+// that scan and waits for it to stop writing before SetRoots.
 func (s *Scanner) SetRoots(roots []string) {
 	rc := append([]string(nil), roots...)
 	s.roots.Store(&rc)
+}
+
+// beginCancellable publishes a child of parent so CommitRootChange can
+// cancel this scan without cancelling the serve-wide scan context. stop
+// clears the slot only when it is still this run.
+func (s *Scanner) beginCancellable(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	run := &inflightScan{ctx: ctx, cancel: cancel}
+	s.inflight.Store(run)
+	return ctx, func() {
+		s.inflight.CompareAndSwap(run, nil)
+		cancel()
+	}
+}
+
+// cancelInFlightScan cancels the published scan, if there is one.
+func (s *Scanner) cancelInFlightScan() {
+	if run := s.inflight.Load(); run != nil {
+		run.cancel()
+	}
+}
+
+// InFlightScanDone is closed when the published scan's context is
+// cancelled, and already closed when no scan is published. Tests park a
+// worker on it.
+func (s *Scanner) InFlightScanDone() <-chan struct{} {
+	if run := s.inflight.Load(); run != nil {
+		return run.ctx.Done()
+	}
+	closed := make(chan struct{})
+	close(closed)
+	return closed
+}
+
+// SetAfterExtractHookForTests installs a hook that runs after a file is
+// extracted, ahead of the package-level hook. A nil hook clears it.
+// Production does not call this.
+func (s *Scanner) SetAfterExtractHookForTests(hook func(string)) {
+	if hook == nil {
+		s.afterExtractHook.Store(nil)
+		return
+	}
+	s.afterExtractHook.Store(&hook)
+}
+
+func (s *Scanner) callExtractHook(abs string) {
+	if p := s.afterExtractHook.Load(); p != nil {
+		if hook := *p; hook != nil {
+			hook(abs)
+			return
+		}
+	}
+	if hook := afterExtractHookForTests; hook != nil {
+		hook(abs)
+	}
+}
+
+// abandonedForRootChange reports why this scan must not read the roots.
+// A parent deadline stays that error. A root change that landed after
+// this scan loaded the epoch is context.Canceled.
+func (s *Scanner) abandonedForRootChange(ctx context.Context, epoch uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.rootEpoch.Load() != epoch {
+		return context.Canceled
+	}
+	return nil
+}
+
+// CommitRootChange runs fn only after a scan that already read the roots
+// has stopped writing. It cancels that scan and waits for the scanner
+// lock, which the scan holds until its workers have joined. fn then
+// deletes or wipes and calls SetRoots. A scan that takes the lock
+// afterwards sees the new epoch and returns without walking. The useful
+// scan fn starts is left running: this does not cancel again after fn.
+func (s *Scanner) CommitRootChange(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.rootEpoch.Add(1)
+	s.cancelInFlightScan()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelInFlightScan()
+	fn()
+}
+
+// scanStopped is a cancellation of this scan, including a child cancel
+// whose parent context is still live.
+func scanStopped(err error, parent context.Context) bool {
+	return errors.Is(err, parent.Err()) || errors.Is(err, context.Canceled)
 }
 
 // Roots returns a snapshot of the currently configured library roots.
@@ -557,8 +670,16 @@ func (s *Scanner) setScanRootBase(roots []string, multiRoot bool) {
 // reads this for its "scanning · X tracks" hint, and the older meaning
 // would briefly over-report on a crash mid-batch.
 func (s *Scanner) Scan(ctx context.Context) (int, error) {
+	ctx, stop := s.beginCancellable(ctx)
+	defer stop()
+	epoch := s.rootEpoch.Load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Before scanning and activeScans, so a scan a root change has
+	// already superseded does not count as running.
+	if err := s.abandonedForRootChange(ctx, epoch); err != nil {
+		return 0, err
+	}
 	s.scanning.Store(true)
 	s.progress.Store(0)
 	// Seed the stall clock at the start so the walk's lead-in (which
@@ -1430,9 +1551,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec, existing); t != nil {
 					tracksToWrite = []*Track{t}
 				}
-				if hook := afterExtractHookForTests; hook != nil {
-					hook(pi.abs)
-				}
+				s.callExtractHook(pi.abs)
 				return
 			}
 			t := &Track{
@@ -1475,20 +1594,22 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				keepArtOfUnsettledRead(t, existing.ArtworkMBID)
 			}
 			s.noteUnsettledArt(pi.rel, t)
-			// Capture-then-call so a concurrent test that nils the
-			// hook between the check and invocation can't trigger a
-			// nil-deref panic. The hook is set/cleared from test
-			// goroutines while production code reads it from worker
-			// goroutines — the local copy makes the read+call atomic
-			// from this caller's view (Gemini medium on PR #188).
-			if hook := afterExtractHookForTests; hook != nil {
-				hook(pi.abs)
-			}
+			// callExtractHook copies the hook before calling it, so a
+			// concurrent test that nils it cannot nil-deref (Gemini
+			// medium on PR #188).
+			s.callExtractHook(pi.abs)
 			tracksToWrite = []*Track{t}
 		}()
 		if len(tracksToWrite) == 0 {
 			// An early-skip-unchanged hit, a panic during extraction,
 			// or a non-expandable ISO. All paths skip the hand-off.
+			continue
+		}
+		if ctx.Err() != nil {
+			// A root change cancels this scan after the extract hook
+			// and before the hand-off. The select below is random when
+			// the writes channel can also take the track, so this check
+			// comes first. continue drains the rest of the channel.
 			continue
 		}
 		for _, tw := range tracksToWrite {
@@ -2223,8 +2344,14 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 // writer goroutine. A subtree scan that resolves to no audio
 // files is a fast no-op.
 func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
+	ctx, stop := s.beginCancellable(ctx)
+	defer stop()
+	epoch := s.rootEpoch.Load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.abandonedForRootChange(ctx, epoch); err != nil {
+		return 0, err
+	}
 	// Same per-scan reset rationale as Scan(): each subtree scan starts
 	// with a fresh folder-art single-flight cache and directory listings,
 	// and counts its own unread files.
@@ -3801,7 +3928,7 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 	initial.Add(1)
 	go func() {
 		defer initial.Done()
-		if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
+		if _, err := s.Scan(ctx); err != nil && !scanStopped(err, ctx) {
 			scanLogger.Error("initial scan", "err", err)
 		}
 	}()
@@ -3815,7 +3942,7 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 			t.Stop()
 			return
 		case <-t.C:
-			if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
+			if _, err := s.Scan(ctx); err != nil && !scanStopped(err, ctx) {
 				scanLogger.Error("periodic scan", "err", err)
 			}
 		case <-rearm:

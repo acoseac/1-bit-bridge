@@ -1986,7 +1986,7 @@ func (s *Server) spawnBackgroundScan(label string) {
 	s.bgScans.Add(1)
 	go func() {
 		defer s.bgScans.Done()
-		if _, err := s.deps.Scanner.Scan(ctx); err != nil && !errors.Is(err, ctx.Err()) {
+		if _, err := s.deps.Scanner.Scan(ctx); err != nil && !errors.Is(err, ctx.Err()) && !errors.Is(err, context.Canceled) {
 			logger.Error("background scan failed", "label", label, "err", err)
 		}
 	}()
