@@ -108,7 +108,7 @@ func countDirs(roots []string, stopAt int) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		err = filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
+		err = fsutil.WalkConfigured(walkFrom, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if path == walkFrom {
 					// Root unreadable — bubble up so checkWatchLimit's

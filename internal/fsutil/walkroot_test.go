@@ -22,7 +22,7 @@ func walkedNames(t *testing.T, root string) (names []string, foreign []string) {
 		t.Fatalf("WalkableRoot(%s): %v", root, err)
 	}
 	prefix := filepath.Clean(root) + string(filepath.Separator)
-	err = filepath.WalkDir(walkPath, func(p string, d fs.DirEntry, err error) error {
+	err = WalkConfigured(walkPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -139,6 +139,22 @@ func modeOf(info fs.FileInfo) fs.FileMode {
 	return info.Mode()
 }
 
+// TestWalkConfiguredKeepsAVolumeRootOnTheLstatWalk pins the trim that
+// would hand ResolveLinks nothing, or only a volume name. "/" trims to
+// the empty string, and EvalSymlinks of that is the working directory.
+func TestWalkConfiguredKeepsAVolumeRootOnTheLstatWalk(t *testing.T) {
+	slash := string(filepath.Separator)
+	walked, err := walkResolvedChain(slash, func(string, fs.DirEntry, error) error {
+		t.Fatal("a volume root is not read through ResolveLinks")
+		return nil
+	})
+	if walked || err != nil {
+		t.Fatalf("walkResolvedChain(%q) = %v, %v", slash, walked, err)
+	}
+	dir := libraryTree(t)
+	requireWalksLibraryTree(t, dir+slash)
+}
+
 // errSlashLstat is the error a test makes the trailing-slash Lstat return.
 var errSlashLstat = errors.New("trailing-slash lstat")
 
@@ -146,7 +162,9 @@ var errSlashLstat = errors.New("trailing-slash lstat")
 // flake made repeatable. os.Lstat(chain+"/") answered "not a directory"
 // while os.Stat(chain) answered a directory, and WalkableRoot refused the
 // root. The target is a directory, so the root walks, under the configured
-// spelling.
+// spelling. The walk is WalkConfigured: filepath.WalkDir of the separator
+// path has then visited nothing, because its own Lstat of that path
+// answered "not a directory" after WalkableRoot had returned it.
 func TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees(t *testing.T) {
 	target := libraryTree(t)
 	base := t.TempDir()
@@ -159,14 +177,24 @@ func TestWalkableRootWalksAChainWhenTheTrailingSlashLstatDisagrees(t *testing.T)
 		walkableRootSlashLstat = func(string) (fs.FileInfo, error) {
 			return stubInfo(0o644), nil
 		}
-		t.Cleanup(func() { walkableRootSlashLstat = nil })
+		t.Cleanup(func() {
+			walkableRootSlashLstat = nil
+			if t.Failed() {
+				logWalkableRootAnswers(t, chain)
+			}
+		})
 		requireConfiguredWalk(t, chain)
 	})
 	t.Run("an error", func(t *testing.T) {
 		walkableRootSlashLstat = func(string) (fs.FileInfo, error) {
 			return nil, errSlashLstat
 		}
-		t.Cleanup(func() { walkableRootSlashLstat = nil })
+		t.Cleanup(func() {
+			walkableRootSlashLstat = nil
+			if t.Failed() {
+				logWalkableRootAnswers(t, chain)
+			}
+		})
 		requireConfiguredWalk(t, chain)
 	})
 }

@@ -2573,7 +2573,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// (isLibraryEntry, as walkRoot counts it), for the clean-empty
 	// guard a scan of the root runs after the walk.
 	var observed int
-	walkErr := filepath.WalkDir(walkFrom, func(abs string, d fs.DirEntry, err error) error {
+	walkErr := fsutil.WalkConfigured(walkFrom, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// `fs.ErrNotExist` on the subtree root (or any descendant)
 			// is the SIGNAL we're here for — fsnotify fired because the
@@ -2996,7 +2996,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		return 0, nil
 	}
 	var observed int
-	walkErr := filepath.WalkDir(walkFrom, func(abs string, d fs.DirEntry, err error) error {
+	walkErr := fsutil.WalkConfigured(walkFrom, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
 			scanLogger.Warn("walk", "path", abs, "err", err)
