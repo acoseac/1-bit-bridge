@@ -332,6 +332,59 @@ func TestKqueueFlushDoesNotOpenAFolderTwice(t *testing.T) {
 	}
 }
 
+// TestADeletedFlushSignalStillWatchesANewFolder removes the signal file
+// while the watcher is running. The watcher makes it again, under the same
+// name, and a folder made after that is watched. The open-file count is
+// the one folder: a flush that watched it from the removal itself would
+// be the add that keeps a second descriptor.
+func TestADeletedFlushSignalStillWatchesANewFolder(t *testing.T) {
+	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
+	var gone string
+	t.Cleanup(func() {
+		if gone == "" {
+			return
+		}
+		if _, err := os.Lstat(gone); !os.IsNotExist(err) {
+			t.Errorf("the flush signal %s was still there after the watcher stopped (%v)", gone, err)
+		}
+	})
+	startWatcher(t, w)
+	var path string
+	watchWaitUntil(t, func() bool {
+		path = w.signalPath()
+		return path != ""
+	}, nil, "the watcher never opened its flush signal")
+	gone = path
+	if filepath.Dir(path) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("flush signal %s is not in the temp directory", path)
+	}
+	wantName := "bridge-watch-flush-" + strconv.Itoa(os.Getpid())
+	if filepath.Base(path) != wantName {
+		t.Fatalf("flush signal name %s, want %s", filepath.Base(path), wantName)
+	}
+	base := libraryFiles(t, libDir)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	watchWaitUntil(t, func() bool {
+		if w.signalPath() != path {
+			return false
+		}
+		_, err := os.Lstat(path)
+		return err == nil
+	}, nil, "the watcher never replaced a deleted flush signal")
+	const name = "after-delete"
+	if err := os.Mkdir(filepath.Join(libDir, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	watchWaitUntil(t, func() bool { return watched(w, name) }, nil,
+		"a folder made after the flush signal was deleted was never watched")
+	waitUntilWatcherIdle(t, w)
+	if got, want := libraryFiles(t, libDir), base+1; got != want {
+		t.Fatalf("after the replaced signal watched one folder, %d open files on the library, want %d", got, want)
+	}
+}
+
 // TestKqueueWatcherOpensAFolderMovedInOnce: an album folder moved into the
 // library costs one open file for the folder and one per file in it, never
 // two for the folder. fsnotify watches a new folder itself right after it

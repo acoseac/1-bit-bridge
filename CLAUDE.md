@@ -2230,19 +2230,34 @@ lost my library."
   38367213087) stayed one high for the whole 2 s poll B337 added, which
   cannot tell the two apart. A longer poll does not close a descriptor
   nothing releases, and it is the wrong wait for a release that has not
-  been read. The rename test waits for `afterReleaseForTests`.   The timer
-  writes one byte of a file `openFlushSignal` creates
-  outside the library and gives it `fsutil.KeepOwner` while it is open. A
-  chown that fails removes the file. `register`'s `Kevent` does not drain, so the
-  write's event is read after `internalWatch` returns. `receive` flushes
-  then and returns before `handleEvent`. `libraryFiles` does not count
-  that file. When the write cannot be made, the timer flushes directly.
-  `flushAsked` keeps the timer from arming again until that event
-  arrives. `TestKqueueFlushDoesNotOpenAFolderTwice` writes the signal in
-  the same turn (`immediateFlushForTests`, false in production) for forty
-  empty folders, one at a time, at `GOMAXPROCS` 1, and wants one open
-  file each. A direct flush from that turn held 42 or 43 where 41 was
-  wanted, 9 runs of 20. The signal write held 41, 20 runs of 20.
+  been read. The rename test waits for `afterReleaseForTests`. The timer
+  writes one byte of a file `openFlushSignal` creates outside the
+  library and gives it `fsutil.KeepOwner` while it is open. A chown that
+  fails removes the file. `register`'s `Kevent` does not drain, so the
+  write's event is read after `internalWatch` returns. A write of that
+  file flushes and returns before `handleEvent`. `libraryFiles` does not
+  count that file. When the write cannot be made, the timer flushes
+  directly. `flushAsked` keeps the timer from arming again until that
+  event arrives. The file exists only where `fds` is set, which is
+  kqueue. inotify and ReadDirectoryChangesW keep the loop they had: no
+  signal file, and a new folder is watched from its Create. The watcher
+  has no data directory, so the file is
+  `bridge-watch-flush-<pid>` in the temp directory. Close removes it. A
+  crash leaves that one name, and the next open of this process removes
+  it first. A write to a file that is gone succeeds and wakes nothing, so
+  the timer stats the path before it writes. A Remove or Rename of the
+  path replaces the file and leaves the waiting folders pending; the
+  next write of the new file is what watches them. A replacement that
+  cannot be made flushes directly. `loopGate` does nothing unless a test
+  arms it before Run, so production pays a bool read per event.
+  `TestKqueueFlushDoesNotOpenAFolderTwice` writes the signal in the same
+  turn (`immediateFlushForTests`, false in production) for forty empty
+  folders, one at a time, at `GOMAXPROCS` 1, and wants one open file
+  each. A direct flush from that turn held 42 or 43 where 41 was wanted,
+  9 runs of 20. The signal write held 41, 20 runs of 20.
+  `TestADeletedFlushSignalStillWatchesANewFolder` deletes the file and
+  wants the same name back, then one new folder watched as one open
+  file.
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.**
   `WalkDir` orders by base name and visits a directory before its children, so
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —

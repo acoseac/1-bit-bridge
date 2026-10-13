@@ -454,7 +454,9 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 // of every 10 new folders, each a descriptor nothing closes, Close
 // included). With no library event to come, the quiet timer writes a file
 // outside the library; that file's event is read after the open in progress
-// has finished, and it is what calls this. A folder that has gone, or cannot
+// has finished, and it is what calls this. A Remove or Rename of that file
+// replaces it and does not call this; the next write of the new file does.
+// A folder that has gone, or cannot
 // be read, is left to the scan its Create asked for.
 func (wt *Watcher) flushPendingAdds() {
 	f := wt.fds

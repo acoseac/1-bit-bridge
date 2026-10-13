@@ -41465,3 +41465,42 @@ the same test pass. Thirty runs under the same sixteen busy loops, after
 that restore, passed in 26.3 s.
 
 No `ExtractorVersion` bump and no `ProtocolVersion` bump.
+
+## 2026-10-13 — the kqueue flush signal is replaced when it disappears (backlog B361)
+
+The signal file is opened only where the watcher accounts for open files.
+`NewWatcher` sets `fds` only when `kqueueBackend` is true, and `loop` calls
+`openFlushSignal` only inside `if wt.fds != nil`. On Linux and Windows
+`fds` stays nil, `receive`'s `flushPendingAdds` is a no-op, and a new
+folder is still watched from its Create. The production NUC and the Linux
+deployments keep that loop.
+
+The watcher is constructed with a scanner and a debounce and has no data
+directory, so the file cannot live beside the database. It also cannot
+live under a library root: `libraryFiles` would count it, and a write
+would scan the parent. The name is `bridge-watch-flush-<pid>` in the
+temp directory, opened `O_RDWR|O_CREATE|O_EXCL` after removing that name,
+with `fsutil.KeepOwner` on the open file. `closeFlushSignal` drops the
+watch and removes the file when the loop returns, before `Run`'s
+`w.Close`. A crash leaves that one name. The next open of this process
+removes it first. Another process's file has another pid and is left
+alone.
+
+A write to a file that was unlinked while this process still holds it
+succeeds and wakes nothing (`NOTE_DELETE` already fired). `askFlush`
+stats the open file against the path before it writes. A missing path,
+a different file, or a write error replaces the signal. A Remove or
+Rename of the path does the same and does not watch the waiting folders
+from that event: `readEvents` has already closed the watch, and watching
+from the handler is the race the file exists to avoid. The folders stay
+pending. The next write of the new file watches them. When the
+replacement cannot be made, `askFlush` watches them directly and returns
+false, so the timer can arm again.
+
+`loopGate` does nothing unless a test sets `enabled` before `Run`.
+Production leaves it false and pays one bool read per event, with no
+mutex. `startWatcher` arms it before the loop goroutine starts.
+
+`TestADeletedFlushSignalStillWatchesANewFolder` deletes the file, waits
+until the same name is back, then makes one folder and wants that folder
+watched as one more open file. After the watcher stops the name is gone.
