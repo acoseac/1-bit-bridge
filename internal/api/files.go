@@ -281,10 +281,14 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	if s.upnpProxyEnabled() && q.Get("variant") == "" {
 		rt, lookupErr := s.upnpRouting.GetUPnPRouting(r.Context(), clientPath)
 		if lookupErr != nil {
-			// Surface DB faults loudly — silently falling through to
-			// ResolveChecked would have a real database error masquerade
-			// as "filesystem track" and produce a confusing 400/404.
-			// Per Gemini on PR #352.
+			// A client that already left is the shared abort rule.
+			// A database fault is still logged and the request falls
+			// through, so a routing miss is not invented from the
+			// error. Per Gemini on PR #352.
+			if clientWentAway(r, lookupErr) {
+				writeErrorLog(w, r, http.StatusInternalServerError, "internal", errMsgInternalError, lookupErr)
+				return
+			}
 			LoggerFromContext(r.Context()).Error(
 				"upnp routing lookup failed",
 				"path", clientPath, "err", lookupErr)

@@ -75,8 +75,7 @@ func (s *Server) booklet(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := s.bookletStore.GetBooklet(r.Context(), mbid)
 	if err != nil {
-		logger.Error("booklet lookup", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal", errMsgInternalError, err)
 		return
 	}
 	if row == nil || !row.Available {
