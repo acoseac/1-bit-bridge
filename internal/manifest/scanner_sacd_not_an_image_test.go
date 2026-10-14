@@ -96,6 +96,14 @@ func TestScanner_ANotAnSACDVerdictFollowsTheFile(t *testing.T) {
 	if rows := sacdTrackPathsUnder(t, store, "Music/Album.iso"); len(rows) != 2 {
 		t.Fatalf("an image replaced by an SACD did not expand: %v", rows)
 	}
+	// The verdict goes when the image expands, so the map holds only images
+	// that are not SACDs (forgetNotSACD; a pre-merge review of #1230).
+	sc.notSACDMu.Lock()
+	_, stale := sc.notSACD["Music/Album.iso"]
+	sc.notSACDMu.Unlock()
+	if stale {
+		t.Error("an image that expanded still carries a not-an-SACD verdict")
+	}
 }
 
 // TestScanner_AnISOWhoseProbeFailedIsProbedAgain holds B134's line: only a

@@ -531,7 +531,11 @@ lost my library."
   pass sees it, rather than in the store: the Scanner lives as long as
   `serve`, so a bridge probes each such image once per process, and
   `ExtractorVersion` is compiled in, so a reader that learns a new layout
-  is a new process with an empty map. **Don't record a probe that did not
+  is a new process with an empty map. Residuals, accepted: an image a
+  symlink is retargeted to with the same size and mtime as the one it
+  replaced keeps the old verdict until the process ends, and the verdicts
+  of images renamed or deleted stay in the map until then (one entry per
+  `.iso` path seen). **Don't record a probe that did not
   complete, don't key the verdict on the path alone, and don't move it
   into `tracks`**, where it would reach the manifest
   (`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`,

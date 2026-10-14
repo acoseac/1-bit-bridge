@@ -42605,3 +42605,16 @@ Controls, each on the committed tree and restored from git:
   three scans, want 3").
 Both pins passed on main before the change, as pins do; the defect case
 was the one red.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) of #1230: taken, a pin
+that the verdict goes when the image expands (`forgetNotSACD`, asserted at
+the end of `TestScanner_ANotAnSACDVerdictFollowsTheFile`). Recorded as
+residuals, not changed: a symlink retargeted to an image with the same size
+and mtime keeps the old verdict until the process ends (`os.SameFile` would
+not help on Windows, where `os.Stat` leaves the identity to be read at the
+comparison, from the new target), and verdicts of renamed or deleted images
+stay in the map until then. Not a defect: the review's "two roots at the same
+relative path", since a relative path is the store's key and is already unique
+across roots. The `retired == false` branch has no test: no seam fails
+`TrackPathsUnder` or the threshold delete, and adding one to production code
+for it was not worth it.
