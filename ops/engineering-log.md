@@ -42809,6 +42809,59 @@ the GC and the cap but not the empty-store guard; it now asks the guard
 too (a dry run over an empty store must refuse), and the same control
 failed it at that first assertion, in both subtests.
 
+## 2026-10-14 — a Deezer artist portrait is written through the checked primitive (backlog B168)
+
+The pre-v0.2.1 network-surface review found the sixth artwork write site
+the #976 hardening missed: `ensureArtistImageCached` wrote `FetchImage`'s
+bytes with the buffered `writeArtworkAtomic`, which has neither the
+containment check (`fsutil.IsUnderAny` against the cache directory) nor the
+image-signature check (`FF D8 FF` or the PNG magic) that
+`writeArtworkAtomicStream` applies to the CAA, iTunes and premium covers.
+TLS and the Deezer host allowlist (`.dzcdn.net`, `.deezer.com`) stand in
+front of it, which is why it was low.
+
+Red first on main (`3a0e143d`):
+`TestArtistPortraitIsStoredOnlyWhenItIsAnImage`, with a stub allowlisted
+the way the existing Deezer tests allow 127.0.0.1, served
+`<html><body>not an image</body></html>` with `Content-Type: image/jpeg`.
+`ensureArtistImageCached` answered ok, and the HTML sat at both
+`artist-name-<sha>.jpg` and the `artist-<mbid>.jpg` hard-linked to it. The
+same test's JPEG body (the positive control) was cached before and after.
+
+The write now goes through `writeArtworkAtomicStream(e.CacheDir, namePath,
+bytes.NewReader(data), maxDeezerImageBytes)`. `FetchImage` already caps the
+body at that size, so the stream's cap changes nothing for a body that
+passed it. A refused body returns an error: the caller logs it through
+`logUpstream` and does not negative-cache it, so a later pass may ask
+again, as for a transient failure. The containment layer is defence in
+depth here: the canonical name is a hex hash under the cache, so no input
+reaches it, and the primitive's own tests pin it. `linkOrCopy`'s copy
+fallback keeps the buffered writer; it copies a canonical that already
+passed.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) found the layer this left
+open: `writeArtworkAtomicStream`'s containment covers the canonical it
+writes, never the MBID path `linkOrCopy` then links or copies it to. Red
+first: `TestArtistPortraitPathsStayInsideTheCache`, with an MBID of
+`x/../../escape` and the cache deep inside the test's temp directory, had
+`ensureArtistImageCached` answer ok, contact Deezer twice and hard-link
+`escape.jpg` outside the cache. Both paths are now checked with
+`fsutil.IsUnderAny` before anything is read, fetched, linked or copied.
+Every caller checks the MBID's shape first (`isValidMBID`), so no input
+reaches it today; it is the layer under that check.
+
+The PR's bot review (Gemini) asked for one more: with no cache directory,
+both paths are relative to the working directory, and the containment
+check refused them as "outside the cache directory", which the caller logs
+as a Deezer failure. That refusal was already safe (nothing fetched,
+nothing written), so this is the message: `ensureArtistImageCached` now
+refuses first with "no artwork cache directory"
+(`TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch`, which also pins
+no request and an empty working directory). Control on the committed tree:
+the guard removed failed exactly that case, on its message alone. The same
+review moved the two tests' shared stub and enricher setup into helpers
+(SonarCloud's duplication gate, 15.3%), with an atomic request counter.
+
 ## 2026-10-14 — the shared sox probe keeps its last answer through a timeout, off the request path (backlog B142)
 
 `soxToolchainCache.snapshot` ran `transcode.ProbeSox` under its mutex
