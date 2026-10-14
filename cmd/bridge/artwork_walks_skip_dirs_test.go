@@ -108,15 +108,20 @@ func TestSweepArtworkCachePassesOverTheDirectoriesALibraryWalkSkips(t *testing.T
 
 // TestArtworkWalksWalkACacheNamedLikeASkippedDirectory — the configured
 // cache directory is walked whatever its own name: only directories BELOW
-// it are passed over. A cache named `.artwork` holding an orphan still has
-// it removed by the GC and counted and evicted by the size cap.
+// it are passed over. In a cache named `.artwork` holding an orphan, the
+// empty-store guard sees the orphan (and refuses an empty store), the GC
+// removes it, and the size cap counts and evicts a cover.
 func TestArtworkWalksWalkACacheNamedLikeASkippedDirectory(t *testing.T) {
 	store, _ := artworkCacheFixture(t, keptArtworkKey)
+	empty, _ := artworkCacheFixture(t)
 	for _, name := range []string{".artwork", "#recycle"} {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), name)
 			orphan := filepath.Join(dir, orphanArtworkKey+"-500.jpg")
 			writeFixtureFile(t, orphan, 10)
+			if rc, _, stderr := runArtworkGCOver(empty, dir, true); rc != 1 || !strings.Contains(stderr, "refusing") {
+				t.Errorf("the guard over an empty store: rc=%d, want 1 with a refusal\nstderr: %s", rc, stderr)
+			}
 			if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
 				t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 			}
