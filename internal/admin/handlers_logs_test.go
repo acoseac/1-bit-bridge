@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // logTestServer wires a test admin server whose LogPath points at a file
@@ -98,7 +100,7 @@ func TestLogStatusMissingFileDoesNotBlameTheForeground(t *testing.T) {
 	if !strings.Contains(got.Reason, s.deps.LogPath) {
 		t.Errorf("reason omits the path it looked at: %q", got.Reason)
 	}
-	if !strings.Contains(got.Reason, noLogFileHint(runtime.GOOS, runningInContainer())) {
+	if !strings.Contains(got.Reason, noLogFileHint(runtime.GOOS, fsutil.InContainer())) {
 		t.Errorf("reason %q does not carry this environment's hint", got.Reason)
 	}
 

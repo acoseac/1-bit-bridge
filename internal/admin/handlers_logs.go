@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -77,7 +78,7 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return path, nil, "no log file at " + path + " — " + noLogFileHint(runtime.GOOS, runningInContainer())
+			return path, nil, "no log file at " + path + " — " + noLogFileHint(runtime.GOOS, fsutil.InContainer())
 		}
 		return path, nil, "cannot read " + path + ": " + err.Error()
 	}
@@ -122,24 +123,6 @@ func noLogFileHint(goos string, inContainer bool) string {
 		return "a foreground `bridge serve` logs to its terminal, and a systemd unit without `StandardOutput=append:` logs to the journal instead — read it with `journalctl -u 1-bit-bridge`"
 	}
 	return "the file is created by a service install; a foreground `bridge serve` logs to its terminal"
-}
-
-// runningInContainer reports whether this process is inside a container.
-//
-// Marker files, not cgroup parsing: `/.dockerenv` is created by Docker in every
-// container's root and `/run/.containerenv` is Podman's equivalent. Both were
-// verified on the test host to be present inside the image (readable by the
-// unprivileged `bridge` user) and absent on the host itself. cgroup-based
-// detection is famously brittle across cgroup v1/v2 and rootless runtimes, and
-// this only ever selects the wording of one diagnostic sentence — a wrong
-// answer costs a slightly-off hint, never behaviour, so the cheap check wins.
-func runningInContainer() bool {
-	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
-		if _, err := os.Stat(marker); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // apiLogStatus handles GET /api/logs/status.
