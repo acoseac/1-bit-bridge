@@ -42861,3 +42861,77 @@ no request and an empty working directory). Control on the committed tree:
 the guard removed failed exactly that case, on its message alone. The same
 review moved the two tests' shared stub and enricher setup into helpers
 (SonarCloud's duplication gate, 15.3%), with an atomic request counter.
+
+## 2026-10-14 — one opener of a database runs its migration ladder at a time (backlog B185)
+
+Two processes opening an older database at once (a `bridge doctor` run with
+the new binary beside the new serve's first start, during an upgrade) ran
+the migration ladder side by side. `migrate` reads `user_version` once and
+runs every step above it, so both ran every step, and a step that checks
+before it writes failed the slower opener. The data-integrity review's probe
+had three concurrent `OpenStore` calls on copies of a real v0.2.0 database
+fail 78 of 120 opens with "migration 45 … add playlists.deleted_by:
+duplicate column name": `addColumnsIfMissing` probes `PRAGMA table_info`,
+then ALTERs.
+
+Red first on `be0f895b`: `TestConcurrentOpensOfAnOlderDatabaseAllSucceed`
+(three goroutines open one database at user_version 44, ten rounds) failed
+round 1 in three runs of three, with v45's `deleted_by` or v49's
+`folder_art_key` duplicate. The backlog's own suggestion, taking the
+duplicate-column error as the column existing (the older migrations' rule),
+was built first. The same test then failed one run in three at migration
+52's post, which counts the `backup_epoch` row and inserts one when there
+is none: "UNIQUE constraint failed: backup_epoch.id". Each step of the ladder
+was written to be re-run after a crash, not run beside another opener, so
+tolerating races one at a time would mean editing shipped migrations.
+
+A design consult (Gemini "Argon") agreed on serializing the ladder instead,
+which changes no shipped migration and not the frozen column helper.
+`OpenStore` now holds an exclusive kernel lock on `<db>-migrate.lock`
+(`lockLadder`, `internal/manifest/ladder_lock.go`) from before SQLite opens
+the database until it returns, so a new database's switch to WAL is one
+opener's too. A second opener polls `fsutil.TryLock` every 50 ms, logs once
+after 2 s that it is waiting, and gives up after `ladderLockWait` (5 min)
+with `errLadderLockTimeout`: proceeding would run the ladder beside a holder
+that may still be migrating. A lock that cannot be taken at all (a
+filesystem that keeps no locks, a lock file that cannot be opened) is logged
+and the ladder runs without it, as serve's data-dir lock does. The file is a
+sidecar in `storeOpenPaths`, so a symlink there is refused like one at -wal
+or -shm, and it is never removed. The consult's other points checked: its
+claim that `journal_mode(WAL)` before `busy_timeout` in the DSN fails a
+concurrent open did not apply (every database here is already WAL, and the
+lock now covers a new one's switch); the helper tolerance, built first, was
+dropped.
+
+The first run of the lock found it never engaged: every opener logged "could
+not take the migration lock" with `openat v44.db-migrate.lock: no such file
+or directory`. On macOS 27.0.1 an openat(2) with O_CREAT that loses a race
+with another create of the same name answers ENOENT instead of opening the
+file the winner made. Three concurrent openers of one new name, 300 rounds:
+596 of 900 opens failed through `os.Root.OpenFile`, 586 through a raw
+`unix.Openat`, with or without O_NOFOLLOW, and none through `os.OpenFile` on
+the whole path. Retried, every loser opened the file on its second attempt
+(3,000 of 3,000). serve's data-dir lock (B208) opens `server.lock` the same
+way, and took the ENOENT for a data dir that cannot be locked: of two serves
+started at once on a fresh data dir, the loser warned and went on unlocked
+beside the holder. Both locks now open their file through
+`fsutil.OpenLockFile`, the precreate, `os.Root` open and retry moved out of
+`lockServeDataDir`. Red on `be0f895b`'s `lockServeDataDir`:
+`TestServesLockingAFreshDataDirAtOnceTakeItOnce` failed round 2 with
+`openat server.lock: no such file or directory`.
+
+Controls on the committed tree, each restored from git and checked against
+the source:
+- `OpenLockFile` without its retry failed
+  `TestOpenLockFileOpensForEveryConcurrentOpener`,
+  `TestServesLockingAFreshDataDirAtOnceTakeItOnce` and
+  `TestConcurrentOpensOfAnOlderDatabaseAllSucceed`, as predicted.
+- `lockLadder` taking no lock failed the concurrent test,
+  `TestAnOpenerWaitsForAnotherOpenersLadder` and
+  `TestAnOpenerGivesUpOnALadderLockHeldPastTheBound`, as predicted.
+- Proceeding after the bound failed exactly the bound test.
+- The lock left out of `storeOpenPaths` failed exactly
+  `TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`'s
+  `link_at_bridge.db-migrate.lock`.
+The concurrent test passed 30 runs of 30 on the fix, and the lock tests are
+clean under `-race`.
