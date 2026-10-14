@@ -42034,3 +42034,68 @@ That edit was reverted and not committed.
 `TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta` still clears the
 suppression at once when no scan is in flight, and the deferred test's
 retry does the same once the parked scan has returned.
+
+## 2026-10-14 — `stringOf` picks one raw key per alias (backlog B182)
+
+### What was wrong
+
+`stringOf` walks the caller's aliases in order, which is stable across
+scans. For each alias it ranged the raw map and returned the first key
+whose `normaliseRawTagKey` matched and whose value coerced to a non-empty
+string. Go 1.26's swiss maps start every range at a random slot:
+`Iter.Init` sets `entryOffset` and `dirOffset` from `rand()`
+(`src/internal/runtime/maps/table.go`). Two raw keys that normalise to one
+alias therefore flap.
+
+A probe of one map, fifty ranges, `GOTOOLCHAIN=go1.26.6`:
+`REPLAYGAIN_TRACK_GAIN` 47, `replaygain_track_gain` 3. Fresh maps, fifty:
+`MUSICBRAINZ_ALBUM_ID` 9, `MusicBrainz Album Id` 41. Through
+`populateFromTagMetadata`, fifty extractions of one map:
+replay gain `-6.00` 47 and `-3.00` 3; album id
+`11111111-1111-4111-8111-111111111111` 42 and
+`22222222-2222-4222-8222-222222222222` 8
+(`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction`, before the
+fix). A flapping MusicBrainz id or gain is a changed row on every
+version-stale re-read.
+
+The other raw-map ranges do not pick a value that way. `hasAnyRawKey` is
+a presence boolean. `extractMultiValueTagFromRaw` already keeps the
+longest non-empty slice, then the lexicographically smaller slice.
+`id3v2NamedValues` sorts UFID, then dhowden's rename index, then the raw
+key. `stripMP4FreeformLocales` rewrites every freeform value.
+`applyEmbeddedLyricsFromTag` hands every frame to `lyrics.Pick`, which
+sorts by a strict total order. `namedValueOf` and `rawDateYear` call
+`stringOf`, so they follow this fix. Year, track and disc integers come
+from dhowden's accessors after a presence check.
+
+### The fix
+
+`stringOfAlias` collects every raw key that normalises to the alias,
+sorts those keys with `sort.Strings`, and returns the first value
+`coerceRawTagValue` accepts. Empty and whitespace values are still
+skipped, so a later key can answer. Map keys are unique, so the order
+has no ties. The alias loop stays the caller's order.
+
+Ascending raw-key order is the tie-break `id3v2NamedValues` already uses
+on the key. An exact-case canonical key was declined: Picard writes
+`REPLAYGAIN_TRACK_GAIN` and `MusicBrainz Album Id`, other taggers write
+the lowercased form, and no field has one spelling the spec names. The
+rule claims the same file always reads the same way. Under `<`,
+`REPLAYGAIN_TRACK_GAIN` answers before `replaygain_track_gain`, and
+`MUSICBRAINZ_ALBUM_ID` answers before `MusicBrainz Album Id`.
+
+`ExtractorVersion` stays 24. A file with one matching key has nothing to
+choose, so its reading is unchanged. A file that carried two spellings of
+one alias stops flapping on the next re-read; that re-read can take the
+full upsert once, and the scan after it stamps.
+
+### The control
+
+Restoring the first-match range inside `stringOf` made
+`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction` fail again:
+replay gain saw `-6.00` 47 and `-3.00` 3, and the album id saw the spaced
+UUID 46 and the underscored UUID 4. That edit was reverted and not
+committed. `TestOneSpellingOfAnAliasReadsTheValueItCarries` reads each
+spelling alone, fifty times, as the value that key carries.
+`TestAnEmptyEarlierRawKeyLeavesTheLaterValue` keeps the skip of a
+whitespace value.

@@ -2132,9 +2132,34 @@ lost my library."
   because it failed open on an empty codec, until 2026-09-29). `Year()==0` (and a
   Vorbis 1, the next bullet) falls back to `rawDateYear`, `parseYearPrefix` over
   each raw date tag in turn — a valid ISO `2023-06-09` otherwise
-  indexes as year 0. `stringOf` iterates the REQUESTED aliases in priority order,
-  never `range raw` (Go map order is randomised, so a file carrying two matching
-  tags resolved differently across scans).
+  indexes as year 0. `stringOf` asks the requested aliases in the caller's
+  order, so DATE before YEAR stays stable. Two raw keys that normalise to
+  one of those aliases are chosen by the next bullet.
+- **Two raw keys that normalise to one `stringOf` alias are the first non-empty value in ascending raw-key order**
+  (2026-10-14, backlog B182). `stringOf` walked the raw map for each alias
+  and returned the first key whose `normaliseRawTagKey` matched. Go 1.26
+  starts every `range` at a random slot (`Iter.Init` sets `entryOffset`
+  and `dirOffset` from `rand()`), so fifty extractions of one two-key map
+  saw both values: MP4 `REPLAYGAIN_TRACK_GAIN` beside
+  `replaygain_track_gain` (47 and 3), Vorbis `MusicBrainz Album Id` beside
+  `MUSICBRAINZ_ALBUM_ID` (42 and 8). The comment beside the loop called
+  that order deterministic, which held across aliases only.
+  `stringOfAlias` collects every matching key, sorts those raw keys, and
+  returns the first value `coerceRawTagValue` accepts. A value that trims
+  to nothing leaves the next key. Ascending byte order is the same
+  tie-break `id3v2NamedValues` uses on the key. An exact-case canonical
+  key was declined: it would crown one tagger's spelling, and no field
+  has a single canonical spelling. A file with one matching key is
+  unchanged, so `ExtractorVersion` stays 24. The other raw-map ranges
+  were already decided: `hasAnyRawKey` is presence,
+  `extractMultiValueTagFromRaw` keeps the longest list then the
+  lexicographically smaller slice, `id3v2NamedValues` sorts before it
+  walks, `stripMP4FreeformLocales` rewrites every value, and lyrics
+  `Pick` is a total order. `namedValueOf` and `rawDateYear` go through
+  `stringOf`.
+  (`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction`,
+  `TestAnEmptyEarlierRawKeyLeavesTheLaterValue`,
+  `TestOneSpellingOfAnAliasReadsTheValueItCarries`.)
 - **dhowden's Vorbis reader answers year 1 for a DATE it cannot parse, so a
   Vorbis 1 is re-read like a 0** (ExtractorVersion 22, backlog B222, B234).
   `metadataVorbis.Year()` (FLAC, Ogg Vorbis, Opus, Ogg FLAC: every reader whose
