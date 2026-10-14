@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -41,6 +43,10 @@ const portraitGrace = 10 * time.Minute
 // artworkGCNow is the clock the grace reads, a seam so the tests can age the
 // fixtures they write; production never changes it.
 var artworkGCNow = time.Now
+
+// portraitRemove is how the portrait pass removes a file, a seam so a test
+// can cancel the run between two removals; production never changes it.
+var portraitRemove = os.Remove
 
 // artworkPortrait is one portrait file at the top of the cache.
 type artworkPortrait struct {
@@ -95,16 +101,27 @@ func isTopLevelPortrait(walkRoot, path string) bool {
 	return ok
 }
 
-// artworkPortraits lists the portraits at the top of the cache: one
-// ReadDir, and an lstat per portrait. A symlink is not a portrait the
+// canBePortrait reports whether an entry whose type bits are t can be a
+// portrait: a list of kinds refused (fsutil.NotAFile's, and a symlink),
+// never "is a regular file". On Windows a portrait OneDrive has dehydrated
+// (files on demand, a data dir under a synced folder) is ModeIrregular and
+// is still the enricher's file, which "is a regular file" would keep for
+// ever (a pre-merge review of B85). A symlink is not a portrait the
 // enricher wrote and is left alone.
+func canBePortrait(t fs.FileMode) bool {
+	return t&fs.ModeSymlink == 0 && fsutil.NotAFile(t) == ""
+}
+
+// artworkPortraits lists the portraits at the top of the cache: one
+// ReadDir, and an lstat per portrait (canBePortrait says which entries can
+// be one).
 func artworkPortraits(walkRoot string) (byMBID, canonical []artworkPortrait, err error) {
 	entries, err := os.ReadDir(walkRoot)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
+		if !canBePortrait(e.Type()) {
 			continue
 		}
 		name := e.Name()
@@ -193,6 +210,10 @@ type portraitTally struct {
 // artist. The covers' refusal stops the whole run; this one only skips the
 // portraits, with a line saying how to remove them, because the cover GC
 // beside it is still right.
+//
+// A cancelled ctx stops the pass before its next removal and returns
+// ctx.Err(), which runArtworkGC reports as the cover walk's interruption
+// (a pre-merge review of B85).
 func collectPortraits(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir, walkRoot string, dryRun, allowEmpty bool) (portraitTally, error) {
 	var tally portraitTally
 	// The artist set, read here rather than with the covers' keys before
@@ -221,13 +242,16 @@ func collectPortraits(ctx context.Context, stdout, stderr io.Writer, store *mani
 	remove, kept := portraitVerdicts(byMBID, canonical, artistMBIDs, artworkGCNow())
 	tally.kept = kept
 	for _, p := range remove {
+		if err := ctx.Err(); err != nil {
+			return tally, err
+		}
 		reported := artworkReportPath(artworkDir, walkRoot, p.path)
 		if dryRun {
 			fmt.Fprintf(stdout, "would remove: %s\n", reported)
 			tally.removed++
 			continue
 		}
-		if err := os.Remove(p.path); err != nil {
+		if err := portraitRemove(p.path); err != nil {
 			if os.IsNotExist(err) {
 				continue // gone since the listing: nothing left to remove
 			}

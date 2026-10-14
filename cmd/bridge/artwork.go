@@ -474,6 +474,11 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	if present {
 		pt, err := collectPortraits(ctx, stdout, stderr, store, artworkDir, walkRoot, dryRun, allowEmpty)
 		if err != nil {
+			// The cover walk's interruption, read the same way.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintln(stderr, "artwork gc interrupted")
+				return 1
+			}
 			fmt.Fprintf(stderr, "artwork gc: list the artist portraits: %v\n", artworkErrWithoutPath(err))
 			return 1
 		}

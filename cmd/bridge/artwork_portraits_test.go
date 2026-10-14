@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,10 @@ func pastTheGrace(t *testing.T) {
 	t.Cleanup(func() { artworkGCNow = prev })
 }
 
-const secondOrphanArtistMBID = "33333333-3333-4333-8333-333333333333"
+const (
+	secondOrphanArtistMBID = "33333333-3333-4333-8333-333333333333"
+	thirdOrphanArtistMBID  = "44444444-4444-4444-8444-444444444444"
+)
 
 // portraitFixture writes a canonical portrait and hard-links each MBID's
 // portrait to it, as the enricher does (linkOrCopy).
@@ -247,4 +251,105 @@ func TestArtworkGCKeepsAPortraitWrittenWithinTheGrace(t *testing.T) {
 	}
 	mustGone(t, filepath.Join(dir, "artist-"+orphanArtistMBID+".jpg"))
 	mustGone(t, filepath.Join(dir, canonicalName("e")))
+}
+
+// TestCanBePortraitRefusesKindsNotIrregular — what can be a portrait is
+// decided by a list of kinds refused, never "is a regular file": a portrait
+// OneDrive has dehydrated on Windows is ModeIrregular and is still the
+// enricher's file (a pre-merge review of B85). A symlink, a directory and
+// what does not open as a file are refused. No test filesystem here makes a
+// ModeIrregular entry, so the kinds are pinned on their bits.
+func TestCanBePortraitRefusesKindsNotIrregular(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		t    fs.FileMode
+		want bool
+	}{
+		{"regular file", 0, true},
+		{"cloud placeholder (ModeIrregular)", fs.ModeIrregular, true},
+		{"symlink", fs.ModeSymlink, false},
+		{"directory", fs.ModeDir, false},
+		{"Windows junction or mount point (ModeIrregular|ModeDir)", fs.ModeIrregular | fs.ModeDir, false},
+		{"named pipe", fs.ModeNamedPipe, false},
+		{"socket", fs.ModeSocket, false},
+		{"device", fs.ModeDevice, false},
+		{"character device", fs.ModeDevice | fs.ModeCharDevice, false},
+	} {
+		if got := canBePortrait(tc.t); got != tc.want {
+			t.Errorf("%s: canBePortrait(%v) = %v, want %v", tc.name, tc.t, got, tc.want)
+		}
+	}
+}
+
+// TestArtworkGCLeavesASymlinkNamedLikeAPortrait — the enricher writes no
+// symlink, so one named `artist-<mbid>.jpg` for an artist no row names is
+// not a portrait: the link and what it points to both stay.
+func TestArtworkGCLeavesASymlinkNamedLikeAPortrait(t *testing.T) {
+	pastTheGrace(t)
+	store, dir := artworkCacheFixture(t)
+	storeNamingArtist(t, store, keptArtistMBID)
+	target := filepath.Join(t.TempDir(), "elsewhere.jpg")
+	writeFixtureFile(t, target, 64)
+	link := filepath.Join(dir, "artist-"+orphanArtistMBID+".jpg")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
+		t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the symlink was removed: %v", err)
+	}
+	mustExist(t, target)
+}
+
+// TestArtworkGCPortraitPassStopsWhenCancelled — a SIGINT that lands while
+// the portrait pass removes stops it before the next removal, and the run
+// ends as the cover walk's interruption does: "artwork gc interrupted",
+// exit 1, no summary (a pre-merge review of B85). The seam cancels during
+// the first removal, so exactly one of three orphans goes.
+func TestArtworkGCPortraitPassStopsWhenCancelled(t *testing.T) {
+	pastTheGrace(t)
+	store, dir := artworkCacheFixture(t)
+	storeNamingArtist(t, store, keptArtistMBID)
+	orphans := []string{orphanArtistMBID, secondOrphanArtistMBID, thirdOrphanArtistMBID}
+	for _, m := range orphans {
+		writeFixtureFile(t, filepath.Join(dir, "artist-"+m+".jpg"), 64)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	removals := 0
+	prev := portraitRemove
+	portraitRemove = func(path string) error {
+		removals++
+		cancel()
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { portraitRemove = prev })
+
+	var stdout, stderr bytes.Buffer
+	rc := runArtworkGC(ctx, &stdout, &stderr, store, dir, false, false)
+	if rc != 1 {
+		t.Errorf("rc=%d, want 1", rc)
+	}
+	if !strings.Contains(stderr.String(), "artwork gc interrupted") {
+		t.Errorf("stderr: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "GC: removed") {
+		t.Errorf("an interrupted run printed its summary: %s", stdout.String())
+	}
+	if removals != 1 {
+		t.Errorf("removals = %d, want 1: the pass went on after the cancel", removals)
+	}
+	left := 0
+	for _, m := range orphans {
+		if _, err := os.Stat(filepath.Join(dir, "artist-"+m+".jpg")); err == nil {
+			left++
+		}
+	}
+	if left != 2 {
+		t.Errorf("%d orphan portrait(s) left, want 2", left)
+	}
 }
