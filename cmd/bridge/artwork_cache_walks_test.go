@@ -365,9 +365,12 @@ func TestArtworkCapSweeperSaysNothingAboutTheFilesystemsLostFound(t *testing.T) 
 // artist no row names and those filed under an artworkVersion alias, which
 // nothing reads (the console resolves an alias before it derives,
 // TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey). It kept artwork keys
-// alone, and removed every artist thumbnail. The portraits themselves carry
-// no size suffix and are out of its scope.
+// alone, and removed every artist thumbnail. The portraits are decided from
+// the same artist set (backlog B85): the named artist's stays, the unnamed
+// one's goes, and so does a canonical no kept portrait links to (here, a
+// separate file).
 func TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	ctx := context.Background()
 	if err := store.UpsertTrack(ctx, &manifest.Track{
@@ -388,12 +391,12 @@ func TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames(t *testing.T) {
 		thumb(manifest.ArtistThumbKey(keptArtistMBID), 250),
 		thumb(manifest.ArtistThumbKey(keptArtistMBID), 500),
 		"artist-" + keptArtistMBID + ".jpg",
-		"artist-" + orphanArtistMBID + ".jpg",
-		"artist-name-" + strings.Repeat("c", 64) + ".jpg",
 	}
 	remove := []string{
 		thumb(manifest.ArtistThumbKey(orphanArtistMBID), 250),
 		thumb(alias, 250),
+		"artist-" + orphanArtistMBID + ".jpg",
+		"artist-name-" + strings.Repeat("c", 64) + ".jpg",
 	}
 	for _, p := range append(append([]string{}, keep...), remove...) {
 		writeFixtureFile(t, filepath.Join(dir, p), 10)
@@ -409,7 +412,7 @@ func TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames(t *testing.T) {
 	for _, p := range remove {
 		mustGone(t, filepath.Join(dir, p))
 	}
-	if !strings.Contains(stdout, "removed 2 orphan(s), kept 4 known cache file(s), 3 skipped") {
+	if !strings.Contains(stdout, "removed 4 orphan(s), kept 5 known cache file(s), 0 skipped") {
 		t.Errorf("summary: %s", stdout)
 	}
 }

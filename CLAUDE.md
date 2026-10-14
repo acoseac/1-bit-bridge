@@ -4803,6 +4803,52 @@ no failing test — which is the shape to expect in this area.
   `no_image` and nothing fetches it again, a `local-` cover included (the
   cap's docblock said a 202 and a re-enrichment until 2026-09-29; backlog
   B84).
+- **`artwork --gc` collects the portraits of artists no track row names**
+  (2026-10-14, backlog B85). The GC judged a file by its size suffix, so the
+  portraits at the top of the cache, `artist-<mbid>.jpg` (what the console
+  and `/v1/artist-image` read) and the name-hashed canonical
+  `artist-name-<sha256>.jpg` the enricher fetches once per artist name and
+  hard-links each MBID path to, were "skipped (non-cache file)" whatever the
+  store said, and an artist whose tracks were removed or re-tagged kept both
+  for ever. The portrait pass (`collectPortraits`, after the cover walk,
+  which leaves top-level portraits to it) keeps an MBID portrait while
+  `$.artistMBID` names it (the same set as the thumbnails; the enricher
+  fetches a portrait only under the MBID it stamps on the track), and a
+  canonical while a portrait that STAYS is the same file (`os.SameFile`,
+  compared within one size): **never from the name** (the hash is one-way
+  and hashes `artistImageQueryName`, which no row stores), and **against
+  the kept portraits, not every portrait**, so a canonical whose last link
+  goes in this run goes with it, in a dry run too. Where the filesystem
+  refused the hard link, `linkOrCopy` copied, so that canonical shares no
+  file and is removed: the MBID copy stays and serves, at the cost of one
+  Deezer fetch if a new MBID of that name ever needs it. **The pass reads
+  the artist set right before it runs, and never removes a portrait written
+  in the last ten minutes** (`portraitGrace`; a pre-merge review): `artwork
+  --gc` can run beside `bridge serve`, whose enricher writes a canonical and
+  links it before the track row names the artist, so a set read before the
+  cover walk, or a fresh file, would delete a portrait being served. Left
+  open: a NEW hard link to an OLD canonical (its mtime is the canonical's)
+  in the milliseconds between the link and the row's commit; run the GC
+  with the bridge idle to rule it out. **An empty artist
+  set removes no portrait without `--allow-empty`**: it keeps them with a
+  line on stderr and the cover GC goes on (exit 0), since covers have their
+  own refusal and a portrait comes back only through a fetch. Only the
+  enricher's names at the top of the cache are portraits; anything else is
+  skipped as before. **Which entries can be one is a list of kinds refused,
+  never "is a regular file"** (`canBePortrait`: `fsutil.NotAFile`'s kinds,
+  and a symlink, which the enricher never writes): on Windows a portrait
+  OneDrive has dehydrated is `ModeIrregular` and is still the enricher's
+  file. **A cancel stops the pass before its next removal**, and the run
+  ends as the cover walk's interruption does (`artwork gc interrupted`,
+  exit 1, no summary) (`TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames`,
+  `TestArtworkGCPortraitsDryRunRemovesNothing`,
+  `TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist`,
+  `TestArtworkGCPortraitCopyKeepsTheMBIDFile`,
+  `TestArtworkGCLeavesWhatIsNoPortrait`, `TestArtworkGCSharedCanonical`,
+  `TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`,
+  `TestCanBePortraitRefusesKindsNotIrregular`,
+  `TestArtworkGCLeavesASymlinkNamedLikeAPortrait`,
+  `TestArtworkGCPortraitPassStopsWhenCancelled`).
 - **A sidecar walk passes over, at the WALK, every directory a library walk
   skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it
   lists it** (2026-10-02, backlog B207). With `variantsDir` on its own
