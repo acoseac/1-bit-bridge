@@ -32,8 +32,11 @@ func TestClearMissingCountsRemovesTheSidecarsTheDeleteDrops(t *testing.T) {
 	// and its rows dropped before the clear, so the command has nothing
 	// on disk to unlink for it.
 	dropSidecarRows(t, ctx, s, "bare/01.flac")
-	os.Remove(bareVar)
-	os.Remove(bareWave)
+	for _, path := range []string{bareVar, bareWave} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	markTrackMissing(t, ctx, s, "gone/01.flac")
 	markTrackMissing(t, ctx, s, "bare/01.flac")
 	markTrackMissing(t, ctx, s, "routed/01.flac")
