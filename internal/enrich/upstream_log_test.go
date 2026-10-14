@@ -49,40 +49,70 @@ func runBusyUpstreams(t *testing.T) upstreamRun {
 	caa := httptest.NewServer(scriptHandler(t, []int{statusHang, statusHang, http.StatusOK}, ""))
 	defer caa.Close()
 
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	mbClient := &http.Client{Timeout: busyClientTimeout}
-	caaClient := &http.Client{Timeout: busyClientTimeout}
-	e := NewEnricher(store,
-		NewMusicBrainzClient(mb.URL, "upstream-log-test", mbClient),
-		NewCoverArtClient(caa.URL, "upstream-log-test", caaClient),
-		nil, filepath.Join(dir, "art"))
-	tuneForTest(e)
-
-	ctx := context.Background()
+	rig := newLogTestRig(t, mb, caa, &http.Client{Timeout: busyClientTimeout}, &http.Client{Timeout: busyClientTimeout})
 	var retried, stamped []string
 	for i, local := range []bool{true, true, true, false, false, false} {
 		tr := logTrack(i, local)
-		if err := store.UpsertTrack(ctx, tr); err != nil {
-			t.Fatal(err)
-		}
-		e.enrichOne(ctx, tr)
-		left, err := store.UnenrichedTracks(ctx, 20)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if unenrichedPath(left, tr.Path) {
+		if rig.enrich(t, tr) {
 			retried = append(retried, tr.Path)
 		} else {
 			stamped = append(stamped, tr.Path)
 		}
 	}
 	return upstreamRun{retried: retried, stamped: stamped}
+}
+
+// logTestRig is the store and the enricher every case here drives, with
+// MusicBrainz and Cover Art Archive at the two test servers.
+type logTestRig struct {
+	store *manifest.Store
+	e     *Enricher
+}
+
+// newLogTestRig opens a store in a temp dir and an enricher over the two
+// servers; a nil client takes the package default.
+func newLogTestRig(t *testing.T, mb, caa *httptest.Server, mbClient, caaClient *http.Client) logTestRig {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	e := NewEnricher(store,
+		NewMusicBrainzClient(mb.URL, "upstream-log-test", mbClient),
+		NewCoverArtClient(caa.URL, "upstream-log-test", caaClient),
+		nil, filepath.Join(dir, "art"))
+	tuneForTest(e)
+	return logTestRig{store: store, e: e}
+}
+
+// enrich upserts tr, enriches it once, and reports whether it was left
+// unenriched for a later batch (retried) rather than stamped.
+func (r logTestRig) enrich(t *testing.T, tr *manifest.Track) bool {
+	t.Helper()
+	ctx := context.Background()
+	if err := r.store.UpsertTrack(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	r.e.enrichOne(ctx, tr)
+	left, err := r.store.UnenrichedTracks(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return unenrichedPath(left, tr.Path)
+}
+
+// artistThen answers MusicBrainz's artist search with logArtistBody and
+// every other request with rest.
+func artistThen(rest http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/artist") {
+			io.WriteString(w, logArtistBody)
+			return
+		}
+		rest(w, r)
+	}
 }
 
 func TestABusyUpstreamWarnsOnceAndAnswersAtInfo(t *testing.T) {
@@ -121,11 +151,7 @@ func TestABusyMusicBrainzRetriesAndACoverMissStillStamps(t *testing.T) {
 }
 
 func TestACleanMissIsDebugAndStillStamps(t *testing.T) {
-	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/artist") {
-			io.WriteString(w, logArtistBody)
-			return
-		}
+	mb := httptest.NewServer(artistThen(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer mb.Close()
@@ -133,34 +159,13 @@ func TestACleanMissIsDebugAndStillStamps(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer caa.Close()
-
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	e := NewEnricher(store,
-		NewMusicBrainzClient(mb.URL, "upstream-log-test", nil),
-		NewCoverArtClient(caa.URL, "upstream-log-test", nil),
-		nil, filepath.Join(dir, "art"))
-	tuneForTest(e)
+	rig := newLogTestRig(t, mb, caa, nil, nil)
 
 	rec := loggingtest.Record(t)
-	ctx := context.Background()
 	for i := 0; i < 2; i++ {
-		tr := logTrack(10+i, false)
-		if err := store.UpsertTrack(ctx, tr); err != nil {
-			t.Fatal(err)
+		if rig.enrich(t, logTrack(10+i, false)) {
+			t.Fatalf("clean miss %d left unenriched, want it stamped", i)
 		}
-		e.enrichOne(ctx, tr)
-	}
-	left, err := store.UnenrichedTracks(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 0 {
-		t.Fatalf("clean misses left %d unenriched, want them stamped", len(left))
 	}
 	for _, msg := range []string{"release-group lookup", "artwork"} {
 		debug := linesAt(rec, slog.LevelDebug, msg)
@@ -172,11 +177,7 @@ func TestACleanMissIsDebugAndStillStamps(t *testing.T) {
 }
 
 func TestAnUnexpectedUpstreamFailureStaysErrorAndStamps(t *testing.T) {
-	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/artist") {
-			io.WriteString(w, logArtistBody)
-			return
-		}
+	mb := httptest.NewServer(artistThen(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, "{")
 	}))
@@ -185,31 +186,10 @@ func TestAnUnexpectedUpstreamFailureStaysErrorAndStamps(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer caa.Close()
-
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	e := NewEnricher(store,
-		NewMusicBrainzClient(mb.URL, "upstream-log-test", nil),
-		NewCoverArtClient(caa.URL, "upstream-log-test", nil),
-		nil, filepath.Join(dir, "art"))
-	tuneForTest(e)
+	rig := newLogTestRig(t, mb, caa, nil, nil)
 
 	rec := loggingtest.Record(t)
-	ctx := context.Background()
-	tr := logTrack(20, false)
-	if err := store.UpsertTrack(ctx, tr); err != nil {
-		t.Fatal(err)
-	}
-	e.enrichOne(ctx, tr)
-	left, err := store.UnenrichedTracks(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 0 {
+	if rig.enrich(t, logTrack(20, false)) {
 		t.Fatal("a non-transient artwork failure left the track unenriched")
 	}
 	if got := linesAt(rec, slog.LevelError, "artwork"); len(got) != 1 {
