@@ -195,6 +195,65 @@ func TestAnSACDCoverChangeReachesTheRowsWithoutExpanding(t *testing.T) {
 	f.requireArt(t, "")
 }
 
+// TestAnSACDCoverThatCouldNotBeReadKeepsItsArtAndIsRetried pins the unsettled
+// branch of the container's gate: a cover change whose read fails keeps the art
+// the rows had and records folderArtUnsettledKey, without expanding the image,
+// and the first scan that reads the cover gives the rows the new one.
+func TestAnSACDCoverThatCouldNotBeReadKeepsItsArtAndIsRetried(t *testing.T) {
+	f := newSACDCoverFixture(t)
+	f.writeISO(t)
+	f.writeCover(t, coverBytes("first"), sacdCoverWhen)
+	f.scan(t, "with cover")
+	first := f.art(t, sacdCoverTrack)
+
+	f.writeCover(t, coverBytes("second"), sacdCoverWhen.Add(time.Hour))
+	f.sc.readArt = failingArtRead("cover.jpg")
+	f.scan(t, "cover changed, its read failing")
+	f.requireExpands(t, 1)
+	f.requireArt(t, first)
+	if k := f.key(t, sacdCoverTrack); k != folderArtUnsettledKey {
+		t.Fatalf("folder_art_key = %q, want %q", k, folderArtUnsettledKey)
+	}
+
+	f.sc.readArt = nil
+	f.scan(t, "the cover read")
+	f.requireExpands(t, 1)
+	second := f.art(t, sacdCoverTrack)
+	if second == "" || second == first {
+		t.Fatalf("ArtworkMBID = %q after the read, was %q", second, first)
+	}
+	f.requireArt(t, second)
+	if k := f.key(t, sacdCoverTrack); k == "" || k == folderArtUnsettledKey {
+		t.Fatalf("folder_art_key = %q, want the cover's key", k)
+	}
+}
+
+// TestAnSACDCoverWhoseCacheIsGoneIsRestoredWithoutExpanding pins the recovery
+// branch: an unchanged image whose rows name a local- cover whose cache file is
+// gone reads the folder's cover again, without expanding the image.
+func TestAnSACDCoverWhoseCacheIsGoneIsRestoredWithoutExpanding(t *testing.T) {
+	f := newSACDCoverFixture(t)
+	f.writeISO(t)
+	f.writeCover(t, coverBytes("cached"), sacdCoverWhen)
+	f.scan(t, "with cover")
+	art := f.art(t, sacdCoverTrack)
+	key := f.key(t, sacdCoverTrack)
+	cache := filepath.Join(f.sc.artDir, art+"-500.jpg")
+	if err := os.Remove(cache); err != nil {
+		t.Fatalf("remove the cover cache: %v", err)
+	}
+
+	f.scan(t, "the cache gone")
+	f.requireExpands(t, 1)
+	f.requireArt(t, art)
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("the cover cache was not restored: %v", err)
+	}
+	if k := f.key(t, sacdCoverTrack); k != key {
+		t.Fatalf("folder_art_key = %q, want %q", k, key)
+	}
+}
+
 func TestAnSACDImageWithNoCoverScansAsBefore(t *testing.T) {
 	f := newSACDCoverFixture(t)
 	f.writeISO(t)

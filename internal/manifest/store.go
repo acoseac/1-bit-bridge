@@ -3460,13 +3460,16 @@ func (s *Store) stampFolderArtKeys(ctx context.Context, tracks []*Track) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET folder_art_key = ?, missing_count = 0 WHERE path = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
 	for _, t := range tracks {
 		if t == nil || t.Path == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE tracks SET folder_art_key = ?, missing_count = 0 WHERE path = ?`,
-			t.folderArtKey, t.Path); err != nil {
+		if _, err := stmt.ExecContext(ctx, t.folderArtKey, t.Path); err != nil {
 			return err
 		}
 	}

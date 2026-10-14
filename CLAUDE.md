@@ -512,7 +512,9 @@ lost my library."
   row is the cover that tile shows.
   (`TestAnSACDImageCarriesTheCoverBesideIt`,
   `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`,
-  `TestAnSACDImageWithNoCoverScansAsBefore`.)
+  `TestAnSACDImageWithNoCoverScansAsBefore`,
+  `TestAnSACDCoverThatCouldNotBeReadKeepsItsArtAndIsRetried`,
+  `TestAnSACDCoverWhoseCacheIsGoneIsRestoredWithoutExpanding`.)
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the
