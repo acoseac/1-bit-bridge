@@ -42016,8 +42016,9 @@ waits `duplicatesDeferRetry`, and does not call `sweepFinished`. The
 Jobs card therefore stays on "re-evaluating now" (`running` is still
 set from `sweepStarted`) and the summary stays on the policy the last
 pass stamped. The commit-time re-check stays on `activeScans`. The
-in-scan caller is exempt; a sentinel there is an Info line and does not
-fail the scan. `IsScanning` is not widened.
+in-scan caller passes `insideScan`, never reaches the guard and so never
+sees the sentinel (the review round removed its unreachable handling).
+`IsScanning` is not widened.
 
 The only production caller of `RestampDuplicates` is the sweeper. Scan
 and `ScanSubtree` go through `restampDuplicatesNonFatal`. A pass that

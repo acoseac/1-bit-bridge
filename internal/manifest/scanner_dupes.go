@@ -103,12 +103,6 @@ func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
 	// per scan is what turns it into a measured one.
 	start := time.Now()
 	n, err := s.restampDuplicates(ctx, true)
-	if errors.Is(err, ErrDupeRestampDeferred) {
-		// The in-scan caller is exempt from the guard. A deferred answer
-		// here would be a pass that did not stamp, not a failed scan.
-		scanLogger.Info("duplicate stamping deferred: a scan is in flight", "took", time.Since(start))
-		return
-	}
 	if err != nil {
 		// A pass the shutdown stopped is not a failed one: its stamps
 		// commit in one transaction, which rolled back, and the next

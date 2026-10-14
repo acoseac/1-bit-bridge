@@ -1234,8 +1234,8 @@ lost my library."
   branch: it puts the nudge back, waits `duplicatesDeferRetry`, and does
   not call `sweepFinished`, so the Jobs card stays on "re-evaluating now"
   and `dupe_summary` stays on the policy the last pass actually stamped.
-  The in-scan caller is exempt (`insideScan`); a sentinel there is logged
-  and does not fail the scan. `noteRestampCovered` still runs only after
+  The in-scan caller passes `insideScan`, never reaches the guard and so
+  never sees the sentinel. `noteRestampCovered` still runs only after
   stamps commit. Don't take `s.mu`. Don't widen `IsScanning`.
   (`TestAPolicyChangeDuringANoOpSubtreeScanIsDeferred`,
   `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass`,
