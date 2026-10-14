@@ -42602,3 +42602,25 @@ pin). Controls, each on the committed tree and restored from git:
   kept ones failed exactly the main case (the last-link canonical survived)
   and the dry-run case (it was not named).
 - The empty-set guard disabled failed exactly the empty-set case.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) found a real race: `artwork
+--gc` takes no lock against a running `bridge serve` (the cover GC has the
+same race), and the portrait pass used the artist set read before the cover
+walk. An artist enriched during the walk, or a canonical caught between its
+write and its hard link, was an orphan to the pass. Now the pass reads
+`DistinctArtistMBIDs` itself, right before it lists the cache, and keeps
+any portrait whose mtime is within `portraitGrace` (ten minutes), whatever
+the store says. That covers every file the enricher writes during or just
+before the run: a new canonical, and a copy where links are refused. It
+cannot cover a new hard link to an old canonical, whose mtime is the
+canonical's (ctime would show it, but is not portable), in the milliseconds
+between the link and the track row's commit; the rule says to run the GC
+with the bridge idle. Tests age their fixtures through the `artworkGCNow`
+seam. Taken too: the shared-canonical cases the fixture was built for
+(`TestArtworkGCSharedCanonical`: one MBID named keeps the canonical; none
+named removes all three in one run, though the link count was 3).
+Control: the grace disabled failed exactly
+`TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`. Not a defect: the
+review's case-sensitivity point, since the enricher writes MusicBrainz's
+lowercase MBIDs and `hex.EncodeToString`'s lowercase hash, and both sides of
+the MBID comparison are lowercased.

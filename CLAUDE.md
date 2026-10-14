@@ -4782,7 +4782,15 @@ no failing test — which is the shape to expect in this area.
   goes in this run goes with it, in a dry run too. Where the filesystem
   refused the hard link, `linkOrCopy` copied, so that canonical shares no
   file and is removed: the MBID copy stays and serves, at the cost of one
-  Deezer fetch if a new MBID of that name ever needs it. **An empty artist
+  Deezer fetch if a new MBID of that name ever needs it. **The pass reads
+  the artist set right before it runs, and never removes a portrait written
+  in the last ten minutes** (`portraitGrace`; a pre-merge review): `artwork
+  --gc` can run beside `bridge serve`, whose enricher writes a canonical and
+  links it before the track row names the artist, so a set read before the
+  cover walk, or a fresh file, would delete a portrait being served. Left
+  open: a NEW hard link to an OLD canonical (its mtime is the canonical's)
+  in the milliseconds between the link and the row's commit; run the GC
+  with the bridge idle to rule it out. **An empty artist
   set removes no portrait without `--allow-empty`**: it keeps them with a
   line on stderr and the cover GC goes on (exit 0), since covers have their
   own refusal and a portrait comes back only through a fetch. Only the
@@ -4791,7 +4799,8 @@ no failing test — which is the shape to expect in this area.
   `TestArtworkGCPortraitsDryRunRemovesNothing`,
   `TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist`,
   `TestArtworkGCPortraitCopyKeepsTheMBIDFile`,
-  `TestArtworkGCLeavesWhatIsNoPortrait`).
+  `TestArtworkGCLeavesWhatIsNoPortrait`, `TestArtworkGCSharedCanonical`,
+  `TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`).
 - **A sidecar walk passes over, at the WALK, every directory a library walk
   skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it
   lists it** (2026-10-02, backlog B207). With `variantsDir` on its own
