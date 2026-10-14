@@ -42808,3 +42808,45 @@ and `#recycle`. A pre-merge review (Gemini "Argon") found that case read
 the GC and the cap but not the empty-store guard; it now asks the guard
 too (a dry run over an empty store must refuse), and the same control
 failed it at that first assertion, in both subtests.
+
+## 2026-10-14 — the shared sox probe keeps its last answer through a timeout, off the request path (backlog B142)
+
+`soxToolchainCache.snapshot` ran `transcode.ProbeSox` under its mutex
+whenever its 30 s TTL had run out, and `ProbeSox` gives `sox --help` 2 s. A
+probe that timed out was cached as no sox for the TTL, so on a host whose sox
+is only slow to start the live upscale and analysis gates closed,
+`/v1/health` said `upscaleEnabled: false`, `/v1/upscale` refused, the sweeps
+skipped and the manifest provider stripped every track's `variants` for the
+window, which a phone that synced in it would take as the renditions gone
+(the iOS sync writes a row's variants from the page). And the probe ran on
+the request path: the first health check, manifest page, stats read or SSE
+tick after the TTL waited for it, every concurrent one behind it (measured
+in the B105 session: 2217 ms for the health request that ran a 2.2 s
+stand-in).
+
+Now only the first snapshot waits for a probe (concurrent first callers
+share it). After the TTL a snapshot answers from the cache at once and
+starts one background probe (`refresh`, a channel per probe in flight), which
+replaces the verdict when it lands. A timeout is typed
+(`transcode.ErrSoxProbeTimeout`, the same message as before) and keeps the
+last verdict a probe answered, with one WARN per run of timeouts; a probe
+that answers ends the run. A missing sox (`ErrSoxMissing`, LookPath failed,
+no fork) and a sox that runs and fails are verdicts the moment their probe
+answers, as before; with nothing answered yet a timeout is the verdict, so a
+first slow probe keeps the gates closed until one answers, as before. The
+one-probe pin (`TestServeReadsSoxThroughTheSharedProbe`) now names
+`soxToolchainCache.refresh` as the probe's one caller.
+
+Red first on main (`7fa929da`) with only the sentinel and the `refreshing`
+field stubbed: exactly the two predicted cases failed (the timeout read as no
+sox; the snapshot after the TTL took 3.0 s and answered the new verdict);
+the guards stayed green (a missing sox closes, a first timeout is the
+verdict, concurrent first snapshots share one probe). Controls on the
+committed tree, each restored from git: a timeout not kept failed exactly the
+timeout case; the snapshot after the TTL waiting failed exactly the no-wait
+case; a missing sox kept like a timeout failed the missing-sox case and the
+no-wait case's last step (the probe's missing-sox answer must replace the
+verdict), a prediction that missed the second; the first snapshot not waiting
+failed the no-answer-yet case and the three cases whose premise is a first
+probe that answered; the run of timeouts said once ever failed exactly the
+timeout case's line count.
