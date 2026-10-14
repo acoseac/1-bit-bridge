@@ -857,7 +857,12 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	if err != nil {
 		return false, err
 	}
-	if err := writeArtworkAtomic(namePath, data); err != nil {
+	// Through the cover writes' primitive (backlog B168), for its two
+	// checks: the path stays inside the cache, and the body is an image.
+	// This write was the buffered writeArtworkAtomic, and an allowlisted
+	// host that answered with HTML had it stored as the canonical and
+	// linked to the MBID path `/v1/artist-image` serves as image/jpeg.
+	if err := writeArtworkAtomicStream(e.CacheDir, namePath, bytes.NewReader(data), maxDeezerImageBytes); err != nil {
 		return false, err
 	}
 	if err := linkOrCopy(namePath, mbidPath); err != nil {
