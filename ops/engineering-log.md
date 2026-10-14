@@ -42850,3 +42850,15 @@ verdict), a prediction that missed the second; the first snapshot not waiting
 failed the no-answer-yet case and the three cases whose premise is a first
 probe that answered; the run of timeouts said once ever failed exactly the
 timeout case's line count.
+
+A pre-merge review (Gemini "Argon") found the cache sound and named one gap
+the move off the request path makes matter: `ProbeSox`'s 2 s kills the
+process it started, but `CombinedOutput` then waits for the output pipe, and
+a PATH wrapper's child that outlives the killed wrapper holds it open. The
+background probe then never landed, so the cache kept its last verdict for as
+long as that child lived (on main, the request that ran the probe waited that
+long). `ProbeSox` now sets `exec.Cmd.WaitDelay` (`soxProbeWaitDelay`, 1 s):
+`TestProbeSoxTimeoutDoesNotWaitForAChildHoldingItsOutput` (a `/bin/sh`
+wrapper whose background `sleep 12` holds the pipe) answers
+`ErrSoxProbeTimeout` in 3.0 s; with the line removed it took 12.0 s and
+failed.
