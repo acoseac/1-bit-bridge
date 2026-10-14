@@ -42,6 +42,9 @@ func TestOpenStoreAsRootKeepsTheInstallOwner(t *testing.T) {
 	want := []fsutil.OwnerChange{
 		{Dst: dir, UID: 4242, GID: 4243},  // the data directory it made
 		{Dst: path, UID: 4242, GID: 4243}, // the database it created
+		// The migration lock beside it (backlog B185): left root's, the
+		// service could not open it again.
+		{Dst: path + ladderLockSuffix, UID: 4242, GID: 4243},
 	}
 	got := changes()
 	if len(got) != len(want) {

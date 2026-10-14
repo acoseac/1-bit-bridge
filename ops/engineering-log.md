@@ -42951,3 +42951,14 @@ or more openers could lose the create race more than three times, did not
 hold when measured: with 3, 8 and 16 concurrent openers, 300 rounds each,
 every one opened the file by its second attempt (a loser loses only to the
 one create), so `lockFileOpenTries` stays 3.
+
+The full `make check` found three tests whose premise the lock changed, all
+fixed in the tests: the as-root owner tests (`TestOpenStoreAsRootKeepsTheInstallOwner`
+and backup's two restore tests) now list the lock file among the files given
+the install's owner, which is right, since a root-owned lock would keep the
+service out of it. `TestTwoOpenersLeaveTheMapToTheOneThatMigrates` held a
+first opener inside the FTS row-map migration and waited for a second to
+enter it, which the lock now prevents. The map's own guard still matters on
+the lock's fallback (a filesystem without locks, a binary without the
+lock), so the test now plants a directory where the lock file goes and runs
+both openers through that fallback, the first test of it.
