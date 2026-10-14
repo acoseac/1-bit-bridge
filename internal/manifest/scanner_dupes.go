@@ -9,11 +9,19 @@ package manifest
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 )
+
+// ErrDupeRestampDeferred is what an external stamping pass returns when a
+// scan is in flight at the commit. The scan may be a subtree scan that
+// commits nothing, and that scan does not stamp, so a zero count with a
+// nil error would read as applied. The caller retries. An in-scan pass
+// never returns this: it is the scan whose tail stamps.
+var ErrDupeRestampDeferred = errors.New("duplicate stamping deferred: a scan is in flight")
 
 // SetDupePolicy installs the policy-snapshot source the stamping pass
 // reads at the START of each run. cmd/bridge wires a closure over the
@@ -85,7 +93,8 @@ func (s *Scanner) stampsBehindDeletions(ctx context.Context) bool {
 // next scan.
 //
 // insideScan=true: the caller holds s.mu and is itself what makes
-// activeScans non-zero, so it must never hit the abandon guard.
+// activeScans non-zero, so it must never hit the deferral guard.
+// ErrDupeRestampDeferred is for the external caller only.
 func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
 	// The duration is logged unconditionally because this pass is
 	// WHOLE-LIBRARY even when it runs in a subtree scan's tail. That is what
@@ -94,6 +103,12 @@ func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
 	// per scan is what turns it into a measured one.
 	start := time.Now()
 	n, err := s.restampDuplicates(ctx, true)
+	if errors.Is(err, ErrDupeRestampDeferred) {
+		// The in-scan caller is exempt from the guard. A deferred answer
+		// here would be a pass that did not stamp, not a failed scan.
+		scanLogger.Info("duplicate stamping deferred: a scan is in flight", "took", time.Since(start))
+		return
+	}
 	if err != nil {
 		// A pass the shutdown stopped is not a failed one: its stamps
 		// commit in one transaction, which rolled back, and the next
@@ -232,16 +247,17 @@ func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, 
 	// above is a SNAPSHOT: two full-library streams plus the election,
 	// which on a large library is seconds of wall clock. An external
 	// caller (the sweeper) passed its own IsScanning() gate before all
-	// of that, so a scan may have started since — and that scan runs its
-	// own stamping tail from fresher state. Committing here would write
-	// the stale snapshot over it, un-suppressing rows the scan just
-	// suppressed (or re-suppressing rows it cleared) with no third pass
-	// to heal them until the next scan.
+	// of that, so a scan may have started since. Committing here would
+	// write the stale snapshot over the scan, un-suppressing rows the
+	// scan just suppressed (or re-suppressing rows it cleared).
 	//
-	// Abandoning is the cheap, correct response: stamps are best-effort
-	// and this pass had nothing the scan's own tail won't produce. Taking
-	// s.mu instead would deadlock the in-scan callers and, for the
-	// external ones, block the scan for the length of two library walks.
+	// Standing down is the cheap response. It is a deferral, not an
+	// applied pass: a subtree scan that commits nothing skips its
+	// stamping tail, so a zero count with a nil error would leave the
+	// old suppressions in place while the caller recorded success.
+	// Taking s.mu instead would deadlock the in-scan callers and, for
+	// the external ones, block the scan for the length of two library
+	// walks. An in-scan caller is the scan and is exempt.
 	//
 	// Residual, accepted: a scan that starts AND finishes entirely inside
 	// this window is undetectable here. A full scan walks the library, so
@@ -251,9 +267,9 @@ func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, 
 		hook()
 	}
 	if !insideScan && s.activeScans.Load() > 0 {
-		scanLogger.Info("duplicate stamping abandoned: scan started mid-pass (its tail applies the current policy)",
+		scanLogger.Info("duplicate stamping deferred: a scan is in flight",
 			"stamps", len(stamps))
-		return 0, nil
+		return 0, ErrDupeRestampDeferred
 	}
 
 	n, err := s.store.ApplyDupeStamps(ctx, stamps)

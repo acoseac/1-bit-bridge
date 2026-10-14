@@ -1219,6 +1219,27 @@ lost my library."
   it deadlocks the in-scan callers and, for external ones, blocks the scan for
   two library walks; and **don't widen the public `IsScanning`** to cover subtree
   scans, which drives the admin badge, the SSE fast tick and the booklet-GC skip.
+  The stand-down is `ErrDupeRestampDeferred` (the next bullet).
+- **An external restamp that finds a scan in flight returns
+  `ErrDupeRestampDeferred` and stamps nothing** (2026-10-14, backlog
+  B184). That check used to return `(0, nil)`. The duplicates sweeper
+  logged that as applied and did not re-arm: `IsScanning` sees a full
+  scan only. `ScanSubtree`'s restamp tail runs only when that scan
+  committed, settled, deleted or renamed a row, or a stamped row was
+  deleted outside it. A subtree scan of an unchanged folder stays in
+  `activeScans` for its whole body and then skips the tail, so a policy
+  change from highest-quality to off left the losing copy
+  `dupe_suppressed = 1` after the pass and after another subtree scan of
+  the same folder. The sweeper treats the sentinel like its `IsScanning`
+  branch: it puts the nudge back, waits `duplicatesDeferRetry`, and does
+  not call `sweepFinished`, so the Jobs card stays on "re-evaluating now"
+  and `dupe_summary` stays on the policy the last pass actually stamped.
+  The in-scan caller is exempt (`insideScan`); a sentinel there is logged
+  and does not fail the scan. `noteRestampCovered` still runs only after
+  stamps commit. Don't take `s.mu`. Don't widen `IsScanning`.
+  (`TestAPolicyChangeDuringANoOpSubtreeScanIsDeferred`,
+  `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass`,
+  `TestDuplicatesSweeperReArmsWhenThePassDefers`.)
 - **A row deleted where no stamping pass follows reaches the duplicate stamps
   through a COUNT kept where every deletion passes** (2026-10-02, backlog
   B218). The console's delete retires its rows (`retireAndRescan`, threshold 1)
