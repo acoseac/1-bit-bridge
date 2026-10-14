@@ -690,6 +690,36 @@ lost my library."
   the file's tags); a bump now re-reads the library and re-upserts every
   SACD virtual row to heal rows nothing can tell from a tagless file. To
   heal one by hand, zero its `mtime_ns` (`## Local test fixture`).
+- **A case-only rename reaps the old row only when this pass committed the
+  new spelling** (2026-10-14, backlog B175). `caseOnlyRenames` flags a
+  stored path the walk did not see whose `renameFold` matches a path it
+  did. The deletion pass used to reap that row at once, on the premise
+  the new spelling was written this pass. Since B134 a worker that cannot
+  read the file writes no row for a spelling that has none, so the old
+  row was deleted and the new spelling never appeared, while
+  `msgUnreadAudio` said the rows were kept. Measured on APFS: `Album/01.flac`
+  indexed, the folder renamed to `album`, `openAudio` answering EIO; after
+  the scan both `GetTrack`s were nil and the log carried the unread line
+  and `reaped stale rows from case-only rename`. The workers and the writer
+  fill one set (`backedPaths`), mutexed because both write it, and read
+  after both have returned. The writer adds a path a successful upsert or
+  stamp persisted. A worker adds a path the skip gate accepted, and a path
+  `keepUnread` kept because that exact spelling already had a row. A new
+  spelling the worker could not read is not added. `reapCaseRename` reaps
+  the old spelling only when a path the walk saw with the same fold is in
+  that set; otherwise the row is counted missing and the grace applies.
+  `isUnderErroredSubtree` still runs first. A failed flush and a held
+  reconcile record nothing. The unread line stays, and the reap line is
+  logged only when a row was reaped. The scanner's unset threshold is 1,
+  which deletes a first miss at once; the tests set
+  `config.DefaultDeleteAfterMissingScans` (3), the value serve wires, so
+  the kept row is visible at `missing_count` 1. A readable rename still
+  writes the new spelling and reaps the old one in the same pass. An
+  unchanged file still reaps a composition twin: the skip gate backs the
+  live spelling, so the unseen spelling goes at once.
+  (`TestAnUnreadCaseRenameKeepsTheOldRow`,
+  `TestAReadableCaseRenameReapsTheOldRowAtOnce`,
+  `TestScannerReapsTheUnseenCompositionOfOneFolder`.)
 - **…and a folder's cover reaches the tracks beside it when IT changes,
   not only when they do** (2026-09-29, backlog B141). A cover is read only
   when a track is extracted, and the skip gate extracts an unchanged audio

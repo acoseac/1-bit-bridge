@@ -19,17 +19,17 @@ import (
 //
 // They are then not routed and not under an errored subtree, so they fall
 // through to `caseOnlyRenames`, which fold-matches them against a path that
-// WAS seen and classifies them as "the old case of a rename". The pass
-// reaps those IMMEDIATELY — bypassing the `missing_count >= threshold`
-// debounce entirely. Files still on disk, rows gone.
+// WAS seen and classifies them as the old case of a rename. When this pass
+// backs that seen spelling, the pass reaps the twin at once, bypassing
+// the missing-count grace. Files still on disk, rows gone.
 //
-// That immediate reap is sound only because of the premise stated in
-// caseOnlyRenames' own docblock: "a stored path that fold-matches a seen
-// entry refers to a file the walker DID enumerate this pass." True for a
-// full Scan, which walks everything. False the moment the SNAPSHOT is
-// broader than the WALK — which is exactly what a case-folding scope query
-// makes it. Keeping TrackPathsUnder case-exact is what keeps that premise
-// true; the deletion pass cannot spare a row it was never told to consider.
+// That reap is sound when the snapshot holds a file the walk enumerated.
+// True for a full Scan, which walks everything. False the moment the
+// SNAPSHOT is broader than the WALK, which is exactly what a case-folding
+// scope query makes it. Keeping TrackPathsUnder case-exact is what keeps a
+// twin the walk never visited out of the decision; the deletion pass cannot
+// spare a row it was never told to consider. A file the scan could not read
+// is counted missing even when its spelling fold-matches a seen path.
 //
 // This is the CLAUDE.md rule "'we could not see this path' must dominate
 // every '…but it looks like X' classification", reached through a vector

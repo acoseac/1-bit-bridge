@@ -941,17 +941,18 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 
 	s.setScanRootBase(roots, multiRoot)
 	s.publishFirstIndexed(ctx, multiRoot)
+	committed := new(atomic.Int64)
+	backed := newBackedPaths()
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, backed, &workersWG)
 	}
 
-	committed := new(atomic.Int64)
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
-	go s.runScanWriter(ctx, writes, committed, &writerWG)
+	go s.runScanWriter(ctx, writes, committed, backed, &writerWG)
 
 	// Walker drives `filepath.WalkDir` for each configured root,
 	// enqueuing audio files for the workers. Folder upserts stay inline
@@ -1071,6 +1072,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	renamed := make([]string, 0)
 	spared := 0
 	renames := caseOnlyRenames(beforeSet, seen)
+	backedFolds := backedSeenFolds(renames, seen, backed)
 	for p := range beforeSet {
 		if _, ok := seen[p]; ok {
 			continue
@@ -1103,12 +1105,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			spared++
 			continue
 		}
-		if _, ok := renames[p]; ok {
-			// Case-only rename on a case-insensitive FS — the
-			// new-case row was already upserted this pass, so reap
-			// the stale old-case row NOW (below) rather than let it
-			// shadow the new row in /v1/manifest for up to
-			// `threshold` scans.
+		if reapCaseRename(p, renames, backedFolds) {
+			// The seen spelling is backed this pass, so reap the old
+			// spelling now. A fold match nothing backed falls through
+			// and is counted missing: a file the scan could not read
+			// keeps its row.
 			renamed = append(renamed, p)
 			continue
 		}
@@ -1459,7 +1460,7 @@ var beforeApplyReconciledHookForTests func(paths []string)
 // channel. Errors from GetTrack/Extract are logged-and-skipped (matches
 // the legacy walker's "log + continue" semantics — a single corrupt
 // FLAC must not abort the whole scan).
-func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, rootDirs map[string]struct{}, wg *sync.WaitGroup) {
+func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, rootDirs map[string]struct{}, backed *backedPaths, wg *sync.WaitGroup) {
 	defer wg.Done()
 	// One ExtractContext per worker, reused across every track this
 	// worker pulls. The pointers to s.folderArt and s.dirListings are
@@ -1571,6 +1572,10 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			if existing != nil && existing.Size == pi.info.Size() &&
 				existing.MTimeNS == pi.info.ModTime().UnixNano() {
 				if s.rowIsCurrent(pi, existing, ec) {
+					// The row is already there. A case-only twin of
+					// this spelling can be reaped: the file was read
+					// on an earlier pass, and this pass did not write.
+					backed.add(pi.rel)
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -1603,7 +1608,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// stamp records the folder's new key. And so does a file
 				// its extractor refuses: its row as it was, stamped
 				// current and refused.
-				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec, existing); t != nil {
+				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec, existing, backed); t != nil {
 					tracksToWrite = []*Track{t}
 				}
 				s.callExtractHook(pi.abs)
@@ -1629,7 +1634,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					// is the path's guess, or part of the file,
 					// under the file's own size and mtime, which the
 					// skip gate would trust from the next scan on.
-					s.keepUnread(ctx, pi, existing != nil, fault)
+					s.keepUnread(ctx, pi, existing != nil, fault, backed)
 					return
 				}
 				// A file read whole that its extractor refused (not
@@ -1732,11 +1737,14 @@ func warnNoLongerAFile(rel, kind string) {
 // The row's missing count is reset, as the skip gate resets an unchanged
 // file's: the walk saw the file, and a row the walk sees ends the scan at
 // zero. The scan's one line counts the file (unreadTally).
-func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, fault error) {
+func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, fault error, backed *backedPaths) {
 	s.unread.note(pi.rel, fault)
 	if !hasRow {
 		return
 	}
+	// The row is already there, so a case-only twin of this spelling
+	// can be reaped. A new spelling records nothing: it has no row.
+	backed.add(pi.rel)
 	if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 			scanLogger.Warn("reset missing_count of an unread file", "path", pi.rel, "err", failure)
@@ -1897,7 +1905,7 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 // ExtractorVersion bump, forever. The refusal is logged only when the row
 // did not record one: at the same size and mtime, it was logged when it
 // was recorded. stored is the row's stat as the skip gate read it.
-func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext, stored *TrackStat) *Track {
+func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext, stored *TrackStat, backed *backedPaths) *Track {
 	t := &Track{
 		Path:    pi.rel,
 		Size:    pi.info.Size(),
@@ -1910,7 +1918,7 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 			return nil
 		}
 		if fault := readFault(err); fault != nil {
-			s.keepUnread(ctx, pi, true, fault)
+			s.keepUnread(ctx, pi, true, fault, backed)
 			return nil
 		}
 		if stored == nil || !stored.ExtractRefused {
@@ -2294,7 +2302,15 @@ func sacdLibraryRelative(msg string, pi pathInfo) string {
 // would hold shutdown for a batch of up to scanBatchSize rows, for rows
 // the next scan writes anyway.
 // TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo pins it.
-func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, wg *sync.WaitGroup) {
+//
+// backed records each path this pass can stand behind. This goroutine adds
+// a path a successful upsert or stamp persisted. The workers add a path
+// the skip gate accepted and a path keepUnread kept because it already
+// had a row. The deletion pass reads the set after both have returned. A
+// failed flush, a held reconcile, and a new spelling the worker could not
+// read record nothing, so the case-only rename reap treats that spelling
+// as unseen.
+func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, backed *backedPaths, wg *sync.WaitGroup) {
 	defer wg.Done()
 	batch := make([]*Track, 0, scanBatchSize)
 	flush := func() {
@@ -2336,6 +2352,7 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 				}
 			} else {
 				committedRows += len(full)
+				backed.addTracks(full)
 			}
 		}
 		if len(stampRows) > 0 {
@@ -2345,6 +2362,7 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 				}
 			} else {
 				committedRows += len(stampRows)
+				backed.addTracks(stampRows)
 			}
 		}
 		if committedRows > 0 {
@@ -2554,17 +2572,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	writes := make(chan *Track, scanChannelBuffer)
 
 	s.setScanRootBase(roots, multiRoot)
+	committed := new(atomic.Int64)
+	backed := newBackedPaths()
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, backed, &workersWG)
 	}
 
-	committed := new(atomic.Int64)
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
-	go s.runScanWriter(ctx, writes, committed, &writerWG)
+	go s.runScanWriter(ctx, writes, committed, backed, &writerWG)
 
 	// Subtree walker: same shape as walkRoot, including the err-
 	// callback's errored-subtree recording so the deletion pass
@@ -2765,6 +2784,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	renamed := make([]string, 0)
 	sparedTracks := 0
 	renames := caseOnlyRenames(beforeTrackSet, seen)
+	backedFolds := backedSeenFolds(renames, seen, backed)
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
 			continue
@@ -2790,9 +2810,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			sparedTracks++
 			continue
 		}
-		if _, ok := renames[p]; ok {
-			// Case-only rename — same immediate-reap rationale as
-			// the full-scan deletion pass above.
+		if reapCaseRename(p, renames, backedFolds) {
+			// Same backed-spelling rule as the full-scan pass.
 			renamed = append(renamed, p)
 			continue
 		}
@@ -3309,28 +3328,27 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 	return false
 }
 
-// caseOnlyRenames returns the subset of `before` paths that are absent
-// from `seen` EXACTLY but present after renameFold — a case-only rename
-// (Album→album) on a case-insensitive filesystem, or two spellings of
-// one name. The walker records the on-disk spelling, so the fresh
-// row is upserted under the new spelling this same pass; the stale
-// old-case row must be reaped NOW — left to the missing_count
-// threshold it would shadow the new row in /v1/manifest for up to
-// `threshold` scans, with both rows serving the same physical file.
+// caseOnlyRenames returns the subset of before paths that are absent
+// from seen exactly but present after renameFold: a case-only rename
+// (Album to album) on a case-insensitive filesystem, or two spellings of
+// one name. The result is a candidate set. The deletion pass reaps a
+// candidate only when this pass backs the seen spelling: the writer
+// committed it, or the skip gate or an unread file that already had a
+// row kept it. A new spelling the worker could not read is not backed,
+// so the old row is counted missing. A backed spelling is reaped at
+// once, so the old row does not shadow it.
 //
 // The fold is renameFold (sqlfunc.go): NFC, then the Unicode
 // lowercase pathFold uses. A case difference and a composition
 // difference (NFC "Café" beside NFD "Café", U+0130 beside
 // I+U+0307) are one folder. A plain "i" beside U+0130 is not.
 // A stored path that fold-matches a seen entry refers to a file the
-// walker DID enumerate this pass, so reaping it can't confuse a
-// transient partial enumeration with a rename — the threshold's
-// silent-enumeration protection stays intact for genuinely-unseen
-// paths. An exact spelling in seen is skipped here; two names the
-// walk saw both of are left alone. The errored-subtree check stays
-// in the deletion loop, ahead of this map. GetTrack stays exact-key
-// (pinned by store_lookup_case_test.go); the fold applies ONLY to
-// this deletion-pass filter.
+// walker enumerated this pass. The workers and the writer, not this
+// map, decide whether that file's row is backed. An exact spelling in seen is
+// skipped here; two names the walk saw both of are left alone. The
+// errored-subtree check stays in the deletion loop, ahead of this map.
+// GetTrack stays exact-key (pinned by store_lookup_case_test.go); the
+// fold applies ONLY to this deletion-pass filter.
 func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
 	seenFolded := make(map[string]struct{}, len(seen))
 	for p := range seen {
@@ -3346,6 +3364,72 @@ func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
 		}
 	}
 	return renames
+}
+
+// backedPaths records library paths whose rows this scan can stand behind.
+// Workers add a path the skip gate accepted and a path keepUnread kept
+// because it already had a row. The writer adds a path a successful upsert
+// or stamp persisted. The deletion pass reads the set after both have
+// returned. A new spelling the worker could not read is absent, so its
+// old spelling is counted missing.
+type backedPaths struct {
+	mu sync.Mutex
+	m  map[string]struct{}
+}
+
+func newBackedPaths() *backedPaths {
+	return &backedPaths{m: map[string]struct{}{}}
+}
+
+func (b *backedPaths) add(path string) {
+	b.mu.Lock()
+	b.m[path] = struct{}{}
+	b.mu.Unlock()
+}
+
+func (b *backedPaths) addTracks(rows []*Track) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, t := range rows {
+		if t == nil {
+			continue
+		}
+		b.m[t.Path] = struct{}{}
+	}
+}
+
+// backedSeenFolds is renameFold of each path the walk saw and this pass
+// backs. A path the writer committed that the walk did not see (a SACD
+// virtual row) is not a case-rename of a walked file. It is built only
+// when the pass found a case-only rename: with none, reapCaseRename never
+// reads it, and folding every backed path would cost a typical scan
+// a Unicode normalization per file for nothing.
+func backedSeenFolds(renames, seen map[string]struct{}, backed *backedPaths) map[string]struct{} {
+	if len(renames) == 0 {
+		return nil
+	}
+	folds := make(map[string]struct{})
+	backed.mu.Lock()
+	defer backed.mu.Unlock()
+	for p := range backed.m {
+		if _, ok := seen[p]; !ok {
+			continue
+		}
+		folds[renameFold(p)] = struct{}{}
+	}
+	return folds
+}
+
+// reapCaseRename reports whether p is the old spelling of a path the walk
+// saw and this pass backs. A fold match nothing backed is counted missing,
+// so a file the scan could not read keeps its old row for the missing-count
+// grace.
+func reapCaseRename(p string, renames, backedFolds map[string]struct{}) bool {
+	if _, ok := renames[p]; !ok {
+		return false
+	}
+	_, wrote := backedFolds[renameFold(p)]
+	return wrote
 }
 
 // relPath converts an absolute on-disk path to the library-relative,

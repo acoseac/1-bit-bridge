@@ -121,9 +121,9 @@ func TestDeleteTracksByPrefixRefusesEmptyPrefix(t *testing.T) {
 // deletion pass. When the LIKE pulled a case-twin sibling's rows into
 // that snapshot they were absent from `seen` (the walk never visits that
 // directory), and caseOnlyRenames then fold-matched them to a path that
-// WAS seen — so the pass reaped them outright, bypassing the
-// missing_count debounce. See TestScanSubtreeSparesCaseTwinDirectory for
-// the end-to-end consequence.
+// WAS seen. When this pass backs that spelling, the pass reaps the
+// twin at once, bypassing the missing-count grace. See
+// TestScanSubtreeSparesCaseTwinDirectory for the end-to-end consequence.
 func TestTrackPathsUnderIsCaseExact(t *testing.T) {
 	s, ctx := prefixCaseStore(t)
 	seedPaths(t, s, ctx,
