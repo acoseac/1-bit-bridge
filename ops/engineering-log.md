@@ -42237,3 +42237,63 @@ item of each sentinel plus one bridge fingerprint on
 GET unchanged. Negative control: both handlers refused
 `originFingerprint == "mpd"` with 400; both subtests failed; the refusals
 were removed before the commit.
+
+## 2026-10-14 — upscale --gc reclaims renditions only (backlog B132)
+
+`bridge upscale --gc`, and `optimize --gc` and `render --gc` through the
+same `runGC`, passed `TakeSidecarInventory` a nil Consider. The forward
+sweep then counted and removed every file in the variants directory that
+no row named. A `.DS_Store`, a `.keep`, a README and any other foreign
+file went with the stranded renditions. Dot-directories were already
+pruned; dot-files were not. The background orphan sweep considers `.flac`
+only and `analyze --gc` considers waveforms, so the three sweeps
+disagreed about what a file in that tree is.
+
+B65 (2026-09-29) made the empty-catalog refusal weigh what the sweep
+would remove, and left this Consider as a separate decision. That entry
+names B132. Weighing only rendition-shaped files while the sweep still
+removed every file was declined then, because the refusal would wave
+through a run that removes files it never weighed. This change makes the
+sweep and the weigh the same set.
+
+`integrity.ConsiderVariantSidecar` is `looksLikeVariantSidecar`, the
+probe's predicate (`scanForRenditions`, `TreeHoldsVariantSidecars`). It
+matches `manifest.VariantIDPattern` with a dot or a dash before the id,
+so the source-mirrored layout and the legacy hash-flat layout both
+count. `gcTakeInventory` and the doctor's `variantsIndexCounts` pass it.
+The background sweep stays on `shouldConsiderSidecarFile` and
+`analyze --gc` stays on the waveform extension. `runGC` itself gained no
+branch (backlog B255).
+
+The mass-orphan ratio and the empty-catalog check then weigh renditions
+only. A variants directory that holds only foreign files proceeds
+without `--allow-empty`. `--gc` no longer wipes a foreign file, a
+`.keep`, or a `.tmp` that is not a rendition name. The grace still
+protects a rendition a job is writing. A `.keep` left behind does not
+count as a rendition, so it does not explain an unmounted volume to the
+reverse sweep. The #941 `mkdir .keep` workaround is no longer needed.
+The history stays, because a nil Consider would still unlink the file.
+
+Red first, over the real `runGC` and the CLI, before the Consider was
+wired. The foreign set was `.DS_Store`, `.keep`, `README.txt`, `.hidden`
+and `notes.flac` (the last one so a Consider of any `.flac` fails),
+each aged past the grace. The summary was `removed 7 orphan file(s)`
+where the two renditions were the only orphans. An empty catalog over
+those five refused `holds 5 file(s)`. A tree of 40 stranded renditions
+plus the five refused `45 of 47`. `upscaleCmd --gc` unlinked all five.
+`optimize --gc` and `render --gc` refused the same way. The doctor
+counted Files/Known/Orphans 8/1/7. A catalog whose every rendition had
+a row reclaimed nothing on that unfixed code as well (`removed 0`).
+
+Negative control, after the fix: the Consider was taken back out of
+`gcTakeInventory` and `variantsIndexCounts`. The same six foreign-file
+tests failed again on those same counts, and the no-stray catalog still
+reclaimed nothing. The Consider was put back. That edit was not
+committed.
+
+`TestGCEmptyCatalogRefusesOverAFileItWouldRemove` no longer expects a
+`.DS_Store` to refuse on `upscale --gc`.
+`TestGCEmptyCatalogProceedsOverNothingItWouldRemove` covers that file
+on both sweeps. `TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt`
+expects the inventory to list the three renditions and to leave
+`notes.txt`. No `ExtractorVersion` bump and no wire change.

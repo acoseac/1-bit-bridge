@@ -193,10 +193,11 @@ func TestGCEmptyCatalogProceedsOverNothingItWouldRemove(t *testing.T) {
 		{name: "the filesystem's lost+found", locks: true, plant: func(t *testing.T, dir string) []string {
 			return []string{lockDir(t, filepath.Join(dir, "lost+found"))}
 		}},
-		// analyze --gc removes waveforms only; upscale --gc removes every
-		// file (a nil Consider), so a .DS_Store refuses there
-		// (TestGCEmptyCatalogRefusesOverAFileItWouldRemove).
-		{name: "a .DS_Store", only: "analyze --gc", plant: func(t *testing.T, dir string) []string {
+		// A .DS_Store is a file neither sweep's Consider takes: analyze
+		// removes waveforms, and the variants sweeps take renditions
+		// (ConsiderVariantSidecar, backlog B132). Until then upscale
+		// --gc passed a nil Consider and refused over it.
+		{name: "a .DS_Store", plant: func(t *testing.T, dir string) []string {
 			p := filepath.Join(dir, ".DS_Store")
 			writeFixtureFile(t, p, 1)
 			return []string{p}
@@ -246,11 +247,12 @@ func TestGCEmptyCatalogRemovesAWaveformScratchFileWithoutARefusal(t *testing.T) 
 // TestGCEmptyCatalogRefusesOverAFileItWouldRemove — wherever the walk finds
 // a file the sweep would remove, an empty catalog makes it an orphan, and
 // the run refuses without --allow-empty, below the mass-orphan floor too:
-// a sidecar of the sweep's own family in both sweeps, any file at all in
-// `upscale --gc` (its nil Consider removes a .DS_Store as readily as a
-// rendition), and an entry the walk could not stat, weighed as one such
-// file. The refusal counts what it saw and names an example, so the
-// operator deciding on --allow-empty can see what would go.
+// a sidecar of the sweep's own family in both sweeps, and an entry the
+// walk could not stat, weighed as one such file. A .DS_Store is not a
+// rendition, so the variants sweep proceeds over it (backlog B132);
+// until then a nil Consider refused. The refusal counts what it saw and
+// names an example, so the operator deciding on --allow-empty can see
+// what would go.
 func TestGCEmptyCatalogRefusesOverAFileItWouldRemove(t *testing.T) {
 	type shape struct {
 		name string
@@ -258,7 +260,6 @@ func TestGCEmptyCatalogRefusesOverAFileItWouldRemove(t *testing.T) {
 		// candidate, and returns the entry that must survive the refusal.
 		plant func(t *testing.T, dir, candidate string) string
 		locks bool
-		only  string
 		// says is what the refusal must say besides the flag and the cause.
 		says []string
 	}
@@ -268,11 +269,6 @@ func TestGCEmptyCatalogRefusesOverAFileItWouldRemove(t *testing.T) {
 			writeFixtureFile(t, p, 1)
 			return p
 		}, says: []string{"holds 1 file(s) this sweep would remove", filepath.Join("Artist", "Album")}},
-		{name: "a .DS_Store", only: "upscale --gc", plant: func(t *testing.T, dir, _ string) string {
-			p := filepath.Join(dir, ".DS_Store")
-			writeFixtureFile(t, p, 1)
-			return p
-		}, says: []string{"holds 1 file(s) this sweep would remove", ".DS_Store"}},
 		{name: "a link the walk could not stat", locks: true, plant: func(t *testing.T, dir, candidate string) string {
 			link := filepath.Join(dir, "Parked", candidate)
 			plantUnstattableLink(t, link)
@@ -280,9 +276,6 @@ func TestGCEmptyCatalogRefusesOverAFileItWouldRemove(t *testing.T) {
 		}, says: []string{"holds 1 file(s) this sweep would remove", "could not stat"}},
 	} {
 		for _, sw := range emptyCatalogSweeps {
-			if sh.only != "" && sh.only != sw.name {
-				continue
-			}
 			t.Run(sw.name+" over "+sh.name, func(t *testing.T) {
 				if sh.locks {
 					skipUnlessModeBitsDeny(t, "root stats through any directory, so the link would resolve")

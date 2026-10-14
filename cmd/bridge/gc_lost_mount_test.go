@@ -176,10 +176,11 @@ func TestTheReverseGuardCountsOnlyTheRenditionsThisRunUnlinked(t *testing.T) {
 	}
 }
 
-// TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt — of four
-// orphans, a rendition it unlinks counts, a rendition already gone
+// TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt — of the three
+// renditions the inventory lists, one it unlinks counts, one already gone
 // (ENOENT) and one whose unlink fails (a directory this user may not
-// write) do not, and a file that is not a rendition never does.
+// write) do not. A file that is not a rendition is not in that list
+// (ConsiderVariantSidecar, backlog B132) and stays on disk.
 func TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a directory whose mode refuses this user an unlink")
@@ -195,8 +196,13 @@ func TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	inv, code := gcTakeInventory(context.Background(), &stderr, dir, map[string]struct{}{})
-	if code != 0 || len(inv.OrphanPaths) != 4 {
-		t.Fatalf("inventory: code %d, %d orphans, want 4\n%s", code, len(inv.OrphanPaths), stderr.String())
+	if code != 0 || len(inv.OrphanPaths) != 3 {
+		t.Fatalf("inventory: code %d, %d orphans, want the 3 renditions\n%s", code, len(inv.OrphanPaths), stderr.String())
+	}
+	for _, p := range inv.OrphanPaths {
+		if p == junk {
+			t.Fatalf("the inventory listed %s, which is not a rendition", junk)
+		}
 	}
 	if err := os.Remove(gone); err != nil {
 		t.Fatal(err)
@@ -207,10 +213,13 @@ func TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(lockedDir, 0o755) })
 	removed, _, failed, exitCode, unlinked := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace(), "", nil)
-	if exitCode != 0 || removed != 3 || failed != 1 {
-		t.Fatalf("forward sweep: exit %d, %d removed, %d failed; want 0, 3 (the unlinked two and the one already gone), 1\n%s", exitCode, removed, failed, stderr.String())
+	if exitCode != 0 || removed != 2 || failed != 1 {
+		t.Fatalf("forward sweep: exit %d, %d removed, %d failed; want 0, 2 (the unlinked rendition and the one already gone), 1\n%s", exitCode, removed, failed, stderr.String())
 	}
 	if unlinked != 1 {
 		t.Errorf("renditions unlinked = %d, want 1: only the rendition this run removed", unlinked)
+	}
+	if _, err := os.Stat(junk); err != nil {
+		t.Errorf("a file that is not a rendition was removed: %v", err)
 	}
 }

@@ -247,8 +247,10 @@ func TestDoctorVariantsIndexProbeReportsAnUnreadableManifest(t *testing.T) {
 func TestDoctorVariantsIndexWalkIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath, variantsDir := variantsIndexInstall(t, dir, 0, 0)
+	// The names are renditions: the probe weighs what upscale --gc reclaims
+	// (ConsiderVariantSidecar). A plain .flac is not in that count.
 	for i := 0; i < 12; i++ {
-		writeFixtureFile(t, filepath.Join(variantsDir, "d", fmt.Sprintf("%06d.flac", i)), 1)
+		writeFixtureFile(t, filepath.Join(variantsDir, "d", fmt.Sprintf("%06d.flac.upscaled-v1-44100-16.flac", i)), 1)
 	}
 	dbPath := manifest.DefaultDBPath(filepath.Join(dir, "data"))
 
@@ -310,7 +312,7 @@ func TestDoctorVariantsIndexClaimsNoVerdictFromATruncatedWalk(t *testing.T) {
 	dir := t.TempDir()
 	_, variantsDir := variantsIndexInstall(t, dir, 0, 0)
 	for i := 0; i < 40; i++ {
-		writeFixtureFile(t, filepath.Join(variantsDir, "aaa", fmt.Sprintf("%03d.flac", i)), 1)
+		writeFixtureFile(t, filepath.Join(variantsDir, "aaa", fmt.Sprintf("%03d.flac.upscaled-v1-44100-16.flac", i)), 1)
 	}
 	dbPath := manifest.DefaultDBPath(filepath.Join(dir, "data"))
 

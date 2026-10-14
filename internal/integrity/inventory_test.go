@@ -83,11 +83,11 @@ func TestTakeSidecarInventoryPartitionsTheTree(t *testing.T) {
 func TestTakeSidecarInventoryKeepsScratchOutOfTheRatio(t *testing.T) {
 	root := t.TempDir()
 	seedTree(t, root, "a.waveform.bin", "b.waveform.bin.tmp", "c.waveform.bin.tmp")
-	// Consider is nil — accept every file, the shape `upscale --gc` uses
-	// — so Scratch is the ONLY thing keeping the two .tmp files out of
-	// the ratio. With a Consider that excludes them anyway (what
-	// `analyze --gc` passes) this assertion would hold with Scratch
-	// deleted, and prove nothing.
+	// Consider is nil — accept every file — so Scratch is the ONLY thing
+	// keeping the two .tmp files out of the ratio. With a Consider that
+	// excludes them anyway (what `analyze --gc` passes, and what the
+	// variants sweeps pass as ConsiderVariantSidecar since backlog B132)
+	// this assertion would hold with Scratch deleted, and prove nothing.
 	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
 		Scratch: func(n string) bool { return strings.HasSuffix(n, ".waveform.bin.tmp") },
 	})
@@ -480,10 +480,12 @@ func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
 // filepath.WalkDir Lstats its root and follows no link, so a variants
 // directory that is itself a symlink — `/srv/variants -> /mnt/vol/…`,
 // the ordinary mountpoint alias — arrives at the callback as ONE
-// non-directory entry and the walk ends there. `upscale --gc` passes a
-// nil Consider, so that entry is a candidate: it is counted, missed by
-// the known set, and appended to OrphanPaths, whereupon the forward
-// sweep unlinks the variants directory itself. One orphan is below the
+// non-directory entry and the walk ends there. A nil Consider counts
+// that entry: it is missed by the known set and appended to OrphanPaths,
+// and a forward sweep unlinks the variants directory itself. `upscale
+// --gc` passed nil until backlog B132; it now passes
+// ConsiderVariantSidecar, and the resolve stays because an unresolved
+// root hides the renditions under it. One orphan is below the
 // mass-orphan floor of ten, so no guard can see it, and `bridge doctor`
 // reports it as reclaimable and names `bridge upscale --gc` in the hint.
 //
@@ -612,8 +614,10 @@ func TestSidecarInventoryTreatsADanglingRootAsNothingToDo(t *testing.T) {
 //
 // WalkDir does not descend into a symlinked subdirectory either, so an
 // album an operator parked on another volume arrives as a single
-// non-directory entry. Under `upscale --gc`'s nil Consider that is an
-// orphan, and unlinking it takes the whole subtree's only reference.
+// non-directory entry. A nil Consider counts that as an orphan, and
+// unlinking it takes the whole subtree's only reference. The variants
+// sweep's ConsiderVariantSidecar rejects a name that is not a rendition;
+// the walk skips the link either way.
 // Skipped rather than followed: descending raises the cycle question,
 // and the files under it are not this tree's to reclaim.
 func TestSidecarInventorySkipsASymlinkedDirectory(t *testing.T) {
@@ -712,8 +716,9 @@ func (f fakeFileInfo) IsDir() bool { return f.dir }
 // winsymlink change, os.Lstat gives a name-surrogate reparse point
 // ModeIrregular and withholds ModeDir, so a directory JUNCTION
 // (`mklink /J`, IO_REPARSE_TAG_MOUNT_POINT) reports IsDir() false with
-// no ModeSymlink bit — it fell through every arm and `upscale --gc`'s
-// nil Consider made it an orphan FILE. A junction is the ORDINARY way
+// no ModeSymlink bit — it fell through every arm and a nil Consider
+// (what `upscale --gc` passed until backlog B132) made it an orphan
+// FILE. A junction is the ORDINARY way
 // to park an album on another volume there: a real symlink needs a
 // privilege a service account usually does not have. One junction is
 // below the mass-orphan floor of ten, so no guard could see it, and

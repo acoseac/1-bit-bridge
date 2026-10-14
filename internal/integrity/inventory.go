@@ -165,9 +165,12 @@ func (inv SidecarInventory) OrphanIsRendition(i int) bool {
 // SidecarInventoryOptions configures one inventory pass.
 type SidecarInventoryOptions struct {
 	// Consider reports whether a BASENAME is a file this sweep manages.
-	// nil accepts every file, which is what `upscale --gc` has always
-	// done inside its variants directory (a foreign file there is an
-	// orphan to it, and changing that is a separate decision).
+	// nil accepts every file. The variants sweeps and the doctor's
+	// variants-index probe pass ConsiderVariantSidecar, so a foreign
+	// file is not a candidate; the background sweep passes
+	// shouldConsiderSidecarFile and `analyze --gc` its waveform
+	// extension. Until backlog B132 the variants sweeps passed nil, and
+	// a foreign file there was an orphan.
 	Consider func(name string) bool
 	// Scratch reports whether a basename is the sweep's own half-written
 	// temporary. nil means the family has none.
@@ -180,9 +183,9 @@ type SidecarInventoryOptions struct {
 	// Traversed, not classified, because the cap is a wall-clock bound
 	// and a directory costs the same to walk as a file. Gated on
 	// inv.Files it would bound nothing on a tree of directories or of
-	// files Consider rejects — the guarantee would hold only for
-	// today's callers, both of which happen to pass a nil Consider
-	// (CodeRabbit on #940).
+	// files Consider rejects — the guarantee would hold only for a
+	// caller that passes a nil Consider (CodeRabbit on #940, when both
+	// callers did). Production callers now pass one.
 	//
 	// Only a REPORTING caller may set it. A sweep that deletes on a
 	// truncated inventory would be deleting on a ratio measured from part
@@ -211,8 +214,10 @@ type SidecarInventoryOptions struct {
 // The root is RESOLVED before the walk (resolveSidecarRoot) and paths are
 // REPORTED under the configured one. Both halves are load-bearing:
 // unresolved, a symlinked variants directory is one non-directory entry
-// that `upscale --gc`'s nil Consider classifies as an orphan file and
-// unlinks; reported resolved, every key in a KnownSidecarSet built from
+// that a nil Consider classifies as an orphan file and unlinks (what
+// `upscale --gc` passed until backlog B132; it now passes
+// ConsiderVariantSidecar, and an unresolved root still hides every
+// rendition under it); reported resolved, every key in a KnownSidecarSet built from
 // the configured dir would miss and a healthy tree would read as orphans.
 // A symlinked subdirectory is skipped rather than classified, for the
 // first reason one level down.
@@ -590,9 +595,11 @@ func MassOrphanRefusalFor(inv SidecarInventory, rows, maxOrphanPercent int) stri
 // which the sweep that has any removes whatever the catalog says (once it
 // is older than the grace, OrphanGracePeriod), so an empty catalog puts
 // none at risk. What the Consider takes is each sweep's
-// own: the background sweep takes `.flac` files and `analyze --gc`
-// waveforms, while `upscale --gc` takes EVERY file, so a `.DS_Store` in the
-// variants directory is a file it would remove and still refuses there.
+// own: the background sweep takes `.flac` files, `analyze --gc`
+// waveforms, and the variants sweeps renditions
+// (ConsiderVariantSidecar). A `.DS_Store` proceeds on all three. Until
+// backlog B132 the variants sweeps took every file, so a `.DS_Store`
+// still refused there. A rendition no row names still refuses.
 //
 // A directory the walk could not LIST is not weighed: it may hold sidecars
 // or nothing, and the walk reached no file to count. A verdict over part

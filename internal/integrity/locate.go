@@ -177,6 +177,16 @@ func looksLikeVariantSidecar(name string) bool {
 	return variantSidecarNameRe.MatchString(name)
 }
 
+// ConsiderVariantSidecar is the variants sweeps' Consider: whether a
+// basename is a rendition sidecar, in either layout
+// looksLikeVariantSidecar already recognises. `bridge upscale --gc`,
+// `bridge optimize --gc` and `bridge render --gc` pass it, and so does
+// the doctor's variants-index probe, so a file one weighs is a file the
+// others reclaim. A foreign file is left where it is.
+func ConsiderVariantSidecar(name string) bool {
+	return looksLikeVariantSidecar(name)
+}
+
 // resolveSidecarRoot is the one place a sidecar walk turns a configured
 // directory into the path filepath.WalkDir may be handed.
 //
@@ -185,10 +195,14 @@ func looksLikeVariantSidecar(name string) bool {
 // mountpoint alias) arrives at the callback as ONE non-directory entry
 // and the walk ends there. The two consumers read that differently and
 // both read it wrong: TreeHoldsVariantSidecars sees a tree that "holds
-// nothing", and TakeSidecarInventory — whose `upscale --gc` caller
-// passes a nil Consider, so every non-directory is a candidate —
-// classifies the variants directory ITSELF as an orphan file and hands
-// it to the forward sweep to unlink. One orphan is below the
+// nothing", and TakeSidecarInventory with a nil Consider — every
+// non-directory is a candidate, which is what `upscale --gc` passed
+// until backlog B132 — classifies the variants directory ITSELF as an
+// orphan file and hands it to the forward sweep to unlink. The sweeps
+// now pass ConsiderVariantSidecar, so a name that is not a rendition
+// is not a candidate; the resolve stays, because an unresolved root is
+// one entry and the walk never sees the renditions under it. One
+// orphan is below the
 // mass-orphan floor of ten, so no guard can see it.
 //
 // ONE body, because the two have to agree about what the tree IS before

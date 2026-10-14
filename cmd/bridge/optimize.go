@@ -17,10 +17,10 @@ package main
 //   bridge optimize                       # all hi-res PCM tracks
 //   bridge optimize --filter Krall       # path-scoped
 //   bridge optimize --dry-run            # preview without running
-//   bridge optimize --gc                 # reuses upscale's GC (path-
-//                                          equality-against-DB-row, so
-//                                          optimize sidecars are preserved
-//                                          alongside upscale sidecars).
+//   bridge optimize --gc                 # reuses upscale's GC: a
+//                                          rendition no row names is
+//                                          reclaimed, in either layout,
+//                                          and a foreign file is left.
 
 import (
 	"context"
@@ -40,8 +40,8 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
-	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion. Shares the upscale GC path — preserves BOTH optimized-* and upscaled-* sidecars.")
-	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
+	gc := fs.Bool("gc", false, "remove orphan rendition files (either layout, no DB row) and leave every other file, AND remove orphan DB rows (rows with no on-disk sidecar); skips conversion. Shares the upscale GC path — preserves BOTH optimized-* and upscaled-* sidecars.")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every rendition on disk look like an orphan")
 	allowMassDelete := fs.Bool("allow-mass-delete", false, gcAllowMassDeleteUsage)
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)

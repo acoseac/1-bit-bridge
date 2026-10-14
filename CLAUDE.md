@@ -4624,11 +4624,18 @@ no failing test — which is the shape to expect in this area.
   the sweep would remove BY ITS OWN Consider, or an entry the walk could not
   stat, weighed as one; never a directory it could not list (the partial
   walk's refusal) nor a scratch `.tmp`, which is removed whatever the catalog
-  says (once past the forward sweeps' grace, backlog B205). So `upscale --gc`, whose nil Consider removes every file, still
-  refuses over a lone `.DS_Store` (the refusal names it), while `analyze --gc`
-  passes over one. **Don't count only rendition-shaped files there while the
-  sweep goes on removing every file**: the refusal would wave through a run
-  that removes files it never weighed. The refusal names
+  says (once past the forward sweeps' grace, backlog B205). Until backlog
+  B132, `upscale --gc` passed a nil Consider and removed every file, so it
+  still refused over a lone `.DS_Store` while `analyze --gc` passed over one.
+  The rule then was not to count only rendition-shaped files while the sweep
+  went on removing every file: the refusal would wave through a run that
+  removes files it never weighed. Since B132 the variants sweep's Consider is
+  `integrity.ConsiderVariantSidecar`, the probe's own notion of a rendition
+  in either layout, so a `.DS_Store`, a `.keep` or a README is never a
+  candidate and an empty catalog over only those files proceeds. The
+  mass-orphan ratio weighs the same set. A rendition no row names is still
+  reclaimed, and a directory of renditions with an empty catalog still
+  refuses. The refusal names
   `--allow-mass-orphans` beside `--allow-empty` when the mass-orphan check
   would refuse the same run (ten files or more with no rows). A BACKGROUND sweeper gets no override (nobody is in the loop to
   express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
@@ -5320,8 +5327,10 @@ no failing test — which is the shape to expect in this area.
   its floor, `orphans > rows` AND the ratio. The shared walker changed one
   behaviour on purpose: a SYMLINKED variants directory is walked now (the
   old WalkDir Lstat'd the link and swept nothing). The `.flac` Consider
-  stays, so the ratio is over the files this sweep would remove, where
-  `upscale --gc`'s nil Consider counts and removes every file. **A walk
+  stays, so the ratio is over the files this sweep would remove. The variants
+  sweeps weigh renditions only (`ConsiderVariantSidecar`, backlog B132);
+  until then `upscale --gc`'s nil Consider counted and removed every file.
+  **A walk
   that could not LIST a directory refuses too** (`PartialWalkRefusal`),
   after the mass-orphan check and under a WARN of its own (CodeRabbit on
   #1063). What it could not list is missing from every count and may hold
@@ -5418,9 +5427,11 @@ no failing test — which is the shape to expect in this area.
   minutes) before the run started**, sampled BEFORE the catalog listing,
   since the classification and the walk after it take minutes on a large
   tree over a network mount. **The `.tmp` scratch takes the grace too**:
-  `analyze --gc` removed its scratch unconditionally, and `upscale --gc`
-  (nil Consider) every `.tmp` as an orphan; a recent one may be a live
-  job's, whose mtime moves with every write. A recent file is no failure:
+  `analyze --gc` removed its scratch unconditionally, and until backlog B132
+  `upscale --gc` (nil Consider) removed every `.tmp` as an orphan. A `.tmp`
+  is not a rendition, so the variants sweep now leaves it; the grace is what
+  still protects a rendition a job is writing, whose mtime moves with every
+  write. A recent file the sweep does take is no failure:
   the summary counts it (`left N recent file(s)`) and one line says why.
   Gone is still a success; an unlink the filesystem refuses, or a path the
   re-check cannot stat, is still a failure. **The refusals still weigh
@@ -5515,11 +5526,14 @@ no failing test — which is the shape to expect in this area.
   just created. No re-run cleared it — the directory was still empty, so it
   refused again having removed nothing — and **no flag reached it either**
   (measured: `--allow-mass-delete`, `--allow-mass-orphans` and `--allow-empty`
-  all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` does
-  NOT, because the `--gc` inventory passes a nil `Consider`, so a dot-FILE is
-  unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk). Those rows could not
-  be reaped by `--gc` at all, and `manifest clear-missing` is not a route past
-  this refusal. `ClearMissingCounts` deletes tracks with `missing_count > 0`,
+  all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` did
+  NOT, because the `--gc` inventory passed a nil `Consider`, so a dot-FILE was
+  unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk).
+  Those rows could not be reaped by `--gc` at all, and `manifest clear-missing`
+  is not a route past this refusal. Since backlog B132 the sweep's Consider
+  is renditions only, so a `.keep` file is left where it is and that
+  workaround is no longer needed; a nil Consider would still unlink the
+  file, which is why the history stays. `ClearMissingCounts` deletes tracks with `missing_count > 0`,
   and with them the variant and analysis rows that cascade and their files. It
   does not delete the variant rows of tracks that are still present, so it
   never supplies the reverse sweep's removed count. The source-mirrored layout hid it for years: `WalkDir`

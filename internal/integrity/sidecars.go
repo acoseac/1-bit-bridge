@@ -205,9 +205,11 @@ const orphanRefusalExamples = 3
 // the walk; a link to a directory or a Windows junction is never a
 // candidate ("not a REGULAR file", #969); and a walk error fails closed.
 // One difference is deliberate: this sweep considers `.flac` files only
-// (shouldConsiderSidecarFile) where `upscale --gc` passes a nil Consider
-// and counts and removes every file, so the ratio here is over the files
-// this sweep would remove, as `analyze --gc`'s is over waveform files.
+// (shouldConsiderSidecarFile) where the variants sweeps pass
+// ConsiderVariantSidecar and weigh renditions only, so each ratio is
+// over the files that sweep would remove, as `analyze --gc`'s is over
+// waveform files. Until backlog B132 `upscale --gc` passed a nil
+// Consider and counted every file.
 //
 // Threading: one long-lived goroutine spun up by Start; stops on
 // ctx cancellation OR the stopFn closing the done channel.
@@ -1116,13 +1118,16 @@ func KnownSidecarKey(path string) string {
 // filepath.Ext, so it answers for either). Extracted as a pure function
 // for unit testing without a real walk.
 //
-// Narrower than `upscale --gc` on purpose, and this docblock said the
-// opposite until 2026-09-28 ("the operator-triggered `--gc` uses the same
-// shape"), which was never true — at #284, where this predicate came in,
-// `--gc`'s forward sweep already removed every unreferenced file. `--gc`
-// passes a nil Consider and counts and removes EVERY file in the variants
-// directory, while this sweep never unlinks anything but a `.flac`, and so
-// measures its mass-orphan ratio over `.flac` files only.
+// Narrower than the variants sweeps' ConsiderVariantSidecar on the
+// names it takes (any `.flac`, not only a rendition id), and this
+// docblock said the opposite until 2026-09-28 ("the operator-triggered
+// `--gc` uses the same shape"), which was never true — at #284, where
+// this predicate came in, `--gc`'s forward sweep already removed every
+// unreferenced file. Until backlog B132 `--gc` passed a nil Consider
+// and counted every file in the variants directory. It now passes
+// ConsiderVariantSidecar and reclaims a rendition only, while this
+// sweep never unlinks anything but a `.flac`, and so measures its
+// mass-orphan ratio over `.flac` files only.
 //
 // Future variant formats (FLAC-only today; opus / wavpack are
 // hypothetical follow-ups) would extend the predicate rather than
