@@ -139,3 +139,28 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+// TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch — an enricher with
+// no artwork cache directory refuses a portrait before anything is
+// fetched, with an error that says so (Gemini on #1232): its paths would be
+// relative to the working directory, which gets nothing.
+func TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch(t *testing.T) {
+	srv, requests := portraitStub(t, []byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD})
+	e := portraitEnricher(t, srv, filepath.Join(t.TempDir(), "artwork"))
+	e.CacheDir = ""
+	wd := t.TempDir()
+	t.Chdir(wd)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ok, err := e.ensureArtistImageCached(ctx, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Artist")
+	if ok || err == nil || !strings.Contains(err.Error(), "no artwork cache directory") {
+		t.Errorf("ok=%v err=%v, want a refusal naming the missing cache directory", ok, err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the refused portrait still reached Deezer (%d requests)", n)
+	}
+	if entries, _ := os.ReadDir(wd); len(entries) != 0 {
+		t.Errorf("the working directory holds %d file(s) after the refusal", len(entries))
+	}
+}

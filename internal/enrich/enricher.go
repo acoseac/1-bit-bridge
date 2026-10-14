@@ -831,7 +831,12 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	// checks the MBID's shape first, so this is the layer under that check,
 	// as writeArtworkAtomicStream's is for the canonical; it also covers the
 	// hard link and linkOrCopy's copy to the MBID path, which that
-	// primitive never sees.
+	// primitive never sees. No cache directory refuses first, saying so:
+	// both paths would be relative to the working directory, and the
+	// containment check would call them outside a cache that is not there.
+	if e.CacheDir == "" {
+		return false, errors.New("artist image: no artwork cache directory")
+	}
 	for _, p := range []string{mbidPath, namePath} {
 		if fsutil.IsUnderAny(p, []string{e.CacheDir}) == "" {
 			return false, fmt.Errorf("artist image path %q is outside the cache directory", filepath.Base(p))
