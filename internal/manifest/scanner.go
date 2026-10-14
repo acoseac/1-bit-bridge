@@ -1072,7 +1072,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	renamed := make([]string, 0)
 	spared := 0
 	renames := caseOnlyRenames(beforeSet, seen)
-	backedFolds := backedSeenFolds(seen, backed)
+	backedFolds := backedSeenFolds(renames, seen, backed)
 	for p := range beforeSet {
 		if _, ok := seen[p]; ok {
 			continue
@@ -2784,7 +2784,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	renamed := make([]string, 0)
 	sparedTracks := 0
 	renames := caseOnlyRenames(beforeTrackSet, seen)
-	backedFolds := backedSeenFolds(seen, backed)
+	backedFolds := backedSeenFolds(renames, seen, backed)
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
 			continue
@@ -3400,8 +3400,14 @@ func (b *backedPaths) addTracks(rows []*Track) {
 
 // backedSeenFolds is renameFold of each path the walk saw and this pass
 // backs. A path the writer committed that the walk did not see (a SACD
-// virtual row) is not a case-rename of a walked file.
-func backedSeenFolds(seen map[string]struct{}, backed *backedPaths) map[string]struct{} {
+// virtual row) is not a case-rename of a walked file. It is built only
+// when the pass found a case-only rename: with none, reapCaseRename never
+// reads it, and folding every backed path would cost a typical scan
+// a Unicode normalization per file for nothing.
+func backedSeenFolds(renames, seen map[string]struct{}, backed *backedPaths) map[string]struct{} {
+	if len(renames) == 0 {
+		return nil
+	}
 	folds := make(map[string]struct{})
 	backed.mu.Lock()
 	defer backed.mu.Unlock()
