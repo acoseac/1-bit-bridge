@@ -3594,11 +3594,27 @@ no failing test — which is the shape to expect in this area.
   bytes) ON THE SCANNER'S LOCAL FOLDER-ART PATH — that rule never covered the
   NETWORK path, and this bullet read as though it did.** `internal/manifest` has
   `looksLikeJPEG` + the `folderArtCandidates` sniff; `internal/enrich` had no
-  content check of any kind, on ANY of its five write sites (CAA release, CAA
-  release-group, iTunes, and both premium paths), so whatever an upstream
-  returned was stored behind a `*-N.jpg` name that `/v1/artwork` serves as
-  `image/jpeg`. The write primitive now refuses bytes that are not a recognised
-  image. Deliberately NOT JPEG-only, though that is what this path's contract
+  content check of any kind, on ANY of its six write sites (CAA release, CAA
+  release-group, iTunes, both premium paths, and the Deezer artist portrait),
+  so whatever an upstream returned was stored behind a name served as
+  `image/jpeg`: a cover's `*-N.jpg`, which `/v1/artwork` serves, and the
+  portrait's `artist-<mbid>.jpg`, which `/v1/artist-image` serves. The write primitive
+  (`writeArtworkAtomicStream`) now refuses bytes that are not a recognised
+  image. **Every upstream artwork write goes through it**: the Deezer
+  portrait kept the buffered `writeArtworkAtomic` until 2026-10-14 (backlog
+  B168), so an allowlisted host serving HTML had it stored as the canonical
+  and linked to the `artist-<mbid>.jpg` that `/v1/artist-image` serves as
+  `image/jpeg` (`TestArtistPortraitIsStoredOnlyWhenItIsAnImage`). The
+  buffered writer is left only for `linkOrCopy`'s copy of a canonical that
+  already passed. **Both portrait paths are checked inside the cache before
+  anything is read, fetched, linked or copied** (`ensureArtistImageCached`):
+  the primitive's containment covers the canonical it writes, never the MBID
+  path it is then linked or copied to, so an MBID that leaves the cache had
+  a portrait hard-linked outside it
+  (`TestArtistPortraitPathsStayInsideTheCache`; every caller checks the
+  MBID's shape first, so this is the layer under that check). No cache
+  directory refuses first, as such (both paths would be relative to the
+  working directory; `TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch`). Deliberately NOT JPEG-only, though that is what this path's contract
   says: CAA can serve PNG, those covers render today because clients sniff, and
   dropping them inside a security fix buys nothing the arbitrary-payload refusal
   does not already buy. `artwork_scale.go`'s rule — **"a verbatim PNG write would
