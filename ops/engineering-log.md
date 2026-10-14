@@ -42563,6 +42563,129 @@ at the first scan still passed. `stampSACDFolderArt` returning before the
 lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
 empty, want a folder cover). No wire change.
 
+## 2026-10-14 — a container's doctor report skips the two host-shell checks (backlog B190)
+
+`docker exec <c> bridge doctor` on a healthy container from the image
+(the pre-v0.2.1 Docker test on dido, image from main 24523cf) ended
+"14 ok, 3 warn". Two of the warns were advice for a host the reader is
+not on: `service-manager` ("no user systemd session", use `bridge init
+--no-service`) and `browser-opener` ("no opener found"). The image runs
+`serve --init-if-missing`, `docs/docker.md`'s one-shot `docker run … init`
+already passes `--no-service`, and the image has no browser. The managed
+skip (`Deps.Managed`) already drops both for hosted tenants.
+
+The signal is the one the console's log hint already used:
+`runningInContainer` in `internal/admin`, Docker's `/.dockerenv` or
+Podman's `/run/.containerenv`. It moved to `fsutil.InContainer()` so the
+doctor and the console answer the same way. An env var the Dockerfile sets
+was the backlog's other option and was not taken: it would miss a user
+running the binary in their own image (a NAS app, a compose file of their
+own), which the markers catch. cgroup parsing stays rejected for the reason
+the old docblock gave (cgroup v1/v2, rootless). `internal/advertise` keeps
+its Docker-only marker: the network it leaves out (172.17.0.0/16) is
+Docker's default bridge.
+
+`Deps.InContainer` skips exactly the two checks. It is not `Managed`: a
+container's operator has a shell through `docker exec`, so `log-file-size`
+still reports a log nothing rotates. The verdict reaches both reports that
+grade a host: `buildDoctorDepsFor` (the command and the console) and
+`initPreflightDeps` (init's preflight, extracted so the test can reach it),
+through one seam, `inContainerFunc`.
+
+Red first, and controls, each on the committed tree and restored from git:
+- The two `if d.InContainer` branches removed:
+  `TestInContainerSkipsTheHostOperatorChecks` and
+  `TestDoctorAndInitCarryTheContainerVerdict` failed (the real report read
+  `service-manager` "launchctl available" and `browser-opener` "open" on
+  the macOS test host); `TestInContainerKeepsTheChecksItsOperatorCanActOn`
+  stayed green.
+- Both `InContainer: inContainerFunc()` lines removed:
+  `TestDoctorAndInitCarryTheContainerVerdict` failed on both reports
+  ("InContainer = false, want true").
+
+Checked in the built image (Docker 29.1.3 on the Linux test host,
+`docker buildx build` of this branch, a container with an empty `/library`
+and its own `/data` volume, no ports published, running as the image's
+unprivileged `bridge` user with `/.dockerenv` present): `docker exec …
+bridge doctor --config /data/bridge.yaml` read `service-manager` "lifecycle
+managed by the container runtime — check skipped" and `browser-opener` "no
+browser in a container — check skipped", "17 ok, 2 warn, 0 fail". The two
+warns were `pairing-url` (no dialable address without
+`BRIDGE_CUSTOM_ENDPOINTS`, which docs/docker.md tells the reader to set) and
+`library-roots` (the empty fixture), both actionable. The same fixture on an
+older image of the bridge (built 2026-07-09) warned "no user systemd
+session" and "no opener found".
+
+A pre-merge review (Gemini "Argon", 2026-10-14): Podman's marker is in
+Toolbx and Distrobox containers too, where the host's opener (and in a
+system container its own systemd) is there to use, and the skip hid what
+those checks found. Both checks now run in a container (`serviceManagerOnHost`,
+`browserOpenerOnHost`, seams a test sets), and only a failing one is
+replaced by "check skipped" with no advice. A passing one keeps its summary.
+`TestInContainerSkipsTheHostOperatorChecks` is a table over a host where both fail
+and one where both pass, so it decides on any machine (before, on macOS both
+host checks pass and the suppression was exercised only on Linux CI and in
+the image). Control: the old unconditional skip failed exactly the
+passing-host case ("the container hid a passing check"). The review's other
+point, an assertion on the not-in-a-container iteration of
+`TestDoctorAndInitCarryTheContainerVerdict`, was taken.
+
+## 2026-10-14 — an `.iso` that is not an SACD is probed once per process (backlog B157)
+
+`processSACDISO` keys its skip gate on the container's first virtual row
+(`SACDVirtualTrackPath(rel, 1)`). An image that is not an SACD (a DVD or
+CD image, a disk image named `.iso`, a plain-DSD or multichannel-only
+disc) expands to nothing, so it has no row, and every scan opened it,
+stat'd it twice, ran `TrackPathsUnder` and probed its master TOC again,
+logging "iso is not an expandable SACD image" at Debug. On a library that
+keeps disc images beside its music over a network mount, that was an open
+and a probe per image per scan, forever. Measured red on main (`3a0e143d`):
+`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`, three full scans of a
+1.2 MB zero-filled `dvd.iso` through the `openSACD` seam, 3 opens.
+
+The verdict lives on the Scanner (`notSACD`, a mutex-guarded map of
+library-relative path to the size and mtime the probe read), not in the
+store. The backlog entry asked for "somewhere no manifest reader sees",
+keyed on size, mtime and `ExtractorVersion`. A table, or `scan_state`
+keys, would have meant a migration and a sweep for the verdicts of images
+that are gone. In memory the cost is one probe per image per `serve`
+process: the Scanner is built once at startup (`cmd/bridge/main.go`) and
+lives across scans and subtree scans, and `ExtractorVersion` is compiled
+in, so a reader that learns a new layout is a new binary and a new
+process with an empty map. Rejected: B145's refusal mark, which lives on a
+`tracks` row and would reach the manifest.
+
+Only a completed probe records. A read fault and a container that changed
+under the read return before the verdict (B134), and so does a stale-row
+retire that could not list (`TrackPathsUnder` failed) or delete
+(`IncrementMissingTracksAndDeleteAtThreshold` failed), since a verdict
+would otherwise skip the image, and its leftover rows, until the process
+ends. A verdict is dropped when the image expands, so the map holds only
+images that are not SACDs.
+
+Controls, each on the committed tree and restored from git:
+- `knownNotSACD` matching on the path alone failed exactly
+  `TestScanner_ANotAnSACDVerdictFollowsTheFile` ("after a new mtime: 1
+  opens, want 2").
+- A verdict recorded in the read-fault branch failed exactly
+  `TestScanner_AnISOWhoseProbeFailedIsProbedAgain` ("opened 1 times in
+  three scans, want 3").
+Both pins passed on main before the change, as pins do; the defect case
+was the one red.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) of #1230: taken, a pin
+that the verdict goes when the image expands (`forgetNotSACD`, asserted at
+the end of `TestScanner_ANotAnSACDVerdictFollowsTheFile`). Recorded as
+residuals, not changed: a symlink retargeted to an image with the same size
+and mtime keeps the old verdict until the process ends (`os.SameFile` would
+not help on Windows, where `os.Stat` leaves the identity to be read at the
+comparison, from the new target), and verdicts of renamed or deleted images
+stay in the map until then. Not a defect: the review's "two roots at the same
+relative path", since a relative path is the store's key and is already unique
+across roots. The `retired == false` branch has no test: no seam fails
+`TrackPathsUnder` or the threshold delete, and adding one to production code
+for it was not worth it.
+
 ## 2026-10-14 — `artwork --gc` collects the portraits of artists no track row names (backlog B85)
 
 The GC judged a file by its size suffix (`artworkCacheStem`), so the
