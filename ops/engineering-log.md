@@ -42685,3 +42685,85 @@ relative path", since a relative path is the store's key and is already unique
 across roots. The `retired == false` branch has no test: no seam fails
 `TrackPathsUnder` or the threshold delete, and adding one to production code
 for it was not worth it.
+
+## 2026-10-14 — `artwork --gc` collects the portraits of artists no track row names (backlog B85)
+
+The GC judged a file by its size suffix (`artworkCacheStem`), so the
+portraits at the top of the cache were "skipped (non-cache file)" on every
+run: `artist-<mbid>.jpg`, the path `/v1/artist-image` and the console read,
+and `artist-name-<sha256>.jpg`, the canonical the enricher fetches once per
+artist name (`ArtistImagePathByName`) and hard-links each MBID path to
+(`linkOrCopy`). Since B64 the GC kept the portrait THUMBNAILS by the store's
+`$.artistMBID` set; the portraits stayed out of scope, and
+`TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames` pinned that scope
+(it now pins the new one).
+
+Only the enricher writes portraits, and only under `t.ArtistMBID`
+(`ensureArtistImageCached`, from the text path and the acoustic fallback),
+so `DistinctArtistMBIDs` is the whole keep set for the MBID files. The
+canonical cannot be mapped back to a name: the hash is one-way and hashes
+`artistImageQueryName`'s name, which no row stores. It is kept while a kept
+MBID portrait is the same file (`os.SameFile`, bucketed by size: a hard
+link has its file's size). Rejected: the link count, which cannot tell a
+link this run keeps from one it removes, and is fixed during a dry run.
+
+`linkOrCopy` copies where the filesystem refuses a hard link, so such a
+canonical shares no file with anything and goes. Nothing served is lost
+(the MBID copies stay); the canonical's job was the network dedup, so the
+cost is one Deezer fetch if a new MBID of that name ever needs a portrait.
+
+An empty artist set removes no portrait without `--allow-empty`: the shape
+of a wrong `--config`, or a store never enriched. Unlike the covers'
+refusal (exit 1 before the walk) it keeps the portraits with a stderr line
+and lets the cover GC go on, because a portrait comes back through a fetch
+and the covers have their own guard.
+
+Red first on main (`3a0e143d`): the four new behaviour cases and the
+updated scope test failed; `TestArtworkGCLeavesWhatIsNoPortrait` passed (a
+pin). Controls, each on the committed tree and restored from git:
+- The same-file comparison made against every MBID portrait instead of the
+  kept ones failed exactly the main case (the last-link canonical survived)
+  and the dry-run case (it was not named).
+- The empty-set guard disabled failed exactly the empty-set case.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) found a real race: `artwork
+--gc` takes no lock against a running `bridge serve` (the cover GC has the
+same race), and the portrait pass used the artist set read before the cover
+walk. An artist enriched during the walk, or a canonical caught between its
+write and its hard link, was an orphan to the pass. Now the pass reads
+`DistinctArtistMBIDs` itself, right before it lists the cache, and keeps
+any portrait whose mtime is within `portraitGrace` (ten minutes), whatever
+the store says. That covers every file the enricher writes during or just
+before the run: a new canonical, and a copy where links are refused. It
+cannot cover a new hard link to an old canonical, whose mtime is the
+canonical's (ctime would show it, but is not portable), in the milliseconds
+between the link and the track row's commit; the rule says to run the GC
+with the bridge idle. Tests age their fixtures through the `artworkGCNow`
+seam. Taken too: the shared-canonical cases the fixture was built for
+(`TestArtworkGCSharedCanonical`: one MBID named keeps the canonical; none
+named removes all three in one run, though the link count was 3).
+Control: the grace disabled failed exactly
+`TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`. Not a defect: the
+review's case-sensitivity point, since the enricher writes MusicBrainz's
+lowercase MBIDs and `hex.EncodeToString`'s lowercase hash, and both sides of
+the MBID comparison are lowercased.
+
+The PR's bot review (Gemini, CodeRabbit) found two more, both taken. A
+SIGINT after the artist-set read went on removing every selected portrait
+and could exit 0, where the cover walk checks `ctx` per entry: the pass now
+checks it before each removal and returns `ctx.Err()`, which `runArtworkGC`
+reports as the cover walk's interruption (`artwork gc interrupted`, exit 1,
+no summary). And the entry filter was "is a regular file", the test the
+bridge refuses everywhere else (`fsutil.NotAFile`): on Windows a portrait
+OneDrive has dehydrated, in a data dir under a synced folder, is
+`ModeIrregular` and would have been kept for ever. `canBePortrait` refuses
+`NotAFile`'s kinds and a symlink. No macOS or Linux filesystem makes a
+`ModeIrregular` entry, so `TestCanBePortraitRefusesKindsNotIrregular` pins
+the kinds on their bits; the symlink and the cancel are end to end
+(`TestArtworkGCLeavesASymlinkNamedLikeAPortrait`, and
+`TestArtworkGCPortraitPassStopsWhenCancelled`, whose `portraitRemove` seam
+cancels during the first of three removals). Controls on the committed
+tree, each restored from git: the loop's check removed, and the
+interruption mapping removed, each failed exactly the cancel case; the
+filter put back to `IsRegular` failed exactly the kinds case; the symlink
+clause dropped failed the kinds case and the symlink case.
