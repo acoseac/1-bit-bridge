@@ -19,7 +19,7 @@ cert-re-mint bug existed because the only copy lived on the host and drifted).
 See [`deploy/README.md`](../deploy/README.md) for the script index + sync
 contract. Routine update one-liners:
 - **home-pc**: `ssh <HOMEPC-SSH> 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
-- **bridge.ars.md**: this host runs only the public demo. A release deploy is the artifact procedure in the Demo bridge section, with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. Building `deploy/linux/deploy-bridge-vps.sh` from `main` is only a hotfix with no tag, still via `deploy/linux/.env.demo`; that build makes the demo advertise `updateAvailable` until the next tagged artifact. The script's defaults name the previous operator unit and binary. Coordinates live in the gitignored env file — the script ships no host defaults because `deploy/` is public.
+- **bridge.ars.md**: this host runs only the public demo. A release deploy is the artifact procedure in the Demo bridge section, with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. Building `deploy/linux/deploy-bridge-vps.sh` from `main` is only a hotfix with no tag, still via `deploy/linux/.env.demo`; that build's `serverVersion` is a `git describe` string until the next tagged artifact. The script's defaults name the previous operator unit and binary. Coordinates live in the gitignored env file — the script ships no host defaults because `deploy/` is public.
 
 ## Production deployments
 
@@ -433,8 +433,7 @@ still on this host. A demo swap must not touch them or restart that unit. The
 operator bridge moved to the NUC on 2026-09-22.
 
 The artifact is what `latestServerVersion` names. It carries goreleaser's clean
-`{{.Version}}` stamp (`0.1.9`, no `v`), so `serverVersion` matches the tag and
-`updateAvailable` reads `false` afterwards.
+`{{.Version}}` stamp (`0.1.9`, no `v`), so `serverVersion` matches the tag exactly.
 
 ```sh
 # 1. Fetch + verify against the release's OWN manifest, then extract.
@@ -465,29 +464,32 @@ ssh -i <VPS-SSH-KEY> <VPS-SSH> 'chmod +x /tmp/bridge.new
 ```
 
 Keep the detached dispatch: the window between the two `mv`s is the one state with no
-binary at `/usr/local/bin/bridge-demo`. Confirm with `updateAvailable` reading **false**
-afterwards — that is the signal the version string is clean, and no other check shows it.
+binary at `/usr/local/bin/bridge-demo`. Confirm with `serverVersion` reading exactly the
+tag afterwards (`0.1.9`, with no `-N-g<sha>` suffix): that is the signal the version
+string is clean, and `/v1/health` gives it to any caller.
 
 This host is the only one where the version string is user-visible. A build of
 `main` is whatever `git describe --tags` yields; one commit past a tag that is
-`v0.1.9-1-g8f3a873`, a semver **prerelease**, and a prerelease ranks BELOW the
-plain release:
+`v0.1.9-1-g8f3a873`. Since #797 (2026-08-30) the updater reads the describe suffix as
+build metadata (`normalizeDescribe` in `internal/updater/updater.go`), so that build
+compares EQUAL to its tag and is offered no update, while a real release still lands:
 
 ```
-semverGreater("0.1.9", "0.1.9-1-g8f3a873") == true      # updateAvailable stays true
-semverGreater("0.1.9", "0.1.9")            == false     # until the next tagged artifact
+semverGreater("0.1.9",  "0.1.9-1-g8f3a873") == false    # 0.1.9+1.g8f3a873 == 0.1.9
+semverGreater("0.1.10", "0.1.9-1-g8f3a873") == true     # the next release
 ```
 
-iOS is not passive about it: `BridgeEditorView.probeResultSection` renders
-`bridgeUpdateAdvisoryRow` with **no demo gate**, so a user opening the demo
-bridge in Settings is told *"Bridge update available · 0.1.9"* about a server
-they do not own. (Observed 2026-08-26; the host had been shipping that since
-08-20, on a build whose only delta from the tag was a docs commit.) Such a
-build keeps `updateAvailable: true` until the next tagged artifact.
+So `updateAvailable` cannot tell a hotfix from an artifact deploy: both read `false`
+until the next release. `/v1/health` also withholds it from an unauthenticated caller
+(it reads `null`), which is why the probes below check `serverVersion` instead.
 
-The other two bridges track `main` deliberately and will keep reporting
-`updateAvailable: true` between releases. That is correct there ("you are ahead of the
-last tag") and needs no fix.
+Before #797 a describe string was a semver prerelease, ranked BELOW the plain release,
+and iOS is not passive about that: `BridgeEditorView.probeResultSection` renders
+`bridgeUpdateAdvisoryRow` with **no demo gate**, so a user opening the demo bridge in
+Settings was told *"Bridge update available · 0.1.9"* about a server they do not own.
+(Observed 2026-08-26; the host had been shipping that since 08-20, on a build whose only
+delta from the tag was a docs commit.) #797 fixed it, and the other two bridges, which
+track `main` deliberately, no longer report an update between releases either.
 
 **A build of the deploy script from `main` is only a hotfix with no tag.** It
 must still name the demo unit, or the script's defaults restart the previous
@@ -497,15 +499,17 @@ operator install:
 ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
 ```
 
-That binary makes the demo advertise `updateAvailable` until the next tagged
-artifact. Check afterwards the same way. An artifact deploy reads `false`; a
-hotfix reads `true` until that artifact:
+That binary's `serverVersion` is the describe string, which demo users see until
+the next tagged artifact. Check afterwards the same way: an artifact deploy reads
+exactly the tag, a hotfix reads `<tag>-N-g<sha>`:
 
 ```sh
-curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, .leCertNotAfter, .endpoints, (.features | index("demoMode") != null)'
-# Expect: the new version, `false` after an artifact deploy (a main-built
-# hotfix reads `true` until the next tagged artifact), an LE expiry ~90d out,
-# the single endpoint once #871 has shipped, and `true` (demoMode advertised).
+curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .leCertNotAfter, .endpoints, (.features | index("demoMode") != null)'
+# Expect: the new version (exactly the tag after an artifact deploy; a main-built
+# hotfix reads <tag>-N-g<sha>), an LE expiry ~90d out, the single endpoint once
+# #871 has shipped, and `true` (demoMode advertised). Not `updateAvailable`:
+# /v1/health withholds it from an unauthenticated caller, and since #797 it
+# reads `false` for a hotfix too.
 ```
 
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then
@@ -574,7 +578,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 
 Public read-only demo bridge (the iOS "Add demo bridge" target). Full coordinates + rationale live in the `Demo bridge` subsection under "Production deployments" above.
 
-**One-line summary**: deploy the release artifact (the Demo bridge section), with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A `git describe` build of `main` is only a hotfix with no tag, and it makes this host advertise `updateAvailable: true` until the next tagged artifact, which iOS shows to demo users. Then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, (.features | index("demoMode") != null)'` — expect the new version, `false` after an artifact deploy, and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
+**One-line summary**: deploy the release artifact (the Demo bridge section), with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A `git describe` build of `main` is only a hotfix with no tag, and its `serverVersion`, the describe string, is what demo users see until the next tagged artifact. Then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, (.features | index("demoMode") != null)'` — expect exactly the tag after an artifact deploy, and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
 
 **SSH-flap note (2026-08-17): it is not the key, and it is not necessarily all-or-nothing.**
 

@@ -42243,17 +42243,21 @@ were removed before the commit.
 The runbook's Demo bridge "Update per release" led with
 `ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh`,
 which builds current `main`, and then said to deploy the release artifact.
-`deploy/README.md` said not to run that script for the demo at all. A
-`git describe` string is a semver prerelease, ranked below the plain
-release, so that build advertises `updateAvailable` until the next tagged
-artifact (observed 2026-08-26).
+`deploy/README.md` said not to run that script for the demo at all. Its
+`serverVersion` is then a `git describe` string, the one version string
+demo users see. (The runbook also said that build advertises
+`updateAvailable` until the next tagged artifact, observed 2026-08-26;
+that was true before #797, which reads the describe suffix as build
+metadata, so the build compares equal to its tag.)
 
 One procedure in both files. A release deploy is the artifact, with
 `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A
-`main` build of the script is only a hotfix with no tag, and it keeps
-`updateAvailable` true until the next tagged artifact. The post-deploy
-`updateAvailable` check stays: `false` after an artifact, `true` after
-that hotfix.
+`main` build of the script is only a hotfix with no tag, and its
+`serverVersion` stays the describe string until the next tagged artifact.
+The post-deploy check reads `serverVersion` (exactly the tag after an
+artifact), not `updateAvailable`: `/v1/health` withholds that from an
+unauthenticated caller, and since #797 it reads `false` for a hotfix too
+(CodeRabbit on #1223).
 
 The binary row, the swap comment and the do-not still called
 `/usr/local/bin/bridge` and unit `1-bit-bridge` the operator bridge on

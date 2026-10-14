@@ -65,13 +65,13 @@ A release deploy of the demo is the release artifact. Follow the runbook's
 `SVC=1-bit-bridge-demo`, `REMOTE_BIN=/usr/local/bin/bridge-demo` and
 `HEALTH_URL=https://bridge.1-bit.app/v1/health`. The script's defaults
 (`SVC=1-bit-bridge`, `REMOTE_BIN=/usr/local/bin/bridge`) name the previous
-operator unit and binary still on this host. Check `updateAvailable`
-afterwards: an artifact deploy reads `false`.
+operator unit and binary still on this host. Check `serverVersion`
+afterwards: an artifact deploy reads exactly the tag.
 
 Building this script from `main` is only a hotfix with no tag, and only with
 those same overrides (`ENV_FILE=deploy/linux/.env.demo`). The script always
-builds current `main`, and a `git describe` version makes the demo advertise
-`updateAvailable` until the next tagged artifact.
+builds current `main`, so the demo's `serverVersion` reads the `git describe`
+string until the next tagged artifact.
 
 No production bridge takes this script as its release deploy. It stays the
 reference for the manual form's steps, and the untagged hotfix above. Its
