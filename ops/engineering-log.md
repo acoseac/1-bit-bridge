@@ -42516,3 +42516,49 @@ after each of the first two tracks. Restoring the lazy
 `answered` on every non-transient error failed only
 `TestATransientStreakSurvivesANonResponse`, on the recovery line between
 the 503 and the DNS error. No `ExtractorVersion` bump and no wire change.
+
+## 2026-10-14 — SACD ISO folder cover (backlog B146)
+
+An SACD image's virtual tracks never carried the cover that sits beside
+the image. `processSACDISO` expanded through `expandSACDContainer` and
+returned. It never called the folder-art lookup, and the container's skip
+gate returned on the representative row's size, mtime and extractor
+version, so a cover added later never re-entered the expansion. Measured
+before the change: `buildSACDImage` of two tracks plus `cover.jpg`, both
+virtual rows had `artworkMBID` empty
+(`TestAnSACDImageCarriesTheCoverBesideIt` failed at the artwork assertion;
+`TestAnSACDCoverChangeReachesTheRowsWithoutExpanding` failed when the
+cover was added). An image with no cover already stayed at one expansion
+and empty art (`TestAnSACDImageWithNoCoverScansAsBefore`).
+
+The lookup is `applyFolderArtwork`, the folder half of
+`extractLocalArtwork`, called with the image's directory. A virtual
+path's directory is the area folder and holds no cover. The representative
+row's `folder_art_key` is that directory's key. An unchanged image whose
+key drifted, or whose `local-` cache file is gone, restamps every virtual
+row and does not open the image. Artwork that changed is upserted whole.
+A key that moved while the artwork bytes did not is a column update
+(`stampFolderArtKeys`): tags, lyrics, `indexed_at` and `enriched_at` stay.
+`StampExtractorVersionBatch` was the rejected writer. It calls
+`writeLyricsRowTx`, and a track `GetTrack` returned has no lyrics, so the
+stamp would delete a local lyrics row the expansion does not carry.
+
+`ExtractorVersion` stays 25. A coverless folder keys to empty, which is
+what existing rows store, so those containers stay on the size and mtime
+skip. A folder that already holds a cover keys differently, and the first
+scan after the change restamps those containers once.
+
+The iOS album tile is first-writer-wins over the manifest
+(`BridgeSyncActor`, the album artwork map): the first track of the album
+with a non-empty `artworkMBID` seeds it, and `Album.artworkHash` is
+`artworkVersion` when present, otherwise the id. There is no ISO-specific
+artwork path. Virtual rows with an empty id leave the tile on the
+enricher's cover, or with none. The same `local-` hash on every virtual
+row is the cover the tile shows, whichever track is first.
+
+Controls, each restored before the commit. `sacdCoverDrifted` returning
+false failed only `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`
+(`added cover: ArtworkMBID` empty); the image that already had its cover
+at the first scan still passed. `stampSACDFolderArt` returning before the
+lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
+empty, want a folder cover). No wire change.
