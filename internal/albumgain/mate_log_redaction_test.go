@@ -18,7 +18,9 @@ import (
 // scratch's mkdir), which names the mate's absolute path and the configured
 // tempDir: families a failed job's own message is redacted of
 // (redactSoxErr). The line takes the same redaction, by the mate's own spec,
-// so it names the mate library-relative, as the privacy page promises.
+// so it names the mate library-relative, as the privacy page promises. The
+// mate's renders are suppressed, which is what leaves it out here: the
+// error itself is not a fact about the file (backlog B215).
 func TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative(t *testing.T) {
 	var logs bytes.Buffer
 	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&logs, nil)))
@@ -33,6 +35,7 @@ func TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative(t *testing.T) {
 	h.meas.errs[mate] = fmt.Errorf("mkdir render scratch dir: mkdir %s: permission denied; %s: Invalid data found when processing input",
 		j.TempDir, mateAbs)
 	h.meas.peaks[refs[2].Path] = fp(-5.0)
+	h.peaks.suppressed = map[string]bool{mate: true}
 	if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); err != nil {
 		t.Fatalf("AlbumGainDB: %v", err)
 	}

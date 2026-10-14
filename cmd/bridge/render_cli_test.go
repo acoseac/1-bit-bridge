@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -397,12 +399,14 @@ func TestCLIAlbumMateSpecIsTheRunsOwnSpec(t *testing.T) {
 		t.Errorf("duration/channels %v/%d, want the row's", spec.SourceDurationSec, spec.SourceChannels)
 	}
 
+	// Both refusals are facts about the mate (albumgain.ErrMateIneligible),
+	// which leave it out of the album rather than hold it back (B215).
 	noCaps := p
 	noCaps.dsdCaps = cliCapsOff
-	if _, err := cliAlbumMateSpec(store, resolver, noCaps)(ctx, tr.Path, like); err == nil {
-		t.Error("a run that cannot render DSD must not measure a DSD mate")
+	if _, err := cliAlbumMateSpec(store, resolver, noCaps)(ctx, tr.Path, like); !errors.Is(err, albumgain.ErrMateIneligible) {
+		t.Errorf("a run that cannot render DSD must not measure a DSD mate: err = %v, want ErrMateIneligible", err)
 	}
-	if _, err := cliAlbumMateSpec(store, resolver, p)(ctx, "A/DSD/gone.dsf", like); err == nil {
-		t.Error("a mate not in the library must be refused")
+	if _, err := cliAlbumMateSpec(store, resolver, p)(ctx, "A/DSD/gone.dsf", like); !errors.Is(err, albumgain.ErrMateIneligible) {
+		t.Errorf("a mate not in the library must be refused: err = %v, want ErrMateIneligible", err)
 	}
 }

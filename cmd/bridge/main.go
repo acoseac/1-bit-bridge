@@ -1333,7 +1333,7 @@ func (a *upscaleEnqueuerAdapter) enqueueKind(kind transcode.JobKind, libraryRela
 func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error) {
 	abs, track, err := a.resolveAndLookupTrack(path)
 	if err != nil {
-		return transcode.JobSpec{}, err
+		return transcode.JobSpec{}, albumMateSpecErr(err)
 	}
 	var spec transcode.JobSpec
 	if like.Kind == transcode.JobKindPCMRender {
@@ -1342,12 +1342,25 @@ func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, l
 		spec, err = buildOptimizeSpec(track, abs, like.OutputDir, like.TempDir, a.caps())
 	}
 	if err != nil {
-		return transcode.JobSpec{}, err
+		return transcode.JobSpec{}, albumMateSpecErr(err)
 	}
 	spec.Quality = like.Quality
 	spec.SourceMTimeNS = track.ModTime.UnixNano()
 	spec.SourceSize = track.Size
 	return spec, nil
+}
+
+// albumMateSpecErr marks an album-mate this bridge would not render (no
+// track row, or a source its rendition gate refuses: api.ErrUpscaleIneligible)
+// as albumgain.ErrMateIneligible, so the survey leaves it out of the album.
+// Any other error (a store read, a path that does not resolve) passes as it
+// is, which the survey takes as transient (backlog B215): a mate whose file
+// is gone keeps its row until a scan reaps it, and the album waits for that.
+func albumMateSpecErr(err error) error {
+	if errors.Is(err, api.ErrUpscaleIneligible) {
+		return fmt.Errorf("%w: %w", albumgain.ErrMateIneligible, err)
+	}
+	return err
 }
 
 // wireAlbumGain gives the pool the album-level gain: every DSD render it

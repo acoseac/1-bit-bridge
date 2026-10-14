@@ -29,6 +29,7 @@ package albumgain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -48,15 +49,28 @@ type CatalogStreamer interface {
 	StreamDSDCatalogRefs(ctx context.Context, fn func(manifest.CatalogRef) error) error
 }
 
-// PeakStore reads and records peaks (manifest.Store).
+// PeakStore reads and records peaks (manifest.Store), and answers whether a
+// track's renders are suppressed by their failures.
 type PeakStore interface {
 	FreshDSDPeaks(ctx context.Context, profile string, paths []string) (map[string]manifest.DSDPeak, error)
 	UpsertDSDPeak(ctx context.Context, p manifest.DSDPeak) error
+	// VariantFailureSuppressed is the pool's own verdict on a file whose
+	// renders keep failing (manifest.Store): such an album-mate will not
+	// render, so it does not constrain its album.
+	VariantFailureSuppressed(ctx context.Context, path string) (bool, error)
 }
 
 // SpecFor builds the spec that measures path on like's profile: the
-// album-mate's own source facts under like's kind, target and quality.
+// album-mate's own source facts under like's kind, target and quality. An
+// album-mate this bridge would not render (no track row, or a source its
+// rendition gate refuses) is an error wrapping ErrMateIneligible: such a
+// mate does not constrain the album. Any other error (a store read, a path
+// that does not resolve) is taken as transient (backlog B215).
 type SpecFor func(ctx context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error)
+
+// ErrMateIneligible is an album-mate this bridge would not render on the
+// job's profile, which therefore does not constrain the album (SpecFor).
+var ErrMateIneligible = errors.New("album gain: the album-mate is not rendered on this profile")
 
 // Measurer measures one spec's true peak at unity decode; nil = silent.
 type Measurer func(ctx context.Context, j transcode.JobSpec) (*float64, error)
@@ -91,6 +105,15 @@ const (
 	unknownDurationBudget = 10 * time.Minute
 	// minMeasureBudget floors a known duration's budget.
 	minMeasureBudget = time.Minute
+	// mateTransientGrace is how long an album-mate whose measurement keeps
+	// failing for a reason not known to be its file's holds its album's
+	// renders back (backlog B215). Its own render normally records its
+	// peak well inside it, or collects the strikes that suppress it. The
+	// bound is for what neither covers: a mate that already has a
+	// rendition (no render of its own will run) and fails the same way on
+	// every survey. After it, the mate is left out, as a fact would be,
+	// with a line saying so.
+	mateTransientGrace = 24 * time.Hour
 )
 
 // Resolver is the album-level gain decider. Safe for concurrent use.
@@ -99,9 +122,14 @@ type Resolver struct {
 
 	rebuildMu sync.Mutex // serialises index rebuilds
 
-	mu     sync.Mutex // guards ix, claims and short
+	mu     sync.Mutex // guards ix, claims, short and transientSince
 	ix     *index
 	claims map[claimKey]*claim
+	// transientSince is when an album-mate's measurement on a profile
+	// first failed for a reason not known to be its file's, since its
+	// peak was last recorded (mateTransientGrace). In memory: a restart
+	// starts the grace again.
+	transientSince map[claimKey]time.Time
 	// short remembers a mate a later render would only measure again: a
 	// decode that finished at a different length than its container, or a
 	// malformed DSF header. The key is the mate spec's path, size and
@@ -142,7 +170,8 @@ func New(cfg Config) (*Resolver, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Resolver{cfg: cfg, claims: map[claimKey]*claim{}, short: map[shortKey]struct{}{}}, nil
+	return &Resolver{cfg: cfg, claims: map[claimKey]*claim{}, short: map[shortKey]struct{}{},
+		transientSince: map[claimKey]time.Time{}}, nil
 }
 
 // Invalidate drops the album index; the next render rebuilds it. Called
@@ -221,8 +250,19 @@ func (r *Resolver) Claim(ctx context.Context, j transcode.JobSpec) func(*float64
 
 // AlbumGainDB is transcode.AlbumGainer's decision: the album-level boost for
 // j, from j's own peak and every album-mate's. ok=false when j has no
-// album-mate on its profile. An album-mate that cannot be measured does not
-// constrain the album; it will not render either, for the same reason.
+// album-mate on its profile.
+//
+// An album-mate whose peak cannot be found does not constrain the album when
+// that is a fact about it, since it will not render either: its file decodes
+// short or has a malformed header (transcode.RepeatedFileFact), this bridge
+// would not render it on the profile (ErrMateIneligible), or its renders are
+// suppressed by their failures. Any other failure (a full scratch volume, an
+// I/O error, a store read) says nothing about the mate, and a boost decided
+// without it would be too high when it is the hottest, kept by the rendition
+// for good: the call then returns an error wrapping
+// transcode.ErrAlbumMateUnmeasured, and the render publishes nothing
+// (backlog B215). Such a mate stops holding the album back after
+// mateTransientGrace.
 func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *float64) (float64, bool, error) {
 	profile := j.DSDPeakProfile()
 	if profile == "" {
@@ -236,13 +276,16 @@ func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *fl
 		return 0, false, nil
 	}
 	s := &survey{r: r, j: j, profile: profile, mates: mates, paths: pathsOf(mates),
-		measured: map[string]*float64{}, gaveUp: map[string]bool{}}
+		measured: map[string]*float64{}, gaveUp: map[string]bool{}, transient: map[string]error{}}
 	for {
 		waits, err := s.pass(ctx)
 		if err != nil {
 			return 0, false, err
 		}
 		if len(waits) == 0 {
+			if err := s.unmeasured(); err != nil {
+				return 0, false, err
+			}
 			return transcode.AlbumClipGuardedGainDB(s.peaks(own)), true, nil
 		}
 		if err := waitForClaims(ctx, waits); err != nil {
@@ -259,16 +302,37 @@ func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *fl
 // pass read from the store, and what this call measured or gave up on.
 // measured and gaveUp are kept per call, whether or not the store accepted
 // a row, so a mate is measured at most once here even if its peak cannot
-// be recorded.
+// be recorded. transient holds the mates given up on for a reason that is
+// not a fact about them (measureClaimed): each fails the call unless a
+// later pass of it finds the mate's peak recorded after all.
 type survey struct {
-	r        *Resolver
-	j        transcode.JobSpec
-	profile  string
-	mates    []member
-	paths    []string
-	fresh    map[string]manifest.DSDPeak
-	measured map[string]*float64
-	gaveUp   map[string]bool
+	r         *Resolver
+	j         transcode.JobSpec
+	profile   string
+	mates     []member
+	paths     []string
+	fresh     map[string]manifest.DSDPeak
+	measured  map[string]*float64
+	gaveUp    map[string]bool
+	transient map[string]error
+}
+
+// unmeasured is the first album-mate, in album order, given up on for a
+// transient reason whose peak no pass found since, as an error wrapping
+// transcode.ErrAlbumMateUnmeasured and the mate's own error; nil when there
+// is none.
+func (s *survey) unmeasured() error {
+	for _, m := range s.mates {
+		err, ok := s.transient[m.path]
+		if !ok {
+			continue
+		}
+		if _, known := s.fresh[m.path]; known {
+			continue
+		}
+		return fmt.Errorf("%w: album-mate %s: %w", transcode.ErrAlbumMateUnmeasured, m.path, err)
+	}
+	return nil
 }
 
 // pass reads the fresh peaks, measures every unknown mate nobody else is
@@ -319,8 +383,10 @@ func (s *survey) unknown(path string) bool {
 // released its claim since. A measurement records before it releases, so
 // this read sees it and the mate is not decoded twice
 // (TestASurveyRereadsThePeakUnderItsClaim). A failed measurement leaves the
-// mate out of the album; only a cancelled context or a failed store read is
-// returned.
+// mate out of the album when it is a fact about the mate (leftOutBecause),
+// and otherwise marks it transient, which fails the call (backlog B215);
+// either way it is not measured again in this call. Only a cancelled
+// context or a failed store read is returned.
 //
 // The deferred release is for a panic. The measurement is a decode, and
 // transcode.Pool's processJob recovers a panic in its runner and keeps the
@@ -354,14 +420,48 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 		return ctx.Err()
 	}
 	s.gaveUp[path] = true
+	why := s.r.leftOutBecause(ctx, key, err)
+	if why == "" {
+		s.transient[path] = err
+		return nil
+	}
 	// A file fact is logged when it is first remembered. A later render
 	// uses that memory and does not log it again.
 	if transcode.RepeatedFileFact(err) {
 		return nil
 	}
 	logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
-		"path", s.j.SourceLibraryRel, "mate", path, "err", err)
+		"path", s.j.SourceLibraryRel, "mate", path, "why", why, "err", err)
 	return nil
+}
+
+// leftOutBecause says why an album-mate whose measurement failed with err
+// does not constrain its album, or "" when it does and the failure is
+// transient (backlog B215). A transient failure starts the mate's grace,
+// and once that has run out the mate is left out too.
+func (r *Resolver) leftOutBecause(ctx context.Context, key claimKey, err error) string {
+	switch {
+	case transcode.RepeatedFileFact(err):
+		return "its file decodes short or has a malformed header"
+	case errors.Is(err, ErrMateIneligible):
+		return "this bridge does not render it on the profile"
+	}
+	// A failed read is no verdict: the mate is taken as not suppressed.
+	if suppressed, serr := r.cfg.Peaks.VariantFailureSuppressed(ctx, key.path); serr == nil && suppressed {
+		return "its renders are suppressed by their failures"
+	}
+	now := r.cfg.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	since, ok := r.transientSince[key]
+	if !ok {
+		r.transientSince[key] = now
+		return ""
+	}
+	if now.Sub(since) < mateTransientGrace {
+		return ""
+	}
+	return fmt.Sprintf("its measurement has failed for %s for reasons not known to be its file's", mateTransientGrace)
 }
 
 // peaks is own plus every mate's known peak, for AlbumClipGuardedGainDB.
@@ -396,7 +496,11 @@ func (r *Resolver) measure(ctx context.Context, path string, like transcode.JobS
 		return nil, err
 	}
 	if got := spec.DSDPeakProfile(); got != profile {
-		return nil, fmt.Errorf("album gain: %s would be measured on %q, not %q", path, got, profile)
+		// The mate's row moved to another profile since the index was
+		// built: it is no album-mate on this one, which a rebuilt index
+		// will say.
+		r.Invalidate()
+		return nil, fmt.Errorf("%w: %s would be measured on %q, not %q", ErrMateIneligible, path, got, profile)
 	}
 	if r.knownShort(spec) {
 		return nil, errMateDecodesShort
@@ -436,7 +540,11 @@ func (r *Resolver) rememberShort(spec transcode.JobSpec) {
 
 // record stores a measurement. A failure is logged and otherwise ignored:
 // the caller keeps the number it measured, and the next render re-measures.
+// A measured peak ends the track's transient grace on the profile.
 func (r *Resolver) record(ctx context.Context, j transcode.JobSpec, profile string, tp *float64) {
+	r.mu.Lock()
+	delete(r.transientSince, claimKey{path: j.SourceLibraryRel, profile: profile})
+	r.mu.Unlock()
 	err := r.cfg.Peaks.UpsertDSDPeak(ctx, manifest.DSDPeak{
 		SourcePath: j.SourceLibraryRel, Profile: profile, TruePeakDBTP: tp,
 		SourceMTimeNS: j.SourceMTimeNS, SourceSize: j.SourceSize,
