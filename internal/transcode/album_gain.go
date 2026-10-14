@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -88,9 +89,22 @@ type AlbumGainer interface {
 	Claim(ctx context.Context, j JobSpec) (resolve func(truePeakUnity *float64, err error))
 	// AlbumGainDB returns the album's boost for j given j's own true peak at
 	// unity. ok=false keeps the per-track guard: j is in no album of two or
-	// more tracks that render to the same profile.
+	// more tracks that render to the same profile. An error wrapping
+	// ErrAlbumMateUnmeasured says an album-mate's peak could not be found
+	// for a reason that is not a fact about its file, so no album figure
+	// can be decided yet.
 	AlbumGainDB(ctx context.Context, j JobSpec, ownTruePeakUnity *float64) (gainDB float64, ok bool, err error)
 }
+
+// ErrAlbumMateUnmeasured is an album gain that could not be decided because
+// an album-mate's measurement failed for a reason that says nothing about
+// its file (a full scratch volume, an I/O error on a flaky mount): a boost
+// decided without that mate would be too high when the mate is the hottest,
+// and the rendition would keep it for good (backlog B215). The render fails
+// and publishes nothing; it is no verdict on the RENDERING file either, so
+// the pool strikes nothing (pool.go), and the next sweep or request renders
+// it again, by when the mate's own render has usually recorded its peak.
+var ErrAlbumMateUnmeasured = errors.New("an album-mate's peak could not be measured yet")
 
 // Gain scopes recorded in a DSD rendition's settings blob: which rule
 // decided its applied gain.

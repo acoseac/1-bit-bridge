@@ -1333,7 +1333,7 @@ func (a *upscaleEnqueuerAdapter) enqueueKind(kind transcode.JobKind, libraryRela
 func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error) {
 	abs, track, err := a.resolveAndLookupTrack(path)
 	if err != nil {
-		return transcode.JobSpec{}, err
+		return transcode.JobSpec{}, albumMateSpecErr(err)
 	}
 	var spec transcode.JobSpec
 	if like.Kind == transcode.JobKindPCMRender {
@@ -1342,12 +1342,25 @@ func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, l
 		spec, err = buildOptimizeSpec(track, abs, like.OutputDir, like.TempDir, a.caps())
 	}
 	if err != nil {
-		return transcode.JobSpec{}, err
+		return transcode.JobSpec{}, albumMateSpecErr(err)
 	}
 	spec.Quality = like.Quality
 	spec.SourceMTimeNS = track.ModTime.UnixNano()
 	spec.SourceSize = track.Size
 	return spec, nil
+}
+
+// albumMateSpecErr marks an album-mate this bridge would not render (no
+// track row, or a source its rendition gate refuses: api.ErrUpscaleIneligible)
+// as albumgain.ErrMateIneligible, so the survey leaves it out of the album.
+// Any other error (a store read, a path that does not resolve) passes as it
+// is, which the survey takes as transient (backlog B215): a mate whose file
+// is gone keeps its row until a scan reaps it, and the album waits for that.
+func albumMateSpecErr(err error) error {
+	if errors.Is(err, api.ErrUpscaleIneligible) {
+		return fmt.Errorf("%w: %w", albumgain.ErrMateIneligible, err)
+	}
+	return err
 }
 
 // wireAlbumGain gives the pool the album-level gain: every DSD render it
@@ -1893,11 +1906,36 @@ func (a *analysisStatsAdapter) AnalysisStatsSnapshot(ctx context.Context) (api.A
 // admin.Deps.UpscalePrecheck contract) and the FLAC closure
 // (admin.Deps.UpscaleSoxFLAC) read the SAME snapshot, so wiring both costs
 // at most one probe per TTL window.
+//
+// Two rules since backlog B142, both because a probe that does not answer
+// is no verdict ("could not see is not not there"):
+//   - Only the first snapshot waits for a probe. Once there is a verdict, a
+//     snapshot after the TTL answers from it at once and starts ONE probe in
+//     the background, which replaces the verdict when it answers. The probe
+//     ran on the request path under the lock until then: the first
+//     /v1/health, manifest page, stats read or SSE tick after the TTL waited
+//     for `sox --help`, up to its 2 s, and every concurrent one behind it.
+//   - A probe that times out (transcode.ErrSoxProbeTimeout) keeps the last
+//     verdict a probe answered, and says so once per run of timeouts. Cached
+//     as "no sox" for the TTL, it closed the live upscale and analysis gates,
+//     said `upscaleEnabled: false` and stripped every track's variants from
+//     the manifests for 30 s, on a host whose sox was only slow to start. A
+//     sox that is not on PATH, or one that runs and fails, is still the
+//     verdict the moment its probe answers. With no verdict yet, a timeout
+//     is the verdict, as before: the gates stay closed until a probe answers.
 type soxToolchainCache struct {
 	mu   sync.Mutex
 	at   time.Time
 	info transcode.SoxInfo
 	err  error
+	// answered: the verdict above came from a probe that answered (any
+	// result but a timeout), so a timeout keeps it.
+	answered bool
+	// timeoutSaid: this run of timeouts has been logged.
+	timeoutSaid bool
+	// refreshing is closed when the running probe has landed; nil when no
+	// probe runs.
+	refreshing chan struct{}
 	// probe answers in place of transcode.ProbeSox when set: serveOpts'
 	// soxProbe, which only the boot tests give.
 	probe func(context.Context) (transcode.SoxInfo, error)
@@ -1907,17 +1945,57 @@ const adminSoxTTL = 30 * time.Second
 
 func (c *soxToolchainCache) snapshot() (transcode.SoxInfo, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.at.IsZero() && time.Since(c.at) < adminSoxTTL {
-		return c.info, c.err
+	if c.at.IsZero() {
+		// No verdict yet: wait for the one probe, starting it if none runs.
+		done := c.startProbeLocked()
+		c.mu.Unlock()
+		<-done
+		c.mu.Lock()
+	} else if time.Since(c.at) >= adminSoxTTL {
+		c.startProbeLocked()
 	}
+	info, err := c.info, c.err
+	c.mu.Unlock()
+	return info, err
+}
+
+// startProbeLocked starts the background probe unless one runs, and returns
+// the channel closed when it lands. c.mu is held.
+func (c *soxToolchainCache) startProbeLocked() chan struct{} {
+	if c.refreshing == nil {
+		c.refreshing = make(chan struct{})
+		go c.refresh(c.refreshing)
+	}
+	return c.refreshing
+}
+
+// refresh runs one probe and records its answer (snapshot's rules).
+func (c *soxToolchainCache) refresh(done chan struct{}) {
+	var info transcode.SoxInfo
+	var err error
 	if c.probe != nil {
-		c.info, c.err = c.probe(context.Background())
+		info, err = c.probe(context.Background())
 	} else {
-		c.info, c.err = transcode.ProbeSox(context.Background())
+		info, err = transcode.ProbeSox(context.Background())
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer close(done)
+	c.refreshing = nil
 	c.at = time.Now()
-	return c.info, c.err
+	if errors.Is(err, transcode.ErrSoxProbeTimeout) && c.answered {
+		if !c.timeoutSaid {
+			c.timeoutSaid = true
+			logger.Warn("sox probe: `sox --help` did not answer in time, so the last answer stands until one does",
+				"soxAvailable", c.err == nil, "err", err)
+		}
+		return
+	}
+	c.info, c.err = info, err
+	c.answered = !errors.Is(err, transcode.ErrSoxProbeTimeout)
+	if c.answered {
+		c.timeoutSaid = false
+	}
 }
 
 // precheck satisfies admin.Deps.UpscalePrecheck (nil == sox runnable).

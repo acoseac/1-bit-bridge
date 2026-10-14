@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSoxFileFormats(t *testing.T) {
@@ -224,5 +225,32 @@ func TestProbeSox_RealSoxIfPresent(t *testing.T) {
 	}
 	if !info.HasFLAC {
 		t.Logf("host sox lacks FLAC support (formats: %v) — feature would degrade", info.Formats)
+	}
+}
+
+// TestProbeSoxTimeoutDoesNotWaitForAChildHoldingItsOutput: a PATH wrapper
+// whose child outlives it holds the probe's output pipe open. The deadline
+// kills the wrapper, and the probe answers ErrSoxProbeTimeout about
+// soxProbeWaitDelay later instead of waiting for the child (backlog B142).
+func TestProbeSoxTimeoutDoesNotWaitForAChildHoldingItsOutput(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("test uses /bin/sh which isn't available on this platform")
+	}
+	origLook, origCmd := soxLookPath, soxProbeCommand
+	t.Cleanup(func() { soxLookPath, soxProbeCommand = origLook, origCmd })
+	soxLookPath = func(string) (string, error) { return "/fake/sox", nil }
+	soxProbeCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// The background sleep inherits the output pipe and outlives the
+		// shell the deadline kills.
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 12 & sleep 12")
+	}
+	start := time.Now()
+	_, err := ProbeSox(context.Background())
+	took := time.Since(start)
+	if !errors.Is(err, ErrSoxProbeTimeout) {
+		t.Errorf("err = %v, want ErrSoxProbeTimeout", err)
+	}
+	if took > 8*time.Second {
+		t.Errorf("the probe took %v: it waited for the child holding its output", took)
 	}
 }

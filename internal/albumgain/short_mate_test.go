@@ -99,7 +99,8 @@ func TestAChangedShortMateIsMeasuredAgain(t *testing.T) {
 
 // TestATransientMateFailureIsMeasuredAgain: a decoder error that is not a
 // length disagreement, and a length disagreement on a cancelled call, are
-// not remembered.
+// not remembered. The I/O error is transient, so each call also decides no
+// album figure (backlog B215).
 func TestATransientMateFailureIsMeasuredAgain(t *testing.T) {
 	refs := album(3)
 	h := newHarness(t, refs...)
@@ -108,8 +109,8 @@ func TestATransientMateFailureIsMeasuredAgain(t *testing.T) {
 	h.meas.peaks[refs[2].Path] = fp(-5.0)
 	j := compactSpec(refs[0].Path, dsd64)
 	for n := 0; n < 2; n++ {
-		if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); err != nil {
-			t.Fatal(err)
+		if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); !errors.Is(err, transcode.ErrAlbumMateUnmeasured) {
+			t.Fatalf("call %d: err = %v, want ErrAlbumMateUnmeasured", n, err)
 		}
 	}
 	if n := h.meas.callCount(mate); n != 2 {

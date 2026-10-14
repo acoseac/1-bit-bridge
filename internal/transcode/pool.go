@@ -1408,6 +1408,20 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 				"path", job.spec.SourceLibraryRel, "err", msg)
 			return
 		}
+		// An album-mate this render's boost needs could not be measured, for
+		// a reason that is not a fact about its file (albumgain, backlog
+		// B215). The render publishes no album figure without it, and it is
+		// no verdict on THIS file, so it strikes nothing: three strikes would
+		// suppress a good file for 30 days over its album-mate's full scratch
+		// volume. It is counted and announced like any other failure, and the
+		// next sweep or request renders it again. A mate's host fault (a tool
+		// this host lacks, an output it refuses) took the exits above, as
+		// the render's own would.
+		if errors.Is(err, ErrAlbumMateUnmeasured) {
+			logger.Info("pool: the render waits for an album-mate's peak",
+				"path", job.spec.SourceLibraryRel, "err", msg)
+			return
+		}
 		logger.Warn("pool: sox failed",
 			"path", job.spec.SourceLibraryRel,
 			"err", msg)

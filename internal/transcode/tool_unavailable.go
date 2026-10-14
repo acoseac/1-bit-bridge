@@ -127,6 +127,19 @@ func unavailableTool(err error) (missingTool, bool) {
 	return missingTool{}, false
 }
 
+// HostFault reports an error that is the HOST's, not its file's: a tool
+// this host lacks or cannot start (unavailableTool), or an output it will
+// not let a job write (unwritableOutput). The pool exits on both without a
+// strike; the album gain never leaves an album-mate out for one, nor counts
+// it toward the mate's grace (albumgain, backlog B215).
+func HostFault(err error) bool {
+	if _, ok := unavailableTool(err); ok {
+		return true
+	}
+	_, ok := unwritableOutput(err)
+	return ok
+}
+
 // causeText is an exec failure's cause as the report states it. The os and
 // exec packages always set one; a value built without it must not panic the
 // worker that classifies it.

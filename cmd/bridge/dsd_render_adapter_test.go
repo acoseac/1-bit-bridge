@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -298,11 +299,13 @@ func TestAlbumMateSpecMeasuresOnTheRendersProfile(t *testing.T) {
 		checkMateSpec(t, like, spec, mate, filepath.Join(f.libDir, mate.Path))
 	}
 	like := transcode.JobSpec{Kind: transcode.JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16}
-	if _, err := f.a.albumMateSpec(ctx, "A/DSD/03.dff", like); !errors.Is(err, api.ErrUpscaleIneligible) {
-		t.Errorf("a DST mate without the dst decoder: err = %v, want ErrUpscaleIneligible", err)
+	// A fact about the mate: it leaves the album rather than hold it back
+	// (albumgain.ErrMateIneligible, B215).
+	if _, err := f.a.albumMateSpec(ctx, "A/DSD/03.dff", like); !errors.Is(err, api.ErrUpscaleIneligible) || !errors.Is(err, albumgain.ErrMateIneligible) {
+		t.Errorf("a DST mate without the dst decoder: err = %v, want ErrUpscaleIneligible as ErrMateIneligible", err)
 	}
-	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); err == nil {
-		t.Error("a mate with no row must not be measured")
+	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); !errors.Is(err, albumgain.ErrMateIneligible) {
+		t.Errorf("a mate with no row must not be measured: err = %v, want ErrMateIneligible", err)
 	}
 }
 
