@@ -1972,12 +1972,46 @@ lost my library."
   after the last header packet and no segment data but the first bytes of a packet
   (the fixtures: 360 of 2,117 bytes, 610 of 1,441), and it wants mapping major version
   1, which libFLAC and ffmpeg both require (measured: both refuse 2). **ExtractorVersion
-  18**; the codec stays "OGG", and an Ogg row still has no sample rate, bit depth or
-  duration (backlog B118). The iOS app lists no `.ogg` or `.oga` from SMB or the device
-  and takes a bridge row's tags as strings: no twin, no Mirror-PR.
+  18** is the tag read. Format facts are ExtractorVersion 25 (the next bullet).
+  The iOS app lists no `.ogg` or `.oga` from SMB or the device and takes a bridge
+  row's tags as strings.
   `FuzzOggFLACReadsBackTheMetadataItCarries` lays blocks out in pages of any size and
   requires them back byte for byte, and `FuzzExtractOGG` carries Ogg FLAC seeds, both
   picture bombs among them: the guards meet them in the join.
+- **An Ogg row carries the format facts its container holds, and an Ogg FLAC
+  stream is classed as FLAC** (ExtractorVersion 25, 2026-10-14, backlog B118).
+  The `.ogg` / `.oga` branch used to stamp codec `OGG` and nothing else, so
+  Vorbis, Opus and Ogg FLAC all arrived with no sample rate, bit depth,
+  channel count or duration, and an Ogg FLAC file sat on every lossy list.
+  `extractOggWithContext` opens the file once. Vorbis and Opus are read from
+  the identification header (Vorbis rate and channels; Opus channels and the
+  48 kHz clock, duration minus the pre-skip) and stay codec `OGG`, with no
+  bit depth. Their duration is the last page's granule, and that page is
+  read from a window of one maximum Ogg page at the end of the file, never
+  the whole file: the page must end on the last byte, carry the same serial
+  as the first page, a non-negative granule and a matching CRC. Ogg FLAC
+  takes STREAMINFO from the join `oggFLACMetadata` already builds, through
+  the same `extractFLACFormatFromReader` a `.flac` file uses, plus the
+  channel count that reader does not store: codec `FLAC`, so
+  `canSetBitsPerSample` writes the depth and `IsLossyCodec` is false, the
+  audio MD5 when STREAMINFO carries one, and the duration from the total
+  sample count. Vorbis and Opus store the rate and the channels when the
+  header parses and a page of that stream ends at EOF with a non-negative
+  granule. A duration is stored only when `plausibleDuration` accepts it,
+  so a granule of 0 or one past a week leaves the duration unset. A
+  truncated or malformed file keeps the codec alone. A library with no Ogg
+  file re-reads each version-stale row once and stamps it. SACD ISO virtual
+  rows re-expand, as on every bump. `ProtocolVersion` stays 1. The app
+  already treats codec `FLAC` as lossless and still drops `bitsPerSample`
+  for an `.ogg` or `.oga` extension, and it does not index or play an Ogg
+  container the way it plays a `.flac` file, so the codec change is a
+  Mirror note and not an app change.
+  (`TestAnOggFLACStreamCarriesAFlacFilesFacts`,
+  `TestVorbisAndOpusCarryRateChannelsAndDuration`,
+  `TestACutOrGarbageOggKeepsTheCodecOnly`,
+  `TestVorbisDurationIsReadFromTheTail`,
+  `TestOggFormatLeavesFLACMP3AndM4AAlone`,
+  `TestScanner_V25_AnOggRowJoinsTheDelta_OtherRowsOnlyStamp`.)
 - **An ID3v2 tag's MusicBrainz ids and ReplayGain are read BY NAME, from its TXXX
   frames and the MusicBrainz UFID** (ExtractorVersion 19, 2026-09-29, backlog B116).
   dhowden files a TXXX frame as a `*tag.Comm` under `TXXX`, `TXXX_0`, … (the renaming

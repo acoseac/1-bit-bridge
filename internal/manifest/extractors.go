@@ -554,7 +554,22 @@ var Ext = map[string]bool{
 // (its enrichment re-queued once) and is the iOS delta. Every other row
 // re-extracts byte-identical and rides the version-stamp leg; SACD ISO
 // virtual rows re-expand as on every bump. ProtocolVersion stays 1.
-const ExtractorVersion = 24
+//
+// v25 — an Ogg row carries the format facts its container holds (backlog
+// B118). An Ogg FLAC stream is read from the same STREAMINFO the .flac
+// path reads, on the join oggFLACMetadata builds: codec FLAC, sample rate,
+// bit depth, channel count, duration from the total sample count, and the
+// audio MD5 when STREAMINFO carries one. Vorbis reads its identification
+// header for rate and channels. Opus reads its channel count and the
+// 48 kHz clock, and the duration subtracts the pre-skip. Vorbis and Opus
+// stay codec OGG, with no bit depth, and their duration is the last page
+// granule, read from the tail of the file. A truncated or malformed file
+// keeps the codec alone. Only an Ogg row whose new facts differ takes the
+// full-upsert leg. Every other row re-extracts byte-identical and rides
+// the version-stamp leg, including a library that holds no Ogg file: the
+// bump re-reads each version-stale file once and stamps it. SACD ISO
+// virtual rows re-expand as on every bump. ProtocolVersion stays 1.
+const ExtractorVersion = 25
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -890,13 +905,10 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		}
 		return extractViaDhowdenFromReader(f, absPath, t, ec)
 	case ".ogg", ".oga":
-		// OGG container; for v1.2 we conservatively report "OGG"
-		// rather than trying to distinguish Vorbis vs Opus — both
-		// are lossy, both bin under the iOS `.lossy` filter via the
-		// `hasPrefix("OGG")` check (the legacy "M4A" branch covers
-		// this codepath today; "OGG" added to be explicit).
+		// Vorbis and Opus stay OGG. An Ogg FLAC stream is restamped
+		// FLAC from its STREAMINFO once the header join is in hand.
 		t.Codec = "OGG"
-		return extractViaDhowdenWithContext(absPath, t, ec)
+		return extractOggWithContext(absPath, t, ec)
 	case ".flac":
 		// Pre-fix the FLAC branch opened the file twice: once for
 		// `extractFLACFormat` (`flac.ParseFile`) and once for
@@ -1005,6 +1017,7 @@ func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) 
 // file's in every respect, whatever the file is called.
 func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	if flac, ok := oggFLACMetadata(f); ok {
+		applyJoinedFLACFacts(flac, absPath, t)
 		err := readDhowdenTags(flac, absPath, t, ec)
 		if _, serr := flac.Seek(0, io.SeekStart); serr == nil {
 			applyFLACMultiValueArtists(flac, t)

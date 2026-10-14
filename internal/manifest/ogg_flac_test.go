@@ -61,8 +61,8 @@ func TestAnOggFLACFileGetsItsTags(t *testing.T) {
 		if tr.MusicBrainzTrackID != "0a1b2c3d-0000-4000-8000-000000000001" {
 			t.Errorf("MusicBrainzTrackID = %q", tr.MusicBrainzTrackID)
 		}
-		if tr.Codec != "OGG" {
-			t.Errorf("Codec = %q, want OGG (the .oga branch's, unchanged)", tr.Codec)
+		if tr.Codec != "FLAC" || IsLossyCodec(tr.Codec) {
+			t.Errorf("Codec = %q, lossy = %v, want FLAC and the lossless class a .flac file gets", tr.Codec, IsLossyCodec(tr.Codec))
 		}
 	})
 	t.Run("libFLAC", func(t *testing.T) {
