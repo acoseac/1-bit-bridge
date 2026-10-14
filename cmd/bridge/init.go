@@ -587,13 +587,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// refused above unless it passes the config's check.
 		apiPort, _ := configuredPort(listenAddr)
 		adminPort, _ := configuredPort(adminAddr)
-		d := doctor.Deps{
-			ConfigDir:    cfgDir,
-			DataDir:      dataDir,
-			LibraryRoots: namedRoots,
-			APIPort:      apiPort,
-			AdminPort:    adminPort,
-		}
+		d := initPreflightDeps(cfgDir, dataDir, namedRoots, apiPort, adminPort)
 		installPorts := withExistingInstallDeps(&d, cfgPath)
 		rewriting := installPorts && replace
 		if rewriting {
@@ -1433,6 +1427,22 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 		return defYes
 	}
 	return line == "y" || line == "yes"
+}
+
+// initPreflightDeps is what `bridge init` grades before it writes: the
+// install it is about to make. The container verdict is the doctor
+// command's too (buildDoctorDepsFor), so the documented `docker run …
+// init --no-service` is not told to pass the --no-service it was given, nor
+// to install a browser opener in an image (backlog B190).
+func initPreflightDeps(cfgDir, dataDir string, roots []string, apiPort, adminPort int) doctor.Deps {
+	return doctor.Deps{
+		ConfigDir:    cfgDir,
+		DataDir:      dataDir,
+		LibraryRoots: roots,
+		APIPort:      apiPort,
+		AdminPort:    adminPort,
+		InContainer:  inContainerFunc(),
+	}
 }
 
 // withExistingInstallDeps points `bridge init`'s preflight at the

@@ -515,6 +515,32 @@ lost my library."
   `TestAnSACDImageWithNoCoverScansAsBefore`,
   `TestAnSACDCoverThatCouldNotBeReadKeepsItsArtAndIsRetried`,
   `TestAnSACDCoverWhoseCacheIsGoneIsRestoredWithoutExpanding`.)
+- **An `.iso` that is not an SACD is probed once per process, not once
+  per scan** (2026-10-14, backlog B157). It expands to nothing, so it has
+  no row for the skip gate to key on, and every scan opened it, ran
+  `TrackPathsUnder` and probed its master TOC again (measured: three full
+  scans of a zero-filled `dvd.iso`, three opens through `Scanner.openSACD`).
+  A completed "nothing to expand" probe is recorded in `Scanner.notSACD`,
+  by library-relative path, with the size and mtime it read, and
+  `processSACDISO` returns before any open while both still match. **Only
+  a completed probe records**: a read fault and a container that changed
+  under the read return before the verdict (B134's line), and so does a
+  stale-row retire that could not list or delete, or those rows would wait
+  for the process to end. A verdict is dropped when the image expands.
+  Kept in memory, where no manifest reader, retirement pass or deletion
+  pass sees it, rather than in the store: the Scanner lives as long as
+  `serve`, so a bridge probes each such image once per process, and
+  `ExtractorVersion` is compiled in, so a reader that learns a new layout
+  is a new process with an empty map. Residuals, accepted: an image a
+  symlink is retargeted to with the same size and mtime as the one it
+  replaced keeps the old verdict until the process ends, and the verdicts
+  of images renamed or deleted stay in the map until then (one entry per
+  `.iso` path seen). **Don't record a probe that did not
+  complete, don't key the verdict on the path alone, and don't move it
+  into `tracks`**, where it would reach the manifest
+  (`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`,
+  `TestScanner_ANotAnSACDVerdictFollowsTheFile`,
+  `TestScanner_AnISOWhoseProbeFailedIsProbedAgain`).
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the
@@ -6727,6 +6753,29 @@ no failing test — which is the shape to expect in this area.
   it. This said until 2026-09-30 that the pointer "is loopback-gated and
   answers 403", a claim about the gate B171 replaced (under **Auth,
   pairing, TLS and security posture**).
+- **A container's doctor report must not advise a host it is not on
+  either** (backlog B190). In the Docker image a healthy bridge's report
+  ended "14 ok, 3 warn", two of them `service-manager` ("use `bridge init
+  --no-service`", to an image that already runs `serve` and whose documented
+  `docker run … init` already passes the flag) and `browser-opener` ("no
+  opener found", in an image with no browser). In a container both still
+  run, and a failing one is reported "check skipped" with no advice, while
+  a passing one (a system container with its own systemd, Toolbx's shared
+  opener) still says what it found. The verdict is `Deps.InContainer`,
+  which `fsutil.InContainer()` sets from Docker's
+  `/.dockerenv` or Podman's `/run/.containerenv` (marker files, never cgroup
+  parsing), in `bridge doctor` (the console shares its report) and in init's
+  preflight (`initPreflightDeps`), so the two cannot grade one container
+  differently. Unlike `Managed` it skips nothing else: a container's
+  operator has a shell (`docker exec`), so `log-file-size` and every other
+  check still speak to them. The console's no-log-file hint asks the same
+  helper. **Don't detect a container from cgroups or an env var only our
+  image sets, don't widen the skip past these two checks, and don't set the
+  verdict in one report's inputs and not the other's, and don't skip a
+  check that passes.** Pinned by
+  `TestInContainerSkipsTheHostOperatorChecks`,
+  `TestInContainerKeepsTheChecksItsOperatorCanActOn` and
+  `TestDoctorAndInitCarryTheContainerVerdict`.
 - **The console must SEND only what it SHOWED.** The settings Save payload is
   an explicit allowlist naming every field, `hideManagedSettings` sets `hidden`
   on the enclosing `.field` rather than removing the input, and a hidden input
