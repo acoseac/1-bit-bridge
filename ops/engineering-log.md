@@ -42935,3 +42935,19 @@ the source:
   `link_at_bridge.db-migrate.lock`.
 The concurrent test passed 30 runs of 30 on the fix, and the lock tests are
 clean under `-race`.
+
+A pre-merge review (Argon) found the lock's lifetime, the Windows path, the
+seams and the tests sound, and one gap: a link planted at `-migrate.lock`
+after `OpenStore`'s symlink check made `OpenLockFile` fail, and `lockLadder`
+took that for a filesystem without locks and ran the ladder unlocked, where
+a late link at -wal or -shm comes back as the symlink refusal. It now
+answers `errStoreSymlink` when a link stands at a store path, and the lock is
+taken after the `openStoreBeforeSQLite` seam, so
+`TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen` plants one there too.
+Controls: the refusal removed failed exactly that test's
+`link_at_bridge.db-migrate.lock`; the lock left out of `storeOpenPaths` now
+fails both symlink tests' `-migrate.lock` cases. Its other point, that four
+or more openers could lose the create race more than three times, did not
+hold when measured: with 3, 8 and 16 concurrent openers, 300 rounds each,
+every one opened the file by its second attempt (a loser loses only to the
+one create), so `lockFileOpenTries` stays 3.

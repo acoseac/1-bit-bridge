@@ -1732,11 +1732,14 @@ lost my library."
   proceeding would run the ladder beside a holder that may still be
   migrating. A lock that cannot be taken at all is logged and the ladder runs
   without it, as serve's data-dir lock does. The file is a sidecar like -wal
-  and -shm, so a symlink there is refused (`storeOpenPaths`), and it is never
-  removed (`TestConcurrentOpensOfAnOlderDatabaseAllSucceed`,
+  and -shm, so a symlink there is refused (`storeOpenPaths`), a link planted
+  there after that check too (`lockLadder` answers `errStoreSymlink`, never
+  "no locks here"), and it is never removed
+  (`TestConcurrentOpensOfAnOlderDatabaseAllSucceed`,
   `TestAnOpenerWaitsForAnotherOpenersLadder`,
   `TestAnOpenerGivesUpOnALadderLockHeldPastTheBound`,
-  `TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`).
+  `TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`,
+  `TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen`).
 - **Column-only columns must never gain `json:` tags or be spliced onto wire
   output**: the v25 format facts, `acoustid_match` (v28), `dupe_*` (v31),
   `audio_md5` (v32), `booklet_tag`, `artwork_version`. `tags_json` stays the Go
