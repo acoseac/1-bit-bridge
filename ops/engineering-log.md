@@ -42562,3 +42562,46 @@ false failed only `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`
 at the first scan still passed. `stampSACDFolderArt` returning before the
 lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
 empty, want a folder cover). No wire change.
+
+## 2026-10-14 — an `.iso` that is not an SACD is probed once per process (backlog B157)
+
+`processSACDISO` keys its skip gate on the container's first virtual row
+(`SACDVirtualTrackPath(rel, 1)`). An image that is not an SACD (a DVD or
+CD image, a disk image named `.iso`, a plain-DSD or multichannel-only
+disc) expands to nothing, so it has no row, and every scan opened it,
+stat'd it twice, ran `TrackPathsUnder` and probed its master TOC again,
+logging "iso is not an expandable SACD image" at Debug. On a library that
+keeps disc images beside its music over a network mount, that was an open
+and a probe per image per scan, forever. Measured red on main (`3a0e143d`):
+`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`, three full scans of a
+1.2 MB zero-filled `dvd.iso` through the `openSACD` seam, 3 opens.
+
+The verdict lives on the Scanner (`notSACD`, a mutex-guarded map of
+library-relative path to the size and mtime the probe read), not in the
+store. The backlog entry asked for "somewhere no manifest reader sees",
+keyed on size, mtime and `ExtractorVersion`. A table, or `scan_state`
+keys, would have meant a migration and a sweep for the verdicts of images
+that are gone. In memory the cost is one probe per image per `serve`
+process: the Scanner is built once at startup (`cmd/bridge/main.go`) and
+lives across scans and subtree scans, and `ExtractorVersion` is compiled
+in, so a reader that learns a new layout is a new binary and a new
+process with an empty map. Rejected: B145's refusal mark, which lives on a
+`tracks` row and would reach the manifest.
+
+Only a completed probe records. A read fault and a container that changed
+under the read return before the verdict (B134), and so does a stale-row
+retire that could not list (`TrackPathsUnder` failed) or delete
+(`IncrementMissingTracksAndDeleteAtThreshold` failed), since a verdict
+would otherwise skip the image, and its leftover rows, until the process
+ends. A verdict is dropped when the image expands, so the map holds only
+images that are not SACDs.
+
+Controls, each on the committed tree and restored from git:
+- `knownNotSACD` matching on the path alone failed exactly
+  `TestScanner_ANotAnSACDVerdictFollowsTheFile` ("after a new mtime: 1
+  opens, want 2").
+- A verdict recorded in the read-fault branch failed exactly
+  `TestScanner_AnISOWhoseProbeFailedIsProbedAgain` ("opened 1 times in
+  three scans, want 3").
+Both pins passed on main before the change, as pins do; the defect case
+was the one red.

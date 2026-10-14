@@ -515,6 +515,28 @@ lost my library."
   `TestAnSACDImageWithNoCoverScansAsBefore`,
   `TestAnSACDCoverThatCouldNotBeReadKeepsItsArtAndIsRetried`,
   `TestAnSACDCoverWhoseCacheIsGoneIsRestoredWithoutExpanding`.)
+- **An `.iso` that is not an SACD is probed once per process, not once
+  per scan** (2026-10-14, backlog B157). It expands to nothing, so it has
+  no row for the skip gate to key on, and every scan opened it, ran
+  `TrackPathsUnder` and probed its master TOC again (measured: three full
+  scans of a zero-filled `dvd.iso`, three opens through `Scanner.openSACD`).
+  A completed "nothing to expand" probe is recorded in `Scanner.notSACD`,
+  by library-relative path, with the size and mtime it read, and
+  `processSACDISO` returns before any open while both still match. **Only
+  a completed probe records**: a read fault and a container that changed
+  under the read return before the verdict (B134's line), and so does a
+  stale-row retire that could not list or delete, or those rows would wait
+  for the process to end. A verdict is dropped when the image expands.
+  Kept in memory, where no manifest reader, retirement pass or deletion
+  pass sees it, rather than in the store: the Scanner lives as long as
+  `serve`, so a bridge probes each such image once per process, and
+  `ExtractorVersion` is compiled in, so a reader that learns a new layout
+  is a new process with an empty map. **Don't record a probe that did not
+  complete, don't key the verdict on the path alone, and don't move it
+  into `tracks`**, where it would reach the manifest
+  (`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`,
+  `TestScanner_ANotAnSACDVerdictFollowsTheFile`,
+  `TestScanner_AnISOWhoseProbeFailedIsProbedAgain`).
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the
