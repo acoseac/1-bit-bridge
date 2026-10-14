@@ -22,7 +22,8 @@
 // `artistMBID` the enricher stamped on the track and fetched the portrait
 // under, so the referenced set holds those too (artworkKeysInUse). The
 // portraits themselves (`artist-<mbid>.jpg`, `artist-name-<sha>.jpg`)
-// carry no size suffix and are out of the GC's scope.
+// carry no size suffix; the portrait pass decides them from the same
+// artist set (artwork_portraits.go, backlog B85).
 //
 // **Manual subcommand, NOT auto-tail-of-Scan()**: per Gemini A10 /
 // iOS bug review #10. Operators on low-IOPS hosts (Pi SD cards)
@@ -272,23 +273,27 @@ func artworkCacheHasOrphans(walkRoot string, known map[string]bool) (bool, error
 // stands for before it derives anything, so no build files a thumbnail
 // under one and nothing would read it
 // (TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey).
-func artworkKeysInUse(ctx context.Context, store *manifest.Store) (artworkKeys []string, known map[string]bool, err error) {
+func artworkKeysInUse(ctx context.Context, store *manifest.Store) (artworkKeys []string, known, artists map[string]bool, err error) {
 	artworkKeys, err = store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list referenced artwork ids: %w", err)
+		return nil, nil, nil, fmt.Errorf("list referenced artwork ids: %w", err)
 	}
 	artistMBIDs, err := store.DistinctArtistMBIDs(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list referenced artist ids: %w", err)
+		return nil, nil, nil, fmt.Errorf("list referenced artist ids: %w", err)
 	}
 	known = make(map[string]bool, len(artworkKeys)+len(artistMBIDs))
 	for _, k := range artworkKeys {
 		known[k] = true
 	}
+	// The portraits' keep set (artwork_portraits.go), lowercased as the
+	// portrait pass reads a file name's MBID.
+	artists = make(map[string]bool, len(artistMBIDs))
 	for _, m := range artistMBIDs {
 		known[manifest.ArtistThumbKey(m)] = true
+		artists[strings.ToLower(m)] = true
 	}
-	return artworkKeys, known, nil
+	return artworkKeys, known, artists, nil
 }
 
 // artworkUnlistedDir reports whether a walk error is a directory inside the
@@ -331,7 +336,7 @@ func artworkErrWithoutPath(err error) error {
 }
 
 func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun, allowEmpty bool) int {
-	artworkKeys, known, err := artworkKeysInUse(ctx, store)
+	artworkKeys, known, artists, err := artworkKeysInUse(ctx, store)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -425,11 +430,13 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			if d.IsDir() {
 				return nil
 			}
+			// A portrait is the portrait pass's (collectPortraits).
+			if isTopLevelPortrait(walkRoot, path) {
+				return nil
+			}
 			// Only consider files matching a recognised cache suffix.
 			// Anything else (a stray README, a partial download, an
-			// old-format thumb, an artist portrait) is treated as
-			// out-of-scope and skipped — a future GC pass with broader
-			// coverage can extend this.
+			// old-format thumb) is treated as out-of-scope and skipped.
 			base := filepath.Base(path)
 			stem, ok := artworkCacheStem(base)
 			if !ok {
@@ -467,6 +474,16 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		}
 		fmt.Fprintf(stderr, "walk artwork dir: %v\n", walkErr)
 		return 1
+	}
+	if present {
+		pt, err := collectPortraits(stdout, stderr, artworkDir, walkRoot, artists, dryRun, allowEmpty)
+		if err != nil {
+			fmt.Fprintf(stderr, "artwork gc: list the artist portraits: %v\n", artworkErrWithoutPath(err))
+			return 1
+		}
+		removed += pt.removed
+		kept += pt.kept
+		failed += pt.failed
 	}
 	// A directory it could not list is counted on the summary, and does not
 	// fail the run: nothing the run decided depended on it (see
