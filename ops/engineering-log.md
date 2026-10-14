@@ -42767,3 +42767,71 @@ tree, each restored from git: the loop's check removed, and the
 interruption mapping removed, each failed exactly the cancel case; the
 filter put back to `IsRegular` failed exactly the kinds case; the symlink
 clause dropped failed the kinds case and the symlink case.
+
+## 2026-10-14 — an album-mate's transient measurement failure decides no album gain (backlog B215)
+
+The album gain's survey left a mate out of the album whenever its
+measurement failed, for any reason but a cancelled context: AlbumGainDB's
+rationale was "an album-mate that cannot be measured does not constrain the
+album; it will not render either, for the same reason". That holds for a
+fact about the file and not for a transient fault. The render then
+published a boost decided without the mate, too high when the mate is the
+hottest, and the plan's rule that renditions keep their boost until an
+operator re-gains the album (D5) kept it for good, with nothing pointing at
+it until the mate rendered with a different figure.
+
+The classification (`leftOutBecause`). Left out, as before: a short decode or
+a malformed header (`RepeatedFileFact`); a mate this bridge would not render
+on the profile (`ErrMateIneligible`: SpecFor returns it for no track row or a
+source the rendition gate refuses, both wirings map `api.ErrUpscaleIneligible`
+or the CLI classifier's refusal to it, and `measure` returns it for a mate
+whose row moved to another profile, which also drops the index); and a mate
+whose renders are suppressed (the pool's own three-strike verdict,
+`VariantFailureSuppressed`, now on the PeakStore interface). Everything else
+is transient: the survey still measures the other mates, so their peaks are
+recorded for the next attempt, and then fails the call with
+`transcode.ErrAlbumMateUnmeasured` wrapping the mate's error, unless a later
+pass of the same call found the mate's peak recorded meanwhile (its own
+render finished). A transient mate is marked given-up for the call, so a
+second pass does not decode it again.
+
+The pool counts and announces such a render as failed and strikes nothing:
+the fault is the mate's, and three strikes would suppress a good file for 30
+days over its mate's full scratch volume. The next sweep (the scan cadence,
+6 h by default) or the next request renders it again; meanwhile the mate's
+own render usually records its peak. A mate's host fault keeps the pool's
+earlier exits (`unavailableTool`, `unwritableOutput`), since the error wraps
+the mate's own.
+
+The bound: a mate stops holding its album back 24 h (`mateTransientGrace`)
+after its first transient failure, in memory, ended by any recorded peak of
+it. Its own render normally records the peak, or collects the strikes that
+suppress it, well inside that; the grace covers a mate that already has a
+rendition (no render of its own runs) and fails the same way on every
+survey. A design consult (Gemini "Argon", 2026-10-14) raised the cases this
+classification keeps: a file that is missing on disk while its row is there
+is transient (an unmounted share, or a deletion the next scan reaps), and a
+profile mismatch is a fact. Rejected from it: that `RedactError` breaks the
+error chain (it keeps the original behind `Unwrap`), and failing fast before
+the rendering track's own decode when its peak is stored (a reorder of the
+render chain for a retry cost the 6 h cadence already bounds).
+
+Red first on main (`3faeaa8d`) with only the two sentinels and the grace
+constant stubbed: exactly the eight predicted cases failed: the defect
+(a figure decided without the failed mate), once per call, the grace, the
+profile mismatch's index rebuild, the I/O error now failing each call, the
+pool's strike (four waits suppressed the file), and both wirings' ineligible
+mapping. The guards stayed green on main: a suppressed mate, an ineligible
+one, a mate recorded meanwhile, a real file fact and the redacted log line.
+Controls on the committed tree, each restored from git, each red exactly as
+predicted: every failure left out (4 cases), no suppression check (2), no
+grace (1), ineligible not a fact (2), a peak recorded meanwhile ignored (1),
+a transient mate re-measured within the call (1), a recorded peak not ending
+the grace (1), the pool striking the wait (1), and each wiring not marking
+its ineligible mate (1 each).
+
+Three tests changed meaning: `TestAMateThatCannotBeMeasuredDoesNotConstrain`
+now uses a malformed header (a fact) instead of a bare "corrupt file" error;
+`TestATransientMateFailureIsMeasuredAgain`'s I/O error now fails each call;
+and the redaction test's mate is left out because its renders are
+suppressed.
