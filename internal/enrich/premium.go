@@ -99,11 +99,12 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		// 404 = no cover at Atlas (normal — fall through to CAA rg + iTunes);
-		// 5xx = Atlas hiccup. The public artwork proxy doesn't 401/403 a bad
+		// 429 or 5xx = Atlas busy (transientHTTPStatus, the one predicate the
+		// other clients use), which keeps the streak. The public artwork proxy doesn't 401/403 a bad
 		// bearer (it serves CAA), so those are defense-in-depth — see
 		// clearOnAuthReject.
 		f.clearOnAuthReject(resp.StatusCode)
-		if resp.StatusCode >= 500 {
+		if transientHTTPStatus(resp.StatusCode) {
 			f.reports.noteBusy(upstreamAtlas, "atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
 		} else {
 			f.reports.answered(upstreamAtlas)
