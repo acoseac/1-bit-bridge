@@ -28,13 +28,14 @@ func TestDoctorAndInitCarryTheContainerVerdict(t *testing.T) {
 		if got := initPreflightDeps(t.TempDir(), t.TempDir(), nil, 7788, 7789).InContainer; got != want {
 			t.Errorf("init's preflight: InContainer = %v, want %v", got, want)
 		}
-		if !want {
-			continue
-		}
 		rep := doctor.Run(context.Background(), d)
 		for _, name := range []string{"service-manager", "browser-opener"} {
-			if c := findCheck(t, rep, name); c.Status != doctor.OK || !strings.Contains(c.Summary, "container") {
-				t.Errorf("%s in a container's report: %q %q, want ok and skipped for the container", name, c.Status, c.Summary)
+			c := findCheck(t, rep, name)
+			if want && (c.Status != doctor.OK || c.Hint != "") {
+				t.Errorf("%s in a container's report: %q %q (hint %q), want ok with no advice", name, c.Status, c.Summary, c.Hint)
+			}
+			if !want && strings.Contains(c.Summary, "container") {
+				t.Errorf("%s outside a container says %q", name, c.Summary)
 			}
 		}
 	}

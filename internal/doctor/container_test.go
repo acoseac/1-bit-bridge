@@ -14,34 +14,52 @@ import (
 // reader to fix a host they are not on.
 func TestInContainerSkipsTheHostOperatorChecks(t *testing.T) {
 	ctx := context.Background()
+	prevSM, prevBO := serviceManagerOnHost, browserOpenerOnHost
+	t.Cleanup(func() { serviceManagerOnHost, browserOpenerOnHost = prevSM, prevBO })
 
-	in := Deps{InContainer: true}
-	for name, c := range map[string]Check{
-		"service-manager": checkServiceManager(ctx, in),
-		"browser-opener":  checkBrowserOpener(ctx, in),
+	for _, host := range []struct {
+		name    string
+		sm, bo  Check
+		failing bool
+	}{
+		{"a host where both checks fail", warn(checkNameServiceManager, "no user systemd session", "use `bridge init --no-service`"),
+			warn(checkNameBrowserOpener, "no opener found", "install one"), true},
+		{"a host where both checks pass (a system container with its own systemd, a shared opener)",
+			ok(checkNameServiceManager, "systemctl --user reachable"), ok(checkNameBrowserOpener, "xdg-open"), false},
 	} {
-		if c.Status != OK {
-			t.Errorf("%s in a container: status = %q, want ok", name, c.Status)
-		}
-		if !strings.Contains(c.Summary, "skipped") || !strings.Contains(c.Summary, "container") {
-			t.Errorf("%s summary = %q, want it to say the check was skipped because of the container", name, c.Summary)
-		}
-		if c.Hint != "" {
-			t.Errorf("%s still carries advice for the host: %q", name, c.Hint)
-		}
-	}
+		t.Run(host.name, func(t *testing.T) {
+			serviceManagerOnHost = func(context.Context) Check { return host.sm }
+			browserOpenerOnHost = func() Check { return host.bo }
 
-	// NEGATIVE CONTROL: outside a container both checks run. Their verdict
-	// depends on the machine the suite runs on, so the assertion is that
-	// they answered about THIS host rather than skipping.
-	out := Deps{}
-	for name, c := range map[string]Check{
-		"service-manager": checkServiceManager(ctx, out),
-		"browser-opener":  checkBrowserOpener(ctx, out),
-	} {
-		if strings.Contains(c.Summary, "skipped") {
-			t.Errorf("%s skipped outside a container: %q", name, c.Summary)
-		}
+			in := Deps{InContainer: true}
+			for name, pair := range map[string][2]Check{
+				"service-manager": {checkServiceManager(ctx, in), host.sm},
+				"browser-opener":  {checkBrowserOpener(ctx, in), host.bo},
+			} {
+				c, hostCheck := pair[0], pair[1]
+				if c.Status != OK || c.Hint != "" {
+					t.Errorf("%s in a container: %q %q (hint %q), want ok with no advice", name, c.Status, c.Summary, c.Hint)
+				}
+				if host.failing && !strings.Contains(c.Summary, "container") {
+					t.Errorf("%s: the failing host check was not reported skipped for the container: %q", name, c.Summary)
+				}
+				if !host.failing && c.Summary != hostCheck.Summary {
+					t.Errorf("%s: the container hid a passing check (%q, want %q)", name, c.Summary, hostCheck.Summary)
+				}
+			}
+
+			// NEGATIVE CONTROL: outside a container the host's own answer,
+			// advice included, is what the report says.
+			out := Deps{}
+			for name, pair := range map[string][2]Check{
+				"service-manager": {checkServiceManager(ctx, out), host.sm},
+				"browser-opener":  {checkBrowserOpener(ctx, out), host.bo},
+			} {
+				if pair[0] != pair[1] {
+					t.Errorf("%s outside a container: %+v, want the host's %+v", name, pair[0], pair[1])
+				}
+			}
+		})
 	}
 }
 

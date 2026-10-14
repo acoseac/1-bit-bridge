@@ -320,7 +320,9 @@ type Deps struct {
 
 	// InContainer is fsutil.InContainer(): this process runs in a
 	// container (Docker's /.dockerenv, Podman's /run/.containerenv). It
-	// skips the same two checks Managed skips, for a sibling reason: the
+	// suppresses the failing advice of the same two checks Managed skips
+	// (both still run, so a pass still says what it found), for a sibling
+	// reason: the
 	// container runtime starts and restarts the bridge, so there is no
 	// user systemd session to install a service into, and the image has
 	// no browser to open the console with. Measured in the Docker image
@@ -1186,9 +1188,29 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 	if d.Managed {
 		return ok(checkNameServiceManager, "lifecycle managed by the host — check skipped")
 	}
-	if d.InContainer {
+	c := serviceManagerOnHost(ctx)
+	// In a container the check still runs, so one that passes (a system
+	// container with its own systemd) says what it found; only failing
+	// advice, which is for a host the reader is not on, is suppressed
+	// (Deps.InContainer).
+	if d.InContainer && c.Status != OK {
 		return ok(checkNameServiceManager, "lifecycle managed by the container runtime — check skipped")
 	}
+	return c
+}
+
+// serviceManagerOnHost and browserOpenerOnHost are the two host checks
+// behind checkServiceManager and checkBrowserOpener, as seams so a test
+// decides whether the host passes, whatever machine it runs on. Production
+// never changes them.
+var (
+	serviceManagerOnHost = hostServiceManager
+	browserOpenerOnHost  = hostBrowserOpener
+)
+
+// hostServiceManager is the service-manager check itself, for the host
+// this process runs on.
+func hostServiceManager(ctx context.Context) Check {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("launchctl"); err != nil {
@@ -1251,9 +1273,18 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 	if d.Managed {
 		return ok(checkNameBrowserOpener, "console is reached over the network — check skipped")
 	}
-	if d.InContainer {
+	c := browserOpenerOnHost()
+	// As checkServiceManager: an opener a container has (Toolbx and
+	// Distrobox share the host's) is still named; only the missing-opener
+	// advice is suppressed.
+	if d.InContainer && c.Status != OK {
 		return ok(checkNameBrowserOpener, "no browser in a container — check skipped")
 	}
+	return c
+}
+
+// hostBrowserOpener is the browser-opener check itself.
+func hostBrowserOpener() Check {
 	var candidates []string
 	switch runtime.GOOS {
 	case "darwin":
