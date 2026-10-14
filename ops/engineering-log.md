@@ -42562,3 +42562,33 @@ false failed only `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`
 at the first scan still passed. `stampSACDFolderArt` returning before the
 lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
 empty, want a folder cover). No wire change.
+
+## 2026-10-14 — a Deezer artist portrait is written through the checked primitive (backlog B168)
+
+The pre-v0.2.1 network-surface review found the sixth artwork write site
+the #976 hardening missed: `ensureArtistImageCached` wrote `FetchImage`'s
+bytes with the buffered `writeArtworkAtomic`, which has neither the
+containment check (`fsutil.IsUnderAny` against the cache directory) nor the
+image-signature check (`FF D8 FF` or the PNG magic) that
+`writeArtworkAtomicStream` applies to the CAA, iTunes and premium covers.
+TLS and the Deezer host allowlist (`.dzcdn.net`, `.deezer.com`) stand in
+front of it, which is why it was low.
+
+Red first on main (`3a0e143d`):
+`TestArtistPortraitIsStoredOnlyWhenItIsAnImage`, with a stub allowlisted
+the way the existing Deezer tests allow 127.0.0.1, served
+`<html><body>not an image</body></html>` with `Content-Type: image/jpeg`.
+`ensureArtistImageCached` answered ok, and the HTML sat at both
+`artist-name-<sha>.jpg` and the `artist-<mbid>.jpg` hard-linked to it. The
+same test's JPEG body (the positive control) was cached before and after.
+
+The write now goes through `writeArtworkAtomicStream(e.CacheDir, namePath,
+bytes.NewReader(data), maxDeezerImageBytes)`. `FetchImage` already caps the
+body at that size, so the stream's cap changes nothing for a body that
+passed it. A refused body returns an error: the caller logs it through
+`logUpstream` and does not negative-cache it, so a later pass may ask
+again, as for a transient failure. The containment layer is defence in
+depth here: the canonical name is a hex hash under the cache, so no input
+reaches it, and the primitive's own tests pin it. `linkOrCopy`'s copy
+fallback keeps the buffered writer; it copies a canonical that already
+passed.
