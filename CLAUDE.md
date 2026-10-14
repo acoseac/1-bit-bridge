@@ -113,6 +113,14 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - **On a host whose Go is newer than `go.mod`'s, `make fmt` rewrites files CI calls clean.** CI's gofmt check runs `go.mod`'s toolchain (`go-version-file: go.mod`, 1.26.6 as of 2026-09-25), and gofmt 1.27 indents a composite literal in a multi-value `return` differently: on a 1.27.1 host `make fmt` re-indents `internal/manifest/favorites_test.go` and `internal/atlasharvest/lyrics_test.go`, and 1.26.6's `gofmt -l` reports both rewrites. Never commit such a rewrite. Restore those files, and check your own with the pinned gofmt: `$(GOTOOLCHAIN=go1.26.6 go env GOROOT)/bin/gofmt -l <files>`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
 
+- **A test that removes or replaces a library fixture after a request that can start a
+  background scan waits for the server's background scans first, and fails if they do not
+  settle** (2026-10-14, backlog B384). On Windows a file a scan holds open cannot be removed:
+  `TestACancelledWipeDropsTheSavedDates` failed four Windows runs in one day, on PRs that did
+  not touch it, because a failed root flip's compensating scan was still reading the song its
+  `readdedKeeps` removes. macOS and Linux remove an open file, so it never failed there. Wait
+  with `srvBgScansSettled(t, srv)`, which fails after 30 s; `srvBgScansWait` returns silently
+  at its 10 s bound, which turns a slow scan back into the same flake.
 ## Architecture at a glance
 
 | Package | Role |

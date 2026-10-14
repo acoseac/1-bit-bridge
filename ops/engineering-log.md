@@ -43135,3 +43135,9 @@ never failed there). The test now calls `srvBgScansWait` after the request,
 as `TestACancelledSaveAfterTheWipeDropsTheSavedDates` beside it already did,
 and its checks read the settled state. No red-first here: the race is
 Windows-only and timing-dependent; the evidence is the CI Windows job.
+
+Review round (Argon, then CodeRabbit, both on `srvBgScansWait`'s silent
+return at its 10 s bound, which would turn a slow scan back into the same
+flake): the test now waits with `srvBgScansSettled`, which fails after 30 s.
+The shared `srvBgScansWait` and its other callers are unchanged. CodeRabbit's
+second point, the rule in CLAUDE.md, is taken: a bullet at the end of Build.
