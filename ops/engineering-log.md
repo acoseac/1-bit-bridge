@@ -42747,3 +42747,23 @@ Control: the grace disabled failed exactly
 review's case-sensitivity point, since the enricher writes MusicBrainz's
 lowercase MBIDs and `hex.EncodeToString`'s lowercase hash, and both sides of
 the MBID comparison are lowercased.
+
+The PR's bot review (Gemini, CodeRabbit) found two more, both taken. A
+SIGINT after the artist-set read went on removing every selected portrait
+and could exit 0, where the cover walk checks `ctx` per entry: the pass now
+checks it before each removal and returns `ctx.Err()`, which `runArtworkGC`
+reports as the cover walk's interruption (`artwork gc interrupted`, exit 1,
+no summary). And the entry filter was "is a regular file", the test the
+bridge refuses everywhere else (`fsutil.NotAFile`): on Windows a portrait
+OneDrive has dehydrated, in a data dir under a synced folder, is
+`ModeIrregular` and would have been kept for ever. `canBePortrait` refuses
+`NotAFile`'s kinds and a symlink. No macOS or Linux filesystem makes a
+`ModeIrregular` entry, so `TestCanBePortraitRefusesKindsNotIrregular` pins
+the kinds on their bits; the symlink and the cancel are end to end
+(`TestArtworkGCLeavesASymlinkNamedLikeAPortrait`, and
+`TestArtworkGCPortraitPassStopsWhenCancelled`, whose `portraitRemove` seam
+cancels during the first of three removals). Controls on the committed
+tree, each restored from git: the loop's check removed, and the
+interruption mapping removed, each failed exactly the cancel case; the
+filter put back to `IsRegular` failed exactly the kinds case; the symlink
+clause dropped failed the kinds case and the symlink case.

@@ -4821,12 +4821,21 @@ no failing test — which is the shape to expect in this area.
   line on stderr and the cover GC goes on (exit 0), since covers have their
   own refusal and a portrait comes back only through a fetch. Only the
   enricher's names at the top of the cache are portraits; anything else is
-  skipped as before (`TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames`,
+  skipped as before. **Which entries can be one is a list of kinds refused,
+  never "is a regular file"** (`canBePortrait`: `fsutil.NotAFile`'s kinds,
+  and a symlink, which the enricher never writes): on Windows a portrait
+  OneDrive has dehydrated is `ModeIrregular` and is still the enricher's
+  file. **A cancel stops the pass before its next removal**, and the run
+  ends as the cover walk's interruption does (`artwork gc interrupted`,
+  exit 1, no summary) (`TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames`,
   `TestArtworkGCPortraitsDryRunRemovesNothing`,
   `TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist`,
   `TestArtworkGCPortraitCopyKeepsTheMBIDFile`,
   `TestArtworkGCLeavesWhatIsNoPortrait`, `TestArtworkGCSharedCanonical`,
-  `TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`).
+  `TestArtworkGCKeepsAPortraitWrittenWithinTheGrace`,
+  `TestCanBePortraitRefusesKindsNotIrregular`,
+  `TestArtworkGCLeavesASymlinkNamedLikeAPortrait`,
+  `TestArtworkGCPortraitPassStopsWhenCancelled`).
 - **A sidecar walk passes over, at the WALK, every directory a library walk
   skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it
   lists it** (2026-10-02, backlog B207). With `variantsDir` on its own
