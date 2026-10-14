@@ -235,7 +235,7 @@ func callOpenStoreBeforeSQLite(path string) {
 }
 
 func storeOpenPaths(path string) []string {
-	return []string{path, path + "-wal", path + "-shm", path + "-journal"}
+	return []string{path, path + "-wal", path + "-shm", path + "-journal", path + ladderLockSuffix}
 }
 
 // storeOpenErr returns the symlink refusal when one of the store files is
@@ -262,8 +262,9 @@ func symlinkAtStore(path string) (string, bool) {
 	return "", false
 }
 
-// A symlink at the database or a sidecar (-wal, -shm, -journal) is refused.
-// The check below catches one present when OpenStore starts. The open uses
+// A symlink at the database or a sidecar (-wal, -shm, -journal, and the
+// ladder lock's -migrate.lock) is refused. The check below catches one
+// present when OpenStore starts. The open uses
 // storeVFSName, so on unix a final-component symlink at the database, -wal
 // or -shm is also refused by SQLite's own open (O_NOFOLLOW). -journal is
 // not opened in WAL mode. None of the four is a symlink in any supported
@@ -280,6 +281,14 @@ func OpenStore(path string) (*Store, error) {
 			return nil, fmt.Errorf("create the store's file: %w", err)
 		}
 	}
+	// One opener at a time runs the ladder, from before SQLite opens the
+	// database, so a new database's switch to WAL is one opener's too
+	// (backlog B185). Held until OpenStore returns.
+	releaseLadder, err := lockLadder(path)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLadder()
 	callOpenStoreBeforeSQLite(path)
 	vfsQuery, err := storeVFSQuery()
 	if err != nil {

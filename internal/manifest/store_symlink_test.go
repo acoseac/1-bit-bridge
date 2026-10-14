@@ -10,7 +10,8 @@ import (
 
 // TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar pins that OpenStore
 // refuses a symlink planted at the database file or either SQLite sidecar
-// (-wal, -shm), rather than opening the link's target. Run as root over an
+// (-wal, -shm), or at the migration lock (-migrate.lock, backlog B185),
+// rather than opening the link's target. Run as root over an
 // install whose data dir another user owns, following such a link writes
 // the database wherever that user aimed it (backlog B262). The refusal is
 // unconditional — no supported layout symlinks these — so this runs as any
@@ -21,7 +22,7 @@ func TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs privilege on Windows; the data dir is the bridge's own")
 	}
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal", ladderLockSuffix} {
 		t.Run("link at bridge.db"+suffix, func(t *testing.T) {
 			root := t.TempDir()
 			dir := filepath.Join(root, "data")

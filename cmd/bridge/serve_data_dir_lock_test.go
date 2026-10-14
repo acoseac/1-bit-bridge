@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,6 +220,50 @@ func TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(outside); !os.IsNotExist(statErr) {
 		t.Errorf("the file the link names was created (lstat: %v)", statErr)
+	}
+}
+
+// TestServesLockingAFreshDataDirAtOnceTakeItOnce has three serves take a
+// fresh data dir's lock at once, twenty times, and requires one of them to
+// hold it and the others to be refused as held. On macOS 27 the openat that
+// lost the race to create server.lock answered ENOENT, which a serve takes
+// for a data dir that cannot be locked: it warned and went on unlocked
+// beside the holder (backlog B185, fsutil.OpenLockFile).
+func TestServesLockingAFreshDataDirAtOnceTakeItOnce(t *testing.T) {
+	const rounds, serves = 20, 3
+	for round := range rounds {
+		dataDir := filepath.Join(t.TempDir(), "data")
+		start := make(chan struct{})
+		releases := make([]func(), serves)
+		errs := make([]error, serves)
+		var wg sync.WaitGroup
+		for i := range serves {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				releases[i], errs[i] = lockServeDataDir(dataDir)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		held := 0
+		for i, err := range errs {
+			var refused *serveDataDirHeldError
+			switch {
+			case err == nil:
+				held++
+			case errors.As(err, &refused):
+			default:
+				t.Errorf("round %d, serve %d: %v, want the lock or a held refusal", round+1, i+1, err)
+			}
+		}
+		for _, release := range releases {
+			release()
+		}
+		if held != 1 {
+			t.Fatalf("round %d: %d serves took the lock, want 1", round+1, held)
+		}
 	}
 }
 
