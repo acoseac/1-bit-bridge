@@ -42768,6 +42768,47 @@ interruption mapping removed, each failed exactly the cancel case; the
 filter put back to `IsRegular` failed exactly the kinds case; the symlink
 clause dropped failed the kinds case and the symlink case.
 
+## 2026-10-14 — the artwork cache's walks pass over recycle bins, snapshots and NAS metadata (backlog B260)
+
+The three walks of the artwork cache, `artwork --gc`, its empty-store guard
+(`artworkCacheHasOrphans`) and the serve size cap (`sweepArtworkCache`),
+pruned nothing by name, so a directory a library walk skips was walked as
+cache content when it sat under the cache: a NAS share's `#recycle` or
+`#snapshot` when the cache is kept at the share's root, Synology's `@eaDir`,
+a volume's `.Trashes`. The sidecar walks had the same shape until B207
+(#1141), which named this one as left.
+
+Red first on main (`3faeaa8d`), each with one directory of each kind
+(`#recycle`, `#snapshot`, `@eaDir`, `.Trashes`) under the cache: the GC's
+dry run named the orphan-named copy in all four and a real run removed them
+(the summary counted five orphans for one); with no artwork key referenced,
+the guard refused (exit 1) a cache whose only covers were in them; and the
+size cap counted 430 bytes for a cache whose one cover is 30, and evicted
+the four, oldest first.
+
+The fix is the sidecar walks' predicate, exported from internal/integrity as
+`SkipsDerivedTreeDir` (it was `skipsSidecarDir`), asked through one helper,
+`artworkWalkSkips`, by all three walks before they list a directory below
+the walk root, so they keep agreeing about what the tree is (the reason
+`artworkWalkRoot` is shared). Nothing of the bridge's own is passed over:
+it writes covers at the top of the cache and in `thumbs/` alone, and its
+temp files are dot-named files (`.caa-*.jpg.tmp`, `.thumb-*`, `.rescale-*`).
+The cache directory itself is walked whatever its name, and lost+found
+keeps `artworkUnlistedDir`'s rule. The size cap's partial-pass argument
+(B64) holds over the subset: the passed-over bytes are not the cache's.
+
+Controls on the committed tree, each restored from git: the guard's probe
+not pruning failed exactly the guard case; the GC walk not pruning failed
+exactly the GC case (the guard case, a real run at first, failed too,
+because the unpruned walk then removed what it asserted on, so it became a
+dry run reading the guard's verdict alone, and the control was re-run); the
+cap's walk not pruning failed exactly the cap case; and the walk root
+pruned by its own name failed exactly the case of a cache named `.artwork`
+and `#recycle`. A pre-merge review (Gemini "Argon") found that case read
+the GC and the cap but not the empty-store guard; it now asks the guard
+too (a dry run over an empty store must refuse), and the same control
+failed it at that first assertion, in both subtests.
+
 ## 2026-10-14 — an album-mate's transient measurement failure decides no album gain (backlog B215)
 
 The album gain's survey left a mate out of the album whenever its
