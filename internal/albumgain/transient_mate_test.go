@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -209,5 +210,47 @@ func TestATransientMateStopsHoldingTheAlbumAfterTheGrace(t *testing.T) {
 	h.peaks.mu.Unlock()
 	if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); !errors.Is(err, transcode.ErrAlbumMateUnmeasured) {
 		t.Errorf("after a recorded peak, a new failure: err = %v, want ErrAlbumMateUnmeasured (a new grace)", err)
+	}
+}
+
+// TestTwoFailuresADayApartLeaveNothingOut: the grace needs both terms, the
+// time AND mateTransientFailures failures, so a mate that failed once and
+// once more a day later still holds its album back (Argon on the B215 PR).
+func TestTwoFailuresADayApartLeaveNothingOut(t *testing.T) {
+	refs := album(3)
+	h := newHarness(t, refs...)
+	j := compactSpec(refs[0].Path, dsd64)
+	h.meas.errs[refs[1].Path] = transientErr
+	h.meas.peaks[refs[2].Path] = fp(-5.0)
+
+	for n, step := range []time.Duration{0, 30 * time.Hour} {
+		h.now = h.now.Add(step)
+		if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); !errors.Is(err, transcode.ErrAlbumMateUnmeasured) {
+			t.Fatalf("failure %d: err = %v, want ErrAlbumMateUnmeasured", n+1, err)
+		}
+	}
+	// The third failure, past the grace, is the one that leaves it out.
+	if g, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); err != nil || !ok || g != 4.0 {
+		t.Errorf("third failure: gain=%.1f ok=%v err=%v, want 4.0 without the mate", g, ok, err)
+	}
+}
+
+// TestAHostFaultNeverLeavesTheMateOut: a tool this host cannot start is no
+// fact about the mate however long it lasts, so it never counts toward the
+// grace; the error still wraps it, so the pool takes its tool-outage exit.
+func TestAHostFaultNeverLeavesTheMateOut(t *testing.T) {
+	refs := album(3)
+	h := newHarness(t, refs...)
+	j := compactSpec(refs[0].Path, dsd64)
+	host := &exec.Error{Name: "ffmpeg", Err: exec.ErrNotFound}
+	h.meas.errs[refs[1].Path] = host
+	h.meas.peaks[refs[2].Path] = fp(-5.0)
+
+	for n := 0; n < 4; n++ {
+		_, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0))
+		if !errors.Is(err, transcode.ErrAlbumMateUnmeasured) || !transcode.HostFault(err) {
+			t.Fatalf("failure %d: err = %v, want ErrAlbumMateUnmeasured wrapping the host fault", n+1, err)
+		}
+		h.now = h.now.Add(mateTransientGrace)
 	}
 }

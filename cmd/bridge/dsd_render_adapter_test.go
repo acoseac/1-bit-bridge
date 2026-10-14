@@ -304,8 +304,8 @@ func TestAlbumMateSpecMeasuresOnTheRendersProfile(t *testing.T) {
 	if _, err := f.a.albumMateSpec(ctx, "A/DSD/03.dff", like); !errors.Is(err, api.ErrUpscaleIneligible) || !errors.Is(err, albumgain.ErrMateIneligible) {
 		t.Errorf("a DST mate without the dst decoder: err = %v, want ErrUpscaleIneligible as ErrMateIneligible", err)
 	}
-	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); err == nil {
-		t.Error("a mate with no row must not be measured")
+	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); !errors.Is(err, albumgain.ErrMateIneligible) {
+		t.Errorf("a mate with no row must not be measured: err = %v, want ErrMateIneligible", err)
 	}
 }
 

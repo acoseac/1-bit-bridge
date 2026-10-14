@@ -105,15 +105,20 @@ const (
 	unknownDurationBudget = 10 * time.Minute
 	// minMeasureBudget floors a known duration's budget.
 	minMeasureBudget = time.Minute
-	// mateTransientGrace is how long an album-mate whose measurement keeps
-	// failing for a reason not known to be its file's holds its album's
-	// renders back (backlog B215). Its own render normally records its
-	// peak well inside it, or collects the strikes that suppress it. The
-	// bound is for what neither covers: a mate that already has a
-	// rendition (no render of its own will run) and fails the same way on
-	// every survey. After it, the mate is left out, as a fact would be,
-	// with a line saying so.
-	mateTransientGrace = 24 * time.Hour
+	// mateTransientGrace and mateTransientFailures bound how long an
+	// album-mate whose measurement keeps failing for a reason not known to
+	// be its file's holds its album's renders back (backlog B215): once it
+	// has failed so at least mateTransientFailures times, the first of them
+	// mateTransientGrace ago or longer, it is left out, as a fact would be,
+	// with a line saying so. Its own render normally records its peak well
+	// inside that, or collects the strikes that suppress it. The bound is
+	// for what neither covers: a mate that already has a rendition (no
+	// render of its own will run) and fails the same way on every survey.
+	// Both terms, so two failures a day apart leave nothing out. A host
+	// fault does not count (transcode.HostFault): it is no fact about the
+	// mate, however long it lasts.
+	mateTransientGrace    = 24 * time.Hour
+	mateTransientFailures = 3
 )
 
 // Resolver is the album-level gain decider. Safe for concurrent use.
@@ -122,14 +127,14 @@ type Resolver struct {
 
 	rebuildMu sync.Mutex // serialises index rebuilds
 
-	mu     sync.Mutex // guards ix, claims, short and transientSince
+	mu     sync.Mutex // guards ix, claims, short and transient
 	ix     *index
 	claims map[claimKey]*claim
-	// transientSince is when an album-mate's measurement on a profile
-	// first failed for a reason not known to be its file's, since its
-	// peak was last recorded (mateTransientGrace). In memory: a restart
-	// starts the grace again.
-	transientSince map[claimKey]time.Time
+	// transient is, per album-mate and profile, when its measurement first
+	// failed for a reason not known to be its file's since its peak was
+	// last recorded, and how many times it has (mateTransientGrace). In
+	// memory: a restart starts the grace again.
+	transient map[claimKey]transientFailures
 	// short remembers a mate a later render would only measure again: a
 	// decode that finished at a different length than its container, or a
 	// malformed DSF header. The key is the mate spec's path, size and
@@ -137,6 +142,13 @@ type Resolver struct {
 	// misses it. A cancelled context, a deadline, an output fault and any
 	// other error are not entered. The map lives for the process.
 	short map[shortKey]struct{}
+}
+
+// transientFailures is one album-mate's run of transient measurement
+// failures on a profile (Resolver.transient).
+type transientFailures struct {
+	since time.Time
+	count int
 }
 
 // shortKey is one version of one file. Size and mtime are the track row's,
@@ -171,7 +183,7 @@ func New(cfg Config) (*Resolver, error) {
 		cfg.Now = time.Now
 	}
 	return &Resolver{cfg: cfg, claims: map[claimKey]*claim{}, short: map[shortKey]struct{}{},
-		transientSince: map[claimKey]time.Time{}}, nil
+		transient: map[claimKey]transientFailures{}}, nil
 }
 
 // Invalidate drops the album index; the next render rebuilds it. Called
@@ -261,8 +273,9 @@ func (r *Resolver) Claim(ctx context.Context, j transcode.JobSpec) func(*float64
 // without it would be too high when it is the hottest, kept by the rendition
 // for good: the call then returns an error wrapping
 // transcode.ErrAlbumMateUnmeasured, and the render publishes nothing
-// (backlog B215). Such a mate stops holding the album back after
-// mateTransientGrace.
+// (backlog B215). Such a mate stops holding the album back once it has
+// failed so mateTransientFailures times over mateTransientGrace, and a
+// host fault (transcode.HostFault) never does.
 func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *float64) (float64, bool, error) {
 	profile := j.DSDPeakProfile()
 	if profile == "" {
@@ -437,14 +450,17 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 
 // leftOutBecause says why an album-mate whose measurement failed with err
 // does not constrain its album, or "" when it does and the failure is
-// transient (backlog B215). A transient failure starts the mate's grace,
-// and once that has run out the mate is left out too.
+// transient (backlog B215). A transient failure counts toward the mate's
+// grace, and once that has run out the mate is left out too; a host fault
+// counts toward nothing.
 func (r *Resolver) leftOutBecause(ctx context.Context, key claimKey, err error) string {
 	switch {
 	case transcode.RepeatedFileFact(err):
 		return "its file decodes short or has a malformed header"
 	case errors.Is(err, ErrMateIneligible):
 		return "this bridge does not render it on the profile"
+	case transcode.HostFault(err):
+		return ""
 	}
 	// A failed read is no verdict: the mate is taken as not suppressed.
 	if suppressed, serr := r.cfg.Peaks.VariantFailureSuppressed(ctx, key.path); serr == nil && suppressed {
@@ -453,15 +469,17 @@ func (r *Resolver) leftOutBecause(ctx context.Context, key claimKey, err error) 
 	now := r.cfg.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	since, ok := r.transientSince[key]
-	if !ok {
-		r.transientSince[key] = now
+	run := r.transient[key]
+	if run.count == 0 {
+		run.since = now
+	}
+	run.count++
+	r.transient[key] = run
+	if run.count < mateTransientFailures || now.Sub(run.since) < mateTransientGrace {
 		return ""
 	}
-	if now.Sub(since) < mateTransientGrace {
-		return ""
-	}
-	return fmt.Sprintf("its measurement has failed for %s for reasons not known to be its file's", mateTransientGrace)
+	return fmt.Sprintf("its measurement has failed %d times over %s for reasons not known to be its file's",
+		run.count, now.Sub(run.since).Round(time.Minute))
 }
 
 // peaks is own plus every mate's known peak, for AlbumClipGuardedGainDB.
@@ -543,7 +561,7 @@ func (r *Resolver) rememberShort(spec transcode.JobSpec) {
 // A measured peak ends the track's transient grace on the profile.
 func (r *Resolver) record(ctx context.Context, j transcode.JobSpec, profile string, tp *float64) {
 	r.mu.Lock()
-	delete(r.transientSince, claimKey{path: j.SourceLibraryRel, profile: profile})
+	delete(r.transient, claimKey{path: j.SourceLibraryRel, profile: profile})
 	r.mu.Unlock()
 	err := r.cfg.Peaks.UpsertDSDPeak(ctx, manifest.DSDPeak{
 		SourcePath: j.SourceLibraryRel, Profile: profile, TruePeakDBTP: tp,
