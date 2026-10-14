@@ -42615,3 +42615,17 @@ warns were `pairing-url` (no dialable address without
 `library-roots` (the empty fixture), both actionable. The same fixture on an
 older image of the bridge (built 2026-07-09) warned "no user systemd
 session" and "no opener found".
+
+A pre-merge review (Gemini "Argon", 2026-10-14): Podman's marker is in
+Toolbx and Distrobox containers too, where the host's opener (and in a
+system container its own systemd) is there to use, and the skip hid what
+those checks found. Both checks now run in a container (`serviceManagerOnHost`,
+`browserOpenerOnHost`, seams a test sets), and only a failing one is
+replaced by "check skipped" with no advice. A passing one keeps its summary.
+`TestInContainerSkipsTheHostOperatorChecks` is a table over a host where both fail
+and one where both pass, so it decides on any machine (before, on macOS both
+host checks pass and the suppression was exercised only on Linux CI and in
+the image). Control: the old unconditional skip failed exactly the
+passing-host case ("the container hid a passing check"). The review's other
+point, an assertion on the not-in-a-container iteration of
+`TestDoctorAndInitCarryTheContainerVerdict`, was taken.

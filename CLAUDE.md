@@ -6719,8 +6719,11 @@ no failing test — which is the shape to expect in this area.
   ended "14 ok, 3 warn", two of them `service-manager` ("use `bridge init
   --no-service`", to an image that already runs `serve` and whose documented
   `docker run … init` already passes the flag) and `browser-opener` ("no
-  opener found", in an image with no browser). Both skip on
-  `Deps.InContainer`, which `fsutil.InContainer()` sets from Docker's
+  opener found", in an image with no browser). In a container both still
+  run, and a failing one is reported "check skipped" with no advice, while
+  a passing one (a system container with its own systemd, Toolbx's shared
+  opener) still says what it found. The verdict is `Deps.InContainer`,
+  which `fsutil.InContainer()` sets from Docker's
   `/.dockerenv` or Podman's `/run/.containerenv` (marker files, never cgroup
   parsing), in `bridge doctor` (the console shares its report) and in init's
   preflight (`initPreflightDeps`), so the two cannot grade one container
@@ -6729,7 +6732,8 @@ no failing test — which is the shape to expect in this area.
   check still speak to them. The console's no-log-file hint asks the same
   helper. **Don't detect a container from cgroups or an env var only our
   image sets, don't widen the skip past these two checks, and don't set the
-  verdict in one report's inputs and not the other's.** Pinned by
+  verdict in one report's inputs and not the other's, and don't skip a
+  check that passes.** Pinned by
   `TestInContainerSkipsTheHostOperatorChecks`,
   `TestInContainerKeepsTheChecksItsOperatorCanActOn` and
   `TestDoctorAndInitCarryTheContainerVerdict`.
