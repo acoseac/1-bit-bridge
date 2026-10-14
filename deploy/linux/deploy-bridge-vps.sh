@@ -84,7 +84,8 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-2}"
 # shares bridge.ars.md since 2026-09-16 (runbook § "Demo bridge") as its own
 # unit + binary: `.env.demo` sets SVC=1-bit-bridge-demo and
 # REMOTE_BIN=/usr/local/bin/bridge-demo, so a demo deploy can never restart
-# the operator's own bridge, and vice versa.
+# the previous operator install still on this host (the defaults below), and
+# vice versa. The operator bridge itself moved to a home NUC on 2026-09-22.
 SVC="${SVC:-1-bit-bridge}"
 LOCAL_BIN="dist/bridge-linux-amd64"
 

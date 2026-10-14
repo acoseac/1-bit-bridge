@@ -42237,3 +42237,34 @@ item of each sentinel plus one bridge fingerprint on
 GET unchanged. Negative control: both handlers refused
 `originFingerprint == "mpd"` with 400; both subtests failed; the refusals
 were removed before the commit.
+
+## 2026-10-14 — one demo deploy procedure (backlog B115)
+
+The runbook's Demo bridge "Update per release" led with
+`ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh`,
+which builds current `main`, and then said to deploy the release artifact.
+`deploy/README.md` said not to run that script for the demo at all. Its
+`serverVersion` is then a `git describe` string, the one version string
+demo users see. (The runbook also said that build advertises
+`updateAvailable` until the next tagged artifact, observed 2026-08-26;
+that was true before #797, which reads the describe suffix as build
+metadata, so the build compares equal to its tag.)
+
+One procedure in both files. A release deploy is the artifact, with
+`SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A
+`main` build of the script is only a hotfix with no tag, and its
+`serverVersion` stays the describe string until the next tagged artifact.
+The post-deploy check reads `serverVersion` (exactly the tag after an
+artifact), not `updateAvailable`: `/v1/health` withholds that from an
+unauthenticated caller, and since #797 it reads `false` for a hotfix too
+(CodeRabbit on #1223).
+
+The binary row, the swap comment and the do-not still called
+`/usr/local/bin/bridge` and unit `1-bit-bridge` the operator bridge on
+bridge.ars.md. The operator bridge moved to the NUC on 2026-09-22. Those
+paths are the previous operator install, still on the VPS, and the
+script's defaults. The same correction covers the runbook opening, the
+`bridge.ars.md` subsection heading, the canonical-procedure lead, the
+update reminder, and Step 3, which still sent a current operator deploy
+at that host. No code change. The deploy script's own comment still
+says a demo deploy must not restart the operator's own bridge.
