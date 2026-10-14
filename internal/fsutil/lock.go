@@ -2,7 +2,9 @@ package fsutil
 
 import (
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // ErrLocked is TryLock's answer when another open of the file holds its
@@ -48,6 +50,50 @@ func Unlock(f *os.File) error {
 		return &os.PathError{Op: "unlock", Err: os.ErrInvalid}
 	}
 	return unlock(f)
+}
+
+// lockFileOpenTries is how many times OpenLockFile asks for its file.
+const lockFileOpenTries = 3
+
+// OpenLockFile opens the file name in dir for TryLock, creating it when it
+// is missing: the open serve's data-dir lock and the store's migration lock
+// share. The caller closes the file, after Unlock.
+//
+// Run as root over an install another user owns, the file takes dir's
+// owner (Precreate), as every other file written there does: left root's,
+// the service user could not open it again. Through dir's os.Root, so a
+// lock file that is a link leading out of dir is refused rather than
+// followed: a process run as root would otherwise create, or lock, whatever
+// file the link names. Open for writing though nothing is written: on a
+// Linux NFS mount flock is carried out as a POSIX record lock, whose
+// exclusive form wants a descriptor open for writing.
+//
+// A create that loses a race with another opener's create is asked again.
+// On macOS 27 an openat(2) with O_CREAT that loses that race answers ENOENT
+// rather than opening the file the winner made (measured 2026-10-14 on
+// 27.0.1: 596 of 900 opens by three concurrent openers of one new name,
+// with or without O_NOFOLLOW; open(2) on the whole path never did, and
+// every retry opened the file). Two serves started at once on a fresh data
+// dir both went on unlocked, and so did the losing openers of the
+// migration lock (backlog B185). A loser loses only to the one create:
+// with 3, 8 and 16 concurrent openers, 300 rounds each, every one opened
+// the file by its second attempt.
+func OpenLockFile(dir, name string) (*os.File, error) {
+	path := filepath.Join(dir, name)
+	if err := Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close() // the file stays open: it does not belong to the root
+	for try := 1; ; try++ {
+		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE, 0o600)
+		if err == nil || !errors.Is(err, fs.ErrNotExist) || try == lockFileOpenTries {
+			return f, err
+		}
+	}
 }
 
 // controlFD runs fn on f's descriptor and wraps what it answers in an

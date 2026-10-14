@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -420,6 +421,17 @@ func TestAnErrorAfterTheMapFillLeavesVersion54(t *testing.T) {
 
 func TestTwoOpenersLeaveTheMapToTheOneThatMigrates(t *testing.T) {
 	path := libraryRewoundToV54(t, "")
+	// The ladder lock keeps a second opener out of the ladder while the
+	// first runs it (backlog B185). A lock that cannot be taken lets both
+	// in, as before it, which is the case the map's own guard is for: a
+	// directory where the lock file goes is one. The rewind's own open left
+	// the file there; nothing holds it now.
+	if err := os.Remove(path + ladderLockSuffix); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+ladderLockSuffix, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	before := ftsRowIDs(t, path)
 
 	entered := make(chan struct{}, 1)

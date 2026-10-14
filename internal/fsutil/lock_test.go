@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -170,5 +172,43 @@ func requireLockFreed(t *testing.T, f *os.File, after string) {
 			t.Fatalf("TryLock after %s = %v, want nil", after, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestOpenLockFileOpensForEveryConcurrentOpener has three openers create
+// one new lock file at once, a hundred times. On macOS 27 the openat that
+// loses the create race answered ENOENT, so two of every three openers got
+// no file, and serve's data-dir lock and the store's migration lock went on
+// without their lock (backlog B185). OpenLockFile asks again.
+func TestOpenLockFileOpensForEveryConcurrentOpener(t *testing.T) {
+	const rounds, openers = 100, 3
+	base := t.TempDir()
+	for round := range rounds {
+		dir := filepath.Join(base, strconv.Itoa(round))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		errs := make([]error, openers)
+		var wg sync.WaitGroup
+		for i := range openers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				f, err := OpenLockFile(dir, "x.lock")
+				if err == nil {
+					err = f.Close()
+				}
+				errs[i] = err
+			}()
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d, opener %d: %v", round+1, i+1, err)
+			}
+		}
 	}
 }

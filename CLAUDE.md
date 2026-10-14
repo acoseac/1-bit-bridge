@@ -1714,6 +1714,32 @@ lost my library."
 - **Migrations are append-only**; `sql` must be idempotent. A shipped migration
   is never rewritten — both live bridges already ran it, so editing it changes
   only fresh installs while diverging from what deployed DBs did.
+- **One opener of a database runs its migration ladder at a time** (2026-10-14,
+  backlog B185). `OpenStore` holds an exclusive kernel lock on
+  `<db>-migrate.lock` (`lockLadder`, opened through `fsutil.OpenLockFile`) from
+  before SQLite opens the database until it returns. A second opener waits up
+  to `ladderLockWait` (5 min), then reads the `user_version` the first left
+  and runs nothing. Two openers of an older database (a `bridge doctor` run
+  with the new binary beside the new serve's first start) used to run the
+  ladder side by side: each read the version once and ran every step from
+  it, and a step that checks before it writes failed the slower one. That was
+  the column helper's probe and ALTER ("duplicate column name", 78 of 120
+  opens in a probe on a real v0.2.0 database) and, with that tolerated,
+  migration 52's epoch row ("UNIQUE constraint failed: backup_epoch.id", one
+  run in three). **Don't fix such a race inside a shipped migration or the
+  frozen column helper**: the lock serializes every step, those two included.
+  **A lock held past the bound fails the open** (`errLadderLockTimeout`):
+  proceeding would run the ladder beside a holder that may still be
+  migrating. A lock that cannot be taken at all is logged and the ladder runs
+  without it, as serve's data-dir lock does. The file is a sidecar like -wal
+  and -shm, so a symlink there is refused (`storeOpenPaths`), a link planted
+  there after that check too (`lockLadder` answers `errStoreSymlink`, never
+  "no locks here"), and it is never removed
+  (`TestConcurrentOpensOfAnOlderDatabaseAllSucceed`,
+  `TestAnOpenerWaitsForAnotherOpenersLadder`,
+  `TestAnOpenerGivesUpOnALadderLockHeldPastTheBound`,
+  `TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`,
+  `TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen`).
 - **Column-only columns must never gain `json:` tags or be spliced onto wire
   output**: the v25 format facts, `acoustid_match` (v28), `dupe_*` (v31),
   `audio_md5` (v32), `booklet_tag`, `artwork_version`. `tags_json` stays the Go
@@ -8584,6 +8610,19 @@ mentions across the four `ops/audit-*.md` files.
   the check), `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed`, and
   fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
   `TestALockDiesWithTheProcessThatHeldIt`.
+- **A lock file is opened through `fsutil.OpenLockFile`, which asks again
+  when its create loses a race** (2026-10-14, backlog B185). On macOS 27 an
+  openat(2) with O_CREAT that loses a concurrent create of the same name
+  answers ENOENT rather than opening the file the winner made: 596 of 900
+  opens by three concurrent openers on 27.0.1, with or without O_NOFOLLOW,
+  while open(2) on the whole path never did, and every retry opened the
+  file. `lockServeDataDir` took that ENOENT for a data dir that cannot be
+  locked, so of two serves started at once on a fresh data dir the second
+  went on unlocked beside the first; the store's migration lock lost the
+  same race. **Don't open a lock file with a bare
+  `os.Root.OpenFile(name, O_CREATE)`** (`TestOpenLockFileOpensForEveryConcurrentOpener`,
+  `TestServesLockingAFreshDataDirAtOnceTakeItOnce`, both red on macOS 27.0.1
+  before the retry).
 - **`bridge restore` and `bridge manifest clear-missing` hold the data-dir
   lock for the whole run.** Both mutate the store from a second process,
   where `Store.mu` does not reach and `busy_timeout` is a retry rather than

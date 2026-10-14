@@ -73,28 +73,10 @@ func lockServeDataDir(dataDir string) (release func(), err error) {
 	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
 		return release, err
 	}
-	path := filepath.Join(dataDir, serveLockFileName)
-	// Run as root over an install another user owns, the file takes the
-	// data dir's owner, as every other file serve writes there does: left
-	// root's, the service user could not open it again. dst is the file
-	// itself, which Precreate reads as "the owner of the directory it is
-	// created in" while it does not exist yet.
-	if err := fsutil.Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
-		return release, err
-	}
-	// Through the data dir's os.Root, so a lock file that is a link
-	// leading out of the data dir is refused rather than followed: a
-	// serve run as root would otherwise create, or lock, whatever file the
-	// link names, as root (Precreate's O_EXCL refuses the link, and a plain
-	// open then follows it). Open for writing though nothing is written:
-	// on a Linux NFS mount flock is carried out as a POSIX record lock,
-	// whose exclusive form wants a descriptor open for writing.
-	root, err := os.OpenRoot(dataDir)
-	if err != nil {
-		return release, err
-	}
-	f, err := root.OpenFile(serveLockFileName, os.O_RDWR|os.O_CREATE, 0o600)
-	_ = root.Close() // f stays open: it does not belong to the root
+	// The data dir's owner's file, never followed out of the data dir,
+	// and opened again when a create races another serve's on macOS 27
+	// (fsutil.OpenLockFile).
+	f, err := fsutil.OpenLockFile(dataDir, serveLockFileName)
 	if err != nil {
 		return release, err
 	}
