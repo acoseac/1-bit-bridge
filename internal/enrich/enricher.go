@@ -823,12 +823,23 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 // (no second Deezer call) is preserved either way.
 func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName string) (bool, error) {
 	mbidPath := ArtistImagePath(e.CacheDir, mbid)
-	if _, err := os.Stat(mbidPath); err == nil {
-		return true, nil
-	}
 	// Name-hashed canonical path — populated once per unique artist
 	// name regardless of how many MBIDs we see for them.
 	namePath := ArtistImagePathByName(e.CacheDir, artistName)
+	// Both paths stay inside the cache, before anything is read, fetched,
+	// linked or copied (backlog B168, its pre-merge review). Every caller
+	// checks the MBID's shape first, so this is the layer under that check,
+	// as writeArtworkAtomicStream's is for the canonical; it also covers the
+	// hard link and linkOrCopy's copy to the MBID path, which that
+	// primitive never sees.
+	for _, p := range []string{mbidPath, namePath} {
+		if fsutil.IsUnderAny(p, []string{e.CacheDir}) == "" {
+			return false, fmt.Errorf("artist image path %q is outside the cache directory", filepath.Base(p))
+		}
+	}
+	if _, err := os.Stat(mbidPath); err == nil {
+		return true, nil
+	}
 	if _, err := os.Stat(namePath); err == nil {
 		// Canonical already exists from a prior MBID for the same
 		// artist name (or a prior session). Link and return without a

@@ -42592,3 +42592,14 @@ depth here: the canonical name is a hex hash under the cache, so no input
 reaches it, and the primitive's own tests pin it. `linkOrCopy`'s copy
 fallback keeps the buffered writer; it copies a canonical that already
 passed.
+
+A pre-merge review (Gemini "Argon", 2026-10-14) found the layer this left
+open: `writeArtworkAtomicStream`'s containment covers the canonical it
+writes, never the MBID path `linkOrCopy` then links or copies it to. Red
+first: `TestArtistPortraitPathsStayInsideTheCache`, with an MBID of
+`x/../../escape` and the cache deep inside the test's temp directory, had
+`ensureArtistImageCached` answer ok, contact Deezer twice and hard-link
+`escape.jpg` outside the cache. Both paths are now checked with
+`fsutil.IsUnderAny` before anything is read, fetched, linked or copied.
+Every caller checks the MBID's shape first (`isValidMBID`), so no input
+reaches it today; it is the layer under that check.

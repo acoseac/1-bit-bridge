@@ -3579,7 +3579,13 @@ no failing test — which is the shape to expect in this area.
   and linked to the `artist-<mbid>.jpg` that `/v1/artist-image` serves as
   `image/jpeg` (`TestArtistPortraitIsStoredOnlyWhenItIsAnImage`). The
   buffered writer is left only for `linkOrCopy`'s copy of a canonical that
-  already passed. Deliberately NOT JPEG-only, though that is what this path's contract
+  already passed. **Both portrait paths are checked inside the cache before
+  anything is read, fetched, linked or copied** (`ensureArtistImageCached`):
+  the primitive's containment covers the canonical it writes, never the MBID
+  path it is then linked or copied to, so an MBID that leaves the cache had
+  a portrait hard-linked outside it
+  (`TestArtistPortraitPathsStayInsideTheCache`; every caller checks the
+  MBID's shape first, so this is the layer under that check). Deliberately NOT JPEG-only, though that is what this path's contract
   says: CAA can serve PNG, those covers render today because clients sniff, and
   dropping them inside a security fix buys nothing the arbitrary-payload refusal
   does not already buy. `artwork_scale.go`'s rule — **"a verbatim PNG write would
