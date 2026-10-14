@@ -42220,3 +42220,30 @@ MP3 and M4A assertions in the same run stayed green. That edit was
 reverted and not committed. A file cut so no page ends at EOF, and a
 buffer that is not an Ogg page, still extract as codec `OGG` with no
 facts.
+
+## 2026-10-14 — one demo deploy procedure (backlog B115)
+
+The runbook's Demo bridge "Update per release" led with
+`ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh`,
+which builds current `main`, and then said to deploy the release artifact.
+`deploy/README.md` said not to run that script for the demo at all. A
+`git describe` string is a semver prerelease, ranked below the plain
+release, so that build advertises `updateAvailable` until the next tagged
+artifact (observed 2026-08-26).
+
+One procedure in both files. A release deploy is the artifact, with
+`SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A
+`main` build of the script is only a hotfix with no tag, and it keeps
+`updateAvailable` true until the next tagged artifact. The post-deploy
+`updateAvailable` check stays: `false` after an artifact, `true` after
+that hotfix.
+
+The binary row, the swap comment and the do-not still called
+`/usr/local/bin/bridge` and unit `1-bit-bridge` the operator bridge on
+bridge.ars.md. The operator bridge moved to the NUC on 2026-09-22. Those
+paths are the previous operator install, still on the VPS, and the
+script's defaults. The same correction covers the runbook opening, the
+`bridge.ars.md` subsection heading, the canonical-procedure lead, the
+update reminder, and Step 3, which still sent a current operator deploy
+at that host. No code change. The deploy script's own comment still
+says a demo deploy must not restart the operator's own bridge.

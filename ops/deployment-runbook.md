@@ -1,8 +1,9 @@
 # Bridge deployment runbook (operator)
 
 Extracted from CLAUDE.md to keep it out of always-loaded context. **Read this
-before any production deploy** — covers the two live bridges (home-pc Windows,
-bridge.ars.md Linux VPS) and the post-merge 3-step deploy flow.
+before any production deploy** — covers home-pc (Windows), the operator bridge
+(a home NUC since 2026-09-22) and the public demo on bridge.ars.md, and the
+post-merge deploy flow.
 
 > **Placeholders.** This repo is public, so live host coordinates are not committed.
 > Substitute your own for `<WAN-IP>`, `<HOMEPC-SSH>`, `<HOMEPC-LAN-IP>`, `<VPS-SSH>`, and
@@ -18,7 +19,7 @@ cert-re-mint bug existed because the only copy lived on the host and drifted).
 See [`deploy/README.md`](../deploy/README.md) for the script index + sync
 contract. Routine update one-liners:
 - **home-pc**: `ssh <HOMEPC-SSH> 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
-- **bridge.ars.md**: `./deploy/linux/deploy-bridge-vps.sh` (needs `deploy/linux/.env` — copy `.env.example` once and fill in the coordinates; the script ships no host defaults because `deploy/` is public)
+- **bridge.ars.md**: this host runs only the public demo. A release deploy is the artifact procedure in the Demo bridge section, with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. Building `deploy/linux/deploy-bridge-vps.sh` from `main` is only a hotfix with no tag, still via `deploy/linux/.env.demo`; that build makes the demo advertise `updateAvailable` until the next tagged artifact. The script's defaults name the previous operator unit and binary. Coordinates live in the gitignored env file — the script ships no host defaults because `deploy/` is public.
 
 ## Production deployments
 
@@ -148,9 +149,11 @@ ssh <HOMEPC-SSH> \
 
 **zsh `echo` mangles `\b` in PowerShell paths sent via `-EncodedCommand`.** When piping a PowerShell script to PowerShell `-EncodedCommand` over SSH (the only sane way to avoid layered single-/double-quote escaping between zsh → CMD → pwsh), the natural pipeline is `echo -n "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'`. **`echo -n` on macOS zsh processes backslash escapes by default** (POSIX-noncompliant, zsh-historical behaviour), so any Windows path with `\b` — `C:\1-bit-bridge\bin`, `\bridge.exe`, `\backups` — gets `\b` collapsed to a literal 0x08 byte (backspace) BEFORE the base64 layer. PowerShell then receives a string with embedded BS control characters and fails with a `Test-Path` / `Rename-Item` error like `missing C:\1-bit-bridge_x0008_in\bridge.exe.new` (PowerShell's error formatter renders the BS byte as `_x0008_`). The failure mode is invisible at the source — single-quoted PowerShell strings don't help because the mangling happens in zsh, not PowerShell. **Always use `printf '%s' "$PS"` instead of `echo -n "$PS"`** as the first stage of the pipeline. `printf '%s'` is POSIX-defined to emit bytes verbatim. Bash's `echo` happens to default to non-interpret on macOS, but zsh is the default Mac shell now — code for zsh. Burned 2026-05-22 during the post-PR-#285 home-pc deploy: the rename step silently truncated three different paths until I switched the pipeline to `printf`.
 
-### bridge.ars.md (Linux VPS, public mode, SSH `<VPS-SSH>`)
+### bridge.ars.md (Linux VPS — previous operator install; the public demo since 2026-09-22)
 
-Public-internet-reachable bridge running in `deployment.mode: public` against a Backblaze B2 bucket mounted via rclone. Stood up 2026-05-24 (steps 1–11 of the post-PR-#296 deployment plan — iOS pairing deferred until the iOS Mirror PR for `PinningDelegate.shouldSkipPinning` extension lands; see `~/Desktop/to-do/2026-05-24-ios-mirror-public-vps-pinning-exemption.md`).
+The operator bridge moved to the NUC on 2026-09-22. This host now runs only the public demo. The coordinates and the update steps below are the previous operator install (`/usr/local/bin/bridge`, unit `1-bit-bridge`), which is still on the VPS. The NUC takes the manual form of those steps, with paths from `ops/coordinates.local.md`. A release deploy of the demo is the artifact procedure in the Demo bridge section.
+
+The previous install was a public-internet bridge in `deployment.mode: public` against a Backblaze B2 bucket mounted via rclone. Stood up 2026-05-24 (steps 1–11 of the post-PR-#296 deployment plan — iOS pairing deferred until the iOS Mirror PR for `PinningDelegate.shouldSkipPinning` extension lands; see `~/Desktop/to-do/2026-05-24-ios-mirror-public-vps-pinning-exemption.md`).
 
 **Coordinates:**
 
@@ -228,7 +231,9 @@ is actually being listened to. Hence `fingerprint.maxPerRun` (default 500) and
 
 **Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
 
-**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → detached swap → `setcap` → restart → health-polled verify → prune); the manual steps below are what it runs. **Prefer the script** — it retries the health poll and prunes old backups; the manual form below is for when you need to drive a step by hand, and it must keep the same detached dispatch to be safe:
+**Canonical update procedure** (from the operator's macOS workstation). These steps update `/usr/local/bin/bridge` and unit `1-bit-bridge`. On this VPS that is the previous operator install, left in place when the operator bridge moved to the NUC on 2026-09-22. Do not run them as the current operator deploy, and do not use them for the demo. The operator bridge is the NUC: drive it by hand with the manual form below (the script cannot verify a self-signed host; every health probe needs `curl -k`), with paths from `ops/coordinates.local.md`. The demo's release deploy is the artifact procedure in the Demo bridge section.
+
+The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → detached swap → `setcap` → restart → health-polled verify → prune); the manual steps below are what it runs. **Prefer the script** on a host that serves a certificate `curl` verifies and is meant to track `main` — it retries the health poll and prunes old backups. The manual form is for the NUC and for driving a step by hand, and it must keep the same detached dispatch to be safe:
 
 ```sh
 # 1. Cross-compile against current main.
@@ -324,9 +329,9 @@ one happened to be clean; the check hadn't shown it.)
 
 **The swap is dispatched DETACHED (`setsid nohup`), and the verification polls `:443` rather than SSH.** Run inline over the SSH channel, the swap dies wherever the connection dies — and the window between the two `mv`s is the one state with **no binary at `/usr/local/bin/bridge`**. The running process survives on its held inode, so nothing looks wrong until the next restart, which then fails under `Restart=always` and takes the bridge down. On 2026-08-17 a deploy dropped exactly inside step 4; it happened to die *before* the first `mv`, which was luck. Diagnose an interrupted swap by comparing `/usr/local/bin/bridge version` against `/tmp/bridge.new version` and checking whether a `bridge.old-<today's ts>` exists — if the newest backup predates the attempt, the first `mv` never ran and nothing is broken. Progress lands in `/tmp/bridge-swap.log` on the host.
 
-**Cli-mode-only host.** Tailscale is NOT installed; `cfg.Tailscale.Mode` is `disabled`. The bridge advertises a single `https://bridge.ars.md/` endpoint and that's the only path iOS clients can use post-pairing. Adding Tailscale later is straightforward but currently out of scope.
+**Previous operator install, cli-mode-only.** Tailscale is NOT installed on this VPS; `cfg.Tailscale.Mode` was `disabled`. While this host was the operator bridge it advertised a single `https://bridge.ars.md/` endpoint, and that was the only path iOS clients could use post-pairing. The operator bridge is the NUC since 2026-09-22, and `https://bridge.ars.md` no longer answers as a bridge. Adding Tailscale on this VPS stays out of scope.
 
-**Update reminder.** This host should be brought up to current `main` after every merged runtime-behavior PR (same as `home-pc`). Docs-only / test-only merges can skip. See [Post-merge deployment](#post-merge-deployment) for the umbrella rule — bridge.ars.md is **step 3** alongside the local fixture (step 1) and `home-pc` (step 2).
+**Update reminder.** The operator bridge is the NUC since 2026-09-22, not this host. Bring the NUC up to current `main` after every merged runtime-behavior PR, by the manual form, alongside the local fixture (step 1) and home-pc (step 2). This VPS runs only the public demo. A release deploy is the artifact procedure in the Demo bridge section, and a `main` build of the deploy script is only a hotfix with no tag. Docs-only / test-only merges can skip. See [Post-merge deployment](#post-merge-deployment).
 
 **UDP buffer cap for HTTP/3** (`/etc/sysctl.d/999-bridge-quic.conf`, applied 2026-05-24). quic-go asks the kernel for 7 MB receive+send buffers at UDP-bind time; Linux's default 2 MB cap clamps that and logs the well-known `failed to increase receive buffer size (wanted: 7168 kiB, got 2048 kiB)` INFO line at boot. Raising `net.core.rmem_max` + `net.core.wmem_max` to 7340032 silences the warning AND lets quic-go actually use the headroom (which materially improves HTTP/3 throughput for clients on lossy cellular links — cellular RTT is high, so a too-small kernel buffer becomes the throughput ceiling).
 
@@ -352,7 +357,7 @@ Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap 
 |---|---|
 | Host / SSH | the bridge.ars.md VM: `ssh -i <VPS-SSH-KEY> <VPS-SSH>` (Azure NSG source-allowlists :22 — see the SSH-flap note above; multiplex over one connection) |
 | Service manager | systemd `1-bit-bridge-demo.service` — `User=onebit-demo` (nologin system user), the tenant template's hardening (`ProtectSystem=strict`, `ProtectHome=yes`, empty capability set, `MemoryMax=2G`) |
-| Binary | `/usr/local/bin/bridge-demo` — the RELEASE ARTIFACT (see below), **separate from** `/usr/local/bin/bridge`, which is the operator's own bridge on the same host; a deploy of one never restarts the other |
+| Binary | `/usr/local/bin/bridge-demo` — the release artifact (see below). Separate from `/usr/local/bin/bridge` and unit `1-bit-bridge`, the previous operator install still on this host. The operator bridge is the NUC since 2026-09-22. A deploy of one never restarts the other |
 | Config | `/srv/onebit-demo/bridge.yaml` (owner `onebit-demo`, 0600 — `sudo cat` to read) |
 | Data dir | `/srv/onebit-demo/data/` (adminauth.json, server.crt/.key, acme/, backups/, transcoded/, waveforms/, bridge.db, atlas-harvest.json) |
 | Library | `/srv/onebit-demo/library/` — GENERATED demo content only (see `tools/demo-library/`); never put real/licensed music here |
@@ -418,31 +423,18 @@ No `CAP_NET_BIND_SERVICE`: both listeners are loopback high ports; HAProxy owns 
 
 **Known interim on the v0.1.9 artifact — one unreachable alternate endpoint.** `/v1/health.endpoints` reads `["https://bridge.1-bit.app", "https://bridge.1-bit.app:8446"]`: the tag's `publicModeEndpoints` appends `https://<autocert.domain>:<listen port>` whenever the listen port is not 443, and `:8446` is loopback-only here. PR #871 (`fix(api): don't advertise a listen port a proxy has remapped`, 2026-09-08) fixed exactly this on `main`, after the tag. Cost until the next release artifact: iOS puts the alternate into its failover rotation, which it consults only after the primary FAILS — so normal operation is unaffected and a demo outage merely reads as offline more slowly. A loopback `:443` listener would collapse the pair on the tag, and it is not available: HAProxy's wildcard `:::443` conflicts with any loopback `:443` bind on Linux (measured `EADDRINUSE`, 2026-09-16). **After the first release-artifact deploy that includes #871, verify `endpoints` reads exactly `["https://bridge.1-bit.app"]`** and delete this paragraph.
 
-**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here). `.env.demo` (untracked) carries `HOST=<VPS-SSH>`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`, `SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`; the deploy script honours all of them:
+**Update per release.** There is one release procedure: the published artifact.
+The iOS repo's release checklist points here. `.env.demo` (untracked) carries
+`HOST=<VPS-SSH>`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`,
+`SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`.
+The swap uses those two overrides. The script's defaults (`SVC=1-bit-bridge`,
+`REMOTE_BIN=/usr/local/bin/bridge`) name the previous operator unit and binary
+still on this host. A demo swap must not touch them or restart that unit. The
+operator bridge moved to the NUC on 2026-09-22.
 
-```sh
-ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
-```
-
-**Deploy this host from the RELEASE ARTIFACT, not from `main`** — it is the only
-bridge where the version *string* is user-visible, and the deploy script cannot produce
-the right one. The script builds whatever `git describe --tags` yields on `main`; one
-commit past a tag that is `v0.1.9-1-g8f3a873`, which is valid semver where `-1-g8f3a873`
-is a **prerelease** — and semver ranks a prerelease BELOW the plain release:
-
-```
-semverGreater("0.1.9", "0.1.9-1-g8f3a873") == true      # reports an update forever
-semverGreater("0.1.9", "0.1.9")            == false
-```
-
-So the bridge sets `updateAvailable: true` permanently, and iOS is not passive about it:
-`BridgeEditorView.probeResultSection` renders `bridgeUpdateAdvisoryRow` with **no demo
-gate**, so a user opening the demo bridge in Settings is told *"Bridge update available ·
-0.1.9"* about a server they do not own. (Observed 2026-08-26; the host had been shipping
-that since 08-20, on a build whose only delta from the tag was a docs commit.)
-
-Use the published artifact — it is what `latestServerVersion` names, it carries
-goreleaser's clean `{{.Version}}` stamp (`0.1.9`, no `v`), and it is the binary users get:
+The artifact is what `latestServerVersion` names. It carries goreleaser's clean
+`{{.Version}}` stamp (`0.1.9`, no `v`), so `serverVersion` matches the tag and
+`updateAvailable` reads `false` afterwards.
 
 ```sh
 # 1. Fetch + verify against the release's OWN manifest, then extract.
@@ -452,8 +444,7 @@ gh release download v0.1.9 -R acoseac/1-bit-bridge \
 
 # 2. Upload THAT binary -- /tmp/rel/bridge, NOT dist/bridge-linux-amd64. The
 #    bridge.ars.md upload step above hardcodes the locally-built path, so
-#    "then follow the flow above" would ship a main build and reintroduce the
-#    exact version string this whole note exists to avoid.
+#    "then follow the flow above" would ship a main build.
 scp -i <VPS-SSH-KEY> /tmp/rel/bridge <VPS-SSH>:/tmp/bridge.new
 shasum -a 256 /tmp/rel/bridge                                          # local
 ssh -i <VPS-SSH-KEY> <VPS-SSH> 'chmod +x /tmp/bridge.new
@@ -467,24 +458,54 @@ ssh -i <VPS-SSH-KEY> <VPS-SSH> 'chmod +x /tmp/bridge.new
 # 3. Then the DETACHED swap -> setcap -> restart from the bridge.ars.md section,
 #    with REMOTE_BIN=/usr/local/bin/bridge-demo and SVC=1-bit-bridge-demo -- it
 #    operates on /tmp/bridge.new and never names the local path. `.env.demo`
-#    carries both; NEVER let a demo swap touch /usr/local/bin/bridge, which is
-#    the operator's own bridge on the same host.
+#    carries both. NEVER let a demo swap touch /usr/local/bin/bridge or restart
+#    unit 1-bit-bridge. Those are the previous operator install, still on this
+#    host; the operator bridge is the NUC since 2026-09-22. The script's
+#    defaults name them, which is why SVC and REMOTE_BIN are set here.
 ```
 
 Keep the detached dispatch: the window between the two `mv`s is the one state with no
 binary at `/usr/local/bin/bridge-demo`. Confirm with `updateAvailable` reading **false**
 afterwards — that is the signal the version string is clean, and no other check shows it.
 
+This host is the only one where the version string is user-visible. A build of
+`main` is whatever `git describe --tags` yields; one commit past a tag that is
+`v0.1.9-1-g8f3a873`, a semver **prerelease**, and a prerelease ranks BELOW the
+plain release:
+
+```
+semverGreater("0.1.9", "0.1.9-1-g8f3a873") == true      # updateAvailable stays true
+semverGreater("0.1.9", "0.1.9")            == false     # until the next tagged artifact
+```
+
+iOS is not passive about it: `BridgeEditorView.probeResultSection` renders
+`bridgeUpdateAdvisoryRow` with **no demo gate**, so a user opening the demo
+bridge in Settings is told *"Bridge update available · 0.1.9"* about a server
+they do not own. (Observed 2026-08-26; the host had been shipping that since
+08-20, on a build whose only delta from the tag was a docs commit.) Such a
+build keeps `updateAvailable: true` until the next tagged artifact.
+
 The other two bridges track `main` deliberately and will keep reporting
 `updateAvailable: true` between releases. That is correct there ("you are ahead of the
 last tag") and needs no fix.
 
-The script path (a `main` build) stays the right one for a hotfix that has no release tag. Verify afterwards:
+**A build of the deploy script from `main` is only a hotfix with no tag.** It
+must still name the demo unit, or the script's defaults restart the previous
+operator install:
+
+```sh
+ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
+```
+
+That binary makes the demo advertise `updateAvailable` until the next tagged
+artifact. Check afterwards the same way. An artifact deploy reads `false`; a
+hotfix reads `true` until that artifact:
 
 ```sh
 curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, .leCertNotAfter, .endpoints, (.features | index("demoMode") != null)'
-# Expect: the new version, `false` (see the release-artifact note above), an LE expiry
-# ~90d out, the single endpoint once #871 has shipped, and `true` (demoMode advertised).
+# Expect: the new version, `false` after an artifact deploy (a main-built
+# hotfix reads `true` until the next tagged artifact), an LE expiry ~90d out,
+# the single endpoint once #871 has shipped, and `true` (demoMode advertised).
 ```
 
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then
@@ -499,7 +520,7 @@ rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" <out>/library/ <VPS-
 
 **Atlas enrichment on the demo bridge:** `enrich.musicbrainzBaseURL` / `coverArtBaseURL` point at `https://atlas.ars.md` (keyless server-to-server, mirrors bridge.ars.md — kills public-MusicBrainz 503s); since the move Atlas is on the same host, so that name resolves to loopback via `/etc/hosts` and the requests never leave the box. Rich-tier bios (`atlas.enabled: true` + `harvestEnabled: true`) are safe here ONLY because demo mode 403s `POST /v1/atlas-ingest` (`demo_read_only`) — the client-content push a public bearer could poison; the bridge instead pulls bios itself via the harvest client, bootstrapped ONCE by the operator's attested 1-bit app (on the demo share in the app: set Atlas base URL `https://atlas.ars.md` + enable the harvest toggle; App Attest needs a real device, not the Simulator). Harvest state persists in `data/atlas-harvest.json` (carried over in the move); re-provision only when new content needs harvesting after the token TTL.
 
-**Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit — the cache moved with the data, so the move cost no issuance); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it); never point a demo deploy at `/usr/local/bin/bridge` or `1-bit-bridge` (those are the operator's bridge on the same host).
+**Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit — the cache moved with the data, so the move cost no issuance); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it); never point a demo deploy at `/usr/local/bin/bridge` or `1-bit-bridge` (the previous operator install still on this host, and the script's defaults; the operator bridge is the NUC since 2026-09-22).
 
 ## Post-merge deployment
 
@@ -529,18 +550,22 @@ Full coordinates + canonical update procedure live in the `home-pc (Windows)` su
 - Config file — `setup-bridge-windows.ps1` only injects missing `customEndpoints` + `upscale.variantsDir` keys; existing config preserved.
 - Library DB — schema migrations are append-only and idempotent; the same DB carries forward across releases.
 
-### Step 3 — Linux VPS public-mode bridge (`bridge.ars.md`)
+### Step 3 — operator bridge (home NUC since 2026-09-22)
 
-Public-internet bridge running `deployment.mode: public` against rclone-mounted B2. Cross-compile + scp + two-step swap pattern for linux/amd64 + systemd. Full coordinates + canonical update procedure live in the `bridge.ars.md` subsection under "Production deployments" above — don't duplicate the deploy commands here; consult that section directly.
+The operator bridge is the NUC (`<OPERATOR-SSH>`), not `bridge.ars.md`. Drive the manual form in the `bridge.ars.md` subsection by hand (the deploy script cannot verify a self-signed host; every health probe needs `curl -k`). Paths, the unit name and the health URL come from `ops/coordinates.local.md`. The commands below are the previous public-mode layout on `bridge.ars.md` (`/usr/local/bin/bridge`, unit `1-bit-bridge`). That host now runs only the public demo, whose release deploy is Step 4.
 
-**One-line summary**: `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/<VPS-SSH-KEY> … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
+**One-line summary** (previous layout on bridge.ars.md, not the NUC): `GOOS=linux GOARCH=amd64 go build … -o dist/bridge-linux-amd64 ./cmd/bridge` → `scp -i ~/.ssh/<VPS-SSH-KEY> … :/tmp/bridge.new` → SHA-256 verify → two-step `sudo mv` swap + `setcap cap_net_bind_service=+ep` + `systemctl restart 1-bit-bridge`.
 
 **Public-mode-specific verification** (extends the `/v1/health` check):
 
 ```sh
 curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .leCertNotAfter'
-# Expect: ServerVersion string matches the build, certNotAfter ~397d out
-# (self-signed pinned cert), leCertNotAfter ~90d out (Let's Encrypt).
+# Previous public-mode layout on this VPS. The operator bridge is the NUC
+# since 2026-09-22 (probe it with curl -k). https://bridge.ars.md no longer
+# answers as a bridge.
+# Expect, while this layout was live: ServerVersion string matches the build,
+# certNotAfter ~397d out (self-signed pinned cert), leCertNotAfter ~90d out
+# (Let's Encrypt).
 ```
 
 **Connection-issues hint** (re-stated for the post-merge loop): SSH and the admin port `7790` are allowlisted to the operator's ranges (the Azure NSG since 2026-09-16; ufw before). A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Add the new source range to the NSG rules — ufw allows those ports from anywhere and is not the gate.
@@ -549,7 +574,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 
 Public read-only demo bridge (the iOS "Add demo bridge" target). Full coordinates + rationale live in the `Demo bridge` subsection under "Production deployments" above.
 
-**One-line summary**: deploy the RELEASE ARTIFACT rather than a `main` build (see the `Demo bridge` subsection for why — a `git describe` version string makes this host advertise `updateAvailable: true` forever, which iOS shows to demo users), then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, (.features | index("demoMode") != null)'` — expect the new version, `false`, and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
+**One-line summary**: deploy the release artifact (the Demo bridge section), with `SVC=1-bit-bridge-demo` and `REMOTE_BIN=/usr/local/bin/bridge-demo`. A `git describe` build of `main` is only a hotfix with no tag, and it makes this host advertise `updateAvailable: true` until the next tagged artifact, which iOS shows to demo users. Then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, (.features | index("demoMode") != null)'` — expect the new version, `false` after an artifact deploy, and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
 
 **SSH-flap note (2026-08-17): it is not the key, and it is not necessarily all-or-nothing.**
 
