@@ -405,11 +405,11 @@ func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Tr
 func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m AcousticMatch) bool {
 	releaseMBID, rgMBID, err := e.resolveAlbumFromAcoustic(ctx, t, m)
 	if err != nil {
-		if ctx.Err() != nil || IsTransient(err) {
+		if ctx.Err() != nil {
 			return false
 		}
-		logger.Error("MB search (fingerprint artist)", "path", t.Path, "err", err)
-		return true
+		e.logUpstream(upstreamMusicBrainz, "MB search (fingerprint artist)", err, "path", t.Path)
+		return !IsTransient(err)
 	}
 	if releaseMBID == "" {
 		return true
@@ -426,7 +426,7 @@ func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m Acous
 	cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), e.coverSize())
 	if aerr != nil {
 		if ctx.Err() == nil {
-			logger.Error("artwork", "mbid", releaseMBID, "err", aerr)
+			e.logUpstream(upstreamCoverArt, "artwork", aerr, "mbid", releaseMBID)
 		}
 		return true
 	}
@@ -467,7 +467,7 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
 	if err != nil {
 		if ctx.Err() == nil {
-			logger.Error("artist image", "mbid", t.ArtistMBID, "err", err)
+			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", t.ArtistMBID)
 		}
 		return
 	}

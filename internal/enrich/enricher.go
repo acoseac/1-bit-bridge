@@ -164,6 +164,10 @@ type Enricher struct {
 	// PollInterval is how long to wait between empty-batch checks.
 	PollInterval time.Duration
 
+	// reports is one failure streak per upstream. The log level never
+	// decides whether a track is retried or stamped.
+	reports *upstreamReports
+
 	// albumCache memoizes (artist, album) → albumResolution so tracks
 	// on the same album share a single MB round-trip. Bounded LRU
 	// (capacity albumCacheCap) so a long-running enricher on a
@@ -274,6 +278,8 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		artistCache:       lrucache.New[string, string](artistCacheCap),
 		deezerNegCache:    lrucache.New[string, struct{}](deezerNegCacheCap),
 	}
+	e.reports = newUpstreamReports()
+	e.watchUpstreamAnswers()
 	return e
 }
 
@@ -286,6 +292,7 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 // fluent setup: `NewEnricher(...).WithITunes(itc)`.
 func (e *Enricher) WithITunes(itc *ITunesClient) *Enricher {
 	e.itunes = itc
+	e.watchUpstreamAnswers()
 	return e
 }
 
@@ -435,7 +442,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Error("MB search", "artist", t.Artist, "album", t.Album, "err", err)
+				e.logUpstream(upstreamMusicBrainz, "MB search", err, "artist", t.Artist, "album", t.Album)
 				if IsTransient(err) {
 					// Network blip, 5xx, 429, or timeout — leave
 					// `enriched_at` at 0 so the next pass picks
@@ -602,7 +609,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			// isn't a real artwork failure. Mirrors the ctx guard the album /
 			// artist SearchRelease / SearchArtist paths already carry.
 			if ctx.Err() == nil {
-				logger.Error("artwork", "mbid", albumMBID, "err", err)
+				e.logUpstream(upstreamCoverArt, "artwork", err, "mbid", albumMBID)
 			}
 			// Artwork miss isn't fatal — mark enriched so we don't retry
 			// every 15 seconds. A future background pass can re-try.
@@ -689,7 +696,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 			// blip would otherwise block sibling-track retries until
 			// process restart. Matches the album-path behavior.
 			if ctx.Err() == nil {
-				logger.Error("MB artist search", "artist", t.Artist, "err", err)
+				e.logUpstream(upstreamMusicBrainz, "MB artist search", err, "artist", t.Artist)
 			}
 			// Shutdown/cancellation: propagate the ctx error so enrichOne
 			// skips MarkEnriched (mirrors the album SearchRelease path) — no
@@ -785,7 +792,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
 		// sleepCtx). Mirrors the album/artist tier-1 ctx guard.
 		if ctx.Err() == nil {
-			logger.Error("artist image", "artist", t.Artist, "mbid", artistMBID, "err", err)
+			e.logUpstream(upstreamDeezer, "artist image", err, "artist", t.Artist, "mbid", artistMBID)
 		}
 		return nil
 	}
@@ -1264,7 +1271,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// state consistently with pre-fallback behaviour. A lookup the
 		// shutdown stopped is not reported.
 		if failure := ctxerr.WithoutCancellation(ctx, rgErr); failure != nil {
-			logger.Error("release-group lookup", "mbid", mbid, "err", failure)
+			e.logUpstream(upstreamMusicBrainz, "release-group lookup", failure, "mbid", mbid)
 		}
 		// Don't bail yet — iTunes may still have the album by name,
 		// and a transient MB lookup error shouldn't block the iTunes
@@ -1324,7 +1331,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 			// useful signal for the caller. The ctx.Err() guard
 			// suppresses the spurious Error on a clean shutdown, where
 			// fetchITunesArtwork returns ctx.Err() from its pacing sleepCtx.
-			logger.Error("iTunes fallback", "artist", artist, "album", album, "err", itErr)
+			e.logUpstream(upstreamITunes, "iTunes fallback", itErr, "artist", artist, "album", album)
 		}
 	}
 	return false, err

@@ -42382,3 +42382,137 @@ After the fix those five pass. Dropping the keep (the guard forced true)
 failed exactly the two keep cases again, on the saved defaults and on an
 exit 0 while another process held the install's port. That edit was not
 committed. No wire change.
+
+## 2026-10-14 — the enricher logs a busy upstream once, and a clean miss below Error (backlog B191)
+
+### The decision
+
+`IsTransient` keeps deciding retry versus stamp. The log level does not.
+A transient failure of one upstream warns once when the streak starts and
+stays quiet while it continues. The next answer from that upstream is one
+Info line. A clean 404 is Debug. A decode error, a 4xx other than 404, and
+an HTTP 500 that `IsTransient` does not treat as transient stays Error.
+
+Debug, rather than Info, for the clean miss: `logging.Init` fixes the
+process level at Info, so Debug stays out of the journal an operator scans.
+An Info line per track, on a library whose covers are missing, would replace
+the ERROR flood with an INFO flood. A clean miss is the ordinary outcome of
+an unknown release-group MBID and of artwork the archive does not hold.
+
+The streak is per upstream, not per call site, and it does not escalate to
+Error after a duration. `discovery.SendFailureLog` is the shape (Warn at the
+start, silence while it continues, Info when it ends). The enricher does not
+import that package, and it does not copy the ten-minute Error escalation:
+a MusicBrainz outage that lasts past ten minutes is still the same outage.
+
+MusicBrainz artist search, release search, release-group lookup and the
+fingerprint artist search share `musicbrainz`. Cover Art Archive, iTunes,
+Deezer and Atlas are separate. A successful request ends the streak, so the
+backlog's consecutive artist-search failures are one Warn only while nothing
+successful is asked of MusicBrainz between them. A disk or cache hit does
+not end a streak. A 404 ends it, because the upstream answered, and the miss
+is then Debug. Atlas and iTunes already logged a clean miss as nothing; they
+stay silent and still end an open streak.
+
+Cover Art Archive, iTunes, Deezer and Atlas report an HTTP 500 as a plain
+error, not `*httpError`, so `IsTransient` is false for them. That stays.
+Widening the classification would stamp a different set of tracks. Those
+500s stay Error. A timeout or a refused connect on any client is transient
+and joins that client's streak.
+
+The recovery line is `upstream answered` with `upstream` and `failures`.
+It names no URL and no credential.
+
+### The defect, measured
+
+On the unfixed enricher, three tracks whose only MusicBrainz call was the
+artist search (embedded album MBID, local artwork) logged three `ERROR MB
+artist search` lines, one each for 503, 429 and a client timeout, and the
+two Cover Art Archive timeouts that followed logged two `ERROR artwork`
+lines. Two clean misses logged two `ERROR release-group lookup` and two
+`ERROR artwork` (`not found`). Two Atlas 503s logged two `WARN atlas premium
+cover fetch` lines. The tracks were already retried or stamped correctly:
+the three MusicBrainz failures stayed unenriched, and the cover misses and
+the clean misses were stamped.
+
+### The fix
+
+`upstreamReports` in `internal/enrich` is the one logger. Each client calls
+`noteAnswered` when an HTTP response arrives. MusicBrainz skips that call on
+429 and 5xx, which keep the streak. The other clients call it on any
+response, including a 404 or a 5xx, because their 5xx is not a streak.
+Transport errors do not call it. `logUpstream` then routes the error the
+call site already had: transient to the streak, `errNotFound` to Debug,
+anything else to Error. The return, the cache and the stamp are the ones
+the call site had. Atlas `TryCache` uses the same helper for a transport
+error and for a status of 500 or above, and ends the streak on 404 and on
+200 before the artwork write. `RefetchPremium` is unchanged: the harvest
+sweep already logs its own line.
+
+### Red first, and the control
+
+Before the helper, `TestABusyUpstreamWarnsOnceAndAnswersAtInfo`,
+`TestACleanMissIsDebugAndStillStamps` and
+`TestAtlasBusyWarnsOnceThenAnswers` failed on the per-track Error and Warn
+lines above. `TestABusyMusicBrainzRetriesAndACoverMissStillStamps` and
+`TestAnUnexpectedUpstreamFailureStaysErrorAndStamps` passed on that same
+run: three local tracks stayed unenriched, three cover tracks were stamped,
+and one Cover Art Archive HTTP 500 stayed one Error and was stamped.
+
+After the fix all five pass. The negative control put `logger.Error` back
+on the first line of a transient streak. The streak still collapsed to one
+line, and that line was Error: `TestABusyUpstreamWarnsOnceAndAnswersAtInfo`
+and `TestAtlasBusyWarnsOnceThenAnswers` failed on `1 error and 0 warn`.
+`TestABusyMusicBrainzRetriesAndACoverMissStillStamps`,
+`TestACleanMissIsDebugAndStillStamps` and
+`TestAnUnexpectedUpstreamFailureStaysErrorAndStamps` stayed green. That
+edit was not committed. No `ExtractorVersion` bump and no wire change.
+
+### Round 2 — a 429 or a 5xx keeps the streak, and a non-response does not end it
+
+The first cut had Cover Art Archive, iTunes and Deezer call `noteAnswered`
+on every HTTP response, and `report` call `answered` for every error
+`IsTransient` rejected. A 503 from those clients ended the streak, so the
+next 503 warned again, once per track. An NXDOMAIN, a TLS certificate
+failure and `baseEndpoint.err` ended it too, with no response having
+arrived. `logUpstream` also built `reports` on first use when the field was
+nil, and `watchUpstreamAnswers` had not run, so that map's streak was one
+the clients could not end.
+
+`transientHTTPStatus` is the one predicate: 429 or a status of 500 or
+above. `noteSettledAnswer` is what every client calls, and it skips that
+class. `carryTransientStatus` wraps the client's own sentence with the
+status when the class matches, and `IsTransient` reads `HTTPStatus` on
+`*httpError` and on that wrap. The sentence stays the client's
+(`coverart: HTTP 503`, `itunes: artwork HTTP 503`, `deezer: HTTP 503`).
+Artwork and portrait paths still stamp: they log the error and do not
+consult `IsTransient`, so the classification changes the line and not the
+stamp. Atlas 5xx was already `noteBusy`.
+
+`report` ends a streak only when `err` is nil. The clients note a settled
+response, and Atlas calls `answered` itself. A nil `reports` stays nil.
+`NewEnricher` is what sets the field; tests that build an `Enricher` field
+by field have none, and a lazy map would race with clients added later.
+
+Before the change, `TestARunOfTransientStatusesWarnsOnce` logged 0 Warn
+and 3 Error for artwork (`coverart: HTTP 503` and `deezer: HTTP 503`,
+three times each) and the tracks were stamped.
+`TestANilReportsFieldKeepsNoStreak` logged 1 Warn and left a non-nil map.
+`TestATransientStreakSurvivesANonResponse` logged `upstream answered` on
+the DNS failure, between the 503 and the lookup error. After the change
+those three pass, with one Warn for the 503 run, two Warns and a nil map
+for the field-built enricher, and no recovery line until the artist search
+that follows the DNS failure. `TestAnUnexpectedUpstreamFailureStaysErrorAndStamps`
+now drives a 400, which stays a plain error and one Error line.
+`TestIsTransient` covers a carried 503 and a carried 400.
+
+Three controls, each reverted before the commit. Putting
+`noteUpstreamAnswer` back in the Cover Art Archive and Deezer response
+paths, with `carryTransientStatus` left in place, failed only
+`TestARunOfTransientStatusesWarnsOnce`: 3 Warn and an `upstream answered`
+after each of the first two tracks. Restoring the lazy
+`e.reports = newUpstreamReports()` failed only
+`TestANilReportsFieldKeepsNoStreak` (1 Warn, map non-nil). Restoring
+`answered` on every non-transient error failed only
+`TestATransientStreakSurvivesANonResponse`, on the recovery line between
+the 503 and the DNS error. No `ExtractorVersion` bump and no wire change.

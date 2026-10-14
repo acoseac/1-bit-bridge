@@ -57,6 +57,9 @@ type atlasPremiumFetcher struct {
 	// itself rather than trust the path it was handed. Empty disables
 	// the bound; production always sets it.
 	cacheDir string
+	// reports is this fetcher's Atlas failure streak. A 5xx warns once
+	// until a later request is answered.
+	reports *upstreamReports
 }
 
 // NewAtlasPremiumFetcher builds the premium-cover fetcher. A nil httpClient
@@ -70,7 +73,10 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 	// A copy that never carries the bearer token, or the Basic header a stored
 	// base with user information gets, from an https request onto a hop that
 	// is not https (guardRedirects).
-	return &atlasPremiumFetcher{cred: cred, userAgent: userAgent, http: guardRedirects(httpClient), cacheDir: cacheDir}
+	return &atlasPremiumFetcher{
+		cred: cred, userAgent: userAgent, http: guardRedirects(httpClient), cacheDir: cacheDir,
+		reports: newUpstreamReports(),
+	}
 }
 
 // TryCache fetches the premium cover for (mbid, size) and streams it to path.
@@ -86,19 +92,22 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	if err != nil {
 		// A fetch the shutdown stopped is not reported either.
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) {
-			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "err", failure)
+			f.reports.report(upstreamAtlas, "atlas premium cover fetch", failure, "mbid", mbid, "size", size)
 		}
 		return false // no credential / transport error → CAA path
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		// 404 = no cover at Atlas (normal — fall through to CAA rg + iTunes);
-		// 5xx = Atlas hiccup. The public artwork proxy doesn't 401/403 a bad
+		// 429 or 5xx = Atlas busy (transientHTTPStatus, the one predicate the
+		// other clients use), which keeps the streak. The public artwork proxy doesn't 401/403 a bad
 		// bearer (it serves CAA), so those are defense-in-depth — see
 		// clearOnAuthReject.
 		f.clearOnAuthReject(resp.StatusCode)
-		if resp.StatusCode >= 500 {
-			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
+		if transientHTTPStatus(resp.StatusCode) {
+			f.reports.noteBusy(upstreamAtlas, "atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
+		} else {
+			f.reports.answered(upstreamAtlas)
 		}
 		// Drain before Close so the connection returns to the idle
 		// pool — net/http only reuses an HTTP/1.1 conn whose body was
@@ -112,6 +121,7 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		drainBody(resp.Body)
 		return false
 	}
+	f.reports.answered(upstreamAtlas)
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
 		// A body the shutdown cut off is not a failed write; the write
 		// removed its temp file either way.

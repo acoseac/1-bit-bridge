@@ -3211,6 +3211,47 @@ no failing test — which is the shape to expect in this area.
   in-flight track permanently. The HTTP-code parser must be structural
   (`HasPrefix` + `Atoi`), never a substring match, or a 4xx whose *body* mentions
   "HTTP 503" retries forever. A clean artist no-match is still NOT cached.
+- **The log level never decides retry or stamp** (2026-10-14, backlog B191).
+  `IsTransient` decides the MusicBrainz search paths: a transient error is
+  left unenriched for the next batch and is not negative-cached; a persistent
+  error is stamped. Cover Art Archive, iTunes and Deezer artwork and portrait
+  paths stamp either way; they do not consult `IsTransient`.
+  `upstreamReports` is the one logger, one streak per upstream. A transient
+  failure warns once when that streak starts, stays quiet while it continues,
+  and the next answer from that upstream is one Info line (`upstream answered`,
+  attribute `upstream`, the count of failures it covered). There is no later
+  Error escalation. MusicBrainz artist search, release search, release-group
+  lookup and the fingerprint artist search share `musicbrainz`. Cover Art
+  Archive, iTunes, Deezer and Atlas each have their own. A clean 404
+  (`errNotFound`) is Debug, once per track at most: the process log level is
+  Info, so Debug stays out of the journal an operator scans, and a library of
+  missing covers would otherwise be an Info line per track. A 404 is an
+  answer, so it ends an open streak before that Debug line. A 429 and a 5xx
+  are one status class, `transientHTTPStatus`, and `IsTransient` reads it
+  through `HTTPStatus` (`*httpError`, and a Cover Art Archive, iTunes or
+  Deezer sentence wrapped by `carryTransientStatus`). Every client notes an
+  answer through `noteSettledAnswer`, which skips that class, so a run of
+  503s is one Warn. A decode error and a 4xx other than 404 and 429 stay
+  Error, and the client notes that answer, which ends the streak. Atlas 5xx
+  is the same streak through `noteBusy`. A disk or cache hit does not end a
+  streak. Atlas and iTunes clean misses stay silent, as they were, and still
+  end an open streak. `report` ends a streak only for a nil error. A DNS
+  failure, a TLS certificate failure and a base that could not be used
+  produced no response, so they leave the streak open; the next real answer
+  is the Info line. `NewEnricher` sets `reports` and points the clients at
+  it. A nil field is an Enricher built field by field: it keeps no streak,
+  and each transient failure warns, because a map created on first use would
+  open a streak the clients were never pointed at. The recovery line names
+  the upstream. It carries no URL and no credential (the B69 rule). Local
+  store errors stay Error.
+  (`TestABusyUpstreamWarnsOnceAndAnswersAtInfo`,
+  `TestABusyMusicBrainzRetriesAndACoverMissStillStamps`,
+  `TestACleanMissIsDebugAndStillStamps`,
+  `TestAnUnexpectedUpstreamFailureStaysErrorAndStamps`,
+  `TestAtlasBusyWarnsOnceThenAnswers`,
+  `TestARunOfTransientStatusesWarnsOnce`,
+  `TestANilReportsFieldKeepsNoStreak`,
+  `TestATransientStreakSurvivesANonResponse`.)
 - **A stamp a shutdown stopped records nothing**: no `mark skipped` count, no
   `enrichment skipped` line, and the row stays `enriched_at = 0`. The stop is
   at `stampEnriched` / `markSkipped`, never at the fetches that absorb their

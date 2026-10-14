@@ -29,6 +29,11 @@ type DeezerClient struct {
 	// NewDeezerClient; tests may append their httptest host via
 	// SetAllowedImageHostsForTest.
 	allowedImageHosts []string
+	// noteAnswered ends the Deezer failure streak when a request is
+	// answered, including a 404. A 429 or a 5xx keeps the streak. A
+	// transport error does not call it. Nil when the client is built
+	// outside an enricher.
+	noteAnswered func()
 }
 
 // NewDeezerClient constructs a client.
@@ -122,11 +127,12 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 		return "", err
 	}
 	defer resp.Body.Close()
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		return "", errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("deezer: HTTP %d", resp.StatusCode)
+		return "", carryTransientStatus(resp.StatusCode, fmt.Errorf("deezer: HTTP %d", resp.StatusCode))
 	}
 
 	var body struct {
@@ -184,11 +190,12 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("deezer: image HTTP %d", resp.StatusCode)
+		return nil, carryTransientStatus(resp.StatusCode, fmt.Errorf("deezer: image HTTP %d", resp.StatusCode))
 	}
 	// Read one byte past the cap so an over-sized body surfaces as an
 	// explicit error rather than silently truncating mid-JPEG.

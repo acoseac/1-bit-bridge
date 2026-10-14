@@ -58,6 +58,10 @@ type MusicBrainzClient struct {
 	// liveBase, when non-nil, supersedes base and is read per use — see
 	// WithLiveBase. The pacing re-derives from it too.
 	liveBase func() string
+	// noteAnswered ends the MusicBrainz failure streak when a request
+	// is answered. A 429 or a 5xx does not call it: those keep the streak.
+	// Nil when the client is built outside an enricher.
+	noteAnswered func()
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
@@ -216,6 +220,9 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 		return err
 	}
 	defer resp.Body.Close()
+	// A 429 or a 5xx is the upstream still busy. Every other status,
+	// including a later decode error, means it answered.
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		// Drain the (usually tiny) 404 body so the deferred Close returns the
 		// HTTP/1.1 connection to the idle pool instead of dropping it — MB 404
@@ -280,6 +287,22 @@ type httpError struct {
 
 func (e *httpError) Error() string {
 	return fmt.Sprintf("musicbrainz: HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+// HTTPStatus is the response status. A nil receiver is not a status.
+func (e *httpError) HTTPStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+// transientHTTPStatus is 429 and every 5xx. IsTransient and every client
+// share it. A MusicBrainz search leaves that status unenriched. Cover Art
+// Archive, iTunes and Deezer artwork and portrait paths stamp either way;
+// for them the status only keeps the streak open.
+func transientHTTPStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
 
 // maxRetryAfter caps the wait to protect against a hostile or
@@ -443,22 +466,14 @@ func IsTransient(err error) bool {
 		errors.Is(err, syscall.EHOSTUNREACH) {
 		return true
 	}
-	// HTTP status is consulted via the typed `httpError` carried by
-	// `MusicBrainzClient.get`. `errors.As` survives any number of
-	// `fmt.Errorf("...: %w", err)` wraps a future caller might add,
-	// where the prior `strings.HasPrefix(msg, "musicbrainz: HTTP ")`
-	// shape would silently misclassify a wrapped 5xx as non-transient
-	// and reintroduce the PR #74 poisoning regression.
-	//
-	// The pre-fix substring guard against an HTML error body that
-	// mentions "HTTP 503" elsewhere is now structural — the typed
-	// StatusCode is the response status code, not anything text-
-	// matched out of the body.
-	var herr *httpError
-	if errors.As(err, &herr) {
-		if herr.StatusCode >= 500 || herr.StatusCode == 429 {
-			return true
-		}
+	// HTTP status is consulted via HTTPStatus, which *httpError and a
+	// status wrapped around another client's own sentence both carry.
+	// errors.As survives fmt.Errorf("%w") wraps. A plain string that
+	// mentions "HTTP 503" does not implement the method, so it stays
+	// persistent: the status is the response's, not text in a body.
+	var status interface{ HTTPStatus() int }
+	if errors.As(err, &status) && status != nil && transientHTTPStatus(status.HTTPStatus()) {
+		return true
 	}
 	return false
 }
