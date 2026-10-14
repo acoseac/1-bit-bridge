@@ -3778,7 +3778,52 @@ no failing test — which is the shape to expect in this area.
   - A waiter whose claim resolved without a peak measures that mate itself,
     because the holder's failure may have been transient. A length-incomplete
     decode is remembered, so that measurement is the memory. Only the waiter's
-    OWN failed measurement leaves the mate out of the album.
+    OWN failed measurement decides about the mate (next bullet).
+  - **A failed album-mate measurement leaves the mate out only when it is a
+    fact about the mate; any other failure decides NO album figure**
+    (2026-10-14, backlog B215). The facts (`leftOutBecause`): a short decode
+    or a malformed header (`transcode.RepeatedFileFact`), a mate this bridge
+    would not render on the profile (`albumgain.ErrMateIneligible`, which
+    `SpecFor` returns for no track row or a source the rendition gate
+    refuses, and `measure` for a mate whose row moved to another profile,
+    which also drops the index), and a mate whose renders are suppressed by
+    their strikes (`VariantFailureSuppressed`). Anything else (a full
+    scratch volume, an I/O error, a store read, a path that does not
+    resolve) says nothing about the mate, and a boost decided without it is
+    too high when it is the hottest, kept by the rendition for good: the
+    survey still measures the other mates (their peaks are recorded for the
+    next attempt), then `AlbumGainDB` returns an error wrapping
+    `transcode.ErrAlbumMateUnmeasured`, unless a later pass of the call
+    found the mate's peak recorded after all. The render fails, and **the
+    pool strikes nothing for it** (it is no verdict on the RENDERING file;
+    three strikes would suppress a good file over its mate's full scratch
+    volume), counted and announced like any other failure, so the next sweep
+    or request renders it again, by when the mate's own render has usually
+    recorded its peak. A transient mate is measured at most once per call.
+    **A mate stops holding its album back once it has failed transiently
+    `mateTransientFailures` (3) times, the first of them `mateTransientGrace`
+    (24 h) ago or longer**, in memory, ended by a peak of it measured or
+    found recorded, whoever recorded it (a found one too since 2026-10-14):
+    the bound for a mate whose own render never runs (it already has a
+    rendition) and that fails the same way on every survey. Both terms, so
+    two failures a day apart leave nothing out. **A host fault
+    (`transcode.HostFault`: a tool this host lacks, an output it refuses)
+    never counts toward it**, however long it lasts, and still takes the
+    pool's earlier exits, since the error wraps the mate's own. **Don't
+    leave a mate out for a failure that is not a fact about it, and don't
+    strike the rendering file for its album-mate**
+    (`TestATransientMateFailureDecidesNoAlbumFigure`,
+    `TestATransientMateIsMeasuredOncePerCall`,
+    `TestATransientMateRecordedSinceDecidesTheFigure`,
+    `TestAnIneligibleMateDoesNotConstrain`,
+    `TestAMateOnAnotherProfileDoesNotConstrain`,
+    `TestASuppressedMateDoesNotConstrain`,
+    `TestATransientMateStopsHoldingTheAlbumAfterTheGrace`,
+    `TestTwoFailuresADayApartLeaveNothingOut`,
+    `TestAHostFaultNeverLeavesTheMateOut`,
+    `TestAPeakFoundInTheStoreEndsTheGrace`,
+    `TestAPeakFoundUnderTheClaimEndsTheGrace`,
+    `TestAnAlbumMateWaitStrikesNothing`).
   - **A mate whose decode finished short of its container is remembered for
     the process, keyed on the mate spec's path, size and mtime** (2026-10-13,
     backlog B241). `SpecFor` stamps those from the track row, the same facts a
@@ -3789,7 +3834,7 @@ no failing test — which is the shape to expect in this area.
     remembered. A malformed DSF header is remembered on this same map
     (`RepeatedFileFact`). `LengthIncompleteFile` stays the short decode.
     A restart measures the file once more. The
-    mate still does not constrain the album. **Don't write the memory into
+    mate still does not constrain the album (a file fact, B215). **Don't write the memory into
     the variant-strike table**: the file's own v2 render already strikes a
     length-incomplete decode, and a survey failure must not add a strike.
     (`TestAShortMateIsMeasuredOnceAcrossTwoRenders`,

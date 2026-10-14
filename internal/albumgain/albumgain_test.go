@@ -3,6 +3,7 @@ package albumgain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -40,6 +41,8 @@ type fakePeaks struct {
 	// snapshot, outside the lock: a test's way to hold a survey between its
 	// read of the store and its claims.
 	afterRead func()
+	// suppressed are the paths whose renders the pool has suppressed.
+	suppressed map[string]bool
 }
 
 func newFakePeaks() *fakePeaks { return &fakePeaks{rows: map[claimKey]manifest.DSDPeak{}} }
@@ -66,6 +69,12 @@ func (f *fakePeaks) UpsertDSDPeak(_ context.Context, p manifest.DSDPeak) error {
 	f.rows[claimKey{path: p.SourcePath, profile: p.Profile}] = p
 	f.upserts = append(f.upserts, p)
 	return nil
+}
+
+func (f *fakePeaks) VariantFailureSuppressed(_ context.Context, path string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.suppressed[path], nil
 }
 
 func (f *fakePeaks) put(path, profile string, tp *float64) {
@@ -375,12 +384,13 @@ func TestAlbumGainMeasuresEachMissingMateOnceAndRecordsIt(t *testing.T) {
 }
 
 // TestAMateThatCannotBeMeasuredDoesNotConstrain: a file the decoder refuses
-// will not render either, so it must not hold the whole album's boost down.
+// (a fact about it, transcode.RepeatedFileFact) will not render either, so
+// it must not hold the whole album's boost down.
 func TestAMateThatCannotBeMeasuredDoesNotConstrain(t *testing.T) {
 	refs := album(3)
 	h := newHarness(t, refs...)
 	j := compactSpec(refs[0].Path, dsd64)
-	h.meas.errs[refs[1].Path] = errors.New("corrupt file")
+	h.meas.errs[refs[1].Path] = fmt.Errorf("%w (%s)", manifest.ErrDSFAudioMalformed, refs[1].Path)
 	h.meas.peaks[refs[2].Path] = fp(-5.0)
 	g, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0))
 	if err != nil || !ok || g != 4.0 {

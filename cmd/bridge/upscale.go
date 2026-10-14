@@ -847,12 +847,16 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 			return transcode.JobSpec{}, err
 		}
 		if t == nil {
-			return transcode.JobSpec{}, fmt.Errorf("album-mate %s is not in the library", path)
+			return transcode.JobSpec{}, fmt.Errorf("%w: album-mate %s is not in the library", albumgain.ErrMateIneligible, path)
 		}
 		var ignored upscaleSkipCounters
 		c, exit := classifyUpscaleTrack(ctx, io.Discard, store, resolver, *t, mate, &ignored)
-		if exit != 0 || c == nil {
-			return transcode.JobSpec{}, fmt.Errorf("album-mate %s is not renderable by this command", path)
+		if exit != 0 {
+			// The classifier failed (a store read): no verdict on the mate.
+			return transcode.JobSpec{}, fmt.Errorf("album-mate %s could not be classified (exit %d)", path, exit)
+		}
+		if c == nil {
+			return transcode.JobSpec{}, fmt.Errorf("%w: album-mate %s is not renderable by this command", albumgain.ErrMateIneligible, path)
 		}
 		spec := c.spec
 		spec.Quality = like.Quality

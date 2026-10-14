@@ -42915,3 +42915,108 @@ long). `ProbeSox` now sets `exec.Cmd.WaitDelay` (`soxProbeWaitDelay`, 1 s):
 wrapper whose background `sleep 12` holds the pipe) answers
 `ErrSoxProbeTimeout` in 3.0 s; with the line removed it took 12.0 s and
 failed.
+
+## 2026-10-14 — an album-mate's transient measurement failure decides no album gain (backlog B215)
+
+The album gain's survey left a mate out of the album whenever its
+measurement failed, for any reason but a cancelled context: AlbumGainDB's
+rationale was "an album-mate that cannot be measured does not constrain the
+album; it will not render either, for the same reason". That holds for a
+fact about the file and not for a transient fault. The render then
+published a boost decided without the mate, too high when the mate is the
+hottest, and the plan's rule that renditions keep their boost until an
+operator re-gains the album (D5) kept it for good, with nothing pointing at
+it until the mate rendered with a different figure.
+
+The classification (`leftOutBecause`). Left out, as before: a short decode or
+a malformed header (`RepeatedFileFact`); a mate this bridge would not render
+on the profile (`ErrMateIneligible`: SpecFor returns it for no track row or a
+source the rendition gate refuses, both wirings map `api.ErrUpscaleIneligible`
+or the CLI classifier's refusal to it, and `measure` returns it for a mate
+whose row moved to another profile, which also drops the index); and a mate
+whose renders are suppressed (the pool's own three-strike verdict,
+`VariantFailureSuppressed`, now on the PeakStore interface). Everything else
+is transient: the survey still measures the other mates, so their peaks are
+recorded for the next attempt, and then fails the call with
+`transcode.ErrAlbumMateUnmeasured` wrapping the mate's error, unless a later
+pass of the same call found the mate's peak recorded meanwhile (its own
+render finished). A transient mate is marked given-up for the call, so a
+second pass does not decode it again.
+
+The pool counts and announces such a render as failed and strikes nothing:
+the fault is the mate's, and three strikes would suppress a good file for 30
+days over its mate's full scratch volume. The next sweep (the scan cadence,
+6 h by default) or the next request renders it again; meanwhile the mate's
+own render usually records its peak. A mate's host fault keeps the pool's
+earlier exits (`unavailableTool`, `unwritableOutput`), since the error wraps
+the mate's own.
+
+The bound: a mate stops holding its album back 24 h (`mateTransientGrace`)
+after its first transient failure, in memory, ended by any recorded peak of
+it. Its own render normally records the peak, or collects the strikes that
+suppress it, well inside that; the grace covers a mate that already has a
+rendition (no render of its own runs) and fails the same way on every
+survey. A design consult (Gemini "Argon", 2026-10-14) raised the cases this
+classification keeps: a file that is missing on disk while its row is there
+is transient (an unmounted share, or a deletion the next scan reaps), and a
+profile mismatch is a fact. Rejected from it: that `RedactError` breaks the
+error chain (it keeps the original behind `Unwrap`), and failing fast before
+the rendering track's own decode when its peak is stored (a reorder of the
+render chain for a retry cost the 6 h cadence already bounds).
+
+Red first on main (`3faeaa8d`) with only the two sentinels and the grace
+constant stubbed: exactly the eight predicted cases failed: the defect
+(a figure decided without the failed mate), once per call, the grace, the
+profile mismatch's index rebuild, the I/O error now failing each call, the
+pool's strike (four waits suppressed the file), and both wirings' ineligible
+mapping. The guards stayed green on main: a suppressed mate, an ineligible
+one, a mate recorded meanwhile, a real file fact and the redacted log line.
+Controls on the committed tree, each restored from git, each red exactly as
+predicted: every failure left out (4 cases), no suppression check (2), no
+grace (1), ineligible not a fact (2), a peak recorded meanwhile ignored (1),
+a transient mate re-measured within the call (1), a recorded peak not ending
+the grace (1), the pool striking the wait (1), and each wiring not marking
+its ineligible mate (1 each).
+
+Three tests changed meaning: `TestAMateThatCannotBeMeasuredDoesNotConstrain`
+now uses a malformed header (a fact) instead of a bare "corrupt file" error;
+`TestATransientMateFailureIsMeasuredAgain`'s I/O error now fails each call;
+and the redaction test's mate is left out because its renders are
+suppressed.
+
+A pre-merge review of the PR (Gemini "Argon") found the grace too eager: it
+left a mate out at its first failure once 24 h had passed since an earlier
+one, so two failures a day apart did it, and it counted a host fault, so a
+scratch volume full for more than a day left the mate out and reopened the
+defect. The grace now needs `mateTransientFailures` (3) transient failures
+as well as 24 h since the first, and a host fault (`transcode.HostFault`,
+the pool's own `unavailableTool` and `unwritableOutput`, newly exported as
+one predicate) counts toward nothing. Controls on the committed tree: the
+host fault counted failed exactly `TestAHostFaultNeverLeavesTheMateOut`, and
+the grace by time alone exactly `TestTwoFailuresADayApartLeaveNothingOut`.
+The same review's "high" (a mate with no track row not marked ineligible on
+the serve side) did not hold: `Resolve` maps the path without a stat, so
+`resolveAndLookupTrack` reaches the row lookup and answers
+`ErrUpscaleIneligible`, which the wiring marks; the adapter test now asserts
+`ErrMateIneligible` there, as the CLI's does.
+
+The bot review (CodeRabbit) found that only `record` ended a run: a mate's
+peak a survey found recorded by another writer (a CLI render's process, or
+the mate's own render after the resolver counted its failure) left the run
+in place, so a run of failures on a new version of the mate counted from
+the old run's start and left it out too soon, the unsafe side. Both reads
+that find a peak (the pass's, and the one under a mate's claim) now end it
+(`peaksFound`). Red first on the PR's head: `TestAPeakFoundInTheStoreEndsTheGrace`
+and `TestAPeakFoundUnderTheClaimEndsTheGrace` each failed at the new run's
+second failure ("failed 3 times over 25h0m0s"). Controls on the committed
+tree, each restored from git: the pass's call removed failed exactly the
+first, the claim read's exactly the second. Its other finding, to keep a run
+through a measurement whose store write failed, was declined: a measurement
+that succeeded ends the run, and a new run holds the album back for a whole
+grace again, the safe side for a boost a rendition keeps; `record`'s comment
+says so. Gemini's local for the elapsed time was taken in the first round.
+A second pre-merge review (Argon) found the round sound, the decline right
+and both tests sound, and asked for the claim read's `peaksFound` to run
+before the claim's release, as `record` ends a grace before its caller
+releases; taken, and the claim read's control re-run on the moved call
+failed exactly `TestAPeakFoundUnderTheClaimEndsTheGrace` again.
