@@ -231,7 +231,7 @@ func resolveSidecarRoot(dir string) (string, error) {
 
 // TreeHoldsVariantSidecars reports whether at least one file under dir
 // is a bridge sidecar (looksLikeVariantSidecar), pruning the directories
-// the orphan sweep prunes (skipsSidecarDir) — a `.Trashes/` or a NAS
+// the orphan sweep prunes (SkipsDerivedTreeDir) — a `.Trashes/` or a NAS
 // `#recycle/` full of sidecars an operator threw away, or a `#snapshot/`
 // holding copies, is not a tree that still holds them. Stops at the
 // first hit, so on the tree it exists for (a relocated library, every

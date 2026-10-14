@@ -202,7 +202,7 @@ type SidecarInventoryOptions struct {
 // spellings are in it).
 //
 // Below the root, every directory a library walk skips is passed over
-// (skipsSidecarDir: a dot-directory, a NAS recycle bin or snapshot,
+// (SkipsDerivedTreeDir: a dot-directory, a NAS recycle bin or snapshot,
 // Synology's @eaDir, Windows' recycle bin and System Volume Information),
 // the rule every sidecar walk in this tree follows: with a variants
 // directory on its own volume or share, `.Trashes/<uid>/`, `#recycle/` and
@@ -317,7 +317,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			traversed++
 		}
 		if d.IsDir() {
-			if path != walkRoot && skipsSidecarDir(d.Name()) {
+			if path != walkRoot && SkipsDerivedTreeDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -450,14 +450,17 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 	return walkEntryClassify
 }
 
-// skipsSidecarDir reports whether a sidecar walk passes over a directory
-// of this name below its root, without listing it: every directory a
-// library walk skips (manifest.ShouldSkipDir, the scanner's own rule: a
-// dot-directory, a NAS recycle bin or snapshot, Synology's @eaDir,
-// Windows' recycle bin and System Volume Information), except lost+found.
-// TakeSidecarInventory and scanForRenditions ask it, so the forward sweeps
-// and the probe behind the mount-loss and relocation guards cannot
-// disagree about what the tree holds.
+// SkipsDerivedTreeDir reports whether a walk of a tree the bridge derives
+// from the library passes over a directory of this name below its root,
+// without listing it: every directory a library walk skips
+// (manifest.ShouldSkipDir, the scanner's own rule: a dot-directory, a NAS
+// recycle bin or snapshot, Synology's @eaDir, Windows' recycle bin and
+// System Volume Information), except lost+found. TakeSidecarInventory and
+// scanForRenditions ask it, so the forward sweeps and the probe behind the
+// mount-loss and relocation guards cannot disagree about what the tree
+// holds; so do the artwork cache's three walks in cmd/bridge (`artwork
+// --gc`, its empty-store guard and the size cap, backlog B260), whose cache
+// sits in the same places (a NAS share's root, a volume of its own).
 //
 // They pruned dot-directories alone until 2026-10-02 (backlog B207). A
 // variants directory on a NAS share holds the share's recycle bin and
@@ -493,7 +496,7 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 // mounted inside the tree, which nothing about the walk root vouches for
 // (PartialWalkRefusal). It holds what fsck recovered from the volume, not
 // a NAS's or an operating system's copies of the tree.
-func skipsSidecarDir(name string) bool {
+func SkipsDerivedTreeDir(name string) bool {
 	return name != "lost+found" && manifest.ShouldSkipDir(name)
 }
 
