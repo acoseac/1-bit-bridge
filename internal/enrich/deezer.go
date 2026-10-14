@@ -29,6 +29,10 @@ type DeezerClient struct {
 	// NewDeezerClient; tests may append their httptest host via
 	// SetAllowedImageHostsForTest.
 	allowedImageHosts []string
+	// noteAnswered ends the Deezer failure streak when a request is
+	// answered. A transport error does not call it. Nil when the client
+	// is built outside an enricher.
+	noteAnswered func()
 }
 
 // NewDeezerClient constructs a client.
@@ -122,6 +126,7 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 		return "", err
 	}
 	defer resp.Body.Close()
+	noteUpstreamAnswer(c.noteAnswered)
 	if resp.StatusCode == http.StatusNotFound {
 		return "", errNotFound
 	}
@@ -184,6 +189,7 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	noteUpstreamAnswer(c.noteAnswered)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errNotFound
 	}

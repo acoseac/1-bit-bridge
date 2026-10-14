@@ -52,6 +52,10 @@ type ITunesClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+	// noteAnswered ends the iTunes failure streak when a request is
+	// answered. A transport error does not call it. Nil when the client
+	// is built outside an enricher.
+	noteAnswered func()
 }
 
 // NewITunesClient constructs a client. userAgent must identify the
@@ -196,6 +200,7 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	if err != nil {
 		return nil, err
 	}
+	noteUpstreamAnswer(c.noteAnswered)
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
 		return nil, errNotFound
@@ -238,6 +243,7 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	noteUpstreamAnswer(c.noteAnswered)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
 			// sleepCtx (time.NewTimer + Stop) avoids leaking the timer in

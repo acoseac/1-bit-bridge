@@ -58,6 +58,10 @@ type MusicBrainzClient struct {
 	// liveBase, when non-nil, supersedes base and is read per use — see
 	// WithLiveBase. The pacing re-derives from it too.
 	liveBase func() string
+	// noteAnswered ends the MusicBrainz failure streak when a request
+	// is answered. A 429 or a 5xx does not call it: those keep the streak.
+	// Nil when the client is built outside an enricher.
+	noteAnswered func()
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
@@ -216,6 +220,11 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 		return err
 	}
 	defer resp.Body.Close()
+	// A 429 or a 5xx is the upstream still busy. Every other status,
+	// including a later decode error, means it answered.
+	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < http.StatusInternalServerError {
+		noteUpstreamAnswer(c.noteAnswered)
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		// Drain the (usually tiny) 404 body so the deferred Close returns the
 		// HTTP/1.1 connection to the idle pool instead of dropping it — MB 404

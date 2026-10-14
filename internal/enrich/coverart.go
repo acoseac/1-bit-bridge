@@ -38,6 +38,10 @@ type CoverArtClient struct {
 	// minInterval is the politeness pacing the ENRICHER must apply before
 	// each call, derived from base at construction — see pacing.go.
 	minInterval time.Duration
+	// noteAnswered ends the Cover Art Archive failure streak when a
+	// request is answered, including a 404 or a 5xx. A transport error
+	// does not call it. Nil when the client is built outside an enricher.
+	noteAnswered func()
 	// liveBase, when non-nil, supersedes base and is read per use — see
 	// WithLiveBase. The pacing re-derives from it too.
 	liveBase func() string
@@ -166,6 +170,7 @@ func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path 
 	if err != nil {
 		return nil, err
 	}
+	noteUpstreamAnswer(c.noteAnswered)
 	if resp.StatusCode == http.StatusNotFound {
 		drainBody(resp.Body)
 		resp.Body.Close()
