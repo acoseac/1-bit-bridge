@@ -11317,6 +11317,34 @@ its twin.** The top list is older, shorter, and read first.
   the one consumer the stand-in did not reach, and a second fork at boot
   (`TestServeBootLineReadsTheSharedSoxProbe`). The product's 2 s is not
   the test's to raise.
+- **The shared sox probe keeps its last answer through a probe that times
+  out, and only its first snapshot waits for a probe** (2026-10-14,
+  backlog B142). It ran `sox --help` under its lock on the request path
+  whenever its 30 s TTL had run out, and cached a timed-out probe as no
+  sox for the TTL: on a host whose sox is only slow to start (a swapping
+  host, a PATH wrapper on a slow mount), the live upscale and analysis
+  gates closed, `/v1/health` said `upscaleEnabled: false` and every
+  manifest page lost its tracks' `variants` for 30 s, and the request that
+  ran the probe waited up to 2 s with every concurrent one behind it. Now
+  a snapshot after the TTL answers from the cache at once and starts ONE
+  background probe (`soxToolchainCache.refresh`), which replaces the
+  verdict when it answers; a timeout (`transcode.ErrSoxProbeTimeout`) keeps
+  the last answered verdict and logs once per run of timeouts. **A sox
+  that is not on PATH, or that runs and fails, is the verdict the moment
+  its probe answers; with no verdict yet a timeout is one** (the gates stay
+  closed until a probe answers). `ProbeSox` stops waiting for its output
+  pipe `soxProbeWaitDelay` (1 s) after its deadline (`exec.Cmd.WaitDelay`):
+  a PATH wrapper's child that outlives the killed wrapper held the pipe
+  open, so the probe, and the background one with it, waited as long as
+  that child lived. The probe stays the one serve makes
+  (`soxProbeCallers` names `refresh`). **Don't read a probe that could not
+  answer as no sox, and don't probe on the request path once there is a
+  verdict** (`TestASoxProbeTimeoutKeepsTheLastAnswer`,
+  `TestASnapshotAfterTheTTLDoesNotWaitForTheProbe`,
+  `TestASoxThatLeftThePathClosesTheGatesWhenItsProbeAnswers`,
+  `TestWithNoAnswerYetATimeoutIsTheVerdict`,
+  `TestConcurrentFirstSnapshotsShareOneProbe`,
+  `TestProbeSoxTimeoutDoesNotWaitForAChildHoldingItsOutput`).
 - **Put a test seam on the instance it serves; where a package-level seam
   must remain, its restore runs after every goroutine that read it has
   FINISHED, and cleanups run last-registered-first** (2026-09-28). The
