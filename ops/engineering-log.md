@@ -42602,3 +42602,16 @@ Red first, and controls, each on the committed tree and restored from git:
 - Both `InContainer: inContainerFunc()` lines removed:
   `TestDoctorAndInitCarryTheContainerVerdict` failed on both reports
   ("InContainer = false, want true").
+
+Checked in the built image (Docker 29.1.3 on the Linux test host,
+`docker buildx build` of this branch, a container with an empty `/library`
+and its own `/data` volume, no ports published, running as the image's
+unprivileged `bridge` user with `/.dockerenv` present): `docker exec …
+bridge doctor --config /data/bridge.yaml` read `service-manager` "lifecycle
+managed by the container runtime — check skipped" and `browser-opener` "no
+browser in a container — check skipped", "17 ok, 2 warn, 0 fail". The two
+warns were `pairing-url` (no dialable address without
+`BRIDGE_CUSTOM_ENDPOINTS`, which docs/docker.md tells the reader to set) and
+`library-roots` (the empty fixture), both actionable. The same fixture on an
+older image of the bridge (built 2026-07-09) warned "no user systemd
+session" and "no opener found".
