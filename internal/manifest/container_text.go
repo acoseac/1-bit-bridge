@@ -107,12 +107,57 @@ func diinText(b []byte) string {
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
 	}
+	return strings.TrimSpace(latin1Text(b))
+}
+
+// latin1Text reads b as ISO-8859-1 when it is not valid UTF-8, and returns
+// valid UTF-8 unchanged. Every byte of ISO-8859-1 is the code point of the
+// same number. ID3v1 text and a DSDIFF DIIN chunk are defined that way
+// (diinText); a raw copy of 0xE9 is not UTF-8 and would be stored as U+FFFD.
+func latin1Text(b []byte) string {
 	if utf8.Valid(b) {
-		return strings.TrimSpace(string(b))
+		return string(b)
 	}
 	runes := make([]rune, len(b))
 	for i, c := range b {
 		runes[i] = rune(c)
 	}
-	return strings.TrimSpace(string(runes))
+	return string(runes)
+}
+
+// latin1String is latin1Text for a string that already holds the raw bytes.
+func latin1String(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return latin1Text([]byte(s))
+}
+
+// windows1252 is the 0x80–0x9F row of Windows-1252. The five bytes the
+// encoding leaves undefined map to the C1 control of the same number.
+var windows1252 = [32]rune{
+	0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+	0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+	0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+	0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+}
+
+// windows1252Text reads a RIFF INFO value. The RIFF specification calls it
+// a null-terminated string in the system character set, and Windows writers
+// use Windows-1252. Valid UTF-8 is kept, so a file that already stores UTF-8
+// is unchanged; any other byte string is Windows-1252, which is ISO-8859-1
+// except for the 0x80–0x9F row (0x80 is €).
+func windows1252Text(b []byte) string {
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	runes := make([]rune, len(b))
+	for i, c := range b {
+		if c >= 0x80 && c <= 0x9F {
+			runes[i] = windows1252[c-0x80]
+		} else {
+			runes[i] = rune(c)
+		}
+	}
+	return string(runes)
 }

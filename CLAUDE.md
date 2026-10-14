@@ -1632,6 +1632,26 @@ lost my library."
   merge set by grepping the actual `tags_json` writers, not from what a field
   "looks like"** — `MusicBrainzTrackID` was omitted on the belief it was
   extractor-owned when the acoustic fallback writes it.
+- **A string stored in `tags_json` is valid UTF-8, decoded where the format
+  says what the bytes are** (2026-10-14, backlog B181). Under go1.26.6
+  `json.Marshal` writes a byte that is not UTF-8 as the `\ufffd` escape, and
+  the decoded copy marshals that character raw, so `markStampIfUnchanged`
+  never matches and every version-stale re-read takes the full upsert. ID3v1
+  text is ISO-8859-1 (`latin1String`, the same reading as `diinText`) and a
+  RIFF INFO value is Windows-1252 (`windows1252Text`); valid UTF-8 is kept
+  in both, so a file that already stored UTF-8 does not change. A DSDIFF
+  DIIN chunk was already decoded. An APE tag is not read. Every other text
+  field is `strings.ToValidUTF8` before it is stored (`coerceStoredUTF8`,
+  on the track a scan writes and again on `marshalForStorage`'s clone).
+  The path column stays the bytes on disk; only the clone's path is
+  coerced, because that is what the next read compares.   **No
+  `ExtractorVersion` bump**: a row that was already valid UTF-8 marshals
+  the same. A row that already stores the replacement character is not
+  re-read by this change; the next re-read (a later bump, a changed file,
+  a cover or a lyrics sidecar) upserts once, because the decoded character
+  differs, and the scan after that stamps. Run the stamp test under
+  `GOTOOLCHAIN=go1.26.6`; go1.27 marshals the invalid bytes as the raw
+  replacement and the bug is invisible there.
 - **`plausibleDuration` has BOTH ends, and "empty" has three spellings**
   (ExtractorVersion 13, #966). The gate defended the ceiling alone until
   then: `d > 0` admits anything positive, and a forged header reaches
