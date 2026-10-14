@@ -42562,3 +42562,43 @@ false failed only `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`
 at the first scan still passed. `stampSACDFolderArt` returning before the
 lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
 empty, want a folder cover). No wire change.
+
+## 2026-10-14 — a container's doctor report skips the two host-shell checks (backlog B190)
+
+`docker exec <c> bridge doctor` on a healthy container from the image
+(the pre-v0.2.1 Docker test on dido, image from main 24523cf) ended
+"14 ok, 3 warn". Two of the warns were advice for a host the reader is
+not on: `service-manager` ("no user systemd session", use `bridge init
+--no-service`) and `browser-opener` ("no opener found"). The image runs
+`serve --init-if-missing`, `docs/docker.md`'s one-shot `docker run … init`
+already passes `--no-service`, and the image has no browser. The managed
+skip (`Deps.Managed`) already drops both for hosted tenants.
+
+The signal is the one the console's log hint already used:
+`runningInContainer` in `internal/admin`, Docker's `/.dockerenv` or
+Podman's `/run/.containerenv`. It moved to `fsutil.InContainer()` so the
+doctor and the console answer the same way. An env var the Dockerfile sets
+was the backlog's other option and was not taken: it would miss a user
+running the binary in their own image (a NAS app, a compose file of their
+own), which the markers catch. cgroup parsing stays rejected for the reason
+the old docblock gave (cgroup v1/v2, rootless). `internal/advertise` keeps
+its Docker-only marker: the network it leaves out (172.17.0.0/16) is
+Docker's default bridge.
+
+`Deps.InContainer` skips exactly the two checks. It is not `Managed`: a
+container's operator has a shell through `docker exec`, so `log-file-size`
+still reports a log nothing rotates. The verdict reaches both reports that
+grade a host: `buildDoctorDepsFor` (the command and the console) and
+`initPreflightDeps` (init's preflight, extracted so the test can reach it),
+through one seam, `inContainerFunc`.
+
+Red first, and controls, each on the committed tree and restored from git:
+- The two `if d.InContainer` branches removed:
+  `TestInContainerSkipsTheHostOperatorChecks` and
+  `TestDoctorAndInitCarryTheContainerVerdict` failed (the real report read
+  `service-manager` "launchctl available" and `browser-opener` "open" on
+  the macOS test host); `TestInContainerKeepsTheChecksItsOperatorCanActOn`
+  stayed green.
+- Both `InContainer: inContainerFunc()` lines removed:
+  `TestDoctorAndInitCarryTheContainerVerdict` failed on both reports
+  ("InContainer = false, want true").
