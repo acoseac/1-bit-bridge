@@ -370,6 +370,7 @@ func TestArtworkCapSweeperSaysNothingAboutTheFilesystemsLostFound(t *testing.T) 
 // one's goes, and so does a canonical no kept portrait links to (here, a
 // separate file).
 func TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	ctx := context.Background()
 	if err := store.UpsertTrack(ctx, &manifest.Track{

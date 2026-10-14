@@ -273,27 +273,23 @@ func artworkCacheHasOrphans(walkRoot string, known map[string]bool) (bool, error
 // stands for before it derives anything, so no build files a thumbnail
 // under one and nothing would read it
 // (TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey).
-func artworkKeysInUse(ctx context.Context, store *manifest.Store) (artworkKeys []string, known, artists map[string]bool, err error) {
+func artworkKeysInUse(ctx context.Context, store *manifest.Store) (artworkKeys []string, known map[string]bool, err error) {
 	artworkKeys, err = store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("list referenced artwork ids: %w", err)
+		return nil, nil, fmt.Errorf("list referenced artwork ids: %w", err)
 	}
 	artistMBIDs, err := store.DistinctArtistMBIDs(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("list referenced artist ids: %w", err)
+		return nil, nil, fmt.Errorf("list referenced artist ids: %w", err)
 	}
 	known = make(map[string]bool, len(artworkKeys)+len(artistMBIDs))
 	for _, k := range artworkKeys {
 		known[k] = true
 	}
-	// The portraits' keep set (artwork_portraits.go), lowercased as the
-	// portrait pass reads a file name's MBID.
-	artists = make(map[string]bool, len(artistMBIDs))
 	for _, m := range artistMBIDs {
 		known[manifest.ArtistThumbKey(m)] = true
-		artists[strings.ToLower(m)] = true
 	}
-	return artworkKeys, known, artists, nil
+	return artworkKeys, known, nil
 }
 
 // artworkUnlistedDir reports whether a walk error is a directory inside the
@@ -336,7 +332,7 @@ func artworkErrWithoutPath(err error) error {
 }
 
 func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun, allowEmpty bool) int {
-	artworkKeys, known, artists, err := artworkKeysInUse(ctx, store)
+	artworkKeys, known, err := artworkKeysInUse(ctx, store)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -476,7 +472,7 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		return 1
 	}
 	if present {
-		pt, err := collectPortraits(stdout, stderr, artworkDir, walkRoot, artists, dryRun, allowEmpty)
+		pt, err := collectPortraits(ctx, stdout, stderr, store, artworkDir, walkRoot, dryRun, allowEmpty)
 		if err != nil {
 			fmt.Fprintf(stderr, "artwork gc: list the artist portraits: %v\n", artworkErrWithoutPath(err))
 			return 1

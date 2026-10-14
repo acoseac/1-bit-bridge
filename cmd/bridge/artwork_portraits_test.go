@@ -23,6 +23,17 @@ func canonicalName(c string) string {
 	return "artist-name-" + strings.Repeat(c, 64) + ".jpg"
 }
 
+// pastTheGrace makes the GC's clock read an hour ahead, so the portraits a
+// test has just written are older than portraitGrace, as a cache's are.
+func pastTheGrace(t *testing.T) {
+	t.Helper()
+	prev := artworkGCNow
+	artworkGCNow = func() time.Time { return time.Now().Add(time.Hour) }
+	t.Cleanup(func() { artworkGCNow = prev })
+}
+
+const secondOrphanArtistMBID = "33333333-3333-4333-8333-333333333333"
+
 // portraitFixture writes a canonical portrait and hard-links each MBID's
 // portrait to it, as the enricher does (linkOrCopy).
 func portraitFixture(t *testing.T, dir, canonical string, mbids ...string) {
@@ -52,6 +63,7 @@ func storeNamingArtist(t *testing.T, store *manifest.Store, artist string) {
 // portrait goes, and so does the canonical it was the last link to, in the
 // same run. A canonical nothing links to goes.
 func TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	storeNamingArtist(t, store, keptArtistMBID)
 	portraitFixture(t, dir, canonicalName("a"), keptArtistMBID)
@@ -76,6 +88,7 @@ func TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames(t *testing.T) {
 // portraits a real run removes, the last-link canonical included, and
 // touches none.
 func TestArtworkGCPortraitsDryRunRemovesNothing(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	storeNamingArtist(t, store, keptArtistMBID)
 	portraitFixture(t, dir, canonicalName("a"), keptArtistMBID)
@@ -107,6 +120,7 @@ func TestArtworkGCPortraitsDryRunRemovesNothing(t *testing.T) {
 // remove them, and the run still collects the covers (exit 0). With
 // --allow-empty they go.
 func TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t, keptArtworkKey)
 	portraitFixture(t, dir, canonicalName("a"), keptArtistMBID)
 	orphanCover := filepath.Join(dir, "11111111-1111-4111-8111-111111111111-500.jpg")
@@ -137,6 +151,7 @@ func TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist(t *testing.T) {
 // `/v1/artist-image` reads. The canonical shares no file with it and goes,
 // which costs one Deezer fetch if a new MBID of that name ever needs it.
 func TestArtworkGCPortraitCopyKeepsTheMBIDFile(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	storeNamingArtist(t, store, keptArtistMBID)
 	writeFixtureFile(t, filepath.Join(dir, canonicalName("a")), 64)
@@ -153,6 +168,7 @@ func TestArtworkGCPortraitCopyKeepsTheMBIDFile(t *testing.T) {
 // of the cache are portraits: a name that is not an MBID or a 64-hex hash,
 // and a portrait name below the top, are skipped as before.
 func TestArtworkGCLeavesWhatIsNoPortrait(t *testing.T) {
+	pastTheGrace(t)
 	store, dir := artworkCacheFixture(t)
 	storeNamingArtist(t, store, keptArtistMBID)
 	stray := []string{
@@ -175,4 +191,60 @@ func TestArtworkGCLeavesWhatIsNoPortrait(t *testing.T) {
 	if !strings.Contains(stdout, "4 skipped") {
 		t.Errorf("summary: %s", stdout)
 	}
+}
+
+// TestArtworkGCSharedCanonical — two MBIDs of one artist name share one
+// canonical (the enricher's dedup: the second MBID is a hard link). One MBID
+// a row names keeps the canonical while the other goes; when no row names
+// either, all three go in one run, though the canonical's link count was 3
+// when the pass began (a pre-merge review of B85).
+func TestArtworkGCSharedCanonical(t *testing.T) {
+	t.Run("one MBID named, one not", func(t *testing.T) {
+		pastTheGrace(t)
+		store, dir := artworkCacheFixture(t)
+		storeNamingArtist(t, store, keptArtistMBID)
+		portraitFixture(t, dir, canonicalName("a"), keptArtistMBID, orphanArtistMBID)
+		if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
+			t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
+		}
+		mustExist(t, filepath.Join(dir, "artist-"+keptArtistMBID+".jpg"))
+		mustExist(t, filepath.Join(dir, canonicalName("a")))
+		mustGone(t, filepath.Join(dir, "artist-"+orphanArtistMBID+".jpg"))
+	})
+	t.Run("neither MBID named", func(t *testing.T) {
+		pastTheGrace(t)
+		store, dir := artworkCacheFixture(t)
+		storeNamingArtist(t, store, keptArtistMBID)
+		portraitFixture(t, dir, canonicalName("b"), orphanArtistMBID, secondOrphanArtistMBID)
+		if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
+			t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
+		}
+		for _, name := range []string{"artist-" + orphanArtistMBID + ".jpg", "artist-" + secondOrphanArtistMBID + ".jpg", canonicalName("b")} {
+			mustGone(t, filepath.Join(dir, name))
+		}
+	})
+}
+
+// TestArtworkGCKeepsAPortraitWrittenWithinTheGrace — `artwork --gc` can run
+// beside `bridge serve`, whose enricher writes a canonical and links it
+// before the track row names the artist. A portrait written in the last
+// portraitGrace is never the GC's to remove, whatever the store says; past
+// the grace, the same files go (a pre-merge review of B85).
+func TestArtworkGCKeepsAPortraitWrittenWithinTheGrace(t *testing.T) {
+	store, dir := artworkCacheFixture(t)
+	storeNamingArtist(t, store, keptArtistMBID)
+	portraitFixture(t, dir, canonicalName("e"), orphanArtistMBID)
+
+	if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
+		t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
+	}
+	mustExist(t, filepath.Join(dir, "artist-"+orphanArtistMBID+".jpg"))
+	mustExist(t, filepath.Join(dir, canonicalName("e")))
+
+	pastTheGrace(t)
+	if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 0 {
+		t.Fatalf("rc=%d\nstdout: %s\nstderr: %s", rc, stdout, stderr)
+	}
+	mustGone(t, filepath.Join(dir, "artist-"+orphanArtistMBID+".jpg"))
+	mustGone(t, filepath.Join(dir, canonicalName("e")))
 }

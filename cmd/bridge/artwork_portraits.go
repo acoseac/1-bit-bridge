@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -24,6 +26,21 @@ const (
 	artistPortraitSuffix   = ".jpg"
 	artistCanonicalHashLen = 64 // hex SHA-256 of the folded artist name
 )
+
+// portraitGrace keeps a portrait modified this recently, whatever the store
+// says: `artwork --gc` can run beside `bridge serve`, whose enricher writes a
+// canonical (or, where links are refused, a copy) and then commits the
+// artist MBID to the track row. A portrait written during the run, or in the
+// minutes before it, is never the GC's to remove (a pre-merge review of
+// B85). It does not cover a new hard link to an OLD canonical, whose
+// mtime is the canonical's; that gap, between the link and the row's
+// commit, is a few milliseconds after the artist set is read again right
+// before this pass (collectPortraits).
+const portraitGrace = 10 * time.Minute
+
+// artworkGCNow is the clock the grace reads, a seam so the tests can age the
+// fixtures they write; production never changes it.
+var artworkGCNow = time.Now
 
 // artworkPortrait is one portrait file at the top of the cache.
 type artworkPortrait struct {
@@ -128,12 +145,13 @@ func artworkPortraits(walkRoot string) (byMBID, canonical []artworkPortrait, err
 // removed. Nothing served is lost: the MBID copies stay and are what
 // `/v1/artist-image` reads. The cost is one Deezer fetch if a NEW MBID of
 // that name ever needs a portrait, the dedup the canonical exists for.
-func portraitVerdicts(byMBID, canonical []artworkPortrait, artistMBIDs map[string]bool) (remove []artworkPortrait, kept int) {
+func portraitVerdicts(byMBID, canonical []artworkPortrait, artistMBIDs map[string]bool, now time.Time) (remove []artworkPortrait, kept int) {
 	// Kept MBID portraits by size: a hard link has its file's size, so a
 	// canonical is compared only with portraits of its own size.
+	fresh := func(p artworkPortrait) bool { return p.info.ModTime().After(now.Add(-portraitGrace)) }
 	keptBySize := make(map[int64][]os.FileInfo)
 	for _, p := range byMBID {
-		if artistMBIDs[p.mbid] {
+		if artistMBIDs[p.mbid] || fresh(p) {
 			kept++
 			keptBySize[p.info.Size()] = append(keptBySize[p.info.Size()], p.info)
 			continue
@@ -141,6 +159,10 @@ func portraitVerdicts(byMBID, canonical []artworkPortrait, artistMBIDs map[strin
 		remove = append(remove, p)
 	}
 	for _, c := range canonical {
+		if fresh(c) {
+			kept++
+			continue
+		}
 		linked := false
 		for _, k := range keptBySize[c.info.Size()] {
 			if os.SameFile(c.info, k) {
@@ -171,8 +193,18 @@ type portraitTally struct {
 // artist. The covers' refusal stops the whole run; this one only skips the
 // portraits, with a line saying how to remove them, because the cover GC
 // beside it is still right.
-func collectPortraits(stdout, stderr io.Writer, artworkDir, walkRoot string, artistMBIDs map[string]bool, dryRun, allowEmpty bool) (portraitTally, error) {
+func collectPortraits(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir, walkRoot string, dryRun, allowEmpty bool) (portraitTally, error) {
 	var tally portraitTally
+	// The artist set, read here rather than with the covers' keys before
+	// the cover walk: an artist enriched during that walk is in it.
+	names, err := store.DistinctArtistMBIDs(ctx)
+	if err != nil {
+		return tally, fmt.Errorf("list referenced artist ids: %w", err)
+	}
+	artistMBIDs := make(map[string]bool, len(names))
+	for _, m := range names {
+		artistMBIDs[strings.ToLower(m)] = true
+	}
 	byMBID, canonical, err := artworkPortraits(walkRoot)
 	if err != nil {
 		return tally, err
@@ -186,7 +218,7 @@ func collectPortraits(stdout, stderr io.Writer, artworkDir, walkRoot string, art
 		fmt.Fprintln(stderr, "  If no track really names an artist and you want them gone, re-run with --allow-empty.")
 		return tally, nil
 	}
-	remove, kept := portraitVerdicts(byMBID, canonical, artistMBIDs)
+	remove, kept := portraitVerdicts(byMBID, canonical, artistMBIDs, artworkGCNow())
 	tally.kept = kept
 	for _, p := range remove {
 		reported := artworkReportPath(artworkDir, walkRoot, p.path)
