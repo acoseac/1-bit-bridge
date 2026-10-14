@@ -148,6 +148,8 @@ func TestIsTransient_PinsClassification(t *testing.T) {
 		// transient should attach a `*httpError` (or extend
 		// `IsTransient` with another typed predicate).
 		{"plain-string HTTP 503 no longer matches", errors.New("musicbrainz: HTTP 503: service unavailable"), false},
+		{"coverart 503 carries the status", carryTransientStatus(503, fmt.Errorf("coverart: HTTP 503")), true},
+		{"coverart 400 stays a plain error", carryTransientStatus(400, fmt.Errorf("coverart: HTTP 400")), false},
 		{"body containing HTTP 503 elsewhere", errors.New("page says: HTTP 503 was returned"), false},
 	}
 

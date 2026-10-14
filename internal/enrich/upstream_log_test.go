@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -183,7 +184,9 @@ func TestAnUnexpectedUpstreamFailureStaysErrorAndStamps(t *testing.T) {
 	}))
 	defer mb.Close()
 	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		// 400 stays a plain error. 429 and 5xx are the transient status
+		// and join the streak (TestARunOfTransientStatusesWarnsOnce).
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer caa.Close()
 	rig := newLogTestRig(t, mb, caa, nil, nil)
@@ -196,6 +199,123 @@ func TestAnUnexpectedUpstreamFailureStaysErrorAndStamps(t *testing.T) {
 		t.Fatalf("artwork errors: %d, want 1\n%s", len(got), strings.Join(rec.All(), "\n"))
 	}
 }
+
+// A run of 503s from Cover Art Archive and from Deezer is one Warn
+// each. The response is transient, so it does not end the streak, and
+// the next track stays quiet. A cover or portrait miss still stamps.
+func TestARunOfTransientStatusesWarnsOnce(t *testing.T) {
+	mb := httptest.NewServer(artistThen(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "{}")
+	}))
+	defer mb.Close()
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer caa.Close()
+	dz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer dz.Close()
+	rig := newLogTestRig(t, mb, caa, nil, nil)
+	rig.e.deezer = NewDeezerClient(dz.URL, "upstream-log-test", dz.Client())
+	rig.e.watchUpstreamAnswers()
+
+	rec := loggingtest.Record(t)
+	for i := 0; i < 3; i++ {
+		if rig.enrich(t, logTrack(30+i, false)) {
+			t.Fatalf("track %d left unenriched; a cover or portrait miss still stamps", i)
+		}
+	}
+	for _, msg := range []string{"artwork", "artist image"} {
+		warns := linesAt(rec, slog.LevelWarn, msg)
+		errs := linesAt(rec, slog.LevelError, msg)
+		if len(warns) != 1 || len(errs) != 0 {
+			t.Fatalf("%s: %d warn and %d error, want 1 and 0\n%s", msg, len(warns), len(errs), strings.Join(rec.All(), "\n"))
+		}
+	}
+	if got := answeredLines(rec, upstreamCoverArt); len(got) != 0 {
+		t.Fatalf("cover art recovery during a 503 run: %d, want 0\n%s", len(got), strings.Join(rec.All(), "\n"))
+	}
+	if got := answeredLines(rec, upstreamDeezer); len(got) != 0 {
+		t.Fatalf("deezer recovery during a 503 run: %d, want 0\n%s", len(got), strings.Join(rec.All(), "\n"))
+	}
+}
+
+// A nil reports field is an Enricher built field by field. It warns on
+// every transient failure and never grows a map the clients were not
+// pointed at.
+func TestANilReportsFieldKeepsNoStreak(t *testing.T) {
+	rec := loggingtest.Record(t)
+	e := &Enricher{}
+	err := &httpError{StatusCode: http.StatusServiceUnavailable, Body: "unavailable"}
+	e.logUpstream(upstreamCoverArt, "artwork", err)
+	e.logUpstream(upstreamCoverArt, "artwork", err)
+	warns := linesAt(rec, slog.LevelWarn, "artwork")
+	if len(warns) != 2 || e.reports != nil {
+		t.Fatalf("warns=%d reports-nil=%v, want 2 warns and a nil reports\n%s", len(warns), e.reports == nil, strings.Join(rec.All(), "\n"))
+	}
+}
+
+// A 503 opens the MusicBrainz streak. A later DNS failure is persistent
+// and is not an answer, so it logs no recovery. The next real response does.
+func TestATransientStreakSurvivesANonResponse(t *testing.T) {
+	var n atomic.Int32
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, logArtistBody)
+	}))
+	defer mb.Close()
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("cover art fetched for local art: %s", r.URL.Path)
+	}))
+	defer caa.Close()
+	client := mb.Client()
+	inner := client.Transport
+	client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch n.Add(1) {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Status:     "503 Service Unavailable",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("busy")),
+				Request:    r,
+			}, nil
+		case 2:
+			return nil, &net.DNSError{Err: "no such host", Name: r.URL.Hostname(), IsNotFound: true}
+		default:
+			return inner.RoundTrip(r)
+		}
+	})
+	rig := newLogTestRig(t, mb, caa, client, nil)
+
+	rec := loggingtest.Record(t)
+	artists := []string{"Busy Artist", "Other Artist", "Third Artist"}
+	wantRetry := []bool{true, false, false}
+	for i, artist := range artists {
+		tr := logTrack(40+i, true)
+		tr.Artist = artist
+		if got := rig.enrich(t, tr); got != wantRetry[i] {
+			t.Fatalf("track %d unenriched=%v, want %v\n%s", i, got, wantRetry[i], strings.Join(rec.All(), "\n"))
+		}
+		if i == 1 && len(answeredLines(rec, upstreamMusicBrainz)) != 0 {
+			t.Fatalf("a DNS failure ended the streak\n%s", strings.Join(rec.All(), "\n"))
+		}
+	}
+	if got := answeredLines(rec, upstreamMusicBrainz); len(got) != 1 {
+		t.Fatalf("musicbrainz recovery: %d, want 1\n%s", len(got), strings.Join(rec.All(), "\n"))
+	}
+	if got := linesAt(rec, slog.LevelWarn, "MB artist search"); len(got) != 1 {
+		t.Fatalf("warns: %d, want 1\n%s", len(got), strings.Join(rec.All(), "\n"))
+	}
+	if got := linesAt(rec, slog.LevelError, "MB artist search"); len(got) != 1 {
+		t.Fatalf("dns errors: %d, want 1\n%s", len(got), strings.Join(rec.All(), "\n"))
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestAtlasBusyWarnsOnceThenAnswers(t *testing.T) {
 	var n atomic.Int32

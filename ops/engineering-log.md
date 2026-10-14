@@ -42467,3 +42467,52 @@ and `TestAtlasBusyWarnsOnceThenAnswers` failed on `1 error and 0 warn`.
 `TestACleanMissIsDebugAndStillStamps` and
 `TestAnUnexpectedUpstreamFailureStaysErrorAndStamps` stayed green. That
 edit was not committed. No `ExtractorVersion` bump and no wire change.
+
+### Round 2 — a 429 or a 5xx keeps the streak, and a non-response does not end it
+
+The first cut had Cover Art Archive, iTunes and Deezer call `noteAnswered`
+on every HTTP response, and `report` call `answered` for every error
+`IsTransient` rejected. A 503 from those clients ended the streak, so the
+next 503 warned again, once per track. An NXDOMAIN, a TLS certificate
+failure and `baseEndpoint.err` ended it too, with no response having
+arrived. `logUpstream` also built `reports` on first use when the field was
+nil, and `watchUpstreamAnswers` had not run, so that map's streak was one
+the clients could not end.
+
+`transientHTTPStatus` is the one predicate: 429 or a status of 500 or
+above. `noteSettledAnswer` is what every client calls, and it skips that
+class. `carryTransientStatus` wraps the client's own sentence with the
+status when the class matches, and `IsTransient` reads `HTTPStatus` on
+`*httpError` and on that wrap. The sentence stays the client's
+(`coverart: HTTP 503`, `itunes: artwork HTTP 503`, `deezer: HTTP 503`).
+Artwork and portrait paths still stamp: they log the error and do not
+consult `IsTransient`, so the classification changes the line and not the
+stamp. Atlas 5xx was already `noteBusy`.
+
+`report` ends a streak only when `err` is nil. The clients note a settled
+response, and Atlas calls `answered` itself. A nil `reports` stays nil.
+`NewEnricher` is what sets the field; tests that build an `Enricher` field
+by field have none, and a lazy map would race with clients added later.
+
+Before the change, `TestARunOfTransientStatusesWarnsOnce` logged 0 Warn
+and 3 Error for artwork (`coverart: HTTP 503` and `deezer: HTTP 503`,
+three times each) and the tracks were stamped.
+`TestANilReportsFieldKeepsNoStreak` logged 1 Warn and left a non-nil map.
+`TestATransientStreakSurvivesANonResponse` logged `upstream answered` on
+the DNS failure, between the 503 and the lookup error. After the change
+those three pass, with one Warn for the 503 run, two Warns and a nil map
+for the field-built enricher, and no recovery line until the artist search
+that follows the DNS failure. `TestAnUnexpectedUpstreamFailureStaysErrorAndStamps`
+now drives a 400, which stays a plain error and one Error line.
+`TestIsTransient` covers a carried 503 and a carried 400.
+
+Three controls, each reverted before the commit. Putting
+`noteUpstreamAnswer` back in the Cover Art Archive and Deezer response
+paths, with `carryTransientStatus` left in place, failed only
+`TestARunOfTransientStatusesWarnsOnce`: 3 Warn and an `upstream answered`
+after each of the first two tracks. Restoring the lazy
+`e.reports = newUpstreamReports()` failed only
+`TestANilReportsFieldKeepsNoStreak` (1 Warn, map non-nil). Restoring
+`answered` on every non-transient error failed only
+`TestATransientStreakSurvivesANonResponse`, on the recovery line between
+the 503 and the DNS error. No `ExtractorVersion` bump and no wire change.

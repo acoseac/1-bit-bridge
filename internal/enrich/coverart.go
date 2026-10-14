@@ -39,8 +39,9 @@ type CoverArtClient struct {
 	// each call, derived from base at construction — see pacing.go.
 	minInterval time.Duration
 	// noteAnswered ends the Cover Art Archive failure streak when a
-	// request is answered, including a 404 or a 5xx. A transport error
-	// does not call it. Nil when the client is built outside an enricher.
+	// request is answered, including a 404. A 429 or a 5xx keeps the
+	// streak. A transport error does not call it. Nil when the client
+	// is built outside an enricher.
 	noteAnswered func()
 	// liveBase, when non-nil, supersedes base and is read per use — see
 	// WithLiveBase. The pacing re-derives from it too.
@@ -170,7 +171,7 @@ func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path 
 	if err != nil {
 		return nil, err
 	}
-	noteUpstreamAnswer(c.noteAnswered)
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		drainBody(resp.Body)
 		resp.Body.Close()
@@ -179,7 +180,7 @@ func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path 
 	if resp.StatusCode != http.StatusOK {
 		drainBody(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("coverart: HTTP %d", resp.StatusCode)
+		return nil, carryTransientStatus(resp.StatusCode, fmt.Errorf("coverart: HTTP %d", resp.StatusCode))
 	}
 	return resp.Body, nil
 }

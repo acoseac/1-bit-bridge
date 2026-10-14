@@ -53,8 +53,9 @@ type ITunesClient struct {
 	userAgent string
 	http      *http.Client
 	// noteAnswered ends the iTunes failure streak when a request is
-	// answered. A transport error does not call it. Nil when the client
-	// is built outside an enricher.
+	// answered, including a 404. A 429 or a 5xx keeps the streak. A
+	// transport error does not call it. Nil when the client is built
+	// outside an enricher.
 	noteAnswered func()
 }
 
@@ -200,7 +201,7 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	if err != nil {
 		return nil, err
 	}
-	noteUpstreamAnswer(c.noteAnswered)
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
 		return nil, errNotFound
@@ -222,7 +223,7 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("itunes: artwork HTTP %d", resp.StatusCode)
+		return nil, carryTransientStatus(resp.StatusCode, fmt.Errorf("itunes: artwork HTTP %d", resp.StatusCode))
 	}
 	return resp.Body, nil
 }
@@ -243,7 +244,7 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	noteUpstreamAnswer(c.noteAnswered)
+	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
 			// sleepCtx (time.NewTimer + Stop) avoids leaking the timer in
@@ -256,7 +257,7 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("itunes: HTTP %d: %s", resp.StatusCode, string(b))
+		return carryTransientStatus(resp.StatusCode, fmt.Errorf("itunes: HTTP %d: %s", resp.StatusCode, string(b)))
 	}
 	err = json.NewDecoder(limitJSONBody(resp.Body)).Decode(out)
 	// Drain any bytes past the decoded JSON document so the deferred Close

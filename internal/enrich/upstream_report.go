@@ -34,15 +34,19 @@ func newUpstreamReports() *upstreamReports {
 	return &upstreamReports{streak: make(map[string]int)}
 }
 
-// report logs err for upstream. A nil error only ends an open streak.
+// report logs err for upstream. A nil error ends an open streak: the
+// caller is reporting that the upstream answered without an error value.
+// A non-nil error never does, including a persistent one. A response
+// that arrived is noted by the client (noteSettledAnswer) or by Atlas.
+// A DNS failure, a TLS failure and a base that could not be used produced
+// no response, so they leave the streak open.
+//
 // A nil receiver keeps no streak, so a transient failure warns every time
-// and every other error is still logged. That is a client built outside
-// an enricher.
+// and every other error is still logged. That is an Enricher built field
+// by field, whose reports field NewEnricher never set.
 func (r *upstreamReports) report(upstream, message string, err error, args ...any) {
-	if err == nil || !IsTransient(err) {
-		r.answered(upstream)
-	}
 	if err == nil {
+		r.answered(upstream)
 		return
 	}
 	if IsTransient(err) {
@@ -107,13 +111,57 @@ func noteUpstreamAnswer(fn func()) {
 	}
 }
 
-// logUpstream is the enricher's one route onto upstreamReports.
-// An Enricher whose reports field is nil grows the map on first use.
-// NewEnricher sets it before any request runs.
-func (e *Enricher) logUpstream(upstream, message string, err error, args ...any) {
-	if e.reports == nil {
-		e.reports = newUpstreamReports()
+// noteSettledAnswer ends the streak when code is not a transient HTTP
+// status. A 429 or a 5xx keeps it open. Every client uses this, so none
+// of them copies the status test.
+func noteSettledAnswer(fn func(), code int) {
+	if transientHTTPStatus(code) {
+		return
 	}
+	noteUpstreamAnswer(fn)
+}
+
+// carriedHTTP wraps a client's own error sentence with the response
+// status. Error() stays that sentence. IsTransient reads the status
+// through HTTPStatus, the same method *httpError carries, so Cover Art
+// Archive, iTunes and Deezer 429s and 5xxs join the streak without
+// becoming a MusicBrainz error.
+type carriedHTTP struct {
+	code int
+	err  error
+}
+
+func (e *carriedHTTP) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *carriedHTTP) Unwrap() error { return e.err }
+
+func (e *carriedHTTP) HTTPStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.code
+}
+
+// carryTransientStatus wraps err when code is a transient HTTP status.
+// Any other code, and a nil err, is returned unchanged, so a 404 and a
+// 4xx keep the sentence the client already built.
+func carryTransientStatus(code int, err error) error {
+	if err == nil || !transientHTTPStatus(code) {
+		return err
+	}
+	return &carriedHTTP{code: code, err: err}
+}
+
+// logUpstream is the enricher's one route onto upstreamReports.
+// NewEnricher sets reports and watchUpstreamAnswers points each client
+// at it before any request. A map created here would open a streak those
+// clients were never pointed at, so a nil field stays nil.
+func (e *Enricher) logUpstream(upstream, message string, err error, args ...any) {
 	e.reports.report(upstream, message, err, args...)
 }
 
