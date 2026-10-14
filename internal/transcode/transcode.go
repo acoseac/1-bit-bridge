@@ -1356,7 +1356,7 @@ func ProbeSox(ctx context.Context) (SoxInfo, error) {
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
 	out, runErr := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return info, fmt.Errorf("sox --help timed out after 2s; broken PATH wrapper or hung process")
+		return info, ErrSoxProbeTimeout
 	}
 	text := string(out)
 	if strings.TrimSpace(text) == "" {
@@ -1443,6 +1443,13 @@ func parseSoxFileFormats(text string) ([]string, bool) {
 // targeted install-hint message vs the generic "something went
 // wrong" path.
 var ErrSoxMissing = errors.New("sox binary not found on PATH")
+
+// ErrSoxProbeTimeout is a `sox --help` that did not answer within ProbeSox's
+// 2 s: sox is on PATH, and whether it runs is not known (a host swapping, a
+// PATH wrapper on a slow mount, a sox that hangs). Unlike ErrSoxMissing it
+// is no verdict, and serve's shared probe keeps its last answer through one
+// (soxToolchainCache, backlog B142).
+var ErrSoxProbeTimeout = errors.New("sox --help timed out after 2s; broken PATH wrapper or hung process")
 
 // CreatedAtNow returns wall-clock UTC nanoseconds — the value
 // callers stamp into `track_variants.created_at` on insert.
