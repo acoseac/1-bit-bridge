@@ -42945,3 +42945,19 @@ the serve side) did not hold: `Resolve` maps the path without a stat, so
 `resolveAndLookupTrack` reaches the row lookup and answers
 `ErrUpscaleIneligible`, which the wiring marks; the adapter test now asserts
 `ErrMateIneligible` there, as the CLI's does.
+
+The bot review (CodeRabbit) found that only `record` ended a run: a mate's
+peak a survey found recorded by another writer (a CLI render's process, or
+the mate's own render after the resolver counted its failure) left the run
+in place, so a run of failures on a new version of the mate counted from
+the old run's start and left it out too soon, the unsafe side. Both reads
+that find a peak (the pass's, and the one under a mate's claim) now end it
+(`peaksFound`). Red first on the PR's head: `TestAPeakFoundInTheStoreEndsTheGrace`
+and `TestAPeakFoundUnderTheClaimEndsTheGrace` each failed at the new run's
+second failure ("failed 3 times over 25h0m0s"). Controls on the committed
+tree, each restored from git: the pass's call removed failed exactly the
+first, the claim read's exactly the second. Its other finding, to keep a run
+through a measurement whose store write failed, was declined: a measurement
+that succeeded ends the run, and a new run holds the album back for a whole
+grace again, the safe side for a boost a rendition keeps; `record`'s comment
+says so. Gemini's local for the elapsed time was taken in the first round.

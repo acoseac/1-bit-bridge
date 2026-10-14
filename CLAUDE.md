@@ -3802,8 +3802,9 @@ no failing test — which is the shape to expect in this area.
     recorded its peak. A transient mate is measured at most once per call.
     **A mate stops holding its album back once it has failed transiently
     `mateTransientFailures` (3) times, the first of them `mateTransientGrace`
-    (24 h) ago or longer**, in memory, ended by any recorded peak of it: the
-    bound for a mate whose own render never runs (it already has a
+    (24 h) ago or longer**, in memory, ended by a peak of it measured or
+    found recorded, whoever recorded it (a found one too since 2026-10-14):
+    the bound for a mate whose own render never runs (it already has a
     rendition) and that fails the same way on every survey. Both terms, so
     two failures a day apart leave nothing out. **A host fault
     (`transcode.HostFault`: a tool this host lacks, an output it refuses)
@@ -3820,6 +3821,8 @@ no failing test — which is the shape to expect in this area.
     `TestATransientMateStopsHoldingTheAlbumAfterTheGrace`,
     `TestTwoFailuresADayApartLeaveNothingOut`,
     `TestAHostFaultNeverLeavesTheMateOut`,
+    `TestAPeakFoundInTheStoreEndsTheGrace`,
+    `TestAPeakFoundUnderTheClaimEndsTheGrace`,
     `TestAnAlbumMateWaitStrikesNothing`).
   - **A mate whose decode finished short of its container is remembered for
     the process, keyed on the mate spec's path, size and mtime** (2026-10-13,
