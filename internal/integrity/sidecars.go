@@ -1118,16 +1118,16 @@ func KnownSidecarKey(path string) string {
 // filepath.Ext, so it answers for either). Extracted as a pure function
 // for unit testing without a real walk.
 //
-// Narrower than the variants sweeps' ConsiderVariantSidecar on the
-// names it takes (any `.flac`, not only a rendition id), and this
-// docblock said the opposite until 2026-09-28 ("the operator-triggered
-// `--gc` uses the same shape"), which was never true — at #284, where
-// this predicate came in, `--gc`'s forward sweep already removed every
-// unreferenced file. Until backlog B132 `--gc` passed a nil Consider
-// and counted every file in the variants directory. It now passes
-// ConsiderVariantSidecar and reclaims a rendition only, while this
-// sweep never unlinks anything but a `.flac`, and so measures its
-// mass-orphan ratio over `.flac` files only.
+// Broader than the variants sweeps' ConsiderVariantSidecar on the names
+// it takes: any `.flac`, where a rendition is a `.flac` named by a
+// rendition id. Until 2026-09-28 this docblock said the operator-triggered
+// `--gc` "uses the same shape", which was never true: at #284, where this
+// predicate came in, `--gc`'s forward sweep already removed every
+// unreferenced file. Until backlog B132 `--gc` passed a nil Consider and
+// counted every file in the variants directory. It now passes
+// ConsiderVariantSidecar and reclaims a rendition only, while this sweep
+// never unlinks anything but a `.flac`, and so measures its mass-orphan
+// ratio over `.flac` files only.
 //
 // Future variant formats (FLAC-only today; opus / wavpack are
 // hypothetical follow-ups) would extend the predicate rather than
