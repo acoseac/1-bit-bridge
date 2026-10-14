@@ -2872,6 +2872,30 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 	return rate, bits, isDSD, codec, compression
 }
 
+// coerceStoredUTF8 replaces every byte that is not UTF-8 in the text
+// tags_json stores. json.Marshal on go1.26.6 writes such a byte as the
+// \ufffd escape, and the value read back marshals the replacement character
+// itself, so the version-stale diff never matches (backlog B181). A string
+// that is already UTF-8 is unchanged. Path is the row key and is not
+// touched here; marshalForStorage coerces its own copy.
+func coerceStoredUTF8(t *Track) {
+	const repl = "\uFFFD"
+	t.Title = strings.ToValidUTF8(t.Title, repl)
+	t.Artist = strings.ToValidUTF8(t.Artist, repl)
+	t.AlbumArtist = strings.ToValidUTF8(t.AlbumArtist, repl)
+	t.Album = strings.ToValidUTF8(t.Album, repl)
+	t.Genre = strings.ToValidUTF8(t.Genre, repl)
+	t.MusicBrainzTrackID = strings.ToValidUTF8(t.MusicBrainzTrackID, repl)
+	t.MusicBrainzAlbumID = strings.ToValidUTF8(t.MusicBrainzAlbumID, repl)
+	t.ArtworkMBID = strings.ToValidUTF8(t.ArtworkMBID, repl)
+	t.ArtistMBID = strings.ToValidUTF8(t.ArtistMBID, repl)
+	t.Codec = strings.ToValidUTF8(t.Codec, repl)
+	t.Compression = strings.ToValidUTF8(t.Compression, repl)
+	t.Composer = strings.ToValidUTF8(t.Composer, repl)
+	t.Conductor = strings.ToValidUTF8(t.Conductor, repl)
+	t.Work = strings.ToValidUTF8(t.Work, repl)
+}
+
 // marshalForStorage encodes a Track into the JSON blob written to
 // `tags_json`. **Strips `Enriched` before marshalling** so the field
 // is never persisted in the blob — the column-truth invariant is that
@@ -2891,6 +2915,11 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 // than relying on every future caller to remember.
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
+	// The clone's path is coerced too. The row key stays the path on disk;
+	// only the JSON copy is made into UTF-8, which is what a later read
+	// compares against. An ASCII path is unchanged.
+	coerceStoredUTF8(&clone)
+	clone.Path = strings.ToValidUTF8(clone.Path, "\uFFFD")
 	clone.Enriched = nil
 	// Variants are column-derived (spliced from the variants table at
 	// read time via scanTrackVariants, same as Enriched). Zero them so a

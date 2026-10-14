@@ -41926,3 +41926,53 @@ scan and the subtree subtest: `GetTrack Album/01.flac` had no row. That
 edit was reverted and not committed.
 `TestAReadableCaseRenameReapsTheOldRowAtOnce` keeps the old row absent and
 the new row present, with one reap line.
+
+## 2026-10-14 — version-stale re-reads stamp once text is valid UTF-8 (backlog B181)
+
+### What was wrong
+
+`markStampIfUnchanged` compares `marshalForStorage` of the fresh extract
+with `marshalForStorage` of the row decoded from `tags_json`. On go1.26.6,
+`json.Marshal` writes a byte that is not UTF-8 as the `\ufffd` escape. The
+decoded copy holds U+FFFD and marshals those three bytes raw, so the two
+never compare equal. Every version-stale re-read of such a row takes the
+full upsert: `indexed_at` moves and `enriched_at` resets. go1.27 writes the
+invalid bytes as the raw replacement on both sides, so the same files stamp
+there and the bug is invisible. CI and `go.mod` are 1.26.6.
+
+The bytes came from formats that are not UTF-8. ID3v1 fields are
+ISO-8859-1 and dhowden returns them raw (`ReadID3v1Tags`). A RIFF LIST/INFO
+value is a null-terminated string in the system character set; Windows
+writers use Windows-1252, and `parseWAVINFOBlock` copied the bytes. A
+non-UTF-8 file name reaches the path guess the same way. A DSDIFF DIIN
+chunk was already decoded by `diinText`. Nothing in this process reads an
+APE tag.
+
+### The fix
+
+ID3v1 title, artist and album go through `latin1String` when
+`m.Format()` is ID3v1: valid UTF-8 stays, every other byte is the code
+point of the same number, which is what `diinText` already did. A RIFF
+INFO value goes through `windows1252Text` after the NUL cut: valid UTF-8
+stays, and 0x80–0x9F is the Windows-1252 row (0x80 is €). Every other
+text field is `strings.ToValidUTF8` in `coerceStoredUTF8`, called from
+`ExtractWithContext` and again on `marshalForStorage`'s clone, path
+included on the clone only. The path column stays the bytes on disk.
+
+`ExtractorVersion` stays 24. A row that was already valid UTF-8 marshals
+the same, so a bump would re-read the library to change nothing that was
+right. A row that already stores U+FFFD is not re-read until a later bump
+or a file, cover or lyrics change; that re-read upserts once and the one
+after it stamps.
+
+### The tests
+
+`TestScanner_AVersionStaleRereadOfID3v1AndWindows1252Stamps`, under
+`GOTOOLCHAIN=go1.26.6` before the fix: an ID3v1-only MP3 whose title ends
+in 0xE9 and a WAV whose INAM ends in 0x80 both stored U+FFFD, and two
+version-stale re-reads each moved `indexed_at` and reset `enriched_at`.
+The clean FLAC only stamped. After the fix the MP3 title is Café, the
+WAV title is Caf€, a UTF-8 INFO title stays Café, and both re-reads
+stamp. `TestDeclaredCharsetsAndTheUTF8Fallback` pins the three readings
+and that the fallback does not rewrite the path column. Undoing the
+ID3v1 and Windows-1252 decodes makes the scanner test fail again.

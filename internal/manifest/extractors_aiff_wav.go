@@ -767,7 +767,7 @@ func parseWAVINFOBlock(body []byte) containerText {
 		if i := bytes.IndexByte(payload, 0); i >= 0 {
 			payload = payload[:i]
 		}
-		text := strings.TrimSpace(string(payload))
+		text := strings.TrimSpace(windows1252Text(payload))
 		switch id {
 		case "INAM":
 			c.keepFirst(containerText{title: text})

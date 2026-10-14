@@ -604,6 +604,10 @@ func trackLogPath(absPath string, t *Track) string {
 // but the path's guess; the scanner must not write it (backlog B134). What
 // the extractors made of it is left in t, which the caller discards.
 func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
+	// Text that is not UTF-8 is replaced before the caller stores the track.
+	// A read that did not complete still returns above the write, and the
+	// replacement on that discarded track changes nothing that is stored.
+	defer coerceStoredUTF8(t)
 	// Every open and read of the audio file goes through openAudioFile,
 	// which notes, in this call's own copy of the context, the first that
 	// did not complete.
@@ -1312,6 +1316,20 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	} else if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
 		t.Explicit = true
 	}
+	decodeID3v1Text(m, t)
+}
+
+// decodeID3v1Text reads an ID3v1 title, artist and album as ISO-8859-1.
+// dhowden returns those fields as the raw bytes (ReadID3v1Tags), and the
+// ID3v1 specification defines them as ISO-8859-1. A string that is already
+// UTF-8 is left as it is. The genre comes from the ASCII genre table.
+func decodeID3v1Text(m tag.Metadata, t *Track) {
+	if m == nil || m.Format() != tag.ID3v1 {
+		return
+	}
+	t.Title = latin1String(t.Title)
+	t.Artist = latin1String(t.Artist)
+	t.Album = latin1String(t.Album)
 }
 
 // applyMultiValueArtistsFromRaw mirrors applyFLACMultiValueArtists
