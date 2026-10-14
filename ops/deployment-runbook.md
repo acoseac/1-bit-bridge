@@ -427,7 +427,7 @@ No `CAP_NET_BIND_SERVICE`: both listeners are loopback high ports; HAProxy owns 
 The iOS repo's release checklist points here. `.env.demo` (untracked) carries
 `HOST=<VPS-SSH>`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`,
 `SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`.
-The swap uses those two overrides. The script's defaults (`SVC=1-bit-bridge`,
+The swap uses the `REMOTE_BIN` and `SVC` overrides. The script's defaults (`SVC=1-bit-bridge`,
 `REMOTE_BIN=/usr/local/bin/bridge`) name the previous operator unit and binary
 still on this host. A demo swap must not touch them or restart that unit. The
 operator bridge moved to the NUC on 2026-09-22.
