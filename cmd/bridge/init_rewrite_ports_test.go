@@ -100,10 +100,6 @@ func TestInitRewriteOfAnotherPostureWritesThatPosturesPorts(t *testing.T) {
 		t.Errorf("saved %s and %s, want public mode's :443 and %s",
 			saved.ListenAddress, saved.AdminAddress, config.DefaultAdminAddress)
 	}
-	if saved.ListenAddress == loopbackAddr(api) || saved.AdminAddress == loopbackAddr(admin) {
-		t.Errorf("the posture change kept the loopback install's ports %s and %s",
-			loopbackAddr(api), loopbackAddr(admin))
-	}
 	if _, ok := keptValue(out, "listenAddress"); ok {
 		t.Error("the rewrite lists a listen address it kept, and it wrote public mode's")
 	}
