@@ -18,9 +18,9 @@ import (
 // TTL-cached probe (soxToolchainCache), which the upscale and analysis gates
 // read too.
 var soxProbeCallers = map[string]string{
-	"soxToolchainCache.snapshot": "the shared probe itself",
-	"soxCLIReady":                "a CLI command's preflight, once per run",
-	"runUpscaleBatch":            "a CLI command's classifier probe, once per run",
+	"soxToolchainCache.refresh": "the shared probe itself, one at a time (B142: off the request path once there is a verdict)",
+	"soxCLIReady":               "a CLI command's preflight, once per run",
+	"runUpscaleBatch":           "a CLI command's classifier probe, once per run",
 }
 
 // soxPrecheckWirings are the struct fields in runServe that hand a sox
@@ -79,9 +79,9 @@ func TestServeReadsSoxThroughTheSharedProbe(t *testing.T) {
 			wired[key] = append(wired[key], values...)
 		}
 	}
-	if parsed < 20 || !seen["soxToolchainCache.snapshot"] {
+	if parsed < 20 || !seen["soxToolchainCache.refresh"] {
 		t.Fatalf("parsed %d files and found the shared probe's own call %v: the scan no longer "+
-			"reaches this package, so it proves nothing", parsed, seen["soxToolchainCache.snapshot"])
+			"reaches this package, so it proves nothing", parsed, seen["soxToolchainCache.refresh"])
 	}
 	sort.Strings(callers)
 	for _, c := range callers {
