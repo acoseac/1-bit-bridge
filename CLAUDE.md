@@ -3596,8 +3596,9 @@ no failing test — which is the shape to expect in this area.
   `looksLikeJPEG` + the `folderArtCandidates` sniff; `internal/enrich` had no
   content check of any kind, on ANY of its six write sites (CAA release, CAA
   release-group, iTunes, both premium paths, and the Deezer artist portrait),
-  so whatever an upstream returned was stored behind a `*-N.jpg` name that
-  `/v1/artwork` serves as `image/jpeg`. The write primitive
+  so whatever an upstream returned was stored behind a name served as
+  `image/jpeg`: a cover's `*-N.jpg`, which `/v1/artwork` serves, and the
+  portrait's `artist-<mbid>.jpg`, which `/v1/artist-image` serves. The write primitive
   (`writeArtworkAtomicStream`) now refuses bytes that are not a recognised
   image. **Every upstream artwork write goes through it**: the Deezer
   portrait kept the buffered `writeArtworkAtomic` until 2026-10-14 (backlog

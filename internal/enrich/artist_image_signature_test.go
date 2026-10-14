@@ -81,30 +81,43 @@ func TestArtistPortraitIsStoredOnlyWhenItIsAnImage(t *testing.T) {
 
 			paths := []string{ArtistImagePath(artworkDir, mbid), ArtistImagePathByName(artworkDir, "Artist")}
 			if c.stored {
-				if err != nil || !ok {
-					t.Fatalf("a JPEG portrait was not cached: ok=%v err=%v", ok, err)
-				}
-				for _, p := range paths {
-					if _, statErr := os.Stat(p); statErr != nil {
-						t.Errorf("a JPEG portrait is missing at %s: %v", filepath.Base(p), statErr)
-					}
-				}
-				return
-			}
-			if ok || err == nil {
-				t.Errorf("an HTML body was accepted as a portrait: ok=%v err=%v", ok, err)
-			}
-			for _, p := range paths {
-				if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
-					body, _ := os.ReadFile(p)
-					t.Errorf("an HTML body was stored at %s: %q", filepath.Base(p), body)
-				}
-			}
-			entries, _ := os.ReadDir(artworkDir)
-			for _, en := range entries {
-				t.Errorf("the cache holds %s after a refused body", en.Name())
+				assertPortraitStored(t, paths, ok, err)
+			} else {
+				assertPortraitRefused(t, artworkDir, paths, ok, err)
 			}
 		})
+	}
+}
+
+// assertPortraitStored checks that a portrait was cached at both paths.
+func assertPortraitStored(t *testing.T, paths []string, ok bool, err error) {
+	t.Helper()
+	if err != nil || !ok {
+		t.Fatalf("a JPEG portrait was not cached: ok=%v err=%v", ok, err)
+	}
+	for _, p := range paths {
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("a JPEG portrait is missing at %s: %v", filepath.Base(p), statErr)
+		}
+	}
+}
+
+// assertPortraitRefused checks that a body was refused and that nothing,
+// at either path or anywhere else, is left in the cache.
+func assertPortraitRefused(t *testing.T, artworkDir string, paths []string, ok bool, err error) {
+	t.Helper()
+	if ok || err == nil {
+		t.Errorf("an HTML body was accepted as a portrait: ok=%v err=%v", ok, err)
+	}
+	for _, p := range paths {
+		if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+			body, _ := os.ReadFile(p)
+			t.Errorf("an HTML body was stored at %s: %q", filepath.Base(p), body)
+		}
+	}
+	entries, _ := os.ReadDir(artworkDir)
+	for _, en := range entries {
+		t.Errorf("the cache holds %s after a refused body", en.Name())
 	}
 }
 
