@@ -42808,3 +42808,15 @@ first: `TestArtistPortraitPathsStayInsideTheCache`, with an MBID of
 `fsutil.IsUnderAny` before anything is read, fetched, linked or copied.
 Every caller checks the MBID's shape first (`isValidMBID`), so no input
 reaches it today; it is the layer under that check.
+
+The PR's bot review (Gemini) asked for one more: with no cache directory,
+both paths are relative to the working directory, and the containment
+check refused them as "outside the cache directory", which the caller logs
+as a Deezer failure. That refusal was already safe (nothing fetched,
+nothing written), so this is the message: `ensureArtistImageCached` now
+refuses first with "no artwork cache directory"
+(`TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch`, which also pins
+no request and an empty working directory). Control on the committed tree:
+the guard removed failed exactly that case, on its message alone. The same
+review moved the two tests' shared stub and enricher setup into helpers
+(SonarCloud's duplication gate, 15.3%), with an atomic request counter.

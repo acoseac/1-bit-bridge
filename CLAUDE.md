@@ -3611,7 +3611,9 @@ no failing test — which is the shape to expect in this area.
   path it is then linked or copied to, so an MBID that leaves the cache had
   a portrait hard-linked outside it
   (`TestArtistPortraitPathsStayInsideTheCache`; every caller checks the
-  MBID's shape first, so this is the layer under that check). Deliberately NOT JPEG-only, though that is what this path's contract
+  MBID's shape first, so this is the layer under that check). No cache
+  directory refuses first, as such (both paths would be relative to the
+  working directory; `TestArtistPortraitWithNoCacheDirectoryIsRefusedAsSuch`). Deliberately NOT JPEG-only, though that is what this path's contract
   says: CAA can serve PNG, those covers render today because clients sniff, and
   dropping them inside a security fix buys nothing the arbitrary-payload refusal
   does not already buy. `artwork_scale.go`'s rule — **"a verbatim PNG write would
