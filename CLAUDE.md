@@ -3784,11 +3784,14 @@ no failing test — which is the shape to expect in this area.
     volume), counted and announced like any other failure, so the next sweep
     or request renders it again, by when the mate's own render has usually
     recorded its peak. A transient mate is measured at most once per call.
-    **A mate stops holding its album back `mateTransientGrace` (24 h) after
-    its first transient failure**, in memory, ended by any recorded peak of
-    it: the bound for a mate whose own render never runs (it already has a
-    rendition) and that fails the same way on every survey. A mate's host
-    fault (a tool this host lacks, an output it refuses) still takes the
+    **A mate stops holding its album back once it has failed transiently
+    `mateTransientFailures` (3) times, the first of them `mateTransientGrace`
+    (24 h) ago or longer**, in memory, ended by any recorded peak of it: the
+    bound for a mate whose own render never runs (it already has a
+    rendition) and that fails the same way on every survey. Both terms, so
+    two failures a day apart leave nothing out. **A host fault
+    (`transcode.HostFault`: a tool this host lacks, an output it refuses)
+    never counts toward it**, however long it lasts, and still takes the
     pool's earlier exits, since the error wraps the mate's own. **Don't
     leave a mate out for a failure that is not a fact about it, and don't
     strike the rendering file for its album-mate**
@@ -3799,6 +3802,8 @@ no failing test — which is the shape to expect in this area.
     `TestAMateOnAnotherProfileDoesNotConstrain`,
     `TestASuppressedMateDoesNotConstrain`,
     `TestATransientMateStopsHoldingTheAlbumAfterTheGrace`,
+    `TestTwoFailuresADayApartLeaveNothingOut`,
+    `TestAHostFaultNeverLeavesTheMateOut`,
     `TestAnAlbumMateWaitStrikesNothing`).
   - **A mate whose decode finished short of its container is remembered for
     the process, keyed on the mate spec's path, size and mtime** (2026-10-13,

@@ -42835,3 +42835,19 @@ now uses a malformed header (a fact) instead of a bare "corrupt file" error;
 `TestATransientMateFailureIsMeasuredAgain`'s I/O error now fails each call;
 and the redaction test's mate is left out because its renders are
 suppressed.
+
+A pre-merge review of the PR (Gemini "Argon") found the grace too eager: it
+left a mate out at its first failure once 24 h had passed since an earlier
+one, so two failures a day apart did it, and it counted a host fault, so a
+scratch volume full for more than a day left the mate out and reopened the
+defect. The grace now needs `mateTransientFailures` (3) transient failures
+as well as 24 h since the first, and a host fault (`transcode.HostFault`,
+the pool's own `unavailableTool` and `unwritableOutput`, newly exported as
+one predicate) counts toward nothing. Controls on the committed tree: the
+host fault counted failed exactly `TestAHostFaultNeverLeavesTheMateOut`, and
+the grace by time alone exactly `TestTwoFailuresADayApartLeaveNothingOut`.
+The same review's "high" (a mate with no track row not marked ineligible on
+the serve side) did not hold: `Resolve` maps the path without a stat, so
+`resolveAndLookupTrack` reaches the row lookup and answers
+`ErrUpscaleIneligible`, which the wiring marks; the adapter test now asserts
+`ErrMateIneligible` there, as the CLI's does.
