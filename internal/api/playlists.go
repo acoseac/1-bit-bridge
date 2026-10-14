@@ -143,7 +143,7 @@ func (c *cappedPlaylistItems) UnmarshalJSON(data []byte) error {
 type playlistItemDTO struct {
 	Position          int    `json:"position"`
 	Path              string `json:"path,omitempty"`              // local, resolvable on this bridge
-	OriginFingerprint string `json:"originFingerprint,omitempty"` // foreign: owning bridge fp / "local" / "smb" / "upnp"
+	OriginFingerprint string `json:"originFingerprint,omitempty"` // foreign: owning bridge fp / "local" / "smb" / "upnp" / "mpd"
 	OriginPath        string `json:"originPath,omitempty"`
 	Title             string `json:"title,omitempty"`
 	Artist            string `json:"artist,omitempty"`

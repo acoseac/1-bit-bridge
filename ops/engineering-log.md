@@ -42221,6 +42221,23 @@ reverted and not committed. A file cut so no page ends at EOF, and a
 buffer that is not an Ogg page, still extract as codec `OGG` with no
 facts.
 
+## 2026-10-14 — the "mpd" foreign sentinel (iOS B317)
+
+iOS stores a playlist item or a favorite that names a track in an MPD
+player's own library with `originFingerprint` `"mpd"`, beside `"local"`,
+`"smb"`, `"upnp"` and a bridge cert fingerprint (acoseac/1-bit#2165).
+`putPlaylist` and `putFavorites` already accept any non-empty fingerprint
+paired with `originPath` and no local path. PROTOCOL.md now names `"mpd"`
+in both sentinel lists: it names a track in an MPD player's own library on
+the client; the bridge treats it as opaque, like the others; a client that
+predates it resolves nothing and carries the item forward unresolved.
+`ProtocolVersion` stays 1. `TestForeignSentinelsRoundTripOpaque` puts one
+item of each sentinel plus one bridge fingerprint on
+`PUT /v1/playlists/{id}` and `PUT /v1/favorites` and requires each back on
+GET unchanged. Negative control: both handlers refused
+`originFingerprint == "mpd"` with 400; both subtests failed; the refusals
+were removed before the commit.
+
 ## 2026-10-14 — one demo deploy procedure (backlog B115)
 
 The runbook's Demo bridge "Update per release" led with
