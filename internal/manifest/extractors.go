@@ -3345,13 +3345,36 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 		}
 	}
 
-	// 2) Folder-level fallback, single-flighted per directory so a
-	//    15-track album doesn't ReadDir + hash 15 times.
-	dir := filepath.Dir(absPath)
+	// 2) Folder-level fallback, then one disc-folder parent.
+	applyFolderArtwork(filepath.Dir(absPath), t, ec)
+}
+
+// applyFolderArtwork writes the cover beside dir onto t, the same lookup
+// a folder's tracks use. It is single-flighted per directory so a
+// 15-track album does not ReadDir and hash 15 times. A nil folder-art
+// cache is left unread: sharing nothing would race every track, and the
+// row stays unsettled so a later scan reads the cover.
+//
+// The disc-subfolder parent is the standard multi-disc layout, one cover
+// at the album root with tracks a level deeper (Album/cover.jpg beside
+// Album/Disc 1/track.dsf). The own directory can never see that cover.
+// The climb is exactly one level, and only when dir is named like a disc
+// folder: an unconditional walk-up would give Artist/cover.jpg to every
+// Artist/Album/track. The own directory's candidates win first.
+//
+// A disc folder that sits directly under the artist, with a cover at the
+// artist, inherits that cover. A wrong cover there beats a missing one,
+// and the layout itself is a disc folder outside an album.
+//
+// The parent lookup uses the same cache, keyed on the parent path, so
+// two disc folders and loose tracks in the album share one ReadDir and
+// hash of the album root per scan. discArtParent decides the climb, and
+// the folder-art key asks it too, so the key names the directories read
+// here. An SACD image passes its own directory: a virtual track's
+// directory is the area folder, which holds no cover.
+func applyFolderArtwork(dir string, t *Track, ec *ExtractContext) {
+	t.localArt = localArtSettled
 	if ec.FolderArtCache == nil {
-		// Defensive: caller should always pass a cache, but a nil
-		// cache means we'd race on every track. Skip rather than
-		// reintroduce the stampede, and say the folder was not read.
 		t.localArt = localArtUnsettled
 		return
 	}
@@ -3361,31 +3384,6 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 		t.ArtworkMBID = own.mbid
 		return
 	}
-
-	// 3) Disc-subfolder parent fallback: the standard multi-disc layout
-	//    keeps ONE cover at the album root with tracks a level deeper —
-	//    `Album/cover.jpg` + `Album/Disc 1/track.dsf` — which the own-dir
-	//    lookup above can never see (the confirmed root cause of the
-	//    "Puccini: Turandot" grey tile, 2026-07-30). Climb EXACTLY ONE
-	//    level, and ONLY when the track's own directory is named like a
-	//    disc folder: an unconditional walk-up would attribute
-	//    `Artist/cover.jpg` to every `Artist/Album/track`. The own-dir
-	//    candidates always win (the early return above).
-	//
-	//    Shallow-hierarchy consequence, accepted: a degenerate layout
-	//    `Artist/Disc 1/track` with an artist-level cover.jpg inherits
-	//    that asset — a wrong-ish cover beats a grey tile, and the
-	//    layout itself is malformed (a disc folder outside an album).
-	//
-	//    The parent lookup rides the SAME single-flight cache keyed on
-	//    the parent path, so `Album/Disc 1` + `Album/Disc 2` (and an
-	//    `Album/` that also holds loose tracks) share exactly one
-	//    ReadDir + hash for the album root per scan — positive AND
-	//    negative results cached, identical to an own-dir lookup of
-	//    that directory. discArtParent decides the climb (a disc-named
-	//    directory that is not a library root, whose parent is outside
-	//    the library), and the folder-art key asks it too, so the key
-	//    names exactly the directories read here.
 	parent, climbs := discArtParent(dir, ec)
 	if !climbs {
 		return

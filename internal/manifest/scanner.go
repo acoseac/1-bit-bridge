@@ -1513,7 +1513,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// container's size+mtime, so an unchanged image costs one
 			// stat like any other file.
 			if strings.EqualFold(filepath.Ext(pi.rel), ".iso") {
-				tracksToWrite = s.processSACDISO(ctx, pi)
+				tracksToWrite = s.processSACDISO(ctx, pi, ec)
 				return
 			}
 			// Early-skip on unchanged-since-last-scan: matches the legacy
@@ -2071,11 +2071,21 @@ func mergePostScanFields(fresh, old *Track) {
 // they were, retired by nothing and rewritten by nothing, until a later scan
 // reads the file whole.
 //
+// An unchanged image whose folder cover changed is not re-expanded. The
+// representative row's folder-art key is the cover's identity, the same
+// key a folder's tracks record, taken from the image's own directory.
+// A drift, or a local cover whose cache file is gone, restamps every
+// virtual row from that lookup. Artwork that changed is written whole.
+// A key that moved while the artwork did not is recorded alone, so the
+// next scan does not look again and a lyrics row the expansion does not
+// carry is left where it is.
+//
 // Runs inside the worker's panic-recovery closure; returns nil for an
-// unchanged image, a non-SACD/plain-DSD/multichannel-only image, a parse or
-// read failure (logged — the image contributes no rows), or a container that
-// changed during the scan (logged, and left for the next one).
-func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
+// image whose bytes and cover are unchanged, a non-SACD/plain-DSD/
+// multichannel-only image, a parse or read failure (logged — the image
+// contributes no rows), or a container that changed during the scan
+// (logged, and left for the next one).
+func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo, ec *ExtractContext) []*Track {
 	rep := SACDVirtualTrackPath(pi.rel, 1)
 	existing, statErr := s.store.GetTrackStat(ctx, rep)
 	if statErr != nil && ctx.Err() == nil {
@@ -2084,12 +2094,7 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 	if existing != nil && existing.Size == pi.info.Size() &&
 		existing.MTimeNS == pi.info.ModTime().UnixNano() &&
 		existing.ExtractorVersion >= ExtractorVersion {
-		// Unchanged + current: nothing to extract, and the rows' missing
-		// count goes back to 0, as the skip gate's does for a plain file
-		// (keepSACDRowsSeen). The deletion pass's container-seen
-		// membership only keeps them from being counted missing.
-		s.keepSACDRowsSeen(ctx, pi)
-		return nil
+		return s.unchangedSACD(ctx, pi, existing, ec)
 	}
 
 	tracks, changed, err := s.expandSACDContainer(pi)
@@ -2150,7 +2155,140 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 		scanLogger.Debug("iso is not an expandable SACD image", "path", pi.rel)
 		return nil
 	}
+	s.stampSACDFolderArt(pi, tracks, ec)
 	return tracks
+}
+
+// unchangedSACD is the container skip gate once size, mtime and extractor
+// version already match. A cover that has not moved leaves the rows seen
+// and expands nothing. A cover that has is read through the folder-art
+// lookup and written only as far as that reading changed the rows.
+func (s *Scanner) unchangedSACD(ctx context.Context, pi pathInfo, existing *TrackStat, ec *ExtractContext) []*Track {
+	if !s.sacdCoverDrifted(pi, existing, ec) {
+		s.keepSACDRowsSeen(ctx, pi)
+		return nil
+	}
+	tracks, err := s.sacdTracks(ctx, pi.rel)
+	if err != nil || len(tracks) == 0 {
+		s.warnSACDCover(ctx, "sacd cover restamp", pi.rel, err)
+		s.keepSACDRowsSeen(ctx, pi)
+		return nil
+	}
+	before := sacdArtworkIDs(tracks)
+	s.stampSACDFolderArt(pi, tracks, ec)
+	if sacdArtworkChanged(before, tracks) {
+		return tracks
+	}
+	if sacdRepKeyMoved(SACDVirtualTrackPath(pi.rel, 1), existing.FolderArtKey, tracks) {
+		s.warnSACDCover(ctx, "sacd cover key", pi.rel, s.store.stampFolderArtKeys(ctx, tracks))
+	}
+	s.keepSACDRowsSeen(ctx, pi)
+	return nil
+}
+
+// sacdCoverDrifted reports whether the image's folder cover, or a local
+// cover cache the representative row names, is no longer what that row
+// recorded. An empty artwork cache asks nothing: there is no lookup to
+// retry, and the key stays empty so a later cache still sees the drift.
+func (s *Scanner) sacdCoverDrifted(pi pathInfo, existing *TrackStat, ec *ExtractContext) bool {
+	if s.artDir == "" || existing == nil || ec == nil {
+		return false
+	}
+	if s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
+		return true
+	}
+	return s.folderArtDrifted(pi.abs, pi.rel, existing, ec)
+}
+
+// sacdTracks reads the virtual rows under the container. A missing row is
+// left out; an error returns what it has not, so the caller writes nothing
+// and asks again next scan.
+func (s *Scanner) sacdTracks(ctx context.Context, rel string) ([]*Track, error) {
+	under, err := s.store.TrackPathsUnder(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	tracks := make([]*Track, 0, len(under))
+	for _, p := range under {
+		if !IsSACDVirtualPath(p) {
+			continue
+		}
+		t, err := s.store.GetTrack(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		if t != nil {
+			tracks = append(tracks, t)
+		}
+	}
+	return tracks, nil
+}
+
+// stampSACDFolderArt gives each virtual row the cover beside the image,
+// through the folder lookup a folder's tracks use. The image path is what
+// the key is taken from: a virtual path's directory is the area folder,
+// which holds no cover. An empty artwork cache records nothing, so the
+// key stays empty rather than the not-looked mark the gate never retries.
+func (s *Scanner) stampSACDFolderArt(pi pathInfo, tracks []*Track, ec *ExtractContext) {
+	if s.artDir == "" || ec == nil || len(tracks) == 0 {
+		return
+	}
+	dir := filepath.Dir(pi.abs)
+	for _, t := range tracks {
+		if t == nil {
+			continue
+		}
+		old := t.ArtworkMBID
+		t.ArtworkMBID = ""
+		applyFolderArtwork(dir, t, ec)
+		keepArtOfUnsettledRead(t, old)
+		if t.ArtworkMBID == "" && !sacdDroppedLocalCover(t, old) {
+			t.ArtworkMBID = old
+		}
+		recordFolderArtKey(pi.abs, t, ec)
+		s.noteUnsettledArt(t.Path, t)
+	}
+}
+
+func sacdDroppedLocalCover(t *Track, old string) bool {
+	return t.localArt == localArtSettled && !t.localArtWriteFailed && isLocalArtworkMBID(old)
+}
+
+func sacdArtworkIDs(tracks []*Track) []string {
+	ids := make([]string, len(tracks))
+	for i, t := range tracks {
+		if t != nil {
+			ids[i] = t.ArtworkMBID
+		}
+	}
+	return ids
+}
+
+func sacdArtworkChanged(before []string, tracks []*Track) bool {
+	for i, t := range tracks {
+		if t != nil && t.ArtworkMBID != before[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func sacdRepKeyMoved(rep, stored string, tracks []*Track) bool {
+	for _, t := range tracks {
+		if t != nil && t.Path == rep {
+			return t.folderArtKey != stored
+		}
+	}
+	return false
+}
+
+func (s *Scanner) warnSACDCover(ctx context.Context, msg, rel string, err error) {
+	if err == nil {
+		return
+	}
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		scanLogger.Warn(msg, "path", rel, "err", failure)
+	}
 }
 
 // What processSACDISO logs as the change when a container is not the file

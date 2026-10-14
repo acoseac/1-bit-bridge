@@ -477,6 +477,42 @@ lost my library."
   (`TestScanner_SACDRowsCountOnlyConsecutiveMisses`,
   `TestScanner_SACDRowsAreSeenWhereTheScanWritesNone`,
   `TestResetTrackMissingCountsUnderIsAByteRange`).
+- **An SACD image's virtual rows carry the cover beside the image, and the
+  container's skip gate watches that cover** (2026-10-14, backlog B146).
+  `processSACDISO` expanded and never ran the folder-art lookup, so a
+  `cover.jpg` beside the `.iso` left every virtual row with an empty
+  `artworkMBID`. The container has no row of its own. The representative
+  first virtual row is where the folder-art key lives, and the skip gate
+  returned on size, mtime and extractor version before any cover was read,
+  so a cover added after the image was indexed never reached the rows.
+  `stampSACDFolderArt` runs the same lookup a folder's tracks use
+  (`applyFolderArtwork`, the folder half of `extractLocalArtwork`) against
+  the image's directory. A virtual path's directory is the area folder,
+  which holds no cover, so the key is taken from the image path. Every
+  virtual row records the same `local-` hash and the same key. On an
+  unchanged image, `sacdCoverDrifted` asks `folderArtDrifted` and
+  `needsLocalArtworkRecovery` of that representative row. A drift restamps
+  without `expandSACD`. Artwork that changed is written whole
+  (`UpsertTrackBatch` moves `indexed_at` and resets `enriched_at`). A key
+  that moved while the artwork did not is `stampFolderArtKeys`
+  (`folder_art_key` and `missing_count` only). `StampExtractorVersionBatch`
+  would delete a local lyrics row: the expansion carries none, and
+  `GetTrack` does not load lyrics. A removed local cover is dropped the
+  way `mergePostScanFields` drops one; a non-local id is kept. An unsettled
+  cover keeps the art it had and records the unsettled key, so the next
+  scan retries the cover and does not re-expand. An empty artwork cache
+  records no key, so the column stays empty and a later cache still sees
+  the drift. The not-looked mark would make `folderArtDrifted` answer
+  false for good. **No `ExtractorVersion` bump**: a coverless image keys
+  to empty, the same key existing rows hold, so those containers stay on
+  the size and mtime skip. An image whose folder already holds a cover
+  restamps once, without re-expanding. The phone's album tile is the
+  first track of the album with a non-empty `artworkMBID` (`artworkVersion`
+  when the row has one, otherwise the id). The same hash on every virtual
+  row is the cover that tile shows.
+  (`TestAnSACDImageCarriesTheCoverBesideIt`,
+  `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`,
+  `TestAnSACDImageWithNoCoverScansAsBefore`.)
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the

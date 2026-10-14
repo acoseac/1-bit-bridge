@@ -3445,6 +3445,34 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 	return nil
 }
 
+// stampFolderArtKeys records each track's folder-art key and clears its
+// missing count. It leaves tags, lyrics, indexed_at and enriched_at alone,
+// so a cover whose bytes did not change does not republish the row or drop
+// a lyrics document the expansion does not carry.
+func (s *Store) stampFolderArtKeys(ctx context.Context, tracks []*Track) error {
+	if len(tracks) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, t := range tracks {
+		if t == nil || t.Path == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tracks SET folder_art_key = ?, missing_count = 0 WHERE path = ?`,
+			t.folderArtKey, t.Path); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ----- tracks -----
 
 // dbTx is the statement surface of a transaction. *sql.Tx implements it.
