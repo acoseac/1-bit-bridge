@@ -59,7 +59,8 @@ func TestArtworkGCPassesOverTheDirectoriesALibraryWalkSkips(t *testing.T) {
 // TestArtworkGCEmptyStoreGuardPassesOverTheDirectoriesALibraryWalkSkips —
 // with no artwork key referenced, a cache whose only covers sit in skipped
 // directories holds nothing the GC would remove, so it is no reason to
-// refuse: the run exits 0 and those files stay.
+// refuse: the run exits 0. A dry run, so the case reads the guard's verdict
+// alone (the GC walk's own pruning is the case above).
 func TestArtworkGCEmptyStoreGuardPassesOverTheDirectoriesALibraryWalkSkips(t *testing.T) {
 	store, dir := artworkCacheFixture(t)
 	cover := "local-" + strings.Repeat("a", 64) + "-500.jpg"
@@ -67,7 +68,7 @@ func TestArtworkGCEmptyStoreGuardPassesOverTheDirectoriesALibraryWalkSkips(t *te
 		writeFixtureFile(t, filepath.Join(dir, d, cover), 10)
 	}
 
-	rc, stdout, stderr := runArtworkGCOver(store, dir, false)
+	rc, stdout, stderr := runArtworkGCOver(store, dir, true)
 	if rc != 0 || strings.Contains(stderr, "refusing") {
 		t.Errorf("rc=%d, want 0 with no refusal\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 	}
