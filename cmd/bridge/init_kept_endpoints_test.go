@@ -14,7 +14,9 @@ import (
 // (backlog B61): an install on 127.0.0.1:X listing https://nas…:X, rewritten
 // onto :Z, kept the endpoint without a word, and the restarted bridge's
 // /v1/health advertised https://nas…:X beside its :Z addresses, an alternate
-// every device puts into its failover rotation.
+// every device puts into its failover rotation. Since backlog B125 a rewrite
+// that names neither address flag keeps the install's ports, so the move
+// this warning is about is one the run names with --listen-address.
 //
 // The rewrite warns and keeps the endpoint. It cannot tell a port that
 // reaches this bridge directly from one a router or proxy forwards: the
@@ -23,7 +25,10 @@ import (
 
 // TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff: the rewrite
 // names the endpoint, the port it names and the port the API moves to, and
-// keeps the endpoint. An endpoint on another port is not named.
+// keeps the endpoint. An endpoint on another port is not named. Both rows
+// move the API with --listen-address, including the one that moves it to
+// :7788: a rewrite that names no address flag no longer does that
+// (backlog B125).
 func TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -35,8 +40,9 @@ func TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff(t *testing.T) {
 		{"to the port --listen-address names", func(p int) []string {
 			return []string{"--listen-address", loopbackAddr(p)}
 		}, func(p int) int { return p }},
-		{"to the default, with no --listen-address", func(int) []string { return nil },
-			func(int) int { return 7788 }},
+		{"to :7788, named with --listen-address", func(int) []string {
+			return []string{"--listen-address", ":7788"}
+		}, func(int) int { return 7788 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")

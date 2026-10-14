@@ -373,9 +373,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 2
 	}
-	// The addresses this run writes, which the preflight grades wherever no
-	// install's config names its own, and on a --yes --force rewrite where
-	// they replace its own (initAddresses).
+	// The addresses a run writes when it names a flag or changes posture
+	// (initAddresses). A rewrite that names neither, and keeps the posture,
+	// overlays the install's own once that decision is made, before the
+	// preflight grades them.
 	listenAddr, adminAddr := initAddresses(*publicMode, *publicProxy, *listenAddressFlag, *adminAddressFlag)
 
 	cfgDir := *cfgDirFlag
@@ -526,6 +527,15 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	// A same-posture rewrite that names neither address flag keeps the
+	// install's pair (addressesARewriteKeeps). The preflight below grades
+	// these, so a kept port is the install's, pid file and all, and one the
+	// run moves off is the only one left ungraded.
+	var listenListed, adminListed bool
+	listenAddr, adminAddr, listenListed, adminListed = addressesARewriteKeeps(
+		listenAddr, adminAddr, *listenAddressFlag != "", *adminAddressFlag != "",
+		*publicMode, *publicProxy, replace, prior)
+
 	// Preflight. Run after library-path resolution so doctor sees the
 	// real path the user chose, not a default. --skip-doctor bypasses
 	// for the rare case where the operator knows better than the check.
@@ -553,7 +563,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	//
 	// A rewrite of an install whose config loads, --yes --force or an
 	// interactive yes, is certain by now, and the preflight grades only the
-	// install's ports that rewrite keeps. One it moves off is left ungraded
+	// install's ports that rewrite keeps. A same-posture rewrite that names
+	// neither address flag keeps both, so nothing is abandoned. One it moves
+	// off, because it names a flag or changes posture, is left ungraded
 	// (portsARewriteAbandons, doctor.Deps.AbandonedPorts): who holds a port
 	// the new config does not name says nothing about whether the bridge can
 	// start. Until 2026-09-28 it was graded, and a stranger on the old port,
@@ -693,8 +705,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	cfg := baseConfig(roots, name, dataDir)
-	// The addresses the preflight graded, where no install's config named
-	// its own: one definition for both (initAddresses).
+	// The addresses the preflight graded: initAddresses, or the install's
+	// pair a same-posture rewrite kept over it.
 	cfg.ListenAddress, cfg.AdminAddress = listenAddr, adminAddr
 	if *publicMode {
 		// Public-mode YAML shape (PR 5). Defaults:
@@ -735,20 +747,19 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// The ports this run is about to SAVE, where the preflight graded
-	// others: it ran before the keep-or-overwrite decision, against the
-	// config already on disk when that config loads. For the certificate
-	// that reading is right and deliberate — init does not rewrite the
-	// cert, so the pair on disk IS the pair. The ports are the opposite:
-	// a rewrite writes this run's (initAddresses), so an install on
-	// :9090/:9091 was graded on 9090/9091 and then handed
-	// :7788/127.0.0.1:7789 — and if something else holds 7789, the
-	// operator learns it from a `bridge serve` that cannot bind, having
-	// just been told the host was fine. Where no config loads, the
+	// others. For the certificate that earlier reading is right and
+	// deliberate — init does not rewrite the cert, so the pair on disk IS
+	// the pair. A rewrite writes the addresses decided above: the install's
+	// own when it names neither flag and the posture is unchanged, and
+	// initAddresses when it names a flag or changes posture. Until the
+	// addresses were kept, an install on :9090/:9091 was graded on those
+	// and then handed :7788/127.0.0.1:7789. Where no config loads, the
 	// preflight graded this run's ports already, and nothing here differs.
-	// On a --yes --force rewrite the preflight left the install's ports
-	// this run moves off ungraded (doctor.Deps.AbandonedPorts), and this
-	// pass grades what it writes in their place: d carries that list, and
-	// it never names a port the run writes (portsARewriteAbandons).
+	// On a rewrite the preflight left the install's ports this run moves
+	// off ungraded (doctor.Deps.AbandonedPorts), and this pass grades what
+	// it writes in their place: d carries that list, and it never names a
+	// port the run writes (portsARewriteAbandons). A rewrite that keeps
+	// both addresses changes none, so this pass grades nothing.
 	//
 	// Before Save, so a refusal leaves the existing config intact, and
 	// only over the ports that actually CHANGED: an unchanged one was
@@ -860,7 +871,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
-	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept)
+	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept, listenListed, adminListed)
 	if endpointsKept {
 		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
 	}
