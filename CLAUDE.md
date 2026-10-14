@@ -4764,6 +4764,34 @@ no failing test — which is the shape to expect in this area.
   `no_image` and nothing fetches it again, a `local-` cover included (the
   cap's docblock said a 202 and a re-enrichment until 2026-09-29; backlog
   B84).
+- **`artwork --gc` collects the portraits of artists no track row names**
+  (2026-10-14, backlog B85). The GC judged a file by its size suffix, so the
+  portraits at the top of the cache, `artist-<mbid>.jpg` (what the console
+  and `/v1/artist-image` read) and the name-hashed canonical
+  `artist-name-<sha256>.jpg` the enricher fetches once per artist name and
+  hard-links each MBID path to, were "skipped (non-cache file)" whatever the
+  store said, and an artist whose tracks were removed or re-tagged kept both
+  for ever. The portrait pass (`collectPortraits`, after the cover walk,
+  which leaves top-level portraits to it) keeps an MBID portrait while
+  `$.artistMBID` names it (the same set as the thumbnails; the enricher
+  fetches a portrait only under the MBID it stamps on the track), and a
+  canonical while a portrait that STAYS is the same file (`os.SameFile`,
+  compared within one size): **never from the name** (the hash is one-way
+  and hashes `artistImageQueryName`, which no row stores), and **against
+  the kept portraits, not every portrait**, so a canonical whose last link
+  goes in this run goes with it, in a dry run too. Where the filesystem
+  refused the hard link, `linkOrCopy` copied, so that canonical shares no
+  file and is removed: the MBID copy stays and serves, at the cost of one
+  Deezer fetch if a new MBID of that name ever needs it. **An empty artist
+  set removes no portrait without `--allow-empty`**: it keeps them with a
+  line on stderr and the cover GC goes on (exit 0), since covers have their
+  own refusal and a portrait comes back only through a fetch. Only the
+  enricher's names at the top of the cache are portraits; anything else is
+  skipped as before (`TestArtworkGCRemovesThePortraitsOfAnArtistNoTrackNames`,
+  `TestArtworkGCPortraitsDryRunRemovesNothing`,
+  `TestArtworkGCKeepsEveryPortraitWhenNoTrackNamesAnArtist`,
+  `TestArtworkGCPortraitCopyKeepsTheMBIDFile`,
+  `TestArtworkGCLeavesWhatIsNoPortrait`).
 - **A sidecar walk passes over, at the WALK, every directory a library walk
   skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it
   lists it** (2026-10-02, backlog B207). With `variantsDir` on its own

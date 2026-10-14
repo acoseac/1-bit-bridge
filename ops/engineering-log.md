@@ -42562,3 +42562,43 @@ false failed only `TestAnSACDCoverChangeReachesTheRowsWithoutExpanding`
 at the first scan still passed. `stampSACDFolderArt` returning before the
 lookup failed `TestAnSACDImageCarriesTheCoverBesideIt` (`ArtworkMBID`
 empty, want a folder cover). No wire change.
+
+## 2026-10-14 — `artwork --gc` collects the portraits of artists no track row names (backlog B85)
+
+The GC judged a file by its size suffix (`artworkCacheStem`), so the
+portraits at the top of the cache were "skipped (non-cache file)" on every
+run: `artist-<mbid>.jpg`, the path `/v1/artist-image` and the console read,
+and `artist-name-<sha256>.jpg`, the canonical the enricher fetches once per
+artist name (`ArtistImagePathByName`) and hard-links each MBID path to
+(`linkOrCopy`). Since B64 the GC kept the portrait THUMBNAILS by the store's
+`$.artistMBID` set; the portraits stayed out of scope, and
+`TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames` pinned that scope
+(it now pins the new one).
+
+Only the enricher writes portraits, and only under `t.ArtistMBID`
+(`ensureArtistImageCached`, from the text path and the acoustic fallback),
+so `DistinctArtistMBIDs` is the whole keep set for the MBID files. The
+canonical cannot be mapped back to a name: the hash is one-way and hashes
+`artistImageQueryName`'s name, which no row stores. It is kept while a kept
+MBID portrait is the same file (`os.SameFile`, bucketed by size: a hard
+link has its file's size). Rejected: the link count, which cannot tell a
+link this run keeps from one it removes, and is fixed during a dry run.
+
+`linkOrCopy` copies where the filesystem refuses a hard link, so such a
+canonical shares no file with anything and goes. Nothing served is lost
+(the MBID copies stay); the canonical's job was the network dedup, so the
+cost is one Deezer fetch if a new MBID of that name ever needs a portrait.
+
+An empty artist set removes no portrait without `--allow-empty`: the shape
+of a wrong `--config`, or a store never enriched. Unlike the covers'
+refusal (exit 1 before the walk) it keeps the portraits with a stderr line
+and lets the cover GC go on, because a portrait comes back through a fetch
+and the covers have their own guard.
+
+Red first on main (`3a0e143d`): the four new behaviour cases and the
+updated scope test failed; `TestArtworkGCLeavesWhatIsNoPortrait` passed (a
+pin). Controls, each on the committed tree and restored from git:
+- The same-file comparison made against every MBID portrait instead of the
+  kept ones failed exactly the main case (the last-link canonical survived)
+  and the dry-run case (it was not named).
+- The empty-set guard disabled failed exactly the empty-set case.
