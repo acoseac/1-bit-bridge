@@ -2872,6 +2872,30 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 	return rate, bits, isDSD, codec, compression
 }
 
+// coerceStoredUTF8 replaces every byte that is not UTF-8 in the text
+// tags_json stores. json.Marshal on go1.26.6 writes such a byte as the
+// \ufffd escape, and the value read back marshals the replacement character
+// itself, so the version-stale diff never matches (backlog B181). A string
+// that is already UTF-8 is unchanged. Path is the row key and is not
+// touched here; marshalForStorage coerces its own copy.
+func coerceStoredUTF8(t *Track) {
+	const repl = "\uFFFD"
+	t.Title = strings.ToValidUTF8(t.Title, repl)
+	t.Artist = strings.ToValidUTF8(t.Artist, repl)
+	t.AlbumArtist = strings.ToValidUTF8(t.AlbumArtist, repl)
+	t.Album = strings.ToValidUTF8(t.Album, repl)
+	t.Genre = strings.ToValidUTF8(t.Genre, repl)
+	t.MusicBrainzTrackID = strings.ToValidUTF8(t.MusicBrainzTrackID, repl)
+	t.MusicBrainzAlbumID = strings.ToValidUTF8(t.MusicBrainzAlbumID, repl)
+	t.ArtworkMBID = strings.ToValidUTF8(t.ArtworkMBID, repl)
+	t.ArtistMBID = strings.ToValidUTF8(t.ArtistMBID, repl)
+	t.Codec = strings.ToValidUTF8(t.Codec, repl)
+	t.Compression = strings.ToValidUTF8(t.Compression, repl)
+	t.Composer = strings.ToValidUTF8(t.Composer, repl)
+	t.Conductor = strings.ToValidUTF8(t.Conductor, repl)
+	t.Work = strings.ToValidUTF8(t.Work, repl)
+}
+
 // marshalForStorage encodes a Track into the JSON blob written to
 // `tags_json`. **Strips `Enriched` before marshalling** so the field
 // is never persisted in the blob — the column-truth invariant is that
@@ -2891,6 +2915,11 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 // than relying on every future caller to remember.
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
+	// The clone's path is coerced too. The row key stays the path on disk;
+	// only the JSON copy is made into UTF-8, which is what a later read
+	// compares against. An ASCII path is unchanged.
+	coerceStoredUTF8(&clone)
+	clone.Path = strings.ToValidUTF8(clone.Path, "\uFFFD")
 	clone.Enriched = nil
 	// Variants are column-derived (spliced from the variants table at
 	// read time via scanTrackVariants, same as Enriched). Zero them so a
@@ -5629,8 +5658,8 @@ func (s *Store) listAllSidecars(ctx context.Context) ([]string, error) {
 
 // removeSidecarFiles unlinks every path in the slice, logging
 // (but not propagating) per-file errors. Missing files are
-// silent — they're already in the desired state. Shared by all
-// three deletion entry points so the "log but don't block on
+// silent — they're already in the desired state. Shared by the
+// deletion entry points so the "log but don't block on
 // per-file failure" policy lives in one place.
 func removeSidecarFiles(paths []string) {
 	for _, sp := range paths {
@@ -6052,12 +6081,12 @@ func trackScopeBase(relDir string) string {
 // a path that WAS seen, so the pass reaped them outright, bypassing the
 // missing_count debounce entirely.
 //
-// That reap is only sound because of the premise in caseOnlyRenames'
-// docblock: "a stored path that fold-matches a seen entry refers to a
-// file the walker DID enumerate this pass". True for a full Scan, false
-// here the moment the snapshot is broader than the walk. Keeping this
-// query case-exact is what keeps that premise true — the deletion pass
-// cannot spare a row it was never told to consider.
+// A fold match is a candidate the deletion pass reaps only when this
+// pass backs the seen spelling. That reap is sound when
+// the snapshot holds a file the walk enumerated: true for a full Scan,
+// false here the moment the snapshot is broader than the walk. Keeping
+// this query case-exact is what keeps a case-twin out of the snapshot —
+// the deletion pass cannot spare a row it was never told to consider.
 //
 // Used by ScanSubtree's bounded deletion pass.
 func (s *Store) TrackPathsUnder(ctx context.Context, relDir string) ([]string, error) {
@@ -6300,6 +6329,17 @@ const clearMissingTracksWhereSQL = `missing_count > 0
 
 const clearMissingTracksDeleteSQL = `DELETE FROM tracks
 		 WHERE ` + clearMissingTracksWhereSQL
+
+// The two statements below list the rendition and waveform files of the
+// rows clearMissingTracksDeleteSQL deletes. Both embed
+// clearMissingTracksWhereSQL, so the unlink set and the row set are one
+// predicate: a routed row is spared by both, and a filesystem row with
+// missing_count > 0 loses its files with its row. dsd_peaks has no file;
+// its rows leave by ON DELETE CASCADE.
+const clearMissingVariantSidecarsSQL = `SELECT sidecar_path FROM track_variants
+		 WHERE source_path IN (SELECT path FROM tracks WHERE ` + clearMissingTracksWhereSQL + `)`
+
+const clearMissingWaveformWhereSQL = `source_path IN (SELECT path FROM tracks WHERE ` + clearMissingTracksWhereSQL + `)`
 
 // doomedReapSidecarsTx enumerates the sidecar files owned by the rows
 // `where` is about to delete, so the caller can unlink them after the
@@ -6831,6 +6871,12 @@ func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) e
 // leave the operator with a partially-purged state — re-running the
 // command picks up exactly the rows the prior attempt missed.
 //
+// The rendition and waveform files of those tracks are listed in the
+// same transaction, from the same predicate, and removed after the
+// commit. A file the remove cannot unlink is logged and left for the
+// orphan sweep; that does not fail the command. dsd_peaks rows leave
+// with the track and have no file of their own.
+//
 // Holds `s.mu` per the writer contract on Store.
 func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	s.mu.Lock()
@@ -6840,6 +6886,15 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	// List before the journal and the DELETE, on this transaction, so a
+	// variant listing that fails aborts before the cascade and the files
+	// stay with the rows. Waveforms are best-effort, as in the threshold
+	// reap: a failed listing still deletes, and the orphan sweep sees
+	// whatever file was left.
+	doomed, err := s.doomedReapSidecarsTx(ctx, tx, clearMissingVariantSidecarsSQL, clearMissingWaveformWhereSQL)
+	if err != nil {
+		return 0, err
+	}
 	// Journal before the DELETE — same predicate via
 	// clearMissingTracksWhereSQL, same tx.
 	if _, err := tx.ExecContext(ctx, journalClearMissingSQL, s.now().UnixNano()); err != nil {
@@ -6868,6 +6923,10 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// After the commit, as the threshold reap does. A remove that fails
+	// is logged inside removeSidecarFiles and left for the orphan sweep;
+	// it does not change this return.
+	removeSidecarFiles(doomed)
 	if tCount > 0 {
 		s.noteLibrary(ctx)
 	}

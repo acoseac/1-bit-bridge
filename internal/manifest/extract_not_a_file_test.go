@@ -142,7 +142,7 @@ func runWorkerOn(t *testing.T, sc *Scanner, root string, pi pathInfo, fifos []st
 	var wg sync.WaitGroup
 	wg.Add(1)
 	within(t, "the scan worker on "+pi.rel, scanBound, fifos, func() {
-		sc.runScanWorker(context.Background(), paths, writes, false, map[string]struct{}{filepath.Clean(root): {}}, &wg)
+		sc.runScanWorker(context.Background(), paths, writes, false, map[string]struct{}{filepath.Clean(root): {}}, newBackedPaths(), &wg)
 	})
 	close(writes)
 	var out []*Track

@@ -690,6 +690,36 @@ lost my library."
   the file's tags); a bump now re-reads the library and re-upserts every
   SACD virtual row to heal rows nothing can tell from a tagless file. To
   heal one by hand, zero its `mtime_ns` (`## Local test fixture`).
+- **A case-only rename reaps the old row only when this pass committed the
+  new spelling** (2026-10-14, backlog B175). `caseOnlyRenames` flags a
+  stored path the walk did not see whose `renameFold` matches a path it
+  did. The deletion pass used to reap that row at once, on the premise
+  the new spelling was written this pass. Since B134 a worker that cannot
+  read the file writes no row for a spelling that has none, so the old
+  row was deleted and the new spelling never appeared, while
+  `msgUnreadAudio` said the rows were kept. Measured on APFS: `Album/01.flac`
+  indexed, the folder renamed to `album`, `openAudio` answering EIO; after
+  the scan both `GetTrack`s were nil and the log carried the unread line
+  and `reaped stale rows from case-only rename`. The workers and the writer
+  fill one set (`backedPaths`), mutexed because both write it, and read
+  after both have returned. The writer adds a path a successful upsert or
+  stamp persisted. A worker adds a path the skip gate accepted, and a path
+  `keepUnread` kept because that exact spelling already had a row. A new
+  spelling the worker could not read is not added. `reapCaseRename` reaps
+  the old spelling only when a path the walk saw with the same fold is in
+  that set; otherwise the row is counted missing and the grace applies.
+  `isUnderErroredSubtree` still runs first. A failed flush and a held
+  reconcile record nothing. The unread line stays, and the reap line is
+  logged only when a row was reaped. The scanner's unset threshold is 1,
+  which deletes a first miss at once; the tests set
+  `config.DefaultDeleteAfterMissingScans` (3), the value serve wires, so
+  the kept row is visible at `missing_count` 1. A readable rename still
+  writes the new spelling and reaps the old one in the same pass. An
+  unchanged file still reaps a composition twin: the skip gate backs the
+  live spelling, so the unseen spelling goes at once.
+  (`TestAnUnreadCaseRenameKeepsTheOldRow`,
+  `TestAReadableCaseRenameReapsTheOldRowAtOnce`,
+  `TestScannerReapsTheUnseenCompositionOfOneFolder`.)
 - **…and a folder's cover reaches the tracks beside it when IT changes,
   not only when they do** (2026-09-29, backlog B141). A cover is read only
   when a track is extracted, and the skip gate extracts an unchanged audio
@@ -1189,6 +1219,27 @@ lost my library."
   it deadlocks the in-scan callers and, for external ones, blocks the scan for
   two library walks; and **don't widen the public `IsScanning`** to cover subtree
   scans, which drives the admin badge, the SSE fast tick and the booklet-GC skip.
+  The stand-down is `ErrDupeRestampDeferred` (the next bullet).
+- **An external restamp that finds a scan in flight returns
+  `ErrDupeRestampDeferred` and stamps nothing** (2026-10-14, backlog
+  B184). That check used to return `(0, nil)`. The duplicates sweeper
+  logged that as applied and did not re-arm: `IsScanning` sees a full
+  scan only. `ScanSubtree`'s restamp tail runs only when that scan
+  committed, settled, deleted or renamed a row, or a stamped row was
+  deleted outside it. A subtree scan of an unchanged folder stays in
+  `activeScans` for its whole body and then skips the tail, so a policy
+  change from highest-quality to off left the losing copy
+  `dupe_suppressed = 1` after the pass and after another subtree scan of
+  the same folder. The sweeper treats the sentinel like its `IsScanning`
+  branch: it puts the nudge back, waits `duplicatesDeferRetry`, and does
+  not call `sweepFinished`, so the Jobs card stays on "re-evaluating now"
+  and `dupe_summary` stays on the policy the last pass actually stamped.
+  The in-scan caller passes `insideScan`, never reaches the guard and so
+  never sees the sentinel. `noteRestampCovered` still runs only after
+  stamps commit. Don't take `s.mu`. Don't widen `IsScanning`.
+  (`TestAPolicyChangeDuringANoOpSubtreeScanIsDeferred`,
+  `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass`,
+  `TestDuplicatesSweeperReArmsWhenThePassDefers`.)
 - **A row deleted where no stamping pass follows reaches the duplicate stamps
   through a COUNT kept where every deletion passes** (2026-10-02, backlog
   B218). The console's delete retires its rows (`retireAndRescan`, threshold 1)
@@ -1470,6 +1521,19 @@ lost my library."
   const so the unlink set and the row set cannot diverge. The ill-formed-UTF-8
   arm needs its own enumeration. Variant enumeration is strict (abort before the
   CASCADE); waveform is best-effort.
+  **`ClearMissingCounts` does the same for the rows it deletes** (2026-10-14,
+  backlog B186). Its rendition list, its waveform list and its DELETE embed
+  `clearMissingTracksWhereSQL`. The files are removed after the commit. A
+  remove the filesystem refuses is logged and left for the orphan sweep, and
+  it does not fail the command. `dsd_peaks` has no file; those rows leave by
+  the tracks cascade. Leftover renditions are what made the orphan sweep
+  refuse: twelve of them beside one remaining rendition is the lost-index
+  refusal, and one of them with no variant row left is the empty-catalog
+  refusal. Both unlink nothing.
+  (`TestClearMissingCountsRemovesTheSidecarsTheDeleteDrops`,
+  `TestClearMissingCountsLogsASidecarItCannotRemove`,
+  `TestClearMissingSidecarQueriesShareTheDeletePredicate`,
+  `TestClearMissingLeavesNoRenditionForTheOrphanSweep`.)
 - **Every writer holds `Store.mu`; reads stay un-mutexed** (WAL handles
   concurrent readers). The mutex also protects multi-statement transactions and
   `SELECT sidecars → DELETE rows → os.Remove` ordering — `busy_timeout` is a
@@ -1602,6 +1666,26 @@ lost my library."
   merge set by grepping the actual `tags_json` writers, not from what a field
   "looks like"** — `MusicBrainzTrackID` was omitted on the belief it was
   extractor-owned when the acoustic fallback writes it.
+- **A string stored in `tags_json` is valid UTF-8, decoded where the format
+  says what the bytes are** (2026-10-14, backlog B181). Under go1.26.6
+  `json.Marshal` writes a byte that is not UTF-8 as the `\ufffd` escape, and
+  the decoded copy marshals that character raw, so `markStampIfUnchanged`
+  never matches and every version-stale re-read takes the full upsert. ID3v1
+  text is ISO-8859-1 (`latin1String`, the same reading as `diinText`) and a
+  RIFF INFO value is Windows-1252 (`windows1252Text`); valid UTF-8 is kept
+  in both, so a file that already stored UTF-8 does not change. A DSDIFF
+  DIIN chunk was already decoded. An APE tag is not read. Every other text
+  field is `strings.ToValidUTF8` before it is stored (`coerceStoredUTF8`,
+  on the track a scan writes and again on `marshalForStorage`'s clone).
+  The path column stays the bytes on disk; only the clone's path is
+  coerced, because that is what the next read compares.   **No
+  `ExtractorVersion` bump**: a row that was already valid UTF-8 marshals
+  the same. A row that already stores the replacement character is not
+  re-read by this change; the next re-read (a later bump, a changed file,
+  a cover or a lyrics sidecar) upserts once, because the decoded character
+  differs, and the scan after that stamps. Run the stamp test under
+  `GOTOOLCHAIN=go1.26.6`; go1.27 marshals the invalid bytes as the raw
+  replacement and the bug is invisible there.
 - **`plausibleDuration` has BOTH ends, and "empty" has three spellings**
   (ExtractorVersion 13, #966). The gate defended the ceiling alone until
   then: `d > 0` admits anything positive, and a forged header reaches
@@ -1888,12 +1972,46 @@ lost my library."
   after the last header packet and no segment data but the first bytes of a packet
   (the fixtures: 360 of 2,117 bytes, 610 of 1,441), and it wants mapping major version
   1, which libFLAC and ffmpeg both require (measured: both refuse 2). **ExtractorVersion
-  18**; the codec stays "OGG", and an Ogg row still has no sample rate, bit depth or
-  duration (backlog B118). The iOS app lists no `.ogg` or `.oga` from SMB or the device
-  and takes a bridge row's tags as strings: no twin, no Mirror-PR.
+  18** is the tag read. Format facts are ExtractorVersion 25 (the next bullet).
+  The iOS app lists no `.ogg` or `.oga` from SMB or the device and takes a bridge
+  row's tags as strings.
   `FuzzOggFLACReadsBackTheMetadataItCarries` lays blocks out in pages of any size and
   requires them back byte for byte, and `FuzzExtractOGG` carries Ogg FLAC seeds, both
   picture bombs among them: the guards meet them in the join.
+- **An Ogg row carries the format facts its container holds, and an Ogg FLAC
+  stream is classed as FLAC** (ExtractorVersion 25, 2026-10-14, backlog B118).
+  The `.ogg` / `.oga` branch used to stamp codec `OGG` and nothing else, so
+  Vorbis, Opus and Ogg FLAC all arrived with no sample rate, bit depth,
+  channel count or duration, and an Ogg FLAC file sat on every lossy list.
+  `extractOggWithContext` opens the file once. Vorbis and Opus are read from
+  the identification header (Vorbis rate and channels; Opus channels and the
+  48 kHz clock, duration minus the pre-skip) and stay codec `OGG`, with no
+  bit depth. Their duration is the last page's granule, and that page is
+  read from a window of one maximum Ogg page at the end of the file, never
+  the whole file: the page must end on the last byte, carry the same serial
+  as the first page, a non-negative granule and a matching CRC. Ogg FLAC
+  takes STREAMINFO from the join `oggFLACMetadata` already builds, through
+  the same `extractFLACFormatFromReader` a `.flac` file uses, plus the
+  channel count that reader does not store: codec `FLAC`, so
+  `canSetBitsPerSample` writes the depth and `IsLossyCodec` is false, the
+  audio MD5 when STREAMINFO carries one, and the duration from the total
+  sample count. Vorbis and Opus store the rate and the channels when the
+  header parses and a page of that stream ends at EOF with a non-negative
+  granule. A duration is stored only when `plausibleDuration` accepts it,
+  so a granule of 0 or one past a week leaves the duration unset. A
+  truncated or malformed file keeps the codec alone. A library with no Ogg
+  file re-reads each version-stale row once and stamps it. SACD ISO virtual
+  rows re-expand, as on every bump. `ProtocolVersion` stays 1. The app
+  already treats codec `FLAC` as lossless and still drops `bitsPerSample`
+  for an `.ogg` or `.oga` extension, and it does not index or play an Ogg
+  container the way it plays a `.flac` file, so the codec change is a
+  Mirror note and not an app change.
+  (`TestAnOggFLACStreamCarriesAFlacFilesFacts`,
+  `TestVorbisAndOpusCarryRateChannelsAndDuration`,
+  `TestACutOrGarbageOggKeepsTheCodecOnly`,
+  `TestVorbisDurationIsReadFromTheTail`,
+  `TestOggFormatLeavesFLACMP3AndM4AAlone`,
+  `TestScanner_V25_AnOggRowJoinsTheDelta_OtherRowsOnlyStamp`.)
 - **An ID3v2 tag's MusicBrainz ids and ReplayGain are read BY NAME, from its TXXX
   frames and the MusicBrainz UFID** (ExtractorVersion 19, 2026-09-29, backlog B116).
   dhowden files a TXXX frame as a `*tag.Comm` under `TXXX`, `TXXX_0`, … (the renaming
@@ -2061,9 +2179,34 @@ lost my library."
   because it failed open on an empty codec, until 2026-09-29). `Year()==0` (and a
   Vorbis 1, the next bullet) falls back to `rawDateYear`, `parseYearPrefix` over
   each raw date tag in turn — a valid ISO `2023-06-09` otherwise
-  indexes as year 0. `stringOf` iterates the REQUESTED aliases in priority order,
-  never `range raw` (Go map order is randomised, so a file carrying two matching
-  tags resolved differently across scans).
+  indexes as year 0. `stringOf` asks the requested aliases in the caller's
+  order, so DATE before YEAR stays stable. Two raw keys that normalise to
+  one of those aliases are chosen by the next bullet.
+- **Two raw keys that normalise to one `stringOf` alias are the first non-empty value in ascending raw-key order**
+  (2026-10-14, backlog B182). `stringOf` walked the raw map for each alias
+  and returned the first key whose `normaliseRawTagKey` matched. Go 1.26
+  starts every `range` at a random slot (`Iter.Init` sets `entryOffset`
+  and `dirOffset` from `rand()`), so fifty extractions of one two-key map
+  saw both values: MP4 `REPLAYGAIN_TRACK_GAIN` beside
+  `replaygain_track_gain` (47 and 3), Vorbis `MusicBrainz Album Id` beside
+  `MUSICBRAINZ_ALBUM_ID` (42 and 8). The comment beside the loop called
+  that order deterministic, which held across aliases only.
+  `stringOfAlias` collects every matching key, sorts those raw keys, and
+  returns the first value `coerceRawTagValue` accepts. A value that trims
+  to nothing leaves the next key. Ascending byte order is the same
+  tie-break `id3v2NamedValues` uses on the key. An exact-case canonical
+  key was declined: it would crown one tagger's spelling, and no field
+  has a single canonical spelling. A file with one matching key is
+  unchanged, so `ExtractorVersion` stays 24. The other raw-map ranges
+  were already decided: `hasAnyRawKey` is presence,
+  `extractMultiValueTagFromRaw` keeps the longest list then the
+  lexicographically smaller slice, `id3v2NamedValues` sorts before it
+  walks, `stripMP4FreeformLocales` rewrites every value, and lyrics
+  `Pick` is a total order. `namedValueOf` and `rawDateYear` go through
+  `stringOf`.
+  (`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction`,
+  `TestAnEmptyEarlierRawKeyLeavesTheLaterValue`,
+  `TestOneSpellingOfAnAliasReadsTheValueItCarries`.)
 - **dhowden's Vorbis reader answers year 1 for a DATE it cannot parse, so a
   Vorbis 1 is re-read like a 0** (ExtractorVersion 22, backlog B222, B234).
   `metadataVorbis.Year()` (FLAC, Ogg Vorbis, Opus, Ogg FLAC: every reader whose
@@ -5375,9 +5518,11 @@ no failing test — which is the shape to expect in this area.
   all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` does
   NOT, because the `--gc` inventory passes a nil `Consider`, so a dot-FILE is
   unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk). Those rows could not
-  be reaped by `--gc` at all, and `manifest clear-missing` is not a route —
-  `ClearMissingCounts` deletes from `tracks` + `folders` and never touches
-  `track_variants`. The source-mirrored layout hid it for years: `WalkDir`
+  be reaped by `--gc` at all, and `manifest clear-missing` is not a route past
+  this refusal. `ClearMissingCounts` deletes tracks with `missing_count > 0`,
+  and with them the variant and analysis rows that cascade and their files. It
+  does not delete the variant rows of tracks that are still present, so it
+  never supplies the reverse sweep's removed count. The source-mirrored layout hid it for years: `WalkDir`
   removes no directories, so an emptied subtree still leaves dirents behind.
   It now takes the forward sweep's `removed` count and skips the refusal for
   **EMPTY alone**; missing, unreadable and not-a-directory still refuse however

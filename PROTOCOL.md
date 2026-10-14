@@ -435,6 +435,13 @@ rule below). The wire shape is
 unchanged and `ProtocolVersion` stays 1: a pre-v11 bridge simply omits
 the field for those rows, and a client keeps whatever fallback it had.
 
+Since ExtractorVersion 25 an Ogg row derives `duration` too. Ogg FLAC takes
+it from the STREAMINFO total sample count over the sample rate, the same
+reading as a `.flac` file. Vorbis and Opus take it from the last page's
+granule position; Opus subtracts the pre-skip and divides by 48 kHz. The
+same plausibility gate applies, and a truncated file omits the field.
+`ProtocolVersion` stays 1.
+
 **One plausibility gate applies to every duration the bridge stamps, and
 it has BOTH ends.** A value is omitted below **0.1 s** as well as at or
 past a week, so a `duration` that reaches a client is always within
@@ -471,7 +478,9 @@ omit both and clients treat absence as before):
   ships (docs/DSTFeasibility.md).
 - `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
   `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
-  Today only the DFF extractor populates it; other formats omit it.
+  The DFF extractor populates it, and since ExtractorVersion 25 an Ogg
+  FLAC, Vorbis or Opus row does too. A native FLAC and the other formats
+  omit it. `ProtocolVersion` stays 1.
 
 DST rows are TYPED like any other DSD row: `isDSD: true`,
 `sampleRate` = the DSD rate, `bitsPerSample: 1` — all stamped together

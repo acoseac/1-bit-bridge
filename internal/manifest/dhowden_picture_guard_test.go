@@ -102,18 +102,7 @@ func mbpComment(key string, dataLen uint32, payload []byte) string {
 // oggCRC is the Ogg page checksum: CRC-32 with polynomial 0x04c11db7, no
 // reflection, no final XOR, over the page with its CRC field zeroed.
 func oggCRC(page []byte) uint32 {
-	var crc uint32
-	for _, v := range page {
-		crc ^= uint32(v) << 24
-		for range 8 {
-			if crc&0x80000000 != 0 {
-				crc = crc<<1 ^ 0x04c11db7
-			} else {
-				crc <<= 1
-			}
-		}
-	}
-	return crc
+	return oggPageCRC(page)
 }
 
 // oggStream lays packets out as Ogg pages of one stream, splitting each

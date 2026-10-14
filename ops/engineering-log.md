@@ -958,9 +958,9 @@ The bridge groups tracks by the iOS client's own duplicate-collapse identity and
 - **Tiers are evidence claims**: `different-format` = different masters (NEVER framed as redundant; renders per-member geometry inline), `same-format` = inference, `identical-audio`/`different-audio` = STREAMINFO-MD5-proven (v32; the ONLY tier allowed to say "reclaimable" is identical-audio), `inconclusive` absorbs every uncertainty and is NEVER suppressed, `self-nested` = upload accidents detected by **collapsed-path equality** (an eponymous album's run-of-2 can never read as one). `classify()` has a len<2 inconclusive floor.
 - **Winner election** (`dupes.PlanSuppression`): lossless > bits > rate > size > shallower/shorter/lexicographic path — a strict total order so winners never flap (flapping = indexed_at churn). Self-nested keeps the shallowest per twin class. **DSD and PCM are NEVER cross-suppressed** (user decision 2026-08-05: both editions serve; ranking applies within each domain). `different-audio` (proven remasters) never suppresses under any mode, and a previously-suppressed copy AUTO-UN-SUPPRESSES when MD5 evidence lands (restamp diff + bump). Every suppression unit serves exactly one winner. The dupes-side lossy set mirrors `manifest.IsLossyCodec` (import cycle forbids calling it); `TestDupesLossyCodecsMirrorIsLossyCodec` is the lockstep pin.
 - **Stamping pass = pass #6 of Scan's success tail** (`Scanner.RestampDuplicates`), AFTER all metadata reconciliation so keys see reconciled tags. v31 columns `dupe_group_id`/`dupe_tier`/`dupe_suppressed` are COLUMN-ONLY (v25/v28 rule — no json tags, never spliced to wire); upserts deliberately DON'T touch them (fresh INSERT = served; the same scan's tail re-stamps). Diff-vs-current → zero writes on a stable library. **Corrected 2026-08-06 — "the tail" is THREE successful exits, and ScanSubtree is a writer too.** Scan now dispatches the pass from a `defer` (scanOK-gated, registered after the post-scan-hook defer so LIFO runs stamps first) because the ctx-done skip and the routed-exclusion-set failure both `return count, nil` AFTER the deletion pass has committed — reached inline at the bottom, a reaped winner left its twin `dupe_suppressed = 1` with no served copy in its group, i.e. an album invisible to every client. `ScanSubtree` (the watcher's path) gained the same tail: its upserts retag rows out of / into groups and its bounded deletion pass reaps winners, and the upsert comment's premise ("the full-scan tail runs in the SAME scan as these upserts") was never true there — a de-duplicated row stayed hidden until the next full scan, up to `ScanIntervalSec` (6h) away. Its pass is whole-library like Scan's: duplicates group ACROSS directories, so a subtree-scoped election cannot see the twin in another folder. **The ctx-done leg is the one exit that still can't restamp** (a cancelled context cannot write) — documented, heals on the next scan. **Best-effort here is NOT symmetric: an unstamped row is served (fail-open), a STALE SUPPRESSION hides one (fail-closed) and only another stamping pass clears it.** `ScanSubtree`'s pass is gated on that scan having committed or reaped a row (the stamps derive only from `tracks`, and unlike Scan this runs per debounced watcher event — an unconditional pass would put two full-table `json_extract` streams on every noise event). (Since 2026-10-02 the gate also opens when a row that carried a stamp was deleted since the last pass, wherever it was deleted, and a full `Scan` then restamps before its walk too: the console's delete retires its rows before its subtree scan, which left the gate shut, backlog B218.) Locked by `TestScanSubtree_RestampsAfterReapingTheServedWinner` + `TestScan_RestampsWhenTheReconciliationTailBailsEarly`. `ApplyDupeStamps` never touches `enriched_at`/`tags_json`; **`indexed_at` strict-advances ONLY on suppressed→served transitions** — reappearing rows MUST bump or deltas never see them. Don't add a bump on suppression; don't move the pass before reconciliation. **The suppression→delta story CHANGED with the deletion journal** (2026-08-19 sync-redesign batch): a served→suppressed transition now writes a `manifest_deletions` tombstone (`DupeStamp.JournalDelete`, same transaction as the stamp) and the since-leg emits it as `deleted: [paths]`, so suppressed copies no longer linger on synced clients until a full sync — the pre-journal sentence that stood here ("iOS deltas never delete; suppressed rows linger invisibly…") described the v0.1.9–v1.9 behaviour. `indexed_at` is STILL never bumped on suppression; the tombstone is the delta signal, and any non-suppressed stamp clears the path's tombstone (see `deletion_journal.go`'s header for the coverage/retention/mass-op contract).
-- **The stamping pass re-checks for an in-flight scan immediately BEFORE `ApplyDupeStamps`, not just at the top.** `runDuplicatesSweeper` gates on `IsScanning()` and then calls `RestampDuplicates` WITHOUT `s.mu`, so a scan starting in that gap runs its own tail from fresher state while the sweeper is still mid-snapshot (two full-library streams + the election) — and the stale commit lands after it, un-suppressing rows the scan just suppressed. `Scanner.activeScans` (an `atomic.Int64` incremented by BOTH `Scan` and `ScanSubtree`) is the predicate; the exported `RestampDuplicates` abandons at the commit point when it is non-zero, while the scan tails call the unexported `restampDuplicates(ctx, insideScan=true)` and are exempt — they ARE what makes it non-zero. **Don't take `s.mu` instead** (deadlocks the in-scan callers; for external ones it blocks the scan for two library walks) and **don't widen the public `IsScanning`** to cover subtree scans — it drives the admin badge, the SSE fast tick and the booklet-GC skip. Residual, accepted: a scan that starts AND finishes inside one pass is undetectable. Locked by `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass` (via the `beforeApplyDupeStampsHookForTests` seam, which is what pins the guard's POSITION) + `TestScanSubtree_MarksItselfScanInFlight`.
+- **The stamping pass re-checks for an in-flight scan immediately BEFORE `ApplyDupeStamps`, not just at the top.** `runDuplicatesSweeper` gates on `IsScanning()` and then calls `RestampDuplicates` WITHOUT `s.mu`, so a scan starting in that gap runs its own tail from fresher state while the sweeper is still mid-snapshot (two full-library streams + the election) — and the stale commit lands after it, un-suppressing rows the scan just suppressed. `Scanner.activeScans` (an `atomic.Int64` incremented by BOTH `Scan` and `ScanSubtree`) is the predicate; the exported `RestampDuplicates` abandons at the commit point when it is non-zero, while the scan tails call the unexported `restampDuplicates(ctx, insideScan=true)` and are exempt — they ARE what makes it non-zero. **Don't take `s.mu` instead** (deadlocks the in-scan callers; for external ones it blocks the scan for two library walks) and **don't widen the public `IsScanning`** to cover subtree scans — it drives the admin badge, the SSE fast tick and the booklet-GC skip. Residual, accepted: a scan that starts AND finishes inside one pass is undetectable. Locked by `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass` (via the `beforeApplyDupeStampsHookForTests` seam, which is what pins the guard's POSITION) + `TestScanSubtree_MarksItselfScanInFlight`. **Corrected 2026-10-14 (backlog B184):** the stand-down returns `ErrDupeRestampDeferred`, not `(0, nil)`. A subtree scan that committed nothing skips its tail, so the nil success was logged as applied and the sweeper did not re-arm. The sweeper re-arms on the sentinel and does not call `sweepFinished`. Record at the 2026-10-14 B184 entry.
 - **Served-population rule**: every number leaving `/v1` describes the served set. `ListServedTracks`/`StreamServedTracks`/`ListServedTracksPage`/`CountServedTracks` power the manifest (stream+page+total), `enrichmentProgress` (EnrichmentCounts' numerator gained `AND dupe_suppressed = 0`; `MAX(enriched_at)` deliberately unscoped), health `tracksIndexed`, the DLNA adapter (one `ListServedTracks` call filters the whole CDS surface), and the smart-playlist pools (predicate baked into `trackFeatureSelect`'s WHERE — callers append with AND — because mixes PERSIST paths and serve them verbatim). **The full-store readers stay unfiltered on purpose and MUST keep seeing suppressed rows**: `TrackPaths`/`TrackPathsUnder` (deletion-pass snapshots — filtering them would REAP suppressed rows), `ListTracks`/`StreamTracks` (reconciliation passes, fingerprint sweeper, upscale CLI), `UnenrichedTracks`, `GetTrack`, admin rollups/browse/composition (operator truth — the admin dashboard's TracksIndexed deliberately re-diverges from the wire count). `/v1/list`/`stat`/`read`/`download` are fs/path-keyed and unfiltered (stale clients keep working; suppressed files stay downloadable).
-- **`duplicates.filter` is the one HOT-APPLYING feature setting** (highest-quality default | same-format | off; TailscaleMode-style resolver, validated at load). The settings PATCH fires `Deps.TriggerDuplicatesPass` → buffered-1 nudge → `runDuplicatesSweeper` (bgWriters-joined, nudge-only — no tick, no startup run; DEFERS when a scan is in flight because the scan's own tail reads the policy closure at runtime). `RestartRequired` stays false. **`SetDupePolicy` MUST be wired BEFORE `RunPeriodic` starts** — an unwired scanner stamps with FilterOff, which on boot would CLEAR every suppression (mass indexed_at bumps → iOS delta churn) before the next pass re-suppressed; main.go late-binds the live config holder through an atomic pointer with the boot snapshot as fallback. Unwired (tests/CLI) = groups still stamped, NOTHING suppressed (fail-open; stats work with filter off).
+- **`duplicates.filter` is the one HOT-APPLYING feature setting** (highest-quality default | same-format | off; TailscaleMode-style resolver, validated at load). The settings PATCH fires `Deps.TriggerDuplicatesPass` → buffered-1 nudge → `runDuplicatesSweeper` (bgWriters-joined, nudge-only — no tick, no startup run; DEFERS when a scan is in flight because the scan's own tail reads the policy closure at runtime). **Corrected 2026-10-14 (backlog B184):** a subtree scan that commits nothing does not stamp. The sweeper also re-arms when `RestampDuplicates` returns `ErrDupeRestampDeferred`. `RestartRequired` stays false. **`SetDupePolicy` MUST be wired BEFORE `RunPeriodic` starts** — an unwired scanner stamps with FilterOff, which on boot would CLEAR every suppression (mass indexed_at bumps → iOS delta churn) before the next pass re-suppressed; main.go late-binds the live config holder through an atomic pointer with the boot snapshot as fallback. Unwired (tests/CLI) = groups still stamped, NOTHING suppressed (fail-open; stats work with filter off).
 - **`tracks.audio_md5` (v32) rides the version-stale stamp leg** — the PR-D trap: `marshalForStorage` can't see the unexported `Track.audioMD5`, so byte-identical rows take `versionStampOnly` → `StampExtractorVersionBatch` now takes `[]*Track` and carries the hash via `COALESCE(NULLIF(?,''), audio_md5)` (fresh EMPTY must not erase a known value — this leg only runs on proved-identical rows), while both upserts write `excluded.audio_md5` UNCONDITIONALLY (bytes changed → stale hash must die, empty included). Reversing either direction fails silently. All-zero STREAMINFO MD5 = "not computed" sentinel → "" (else every checksum-less encode reads bit-identical). `ExtractorVersion` is 3; the bump's one-shot re-extract IS the column backfill (no migration backfill possible — needs the file).
 - **Admin page reads the persisted `dupe_summary` scan_state document** (written at stamp time) — zero-cost tiles exactly consistent with the stamps, NO TTL/singleflight machinery, refreshed on the SSE `stats` isScanning true→false edge (Diagnostics-page precedent; deliberately NO new SSE event). Group listing = live paged query over the stamped columns (v31 partial index). The E2E browser pass caught `formatTimeAgo(sum.stampedAt)` needing `new Date(...)` — render tests pin ids, not JS runtime types; keep the live-browser step for new admin pages.
 ---
@@ -41864,6 +41864,362 @@ seconds, all against a five-second budget. Replacing the sleep with
 `select {}` stayed up for 30 of 30 half-second waits on this Mac, so the
 local suite cannot show that revert red. The duration check is what
 fails the recorded Windows shape.
+
+## 2026-10-14 — a case-only rename keeps the old row when the new spelling was not read (backlog B175)
+
+### The defect
+
+`Scan` and `ScanSubtree` build `caseOnlyRenames` from paths the walk saw
+and reap every match at once. The comment beside the reap said the new
+spelling had already been upserted this pass. Since B134 (`keepUnread`,
+#1113) a worker writes a row only from a read that completed. A new
+spelling has no existing row, so an EIO on `openAudio` writes nothing and
+does not touch the old row. The deletion pass then deleted the old row.
+Both spellings were gone, and `msgUnreadAudio` still said the rows were
+kept.
+
+On this Mac (APFS, case-insensitive), `Album/01.flac` was indexed, the
+folder was renamed to `album`, and the scanner's `openAudio` seam answered
+`EIO`. After `Scan` and after `ScanSubtree` of the library root,
+`GetTrack("Album/01.flac")` and `GetTrack("album/01.flac")` were both nil.
+The log carried the unread warning and `reaped stale rows from case-only
+rename` with `renamed=1`.
+
+The scanner's unset `effectiveDeleteThreshold` is 1, so counting the old
+row missing would still delete it on that first miss. Serve wires
+`config.DefaultDeleteAfterMissingScans` (3). The tests set that threshold
+so a kept row is `missing_count` 1.
+
+### The fix
+
+The workers and the writer fill `backedPaths`. The writer adds each path
+a successful `UpsertTrackBatch` or `StampExtractorVersionBatch` persisted.
+A worker adds a path the skip gate accepted, and a path `keepUnread` kept
+because that exact spelling already had a row. A new spelling the worker
+could not read is not added. The set is mutexed: the workers and the
+writer fill it together, and the deletion pass reads it after both have
+returned. It folds the paths that are in both that set and `seen`.
+`reapCaseRename` reaps an old spelling only when that fold is backed.
+Anything else goes to `IncrementMissingTracksAndDeleteAtThreshold`.
+`isUnderErroredSubtree` still runs first. A failed flush and a held
+reconcile are not recorded, so they are counted missing. The reap line
+stays behind `len(renamed) > 0`.
+
+A readable rename still takes the full upsert of the new spelling, so the
+old row is reaped in the same pass, and the first-indexed date still
+moves with it.
+
+Recording commits alone left
+`TestScannerReapsTheUnseenCompositionOfOneFolder` red. The second scan's
+skip gate found the live spelling unchanged and wrote nothing, so the
+fold was not backed and the planted composition was counted missing
+(`missing=2 deleted=0` at threshold 3). That file is on disk under the
+live spelling and the row for it already exists, so the unseen
+composition is reaped at once once the skip gate backs the live path. The
+B175 case, a new spelling with no row, is still not backed.
+
+### The control
+
+Restoring an unconditional true from `reapCaseRename` (the old immediate
+reap) made `TestAnUnreadCaseRenameKeepsTheOldRow` fail again on both the
+scan and the subtree subtest: `GetTrack Album/01.flac` had no row. That
+edit was reverted and not committed.
+`TestAReadableCaseRenameReapsTheOldRowAtOnce` keeps the old row absent and
+the new row present, with one reap line.
+
+## 2026-10-14 — version-stale re-reads stamp once text is valid UTF-8 (backlog B181)
+
+### What was wrong
+
+`markStampIfUnchanged` compares `marshalForStorage` of the fresh extract
+with `marshalForStorage` of the row decoded from `tags_json`. On go1.26.6,
+`json.Marshal` writes a byte that is not UTF-8 as the `\ufffd` escape. The
+decoded copy holds U+FFFD and marshals those three bytes raw, so the two
+never compare equal. Every version-stale re-read of such a row takes the
+full upsert: `indexed_at` moves and `enriched_at` resets. go1.27 writes the
+invalid bytes as the raw replacement on both sides, so the same files stamp
+there and the bug is invisible. CI and `go.mod` are 1.26.6.
+
+The bytes came from formats that are not UTF-8. ID3v1 fields are
+ISO-8859-1 and dhowden returns them raw (`ReadID3v1Tags`). A RIFF LIST/INFO
+value is a null-terminated string in the system character set; Windows
+writers use Windows-1252, and `parseWAVINFOBlock` copied the bytes. A
+non-UTF-8 file name reaches the path guess the same way. A DSDIFF DIIN
+chunk was already decoded by `diinText`. Nothing in this process reads an
+APE tag.
+
+### The fix
+
+ID3v1 title, artist and album go through `latin1String` when
+`m.Format()` is ID3v1: valid UTF-8 stays, every other byte is the code
+point of the same number, which is what `diinText` already did. A RIFF
+INFO value goes through `windows1252Text` after the NUL cut: valid UTF-8
+stays, and 0x80–0x9F is the Windows-1252 row (0x80 is €). Every other
+text field is `strings.ToValidUTF8` in `coerceStoredUTF8`, called from
+`ExtractWithContext` and again on `marshalForStorage`'s clone, path
+included on the clone only. The path column stays the bytes on disk.
+
+`ExtractorVersion` stays 24. A row that was already valid UTF-8 marshals
+the same, so a bump would re-read the library to change nothing that was
+right. A row that already stores U+FFFD is not re-read until a later bump
+or a file, cover or lyrics change; that re-read upserts once and the one
+after it stamps.
+
+### The tests
+
+`TestScanner_AVersionStaleRereadOfID3v1AndWindows1252Stamps`, under
+`GOTOOLCHAIN=go1.26.6` before the fix: an ID3v1-only MP3 whose title ends
+in 0xE9 and a WAV whose INAM ends in 0x80 both stored U+FFFD, and two
+version-stale re-reads each moved `indexed_at` and reset `enriched_at`.
+The clean FLAC only stamped. After the fix the MP3 title is Café, the
+WAV title is Caf€, a UTF-8 INFO title stays Café, and both re-reads
+stamp. `TestDeclaredCharsetsAndTheUTF8Fallback` pins the three readings
+and that the fallback does not rewrite the path column. Undoing the
+ID3v1 and Windows-1252 decodes makes the scanner test fail again.
+
+## 2026-10-14 — a duplicates-policy change waits when a no-op subtree scan is in flight (backlog B184)
+
+### The defect
+
+`RestampDuplicates` re-checks `Scanner.activeScans` immediately before
+`ApplyDupeStamps` and, for an external caller, used to return `(0, nil)`.
+The comment said the in-flight scan's tail applies the current policy.
+`ScanSubtree` runs that tail only when the scan committed, settled,
+deleted or renamed a row, or a stamped-row deletion is still uncovered.
+A subtree scan of an unchanged folder increments `activeScans` for its
+whole body and then skips the tail.
+
+The duplicates sweeper's own `IsScanning` check sees a full scan only, so
+it entered the pass. `(0, nil)` was logged as `duplicates restamp applied`
+and recorded with `sweepFinished`, which sets the Jobs card's
+`lastFinishedAt` and clears `running`. The nudge was not put back.
+`SaveDupeSummary` runs only after stamps commit, so the duplicates page
+kept saying "Re-evaluating…" while the stamps stayed on the old policy,
+until the next full scan.
+
+Measured with the real scanner: a smaller copy suppressed under
+highest-quality, the policy set to off, and a no-op `ScanSubtree` of an
+unchanged folder held in flight at `beforeApplyDupeStampsHookForTests`
+(the store lock taken so the skip path blocks in
+`ResetTrackMissingCount`). The pass returned `(0, <nil>)` and logged
+`duplicate stamping abandoned: scan started mid-pass (its tail applies
+the current policy)` with `stamps=1`. The losing copy stayed
+`dupe_suppressed = 1` after that pass and after a second no-op subtree
+scan of the same folder.
+
+### The fix
+
+The stand-down returns `ErrDupeRestampDeferred` and writes nothing,
+including no `noteRestampCovered` and no `dupe_summary`. The sweeper
+treats that error like its `IsScanning` branch: it puts the nudge back,
+waits `duplicatesDeferRetry`, and does not call `sweepFinished`. The
+Jobs card therefore stays on "re-evaluating now" (`running` is still
+set from `sweepStarted`) and the summary stays on the policy the last
+pass stamped. The commit-time re-check stays on `activeScans`. The
+in-scan caller passes `insideScan`, never reaches the guard and so never
+sees the sentinel (the review round removed its unreachable handling).
+`IsScanning` is not widened.
+
+The only production caller of `RestampDuplicates` is the sweeper. Scan
+and `ScanSubtree` go through `restampDuplicatesNonFatal`. A pass that
+stands down still leaves a deletion it saw uncovered
+(`TestAStampingPassThatDoesNotApplyLeavesTheDeletionUncovered`).
+
+### The control
+
+Restoring `return 0, nil` from the stand-down made
+`TestAPolicyChangeDuringANoOpSubtreeScanIsDeferred` fail again:
+`pass during a no-op subtree scan = (0, <nil>), want (0, deferred)`.
+That edit was reverted and not committed.
+`TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta` still clears the
+suppression at once when no scan is in flight, and the deferred test's
+retry does the same once the parked scan has returned.
+
+## 2026-10-14 — `stringOf` picks one raw key per alias (backlog B182)
+
+### What was wrong
+
+`stringOf` walks the caller's aliases in order, which is stable across
+scans. For each alias it ranged the raw map and returned the first key
+whose `normaliseRawTagKey` matched and whose value coerced to a non-empty
+string. Go 1.26's swiss maps start every range at a random slot:
+`Iter.Init` sets `entryOffset` and `dirOffset` from `rand()`
+(`src/internal/runtime/maps/table.go`). Two raw keys that normalise to one
+alias therefore flap.
+
+A probe of one map, fifty ranges, `GOTOOLCHAIN=go1.26.6`:
+`REPLAYGAIN_TRACK_GAIN` 47, `replaygain_track_gain` 3. Fresh maps, fifty:
+`MUSICBRAINZ_ALBUM_ID` 9, `MusicBrainz Album Id` 41. Through
+`populateFromTagMetadata`, fifty extractions of one map:
+replay gain `-6.00` 47 and `-3.00` 3; album id
+`11111111-1111-4111-8111-111111111111` 42 and
+`22222222-2222-4222-8222-222222222222` 8
+(`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction`, before the
+fix). A flapping MusicBrainz id or gain is a changed row on every
+version-stale re-read.
+
+The other raw-map ranges do not pick a value that way. `hasAnyRawKey` is
+a presence boolean. `extractMultiValueTagFromRaw` already keeps the
+longest non-empty slice, then the lexicographically smaller slice.
+`id3v2NamedValues` sorts UFID, then dhowden's rename index, then the raw
+key. `stripMP4FreeformLocales` rewrites every freeform value.
+`applyEmbeddedLyricsFromTag` hands every frame to `lyrics.Pick`, which
+sorts by a strict total order. `namedValueOf` and `rawDateYear` call
+`stringOf`, so they follow this fix. Year, track and disc integers come
+from dhowden's accessors after a presence check.
+
+### The fix
+
+`stringOfAlias` collects every raw key that normalises to the alias,
+sorts those keys with `sort.Strings`, and returns the first value
+`coerceRawTagValue` accepts. Empty and whitespace values are still
+skipped, so a later key can answer. Map keys are unique, so the order
+has no ties. The alias loop stays the caller's order.
+
+Ascending raw-key order is the tie-break `id3v2NamedValues` already uses
+on the key. An exact-case canonical key was declined: Picard writes
+`REPLAYGAIN_TRACK_GAIN` and `MusicBrainz Album Id`, other taggers write
+the lowercased form, and no field has one spelling the spec names. The
+rule claims the same file always reads the same way. Under `<`,
+`REPLAYGAIN_TRACK_GAIN` answers before `replaygain_track_gain`, and
+`MUSICBRAINZ_ALBUM_ID` answers before `MusicBrainz Album Id`.
+
+`ExtractorVersion` stays 24. A file with one matching key has nothing to
+choose, so its reading is unchanged. A file that carried two spellings of
+one alias stops flapping on the next re-read; that re-read can take the
+full upsert once, and the scan after it stamps.
+
+### The control
+
+Restoring the first-match range inside `stringOf` made
+`TestTwoSpellingsOfOneAliasReadOneValueOnEveryExtraction` fail again:
+replay gain saw `-6.00` 47 and `-3.00` 3, and the album id saw the spaced
+UUID 46 and the underscored UUID 4. That edit was reverted and not
+committed. `TestOneSpellingOfAnAliasReadsTheValueItCarries` reads each
+spelling alone, fifty times, as the value that key carries.
+`TestAnEmptyEarlierRawKeyLeavesTheLaterValue` keeps the skip of a
+whitespace value.
+
+## 2026-10-14 — clear-missing unlinks the sidecars its cascade drops (backlog B186)
+
+### The defect
+
+`ClearMissingCounts` (`bridge manifest clear-missing`) deleted every
+filesystem track with `missing_count > 0` and every such folder. The
+tracks cascade dropped `track_variants`, `track_analysis` and
+`dsd_peaks` in the same statement. The command listed none of the files
+those rows named, so the rendition and the waveform stayed on disk
+after the rows were gone. `dsd_peaks` is a row only; it has no file.
+
+The #941 sentence in this file and in `CLAUDE.md` said the command
+deletes from `tracks` and `folders` and never touches `track_variants`.
+The cascade has touched those rows since the tables existed. What the
+sentence was reaching for is still true, and stays in the #941 bullet:
+clear-missing is not a route past the reverse sweep's empty-directory
+refusal, because it deletes missing tracks and not the variant rows of
+tracks that are still present. The #941 entry further up is left
+as it was written.
+
+Measured before the unlink, through the real store. A missing track
+with a rendition, a waveform and a peak: the command returned the track
+count, the track and the three rows were gone, and both files were
+still on disk. A present track and a routed track kept their files.
+The orphan sweep, given those leftovers, unlinked nothing and refused.
+Twelve renditions beside one remaining rendition is the lost-index
+refusal (`msgOrphanRefusal`, "the INDEX was lost"): 12 of 13 files,
+92%, more orphans than the one row, over the 20% threshold. One
+rendition with no variant row left is the empty-catalog refusal
+(`msgOrphanEmptyCatalog`), which fires below the floor of ten and
+names a reset or a root wipe, not a lost index. Waveforms are
+`.waveform.bin` and this sweep does not consider them. An earlier
+fixture wrote `keep/01.flac` and `gone/01.flac` to the same basename
+under the variants directory, so the walk saw 11 orphans of 12 files
+and still refused; the paths are `keep/kept.flac` and
+`gone/track-NN.flac` now.
+
+### The fix
+
+The rendition list and the waveform list embed
+`clearMissingTracksWhereSQL`, the predicate the DELETE and the journal
+already share, so a routed row is spared by both and the two sets
+cannot drift. `doomedReapSidecarsTx` runs on the clear's own
+transaction, before the journal and the DELETE: a variant listing that
+fails aborts before the cascade, and a waveform listing stays
+best-effort, as in the threshold reap. `removeSidecarFiles` runs after
+the commit. A remove the filesystem refuses is the existing warning
+(`remove sidecar`) and does not change the command's error or its
+count. The return is still tracks plus folders.
+
+### The control
+
+Dropping the `removeSidecarFiles` call, and keeping the listing so the
+package still builds, made
+`TestClearMissingCountsRemovesTheSidecarsTheDeleteDrops` fail again on
+the two files, and
+`TestClearMissingLeavesNoRenditionForTheOrphanSweep` fail again on both
+refusals above. That edit was reverted and not committed. The same
+test keeps a present track's files and a routed track's files, and
+still deletes a missing track that has no sidecars (count 2: that
+track and the one that had files). A rendition path that is a
+non-empty directory cannot be removed: the command returns nil, the
+row is gone, the directory stays, the waveform beside it is removed,
+and one `remove sidecar` warning is logged.
+
+## 2026-10-14 — Ogg rows carry format facts, and Ogg FLAC is classed FLAC (backlog B118)
+
+### What was wrong
+
+The `.ogg` / `.oga` branch stamped codec `OGG` and returned. B102 reads
+an Ogg FLAC file's tags from the header-packet join and left the format
+facts for this entry. Measured on `testdata/ogg/ffmpeg_pages.oga` and
+`libflac_picture.oga`, and on a Vorbis and an Opus page built the same
+way: `SampleRate`, `BitsPerSample`, `Channels` and `Duration` were all
+nil. `IsLossyCodec("OGG")` is true, so an Ogg FLAC stream sat on every
+lossy list beside Vorbis and Opus.
+
+### The fix
+
+`ExtractorVersion` is 25. `extractOggWithContext` opens the file once.
+
+Ogg FLAC reads STREAMINFO through `extractFLACFormatFromReader` on the
+join `oggFLACMetadata` already builds, then the channel count that
+reader does not store (the byte at offset 20 of the join). The codec
+becomes `FLAC`, so `canSetBitsPerSample` writes the depth and
+`IsLossyCodec` is false. The audio MD5 is stored when STREAMINFO's
+checksum is not all zeros. Duration is the total sample count over the
+rate, and only when `plausibleDuration` accepts it. The join is in
+memory, so the file is not read past the header packets B102 already
+stops at.
+
+Vorbis reads version 0, channels and sample rate from the
+identification header. Opus reads version 1, the channel count and the
+pre-skip, and stores the 48 kHz clock rather than the input rate. Both
+stay codec `OGG` and carry no bit depth. Duration is the granule of the
+page that ends on the last byte of the file, same serial, non-negative
+granule, matching CRC. Opus subtracts the pre-skip and divides by
+48 kHz. That page is taken from one maximum Ogg page at the end
+(65,307 bytes), never a walk of the file. A granule of 0 stores the
+rate and the channels and leaves duration unset. A negative granule, a
+page that does not end at EOF, or a header that does not parse leaves
+the codec alone.
+
+A library with no Ogg file re-reads each version-stale row once. Rows
+that marshal the same only stamp. SACD ISO virtual rows re-expand, as
+on every bump. `ProtocolVersion` stays 1. The app already treats codec
+`FLAC` as lossless. It still drops `bitsPerSample` when the extension
+is `.ogg` or `.oga`, it does not list those extensions in its own
+scanner, and playback of an Ogg container is not the `.flac` path. No
+iOS change.
+
+### The control
+
+Replacing `applyJoinedFLACFacts` and `applyOggLossyFacts` with no-ops
+made the Ogg fact tests fail again: codec stayed `OGG`, and rate,
+depth, channels, duration and the audio MD5 were nil. The native FLAC,
+MP3 and M4A assertions in the same run stayed green. That edit was
+reverted and not committed. A file cut so no page ends at EOF, and a
+buffer that is not an Ogg page, still extract as codec `OGG` with no
+facts.
 
 ## 2026-10-14 — the "mpd" foreign sentinel (iOS B317)
 
