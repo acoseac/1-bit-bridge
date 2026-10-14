@@ -41864,3 +41864,65 @@ seconds, all against a five-second budget. Replacing the sleep with
 `select {}` stayed up for 30 of 30 half-second waits on this Mac, so the
 local suite cannot show that revert red. The duration check is what
 fails the recorded Windows shape.
+
+## 2026-10-14 — a case-only rename keeps the old row when the new spelling was not read (backlog B175)
+
+### The defect
+
+`Scan` and `ScanSubtree` build `caseOnlyRenames` from paths the walk saw
+and reap every match at once. The comment beside the reap said the new
+spelling had already been upserted this pass. Since B134 (`keepUnread`,
+#1113) a worker writes a row only from a read that completed. A new
+spelling has no existing row, so an EIO on `openAudio` writes nothing and
+does not touch the old row. The deletion pass then deleted the old row.
+Both spellings were gone, and `msgUnreadAudio` still said the rows were
+kept.
+
+On this Mac (APFS, case-insensitive), `Album/01.flac` was indexed, the
+folder was renamed to `album`, and the scanner's `openAudio` seam answered
+`EIO`. After `Scan` and after `ScanSubtree` of the library root,
+`GetTrack("Album/01.flac")` and `GetTrack("album/01.flac")` were both nil.
+The log carried the unread warning and `reaped stale rows from case-only
+rename` with `renamed=1`.
+
+The scanner's unset `effectiveDeleteThreshold` is 1, so counting the old
+row missing would still delete it on that first miss. Serve wires
+`config.DefaultDeleteAfterMissingScans` (3). The tests set that threshold
+so a kept row is `missing_count` 1.
+
+### The fix
+
+The workers and the writer fill `backedPaths`. The writer adds each path
+a successful `UpsertTrackBatch` or `StampExtractorVersionBatch` persisted.
+A worker adds a path the skip gate accepted, and a path `keepUnread` kept
+because that exact spelling already had a row. A new spelling the worker
+could not read is not added. The set is mutexed: the workers and the
+writer fill it together, and the deletion pass reads it after both have
+returned. It folds the paths that are in both that set and `seen`.
+`reapCaseRename` reaps an old spelling only when that fold is backed.
+Anything else goes to `IncrementMissingTracksAndDeleteAtThreshold`.
+`isUnderErroredSubtree` still runs first. A failed flush and a held
+reconcile are not recorded, so they are counted missing. The reap line
+stays behind `len(renamed) > 0`.
+
+A readable rename still takes the full upsert of the new spelling, so the
+old row is reaped in the same pass, and the first-indexed date still
+moves with it.
+
+Recording commits alone left
+`TestScannerReapsTheUnseenCompositionOfOneFolder` red. The second scan's
+skip gate found the live spelling unchanged and wrote nothing, so the
+fold was not backed and the planted composition was counted missing
+(`missing=2 deleted=0` at threshold 3). That file is on disk under the
+live spelling and the row for it already exists, so the unseen
+composition is reaped at once once the skip gate backs the live path. The
+B175 case, a new spelling with no row, is still not backed.
+
+### The control
+
+Restoring an unconditional true from `reapCaseRename` (the old immediate
+reap) made `TestAnUnreadCaseRenameKeepsTheOldRow` fail again on both the
+scan and the subtree subtest: `GetTrack Album/01.flac` had no row. That
+edit was reverted and not committed.
+`TestAReadableCaseRenameReapsTheOldRowAtOnce` keeps the old row absent and
+the new row present, with one reap line.

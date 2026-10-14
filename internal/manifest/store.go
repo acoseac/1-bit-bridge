@@ -6052,12 +6052,12 @@ func trackScopeBase(relDir string) string {
 // a path that WAS seen, so the pass reaped them outright, bypassing the
 // missing_count debounce entirely.
 //
-// That reap is only sound because of the premise in caseOnlyRenames'
-// docblock: "a stored path that fold-matches a seen entry refers to a
-// file the walker DID enumerate this pass". True for a full Scan, false
-// here the moment the snapshot is broader than the walk. Keeping this
-// query case-exact is what keeps that premise true — the deletion pass
-// cannot spare a row it was never told to consider.
+// A fold match is a candidate the deletion pass reaps only when this
+// pass backs the seen spelling. That reap is sound when
+// the snapshot holds a file the walk enumerated: true for a full Scan,
+// false here the moment the snapshot is broader than the walk. Keeping
+// this query case-exact is what keeps a case-twin out of the snapshot —
+// the deletion pass cannot spare a row it was never told to consider.
 //
 // Used by ScanSubtree's bounded deletion pass.
 func (s *Store) TrackPathsUnder(ctx context.Context, relDir string) ([]string, error) {

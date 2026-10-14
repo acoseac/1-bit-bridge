@@ -8,9 +8,9 @@ import (
 // TestCaseOnlyRenames pins the deletion-pass fold filter (2026-07-21
 // review Low): on a case-insensitive filesystem a case-only rename
 // (Album→album) leaves the walker seeing the NEW case while the
-// beforeSet still carries the old one — the old-case row must be
-// reaped immediately rather than shadow the new row in /v1/manifest
-// until missing_count hits the delete threshold. The fold is
+// beforeSet still carries the old one. The fold flags that old spelling
+// as a candidate; the deletion pass reaps it when this pass backs the
+// seen spelling. The fold is
 // renameFold: NFC, then the Unicode lowercase pathFold uses.
 // Unit-level on purpose: a full case-insensitive-FS
 // integration test isn't portable (Linux CI filesystems are
