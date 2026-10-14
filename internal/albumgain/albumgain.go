@@ -131,9 +131,9 @@ type Resolver struct {
 	ix     *index
 	claims map[claimKey]*claim
 	// transient is, per album-mate and profile, when its measurement first
-	// failed for a reason not known to be its file's since its peak was
-	// last recorded, and how many times it has (mateTransientGrace). In
-	// memory: a restart starts the grace again.
+	// failed for a reason not known to be its file's since a peak of it was
+	// last measured or found recorded, and how many times it has
+	// (mateTransientGrace). In memory: a restart starts the grace again.
 	transient map[claimKey]transientFailures
 	// short remembers a mate a later render would only measure again: a
 	// decode that finished at a different length than its container, or a
@@ -360,6 +360,7 @@ func (s *survey) pass(ctx context.Context) ([]*claim, error) {
 		fresh = map[string]manifest.DSDPeak{} // measureClaimed writes into it
 	}
 	s.fresh = fresh
+	s.r.peaksFound(s.profile, fresh)
 	var waits []*claim
 	for _, m := range s.mates {
 		if !s.unknown(m.path) {
@@ -421,6 +422,7 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 	if p, ok := recorded[path]; ok {
 		s.r.release(key, c)
 		s.fresh[path] = p
+		s.r.peaksFound(s.profile, recorded)
 		return nil
 	}
 	tp, err := s.r.measure(ctx, path, s.j, s.profile)
@@ -481,6 +483,23 @@ func (r *Resolver) leftOutBecause(ctx context.Context, key claimKey, err error) 
 	}
 	return fmt.Sprintf("its measurement has failed %d times over %s for reasons not known to be its file's",
 		run.count, failingFor.Round(time.Minute))
+}
+
+// peaksFound ends the transient grace on profile of every mate a read found
+// a peak of, whoever recorded it: this resolver's record, another process
+// (a CLI render), or the mate's own render after this resolver counted its
+// failure. Until 2026-10-14 only record ended it, so a run of failures on a
+// new version of the mate counted from an old run's start and left the mate
+// out too soon (CodeRabbit on the B215 PR).
+func (r *Resolver) peaksFound(profile string, found map[string]manifest.DSDPeak) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.transient) == 0 {
+		return
+	}
+	for path := range found {
+		delete(r.transient, claimKey{path: path, profile: profile})
+	}
 }
 
 // peaks is own plus every mate's known peak, for AlbumClipGuardedGainDB.
@@ -559,7 +578,12 @@ func (r *Resolver) rememberShort(spec transcode.JobSpec) {
 
 // record stores a measurement. A failure is logged and otherwise ignored:
 // the caller keeps the number it measured, and the next render re-measures.
-// A measured peak ends the track's transient grace on the profile.
+// A measured peak ends the track's transient grace on the profile, whether
+// or not the store takes it: a measurement that succeeded ends the run of
+// failures, and a new run holds the album back for a whole grace again,
+// the safe side for a boost a rendition keeps. Keeping the old run through
+// a failed write would leave the mate out sooner (asked on the B215 PR,
+// declined).
 func (r *Resolver) record(ctx context.Context, j transcode.JobSpec, profile string, tp *float64) {
 	r.mu.Lock()
 	delete(r.transient, claimKey{path: j.SourceLibraryRel, profile: profile})

@@ -254,3 +254,76 @@ func TestAHostFaultNeverLeavesTheMateOut(t *testing.T) {
 		h.now = h.now.Add(mateTransientGrace)
 	}
 }
+
+// TestAPeakFoundInTheStoreEndsTheGrace: a mate's peak a survey finds
+// recorded by another writer (a CLI render's process, or the mate's own
+// render after this resolver counted its failure) ends its run of transient
+// failures as one record stores does. A run on a new version of the mate
+// then starts its own grace, and two more failures a day later leave
+// nothing out (CodeRabbit on the B215 PR).
+func TestAPeakFoundInTheStoreEndsTheGrace(t *testing.T) {
+	h, j, mate := graceAfterOneFailure(t)
+	// Another writer records the mate's peak, and the next survey's pass
+	// reads it.
+	h.peaks.put(mate, j.DSDPeakProfile(), fp(-3.0))
+	if _, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); err != nil || !ok {
+		t.Fatalf("with the mate's peak recorded: ok=%v err=%v, want a figure", ok, err)
+	}
+	assertANewRunHoldsTheAlbum(t, h, j, mate)
+}
+
+// TestAPeakFoundUnderTheClaimEndsTheGrace: the same for the read a survey
+// makes under a mate's claim, which finds a peak recorded since its pass
+// read the store.
+func TestAPeakFoundUnderTheClaimEndsTheGrace(t *testing.T) {
+	h, j, mate := graceAfterOneFailure(t)
+	// The pass reads the store before the peak lands; the read under the
+	// mate's claim finds it.
+	reads := 0
+	h.peaks.afterRead = func() {
+		if reads++; reads == 1 {
+			h.peaks.put(mate, j.DSDPeakProfile(), fp(-3.0))
+		}
+	}
+	if _, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); err != nil || !ok {
+		t.Fatalf("with the mate's peak recorded under its claim: ok=%v err=%v, want a figure", ok, err)
+	}
+	if n := h.meas.callCount(mate); n != 1 {
+		t.Fatalf("the mate was measured %d times, want only the first call's failure", n)
+	}
+	h.peaks.afterRead = nil
+	assertANewRunHoldsTheAlbum(t, h, j, mate)
+}
+
+// graceAfterOneFailure is an album whose mate refs[1] has failed
+// transiently once, which started its grace.
+func graceAfterOneFailure(t *testing.T) (*harness, transcode.JobSpec, string) {
+	t.Helper()
+	refs := album(3)
+	h := newHarness(t, refs...)
+	j := compactSpec(refs[0].Path, dsd64)
+	mate := refs[1].Path
+	h.meas.errs[mate] = transientErr
+	h.meas.peaks[refs[2].Path] = fp(-5.0)
+	if _, _, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); !errors.Is(err, transcode.ErrAlbumMateUnmeasured) {
+		t.Fatalf("first failure: err = %v, want ErrAlbumMateUnmeasured", err)
+	}
+	return h, j, mate
+}
+
+// assertANewRunHoldsTheAlbum: a new version of the mate (its peak no longer
+// fresh) fails twice more, more than a grace after the first failure. A run
+// counted from that first failure would leave it out at the second; a new
+// run holds the album back at both.
+func assertANewRunHoldsTheAlbum(t *testing.T, h *harness, j transcode.JobSpec, mate string) {
+	t.Helper()
+	h.peaks.mu.Lock()
+	delete(h.peaks.rows, claimKey{path: mate, profile: j.DSDPeakProfile()})
+	h.peaks.mu.Unlock()
+	h.now = h.now.Add(mateTransientGrace + time.Hour)
+	for n := 1; n <= 2; n++ {
+		if g, ok, err := h.r.AlbumGainDB(context.Background(), j, fp(-8.0)); !errors.Is(err, transcode.ErrAlbumMateUnmeasured) {
+			t.Fatalf("failure %d of the new version's run: gain=%.1f ok=%v err=%v, want ErrAlbumMateUnmeasured: the found peak did not end the old run", n, g, ok, err)
+		}
+	}
+}
