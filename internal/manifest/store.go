@@ -5658,8 +5658,8 @@ func (s *Store) listAllSidecars(ctx context.Context) ([]string, error) {
 
 // removeSidecarFiles unlinks every path in the slice, logging
 // (but not propagating) per-file errors. Missing files are
-// silent — they're already in the desired state. Shared by all
-// three deletion entry points so the "log but don't block on
+// silent — they're already in the desired state. Shared by the
+// deletion entry points so the "log but don't block on
 // per-file failure" policy lives in one place.
 func removeSidecarFiles(paths []string) {
 	for _, sp := range paths {
@@ -6330,6 +6330,17 @@ const clearMissingTracksWhereSQL = `missing_count > 0
 const clearMissingTracksDeleteSQL = `DELETE FROM tracks
 		 WHERE ` + clearMissingTracksWhereSQL
 
+// The two statements below list the rendition and waveform files of the
+// rows clearMissingTracksDeleteSQL deletes. Both embed
+// clearMissingTracksWhereSQL, so the unlink set and the row set are one
+// predicate: a routed row is spared by both, and a filesystem row with
+// missing_count > 0 loses its files with its row. dsd_peaks has no file;
+// its rows leave by ON DELETE CASCADE.
+const clearMissingVariantSidecarsSQL = `SELECT sidecar_path FROM track_variants
+		 WHERE source_path IN (SELECT path FROM tracks WHERE ` + clearMissingTracksWhereSQL + `)`
+
+const clearMissingWaveformWhereSQL = `source_path IN (SELECT path FROM tracks WHERE ` + clearMissingTracksWhereSQL + `)`
+
 // doomedReapSidecarsTx enumerates the sidecar files owned by the rows
 // `where` is about to delete, so the caller can unlink them after the
 // commit. Reads run on `tx` so the whole enumerate-then-delete sequence
@@ -6860,6 +6871,12 @@ func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) e
 // leave the operator with a partially-purged state — re-running the
 // command picks up exactly the rows the prior attempt missed.
 //
+// The rendition and waveform files of those tracks are listed in the
+// same transaction, from the same predicate, and removed after the
+// commit. A file the remove cannot unlink is logged and left for the
+// orphan sweep; that does not fail the command. dsd_peaks rows leave
+// with the track and have no file of their own.
+//
 // Holds `s.mu` per the writer contract on Store.
 func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	s.mu.Lock()
@@ -6869,6 +6886,15 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	// List before the journal and the DELETE, on this transaction, so a
+	// variant listing that fails aborts before the cascade and the files
+	// stay with the rows. Waveforms are best-effort, as in the threshold
+	// reap: a failed listing still deletes, and the orphan sweep sees
+	// whatever file was left.
+	doomed, err := s.doomedReapSidecarsTx(ctx, tx, clearMissingVariantSidecarsSQL, clearMissingWaveformWhereSQL)
+	if err != nil {
+		return 0, err
+	}
 	// Journal before the DELETE — same predicate via
 	// clearMissingTracksWhereSQL, same tx.
 	if _, err := tx.ExecContext(ctx, journalClearMissingSQL, s.now().UnixNano()); err != nil {
@@ -6897,6 +6923,10 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// After the commit, as the threshold reap does. A remove that fails
+	// is logged inside removeSidecarFiles and left for the orphan sweep;
+	// it does not change this return.
+	removeSidecarFiles(doomed)
 	if tCount > 0 {
 		s.noteLibrary(ctx)
 	}

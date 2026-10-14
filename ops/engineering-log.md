@@ -42099,3 +42099,68 @@ committed. `TestOneSpellingOfAnAliasReadsTheValueItCarries` reads each
 spelling alone, fifty times, as the value that key carries.
 `TestAnEmptyEarlierRawKeyLeavesTheLaterValue` keeps the skip of a
 whitespace value.
+
+## 2026-10-14 — clear-missing unlinks the sidecars its cascade drops (backlog B186)
+
+### The defect
+
+`ClearMissingCounts` (`bridge manifest clear-missing`) deleted every
+filesystem track with `missing_count > 0` and every such folder. The
+tracks cascade dropped `track_variants`, `track_analysis` and
+`dsd_peaks` in the same statement. The command listed none of the files
+those rows named, so the rendition and the waveform stayed on disk
+after the rows were gone. `dsd_peaks` is a row only; it has no file.
+
+The #941 sentence in this file and in `CLAUDE.md` said the command
+deletes from `tracks` and `folders` and never touches `track_variants`.
+The cascade has touched those rows since the tables existed. What the
+sentence was reaching for is still true, and stays in the #941 bullet:
+clear-missing is not a route past the reverse sweep's empty-directory
+refusal, because it deletes missing tracks and not the variant rows of
+tracks that are still present. The #941 entry further up is left
+as it was written.
+
+Measured before the unlink, through the real store. A missing track
+with a rendition, a waveform and a peak: the command returned the track
+count, the track and the three rows were gone, and both files were
+still on disk. A present track and a routed track kept their files.
+The orphan sweep, given those leftovers, unlinked nothing and refused.
+Twelve renditions beside one remaining rendition is the lost-index
+refusal (`msgOrphanRefusal`, "the INDEX was lost"): 12 of 13 files,
+92%, more orphans than the one row, over the 20% threshold. One
+rendition with no variant row left is the empty-catalog refusal
+(`msgOrphanEmptyCatalog`), which fires below the floor of ten and
+names a reset or a root wipe, not a lost index. Waveforms are
+`.waveform.bin` and this sweep does not consider them. An earlier
+fixture wrote `keep/01.flac` and `gone/01.flac` to the same basename
+under the variants directory, so the walk saw 11 orphans of 12 files
+and still refused; the paths are `keep/kept.flac` and
+`gone/track-NN.flac` now.
+
+### The fix
+
+The rendition list and the waveform list embed
+`clearMissingTracksWhereSQL`, the predicate the DELETE and the journal
+already share, so a routed row is spared by both and the two sets
+cannot drift. `doomedReapSidecarsTx` runs on the clear's own
+transaction, before the journal and the DELETE: a variant listing that
+fails aborts before the cascade, and a waveform listing stays
+best-effort, as in the threshold reap. `removeSidecarFiles` runs after
+the commit. A remove the filesystem refuses is the existing warning
+(`remove sidecar`) and does not change the command's error or its
+count. The return is still tracks plus folders.
+
+### The control
+
+Dropping the `removeSidecarFiles` call, and keeping the listing so the
+package still builds, made
+`TestClearMissingCountsRemovesTheSidecarsTheDeleteDrops` fail again on
+the two files, and
+`TestClearMissingLeavesNoRenditionForTheOrphanSweep` fail again on both
+refusals above. That edit was reverted and not committed. The same
+test keeps a present track's files and a routed track's files, and
+still deletes a missing track that has no sidecars (count 2: that
+track and the one that had files). A rendition path that is a
+non-empty directory cannot be removed: the command returns nil, the
+row is gone, the directory stays, the waveform beside it is removed,
+and one `remove sidecar` warning is logged.
