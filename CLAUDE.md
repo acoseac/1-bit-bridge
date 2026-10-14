@@ -1521,6 +1521,19 @@ lost my library."
   const so the unlink set and the row set cannot diverge. The ill-formed-UTF-8
   arm needs its own enumeration. Variant enumeration is strict (abort before the
   CASCADE); waveform is best-effort.
+  **`ClearMissingCounts` does the same for the rows it deletes** (2026-10-14,
+  backlog B186). Its rendition list, its waveform list and its DELETE embed
+  `clearMissingTracksWhereSQL`. The files are removed after the commit. A
+  remove the filesystem refuses is logged and left for the orphan sweep, and
+  it does not fail the command. `dsd_peaks` has no file; those rows leave by
+  the tracks cascade. Leftover renditions are what made the orphan sweep
+  refuse: twelve of them beside one remaining rendition is the lost-index
+  refusal, and one of them with no variant row left is the empty-catalog
+  refusal. Both unlink nothing.
+  (`TestClearMissingCountsRemovesTheSidecarsTheDeleteDrops`,
+  `TestClearMissingCountsLogsASidecarItCannotRemove`,
+  `TestClearMissingSidecarQueriesShareTheDeletePredicate`,
+  `TestClearMissingLeavesNoRenditionForTheOrphanSweep`.)
 - **Every writer holds `Store.mu`; reads stay un-mutexed** (WAL handles
   concurrent readers). The mutex also protects multi-statement transactions and
   `SELECT sidecars → DELETE rows → os.Remove` ordering — `busy_timeout` is a
@@ -5471,9 +5484,11 @@ no failing test — which is the shape to expect in this area.
   all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` does
   NOT, because the `--gc` inventory passes a nil `Consider`, so a dot-FILE is
   unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk). Those rows could not
-  be reaped by `--gc` at all, and `manifest clear-missing` is not a route —
-  `ClearMissingCounts` deletes from `tracks` + `folders` and never touches
-  `track_variants`. The source-mirrored layout hid it for years: `WalkDir`
+  be reaped by `--gc` at all, and `manifest clear-missing` is not a route past
+  this refusal. `ClearMissingCounts` deletes tracks with `missing_count > 0`,
+  and with them the variant and analysis rows that cascade and their files. It
+  does not delete the variant rows of tracks that are still present, so it
+  never supplies the reverse sweep's removed count. The source-mirrored layout hid it for years: `WalkDir`
   removes no directories, so an emptied subtree still leaves dirents behind.
   It now takes the forward sweep's `removed` count and skips the refusal for
   **EMPTY alone**; missing, unreadable and not-a-directory still refuse however
