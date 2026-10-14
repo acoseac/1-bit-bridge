@@ -475,11 +475,12 @@ func (r *Resolver) leftOutBecause(ctx context.Context, key claimKey, err error) 
 	}
 	run.count++
 	r.transient[key] = run
-	if run.count < mateTransientFailures || now.Sub(run.since) < mateTransientGrace {
+	failingFor := now.Sub(run.since)
+	if run.count < mateTransientFailures || failingFor < mateTransientGrace {
 		return ""
 	}
 	return fmt.Sprintf("its measurement has failed %d times over %s for reasons not known to be its file's",
-		run.count, now.Sub(run.since).Round(time.Minute))
+		run.count, failingFor.Round(time.Minute))
 }
 
 // peaks is own plus every mate's known peak, for AlbumClipGuardedGainDB.

@@ -111,19 +111,6 @@ func markToolUnavailable(tool, reason string, err error) error {
 // A tool that could not start is asked about first: a route mark wraps sox's
 // own failure on an MP4 source, and if sox itself vanished between the probe
 // and the run, the tool to name is sox.
-// HostFault reports an error that is the HOST's, not its file's: a tool
-// this host lacks or cannot start (unavailableTool), or an output it will
-// not let a job write (unwritableOutput). The pool exits on both without a
-// strike; the album gain never leaves an album-mate out for one, nor counts
-// it toward the mate's grace (albumgain, backlog B215).
-func HostFault(err error) bool {
-	if _, ok := unavailableTool(err); ok {
-		return true
-	}
-	_, ok := unwritableOutput(err)
-	return ok
-}
-
 func unavailableTool(err error) (missingTool, bool) {
 	var lookup *exec.Error
 	if errors.As(err, &lookup) {
@@ -138,6 +125,19 @@ func unavailableTool(err error) (missingTool, bool) {
 		return marked.tool, true
 	}
 	return missingTool{}, false
+}
+
+// HostFault reports an error that is the HOST's, not its file's: a tool
+// this host lacks or cannot start (unavailableTool), or an output it will
+// not let a job write (unwritableOutput). The pool exits on both without a
+// strike; the album gain never leaves an album-mate out for one, nor counts
+// it toward the mate's grace (albumgain, backlog B215).
+func HostFault(err error) bool {
+	if _, ok := unavailableTool(err); ok {
+		return true
+	}
+	_, ok := unwritableOutput(err)
+	return ok
 }
 
 // causeText is an exec failure's cause as the report states it. The os and
