@@ -42164,3 +42164,59 @@ track and the one that had files). A rendition path that is a
 non-empty directory cannot be removed: the command returns nil, the
 row is gone, the directory stays, the waveform beside it is removed,
 and one `remove sidecar` warning is logged.
+
+## 2026-10-14 — Ogg rows carry format facts, and Ogg FLAC is classed FLAC (backlog B118)
+
+### What was wrong
+
+The `.ogg` / `.oga` branch stamped codec `OGG` and returned. B102 reads
+an Ogg FLAC file's tags from the header-packet join and left the format
+facts for this entry. Measured on `testdata/ogg/ffmpeg_pages.oga` and
+`libflac_picture.oga`, and on a Vorbis and an Opus page built the same
+way: `SampleRate`, `BitsPerSample`, `Channels` and `Duration` were all
+nil. `IsLossyCodec("OGG")` is true, so an Ogg FLAC stream sat on every
+lossy list beside Vorbis and Opus.
+
+### The fix
+
+`ExtractorVersion` is 25. `extractOggWithContext` opens the file once.
+
+Ogg FLAC reads STREAMINFO through `extractFLACFormatFromReader` on the
+join `oggFLACMetadata` already builds, then the channel count that
+reader does not store (the byte at offset 20 of the join). The codec
+becomes `FLAC`, so `canSetBitsPerSample` writes the depth and
+`IsLossyCodec` is false. The audio MD5 is stored when STREAMINFO's
+checksum is not all zeros. Duration is the total sample count over the
+rate, and only when `plausibleDuration` accepts it. The join is in
+memory, so the file is not read past the header packets B102 already
+stops at.
+
+Vorbis reads version 0, channels and sample rate from the
+identification header. Opus reads version 1, the channel count and the
+pre-skip, and stores the 48 kHz clock rather than the input rate. Both
+stay codec `OGG` and carry no bit depth. Duration is the granule of the
+page that ends on the last byte of the file, same serial, non-negative
+granule, matching CRC. Opus subtracts the pre-skip and divides by
+48 kHz. That page is taken from one maximum Ogg page at the end
+(65,307 bytes), never a walk of the file. A granule of 0 stores the
+rate and the channels and leaves duration unset. A negative granule, a
+page that does not end at EOF, or a header that does not parse leaves
+the codec alone.
+
+A library with no Ogg file re-reads each version-stale row once. Rows
+that marshal the same only stamp. SACD ISO virtual rows re-expand, as
+on every bump. `ProtocolVersion` stays 1. The app already treats codec
+`FLAC` as lossless. It still drops `bitsPerSample` when the extension
+is `.ogg` or `.oga`, it does not list those extensions in its own
+scanner, and playback of an Ogg container is not the `.flac` path. No
+iOS change.
+
+### The control
+
+Replacing `applyJoinedFLACFacts` and `applyOggLossyFacts` with no-ops
+made the Ogg fact tests fail again: codec stayed `OGG`, and rate,
+depth, channels, duration and the audio MD5 were nil. The native FLAC,
+MP3 and M4A assertions in the same run stayed green. That edit was
+reverted and not committed. A file cut so no page ends at EOF, and a
+buffer that is not an Ogg page, still extract as codec `OGG` with no
+facts.

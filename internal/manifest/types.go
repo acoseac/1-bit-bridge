@@ -182,9 +182,11 @@ type Track struct {
 
 	// Channels is the audio channel count (DSDIFF `CHNL` numChannels;
 	// 2 = stereo, 5/6 = multichannel SACD layouts). Pointer + omitempty
-	// per the numeric-field convention (absent ≠ 0); today only the DFF
-	// extractor populates it — other formats leave it nil and the DLNA
-	// `<res nrAudioChannels>` builder keeps its default-to-2 behaviour.
+	// per the numeric-field convention (absent ≠ 0). The DFF extractor
+	// populates it, and since ExtractorVersion 25 an Ogg FLAC, Vorbis or
+	// Opus row does too. A native FLAC and the other formats leave it nil,
+	// and the DLNA `<res nrAudioChannels>` builder keeps its default-to-2
+	// behaviour when the field is absent.
 	// Wire-additive; iOS deliberately does NOT decode it yet (no
 	// consumer — the store-only deferral pattern); it rides the wire
 	// for other/future clients and feeds the bridge's own DLNA
