@@ -1354,6 +1354,13 @@ func ProbeSox(ctx context.Context) (SoxInfo, error) {
 	defer cancel()
 	cmd := soxProbeCommand(ctx, path, "--help")
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+	// The 2 s kills the process it started, but CombinedOutput then waits
+	// for its output pipe to close, which a child of a PATH wrapper that
+	// outlives it can hold open: the probe, and serve's background probe
+	// with it (soxToolchainCache.refresh), waited as long as that child
+	// lived. WaitDelay closes the pipe that much after the kill (backlog
+	// B142, a pre-merge review).
+	cmd.WaitDelay = soxProbeWaitDelay
 	out, runErr := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return info, ErrSoxProbeTimeout
@@ -1443,6 +1450,10 @@ func parseSoxFileFormats(text string) ([]string, bool) {
 // targeted install-hint message vs the generic "something went
 // wrong" path.
 var ErrSoxMissing = errors.New("sox binary not found on PATH")
+
+// soxProbeWaitDelay bounds ProbeSox's wait for the output pipe after its
+// deadline killed `sox --help` (exec.Cmd.WaitDelay).
+const soxProbeWaitDelay = time.Second
 
 // ErrSoxProbeTimeout is a `sox --help` that did not answer within ProbeSox's
 // 2 s: sox is on PATH, and whether it runs is not known (a host swapping, a
