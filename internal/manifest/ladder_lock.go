@@ -77,12 +77,16 @@ func callLadderLockWaiting(path string) {
 // up to ladderLockWait for a holder to finish, and returns what releases
 // it. release is never nil, and does nothing when no lock was taken.
 //
-// It fails only when the wait runs out (errLadderLockTimeout). Proceeding
-// then would run this opener's ladder beside a holder's that may still be
-// migrating. A lock that cannot be taken at all (a filesystem that keeps
-// no locks, a lock file this user cannot open) is logged and the ladder
-// runs without it, as before: serve's data-dir lock makes the same call,
-// since a lock that cannot be taken must not stop a bridge from starting.
+// It fails when the wait runs out (errLadderLockTimeout): proceeding then
+// would run this opener's ladder beside a holder's that may still be
+// migrating. It also fails when a link stands at the lock file, planted
+// since OpenStore's own check, with the refusal a link at the database or
+// another sidecar gets (errStoreSymlink), never taken for a filesystem
+// that keeps no locks (Argon on the B185 PR). A lock that cannot be taken
+// at all (a filesystem that keeps no locks, a lock file this user cannot
+// open) is logged and the ladder runs without it, as before: serve's
+// data-dir lock makes the same call, since a lock that cannot be taken
+// must not stop a bridge from starting.
 func lockLadder(dbPath string) (release func(), err error) {
 	release = func() {
 		// Nothing to release: no lock has been taken.
@@ -97,6 +101,9 @@ func lockLadder(dbPath string) (release func(), err error) {
 	// (fsutil.OpenLockFile).
 	f, err := fsutil.OpenLockFile(dir, name)
 	if err != nil {
+		if link, ok := symlinkAtStore(dbPath); ok {
+			return release, fmt.Errorf("%w at %s", errStoreSymlink, link)
+		}
 		return unlocked(err)
 	}
 	start := time.Now()

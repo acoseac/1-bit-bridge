@@ -84,14 +84,15 @@ func TestOpenStoreOpensARealExistingDatabase(t *testing.T) {
 
 // TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen plants the link after
 // OpenStore's own check and before SQLite opens the files, through the real
-// OpenStore. The database, -wal and -shm must come back as the symlink
-// refusal, and the decoy must not be created. -journal is not opened in WAL
-// mode; that case only requires the decoy to stay absent.
+// OpenStore. The database, -wal, -shm and the migration lock
+// (-migrate.lock, backlog B185) must come back as the symlink refusal, and
+// the decoy must not be created. -journal is not opened in WAL mode; that
+// case only requires the decoy to stay absent.
 func TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs privilege on Windows; the data dir is the bridge's own")
 	}
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal", ladderLockSuffix} {
 		t.Run("link at bridge.db"+suffix, func(t *testing.T) {
 			root := t.TempDir()
 			dir := filepath.Join(root, "data")

@@ -281,6 +281,7 @@ func OpenStore(path string) (*Store, error) {
 			return nil, fmt.Errorf("create the store's file: %w", err)
 		}
 	}
+	callOpenStoreBeforeSQLite(path)
 	// One opener at a time runs the ladder, from before SQLite opens the
 	// database, so a new database's switch to WAL is one opener's too
 	// (backlog B185). Held until OpenStore returns.
@@ -289,7 +290,6 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	defer releaseLadder()
-	callOpenStoreBeforeSQLite(path)
 	vfsQuery, err := storeVFSQuery()
 	if err != nil {
 		return nil, fmt.Errorf("register store vfs: %w", err)

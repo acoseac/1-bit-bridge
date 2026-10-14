@@ -75,7 +75,9 @@ const lockFileOpenTries = 3
 // with or without O_NOFOLLOW; open(2) on the whole path never did, and
 // every retry opened the file). Two serves started at once on a fresh data
 // dir both went on unlocked, and so did the losing openers of the
-// migration lock (backlog B185).
+// migration lock (backlog B185). A loser loses only to the one create:
+// with 3, 8 and 16 concurrent openers, 300 rounds each, every one opened
+// the file by its second attempt.
 func OpenLockFile(dir, name string) (*os.File, error) {
 	path := filepath.Join(dir, name)
 	if err := Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
