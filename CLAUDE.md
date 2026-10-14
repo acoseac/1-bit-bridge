@@ -7352,13 +7352,17 @@ what it claimed**, and none of it had a failing test.
   bullet's), all of them on a run that keeps the config and those a
   rewrite keeps on one that does. For the certificate that is right and
   deliberate — init does not rewrite the pair on disk.
-  For the ports it is backwards: a rewrite writes the run's own addresses,
+  For the ports it was backwards: a rewrite wrote the run's own addresses,
   so an install on `:9090`/`:9091` was graded on those, passed, and was
   then handed `:7788` / `127.0.0.1:7789`. A second narrow pass
   (`doctor.RunPortChecks`) grades what the config will contain, BEFORE
   `Save`, so a refusal leaves the existing config intact — and only over
   the ports that CHANGED, since an unchanged one was already graded
-  correctly.
+  correctly. Since backlog B125 a same-posture rewrite that names neither
+  address flag keeps the install's listen and admin addresses, so that
+  first pass already grades what will be saved. A named flag or a posture
+  change still writes the new addresses, and the second pass grades only
+  the ports that changed.
 - **…and where no install's config loads, the preflight grades the ports
   this run WRITES, from the one definition the config is built from**
   (2026-09-28). It kept init's 7788 / 7789 there, on a first install and
@@ -7368,13 +7372,17 @@ what it claimed**, and none of it had a failing test.
   refused a public first install, and a public re-init over a broken
   config, over a port neither would bind: measured with the real binary,
   exit 1 on `[FAIL] port-api :7788 in use`, and exit 0 now.
-  `initAddresses` is the ONE definition of the addresses a run writes: the
-  config is built from it, and the preflight is seeded with its ports,
+  `initAddresses` is the ONE definition of the addresses a run writes when
+  it names a flag or changes posture, and of a first install's. The config
+  is built from those variables, and the preflight is seeded with them,
   which `withExistingInstallDeps` still replaces with the install's own
-  where the config loads (and reports whether it did). **Don't seed the
-  preflight from anything else, or build the config's addresses anywhere
-  else**: a divergence reaches only the second pass, which runs after init
-  has made its data dir. Where no config loads that pass now grades
+  where the config loads (and reports whether it did). A same-posture
+  rewrite that names neither address flag overlays the file's addresses
+  onto the same variables before the preflight (`addressesARewriteKeeps`,
+  backlog B125), so the preflight and the saved config still share one
+  pair. **Don't seed the preflight from anything else, or build the
+  config's addresses anywhere else**: a divergence reaches only the second
+  pass, which runs after init has made its data dir. Where no config loads that pass now grades
   nothing, and its `OwnPIDPortsUnknown` exception (the "…over a config
   that is there and does not load" bullet) stays for a port that could
   differ. **A refusal on the run's ports says so under the report**
@@ -7407,7 +7415,11 @@ what it claimed**, and none of it had a failing test.
   the install's ports the rewrite binds in NEITHER role, and
   `doctor.Deps.AbandonedPorts` answers each ok "not checked: this rewrite
   moves off :X", with no probe; the second pass grades what the rewrite
-  writes in their place, as before. **Build that list over both roles,
+  writes in their place, as before. Since backlog B125 a same-posture
+  rewrite that names neither address flag keeps both, so that list is
+  empty and the install's ports are graded as its own. A rewrite moves a
+  port when it names `--listen-address` or `--admin-address`, or changes
+  posture. **Build that list over both roles,
   never per role**: a rewrite moving the console onto the old API port
   binds that port again, and a per-role list names it, so the second pass,
   which carries the same Deps while it grades that port as the new admin
@@ -7962,7 +7974,9 @@ what it claimed**, and none of it had a failing test.
   --force` (or "Overwrite? y") keeps `dataDir`, `tlsCertPath` and
   `tlsKeyPath` always, a loopback install's `customEndpoints` on a loopback
   rewrite, and `libraryRoots` when the run names no `--library` (#1040),
-  and `libraryName` when it names no `--name` (#1041). It
+  and `libraryName` when it names no `--name` (#1041), and `listenAddress`
+  and `adminAddress` when the run names neither address flag and the
+  posture does not change (backlog B125). It
   built `bridge.yaml` from `baseConfig` and the flags and kept nothing.
   Measured with the real binary: a config naming its pair outside the data
   dir lost it, init minted a new one there and printed it as "Stable across
@@ -7998,14 +8012,26 @@ what it claimed**, and none of it had a failing test.
   and keeping that listed it as kept from a config that never held it (a
   Gemini consult caught the first draft doing so). Don't default the name
   in `readPriorInstall` the way it defaults `dataDir`, whose `Load` default
-  is init's own. The rest (features, cadences, the ports, which #970
-  GRADES rather than keeps) is the documented overwrite. **A kept endpoint
+  is init's own. The rest (features and cadences) is the documented
+  overwrite. The ports are kept when the run names neither address flag
+  and the posture does not change, read from the file and defaulted as
+  `Load` defaults them (the admin address only on a loopback install). A
+  posture change writes the new posture's ports. Naming either flag writes
+  that address and the posture's address for the one it does not name, so
+  a run that names only `--listen-address` still resets the admin address.
+  A script that re-runs `bridge init --yes --force` expecting `:7788`
+  keeps the old port. `printKept` lists an address only when a first
+  install of this posture would have written another, so a default-port
+  rewrite says nothing. **A kept endpoint
   that names the port the rewrite moves the API off is kept, and named in
   a warning** (`warnKeptEndpointsOnAMovedPort`, 2026-09-29, backlog B61):
   measured, an install on 127.0.0.1:X listing `https://nas…:X`, rewritten
   onto :Z, kept it without a word, and the restarted bridge's `/v1/health`
   advertised it beside its :Z addresses, an alternate every device tries
-  and fails over past. An endpoint names a port by its own or by its
+  and fails over past. Since B125 an unflagged same-posture rewrite no
+  longer moves the port, so the warning fires when a flag or a posture
+  change does. The test's move onto `:7788` is an explicit
+  `--listen-address`. An endpoint names a port by its own or by its
   scheme's (443, 80); `:0` names none. **Never drop or rewrite it**: the
   endpoint is the operator's word for what reaches the bridge, its port may
   be a router's or a proxy's (the endpoint-synthesis rule under The wire

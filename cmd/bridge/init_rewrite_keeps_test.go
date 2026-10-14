@@ -874,7 +874,7 @@ func TestInitRefusesToRewriteAConfigThisUserCannotRead(t *testing.T) {
 // tag renamed on config.Config would otherwise leave it reading a key nothing
 // writes.
 func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
-	for _, env := range []string{"BRIDGE_DATA_DIR", "BRIDGE_LIBRARY_ROOTS", "BRIDGE_CUSTOM_ENDPOINTS", "BRIDGE_LIBRARY_NAME"} {
+	for _, env := range []string{"BRIDGE_DATA_DIR", "BRIDGE_LIBRARY_ROOTS", "BRIDGE_CUSTOM_ENDPOINTS", "BRIDGE_LIBRARY_NAME", "BRIDGE_LISTEN_ADDRESS", "BRIDGE_ADMIN_ADDRESS"} {
 		t.Setenv(env, "")
 	}
 	dir := t.TempDir()
@@ -909,6 +909,8 @@ func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
 		{"libraryName", prior.LibraryName, loaded.LibraryName},
 		{"customEndpoints", prior.CustomEndpoints, loaded.CustomEndpoints},
 		{"deployment.managedSettings", prior.Deployment.ManagedSettings, loaded.Deployment.ManagedSettings},
+		{"listenAddress", prior.ListenAddress, loaded.ListenAddress},
+		{"adminAddress", prior.AdminAddress, loaded.AdminAddress},
 	} {
 		if !reflect.DeepEqual(f.got, f.want) {
 			t.Errorf("%s: readPriorInstall %q, config.Load %q", f.name, f.got, f.want)

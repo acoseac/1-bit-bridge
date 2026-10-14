@@ -31474,12 +31474,14 @@ order test alone.
 ### Out of scope
 
 - **A loopback rewrite that names no `--listen-address` moves an install off
-  its own port to :7788** (the kept-endpoint test's second row measures it).
-  That is the documented overwrite, "the ports, which #970 GRADES rather than
-  keeps", and the warning above now names the move where a kept endpoint
-  shows it. Whether a rewrite should keep the install's ports where the run
-  names none, as it keeps the name, is a product decision, filed as
-  backlog B125.
+  its own port to :7788** (the kept-endpoint test's second row measured it).
+  That was the documented overwrite, "the ports, which #970 GRADES rather than
+  keeps", and the warning above names the move where a kept endpoint shows
+  it. Whether a rewrite should keep the install's ports where the run names
+  none, as it keeps the name, was left as a product decision, filed as
+  backlog B125. The decision was made on 2026-10-14: keep them. That
+  leftover is closed by the B125 record at the end of this file. The
+  warning still names a move the run makes with `--listen-address`.
 - `--start-now` is Windows-only and ignored elsewhere without a word, as
   `--force` is without `--yes` (the prompt still asks). Neither changes what
   a run writes; not touched.
@@ -42328,3 +42330,55 @@ committed.
 on both sweeps. `TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt`
 expects the inventory to list the three renditions and to leave
 `notes.txt`. No `ExtractorVersion` bump and no wire change.
+
+## 2026-10-14 — a rewrite keeps the listen and admin addresses when the run names none (backlog B125)
+
+### The decision
+
+B61 left this as a product question: a `--yes --force` rewrite that named
+no `--listen-address` saved `:7788` and `127.0.0.1:7789` over an install
+on its own ports. #1040's rule for what a rewrite keeps is who could give
+a value back, and every URL a paired device holds for a loopback install
+names its port. The owner delegated the decision. A rewrite keeps the
+install's listen address and admin address when the run names neither
+address flag and the posture does not change, as it already keeps the name
+and the roots. A posture change writes the new posture's ports. Naming
+either flag writes that address and the posture's address for the one it
+does not name. The accepted cost is that a script which re-runs
+`bridge init --yes --force` and expects `:7788` keeps the old port.
+
+### The defect, measured
+
+On the unfixed `initCmd`, a loopback install on `127.0.0.1:<free>` with
+the console on another free port, rewritten with `--yes --force` and no
+address flag, saved `:7788` and `127.0.0.1:7789` and did not list either
+under `kept from the config this run replaces:`. A stranger holding the
+install's listen port did not refuse the rewrite: the preflight graded
+the ports the rewrite was about to abandon, and the saved config bound
+the defaults. `priorInstallFile` already read `listenAddress`, for B61's
+kept-endpoint warning only, and did not read `adminAddress`.
+
+### The fix
+
+`addressesARewriteKeeps` overlays the file's pair onto the addresses
+`initAddresses` chose, after the overwrite decision and before the
+preflight, so a same-posture rewrite that names neither flag abandons
+nothing and the first pass grades the install's ports with its pid file.
+The values come from `readPriorInstall`, never `config.Load`, and a blank
+admin address defaults the way `Load` defaults it, only on a loopback
+install. `printKept` lists an address only when a first install of this
+posture would have written another, so a default-port rewrite still
+prints nothing. The B61 warning still fires when a flag moves the port.
+The test's move onto `:7788` is an explicit `--listen-address`.
+
+### Red first, and the control
+
+Before the overlay, `TestInitRewriteKeepsTheAddressesItDoesNotName` and
+`TestInitRewriteGradesAKeptListenPortAsTheInstalls` failed, and
+`TestInitRewriteWritesTheListenAddressItNames`,
+`TestInitRewriteOfAnotherPostureWritesThatPosturesPorts` and
+`TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff` passed.
+After the fix those five pass. Dropping the keep (the guard forced true)
+failed exactly the two keep cases again, on the saved defaults and on an
+exit 0 while another process held the install's port. That edit was not
+committed. No wire change.

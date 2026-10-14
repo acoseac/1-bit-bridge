@@ -55,10 +55,17 @@ import (
 //     blank one, has none to keep, and the run takes the host's as a first
 //     install does: DefaultLibraryName, which Load serves such a config, is
 //     a fallback nobody chose.
+//   - listenAddress and adminAddress, when the run names neither address
+//     flag and the posture does not change (addressesARewriteKeeps). A
+//     posture change writes the new posture's ports. Naming either flag
+//     writes that flag and the posture's address for the one it does not
+//     name. A script that re-runs init --yes --force and expects :7788
+//     keeps the old port instead. printKept lists an address only when a
+//     first install of this posture would have written another.
 //
 // Everything else is this run's value or the default, which is the
-// documented overwrite: features, cadences, the ports (init grades the ports
-// it saves rather than keeping the old ones).
+// documented overwrite: features and cadences. The ports are kept under
+// the rule above; init grades the addresses the rewrite saves.
 
 // priorInstallFile is what the config already at init's path says about the
 // install it describes: the fields a rewrite keeps, and those that decide
@@ -83,20 +90,22 @@ type priorInstallFile struct {
 	CustomEndpoints []string                `yaml:"customEndpoints"`
 	Deployment      config.DeploymentConfig `yaml:"deployment"`
 	Demo            config.DemoConfig       `yaml:"demo"`
-	// ListenAddress is not kept: a rewrite writes the run's ports. It is read
-	// to say which kept endpoint names the port the rewrite moves the API off
-	// (warnKeptEndpointsOnAMovedPort).
+	// ListenAddress and AdminAddress are kept when the run names neither
+	// address flag and the posture does not change. ListenAddress also says
+	// which kept endpoint names the port a rewrite that does move the API
+	// moves it off (warnKeptEndpointsOnAMovedPort).
 	ListenAddress string `yaml:"listenAddress"`
+	AdminAddress  string `yaml:"adminAddress,omitempty"`
 }
 
 // readPriorInstall reads the config at cfgPath as priorInstallFile, with its
 // paths resolved as config.Load resolves them: against the file's directory,
 // dataDir defaulting to the one beside it. The listen address defaults as
-// Load defaults it, to the port the install listens on. The name is as
-// written, with no default: a rewrite keeps a name the config gives, and
-// DefaultLibraryName, which Load serves a config that gives none, is a
-// fallback nobody chose. A config that is not there is no install, and
-// answers nil and no error.
+// Load defaults it, and so does the admin address, only for a loopback
+// install. The name is as written, with no default: a rewrite keeps a name
+// the config gives, and DefaultLibraryName, which Load serves a config that
+// gives none, is a fallback nobody chose. A config that is not there is no
+// install, and answers nil and no error.
 func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 	return priorInstallFrom(cfgPath, readConfigAsIs(cfgPath))
 }
@@ -125,6 +134,9 @@ func priorInstallFrom(cfgPath string, read configAsRead) (*priorInstallFile, err
 	}
 	if p.ListenAddress == "" {
 		p.ListenAddress = config.DefaultListenAddress
+	}
+	if p.AdminAddress == "" && !p.public() {
+		p.AdminAddress = config.DefaultAdminAddress
 	}
 	p.DataDir = config.ResolvePath(base, p.DataDir)
 	p.TLSCertPath = config.ResolvePath(base, p.TLSCertPath)
@@ -384,13 +396,40 @@ func endpointPort(raw string) int {
 // keptFromHeading opens the list printKept prints.
 const keptFromHeading = "kept from the config this run replaces:"
 
+// addressesARewriteKeeps returns the listen and admin addresses a rewrite
+// saves, and whether printKept lists each. It keeps the install's pair when
+// the run replaces the config, names neither address flag and does not
+// change posture. A named flag, a posture change, a first install and a run
+// that keeps the file all leave the addresses the run already chose. An
+// address is listed only when it was kept and a first install of this
+// posture would have written another.
+func addressesARewriteKeeps(listen, admin string, listenNamed, adminNamed, public, proxy, replace bool, prior *priorInstallFile) (string, string, bool, bool) {
+	if !replace || prior == nil || prior.public() != public || listenNamed || adminNamed {
+		return listen, admin, false, false
+	}
+	firstListen, firstAdmin := initAddresses(public, proxy, "", "")
+	listenListed, adminListed := false, false
+	if prior.ListenAddress != "" {
+		listen = prior.ListenAddress
+		listenListed = listen != firstListen
+	}
+	if prior.AdminAddress != "" {
+		admin = prior.AdminAddress
+		adminListed = admin != firstAdmin
+	}
+	return listen, admin, listenListed, adminListed
+}
+
 // printKept lists, after the rewrite is saved, what it kept that a first
 // install would not have: a data dir other than initDataDir (init's own,
 // beside the config), a pair the config names, the roots when the run named
 // none, the name when it named none and a first install would have taken
-// another (nameKept), the custom endpoints. An operator who rewrote a config
-// should not have to diff it to learn that these stayed, and a rewrite that
-// gives an install init made the answers it was made with prints nothing.
+// another (nameKept), the listen and admin addresses when the run named
+// neither and they are not the ones a first install of this posture writes
+// (listenKept, adminKept), the custom endpoints. An operator who rewrote a
+// config should not have to diff it to learn that these stayed, and a
+// rewrite that gives an install init made the answers it was made with
+// prints nothing.
 //
 // Both sides of the data dir comparison are absolute, so it compares
 // directories and not spellings: initCmd makes cfgDir absolute before it
@@ -398,7 +437,7 @@ const keptFromHeading = "kept from the config this run replaces:"
 // which resolves the file's value against the config's directory.
 // NormalizeAndValidate resolves no path. (Gemini on #1040, twice, assumed a
 // relative cfgDir.)
-func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, nameKept, endpointsKept bool) {
+func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, nameKept, endpointsKept, listenKept, adminKept bool) {
 	var lines [][2]string
 	add := func(key string, values ...string) {
 		for i, v := range values {
@@ -425,6 +464,12 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	}
 	if endpointsKept {
 		add("customEndpoints", cfg.CustomEndpoints...)
+	}
+	if listenKept {
+		add("listenAddress", cfg.ListenAddress)
+	}
+	if adminKept {
+		add("adminAddress", cfg.AdminAddress)
 	}
 	if len(lines) == 0 {
 		return
