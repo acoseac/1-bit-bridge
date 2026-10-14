@@ -241,6 +241,21 @@ type Scanner struct {
 	// never while one runs.
 	openSACD func(abs string) (sacdContainer, error)
 
+	// notSACD remembers each `.iso` whose last completed probe found
+	// nothing to expand (a DVD or CD image, a disk image named `.iso`, a
+	// plain-DSD or multichannel-only disc), by library-relative path, with
+	// the size and mtime the probe read (backlog B157). Such an image has
+	// no row for processSACDISO's skip gate to key on, so before this it
+	// was opened and probed on every scan, forever. A probe that failed,
+	// or a container that changed under it, records nothing, so it is
+	// probed again (B134's line); a changed size or mtime probes again.
+	// Kept in memory, where no manifest reader sees it, rather than in
+	// the store: the Scanner lives as long as `serve`, so an image is
+	// probed once per process, and ExtractorVersion is compiled in, so a
+	// reader that learns a new layout is a new process with an empty map.
+	notSACDMu sync.Mutex
+	notSACD   map[string]sacdProbeStamp
+
 	// openAudio, when set, opens an audio file for the extractors in place
 	// of fsutil.OpenAsFile (openAudioFile), the way openSACD opens a
 	// container: a TEST seam, per scanner, through which a test fails an
@@ -2086,6 +2101,11 @@ func mergePostScanFields(fresh, old *Track) {
 // contributes no rows), or a container that changed during the scan
 // (logged, and left for the next one).
 func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo, ec *ExtractContext) []*Track {
+	// An image this process already probed whole and found nothing in,
+	// unchanged since: no open, no probe (backlog B157).
+	if s.knownNotSACD(pi) {
+		return nil
+	}
 	rep := SACDVirtualTrackPath(pi.rel, 1)
 	existing, statErr := s.store.GetTrackStat(ctx, rep)
 	if statErr != nil && ctx.Err() == nil {
@@ -2128,7 +2148,12 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo, ec *ExtractCo
 	for _, t := range tracks {
 		fresh[t.Path] = struct{}{}
 	}
+	// Whether the retire below ran to the end: a "not an SACD" verdict is
+	// recorded only then, or rows it could not list or retire would wait
+	// for this process to end.
+	retired := false
 	if under, err := s.store.TrackPathsUnder(ctx, pi.rel); err == nil {
+		retired = true
 		var stale []string
 		for _, p := range under {
 			if _, ok := fresh[p]; ok {
@@ -2140,6 +2165,7 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo, ec *ExtractCo
 		}
 		if len(stale) > 0 {
 			if n, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, stale, 1); derr != nil {
+				retired = false
 				if failure := ctxerr.WithoutCancellation(ctx, derr); failure != nil {
 					scanLogger.Warn("sacd stale-row retire", "path", pi.rel, "err", failure)
 				}
@@ -2153,10 +2179,47 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo, ec *ExtractCo
 
 	if len(tracks) == 0 {
 		scanLogger.Debug("iso is not an expandable SACD image", "path", pi.rel)
+		if retired {
+			s.noteNotSACD(pi)
+		}
 		return nil
 	}
+	s.forgetNotSACD(pi.rel)
 	s.stampSACDFolderArt(pi, tracks, ec)
 	return tracks
+}
+
+// sacdProbeStamp is the size and mtime of an `.iso` whose completed probe
+// found nothing to expand (Scanner.notSACD).
+type sacdProbeStamp struct {
+	size, mtimeNS int64
+}
+
+// knownNotSACD reports whether pi is an image this process probed whole
+// and found nothing in, at the size and mtime the walk sees now.
+func (s *Scanner) knownNotSACD(pi pathInfo) bool {
+	s.notSACDMu.Lock()
+	defer s.notSACDMu.Unlock()
+	st, ok := s.notSACD[pi.rel]
+	return ok && st.size == pi.info.Size() && st.mtimeNS == pi.info.ModTime().UnixNano()
+}
+
+// noteNotSACD records pi's completed "nothing to expand" probe.
+func (s *Scanner) noteNotSACD(pi pathInfo) {
+	s.notSACDMu.Lock()
+	defer s.notSACDMu.Unlock()
+	if s.notSACD == nil {
+		s.notSACD = make(map[string]sacdProbeStamp)
+	}
+	s.notSACD[pi.rel] = sacdProbeStamp{size: pi.info.Size(), mtimeNS: pi.info.ModTime().UnixNano()}
+}
+
+// forgetNotSACD drops rel's verdict once it expands, so the map holds only
+// images that are not SACDs.
+func (s *Scanner) forgetNotSACD(rel string) {
+	s.notSACDMu.Lock()
+	defer s.notSACDMu.Unlock()
+	delete(s.notSACD, rel)
 }
 
 // unchangedSACD is the container skip gate once size, mtime and extractor
