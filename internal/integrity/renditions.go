@@ -20,11 +20,11 @@ type renditionScan struct {
 	// entries: the directory itself holds at least one entry, of any kind.
 	entries bool
 	// rendition: a file looksLikeVariantSidecar names, regular or a link
-	// resolving to a regular file, outside a directory skipsSidecarDir
+	// resolving to a regular file, outside a directory SkipsDerivedTreeDir
 	// names (a dot-directory, a NAS recycle bin or snapshot, and the rest).
 	rendition bool
 	// dirLink: a link to a directory (a symlink, or on Windows a junction or
-	// a volume mounted in a folder), not named as skipsSidecarDir skips,
+	// a volume mounted in a folder), not named as SkipsDerivedTreeDir skips,
 	// which the scan does not look behind: what it holds, the scan cannot
 	// say.
 	dirLink bool
@@ -57,7 +57,7 @@ type pendingScanDir struct {
 //
 // The rules are TreeHoldsVariantSidecars' (its docblock): the root resolved
 // before anything is read (resolveSidecarRoot), every directory a library
-// walk skips pruned by its name (skipsSidecarDir: a recycle bin's renditions
+// walk skips pruned by its name (SkipsDerivedTreeDir: a recycle bin's renditions
 // were deleted and a snapshot's are copies, so neither is the tree's own),
 // a link counted as a rendition only when it resolves to a regular file, and
 // the filesystem's lost+found at the top, which this user cannot list,
@@ -129,7 +129,7 @@ func scanForRenditions(dir string) (renditionScan, error) {
 
 // scanDirEntries reads the open directory d, at path, a batch at a time: it
 // sets scan.rendition and returns at the first rendition, queues each
-// directory below it that skipsSidecarDir does not name, and marks the
+// directory below it that SkipsDerivedTreeDir does not name, and marks the
 // root's entries and any link to a directory. An error ends the listing
 // of d alone.
 func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, pending *[]pendingScanDir) error {
@@ -143,7 +143,7 @@ func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, p
 			p := filepath.Join(path, name)
 			switch t := e.Type(); {
 			case t.IsDir():
-				if !skipsSidecarDir(name) {
+				if !SkipsDerivedTreeDir(name) {
 					*pending = append(*pending, pendingScanDir{path: p, entry: e})
 				}
 			case t.IsRegular():
@@ -161,7 +161,7 @@ func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, p
 				switch {
 				case err != nil:
 				case st.IsDir():
-					if !skipsSidecarDir(name) {
+					if !SkipsDerivedTreeDir(name) {
 						scan.dirLink = true
 					}
 				case st.Mode().IsRegular() && looksLikeVariantSidecar(name):

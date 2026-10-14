@@ -236,6 +236,9 @@ func artworkCacheHasOrphans(walkRoot string, known map[string]bool) (bool, error
 			}
 			return walkErr
 		}
+		if artworkWalkSkips(walkRoot, path, d) {
+			return filepath.SkipDir
+		}
 		if d.IsDir() {
 			return nil
 		}
@@ -290,6 +293,23 @@ func artworkKeysInUse(ctx context.Context, store *manifest.Store) (artworkKeys [
 		known[manifest.ArtistThumbKey(m)] = true
 	}
 	return artworkKeys, known, nil
+}
+
+// artworkWalkSkips reports whether a walk of the cache passes over the
+// directory d without listing it (backlog B260): a directory below the walk
+// root that a library walk skips, by its name (integrity.SkipsDerivedTreeDir,
+// the sidecar walks' predicate). A cache kept at a NAS share's root holds
+// the share's recycle bin and snapshots, and Synology's @eaDir; a cache on
+// a volume of its own holds `.Trashes`. None of it is the cache's: the
+// bridge writes covers at the top and in `thumbs/` alone, and its temp
+// files are dot-named FILES. Until then the GC removed whatever such a
+// directory held that was named like an orphan, its empty-store guard
+// counted those files as covers to protect, and the size cap counted their
+// bytes and evicted them, oldest first. The cache directory itself is
+// never passed over, whatever its name. lost+found keeps its own rule
+// (artworkUnlistedDir).
+func artworkWalkSkips(walkRoot, path string, d os.DirEntry) bool {
+	return d.IsDir() && path != walkRoot && integrity.SkipsDerivedTreeDir(d.Name())
 }
 
 // artworkUnlistedDir reports whether a walk error is a directory inside the
@@ -422,6 +442,9 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 					return nil
 				}
 				return walkErr
+			}
+			if artworkWalkSkips(walkRoot, path, d) {
+				return filepath.SkipDir
 			}
 			if d.IsDir() {
 				return nil
@@ -719,6 +742,9 @@ func sweepArtworkCache(ctx context.Context, artworkDir string, capBytes int64) (
 				return nil
 			}
 			return walkErr
+		}
+		if artworkWalkSkips(walkRoot, path, d) {
+			return filepath.SkipDir
 		}
 		if d.IsDir() {
 			return nil

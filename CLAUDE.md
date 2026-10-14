@@ -4869,10 +4869,11 @@ no failing test — which is the shape to expect in this area.
   snapshots one that lost its index; a tree holding renditions only in such
   a directory, or a link named `#snapshot`, read to the mount-loss probe as
   healthy; and a recycle bin this user cannot list made every walk partial.
-  `skipsSidecarDir` is the one predicate, asked by `TakeSidecarInventory`
-  and by `scanForRenditions` at both of its sites (a directory, and a link
-  to one), so the forward sweeps and the probe behind the mount-loss and
-  relocation guards cannot disagree. **lost+found keeps its own rule**
+  `integrity.SkipsDerivedTreeDir` (`skipsSidecarDir` until B260) is the one
+  predicate, asked by `TakeSidecarInventory` and by `scanForRenditions` at
+  both of its sites (a directory, and a link to one), so the forward sweeps
+  and the probe behind the mount-loss and relocation guards cannot
+  disagree, and by the artwork cache's walks (next bullet). **lost+found keeps its own rule**
   (`IsFilesystemLostFound`, the partial-walk bullet below: the filesystem's
   own at the top is not counted, a readable one is walked, a locked one
   deeper is unlisted); don't fold it into the prune, which turns that
@@ -4897,6 +4898,24 @@ no failing test — which is the shape to expect in this area.
   `TestSidecarWalksListNoDirectoryALibraryWalkSkips`,
   `TestEveryGCSweepPassesOverADirectoryALibraryWalkSkips`,
   `TestDoctorVariantsIndexPassesOverASnapshot`).
+- **The artwork cache's three walks pass over the same directories**
+  (2026-10-14, backlog B260): `artwork --gc`, its empty-store guard
+  (`artworkCacheHasOrphans`) and the serve size cap (`sweepArtworkCache`)
+  ask `artworkWalkSkips`, which is `SkipsDerivedTreeDir` for a directory
+  below the walk root. They pruned nothing by name until then: on a cache
+  kept at a NAS share's root, the GC removed whatever the share's
+  `#recycle` or `#snapshot` held that was named like an orphan, the guard
+  refused an empty store over a recycle bin's covers, and the cap counted
+  their bytes and evicted them, oldest first (measured on main, every
+  shape). Nothing of the bridge's own is passed over: it writes covers at
+  the top of the cache and in `thumbs/` alone, and its temp files are
+  dot-named FILES. **The cache directory itself is walked whatever its
+  name** (a cache named `.artwork`), and lost+found keeps
+  `artworkUnlistedDir`'s rule
+  (`TestArtworkGCPassesOverTheDirectoriesALibraryWalkSkips`,
+  `TestArtworkGCEmptyStoreGuardPassesOverTheDirectoriesALibraryWalkSkips`,
+  `TestSweepArtworkCachePassesOverTheDirectoriesALibraryWalkSkips`,
+  `TestArtworkWalksWalkACacheNamedLikeASkippedDirectory`).
 - **…and a forward sweep compares a walked file with its rows in ONE
   spelling, `integrity.KnownSidecarKey`: cleaned, NFC-composed, THEN
   lowercased** (2026-10-02, backlog B206). HFS+ stores every name
@@ -5181,7 +5200,7 @@ no failing test — which is the shape to expect in this area.
   **One walk behind the probe and `TreeHoldsVariantSidecars`**,
   `scanForRenditions`: a rendition is a file `looksLikeVariantSidecar`
   names (regular, or a link to one) outside a directory the sidecar walks
-  skip (a dot-directory until 2026-10-02, every `skipsSidecarDir` name since:
+  skip (a dot-directory until 2026-10-02, every `SkipsDerivedTreeDir` name since:
   the B207 bullet above); the filesystem's lost+found counts as nothing; a link to a directory, which
   it does not follow, keeps the directory healthy (it cannot say what is
   behind it); it reads each directory a batch at a time and stops at the
