@@ -60,6 +60,10 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	}
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
+		// The epoch reset opens the restored store, which creates its
+		// migration lock (manifest's ladderLockSuffix, backlog B185): left
+		// root's, the service could not open it again.
+		src.ManifestDB + "-migrate.lock",
 	})
 }
 
@@ -115,7 +119,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	}
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
-		src.AdminAuth, src.AtlasHarvest,
+		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock",
 	})
 }
 
