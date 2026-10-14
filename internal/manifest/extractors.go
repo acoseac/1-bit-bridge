@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1941,9 +1942,9 @@ func readUint32LE(r io.Reader) (uint32, error) {
 // stringOf looks up keys in a raw tag map. Caller-provided keys
 // MUST already be in normalised form: lowercased AND with spaces
 // replaced by underscores (the `normaliseRawTagKey` shape). The
-// function normalises each map key once per iteration and compares
-// directly against the caller's set — no per-call allocation, no
-// repeated normalisation of the static literals at call sites.
+// function normalises each map key and compares it with the caller's
+// alias. Call sites pass the normalised literals, which are not
+// normalised again.
 //
 // To match BOTH Vorbis-style ("MUSICBRAINZ_ALBUMID") and Picard's
 // spaced ("MusicBrainz Album Id") shapes, callers MUST pass BOTH
@@ -1952,6 +1953,12 @@ func readUint32LE(r io.Reader) (uint32, error) {
 // the underscore-separated form). The normaliser bridges minor case
 // + space-vs-underscore variants WITHIN one spelling but NOT across
 // fundamentally different word-boundary shapes.
+//
+// When several raw keys normalise to one requested alias, the first
+// non-empty value in ascending raw-key order wins (stringOfAlias,
+// backlog B182). Map keys are unique, so that order has no ties. A
+// value that trims to nothing is skipped and a later key can answer.
+// A file with one matching key is unchanged.
 //
 // Pre-fix the lookup did exact case-sensitive map subscripts, so
 // MBID extraction silently failed for Picard's spaced names. What
@@ -1972,69 +1979,72 @@ func stringOf(raw map[string]any, keys ...string) (string, bool) {
 	if len(keys) == 0 {
 		return "", false
 	}
-	// Coerce a raw tag value to a non-empty trimmed string, mirroring the
-	// value shapes dhowden/tag surfaces.
-	coerce := func(v any) (string, bool) {
-		switch s := v.(type) {
-		case string:
-			if trimmed := strings.TrimSpace(s); trimmed != "" {
+	// Aliases stay in the caller's order: DATE before YEAR, TDRC before
+	// TYER (Gemini HIGH on PR #447). Within one alias, stringOfAlias
+	// chooses. The first raw key a range visits is not that choice: Go
+	// starts each range at a random slot.
+	for _, k := range keys {
+		if out, ok := stringOfAlias(raw, k); ok {
+			return out, true
+		}
+	}
+	return "", false
+}
+
+// stringOfAlias returns the first non-empty coerced value among raw keys
+// that normalise to alias, in ascending raw-key order. Two spellings of
+// one alias then read the same way on every extraction.
+func stringOfAlias(raw map[string]any, alias string) (string, bool) {
+	var matches []string
+	for mapKey := range raw {
+		if normaliseRawTagKey(mapKey) == alias {
+			matches = append(matches, mapKey)
+		}
+	}
+	sort.Strings(matches)
+	for _, mapKey := range matches {
+		if out, ok := coerceRawTagValue(raw[mapKey]); ok {
+			return out, true
+		}
+	}
+	return "", false
+}
+
+// coerceRawTagValue returns a non-empty trimmed string for the value
+// shapes dhowden/tag surfaces, and reports false when the value is empty
+// or of another type.
+func coerceRawTagValue(v any) (string, bool) {
+	switch s := v.(type) {
+	case string:
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			return trimmed, true
+		}
+	case []string:
+		// Scan the whole slice. Vorbis comments can carry the same key
+		// more than once, and a leading blank used to hide a later value
+		// (CodeRabbit Minor round-1 on PR #166).
+		for _, item := range s {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
 				return trimmed, true
 			}
-		case []string:
-			// Scan the WHOLE slice — Vorbis comments can carry the
-			// same key multiple times (e.g. `COMMENT="" / COMMENT="real"`).
-			// Pre-fix, only `s[0]` was inspected so a leading blank
-			// entry treated the tag as absent. CodeRabbit Minor
-			// round-1 on PR #166.
-			for _, item := range s {
-				if trimmed := strings.TrimSpace(item); trimmed != "" {
-					return trimmed, true
-				}
-			}
-		case int:
-			// dhowden/tag surfaces MP4/M4A `cpil` (compilation atom)
-			// as int (0 or 1) via getInt(b[:1]) — NOT a string. Pre-fix
-			// the compilation safety net's `stringOf(... ) == "1"`
-			// check silently failed for every M4A compilation, leaving
-			// the AlbumArtist synth dead on that codepath. Coerce to
-			// string so downstream value comparisons work uniformly.
-			// CodeRabbit Critical round-1 on PR #166.
-			return strconv.Itoa(s), true
-		case int64:
-			return strconv.FormatInt(s, 10), true
-		case uint8:
-			// Defensive: dhowden's atomTypes class 21 (uint8) is the
-			// MP4 path most cpil values surface through; some library
-			// versions return uint8 directly rather than promoting to
-			// int. Both shapes mean the same thing on the wire.
-			return strconv.FormatUint(uint64(s), 10), true
-		case bool:
-			// Some tag libraries (and a future dhowden refactor) might
-			// surface boolean atoms directly. "1"/"0" matches the
-			// existing string-comparison conventions at call sites.
-			if s {
-				return "1", true
-			}
-			return "0", true
 		}
-		return "", false
-	}
-	// Iterate the REQUESTED keys in priority order — NOT the raw map, whose
-	// Go iteration order is randomized. When a file carries more than one
-	// matching tag (e.g. both DATE and YEAR, or TDRC + TYER), the earliest-
-	// listed key wins DETERMINISTICALLY, so the resolved value (and any year
-	// parsed from it) is stable across scans instead of flapping with map
-	// order. Gemini HIGH on PR #447. The inner scan is O(map) but the map is
-	// a dozen tags and `keys` is a handful, so the nesting is negligible.
-	for _, k := range keys {
-		for mapKey, v := range raw {
-			if normaliseRawTagKey(mapKey) != k {
-				continue
-			}
-			if out, ok := coerce(v); ok {
-				return out, true
-			}
+	case int:
+		// dhowden/tag surfaces an MP4 cpil atom as int via getInt, so the
+		// compilation check can compare it with "1" (CodeRabbit Critical
+		// round-1 on PR #166).
+		return strconv.Itoa(s), true
+	case int64:
+		return strconv.FormatInt(s, 10), true
+	case uint8:
+		// atomTypes class 21 is uint8. Some versions return that instead
+		// of promoting to int. Both mean the same thing on the wire.
+		return strconv.FormatUint(uint64(s), 10), true
+	case bool:
+		// "1" and "0" match the string comparisons at the call sites.
+		if s {
+			return "1", true
 		}
+		return "0", true
 	}
 	return "", false
 }
