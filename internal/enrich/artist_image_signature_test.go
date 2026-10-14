@@ -8,9 +8,50 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// portraitStub serves Deezer's artist search naming one artist, whose
+// picture at /picture.jpg is body, and counts the requests it answers.
+func portraitStub(t *testing.T, body []byte) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var requests atomic.Int64
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch {
+		case strings.Contains(r.URL.Path, "/search/artist"):
+			fmt.Fprintf(w, `{"data":[{"id":1,"name":"Artist","picture_xl":%q,"picture_big":""}]}`, srvURL+"/picture.jpg")
+		case strings.HasSuffix(r.URL.Path, "/picture.jpg"):
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	srvURL = srv.URL
+	return srv, &requests
+}
+
+// portraitEnricher returns an enricher whose clients all talk to srv, with
+// srv's host allowed for images, caching into artworkDir, which it creates.
+func portraitEnricher(t *testing.T, srv *httptest.Server, artworkDir string) *Enricher {
+	t.Helper()
+	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deezer := NewDeezerClient(srv.URL, "t", nil)
+	deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
+	e := NewEnricher(nil,
+		NewMusicBrainzClient(srv.URL, "t", nil),
+		NewCoverArtClient(srv.URL, "t", nil),
+		deezer, artworkDir)
+	e.DeezerMinInterval = 0
+	return e
+}
 
 // TestArtistPortraitIsStoredOnlyWhenItIsAnImage — backlog B168: the Deezer
 // portrait path wrote FetchImage's bytes through the buffered
@@ -30,33 +71,9 @@ func TestArtistPortraitIsStoredOnlyWhenItIsAnImage(t *testing.T) {
 		{"a JPEG body", []byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var srvURL string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.Contains(r.URL.Path, "/search/artist"):
-					fmt.Fprintf(w, `{"data":[{"id":1,"name":"Artist","picture_xl":%q,"picture_big":""}]}`,
-						srvURL+"/picture.jpg")
-				case strings.HasSuffix(r.URL.Path, "/picture.jpg"):
-					w.Header().Set("Content-Type", "image/jpeg")
-					_, _ = w.Write(c.body)
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer srv.Close()
-			srvURL = srv.URL
-
+			srv, _ := portraitStub(t, c.body)
 			artworkDir := filepath.Join(t.TempDir(), "artwork")
-			if err := os.MkdirAll(artworkDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			deezer := NewDeezerClient(srv.URL, "t", nil)
-			deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
-			e := NewEnricher(nil,
-				NewMusicBrainzClient(srv.URL, "t", nil),
-				NewCoverArtClient(srv.URL, "t", nil),
-				deezer, artworkDir)
-			e.DeezerMinInterval = 0
+			e := portraitEnricher(t, srv, artworkDir)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -99,34 +116,9 @@ func TestArtistPortraitIsStoredOnlyWhenItIsAnImage(t *testing.T) {
 // before anything is fetched. The cache sits deep in the test's own temp
 // directory, so on the unchecked code the escaping link lands inside it.
 func TestArtistPortraitPathsStayInsideTheCache(t *testing.T) {
-	var requests int
-	var srvURL string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		switch {
-		case strings.Contains(r.URL.Path, "/search/artist"):
-			fmt.Fprintf(w, `{"data":[{"id":1,"name":"Artist","picture_xl":%q,"picture_big":""}]}`, srvURL+"/picture.jpg")
-		case strings.HasSuffix(r.URL.Path, "/picture.jpg"):
-			_, _ = w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-	srvURL = srv.URL
-
+	srv, requests := portraitStub(t, []byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD})
 	base := filepath.Join(t.TempDir(), "a", "b", "c")
-	artworkDir := filepath.Join(base, "artwork")
-	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	deezer := NewDeezerClient(srv.URL, "t", nil)
-	deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
-	e := NewEnricher(nil,
-		NewMusicBrainzClient(srv.URL, "t", nil),
-		NewCoverArtClient(srv.URL, "t", nil),
-		deezer, artworkDir)
-	e.DeezerMinInterval = 0
+	e := portraitEnricher(t, srv, filepath.Join(base, "artwork"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -138,8 +130,8 @@ func TestArtistPortraitPathsStayInsideTheCache(t *testing.T) {
 	if outside := filepath.Join(base, "escape.jpg"); fileExists(outside) {
 		t.Errorf("a portrait was written outside the cache, at %s", outside)
 	}
-	if requests != 0 {
-		t.Errorf("the refused MBID still reached Deezer (%d requests)", requests)
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the refused MBID still reached Deezer (%d requests)", n)
 	}
 }
 
