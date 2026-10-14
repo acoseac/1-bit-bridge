@@ -240,6 +240,12 @@ func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
 	if code := doJSONContext(t, srv.Handler(), reqCtx, http.MethodPost, "/api/roots", map[string]string{"path": extra}); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
+	// The failed flip's compensating scan can still be reading the library.
+	// On Windows a file a scan holds open cannot be removed, and
+	// readdedKeeps removes the song: four Windows runs failed there on
+	// 2026-10-14 (backlog B384). The save-failure case below waits the
+	// same way, and the checks then read the settled state.
+	srvBgScansWait(srv)
 	requireNoCarry(t, dataDir, "cancelled wipe")
 	requireKeptDate(t, srv, singleRootSong, kept, "row after the cancelled wipe")
 	if readdedKeeps(t, srv, album, singleRootSong, kept) {
