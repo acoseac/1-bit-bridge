@@ -420,9 +420,11 @@ func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, 
 		return fmt.Errorf("album gain: read peaks: %w", err)
 	}
 	if p, ok := recorded[path]; ok {
+		// Before the release, as record ends a grace before its caller
+		// releases (Argon on the B215 PR).
+		s.r.peaksFound(s.profile, recorded)
 		s.r.release(key, c)
 		s.fresh[path] = p
-		s.r.peaksFound(s.profile, recorded)
 		return nil
 	}
 	tp, err := s.r.measure(ctx, path, s.j, s.profile)
