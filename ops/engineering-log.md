@@ -42961,3 +42961,8 @@ through a measurement whose store write failed, was declined: a measurement
 that succeeded ends the run, and a new run holds the album back for a whole
 grace again, the safe side for a boost a rendition keeps; `record`'s comment
 says so. Gemini's local for the elapsed time was taken in the first round.
+A second pre-merge review (Argon) found the round sound, the decline right
+and both tests sound, and asked for the claim read's `peaksFound` to run
+before the claim's release, as `record` ends a grace before its caller
+releases; taken, and the claim read's control re-run on the moved call
+failed exactly `TestAPeakFoundUnderTheClaimEndsTheGrace` again.
