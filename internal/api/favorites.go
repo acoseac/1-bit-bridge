@@ -134,7 +134,7 @@ func decodeCappedArray[T any](data []byte, cap int, capErr error) ([]T, error) {
 
 type favoriteTrackDTO struct {
 	Path              string `json:"path,omitempty"`              // local, resolvable on this bridge
-	OriginFingerprint string `json:"originFingerprint,omitempty"` // foreign: owning bridge fp / "local" / "smb" / "upnp"
+	OriginFingerprint string `json:"originFingerprint,omitempty"` // foreign: owning bridge fp / "local" / "smb" / "upnp" / "mpd"
 	OriginPath        string `json:"originPath,omitempty"`
 	Title             string `json:"title,omitempty"`
 	Artist            string `json:"artist,omitempty"`
