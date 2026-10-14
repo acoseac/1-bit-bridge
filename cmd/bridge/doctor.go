@@ -532,7 +532,9 @@ const doctorVariantsIndexSamples = 5
 // It reuses integrity.KnownSidecarSet and integrity.TakeSidecarInventory
 // — the enumeration `bridge upscale --gc` and the background orphan
 // sweeper already walk with — rather than a third walker, so the number
-// the doctor reports is the number the sweep would act on.
+// the doctor reports is the number the sweep would act on. The variants
+// sweep and this probe both pass integrity.ConsiderVariantSidecar, so a
+// foreign file is in neither count.
 func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrphanPercent, budget int) (doctor.VariantsIndex, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctor.VariantsIndex{}, err
@@ -549,6 +551,7 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 	out := doctor.VariantsIndex{Rows: len(rows), VariantsDir: variantsDir, Budget: budget}
 	known := integrity.KnownSidecarSet(variantsDir, integritySnapshotsFromRows(rows))
 	inv, err := integrity.TakeSidecarInventory(ctx, variantsDir, known, integrity.SidecarInventoryOptions{
+		Consider:       integrity.ConsiderVariantSidecar,
 		MaxEntries:     budget,
 		MaxOrphanPaths: doctorVariantsIndexSamples,
 	})

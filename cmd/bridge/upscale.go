@@ -14,8 +14,9 @@
 // Maintenance modes:
 //   - `--gc`: symmetric garbage collection. Walks the on-disk
 //     variants directory (`upscale.variantsDir` or the default
-//     `<dataDir>/transcoded/`) and removes files with no
-//     matching DB row (forward sweep — orphan file recovery), AND
+//     `<dataDir>/transcoded/`) and removes a rendition file no
+//     row names, in either layout (forward sweep — orphan file
+//     recovery). A foreign file is left. AND
 //     walks `track_variants` rows and removes rows whose
 //     `sidecar_path` does not exist on disk (reverse sweep — orphan
 //     row recovery). The reverse sweep closes the "phantom variant"
@@ -219,8 +220,8 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
-	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
-	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
+	gc := fs.Bool("gc", false, "remove orphan rendition files (either layout, no DB row) and leave every other file, AND remove orphan DB rows (rows with no on-disk sidecar); skips conversion")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every rendition on disk look like an orphan")
 	allowMassDelete := fs.Bool("allow-mass-delete", false, gcAllowMassDeleteUsage)
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
@@ -988,14 +989,18 @@ func (t gcReclaimTally) explainRecent(stdout io.Writer, label string) {
 }
 
 // gcTakeInventory is the forward sweep's read-only half: one walk of
-// `outputDir` classifying every file against the known set, taken before
-// anything is deleted.
+// `outputDir` classifying every rendition file against the known set,
+// taken before anything is deleted. The Consider is
+// integrity.ConsiderVariantSidecar, the probe's own notion of a
+// rendition in either layout, so a foreign file is never a candidate.
 //
 // The walk is deliberately unbounded (no MaxEntries): the caller is about
 // to act on this list, and a truncated inventory would both miss orphans
 // and measure the guard's ratio from a slice of the tree.
 func gcTakeInventory(ctx context.Context, stderr io.Writer, outputDir string, known map[string]struct{}) (integrity.SidecarInventory, int) {
-	inv, err := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{})
+	inv, err := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{
+		Consider: integrity.ConsiderVariantSidecar,
+	})
 	if err != nil {
 		// Operator-interrupt path: distinguish from a real
 		// walk error so the SIGINT case reads cleanly.
@@ -1177,9 +1182,11 @@ var (
 // Until 2026-09-29 this asked VariantsDirSweepBlockReason whether the
 // directory held any entry at all, so each of those needed --allow-empty
 // for a run with nothing to do (backlog B65). What the sweep would remove
-// is its own Consider's: `upscale --gc` removes every file, so a
-// `.DS_Store` still refuses there, where `analyze --gc` removes waveforms
-// only and passes over it.
+// is its own Consider's: the variants sweep passes
+// ConsiderVariantSidecar, so a `.DS_Store` proceeds, as `analyze --gc`
+// does over a file that is not a waveform. A rendition no row names
+// still refuses. Until backlog B132 this sweep passed a nil Consider
+// and a `.DS_Store` refused here.
 func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv integrity.SidecarInventory, known int, massOrphansToo bool) int {
 	orphans, unstatted := integrity.EmptyCatalogOrphans(inv, known)
 	if orphans == 0 {
@@ -1246,10 +1253,12 @@ func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv
 // That parenthesis is a DEPENDENCY, not an observation. It held only
 // once TakeSidecarInventory began resolving its root: unresolved, a
 // symlinked variants directory reached the callback as one
-// non-directory entry, and with `--gc`'s nil Consider the forward
-// sweep unlinked the mountpoint alias itself — so this guard then
-// refused on a state that same run had just created, and no flag
-// reached it. If the inventory ever stops resolving, or starts
+// non-directory entry, and with the nil Consider `--gc` passed until
+// backlog B132 the forward sweep unlinked the mountpoint alias itself
+// — so this guard then refused on a state that same run had just
+// created, and no flag reached it. The sweeps now pass
+// ConsiderVariantSidecar; the resolve stays, because an unresolved
+// root is one entry. If the inventory ever stops resolving, or starts
 // handing back a directory, this reasoning goes with it.
 //
 // `forwardRemoved == 0` keeps the guard whole for the case it was
@@ -1263,10 +1272,13 @@ func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv
 // and never one it found already gone: a volume unmounted between the
 // inventory and the unlinks makes every unlink ENOENT, and the listed
 // renditions, counted instead, read that as this run's work (CodeRabbit on
-// #1129). `--gc`'s nil Consider unlinks a .DS_Store as an orphan, and a run
-// that removed only that found the directory holding no rendition
-// already. Read as its own work, it deleted every row of an unmounted
-// volume whose mountpoint held a .DS_Store (measured, 40 of 40). The
+// #1129). Until backlog B132 `--gc`'s nil Consider unlinked a .DS_Store
+// as an orphan, and a run that removed only that found the directory
+// holding no rendition already. The Consider now leaves that file, so
+// renditionsUnlinked stays 0 and a .DS_Store left behind does not read
+// as this run's work. Read as the run's own work, that count deleted every
+// row of an unmounted volume whose mountpoint held a .DS_Store (measured,
+// 40 of 40). The
 // pre-flight (gcRefuseUnavailableVariantsDir) refuses that directory
 // before anything is unlinked; this is the same question asked again
 // after the forward sweep, as the watcher asks again before it deletes.

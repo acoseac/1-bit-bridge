@@ -207,8 +207,10 @@ func upsertLiveTracks(t *testing.T, store *manifest.Store, sources ...string) {
 // On main the forward sweep took all three files for orphans and unlinked
 // them: the published renditions were left with a row and no file, and the
 // render still writing failed at its rename and struck a good file. What a
-// render that crashed an hour ago left behind, a rendition with no row and
-// a `.tmp`, is the positive control: the run still removes it.
+// render that crashed an hour ago left behind, a rendition with no row, is
+// the positive control: the run still removes it. Its `.tmp` is not a
+// rendition, so the variants sweep leaves it (backlog B132); until then a
+// nil Consider removed every `.tmp`.
 func TestAGCRunBesideALiveRenderKeepsWhatTheRenderWrites(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "variants")
@@ -243,7 +245,7 @@ func TestAGCRunBesideALiveRenderKeepsWhatTheRenderWrites(t *testing.T) {
 	}
 	requireFile(t, writing, "the .tmp a render was still writing")
 	requireNoFile(t, stale, "control: the rendition a crashed render left an hour ago")
-	requireNoFile(t, staleTmp, "control: the .tmp a crashed render left an hour ago")
+	requireFile(t, staleTmp, "a .tmp is not a rendition, so the variants sweep leaves the one a crashed render left")
 	if t.Failed() {
 		t.Logf("stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}

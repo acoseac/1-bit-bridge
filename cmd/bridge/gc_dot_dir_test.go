@@ -13,9 +13,9 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
-// TestRunGCForwardSweepSkipsDotDirectories: the forward sweep reaps every
-// file under the variants dir that no row claims — and a dot-directory is
-// never ours to reap (a `.Trash`, an rclone cache, render scratch an
+// TestRunGCForwardSweepSkipsDotDirectories: the forward sweep reaps a
+// rendition under the variants dir that no row claims, and a dot-directory
+// is never ours to reap (a `.Trash`, an rclone cache, render scratch an
 // operator pointed beneath the variants dir). The planted file must
 // survive while a genuine orphan beside it goes.
 func TestRunGCForwardSweepSkipsDotDirectories(t *testing.T) {
