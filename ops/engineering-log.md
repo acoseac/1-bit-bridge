@@ -42804,4 +42804,7 @@ because the unpruned walk then removed what it asserted on, so it became a
 dry run reading the guard's verdict alone, and the control was re-run); the
 cap's walk not pruning failed exactly the cap case; and the walk root
 pruned by its own name failed exactly the case of a cache named `.artwork`
-and `#recycle`.
+and `#recycle`. A pre-merge review (Gemini "Argon") found that case read
+the GC and the cap but not the empty-store guard; it now asks the guard
+too (a dry run over an empty store must refuse), and the same control
+failed it at that first assertion, in both subtests.
