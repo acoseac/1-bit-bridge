@@ -240,6 +240,11 @@ func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
 	if code := doJSONContext(t, srv.Handler(), reqCtx, http.MethodPost, "/api/roots", map[string]string{"path": extra}); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
+	// The failed flip's compensating scan can still be reading the library.
+	// On Windows a file a scan holds open cannot be removed, and
+	// readdedKeeps removes the song: four Windows runs failed there on
+	// 2026-10-14 (backlog B384). The checks then read the settled state.
+	srvBgScansSettled(t, srv)
 	requireNoCarry(t, dataDir, "cancelled wipe")
 	requireKeptDate(t, srv, singleRootSong, kept, "row after the cancelled wipe")
 	if readdedKeeps(t, srv, album, singleRootSong, kept) {
@@ -292,6 +297,21 @@ func refuseConfigSave(t *testing.T, cfgPath string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+// srvBgScansSettled waits for the server's background scans, as
+// srvBgScansWait does, and fails the test when they have not finished
+// within 30 s rather than returning: a scan still running holds the
+// fixtures this file removes, on Windows (backlog B384).
+func srvBgScansSettled(t *testing.T, s *Server) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); s.bgScans.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the server's background scans did not finish within 30 s")
+	}
 }
 
 // readdedKeeps removes the file, lets a scan reap the row, puts the file

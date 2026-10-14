@@ -43121,3 +43121,23 @@ enter it, which the lock now prevents. The map's own guard still matters on
 the lock's fallback (a filesystem without locks, a binary without the
 lock), so the test now plants a directory where the lock file goes and runs
 both openers through that fallback, the first test of it.
+
+## 2026-10-14 — the cancelled-wipe test waits for the flip's compensating scan before it removes a file (backlog B384)
+
+`TestACancelledWipeDropsTheSavedDates` failed four Windows CI runs on
+2026-10-14, on PRs that do not touch its code (the docs-only #1236 among
+them): `readdedKeeps` removes the fixture song, and Windows refused with
+"The process cannot access the file because it is being used by another
+process". The failed root flip starts a compensating scan, and the test went
+on while it could still be reading the library; a file a scan holds open
+cannot be removed on Windows (on macOS and Linux the remove succeeds, so it
+never failed there). The test now calls `srvBgScansWait` after the request,
+as `TestACancelledSaveAfterTheWipeDropsTheSavedDates` beside it already did,
+and its checks read the settled state. No red-first here: the race is
+Windows-only and timing-dependent; the evidence is the CI Windows job.
+
+Review round (Argon, then CodeRabbit, both on `srvBgScansWait`'s silent
+return at its 10 s bound, which would turn a slow scan back into the same
+flake): the test now waits with `srvBgScansSettled`, which fails after 30 s.
+The shared `srvBgScansWait` and its other callers are unchanged. CodeRabbit's
+second point, the rule in CLAUDE.md, is taken: a bullet at the end of Build.
