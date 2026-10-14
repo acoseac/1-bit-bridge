@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,10 +228,13 @@ func TestScan_RestampsWhenTheReconciliationTailBailsEarly(t *testing.T) {
 //
 // The duplicates sweeper checks IsScanning() and THEN calls
 // RestampDuplicates without s.mu — two full-library streams plus the
-// election later, a scan that started in the gap is running its own
+// election later, a scan that started in the gap may be running its own
 // stamping tail from fresher state. Committing the pre-scan snapshot over
 // it un-suppresses rows the scan just suppressed (and vice versa) with
-// nothing to heal it until the next scan.
+// nothing to heal it until the next scan. The stand-down is
+// ErrDupeRestampDeferred: a zero count and a nil error reads as applied,
+// and the scan that raised activeScans may be a subtree scan whose tail
+// does not run.
 //
 // The hook makes the scan appear mid-pass, which is what distinguishes a
 // commit-time re-check from a check at the top of the pass (the latter
@@ -247,11 +251,11 @@ func TestRestampDuplicates_AbandonsWhenAScanStartsMidPass(t *testing.T) {
 	t.Cleanup(func() { beforeApplyDupeStampsHookForTests = nil })
 
 	n, err := sc.RestampDuplicates(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrDupeRestampDeferred) {
+		t.Fatalf("pass a scan overtook = %v, want deferred", err)
 	}
 	if n != 0 {
-		t.Errorf("stale pass committed %d rows; a pass whose snapshot a scan overtook must abandon", n)
+		t.Errorf("stale pass committed %d rows; a pass whose snapshot a scan overtook must stand down", n)
 	}
 	if st := stampOf(t, s, "CopyA/Album/01 Song.flac"); st.GroupID != "" || st.Suppressed {
 		t.Errorf("abandoned pass wrote stamps anyway: %+v", st)

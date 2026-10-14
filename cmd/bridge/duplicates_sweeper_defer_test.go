@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // fakeRestamper drives both branches of runDuplicatesSweeper's
@@ -19,6 +22,7 @@ type fakeRestamper struct {
 	mu       sync.Mutex
 	restamps int
 	fired    chan struct{} // one send per RestampDuplicates call
+	answer   func() (int, error)
 }
 
 func newFakeRestamper() *fakeRestamper {
@@ -37,6 +41,9 @@ func (f *fakeRestamper) RestampDuplicates(context.Context) (int, error) {
 	select {
 	case f.fired <- struct{}{}:
 	default:
+	}
+	if f.answer != nil {
+		return f.answer()
 	}
 	return 0, nil
 }
@@ -157,6 +164,51 @@ func TestDuplicatesSweeperZeroDeferRetryDoesNotSpin(t *testing.T) {
 	}
 	if r.count() != 0 {
 		t.Fatalf("restamped %d times while scanning", r.count())
+	}
+}
+
+// A pass that stands down because a scan is in flight is not applied.
+// IsScanning does not see a subtree scan, so the sweeper learns about
+// that scan only from ErrDupeRestampDeferred. Recording the deferral as
+// finished would stamp lastFinishedAt while the old suppressions stay.
+func TestDuplicatesSweeperReArmsWhenThePassDefers(t *testing.T) {
+	r := newFakeRestamper()
+	status := &sweepStatus[duplicatesSweepCounts]{}
+	var calls atomic.Int32
+	r.answer = func() (int, error) {
+		if calls.Add(1) == 1 {
+			return 0, manifest.ErrDupeRestampDeferred
+		}
+		running, _, lastEnd, _, last := status.snapshot()
+		if !running || !lastEnd.IsZero() || last != nil {
+			t.Errorf("deferred pass recorded as applied: running=%v lastEnd=%v last=%v", running, lastEnd, last)
+		}
+		return 1, nil
+	}
+
+	nudge := make(chan struct{}, 1)
+	nudge <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runDuplicatesSweeper(ctx, r, nudge, status, time.Millisecond)
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the duplicates sweeper")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, _, lastEnd, _, last := status.snapshot()
+		if last != nil && last.Changed == 1 && !lastEnd.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deferred pass was not retried into an applied one")
+		}
+		runtime.Gosched()
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("restamp calls = %d, want the deferral and one retry", calls.Load())
 	}
 }
 

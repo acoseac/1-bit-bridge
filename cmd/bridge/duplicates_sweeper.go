@@ -55,9 +55,12 @@ const duplicatesDeferRetry = 5 * time.Second
 // success tail, so the sweeper exists solely for the operator flipping
 // duplicates.filter between scans.
 //
-// A nudge that lands while a scan is in flight is RE-ARMED, not dropped.
-// The former behaviour rested on "the running scan's tail already
-// applies the new value", which is not something the sweeper can know:
+// A nudge that lands while a scan is in flight is RE-ARMED, not dropped,
+// and so is a pass that returns ErrDupeRestampDeferred. IsScanning sees
+// a full scan only, and a subtree scan that commits nothing does not
+// stamp, so that answer is not an applied pass. The former behaviour
+// rested on "the running scan's tail already applies the new value",
+// which is not something the sweeper can know:
 // RestampDuplicates snapshots the policy ONCE at the top of the pass,
 // before two full-library streaming walks, so a PATCH that commits after
 // that read and before the scan ends is simply lost — and the tail may
@@ -87,38 +90,57 @@ func runDuplicatesSweeper(ctx context.Context, scanner duplicatesRestamper, nudg
 			return
 		case <-nudge:
 		}
-		if scanner.IsScanning() {
-			logger.Info("duplicates restamp deferred: scan in flight — re-arming")
-			// Put the intent back. The channel is buffered-1, so a full
-			// buffer means another nudge is already pending and carries
-			// the same intent (the pass reads the LIVE policy when it
-			// runs) — dropping ours there is correct, not a loss.
-			select {
-			case nudge <- struct{}{}:
-			default:
-			}
-			// Back off before looping, or the re-armed nudge would be
-			// received immediately and spin this goroutine for the whole
-			// duration of the scan.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(deferRetry):
-			}
-			continue
+		if !runOneDuplicatesPass(ctx, scanner, nudge, status, deferRetry) {
+			return
 		}
-		status.sweepStarted()
-		n, err := scanner.RestampDuplicates(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				logger.Info("duplicates restamp stopped: shutdown")
-			} else {
-				logger.Error("duplicates restamp", "err", err)
-			}
-			status.sweepFinished(nil)
-			continue
+	}
+}
+
+// runOneDuplicatesPass applies one nudge. false means the sweeper context
+// ended while a pass was being re-armed.
+//
+// IsScanning sees a full scan only. A subtree scan still makes
+// RestampDuplicates stand down, and one that commits nothing never
+// stamps, so ErrDupeRestampDeferred is the same re-arm. Recording that
+// answer as finished would show the new policy as applied.
+func runOneDuplicatesPass(ctx context.Context, scanner duplicatesRestamper, nudge chan struct{}, status *sweepStatus[duplicatesSweepCounts], deferRetry time.Duration) bool {
+	if scanner.IsScanning() {
+		logger.Info("duplicates restamp deferred: scan in flight — re-arming")
+		return rearmDuplicatesNudge(ctx, nudge, deferRetry)
+	}
+	status.sweepStarted()
+	n, err := scanner.RestampDuplicates(ctx)
+	if errors.Is(err, manifest.ErrDupeRestampDeferred) {
+		logger.Info("duplicates restamp deferred: scan in flight — re-arming")
+		return rearmDuplicatesNudge(ctx, nudge, deferRetry)
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logger.Info("duplicates restamp stopped: shutdown")
+		} else {
+			logger.Error("duplicates restamp", "err", err)
 		}
-		logger.Info("duplicates restamp applied", "changedRows", n)
-		status.sweepFinished(&duplicatesSweepCounts{Changed: n})
+		status.sweepFinished(nil)
+		return true
+	}
+	logger.Info("duplicates restamp applied", "changedRows", n)
+	status.sweepFinished(&duplicatesSweepCounts{Changed: n})
+	return true
+}
+
+// rearmDuplicatesNudge puts a deferred pass back on the nudge channel and
+// waits before the next try. A full buffer already holds the same intent,
+// which reads the live policy when it runs. false means the sweeper
+// context ended during the wait.
+func rearmDuplicatesNudge(ctx context.Context, nudge chan struct{}, deferRetry time.Duration) bool {
+	select {
+	case nudge <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(deferRetry):
+		return true
 	}
 }

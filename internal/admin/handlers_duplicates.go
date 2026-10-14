@@ -31,12 +31,14 @@ type duplicatesSummaryResponse struct {
 	StampedPolicy string     `json:"stampedPolicy,omitempty"`
 	StampedAt     *time.Time `json:"stampedAt,omitempty"`
 	Stamped       bool       `json:"stamped"`
-	// ScanInFlight lets the page say WHY counts are pending or stale:
-	// the stamping pass runs at the scan's tail, and the sweeper defers
-	// nudges while a scan runs (the tail applies the current policy
-	// anyway) — without this flag, "Re-evaluate now" during a long scan
-	// reads as a dead button (found live minutes after the v0.1.8
-	// deploy, mid ExtractorVersion-backfill scan).
+	// ScanInFlight lets the page say WHY counts are pending or stale.
+	// It is a full scan (IsScanning). The sweeper re-arms a nudge while
+	// one is in flight. A subtree scan is not this flag: a pass it
+	// interrupts returns deferred and the sweeper retries, so the
+	// summary stays on the policy the last pass stamped. Without the
+	// flag, "Re-evaluate now" during a long scan reads as a dead button
+	// (found live minutes after the v0.1.8 deploy, mid
+	// ExtractorVersion-backfill scan).
 	ScanInFlight bool `json:"scanInFlight"`
 	// Scanned / Groups / Suppressed / Served are all scoped to the
 	// population the stamping pass walked — the FILESYSTEM library.
