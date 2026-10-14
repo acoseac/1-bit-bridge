@@ -16,6 +16,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
@@ -228,6 +229,11 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 	return buildDoctorDepsFor(cfgPath, false)
 }
 
+// inContainerFunc is fsutil.InContainer, a seam so a test decides the
+// verdict rather than the machine it runs on: a CI runner is not a
+// container, and a developer's shell in one is.
+var inContainerFunc = fsutil.InContainer
+
 // buildDoctorDepsFor is buildDoctorDeps with one decision exposed: what a
 // NAMED path that is not there means. For --config, and for the console,
 // which names serve's own config, it is a FAIL, because the caller
@@ -253,6 +259,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 		// Same resolution the console's export and `bridge logs` use, so all
 		// three agree on which file is the log.
 		LogPath: adminLogPath(),
+		// Whether this runs in a container, which skips the two checks
+		// whose advice is for a host shell (doctor.Deps.InContainer). It
+		// does not depend on the config, so every lookup below carries it.
+		InContainer: inContainerFunc(),
 	}
 	path, found := resolveConfigPath(cfgPath)
 	// resolveConfigPath answers "not found" for ANY stat error. That is

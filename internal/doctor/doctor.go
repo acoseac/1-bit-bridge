@@ -317,6 +317,22 @@ type Deps struct {
 	// Skipped rather than answered: the checks are not wrong, they are
 	// about a machine that is not the reader's.
 	Managed bool
+
+	// InContainer is fsutil.InContainer(): this process runs in a
+	// container (Docker's /.dockerenv, Podman's /run/.containerenv). It
+	// skips the same two checks Managed skips, for a sibling reason: the
+	// container runtime starts and restarts the bridge, so there is no
+	// user systemd session to install a service into, and the image has
+	// no browser to open the console with. Measured in the Docker image
+	// (backlog B190): a healthy container ended "14 ok, 3 warn", two of
+	// them these, advising `bridge init --no-service` to a reader whose
+	// image already runs `serve` (and whose documented `docker run …
+	// init` already passes --no-service), and an opener nobody installs
+	// in a container.
+	//
+	// Not a Managed: a container's operator has a shell (`docker exec`),
+	// so every other check's advice still applies to them.
+	InContainer bool
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -1170,6 +1186,9 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 	if d.Managed {
 		return ok(checkNameServiceManager, "lifecycle managed by the host — check skipped")
 	}
+	if d.InContainer {
+		return ok(checkNameServiceManager, "lifecycle managed by the container runtime — check skipped")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("launchctl"); err != nil {
@@ -1231,6 +1250,9 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 func checkBrowserOpener(_ context.Context, d Deps) Check {
 	if d.Managed {
 		return ok(checkNameBrowserOpener, "console is reached over the network — check skipped")
+	}
+	if d.InContainer {
+		return ok(checkNameBrowserOpener, "no browser in a container — check skipped")
 	}
 	var candidates []string
 	switch runtime.GOOS {
