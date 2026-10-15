@@ -19,6 +19,7 @@ import (
 type redeemFixture struct {
 	srv      *Server
 	store    *auth.Store
+	path     string // the store's tokens.json, for a second process's store
 	codes    *pairingcode.Store
 	linkRaw  string // the token the link carries
 	tokenID  string
@@ -28,7 +29,8 @@ type redeemFixture struct {
 func newRedeemFixture(t *testing.T, wire bool) redeemFixture {
 	t.Helper()
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
-	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "tokens.json"))
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := auth.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +39,7 @@ func newRedeemFixture(t *testing.T, wire bool) redeemFixture {
 		t.Fatal(err)
 	}
 	codes := pairingcode.New()
-	code, err := codes.Issue(tok.ID)
+	code, err := codes.Issue(tok.ID, tok.Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +47,7 @@ func newRedeemFixture(t *testing.T, wire bool) redeemFixture {
 	if wire {
 		srv.WithPairingCodes(codes)
 	}
-	return redeemFixture{srv: srv, store: store, codes: codes, linkRaw: raw, tokenID: tok.ID, linkCode: code}
+	return redeemFixture{srv: srv, store: store, path: path, codes: codes, linkRaw: raw, tokenID: tok.ID, linkCode: code}
 }
 
 // redeem posts body to the redeem route with no bearer, as the app does,
@@ -166,6 +168,35 @@ func TestPairingRedeemRefusals(t *testing.T) {
 			t.Fatalf("a refused redemption handed over a token: %s", body)
 		}
 	})
+	// Backlog B160: `bridge token rotate` runs in another process, with its
+	// own store on the same tokens.json, so it cannot drop the code the way
+	// a console rotation does (Issue). Redeeming the code would rotate the
+	// token again and hand the old QR's holder a working secret, while the
+	// secret the CLI printed stopped validating.
+	t.Run("token rotated since by another process", func(t *testing.T) {
+		f := newRedeemFixture(t, true)
+		cli, err := auth.OpenStore(f.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cliRaw, _, err := cli.Rotate(f.tokenID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, body := redeem(t, f.srv, codeBody(f.linkCode))
+		if resp.StatusCode != http.StatusGone || !strings.Contains(body, "pairing_code_invalid") {
+			t.Errorf("= %d %s, want 410 pairing_code_invalid", resp.StatusCode, body)
+		}
+		if strings.Contains(body, `"token"`) {
+			t.Errorf("a refused redemption handed over a token: %s", body)
+		}
+		if _, ok := f.store.Validate(cliRaw); !ok {
+			t.Error("the secret the other process's rotation made no longer validates: the redemption rotated the token again")
+		}
+		if _, _, ok := f.codes.Take(f.linkCode); ok {
+			t.Error("the refused redemption left the code redeemable")
+		}
+	})
 	t.Run("token revoked since", func(t *testing.T) {
 		f := newRedeemFixture(t, true)
 		if err := f.store.Revoke(f.tokenID); err != nil {
@@ -175,10 +206,37 @@ func TestPairingRedeemRefusals(t *testing.T) {
 		if resp.StatusCode != http.StatusGone || !strings.Contains(body, "pairing_code_invalid") {
 			t.Fatalf("= %d %s, want 410 pairing_code_invalid", resp.StatusCode, body)
 		}
-		if _, ok := f.codes.Take(f.linkCode); ok {
+		if _, _, ok := f.codes.Take(f.linkCode); ok {
 			t.Fatal("the refused redemption left the code redeemable")
 		}
 	})
+}
+
+// TestPairingRedeemSurvivesChangesThatKeepTheSecret pins the other side of
+// B160's refusal: what another process writes WITHOUT replacing the token's
+// secret (an expiry set ahead, a debounced last-used flush) leaves the code
+// redeemable. Only a rotation, which replaces the secret the link carried,
+// ends it.
+func TestPairingRedeemSurvivesChangesThatKeepTheSecret(t *testing.T) {
+	f := newRedeemFixture(t, true)
+	other, err := auth.OpenStore(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ahead := time.Now().Add(time.Hour)
+	if _, err := other.SetExpiry(f.tokenID, &ahead); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := other.Validate(f.linkRaw); !ok {
+		t.Fatal("fixture broken: the link's token does not validate")
+	}
+	if err := other.FlushLastUsed(); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := redeem(t, f.srv, codeBody(f.linkCode))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("redeem after an expiry change and a last-used flush = %d %s, want 200", resp.StatusCode, body)
+	}
 }
 
 // TestPairingRedeemIsRateLimitedPerIP pins that the unauthenticated route
