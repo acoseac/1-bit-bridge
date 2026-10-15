@@ -119,8 +119,9 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `TestACancelledWipeDropsTheSavedDates` failed four Windows runs in one day, on PRs that did
   not touch it, because a failed root flip's compensating scan was still reading the song its
   `readdedKeeps` removes. macOS and Linux remove an open file, so it never failed there. Wait
-  with `srvBgScansSettled(t, srv)`, which fails after 30 s; `srvBgScansWait` returns silently
-  at its 10 s bound, which turns a slow scan back into the same flake.
+  with `srvBgScansWait(t, srv)`, which fails after 30 s, and the server fixture's cleanup
+  reports a scan still running. Until backlog B404 (2026-10-15) the helper returned silently
+  at a 10 s bound, which turns a slow scan back into the same flake.
 ## Architecture at a glance
 
 | Package | Role |
