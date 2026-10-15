@@ -218,7 +218,17 @@ func BrowseFoldersWalk(
 		deadline:   now().Add(opts.MaxDuration),
 		ancestors:  map[string]struct{}{},
 	}
-	if err := w.recurse(ctx, opts.RootObjectID, prefix, 0, true); err != nil {
+	// The time budget also bounds a single container's pages: BrowseAll
+	// follows one container's pages until the server says it is done (up to
+	// MaxBrowseAllItems), checking only its context between them, so a
+	// deadline checked only between containers let one container's one-item
+	// pages run past it (CodeRabbit on #1241). The context's deadline is the
+	// wall clock's; the check between containers keeps w.now, so a test can
+	// drive it.
+	walkCtx, cancelWalk := context.WithDeadline(ctx, time.Now().Add(opts.MaxDuration))
+	defer cancelWalk()
+	w.parent = ctx
+	if err := w.recurse(walkCtx, opts.RootObjectID, prefix, 0, true); err != nil {
 		if errors.Is(err, ErrWalkTruncated) {
 			stats.Truncated = true
 			return stats, err
@@ -237,6 +247,10 @@ type walker struct {
 	stats      *WalkStats
 	now        func() time.Time
 	deadline   time.Time
+	// parent is the caller's context: the walk's own (recurse's) is the
+	// caller's with the time budget's deadline, and only an expiry the
+	// caller's does not share is the budget's (timeBudgetSpent).
+	parent context.Context
 	// ancestors holds the ids of the containers on the path being walked,
 	// the one being Browsed included (backlog B164).
 	ancestors map[string]struct{}
@@ -247,6 +261,9 @@ type walker struct {
 // `atRoot` flips the SkipContainerTitles gate on/off.
 func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth int, atRoot bool) error {
 	if err := ctx.Err(); err != nil {
+		if w.timeBudgetSpent(ctx) {
+			return ErrWalkTimeBudget
+		}
 		return err
 	}
 	if depth > w.opts.MaxDepth {
@@ -263,6 +280,9 @@ func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth 
 	defer delete(w.ancestors, objectID)
 
 	containers, items, err := w.client.BrowseAll(ctx, w.controlURL, objectID)
+	if err != nil && w.timeBudgetSpent(ctx) {
+		return ErrWalkTimeBudget
+	}
 	if err != nil && !errors.Is(err, ErrBrowseLimit) {
 		// Real error — propagate. (ErrBrowseLimit is per-container;
 		// keep going with what we got but mark truncated.)
@@ -332,6 +352,14 @@ func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth 
 		}
 	}
 	return nil
+}
+
+// timeBudgetSpent reports whether the walk's context has expired while the
+// caller's has not: the time budget, not the caller, ended it. Decided from
+// the two contexts rather than the error chain, since a Browse cut short
+// mid-request may report its cancellation in a form errors.Is cannot see.
+func (w *walker) timeBudgetSpent(ctx context.Context) bool {
+	return ctx.Err() != nil && (w.parent == nil || w.parent.Err() == nil)
 }
 
 // looksLikeAudioItem filters out non-audio items (the 2Go's MediaServer
