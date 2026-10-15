@@ -6521,7 +6521,7 @@ no failing test — which is the shape to expect in this area.
   a live renderer was missing from /v1/renderers until the stub aged out.
   Touch refreshes only a renderer still cached with a ControlURL, so a stub
   that replaced it meanwhile keeps its LastSeenAt (the stub rule); **don't
-  make it refresh a stub**. `beforeKnownRefreshHook` lands the eviction in
+  make it refresh a stub**. `beforeKnownRefresh` lands the eviction in
   that window (`TestHandlePacket_ARendererEvictedBeforeItsRefreshIsFoundAgainOnItsNextAnnouncement`). **Measured and left**: a dual-homed upstream server alternating its
   two addresses re-fetches twice per M-SEARCH cycle (120 GETs an hour, the
   control URL alternating between two valid addresses); porting the

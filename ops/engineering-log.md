@@ -43294,8 +43294,9 @@ fetches one, so a live renderer was missing from /v1/renderers until the stub
 aged out (`RendererTTL`). The upstream client closed the same race with
 `ServerCache.Touch` on 2026-09-28 (2 of 200,000 races measured there).
 
-**Red first** (`cf24d85f`: the tests, and `beforeKnownRefreshHook`, nil in
-production, which runs between the lookup and the refresh). An eviction in
+**Red first** (`cf24d85f`: the tests, and a hook, nil in production, which
+runs between the lookup and the refresh; a client field, `beforeKnownRefresh`,
+as `writeMSearch` is, since the pre-merge review). An eviction in
 that window stored the stub, the next announcement made no fetch, and
 /v1/renderers listed nothing. A stub that replaced the entry in the window (a
 failed re-fetch replaces, it never merges) had its `LastSeenAt` refreshed,

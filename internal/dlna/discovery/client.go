@@ -19,12 +19,6 @@ import (
 // Per CodeRabbit Major round-1 on PR #305.
 var packageLogger = logging.Component("dlna-discovery")
 
-// beforeKnownRefreshHook is a test-only seam (nil in production): it runs in
-// handlePacket between the lookup of a known renderer and its LastSeenAt
-// refresh, so a test can land an eviction or a replacement there (backlog
-// B165).
-var beforeKnownRefreshHook func(udn string)
-
 // ssdpReadErrBackoff paces the read loop after an unexpected (non-timeout,
 // non-shutdown) UDP read error so a persistently-broken socket can't hot-spin
 // a CPU core. On Windows an unconnected UDP socket can surface WSAECONNRESET
@@ -255,6 +249,12 @@ type SSDPDiscoveryClient struct {
 	// send reach the wire therefore measures the host. Like the streak, it
 	// is set before Start, never while a loop runs.
 	writeMSearch func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
+
+	// beforeKnownRefresh, nil in production, runs in handlePacket between
+	// the lookup of a known renderer and its LastSeenAt refresh, so a test
+	// can land an eviction or a replacement there (backlog B165). A field,
+	// as writeMSearch is, so it binds one client and no global state.
+	beforeKnownRefresh func(udn string)
 
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
 	// AND every in-flight per-renderer detail fetch, so Stop() can
@@ -838,8 +838,8 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		if existing.ControlURL == "" {
 			return
 		}
-		if beforeKnownRefreshHook != nil {
-			beforeKnownRefreshHook(udn)
+		if c.beforeKnownRefresh != nil {
+			c.beforeKnownRefresh(udn)
 		}
 		// One step under the cache's lock: an entry evicted since the
 		// lookup stays gone, so the next announcement fetches it as new,

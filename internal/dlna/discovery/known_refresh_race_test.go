@@ -22,24 +22,16 @@ func cacheKnownRenderer(c *SSDPDiscoveryClient, seen time.Time) {
 	})
 }
 
-// inRefreshWindow runs during between the handler's lookup of a known
-// renderer and its refresh, on every packet until the test ends.
-func inRefreshWindow(t *testing.T, during func(udn string)) {
-	t.Helper()
-	beforeKnownRefreshHook = during
-	t.Cleanup(func() { beforeKnownRefreshHook = nil })
-}
-
 func TestHandlePacket_ARendererEvictedBeforeItsRefreshIsFoundAgainOnItsNextAnnouncement(t *testing.T) {
 	disp := &countingDispatcher{handler: descriptionOnlyHandler}
 	c := newTestClient(t, disp)
 	cacheKnownRenderer(c, time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC))
 	evicting := true
-	inRefreshWindow(t, func(udn string) {
+	c.beforeKnownRefresh = func(udn string) {
 		if evicting {
 			c.cache.Remove(udn) // what EvictStale does to an entry past RendererTTL
 		}
-	})
+	}
 	alive := alivePacket(movedUDN, "http://192.0.2.7:8080/description.xml")
 
 	c.handlePacket(context.Background(), alive, nil)
@@ -67,9 +59,9 @@ func TestHandlePacket_AStubThatReplacedARendererBeforeItsRefreshKeepsItsLastSeen
 	c := newTestClient(t, &countingDispatcher{handler: descriptionOnlyHandler})
 	earlier := time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)
 	cacheKnownRenderer(c, earlier)
-	inRefreshWindow(t, func(udn string) {
+	c.beforeKnownRefresh = func(udn string) {
 		c.cache.Replace(RendererInfo{UDN: udn, LastSeenAt: earlier})
-	})
+	}
 	c.handlePacket(context.Background(), alivePacket(movedUDN, "http://192.0.2.7:8080/description.xml"), nil)
 	c.wg.Wait()
 	got, ok := c.cache.Get(movedUDN)
