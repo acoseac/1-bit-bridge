@@ -6719,7 +6719,19 @@ no failing test — which is the shape to expect in this area.
   one — the walk, `LiveHost` for playback, and status. (Until PR #824 `ingestOne`
   refused it outright; **this entry still said "CONFIGURED, VALIDATED and
   UNIMPLEMENTED" a day after that shipped** — the fourth stale claim of the kind.
-  Check the code.)
+  Check the code.) **No SSDP packet can name that key** (backlog B163,
+  2026-10-15): both discovery clients key their caches by the UDN a USN carries,
+  and one alive whose USN was `manual:<the key>`, sent from another host,
+  re-fetched the description there and gave the manual server's entry the
+  sender's control URL, description URL and dial approval (the ingest and
+  `LiveHost` then went there), and refreshed its `LastSeenAt` so a down server
+  showed online; a byebye removed the entry. `discovery.UDNFromUSN` answers ""
+  for a UDN in `discovery.ManualKeyPrefix` (any case, after any leading space),
+  so both clients drop the packet, and `StableServerKey` builds the key from
+  the same constant. **Don't refuse every UDN outside `uuid:`**: UPnP UDA's
+  UDNs begin `uuid:`, but odd firmware exists, and only `manual:` is the
+  bridge's own. **Don't give the ingest a second synthetic key space** without
+  refusing it in `UDNFromUSN` too (`TestAManualServersKeyIsOneNoSSDPPacketCanName`).
 - **UPnP ingest is skip-if-unchanged**, and `walkFieldsEqual`'s exclusions are
   load-bearing: `ModTime` (stamped at walkStart — including it defeats the skip)
   and the enricher-owned MBID fields (including them marks every enriched row

@@ -43328,6 +43328,55 @@ previous QR's code as well" stays true, now for a CLI rotation too.
    link token's) and `TestServeRedeemsThePairingLinksCode` (every code is
    refused).
 
+## 2026-10-15 — no SSDP packet can name an entry in the manual-upstream key space (backlog B163)
+
+From the pre-v0.2.1 network-surface review (DLNA reviewer), confirmed in the
+code. The manual poller caches its server under the ingest's
+`StableServerKey`, `manual:<sha256 of the manual URL>`, and both discovery
+clients key their caches by whatever UDN a packet's USN carries
+(`UDNFromUSN` accepted any prefix). A LAN peer that can guess the manual URL
+(the key is a hash of it, not published, but a NAS URL is guessable) could
+serve the routed library's DIDL and bytes from its own host.
+
+**Red first** (`238b1bb6`, the tests alone on main), through the real upstream
+handler: an alive whose USN is the manual server's key, from 192.0.2.66, made
+one description fetch there and left the entry with the sender's control URL,
+description URL and dial approval ("announced from 192.0.2.66"), its
+`LastSeenAt` refreshed; a byebye with that USN removed the entry. The renderer
+client cached a renderer under a `manual:` UDN, `UDNFromUSN` returned every
+`manual:` UDN, and a manual server's key (both `StableServerKey` shapes) was one
+an SSDP USN could name. An upper-case `MANUAL:` USN, which the map keys apart
+from the real entry, still started a fetch and cached a second server.
+
+**Fix** (`a8b4f022`). `UDNFromUSN` answers "" for a UDN that begins
+`discovery.ManualKeyPrefix` in any case after any leading space, as for an
+absent USN, so both clients drop the packet before `Touch`, the fetch or the
+byebye `Remove`. `StableServerKey` builds both of its `manual:` shapes from the
+constant, and `TestAManualServersKeyIsOneNoSSDPPacketCanName` pins that every
+key it gives a manual server is refused. A `uuid:` UDN and an odd one outside
+both spaces (`UUID:odd-firmware`, `nas-without-uuid`) still cache: UPnP UDA's
+UDNs begin `uuid:`, but the constraint was to keep odd devices working, and
+only `manual:` is the bridge's own.
+
+**Negative controls** (each on the fix, restored from git):
+1. The refusal removed: exactly the new tests red, the same set as on main.
+2. The refusal case-sensitive: exactly the table's upper-case row and the
+   `MANUAL:` alive subtest.
+3. No trim: exactly the table's leading-space row.
+4. The ingest's key moved off the constant (`manualx:`): exactly
+   `TestStableServerKey` and `TestAManualServersKeyIsOneNoSSDPPacketCanName`.
+
+**Review round** (#1243). gemini-code-assist's suggestion taken: the check
+folds case on the prefix's bytes (`strings.EqualFold` on the first
+`len(ManualKeyPrefix)` bytes of the trimmed UDN) instead of lower-casing the
+whole UDN on every packet. It is the same answer for this prefix, since
+every letter of `manual:` is ASCII with no non-ASCII case twin (k and s have
+them). Two table rows pin the slice's edges (a UDN shorter than the prefix,
+one whose first rune is several bytes), and the alive test's body moved into
+a helper (SonarCloud go:S3776). The four controls re-ran on the new check,
+same results, plus a fifth: the length guard removed, exactly the table red
+(the short row).
+
 ## 2026-10-15 — the renderer client refreshes a known renderer in one step under the cache's lock (backlog B165)
 
 From the pre-v0.2.1 network-surface review (DLNA reviewer), read from the

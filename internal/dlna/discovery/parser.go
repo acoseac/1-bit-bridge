@@ -122,25 +122,51 @@ func ParseSSDPHeaders(raw []byte) (ParsedSSDPHeaders, error) {
 	return out, nil
 }
 
+// ManualKeyPrefix begins the key the upstream ingest caches a manual
+// server under (upnpingest.StableServerKey: "manual:<sha256 of its URL>").
+// It is the bridge's own key space: no device announces a UDN in it, since
+// UPnP UDA's UDNs begin "uuid:", and UDNFromUSN refuses every one.
+const ManualKeyPrefix = "manual:"
+
 // UDNFromUSN extracts the bare UDN from a USN header value. SSDP
 // USNs are formatted as `<udn>::<service-or-device-token>`; we
 // take everything before the first `::`. Returns the input unchanged
 // when no `::` separator is present (some renderers emit just the
 // UDN as USN for their root-device announcement).
 //
+// A UDN in the bridge's own key space (ManualKeyPrefix, in any case and
+// after any leading space) answers "", as an absent USN does, and both
+// discovery clients drop the packet. They key their caches by this UDN,
+// so a packet whose USN was a manual server's key landed on that server's
+// entry: an alive from another host re-fetched the description there and
+// gave the entry the sender's control URL, description URL and dial
+// approval, and refreshed LastSeenAt so a down server showed online; a
+// byebye removed it (backlog B163). Every other UDN is kept, one outside
+// "uuid:" included: odd firmware exists, and nothing else is ours. The
+// check folds case on the prefix's bytes alone, not a lower-cased copy of
+// the UDN, which costs nothing per packet; it matches exactly what
+// lower-casing would, since every letter of the prefix is ASCII and none
+// has a non-ASCII case twin (as k and s do).
+//
 // Examples:
 //
 //	"uuid:abc::urn:schemas-upnp-org:device:MediaRenderer:1" → "uuid:abc"
 //	"uuid:abc"                                              → "uuid:abc"
+//	"manual:<hash>::urn:schemas-upnp-org:device:MediaServer:1" → ""
 //	""                                                      → ""
 func UDNFromUSN(usn string) string {
 	if usn == "" {
 		return ""
 	}
+	udn := usn
 	if idx := strings.Index(usn, "::"); idx >= 0 {
-		return usn[:idx]
+		udn = usn[:idx]
 	}
-	return usn
+	if trimmed := strings.TrimSpace(udn); len(trimmed) >= len(ManualKeyPrefix) &&
+		strings.EqualFold(trimmed[:len(ManualKeyPrefix)], ManualKeyPrefix) {
+		return ""
+	}
+	return udn
 }
 
 // DeviceDescription is the subset of fields we extract from
