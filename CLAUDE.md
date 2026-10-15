@@ -3525,6 +3525,17 @@ no failing test — which is the shape to expect in this area.
   `TestTheDefaultHarvestClientDropsTheTokenLeavingHTTPS`, and
   `internal/authredirect`'s own two tests. B97's log entry named B133 and no
   more while it was unfixed (the rule in the backlog section above).
+- **A tick's results cursor and last-submit stamp land only on the base they were computed
+  against** (backlog B169, 2026-10-15). `SetCredential` to another base resets
+  `ResultCursor` and `LastSubmitAt`, but a results page or a library submit still in flight
+  against the old base landed after it: the poll's `SetCursor` gave the new base the old
+  base's cursor, so the new base's results below it were never fetched, and the submit's
+  `SetLastSubmit` held the new base's first library submit for a whole submit interval
+  (6 h). Both setters now take the base the tick's snapshot read and do nothing when the
+  store holds another (`TestAResultsPageFromTheOldBaseLeavesTheNewBasesCursorAlone`,
+  `TestASubmitToTheOldBaseLeavesTheNewBasesFirstSubmitDue`). **Don't give either setter a
+  form without the base**: the "Retry missing" reset passes the base it reads, and a switch
+  in between has already zeroed the stamp it resets.
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**

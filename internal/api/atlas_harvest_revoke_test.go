@@ -95,7 +95,7 @@ func TestAtlasHarvestCredentialDeleteClearsTheStoredToken(t *testing.T) {
 	post := doReq(t, srv, http.MethodPost, "/v1/atlas-harvest/credential", token, "",
 		`{"token":"bh-secret-token","atlasBaseUrl":"https://atlas.example","expiresInSeconds":3600}`)
 	post.Body.Close()
-	if err := store.SetCursor(42); err != nil {
+	if err := store.SetCursor(store.Snapshot().AtlasBaseURL, 42); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, ok := store.AtlasCredential(); !ok {
@@ -147,7 +147,7 @@ func TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile(t *testing.T
 	if err := seeded.SetCredential("bh-secret-token", "https://atlas.example", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := seeded.SetCursor(42); err != nil {
+	if err := seeded.SetCursor(seeded.Snapshot().AtlasBaseURL, 42); err != nil {
 		t.Fatal(err)
 	}
 
