@@ -30,7 +30,7 @@ import (
 // token that comes back. The token the link carried must be dead
 // afterwards, and the code spent.
 func TestServeRedeemsThePairingLinksCode(t *testing.T) {
-	s := bootPairingServe(t)
+	s := bootPairingServe(t, "")
 	mint, linkToken, code := s.mintLink(t)
 	stderr := s.stderr
 	phone := pairingPhone()
@@ -73,7 +73,7 @@ func TestServeRedeemsThePairingLinksCode(t *testing.T) {
 // operator rotated for) a working secret, while the secret the CLI printed
 // stopped validating.
 func TestServeRefusesTheCodeOfATokenTheCLIRotated(t *testing.T) {
-	s := bootPairingServe(t)
+	s := bootPairingServe(t, "")
 	mint, linkToken, code := s.mintLink(t)
 
 	var out, errOut bytes.Buffer
@@ -101,13 +101,21 @@ func TestServeRefusesTheCodeOfATokenTheCLIRotated(t *testing.T) {
 // pairingServe is a running `bridge serve` for the pairing-link tests: its
 // config file (for the CLI's commands), its LAN base URL and its admin
 // address. The server stops at the test's cleanup.
+//
+// Both ports are real listeners, held open and handed to serve (backlog
+// B313): ReachableEndpoints answers nil for a `:0` listen address, which
+// would make health and the QR trivially agree on an empty list. Shutdown is
+// a cleanup, not a tail (drainServeOnCleanup has the reasoning), and every
+// pairing boot test reads this one boot so they cannot drift apart.
 type pairingServe struct {
 	cfgPath, base, admin string
 	ctx                  context.Context
 	stderr               *safeBuffer
 }
 
-func bootPairingServe(t *testing.T) pairingServe {
+// bootPairingServe boots serve on a fresh library and data directory, with
+// extraConfig (YAML lines, or "") appended to its config.
+func bootPairingServe(t *testing.T, extraConfig string) pairingServe {
 	t.Helper()
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "Music")
@@ -117,7 +125,7 @@ func bootPairingServe(t *testing.T) pairingServe {
 	lan, admin := holdLoopback(t), holdLoopback(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n",
-		lib, filepath.Join(dir, "data"), admin.addr)
+		lib, filepath.Join(dir, "data"), admin.addr) + extraConfig
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
