@@ -27,6 +27,9 @@ var ErrQueueFull = errors.New("analyze pool queue is full")
 // ErrPoolClosed is returned by Enqueue after Stop.
 var ErrPoolClosed = errors.New("analyze pool is closed")
 
+// dropBurstMsg is the one line a run of dropped jobs logs, with its count.
+const dropBurstMsg = "analyze: dropped the jobs queued before analysis went off"
+
 // ErrDuplicateInflight is returned by Enqueue when the same source path is
 // already queued or running. The caller should treat it as accepted, with no
 // new work: the job the pool already holds produces the waveform. It is
@@ -85,6 +88,9 @@ type Pool struct {
 	jobTimeout time.Duration
 	fsyncFn    func(path string) error
 	now        func() time.Time
+	// liveGate is asked whether analysis is on when a worker takes a job
+	// (WithLiveGate). Nil reads as open.
+	liveGate func() bool
 
 	// Coalescing state-change publisher: a single long-lived goroutine
 	// drains a cap-1 channel and invokes the wired callback. Nothing in
@@ -127,6 +133,12 @@ func WithJobTimeout(d time.Duration) PoolOption {
 			p.jobTimeout = d
 		}
 	}
+}
+
+// WithLiveGate gives the pool the live analysis gate to ask when a worker
+// takes a job. Nil, the default, reads as open.
+func WithLiveGate(gate func() bool) PoolOption {
+	return func(p *Pool) { p.liveGate = gate }
 }
 
 // WithClock overrides the wall clock used for the analysis row's
@@ -556,6 +568,7 @@ type PoolStats struct {
 	Enqueued uint64
 	Done     uint64
 	Failed   uint64
+	Dropped  uint64
 }
 
 // Stats returns the current snapshot. Safe to call concurrently.

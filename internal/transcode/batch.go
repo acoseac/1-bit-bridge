@@ -1749,6 +1749,12 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	c.publishProgressRow(rowCopy)
 }
 
+// OnJobDropped is the Pool-side callback for a job a worker took while the
+// live gate of its kind was closed. Signature matches the pool's
+// `SetOnJobDropped` parameter.
+func (c *Coordinator) OnJobDropped(path, variantID string, batchID uuid.UUID, droppedAt time.Time) {
+}
+
 // recordThroughputDuration is the primary entry; the per-job
 // wall-clock seconds (from worker startedAt) is the authoritative
 // per-sample value. A zero duration falls back to "fast-fail"

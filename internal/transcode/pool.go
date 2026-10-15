@@ -198,6 +198,18 @@ type Pool struct {
 	jobFailedMu sync.RWMutex
 	onJobFailed func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time)
 
+	// onJobDropped fires once per job a worker took while the live gate of
+	// its rendition kind was closed (SetOnJobDropped). Guarded by its own
+	// mutex, like the two callbacks above.
+	jobDroppedMu sync.RWMutex
+	onJobDropped func(path, variantID string, batchID uuid.UUID, droppedAt time.Time)
+
+	// liveGate answers whether a job may still run when a worker takes it
+	// (SetLiveGate). Nil reads as open. Guarded by its own mutex, like the
+	// callbacks above: wired once after construction.
+	liveGateMu sync.RWMutex
+	liveGate   func(spec JobSpec) bool
+
 	// runner executes one transcode job under the supplied context.
 	// Defaults to Run in NewPool; tests inject a hang-until-ctx-
 	// cancelled stub to drive the per-job timeout branch without a
@@ -367,6 +379,9 @@ type jobFailedEvent struct {
 // response so the iOS toast can say "Queue full — wait for current
 // conversions to finish, then try again."
 var ErrQueueFull = errors.New("transcode pool queue is full")
+
+// dropBurstMsg is the one line a run of dropped jobs logs, with its count.
+const dropBurstMsg = "pool: dropped the jobs queued before their kind went off"
 
 // ErrPoolClosed is returned when Enqueue is called after Stop.
 // Production consumers shouldn't see this — `bridge serve` only
@@ -715,6 +730,24 @@ func (p *Pool) SetOnJobFailed(fn func(path, variantID, errMsg string, durationSe
 	p.jobFailedMu.Unlock()
 }
 
+// SetOnJobDropped wires the callback for a job a worker took while the live
+// gate of its kind was closed. nil disables. Set-once at cmd/bridge wiring
+// time alongside SetOnJobFailed.
+func (p *Pool) SetOnJobDropped(fn func(path, variantID string, batchID uuid.UUID, droppedAt time.Time)) {
+	p.jobDroppedMu.Lock()
+	p.onJobDropped = fn
+	p.jobDroppedMu.Unlock()
+}
+
+// SetLiveGate wires the predicate a worker asks when it takes a job: may
+// this job still run. nil reads as open. Race-safe; in practice set once
+// during cmd/bridge wiring.
+func (p *Pool) SetLiveGate(gate func(spec JobSpec) bool) {
+	p.liveGateMu.Lock()
+	p.liveGate = gate
+	p.liveGateMu.Unlock()
+}
+
 // Stop signals the workers to drain the queue and exit. Blocks
 // until every in-flight conversion completes (either through
 // success, failure, or sox-process kill on the cancelled
@@ -899,6 +932,7 @@ type PoolStats struct {
 	Enqueued uint64
 	Done     uint64
 	Failed   uint64
+	Dropped  uint64
 }
 
 // ActiveJob is the immutable snapshot of the job a worker is currently

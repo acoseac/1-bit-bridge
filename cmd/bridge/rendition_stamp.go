@@ -610,6 +610,11 @@ func (g renditionGates) open(kind transcode.JobKind) bool {
 	return gate != nil && gate()
 }
 
+// admits reports whether a job the transcode pool takes may still run.
+func (g renditionGates) admits(spec transcode.JobSpec) bool {
+	return true
+}
+
 // staleRerender is how a stale download has a rendition rendered again: the
 // way a client's POST /v1/upscale for the family would, and with the
 // refusals every automatic path makes.
