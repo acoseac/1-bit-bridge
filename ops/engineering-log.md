@@ -43320,3 +43320,14 @@ only `manual:` is the bridge's own.
 3. No trim: exactly the table's leading-space row.
 4. The ingest's key moved off the constant (`manualx:`): exactly
    `TestStableServerKey` and `TestAManualServersKeyIsOneNoSSDPPacketCanName`.
+
+**Review round** (#1243). gemini-code-assist's suggestion taken: the check
+folds case on the prefix's bytes (`strings.EqualFold` on the first
+`len(ManualKeyPrefix)` bytes of the trimmed UDN) instead of lower-casing the
+whole UDN on every packet. It is the same answer for this prefix, since
+every letter of `manual:` is ASCII with no non-ASCII case twin (k and s have
+them). Two table rows pin the slice's edges (a UDN shorter than the prefix,
+one whose first rune is several bytes), and the alive test's body moved into
+a helper (SonarCloud go:S3776). The four controls re-ran on the new check,
+same results, plus a fifth: the length guard removed, exactly the table red
+(the short row).
