@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
+	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/urlquery"
 	qrcode "github.com/skip2/go-qrcode"
@@ -75,23 +76,28 @@ func buildPairURL(bridgeURL, rawToken, code, fingerprint, libraryName string, al
 }
 
 // PairingCodeIssuer issues the one-time code a pairing link carries for a
-// token. *pairingcode.Store satisfies it.
+// token, bound to the token's hash as it stands (B160). *pairingcode.Store
+// satisfies it.
 type PairingCodeIssuer interface {
-	Issue(tokenID string) (string, error)
+	Issue(tokenID, tokenHash string) (string, error)
 }
 
-// pairingCodeFor returns a fresh code for tokenID, or "" when this bridge
-// issues none (Deps.PairingCodes nil) or the issue failed. A link without a
-// code still pairs, with its token, so a failure costs the link its code
-// and nothing else; it is logged, since that link is the old, weaker kind.
-func (s *Server) pairingCodeFor(tokenID string) string {
+// pairingCodeFor returns a fresh code for tok, the record the Mint or Rotate
+// that made the link's secret returned, or "" when this bridge issues none
+// (Deps.PairingCodes nil) or the issue failed. A link without a code still
+// pairs, with its token, so a failure costs the link its code and nothing
+// else; it is logged, since that link is the old, weaker kind. The code is
+// bound to tok.Hash, the secret beside it in the link, so a rotation made
+// anywhere after this (`bridge token rotate` included) leaves it nothing to
+// redeem.
+func (s *Server) pairingCodeFor(tok auth.Token) string {
 	if s.deps.PairingCodes == nil {
 		return ""
 	}
-	code, err := s.deps.PairingCodes.Issue(tokenID)
+	code, err := s.deps.PairingCodes.Issue(tok.ID, tok.Hash)
 	if err != nil {
 		logger.Warn("pairing: no one-time code for this link; it pairs with its token alone",
-			"tokenId", tokenID, "err", err)
+			"tokenId", tok.ID, "err", err)
 		return ""
 	}
 	return code

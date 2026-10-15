@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -29,48 +30,11 @@ import (
 // token that comes back. The token the link carried must be dead
 // afterwards, and the code spent.
 func TestServeRedeemsThePairingLinksCode(t *testing.T) {
-	dir := t.TempDir()
-	lib := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(lib, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lan, admin := holdLoopback(t), holdLoopback(t)
-	cfgPath := filepath.Join(dir, "bridge.yaml")
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n",
-		lib, filepath.Join(dir, "data"), admin.addr)
-	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	stdout, stderr := &safeBuffer{}, &safeBuffer{}
-	done := make(chan int, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		done <- runServe(ctx, serveOpts{
-			configPath: cfgPath, addrOverride: lan.addr,
-			lanListener: lan.ln, adminListener: admin.ln,
-		}, stdout, stderr)
-	}()
-	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, exited, done, stderr)
-	waitForAdminReady(t, admin.addr, done, stderr)
-
-	mint := pairViaAdmin(t, ctx, &http.Client{Timeout: 10 * time.Second},
-		"http://"+admin.addr+"/api/tokens",
-		`{"name":"boot test"}`, http.StatusCreated, stderr)
-	items := linkQueryItems(t, mint.PairURL)
-	linkToken, code := items["token"], items["code"]
-	if linkToken == "" || code == "" {
-		t.Fatalf("the console's link carries token=%q code=%q, want both: %s", linkToken, code, mint.PairURL)
-	}
-
-	phone := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-	}
-	base := "https://" + addr
+	s := bootPairingServe(t, "")
+	mint, linkToken, code := s.mintLink(t)
+	stderr := s.stderr
+	phone := pairingPhone()
+	base := s.base
 	if got := listStatus(t, phone, base, linkToken); got != http.StatusOK {
 		t.Fatalf("fixture broken: the link's token answers %d before any redemption, want 200", got)
 	}
@@ -99,6 +63,126 @@ func TestServeRedeemsThePairingLinksCode(t *testing.T) {
 	if status, raw := postRedeem(t, phone, base, code); status != http.StatusGone {
 		t.Errorf("a second redemption of the code = %d: %s, want 410", status, raw)
 	}
+}
+
+// TestServeRefusesTheCodeOfATokenTheCLIRotated pins backlog B160 where it
+// happens. `bridge token rotate` is another process, with its own auth.Store
+// on the same tokens.json, so it cannot reach the serving process's code
+// store. Its rotation must still end the old QR's code: redeeming that code
+// rotated the token AGAIN, handing whoever holds the old QR (the leak the
+// operator rotated for) a working secret, while the secret the CLI printed
+// stopped validating.
+func TestServeRefusesTheCodeOfATokenTheCLIRotated(t *testing.T) {
+	s := bootPairingServe(t, "")
+	mint, linkToken, code := s.mintLink(t)
+
+	var out, errOut bytes.Buffer
+	if rc := tokenRotateCmd([]string{"--config", s.cfgPath, mint.ID}, &out, &errOut); rc != 0 {
+		t.Fatalf("bridge token rotate = %d: %s", rc, errOut.String())
+	}
+	cliToken := printedToken(t, out.String())
+
+	phone := pairingPhone()
+	status, raw := postRedeem(t, phone, s.base, code)
+	if status != http.StatusGone || !strings.Contains(string(raw), "pairing_code_invalid") {
+		t.Errorf("redeeming the old QR's code after a CLI rotation = %d: %s, want 410 pairing_code_invalid", status, raw)
+	}
+	if strings.Contains(string(raw), `"token"`) {
+		t.Errorf("the redemption handed over a token: %s", raw)
+	}
+	if got := listStatus(t, phone, s.base, cliToken); got != http.StatusOK {
+		t.Errorf("the token the CLI printed answers %d, want 200: the redemption rotated it again", got)
+	}
+	if got := listStatus(t, phone, s.base, linkToken); got != http.StatusUnauthorized {
+		t.Errorf("the link's token answers %d after the CLI rotation, want 401", got)
+	}
+}
+
+// pairingServe is a running `bridge serve` for the pairing-link tests: its
+// config file (for the CLI's commands), its LAN base URL and its admin
+// address. The server stops at the test's cleanup.
+//
+// Both ports are real listeners, held open and handed to serve (backlog
+// B313): ReachableEndpoints answers nil for a `:0` listen address, which
+// would make health and the QR trivially agree on an empty list. Shutdown is
+// a cleanup, not a tail (drainServeOnCleanup has the reasoning), and every
+// pairing boot test reads this one boot so they cannot drift apart.
+type pairingServe struct {
+	cfgPath, base, admin string
+	stderr               *safeBuffer
+}
+
+// bootPairingServe boots serve on a fresh library and data directory, with
+// extraConfig (YAML lines, or "") appended to its config.
+func bootPairingServe(t *testing.T, extraConfig string) pairingServe {
+	t.Helper()
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lan, admin := holdLoopback(t), holdLoopback(t)
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: %s\n",
+		lib, filepath.Join(dir, "data"), admin.addr) + extraConfig
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stdout, stderr := &safeBuffer{}, &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{
+			configPath: cfgPath, addrOverride: lan.addr,
+			lanListener: lan.ln, adminListener: admin.ln,
+		}, stdout, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	addr, _ := waitForListening(t, stdout, exited, done, stderr)
+	waitForAdminReady(t, admin.addr, done, stderr)
+	return pairingServe{cfgPath: cfgPath, base: "https://" + addr, admin: admin.addr, stderr: stderr}
+}
+
+// mintLink mints a token in the console, as the operator does for a new
+// device, and returns the record with the token and code its link carries.
+func (s pairingServe) mintLink(t *testing.T) (mint pairResponse, linkToken, code string) {
+	t.Helper()
+	mint = pairViaAdmin(t, t.Context(), &http.Client{Timeout: 10 * time.Second},
+		"http://"+s.admin+"/api/tokens",
+		`{"name":"boot test"}`, http.StatusCreated, s.stderr)
+	items := linkQueryItems(t, mint.PairURL)
+	linkToken, code = items["token"], items["code"]
+	if linkToken == "" || code == "" {
+		t.Fatalf("the console's link carries token=%q code=%q, want both: %s", linkToken, code, mint.PairURL)
+	}
+	return mint, linkToken, code
+}
+
+// pairingPhone is the app's HTTPS client, minus the pin.
+func pairingPhone() *http.Client {
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+}
+
+// printedToken is the bearer token `bridge token rotate` printed: the line
+// after its "New bearer token" header.
+func printedToken(t *testing.T, out string) string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "New bearer token") && i+1 < len(lines) {
+			if tok := strings.TrimSpace(lines[i+1]); tok != "" {
+				return tok
+			}
+		}
+	}
+	t.Fatalf("no token in the rotate output: %q", out)
+	return ""
 }
 
 // linkQueryItems reads a pairing link's query the way the app does

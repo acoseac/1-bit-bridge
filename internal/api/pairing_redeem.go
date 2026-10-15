@@ -10,10 +10,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
 )
 
-// PairingCodeTaker redeems the one-time code a pairing link carries.
-// *pairingcode.Store satisfies it.
+// PairingCodeTaker redeems the one-time code a pairing link carries, with
+// the token ID and hash it was issued for. *pairingcode.Store satisfies it.
 type PairingCodeTaker interface {
-	Take(code string) (tokenID string, ok bool)
+	Take(code string) (tokenID, tokenHash string, ok bool)
 }
 
 // pairingRedeemMaxBodyBytes caps the body: a 43-character code in a
@@ -44,10 +44,17 @@ type pairingRedeemResponse struct {
 // dead once the real device has paired, and if a copy is redeemed first,
 // the real device's redemption fails where the user can see it.
 //
+// The rotation is RotateIfHash: it happens only while the token still
+// carries the hash it had when the code was issued (B160). A rotation in
+// the console drops the token's code (pairingcode.Store.Issue), but `bridge
+// token rotate` is another process and cannot; without the check, its old
+// QR's code rotated the token again, handing whoever held that QR a working
+// secret, and the secret the CLI printed stopped validating.
+//
 // Every refusal of a code (unknown, used, expired, or naming a token the
-// operator revoked since) is the same 410, so the endpoint answers nothing
-// about which codes exist. It draws from the per-IP pairing limiter
-// POST /v1/pairing/requests uses.
+// operator revoked or rotated since) is the same 410, so the endpoint
+// answers nothing about which codes exist. It draws from the per-IP pairing
+// limiter POST /v1/pairing/requests uses.
 func (s *Server) pairingRedeem(w http.ResponseWriter, r *http.Request) {
 	if s.pairingCodes == nil {
 		writeError(w, http.StatusNotFound, "pairing_code_not_supported",
@@ -69,13 +76,13 @@ func (s *Server) pairingRedeem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "code must be the 43-character pairing code")
 		return
 	}
-	tokenID, ok := s.pairingCodes.Take(req.Code)
+	tokenID, tokenHash, ok := s.pairingCodes.Take(req.Code)
 	if !ok {
 		writeGonePairingCode(w)
 		return
 	}
-	raw, tok, err := s.store.Rotate(tokenID)
-	if errors.Is(err, auth.ErrNotFound) {
+	raw, tok, err := s.store.RotateIfHash(tokenID, tokenHash)
+	if errors.Is(err, auth.ErrNotFound) || errors.Is(err, auth.ErrTokenChanged) {
 		writeGonePairingCode(w)
 		return
 	}

@@ -85,7 +85,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	// (pairingcode.Store keeps one live code per token), so the old QR
 	// has nothing left to redeem, as its token has nothing left to use.
 	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
-	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok.ID), fp, cfg.LibraryName, alternates)
+	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the rotate — operator can

@@ -898,6 +898,35 @@ func indexOfToken(tokens []Token, id string) int {
 //
 // Returns ErrNotFound if no token with that ID exists.
 func (s *Store) Rotate(id string) (rawToken string, tok Token, err error) {
+	return s.rotate(id, func(Token) error { return nil })
+}
+
+// RotateIfHash is Rotate for a caller that judged the token as it stood: it
+// rotates only while the token still carries wantHash, the Hash it had when
+// the caller looked, and answers ErrTokenChanged otherwise, with nothing
+// written. The check runs inside the commit, on the file as read for it
+// (and again on a fresh read if a sibling process commits first), so no
+// rotation can land between the check and this one.
+//
+// The pairing-code redemption is the caller (backlog B160): a code is bound
+// to the token's hash when the console makes the QR, and `bridge token
+// rotate`, another process, cannot reach the serving process's code store
+// to drop it. Without the check, redeeming the old QR's code after that
+// rotation rotated the token again, so whoever held the old QR got a
+// working secret and the one the CLI printed stopped validating. A stored
+// token's hash is never empty, so an empty wantHash never matches.
+func (s *Store) RotateIfHash(id, wantHash string) (rawToken string, tok Token, err error) {
+	return s.rotate(id, func(cur Token) error {
+		if cur.Hash != wantHash {
+			return ErrTokenChanged
+		}
+		return nil
+	})
+}
+
+// rotate is Rotate and RotateIfHash: check judges the token as the commit
+// reads it, and an error from it ends the rotation with nothing written.
+func (s *Store) rotate(id string, check func(cur Token) error) (rawToken string, tok Token, err error) {
 	var buf [rawTokenBytes]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", Token{}, fmt.Errorf("random: %w", err)
@@ -917,6 +946,9 @@ func (s *Store) Rotate(id string) (rawToken string, tok Token, err error) {
 		i := indexOfToken(cur, id)
 		if i < 0 {
 			return nil, ErrNotFound
+		}
+		if err := check(cur[i]); err != nil {
+			return nil, err
 		}
 		next := slices.Clone(cur)
 		next[i].Hash = hashHex
@@ -970,3 +1002,7 @@ func (s *Store) SetExpiry(id string, expiresAt *time.Time) (Token, error) {
 // ErrNotFound is returned by Revoke / Rotate / SetExpiry when the
 // given ID is unknown.
 var ErrNotFound = errors.New("token not found")
+
+// ErrTokenChanged is returned by RotateIfHash when the token no longer
+// carries the hash its caller judged it by: it was rotated since.
+var ErrTokenChanged = errors.New("token changed since it was judged")
