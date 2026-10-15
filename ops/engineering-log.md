@@ -43376,3 +43376,34 @@ one whose first rune is several bytes), and the alive test's body moved into
 a helper (SonarCloud go:S3776). The four controls re-ran on the new check,
 same results, plus a fifth: the length guard removed, exactly the table red
 (the short row).
+
+## 2026-10-15 — the renderer client refreshes a known renderer in one step under the cache's lock (backlog B165)
+
+From the pre-v0.2.1 network-surface review (DLNA reviewer), read from the
+code. `internal/dlna/discovery`'s `handlePacket` looked a known renderer up
+(`Get`) and refreshed its `LastSeenAt` later, an `Upsert` of `{UDN,
+LastSeenAt}`. An `EvictStale` between the two stored a stub with no
+ControlURL. Snapshot hides a stub, and the stub branch never refreshes or
+fetches one, so a live renderer was missing from /v1/renderers until the stub
+aged out (`RendererTTL`). The upstream client closed the same race with
+`ServerCache.Touch` on 2026-09-28 (2 of 200,000 races measured there).
+
+**Red first** (`cf24d85f`: the tests, and a hook, nil in production, which
+runs between the lookup and the refresh; a client field, `beforeKnownRefresh`,
+as `writeMSearch` is, since the pre-merge review). An eviction in
+that window stored the stub, the next announcement made no fetch, and
+/v1/renderers listed nothing. A stub that replaced the entry in the window (a
+failed re-fetch replaces, it never merges) had its `LastSeenAt` refreshed,
+against the stub rule.
+
+**Fix** (`6ee12b2c`). `RendererCache.Touch(udn, seen)` advances the
+`LastSeenAt` of a renderer still cached with a ControlURL, in one step under
+the lock, and stores nothing otherwise; the handler's refresh is Touch.
+`Upsert` keeps its merge for the tests that seed the cache, and its docblock
+and `Replace`'s no longer name the alive refresh as its job: it has no
+production caller now.
+
+**Negative controls** (each on the fix, restored from git):
+1. The handler's refresh an `Upsert` again: exactly the two handler tests.
+2. Touch refreshes a stub: exactly `TestRendererCacheTouch` and
+   `TestHandlePacket_AStubThatReplacedARendererBeforeItsRefreshKeepsItsLastSeenAt`.

@@ -250,6 +250,12 @@ type SSDPDiscoveryClient struct {
 	// is set before Start, never while a loop runs.
 	writeMSearch func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
 
+	// beforeKnownRefresh, nil in production, runs in handlePacket between
+	// the lookup of a known renderer and its LastSeenAt refresh, so a test
+	// can land an eviction or a replacement there (backlog B165). A field,
+	// as writeMSearch is, so it binds one client and no global state.
+	beforeKnownRefresh func(udn string)
+
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
 	// AND every in-flight per-renderer detail fetch, so Stop() can
 	// block until the cache can no longer be mutated BEFORE it calls
@@ -832,10 +838,13 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		if existing.ControlURL == "" {
 			return
 		}
-		c.cache.Upsert(RendererInfo{
-			UDN:        udn,
-			LastSeenAt: now,
-		})
+		if c.beforeKnownRefresh != nil {
+			c.beforeKnownRefresh(udn)
+		}
+		// One step under the cache's lock: an entry evicted since the
+		// lookup stays gone, so the next announcement fetches it as new,
+		// and a stub that replaced it keeps its LastSeenAt (backlog B165).
+		c.cache.Touch(udn, now)
 		return
 	}
 
