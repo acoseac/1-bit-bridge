@@ -43192,3 +43192,12 @@ that advances a second per Browse ends after exactly 30; and a tree with three
 cycles (r holds a and b, a holds itself and b, b holds r and a) visits its 5
 acyclic paths and skips 6 cycles, with no error and not truncated.
 
+**Negative controls** on the fix, each predicted by name, its anchors
+count-checked and restored from git: the container budget's check made
+unsatisfiable failed exactly the wide-tree case (at its 90 s deadline) and the
+explicit-budget case (at its 30 s); the time budget's check and the cycle skip
+made unsatisfiable in one build failed exactly the time-budget case (the walk
+then met the container budget instead) and the cycle case; and a
+`walkBudgetError` that is not an `ErrWalkTruncated` failed exactly the three
+budget cases.
+
