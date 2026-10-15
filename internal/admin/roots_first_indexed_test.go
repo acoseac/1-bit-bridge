@@ -94,7 +94,7 @@ func addExtraRoot(t *testing.T, srv *Server, dataDir string) string {
 	if code := doJSON(t, srv.Handler(), http.MethodPost, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
 		t.Fatalf("add status %d", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	return extra
 }
 
@@ -173,7 +173,7 @@ func TestCollapsingSeveralRootsKeepsTheSurvivorsOwnDate(t *testing.T) {
 	if code := doJSON(t, srv.Handler(), http.MethodDelete, "/api/roots", map[string]string{"path": spoken}, nil); code != http.StatusNoContent {
 		t.Fatalf("prefix delete status %d", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	if n := carryCount(t, cfg.DataDir); n != 0 {
 		t.Fatalf("a prefix delete recorded %d dates", n)
 	}
@@ -181,7 +181,7 @@ func TestCollapsingSeveralRootsKeepsTheSurvivorsOwnDate(t *testing.T) {
 	if code := doJSON(t, srv.Handler(), http.MethodDelete, "/api/roots", map[string]string{"path": jazz}, nil); code != http.StatusNoContent {
 		t.Fatalf("collapse status %d", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	got, err := srv.deps.Manifest.GetTrack(ctx, "Artist/Album/song.flac")
 	if err != nil || got == nil || got.FirstIndexedAt == nil {
 		t.Fatalf("survivor %v err %v", got, err)
@@ -205,7 +205,7 @@ func TestASaveFailureAfterAddingARootDropsTheSavedDates(t *testing.T) {
 	if code := doJSON(t, srv.Handler(), http.MethodPost, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	requireKeptDate(t, srv, singleRootSong, kept, "restored file")
 	requireNoCarry(t, dataDir, "save failure")
 	if readdedKeeps(t, srv, album, singleRootSong, kept) {
@@ -221,7 +221,7 @@ func TestASaveFailureAfterCollapsingRootsDropsTheSavedDates(t *testing.T) {
 	if code := doJSON(t, srv.Handler(), http.MethodDelete, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusInternalServerError {
 		t.Fatalf("collapse status %d, want 500", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	stored := "Music/Artist/Album/song.flac"
 	requireKeptDate(t, srv, stored, kept, "restored file")
 	requireNoCarry(t, dataDir, "save failure")
@@ -244,7 +244,7 @@ func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
 	// On Windows a file a scan holds open cannot be removed, and
 	// readdedKeeps removes the song: four Windows runs failed there on
 	// 2026-10-14 (backlog B384). The checks then read the settled state.
-	srvBgScansSettled(t, srv)
+	srvBgScansWait(t, srv)
 	requireNoCarry(t, dataDir, "cancelled wipe")
 	requireKeptDate(t, srv, singleRootSong, kept, "row after the cancelled wipe")
 	if readdedKeeps(t, srv, album, singleRootSong, kept) {
@@ -263,7 +263,7 @@ func TestACancelledSaveAfterTheWipeDropsTheSavedDates(t *testing.T) {
 	if code := doJSONContext(t, srv.Handler(), reqCtx, http.MethodPost, "/api/roots", map[string]string{"path": extra}); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	requireKeptDate(t, srv, singleRootSong, kept, "restored file")
 	requireNoCarry(t, dataDir, "cancelled save")
 	if readdedKeeps(t, srv, album, singleRootSong, kept) {
@@ -297,21 +297,6 @@ func refuseConfigSave(t *testing.T, cfgPath string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-}
-
-// srvBgScansSettled waits for the server's background scans, as
-// srvBgScansWait does, and fails the test when they have not finished
-// within 30 s rather than returning: a scan still running holds the
-// fixtures this file removes, on Windows (backlog B384).
-func srvBgScansSettled(t *testing.T, s *Server) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() { defer close(done); s.bgScans.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the server's background scans did not finish within 30 s")
-	}
 }
 
 // readdedKeeps removes the file, lets a scan reap the row, puts the file

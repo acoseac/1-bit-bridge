@@ -43142,6 +43142,37 @@ flake): the test now waits with `srvBgScansSettled`, which fails after 30 s.
 The shared `srvBgScansWait` and its other callers are unchanged. CodeRabbit's
 second point, the rule in CLAUDE.md, is taken: a bullet at the end of Build.
 
+## 2026-10-15 — the admin tests' background-scan wait fails at its bound (backlog B404)
+
+B384's residual. `srvBgScansWait` joined the admin server's `bgScans`
+WaitGroup with a 10 s bound and returned either way, so a scan still running
+let the test go on: ten inline waits (in `client_spelling_test.go`,
+`handlers_trash_test.go` and `roots_first_indexed_test.go`) assert on state
+those scans write, and on Windows a scan still running holds the fixture files
+a test removes (B384). B384 moved one test to a second helper,
+`srvBgScansSettled`, which failed after 30 s; the shared helper stayed silent.
+
+Now there is one helper. `srvBgScansWait(t, srv)` stops the test with
+`t.Fatalf` when the scans have not finished within `bgScansWaitBound` (30 s),
+`srvBgScansSettled` is retired into it, and the server fixture's cleanup,
+which joins the scans before the store closes, reports with `t.Errorf` rather
+than returning in silence (an error, not a stop, so the cleanups after it
+still run). `srvBgScansJoin` is the bounded join both use, and
+`TestBgScansJoinReportsAScanStillRunning` pins that it reports a scan still
+running at the bound. No call site depended on the silent return: `make
+check` passes with every wait now failing at its bound.
+
+Review round (CodeRabbit, gemini-code-assist and Argon on #1239). The
+fixture's join cleanup now cancels `scanCtx` before it joins. Cleanups run
+last-registered-first, so the join ran before the cleanup that cancels the
+scan context: it waited on scans nobody had told to stop, and a test that
+had already failed at an inline wait's bound waited a second bound in its
+cleanup (CodeRabbit; Argon had noted the same 60 s). Declined:
+gemini-code-assist's wait until the test binary's deadline less a reserve.
+The bound is the failure signal; waiting to the deadline would turn a wedged
+scan back into a hang, which `go test` reports as a timeout panic far from
+the test that caused it.
+
 ## 2026-10-15 — a tick's cursor and last-submit stamp land only on the base they were computed against (backlog B169)
 
 From the pre-v0.2.1 network-surface review (enrich/harvest reviewer), confirmed
