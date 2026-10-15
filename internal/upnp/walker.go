@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 )
 
 // Walked is a single track yielded by a Browse-Folders walk. Path is the
@@ -80,6 +81,25 @@ type WalkOptions struct {
 	// pathological/cyclic server.
 	MaxDepth int
 
+	// MaxContainers caps the containers the walk Browses (backlog B164).
+	// MaxItems counts audio items only, so a tree of empty containers —
+	// from a hostile, broken or spoofed upstream — never met it, and
+	// MaxDepth bounds a chain, not a wide tree: four children a level is
+	// 16.7M containers by depth 12. Defaults to defaultMaxContainers.
+	// Reaching it ends the walk with ErrWalkContainerBudget, an
+	// ErrWalkTruncated, so the ingest reaps nothing and walks again on its
+	// next tick.
+	MaxContainers int
+
+	// MaxDuration caps the walk's wall time (backlog B164): an upstream that
+	// answers each Browse just inside its request timeout is bounded by no
+	// count. Defaults to defaultMaxDuration. Checked between Browse calls;
+	// reaching it ends the walk with ErrWalkTimeBudget, an ErrWalkTruncated.
+	MaxDuration time.Duration
+
+	// now is the walk's clock, for tests; nil is time.Now.
+	now func() time.Time
+
 	// SkipContainerTitles is an optional set of (case-insensitive) folder
 	// titles to skip at the TOP LEVEL of the walk — MiniDLNA exposes
 	// `System Volume Information` alongside `Music` and we don't want
@@ -92,13 +112,41 @@ type WalkStats struct {
 	Containers int // total containers visited (incl. RootObjectID)
 	Items      int // total tracks yielded
 	Truncated  bool
+	// CyclesSkipped counts child containers not walked because they are an
+	// ancestor of the container that lists them (backlog B164). Skipping one
+	// loses nothing: its subtree is the one being walked already.
+	CyclesSkipped int
 }
+
+// defaultMaxContainers is the container budget of a walk whose caller sets
+// none: a Browse per container, as many as the default MaxItems allows tracks.
+// A real folder view holds an album or so per folder, so it never comes near.
+const defaultMaxContainers = 50_000
+
+// defaultMaxDuration is the time budget of a walk whose caller sets none.
+const defaultMaxDuration = 4 * time.Hour
 
 // ErrWalkTruncated is returned when MaxItems is hit before EOF — the
 // partial results MUST NOT be treated as authoritative (a sync-style
 // ingest would otherwise misread the truncation as "every track past N
 // was deleted"). Mirrors ErrBrowseLimit's contract.
 var ErrWalkTruncated = errors.New("upnp: Browse Folders walk hit MaxItems ceiling")
+
+// ErrWalkContainerBudget and ErrWalkTimeBudget end a walk that reached
+// MaxContainers or MaxDuration (backlog B164). Each is an ErrWalkTruncated to
+// errors.Is, so every guard that refuses to reap a truncated walk refuses
+// these too, with a message that names the budget rather than MaxItems.
+var (
+	ErrWalkContainerBudget error = walkBudgetError("upnp: Browse Folders walk hit its container budget (MaxContainers)")
+	ErrWalkTimeBudget      error = walkBudgetError("upnp: Browse Folders walk ran past its time budget (MaxDuration)")
+)
+
+type walkBudgetError string
+
+func (e walkBudgetError) Error() string { return string(e) }
+
+// Is makes a budget error an ErrWalkTruncated.
+func (e walkBudgetError) Is(target error) bool { return target == ErrWalkTruncated }
 
 // BrowseFoldersWalk recursively walks a ContentDirectory subtree
 // SERIALLY (one Browse at a time — MiniDLNA's libmicrohttpd pool is
@@ -136,6 +184,16 @@ func BrowseFoldersWalk(
 	if opts.MaxDepth <= 0 {
 		opts.MaxDepth = 12
 	}
+	if opts.MaxContainers <= 0 {
+		opts.MaxContainers = defaultMaxContainers
+	}
+	if opts.MaxDuration <= 0 {
+		opts.MaxDuration = defaultMaxDuration
+	}
+	now := opts.now
+	if now == nil {
+		now = time.Now
+	}
 	skip := make(map[string]struct{}, len(opts.SkipContainerTitles))
 	for _, t := range opts.SkipContainerTitles {
 		// Drop empty/whitespace-only entries — an empty key would skip
@@ -156,6 +214,9 @@ func BrowseFoldersWalk(
 		skip:       skip,
 		yield:      yield,
 		stats:      &stats,
+		now:        now,
+		deadline:   now().Add(opts.MaxDuration),
+		ancestors:  map[string]struct{}{},
 	}
 	if err := w.recurse(ctx, opts.RootObjectID, prefix, 0, true); err != nil {
 		if errors.Is(err, ErrWalkTruncated) {
@@ -174,6 +235,11 @@ type walker struct {
 	skip       map[string]struct{}
 	yield      func(Walked) error
 	stats      *WalkStats
+	now        func() time.Time
+	deadline   time.Time
+	// ancestors holds the ids of the containers on the path being walked,
+	// the one being Browsed included (backlog B164).
+	ancestors map[string]struct{}
 }
 
 // recurse Browses one container, recurses into child containers, yields
@@ -186,7 +252,15 @@ func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth 
 	if depth > w.opts.MaxDepth {
 		return fmt.Errorf("upnp: walk exceeded MaxDepth=%d at %q", w.opts.MaxDepth, pathSoFar)
 	}
+	if w.stats.Containers >= w.opts.MaxContainers {
+		return ErrWalkContainerBudget
+	}
+	if !w.now().Before(w.deadline) {
+		return ErrWalkTimeBudget
+	}
 	w.stats.Containers++
+	w.ancestors[objectID] = struct{}{}
+	defer delete(w.ancestors, objectID)
 
 	containers, items, err := w.client.BrowseAll(ctx, w.controlURL, objectID)
 	if err != nil && !errors.Is(err, ErrBrowseLimit) {
@@ -242,6 +316,15 @@ func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth 
 			if _, drop := w.skip[strings.ToLower(strings.TrimSpace(ct.Title))]; drop {
 				continue
 			}
+		}
+		// A container that lists one of its own ancestors is a cycle: walking
+		// into it would Browse the same subtree again until MaxDepth, and a
+		// cycle with two ways round multiplies at every level. The same
+		// container under two different parents is not a cycle and is still
+		// walked under each (backlog B164).
+		if _, cycle := w.ancestors[ct.ID]; cycle {
+			w.stats.CyclesSkipped++
+			continue
 		}
 		childPath := joinPath(pathSoFar, containerPathComponent(ct.Title, ct.ID))
 		if err := w.recurse(ctx, ct.ID, childPath, depth+1, false); err != nil {

@@ -6716,6 +6716,20 @@ no failing test — which is the shape to expect in this area.
   error, no `stats.Truncated`) and the sweep deletes every unvisited row. The
   reasons are now named and only `implausibleShape` can expire. Same rule as the
   scanner's, one layer up.
+- **An upstream walk stops at a container budget and a time budget, and skips a child
+  container that is its own ancestor** (backlog B164, 2026-10-15). `recurse` was bounded only
+  by `MaxDepth` (12, which bounds a chain) and `MaxItems` (audio items only), so a tree of
+  empty containers (four children a level is 16.7M containers by depth 12) or a cycle with
+  two ways round walked until a restart, and `upnpingest.Run` holds `runMu` across every
+  server, so every other upstream's walk and "Rescan now" waited behind it. The walk now ends
+  at `MaxContainers` (default 50,000 Browses) or `MaxDuration` (default 4 h) with
+  `ErrWalkContainerBudget` / `ErrWalkTimeBudget`, each an `ErrWalkTruncated` to `errors.Is`,
+  so the ingest reaps nothing and walks again next tick; and a child whose id is an ancestor
+  of the container listing it is skipped (`WalkStats.CyclesSkipped`), while a container under
+  two parents is still walked under each. **Don't make a budget error anything but an
+  `ErrWalkTruncated`** (a partial walk must never reap), **and don't widen the cycle check to
+  every container already visited**: a container reachable from two parents is not a cycle,
+  and its second path is rows of its own.
 - **Routed rows fill artist/album from the container path via `dupes.Resolve`,
   never manifest's `fillFromPath`** — the scanner's two-directories-up rule puts
   "CD1" in the album field, while `dupes` strips disc folders and is what the
