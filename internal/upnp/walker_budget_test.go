@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -63,7 +64,9 @@ func wide(objectID string) []string {
 	return []string{objectID + ".0", objectID + ".1", objectID + ".2", objectID + ".3"}
 }
 
-func walkTree(ctx context.Context, d *treeDispatcher, opts WalkOptions) (WalkStats, error) {
+func walkTree(ctx context.Context, d interface {
+	Do(context.Context, *http.Request) (*http.Response, error)
+}, opts WalkOptions) (WalkStats, error) {
 	opts.RootObjectID = "r"
 	return BrowseFoldersWalk(ctx, NewContentDirectoryClient(d), testControlURL, opts,
 		func(Walked) error { return nil })
@@ -144,5 +147,50 @@ func TestBrowseFoldersWalk_ATimeBudgetEndsTheWalkAsTruncated(t *testing.T) {
 	}
 	if n := d.calls.Load(); n != 30 {
 		t.Errorf("%d Browse calls before the budget ran out, want 30 (one per clock second)", n)
+	}
+}
+
+// pagingDispatcher answers every Browse with one more child container and a
+// TotalMatches that is never reached, after a short pause: ONE container's
+// pages, which BrowseAll follows up to MaxBrowseAllItems (100,000) before it
+// returns, so a deadline checked only between containers never sees them.
+type pagingDispatcher struct {
+	pause time.Duration
+	calls atomic.Int64
+}
+
+func (d *pagingDispatcher) Do(_ context.Context, req *http.Request) (*http.Response, error) {
+	n := d.calls.Add(1)
+	time.Sleep(d.pause)
+	m := objectIDArg.FindStringSubmatch(readAll(req))
+	parent := "r"
+	if m != nil {
+		parent = m[1]
+	}
+	didl := xmlnsHeader + ct("p"+strconv.FormatInt(n, 10), parent, "page") + `</DIDL-Lite>`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(browsePage(didl, 1, 1_000_000))),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func readAll(req *http.Request) string {
+	b, _ := io.ReadAll(req.Body)
+	return string(b)
+}
+
+// CodeRabbit on #1241: the time budget also ends a single container's
+// endless pages, not only a walk between containers.
+func TestBrowseFoldersWalk_ATimeBudgetAlsoEndsOneContainersEndlessPages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	d := &pagingDispatcher{pause: 2 * time.Millisecond}
+	stats, err := walkTree(ctx, d, WalkOptions{MaxDuration: 300 * time.Millisecond})
+	if !errors.Is(err, ErrWalkTimeBudget) || !errors.Is(err, ErrWalkTruncated) {
+		t.Fatalf("err = %v after %d Browse calls of one container, want ErrWalkTimeBudget (an ErrWalkTruncated)", err, d.calls.Load())
+	}
+	if !stats.Truncated {
+		t.Errorf("stats.Truncated = false, want true")
 	}
 }
