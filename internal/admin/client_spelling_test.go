@@ -102,7 +102,7 @@ func uploadAll(t *testing.T, srv *Server, files map[string][]byte) map[string]an
 	if n, _ := commit["committed"].(float64); int(n) != len(files) {
 		t.Fatalf("committed = %v, want %d (%v)", commit["committed"], len(files), commit)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	return commit
 }
 
@@ -118,7 +118,7 @@ func trashPaths(t *testing.T, srv *Server, paths ...string) {
 	if ok, _ := res["ok"].(float64); int(ok) != len(paths) {
 		t.Fatalf("trash result = %v, want %d trashed", res, len(paths))
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 }
 
 // restoreTheOneEntry restores the trash's one entry through the real
@@ -140,7 +140,7 @@ func restoreTheOneEntry(t *testing.T, srv *Server) map[string]any {
 	if ok, _ := res["ok"].(float64); int(ok) != 1 {
 		t.Fatalf("restore result = %v", res)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	return listed[0]
 }
 
