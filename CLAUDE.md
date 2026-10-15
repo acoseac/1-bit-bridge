@@ -6734,7 +6734,9 @@ no failing test — which is the shape to expect in this area.
   empty containers (four children a level is 16.7M containers by depth 12) or a cycle with
   two ways round walked until a restart, and `upnpingest.Run` holds `runMu` across every
   server, so every other upstream's walk and "Rescan now" waited behind it. The walk now ends
-  at `MaxContainers` (default 50,000 Browses) or `MaxDuration` (default 4 h) with
+  at `MaxContainers` (default 50,000 Browses) or `MaxDuration` (default 4 h; the walk runs
+  under a context with that deadline, so it also ends one container's pages, which
+  `BrowseAll` follows up to `MaxBrowseAllItems`) with
   `ErrWalkContainerBudget` / `ErrWalkTimeBudget`, each an `ErrWalkTruncated` to `errors.Is`,
   so the ingest reaps nothing and walks again next tick; and a child whose id is an ancestor
   of the container listing it is skipped (`WalkStats.CyclesSkipped`), while a container under

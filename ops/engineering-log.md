@@ -43264,3 +43264,22 @@ then met the container budget instead) and the cycle case; and a
 `walkBudgetError` that is not an `ErrWalkTruncated` failed exactly the three
 budget cases.
 
+Review round (CodeRabbit on #1241, a Major): `MaxDuration` was checked only
+between containers, but `BrowseAll` follows ONE container's pages until the
+server says it is done (up to `MaxBrowseAllItems`, 100,000), checking only its
+context between them, so an upstream serving one item a page held a single
+container far past the budget. The walk now runs under the caller's context
+with the budget's deadline (wall clock; the check between containers keeps the
+injectable `now`), and `timeBudgetSpent` reports an expiry of the walk's
+context that the caller's does not share as `ErrWalkTimeBudget`, decided from
+the two contexts rather than the error chain. Red first (`0bc1bae1`):
+`TestBrowseFoldersWalk_ATimeBudgetAlsoEndsOneContainersEndlessPages` (one
+container answering one more child a page, 2 ms a page, a 300 ms budget) ran to
+its 10 s outer deadline after 4,017 Browse calls of that container, ending
+`context deadline exceeded`; on the fix it ends at the budget, 0.30 s.
+Controls: `timeBudgetSpent` answering false failed exactly that case (the
+expiry surfaced as the BrowseAll error), and a walk context with no deadline
+failed exactly that case at the 10 s outer deadline.
+`TestBrowseFoldersWalk_HonorsCtxCancellation` still reports the caller's own
+cancel as itself.
+
