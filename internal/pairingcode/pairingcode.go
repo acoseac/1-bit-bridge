@@ -17,6 +17,13 @@
 // issues, the v1 API redeems), so nothing crosses a process, and a code lost
 // to a restart costs the operator one fresh QR. Only a SHA-256 of each code
 // is held, as for tokens.
+//
+// A token can still change in another process: `bridge token rotate` writes
+// tokens.json from its own store and cannot reach this one. So a code also
+// carries the token's hash as it stood when the code was issued, and the
+// redemption rotates the token only while it still carries that hash
+// (auth.Store.RotateIfHash, backlog B160): a rotation anywhere ends the old
+// QR's code, as a console rotation always did.
 package pairingcode
 
 import (
@@ -62,7 +69,10 @@ type Store struct {
 
 type entry struct {
 	tokenID string
-	issued  time.Time
+	// tokenHash is the token's stored hash (auth.Token.Hash) when the code
+	// was issued: the secret the link beside it carries.
+	tokenHash string
+	issued    time.Time
 }
 
 // New returns an empty Store.
@@ -70,9 +80,11 @@ func New() *Store {
 	return &Store{codes: make(map[[sha256.Size]byte]entry), now: time.Now, random: rand.Reader}
 }
 
-// Issue returns a fresh code bound to tokenID. Any code already bound to that
-// token is dropped: a token has at most one live code, so rotating a token in
-// the console (which issues a new code) leaves the old QR's code nothing to
+// Issue returns a fresh code bound to tokenID as it stands: tokenHash is the
+// token's stored hash now, which Take hands back so the redemption can refuse
+// a token rotated since (B160). Any code already bound to that token is
+// dropped: a token has at most one live code, so rotating a token in the
+// console (which issues a new code) leaves the old QR's code nothing to
 // redeem. Expired codes are dropped on the way.
 //
 // The drop comes BEFORE the new code is drawn, so an Issue that fails still
@@ -80,7 +92,7 @@ func New() *Store {
 // has already replaced the token; left in place, the old QR's code would
 // still redeem, and redeeming it rotates the token again and hands the
 // holder of that old QR a working secret (CodeRabbit on #1052).
-func (s *Store) Issue(tokenID string) (string, error) {
+func (s *Store) Issue(tokenID, tokenHash string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -100,26 +112,26 @@ func (s *Store) Issue(tokenID string) (string, error) {
 	for len(s.codes) >= maxLive {
 		s.evictOldestLocked()
 	}
-	s.codes[key] = entry{tokenID: tokenID, issued: now}
+	s.codes[key] = entry{tokenID: tokenID, tokenHash: tokenHash, issued: now}
 	return code, nil
 }
 
 // Take redeems code. It removes the code BEFORE judging it, so a code is
-// accepted at most once whatever the answer, and returns the token ID the
-// code was issued for when it was issued within TTL.
-func (s *Store) Take(code string) (tokenID string, ok bool) {
+// accepted at most once whatever the answer, and returns the token ID and
+// hash the code was issued for when it was issued within TTL.
+func (s *Store) Take(code string) (tokenID, tokenHash string, ok bool) {
 	key := sha256.Sum256([]byte(code))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, found := s.codes[key]
 	if !found {
-		return "", false
+		return "", "", false
 	}
 	delete(s.codes, key)
 	if s.now().Sub(e.issued) >= TTL {
-		return "", false
+		return "", "", false
 	}
-	return e.tokenID, true
+	return e.tokenID, e.tokenHash, true
 }
 
 // ValidShape reports whether code could be one this package issued: the

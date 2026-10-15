@@ -39,7 +39,7 @@ func newRedeemFixture(t *testing.T, wire bool) redeemFixture {
 		t.Fatal(err)
 	}
 	codes := pairingcode.New()
-	code, err := codes.Issue(tok.ID)
+	code, err := codes.Issue(tok.ID, tok.Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestPairingRedeemRefusals(t *testing.T) {
 		if _, ok := f.store.Validate(cliRaw); !ok {
 			t.Error("the secret the other process's rotation made no longer validates: the redemption rotated the token again")
 		}
-		if _, ok := f.codes.Take(f.linkCode); ok {
+		if _, _, ok := f.codes.Take(f.linkCode); ok {
 			t.Error("the refused redemption left the code redeemable")
 		}
 	})
@@ -206,7 +206,7 @@ func TestPairingRedeemRefusals(t *testing.T) {
 		if resp.StatusCode != http.StatusGone || !strings.Contains(body, "pairing_code_invalid") {
 			t.Fatalf("= %d %s, want 410 pairing_code_invalid", resp.StatusCode, body)
 		}
-		if _, ok := f.codes.Take(f.linkCode); ok {
+		if _, _, ok := f.codes.Take(f.linkCode); ok {
 			t.Fatal("the refused redemption left the code redeemable")
 		}
 	})
