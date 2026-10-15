@@ -43162,3 +43162,14 @@ still run). `srvBgScansJoin` is the bounded join both use, and
 running at the bound. No call site depended on the silent return: `make
 check` passes with every wait now failing at its bound.
 
+Review round (CodeRabbit, gemini-code-assist and Argon on #1239). The
+fixture's join cleanup now cancels `scanCtx` before it joins. Cleanups run
+last-registered-first, so the join ran before the cleanup that cancels the
+scan context: it waited on scans nobody had told to stop, and a test that
+had already failed at an inline wait's bound waited a second bound in its
+cleanup (CodeRabbit; Argon had noted the same 60 s). Declined:
+gemini-code-assist's wait until the test binary's deadline less a reserve.
+The bound is the failure signal; waiting to the deadline would turn a wedged
+scan back into a hang, which `go test` reports as a timeout panic far from
+the test that caused it.
+

@@ -112,7 +112,13 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 	// cleanup so it runs BEFORE it (LIFO): otherwise those goroutines outlive
 	// the test and log "database is closed" against a store already shut,
 	// which is noise today and a flake the moment one of them asserts.
+	// Cancelled first: this cleanup runs before the one above that cancels
+	// scanCtx, so without it the join waited on scans nobody had told to
+	// stop, and a test that already failed at an inline wait's bound waited
+	// a second bound here (B404 review). A scan that ignores the cancel is
+	// still reported.
 	t.Cleanup(func() {
+		cancel()
 		if !srvBgScansJoin(srv, bgScansWaitBound) {
 			t.Errorf("the server's background scans did not finish within %v of the test's end", bgScansWaitBound)
 		}
