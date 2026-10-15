@@ -22,7 +22,7 @@ func newTestStore() (*Store, *fakeClock) {
 
 func mustIssue(t *testing.T, s *Store, tokenID string) string {
 	t.Helper()
-	code, err := s.Issue(tokenID)
+	code, err := s.Issue(tokenID, "hash-"+tokenID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,13 +49,13 @@ func TestAnIssuedCodeHasTheTokenShape(t *testing.T) {
 func TestACodeIsRedeemedOnce(t *testing.T) {
 	s, _ := newTestStore()
 	code := mustIssue(t, s, "tok-a")
-	if id, ok := s.Take(code); !ok || id != "tok-a" {
-		t.Fatalf("first Take = (%q, %v), want (tok-a, true)", id, ok)
+	if id, hash, ok := s.Take(code); !ok || id != "tok-a" || hash != "hash-tok-a" {
+		t.Fatalf("first Take = (%q, %q, %v), want (tok-a, hash-tok-a, true)", id, hash, ok)
 	}
-	if id, ok := s.Take(code); ok {
+	if id, _, ok := s.Take(code); ok {
 		t.Fatalf("second Take = (%q, true), want nothing", id)
 	}
-	if _, ok := s.Take("never-issued-never-issued-never-issued-abcd"); ok {
+	if _, _, ok := s.Take("never-issued-never-issued-never-issued-abcd"); ok {
 		t.Fatal("a code nobody issued was taken")
 	}
 }
@@ -69,15 +69,15 @@ func TestACodeExpiresAtTheTTL(t *testing.T) {
 	stale := mustIssue(t, s, "tok-stale")
 
 	clock.t = clock.t.Add(TTL - time.Nanosecond)
-	if _, ok := s.Take(fresh); !ok {
+	if _, _, ok := s.Take(fresh); !ok {
 		t.Fatal("a code one nanosecond short of the TTL was refused")
 	}
 	clock.t = clock.t.Add(time.Nanosecond)
-	if _, ok := s.Take(stale); ok {
+	if _, _, ok := s.Take(stale); ok {
 		t.Fatal("a code exactly TTL old was accepted")
 	}
 	clock.t = clock.t.Add(-time.Hour)
-	if _, ok := s.Take(stale); ok {
+	if _, _, ok := s.Take(stale); ok {
 		t.Fatal("an expired code was accepted once the clock went back: the refusing Take must remove it")
 	}
 }
@@ -90,13 +90,13 @@ func TestATokenHasOneLiveCode(t *testing.T) {
 	first := mustIssue(t, s, "tok-a")
 	other := mustIssue(t, s, "tok-b")
 	second := mustIssue(t, s, "tok-a")
-	if _, ok := s.Take(first); ok {
+	if _, _, ok := s.Take(first); ok {
 		t.Fatal("the token's earlier code still redeemed after a new one was issued")
 	}
-	if id, ok := s.Take(second); !ok || id != "tok-a" {
+	if id, _, ok := s.Take(second); !ok || id != "tok-a" {
 		t.Fatalf("the token's new code = (%q, %v), want (tok-a, true)", id, ok)
 	}
-	if id, ok := s.Take(other); !ok || id != "tok-b" {
+	if id, _, ok := s.Take(other); !ok || id != "tok-b" {
 		t.Fatalf("another token's code = (%q, %v), want (tok-b, true)", id, ok)
 	}
 }
@@ -117,13 +117,13 @@ func TestAFailedIssueStillEndsTheTokensPreviousCode(t *testing.T) {
 	other := mustIssue(t, s, "tok-b")
 
 	s.random = failingReader{}
-	if code, err := s.Issue("tok-a"); err == nil {
+	if code, err := s.Issue("tok-a", "hash-tok-a"); err == nil {
 		t.Fatalf("Issue with a failing random source returned %q, want an error", code)
 	}
-	if _, ok := s.Take(old); ok {
+	if _, _, ok := s.Take(old); ok {
 		t.Fatal("a failed Issue left the token's previous code redeemable")
 	}
-	if id, ok := s.Take(other); !ok || id != "tok-b" {
+	if id, _, ok := s.Take(other); !ok || id != "tok-b" {
 		t.Fatalf("a failed Issue for tok-a touched tok-b's code: (%q, %v)", id, ok)
 	}
 }
@@ -142,7 +142,7 @@ func TestTheStoreHoldsAtMostMaxLiveCodes(t *testing.T) {
 		t.Fatalf("store holds %d codes, want %d", n, maxLive)
 	}
 	for i, code := range codes {
-		_, ok := s.Take(code)
+		_, _, ok := s.Take(code)
 		if want := i >= extra; ok != want {
 			t.Fatalf("code %d taken = %v, want %v (the %d oldest are evicted)", i, ok, want, extra)
 		}

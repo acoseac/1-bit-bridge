@@ -9698,7 +9698,23 @@ its twin.** The top list is older, shorter, and read first.
   rather than handed over to 401 on its first request. **A client that
   understands `code` never falls back to the link's token on a refusal**:
   a copy redeemed first has killed it already, and a device paired with it
-  would keep the secret the exchange exists to replace.
+  would keep the secret the exchange exists to replace. **A code is bound to
+  the token's hash at issue and redeems only while the token still carries
+  it** (backlog B160, 2026-10-15). `bridge token rotate` is another process
+  and cannot drop the serving process's code the way a console rotation
+  does, and redeeming the old QR's code after it rotated the token AGAIN:
+  the QR's holder (the leak the operator rotated for) got a working secret,
+  and the one the CLI printed stopped validating. The console passes the
+  record its Mint or Rotate returned (`pairingCodeFor(tok)`), `Take` hands
+  the hash back, and the redemption rotates through
+  `auth.Store.RotateIfHash`, which judges the token inside the commit (the
+  build, run again on a fresh read when a sibling commits first); its
+  refusal is the same 410. **Don't move the check before the commit**: a
+  `Get` then `Rotate` lets a sibling's rotation land in the commit window
+  (`TestRotateIfHashSeesARotationThatLandsInItsCommitWindow`). **Don't bind
+  a code to anything a write changes without a rotation** (`LastUsedAt`, an
+  expiry): those leave the secret, and the code, as they were
+  (`TestPairingRedeemSurvivesChangesThatKeepTheSecret`).
 - **The login ticket is refused by SHAPE before anything else looks at it**
   (base64url, at most 64 bytes; a minted one is 43) — on the GET so an
   unbounded query is never echoed into the page, on the POST so it never

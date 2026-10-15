@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"testing"
@@ -58,18 +60,22 @@ func TestMintAndRotateIssueACodeForTheTokenTheyPair(t *testing.T) {
 		t.Fatalf("the rotated link carries code=%q, want one fresh code", rotatedItems["code"])
 	}
 
-	if _, ok := codes.Take(mintCode); ok {
+	if _, _, ok := codes.Take(mintCode); ok {
 		t.Error("the mint's code still redeems after a rotation issued a new one")
 	}
-	if id, ok := codes.Take(rotatedItems["code"][0]); !ok || id != mint.ID {
-		t.Errorf("the rotated link's code redeems as (%q, %v), want (%q, true)", id, ok, mint.ID)
+	// The code is bound to the secret its own link carries (B160): the
+	// redemption rotates only while the token still has that hash.
+	sum := sha256.Sum256([]byte(rotated.RawToken))
+	if id, hash, ok := codes.Take(rotatedItems["code"][0]); !ok || id != mint.ID || hash != hex.EncodeToString(sum[:]) {
+		t.Errorf("the rotated link's code redeems as (%q, %q, %v), want (%q, the hash of the link's token %q, true)",
+			id, hash, ok, mint.ID, hex.EncodeToString(sum[:]))
 	}
 }
 
 // failingIssuer is a PairingCodeIssuer whose every issue fails.
 type failingIssuer struct{}
 
-func (failingIssuer) Issue(string) (string, error) { return "", errors.New("no entropy") }
+func (failingIssuer) Issue(string, string) (string, error) { return "", errors.New("no entropy") }
 
 // TestALinkWithoutACodeStillPairs pins the two ways a link comes without a
 // code: a bridge that issues none (Deps.PairingCodes nil) and an issue that

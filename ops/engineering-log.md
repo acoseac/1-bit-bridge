@@ -43283,6 +43283,51 @@ failed exactly that case at the 10 s outer deadline.
 `TestBrowseFoldersWalk_HonorsCtxCancellation` still reports the caller's own
 cancel as itself.
 
+## 2026-10-15 — a pairing code redeems only while its token still carries the secret it was issued beside (backlog B160)
+
+From the pre-v0.2.1 network-surface review, confirmed in the code. A pairing
+code (`internal/pairingcode`, in `bridge serve`'s memory) was bound to a token
+ID only. A console rotation issues a new code, and `Issue` drops the token's
+old one, so the old QR has nothing to redeem. `bridge token rotate` is another
+process, with its own `auth.Store` on the same tokens.json, and cannot reach
+that store: the old QR's code stayed live for the rest of its 10 minutes, and
+`POST /v1/pairing/redeem` rotated the token again for it. Whoever held the old
+QR (a screenshot, a shared link: the leak an operator rotates for) got a fresh,
+working secret, and the secret the CLI had just printed stopped validating.
+
+**Red first** (`51b2f296`, the tests alone on main):
+`TestPairingRedeemRefusals/token_rotated_since_by_another_process` (a second
+store on the same file rotates; the redemption answered 200 with a token, and
+the second store's secret no longer validated) and
+`TestServeRefusesTheCodeOfATokenTheCLIRotated`, which boots the real serve,
+mints in the console and runs the real `tokenRotateCmd` against the same
+config: the same 200, and the CLI's token answered 401. The serve's boot moved
+into `bootPairingServe`, which `TestServeRedeemsThePairingLinksCode` now shares.
+
+**Fix** (`aa0913d3`). `Issue(tokenID, tokenHash)` binds a code to the token's
+stored hash; the console passes the record its Mint or Rotate returned, whose
+hash is the secret beside the code in the link. `Take` returns the hash, and
+the redemption rotates through `auth.Store.RotateIfHash`, which judges the
+token inside the commit's build: on the file as read for the commit, and again
+on a fresh read when a sibling commits during the staging (`commitLocked`'s
+re-read). A token rotated since answers `ErrTokenChanged`, and the redemption
+answers it with the same 410 as an unknown, used, expired or revoked code. A
+write that keeps the secret (an expiry set ahead, a last-used flush) keeps the
+code redeemable (`TestPairingRedeemSurvivesChangesThatKeepTheSecret`). No wire
+change: PROTOCOL.md's "rotating a token, which makes a fresh QR, ends the
+previous QR's code as well" stays true, now for a CLI rotation too.
+
+**Negative controls** (each on the fix, restored from git):
+1. The redemption rotates unconditionally (`Rotate(tokenID)`): exactly the
+   other-process subtest and `TestServeRefusesTheCodeOfATokenTheCLIRotated`.
+2. The check moved before the commit (`Get`, compare, then `Rotate`): exactly
+   `TestRotateIfHashSeesARotationThatLandsInItsCommitWindow`, which lands a
+   sibling's rotation between the staging and the rename.
+3. The console binds no hash (`Issue(tok.ID, "")`): exactly
+   `TestMintAndRotateIssueACodeForTheTokenTheyPair` (the code's hash is the
+   link token's) and `TestServeRedeemsThePairingLinksCode` (every code is
+   refused).
+
 ## 2026-10-15 — no SSDP packet can name an entry in the manual-upstream key space (backlog B163)
 
 From the pre-v0.2.1 network-surface review (DLNA reviewer), confirmed in the
