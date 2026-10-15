@@ -971,7 +971,9 @@ func normalizePrefix(s config.UPnPUpstreamServerConfig) string {
 // to mirror DLNARenderer.canonicalUDN on iOS). When the UDN is empty
 // (a manual-URL server before its description has been fetched) we
 // derive a fallback key from the SHA-256 of the ManualDescriptionURL,
-// prefixed with "manual:" so it's visibly distinguishable. The hash
+// prefixed with "manual:" (discovery.ManualKeyPrefix, a key space no
+// SSDP packet can name: UDNFromUSN refuses it, backlog B163) so it's
+// visibly distinguishable. The hash
 // makes silent collisions structurally impossible across operator
 // configurations — two manual servers can share a Name or PathPrefix
 // without one's reconcile sweep eating the other's tracks (Gemini HIGH
@@ -989,10 +991,10 @@ func StableServerKey(s config.UPnPUpstreamServerConfig) string {
 		// Last resort: trimmed name. config.Validate rejects an empty
 		// (UDN AND ManualDescriptionURL) pair, so this branch is only
 		// reachable from a test that bypassed validation.
-		return "manual:no-url:" + strings.ToLower(strings.TrimSpace(s.Name))
+		return discovery.ManualKeyPrefix + "no-url:" + strings.ToLower(strings.TrimSpace(s.Name))
 	}
 	sum := sha256.Sum256([]byte(url))
-	return "manual:" + hex.EncodeToString(sum[:])
+	return discovery.ManualKeyPrefix + hex.EncodeToString(sum[:])
 }
 
 // codecFromExtension maps a file path's extension to the bridge's
