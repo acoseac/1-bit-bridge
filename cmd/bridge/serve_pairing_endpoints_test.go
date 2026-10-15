@@ -35,7 +35,7 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	const custom = "https://custom.example.test:7788"
 	// Both ports must be real (bootPairingServe holds them; backlog B313).
 	s := bootPairingServe(t, "customEndpoints:\n  - "+custom+"\n")
-	ctx, stderr := s.ctx, s.stderr
+	ctx, stderr := t.Context(), s.stderr
 
 	// What the phone sees.
 	tlsClient := pairingPhone()

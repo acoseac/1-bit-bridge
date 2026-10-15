@@ -109,7 +109,6 @@ func TestServeRefusesTheCodeOfATokenTheCLIRotated(t *testing.T) {
 // pairing boot test reads this one boot so they cannot drift apart.
 type pairingServe struct {
 	cfgPath, base, admin string
-	ctx                  context.Context
 	stderr               *safeBuffer
 }
 
@@ -144,14 +143,14 @@ func bootPairingServe(t *testing.T, extraConfig string) pairingServe {
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	addr, _ := waitForListening(t, stdout, exited, done, stderr)
 	waitForAdminReady(t, admin.addr, done, stderr)
-	return pairingServe{cfgPath: cfgPath, base: "https://" + addr, admin: admin.addr, ctx: ctx, stderr: stderr}
+	return pairingServe{cfgPath: cfgPath, base: "https://" + addr, admin: admin.addr, stderr: stderr}
 }
 
 // mintLink mints a token in the console, as the operator does for a new
 // device, and returns the record with the token and code its link carries.
 func (s pairingServe) mintLink(t *testing.T) (mint pairResponse, linkToken, code string) {
 	t.Helper()
-	mint = pairViaAdmin(t, s.ctx, &http.Client{Timeout: 10 * time.Second},
+	mint = pairViaAdmin(t, t.Context(), &http.Client{Timeout: 10 * time.Second},
 		"http://"+s.admin+"/api/tokens",
 		`{"name":"boot test"}`, http.StatusCreated, s.stderr)
 	items := linkQueryItems(t, mint.PairURL)
