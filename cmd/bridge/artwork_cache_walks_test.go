@@ -28,9 +28,11 @@ const (
 	orphanArtistMBID = "22222222-2222-4222-8222-222222222222"
 )
 
-// sweepCapCounts runs one pass of the size cap and returns its counts.
-func sweepCapCounts(ctx context.Context, dir string, capBytes int64) (int, int64, error) {
-	res, err := sweepArtworkCache(ctx, dir, capBytes)
+// sweepCapCounts runs one pass of the size cap, now, over a cache no track
+// row names a file of, and returns its counts.
+func sweepCapCounts(t *testing.T, dir string, capBytes int64) (int, int64, error) {
+	t.Helper()
+	res, err := sweepArtworkCache(context.Background(), emptyCatalogStore(t), dir, capBytes, time.Now())
 	return res.Evicted, res.Freed, err
 }
 
@@ -109,7 +111,7 @@ func TestSweepArtworkCacheStepsOverTheFilesystemsLostFound(t *testing.T) {
 	writeFixtureFile(t, filepath.Join(lostFound, "#12345"), 1000)
 	lockDir(t, lostFound)
 
-	res, err := sweepArtworkCache(context.Background(), dir, 100)
+	res, err := sweepArtworkCache(context.Background(), emptyCatalogStore(t), dir, 100, time.Now())
 	if err != nil {
 		t.Fatalf("the sweep failed over the filesystem's lost+found: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestSweepArtworkCacheGoesOnOverADirectoryItCannotList(t *testing.T) {
 	writeFixtureFile(t, hidden, 1000)
 	lockDir(t, thumbs)
 
-	res, err := sweepArtworkCache(context.Background(), dir, 100)
+	res, err := sweepArtworkCache(context.Background(), emptyCatalogStore(t), dir, 100, time.Now())
 	if err != nil {
 		t.Fatalf("the sweep stopped at a directory it could not list: %v", err)
 	}
@@ -173,8 +175,13 @@ func TestSweepArtworkCacheGoesOnOverADirectoryItCannotList(t *testing.T) {
 // evicts, never a file that pass would keep, whether the unseen files are
 // the oldest in the cache or the newest. Each case builds the same cache
 // twice, locks thumbs/ in one, and compares what the two passes removed.
+// Two of the visible covers are ones a track row names (backlog B84): both
+// passes count them and neither evicts them, and the property holds beside
+// them.
 func TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould(t *testing.T) {
 	skipUnlessModeBitsDeny(t, "root lists any directory")
+	store, _ := artworkCacheFixture(t, "local-1", "local-3")
+	named := map[string]bool{"local-1-500.jpg": true, "local-3-500.jpg": true}
 	for _, c := range []struct {
 		name string
 		// hiddenAge places the files in thumbs/ relative to the visible
@@ -206,10 +213,11 @@ func TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould(t *testing.T) {
 			before := cacheFilesUnder(t, whole)
 			locked := lockDir(t, filepath.Join(partial, manifest.ThumbsDirName))
 
-			if _, err := sweepArtworkCache(context.Background(), whole, c.capBytes); err != nil {
+			now := time.Now()
+			if _, err := sweepArtworkCache(context.Background(), store, whole, c.capBytes, now); err != nil {
 				t.Fatal(err)
 			}
-			res, err := sweepArtworkCache(context.Background(), partial, c.capBytes)
+			res, err := sweepArtworkCache(context.Background(), store, partial, c.capBytes, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,6 +249,11 @@ func TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould(t *testing.T) {
 					t.Errorf("the partial pass evicted %s, in the directory it could not list", f)
 				}
 			}
+			for f := range named {
+				if goneWhole[f] || gonePartial[f] {
+					t.Errorf("a pass evicted %s, a cover a track row names (whole: %v, partial: %v)", f, goneWhole, gonePartial)
+				}
+			}
 		})
 	}
 }
@@ -265,7 +278,7 @@ func TestSweepArtworkCacheCountsAFileItCannotStat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(thumbs, 0o755) })
 
-	res, err := sweepArtworkCache(context.Background(), dir, 100)
+	res, err := sweepArtworkCache(context.Background(), emptyCatalogStore(t), dir, 100, time.Now())
 	if err != nil {
 		t.Fatalf("the sweep stopped at a file it could not stat: %v", err)
 	}
@@ -298,7 +311,7 @@ func TestArtworkCapSweeperReportsWhatItCannotSeeOncePerStreak(t *testing.T) {
 		unseen = "artwork cache sweep could not see part of the cache"
 		again  = "artwork cache sweep sees the whole cache again"
 	)
-	s := &artworkCapSweeper{dir: dir, capBytes: 1 << 20}
+	s := &artworkCapSweeper{store: emptyCatalogStore(t), dir: dir, capBytes: 1 << 20}
 	ctx := context.Background()
 	base := time.Now()
 
@@ -348,7 +361,7 @@ func TestArtworkCapSweeperSaysNothingAboutTheFilesystemsLostFound(t *testing.T) 
 	}
 	lockDir(t, filepath.Join(dir, "lost+found"))
 	rec := loggingtest.Record(t)
-	s := &artworkCapSweeper{dir: dir, capBytes: 100}
+	s := &artworkCapSweeper{store: emptyCatalogStore(t), dir: dir, capBytes: 100}
 	s.pass(context.Background(), time.Now())
 	if got := rec.Failures(); len(got) != 0 {
 		t.Errorf("a pass over the filesystem's lost+found warned: %q", got)
@@ -419,10 +432,10 @@ func TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames(t *testing.T) {
 
 // TestArtworkGCEmptyStoreGuardIsAboutTheCovers — the refusal over an empty
 // referenced set is keyed on the ARTWORK keys, whatever artists the rows
-// name: the covers are what it protects, and a scanner-extracted one does
-// not come back. And it asks whether the walk would remove a file, so a
-// cache holding only thumbnails of an artist a row names is nothing to
-// refuse over.
+// name: the covers are what it protects, and each would have to be
+// extracted or fetched again. And it asks whether the walk would remove a
+// file, so a cache holding only thumbnails of an artist a row names is
+// nothing to refuse over.
 func TestArtworkGCEmptyStoreGuardIsAboutTheCovers(t *testing.T) {
 	cover := "local-" + strings.Repeat("a", 64) + "-500.jpg"
 	for _, c := range []struct {
@@ -528,14 +541,14 @@ func TestArtworkGCEmptyStoreGuardResolvesALinkedCache(t *testing.T) {
 // evicts the oldest covers where the link resolves. It saw the link as one
 // entry that is not a cover, counted nothing, and never evicted.
 func TestSweepArtworkCacheWalksALinkedCache(t *testing.T) {
-	_, dir := artworkCacheFixture(t)
+	store, dir := artworkCacheFixture(t)
 	target := linkedArtworkCache(t, dir)
 	base := time.Now().Add(-10 * time.Hour)
 	var files []string
 	for i := 0; i < 5; i++ {
 		files = append(files, writeArtFile(t, target, fmt.Sprintf("local-%d-500.jpg", i), 30, base.Add(time.Duration(i)*time.Hour)))
 	}
-	res, err := sweepArtworkCache(context.Background(), dir, 100)
+	res, err := sweepArtworkCache(context.Background(), store, dir, 100, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +579,7 @@ func TestArtworkWalksRefuseACacheThatLinksToAFile(t *testing.T) {
 	if rc, stdout, stderr := runArtworkGCOver(store, dir, false); rc != 1 || !strings.Contains(stderr, "not a directory") {
 		t.Errorf("rc=%d over a cache that links to a file, want 1 and \"not a directory\"\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 	}
-	if _, err := sweepArtworkCache(context.Background(), dir, 1); err == nil {
+	if _, err := sweepArtworkCache(context.Background(), store, dir, 1, time.Now()); err == nil {
 		t.Error("the size cap took a cache that links to a file")
 	}
 	mustExist(t, file)
@@ -586,7 +599,7 @@ func TestArtworkWalksRefuseAnEmptyCacheDirectory(t *testing.T) {
 	if rc, stdout, stderr := runArtworkGCOver(store, "", false); rc != 1 {
 		t.Errorf("rc=%d over an empty cache directory, want 1\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 	}
-	if _, err := sweepArtworkCache(context.Background(), "", 1); err == nil {
+	if _, err := sweepArtworkCache(context.Background(), store, "", 1, time.Now()); err == nil {
 		t.Error("the size cap took an empty cache directory")
 	}
 	mustExist(t, planted)

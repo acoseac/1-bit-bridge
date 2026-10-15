@@ -631,13 +631,20 @@ func (a AtlasConfig) EffectiveMetaTTL() time.Duration {
 // much of it is kept on disk.
 type ArtworkConfig struct {
 	// CacheMaxBytes caps the total on-disk size of the artwork cache. When
-	// the cache exceeds this, a periodic background sweeper evicts the
-	// least-recently-modified cached covers until it is back under the cap.
-	// Zero (the default) means unbounded — no eviction, the historical
-	// behaviour. A library's covers are naturally bounded (one per album, a
-	// few sizes) so a cap is rarely needed; it becomes advisable once premium
-	// hi-res (1200px) covers are enabled, where whole-library covers can fill
-	// a small host disk. A negative value is rejected by Validate.
+	// the cache exceeds this, a periodic background sweeper evicts, least
+	// recently modified first, the files no track uses until it is back
+	// under the cap: covers and artist portraits no track row names, the
+	// console's thumbnails (which it derives again on demand), and strays.
+	// It never evicts a cover or a portrait a track row names, which would
+	// not be fetched again, nor a file written in the last ten minutes, so
+	// when the covers the library uses are more than the cap the cache stays
+	// over it and the bridge logs a WARN saying so (backlog B84). Zero (the
+	// default) means unbounded — no eviction, the historical behaviour. A
+	// library's covers are naturally bounded (one per album, a few sizes) so
+	// a cap is rarely needed; it becomes advisable once premium hi-res
+	// (1200px) covers are enabled, where whole-library covers can fill a
+	// small host disk. A negative value is rejected by Validate. Read at
+	// start-up: a change takes a restart.
 	CacheMaxBytes int64 `yaml:"cacheMaxBytes,omitempty"`
 }
 

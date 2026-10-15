@@ -6193,7 +6193,7 @@ function renderJobCards(j) {
   // EXISTING sidecars and run whenever their interval is positive.
   renderVariantIntegrity(mt);
   renderOrphanSidecarGC(mt);
-  setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — LRU eviction every 15 min" : "unlimited");
+  setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — every 15 min; covers in use are kept" : "unlimited");
   const up = j.upnp || {};
   setText("job-upnp", up.enabled
     ? `on — ${up.configuredServers} upstream server${up.configuredServers === 1 ? "" : "s"}`

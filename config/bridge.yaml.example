@@ -86,10 +86,15 @@ libraryName: "My Music Library"
 # artwork: bound the on-disk artwork cache at <dataDir>/artwork/ (scanner
 #   embedded/folder art + enricher cover art + Atlas premium hi-res covers).
 #   cacheMaxBytes is the total-size cap in bytes; 0 (the default) is unbounded.
-#   When exceeded, a background sweeper evicts the least-recently-modified
-#   cached covers back under the cap. A normal library's covers are naturally
-#   bounded, so a cap is rarely needed — set one once premium hi-res covers
-#   are enabled, where whole-library 1200px covers can fill a small host disk.
+#   When exceeded, a background sweeper evicts, oldest first, what no track
+#   uses: covers and artist portraits no track names, the admin console's
+#   thumbnails (rebuilt on demand) and strays. It never evicts a cover or a
+#   portrait a track uses, or a file written in the last ten minutes, so a cap
+#   below what the library's covers need leaves the cache over it, with a
+#   warning in the log. A normal library's covers are naturally bounded, so a
+#   cap is rarely needed — set one once premium hi-res covers are enabled,
+#   where whole-library 1200px covers can fill a small host disk. Read at
+#   start-up: a change takes a restart.
 # artwork:
 #   cacheMaxBytes: 2147483648   # 2 GiB
 
