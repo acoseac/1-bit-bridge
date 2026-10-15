@@ -6515,7 +6515,14 @@ no failing test — which is the shape to expect in this area.
   refreshes it in one step, `ServerCache.Touch`**: its Get then Upsert of
   `{UDN, LastSeenAt}` resurrected an entry `EvictStale` took in between,
   with no control URL, which was never fetched again (2 of 200,000 races on
-  main). **Measured and left**: a dual-homed upstream server alternating its
+  main). **The renderer handler's refresh is `RendererCache.Touch`** (backlog
+  B165, 2026-10-15): the same Get then Upsert brought an evicted renderer
+  back as a stub that Snapshot hides and the stub branch never fetches, so
+  a live renderer was missing from /v1/renderers until the stub aged out.
+  Touch refreshes only a renderer still cached with a ControlURL, so a stub
+  that replaced it meanwhile keeps its LastSeenAt (the stub rule); **don't
+  make it refresh a stub**. `beforeKnownRefreshHook` lands the eviction in
+  that window (`TestHandlePacket_ARendererEvictedBeforeItsRefreshIsFoundAgainOnItsNextAnnouncement`). **Measured and left**: a dual-homed upstream server alternating its
   two addresses re-fetches twice per M-SEARCH cycle (120 GETs an hour, the
   control URL alternating between two valid addresses); porting the
   renderer's location set into that security-relevant move detector was not
