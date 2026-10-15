@@ -469,7 +469,7 @@ func TestAFileLeftInTheTrashRetiresItsRowAndRescansItsFolder(t *testing.T) {
 	if err != nil || got != nil {
 		t.Fatalf("row still served: %+v %v", got, err)
 	}
-	srvBgScansWait(srv)
+	srvBgScansWait(t, srv)
 	sib, err := srv.deps.Manifest.GetTrack(t.Context(), "Artist/Album/02.flac")
 	if err != nil || sib == nil {
 		t.Fatalf("folder was not rescanned: %+v %v", sib, err)

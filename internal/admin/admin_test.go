@@ -112,7 +112,17 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 	// cleanup so it runs BEFORE it (LIFO): otherwise those goroutines outlive
 	// the test and log "database is closed" against a store already shut,
 	// which is noise today and a flake the moment one of them asserts.
-	t.Cleanup(func() { srvBgScansWait(srv) })
+	// Cancelled first: this cleanup runs before the one above that cancels
+	// scanCtx, so without it the join waited on scans nobody had told to
+	// stop, and a test that already failed at an inline wait's bound waited
+	// a second bound here (B404 review). A scan that ignores the cancel is
+	// still reported.
+	t.Cleanup(func() {
+		cancel()
+		if !srvBgScansJoin(srv, bgScansWaitBound) {
+			t.Errorf("the server's background scans did not finish within %v of the test's end", bgScansWaitBound)
+		}
+	})
 	return srv, cfg, cfgPath
 }
 
@@ -1771,13 +1781,48 @@ func TestSettingsPatchAutoOptimizeUnwiredRequiresRestart(t *testing.T) {
 	}
 }
 
-// srvBgScansWait joins the admin server's background-scan WaitGroup with a
-// bound, so a wedged scan reports rather than hanging the test binary.
-func srvBgScansWait(s *Server) {
+// bgScansWaitBound is how long a test waits for the admin server's
+// background scans before it fails. It returned silently at 10 s until
+// backlog B404, so a scan still running let the test go on and fail
+// somewhere else, or pass on a half-written state (B384 on Windows: the
+// scan held a fixture file the test then removed).
+const bgScansWaitBound = 30 * time.Second
+
+// srvBgScansJoin joins the admin server's background-scan WaitGroup and
+// reports whether the scans finished within bound, so a wedged scan
+// reports rather than hanging the test binary.
+func srvBgScansJoin(s *Server, bound time.Duration) bool {
 	done := make(chan struct{})
 	go func() { defer close(done); s.bgScans.Wait() }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+		return true
+	case <-time.After(bound):
+		return false
+	}
+}
+
+// srvBgScansWait waits for the admin server's background scans and stops
+// the test when they have not finished within bgScansWaitBound: what the
+// test asserts next is what those scans write.
+func srvBgScansWait(t *testing.T, s *Server) {
+	t.Helper()
+	if !srvBgScansJoin(s, bgScansWaitBound) {
+		t.Fatalf("the server's background scans did not finish within %v", bgScansWaitBound)
+	}
+}
+
+// TestBgScansJoinReportsAScanStillRunning pins what every background-scan
+// wait here rests on (backlog B404): a scan still running at the bound is
+// reported, never waited past in silence.
+func TestBgScansJoinReportsAScanStillRunning(t *testing.T) {
+	s := &Server{}
+	s.bgScans.Add(1)
+	if srvBgScansJoin(s, 20*time.Millisecond) {
+		t.Fatal("a background scan still running was reported finished")
+	}
+	s.bgScans.Done()
+	if !srvBgScansJoin(s, 5*time.Second) {
+		t.Fatal("background scans that finished were reported still running")
 	}
 }
