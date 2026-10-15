@@ -27,7 +27,9 @@ var ErrQueueFull = errors.New("analyze pool queue is full")
 // ErrPoolClosed is returned by Enqueue after Stop.
 var ErrPoolClosed = errors.New("analyze pool is closed")
 
-// dropBurstMsg is the one line a run of dropped jobs logs, with its count.
+// dropBurstMsg is the one line a run of dropped jobs logs, with its count
+// (endDropBurstLocked says when a run ends): a switch-off drops a whole queue at once, up to queueCap
+// jobs, and a line per job would bury every other line in the journal.
 const dropBurstMsg = "analyze: dropped the jobs queued before analysis went off"
 
 // ErrDuplicateInflight is returned by Enqueue when the same source path is
@@ -39,9 +41,9 @@ const dropBurstMsg = "analyze: dropped the jobs queued before analysis went off"
 // analysis each sweep re-offers the whole backlog.
 //
 // A job stops being queued or running in the same critical section that
-// counts it (finishJob), so a caller that acts on the count never meets this
-// from the job it is reacting to. Same name and meaning as
-// transcode.ErrDuplicateInflight.
+// counts it (finishJob), as done, failed or dropped, so a caller that acts on
+// the count never meets this from the job it is reacting to. Same name and
+// meaning as transcode.ErrDuplicateInflight.
 var ErrDuplicateInflight = errors.New("analyze pool: job already queued or running")
 
 // Pool is the long-lived single-FIFO worker pool that runs offline
@@ -54,27 +56,46 @@ var ErrDuplicateInflight = errors.New("analyze pool: job already queued or runni
 // source library-relative path (one waveform per source), so a
 // duplicate enqueue while a job is queued or running takes no slot,
 // counts nothing and returns ErrDuplicateInflight. A job stops being
-// "queued or running" at the same instant it is counted done or failed,
-// never later: see finishJob.
+// "queued or running" at the same instant it is counted done, failed or
+// dropped, never later: see finishJob.
+//
+// A worker asks the live gate (WithLiveGate) when it takes a job, and a job
+// taken while the gate is closed is DROPPED: it does not run, its path is
+// given back, and it is counted as neither done nor failed (backlog B155).
+// serve builds this pool on every bridge and never stops it (#781), so the
+// gate is the only thing a switch-off reaches here; before the take-time
+// check, the queue ran to its end, up to queueCap decodes, each an
+// `indexed_at` bump pushed to every paired device, while every surface said
+// analysis was off. A job already running when the gate closes finishes.
 type Pool struct {
 	store    *manifest.Store
 	workers  int
 	jobs     chan poolJob
 	queueCap int
 
-	// mu guards the dedup set and the three counters as ONE state. Enqueue
-	// claims a path and counts it in one critical section, finishJob
-	// releases it and counts the outcome in another, and Stats reads all of
-	// them under the same lock, so no snapshot shows a job both in flight
-	// and counted, or in neither place. Plain integers rather than atomics
-	// on purpose: an increment written outside the lock is then a data race
-	// the race detector reports, not an atomic that compiles and quietly
-	// reopens the window finishJob closes.
+	// mu guards the dedup set and the counters as ONE state. Enqueue claims
+	// a path and counts it in one critical section, finishJob releases it
+	// and counts the outcome in another, and Stats reads all of them under
+	// the same lock, so no snapshot shows a job both in flight and counted,
+	// or in neither place. Plain integers rather than atomics on purpose: an
+	// increment written outside the lock is then a data race the race
+	// detector reports, not an atomic that compiles and quietly reopens the
+	// window finishJob closes.
 	mu          sync.Mutex
 	inflight    map[string]struct{} // key = source library-relative path
 	enqueuedCnt uint64
 	doneCnt     uint64
 	failedCnt   uint64
+	droppedCnt  uint64
+	// undecided counts the jobs Enqueue accepted that no worker has yet
+	// decided about (run, drop, or pass over at shutdown): queued, or taken
+	// and not yet past the gate. It is what tells finishJob a run of drops
+	// is over, exactly: a count of the queue misses a job a worker has just
+	// received from the channel and not yet decided, which would then log a
+	// second line of its own.
+	undecided int
+	// dropBurst counts the drops since the last drop-burst line.
+	dropBurst uint64
 
 	wg         sync.WaitGroup
 	stopCtx    context.Context
@@ -88,8 +109,9 @@ type Pool struct {
 	jobTimeout time.Duration
 	fsyncFn    func(path string) error
 	now        func() time.Time
-	// liveGate is asked whether analysis is on when a worker takes a job
-	// (WithLiveGate). Nil reads as open.
+	// liveGate is the live analysis gate, asked when a worker takes a job
+	// (WithLiveGate). Nil reads as open: `bridge analyze` builds its own
+	// pool, with none, for a run the operator asked for.
 	liveGate func() bool
 
 	// Coalescing state-change publisher: a single long-lived goroutine
@@ -136,7 +158,10 @@ func WithJobTimeout(d time.Duration) PoolOption {
 }
 
 // WithLiveGate gives the pool the live analysis gate to ask when a worker
-// takes a job. Nil, the default, reads as open.
+// takes a job: serve's analysisActiveFn, the closure /v1 reads, so a job is
+// dropped exactly when every surface says analysis is off. Nil, the default,
+// reads as open. It is called on a worker, never under p.mu, and must not
+// call back into the pool.
 func WithLiveGate(gate func() bool) PoolOption {
 	return func(p *Pool) { p.liveGate = gate }
 }
@@ -213,6 +238,7 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
 		p.enqueuedCnt++
+		p.undecided++
 		// fireStateChange BEFORE the unlock — mirrors internal/transcode
 		// Pool. Stop() closes stateChangeChan only after acquiring p.mu
 		// (to close jobs) + wg.Wait, so a send under the lock strictly
@@ -296,19 +322,82 @@ func (p *Pool) workerLoop() {
 
 // jobOutcome is the counter finishJob adds a job to. outcomeUncounted is a
 // job the pool was shutting down under: its path must still be released,
-// but it is neither a success nor a failure of the source.
+// but it is neither a success nor a failure of the source. outcomeDropped is
+// a job a worker took while the live gate was closed (WithLiveGate): it did
+// not run, so it too is neither, and it has a counter of its own so every
+// accepted job is still in exactly one place.
 type jobOutcome int
 
 const (
 	outcomeUncounted jobOutcome = iota
 	outcomeDone
 	outcomeFailed
+	outcomeDropped
 )
+
+// gateOpen asks the live gate whether a job taken now may run. No gate reads
+// as open. Called on the worker, outside p.mu: the gate reads the config and
+// the shared sox probe, which takes its own lock.
+func (p *Pool) gateOpen() bool {
+	return p.liveGate == nil || p.liveGate()
+}
+
+// decideToRun records that the job a worker took passed the gate and runs:
+// the job leaves the undecided count, and a run of drops before it is over
+// (endDropBurstLocked).
+func (p *Pool) decideToRun() {
+	p.mu.Lock()
+	p.undecided--
+	burst := p.endDropBurstLocked(true)
+	p.mu.Unlock()
+	logDropBurst(burst)
+}
+
+// endDropBurstLocked ends the current run of drops if it is over and returns
+// its count, else 0. A run is over once no accepted job is left undecided
+// (none queued, and no worker between taking one and deciding it), or as soon
+// as a job is decided to run, the gate having opened again: a burst is a run
+// of drops with no run between them, so one switch-off is one line however
+// many workers drop its queue. p.mu is held.
+func (p *Pool) endDropBurstLocked(ran bool) uint64 {
+	if p.dropBurst == 0 || (!ran && p.undecided > 0) {
+		return 0
+	}
+	n := p.dropBurst
+	p.dropBurst = 0
+	return n
+}
+
+// logDropBurst writes a finished run of drops' one line, outside p.mu.
+func logDropBurst(n uint64) {
+	if n > 0 {
+		logger.Info(dropBurstMsg, "count", n)
+	}
+}
+
+// noteDrop is a dropped job's own bookkeeping, done before finishJob gives
+// its path back: the job leaves the undecided count and joins the burst, and
+// the drop that leaves nothing undecided writes the burst's line. So the
+// count of the drop that ends a burst means its line has landed, the order
+// every exit keeps (its bookkeeping, then its count), and a caller that sees
+// the pool idle after a switch-off can read the line. Neither field it
+// writes is in a snapshot, so the job is still in exactly one place.
+func (p *Pool) noteDrop() {
+	p.mu.Lock()
+	p.undecided--
+	p.dropBurst++
+	burst := p.endDropBurstLocked(false)
+	p.mu.Unlock()
+	logDropBurst(burst)
+}
 
 // finishJob is the last thing that happens to every job, however it went:
 // it releases the path's dedup slot and adds the job to its outcome counter
 // in ONE critical section, under the p.mu that Enqueue's dedup check and
-// Stats both take.
+// Stats both take. A job that never reached decideToRun (shutdown, a panic
+// before the decision) leaves the undecided count here, in the same
+// section, and so ends a burst it was the last undecided job of. A drop has
+// left it already (noteDrop).
 //
 // One step, because each half answers a question somebody acts on, and
 // splitting them opens a window whichever order they run in. Counting first
@@ -325,16 +414,27 @@ const (
 // Releasing the path any earlier would let a retry run while the previous
 // attempt was still writing, and a strike landing after the retry's success
 // is a verdict against a file that has just analysed cleanly.
-func (p *Pool) finishJob(job poolJob, outcome jobOutcome) {
+func (p *Pool) finishJob(job poolJob, outcome jobOutcome, decided bool) {
+	if outcome == outcomeDropped {
+		p.noteDrop()
+		decided = true
+	}
 	p.mu.Lock()
 	delete(p.inflight, job.dedup)
+	if !decided {
+		p.undecided--
+	}
 	switch outcome {
 	case outcomeDone:
 		p.doneCnt++
 	case outcomeFailed:
 		p.failedCnt++
+	case outcomeDropped:
+		p.droppedCnt++
 	}
+	burst := p.endDropBurstLocked(false)
 	p.mu.Unlock()
+	logDropBurst(burst)
 }
 
 // processJob runs one job: decode + waveform via the runner, fsync the
@@ -356,8 +456,15 @@ func (p *Pool) finishJob(job poolJob, outcome jobOutcome) {
 // at those decision points and never after the release: `bridge analyze`
 // answers an idle pool by calling Stop, so a re-read there would un-count
 // the last job of the run.
+//
+// The live gate is asked next, once, before anything runs: a job taken while
+// analysis is off is dropped (outcomeDropped), and the tail gives its path
+// back, so the sweeper offers it again once analysis is on. Shutdown is
+// asked first, so a job the stop took is shutdown's, uncounted, and the gate
+// is never asked for it.
 func (p *Pool) processJob(job poolJob) {
 	outcome := outcomeUncounted
+	decided := false
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("analyze: recovered panic in job",
@@ -366,7 +473,7 @@ func (p *Pool) processJob(job poolJob) {
 				outcome = outcomeFailed
 			}
 		}
-		p.finishJob(job, outcome)
+		p.finishJob(job, outcome, decided)
 		if !p.closed.Load() {
 			p.fireStateChange()
 		}
@@ -375,6 +482,12 @@ func (p *Pool) processJob(job poolJob) {
 	if p.closed.Load() {
 		return
 	}
+	if !p.gateOpen() {
+		outcome = outcomeDropped
+		return
+	}
+	p.decideToRun()
+	decided = true
 
 	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
 	defer cancel()
@@ -573,11 +686,14 @@ type PoolStats struct {
 
 // Stats returns the current snapshot. Safe to call concurrently.
 //
-// The in-flight count and the three counters are read in one critical
-// section, the lock finishJob moves a job from one to the other under. So
-// an observer can act on what it reads: Done or Failed having moved means
-// that job has also left Inflight, and a re-enqueue of its path is
-// accepted.
+// The in-flight count and the counters are read in one critical section,
+// the lock finishJob moves a job from one to the other under. So an
+// observer can act on what it reads: Done, Failed or Dropped having moved
+// means that job has also left Inflight, and a re-enqueue of its path is
+// accepted. Every accepted job is in exactly one of Inflight, Done, Failed
+// and Dropped, but for one the pool was stopping under, which is in none.
+// No wire or console DTO carries Dropped; the drop-burst line is how an
+// operator learns of a drop.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -589,5 +705,6 @@ func (p *Pool) Stats() PoolStats {
 		Enqueued: p.enqueuedCnt,
 		Done:     p.doneCnt,
 		Failed:   p.failedCnt,
+		Dropped:  p.droppedCnt,
 	}
 }

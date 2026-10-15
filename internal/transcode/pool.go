@@ -51,11 +51,24 @@ const defaultJobTimeout = 10 * time.Minute
 // **Dedup keyed on (source_path, variant_id)**: a duplicate
 // enqueue while a job is already queued or running is refused with
 // ErrDuplicateInflight and takes no slot. A job stops being "queued or
-// running" at the same instant it is counted done or failed, never later:
-// see finishJob. The hash set is mutex-guarded; reads happen on the HTTP
-// handler goroutine, writes on the worker goroutines and the
+// running" at the same instant it is counted done, failed or dropped, never
+// later: see finishJob. The hash set is mutex-guarded; reads happen on the
+// HTTP handler goroutine, writes on the worker goroutines and the
 // enqueue site. Same lock covers both — contention is bounded by
 // the worker count.
+//
+// **A worker asks the live gate when it takes a job** (SetLiveGate), and a
+// job taken while its gate is closed is DROPPED: it does not run, its claim
+// is given back, it is counted as neither done nor failed, and it is
+// announced as dropped (SetOnJobDropped), which is how its batch learns
+// (backlog B155). serve never stops this pool (#781), so the gate is the
+// only thing a switch-off reaches here; before the take-time check the
+// queue ran to its end, up to 5,000 jobs a lane, each a sox render, a
+// sidecar on disk and an `indexed_at` bump. serve's gate is the one of the
+// rendition FAMILY a job renders (cmd/bridge renditionGates.admits), never
+// its enqueuer's: one job serves every enqueuer of its (source, variant), a
+// phone's request riding a sweep's job. A job already running when its gate
+// closes finishes.
 type Pool struct {
 	store   *manifest.Store
 	workers int
@@ -93,7 +106,7 @@ type Pool struct {
 	// claimSeq issues those generations. Guarded by p.mu; pre-incremented
 	// so the first claim is 1 and a map miss (0) never matches.
 	claimSeq uint64
-	// The three counters are guarded by p.mu together with inflight, as ONE
+	// The counters are guarded by p.mu together with inflight, as ONE
 	// state. Enqueue claims a key and counts the job in one critical section,
 	// finishJob gives the key back and counts the outcome in another, and
 	// Stats reads all of them under the same lock. So no snapshot shows a job
@@ -106,6 +119,17 @@ type Pool struct {
 	enqueuedCnt uint64
 	doneCnt     uint64
 	failedCnt   uint64
+	// droppedCnt counts the jobs a worker took while the live gate of their
+	// kind was closed (SetLiveGate): neither done nor failed.
+	droppedCnt uint64
+	// undecided counts the jobs Enqueue accepted that no worker has yet
+	// decided about (run, drop, or pass over at shutdown): queued, or taken
+	// and not yet past the gate. It tells finishJob a run of drops is over,
+	// exactly: the queue's length misses a job a worker has just received
+	// and not yet decided, whose drop would then log a second line.
+	undecided int
+	// dropBurst counts the drops since the last drop-burst line.
+	dropBurst uint64
 
 	wg         sync.WaitGroup
 	stopCtx    context.Context
@@ -199,8 +223,14 @@ type Pool struct {
 	onJobFailed func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time)
 
 	// onJobDropped fires once per job a worker took while the live gate of
-	// its rendition kind was closed (SetOnJobDropped). Guarded by its own
-	// mutex, like the two callbacks above.
+	// its rendition kind was closed (SetOnJobDropped), after finishJob has
+	// given its path back and counted it as dropped, the ordering the two
+	// callbacks above keep. The Coordinator consumes it: a batch counts on
+	// every job it enqueued calling back, and a dropped job has neither a
+	// completion nor a failure to send, so without this event its batch sat
+	// `running` forever. Threading mirrors onJobFailed: invoked on the single
+	// publisher goroutine as it drains jobDroppedChan, fed by a blocking send
+	// with the same 2×workers fidelity buffer. Guarded by its own mutex.
 	jobDroppedMu sync.RWMutex
 	onJobDropped func(path, variantID string, batchID uuid.UUID, droppedAt time.Time)
 
@@ -303,7 +333,12 @@ type Pool struct {
 	// v1.3 Coordinator needs the path + errMsg + batchID to mark
 	// the right `upscale_batches.failed_files` slot.
 	jobFailedChan chan jobFailedEvent
-	publisherWG   sync.WaitGroup
+	// jobDroppedChan carries per-job drop events to the publisher, with the
+	// same cap=2×workers fidelity buffer and blocking send: each names the
+	// batch the Coordinator must tell, and a lost one leaves that batch
+	// `running` forever.
+	jobDroppedChan chan jobDroppedEvent
+	publisherWG    sync.WaitGroup
 }
 
 // poolJob is one transcode unit on the Pool's queue. Carries the
@@ -374,6 +409,16 @@ type jobFailedEvent struct {
 	batchID         uuid.UUID
 }
 
+// jobDroppedEvent is the per-batch attribution of a job a worker took while
+// the live gate of its kind was closed. It carries no duration: the job did
+// not run, so it is no sample for the Coordinator's throughput window.
+type jobDroppedEvent struct {
+	path      string
+	variantID string
+	droppedAt time.Time
+	batchID   uuid.UUID
+}
+
 // ErrQueueFull is returned by Enqueue when the pending-job channel
 // is at capacity. HTTP callers map this to a 503 `queue_full`
 // response so the iOS toast can say "Queue full — wait for current
@@ -405,11 +450,12 @@ var ErrDuplicateInflight = errors.New("transcode pool: job already queued or run
 //
 // The worker doesn't probe for sox per job. `bridge serve` builds the
 // pool whether or not sox is there (#781) and keeps work away from it with
-// the live upscale gate at every enqueue site; a job that reaches the
-// runner without its tool anyway (queued before the tool went, or inside
-// the gate's 30 s probe window) fails without a strike against its source
-// (tool_unavailable.go). This said the caller had verified sox with
-// PrecheckSox until 2026-09-28.
+// the live upscale gate at every enqueue site, and again at take time
+// (SetLiveGate): that gate reads the shared sox probe, so a job queued
+// before its tool went is dropped once the probe sees it gone. One taken
+// inside the probe's 30 s window reaches the runner without its tool and
+// fails without a strike against its source (tool_unavailable.go). This
+// said the caller had verified sox with PrecheckSox until 2026-09-28.
 func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 	if workers < 1 {
 		workers = 1
@@ -437,6 +483,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		stateChangeChan: make(chan struct{}, 1),
 		jobCompleteChan: make(chan jobCompleteEvent, 2*workers),
 		jobFailedChan:   make(chan jobFailedEvent, 2*workers),
+		jobDroppedChan:  make(chan jobDroppedEvent, 2*workers),
 	}
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
@@ -511,6 +558,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case jobsChan <- poolJob{spec: spec, dedup: dedup, claim: claim}:
 		p.enqueuedCnt++
+		p.undecided++
 		// fireStateChange BEFORE the unlock. Stop() must hold p.mu to
 		// close the jobs channels and only closes stateChangeChan
 		// afterward (post wg.Wait), so this non-blocking send strictly
@@ -731,21 +779,42 @@ func (p *Pool) SetOnJobFailed(fn func(path, variantID, errMsg string, durationSe
 }
 
 // SetOnJobDropped wires the callback for a job a worker took while the live
-// gate of its kind was closed. nil disables. Set-once at cmd/bridge wiring
-// time alongside SetOnJobFailed.
+// gate of its kind was closed (see Pool.onJobDropped for ordering and
+// threading). nil disables. Set-once at cmd/bridge wiring time alongside
+// SetOnJobFailed.
 func (p *Pool) SetOnJobDropped(fn func(path, variantID string, batchID uuid.UUID, droppedAt time.Time)) {
 	p.jobDroppedMu.Lock()
 	p.onJobDropped = fn
 	p.jobDroppedMu.Unlock()
 }
 
+// notifyJobDroppedFn mirrors notifyJobFailedFn. Returns nil when no callback
+// is wired.
+func (p *Pool) notifyJobDroppedFn() func(string, string, uuid.UUID, time.Time) {
+	p.jobDroppedMu.RLock()
+	defer p.jobDroppedMu.RUnlock()
+	return p.onJobDropped
+}
+
 // SetLiveGate wires the predicate a worker asks when it takes a job: may
-// this job still run. nil reads as open. Race-safe; in practice set once
-// during cmd/bridge wiring.
+// this job still run. serve passes renditionGates.admits, the live gate of
+// the rendition family the job renders, read from the same closures
+// POST /v1/upscale reads per kind. nil reads as open. The predicate is
+// called on a worker, never under p.mu, once per job, and must not call back
+// into the pool. Race-safe; in practice set once during cmd/bridge wiring.
 func (p *Pool) SetLiveGate(gate func(spec JobSpec) bool) {
 	p.liveGateMu.Lock()
 	p.liveGate = gate
 	p.liveGateMu.Unlock()
+}
+
+// gateOpen asks the live gate whether a job taken now may run. No gate reads
+// as open.
+func (p *Pool) gateOpen(spec JobSpec) bool {
+	p.liveGateMu.RLock()
+	gate := p.liveGate
+	p.liveGateMu.RUnlock()
+	return gate == nil || gate(spec)
 }
 
 // Stop signals the workers to drain the queue and exit. Blocks
@@ -770,12 +839,12 @@ func (p *Pool) SetLiveGate(gate func(spec JobSpec) bool) {
 //     context dies promptly.
 //  3. p.wg.Wait() — block until every worker goroutine has
 //     returned. After this point, no worker can send to
-//     stateChangeChan or jobCompleteChan.
-//  4. close() both publisher channels — safe ONLY because step 3
+//     stateChangeChan or any of the three event channels.
+//  4. close() the publisher's four channels — safe ONLY because step 3
 //     guaranteed no more sends are possible.
 //  5. p.publisherWG.Wait() — let the publisher drain its remaining
 //     buffered events (especially `upscale.complete` events the
-//     iOS path-promotion path depends on), observe both channels
+//     iOS path-promotion path depends on), observe every channel
 //     closed, and return.
 //
 // The publisher does NOT exit on stopCtx.Done() — workers blocking-
@@ -795,6 +864,7 @@ func (p *Pool) Stop() {
 	close(p.stateChangeChan)
 	close(p.jobCompleteChan)
 	close(p.jobFailedChan)
+	close(p.jobDroppedChan)
 	p.publisherWG.Wait()
 }
 
@@ -852,6 +922,14 @@ func (p *Pool) fireJobFailed(evt jobFailedEvent) {
 	p.jobFailedChan <- evt
 }
 
+// fireJobDropped mirrors fireJobFailed for a dropped job: the same blocking
+// send, for the same fidelity (each event names the batch to tell). MUST NOT
+// be called under p.mu; reached only through announce, after finishJob has
+// given the job's path back and counted it.
+func (p *Pool) fireJobDropped(evt jobDroppedEvent) {
+	p.jobDroppedChan <- evt
+}
+
 // fireJobFailedFor builds + emits a jobFailedEvent for job with errMsg,
 // stamping failedAt ONCE and deriving the duration from that single
 // clock read (timestamp/duration parity — Gemini r4 F28). The sox /
@@ -870,11 +948,12 @@ func (p *Pool) fireJobFailedFor(job poolJob, errMsg string, startedAt time.Time)
 }
 
 // runPublisher is the single long-lived goroutine that consumes
-// stateChangeChan + jobCompleteChan and invokes the wired callbacks
-// synchronously. Replaces the prior pattern of one ephemeral
-// goroutine per state transition (unbounded under burst).
+// stateChangeChan and the three per-job event channels (complete,
+// failed, dropped) and invokes the wired callbacks synchronously.
+// Replaces the prior pattern of one ephemeral goroutine per state
+// transition (unbounded under burst).
 //
-// Exits ONLY when both input channels are closed AND drained — NOT
+// Exits ONLY when every input channel is closed AND drained — NOT
 // on stopCtx.Done(). Workers blocking-send to jobCompleteChan; if
 // the publisher exited on stopCtx cancellation while a worker was
 // mid-send, the worker would hang forever and p.wg.Wait() in Stop
@@ -884,14 +963,15 @@ func (p *Pool) fireJobFailedFor(job poolJob, errMsg string, startedAt time.Time)
 // Per-iteration channel-nil pattern: when one channel is observed
 // closed (`ok == false`), it's nil'd out in the local copy so
 // subsequent select iterations can't hot-spin on the always-ready
-// closed-channel case. Once both channels are nil, the for-loop
+// closed-channel case. Once every channel is nil, the for-loop
 // guard exits.
 func (p *Pool) runPublisher() {
 	defer p.publisherWG.Done()
 	stateCh := (<-chan struct{})(p.stateChangeChan)
 	jobCh := (<-chan jobCompleteEvent)(p.jobCompleteChan)
 	failCh := (<-chan jobFailedEvent)(p.jobFailedChan)
-	for stateCh != nil || jobCh != nil || failCh != nil {
+	dropCh := (<-chan jobDroppedEvent)(p.jobDroppedChan)
+	for stateCh != nil || jobCh != nil || failCh != nil || dropCh != nil {
 		select {
 		case _, ok := <-stateCh:
 			if !ok {
@@ -916,6 +996,14 @@ func (p *Pool) runPublisher() {
 			}
 			if fn := p.notifyJobFailedFn(); fn != nil {
 				fn(evt.path, evt.variantID, evt.errMsg, evt.durationSeconds, evt.batchID, evt.failedAt)
+			}
+		case evt, ok := <-dropCh:
+			if !ok {
+				dropCh = nil
+				continue
+			}
+			if fn := p.notifyJobDroppedFn(); fn != nil {
+				fn(evt.path, evt.variantID, evt.batchID, evt.droppedAt)
 			}
 		}
 	}
@@ -1085,15 +1173,17 @@ func (p *Pool) DropInflight(matches func(sourcePath string) bool) int {
 // values — back-compat consumers depend on QueueLen + QueueCap
 // staying ratio-coherent.
 //
-// The in-flight count and the three counters are read in one critical
-// section, the lock finishJob moves a job from one to the other under.
-// So an observer can act on what it reads: Done or Failed having moved
+// The in-flight count and the counters are read in one critical section,
+// the lock finishJob moves a job from one to the other under. So an
+// observer can act on what it reads: Done, Failed or Dropped having moved
 // means that job has also left Inflight, and a re-enqueue of its path is
 // accepted. The console relies on exactly that (notifyUpscaleProgress in
 // app.js): it refreshes when Done+Failed advances, and bypasses its
 // refresh throttle only when that same frame shows nothing in flight or
 // queued, so a frame counting a job that still read as in flight could
-// throttle away the batch's final refresh.
+// throttle away the batch's final refresh. A drop moves neither, and makes
+// no rendition to refresh for. No wire or console DTO carries Dropped; the
+// drop-burst line and a batch's own row are how an operator learns of one.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1105,6 +1195,7 @@ func (p *Pool) Stats() PoolStats {
 		Enqueued: p.enqueuedCnt,
 		Done:     p.doneCnt,
 		Failed:   p.failedCnt,
+		Dropped:  p.droppedCnt,
 	}
 }
 
@@ -1220,14 +1311,67 @@ func variantFailureWriteCtx(jobCtx context.Context) (context.Context, context.Ca
 // jobOutcome is the counter finishJob adds a job to. outcomeUncounted is a
 // job the pool was shutting down under, or never started: its path must
 // still be given back, but it is neither a success nor a failure of the
-// source, so it moves no counter and announces nothing.
+// source, so it moves no counter and announces nothing. outcomeDropped is a
+// job a worker took while the live gate of its kind was closed: it did not
+// run either, so it is neither done nor failed, but it is counted on its own
+// and announced as dropped, because its batch is still waiting on it.
 type jobOutcome int
 
 const (
 	outcomeUncounted jobOutcome = iota
 	outcomeDone
 	outcomeFailed
+	outcomeDropped
 )
+
+// decideToRun records that the job a worker took passed the gate and runs:
+// the job leaves the undecided count, and a run of drops before it is over
+// (endDropBurstLocked).
+func (p *Pool) decideToRun() {
+	p.mu.Lock()
+	p.undecided--
+	burst := p.endDropBurstLocked(true)
+	p.mu.Unlock()
+	logDropBurst(burst)
+}
+
+// endDropBurstLocked ends the current run of drops if it is over and returns
+// its count, else 0. A run is over once no accepted job is left undecided
+// (none queued in either lane, and no worker between taking one and deciding
+// it), or as soon as a job is decided to run: a burst is a run of drops with
+// no run between them, so a master switch-off is one line however many
+// workers drop the queue. A kind switched off beside a kind left on can
+// split into several lines, one per run. p.mu is held.
+func (p *Pool) endDropBurstLocked(ran bool) uint64 {
+	if p.dropBurst == 0 || (!ran && p.undecided > 0) {
+		return 0
+	}
+	n := p.dropBurst
+	p.dropBurst = 0
+	return n
+}
+
+// logDropBurst writes a finished run of drops' one line, outside p.mu.
+func logDropBurst(n uint64) {
+	if n > 0 {
+		logger.Info(dropBurstMsg, "count", n)
+	}
+}
+
+// noteDrop is a dropped job's own bookkeeping, done before finishJob gives
+// its claim back: the job leaves the undecided count and joins the burst,
+// and the drop that leaves nothing undecided writes the burst's line. So the
+// count of the drop that ends a burst means its line has landed, the order
+// every exit keeps (its bookkeeping, then its count). Neither field it
+// writes is in a snapshot, so the job is still in exactly one place.
+func (p *Pool) noteDrop() {
+	p.mu.Lock()
+	p.undecided--
+	p.dropBurst++
+	burst := p.endDropBurstLocked(false)
+	p.mu.Unlock()
+	logDropBurst(burst)
+}
 
 // jobEnd is what one exit of processJob decided, applied by its deferred
 // tail once that exit's own bookkeeping has landed: the counter the job
@@ -1279,6 +1423,14 @@ func failedEnd(errMsg string) jobEnd {
 // shutdown noise), and a job that was counted is always announced.
 // The success exit reads it not at all — its row has committed, so it
 // counts and announces even during shutdown, and Stop drains the event.
+//
+// The live gate is asked right after the stop check, once, with the job's
+// own spec, before anything runs or shows on the worker grid: a job taken
+// while its gate is closed is dropped (outcomeDropped). The tail gives its
+// claim back and announces it as dropped, so a batch can drain and the
+// next request or sweep for the pair is accepted. A drop is decided while
+// the pool is not stopping, so it counts and announces even if Stop lands
+// before the tail, as the success exit does.
 func (p *Pool) processJob(workerID int, job poolJob) {
 	// `startedAt` feeds durationSeconds on every failure / completion
 	// path so the Coordinator's rolling-throughput average sees the
@@ -1288,6 +1440,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	startedAt := time.Now().UTC()
 
 	var end jobEnd
+	decided := false
 	defer func() {
 		// Panic safety: a panic in p.runner (sox subprocess plumbing) or
 		// p.store.UpsertVariant (SQLite write) would otherwise (a) leak
@@ -1316,7 +1469,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 				end = failedEnd("panic recovered in worker: " + panicMsg)
 			}
 		}
-		p.finishJob(workerID, job, end.outcome)
+		p.finishJob(workerID, job, end.outcome, decided)
 		p.announce(job, end, startedAt)
 	}()
 
@@ -1325,6 +1478,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	if p.closed.Load() {
 		return
 	}
+	if !p.gateOpen(job.spec) {
+		end = jobEnd{outcome: outcomeDropped}
+		return
+	}
+	p.decideToRun()
+	decided = true
 
 	// Publish this worker's active job for the live grid — AFTER the
 	// stop check so an immediately-abandoned job never flashes as active.
@@ -1635,13 +1794,21 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 // event describes a job whose path is already free and whose count has
 // already moved, and the state change publishes a snapshot showing both.
 // An uncounted job announces nothing: that is what keeps a graceful
-// shutdown quiet.
+// shutdown quiet. A dropped job announces that it was dropped, so the batch
+// that enqueued it stops waiting on it.
 func (p *Pool) announce(job poolJob, end jobEnd, startedAt time.Time) {
 	switch end.outcome {
 	case outcomeDone:
 		p.fireJobComplete(end.complete)
 	case outcomeFailed:
 		p.fireJobFailedFor(job, end.errMsg, startedAt)
+	case outcomeDropped:
+		p.fireJobDropped(jobDroppedEvent{
+			path:      job.spec.SourceLibraryRel,
+			variantID: job.spec.VariantID(),
+			droppedAt: time.Now().UTC(),
+			batchID:   job.spec.BatchID,
+		})
 	default:
 		return
 	}
@@ -1794,17 +1961,33 @@ func redactSoxErr(s string, spec JobSpec) string {
 // just-finished worker as active until the next tick. Store(nil) on an
 // already-nil slot (the cooperative-stop path runs before the slot is set)
 // is a harmless no-op.
-func (p *Pool) finishJob(workerID int, job poolJob, outcome jobOutcome) {
+//
+// A job that never reached decideToRun (shutdown, a panic before the
+// decision) leaves the undecided count here, in the same section, and so
+// ends a burst it was the last undecided job of. A drop has left it already
+// (noteDrop).
+func (p *Pool) finishJob(workerID int, job poolJob, outcome jobOutcome, decided bool) {
 	p.activeJobs[workerID].Store(nil)
+	if outcome == outcomeDropped {
+		p.noteDrop()
+		decided = true
+	}
 	p.mu.Lock()
 	p.releaseDedupLocked(job.dedup, job.claim)
+	if !decided {
+		p.undecided--
+	}
 	switch outcome {
 	case outcomeDone:
 		p.doneCnt++
 	case outcomeFailed:
 		p.failedCnt++
+	case outcomeDropped:
+		p.droppedCnt++
 	}
+	burst := p.endDropBurstLocked(false)
 	p.mu.Unlock()
+	logDropBurst(burst)
 	// The Prometheus mirror of the same count, decided by the same outcome.
 	// Outside the lock: a scrape reads it on its own schedule and has no
 	// in-flight figure to agree with.

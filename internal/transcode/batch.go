@@ -226,6 +226,42 @@ func (c *Coordinator) logWalkSkips(op, batchPath string, resolveErrors, changed 
 type batchState struct {
 	Row          manifest.UpscaleBatchRow
 	RemainingIDs map[string]struct{} // source-path keys for tracks the batch still expects callbacks for
+	// DroppedFiles counts the batch's jobs the pool dropped unrun because
+	// the live gate of their kind closed before a worker reached them
+	// (OnJobDropped, backlog B155): neither processed nor failed, and still
+	// in TotalFiles. The row has no column for it; settle writes it into the
+	// row's error when the batch ends.
+	DroppedFiles int
+}
+
+// settle sets the terminal status of a batch whose remaining set has just
+// emptied: `verdict` (completed or failed, the caller's), unless the pool
+// dropped any of its jobs, when it is `cancelled` and its error names how
+// many files were not rendered, ahead of any error it already carries. A
+// batch whose files stopped because their kind was switched off did not
+// complete, and a failure count would say its files were broken. Every
+// place a batch can end reaches it: the three job callbacks, the post-loop
+// drain check and the queue-full truncation. c.mu is held.
+func (st *batchState) settle(verdict string) {
+	if st.DroppedFiles == 0 {
+		st.Row.Status = verdict
+		return
+	}
+	st.Row.Status = "cancelled"
+	st.Row.Error = droppedFilesError(st.DroppedFiles, st.Row.TotalFiles, st.Row.Error)
+}
+
+// droppedFilesError is the error of a batch the pool dropped files from:
+// how many of its files were not rendered and why, then what a resubmit
+// does, then the error the batch carried before (its first failure, or a
+// partial enqueue), when it had one.
+func droppedFilesError(dropped, total int, prior string) string {
+	msg := fmt.Sprintf("%d of %d files were not rendered: their kind went off before their turn "+
+		"(switched off, or its tool went missing); submit the batch again to render them", dropped, total)
+	if prior != "" {
+		msg += ". " + prior
+	}
+	return msg
 }
 
 // WithSoxInfo wires the cached sox probe used by the candidate walks to
@@ -847,7 +883,7 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 				// the row doesn't sit `running` forever. Per
 				// CodeRabbit major on PR #204 round 2.
 				if len(st.RemainingIDs) == 0 {
-					st.Row.Status = "failed"
+					st.settle("failed")
 					becameTerminal = true
 				}
 				rowSnapshot = st.Row
@@ -978,15 +1014,24 @@ func (c *Coordinator) dropDedupedPath(batchID uuid.UUID, path string) {
 // cited (a queue-full break clobbering an already-set terminal status): the
 // truncation path deletes the batch from `liveBatches` when it sets a terminal
 // status, so the liveness check makes this a no-op rather than an overwrite.
+//
+// A batch the pool dropped files from ends cancelled here too, with the same
+// error settle writes: its last candidate can be deduped after its other
+// files were dropped, and then no callback is left to end it.
 func (c *Coordinator) completeIfDrained(batchID uuid.UUID, tag string) {
 	c.mu.Lock()
 	st, ok := c.liveBatches[batchID]
 	drained := ok && len(st.RemainingIDs) == 0
+	status, errMsg := "completed", ""
+	if drained && st.DroppedFiles > 0 {
+		status = "cancelled"
+		errMsg = droppedFilesError(st.DroppedFiles, st.Row.TotalFiles, st.Row.Error)
+	}
 	c.mu.Unlock()
 	if !drained {
 		return
 	}
-	if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+	if err := c.transitionStatus(batchID, status, errMsg, c.clock()); err != nil {
 		c.logger.Warn(tag+": transition drained batch",
 			"batchID", batchID.String(), "err", err)
 	}
@@ -1544,7 +1589,7 @@ func (c *Coordinator) handleOptimizeEnqueueFailure(batchID uuid.UUID, cands []op
 		st.Row.Error = "partial enqueue: " + failureErr.Error()
 		st.Row.UpdatedAt = c.clock().UnixNano()
 		if len(st.RemainingIDs) == 0 {
-			st.Row.Status = "failed"
+			st.settle("failed")
 			becameTerminal = true
 		}
 		rowSnapshot = st.Row
@@ -1678,8 +1723,11 @@ func (c *Coordinator) OnJobComplete(path, variantID string, sampleRate, bitsPerS
 		// tracks may have failed; FailedFiles carries that count and the
 		// Jobs page renders it separately). A 100%-failure batch's last
 		// event is a FAILURE, so it terminates in OnJobFailed, which sets
-		// "failed" — this handler never observes an all-failed batch.
-		state.Row.Status = "completed"
+		// "failed" — this handler never observes an all-failed batch. A
+		// batch the pool dropped files from ends cancelled (settle): this
+		// is its last callback when a file was still rendering as its kind
+		// went off.
+		state.settle("completed")
 	}
 	rowCopy := state.Row
 	if allDone {
@@ -1727,9 +1775,9 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 	allDone := len(state.RemainingIDs) == 0
 	if allDone {
 		if state.Row.FailedFiles == state.Row.TotalFiles {
-			state.Row.Status = "failed"
+			state.settle("failed")
 		} else {
-			state.Row.Status = "completed"
+			state.settle("completed")
 		}
 	}
 	rowCopy := state.Row
@@ -1750,9 +1798,59 @@ func (c *Coordinator) OnJobFailed(path, variantID, errMsg string, durationSecond
 }
 
 // OnJobDropped is the Pool-side callback for a job a worker took while the
-// live gate of its kind was closed. Signature matches the pool's
-// `SetOnJobDropped` parameter.
+// live gate of its kind was closed (backlog B155). Signature matches the
+// pool's `SetOnJobDropped` parameter.
+//
+// The batch stops waiting on the file and counts it as dropped, never as
+// processed or failed, and its total keeps it: the file is still one the
+// batch set out to render. When it was the last file the batch waited on,
+// the batch ends cancelled (settle), its error naming how many files were
+// not rendered. Nothing re-offers a batch's dropped file, as the sweepers
+// re-offer theirs, so that error is what tells the operator to submit it
+// again; a resubmit renders only what is still missing. A drop is no sample
+// for the throughput window: the job did not run. The in-flight row is
+// persisted and published only at that end, since a drop moves none of its
+// counters, which keeps a switch-off that drops a 5,000-file batch to one
+// row write instead of 5,000.
+//
+// A path the batch no longer waits on is ignored, so a drop can never count
+// a file twice or count one the batch never enqueued.
 func (c *Coordinator) OnJobDropped(path, variantID string, batchID uuid.UUID, droppedAt time.Time) {
+	if batchID == uuid.Nil {
+		return
+	}
+	c.mu.Lock()
+	state, ok := c.liveBatches[batchID]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	if _, waiting := state.RemainingIDs[path]; !waiting {
+		c.mu.Unlock()
+		return
+	}
+	delete(state.RemainingIDs, path)
+	state.DroppedFiles++
+	state.Row.UpdatedAt = droppedAt.UnixNano()
+	allDone := len(state.RemainingIDs) == 0
+	if !allDone {
+		c.mu.Unlock()
+		return
+	}
+	state.settle("completed")
+	rowCopy := state.Row
+	delete(c.liveBatches, batchID)
+	c.mu.Unlock()
+
+	// Bound the persist (publisher-goroutine path) — see OnJobComplete.
+	if err := persistBounded(func(ctx context.Context) error {
+		return c.store.UpdateUpscaleBatchProgress(ctx, rowCopy)
+	}); err != nil {
+		c.logger.Warn("OnJobDropped: update progress",
+			"batchID", batchID.String(),
+			"err", err)
+	}
+	c.publishProgressRow(rowCopy)
 }
 
 // recordThroughputDuration is the primary entry; the per-job

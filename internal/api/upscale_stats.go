@@ -63,9 +63,10 @@ type UpscaleStats struct {
 	CachedBytes    int64             `json:"cachedBytes"`
 }
 
-// UpscalePoolStats mirrors `transcode.PoolStats` field-for-field
-// but lives here so the api package compiles without importing
-// internal/transcode. The wiring closure in cmd/bridge/main.go
+// UpscalePoolStats mirrors `transcode.PoolStats` field-for-field,
+// Dropped aside (not on the wire: a drop is reported by the pool's
+// drop-burst line and its batch's row, backlog B155), but lives here so
+// the api package compiles without importing internal/transcode. The wiring closure in cmd/bridge/main.go
 // translates between the two value types — same indirection the
 // admin package already uses.
 type UpscalePoolStats struct {

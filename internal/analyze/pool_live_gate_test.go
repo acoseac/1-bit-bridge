@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -202,6 +203,144 @@ func TestAnAnalysisDropBurstLogsOneLineWithItsCount(t *testing.T) {
 				t.Errorf("a line names the dropped %s: %q (the burst is one line, not one per job)", path, line)
 			}
 		}
+	}
+}
+
+// TestADropBurstAcrossWorkersIsOneLine: four workers share one queue of 200
+// dropped at a switch-off, and it is one burst, one line, with every job
+// counted once. It does not decide WHEN a burst ends (the first worker back
+// usually drops most of the queue alone, while the others write their held
+// jobs' rows); TestAJobStillBeingDecidedKeepsItsBurstOpen does.
+func TestADropBurstAcrossWorkersIsOneLine(t *testing.T) {
+	rec := loggingtest.Record(t)
+	s := newStore(t)
+	const workers, queued = 4, 200
+	gate := newGateSwitch(true)
+	started := make(chan struct{}, workers)
+	release := make(chan struct{})
+	runner := func(ctx context.Context, spec AnalyzeSpec) (Result, error) {
+		if strings.HasPrefix(spec.SourceLibraryRel, "H/") {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return Result{}, ctx.Err()
+			}
+		}
+		return Result{WaveformPath: "/w/x", WaveformTag: "t", SchemaVersion: WaveformSchemaVersion}, nil
+	}
+	p := NewPool(s, workers, queued+workers, WithRunner(runner), WithFsync(noFsync), WithLiveGate(gate.open))
+	t.Cleanup(p.Stop)
+	for i := 0; i < workers; i++ {
+		path := fmt.Sprintf("H/%d.flac", i)
+		putTrack(t, s, path)
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < workers; i++ {
+		<-started
+	}
+	for i := 0; i < queued; i++ {
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: fmt.Sprintf("Q/%03d.flac", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate.on.Store(false)
+	close(release)
+	st := waitIdle(t, p)
+
+	if st.Done != workers || st.Dropped != queued {
+		t.Errorf("Done=%d Dropped=%d, want Done=%d Dropped=%d", st.Done, st.Dropped, workers, queued)
+	}
+	lines := rec.Lines(dropBurstMsg)
+	if want := fmt.Sprintf("count=%d", queued); len(lines) != 1 || !strings.Contains(lines[0], want) {
+		t.Fatalf("drop-burst lines = %q, want one carrying %s", lines, want)
+	}
+}
+
+// TestAJobStillBeingDecidedKeepsItsBurstOpen pins when a burst ends: once no
+// accepted job is left undecided. The first job of the queue is parked inside
+// the gate, taken from the queue and not yet decided, while the other worker
+// drops the other nine and so empties the queue. A burst that ended at an
+// empty queue would log its line at that last drop, and the parked job's drop
+// a second line of its own; this one logs nothing until the parked job is
+// decided, and then one line with every drop.
+func TestAJobStillBeingDecidedKeepsItsBurstOpen(t *testing.T) {
+	rec := loggingtest.Record(t)
+	s := newStore(t)
+	const workers, queued = 2, 10
+	started := make(chan struct{}, workers)
+	release := make(chan struct{})
+	runner := func(ctx context.Context, spec AnalyzeSpec) (Result, error) {
+		if strings.HasPrefix(spec.SourceLibraryRel, "H/") {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return Result{}, ctx.Err()
+			}
+		}
+		return Result{WaveformPath: "/w/x", WaveformTag: "t", SchemaVersion: WaveformSchemaVersion}, nil
+	}
+	// The gate answers in take order: open for the two held jobs, closed for
+	// the queue, and the first queued job's ask parks until unpark is closed.
+	var calls atomic.Int32
+	parked := make(chan struct{})
+	unpark := make(chan struct{})
+	gate := func() bool {
+		n := calls.Add(1)
+		if n <= workers {
+			return true
+		}
+		if n == workers+1 {
+			close(parked)
+			<-unpark
+		}
+		return false
+	}
+	p := NewPool(s, workers, queued+workers, WithRunner(runner), WithFsync(noFsync), WithLiveGate(gate))
+	t.Cleanup(p.Stop)
+	t.Cleanup(func() {
+		select {
+		case <-unpark:
+		default:
+			close(unpark)
+		}
+	})
+	for i := 0; i < workers; i++ {
+		path := fmt.Sprintf("H/%d.flac", i)
+		putTrack(t, s, path)
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < workers; i++ {
+		<-started
+	}
+	for i := 0; i < queued; i++ {
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: fmt.Sprintf("Q/%02d.flac", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(release)
+	select {
+	case <-parked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate was never asked about the first queued job")
+	}
+	waitFor(t, func() bool { return p.Stats().Dropped == queued-1 })
+	if st := p.Stats(); st.QueueLen != 0 {
+		t.Fatalf("QueueLen = %d once the other worker dropped the rest, want 0", st.QueueLen)
+	}
+	if lines := rec.Lines(dropBurstMsg); len(lines) != 0 {
+		t.Errorf("drop-burst lines while a taken job is undecided = %q, want none yet", lines)
+	}
+	close(unpark)
+	waitIdle(t, p)
+	lines := rec.Lines(dropBurstMsg)
+	if want := fmt.Sprintf("count=%d", queued); len(lines) != 1 || !strings.Contains(lines[0], want) {
+		t.Fatalf("drop-burst lines = %q, want one carrying %s", lines, want)
 	}
 }
 
