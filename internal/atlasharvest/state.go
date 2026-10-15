@@ -204,10 +204,18 @@ func (s *StateStore) SetCredential(token, baseURL string, expiresAt time.Time) e
 	return s.persistLocked()
 }
 
-// SetCursor advances the delta-sync cursor.
-func (s *StateStore) SetCursor(c int64) error {
+// SetCursor advances the delta-sync cursor of the Atlas at base, the base the
+// page it came from was fetched from (the snapshot the poll read). It does
+// nothing when the store holds another base by now: SetCredential switched
+// Atlas while the page was in flight and reset the cursor, and the old base's
+// position is not the new one's, whose results below it would never be
+// fetched (backlog B169).
+func (s *StateStore) SetCursor(base string, c int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if base != s.st.AtlasBaseURL {
+		return nil
+	}
 	if c <= s.st.ResultCursor {
 		return nil // never rewind
 	}
@@ -215,10 +223,18 @@ func (s *StateStore) SetCursor(c int64) error {
 	return s.persistLocked()
 }
 
-// SetLastSubmit records the time of the last full library submit.
-func (s *StateStore) SetLastSubmit(t time.Time) error {
+// SetLastSubmit records the time of the last full library submit to the Atlas
+// at base, the base the submit was posted to. It does nothing when the store
+// holds another base by now: SetCredential zeroed the stamp at the switch, so
+// the new base's first submit is due at once rather than a whole interval
+// after the old base's (backlog B169). For a reset to zero the mismatch is
+// harmless for the same reason: the switch already zeroed it.
+func (s *StateStore) SetLastSubmit(base string, t time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if base != s.st.AtlasBaseURL {
+		return nil
+	}
 	s.st.LastSubmitAt = t
 	return s.persistLocked()
 }

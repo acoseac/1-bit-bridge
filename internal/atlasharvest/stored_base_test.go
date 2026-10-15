@@ -305,7 +305,7 @@ func newHeldCredential(t *testing.T) heldCredential {
 	if err := h.state.SetCredential("bh-held", "https://atlas.example", h.expires); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.state.SetCursor(42); err != nil {
+	if err := h.state.SetCursor(h.state.Snapshot().AtlasBaseURL, 42); err != nil {
 		t.Fatal(err)
 	}
 	var err error

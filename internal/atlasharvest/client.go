@@ -303,7 +303,7 @@ func (c *Client) tick(ctx context.Context) {
 			}
 			if err := c.submitAll(ctx, st); err != nil {
 				c.handleErr(ctx, "submit", err)
-			} else if err := c.State.SetLastSubmit(c.now()); err != nil {
+			} else if err := c.State.SetLastSubmit(st.AtlasBaseURL, c.now()); err != nil {
 				c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "submit", "error", err)
 			}
 		},
@@ -628,7 +628,7 @@ func (c *Client) pollResults(ctx context.Context) error {
 		}
 		advanced := resp.NextCursor > st.ResultCursor
 		if advanced {
-			if err := c.State.SetCursor(resp.NextCursor); err != nil {
+			if err := c.State.SetCursor(st.AtlasBaseURL, resp.NextCursor); err != nil {
 				return fmt.Errorf("advance cursor: %w", err)
 			}
 		}

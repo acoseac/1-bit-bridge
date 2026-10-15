@@ -240,7 +240,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if err := s.SetCredential("tok", "https://atlas.example", time.Unix(100, 0).UTC()); err != nil {
 		t.Fatalf("SetCredential: %v", err)
 	}
-	if err := s.SetCursor(5); err != nil {
+	if err := s.SetCursor(s.Snapshot().AtlasBaseURL, 5); err != nil {
 		t.Fatalf("SetCursor: %v", err)
 	}
 
@@ -258,7 +258,7 @@ func TestStateRoundTrip(t *testing.T) {
 func TestStateCredentialChangeResetsCursorOnNewAtlas(t *testing.T) {
 	s := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
 	_ = s.SetCredential("t1", "https://atlas-a", time.Time{})
-	_ = s.SetCursor(9)
+	_ = s.SetCursor(s.Snapshot().AtlasBaseURL, 9)
 	_ = s.SetCredential("t2", "https://atlas-b", time.Time{}) // different host
 	if c := s.Snapshot().ResultCursor; c != 0 {
 		t.Errorf("cursor = %d after switching Atlas, want 0", c)
