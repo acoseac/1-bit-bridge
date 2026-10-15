@@ -24,6 +24,10 @@ func TestUDNFromUSNAnswersNothingForTheBridgesOwnKeySpace(t *testing.T) {
 		{"UUID:odd-firmware::upnp:rootdevice", "UUID:odd-firmware"},
 		{"nas-without-uuid::urn:schemas-upnp-org:device:MediaServer:1", "nas-without-uuid"},
 		{"uuid:manual:abc", "uuid:manual:abc"},
+		// The check reads the prefix's bytes: a UDN shorter than it, and one
+		// whose first rune is several bytes, are kept.
+		{"man", "man"},
+		{"ñmanual:abc::upnp:rootdevice", "ñmanual:abc"},
 		{"", ""},
 	} {
 		if got := UDNFromUSN(tc.usn); got != tc.want {

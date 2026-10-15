@@ -142,7 +142,11 @@ const ManualKeyPrefix = "manual:"
 // gave the entry the sender's control URL, description URL and dial
 // approval, and refreshed LastSeenAt so a down server showed online; a
 // byebye removed it (backlog B163). Every other UDN is kept, one outside
-// "uuid:" included: odd firmware exists, and nothing else is ours.
+// "uuid:" included: odd firmware exists, and nothing else is ours. The
+// check folds case on the prefix's bytes alone, not a lower-cased copy of
+// the UDN, which costs nothing per packet; it matches exactly what
+// lower-casing would, since every letter of the prefix is ASCII and none
+// has a non-ASCII case twin (as k and s do).
 //
 // Examples:
 //
@@ -158,7 +162,8 @@ func UDNFromUSN(usn string) string {
 	if idx := strings.Index(usn, "::"); idx >= 0 {
 		udn = usn[:idx]
 	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(udn)), ManualKeyPrefix) {
+	if trimmed := strings.TrimSpace(udn); len(trimmed) >= len(ManualKeyPrefix) &&
+		strings.EqualFold(trimmed[:len(ManualKeyPrefix)], ManualKeyPrefix) {
 		return ""
 	}
 	return udn

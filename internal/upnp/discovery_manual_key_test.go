@@ -40,37 +40,43 @@ func spoofer() *net.UDPAddr { return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 66), P
 
 func TestHandlePacket_AManualKeyAliveLeavesTheManualServersEntryAlone(t *testing.T) {
 	for _, usnUDN := range []string{manualServerKey, strings.ToUpper(manualServerKey)} {
-		t.Run(usnUDN[:8], func(t *testing.T) {
-			disp := &recordingDispatcher{}
-			cache := NewServerCache()
-			earlier := time.Now().Add(-time.Hour)
-			manual := cachedManualServer(cache, earlier)
-			c := newServerDiscoveryTestClient(t, disp, cache)
+		t.Run(usnUDN[:8], func(t *testing.T) { assertAManualKeyAliveChangesNothing(t, usnUDN) })
+	}
+}
 
-			c.handlePacket(context.Background(), alivePacket(usnUDN, "http://192.0.2.66:9001/desc.xml"), spoofer())
-			c.wg.Wait() // any description fetch the packet started
+// assertAManualKeyAliveChangesNothing lands one alive whose USN carries
+// usnUDN, sent from another host, on a cache holding the manual server, and
+// fails unless the entry is as the poller left it and nothing was fetched.
+func assertAManualKeyAliveChangesNothing(t *testing.T, usnUDN string) {
+	t.Helper()
+	disp := &recordingDispatcher{}
+	cache := NewServerCache()
+	earlier := time.Now().Add(-time.Hour)
+	manual := cachedManualServer(cache, earlier)
+	c := newServerDiscoveryTestClient(t, disp, cache)
 
-			if n := disp.fetchCount(); n != 0 {
-				t.Errorf("the packet fetched a description %d times, want 0", n)
-			}
-			got, ok := cache.Get(manualServerKey)
-			if !ok {
-				t.Fatal("the manual server's entry is gone")
-			}
-			if got.ContentDirectoryControlURL != manual.ContentDirectoryControlURL ||
-				got.DescriptionURL != manual.DescriptionURL || got.DialApproval != manual.DialApproval {
-				t.Errorf("the manual server's entry now leads to (%q, %q, %+v), want its own (%q, %q, %+v)",
-					got.ContentDirectoryControlURL, got.DescriptionURL, got.DialApproval,
-					manual.ContentDirectoryControlURL, manual.DescriptionURL, manual.DialApproval)
-			}
-			if !got.LastSeenAt.Equal(earlier) {
-				t.Errorf("the packet refreshed the manual server's LastSeenAt to %v: a down server would show online",
-					got.LastSeenAt)
-			}
-			if _, ok := cache.Get(usnUDN); ok && usnUDN != manualServerKey {
-				t.Errorf("the packet cached a server under %q", usnUDN)
-			}
-		})
+	c.handlePacket(context.Background(), alivePacket(usnUDN, "http://192.0.2.66:9001/desc.xml"), spoofer())
+	c.wg.Wait() // any description fetch the packet started
+
+	if n := disp.fetchCount(); n != 0 {
+		t.Errorf("the packet fetched a description %d times, want 0", n)
+	}
+	got, ok := cache.Get(manualServerKey)
+	if !ok {
+		t.Fatal("the manual server's entry is gone")
+	}
+	if got.ContentDirectoryControlURL != manual.ContentDirectoryControlURL ||
+		got.DescriptionURL != manual.DescriptionURL || got.DialApproval != manual.DialApproval {
+		t.Errorf("the manual server's entry now leads to (%q, %q, %+v), want its own (%q, %q, %+v)",
+			got.ContentDirectoryControlURL, got.DescriptionURL, got.DialApproval,
+			manual.ContentDirectoryControlURL, manual.DescriptionURL, manual.DialApproval)
+	}
+	if !got.LastSeenAt.Equal(earlier) {
+		t.Errorf("the packet refreshed the manual server's LastSeenAt to %v: a down server would show online",
+			got.LastSeenAt)
+	}
+	if _, ok := cache.Get(usnUDN); ok && usnUDN != manualServerKey {
+		t.Errorf("the packet cached a server under %q", usnUDN)
 	}
 }
 
