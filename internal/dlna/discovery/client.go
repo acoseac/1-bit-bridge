@@ -841,10 +841,10 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		if beforeKnownRefreshHook != nil {
 			beforeKnownRefreshHook(udn)
 		}
-		c.cache.Upsert(RendererInfo{
-			UDN:        udn,
-			LastSeenAt: now,
-		})
+		// One step under the cache's lock: an entry evicted since the
+		// lookup stays gone, so the next announcement fetches it as new,
+		// and a stub that replaced it keeps its LastSeenAt (backlog B165).
+		c.cache.Touch(udn, now)
 		return
 	}
 

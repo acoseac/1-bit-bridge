@@ -80,10 +80,13 @@ func NewRendererCache() *RendererCache {
 //
 // When the entry exists, fields are MERGED: new non-zero fields
 // from `info` override the cached ones; cached non-zero fields
-// persist when `info` omits them. This handles the common
-// "ssdp:alive only carries UDN + Location" case where a NOTIFY
-// refreshes lastSeenAt without re-fetching the full
-// DeviceDescription / GetProtocolInfo.
+// persist when `info` omits them.
+//
+// The SSDP handler no longer calls it: its refresh of a known
+// renderer's LastSeenAt is Touch, one step under the lock (backlog
+// B165: an Upsert of `{UDN, LastSeenAt}` after the lookup brought an
+// evicted entry back as a stub), and a detail fetch writes with
+// Replace. The tests seed the cache with it.
 //
 // Callers wanting a strict replace (e.g. post-`fetchDeviceDescription`
 // rebuild) pass a fully-populated `info` — the merge happens to
@@ -188,8 +191,8 @@ func mergeRendererInfo(cached, fresh RendererInfo) RendererInfo {
 // which left the renderer missing from /v1/renderers for the fetch's whole
 // duration; enforcing it at the write instead keeps the entry visible.
 //
-// Callers holding only a PARTIAL observation — the LastSeenAt refresh on an
-// ssdp:alive, which carries no service URLs — MUST use Upsert.
+// A caller holding only a PARTIAL observation — the LastSeenAt refresh on an
+// ssdp:alive, which carries no service URLs — uses Touch, never Replace.
 //
 // A NEW UDN is admitted as makeRoomLocked allows; the result reports whether
 // info is stored. Replacing a UDN already cached is never refused.
@@ -274,6 +277,29 @@ func (c *RendererCache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
+}
+
+// Touch advances the LastSeenAt of a cached renderer that has a ControlURL
+// to seen, in one step under the lock, and reports whether it did. It stores
+// nothing for a UDN the cache does not hold, and leaves a stub (no
+// ControlURL) as it is, so a stub still ages out and is fetched again.
+//
+// It is the SSDP handler's refresh of a known renderer (backlog B165). That
+// was an Upsert of `{UDN, LastSeenAt}` after the lookup, so an entry
+// EvictStale removed in between came back as a stub with no ControlURL,
+// which Snapshot hides and the handler never fetched again, and a stub that
+// replaced the entry in between had its LastSeenAt refreshed. The upstream
+// client's ServerCache.Touch closed the same race on 2026-09-28.
+func (c *RendererCache) Touch(udn string, seen time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, ok := c.entries[udn]
+	if !ok || info.ControlURL == "" {
+		return false
+	}
+	info.LastSeenAt = seen
+	c.entries[udn] = info
+	return true
 }
 
 // Get returns the entry for the given UDN. The second return is
