@@ -5245,7 +5245,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			if harvestState == nil {
 				return false
 			}
-			if err := harvestState.SetLastSubmit(time.Time{}); err != nil {
+			if err := harvestState.SetLastSubmit(harvestState.Snapshot().AtlasBaseURL, time.Time{}); err != nil {
 				logger.Warn("enrichment retry: reset harvest submit stamp", "err", err)
 				return false
 			}

@@ -43173,6 +43173,38 @@ The bound is the failure signal; waiting to the deadline would turn a wedged
 scan back into a hang, which `go test` reports as a timeout panic far from
 the test that caused it.
 
+## 2026-10-15 — a tick's cursor and last-submit stamp land only on the base they were computed against (backlog B169)
+
+From the pre-v0.2.1 network-surface review (enrich/harvest reviewer), confirmed
+in the code. `SetCredential` to another Atlas base resets `ResultCursor` and
+`LastSubmitAt`, but neither `SetCursor` nor `SetLastSubmit` knew which base its
+value came from. A results page in flight against the old base, landing after
+the switch, gave the new base the old base's cursor (`pollResults`' `SetCursor`
+never rewinds, so the new base's results below it were never fetched), and a
+library submit to the old base stamped `LastSubmitAt` on the new one, holding
+its first submit for a whole submit interval (6 h).
+
+**Red first** (`f657d0d7`, the tests alone on main): a stub Atlas whose
+handler re-provisions the store against a second stub base while its response
+is in flight. `TestAResultsPageFromTheOldBaseLeavesTheNewBasesCursorAlone`
+failed with the cursor at the old page's 500, and
+`TestASubmitToTheOldBaseLeavesTheNewBasesFirstSubmitDue` with the stamp set
+and no submit to the new base on the next tick.
+
+**Fix.** Both setters take the base the value was computed against (the
+tick's snapshot) and do nothing when the store holds another. The tick passes
+its snapshot's base; `pollResults` passes the base of the snapshot each page
+read, so a page loop that crosses a switch goes on from the new base's cursor
+on its next page. The "Retry missing" reset (`HarvestForceSubmit`) passes the
+base it reads; if a switch lands in between, the switch has zeroed the stamp
+already, which is what the reset asked for. The test call sites pass the
+store's own base. Not changed: `AddPendingCovers` from a page of the old base
+still queues its release MBIDs, which name releases, not a base, and the
+cover sweep fetches them with whatever credential is current.
+
+**Negative control.** The base check removed from both setters (on the fix):
+exactly the two new tests red, at the same three assertions as on main.
+
 ## 2026-10-15 — an upstream walk stops at a container budget and a time budget, and skips a container that is its own ancestor (backlog B164)
 
 From the pre-v0.2.1 network-surface review (DLNA reviewer), whose scratch stub

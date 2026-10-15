@@ -34,7 +34,7 @@ func TestServeRevokesAHarvestCredentialWithTheHarvestOff(t *testing.T) {
 	if err := seeded.SetCredential("bh-secret-token", "https://atlas.example", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := seeded.SetCursor(42); err != nil {
+	if err := seeded.SetCursor(seeded.Snapshot().AtlasBaseURL, 42); err != nil {
 		t.Fatal(err)
 	}
 	tokens, err := auth.OpenStore(filepath.Join(dataDir, tokensFileName))

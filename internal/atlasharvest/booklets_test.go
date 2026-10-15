@@ -152,7 +152,7 @@ func bookletTestClient(t *testing.T, atlas *httptest.Server, sink *fakeBookletSi
 	if err := state.SetCredential("test-token", base, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.SetLastSubmit(time.Now()); err != nil {
+	if err := state.SetLastSubmit(state.Snapshot().AtlasBaseURL, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if files != nil {

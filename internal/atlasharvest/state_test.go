@@ -176,7 +176,7 @@ func TestClearStoredCredential(t *testing.T) {
 		if err := s.SetCredential("bh-secret-token", "https://atlas.example", time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.SetCursor(42); err != nil {
+		if err := s.SetCursor(s.Snapshot().AtlasBaseURL, 42); err != nil {
 			t.Fatal(err)
 		}
 		if err := ClearStoredCredential(path); err != nil {
@@ -215,7 +215,7 @@ func TestClearStoredCredential(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.SetCursor(7); err != nil {
+		if err := s.SetCursor(s.Snapshot().AtlasBaseURL, 7); err != nil {
 			t.Fatal(err)
 		}
 		before, err := os.ReadFile(path)
