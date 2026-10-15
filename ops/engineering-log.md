@@ -43205,6 +43205,84 @@ cover sweep fetches them with whatever credential is current.
 **Negative control.** The base check removed from both setters (on the fix):
 exactly the two new tests red, at the same three assertions as on main.
 
+## 2026-10-15 — an upstream walk stops at a container budget and a time budget, and skips a container that is its own ancestor (backlog B164)
+
+From the pre-v0.2.1 network-surface review (DLNA reviewer), whose scratch stub
+(branching 4, ending at depth 12, no items) took 20,000 Browse calls with
+`Truncated=false` and ran until the test cancelled it. `recurse` was bounded
+only by `MaxDepth` (12) and `MaxItems` (50,000 audio items). A tree that ends
+AT depth 12 never trips `MaxDepth`, and a tree of empty containers never counts
+toward `MaxItems`, so its 22M containers were bounded by nothing else; and
+`upnpingest.Run` holds `runMu` across every configured server, so one such
+upstream held every other upstream's walk and "Rescan now" until a restart.
+
+**Red first** (the two cases that compile against main, on the unchanged
+walker):
+- `TestBrowseFoldersWalk_AWideTreeEndsAtTheDefaultContainerBudgetAsTruncated`
+  was still walking at its 20 s deadline, after 719,686 Browse calls, and
+  failed with `context deadline exceeded`.
+- `TestBrowseFoldersWalk_AContainerThatIsItsOwnAncestorIsSkipped` failed with
+  `walk exceeded MaxDepth=12` after 13 calls. That is the second finding: a
+  tree that goes deeper than 12 is not unbounded but FAILS on its first
+  branch, and so did any cycle (a container listing itself or an ancestor),
+  so a server with one could never complete a walk. The items walked before the
+  failure were stored; everything after it never was, and nothing was reaped.
+
+**Fix.**
+- `WalkOptions.MaxContainers` (default `defaultMaxContainers`, 50,000: a
+  Browse per container, as many as the default `MaxItems` allows tracks) ends
+  the walk with `ErrWalkContainerBudget`.
+- `WalkOptions.MaxDuration` (default 4 h, checked between Browse calls) ends
+  it with `ErrWalkTimeBudget`: an upstream that answers each Browse just
+  inside its request timeout is bounded by no count.
+- Both are a `walkBudgetError` whose `Is` reports `ErrWalkTruncated`, so
+  `BrowseFoldersWalk` marks the stats truncated and the ingest's guard reaps
+  nothing and does not settle the SystemUpdateID (any walk error skips the
+  reap there; the truncation class is what callers that tell the two apart
+  read). The messages name the budget rather than `MaxItems`.
+- The walker keeps the ids on the path being walked (`ancestors`) and skips a
+  child container whose id is among them (`WalkStats.CyclesSkipped`). The same
+  container under two different parents is not a cycle and is still walked
+  under each: its second path is rows of its own, so a visited-set check would
+  change what the ingest stores.
+
+**Tests** (`internal/upnp/walker_budget_test.go`, a dispatcher that answers
+each Browse by its ObjectID): the wide tree ends at the default budget as
+truncated (it walks the whole 50,000, about 1.5 s and 25 s under `-race`,
+because the default is what the ingest relies on); an explicit budget of 50
+ends after exactly 50 Browse calls; a 30 s time budget on an injected clock
+that advances a second per Browse ends after exactly 30; and a tree with three
+cycles (r holds a and b, a holds itself and b, b holds r and a) visits its 5
+acyclic paths and skips 6 cycles, with no error and not truncated.
+
+**Negative controls** on the fix, each predicted by name, its anchors
+count-checked and restored from git: the container budget's check made
+unsatisfiable failed exactly the wide-tree case (at its 90 s deadline) and the
+explicit-budget case (at its 30 s); the time budget's check and the cycle skip
+made unsatisfiable in one build failed exactly the time-budget case (the walk
+then met the container budget instead) and the cycle case; and a
+`walkBudgetError` that is not an `ErrWalkTruncated` failed exactly the three
+budget cases.
+
+Review round (CodeRabbit on #1241, a Major): `MaxDuration` was checked only
+between containers, but `BrowseAll` follows ONE container's pages until the
+server says it is done (up to `MaxBrowseAllItems`, 100,000), checking only its
+context between them, so an upstream serving one item a page held a single
+container far past the budget. The walk now runs under the caller's context
+with the budget's deadline (wall clock; the check between containers keeps the
+injectable `now`), and `timeBudgetSpent` reports an expiry of the walk's
+context that the caller's does not share as `ErrWalkTimeBudget`, decided from
+the two contexts rather than the error chain. Red first (`0bc1bae1`):
+`TestBrowseFoldersWalk_ATimeBudgetAlsoEndsOneContainersEndlessPages` (one
+container answering one more child a page, 2 ms a page, a 300 ms budget) ran to
+its 10 s outer deadline after 4,017 Browse calls of that container, ending
+`context deadline exceeded`; on the fix it ends at the budget, 0.30 s.
+Controls: `timeBudgetSpent` answering false failed exactly that case (the
+expiry surfaced as the BrowseAll error), and a walk context with no deadline
+failed exactly that case at the 10 s outer deadline.
+`TestBrowseFoldersWalk_HonorsCtxCancellation` still reports the caller's own
+cancel as itself.
+
 ## 2026-10-15 — no SSDP packet can name an entry in the manual-upstream key space (backlog B163)
 
 From the pre-v0.2.1 network-surface review (DLNA reviewer), confirmed in the
