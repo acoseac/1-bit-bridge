@@ -19,6 +19,12 @@ import (
 // Per CodeRabbit Major round-1 on PR #305.
 var packageLogger = logging.Component("dlna-discovery")
 
+// beforeKnownRefreshHook is a test-only seam (nil in production): it runs in
+// handlePacket between the lookup of a known renderer and its LastSeenAt
+// refresh, so a test can land an eviction or a replacement there (backlog
+// B165).
+var beforeKnownRefreshHook func(udn string)
+
 // ssdpReadErrBackoff paces the read loop after an unexpected (non-timeout,
 // non-shutdown) UDP read error so a persistently-broken socket can't hot-spin
 // a CPU core. On Windows an unconnected UDP socket can surface WSAECONNRESET
@@ -831,6 +837,9 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		// was stuck nameless until restart.)
 		if existing.ControlURL == "" {
 			return
+		}
+		if beforeKnownRefreshHook != nil {
+			beforeKnownRefreshHook(udn)
 		}
 		c.cache.Upsert(RendererInfo{
 			UDN:        udn,
