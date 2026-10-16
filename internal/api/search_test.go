@@ -234,7 +234,12 @@ func TestSearchIsAdvertisedInHealth(t *testing.T) {
 func TestSearchSwallowsAClientCancellation(t *testing.T) {
 	st := &stubSearcher{available: true, err: context.Canceled}
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/search?q=abc", nil)
+	// The client's abort: its request's context is the one cancelled, which
+	// is what clientWentAway asks (a cancel while the request is still live
+	// is a 500, TestASearchCancelWhileTheRequestIsLiveAnswers500).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/search?q=abc", nil).WithContext(ctx)
 	searchServer(t, st).search(rr, req)
 
 	if rr.Code >= 500 {

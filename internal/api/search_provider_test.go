@@ -5,14 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -56,29 +52,8 @@ func TestProviderSatisfiesTheSearchSurface(t *testing.T) {
 // against a real store behind a real Provider — no stub anywhere — so
 // the wiring the previous test asserts structurally is also exercised.
 func TestSearchWorksThroughTheRealProvider(t *testing.T) {
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if ok, _ := store.SearchAvailable(context.Background()); !ok {
-		t.Skip("FTS5 not compiled into this driver build")
-	}
-
-	lib := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(lib, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpsertTrack(context.Background(), &manifest.Track{
-		Path: "Aphex Twin/SAW/01 Xtal.flac", Title: "Xtal",
-		Artist: "Aphex Twin", Album: "Selected Ambient Works", Size: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	// The REAL provider, exactly as cmd/bridge constructs it.
-	provider := manifest.NewProvider(store, manifest.NewScanner([]string{lib}, store, ""))
+	provider, _ := newRealSearchProvider(t)
 	s := newRouteRegistryTestServer(t)
 	s.manifest = provider
 
@@ -116,44 +91,10 @@ func TestSearchWorksThroughTheRealProvider(t *testing.T) {
 // the access line are both Error at 500: a server failure, by B364's rule.
 func TestASearchStoreFailureThroughTheRouterSendsAFixedMessage(t *testing.T) {
 	buf := withTestSlog(t)
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Registered after TempDir, so it runs first; a second Close is nil.
-	t.Cleanup(func() { _ = store.Close() })
-	ctx := context.Background()
-	if ok, _ := store.SearchAvailable(ctx); !ok {
-		t.Skip("FTS5 not compiled into this driver build")
-	}
-	lib := filepath.Join(dir, "Music")
-	if err := os.MkdirAll(lib, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpsertTrack(ctx, &manifest.Track{
-		Path: "Aphex Twin/SAW/01 Xtal.flac", Title: "Xtal",
-		Artist: "Aphex Twin", Album: "Selected Ambient Works", Size: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	tokens, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _, err := tokens.Mint("search-client")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "Test"}
-	provider := manifest.NewProvider(store, manifest.NewScanner([]string{lib}, store, ""))
-	router := New(cfg, tokens, provider, "fp").Handler()
+	provider, store := newRealSearchProvider(t)
+	router, token := newSearchRouter(t, provider)
 	search := func() *httptest.ResponseRecorder {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/v1/search?q=xtal", nil)
-		req.Header.Set("Authorization", "Bearer "+raw)
-		router.ServeHTTP(rr, req)
-		return rr
+		return searchWith(context.Background(), router, token)
 	}
 
 	// The route, the token and the store all work before the failure.
