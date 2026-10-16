@@ -45013,3 +45013,11 @@ restored from git and the tree checked against HEAD. Every prediction held.
 | 2. the cancel's silent return removed | `TestAClientAbortDuringSearchStaysInfo` (a request-failed line at Info; the access line at `status=499`) and `TestSearchSwallowsAClientCancellation` (500, an error body); the deadline tests green |
 | 3. a deadline answered through `writeError` with the fixed message | the two deadline tests, at "want one request-failed line, got 0" only |
 | 4. a deadline through `writeErrorLog` with `err.Error()` as the message | the two deadline tests, at the message and the three leak fragments (`tracks_fts`, `deadline`, `context`) only |
+
+**After review.** SonarCloud's quality gate failed #1270 on duplicated new
+code (7.2%, against 3%): the real-store test's setup repeated the B425
+router test's. That test, the older real-provider test and the B434 one now
+share `newRealSearchProvider` and `newSearchRouter` (`23e18ef2`, tests
+only). With B425's fix reverted on that commit (`writeError` with
+`err.Error()`), the B425 router test is still red at its own assertions: the
+message, the three leak fragments, and no request-failed line.
