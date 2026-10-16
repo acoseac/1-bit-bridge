@@ -44570,6 +44570,91 @@ tests above passed again, none skipped.
 - **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
 - **No Go code.**
 
+## 2026-10-16 — a failed search logs its error and answers 500 with a fixed message (backlog B425)
+
+Found by the B413 session while it enumerated the error codes (#1255).
+`GET /v1/search` (`internal/api/search.go:130` at `0d5f43b3`) answered every
+store failure other than a cancel and `ErrSearchUnavailable` with
+`writeError(w, 500, "internal", err.Error())`. `writeError` logs nothing, so
+the error's own text reached the paired client as the message, and the
+operator saw only the access line. The store wraps the query's error as
+`search tracks_fts (served): …`, which names the FTS table and carries
+whatever SQLite or the OS said: an FTS syntax fragment, or an
+`*os.PathError` naming the database file.
+
+**Red first** (`3f71e413`, the tests alone on main at `0d5f43b3`, macOS,
+go1.26.6). `TestASearchStoreFailureAnswersAFixedMessage` drives the handler
+over a stub searcher with two errors under the store's prefix: an FTS fault
+(`SQL logic error: fts5: syntax error near "AND" (1)`) and one naming the
+database file (`open /Users/alice/…/bridge.db-wal: disk I/O error`). Both
+answered 500 `internal` with the error's text as the message, every leak
+fragment in the body (`tracks_fts`, `SQL logic error` and `fts5`;
+`/Users/alice`, `bridge.db-wal` and `disk I/O error`), and no
+request-failed line. `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`
+goes through `Handler()`, a real `manifest.Provider` and a real store: a
+search answers 200 with the seeded track, then the store's database is
+closed, and the same search answered 500 with `search tracks_fts (served):
+sql: database is closed` in the body and no request-failed line. Its access
+line was already Error at 500.
+
+**Fix** (`6471c3c2`). That branch calls `writeErrorLog(w, r, 500,
+"internal", "the bridge couldn't search the library", err)`: the error is
+logged at Error with status 500, and the body carries the fixed message. No
+client abort reaches the call, so B364's 499 never applies there: the early
+return above it, for `context.Canceled` and `context.DeadlineExceeded`, is
+the keystroke path B364 left alone, and `TestSearchSwallowsAClientCancellation`
+still pins it. No wire change: the code stays `internal`, whose PROTOCOL.md
+row says "Server-side failure".
+
+**The sweep for twins.** A throwaway go/ast lister (not committed) printed
+every `writeError`, `writeErrorLog` and `writeFileErrorLog` call in
+`internal/api`'s non-test files whose message is not a string literal: 52 of
+231 calls at `0d5f43b3`, none a `fmt.Sprintf`. Those with a 5xx status:
+- `search.go:130`, `err.Error()`: this fix.
+- `upscale.go:312` and `:381`, the folder walk of `POST /v1/upscale`:
+  `"walk folder: " + redactWalkErr(walkErr)`, which keeps an
+  `*os.PathError`'s `Op` and errno text and drops its path (any other
+  error's text is kept whole). Deliberate: #185's privacy audit chose a
+  redacted reason on the wire ("the same redactor covers both egress
+  channels"), and #1076 copied the shape for the root's `WalkableRoot`
+  error, a 500 that logs no line. Left as they are, and reported.
+- Fixed messages held in a name or built from one: `errMsgInternalError`
+  (the artwork, artist-image, booklet and cover opens, each logging its
+  error first, and two `writeErrorLog` calls), `errMsgUpscalingNotEnabled`
+  (the 503s), `"the bridge couldn't look up this " + kind`, and
+  `proxyUPnP`'s `perr.Message`, a fixed string at each `PreStreamError`
+  literal in `internal/upnpproxy`.
+- `writeErrorLog` and `writeFileErrorLog` passing their own `userMsg` on.
+
+The bodies written without the helpers (the favorites and playlist 409s,
+the batch 507) carry fixed messages or none. The 4xx messages built from an
+error (`enrich.ParseSize`, the Atlas ingest's validation, the event
+stream's topics parse) describe the client's own input, as
+`writeErrorLog`'s docblock asks a 4xx to.
+
+**Negative controls** on the committed fix (`6471c3c2`), each anchor
+count-asserted, the package vetted, the search tests run (`-run
+'TestSearch|TestASearchStoreFailure'`, `-count=1`), restored from git and
+the restore checked against HEAD:
+1. The fix reverted (`writeError(…, err.Error())`). Predicted and observed:
+   exactly the two B425 tests red, at the red run's assertions (the
+   message, every leak fragment, no request-failed line); the ten other
+   search tests green.
+2. `writeErrorLog` with `err.Error()` as the message. Predicted and
+   observed: the two tests red at the message and the leak fragments only;
+   their log assertions green.
+3. `writeError` with the fixed message and no log. Predicted and observed:
+   the two tests red at "want one request-failed line, got 0" only.
+
+**Left open.** The keystroke path's early return also takes
+`context.DeadlineExceeded`, which on this route is the server's own 5 s
+`withCtxTimeout`. A search that runs out its deadline writes nothing, so
+the client gets an empty 200 (net/http's answer to a handler that writes
+nothing: `200`, `Content-Length: 0`, measured with a standalone probe), and
+the log has only the access line at status 0, where B364's rule says a
+server deadline stays Error and 500. B364 named the keystroke path as left
+alone, and this change leaves it too.
+
 ## 2026-10-16 — PROTOCOL.md's error table is held to the pairs the `/v1` handlers send, by two guards (backlog B426)
 
 B413 (#1255) completed the table by hand: it had listed 22 codes while the

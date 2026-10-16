@@ -127,7 +127,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 				"library search is not available on this bridge (FTS5 not compiled in)")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		// Any other failure is the store's. Its text (an FTS fragment, a
+		// table name, a database path) goes to the log, and the client
+		// gets a fixed message (backlog B425).
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't search the library", err)
 		return
 	}
 

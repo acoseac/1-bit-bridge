@@ -10194,6 +10194,21 @@ its twin.** The top list is older, shorter, and read first.
   lines naming a track) is now what the page describes. **A new log line
   that names a library file uses the relative path; one that cannot is a
   page change in the same release.**
+- **A 5xx body carries a fixed message, never an error's text** (2026-10-16,
+  backlog B425). `GET /v1/search` answered a store or FTS failure with the
+  error as its message (`search tracks_fts (served): sql: database is
+  closed`, an FTS syntax fragment, a database path) and logged nothing. It
+  goes through `writeErrorLog` now: the error is logged at Error with the
+  500, and the body says "the bridge couldn't search the library". **A 5xx
+  with a cause goes through `writeErrorLog` or `writeFileErrorLog`, or logs
+  the error itself and sends a fixed message**; a 4xx may say what the
+  client can fix. The upscale folder walk's two 500s still carry
+  `redactWalkErr`'s text (an `*os.PathError`'s `op: errno`, its path
+  dropped), as #185 chose (#1076 copied it for the root's walk), and were
+  left. The keystroke path's return on a
+  cancelled request is B364's and is unchanged
+  (`TestASearchStoreFailureAnswersAFixedMessage`,
+  `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`).
 - **The disk probe's missing-directory warning names the directory by
   its role, never by its path** (2026-10-13, backlog B273).
   `AvailableDiskSpaceNearest` walks to the nearest existing ancestor

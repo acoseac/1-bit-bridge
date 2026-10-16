@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -101,5 +104,97 @@ func TestSearchWorksThroughTheRealProvider(t *testing.T) {
 	}
 	if len(got.Tracks) != 1 || got.Tracks[0].Title != "Xtal" {
 		t.Errorf("tracks = %+v, want the seeded track", got.Tracks)
+	}
+}
+
+// TestASearchStoreFailureThroughTheRouterSendsAFixedMessage is backlog
+// B425 end to end: the real router, the real Provider and a real store
+// whose database is closed under the search, so the query fails the way a
+// live store fails, with its own text ("sql: database is closed", under
+// the tracks_fts query's prefix). The client gets 500 `internal` and the
+// fixed message. The request-failed line carries the error, and it and
+// the access line are both Error at 500: a server failure, by B364's rule.
+func TestASearchStoreFailureThroughTheRouterSendsAFixedMessage(t *testing.T) {
+	buf := withTestSlog(t)
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Registered after TempDir, so it runs first; a second Close is nil.
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if ok, _ := store.SearchAvailable(ctx); !ok {
+		t.Skip("FTS5 not compiled into this driver build")
+	}
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTrack(ctx, &manifest.Track{
+		Path: "Aphex Twin/SAW/01 Xtal.flac", Title: "Xtal",
+		Artist: "Aphex Twin", Album: "Selected Ambient Works", Size: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := tokens.Mint("search-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "Test"}
+	provider := manifest.NewProvider(store, manifest.NewScanner([]string{lib}, store, ""))
+	router := New(cfg, tokens, provider, "fp").Handler()
+	search := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/search?q=xtal", nil)
+		req.Header.Set("Authorization", "Bearer "+raw)
+		router.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// The route, the token and the store all work before the failure.
+	if rr := search(); rr.Code != http.StatusOK {
+		t.Fatalf("search before the store failed: status %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	rr := search()
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rr.Code, rr.Body.String())
+	}
+	er := decodeErrorResponse(t, rr.Body.Bytes())
+	if er.Error != "internal" || er.Message != searchFailedMessage {
+		t.Errorf("body = {%q, %q}, want {internal, %q}", er.Error, er.Message, searchFailedMessage)
+	}
+	for _, leak := range []string{"tracks_fts", "database is closed", "sql:"} {
+		if strings.Contains(rr.Body.String(), leak) {
+			t.Errorf("the 500 body carries %q from the store's error: %s", leak, rr.Body.String())
+		}
+	}
+
+	logged := buf.String()
+	failed := linesContaining(logged, `msg="request failed"`)
+	if len(failed) != 1 {
+		t.Fatalf("want one request-failed line, got %d; log:\n%s", len(failed), logged)
+	}
+	for _, want := range []string{"level=ERROR", "status=500", "database is closed"} {
+		if !strings.Contains(failed[0], want) {
+			t.Errorf("request-failed line lacks %q: %s", want, failed[0])
+		}
+	}
+	access := linesContaining(logged, "msg=http ")
+	if len(access) != 1 {
+		t.Fatalf("want one access line, got %d; log:\n%s", len(access), logged)
+	}
+	if !strings.Contains(access[0], "level=ERROR") || !strings.Contains(access[0], "status=500") {
+		t.Errorf("access line is not Error at 500: %s", access[0])
 	}
 }
