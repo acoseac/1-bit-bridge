@@ -6736,7 +6736,9 @@ no failing test — which is the shape to expect in this area.
   group (root, or a user namespace: dido, not CI). **Still open**: a unicast
   M-SEARCH to port 1900 reaches ONE advertiser's socket (Linux: the last
   bound; macOS, Windows: the first) and is answered with that advertiser's
-  LOCATION, whatever address it was sent to (backlog B119); on Windows the
+  LOCATION, whichever served address it was sent to (backlog B119; since
+  B48 one sent to an address the server does not serve is not answered at
+  all, the bullet after the Tailscale one below); on Windows the
   advertiser hears no search sent from its own host (B120); and a pinned
   `dlna.listenAddress` advertises on the picker's interface, which need
   not hold that address (B121).
@@ -6871,6 +6873,94 @@ no failing test — which is the shape to expect in this area.
   interface reached no peer in the one tailnet measured (no exit node, no
   subnet router): 0 of 32 datagrams each way between the Mac and dido,
   beside 32 of 32 unicast controls.
+- **…and the DLNA listener and SSDP serve only the LAN-eligible
+  interfaces' addresses, judged per connection and per datagram**
+  (2026-10-16, backlog B48; the owner's decision of 2026-10-15: DLNA is for
+  the home network only). The rule above kept a tailnet interface out of the
+  pickers only. The listener binds `dlna.listenAddress` (`:7790` by default)
+  and each advertiser's M-SEARCH listener `0.0.0.0:1900`, so both took a
+  connection or a unicast datagram on every address of the host, and every
+  tailnet peer, a node shared from another account included, reached the
+  unauthenticated surface: measured from a peer in the B15 session, a GET of
+  `/dlna/description.xml` on the host's tailnet address answered 200 and a
+  unicast M-SEARCH there on 1900 was answered with the LAN LOCATION, and
+  `config_gate.go` said to reach DLNA over Tailscale. The sockets stay the
+  wildcard ones. `servedOnlyListener` closes, before reading a byte, a
+  connection whose LOCAL address is not served, so no handler (the Host
+  check included) sees it, and `SSDPAdvertiser.searchedFor` drops an
+  M-SEARCH whose DESTINATION is neither the SSDP group nor a served address.
+  The destination is IP_PKTINFO on Linux and IP_RECVPKTINFO on macOS (x/net's
+  `FlagDst`), and on Windows IP_PKTINFO through `WSARecvMsg` (`ReadMsgUDP`;
+  x/net reads no control message there), decoded by `parseWSAPktinfo`, which
+  is tested on every platform. **What is served is `servedAddrs`**:
+  loopback (the host itself); an address of a member of the multicast set
+  (`pickAllLANInterfaces`, no opt-in) of a LAN kind by the eligibility check's
+  own classes (`lanAddrKindOf`: RFC 1918, a ULA outside Tailscale's,
+  link-local, an IPv6 one only with its member as zone); and a member's
+  address the server itself advertises, whatever its kind (its LOCATION may
+  name a public IPv4 on an interface eligible through a ULA). So not a
+  tailnet address (its interface is no member, and its addresses count as
+  public anyway: either half alone refuses them), not another interface's
+  fe80 (a docker veth, awdl0, a link-local tunnel), and not a member's public
+  address the server does not advertise (a dual-stack LAN's SLAAC address,
+  which a router may let the internet reach). A snapshot of the interfaces
+  answers, rebuilt at `servedMaxAge` (10 s) and, for an address it refuses,
+  at `servedMissRebuild` (1 s), so a new LAN address is served within a
+  second and a flood of refusals lists the interfaces once a second; a
+  listing that fails keeps the last snapshot. A refusal is one Warn per kind
+  and address, naming the interface that holds it (bounded at 32). **A
+  `dlna.listenAddress` pinned to an address that is not served warns once at
+  Start** (`warnIfPinnedOffTheLAN`, the owner's ask of 2026-10-16): the
+  listener binds that address alone and refuses every connection on it, so
+  DLNA serves no one, and before this the first refused connection was the
+  only line that said so. It judges the address the listener bound, so a
+  pinned name counts, and a wildcard is no pin. **It warns and starts; don't
+  make it refuse** (an address can become served later), and the
+  per-connection Warn keeps its cap beside it.
+  **Chosen over binding each served address**, which needs a rebind loop
+  with a window where a new address is unreachable, zoned binds for IPv6
+  link-local, retries for Windows' tentative addresses, and a new SSDP
+  listener: a socket bound to a unicast address hears no multicast on Linux
+  or macOS, and Windows refuses a bind to the group. Its cost: a refused
+  peer completes the TCP handshake, so a scanner sees the port open and then
+  a close. **`dlna.allowTsnet` is reserved and has no effect**: nothing reads
+  it and no caller passes `EligibilityOpts.TsnetIfaceName`; it stays because
+  Load refuses an unknown key (`TestADLNAConfigThatSetsAllowTsnetStillLoads`).
+  **Don't serve a tailnet address again without a real opt-in, don't widen
+  the served set to every address of an eligible interface, don't move the
+  check into a handler or the Host check, don't answer a datagram whose
+  destination was asked for and not reported** (only a listener that cannot
+  be armed answers as before, with one Warn), **and don't judge a group
+  datagram by its destination** (the group is no address of the host; B71's
+  membership keeps it to its interface). **Residuals**: a Docker container
+  on a bridge network sees a published port's connections on its own eth0
+  address after DNAT, so that path works as before and is reachable from
+  wherever the HOST's port is, its tailnet included (publish on the LAN
+  address, `-p <LAN IP>:7790:7790`, as `docs/docker.md` says under
+  "Publishing the DLNA port"); a host that is a Tailscale subnet
+  router for its own LAN carries tailnet peers to its LAN address; a VPN
+  tunnel numbered in RFC 1918 space is a member (eligibility cannot tell it
+  from a LAN); and a laptop on a café's private network serves that network.
+  **An operator's probe of `:7790` runs on the host or from the LAN; over
+  the tailnet it is now refused.** B119's LOCATION choice for a served
+  unicast is unchanged, and the destination read is what it needs.
+  (`TestServedAddrsAreTheLANAddressesOfTheMulticastSet`,
+  `TestServedAddrsServeLoopbackWithoutReadingTheInterfaces`,
+  `TestServedAddrsServeANewLANAddressASecondAfterItsFirstRefusal`,
+  `TestServedAddrsStopServingAnAddressWithinTheMaxAge`,
+  `TestRefusedAddressesRebuildTheSnapshotAtMostOnceASecond`,
+  `TestAFailedListingKeepsTheSnapshotItWouldReplace`,
+  `TestARefusalIsLoggedOncePerKindAndAddress`, `TestTheRefusalLogIsBounded`,
+  `TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe`,
+  `TestTheDLNAListenerLogsARefusedConnection`,
+  `TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart`,
+  `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe`,
+  `TestTheSSDPListenerReadsEachDatagramsDestination`, `TestParseWSAPktinfo`,
+  `TestWSAPktinfoConstantsAreWinsocks` (Windows),
+  `TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes`,
+  `TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination`,
+  `TestTheSSDPAdvertiserAnswersASearchSentToTheGroup` (Linux, macOS),
+  `TestEveryAdvertiserAnswersByTheServersServedAddrs`.)
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns

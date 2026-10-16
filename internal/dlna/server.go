@@ -139,9 +139,12 @@ type ServerConfig struct {
 	ModelNumber      string
 
 	// ListenAddress is the bind address for the HTTP listener (e.g.
-	// "0.0.0.0:7790" or "192.168.0.14:7790"). The bridge picks LAN-only
-	// interfaces — public-mode deployments REFUSE DLNA per
-	// `shouldEnableDLNA` (PR 1 task #4 invariant).
+	// "0.0.0.0:7790" or "192.168.0.14:7790"). Whatever it binds, the
+	// listener serves only the LAN-eligible addresses (servedAddrs, backlog
+	// B48), so a wildcard takes a tailnet peer's connection and closes it,
+	// and a listen address pinned to an address off the LAN serves nothing.
+	// Public-mode deployments REFUSE DLNA per `shouldEnableDLNA` (PR 1 task
+	// #4 invariant).
 	ListenAddress string
 
 	// ServerURL is the absolute URL renderers should use for file
@@ -157,7 +160,9 @@ type ServerConfig struct {
 	// Interface is the LAN-eligible interface for SSDP multicast
 	// (joined to 239.255.255.250:1900). nil = OS picks (works on
 	// single-interface hosts). Multi-interface hosts should pick via
-	// `IsLANEligibleInterface`.
+	// `IsLANEligibleInterface`. It chooses where an advertiser joins and
+	// announces; what the listener and the advertisers answer on is
+	// servedAddrs.
 	//
 	// Used only for the single-advertiser fallback path — when
 	// AdvertiseEndpoints is non-empty, the per-endpoint Interface wins
@@ -250,6 +255,11 @@ type Server struct {
 	// that stands in a host of its own.
 	interfaceAddrs func() ([]net.Addr, error)
 
+	// served is what the listener and every advertiser serve (servedAddrs,
+	// backlog B48). Start makes it from the configuration when it is nil; a
+	// test sets one of its own before Start.
+	served *servedAddrs
+
 	// hostRefusedSeen holds the Host names ownHostOnly has refused, so
 	// each is logged once (noteForeignHost), bounded by
 	// hostRefusedSeenCap.
@@ -312,6 +322,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// at request time) always observe non-nil state once serving begins.
 	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
 	s.notifyClient = newNotifyClient()
+	if s.served == nil {
+		s.served = newServedAddrs(s.knownOwnHosts().addrs)
+	}
 
 	// On any error return BEFORE the happy tail hands ownership of the
 	// cancel to Stop(), cancel the derived context so the child isn't
@@ -352,10 +365,17 @@ func (s *Server) Start(ctx context.Context) error {
 	// Eagerly bind the listener so config errors (e.g. port already
 	// in use) surface as a Start() error rather than as a silent
 	// goroutine crash later.
-	listener, err := net.Listen("tcp", s.cfg.ListenAddress)
+	bound, err := net.Listen("tcp", s.cfg.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("dlna: bind %s: %w", s.cfg.ListenAddress, err)
 	}
+	// The bind is the configured one, a wildcard by default, which takes a
+	// connection on every address of this host: the tailnet's, a VPN's,
+	// another interface's. The listener serves only the LAN-eligible
+	// addresses, and closes every other connection unread (servedAddrs,
+	// backlog B48).
+	s.warnIfPinnedOffTheLAN(bound.Addr())
+	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
 	// is called externally; the returned ErrServerClosed is expected
@@ -413,6 +433,7 @@ func (s *Server) Start(ctx context.Context) error {
 			ServerToken: SSDPServerToken(s.cfg.ModelNumber),
 			Interface:   ep.Interface,
 			Logger:      s.log,
+			served:      s.served,
 		})
 		if err := adv.Start(ctx); err != nil {
 			ifaceName := "default"
@@ -444,6 +465,30 @@ func (s *Server) Start(ctx context.Context) error {
 	)
 	started = true
 	return nil
+}
+
+// warnIfPinnedOffTheLAN logs, once at Start, a listener whose
+// dlna.listenAddress pins it to an address the server does not serve
+// (servedAddrs): it takes connections on that address alone and refuses each
+// one, so DLNA serves no one, and before this a pin to the tailnet's address,
+// say, said so only when a connection arrived. bound is the listener's own
+// address, so a name pinned in the config is judged by the address it bound;
+// a wildcard is no pin. It does not refuse to start: an address can become
+// served later, and every refused connection is still logged under its cap.
+func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
+	a := netAddrIP(bound).Unmap()
+	if !a.IsValid() || a.IsUnspecified() {
+		return
+	}
+	a = s.served.judge(a)
+	if s.served.serves(a) {
+		return
+	}
+	s.log.Warn("dlna.listenAddress pins the listener to an address that is not a LAN-eligible interface's: "+
+		"with it, DLNA serves no one",
+		slog.String("listenAddress", s.cfg.ListenAddress),
+		slog.String("address", a.String()),
+		slog.String("interface", s.served.holderOf(a)))
 }
 
 // advertiseEndpoints returns the SSDP advertise set: the configured

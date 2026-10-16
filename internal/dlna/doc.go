@@ -10,9 +10,14 @@
 // # Posture and gating
 //
 // SSDP advertises and discovers ONLY on LAN-eligible interfaces (RFC1918,
-// IPv6 ULA other than Tailscale's, link-local, and the operator-opted-in
-// Tailscale tsnet interface; IsLANEligibleInterface), and the HTTP
-// listener binds the address `dlna.listenAddress` names. Public
+// IPv6 ULA other than Tailscale's, link-local; IsLANEligibleInterface).
+// The HTTP listener binds the address `dlna.listenAddress` names, a
+// wildcard by default, and each advertiser's M-SEARCH listener
+// 0.0.0.0:1900, and both serve only the LAN addresses of those interfaces
+// (servedAddrs): a connection accepted on any other address of the host,
+// a tailnet's included, is closed unread, and a search sent to one is not
+// answered (backlog B48). The tsnet opt-in (EligibilityOpts.TsnetIfaceName,
+// `dlna.allowTsnet`) is reserved and opts nothing in. Public
 // deployment mode REFUSES to bind DLNA regardless of the operator-supplied
 // `cfg.DLNA.Enabled` value — exposing an unauthenticated ContentDirectory
 // + file endpoint on a public-internet bridge would let any internet user

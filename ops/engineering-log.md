@@ -43807,3 +43807,220 @@ count-asserted, restored from git and the tree checked clean):
    each pool and four of the Tracker's tests; a job that runs not ending the
    run reddens only `TestAJobThatRunsEndsTheRunBeforeIt`, since no pool test
    reopens the gate in the middle of a run.
+
+## 2026-10-16 — the DLNA listener and SSDP serve only the LAN-eligible interfaces' addresses (backlog B48)
+
+#1073 took a tailnet interface out of the LAN pickers, and the DLNA HTTP
+listener and SSDP still answered on its address. Measured from a tailnet peer
+in the B15 session: `GET http://<tailnet IP>:17790/dlna/description.xml`
+answered 200 (1,440 bytes), and a unicast M-SEARCH to the tailnet IP on 1900
+was answered. `config_gate.go` said an operator should reach DLNA over
+Tailscale, `dlna.allowTsnet` was read by nothing, and no production caller
+passed `EligibilityOpts.TsnetIfaceName`. The owner decided on 2026-10-15:
+home network only.
+
+### The binds, at 67154340
+
+- **HTTP**: `internal/dlna/server.go:355`, `net.Listen("tcp",
+  s.cfg.ListenAddress)`. The address is `EffectiveDLNAListenAddress()`
+  (`cmd/bridge/dlna_wiring.go:126`), `:7790` by default
+  (`internal/config/config.go:1771`), validated only as host:port
+  (`config.go:3293`): a dual-stack wildcard.
+- **SSDP**: `internal/dlna/ssdp.go:217`, `listenSSDP`, which is
+  `net.ListenMulticastUDP` (`ssdp_listen_other.go:18`) or `ListenPacket`
+  plus `JoinGroup` (`ssdp_listen_linux.go:72`, `:81`): `0.0.0.0:1900` either
+  way, read with `ReadFromUDP` (`ssdp.go:383`) and answered from a
+  `net.DialUDP` to the source (`ssdp.go:479`) with the advertiser's LOCATION.
+  The NOTIFY sender (`ssdp.go:599`, `0.0.0.0:0`) is never read.
+- **The advertisers**: `server.go:410`, one per endpoint that
+  `gatherAdvertiseEndpoints` (`dlna_wiring.go:256`) builds from
+  `PickAllLANEligibleInterfaces(EligibilityOpts{})` (`:261`, `server.go:1025`,
+  `interfaces.go:279`; eligibility `interfaces.go:47`), an IPv4 LOCATION each.
+- **A pinned `dlna.listenAddress`**: `bindWildcard` is false
+  (`dlna_wiring.go:129`), `gatherAdvertiseEndpoints` returns nil (`:257`),
+  and the server runs one advertiser on the single pick (`dlna_wiring.go:120`,
+  `server.go:452`) announcing the pinned host (`deriveServerURL`, `:287`):
+  B121.
+- **Refresh**: none. `startDLNAIfEnabled` runs once in `runServe`
+  (`main.go:4006`), so the set, the endpoints and the ServerURL are fixed at
+  start. The mDNS responder's `maybeRebind` (`internal/mdns/mdns.go:351`) is
+  the only rebind loop, and the discovery clients re-read only their link's
+  zero-config verdict (`AnnouncementLink.Refresh`, `announcement_link.go:137`).
+- **The Host check**: `ownHostOnly` (`host_guard.go:110`) passes any literal
+  address of this host's interfaces (`isInterfaceAddr`, `:158`), the
+  tailnet's included.
+- **Not surfaces**: the discovery clients bind `0.0.0.0:0`
+  (`internal/dlna/discovery/client.go:462`, `internal/upnp/discovery.go:491`),
+  unchanged. The embedded tsnet node serves only the API (`ListenTLS`), so the
+  exposure was a SYSTEM Tailscale install's interface (`utun`, `tailscale0`,
+  Wintun). `docs/docker.md` names no network mode for DLNA; host networking
+  appears only in its tsnet section, which needs none.
+
+### End to end, on the dev Mac
+
+macOS with Tailscale up: en0 `<MAC-LAN-IP>`, utun7 `<MAC-TAILNET-IP>` (in
+100.64/10, beside its ULA), and en13 `<MAC-LINK-IP>`, self-assigned. Each
+binary (main `67154340`, and the fix) ran `bridge serve` on a `mktemp -d`
+data dir with `dlna.enabled`, `dlna.listenAddress: ":17790"`, mDNS and
+Tailscale off and HTTP/3 off, under `sandbox-exec` with outbound allowed
+only to this host over TCP and UDP to one probe port of this host. Its
+NOTIFYs were refused (`sendto: operation not permitted`, both bursts), and so
+would any answer to a LAN searcher have been. Every probe went to an address
+of the Mac itself.
+
+| probe | main | fix |
+|---|---|---|
+| GET description on `<MAC-LAN-IP>:17790` | 200, 1,561 bytes | 200, 1,561 bytes |
+| GET on `<MAC-LINK-IP>`, en0's fe80, 127.0.0.1, [::1] | 200 each | 200 each |
+| GET on `<MAC-TAILNET-IP>:17790` | **200, 1,561 bytes** | **no byte; connection reset** |
+| unicast M-SEARCH to `<MAC-LAN-IP>`, `<MAC-LINK-IP>`, 127.0.0.1 on 1900 | answered | answered |
+| unicast M-SEARCH to `<MAC-TAILNET-IP>:1900` | **answered, the LAN LOCATION** | **no answer** |
+
+The fix logged one Warn per refusal: `DLNA refused a connection to an
+address it does not serve: it answers only on the LAN-eligible interfaces
+address=<MAC-TAILNET-IP> interface=utun7`, and the same for the M-SEARCH. A
+connect from the Mac to its own tailnet ULA or to utun7's fe80 timed out
+under both binaries (the Mac routes its own tailnet IPv6 into the tunnel), so
+those two are pinned by tests, not end to end. The Linux and Windows paths
+ran nowhere locally (no container runtime, no Windows host): they vet and
+compile for linux and windows on amd64 and arm64, and CI's three legs run
+the tests.
+
+### Decision: keep the wildcard and judge each connection and datagram
+
+- **Bind each served address, rebind on change: rejected.** The HTTP half
+  needs a loop that polls the interfaces (Go has no portable change
+  notification), with a window where a new LAN address is unbound, zoned
+  binds for IPv6 link-local, retries for an address Windows holds tentative
+  during DAD, and listeners added and closed under a live `http.Server`. The
+  SSDP half needs a new listener: a socket bound to a unicast address hears
+  no multicast on Linux or macOS, Go rewrites a multicast bind address to the
+  wildcard, and Windows refuses a bind to the group, which undoes B71's
+  measured listener. And the churn is real: #1073 sampled 21 docker veth
+  changes in 80 minutes on dido.
+- **Keep the wildcard, refuse at accept and at read: chosen.** A TCP
+  connection's local address, zone included, is there on every platform, so
+  `servedOnlyListener` closes one it does not serve before reading a byte. A
+  datagram's destination is IP_PKTINFO on Linux and IP_RECVPKTINFO on macOS,
+  through x/net's `FlagDst` (the package already uses x/net's ipv4 for the
+  join and the pin), and IP_PKTINFO through `WSARecvMsg` on Windows, which
+  Go's `ReadMsgUDP` calls and x/net does not read (its Windows control
+  messages are unimplemented). `parseWSAPktinfo` decodes Winsock's layout
+  from bytes, so it is tested on every platform. No rebind, no new socket,
+  one snapshot of the interfaces. Cost: a refused peer completes the TCP
+  handshake, so a scanner sees the port open and then a close.
+- **What is served (`servedAddrs`)**: loopback; the addresses of the
+  multicast set's members that the eligibility check classes as LAN
+  (`lanAddrKindOf`, which `IsLANEligibleInterface` now calls too); and a
+  member's address the server advertises. The SET, not every eligible
+  interface: it is where the advertisers announce, and it leaves out awdl0
+  (an AWDL peer is not the home network), docker veths and link-local
+  tunnels. The CLASSES too: a dual-stack LAN interface's SLAAC address is not
+  the home network when a router passes unsolicited IPv6. The ADVERTISED
+  exception: an interface eligible through a ULA can carry a public IPv4,
+  which `firstIPv4OnInterface` then advertises. LOOPBACK: the host itself is
+  no peer, and the operator's own probes and the tests use it.
+- **A group datagram** is answered without asking `servedAddrs` (the group
+  is no address of the host), and B71's membership keeps it to its
+  interface. **A datagram with no destination** is refused when the listener
+  asked for one; a listener that cannot be armed answers as before, with one
+  Warn (B71's precedent for a socket option the kernel refuses).
+- **`dlna.allowTsnet`** is kept, reserved and documented as having no
+  effect: `Load` decodes with `KnownFields`, so deleting it would stop a
+  bridge whose config sets it.
+
+### Red first, the fix, and what end to end found
+
+- **Red** (`7c2a3f63`): the tests, `servedAddrs` with its `judgeAs` seam (nil
+  in production; it judges a loopback connection or datagram as an address
+  of a fake host), and the destination read, armed by Start. Nothing
+  consulted the verdict. Red: the five refused cases of
+  `TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe` (the
+  tailnet IPv4 and ULA, utun's and awdl0's fe80, a SLAAC address), each
+  answered 200 with 1,480 bytes; `TestTheDLNAListenerLogsARefusedConnection`
+  (answered, nothing logged); and the tailnet and no-interface cases of
+  `TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes`, answered
+  with the LAN LOCATION. Every other test in the package was green, the
+  verdict's own and the destination read's included.
+- **Fix** (`d9aadaa5`): `servedOnlyListener` around the bound listener, and
+  `ReadMsgUDP` with `searchedFor` in the read loop.
+- **The group exception** (`dfaf6254`) had no test that runs on macOS or CI
+  (only the root-run namespace test sends a group search):
+  `TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination` on every
+  platform, and an end-to-end group search on Linux and macOS
+  (`TestTheSSDPAdvertiserAnswersASearchSentToTheGroup`). The destination
+  test's group case turns `IP_MULTICAST_LOOP` back on (B120) and skips on
+  Windows only when no looped-back datagram arrives.
+- **Found end to end** (`530eeb31`): the dual-stack listener reports an IPv4
+  connection's local address mapped, and the Warn printed
+  `address=::ffff:<MAC-TAILNET-IP>`; `admit` unmaps first. Red first: a fifth
+  line in `TestARefusalIsLoggedOncePerKindAndAddress`.
+- **A pinned address off the LAN warns at Start** (round 2, the owner's ask
+  of 2026-10-16). A `dlna.listenAddress` pinned to an address the server
+  does not serve, the tailnet's say, binds that address alone and refuses
+  every connection on it, so DLNA serves no one, and the first refused
+  connection was the only line that said so. Red first (`7f5d6071`): Start
+  logged no warning for a listener pinned to 127.0.0.1 and judged, from
+  before Start, as the tailnet address
+  (`TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart`, which
+  also holds the per-connection refusal to once under its cap beside the
+  startup line). The fix: `warnIfPinnedOffTheLAN`, called on the bound
+  listener's address, so a name pinned in the config is judged by the
+  address it bound, and a wildcard is no pin; `servedAddrs.judge` is the one
+  path `admit` and the check judge an address by. It warns and starts: an
+  address can become served later. Its shapes are
+  `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe` (the two
+  wildcards, loopback, a LAN address, a zero-config link's and an advertised
+  public one on a member stay quiet; the tailnet IPv4 and ULA and a SLAAC
+  address warn, naming the address).
+
+### Negative controls
+
+Each applied to the committed fix by a script that requires its anchor
+exactly once and the mutation to land, ran the whole `internal/dlna` package
+(`-count=1 -v`), restored with `git checkout --`, and checked the tree clean
+and the anchor back. Run on `dfaf6254` and again on the final code
+(`7ac7e578`); the same red set both times, each as predicted. NC1 ran once
+more on `54670d73`, which made the HTTP test judge a refused connection by
+the bytes it got rather than by its error's wording (a refusal ends in EOF,
+a reset, or on Windows also WSAECONNABORTED): the same seven lines.
+
+| | mutation | red (predicted = observed) |
+|---|---|---|
+| NC1 | the listener not wrapped: the HTTP filter off | the five refused HTTP cases, `TestTheDLNAListenerLogsARefusedConnection` |
+| NC2 | the read loop never refuses: the SSDP filter off | the SSDP tailnet and no-interface cases |
+| NC3 | every address of every interface served: the eligibility replaced with all interfaces | five of seven served-set hosts (the container and the advertised-public one stay green), the five refused HTTP cases, the HTTP log test, the SSDP tailnet case, `TestARefusalIsLoggedOncePerKindAndAddress`, `TestRefusedAddressesRebuildTheSnapshotAtMostOnceASecond`, `TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination` |
+| NC3a | every interface a member, the classes kept | the macos, linux, windows and advertised-off-the-set hosts; the HTTP utun fe80 and awdl0 fe80 cases. The tailnet IPv4 and ULA stay refused: their class alone refuses them |
+| NC4 | the classes off: every address of a member served | the macos, linux and public-not-advertised hosts; the HTTP SLAAC case. The tailnet stays refused: its interface is no member |
+| NC5 | no rebuild on a miss | `TestServedAddrsServeANewLANAddressASecondAfterItsFirstRefusal`, `TestRefusedAddressesRebuildTheSnapshotAtMostOnceASecond` |
+| NC6 | no rebuild at the age | `TestServedAddrsStopServingAnAddressWithinTheMaxAge`, `TestAFailedListingKeepsTheSnapshotItWouldReplace` |
+| NC7 | the link-local zones dropped (both key functions) | the macos host (en0's fe80 served without its zone, and with utun7's) |
+| NC8 | the group judged like a unicast | `TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination`, `TestTheSSDPAdvertiserAnswersASearchSentToTheGroup` |
+| NC9 | the startup check's call removed from Start (round 2, on `775a37fb`) | `TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart` alone; `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe` calls the check directly and stays green |
+
+NC3a and NC4 show the tailnet refused twice over, by the set and by the
+classes; only removing both (NC3) reopens it.
+
+### Residuals and open questions
+
+- **Docker, a bridge network, a published port**: DNAT delivers the
+  connection on the container's own eth0 address, a member, so the path
+  works as before, and it is reachable from wherever the host's port is, the
+  host's tailnet included. Reasoned, not measured (no container runtime on
+  the Mac), and pinned by the `container_on_a_bridge_network` row. The
+  operator scopes it with the publish's host IP (`-p <LAN IP>:7790:7790`),
+  which `docs/docker.md` says since round 2 (the owner's ask of 2026-10-16),
+  under "Publishing the DLNA port". The doc publishes no 1900/udp, so the
+  note names 7790 alone.
+- **A subnet router**: a host that advertises its own LAN as a Tailscale
+  subnet route carries tailnet peers to its LAN address, which is served.
+  Both designs judge the address, not the link a packet arrived on, and no
+  portable socket API reports a TCP connection's arrival interface.
+- **A private VPN, a café**: a WireGuard or OpenVPN tunnel numbered in RFC
+  1918 space is a member (eligibility cannot tell it from a LAN), and a
+  laptop bridge on a café's private Wi-Fi serves that network.
+- **B119 and B121 are unchanged**: a served unicast is still answered with
+  one advertiser's LOCATION, and a pinned address is advertised on the pick.
+  The destination read is what B119 needs.
+- **The operator's probes**: since B48 a probe of `:7790` over the tailnet
+  is refused; run it on the host or from the LAN.

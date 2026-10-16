@@ -101,13 +101,15 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Drive the listener exactly as Start() does: hold a wg slot for its
-	// lifetime (the goroutine's `defer s.wg.Done()` releases it on return).
+	// Drive the listener exactly as Start() does: arm it, and hold a wg
+	// slot for its lifetime (the goroutine's `defer s.wg.Done()` releases
+	// it on return).
+	armed := a.armListener(listener)
 	a.wg.Add(1)
-	go a.runMSearchListener(ctx, listener)
+	go a.runMSearchListener(ctx, listener, armed)
 
 	// Give the goroutine time to pass the top-of-loop ctx.Done() check and
-	// PARK inside ReadFromUDP before cancelling. Without this, cancel()
+	// PARK inside ReadMsgUDP before cancelling. Without this, cancel()
 	// would usually land before the first read, so the loop would exit via
 	// the top-of-loop select — never exercising the read-deadline wake path
 	// this test guards. 50ms >> the microseconds the goroutine needs to
@@ -116,7 +118,7 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 
 	// Cancel the ctx WITHOUT closing the listener — the whole point of B31
 	// is a parent-ctx cancel that never reaches Stop()'s socket-close. The
-	// goroutine (parked in ReadFromUDP) can only observe it after the read
+	// goroutine (parked in ReadMsgUDP) can only observe it after the read
 	// deadline fires and loops back to the top; pre-fix it never would.
 	cancel()
 
@@ -129,7 +131,7 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 	case <-done:
 		// Listener returned — the read deadline let it observe ctx.Done().
 	case <-time.After(3 * time.Second):
-		t.Fatal("runMSearchListener did not return after ctx cancel — leaked, parked in ReadFromUDP")
+		t.Fatal("runMSearchListener did not return after ctx cancel — leaked, parked in ReadMsgUDP")
 	}
 }
 
@@ -182,7 +184,7 @@ func skipUnlessMulticastPins(t *testing.T, iface *net.Interface) {
 // Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
 // capture-local fix closes: with a short advertise interval the periodic
 // NOTIFY goroutine fires `sendAliveAll` rapidly while the M-SEARCH
-// goroutine is parked in `ReadFromUDP`, and `Stop()` closes + nils the
+// goroutine is parked in `ReadMsgUDP`, and `Stop()` closes + nils the
 // socket fields concurrently. Run under `-race`, the OLD shape (helpers
 // reading `s.sender` / `s.listener` from the struct) trips the race
 // detector AND can nil-deref-panic; the fixed shape (goroutines hold

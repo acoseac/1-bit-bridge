@@ -76,6 +76,12 @@ type SSDPConfig struct {
 	// Logger is the structured logger for SSDP events. nil collapses
 	// to `logging.Component("dlna-ssdp")` at Start() time.
 	Logger *slog.Logger
+
+	// served is what the advertiser answers a unicast M-SEARCH on: the
+	// addresses its Server serves (servedAddrs), shared with the HTTP
+	// listener. nil is this host's, for an advertiser started without a
+	// Server.
+	served *servedAddrs
 }
 
 // defaultAdvertiseInterval is the canonical NOTIFY ssdp:alive cadence:
@@ -83,11 +89,11 @@ type SSDPConfig struct {
 // renderer would purge the prior entry.
 const defaultAdvertiseInterval = 14 * time.Minute
 
-// ssdpListenerReadDeadline bounds each blocking ReadFromUDP in the
+// ssdpListenerReadDeadline bounds each blocking ReadMsgUDP in the
 // M-SEARCH listener so the loop wakes periodically to re-check
 // ctx.Done(). Without it, a bare parent-ctx cancel that does NOT go
 // through Stop() (which closes the listener to wake the read) would park
-// the goroutine — and its WaitGroup slot — inside ReadFromUDP indefinitely
+// the goroutine — and its WaitGroup slot — inside ReadMsgUDP indefinitely
 // on a quiet network. Today Server.Stop always calls adv.Stop(), so this
 // is latent defense-in-depth. Mirrors the sibling discovery client's
 // runLoop (internal/dlna/discovery/client.go).
@@ -168,6 +174,9 @@ func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
 	if cfg.AdvertiseInterval < time.Minute {
 		cfg.AdvertiseInterval = defaultAdvertiseInterval
 	}
+	if cfg.served == nil {
+		cfg.served = newServedAddrs(nil)
+	}
 	return &SSDPAdvertiser{
 		cfg:       cfg,
 		targets:   NotifyTargetsFor(cfg.UDN),
@@ -218,6 +227,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	armed := s.armListener(listener)
 
 	// NOTIFY sender: an unconnected socket, pinned to this advertiser's
 	// interface before anything is sent, that writes each NOTIFY to the
@@ -268,7 +278,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 
 	// M-SEARCH response goroutine — captures `listener` locally.
 	s.wg.Add(1)
-	go s.runMSearchListener(innerCtx, listener)
+	go s.runMSearchListener(innerCtx, listener, armed)
 
 	// Flip the state-machine flag AFTER all socket binds + goroutine
 	// spawns succeed. Set on the happy path only; a partial-init
@@ -287,7 +297,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 
 // Stop sends a final NOTIFY ssdp:byebye burst (one packet per target),
 // cancels the goroutine context, closes the listener (which unblocks
-// the M-SEARCH ReadFromUDP), and waits for both goroutines to exit.
+// the M-SEARCH ReadMsgUDP), and waits for both goroutines to exit.
 //
 // Safe to call exactly once after Start(). Calling Stop() before Start()
 // or twice is a no-op (defensive — won't panic).
@@ -315,7 +325,7 @@ func (s *SSDPAdvertiser) Stop() {
 	s.cancel = nil
 
 	// Close the listener + sender to unblock the goroutines' reads
-	// (ReadFromUDP / Write on a closed socket return an error, which
+	// (ReadMsgUDP / Write on a closed socket return an error, which
 	// the goroutines observe alongside the cancelled ctx and exit).
 	// Close errors are intentionally swallowed — we're tearing down.
 	//
@@ -324,7 +334,7 @@ func (s *SSDPAdvertiser) Stop() {
 	// the only struct-field access is this lock-held Stop and the
 	// lock-held Start. We close-then-nil BEFORE `wg.Wait()` (closing
 	// is what unblocks the reads — waiting first would deadlock the
-	// M-SEARCH goroutine parked in `ReadFromUDP`).
+	// M-SEARCH goroutine parked in `ReadMsgUDP`).
 	if s.listener != nil {
 		_ = s.listener.Close()
 		s.listener = nil
@@ -356,14 +366,60 @@ func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPC
 	}
 }
 
+// armListener asks the kernel to report the destination of each datagram
+// listener takes (armDatagramDst), and reports whether it will. Start arms
+// its listener before anything is sent; a test arms one the same way. A
+// listener that cannot be armed answers as every listener did before B48,
+// and says so once here.
+func (s *SSDPAdvertiser) armListener(listener *net.UDPConn) bool {
+	if err := armDatagramDst(listener); err != nil {
+		s.log.Warn("SSDP listener cannot read the destination of each datagram: it answers a unicast M-SEARCH "+
+			"sent to any address of this host, whether or not the DLNA listener serves it",
+			slog.String("interface", interfaceName(s.cfg.Interface)),
+			slog.String("err", err.Error()))
+		return false
+	}
+	return true
+}
+
+// ssdpGroupAddr is the SSDP group's address, without its port.
+var ssdpGroupAddr = netip.MustParseAddrPort(SSDPMulticastAddr).Addr()
+
+// searchedFor reports whether this advertiser answers an M-SEARCH from src
+// that was sent to dst (known is false when the kernel reported no
+// destination), and logs a refusal (servedAddrs.admit). One sent to the SSDP
+// group is answered: a group datagram reaches this listener only on the
+// interface it joined (B71). Anything else is a unicast to an address of
+// this host, which the listener's wildcard bind takes on every address, and
+// is answered only when the server serves that address (backlog B48). One
+// whose destination was asked for and not reported is refused: the listener
+// cannot tell it from a unicast to the tailnet.
+func (s *SSDPAdvertiser) searchedFor(dst netip.Addr, known bool, src *net.UDPAddr) bool {
+	if known && dst == ssdpGroupAddr {
+		return true
+	}
+	if !known {
+		dst = netip.Addr{}
+	}
+	from := ""
+	if src != nil {
+		from = src.IP.String()
+	}
+	return s.cfg.served.admit(s.log, "an M-SEARCH", dst, from)
+}
+
 // runMSearchListener blocks on the multicast listener, parsing each
 // incoming packet for M-SEARCH and responding unicast if the ST
 // matches one of our NotifyTargets. Takes the `listener` socket as a
 // parameter (the local copy captured at Start) so it never reads
 // `s.listener` — that's what keeps `Stop()`'s nil-set race-free.
-func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn) {
+// armed is armListener's answer for listener: when it is true, a search
+// is answered only when it was sent to an address the server serves
+// (searchedFor).
+func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn, armed bool) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
+	oob := make([]byte, datagramDstSpace)
 	consecutiveReadErrs := 0
 	for {
 		select {
@@ -374,13 +430,15 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 		// Short read deadline so the loop wakes periodically to re-check
 		// ctx.Done() above — without it, a bare parent-ctx cancel that
 		// doesn't go through Stop() (which closes the listener to wake the
-		// read) would park us inside ReadFromUDP indefinitely on a quiet
+		// read) would park us inside the read indefinitely on a quiet
 		// network. Wall-clock (time.Now), never an injectable clock:
 		// net.Conn deadlines evaluate against the real OS clock.
 		_ = listener.SetReadDeadline(time.Now().Add(ssdpListenerReadDeadline))
-		// ReadFromUDP blocks up to the deadline; the Stop() path also closes
+		// ReadMsgUDP blocks up to the deadline; the Stop() path also closes
 		// the listener to wake us up. Read errors are expected at teardown.
-		n, src, err := listener.ReadFromUDP(buf)
+		// The out-of-band data carries the datagram's destination, which
+		// armListener asked the kernel for.
+		n, oobn, _, src, err := listener.ReadMsgUDP(buf, oob)
 		if err != nil {
 			// Shared SSDP read-error policy (discovery.HandleReadErr, PR
 			// #469): a read-deadline timeout resets the streak + continues
@@ -396,8 +454,13 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 			continue
 		}
 		consecutiveReadErrs = 0
+		if armed {
+			if dst, ok := parseDatagramDst(oob[:oobn]); !s.searchedFor(dst, ok, src) {
+				continue
+			}
+		}
 		// Offload the response to a bounded worker goroutine so the
-		// listener returns to `ReadFromUDP` immediately — `handleMSearch`
+		// listener returns to its read immediately — `handleMSearch`
 		// sleeps (the spec-mandated MX delay) and does blocking socket
 		// I/O, which must not stall the receive loop (a slow / full send
 		// buffer would otherwise drop concurrent searches from other

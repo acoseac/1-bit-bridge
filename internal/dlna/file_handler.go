@@ -46,10 +46,11 @@ const FilePathPrefix = "/dlna/file/"
 // through to the filesystem so the worst case is the pre-fix 404
 // rather than a panic.
 //
-// **Auth bypass is by design.** The DLNA listener binds LAN-only
-// (per `IsLANEligibleInterface` in PR 1 task #11); DLNA renderers
-// can't speak the bridge's bearer-token scheme. The LAN-only bind
-// IS the gate, not authentication.
+// **Auth bypass is by design.** The DLNA listener serves only the
+// LAN-eligible interfaces' addresses (servedAddrs, backlog B48; the
+// eligibility is `IsLANEligibleInterface`, PR 1 task #11); DLNA renderers
+// can't speak the bridge's bearer-token scheme. Serving the LAN alone IS
+// the gate, not authentication.
 //
 // **HEAD requests are supported** via http.ServeContent's native
 // behavior — useful for libavformat / mConnect probes that test

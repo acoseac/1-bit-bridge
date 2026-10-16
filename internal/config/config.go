@@ -1656,9 +1656,12 @@ func (c *Config) IsPublic() bool {
 }
 
 // DLNAConfig governs the opt-in DLNA MediaServer the bridge exposes
-// on its own parallel http.Server bound LAN/Tailnet-only. Disabled
-// by default — operators who pair iOS with a DLNA renderer (Chord
-// 2go, Lumin, dCS Network Bridge, etc.) flip Enabled to advertise.
+// on its own parallel http.Server, for the home network only: the
+// listener and SSDP serve only the LAN-eligible interfaces' addresses,
+// whatever ListenAddress binds, and refuse a tailnet peer (backlog B48).
+// Disabled by default — operators who pair iOS with a DLNA renderer
+// (Chord 2go, Lumin, dCS Network Bridge, etc.) flip Enabled to
+// advertise.
 //
 // **Public deployment refusal**: even when Enabled is true here, the
 // dlna.ShouldEnableDLNA gate in cmd/bridge/main.go REFUSES to bind
@@ -1673,7 +1676,9 @@ type DLNAConfig struct {
 	// ListenAddress is the TCP bind for the DLNA HTTP server.
 	// Default ":7790" — chosen to sit alongside the existing
 	// :7788 (API) / :7789 (admin) range without colliding with
-	// anything else the bridge binds.
+	// anything else the bridge binds. A wildcard takes a connection on
+	// every address and serves only the LAN-eligible ones; an address
+	// pinned off the LAN (the tailnet's, say) serves nothing.
 	ListenAddress string `yaml:"listenAddress,omitempty"`
 
 	// FriendlyName is the DLNA-advertised device name surfaced
@@ -1681,18 +1686,19 @@ type DLNAConfig struct {
 	// when empty.
 	FriendlyName string `yaml:"friendlyName,omitempty"`
 
-	// AllowTsnet opts into binding the DLNA listener on the
-	// Tailscale interface alongside LAN. Default false because
-	// SSDP multicast doesn't traverse Tailscale's point-to-point
-	// tunnel (verified Phase 0 2026-05-26) — iOS clients on
-	// cellular must use manual renderer entry (PR 3) or the
-	// bridge-mediated discovery path (PR 5+6) for cross-network
-	// playback. Setting this true is only useful for the
-	// uncommon case where renderer + iOS are BOTH on the same
-	// tailnet (renderer published via subnet router with
-	// multicast forwarding hacks). Nothing reads it yet: serve
-	// passes the LAN pickers no tsnet interface name, so setting
-	// it changes nothing (cmd/bridge/dlna_wiring.go).
+	// AllowTsnet is RESERVED and has no effect: setting it changes
+	// nothing. DLNA serves the home network only (backlog B48): the
+	// listener and SSDP refuse every address off the LAN-eligible
+	// interfaces, the tailnet's included, and nothing reads this key.
+	// It is kept, not deleted, because Load refuses an unknown key and
+	// a config that sets it must still load
+	// (TestADLNAConfigThatSetsAllowTsnetStillLoads). It is reserved for
+	// a real opt-in that would pass the tsnet interface's name to the
+	// pickers and to what the listener serves; until one exists, a
+	// renderer on the tailnet cannot reach DLNA. (It was meant for the
+	// uncommon case where a renderer and the phone are both on the
+	// tailnet: SSDP multicast does not traverse Tailscale's tunnel,
+	// verified 2026-05-26.)
 	AllowTsnet bool `yaml:"allowTsnet,omitempty"`
 
 	// TelemetryEnabled wires the per-request middleware that

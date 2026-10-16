@@ -96,9 +96,12 @@ func foldHostName(host string) string {
 //     what a renderer that found us by SSDP dials, and what our own DIDL
 //     hands it;
 //   - any other address of this host, asked of its interfaces at the
-//     request (Server.interfaceAddrs): a wildcard listener answers on every
-//     one, a Tailscale or second-subnet address included, and an address
-//     that came up after Start is one too.
+//     request (Server.interfaceAddrs): a wildcard listener takes a
+//     connection on every one, and an address that came up after Start is
+//     one too. The connection itself was accepted on an address the
+//     server serves (servedOnlyListener, backlog B48), so this judges only
+//     the name the request used: a LAN client that names this host's
+//     tailnet address is answered, over the LAN.
 //
 // A NAME not in that list is refused, this host's own included. A
 // rebinding page's name is exactly such a name, and a name cannot be judged

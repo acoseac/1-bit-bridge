@@ -9,22 +9,25 @@ import (
 
 // EligibilityOpts customizes the per-interface LAN-eligibility check.
 // TsnetIfaceName, when non-empty, opts the Tailscale tsnet interface
-// in to DLNA binding — by default Tailscale's addresses (CGNAT 100.64/10
+// in to the pickers — by default Tailscale's addresses (CGNAT 100.64/10
 // and the ULA fd7a:115c:a1e0::/48) are refused so an operator who hasn't
 // opted in can't accidentally expose DLNA over their tailnet.
 type EligibilityOpts struct {
 	// TsnetIfaceName is the OS-level interface name of the Tailscale
 	// tsnet socket (e.g. "utun7" on macOS, "tailscale0" on Linux).
-	// Empty disables tsnet binding, and it is empty in production: no
-	// caller passes a name yet, so `cfg.DLNA.AllowTsnet` opts nothing in
-	// (cmd/bridge/dlna_wiring.go).
+	// RESERVED: it is empty in production, no caller passes a name, and
+	// servedAddrs, what the DLNA listener and SSDP serve, takes the set
+	// with no opt-in at all, so `cfg.DLNA.AllowTsnet` has no effect
+	// (backlog B48: DLNA serves the home network only).
 	TsnetIfaceName string
 }
 
-// IsLANEligibleInterface reports whether the bridge's DLNA listener may
-// bind to the given interface. This is the load-bearing safety invariant
-// that keeps an unauthenticated DLNA endpoint off any non-LAN interface
-// (a remote VPS public IP, for instance).
+// IsLANEligibleInterface reports whether the bridge's DLNA surface may use
+// the given interface: whether its SSDP advertisers and discovery clients
+// run there, and, through the multicast set (servedAddrs), whether the
+// HTTP listener and SSDP serve its LAN addresses. This is the load-bearing
+// safety invariant that keeps an unauthenticated DLNA endpoint off any
+// non-LAN interface (a remote VPS public IP, for instance).
 //
 // Allowed:
 //   - RFC1918 private ranges: 10/8, 172.16/12, 192.168/16
@@ -76,32 +79,62 @@ func IsLANEligibleInterface(iface net.Interface, addrs []net.Addr, opts Eligibil
 	// predicate, refined for the empty-address edge the existing table pins.)
 	hasPrivate, hasPublic, hasLinkLocal := false, false, false
 	for _, addr := range addrs {
-		ip := ipFromAddr(addr)
-		if ip == nil || ip.IsLoopback() {
-			continue
-		}
-		switch {
-		case isTailscaleULA(ip):
-			// Tailscale's IPv6 range is inside fc00::/7, so IsPrivate
-			// below would count it as a LAN address, and it admitted
-			// every Tailscale interface without the opt-in above until
-			// 2026-09-28. It counts as public, as the tailnet's IPv4
-			// range does below, which also keeps the link-local arm from
-			// admitting a tailnet interface that has no IPv4 address.
-			hasPublic = true
-		case ip.IsPrivate():
-			// RFC1918 IPv4 + RFC4193 IPv6 unique-local.
+		switch lanAddrKindOf(ipFromAddr(addr)) {
+		case lanAddrPrivate:
 			hasPrivate = true
-		case ip.IsLinkLocalUnicast():
-			// fe80::/10 + 169.254/16 — neither Private nor GlobalUnicast.
+		case lanAddrLinkLocal:
 			hasLinkLocal = true
-		case ip.IsGlobalUnicast():
-			// Public v4/v6, incl. CGNAT 100.64/10, Tailscale's IPv4 range
-			// (only LAN-eligible via the TsnetIfaceName opt-in above).
+		case lanAddrPublic:
 			hasPublic = true
 		}
 	}
 	return hasPrivate || (hasLinkLocal && !hasPublic)
+}
+
+// lanAddrKind is what IsLANEligibleInterface makes of one address. The
+// addresses the DLNA listener serves (servedAddrs) are classed by the same
+// function, so the two cannot disagree about what a LAN address is.
+type lanAddrKind int
+
+const (
+	// lanAddrNone is an address the check passes over: loopback,
+	// unspecified, multicast, or one that does not parse.
+	lanAddrNone lanAddrKind = iota
+	// lanAddrPrivate is an RFC 1918 IPv4 address or an RFC 4193 IPv6 ULA
+	// outside Tailscale's range.
+	lanAddrPrivate
+	// lanAddrLinkLocal is 169.254/16 or fe80::/10.
+	lanAddrLinkLocal
+	// lanAddrPublic is any other unicast address, CGNAT 100.64/10 and
+	// Tailscale's ULA included.
+	lanAddrPublic
+)
+
+// lanAddrKindOf classes ip for IsLANEligibleInterface.
+func lanAddrKindOf(ip net.IP) lanAddrKind {
+	switch {
+	case ip == nil || ip.IsLoopback():
+		return lanAddrNone
+	case isTailscaleULA(ip):
+		// Tailscale's IPv6 range is inside fc00::/7, so IsPrivate below
+		// would count it as a LAN address, and it admitted every Tailscale
+		// interface without the opt-in until 2026-09-28. It counts as
+		// public, as the tailnet's IPv4 range does below, which also keeps
+		// the link-local arm from admitting a tailnet interface that has no
+		// IPv4 address.
+		return lanAddrPublic
+	case ip.IsPrivate():
+		// RFC1918 IPv4 + RFC4193 IPv6 unique-local.
+		return lanAddrPrivate
+	case ip.IsLinkLocalUnicast():
+		// fe80::/10 + 169.254/16 — neither Private nor GlobalUnicast.
+		return lanAddrLinkLocal
+	case ip.IsGlobalUnicast():
+		// Public v4/v6, incl. CGNAT 100.64/10, Tailscale's IPv4 range
+		// (only LAN-eligible via the TsnetIfaceName opt-in).
+		return lanAddrPublic
+	}
+	return lanAddrNone
 }
 
 // tailscaleULA is fd7a:115c:a1e0::/48, the IPv6 range Tailscale numbers
