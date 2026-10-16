@@ -44094,3 +44094,82 @@ These tests read this file, and all pass with the new text:
 - **The error table omits about 25 codes the bridge emits:** `demo_read_only`, `upscale_disabled`, the `variant_*`, `waveform_*`, `spectrum_*` and `lyrics_*` families, `device_token_required` and others. It is a separate backlog item.
 - **The DST bullet's "until its DST decoder ships"** is likely stale, since the app decodes DST. The text is identical in both copies and was not changed here.
 - **Statements no test or code pins** are left as written: the 2.1 binary's favorites behaviour and the DSD-silence measurement date.
+
+## 2026-10-16 — a fetch of an SACD virtual track path answers 404, because ResolveChecked counts a stat's ENOTDIR as not found (backlog B414)
+
+Found by the B340 study in the iOS repo (`docs/CUESheetFeasibility.md` §2.4).
+PROTOCOL.md's SACD ISO section and the header of `internal/manifest/sacd.go`
+promise `404 not_found` for `/v1/read`, `/v1/download` and `/v1/stat` on a
+virtual track path, `<image>.iso/st/NN.dff`. The image is a regular file, so
+the resolver's stat goes through a file. On unix that fails with ENOTDIR, and
+`os.ErrNotExist` covers ENOENT alone there (`syscall_unix.go`'s `Errno.Is`,
+go1.26.6), so `ResolveChecked` returned the raw `*fs.PathError`,
+`writeResolveError` took its default branch, and every such request answered
+`500 internal` and logged an Error line, on every unix bridge since v0.2.0
+(#779). Apps since SACD ISO support map a virtual path to its container before
+they fetch, so only an older client met it; its missing-track affordance
+(`isMissingTrackError`) rests on the 404.
+
+**Red first** (`6bf0d16a`, the tests alone on main at `d83db9b1`), over a real
+image on disk. `TestAnSACDVirtualPathAnswers404NotFound` answered 500
+`internal` for `/v1/read` (ranged), `/v1/download` (whole and ranged),
+`/v1/stat` and the area's `/v1/list`. `TestResolveCheckedThroughARegularFileIsNotFound`
+got the stat's "not a directory" for its three shapes (`Album.iso/st/01.dff`,
+`Album.iso/st`, `01.flac/x`). Green on main beside them: the image itself
+still reads (206); `TestAStatThroughARegularFileFailsWithENOTDIR`, the
+platform premise; `TestResolveCheckedKeepsAStatThatCouldNotLookAnError`; and
+`Test_FileHandler_APathThroughAFile_Returns404`, since the DLNA file route
+answers every failed source open 404 and so already gave the same answer.
+
+**Fix.** `ResolveChecked` maps `errors.Is(err, syscall.ENOTDIR)` to
+`ErrNotFound` beside `os.ErrNotExist`. Chosen over the entry's other form, the
+file routes refusing a path whose prefix is a regular file: that is a walk up
+the path in each route, after a stat that already gave the answer, and a route
+keyed on the virtual grammar alone would leave every other path through a file
+at 500. `Resolve`'s path is clean, with no trailing separator, so the stat
+never asks the path's own last element to be a directory: an ENOTDIR always
+means a component on the way to the path, or to a link's target, is not a
+directory, so nothing is there (a dangling link already got ErrNotFound). No
+wire change, and PROTOCOL.md needed no edit: the 404 is what it documents.
+
+**Every caller of `ResolveChecked`**, at `d83db9b1`:
+- `/v1/list`, `/v1/stat`, `/v1/read` and `/v1/download` (`internal/api/files.go`),
+  `/v1/waveform` and `/v1/spectrum` (`lookupAnalysisForRequest`) and
+  `/v1/lyrics` answer through `writeResolveError`: a path through a file goes
+  from 500 to 404, and nothing else moves. `POST /v1/upscale` maps ErrNotFound
+  to 404 itself. The lyrics sidecar's stat (`lyricsSourceInfo`) reads every
+  error as stale, unchanged.
+- The web player's audio route and `attachVariant`
+  (`internal/admin/player_audio.go`) answer every resolve error 404, or offer
+  no variant: unchanged.
+- The fingerprint sweeper, the analysis candidate walk (which skips `.dff`
+  before it resolves), both auto-optimize planners, the transcode batch
+  coordinator's `ResolverFunc` and the stale-rendition heal's stat treat every
+  error alike: unchanged, except that the coordinator's Warn line now names
+  "path not found" for such a path.
+- **Not callers**, so not changed: the delete route (`internal/trash` splits
+  with `SplitRoot` and stats itself), the upload path (`internal/upload` has
+  no resolver: "The write direction has no equivalent of internal/fs.Resolver"),
+  the upload rescan and the M3U export (`Resolve`, lexical), and the DLNA file
+  handler, which opens the manifest's absolute path with `fsutil.OpenAsFile`
+  and answers any failed source open 404.
+
+**Windows.** `syscall.ENOTDIR` is `ERROR_PATH_NOT_FOUND` there
+(`zerrors_windows.go`), which `os.ErrNotExist` covers (`syscall_windows.go`),
+so the clause adds nothing on Windows. What the stat itself answers there was
+measured on the CI Windows leg: `TestAStatThroughARegularFileFailsWithENOTDIR`,
+which asserts both on Windows, passed on `windows-latest` (run 38889467567 at
+`d3d8f54a`; `internal/fs`, `internal/api` and `internal/dlna` ok), so a stat
+through a regular file answers `ERROR_PATH_NOT_FOUND` there, and a Windows
+bridge answered a virtual path 404 before this change.
+
+**Negative controls** on the committed fix (`d3edb084`), each anchor
+count-asserted, restored from git and the restore verified against HEAD:
+1. The ENOTDIR clause dropped, with its import. Predicted and observed:
+   exactly `TestResolveCheckedThroughARegularFileIsNotFound` (its three
+   assertions) and the five subtests of `TestAnSACDVirtualPathAnswers404NotFound`
+   red, each at 500 `internal`; the premise, the permission test and the DLNA
+   test green.
+2. Every stat error mapped to ErrNotFound. Predicted and observed: exactly
+   `TestResolveCheckedKeepsAStatThatCouldNotLookAnError` red ("err = path not
+   found"); `internal/api` green.

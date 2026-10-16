@@ -557,6 +557,22 @@ lost my library."
   (`TestScanner_AnISOThatIsNotAnSACDIsProbedOnce`,
   `TestScanner_ANotAnSACDVerdictFollowsTheFile`,
   `TestScanner_AnISOWhoseProbeFailedIsProbedAgain`).
+- **A route asked for a virtual track path answers 404 `not_found`, because
+  `ResolveChecked` counts a stat's ENOTDIR as not found** (2026-10-16,
+  backlog B414). The stat of `<image>.iso/st/NN.dff` goes through the image,
+  a regular file, and fails with ENOTDIR on unix, which `os.ErrNotExist`
+  does not cover, so `/v1/read`, `/v1/download`, `/v1/stat` and the area's
+  `/v1/list` answered 500 from v0.2.0 on, against PROTOCOL.md and an older
+  app's missing-track affordance. On Windows the stat answers
+  `ERROR_PATH_NOT_FOUND` (measured on the CI leg), which is `syscall.ENOTDIR`
+  there and already not-exist, so Windows bridges gave the 404 all along
+  (`TestAStatThroughARegularFileFailsWithENOTDIR`). **Never widen the answer past
+  ENOTDIR** (an EACCES, EIO or stale handle could not look, and stays a
+  500), **and never special-case the virtual grammar in a route**, which
+  leaves every other path through a file at 500
+  (`TestResolveCheckedThroughARegularFileIsNotFound`,
+  `TestResolveCheckedKeepsAStatThatCouldNotLookAnError`,
+  `TestAnSACDVirtualPathAnswers404NotFound`).
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the
