@@ -5943,6 +5943,17 @@ no failing test — which is the shape to expect in this area.
   top of `handleBrowse` puts an O(N) walk on the flat-list hot path.
   `TrackInfo.RelativePath` is the load-bearing source in production; the
   LCP-derived fallback silently strips a top-level folder.
+- **The ContentDirectory lists no SACD virtual track** (2026-10-16, backlog
+  B415). The adapter's rebuild (`dlna_wiring.go`) leaves out a row
+  `manifest.IsSACDVirtualPath` names unless `upnp_track_routing` has it:
+  nothing is at a virtual path, since the bridge never demuxes, so a
+  renderer could only fail to play it; the app vetoes casting one too.
+  **Filter there, in the one list every view derives from** (All Tracks and
+  `TrackCount`, the folder index, Search's path map, BrowseMetadata, the file
+  route's lookup), never in one reader, or a childCount or a TotalMatches
+  stops matching what it lists; **never re-implement the grammar; and never
+  drop a routed row for its path's shape**, since the proxy serves it
+  (`TestTheContentDirectoryListsNoSACDVirtualTrack`).
 - **`upnpproxy` relays verbatim** (that IS its bit-exact contract) and sets
   `CheckRedirect: ErrUseLastResponse` — without it a rogue LAN upstream can aim
   a `<res>` fetch at the bridge's own no-auth loopback admin API, reachable
