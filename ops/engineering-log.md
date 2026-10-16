@@ -43562,7 +43562,10 @@ Each applied to the committed fix by a script that requires its anchor
 exactly once and the mutation to land, ran the whole `internal/dlna` package
 (`-count=1 -v`), restored with `git checkout --`, and checked the tree clean
 and the anchor back. Run on `dfaf6254` and again on the final code
-(`7ac7e578`); the same red set both times, each as predicted.
+(`7ac7e578`); the same red set both times, each as predicted. NC1 ran once
+more on `54670d73`, which made the HTTP test judge a refused connection by
+the bytes it got rather than by its error's wording (a refusal ends in EOF,
+a reset, or on Windows also WSAECONNABORTED): the same seven lines.
 
 | | mutation | red (predicted = observed) |
 |---|---|---|
