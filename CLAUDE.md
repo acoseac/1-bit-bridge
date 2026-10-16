@@ -10247,7 +10247,14 @@ its twin.** The top list is older, shorter, and read first.
   client can fix. The upscale folder walk's two 500s still carry
   `redactWalkErr`'s text (an `*os.PathError`'s `op: errno`, its path
   dropped), as #185 chose (#1076 copied it for the root's walk), and were
-  left. The keystroke path's return on a
+  left. **Both log through `writeFileErrorLog`** (2026-10-16, backlog
+  B435): the error redacted the same way, with the folder the client
+  named. The root's walk logged nothing, and the other only the walk's own
+  line for an error its callback saw
+  (`TestAFolderWalkThatCannotStartLogsItsError`,
+  `TestAFolderWalkThatFailsPartWayLogsItsError`; the root's case needs
+  `walkableRootForTest`, since no fixture makes `WalkableRoot` fail once
+  the resolve has stat'ed the root). The keystroke path's return on a
   cancelled request is B364's and is unchanged
   (`TestASearchStoreFailureAnswersAFixedMessage`,
   `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`).

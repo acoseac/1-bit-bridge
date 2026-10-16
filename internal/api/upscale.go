@@ -186,9 +186,17 @@ func (s *Server) refuseUpscaleMutationInDemoMode(w http.ResponseWriter) bool {
 // not a directory, and the request's only candidate was the folder itself.
 // Only a root is followed: the scanner indexes nothing behind a link to a
 // directory below one, so there is nothing there to enqueue.
+//
+// walkableRootForTest, when a test sets it, stands in for WalkableRoot. A
+// root whose walk cannot start after the resolve has stat'ed it as a
+// directory (a link chain the separator does not enter, a mount that went
+// away in between) has no fixture these tests can build (backlog B435).
 func (s *Server) folderWalkPath(libraryRel, abs string) (string, error) {
 	if _, suffix, err := s.resolver.SplitRoot(libraryRel); err != nil || suffix != "" {
 		return abs, nil
+	}
+	if s.walkableRootForTest != nil {
+		return s.walkableRootForTest(abs)
 	}
 	return fsutil.WalkableRoot(abs)
 }
@@ -309,7 +317,12 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	if info.IsDir() {
 		walkFrom, walkErr := s.folderWalkPath(libraryRel, abs)
 		if walkErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+redactWalkErr(walkErr))
+			// The root's walk could not start. The wire text is the
+			// walk's redacted reason, as below; the error is logged
+			// through writeFileErrorLog with the folder the client
+			// named. This branch logged nothing (backlog B435).
+			writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"walk folder: "+redactWalkErr(walkErr), libraryRel, walkErr)
 			return
 		}
 		walkErr = fsutil.WalkConfigured(walkFrom, func(p string, d os.DirEntry, walkErr error) error {
@@ -378,7 +391,12 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			// docs/privacy.html commits to "absolute filesystem
 			// paths are not logged" AND not sent over the wire —
 			// the same redactor covers both egress channels.
-			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+redactWalkErr(walkErr))
+			// writeFileErrorLog logs the error that way, with the
+			// folder the client named, beside the walk's own line
+			// for the entry that failed: an error the walk returns
+			// without calling the callback reaches only this one.
+			writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"walk folder: "+redactWalkErr(walkErr), libraryRel, walkErr)
 			return
 		}
 	} else {

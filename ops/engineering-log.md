@@ -45206,3 +45206,81 @@ context is the one cancelled), the helper `writeErrorLog` already uses.
 `TestSearchSwallowsAClientCancellation` sent its cancel with a live request,
 so it now cancels its request's context, as a client abort does; the new
 `TestASearchCancelWhileTheRequestIsLiveAnswers500` pins the other half.
+
+## 2026-10-16 — both `POST /v1/upscale` folder-walk 500s log their error (backlog B435)
+
+Found by the B425 session's sweep (#1258). `POST /v1/upscale` of a folder
+answers 500 `internal` with `"walk folder: " + redactWalkErr(walkErr)` at two
+sites (`internal/api/upscale.go` at `47182e0f`):
+- `:312`, `folderWalkPath`'s error: the root's `fsutil.WalkableRoot`, the
+  shape #1076 copied. `writeError` logs nothing, so the journal had only the
+  access line, at Error with `status=500`, and no cause.
+- `:381`, the walk's error. Its callback logs `upscale folder walk` at Error
+  (`:347`, the package logger, no request id) with the entry that failed,
+  for an error passed to it. `WalkConfigured` can also return one it never
+  passes there: `walkResolvedChain`'s `report` returns `pathUnder`'s error
+  directly (`internal/fsutil/walkroot.go:211`), and that logged nothing.
+
+The wire text is #185's deliberate choice (the PathError's `op: errno`, its
+path dropped) and stays.
+
+**No fixture for the root's site.** `ResolveChecked` has just stat'ed the
+root as a directory, and after that `WalkableRoot` fails only on a race, a
+link chain whose trailing-slash Lstat disagrees with its Stat (B257, which
+the fsutil tests drive through package seams), or a junction the separator
+does not enter. So `Server.walkableRootForTest` stands in for it, nil in
+production, per instance as the seam rule asks. `folderWalkPath` still calls
+`fsutil.WalkableRoot` itself, which
+`TestEveryWalkOfALibraryRootStartsFromWalkableRoot` requires (it passes).
+
+**Red first** (`00a6d507`: the seam and the tests, nothing the handler does
+changed; macOS, go1.26.6, `-count=1`), in
+`internal/api/upscale_walk_error_test.go`, both through the router and a
+recorder. Each also requires that neither the body nor the log names
+`host-side`, a directory above the root that only an absolute host path
+holds: it has no separator, so the check also holds for a Windows path,
+whose backslashes JSON and the text log handler double.
+- `TestAFolderWalkThatCannotStartLogsItsError`: the seam returns the error
+  `WalkableRoot` builds for a root the separator does not enter
+  (`&fs.PathError{Op: "walk", Path: <root>, Err: fsutil.ErrRootNotEntered}`).
+  The body was already right (`walk folder: walk: links to a directory the
+  walk cannot enter`), and the log was the access line alone: red at "want
+  one request-failed line, got 0".
+- `TestAFolderWalkThatFailsPartWayLogsItsError`: a mode-0 directory below the
+  folder (skipped on Windows, where a mode does not stop a read, and as
+  root). The body was `walk folder: open: permission denied`, the log the
+  walk's own line (`path=Artist/Locked err="open: permission denied"`) and
+  the access line: red at the same assertion.
+- The 62 other upscale tests passed.
+
+**Fix** (`39b109d1`). Both sites call `writeFileErrorLog(w, r, 500,
+"internal", "walk folder: "+redactWalkErr(walkErr), libraryRel, walkErr)`:
+the error at Error with the 500, redacted as on the wire, and the folder the
+client named, as every other failure on a library path is logged (#1055).
+Measured, the root's case now logs `level=ERROR msg="request failed"
+component=http request_id=… method=POST path=/v1/upscale code=internal
+status=500 err="walk: links to a directory the walk cannot enter" path=.`,
+and the walk below the folder logs `err="open: permission denied"
+path=Artist` after its own line, which stays: it names the entry that
+failed. A client abort keeps B364's rule inside `writeFileErrorLog`; neither
+walk reads the request context, so none reaches these sites today. No wire
+change: the pair is `500 internal`, and PROTOCOL.md is unchanged.
+
+**"The raw error."** The backlog entry asked for it at Error. An
+`*os.PathError`'s raw text names the absolute host path, which the privacy
+rule (#1055) keeps out of the journal, so the error is logged redacted, with
+the library-relative folder beside it. Control 4 shows the raw value put the
+host path in the log.
+
+**Negative controls** on the committed fix (`39b109d1`), each anchor
+count-asserted by a script (two sites, or the root's alone by its following
+line), the package vetted, the 64 upscale tests run (`-run
+'TestUpscale|TestAFolderWalk'`, `-count=1`), restored from git and the tree
+checked against HEAD. Every prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| 1. the log call removed again (`writeError`) at both sites | both tests, at "want one request-failed line, got 0" only |
+| 2. the log call removed at the root's site only | `TestAFolderWalkThatCannotStartLogsItsError` alone, at the same assertion |
+| 3. `walkErr.Error()` on the wire, still logged | both tests, at the message and the host directory in the body only |
+| 4. the raw error logged (`writeErrorLog`), the redacted text on the wire | both tests, at the host directory in the log, the logged `err`, and the folder missing from the line; the body assertions green |
