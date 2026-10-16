@@ -220,11 +220,12 @@ func namedValueOf(raw map[string]any, named []id3v2Named, keys ...string) (strin
 
 // id3v2NamedValue is the value of the first of an ID3v2 tag's named values
 // (id3v2NamedValues, in their order) filed under name, a normalised alias. The
-// named values hold no empty value, so a frame whose value is empty is no
-// answer and a later frame of the name answers instead.
+// named values hold no empty value, and an empty one is passed over here too,
+// so a frame whose value is empty is no answer and a later frame of the name
+// answers instead.
 func id3v2NamedValue(named []id3v2Named, name string) (string, bool) {
 	for _, n := range named {
-		if n.name == name {
+		if n.name == name && n.value != "" {
 			return n.value, true
 		}
 	}
