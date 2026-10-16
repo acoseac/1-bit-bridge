@@ -2,25 +2,28 @@ package dlna
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"testing"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 // readArmed reads one datagram from l, armed by armDatagramDst, and returns
 // its payload and the destination the kernel reported.
-func readArmed(t *testing.T, l *net.UDPConn) (string, netip.Addr, bool) {
-	t.Helper()
+func readArmed(l *net.UDPConn) (payload string, dst netip.Addr, ok bool, err error) {
 	buf := make([]byte, 2048)
 	oob := make([]byte, datagramDstSpace)
 	_ = l.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, oobn, _, _, err := l.ReadMsgUDP(buf, oob)
 	if err != nil {
-		t.Fatalf("read a datagram: %v", err)
+		return "", netip.Addr{}, false, err
 	}
-	dst, ok := parseDatagramDst(oob[:oobn])
-	return string(buf[:n]), dst, ok
+	dst, ok = parseDatagramDst(oob[:oobn])
+	return string(buf[:n]), dst, ok, nil
 }
 
 // TestTheSSDPListenerReadsEachDatagramsDestination pins the platform half of
@@ -46,7 +49,10 @@ func TestTheSSDPListenerReadsEachDatagramsDestination(t *testing.T) {
 		if _, err := c.Write([]byte(nonce)); err != nil {
 			t.Fatalf("send: %v", err)
 		}
-		payload, dst, ok := readArmed(t, l)
+		payload, dst, ok, err := readArmed(l)
+		if err != nil {
+			t.Fatalf("read the datagram: %v", err)
+		}
 		if payload != nonce {
 			t.Fatalf("read %q, want the datagram sent, %q", payload, nonce)
 		}
@@ -62,12 +68,24 @@ func TestTheSSDPListenerReadsEachDatagramsDestination(t *testing.T) {
 			t.Skipf("join %v on %s: %v", group, lo.Name, err)
 		}
 		defer l.Close()
+		// Windows applies IP_MULTICAST_LOOP to what a socket RECEIVES, and
+		// ListenMulticastUDP turns it off on the listener, so nothing this
+		// host sends would reach it (backlog B120); on Linux and macOS it
+		// governs only what a socket sends.
+		_ = ipv4.NewPacketConn(l).SetMulticastLoopback(true)
 		if err := armDatagramDst(l); err != nil {
 			t.Fatalf("armDatagramDst: %v", err)
 		}
 		nonce := testNonce(t)
 		sendHostLocal(t, lo, group, nonce)
-		payload, dst, ok := readArmed(t, l)
+		payload, dst, ok, err := readArmed(l)
+		var ne net.Error
+		if err != nil && runtime.GOOS == "windows" && errors.As(err, &ne) && ne.Timeout() {
+			t.Skipf("no looped-back multicast reached the listener on %s: %v", lo.Name, err)
+		}
+		if err != nil {
+			t.Fatalf("read the datagram: %v", err)
+		}
 		if payload != nonce {
 			t.Fatalf("read %q, want the datagram sent, %q", payload, nonce)
 		}

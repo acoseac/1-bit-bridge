@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -160,4 +161,51 @@ func netipAddrOfURL(t *testing.T, raw string) netip.Addr {
 		t.Fatalf("%q names no IP literal: %v", raw, err)
 	}
 	return a
+}
+
+// TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination pins what the
+// read loop decides each M-SEARCH by: one sent to the SSDP group is answered
+// without asking servedAddrs, since the group is no address of the host and
+// a group datagram reaches the listener only on the interface it joined
+// (B71). Every other destination is judged, and one whose destination was
+// asked for and not reported is refused, since it could be a unicast to the
+// tailnet.
+func TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination(t *testing.T) {
+	sink := newLogSink()
+	adv := NewSSDPAdvertiser(SSDPConfig{
+		UDN:         "uuid:b48b48b4-8b48-4b48-8b48-b48b48b48b48",
+		Location:    "http://192.168.1.20:7790/dlna/description.xml",
+		ServerToken: "test",
+		served:      newTestHost(macWithTailscale()...).served(nil),
+	})
+	adv.log = sink.logger()
+	src := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 30), Port: 50000}
+	cases := []struct {
+		name  string
+		dst   netip.Addr
+		known bool
+		want  bool
+	}{
+		{"the_group", ssdpGroupAddr, true, true},
+		{"a_lan_address", netip.MustParseAddr("192.168.1.20"), true, true},
+		{"loopback", netip.MustParseAddr("127.0.0.1"), true, true},
+		{"the_tailnet_address", netip.MustParseAddr("100.64.0.7"), true, false},
+		{"a_broadcast_address", netip.MustParseAddr("192.168.1.255"), true, false},
+		{"no_destination_reported", netip.Addr{}, false, false},
+		{"the_group_not_reported", ssdpGroupAddr, false, false},
+	}
+	for _, tc := range cases {
+		if got := adv.searchedFor(tc.dst, tc.known, src); got != tc.want {
+			t.Errorf("%s: searchedFor(%v, known %v) = %v, want %v", tc.name, tc.dst, tc.known, got, tc.want)
+		}
+	}
+	log := sink.String()
+	if strings.Contains(log, "address=239.255.255.250") {
+		t.Errorf("a search sent to the group was judged and refused:\n%s", log)
+	}
+	for _, want := range []string{"address=100.64.0.7 interface=utun7 from=192.168.1.30", `address="(not reported)"`} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the log has no refusal carrying %s:\n%s", want, log)
+		}
+	}
 }
