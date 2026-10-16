@@ -90,16 +90,17 @@ func searchWith(ctx context.Context, router http.Handler, token string) *httptes
 }
 
 // newRealSearchProvider is the Provider cmd/bridge builds, over a real
-// store holding one track, Xtal. It skips where the SQLite driver has no
-// FTS5.
-func newRealSearchProvider(t *testing.T) *manifest.Provider {
+// store holding one track, Xtal, and that store. It skips where the SQLite
+// driver has no FTS5.
+func newRealSearchProvider(t *testing.T) (*manifest.Provider, *manifest.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Registered after TempDir, so it runs first.
+	// Registered after TempDir, so it runs first. A test may close the
+	// store itself: a second Close is nil.
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 	if ok, _ := store.SearchAvailable(ctx); !ok {
@@ -115,7 +116,7 @@ func newRealSearchProvider(t *testing.T) *manifest.Provider {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return manifest.NewProvider(store, manifest.NewScanner([]string{lib}, store, ""))
+	return manifest.NewProvider(store, manifest.NewScanner([]string{lib}, store, "")), store
 }
 
 // assertSearchDeadlineIsAServerFailure checks the answer and the log of a
@@ -195,7 +196,8 @@ func TestASearchThatOutlivesItsDeadlineAnswers500(t *testing.T) {
 // with time to spare finds the track.
 func TestASearchPastItsDeadlineThroughTheRealStoreAnswers500(t *testing.T) {
 	buf := withTestSlog(t)
-	router, token := newSearchRouter(t, newRealSearchProvider(t))
+	provider, _ := newRealSearchProvider(t)
+	router, token := newSearchRouter(t, provider)
 
 	if rr := searchWith(context.Background(), router, token); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Xtal") {
 		t.Fatalf("search with time to spare: status %d, body %s; want 200 with the seeded track", rr.Code, rr.Body.String())
