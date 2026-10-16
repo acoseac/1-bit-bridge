@@ -569,7 +569,22 @@ var Ext = map[string]bool{
 // the version-stamp leg, including a library that holds no Ogg file: the
 // bump re-reads each version-stale file once and stamps it. SACD ISO
 // virtual rows re-expand as on every bump. ProtocolVersion stays 1.
-const ExtractorVersion = 25
+//
+// v26 — an ID3v2 tag's TXXX:WORK is its work, and its content group (TIT1)
+// only when it holds none (backlog B127). MusicBrainz Picard writes the work
+// to TXXX:WORK and the grouping to TIT1 by default, and the work to TIT1 and
+// the grouping to GRP1 under "Save iTunes compatible grouping and work"; the
+// work was read from TIT1 alone, so every default-mode MP3, DSF, AIFF, WAV
+// and DFF stored its grouping as its work, or no work. workOf takes the first
+// TXXX (TXX) named WORK whose value is not empty, matched as B116's named
+// values are, and TIT1 only in a tag with none; a version 2.2 tag's content
+// group, TT1, which was never read, is read now too. Only the rows whose work
+// changes take the full-upsert leg (their enrichment re-queued once) and are
+// the iOS delta: a tag whose TXXX:WORK differs from its TIT1 or stands alone,
+// and a version 2.2 tag holding TT1 or TXX:WORK. Every other row re-extracts
+// byte-identical and rides the version-stamp leg; SACD ISO virtual rows
+// re-expand as on every bump. ProtocolVersion stays 1.
+const ExtractorVersion = 26
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1304,11 +1319,11 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		if v, ok := stringOf(raw, "tpe3", "conductor", "©con"); ok && v != "" {
 			t.Conductor = v
 		}
-		// Work title: classical taggers store the work in TIT1
-		// (Content Group Description) while keeping the movement
-		// in TIT2 (Title). Both ID3v2 spelling AND the Vorbis /
-		// MP4 equivalents need to map to t.Work.
-		if v, ok := stringOf(raw, "tit1", "work", "©wrk"); ok && v != "" {
+		// The work (backlog B127): an ID3v2 tag's TXXX:WORK, else its
+		// content group (TIT1, TT1 in version 2.2), which MusicBrainz
+		// Picard fills with the grouping by default; a Vorbis comment's
+		// WORK. The movement stays the title (TIT2), so the two coexist.
+		if v, ok := workOf(m.Format(), raw, named); ok && v != "" {
 			t.Work = v
 		}
 		// OriginalYear: parsed via strconv to mirror dhowden's

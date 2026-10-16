@@ -34,13 +34,15 @@ import (
 // same precedence (namedValueOf). They serve only the fields whose ID3v2 home
 // is a TXXX or UFID frame, which are the ones the app's ID3v2Parser reads there
 // too. A field ID3v2 gives a frame of its own (the compilation flag, the
-// composer, the conductor, the work, the original year, the tempo) is read from
-// that frame on both sides, and never from a TXXX: the app pins that neither
-// side reads TXXX:COMPILATION (test_TXXXCompilationAndV22TCP_areNotRead), since
-// a flagged file with no album artist is keyed into "Various Artists" on both.
-// ITUNESADVISORY and EXPLICIT are the exceptions that have no frame of
-// their own: each is a TXXX of that description, and namedValueOf reads
-// it, matching the paired app. TXXX:COMPILATION stays unread.
+// composer, the conductor, the original year, the tempo) is read from that
+// frame on both sides, and never from a TXXX: the app pins that neither side
+// reads TXXX:COMPILATION (test_TXXXCompilationAndV22TCP_areNotRead), since a
+// flagged file with no album artist is keyed into "Various Artists" on both.
+// ITUNESADVISORY and EXPLICIT have no frame of their own: each is a TXXX of
+// that description, and namedValueOf reads it, matching the paired app. The
+// work is a TXXX as well, WORK, where MusicBrainz Picard writes it by default,
+// and it outranks the content group frame (TIT1), where Picard writes the
+// grouping (workOf, backlog B127). TXXX:COMPILATION stays unread.
 
 // id3v2Named is one value an ID3v2 tag files under a name: the name,
 // normalised as a raw tag key is, and the value.
@@ -209,11 +211,49 @@ func namedValueOf(raw map[string]any, named []id3v2Named, keys ...string) (strin
 		if v, ok := stringOf(raw, k); ok {
 			return v, true
 		}
-		for _, n := range named {
-			if n.name == k {
-				return n.value, true
-			}
+		if v, ok := id3v2NamedValue(named, k); ok {
+			return v, true
 		}
 	}
 	return "", false
+}
+
+// id3v2NamedValue is the value of the first of an ID3v2 tag's named values
+// (id3v2NamedValues, in their order) filed under name, a normalised alias. The
+// named values hold no empty value, and an empty one is passed over here too,
+// so a frame whose value is empty is no answer and a later frame of the name
+// answers instead.
+func id3v2NamedValue(named []id3v2Named, name string) (string, bool) {
+	for _, n := range named {
+		if n.name == name && n.value != "" {
+			return n.value, true
+		}
+	}
+	return "", false
+}
+
+// workOf is the work a tag names (backlog B127). MusicBrainz Picard writes an
+// ID3v2 file's work to TXXX:WORK and its grouping to TIT1, the content group,
+// unless "Save iTunes compatible grouping and work" is on, when it writes the
+// work to TIT1 and the grouping to GRP1, and deletes TXXX:WORK
+// (picard/formats/id3.py). So the work is the first of the tag's named values
+// called work: a TXXX, or TXX in version 2.2, whose description is WORK,
+// matched as every named value's is (normaliseRawTagKey, so without regard to
+// case), and whose value is not empty. Only a tag with none takes its work
+// from its content group: TIT1, or TT1, a key only a version 2.2 tag holds.
+// Both readers must take this reading (the app's ID3v2Parser in its paired
+// change): read on one side alone, one file is two works.
+//
+// Every other format has no named values, and its aliases answer as they
+// always did: a Vorbis comment's WORK. The ©wrk alias never answers an MP4
+// file's work atom, which dhowden's MP4 reader does not keep.
+func workOf(format tag.Format, raw map[string]any, named []id3v2Named) (string, bool) {
+	if v, ok := id3v2NamedValue(named, "work"); ok {
+		return v, true
+	}
+	contentGroup := "tit1"
+	if format == tag.ID3v2_2 {
+		contentGroup = "tt1"
+	}
+	return stringOf(raw, contentGroup, "work", "©wrk")
 }
