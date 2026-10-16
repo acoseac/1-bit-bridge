@@ -108,8 +108,11 @@ func seedBatchFixture(t *testing.T, s *manifest.Store) {
 		bits := tr.bits
 		isDSD := false
 		if err := s.UpsertTrack(context.Background(), &manifest.Track{
-			Path:          tr.path,
-			Size:          tr.size,
+			Path: tr.path,
+			Size: tr.size,
+			// The version 01's variant below records, so it is fresh: only
+			// a fresh variant covers its track (backlog B100).
+			ModTime:       time.Unix(0, 1),
 			SampleRate:    &rate,
 			BitsPerSample: &bits,
 			Codec:         "FLAC",

@@ -325,9 +325,9 @@ function kindRow(kind, panel) {
         : "Nothing to queue — everything eligible is already covered."));
   const del = el("button", { class: "btn", text: "Delete" });
   del.addEventListener("click", () => {
-    const c = row.cov;
+    const held = heldCount(row.cov);
     if (!confirm(
-      `Delete ${c.covered} ${kind.title} variant${c.covered === 1 ? "" : "s"}?\n\n` +
+      `Delete ${held} ${kind.title} variant${held === 1 ? "" : "s"}?\n\n` +
       `The cached copies are removed from disk. Your original files are not touched.`)) return;
     run(del, status, () => deleteVariants(panel.scope, kind.key),
       (r) => `Deleted ${r.deletedCount}, freed ${bytes(r.freedBytes) || "0 B"}.`,
@@ -362,8 +362,8 @@ function kindRow(kind, panel) {
     // on the Roots page; a single browser confirm() beside a coverage bar
     // is not the guard it deserves.
     const wholeLibrary = panel.scope.path === "";
-    setDisabled(del, c.covered === 0 || wholeLibrary);
-    if (wholeLibrary && c.covered > 0) {
+    setDisabled(del, heldCount(c) === 0 || wholeLibrary);
+    if (wholeLibrary && heldCount(c) > 0) {
       del.title = "Clearing every variant is done from the Roots page.";
     } else {
       del.removeAttribute("title");
@@ -382,11 +382,10 @@ function kindRow(kind, panel) {
     }
     note.textContent = text;
 
-    // A stale copy exists and will not be served, and the bar counts it
-    // as covered — which is the truth about what Generate will do, since
-    // the batch skips any track that already has a variant of the kind.
-    // So it needs saying out loud, WITH the remedy: Delete then Generate
-    // is the only route back to a current copy.
+    // A stale copy exists and will not be served. The bar leaves it out,
+    // which is the truth about what Generate will do: a batch renders a
+    // copy whose source changed again (backlog B100). The note says why the
+    // bar fell, and that its own button is the remedy.
     stale.textContent = staleNote(c.stale);
 
     reconcile(row.node, [
@@ -402,13 +401,22 @@ function kindRow(kind, panel) {
 
 /** What a kind says about copies whose source changed after they were made, or "". */
 function staleNote(count) {
-  if (count === 0) return "";
+  if (!count) return "";
   if (count === 1) {
     return "1 copy is out of date — its source changed after it was made. " +
-      "Delete, then generate again.";
+      "Generate makes it again.";
   }
   return `${count} copies are out of date — their sources changed after they ` +
-    "were made. Delete, then generate again.";
+    "were made. Generate makes them again.";
+}
+
+/**
+ * The tracks holding a copy of the kind, fresh or stale: what Delete removes.
+ * `covered` counts fresh copies only (backlog B100), so a scope whose copies
+ * are all out of date still has something to delete.
+ */
+function heldCount(c) {
+  return (c.covered || 0) + (c.stale || 0);
 }
 
 /**

@@ -230,22 +230,7 @@ func TestEligibilitySQLAgreesWithPCMRenderEligible(t *testing.T) {
 // is_dsd arm agrees.
 func TestEligibilitySQLAgreesWithUpscaleSubmitGate(t *testing.T) {
 	const targetRate, targetBits = 192000, 24
-	submitGate := func(codec string, rate float64, bits int) bool {
-		r, b := int(rate), bits
-		if r <= 0 || b <= 0 {
-			return false
-		}
-		if manifest.IsLossyCodec(codec) {
-			return false
-		}
-		if r > targetRate || b > targetBits {
-			return false
-		}
-		if r == targetRate && b == targetBits {
-			return false
-		}
-		return true
-	}
+	submitGate := upscaleSubmitGate(targetRate, targetBits)
 
 	srv, _, _ := newTestServer(t)
 	paths := seedMatrix(t, srv.deps.Manifest)

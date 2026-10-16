@@ -4,13 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 )
 
 // seedFormatTrack upserts a track with the given geometry. rate<=0 /
-// bits<=0 leave the pointer nil (unknown geometry).
+// bits<=0 leave the pointer nil (unknown geometry). The row records the
+// version seedVariantFor stamps (mtime 1 ns, 1,000,000 bytes), as a scan
+// and then a render leave them, so a seeded variant is FRESH: only a fresh
+// variant covers its track (backlog B100).
 func seedFormatTrack(t *testing.T, s *Store, path, codec string, rate float64, bits int, isDSD bool) {
 	t.Helper()
-	tr := &Track{Path: path, Size: 1_000_000, Codec: codec, IsDSD: &isDSD}
+	tr := &Track{Path: path, Size: 1_000_000, ModTime: time.Unix(0, 1), Codec: codec, IsDSD: &isDSD}
 	if rate > 0 {
 		tr.SampleRate = &rate
 	}

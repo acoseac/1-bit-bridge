@@ -188,14 +188,18 @@ func TestAlbumGridStaleFilter(t *testing.T) {
 	if total != 1 || !titlesOf(albums)["Covered"] {
 		t.Fatalf("needs=stale → total %d %v, want just Covered", total, titlesOf(albums))
 	}
-	// It is still COVERED: the batch walks skip a track that has a
-	// variant of the kind, so promising otherwise would offer a
-	// Generate that enqueues nothing.
+	// It is NOT covered (backlog B100): the batch walks skip only a track
+	// with a fresh variant of the kind, so a Generate renders it again, and
+	// the album reads as needing CarPlay copies until one does. Until B100
+	// this asserted covered 2: the walks skipped any track with a variant.
 	var cov albumCoverage
 	blob, _ := json.Marshal(albums[0]["variants"])
 	_ = json.Unmarshal(blob, &cov)
-	if cov.Optimize.Covered != 2 || cov.Optimize.Stale != 1 {
-		t.Errorf("Covered optimize = %+v, want covered 2 / stale 1", cov.Optimize)
+	if cov.Optimize.Covered != 1 || cov.Optimize.Stale != 1 {
+		t.Errorf("Covered optimize = %+v, want covered 1 / stale 1", cov.Optimize)
+	}
+	if total, albums := albumsPage(t, srv, "needs=optimize"); !titlesOf(albums)["Covered"] {
+		t.Errorf("needs=optimize → total %d %v, want Covered among them: its stale copy is work", total, titlesOf(albums))
 	}
 }
 

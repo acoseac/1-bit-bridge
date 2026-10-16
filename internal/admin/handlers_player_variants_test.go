@@ -270,17 +270,19 @@ func TestTheVariantSummaryReadsSoxAsTheGateDoes(t *testing.T) {
 	}
 }
 
-// TestAlbumDetailCountsStaleVariantsAsCoveredAndSaysSo pins a
-// deliberately awkward pair of facts.
+// TestAlbumDetailCountsOnlyAFreshVariantAsCoveredAndSaysWhatIsStale pins
+// the pair of facts a stale sidecar is (backlog B100).
 //
-// A stale sidecar stays in COVERED, because that is what the batch
-// walks do: Submit skips any track that already has a variant of the
-// kind, freshness unread. Reporting it as missing would show an
-// enabled Generate button that enqueues nothing.
+// It is NOT covered, because that is what the batch walks do now: Submit
+// skips only a track with a FRESH variant of the kind, so a Generate
+// renders the stale one again, and a bar that counted it would read full
+// over work the button does. This test said the opposite until B100,
+// when the walks skipped any track with a variant of the kind.
 //
-// So the staleness has to be said separately, or a full bar quietly
-// hides a copy that will never be served.
-func TestAlbumDetailCountsStaleVariantsAsCoveredAndSaysSo(t *testing.T) {
+// It is still counted on its own, as stale: a copy that exists and will
+// not be served is a fact the short bar alone does not say, and its disk
+// is what Delete frees.
+func TestAlbumDetailCountsOnlyAFreshVariantAsCoveredAndSaysWhatIsStale(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	st := srv.deps.Manifest
 	seedVariantAlbum(t, st)
@@ -304,12 +306,16 @@ func TestAlbumDetailCountsStaleVariantsAsCoveredAndSaysSo(t *testing.T) {
 	if err := json.Unmarshal(blob, &sum); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if sum.Optimize.Covered != 2 {
-		t.Errorf("covered = %d, want 2 — a stale sidecar is still what Submit will skip",
+	if sum.Optimize.Covered != 1 {
+		t.Errorf("covered = %d, want 1 — a stale sidecar is work Submit renders again, not coverage",
 			sum.Optimize.Covered)
 	}
 	if sum.Optimize.Stale != 1 {
 		t.Errorf("stale = %d, want 1", sum.Optimize.Stale)
+	}
+	// Both sidecars still count as disk.
+	if sum.VariantBytes != 800 {
+		t.Errorf("variantBytes = %d, want 800 — a stale sidecar's disk is real", sum.VariantBytes)
 	}
 }
 

@@ -262,9 +262,11 @@ function variantBadge(cov) {
     const c = cov[key];
     if (!c || c.eligible === 0) continue;
     if (c.stale > 0) {
+      // `covered` counts fresh copies only (backlog B100), so the album's
+      // copies are the covered and the stale together.
       wrap.appendChild(el("span", {
         class: "tile-variant tile-variant-stale", text: label,
-        attrs: { title: `${label}: ${c.stale} of ${c.covered} out of date` },
+        attrs: { title: `${label}: ${c.stale} of ${c.covered + c.stale} out of date` },
       }));
     } else if (c.covered >= c.eligible) {
       wrap.appendChild(el("span", {
@@ -2172,11 +2174,13 @@ function folderSummary(r, path) {
       covered: r.subtreeUpscaled || 0,
       eligible: r.subtreeUpscaleEligible ?? total,
       exempt: Math.max(0, total - (r.subtreeUpscaleEligible ?? total)),
+      stale: r.subtreeUpscaledStale || 0,
     },
     optimize: {
       covered: r.subtreeOptimized || 0,
       eligible: r.subtreeOptimizeEligible ?? total,
       exempt: Math.max(0, total - (r.subtreeOptimizeEligible ?? total)),
+      stale: r.subtreeOptimizedStale || 0,
     },
     sourceBytes: r.subtreeSizeBytes || 0,
     variantBytes: 0,

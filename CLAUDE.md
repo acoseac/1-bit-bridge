@@ -4749,13 +4749,15 @@ no failing test — which is the shape to expect in this area.
   `TestAStaleDownloadRescansItsSourceAndRendersItAgain` (renamed by B82),
   `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
   `TestARescanIndexesNoSecondSpellingOfTheDirectory`.
-- **…and a download that finds a rendition stale has it rendered again; a
-  batch and the coverage bars still count a stale rendition as covered**
-  (backlog B82). Measured on main at 6bc4605a: with auto-optimize off (the
+- **…and a download that finds a rendition stale has it rendered again**
+  (backlog B82; until B100, the next bullet, this title went on "a batch
+  and the coverage bars still count a stale rendition as covered").
+  Measured on main at 6bc4605a: with auto-optimize off (the
   default), renditions made on request before a retag answered 410
   `variant_stale` once a scan read the change and nothing rendered them
-  again: the stale downloads rendered nothing, and a batch counts a track
-  with ANY rendition of the family covered (`TrackProjection.HasVariant`).
+  again: the stale downloads rendered nothing, and a batch counted a track
+  with ANY rendition of the family covered (`TrackProjection.HasVariant`
+  until B100).
   On a real `bridge serve` with sox, after a retag and a scan the batch
   answered `enqueuedCount: 0, alreadyCovered: 1` and 15 downloads over 30 s
   all answered 410; with the fix the second download was served (the render
@@ -4814,12 +4816,9 @@ no failing test — which is the shape to expect in this area.
   most 1,024 renders wait, those older than an hour forgotten first.
   **No loop**: the render is stamped with the row, fresh to the serve path,
   the sweep and the album gain alike (#1077's one clock), and a served
-  rendition calls no hook. **A batch and the Inspector's coverage bars were
-  left counting a stale rendition as covered, on purpose**: making them
-  freshness-aware is a product decision, backlog B100 (a whole-library
-  projection 421 → 476 ms, `AllEligibleKinds` 122 → 133 ms, the root folder
-  rollup 94 → 128 ms over 50,000 tracks; about six SQL sites plus
-  `catalog_refs`). **Don't render from a download whose row is behind** (the
+  rendition calls no hook. B82 left a batch and the Inspector's coverage
+  bars counting a stale rendition as covered, for the owner to decide; B100
+  (the next bullet) made them freshness-aware. **Don't render from a download whose row is behind** (the
   render would record a version the serve path refuses), **and don't give
   the re-render gates of its own**: a copy is how a kind's sox half has
   drifted before. Residual: the render replaces a same-id rendition in place,
@@ -4837,6 +4836,41 @@ no failing test — which is the shape to expect in this area.
   `TestAtMostACapOfRendersWaitForARescan`,
   `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep`,
   `TestAStaleDownloadRendersUnderTheV1KindGates`.
+- **…and a batch, and every coverage bar, counts a rendition only while it
+  is FRESH** (2026-10-16, backlog B100, the owner's option (c) of
+  2026-10-14). A rendition covers its track only while its
+  `source_mtime_ns` and `source_size` equal the track ROW's (#1077's one
+  clock, never a stat). Measured on main at fe6d68d1: after a retag and a
+  scan a batch answered `enqueuedCount: 0, alreadyCovered: N`, and every
+  bar read 2/2 over copies that answer 410. **One test, written once in
+  `manifest/rendition_coverage.go`**: `renditionFreshSQL`, and the per-kind
+  EXISTS built from it (`fresh{Upscaled,Optimized,PCM}SQL`,
+  `freshOfBoundKindSQL`), which the projection the batch walks
+  (`HasVariant`), the browse rows' marks and the covered arm of every
+  covered-or-eligible denominator compose. The reads that count
+  `track_variants` rows themselves (`childFolderRollupSelect`,
+  `RollupByPrefix`, `variantPresenceSelect`) compose the term through a
+  JOIN to the row, measured cheaper than the EXISTS over every track row.
+  **Never write the comparison out at a site.** **The kind test stays the
+  version-agnostic id prefix** (any `pcm-` / `optimized-` row of the family
+  counts; the current-DSD-schema rule is the sweep's alone), and **every
+  size still sums every rendition, fresh or stale**: their disk is real.
+  `foldPresence` counts a fresh sidecar as `covered` and a track holding
+  only stale ones as `stale`, which no longer overlap, so the console's
+  Delete counts `covered + stale`, and `RollupByPrefix` returns the stale
+  counts the folder panel needs. Cost over 50,000 tracks and 45,000
+  renditions, medians of seven: the whole-library projection 348 → 371 ms,
+  `AllEligibleKinds` 91 → 111, the root folders' denominators 89 → 108,
+  the root listing 74 → 111 and `RollupByPrefix("")` 54 → 91 (138 and 131
+  through the EXISTS; the rollup groups per track, 130 with four
+  `COUNT(DISTINCT …)`). A covering index on `track_variants(source_path,
+  variant_id, source_mtime_ns, source_size)` would take the per-track reads
+  back to main's cost; proposed, not added (backlog B419). Pins:
+  `TestEveryCoverageReadAgreesWithTheRowFreshnessOfItsRenditions` (the
+  lockstep table: every eligibility case in nine rendition states, against
+  `describeVariants` and the Go gates),
+  `TestABatchRendersARenditionThatARetagAndAScanMadeStale`,
+  `TestTheCoverageBarsDropForAStaleRenditionUntilItIsRenderedAgain`.
 - **`maxPerSweep` is not just a queue guard**: `UpsertVariant` strict-advances
   `indexed_at`, so an uncapped first sweep pushes one delta row per variant to
   every paired device at once. The disk floor is a RUNNING budget and the probe

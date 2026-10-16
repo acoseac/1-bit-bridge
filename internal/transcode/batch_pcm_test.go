@@ -63,6 +63,9 @@ func seedDSDBatchFixture(t *testing.T, s *manifest.Store) {
 			// has nothing to do with laning.
 			Path: r.path, Size: 30_000_000, Codec: r.codec, Compression: r.compression,
 			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
+			// The version seedVariantOn stamps, so a seeded variant is
+			// fresh: only a fresh variant covers its track (backlog B100).
+			ModTime: time.Unix(0, 1),
 		}
 		if r.durationSec > 0 {
 			d := r.durationSec

@@ -4425,8 +4425,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		apiSrv.WithUpscaleEnqueuer(enqueuer)
 		// A download that finds a rendition stale has it rendered again
 		// (staleRenditionHeal, backlog B82): with auto-optimize off nothing
-		// else does, since a batch counts it covered and a client asks for a
-		// new one only once it stops listing the old one. At once when the
+		// else does unasked: a batch renders it only when an operator submits
+		// one (backlog B100), and a client asks for a new one only once it
+		// stops listing the old one. At once when the
 		// row is current, after the rescan it asks for when the file is ahead
 		// of its row (the rescanner's loop, below, runs that step). The
 		// render goes through the enqueuer, under the live gate of the

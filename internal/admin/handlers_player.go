@@ -896,15 +896,20 @@ type playerPlayabilityDTO struct {
 // Exempt is the remainder, surfaced as a muted note rather than as
 // missing work.
 type playerVariantCoverageDTO struct {
+	// Covered counts tracks with a FRESH sidecar of the kind, the bar's
+	// numerator (backlog B100): what the batch walks skip, so the bar
+	// agrees with what a Generate enqueues.
 	Covered  int `json:"covered"`
 	Eligible int `json:"eligible"`
 	Exempt   int `json:"exempt"`
-	// Stale counts covered tracks whose sidecar no longer matches its
-	// source. They are still COVERED — the batch walks skip a track
-	// that has a variant of the kind regardless of freshness, so
-	// reporting them as missing would promise a Generate that enqueues
-	// nothing. Surfaced separately because a copy that exists and will
-	// not be served is a fact an operator cannot infer from a full bar.
+	// Stale counts tracks whose sidecars of the kind no longer match their
+	// source, with no fresh one beside them. They are NOT covered: a
+	// batch renders them again, as the CLI, the on-demand path and the
+	// sweep do. Until B100 they were counted covered, because the batch
+	// walks skipped any track with a variant of the kind. Surfaced
+	// separately because a copy that exists and will not be served is a
+	// fact an operator cannot infer from a short bar, and because its
+	// disk is real: covered + stale is what Delete removes.
 	Stale int `json:"stale,omitempty"`
 }
 

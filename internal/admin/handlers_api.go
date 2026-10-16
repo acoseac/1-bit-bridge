@@ -105,9 +105,10 @@ type statsResponse struct {
 	// coverage so the dashboard can show Originals vs Upscaled vs
 	// Optimized vs total variant files instead of a single ambiguous
 	// "total tracks". TracksWith* are DISTINCT source-track counts
-	// (a track with several upscaled targets counts once); VariantFiles
-	// is the raw sidecar-file count. Populated from RollupByPrefix("")
-	// + VariantStatsByKind.
+	// (a track with several upscaled targets counts once) of tracks with
+	// a FRESH variant of the kind (backlog B100: one a retag made stale
+	// is not counted); VariantFiles is the raw sidecar-file count, stale
+	// ones included. Populated from RollupByPrefix("") + VariantStatsByKind.
 	TracksWithUpscaled  int   `json:"tracksWithUpscaled"`
 	TracksWithOptimized int   `json:"tracksWithOptimized"`
 	VariantFiles        int   `json:"variantFiles"`

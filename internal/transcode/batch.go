@@ -563,9 +563,11 @@ type upscaleCandidates struct {
 // coverage bars stop agreeing with what a submit actually enqueues.
 // Pure helper: no side effects beyond logging.
 func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []manifest.TrackProjection, targetRate, targetBits int) upscaleCandidates {
-	// Tracks with `HasVariant` are already covered; tracks with zero
-	// source rate / bits are unknown-format and skipped (the operator
-	// pre-flight surfaces them separately).
+	// Tracks with `HasVariant` (a FRESH variant of the kind, backlog B100:
+	// a stale one is work here, as it is for the CLI, the on-demand path
+	// and the sweep) are already covered; tracks with zero source rate /
+	// bits are unknown-format and skipped (the operator pre-flight
+	// surfaces them separately).
 	var (
 		out            upscaleCandidates
 		compressionFct = DefaultCompressionFactor(targetBits)

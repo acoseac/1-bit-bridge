@@ -336,10 +336,12 @@ func dsdEligibilityFixture(t *testing.T, s *Store) []string {
 	seedDSDTrack(t, s, "D/03.dsf", "DSF", 3000000, "", 0, 0)
 	seedFormatTrack(t, s, "D/04.flac", "FLAC", 96000, 24, false)
 	seedFormatTrack(t, s, "D/05.flac", "FLAC", 44100, 16, false)
+	// Stamped with the version seedDSDTrack's row records, so it is fresh:
+	// only a fresh variant covers its track (backlog B100).
 	if err := s.UpsertVariant(context.Background(), VariantRow{
 		SourcePath: "D/03.dsf", VariantID: "pcm-v2-176400-24",
 		SidecarPath: "/tmp/p.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1,
-		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
+		SourceMTimeNS: time.Unix(1_700_000_000, 0).UnixNano(), SourceSize: 1_000_000, SoxSettings: "{}", CreatedAt: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +352,7 @@ func dsdEligibilityFixture(t *testing.T, s *Store) []string {
 // helpers agree, in every capability state, on the optimize and pcm
 // denominators of the same fixture: PCM-only counts exactly what it
 // counted before v43, DSD adds the DSF, DST adds the DFF, the SACD
-// virtual and off-family rows never count, and an existing `pcm-`
+// virtual and off-family rows never count, and an existing fresh `pcm-`
 // variant is coverage regardless of caps.
 func TestEligibility_DSDRenderOptsAcrossHelpers(t *testing.T) {
 	s := openTempStore(t)
