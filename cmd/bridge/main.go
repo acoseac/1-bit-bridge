@@ -3406,17 +3406,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// premium covers) at cfg.Artwork.CacheMaxBytes. Off by default
 	// (cap <= 0 = unbounded, the historical behaviour) — only spawned when a
 	// cap is configured, where it becomes the prerequisite for whole-library
-	// hi-res covers not filling a small host disk.
+	// hi-res covers not filling a small host disk. It reads the manifest
+	// store for the covers and portraits it must keep (backlog B84).
 	if cfg.Artwork.CacheMaxBytes > 0 {
 		// bgWriters-joined: it os.Removes files under <dataDir>/artwork, and
 		// the documented shutdown contract is that nothing this loop starts
 		// outlives runServe's return. Leaving it fire-and-forget is what
 		// produced the intermittent "TempDir RemoveAll: directory not empty"
-		// the backup ticker's own comment records.
+		// the backup ticker's own comment records. The join also keeps its
+		// store reads ahead of manifestStore.Close.
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runArtworkCacheSweeper(scanCtx, artworkDir, cfg.Artwork.CacheMaxBytes, artworkCacheSweepInterval)
+			runArtworkCacheSweeper(scanCtx, manifestStore, artworkDir, cfg.Artwork.CacheMaxBytes, artworkCacheSweepInterval)
 		}()
 	}
 

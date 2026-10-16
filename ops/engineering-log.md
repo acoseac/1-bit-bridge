@@ -43408,6 +43408,200 @@ production caller now.
 2. Touch refreshes a stub: exactly `TestRendererCacheTouch` and
    `TestHandlePacket_AStubThatReplacedARendererBeforeItsRefreshKeepsItsLastSeenAt`.
 
+## 2026-10-15 — the artwork size cap never evicts a cover or portrait a track row names (backlog B84)
+
+The cap behind `artwork.cacheMaxBytes` (`sweepArtworkCache`, run by
+`runArtworkCacheSweeper` every 15 minutes after a 90 s settle) evicted the
+oldest `.jpg` files under the cache whatever they were. The owner decided on
+2026-10-14: never evict a cover a track row still names; evict unreferenced
+files and derived thumbnails; don't reset `enriched_at`; measure one enriched
+and one `local-` track under a tiny cap before the PR.
+
+### Measured, end to end
+
+A throwaway `bridge serve` on loopback ports (47788/47789) over a mktemp data
+dir, with no network: MusicBrainz and Cover Art Archive pointed at a dead
+loopback port, every other HTTP(S) request (the updater's GitHub poll) at a
+dead loopback proxy, mDNS, Tailscale and HTTP/3 off. The library was two
+copies of the repo's FLAC fixtures: track A with an embedded front cover
+(a generated 600 px JPEG, so the scan wrote `local-<sha256>-500.jpg`), track
+B with none. `~/medialibtest/`, which the brief named, is not on this Mac.
+With serve stopped, track B was "enriched" through the store's own writer
+(`GetTrack`, then `MarkEnriched`, from a throwaway helper in an untracked
+`_`-dir): an MBID artwork key, an artist MBID, and its files in the cache
+(`<mbid>-1200.jpg`, the canonical `artist-name-<sha>.jpg` and its hard link
+`artist-<mbid>.jpg`); track A was stamped enriched too. An orphan cover no
+row names and a console thumbnail (`thumbs/<mbid>-250.jpg`) went beside
+them, every file aged a day or two, and `artwork.cacheMaxBytes: 1000` against
+about 14 KB. Each route through a paired token, before and after the first
+pass, and after a `POST /api/scan`:
+
+| Route | main (`67154340`) before | after the pass | after a rescan | fix before | after the pass | after a rescan |
+|---|---|---|---|---|---|---|
+| `/v1/artwork/local-<sha>` | 200 | **202 `pending`** | 200 | 200 | 200 | 200 |
+| `/v1/artwork/<mbid>` (enriched) | 200 | **404 `no_image`** | 404 `no_image` | 200 | 200 | 200 |
+| `/v1/artist-image/<artist mbid>` (enriched) | 200 | **404 `no_image`** | 404 `no_image` | 200 | 200 | 200 |
+| `/v1/artwork/<orphan>` (no row) | 200 | 404 `not_found` | 404 `not_found` | 200 | 404 `not_found` | 404 `not_found` |
+
+On main the pass logged `evicted=6 freedBytes=14326`: every file. With the
+fix it evicted 2 (the orphan and the thumbnail, 4,772 bytes), kept the four
+files rows name, and logged the over-cap WARN once (`referencedBytes=9554
+leftBytes=9554 capBytes=1000`, with the hint to raise the cap). Asked for
+afterwards through the console (`/api/library/artwork/<mbid>?size=250`,
+`/api/library/artist-image/<mbid>?size=250`), both thumbnails were derived
+again at 250 px.
+
+**The brief's premise was half wrong**: a `local-` cover the cap evicted
+does come back, at the next scan. `rowIsCurrent` asks
+`needsLocalArtworkRecovery`, which re-extracts a row whose `local-` cache
+file is missing, and `classifyArtworkMiss` answers a missing `local-` key
+202, never `no_image` (`TestScanner_RecoversWipedLocalArtworkCache` since
+#98, `TestArtworkLocalSentinelStaysPendingWhenEnrichmentComplete` since
+#662). So on main such a cover was missing until the next scan (six hours by
+default) and then, written again with a fresh mtime, went again once it was
+the oldest. The MBID cover and the portrait were lost for good: the
+enricher takes only rows at `enriched_at = 0`. "Retry missing" re-queues a
+portrait (`resetArtistImageGaps`) but not a cover whose row still names its
+key.
+
+### Layout: what is derived
+
+Covers sit at the top as `<key>-<size>.jpg`, portraits at the top as
+`artist-<mbid>.jpg` and `artist-name-<sha256>.jpg`, and the console's derived
+tiers in `thumbs/<key>-<size>.jpg`. A thumbnail is rebuilt whenever it is
+missing: `deriveThumb` (internal/admin/handlers_library_meta.go) calls
+`manifest.EnsureThumb`, which derives `dst` unless it exists and is at least
+as new as its source (internal/manifest/artwork_thumbs.go), from
+`resolveArtworkTier` and `serveOrShrink` for a cover and from
+`apiLibraryArtistImage` for a portrait. Nothing serves a thumbnail without
+its source, and `/v1` serves none (artwork_thumbs.go's header). So a
+thumbnail is evictable even when its key is named; `artwork --gc`, which
+removes orphans, keeps a named one.
+
+### The fix
+
+After the walk, and only when the cache is over the cap, the pass reads the
+GC's keep set (`readArtworkCapKeep`: `artworkKeysInUse`'s `known` for covers,
+and `artistMBIDsInUse`, now shared with `collectPortraits`, for the GC's own
+`portraitVerdicts`). `artworkCapFileAt` names each counted file from its
+place and name: thumbnail (anything in `thumbs/`), portrait (a top-level
+name `isTopLevelPortrait` and `canBePortrait` admit), cover (a cache stem)
+or other. `artworkCapCandidates` keeps a cover whose stem is known and a
+portrait the verdicts keep, then any file modified within `artworkCapGrace`
+of the pass's start; the rest are evicted oldest first, as before, down to
+the low-water mark. A store read that fails, or no store, returns an error
+and evicts nothing (fail closed); the pass WARNs. When the bytes rows name
+(`Referenced`) are more than the cap, the pass evicts everything else and
+stays over: `noteOverCap` WARNs when such a streak begins and at most daily
+(`artworkCapUnseenRepeat`, `noteUnseen`'s cadence), and says at Info when
+it ends. The sweeper gets the store from `runServe` (`manifestStore`, closed
+only after `bgWriters` drains; the cap only reads it).
+
+**The subset property** (`TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould`)
+holds because every keep verdict is about the file itself (its name, its
+mtime, the store), so a partial pass and a whole one keep the same files,
+count them both, and take the rest in the same order. The one verdict that
+reads other files is a canonical's (kept while a kept portrait is the same
+file), so a pass that listed a portrait at the top and could not stat it
+keeps every canonical. The test now carries two named covers in each case,
+which neither pass may evict.
+
+### The race, and the grace
+
+Every writer puts its file in the cache before the row that names it
+commits. The enricher writes a cover in `ensureArtworkCached` (CAA, Atlas
+premium, iTunes) or a portrait in `ensureArtistImageCached` (the canonical,
+then the hard link), and commits in `stampEnriched` after the rest of the
+track's lookups, each bounded by its client's timeout (MusicBrainz and
+Deezer 10 s, CAA 30 s; MusicBrainz paced at 1.1 s, at most five artist
+rungs): seconds, and a few minutes at worst (a portrait the text path fetched
+before the fingerprint path's album hop). A transient failure commits
+nothing, and the next pass over the row fetches again whatever is gone. The
+scanner writes a `local-` cover during extraction (`stampLocalArtworkCached`)
+and commits with its batch of `scanBatchSize` (500) rows or at the scan's
+end, which on a slow library can be longer than any grace; those covers come
+back at the next scan anyway. `artworkCapGrace` is `portraitGrace`, ten
+minutes, the window `artwork --gc` already keeps portraits by, and one value
+because the cap decides portraits through `portraitVerdicts`. It is counted
+back from the pass's start, before the walk and the store read, which only
+widens it. Left open, as B85 left it: a writer that ADOPTS an old file, a
+cover already on disk (`ensureArtworkCached` and `stampLocalArtworkCached`
+both stat first) or a new hard link to an old canonical, between its stat and
+its row's commit. Its mtime is old, so neither the grace nor the keep set
+read in between protects it. For a `local-` cover the next scan heals it; for
+an MBID cover it is the defect, in a window of seconds.
+
+Rejected: reading the keep set before the walk (a row that commits during
+the walk is missed); keeping named thumbnails (they are what the cap can
+always reclaim, and the GC is the tool for orphans); an empty-set refusal
+like the GC's (under Left open, below); bumping a file's mtime when a
+writer adopts it (`/v1/artwork`'s ETag and Last-Modified are mtime and size,
+so every client would download it again).
+
+### Red first, tests, controls
+
+Red first on main (`67154340`), with a scratch test file through main's API
+(never committed): one pass under a cap of 100 over a store naming an MBID
+key and a `local-` key evicted both covers, and one over a store naming an
+artist evicted the portrait and its canonical.
+
+New in `cmd/bridge/artwork_cap_keep_test.go`, each over a real
+`manifest.Store` on a temp DB: `TestTheSizeCapNeverEvictsACoverATrackRowNames`,
+`TestTheSizeCapNeverEvictsAPortraitTheGCKeeps`,
+`TestTheSizeCapEvictsUnreferencedFilesAndThumbnailsOldestFirst` (named covers
+interleaved with what may go, so main would take the oldest named one first),
+`TestTheSizeCapEvictsNothingWhenItCannotReadTheStore` (a closed store and no
+store),
+`TestTheSizeCapKeepsAFileWrittenWithinTheGrace` (a cover whose row has not
+committed, a fresh thumbnail, one at the edge kept and one a second past it
+evicted, then the row commits),
+`TestTheSizeCapKeepsEveryCanonicalWhenAPortraitWentUnseen` and
+`TestArtworkCapSweeperWarnsOncePerStreakWhenTrackRowsNameMoreThanTheCap`. The
+existing cap tests take a store and the pass's clock; the one that wrote a
+fresh cover and expected it evicted ages it.
+
+Controls, each predicted by name, run on the committed fix and
+restored from git (the anchor count-asserted at 1, the mutation checked to
+have landed, the restore checked clean):
+1. The cover keep-set check off: exactly the five predicted,
+   `TestTheSizeCapNeverEvictsACoverATrackRowNames`,
+   `TestTheSizeCapEvictsUnreferencedFilesAndThumbnailsOldestFirst`,
+   `TestTheSizeCapKeepsAFileWrittenWithinTheGrace`,
+   `TestArtworkCapSweeperWarnsOncePerStreakWhenTrackRowsNameMoreThanTheCap`
+   and the subset test's two subtests in which a named cover is old enough to
+   be reached ("the unseen files are the newest" and "a tighter cap").
+2. The fail-closed branch off (an empty keep set in its place): exactly
+   `TestTheSizeCapEvictsNothingWhenItCannotReadTheStore`, whose pass then
+   evicted all three files, the named cover included.
+3. The age guard off: exactly `TestTheSizeCapKeepsAFileWrittenWithinTheGrace`.
+4. The portrait keep off: exactly
+   `TestTheSizeCapNeverEvictsAPortraitTheGCKeeps` and
+   `TestTheSizeCapKeepsEveryCanonicalWhenAPortraitWentUnseen`.
+5. The unseen-canonical clause off: exactly
+   `TestTheSizeCapKeepsEveryCanonicalWhenAPortraitWentUnseen`.
+
+### Found on the way
+
+The same false claim, that a `local-` cover never comes back (the mtime skip
+gate), sat in `artworkKeysInUse`'s docblock, in `runArtworkGC`'s empty-set
+comment (written in #854, long after #98's recovery) and in the refusal it
+prints, and in `TestArtworkGCEmptyStoreGuardIsAboutTheCovers`'s docblock; all
+four now say what is true. CLAUDE.md's list counts it as its eighteenth
+corrected claim.
+
+### Left open
+
+- The cap counts a hard link once per name, so a portrait and its canonical
+  are two files to it (`referencedBytes=9554` above counted the portrait's
+  2,388 bytes twice). Pre-existing: it makes the cap read more than is on
+  disk.
+- On an empty or partial store (after `rm bridge.db*`, or between a root
+  flip's `WipeFilesystemTracks` and its rescan) every cover reads as
+  unreferenced, and the cap evicts while over, as main did. They come back
+  (rows are re-created at `enriched_at = 0`, and the scan writes `local-`
+  covers), at the cost of refetching from CAA and Deezer. A refusal like the
+  GC's would cover only the empty case.
+
 ## 2026-10-15 — switching a feature off also stops the work queued for it (backlog B155)
 
 From the B113 session (#1119), which measured it while deciding what the
