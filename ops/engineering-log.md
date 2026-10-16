@@ -44569,3 +44569,164 @@ tests above passed again, none skipped.
 - **The app's copy, `docs/BridgeProtocol.md`.** It equalled PROTOCOL.md at `8bacb117` (`cmp`), so the companion change is a copy of PROTOCOL.md; the iOS repo was read-only for this session.
 - **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
 - **No Go code.**
+
+## 2026-10-16 — `bridge doctor` names the names in one folder that the app reads as one (backlog B420)
+
+The owner decided on 2026-10-16, from the B375 study in the iOS repo, that
+bridge and UPnP shares stay folded in the app, case-insensitive with no
+per-host detection: two names that differ only in case or Unicode composition
+are almost always a copy, and a library switched to case-sensitive would show
+duplicate tracks and split albums. A collision is reported instead, so the user
+can fix the copies. The app's fold is `share.normalize(path:)`, NFC and then
+`lowercased()` over the whole manifest path, which the bridge mirrors as
+`pathFold` and `renameFold`. The scanner keeps both spellings when the walk saw
+both (the `fsutil.Speller` bullet in CLAUDE.md), which a filesystem that keeps
+both allows: ext4, or a case-sensitive APFS volume for a case pair.
+
+### What the check compares
+
+- **The indexed paths, and no library folder.** `nameCollisionGroups`
+  (`cmd/bridge/doctor.go`) opens the manifest per call, like the other manifest
+  probes, reads `TrackPathsLocal` and hands the paths to
+  `manifest.FindNameCollisions`. It renames and writes nothing.
+- **Sibling by sibling, by `renameFold`.** A folder's children are grouped by
+  `nameCollisionKey`, which is `renameFold` (`strings.ToLower` for an ASCII
+  name, renameFold's answer there, pinned by
+  `TestNameCollisionKeyIsTheRenameFold`). A group is two or more spellings with
+  one key. Comparing siblings puts a group at the level where its paths first
+  differ: `Artist/Album/01.flac` beside `artist/Album/01.flac` is the one group
+  {`Artist`, `artist`}, and the tracks below sit under two different stored
+  parents, so they are never compared. Not `cases.Fold`: the app lowercases, so
+  `Straße` and `STRASSE` are two names there, as a capital I with a dot and a
+  plain `i` are.
+- **Several roots.** Every stored path begins with its root's folder name, so a
+  path is compared only with paths in its own root. The roots' folder names are
+  siblings at the top and are compared with each other, because the app folds
+  the whole path, the root's folder name included, as `renameFold` does in the
+  rename reap. `fs.ValidateRoots` refuses two root names that differ only in
+  case ("duplicate library-root basename") and accepts a composed and a
+  decomposed `Café` (both measured with a throwaway program), so a composition
+  pair is the one group across roots that can exist.
+- **UPnP-routed rows are left out** (`TrackPathsLocal`, not `TrackPaths`): a
+  routed row's path is made from another server's metadata, and no copy of it is
+  on this host to fix.
+- **Every other indexed row is compared**, including the duplicates the served
+  set suppresses and the rows waiting out the missing-count grace: both are in
+  the manifest, and a removed spelling whose twin remains is reaped at the next
+  scan by the case-only rename reap (measured below).
+
+### The output
+
+Warn with the count, or ok with the number of paths compared. The hint names the
+first five groups in path order and counts the rest "(+N more)". Five is the
+bound the variants-index hint puts on its orphan sample, and
+`doctorNameCollisionGroups` is defined as `doctorVariantsIndexSamples`. Each path
+is quoted, so a name with a comma, a space or a control character reads as one
+name. A group that mixes a composed and a decomposed spelling, which print alike,
+marks each one "(composed)" or "(decomposed)", judged by the last component, the
+name its paths differ in. A managed bridge runs it too: the library is its
+user's, and the advice names no command. The sample below is from the real
+binary over a real scan:
+
+```
+  [warn] name-collisions     2 group(s) of names in one folder that differ only in case or Unicode composition
+    ↳ The 1-bit app compares names ignoring case and Unicode composition, so it reads the names in each group below as one: two such folders are one folder there, and of two such files it lists one. These are almost always copies. Merge or rename them so each name is spelled one way; the next scan indexes the result. Groups: "Artist" and "artist"; "Other/Album/01 SONG.flac" and "Other/Album/01 Song.flac"
+```
+
+### Measured end to end
+
+macOS's default APFS volume refuses both pairs: `mkdir` of an NFD `Café` beside
+the NFC one, and of `ALBUM` beside `Album`, answered EEXIST. A case-sensitive
+APFS image keeps a case pair and still refuses the NFD `Café`. So the case pair
+was measured on a case-sensitive APFS sparse image, and the NFC/NFD pair is
+covered by the seeded tests only; on a Linux host ext4 keeps both.
+
+On the image, with copies of `internal/transcode/testdata/flac/whole-44100-16-2.flac`
+at `Artist/Album/0{1,2}`, `artist/Album/0{1,2}`, `Other/Album/01 Song` and
+`Other/Album/01 SONG`, `bridge scan` indexed all six tracks and
+`bridge doctor --config` printed the sample above: one group for the folder pair,
+none for the tracks below it, and one for the file pair. With `artist/` and
+`01 SONG.flac` removed, one more `bridge scan` logged
+`reaped stale rows from case-only rename` (`renamed=3`), and the line read
+`[ok] name-collisions 3 track path(s) under the library roots; no two names in
+one folder differ only in case or Unicode composition`. So "the next scan
+indexes the result" holds for a removed copy whose twin remains. A deleted file
+with no twin waits for the missing-count threshold, as any vanished file does,
+and stays in the report until it is reaped.
+
+### Cost
+
+`/api/doctor` runs on every settings-page render, so the cost was measured
+(an M-series Mac, go1.26.6, load about 2) over a synthetic store of 100,000
+tracks: 2,000 artists, 5 albums each, 10 tracks each, one artist in ten
+accented. `TrackPathsLocal` took ~28 ms and `FindNameCollisions` ~20 ms. With
+`renameFold` on every name and a `strings.Split` per path, the comparison took
+~50 ms; over the library's 112,000 names `renameFold` took ~35 ms and
+`nameCollisionKey` ~7 ms. Unlike the variants-index walk, it has no budget: it
+reads rows, not the disk, and a budget would miss the scattered pairs it exists
+to find. Its walk keeps one folder's names per level of the current path, not
+the library's; the paths themselves are in memory as `TrackPathsLocal` returns
+them.
+
+### Red first
+
+`67297aa3` is the tests alone on main at `5266c664` (go1.26.6, macOS): all eight
+`TestDoctorNameCollisions…` tests failed at `findCheck` ("no "name-collisions"
+check in the report").
+
+### Negative controls
+
+On the committed implementation (`45694ca5`), each control was predicted by test
+name before any ran. A script refused a dirty tree, count-asserted each anchor
+(exactly one), checked that the mutation landed and vetted the packages, then ran
+all of `./cmd/bridge` and `./internal/doctor` and the tests of
+`name_collisions_test.go` in `./internal/manifest` (nothing else in that package
+reaches the mutated code) with `-count=1 -v`. It then restored the file with git
+and checked the tree against HEAD. Every prediction held, and every run
+reconciled (tests started equal passed, failed and skipped; no panic).
+
+| mutation | red | green |
+|---|---|---|
+| NC1 NFC dropped (`cases.Lower` alone for a non-ASCII name) | `TestDoctorNameCollisionsNamesAComposedAndADecomposedSpelling`, `TestDoctorNameCollisionsComparesTheRootsFolderNames`, `TestNameCollisionKeyIsTheRenameFold` | the other six end-to-end tests, the other four manifest tests, internal/doctor |
+| NC2 case folding dropped (NFC alone) | `TestDoctorNameCollisionsNamesTwoSpellingsThatDifferOnlyInCase`, `TestDoctorNameCollisionsReportsAStrayFolderOnceNotPerTrack`, `TestDoctorNameCollisionsComparesAPathOnlyWithinItsOwnRoot`, `TestDoctorNameCollisionsNamesTheFirstFiveGroupsAndCountsTheRest`, `TestNameCollisionKeyIsTheRenameFold`, `TestFindNameCollisionsGroupsEverySpellingOfAName`, `TestFindNameCollisionsAnswersAnUnsortedListAsASortedOne`, `TestFindNameCollisionsKeepsTheFirstGroupsInPathOrder` | the NFC/NFD, roots, clean and routed tests, `TestFindNameCollisionsCountsANameMetTwiceOnce`, internal/doctor |
+| NC3 the dedupe of a name met twice dropped | `TestFindNameCollisionsCountsANameMetTwiceOnce` | the rest |
+| NC4 `TrackPaths` for `TrackPathsLocal` in the probe | `TestDoctorNameCollisionsLeavesUPnPRoutedRowsOut` | the rest |
+| NC5 groups kept in the order found, not path order | `TestDoctorNameCollisionsNamesTheFirstFiveGroupsAndCountsTheRest`, `TestFindNameCollisionsKeepsTheFirstGroupsInPathOrder` | the rest |
+
+NC1 and NC2 failed at the predicted assertions: every end-to-end test on the
+status (ok, want warn), and the key test on the decomposed spellings (NC1, the
+rho with psili too) or on every name with a capital (NC2).
+
+### Tests
+
+- `cmd/bridge/doctor_name_collisions_test.go`, end to end through
+  `buildDoctorDeps` and `doctor.Run` over a seeded manifest (the check reads the
+  store alone, so no file exists at a seeded path):
+  `TestDoctorNameCollisionsNamesAComposedAndADecomposedSpelling`,
+  `TestDoctorNameCollisionsNamesTwoSpellingsThatDifferOnlyInCase`,
+  `TestDoctorNameCollisionsReportsAStrayFolderOnceNotPerTrack`,
+  `TestDoctorNameCollisionsComparesAPathOnlyWithinItsOwnRoot`,
+  `TestDoctorNameCollisionsComparesTheRootsFolderNames`,
+  `TestDoctorNameCollisionsNamesTheFirstFiveGroupsAndCountsTheRest`,
+  `TestDoctorNameCollisionsPassesALibraryWithNoCollisions` (with near misses: a
+  capital I with a dot beside a plain `i`, `Straße` beside `STRASSE`, one name in
+  two folders) and `TestDoctorNameCollisionsLeavesUPnPRoutedRowsOut`.
+- `internal/manifest/name_collisions_test.go`:
+  `TestNameCollisionKeyIsTheRenameFold` (every ASCII character among its cases),
+  `TestFindNameCollisionsGroupsEverySpellingOfAName`,
+  `TestFindNameCollisionsCountsANameMetTwiceOnce`,
+  `TestFindNameCollisionsAnswersAnUnsortedListAsASortedOne`,
+  `TestFindNameCollisionsKeepsTheFirstGroupsInPathOrder`.
+- `internal/doctor/namecollisions_test.go`: `TestCheckNameCollisions` (no probe,
+  a probe error, no groups, groups with the rest counted, a managed bridge) and
+  `TestDescribeNameCollisionSaysWhichSpellingIsComposed`.
+  `TestRun_FullReportShape` lists the new line last.
+
+### Not changed
+
+- **The app and PROTOCOL.md.** The check is a CLI and console line: no wire
+  change, no `ProtocolVersion` or `ExtractorVersion` bump.
+- **`fs.ValidateRoots`** still accepts two roots whose folder names differ only
+  in composition. The check reports that pair; whether the validator should
+  refuse it is a separate question.
+- **README's doctor sample**, which shows a few checks and not every one.
