@@ -43601,3 +43601,209 @@ corrected claim.
   (rows are re-created at `enriched_at = 0`, and the scan writes `local-`
   covers), at the cost of refetching from CAA and Deezer. A refusal like the
   GC's would cover only the empty case.
+
+## 2026-10-15 — switching a feature off also stops the work queued for it (backlog B155)
+
+From the B113 session (#1119), which measured it while deciding what the
+console's pool line shows with a feature off; the owner decided on
+2026-10-15 that a switch-off also stops queued work. Since #781 both pools
+are built on every bridge and never stopped, and the live gates refused only
+NEW work at the enqueue paths: neither `analyze.Pool.processJob` nor
+`transcode.Pool.processJob` asked a gate, so a switch-off left the queue
+running to its end, up to 5,000 jobs a lane. Each finished analysis is a
+`track_analysis` write and an `indexed_at` delta to every paired device, each
+finished render a sox run and a sidecar on disk, and since B113 the console
+showed none of it.
+
+**What waits on a queued job.** Only the batch Coordinator: a batch waits on
+every job it enqueued (`RemainingIDs`), and an uncounted job announced
+nothing, so a dropped job with no event would leave its batch `running`
+forever, its row stale and its files in the ETA. `bridge analyze` waits on
+`QueueLen == 0 && Inflight == 0`, never on a count, and builds its own pool
+with no gate. The app's on-demand paths bound their own waits: the download
+worker's `waitForVariant` gives up after 90 s and falls back to the source,
+and the rendition pickup's (B386) after 20 min, re-checking the bridge's
+features on every sync. The pools' own tests wait on counts, and wire no gate.
+
+**Red first** (`89725522`: the tests, and the seams they need, inert: the
+analysis pool's `WithLiveGate`, the transcode pool's `SetLiveGate` and
+`SetOnJobDropped`, `PoolStats.Dropped`, `Coordinator.OnJobDropped` and
+`renditionGates.admits`, none of them asked). Every test queues jobs behind a
+held one, closes the gate and lets the held job go: the analysis pool ran all
+six (`Done=6 Dropped=0`) and wrote the five queued rows; the transcode pool
+rendered all six and announced six completions, no drop; an optimize job
+queued beside an upscale job ran with only the optimize kind switched off,
+and the gate was never asked; neither pool logged a drop line; the three batch
+tests ended `completed` with every file processed (one waited 5 s for a drop
+callback that never came); `admits` admitted every job under every gate; and
+the wiring pin found no gate on either pool.
+
+**Fix.** Each pool asks its live gate once per job, right after the stop
+check and before anything runs or shows on the worker grid: the analysis
+pool `analyze.WithLiveGate(analysisActiveFn)`, the closure /v1 reads, and the
+transcode pool `SetLiveGate(kindGates.admits)`, on the one `renditionGates`
+runServe builds (the closures POST /v1/upscale reads per kind, now held in a
+variable the stale-rendition heal reads too). A refused job is
+`outcomeDropped`: it does not run, finishJob gives its path back and counts
+it (`droppedCnt`) in its one critical section, and the transcode pool
+announces it on a fourth publisher channel (`jobDroppedChan`, the failure
+channel's blocking 2×workers buffer, closed by Stop after `wg.Wait`).
+`Coordinator.OnJobDropped` stops the batch waiting on the file and counts it
+as dropped (`batchState.DroppedFiles`, in memory: the row has no column),
+never as processed or failed and never as a throughput sample; it writes and
+publishes the row only when the batch ends, so dropping a 5,000-file batch is
+one row write. A batch with dropped files ends `cancelled`
+(`batchState.settle`, from the three job callbacks and both queue-full
+truncations; `completeIfDrained` writes the same error), its error naming how
+many files were not rendered and that a resubmit renders them, ahead of any
+error it already had.
+
+The gate a job answers to is its rendition FAMILY's (`renditionGates.admits`:
+its kind's gate, an empty kind being the batch's upscale, and the DSD-render
+gate for a DSD source, which every enqueuer of a DSD rendition passes through
+`DSDRenderEligible`), never its enqueuer's. The pool dedups on (source,
+variant), and a phone's request for a rendition a sweep or a batch already
+queued is answered "already queued" and rides that job: a gate only one
+enqueuer passed (the pre-generation switch, a batch's own state) would drop
+the phone's request with the sweep's.
+
+A run of drops logs one Info line with its count (`dropBurstMsg`). It ends
+when no accepted job is left undecided (`undecided`: incremented by Enqueue
+with the count, decremented at the job's decision) or when a job runs; a
+queue-length test would also end it at a worker that has received a job and
+not decided it, whose drop then logs a second line. The drop that ends a burst
+writes the line before finishJob counts it (`noteDrop`), so a caller that sees
+the pool idle can read the line, the order every exit keeps (its bookkeeping,
+then its count). A first version logged after the count, and
+`TestAJobStillBeingDecidedKeepsItsBurstOpen` failed 6 of 20 runs under `-race`
+reading the recorder before the line landed.
+
+**Measured with the real serve**, main's binary (`67154340`) against the fix,
+on a `mktemp -d` data dir with its own ports, outbound HTTP through a dead
+local proxy, mDNS and Tailscale off. The library was generated with ffmpeg
+(40 FLACs, 44.1/16 sine tones, a frequency and tags of their own each):
+`~/medialibtest/` is not on this Mac. One worker; the feature switched off
+through `PATCH /api/settings`, which answered `live`, once three jobs had
+landed; the counter is read every 2 s.
+
+Analysis, five-minute files, the sweep's first pass queueing 40:
+
+| `cachedWaveforms` | main | fix |
+|---|---|---|
+| at the switch-off (36 queued, one running) | 3 | 3 |
+| +15 s | 7 | 4 |
+| +30 s | 11 | 4 |
+| +60 s | 20 | 4 |
+| +90 s | 29 | 4 |
+| +120 s | 37 | 4 |
+| pool line on switching back on | 2 queued, 3 in flight, 37 done | 0 queued, 0 in flight, 4 done |
+| drop line | none | one, `count=36`, 3 s after the PATCH, as the running job finished |
+| after a sweep nudge | | 36 re-enqueued, 40 analysed in 132 s |
+
+Upscaling, one-minute files, one whole-library batch at the 192/24 default:
+
+| | main | fix |
+|---|---|---|
+| `cachedVariants` at the switch-off | 3 | 3 |
+| +15 s / +30 s / +60 s / +120 s | 17 / 29 / 40 / 40 | 4 / 4 / 4 / 4 |
+| sidecars on disk | 343 MB | 32 MB |
+| batch row | `completed`, 40 of 40 processed | `cancelled`, 4 processed, 0 failed, 40 total, "36 of 40 files were not rendered…" |
+| drop line | none | one, `count=36` |
+| resubmitted with upscaling on | | 36 enqueued, 4 already covered, `completed` 36 of 36 |
+
+**A job already running when its gate closes finishes.** Measured on the dev
+Mac at a load average of 1.3, three runs each through the CLI (process start
+included): one analysis of a five-minute FLAC 3.52-3.77 s, one 192/24
+very-high sox render of it 5.51-5.71 s. A DSD render runs minutes (the
+DSD-render bullets: about 26× realtime on a fast Mac). The pools default to
+NumCPU/2 analysis workers and min(NumCPU-1, 4) render workers, 6 and 4 here,
+so a switch-off lets at most that many jobs finish, each kept and served once
+the feature is on. Cancelling a running job is not built: it needs a per-job
+cancel, something that sees the gate close mid-run (a poll, or the settings
+PATCH telling the pools), and a new branch on every error exit, which today
+reads a cancelled context as shutdown or a timeout.
+
+**Residual.** Switching a feature back on nudges no sweep: a dropped
+analysis is offered again at the analysis sweep's next tick
+(`scanIntervalSec`, six hours by default), after the next scan, or on
+Analyze now (the measurement nudged it). Switching pre-generation alone
+(`autoOptimize.enabled`) off stops the next sweep, not the up to `maxPerSweep` (200) jobs the last one
+queued: they are the CarPlay family's, whose gate stays open, and a phone's
+request can ride them. A kind switched off beside one left on can log a drop
+line per run of drops.
+
+**Negative controls** (each on the fix, committed first, the anchor
+count-asserted, restored from git and the tree checked clean), every red set
+predicted by name and matched:
+1. The analysis pool's take-time check removed: its five drop tests red;
+   `TestTheGateIsNotAskedForAJobTheStopTook` green.
+2. The transcode pool's take-time check removed: its six drop tests and the
+   three batch tests red; `TestTheGateIsNotAskedForARenderTheStopTook` green.
+3. The analysis pool keeps a dropped job's path: its five drop tests red, at
+   the every-snapshot check (a job both in flight and dropped).
+4. The transcode pool keeps a dropped job's claim: its six drop tests red;
+   the three batch tests green (the drop event still drains the batch).
+5. `settle` ignores drops: exactly `TestABatchWhoseQueuedFilesAreDroppedEndsCancelled`
+   and `TestABatchWhoseEveryFileIsDroppedEndsCancelled`.
+6. `completeIfDrained` ignores drops: exactly
+   `TestADroppedFileAndADedupedOneLeaveTheBatchCancelled`.
+7. A burst ends at an empty queue, in each pool: exactly
+   `TestAJobStillBeingDecidedKeepsItsBurstOpen` and
+   `TestARenderStillBeingDecidedKeepsItsBurstOpen` (lines `count=9` then
+   `count=1`). The four-worker tests stay green under it, 10 of 10 when
+   first tried, because the first worker back drops nearly the whole queue
+   alone; that is why the parked-gate tests exist.
+8. The gate asked before the stop check, in each pool: exactly the two
+   stop-guard tests.
+9. The analysis pool built without its gate, and the transcode pool given
+   none: `TestThePoolsTakeJobsUnderTheV1Gates`, each at its own assertion.
+10. `admits` without the DSD term: exactly
+    `TestAQueuedRenderRunsOnlyWhileItsFamilysGateIsOpen`, at the two
+    compact-tier rows with the CarPlay gate open and the DSD gate closed.
+
+**Review round (#1247).** SonarCloud's PR gate failed on duplication, 11.0% of
+new lines against a 3% limit: the drop-run bookkeeping each pool carried (45
+lines in each `pool.go`) and the shapes the two pools' tests shared (56 and 64
+lines). The bookkeeping is now one `dropburst.Tracker` (`internal/dropburst`)
+both pools use. It has no lock of its own: the pool's mutex guards it,
+`AcceptedLocked` and `PassedOverLocked` run inside the pool's sections, `Ran`
+and `Drop` take the mutex themselves, and every line is written with it
+released. finishJob's end check for a job already decided went: a run that
+leaves nothing undecided ends at once, so no run is open with nothing
+undecided, and that check could never fire. The shared test shapes are
+`internal/pooltest`, a test-only package: each pool's test file adapts its
+pool to `pooltest.Start` and keeps its own tests, under their old names, with
+the checks only that pool has. Counting the runs of eight or more identical
+code lines the two files share (comments and blank lines left out), `pool.go`
+went from 90 to 60 lines, of which main's two pools already shared 29 (their
+counters, the constructors' guards, `fireStateChange`, `PoolStats`), and the
+live-gate tests from 46 to 0.
+
+gemini-code-assist's two `sort.Strings` nits are taken. Its two suggestions to
+merge `Drop`'s critical section into finishJob's are declined: one section
+writes the line only after its unlock, so the count is visible before the
+line. As a control, the drop's bookkeeping deferred past its count, under
+`-race`, 20 runs each: `TestAJobStillBeingDecidedKeepsItsBurstOpen` failed 2
+of 20 and `TestARenderStillBeingDecidedKeepsItsBurstOpen` 3 of 20, every other
+B155 test 20 of 20 (the first version of the fix, which had the same order,
+failed the first 6 of 20). The Tracker's doc comment says why.
+
+**Controls re-run on the moved code** (each committed first, its anchors
+count-asserted, restored from git and the tree checked clean):
+1. A dropped job keeps its path (analysis) or its claim (transcode): the red
+   sets of controls 3 and 4, unchanged.
+2. A run ends at an empty queue, in the form it takes now that the end check
+   is the Tracker's, which cannot see the queue: a job leaves the undecided
+   count when a worker TAKES it, with no end check there, instead of when it
+   is decided (`Ran` and `Drop` lose their decrement, `PassedOverLocked` its
+   end check, and each pool decrements at the take). Exactly the two
+   parked-gate tests, with the lines `count=9` and `count=1`, as control 7;
+   and five of the Tracker's six own tests. A first form decremented through
+   `PassedOverLocked` with its end check kept, so it ended the run at the take
+   of the last job, before that job was decided, which the queue-length check
+   never did: it also reddened each pool's single-worker and four-worker burst
+   tests, and is not counted.
+3. New: the end check ignoring undecided jobs reddens the three burst tests of
+   each pool and four of the Tracker's tests; a job that runs not ending the
+   run reddens only `TestAJobThatRunsEndsTheRunBeforeIt`, since no pool test
+   reopens the gate in the middle of a run.
