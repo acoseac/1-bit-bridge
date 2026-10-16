@@ -495,8 +495,12 @@ omit both and clients treat absence as before):
   DSDIFF alike (clients match `codec` by equality elsewhere), so this
   field is the ONLY wire discriminator. iOS maps `compression == "DST"`
   onto its canonical DST codec marker at its upsert chokepoint and
-  refuses playback with an honest pre-flight error until its DST decoder
-  ships (the iOS repo's `docs/DSTFeasibility.md`).
+  decodes DST itself: a stereo DSD64 or DSD128 track (44.1 kHz family)
+  with a library row is decoded on the phone into an uncompressed
+  DSDIFF in the app's cache and played from there. Any other DST track
+  (DSD256 and above, the 48 kHz family, multichannel, a folder-browser
+  play) is refused with an honest error, before the download when its
+  rate already rules it out (the iOS repo's `docs/DSTFeasibility.md`).
 - `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
   `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
   The DFF extractor populates it, a SACD ISO virtual row carries `2`, and
@@ -1628,35 +1632,64 @@ Server-side library search over the FTS5 index the bridge already maintains. A c
 
 ## Error responses
 
-All errors are JSON:
+Errors are JSON, with the exceptions listed under the table:
 ```json
 { "error": "short-code", "message": "human-readable detail" }
 ```
 
 | Status | `error` code             | When                                              |
 |-------:|--------------------------|---------------------------------------------------|
-|    202 | `pending`                | Artwork / artist-image enrichment not yet cached  |
-|    400 | `bad_request`            | Malformed path, missing required query param     |
+|    202 | `pending`                | Artwork / artist-image enrichment not yet cached, or a booklet the bridge knows but has not downloaded yet (`GET /v1/booklet/{mbid}`); carries `Retry-After` |
+|    400 | `bad_request`            | Malformed path, query parameter or request body, or a path that names no library root |
 |    400 | `range_required`         | `/v1/read` called without a `Range` header        |
 |    400 | `query_too_short`        | `GET /v1/search` with `q` shorter than 2 runes    |
+|    400 | `device_token_required`  | `/v1/playlists`, `/v1/favorites` or `POST /v1/history/batch` without a valid `X-Device-Token` (lowercase hex, at most 128 characters) |
+|    400 | `base_revision_required` | `PUT /v1/favorites` with a negative `baseRevision` |
+|    400 | `validate`               | `POST /v1/atlas-ingest` whose `release` or `artist` fails validation: an `mbid` that is not a UUID, or a field over its cap |
 |    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |
-|    403 | `forbidden`              | Valid token, insufficient scope (reserved)        |
-|    404 | `not_found`              | Path does not exist in any library root; or artwork is not cached under the requested MBID + `size` |
+|    403 | `forbidden`              | Valid token, insufficient scope (reserved; no route sends it) |
+|    403 | `demo_read_only`         | Demo bridge: the four upscale mutations (`POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`), `POST /v1/atlas-ingest`, `DELETE /v1/atlas-harvest/credential`, and `POST /v1/atlas-harvest/credential` while `atlas.harvestBaseUrl` is unset |
+|    403 | `harvest_base_url_not_allowed` | `POST /v1/atlas-harvest/credential` whose `atlasBaseUrl` is not the configured `atlas.harvestBaseUrl`, in any mode |
+|    404 | `not_found`              | Path does not exist in any library root (`/v1/list`, `/v1/stat`, `/v1/read`, `/v1/download`, `/v1/waveform`, `/v1/spectrum`, `/v1/lyrics`, `POST /v1/upscale`); an artwork / artist-image key no track names; no booklet, custom cover, cached Atlas metadata or playlist for the key; `/v1/booklet` or `/v1/renderers` with the feature off |
 |    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
+|    404 | `variant_not_found`      | `/v1/download?variant=` (or `/v1/read`) names no rendition of the track, or `DELETE /v1/upscale/variants` while upscaling is not active |
+|    404 | `waveform_not_found`     | `GET /v1/waveform`: no waveform cached for the track yet |
+|    404 | `spectrum_not_found`     | `GET /v1/spectrum`: no spectrum for the track yet |
+|    404 | `lyrics_not_found`       | `GET /v1/lyrics`: no lyrics feature, or no lyrics for the track |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
-|    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2), or the bridge is in demo mode; iOS falls back to polling |
-|    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
-|    404 | `favorites_not_supported` | Bridge build doesn't store favorites backups (pre-v1.10) — no `/v1/favorites` |
-|    409 | `stale`                  | PUT `/v1/playlists/{id}` (no `baseLastModifiedAt`) or a whole-document PUT `/v1/favorites` carried a `lastModifiedAt` strictly older than the stored copy, or a revisioned PUT `/v1/favorites` carried a `baseRevision` that is not the stored revision with a different body; body includes the full server copy when the bridge can re-read it (a tombstoned playlist has none). A playlist client accepts this and does not replace the row |
+|    404 | `events_not_supported`   | `GET /v1/events` on a demo bridge, or either event stream with no event broker running (`serve` always starts one); iOS falls back to polling |
+|    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (no `smartPlaylists` flag) — no `/v1/smart-playlists` |
+|    404 | `favorites_not_supported` | No favorites store, as on a demo bridge (no `favorites` flag) — no `/v1/favorites` |
+|    404 | `playlist_backup_not_supported` | No playlist store, as on a demo bridge (no `playlistBackup` flag) — no `/v1/playlists` route |
+|    404 | `playback_history_not_supported` | No history store, as on a demo bridge (no `playbackHistory` flag) — no `POST /v1/history/batch` or `GET /v1/history` |
+|    404 | `atlas_not_supported`    | `atlas.enabled` is off (no `atlasEnrichment` flag) — no `POST /v1/atlas-ingest` or `GET /v1/atlas-meta/*` |
+|    404 | `harvest_not_supported`  | `POST /v1/atlas-harvest/credential` on a bridge whose harvest is off (`atlas.enabled` and `atlas.harvestEnabled`); the `DELETE` answers `204` there |
+|    409 | `stale`                  | PUT `/v1/playlists/{id}` (no `baseLastModifiedAt`) or a whole-document PUT `/v1/favorites` (a bridge without `favoritesRevisions`) carried a `lastModifiedAt` strictly older than the stored copy, or a revisioned PUT `/v1/favorites` carried a `baseRevision` that is not the stored revision with a different body; body includes the full server copy when the bridge can re-read it (a tombstoned playlist has none). A playlist client accepts this and does not replace the row |
 |    409 | `base_mismatch`          | PUT `/v1/playlists/{id}` carried a `baseLastModifiedAt` that is not the stored stamp, and the body differs. An identical body is `200` and writes nothing. The bridge did not write. `server` is the stored playlist, possibly a tombstoned row; `server.deleted` is `true` then. Distinct from `stale` by the `error` string |
 |    410 | `pairing_code_invalid`   | Pairing-link code unknown, already redeemed or expired, or its token revoked or expired since |
+|    410 | `variant_stale`          | `?variant=`: the source's mtime (beyond 2 s) or size changed since the rendition was made |
+|    410 | `variant_missing_on_disk` | `?variant=`: the rendition's row exists but its file is gone, is not a regular file, or is still arriving |
+|    410 | `waveform_stale`         | `GET /v1/waveform`: the source changed (mtime beyond 2 s, or size) since the waveform was computed |
+|    410 | `waveform_missing_on_disk` | `GET /v1/waveform`: the row exists but the sidecar file is gone |
+|    410 | `spectrum_stale`         | `GET /v1/spectrum`: the source changed since the spectrum was computed |
+|    410 | `lyrics_stale`           | `GET /v1/lyrics`: the lyrics source changed since extraction (a network-tier document never answers it) |
 |    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
-|    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
-|    503 | `queue_full`             | Pending pairing requests at the cap               |
+|    500 | `persist_failed`         | The bridge could not write a harvest credential change (`POST` / `DELETE /v1/atlas-harvest/credential`) or the token a pairing code redeems (`POST /v1/pairing/redeem`) |
+|    502 | `upnp_bad_res_url`       | `/v1/read` / `/v1/download` of a track proxied from an upstream UPnP server whose `<res>` URL could not be built |
+|    502 | `upnp_upstream_unreachable` | `/v1/read` / `/v1/download` of a UPnP-proxied track: the request to the upstream server failed before it answered |
+|    503 | `scan_in_progress`       | `/v1/manifest`, the artwork and artist-image routes or a cover route on a server built without its manifest provider, artwork cache or config; `serve` wires all three before it listens, so a running bridge never sends it, mid-scan included |
+|    503 | `queue_full`             | Pending pairing requests at the cap, or `POST /v1/upscale` when every eligible file met a full transcode queue |
 |    503 | `search_unavailable`     | `GET /v1/search` on a bridge whose SQLite driver has no FTS5 module (terminal) |
+|    503 | `upscale_disabled`       | `POST /v1/upscale`, `POST /v1/upscale/batch` or `DELETE /v1/upscale/batches/{id}` while upscaling is not active (the flag off, or no usable `sox`), or for a `kind` whose own gate is off (`optimize` without `carPlayOptimize`, `pcm` without `dsdRender`); `GET /v1/upscale/batches` only on a server built without a batch coordinator, which `serve` never is |
+|    503 | `upnp_server_offline`    | `/v1/read` / `/v1/download` of a UPnP-proxied track whose upstream server the bridge cannot currently reach |
+|    503 | `stats_unavailable`      | `GET /v1/upscale/stats` or `GET /v1/analysis/stats` could not read its counts (a database fault, or its 2 s bound) |
+|    503 | `unavailable`            | `GET /v1/events` or `GET /v1/pairing/{id}/events` at its subscriber cap; carries `Retry-After: 5` |
+|    507 | `insufficient_disk_space` | `POST /v1/upscale/batch` refused by its disk-space pre-flight; the body is `{error, projectedBytes, requiredBytes, availableBytes}`, with no `message` |
+
+Three kinds of answer carry no JSON body. A path or method no route serves gets net/http's plain-text `404` or `405`. A route that serves file bytes (`/v1/read`, `/v1/download`, the artwork, cover, booklet, waveform and spectrum routes) answers an unsatisfiable `Range` with `http.ServeContent`'s plain-text `416`. For a track the bridge proxies from an upstream UPnP server, `/v1/read` and `/v1/download` relay that server's own status and body once it has answered.
 
 ### `/v1/manifest` rate limit (additive, since v1.2.x)
 
