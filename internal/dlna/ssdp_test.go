@@ -101,10 +101,12 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Drive the listener exactly as Start() does: hold a wg slot for its
-	// lifetime (the goroutine's `defer s.wg.Done()` releases it on return).
+	// Drive the listener exactly as Start() does: arm it, and hold a wg
+	// slot for its lifetime (the goroutine's `defer s.wg.Done()` releases
+	// it on return).
+	armed := a.armListener(listener)
 	a.wg.Add(1)
-	go a.runMSearchListener(ctx, listener)
+	go a.runMSearchListener(ctx, listener, armed)
 
 	// Give the goroutine time to pass the top-of-loop ctx.Done() check and
 	// PARK inside ReadFromUDP before cancelling. Without this, cancel()

@@ -76,6 +76,12 @@ type SSDPConfig struct {
 	// Logger is the structured logger for SSDP events. nil collapses
 	// to `logging.Component("dlna-ssdp")` at Start() time.
 	Logger *slog.Logger
+
+	// served is what the advertiser answers a unicast M-SEARCH on: the
+	// addresses its Server serves (servedAddrs), shared with the HTTP
+	// listener. nil is this host's, for an advertiser started without a
+	// Server.
+	served *servedAddrs
 }
 
 // defaultAdvertiseInterval is the canonical NOTIFY ssdp:alive cadence:
@@ -168,6 +174,9 @@ func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
 	if cfg.AdvertiseInterval < time.Minute {
 		cfg.AdvertiseInterval = defaultAdvertiseInterval
 	}
+	if cfg.served == nil {
+		cfg.served = newServedAddrs(nil)
+	}
 	return &SSDPAdvertiser{
 		cfg:       cfg,
 		targets:   NotifyTargetsFor(cfg.UDN),
@@ -218,6 +227,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	armed := s.armListener(listener)
 
 	// NOTIFY sender: an unconnected socket, pinned to this advertiser's
 	// interface before anything is sent, that writes each NOTIFY to the
@@ -268,7 +278,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 
 	// M-SEARCH response goroutine — captures `listener` locally.
 	s.wg.Add(1)
-	go s.runMSearchListener(innerCtx, listener)
+	go s.runMSearchListener(innerCtx, listener, armed)
 
 	// Flip the state-machine flag AFTER all socket binds + goroutine
 	// spawns succeed. Set on the happy path only; a partial-init
@@ -356,12 +366,29 @@ func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPC
 	}
 }
 
+// armListener asks the kernel to report the destination of each datagram
+// listener takes (armDatagramDst), and reports whether it will. Start arms
+// its listener before anything is sent; a test arms one the same way. A
+// listener that cannot be armed answers as every listener did before B48,
+// and says so once here.
+func (s *SSDPAdvertiser) armListener(listener *net.UDPConn) bool {
+	if err := armDatagramDst(listener); err != nil {
+		s.log.Warn("SSDP listener cannot read the destination of each datagram: it answers a unicast M-SEARCH "+
+			"sent to any address of this host, whether or not the DLNA listener serves it",
+			slog.String("interface", interfaceName(s.cfg.Interface)),
+			slog.String("err", err.Error()))
+		return false
+	}
+	return true
+}
+
 // runMSearchListener blocks on the multicast listener, parsing each
 // incoming packet for M-SEARCH and responding unicast if the ST
 // matches one of our NotifyTargets. Takes the `listener` socket as a
 // parameter (the local copy captured at Start) so it never reads
 // `s.listener` — that's what keeps `Stop()`'s nil-set race-free.
-func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn) {
+// armed is armListener's answer for listener.
+func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn, armed bool) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
 	consecutiveReadErrs := 0

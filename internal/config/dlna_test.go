@@ -84,3 +84,27 @@ func TestDLNAConfig_TelemetryExplicitOptOut(t *testing.T) {
 		t.Errorf("explicit telemetryEnabled=true should opt in, got false")
 	}
 }
+
+// TestADLNAConfigThatSetsAllowTsnetStillLoads pins why dlna.allowTsnet is
+// kept although nothing reads it (backlog B48: the DLNA listener and SSDP
+// serve only the LAN-eligible interfaces, and the key is reserved for an
+// opt-in that does not exist yet). Load refuses an unknown key
+// (KnownFields), so deleting the field would stop a bridge whose config sets
+// it from starting.
+func TestADLNAConfigThatSetsAllowTsnetStillLoads(t *testing.T) {
+	configPath, _ := writeConfig(t, `
+libraryRoots:
+  - {{LIBRARY_ROOT}}
+listenAddress: "127.0.0.1:9000"
+dlna:
+  enabled: true
+  allowTsnet: true
+`)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load refused a config that sets dlna.allowTsnet: %v", err)
+	}
+	if !cfg.DLNA.Enabled || !cfg.DLNA.AllowTsnet {
+		t.Errorf("dlna = %+v, want enabled with allowTsnet as written", cfg.DLNA)
+	}
+}

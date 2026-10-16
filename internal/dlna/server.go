@@ -250,6 +250,11 @@ type Server struct {
 	// that stands in a host of its own.
 	interfaceAddrs func() ([]net.Addr, error)
 
+	// served is what the listener and every advertiser serve (servedAddrs,
+	// backlog B48). Start makes it from the configuration when it is nil; a
+	// test sets one of its own before Start.
+	served *servedAddrs
+
 	// hostRefusedSeen holds the Host names ownHostOnly has refused, so
 	// each is logged once (noteForeignHost), bounded by
 	// hostRefusedSeenCap.
@@ -312,6 +317,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// at request time) always observe non-nil state once serving begins.
 	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
 	s.notifyClient = newNotifyClient()
+	if s.served == nil {
+		s.served = newServedAddrs(s.knownOwnHosts().addrs)
+	}
 
 	// On any error return BEFORE the happy tail hands ownership of the
 	// cancel to Stop(), cancel the derived context so the child isn't
@@ -413,6 +421,7 @@ func (s *Server) Start(ctx context.Context) error {
 			ServerToken: SSDPServerToken(s.cfg.ModelNumber),
 			Interface:   ep.Interface,
 			Logger:      s.log,
+			served:      s.served,
 		})
 		if err := adv.Start(ctx); err != nil {
 			ifaceName := "default"
