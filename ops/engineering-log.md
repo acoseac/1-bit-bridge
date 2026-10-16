@@ -44569,3 +44569,106 @@ tests above passed again, none skipped.
 - **The app's copy, `docs/BridgeProtocol.md`.** It equalled PROTOCOL.md at `8bacb117` (`cmp`), so the companion change is a copy of PROTOCOL.md; the iOS repo was read-only for this session.
 - **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
 - **No Go code.**
+
+## 2026-10-16 — PROTOCOL.md's error table is held to the pairs the `/v1` handlers send, by two guards (backlog B426)
+
+B413 (#1255) completed the table by hand: it had listed 22 codes while the
+handlers sent 48 status and code pairs, and ten of its rows were wrong.
+Nothing kept it in step. `TestEverySentErrorCodeIsInTheProtocolTable` fails
+on a pair a handler sends with no row; `TestEveryProtocolErrorRowIsSent`
+fails on a row naming a pair nothing sends, except a row marked `(reserved;
+no route sends it)`, B413's marking of `forbidden`, and on a reserved row
+something does send. Both are in `internal/api/error_table_test.go`, beside
+the routed-endpoints pair they mirror.
+
+### How the pairs are read
+
+go/ast over `internal/api`'s non-test files; a name starting with `.` or `_`
+is skipped before it is opened (the go tool's rule; an editor's lock file is
+the case). Not go/types: type-checking `internal/api` means type-checking
+every dependency from source, `modernc.org/sqlite` among them, or building
+export data with `go list -export` on every run.
+
+- **The writes.** Every call of `writeError`, `writeErrorLog` and
+  `writeFileErrorLog`, at their status and code positions (their own bodies
+  are not read). And every `writeJSON` / `writeJSONGzip` under a 4xx or 5xx
+  status, whose body must then be a literal (or its address, or a parameter
+  a caller passes one in) of a package struct with a field tagged
+  `json:"error"`: the favorites and playlist 409s and the batch 507. A 2xx
+  body is never an error body, since one may carry `error` as data
+  (`BatchRow`).
+- **The values.** A status or code is read when it is a literal; a package
+  constant; one of net/http's `Status` constants, read from the toolchain's
+  own `net/http` source through `go/build`, so the value is the one the
+  handler compiles against; a sum of those (`kind + "_not_found"`); a
+  parameter, read at each call to its function (up to four calls out), with
+  status and code bound to the same call so two calls stay two pairs, plus
+  whatever the body sets it to; or a local set from a call to a package
+  function, or to a method on the same receiver, read at each of that
+  function's returns (`parseVariantDeleteQuery`'s `errCode`). An empty code is
+  dropped: the caller writes only past a check for one.
+- **Refused**, with the site and the reason, failing both guards: a code
+  built at run time (a call the guard cannot follow), a package variable, a
+  function literal's parameter, a function nothing in the package calls, a
+  status and a code that both take several values (which the guard cannot
+  pair), and a 4xx or 5xx JSON body it cannot read.
+- **One declared flow** (`declaredFieldFlows`). `proxyUPnP` writes
+  `perr.Status` and `perr.Code` of the `*upnpproxy.PreStreamError` that
+  `Proxy.Serve` returns. Only a type checker knows that type, so the flow is
+  declared, and the values are still parsed: the Status and Code of every
+  `PreStreamError` literal in `internal/upnpproxy`, five of them (500
+  `internal` twice, 503 `upnp_server_offline`, 502 `upnp_bad_res_url`, 502
+  `upnp_upstream_unreachable`). A flow that matches no write is reported.
+
+### On main (`5266c664`)
+
+The scan reads 48 pairs and refuses nothing; the table has 49 rows, with
+`forbidden` the reserved one. Those are B413's 48 pairs exactly. Of the four
+non-literal codes B413 listed, three are read by the rules
+(`errCodeUpscaleDisabled` as a constant, `parseVariantDeleteQuery`'s
+`errCode` through its returns, `kind + "_not_found"` at both callers), and
+`perr.Code` through the flow.
+
+### Fixture tests
+
+On a clean tree the guards report nothing, so they cannot show the scan
+still reads each shape. `TestErrorPairScanReadsEveryShapeOnAFixture` scans a
+synthetic package written to a temp dir and requires its 15 pairs exactly
+(each shape above, with the two calls of a status-and-code helper kept
+apart) and exactly eight refusals: a code built at run time, an unreadable
+409 body, a function literal's parameter, a function nothing calls, a status
+and a code that both vary, a package variable read and one set, and a stale
+flow. Its test file, `_` file and lock-shaped file are never read; read, the
+lock fails the parse (measured). `TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair`
+pins the table's reading (a reserved row, a pipe in the When cell, CRLF) and
+eight shapes it refuses: no heading, another table first, no alignment row,
+two codes in a cell, a bare code, a status that is not one, a second row for
+a pair, and no table.
+
+### Negative controls
+
+On the committed guard (`09bf317b`), each predicted by test name, each run
+over the whole `internal/api` package (`-count=1`, go1.26.6), each anchor
+count-asserted, then restored from git and the tree checked clean. Every
+prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| NC1 `writeError(w, http.StatusServiceUnavailable, "search_reindexing", …)` added to the search handler | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "503 search_reindexing, sent at search.go:91 (search)" |
+| NC2 the `lyrics_not_found` row deleted | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "404 lyrics_not_found, sent at lyrics.go:106 (lyrics); lyrics.go:129 (lyrics)" |
+| NC3 a row added for `404 lyrics_missing` | `TestEveryProtocolErrorRowIsSent` alone |
+| NC4 the reserved marker taken off `forbidden`'s row | `TestEveryProtocolErrorRowIsSent` alone: "403 forbidden, which no /v1 handler sends" |
+| NC5 the playlist 409 literal's `base_mismatch` renamed | both guards (the new code has no row, the old row is unsent), and `TestATombstonedBaseMismatchCarriesDeleted` and `TestPlaylistMatchingBaseOnTheWire`, which read that code |
+| NC6 `kind + "_not_found"` made `kind + "_unavailable"` | `TestEverySentErrorCodeIsInTheProtocolTable` alone, naming both callers (`spectrum.go:30`, `waveform.go:136`); the old rows stay sent by the literal 404s |
+| NC7 a `PreStreamError` literal's `upnp_server_offline` renamed | both guards, through the flow, at both `proxyUPnP` writes |
+| NC8 `declaredFieldFlows` emptied | both guards, at the scan: the two `proxyUPnP` writes refused ("perr.Status is not a constant the guard can read") |
+
+### Not read
+
+An error status written with no envelope (`http.Error`, a bare
+`WriteHeader`) carries no code for the table to name; B413 found none in
+`internal/api`, and the note under the table names the three body-less
+answers net/http and the proxy give. A writer called through a function
+value, and an envelope encoded by hand rather than through `writeJSON`, are
+not seen either. `internal/admin`'s writer serves the console's `/api/*`,
+outside the table.
