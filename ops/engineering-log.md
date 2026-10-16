@@ -44171,3 +44171,13 @@ the restore verified against HEAD:
    the fixture's routed rows exempted: exactly the predicted four (All Tracks'
    childCount 5, in the root's answer and in its own BrowseMetadata, against 3
    children; Search still 5 hits, and 2 for the album).
+
+**After review** (3.1 Pro on #1254). `TestTheSACDVirtualFilterReadsTheRoutingAtEachRebuild`
+pins that the routed exception reads the routing table at each rebuild: a row
+of the virtual shape whose routing lands after a listing stays out of the
+cached listing, since the cache is time-based, and is listed once the cache
+rebuilds. Negative control: the routed set read once and kept (a memo in
+`rebuild`), its anchor count-asserted, restored from git. Predicted and
+observed: exactly the new test red, at "not listed after the cache rebuilt".
+The review's other finding, that the maps' capacity hint counts the rows
+left out, stands as written: it is a sizing hint.
