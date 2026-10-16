@@ -144,8 +144,10 @@ func parseErrorTable(spec string) ([]protocolErrorRow, error) {
 			header = true
 			continue
 		case !aligned:
-			if strings.Trim(status, "-:") != "" {
-				return nil, fmt.Errorf("line %d: no alignment row under the header: %q", i+1, line)
+			for _, cell := range []string{status, code, when} {
+				if !strings.Contains(cell, "-") || strings.Trim(cell, "-:") != "" {
+					return nil, fmt.Errorf("line %d: no alignment row under the header: %q", i+1, line)
+				}
 			}
 			aligned = true
 			continue
@@ -1067,7 +1069,10 @@ func receiverType(fn *ast.FuncDecl) string {
 // frame to read it in, when the body is a literal (or the address of one) of
 // an error body type, or a parameter a call passes one in; otherwise nil.
 func (p *sourcePackage) errorBodyCode(body ast.Expr, f *frame) (ast.Expr, *frame, error) {
-	for {
+	for hops := 0; ; hops++ {
+		if hops > maxBodyHops {
+			return nil, nil, fmt.Errorf("its JSON body passes through more than %d names", maxBodyHops)
+		}
 		if u, ok := body.(*ast.UnaryExpr); ok && u.Op == token.AND {
 			body = u.X
 		}
@@ -1076,7 +1081,21 @@ func (p *sourcePackage) errorBodyCode(body ast.Expr, f *frame) (ast.Expr, *frame
 			break
 		}
 		i, variadic, isParam := paramIndex(f.at.fn, id.Name)
-		if !isParam || variadic {
+		if !isParam {
+			// A local the body sets exactly once, from a value, is that value
+			// (`b := conflictBody{...}; writeJSON(w, s, b)`). Any other local is
+			// left unread, so its write fails the guard rather than guess.
+			defs, declared, err := localDefs(f.at.fn, id.Name)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !declared || len(defs) != 1 || defs[0].expr == nil {
+				break
+			}
+			body = defs[0].expr
+			continue
+		}
+		if variadic {
 			break
 		}
 		if f.args == nil {
@@ -1100,6 +1119,10 @@ func (p *sourcePackage) errorBodyCode(body ast.Expr, f *frame) (ast.Expr, *frame
 	}
 	return nil, nil, fmt.Errorf("its %s literal sets no %s, so it sends no code", id.Name, p.errorField[id.Name])
 }
+
+// maxBodyHops bounds the names a JSON body is followed through, so a local
+// set from itself cannot loop.
+const maxBodyHops = 16
 
 // keyedField is the value a literal gives the named field, or nil.
 func keyedField(lit *ast.CompositeLit, field string) ast.Expr {
@@ -1234,6 +1257,7 @@ func TestErrorPairScanReadsEveryShapeOnAFixture(t *testing.T) {
 		"404 wave_not_found", // and at its second
 		"409 first",          // a status and a code, both parameters, at one call
 		"409 in_a_body",      // a struct literal with a json:"error" field
+		"409 in_a_local",     // a local set once from one
 		"409 through_a_parameter",
 		"410 from_const_gone",
 		"429 second", // and at the other call: not crossed with the first
@@ -1247,7 +1271,7 @@ func TestErrorPairScanReadsEveryShapeOnAFixture(t *testing.T) {
 	}
 
 	refused := []string{"(runtimeCode)", "(unreadBody)", "(closure)", "(uncalled)", "(bothVary)",
-		"(viaVar)", "(setsVar)", "in gone"}
+		"(viaVar)", "(setsVar)", "(bodyReassigned)", "in gone"}
 	for _, marker := range refused {
 		n := 0
 		for _, u := range scan.unresolved {
@@ -1328,6 +1352,19 @@ func body()               { writeJSON(nil, http.StatusConflict, conflictBody{Err
 func bodyPointer()        { writeJSON(nil, http.StatusInsufficientStorage, &conflictBody{Error: "in_a_pointer"}) }
 func success()            { writeJSON(nil, http.StatusOK, okBody{N: 1}) }
 func successValue(v okBody) { writeJSON(nil, http.StatusOK, v) }
+
+func bodyInALocal() {
+	b := conflictBody{Error: "in_a_local"}
+	writeJSON(nil, http.StatusConflict, b)
+}
+
+func bodyReassigned(late bool) {
+	b := conflictBody{Error: "early"}
+	if late {
+		b = conflictBody{Error: "late"}
+	}
+	writeJSON(nil, http.StatusConflict, &b)
+}
 
 func proxied() {
 	perr := fetch()
@@ -1425,6 +1462,7 @@ func TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair(t *testing.T) {
 		"no heading":          "## Errors\n| Status | `error` code | When |\n|---|---|---|\n| 404 | `a` | x |\n",
 		"another table first": "## Error responses\n| Code | Meaning |\n|---|---|\n",
 		"no alignment row":    "## Error responses\n| Status | `error` code | When |\n| 404 | `a` | x |\n",
+		"a broken alignment":  "## Error responses\n| Status | `error` code | When |\n|---| broken |---|\n| 404 | `a` | x |\n",
 		"two codes in a cell": head + "| 400 | `a` / `b` | x |\n",
 		"a bare code":         head + "| 400 | a | x |\n",
 		"not a status":        head + "| 4xx | `a` | x |\n",
