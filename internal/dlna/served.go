@@ -88,11 +88,13 @@ func newServedAddrs(advertised map[netip.Addr]struct{}) *servedAddrs {
 // admit judges a connection or a datagram that arrived on the local address
 // local from the peer from (an IP literal, for the log), and logs a refusal
 // (noteRefused) on log. what names it there: "a connection" or "an
-// M-SEARCH".
+// M-SEARCH". The address is unmapped first: a dual-stack listener reports an
+// IPv4 connection's local address as an IPv4-mapped IPv6 one.
 func (s *servedAddrs) admit(log *slog.Logger, what string, local netip.Addr, from string) bool {
 	if s.judgeAs != nil {
 		local = s.judgeAs(local)
 	}
+	local = local.Unmap()
 	if s.serves(local) {
 		return true
 	}

@@ -318,6 +318,10 @@ func TestARefusalIsLoggedOncePerKindAndAddress(t *testing.T) {
 			t.Fatal("a connection to the tailnet address was admitted")
 		}
 	}
+	// A dual-stack listener reports an IPv4 connection's local address
+	// mapped into IPv6 (measured end to end: "::ffff:" and the tailnet
+	// address); it is the same address, logged once and as IPv4.
+	s.admit(log, "a connection", netip.MustParseAddr("::ffff:100.64.0.7"), "100.64.0.99")
 	s.admit(log, "a connection", netip.MustParseAddr("fd7a:115c:a1e0::7"), "fd7a:115c:a1e0::99")
 	s.admit(log, "an M-SEARCH", netip.MustParseAddr("100.64.0.7"), "100.64.0.99")
 	s.admit(log, "an M-SEARCH", netip.Addr{}, "100.64.0.99")
