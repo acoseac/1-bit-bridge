@@ -76,6 +76,40 @@ func wantGroup(paths ...string) string {
 	return strings.Join(q[:len(q)-1], ", ") + " and " + q[len(q)-1]
 }
 
+// nameCollisionWarning runs the check on cfgPath, requires a warning whose
+// summary counts exactly groups group(s), and returns it for the hint's
+// assertions.
+func nameCollisionWarning(t *testing.T, cfgPath string, groups int) doctor.Check {
+	t.Helper()
+	c := nameCollisionCheck(t, cfgPath)
+	if c.Status != doctor.Warn {
+		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
+	}
+	if want := strconv.Itoa(groups) + " group(s) "; !strings.HasPrefix(c.Summary, want) {
+		t.Errorf("summary does not count exactly %d group(s): %q", groups, c.Summary)
+	}
+	return c
+}
+
+// nameCollisionPass runs the check on cfgPath and requires a pass whose
+// summary says it compared exactly paths track path(s).
+func nameCollisionPass(t *testing.T, cfgPath string, paths int) {
+	t.Helper()
+	c := nameCollisionCheck(t, cfgPath)
+	if c.Status != doctor.OK {
+		t.Fatalf("status=%v, want ok\nsummary: %s\nhint: %s", c.Status, c.Summary, c.Hint)
+	}
+	if want := strconv.Itoa(paths) + " track path(s) under the library roots; "; !strings.HasPrefix(c.Summary, want) {
+		t.Errorf("summary does not say it compared %d track path(s): %q", paths, c.Summary)
+	}
+}
+
+// composedPair is how the hint names an NFD and an NFC spelling of one name,
+// which print alike: the decomposed one sorts first.
+func composedPair(nfd, nfc string) string {
+	return strconv.Quote(nfd) + " (decomposed) and " + strconv.Quote(nfc) + " (composed)"
+}
+
 // TestDoctorNameCollisionsNamesAComposedAndADecomposedSpelling: an album
 // folder stored once composed (NFC "Café") and once decomposed (NFD, "e" and
 // a combining acute) is one folder to the app. The two print alike, so the
@@ -87,15 +121,9 @@ func TestDoctorNameCollisionsNamesAComposedAndADecomposedSpelling(t *testing.T) 
 		nfd + "/01 Intro.flac",
 		"Artist/Other/01 Intro.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "1 group(s) ") {
-		t.Errorf("summary does not count one group: %q", c.Summary)
-	}
+	c := nameCollisionWarning(t, cfgPath, 1)
 	// NFD sorts first: "e" (0x65) is below the composed letter's lead byte.
-	want := strconv.Quote(nfd) + " (decomposed) and " + strconv.Quote(nfc) + " (composed)"
+	want := composedPair(nfd, nfc)
 	if !strings.Contains(c.Hint, want) {
 		t.Errorf("hint does not name the pair as %s:\n%s", want, c.Hint)
 	}
@@ -112,13 +140,7 @@ func TestDoctorNameCollisionsNamesTwoSpellingsThatDifferOnlyInCase(t *testing.T)
 		upper, lower,
 		"The Beatles/Abbey Road/02 Something.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "1 group(s) ") {
-		t.Errorf("summary does not count one group: %q", c.Summary)
-	}
+	c := nameCollisionWarning(t, cfgPath, 1)
 	if want := wantGroup(upper, lower); !strings.Contains(c.Hint, want) {
 		t.Errorf("hint does not name the pair as %s:\n%s", want, c.Hint)
 	}
@@ -142,13 +164,7 @@ func TestDoctorNameCollisionsReportsAStrayFolderOnceNotPerTrack(t *testing.T) {
 		"artist/Album/03 Three.flac",
 		"artist/Album/04 Four.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "1 group(s) ") {
-		t.Errorf("summary does not count exactly one group: %q", c.Summary)
-	}
+	c := nameCollisionWarning(t, cfgPath, 1)
 	if want := wantGroup("Artist", "artist"); !strings.Contains(c.Hint, want) {
 		t.Errorf("hint does not name the folder pair as %s:\n%s", want, c.Hint)
 	}
@@ -169,13 +185,7 @@ func TestDoctorNameCollisionsComparesAPathOnlyWithinItsOwnRoot(t *testing.T) {
 		"Archive/miles davis/Kind of Blue/01 So What.flac",
 		"Archive/John Coltrane/Blue Train/01 Blue Train.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "1 group(s) ") {
-		t.Errorf("summary does not count exactly one group (the cross-root pair is not one): %q", c.Summary)
-	}
+	c := nameCollisionWarning(t, cfgPath, 1)
 	if want := wantGroup("Music/Miles Davis/Kind Of Blue", "Music/Miles Davis/Kind of Blue"); !strings.Contains(c.Hint, want) {
 		t.Errorf("hint does not name the in-root pair as %s:\n%s", want, c.Hint)
 	}
@@ -195,14 +205,8 @@ func TestDoctorNameCollisionsComparesTheRootsFolderNames(t *testing.T) {
 		nfc + "/Artist/Album/01 Intro.flac",
 		nfd + "/Artist/Album/01 Intro.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "1 group(s) ") {
-		t.Errorf("summary does not count exactly one group: %q", c.Summary)
-	}
-	want := strconv.Quote(nfd) + " (decomposed) and " + strconv.Quote(nfc) + " (composed)"
+	c := nameCollisionWarning(t, cfgPath, 1)
+	want := composedPair(nfd, nfc)
 	if !strings.Contains(c.Hint, want) {
 		t.Errorf("hint does not name the two roots' folders as %s:\n%s", want, c.Hint)
 	}
@@ -219,13 +223,7 @@ func TestDoctorNameCollisionsNamesTheFirstFiveGroupsAndCountsTheRest(t *testing.
 		paths = append(paths, "Beta/Album/01 "+n+".flac", "Beta/Album/01 "+strings.ToLower(n)+".flac")
 	}
 	cfgPath := nameCollisionInstall(t, []string{"Music"}, paths)
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.Warn {
-		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
-	}
-	if !strings.HasPrefix(c.Summary, "7 group(s) ") {
-		t.Errorf("summary does not count all seven groups: %q", c.Summary)
-	}
+	c := nameCollisionWarning(t, cfgPath, 7)
 	if doctorNameCollisionGroups != 5 {
 		t.Fatalf("the hint names %d group(s), and this test names five", doctorNameCollisionGroups)
 	}
@@ -258,13 +256,7 @@ func TestDoctorNameCollisionsPassesALibraryWithNoCollisions(t *testing.T) {
 		"Artist A/Greatest Hits/01 Song.flac",
 		"Artist B/greatest hits/01 Song.flac",
 	})
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.OK {
-		t.Fatalf("status=%v, want ok\nsummary: %s\nhint: %s", c.Status, c.Summary, c.Hint)
-	}
-	if !strings.HasPrefix(c.Summary, "8 track path(s) under the library roots; ") {
-		t.Errorf("summary does not say what it compared: %q", c.Summary)
-	}
+	nameCollisionPass(t, cfgPath, 8)
 }
 
 // TestDoctorNameCollisionsLeavesUPnPRoutedRowsOut: a routed row's path is
@@ -290,11 +282,5 @@ func TestDoctorNameCollisionsLeavesUPnPRoutedRowsOut(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	c := nameCollisionCheck(t, cfgPath)
-	if c.Status != doctor.OK {
-		t.Fatalf("status=%v, want ok (routed rows are not compared)\nsummary: %s\nhint: %s", c.Status, c.Summary, c.Hint)
-	}
-	if !strings.HasPrefix(c.Summary, "1 track path(s) under the library roots; ") {
-		t.Errorf("summary counts the routed rows: %q", c.Summary)
-	}
+	nameCollisionPass(t, cfgPath, 1)
 }
