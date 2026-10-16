@@ -1713,6 +1713,14 @@ lost my library."
   (the spelling variants skip on a volume that tells them apart: both on
   Linux, the composition one on Windows), and the `TestSpeller…` tests over
   a fake volume that folds as APFS does.
+- **Two spellings of one name in one folder stay two rows and are REPORTED:
+  `bridge doctor`'s `name-collisions`** (2026-10-16, backlog B420). The app
+  folds bridge and UPnP shares, with no per-host detection, so the user fixes
+  the copies. The check reads `TrackPathsLocal` (no routed row, no library
+  walk, no write) and groups each folder's children by `renameFold`: a stray
+  folder is one group, and the roots' own folder names are compared too. It
+  names the first five groups. **Don't give it another fold.**
+  (`TestDoctorNameCollisionsReportsAStrayFolderOnceNotPerTrack`.)
 - **A single↔multi root flip calls `WipeFilesystemTracks`, never
   `WipeAllTracks`** — the latter CASCADE-deletes `upnp_track_routing`,
   destroying an entire upstream library and its cached enrichment on a mere

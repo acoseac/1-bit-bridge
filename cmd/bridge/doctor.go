@@ -428,6 +428,11 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 				d.VariantsIndex = func(ctx context.Context) (doctor.VariantsIndex, error) {
 					return variantsIndexCounts(ctx, dbPath, variantsDir, maxDeletePercent, doctorVariantsIndexBudget)
 				}
+				// Names in one folder the app reads as one (backlog B420):
+				// the same lazy open, over the indexed paths alone.
+				d.NameCollisions = func(ctx context.Context) (doctor.NameCollisions, error) {
+					return nameCollisionGroups(ctx, dbPath, doctorNameCollisionGroups)
+				}
 			}
 		}
 	}
@@ -597,6 +602,46 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 			p = rel
 		}
 		out.OrphanSample = append(out.OrphanSample, p)
+	}
+	return out, nil
+}
+
+// doctorNameCollisionGroups is how many groups the name-collisions hint
+// names: the bound the variants-index hint puts on its sample. The summary
+// counts every group.
+const doctorNameCollisionGroups = doctorVariantsIndexSamples
+
+// nameCollisionGroups compares the indexed track paths for names in one
+// folder that differ only in case or Unicode composition, for the doctor's
+// name-collisions check. Opened per call and closed immediately, like the
+// other manifest probes: `bridge doctor` may run beside a live `bridge
+// serve`. It reads the manifest and walks no library folder.
+//
+// TrackPathsLocal, not TrackPaths: a UPnP-routed row's path is made from
+// another server's metadata, and nothing on this host is a copy to fix.
+//
+// Unbounded, unlike the variants-index walk, though `/api/doctor` runs on a
+// settings-page render too: it reads rows, not the disk, and a budget would
+// miss the scattered pairs it exists to find. Measured on a synthetic
+// 100,000-track store (an M-series Mac, go1.26.6): ~28 ms to read the paths,
+// ~20 ms to compare them.
+func nameCollisionGroups(ctx context.Context, dbPath string, maxGroups int) (doctor.NameCollisions, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return doctor.NameCollisions{}, err
+	}
+	st, err := manifest.OpenStore(dbPath)
+	if err != nil {
+		return doctor.NameCollisions{}, err
+	}
+	defer func() { _ = st.Close() }()
+	paths, err := st.TrackPathsLocal(ctx)
+	if err != nil {
+		return doctor.NameCollisions{}, err
+	}
+	r := manifest.FindNameCollisions(paths, maxGroups)
+	out := doctor.NameCollisions{Paths: r.Paths, Groups: r.Groups}
+	for _, g := range r.First {
+		out.Sample = append(out.Sample, g.Paths)
 	}
 	return out, nil
 }
