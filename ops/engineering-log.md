@@ -45021,3 +45021,13 @@ share `newRealSearchProvider` and `newSearchRouter` (`23e18ef2`, tests
 only). With B425's fix reverted on that commit (`writeError` with
 `err.Error()`), the B425 router test is still red at its own assertions: the
 message, the three leak fragments, and no request-failed line.
+
+**After the 3.1 Pro review.** It found the silent return too broad: it took
+any `context.Canceled`, so a cancel from inside the search while the client
+still waits would also have written nothing and sent an empty 200, against
+B364's rule that a cancel while the request context is live is the server's.
+The return now asks `clientWentAway` (the error is a cancel and the request's
+context is the one cancelled), the helper `writeErrorLog` already uses.
+`TestSearchSwallowsAClientCancellation` sent its cancel with a live request,
+so it now cancels its request's context, as a client abort does; the new
+`TestASearchCancelWhileTheRequestIsLiveAnswers500` pins the other half.

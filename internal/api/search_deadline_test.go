@@ -210,6 +210,43 @@ func TestASearchPastItsDeadlineThroughTheRealStoreAnswers500(t *testing.T) {
 	assertSearchDeadlineIsAServerFailure(t, rr, buf.String())
 }
 
+// TestASearchCancelWhileTheRequestIsLiveAnswers500 pins the other half of
+// the search's silent return (the review on #1270): it is for the client's
+// own abort only. A context.Canceled from inside the search while the
+// request's context is still live is the server's failure, so by B364's
+// rule it is Error and 500 with the fixed message, never an empty 200.
+func TestASearchCancelWhileTheRequestIsLiveAnswers500(t *testing.T) {
+	buf := withTestSlog(t)
+	stub := &stubSearcher{available: true,
+		err: fmt.Errorf("search tracks_fts (served): %w", context.Canceled)}
+	router, token := newSearchRouter(t, stub)
+
+	rr := searchWith(context.Background(), router, token)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%q", rr.Code, rr.Body.String())
+	}
+	logged := buf.String()
+	failed := linesContaining(logged, `msg="request failed"`)
+	if len(failed) != 1 {
+		t.Fatalf("want one request-failed line, got %d; log:\n%s", len(failed), logged)
+	}
+	for _, want := range []string{"level=ERROR", "status=500", "code=internal", "context canceled"} {
+		if !strings.Contains(failed[0], want) {
+			t.Errorf("request-failed line lacks %q: %s", want, failed[0])
+		}
+	}
+	er := decodeErrorResponse(t, rr.Body.Bytes())
+	if er.Error != "internal" || er.Message != searchFailedMessage {
+		t.Errorf("body = {%q, %q}, want {internal, %q}", er.Error, er.Message, searchFailedMessage)
+	}
+	for _, leak := range []string{"tracks_fts", "canceled", "context"} {
+		if strings.Contains(rr.Body.String(), leak) {
+			t.Errorf("the 500 body carries %q from the error's text: %s", leak, rr.Body.String())
+		}
+	}
+}
+
 // TestAClientAbortDuringSearchStaysInfo pins what B434 leaves alone. A
 // client that keeps typing abandons the search in flight, which cancels
 // the request's context, and the handler returns without writing: no

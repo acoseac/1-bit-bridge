@@ -114,14 +114,18 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		// abandons the request in flight — reporting that as 500 would
 		// bury real failures under noise in the logs and in the error
 		// metrics, and the client is gone anyway so nothing reads the
-		// body. Return silently. (Gemini HIGH.)
+		// body. Return silently. (Gemini HIGH.) Only for the client's own
+		// abort, though: clientWentAway asks that the request's context be
+		// the one cancelled. A cancel from inside the search while the
+		// request is still live is the server's failure and takes the 500
+		// below, by B364's rule (the review on #1270).
 		//
 		// A DEADLINE is not that case. The only one on this request is
 		// the route's own 5 s (withCtxTimeout), so the search ran out of
 		// the server's time while the client still waits. Returning here
 		// sent it an empty 200, which reads as "no results" (backlog
 		// B434); it takes the 500 below.
-		if errors.Is(err, context.Canceled) {
+		if clientWentAway(r, err) {
 			return
 		}
 		if errors.Is(err, manifest.ErrSearchUnavailable) {
