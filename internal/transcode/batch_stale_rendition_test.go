@@ -169,6 +169,10 @@ func TestABatchRendersARenditionThatARetagAndAScanMadeStale(t *testing.T) {
 			if !slices.Equal(rendered, tc.renders) {
 				t.Fatalf("the first batch rendered %v, want %v", rendered, tc.renders)
 			}
+			if res.EnqueuedCount != len(tc.renders) || res.AlreadyCovered != 0 {
+				t.Fatalf("the first batch: enqueued %d, alreadyCovered %d, want %d and 0",
+					res.EnqueuedCount, res.AlreadyCovered, len(tc.renders))
+			}
 
 			// A retag, then the scan that reads it: each row's stamp moves.
 			before := map[string]*manifest.TrackStat{}
