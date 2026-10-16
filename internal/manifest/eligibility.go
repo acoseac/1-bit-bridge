@@ -2,12 +2,16 @@
 // coverage bars (eligible-denominator semantics).
 //
 // The tile bars answer "did my generate finish?" — so their
-// denominator counts tracks that HAVE a variant of the kind OR are
-// currently ELIGIBLE to get one. Tracks that need nothing (already at
-// the CarPlay floor / at the upscale target / DSD / unknown geometry)
-// drop out of the denominator instead of pinning mixed folders below
-// 100% forever (field case: ABBA 62/136 "optimized" where the other
-// 74 tracks were already 16/44.1 — natively CarPlay-ready).
+// denominator counts tracks that HAVE a fresh variant of the kind OR
+// are currently ELIGIBLE to get one. Tracks that need nothing (already
+// at the CarPlay floor / at the upscale target / DSD / unknown
+// geometry) drop out of the denominator instead of pinning mixed
+// folders below 100% forever (field case: ABBA 62/136 "optimized"
+// where the other 74 tracks were already 16/44.1 — natively
+// CarPlay-ready). The covered arm is the freshness predicate the
+// numerators and the batch's projection share (rendition_coverage.go,
+// backlog B100), pinned by the admin package's
+// TestEveryCoverageReadAgreesWithTheRowFreshnessOfItsRenditions.
 //
 // The predicates are SQL MIRRORS of the Go gates:
 //
@@ -163,8 +167,18 @@ const dsdRenderEligibleSQL = `(
 )`
 
 // <kind>CoveredOrEligibleSQL is the coverage DENOMINATOR predicate:
-// this track already HAS a variant of the kind, OR is currently
+// this track already HAS a FRESH variant of the kind, OR is currently
 // eligible to get one.
+//
+// The covered arm is the shared freshness predicate (fresh<Kind>SQL,
+// rendition_coverage.go; backlog B100), the one the numerators and the
+// batch's projection compose, so a numerator can never exceed its
+// denominator and a bar agrees with what a batch enqueues. A stale
+// variant of a track that is still eligible stays in the denominator
+// through the eligible arm, as work; one whose track can no longer get a
+// variant (the DSD caps turned off, the target moved under it) drops out,
+// where counting it would pin the bar below 100% with nothing a batch
+// could render. Until B100 the covered arm was any variant of the kind.
 //
 // Hoisted because EligibleCountsForFolders (the tile bar) and
 // EligibleRollupByPrefix (the action panel's header) render the SAME
@@ -180,37 +194,31 @@ const dsdRenderEligibleSQL = `(
 // pcm (eligibilityBinds lays them out in textual order).
 const (
 	upscaleCoveredOrEligibleSQL = `(
-		EXISTS(SELECT 1 FROM track_variants tv
-		        WHERE tv.source_path = t.path
-		          AND tv.variant_id LIKE 'upscaled-%')
+		` + freshUpscaledSQL + `
 		OR ` + upscaleEligibleSQL + `
 	)`
 
 	optimizeCoveredOrEligibleSQL = `(
-		EXISTS(SELECT 1 FROM track_variants tv
-		        WHERE tv.source_path = t.path
-		          AND tv.variant_id LIKE 'optimized-%')
+		` + freshOptimizedSQL + `
 		OR ` + optimizeEligibleSQL + `
 		OR ` + dsdRenderEligibleSQL + `
 	)`
 
 	// pcmCoveredOrEligibleSQL is the faithful DSD tier's denominator: a
-	// `pcm-` variant exists, or the row could get one. A DSD source that
-	// is eligible for the compact tier is eligible for this one — the
+	// fresh `pcm-` variant exists, or the row could get one. A DSD source
+	// that is eligible for the compact tier is eligible for this one — the
 	// two share dsdRenderEligibleSQL, exactly as the Go gates share
 	// DSDRenderEligible.
 	pcmCoveredOrEligibleSQL = `(
-		EXISTS(SELECT 1 FROM track_variants tv
-		        WHERE tv.source_path = t.path
-		          AND tv.variant_id LIKE 'pcm-%')
+		` + freshPCMSQL + `
 		OR ` + dsdRenderEligibleSQL + `
 	)`
 )
 
 // EligibleCounts carries the per-kind coverage DENOMINATORS for a
-// scope: tracks with a variant of the kind plus tracks currently
+// scope: tracks with a fresh variant of the kind plus tracks currently
 // eligible to get one. The numerators are the existing covered
-// counts (ChildFolderRollup / FolderRollup).
+// counts (ChildFolderRollup / FolderRollup), fresh variants only.
 type EligibleCounts struct {
 	Upscale  int
 	Optimize int
@@ -401,9 +409,9 @@ func (s *Store) EligibleCountsForPaths(ctx context.Context, paths []string, targ
 const eligibleCountsChunk = 400
 
 // EligibleKinds is one track's per-kind coverage-denominator
-// membership: whether it already has a variant of the kind OR could
-// still get one. Same predicate as the count helpers, per row instead
-// of summed.
+// membership: whether it already has a fresh variant of the kind OR
+// could still get one. Same predicate as the count helpers, per row
+// instead of summed.
 type EligibleKinds struct {
 	Upscale  bool
 	Optimize bool

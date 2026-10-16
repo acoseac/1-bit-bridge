@@ -107,8 +107,9 @@ func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog, need
 	}
 	// Nothing to say, so do not pay to say it.
 	//
-	// The grid's badge is drawn from PRESENCE — `covered` and `stale`.
-	// With no `track_variants` row anywhere, `AllVariantPresence` comes
+	// The grid's badge is drawn from the sidecars a track HAS — `covered`
+	// (a fresh one) and `stale` (only stale ones). With no
+	// `track_variants` row anywhere, `AllVariantPresence` comes
 	// back empty, `foldPresence` is never reached, and every album's
 	// coverage is a denominator and nothing else: covered 0, stale 0 for
 	// all of them, which renders no badge on any tile. The expensive

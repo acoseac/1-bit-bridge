@@ -375,16 +375,18 @@ func (s *Store) variantChunkForPaths(ctx context.Context, blob string, out map[s
 // coverage readouts need it.
 //
 // Presence and freshness are separate booleans because they answer
-// different questions. The batch walks skip a track that has a variant
-// of the kind regardless of freshness, so PRESENCE is what "covered"
-// means for a coverage bar; a stale sidecar is nonetheless one the
-// serve path answers 410 for, so it has to be countable on its own.
+// different questions. FRESHNESS is what "covered" means for a coverage
+// bar (backlog B100): the batch walks skip only a track with a fresh
+// variant of the kind, so a stale one is work a Generate renders again.
+// PRESENCE is what a stale track still has: a sidecar on disk, which the
+// serve path answers 410 for and Delete removes, so it has to be
+// countable on its own (the readouts' `stale`).
 //
 // Freshness compares the variant's stamped source facts against the
-// scanner's record of the file, not a live stat: it is the same
-// definition autoOptimizeCandidateSQL uses to decide what needs
-// regenerating, it costs no filesystem access, and it is the only
-// definition available at all for a UPnP-routed row.
+// scanner's record of the file, not a live stat: it is renditionFreshSQL,
+// the one definition every coverage read and the batch's projection
+// compose, it costs no filesystem access, and it is the only definition
+// available at all for a UPnP-routed row.
 type VariantPresence struct {
 	Upscaled       bool
 	UpscaledFresh  bool
@@ -406,7 +408,9 @@ type VariantPresence struct {
 // variantPresenceSelect aggregates one row per source path. Kept as a
 // shared const so the scoped and whole-library forms cannot drift on
 // what counts as present or fresh — the same reason
-// trackProjectionSelect exists.
+// trackProjectionSelect exists. It reads `track_variants` rows itself, so
+// it composes the freshness test directly (renditionFreshSQL) where the
+// per-track reads compose its EXISTS form.
 //
 // The kind LIKE patterns are version-agnostic by design (`upscaled-%`
 // matches both v1 and v2 sidecars); see manifest.VariantKindPrefix*.
@@ -414,12 +418,10 @@ const variantPresenceSelect = `
 	SELECT tv.source_path,
 	       MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%'  THEN 1 ELSE 0 END),
 	       MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%'
-	                 AND tv.source_mtime_ns = t.mtime_ns
-	                 AND tv.source_size     = t.size      THEN 1 ELSE 0 END),
+	                 AND ` + renditionFreshSQL + ` THEN 1 ELSE 0 END),
 	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%' THEN 1 ELSE 0 END),
 	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%'
-	                 AND tv.source_mtime_ns = t.mtime_ns
-	                 AND tv.source_size     = t.size      THEN 1 ELSE 0 END),
+	                 AND ` + renditionFreshSQL + ` THEN 1 ELSE 0 END),
 	       COALESCE(SUM(tv.size_bytes), 0)
 	  FROM track_variants tv
 	  JOIN tracks t ON t.path = tv.source_path`

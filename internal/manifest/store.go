@@ -7438,16 +7438,35 @@ const DSDRenditionSchemaVersion = "v2"
 // "f.path/" and nothing past — index-friendly range scan against
 // the existing PRIMARY KEY on tracks(path) / track_variants(source_path).
 // Per Gemini medium on PR #200.
+//
+// **The two counts are tracks with a FRESH rendition of the kind**
+// (backlog B100), the numerators of the bars whose denominators
+// EligibleCountsForFolders draws beside them: the renditions of the kind
+// under the folder whose stamp is the row's (renditionFreshSQL, through a
+// JOIN to the row), counted once per track. The two sizes still sum every
+// rendition, stale ones included, since their disk is real. Until B100
+// the counts were the same `COUNT(DISTINCT tv.source_path)` with no JOIN
+// and no freshness term.
+//
+// A JOIN over the folder's renditions rather than the per-track EXISTS
+// the denominators compose (freshOptimizedSQL), on measurement: over
+// 50,000 tracks and 45,000 renditions the root listing took 73 ms before
+// B100, 111 ms this way and 138 ms through the EXISTS, which visits every
+// track row in the folder instead of only its renditions.
 const childFolderRollupSelect = `
 	SELECT f.path,
 	       (SELECT COUNT(*) FROM tracks t
 	          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS track_count,
 	       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+	          JOIN tracks t ON t.path = tv.source_path
 	          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
-	            AND tv.variant_id LIKE 'upscaled-%') AS upscaled_count,
+	            AND tv.variant_id LIKE 'upscaled-%'
+	            AND ` + renditionFreshSQL + `) AS upscaled_count,
 	       (SELECT COUNT(DISTINCT tv.source_path) FROM track_variants tv
+	          JOIN tracks t ON t.path = tv.source_path
 	          WHERE tv.source_path >= f.path || '/' AND tv.source_path < f.path || '0'
-	            AND tv.variant_id LIKE 'optimized-%') AS optimized_count,
+	            AND tv.variant_id LIKE 'optimized-%'
+	            AND ` + renditionFreshSQL + `) AS optimized_count,
 	       (SELECT COALESCE(SUM(t.size), 0) FROM tracks t
 	          WHERE t.path >= f.path || '/' AND t.path < f.path || '0') AS total_size,
 	       (SELECT COALESCE(SUM(tv.size_bytes), 0) FROM track_variants tv
@@ -7461,25 +7480,23 @@ const childFolderRollupSelect = `
 // per-track browse rows (ListChildTracks + ListChildTracksPage's
 // two branches). Same dedup motivation. Result column order
 // matches the `rows.Scan(&ct.Path, &ct.Size, &rate, &bits, &codec,
-// &isDSDRaw, &upscaled, &optimized)` call site.
+// &isDSDRaw, &upscaled, &optimized)` call site. The two flags are a
+// FRESH rendition of the kind (backlog B100), the per-track twin of
+// childFolderRollupSelect's counts.
 const childTrackRowSelect = `
 	SELECT t.path, t.size,
 	       json_extract(t.tags_json, '$.sampleRate')    AS sample_rate,
 	       json_extract(t.tags_json, '$.bitsPerSample') AS bits_per_sample,
 	       json_extract(t.tags_json, '$.codec')         AS codec,
 	       json_extract(t.tags_json, '$.isDSD')         AS is_dsd,
-	       EXISTS(SELECT 1 FROM track_variants tv
-	               WHERE tv.source_path = t.path
-	                 AND tv.variant_id LIKE 'upscaled-%')  AS is_upscaled,
-	       EXISTS(SELECT 1 FROM track_variants tv
-	               WHERE tv.source_path = t.path
-	                 AND tv.variant_id LIKE 'optimized-%') AS is_optimized`
+	       ` + freshUpscaledSQL + `  AS is_upscaled,
+	       ` + freshOptimizedSQL + ` AS is_optimized`
 
 // FolderRollup is the recursive aggregation under one path prefix:
-// total tracks, tracks with at least one variant (split by kind),
-// sum of source sizes, sum of variant sizes (split by kind). Used
-// by `RollupByPrefix` and embedded in `ChildFolderRollup` for browse
-// rows.
+// total tracks, tracks with a fresh variant (split by kind), sum of
+// source sizes, sum of variant sizes (split by kind, every variant
+// fresh or stale). Used by `RollupByPrefix` and embedded in
+// `ChildFolderRollup` for browse rows.
 //
 // Sizes are int64 bytes; counts are int (a library plausibly past
 // MaxInt32 tracks is implausible for the bridge's target deployment).
@@ -7499,8 +7516,12 @@ type FolderRollup struct {
 	TotalSizeBytes      int64
 	UpscaledSizeBytes   int64
 	OptimizedSizeBytes  int64
-	// UpscaledStaleCount / OptimizedStaleCount: the tracks holding only stale
-	// variants of the kind (backlog B100). Declared ahead of the fix, inert.
+	// UpscaledStaleCount / OptimizedStaleCount are the tracks that hold a
+	// variant of the kind and no FRESH one (backlog B100): out of the
+	// *TrackCount numerators, work for a batch, still in the *SizeBytes
+	// sums. They are what lets a panel say so and keep its Delete for
+	// them. Only RollupByPrefix fills them; the per-folder browse rows
+	// (childFolderRollupSelect) carry no stale count and leave both 0.
 	UpscaledStaleCount  int
 	OptimizedStaleCount int
 }
@@ -7519,7 +7540,8 @@ type ChildFolderRollup struct {
 // the admin endpoint doesn't deserialise the full tags_json blob for
 // every row. `IsUpscaled` / `IsOptimized` are determined by EXISTS
 // subqueries against `track_variants`, filtered by `variant_id`
-// prefix so the two flags discriminate kind.
+// prefix so the two flags discriminate kind, and true only for a
+// FRESH variant (freshUpscaledSQL / freshOptimizedSQL, backlog B100).
 type ChildTrack struct {
 	Path          string
 	Size          int64
@@ -7639,11 +7661,12 @@ func (s *Store) ListChildFolders(ctx context.Context, parent string) ([]ChildFol
 //
 // `IsUpscaled` / `IsOptimized` are determined by EXISTS against
 // `track_variants` filtered by `variant_id` prefix — kind-specific
-// "at least one variant exists" signals. The admin Library Inspector
-// uses these to render dual per-row "variant ready" dots without
-// joining the full variant rows. Version-agnostic prefix match
-// (`upscaled-%` / `optimized-%`) covers BOTH v1 (legacy) and v2
-// sidecars.
+// "at least one FRESH variant exists" signals (backlog B100: a variant
+// whose source the scanner has since read as changed is stale, and
+// marks nothing). The admin Library Inspector uses these to render
+// dual per-row "variant ready" dots without joining the full variant
+// rows. Version-agnostic prefix match (`upscaled-%` / `optimized-%`)
+// covers BOTH v1 (legacy) and v2 sidecars.
 func (s *Store) ListChildTracks(ctx context.Context, parent string) ([]ChildTrack, error) {
 	var (
 		rows *sql.Rows
@@ -7964,15 +7987,27 @@ func (s *Store) CountChildTracks(ctx context.Context, parent string) (int, error
 }
 
 // RollupByPrefix returns the recursive aggregation under `prefix`:
-// total track count, tracks with at least one variant, sum of source
-// sizes, sum of variant sizes. Empty prefix means "the whole library."
+// total track count, tracks with a FRESH variant of each kind, tracks
+// holding only stale ones, sum of source sizes, sum of variant sizes.
+// Empty prefix means "the whole library."
+//
+// The per-kind track counts are the tracks holding a variant of the kind
+// whose stamp is the row's (renditionFreshSQL, backlog B100), so they agree
+// with the covered-or-eligible denominators EligibleRollupByPrefix renders
+// beside them; the sizes sum every variant, fresh or stale, as the disk
+// does. The stale counts are the tracks that hold a variant of the kind
+// (`COUNT(DISTINCT source_path)`, the count this returned until B100)
+// minus those with a fresh one. One pass over the scope's variants,
+// LEFT JOINed to their rows, answers all six (rollupVariantsPerPathSQL;
+// childFolderRollupSelect's counts JOIN the same way, for its measured
+// reason).
 //
 // Used by the admin Library Inspector to render per-root summaries
 // on the empty-parent browse, and by the projection endpoint
 // (apiLibraryBrowseProjection) to back out the source-size sum the
 // operator's pre-flight needs before a batch submit.
 //
-// The four counters come from two scalar queries (tracks + variants)
+// The counters come from two scalar queries (tracks + variants)
 // so the round-trip cost is two SQLite calls regardless of subtree
 // size. Indexes on `tracks(path)` and `track_variants(source_path)`
 // make these O(matched rows) lookups.
@@ -7997,24 +8032,19 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	if strings.TrimRight(prefix, "/") == "" {
 		// One round-trip: two scalar subqueries cover `tracks`, and the
 		// conditional aggregation scans `track_variants` exactly once
-		// instead of twice (Gemini on PR #340).
-		var out FolderRollup
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT
-			  (SELECT COUNT(*) FROM tracks),
-			  (SELECT COALESCE(SUM(size), 0) FROM tracks),
-			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'upscaled-%'  THEN source_path END),
-			  COALESCE(SUM(CASE WHEN variant_id LIKE 'upscaled-%'  THEN size_bytes END), 0),
-			  COUNT(DISTINCT CASE WHEN variant_id LIKE 'optimized-%' THEN source_path END),
-			  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
-			FROM track_variants
-		`).Scan(
+		// instead of twice (Gemini on PR #340). See rollupGlobalSQL.
+		var (
+			out                         FolderRollup
+			upscaledHeld, optimizedHeld int
+		)
+		if err := s.db.QueryRowContext(ctx, rollupGlobalSQL).Scan(
 			&out.TrackCount, &out.TotalSizeBytes,
-			&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
-			&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
+			&out.UpscaledTrackCount, &upscaledHeld, &out.UpscaledSizeBytes,
+			&out.OptimizedTrackCount, &optimizedHeld, &out.OptimizedSizeBytes,
 		); err != nil {
 			return FolderRollup{}, fmt.Errorf("rollup global stats: %w", err)
 		}
+		out.setStale(upscaledHeld, optimizedHeld)
 		return out, nil
 	}
 	// Non-empty prefix: scope to the subtree with the byte-range form
@@ -8043,7 +8073,10 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// byte-range siblings, and ListTrackProjectionsUnderPrefix (which
 	// uses an escaped LIKE) differ deliberately.
 	base := strings.TrimRight(prefix, "/")
-	var out FolderRollup
+	var (
+		out                         FolderRollup
+		upscaledHeld, optimizedHeld int
+	)
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(size), 0)
 		  FROM tracks
@@ -8051,21 +8084,74 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	`, base, base).Scan(&out.TrackCount, &out.TotalSizeBytes); err != nil {
 		return FolderRollup{}, fmt.Errorf("rollup tracks %q: %w", prefix, err)
 	}
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT
-		  COUNT(DISTINCT CASE WHEN variant_id LIKE 'upscaled-%'  THEN source_path END),
-		  COALESCE(SUM(CASE WHEN variant_id LIKE 'upscaled-%'  THEN size_bytes END), 0),
-		  COUNT(DISTINCT CASE WHEN variant_id LIKE 'optimized-%' THEN source_path END),
-		  COALESCE(SUM(CASE WHEN variant_id LIKE 'optimized-%' THEN size_bytes END), 0)
-		  FROM track_variants
-		 WHERE source_path >= ? || '/' AND source_path < ? || '0'
-	`, base, base).Scan(
-		&out.UpscaledTrackCount, &out.UpscaledSizeBytes,
-		&out.OptimizedTrackCount, &out.OptimizedSizeBytes,
+	if err := s.db.QueryRowContext(ctx, rollupPrefixVariantsSQL, base, base).Scan(
+		&out.UpscaledTrackCount, &upscaledHeld, &out.UpscaledSizeBytes,
+		&out.OptimizedTrackCount, &optimizedHeld, &out.OptimizedSizeBytes,
 	); err != nil {
 		return FolderRollup{}, fmt.Errorf("rollup variants %q: %w", prefix, err)
 	}
+	out.setStale(upscaledHeld, optimizedHeld)
 	return out, nil
+}
+
+// rollupVariantsPerPathSQL is RollupByPrefix's one pass over a scope's
+// variants, LEFT JOINed to their rows (`tv`, `t`) and grouped per track:
+// per kind, whether the track holds a fresh variant (renditionFreshSQL; a
+// variant whose row is gone is never fresh), whether it holds any, and the
+// bytes of every one. rollupVariantSums adds them up. The LEFT JOIN keeps
+// the held counts and the bytes what they were before backlog B100, a
+// row-less variant included.
+//
+// Grouped rather than `COUNT(DISTINCT …)` per counter, on measurement: the
+// group follows the primary key's (source_path, variant_id) order, where
+// each DISTINCT builds a temporary b-tree of its own. Over 50,000 tracks
+// and 45,000 variants the whole-library rollup took 130 ms with four
+// DISTINCT counts and 90 ms grouped (54 ms before B100, with two).
+const rollupVariantsPerPathSQL = `
+	SELECT MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%' AND ` + renditionFreshSQL + ` THEN 1 ELSE 0 END) AS up_fresh,
+	       MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%'  THEN 1 ELSE 0 END)            AS up_held,
+	       SUM(CASE WHEN tv.variant_id LIKE 'upscaled-%'  THEN tv.size_bytes ELSE 0 END) AS up_bytes,
+	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%' AND ` + renditionFreshSQL + ` THEN 1 ELSE 0 END) AS opt_fresh,
+	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%' THEN 1 ELSE 0 END)            AS opt_held,
+	       SUM(CASE WHEN tv.variant_id LIKE 'optimized-%' THEN tv.size_bytes ELSE 0 END) AS opt_bytes
+	  FROM track_variants tv
+	  LEFT JOIN tracks t ON t.path = tv.source_path`
+
+// rollupVariantSums is the column list both statements below read, in the
+// order RollupByPrefix scans it.
+const rollupVariantSums = `
+	  COALESCE(SUM(up_fresh), 0), COALESCE(SUM(up_held), 0), COALESCE(SUM(up_bytes), 0),
+	  COALESCE(SUM(opt_fresh), 0), COALESCE(SUM(opt_held), 0), COALESCE(SUM(opt_bytes), 0)`
+
+// rollupGlobalSQL is RollupByPrefix's whole-library statement: the two
+// `tracks` scalars, then ONE pass over `track_variants` (Gemini on PR
+// #340). Both statements are named, so they stay compile-time constants
+// (the go:S2077 shape).
+const (
+	rollupGlobalSQL = `
+	SELECT
+	  (SELECT COUNT(*) FROM tracks),
+	  (SELECT COALESCE(SUM(size), 0) FROM tracks),` + rollupVariantSums + `
+	  FROM (` + rollupVariantsPerPathSQL + `
+	        GROUP BY tv.source_path)`
+
+	// rollupPrefixVariantsSQL scopes the same pass to a subtree. Binds:
+	// the trimmed base, twice.
+	rollupPrefixVariantsSQL = `
+	SELECT` + rollupVariantSums + `
+	  FROM (` + rollupVariantsPerPathSQL + `
+	         WHERE tv.source_path >= ? || '/' AND tv.source_path < ? || '0'
+	         GROUP BY tv.source_path)`
+)
+
+// setStale records, per kind, the tracks that hold a variant and no fresh
+// one: `held` (a variant of the kind) less the fresh count already in the
+// rollup. Never negative: a fresh variant is a held one, so a negative
+// difference could only come from a variant row whose track row is gone,
+// which the foreign key's cascade rules out.
+func (r *FolderRollup) setStale(upscaledHeld, optimizedHeld int) {
+	r.UpscaledStaleCount = max(upscaledHeld-r.UpscaledTrackCount, 0)
+	r.OptimizedStaleCount = max(optimizedHeld-r.OptimizedTrackCount, 0)
 }
 
 // CountVariantsByKind returns the total `track_variants.size_bytes`
@@ -8347,7 +8433,10 @@ type TrackProjection struct {
 	// which every consumer treats as "fall back", never as a real value.
 	DurationSec float64
 	Channels    int
-	HasVariant  bool
+	// HasVariant is a FRESH variant of the projected kind (backlog B100):
+	// one whose recorded source version is the row's. A stale one is not
+	// coverage, so the batch walks render it again.
+	HasVariant bool
 	// Suppressed marks a source that has failed conversion
 	// `variantFailureThreshold` consecutive times on THIS version of the
 	// file, recently enough to still count (migration v39). The batch walks
@@ -8359,9 +8448,10 @@ type TrackProjection struct {
 // ListTrackProjectionsUnderPrefix iterates every track under `prefix`
 // (recursive — NOT one-level) and returns the slim projection fields
 // the admin pre-flight needs to compute the batch's projected
-// variant size. `HasVariant` is true when at least one variant
-// matching `variantPrefix` exists at the source path, so the caller
-// can subtract tracks already covered from the projected total.
+// variant size. `HasVariant` is true when at least one FRESH variant
+// matching `variantPrefix` exists at the source path (its recorded
+// source version is the row's, backlog B100), so the caller can
+// subtract tracks already covered from the projected total.
 //
 // `variantPrefix` is one of `VariantKindPrefixUpscaled` /
 // `VariantKindPrefixOptimized` (e.g. "upscaled" or "optimized").
@@ -8433,6 +8523,13 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 // suppression cutoff, in that order — see the binding-order note on
 // ListTrackProjectionsUnderPrefix; any caller appending a WHERE binds
 // its own parameters AFTER those two.
+//
+// `has_variant` is freshOfBoundKindSQL, the shared "a FRESH rendition of
+// the kind" predicate (backlog B100): the batch walks read it as
+// "already covered", so a rendition a retag made stale is work for a
+// batch as it is for the CLI, the on-demand path and the sweep, and the
+// coverage bars (which compose the same predicate) agree with what a
+// batch enqueues. Until B100 it was any rendition of the kind.
 const trackProjectionSelect = `
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
@@ -8442,9 +8539,7 @@ const trackProjectionSelect = `
 		       COALESCE(t.compression, '') AS compression,
 		       COALESCE(json_extract(t.tags_json, '$.duration'), 0) AS duration_sec,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.channels'), 0) AS INTEGER) AS channels,
-		       EXISTS(SELECT 1 FROM track_variants tv
-		               WHERE tv.source_path = t.path
-		                 AND tv.variant_id LIKE ?) AS has_variant,
+		       ` + freshOfBoundKindSQL + ` AS has_variant,
 		       ` + variantFailureSuppressedSQL + ` AS suppressed
 		  FROM tracks t`
 

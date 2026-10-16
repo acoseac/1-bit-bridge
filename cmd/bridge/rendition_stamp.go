@@ -39,8 +39,9 @@ package main
 //     its row was written, once the rescan it asks for has read the change.
 //     Every rescan drops the album-gain index and nudges the auto-optimize
 //     sweep too. With the sweep off, the default, nothing else renders a
-//     stale rendition: a batch counts it covered, and a client asks for a
-//     new one only once it stops listing the old one.
+//     stale rendition unasked: a batch renders it once an operator submits
+//     one (backlog B100; it counted it covered until then), and a client
+//     asks for a new one only once it stops listing the old one.
 //
 // Before this, the on-demand path and the CLI stamped a live stat while the
 // rest stamped the row, and each writer undid the other: measured on a real
@@ -283,11 +284,12 @@ const staleRenditionWaitMax = time.Hour
 // staleRenditionHeal is the download path's side of a stale rendition
 // (api.StaleRenditionFunc): told of every rendition a GET found stale, it has
 // it rendered again (backlog B82). Until then a phone plays the source, and
-// nothing else renders it on a bridge whose auto-optimize sweep is off, the
-// default: a batch counts a track with any rendition of the family as
-// covered, and the app asks for a new one only once it stops listing the
-// old one, which it does after a 410 on some of its playback routes and never
-// for an offline download.
+// nothing else renders it unasked on a bridge whose auto-optimize sweep is
+// off, the default: a batch renders it only when an operator submits one
+// (since backlog B100; until then a batch counted a track with any
+// rendition of the family as covered), and the app asks for a new one only
+// once it stops listing the old one, which it does after a 410 on some of
+// its playback routes and never for an offline download.
 //
 //   - While the file's row is behind it (the file changed since the scan
 //     that wrote the row), it asks for a rescan of the file's directory

@@ -73,8 +73,12 @@ type browseFolderRow struct {
 	UpscaledSizeBytes  int64  `json:"upscaledSizeBytes"`
 	OptimizedSizeBytes int64  `json:"optimizedSizeBytes"`
 	PathHash           string `json:"pathHash"`
+	// UpscaledCount / OptimizedCount are the NUMERATORS: tracks with a
+	// FRESH variant of the kind (backlog B100); the two sizes count every
+	// variant, stale ones included.
+	//
 	// *EligibleCount are the coverage-bar DENOMINATORS: tracks that
-	// have a variant of the kind OR are currently eligible to get one
+	// have a fresh variant of the kind OR are currently eligible to get one
 	// (manifest.EligibleCountsForFolders). Tracks that need nothing —
 	// at the CarPlay floor, at the upscale target, DSD, unknown
 	// geometry — drop out so a fully-processed mixed folder reads
@@ -93,7 +97,7 @@ type browseFolderRow struct {
 // fields preserve the "tag absent" vs "tag = 0" distinction that
 // the manifest's `Track` wire shape already documents — same
 // convention. `IsOptimized` mirrors `IsUpscaled` for the CarPlay
-// variant kind.
+// variant kind; both mark a FRESH variant only (backlog B100).
 type browseTrackRow struct {
 	Name          string   `json:"name"`
 	Path          string   `json:"path"`
@@ -148,13 +152,19 @@ type browseResponse struct {
 	// pages don't update it, so re-walking the whole subtree on every
 	// follow-up page would be wasted work on exactly the large-node case
 	// pagination exists for (Gemini + CodeRabbit on PR #343).
-	SubtreeTracks    int   `json:"subtreeTracks,omitempty"`
-	SubtreeUpscaled  int   `json:"subtreeUpscaled,omitempty"`
-	SubtreeOptimized int   `json:"subtreeOptimized,omitempty"`
-	SubtreeSizeBytes int64 `json:"subtreeSizeBytes,omitempty"`
-	// Declared ahead of backlog B100's fix, inert.
-	SubtreeUpscaledStale  int `json:"subtreeUpscaledStale,omitempty"`
-	SubtreeOptimizedStale int `json:"subtreeOptimizedStale,omitempty"`
+	//
+	// SubtreeUpscaled / SubtreeOptimized count tracks with a FRESH variant
+	// of the kind (backlog B100), the numerators beside the eligible
+	// denominators below. SubtreeUpscaledStale / SubtreeOptimizedStale are
+	// the tracks holding only stale variants of the kind: work for a
+	// Generate, and still disk a Delete frees, which is why the folder
+	// panel needs them (covered + stale is what Delete removes).
+	SubtreeTracks         int   `json:"subtreeTracks,omitempty"`
+	SubtreeUpscaled       int   `json:"subtreeUpscaled,omitempty"`
+	SubtreeOptimized      int   `json:"subtreeOptimized,omitempty"`
+	SubtreeUpscaledStale  int   `json:"subtreeUpscaledStale,omitempty"`
+	SubtreeOptimizedStale int   `json:"subtreeOptimizedStale,omitempty"`
+	SubtreeSizeBytes      int64 `json:"subtreeSizeBytes,omitempty"`
 	// Subtree*Eligible mirror the per-folder eligible denominators for
 	// the ENTIRE node (manifest.EligibleRollupByPrefix) — the action
 	// panel's coverage header uses these. First page only, like the
@@ -416,6 +426,8 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.SubtreeTracks = rollup.TrackCount
 		resp.SubtreeUpscaled = rollup.UpscaledTrackCount
 		resp.SubtreeOptimized = rollup.OptimizedTrackCount
+		resp.SubtreeUpscaledStale = rollup.UpscaledStaleCount
+		resp.SubtreeOptimizedStale = rollup.OptimizedStaleCount
 		resp.SubtreeSizeBytes = rollup.TotalSizeBytes
 		if ec, err := s.deps.Manifest.EligibleRollupByPrefix(r.Context(), normalised, targetRate, targetBits, s.eligibilityOpts()); err == nil {
 			resp.SubtreeUpscaleEligible = intPtr(ec.Upscale)
@@ -609,9 +621,10 @@ func (s *Server) resolveUpscaleTarget(ctx context.Context, cfg *config.Config) (
 // into `unknownFormatFiles` so the UI's "X skipped" copy
 // reconciles with the JSON payload.
 //
-// Tracks that ALREADY have a variant OF THE REQUESTED KIND are
+// Tracks that ALREADY have a FRESH variant OF THE REQUESTED KIND are
 // counted separately (`alreadyCoveredFiles`) and excluded from
-// the projection. **Kind-scoped HasVariant** (senior-review fix):
+// the projection; a stale one is projected work, as it is for the
+// batch this previews (backlog B100). **Kind-scoped HasVariant** (senior-review fix):
 // a track with only an upscale variant correctly shows as
 // eligible (not "already covered") under kind=optimize, and
 // vice versa.

@@ -2,11 +2,12 @@
 // background pre-generation of CarPlay `optimized-*` variants.
 //
 // Deliberately NOT ListTrackProjectionsUnderPrefix. That query backs
-// the admin Library Inspector's pre-flight, where the operator wants
-// to see EVERYTHING under a path (operator truth, the served-population
-// rule's admin-side exception), and its `HasVariant` is a bare
-// existence check. A write path that spends disk and CPU needs three
-// things it doesn't offer:
+// the admin Library Inspector's pre-flight and the batch walks, where
+// the operator wants to see EVERYTHING under a path (operator truth, the
+// served-population rule's admin-side exception), and its `HasVariant`
+// is "a fresh variant of the family, of any schema version" (backlog
+// B100). A write path that spends disk and CPU on its own schedule needs
+// three things it doesn't offer:
 //
 //  1. UPnP-routed rows EXCLUDED. A routed row has no local file, so
 //     `ResolveChecked` cannot resolve it by construction. Measured on
@@ -18,11 +19,15 @@
 //  2. Duplicate-suppressed rows EXCLUDED. A suppressed row is never
 //     served (`/v1/manifest` filters it), so its variant could never
 //     be requested — pure wasted disk.
-//  3. STALE variants selected, not just missing ones. `HasVariant`
-//     existence means a re-encoded or re-tagged source keeps its old
-//     sidecar forever: `serveVariant` answers `410 variant_stale`,
-//     iOS silently falls back to the source, and nothing ever
-//     regenerates it. The sweeper is the natural place to close that.
+//  3. STALE variants selected, not just missing ones, and for a DSD
+//     source anything short of the CURRENT DSD schema. A bare existence
+//     check meant a re-encoded or re-tagged source kept its old sidecar
+//     forever: `serveVariant` answers `410 variant_stale`, iOS silently
+//     falls back to the source, and nothing ever regenerated it. The
+//     sweeper was the natural place to close that; since B100 the
+//     projection's `HasVariant` is freshness-aware too, so a batch
+//     renders a stale variant as well, but it stays version-agnostic
+//     (the DSD-schema rule is the sweeper's alone, below).
 
 package manifest
 
