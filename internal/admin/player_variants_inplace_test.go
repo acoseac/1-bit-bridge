@@ -120,13 +120,14 @@ function observe(root) {
       walk(child, (n) => { if (has(n, "variants-blocked") && n.textContent) notes.push(n.textContent); });
       continue;
     }
-    const row = { title: "", generateDisabled: null, notes: [], ratio: "", barNow: "", stale: "", staleIn: false };
+    const row = { title: "", generateDisabled: null, deleteDisabled: null, notes: [], ratio: "", barNow: "", stale: "", staleIn: false };
     walk(child, (m) => {
       if (has(m, "variant-kind-title")) row.title = m.textContent;
       if (has(m, "variant-kind-ratio")) row.ratio = m.textContent;
       if (has(m, "variant-bar")) row.barNow = m.getAttribute("aria-valuenow");
       if (has(m, "variant-kind-stale")) { row.stale = m.textContent; row.staleIn = true; }
       if (m.tagName === "button" && m.textContent.startsWith("Generate")) row.generateDisabled = m.disabled;
+      if (m.tagName === "button" && m.textContent === "Delete") row.deleteDisabled = m.disabled;
       if (has(m, "variants-blocked") && m.textContent) row.notes.push(m.textContent);
     });
     rows.push(row);
@@ -187,11 +188,12 @@ const out = {};
 }
 
 // Coverage, the bar and the note about stale copies follow the summary, on
-// the nodes that are there.
+// the nodes that are there. Since backlog B100 a stale copy is not covered:
+// one of two goes stale, then the other, then a Generate renders both.
 {
   const st = (stale, covered) => ({ ...S.carplayOff, upscale: { covered, eligible: 2, exempt: 0, stale } });
-  const answers = [st(2, 2), st(0, 1)];
-  const root = make(st(1, 2), { refresh: async () => answers.shift() });
+  const answers = [st(2, 0), st(0, 2)];
+  const root = make(st(1, 1), { refresh: async () => answers.shift() });
   const first = observe(root);
   await save(builds[0], "optimizeEnabled");
   const second = observe(root);
@@ -293,6 +295,21 @@ const out = {};
   await settle();
   out.deleteFailsWithoutApp = { disabled: del.disabled, focusOnDelete: document.activeElement === del };
 }
+// Every copy out of date: nothing is covered, and Delete still removes them
+// all (backlog B100).
+{
+  const confirms = [];
+  globalThis.confirm = (message) => { confirms.push(message); return true; };
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ deletedCount: 2, freedBytes: 0 }) });
+  const root = make({ ...S.on, upscale: { covered: 0, eligible: 2, exempt: 0, stale: 2 } }, { scope: { albumIds: ["a1"] } });
+  const before = observe(root);
+  let del = null;
+  walk(root, (n) => { if (n.tagName === "button" && n.textContent === "Delete" && !del) del = n; });
+  await del.click();
+  await settle();
+  out.staleOnly = { before, confirms };
+  globalThis.confirm = () => true;
+}
 console.log(JSON.stringify(out));
 `
 
@@ -309,6 +326,7 @@ type inPlaceRow struct {
 	Title            string   `json:"title"`
 	GenerateDisabled bool     `json:"generateDisabled"`
 	Notes            []string `json:"notes"`
+	DeleteDisabled   bool     `json:"deleteDisabled"`
 	Ratio            string   `json:"ratio"`
 	BarNow           string   `json:"barNow"`
 	Stale            string   `json:"stale"`
@@ -362,6 +380,7 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 	checkRedrawsThatPaintNothing(t, out)
 	checkAliveThatIsNotAFunction(t, out)
 	checkFailedDelete(t, out)
+	checkStaleOnlyCopiesKeepTheirDelete(t, out)
 }
 
 // inPlaceOutcome is what the harness printed: the panel at each step of each
@@ -402,6 +421,12 @@ type inPlaceOutcome struct {
 		Disabled      bool `json:"disabled"`
 		FocusOnDelete bool `json:"focusOnDelete"`
 	} `json:"deleteFailsWithoutApp"`
+	// StaleOnly is a panel whose copies are all out of date, and the
+	// confirms its Delete asked.
+	StaleOnly struct {
+		Before   inPlaceView `json:"before"`
+		Confirms []string    `json:"confirms"`
+	} `json:"staleOnly"`
 }
 
 // The two switches the harness's tray stand-ins put focus in, as observe
@@ -522,9 +547,11 @@ func checkCoverageFollowsTheSummary(t *testing.T, out inPlaceOutcome) {
 		bar   string
 		stale string
 	}{
-		{"as drawn", out.Coverage.First, "2 / 2", "2", "1 copy is out of date"},
-		{"one save later", out.Coverage.Second, "2 / 2", "2", "2 copies are out of date"},
-		{"two saves later", out.Coverage.Third, "1 / 2", "1", ""},
+		{"as drawn", out.Coverage.First, "1 / 2", "1",
+			"1 copy is out of date — its source changed after it was made. Generate makes it again."},
+		{"one save later", out.Coverage.Second, "0 / 2", "0",
+			"2 copies are out of date — their sources changed after they were made. Generate makes them again."},
+		{"two saves later", out.Coverage.Third, "2 / 2", "2", ""},
 	}
 	for _, st := range steps {
 		row := st.view.row(t, "Hi-res upscale")
@@ -536,6 +563,22 @@ func checkCoverageFollowsTheSummary(t *testing.T, out inPlaceOutcome) {
 			t.Errorf("%s: the stale-copy note reads %q (in the document: %v), want it to start %q and to be in the "+
 				"document only when that is not empty", st.name, row.Stale, row.StaleIn, st.stale)
 		}
+	}
+}
+
+// checkStaleOnlyCopiesKeepTheirDelete checks a kind whose copies are all out
+// of date (backlog B100): its bar reads none covered and Generate is live,
+// and its Delete stays live and asks to delete both, since `covered` counts
+// fresh copies only and Delete removes the stale ones too.
+func checkStaleOnlyCopiesKeepTheirDelete(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
+	row := out.StaleOnly.Before.row(t, "Hi-res upscale")
+	if row.Ratio != "0 / 2" || row.GenerateDisabled || row.DeleteDisabled {
+		t.Errorf("every copy stale: the row reads %q, Generate disabled=%v, Delete disabled=%v; want 0 / 2 and both live",
+			row.Ratio, row.GenerateDisabled, row.DeleteDisabled)
+	}
+	if len(out.StaleOnly.Confirms) != 1 || !strings.HasPrefix(out.StaleOnly.Confirms[0], "Delete 2 Hi-res upscale variants?") {
+		t.Errorf("Delete asked %q, want one confirm for the 2 stale copies", out.StaleOnly.Confirms)
 	}
 }
 

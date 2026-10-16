@@ -75,16 +75,19 @@ func (s *Server) variantSummaryFor(r *http.Request, paths []string, sourceBytes 
 
 // foldPresence records one track against one kind's counters.
 //
-// A track is STALE only when it has no fresh sidecar of the kind: a
-// current copy sitting beside a superseded one is served correctly, and
-// flagging it would send an operator hunting for a problem that is
-// already solved.
+// A track is COVERED only by a fresh sidecar of the kind (backlog B100):
+// a batch renders a stale one again, so counting it covered would draw a
+// full bar over work a Generate does. It is STALE when it holds sidecars
+// of the kind and no fresh one; a current copy sitting beside a
+// superseded one is served correctly, and flagging it would send an
+// operator hunting for a problem that is already solved. The two never
+// overlap, so covered + stale is every track holding a sidecar of the
+// kind: what Delete removes.
 func foldPresence(c *playerVariantCoverageDTO, present, fresh bool) {
-	if !present {
-		return
-	}
-	c.Covered++
-	if !fresh {
+	switch {
+	case fresh:
+		c.Covered++
+	case present:
 		c.Stale++
 	}
 }

@@ -932,9 +932,10 @@ func (s *Server) WithRendererDiscovery(snap RendererDiscoverySnapshotter) *Serve
 // directory, which it asks for, when the file has changed since its row was
 // written (staleRenditionHeal). With the auto-optimize sweep off, the
 // default, it is the one path that renders a stale rendition again whatever
-// the client does: a batch counts it covered, and a client asks for a new
-// one only once it stops listing the old one. It runs on the request, so it
-// must not block; ctx is the request's.
+// the client and the operator do: a batch renders it only when one is
+// submitted (backlog B100; it counted it covered until then), and a client
+// asks for a new one only once it stops listing the old one. It runs on the
+// request, so it must not block; ctx is the request's.
 type StaleRenditionFunc func(ctx context.Context, clientPath, variantID string, sourceInfo os.FileInfo)
 
 // WithStaleRendition wires the StaleRenditionFunc the download path tells

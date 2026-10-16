@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -368,13 +369,27 @@ func (r *Resolver) SplitRoot(clientPath string) (root, suffix string, err error)
 
 // ResolveChecked is Resolve plus an os.Stat; it returns ErrNotFound if the
 // path does not exist. Convenient for handlers that need both.
+//
+// A stat that fails with ENOTDIR is not found too (backlog B414): a directory
+// on the way to the path, or to a link's target, is not a directory, so
+// nothing is there. The live shape is an SACD image's virtual track path,
+// `<image>.iso/st/NN.dff`, which goes through the image, a regular file, and
+// for which PROTOCOL.md promises a 404; on unix Go counts only ENOENT as
+// not-exist, so the /v1 file routes answered it 500 until B414. Resolve's
+// path is clean, with no trailing separator, so the stat never asks the
+// path's own last element to be a directory: an ENOTDIR is always about a
+// component on the way. On Windows syscall.ENOTDIR is ERROR_PATH_NOT_FOUND,
+// which os.ErrNotExist covers already (TestAStatThroughARegularFileFailsWithENOTDIR).
+// Every other failure is a stat that could not look (EACCES, EIO, a stale
+// NFS handle) and stays an error, which a route answers 500: a client must
+// not take it for a missing track.
 func (r *Resolver) ResolveChecked(clientPath string) (string, os.FileInfo, error) {
 	abs, err := r.Resolve(clientPath)
 	if err != nil {
 		return "", nil, err
 	}
 	info, err := os.Stat(abs)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return "", nil, ErrNotFound
 	}
 	if err != nil {

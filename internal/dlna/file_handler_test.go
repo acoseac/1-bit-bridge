@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -167,6 +168,24 @@ func Test_FileHandler_FileMissingOnDisk_Returns404(t *testing.T) {
 	h(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("missing file should return 404 (indistinguishable from unknown trackID), got %d", rec.Code)
+	}
+}
+
+// Test_FileHandler_APathThroughAFile_Returns404 is the DLNA side of backlog
+// B414: a source path through a regular file, the shape of an SACD virtual
+// track (`<image>.iso/st/NN.dff`), answers the 404 a missing file does, as
+// PROTOCOL.md says. The open fails (ENOTDIR on unix), and this handler answers
+// every failed source open 404, so it passed before B414 too: it pins that the
+// DLNA route and the resolver-backed `/v1` routes give one answer.
+func Test_FileHandler_APathThroughAFile_Returns404(t *testing.T) {
+	image := createTempFile(t, ".iso", "a disc image is a regular file")
+	lib := newTestLib(TrackInfo{TrackID: "virtual", AbsolutePath: filepath.Join(image, "st", "01.dff"), FileExtension: ".dff", Size: 1})
+	h := FileHandler(lib, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/virtual", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("a path through a regular file should return 404 (as a missing file does), got %d", rec.Code)
 	}
 }
 
