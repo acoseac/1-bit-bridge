@@ -44463,6 +44463,327 @@ observed: exactly the new test red, at "not listed after the cache rebuilt".
 The review's other finding, that the maps' capacity hint counts the rows
 left out, stands as written: it is a sizing hint.
 
+## 2026-10-16 — PROTOCOL.md's error table lists every code a `/v1` route sends, and the DST bullet says what the app does (backlog B413)
+
+B412 left two items in PROTOCOL.md open. The error table listed 22 codes, and the
+`/v1` handlers send 48 status and code pairs: 27 codes were missing, and ten rows
+were incomplete or said something the code does not do. The DST bullet said the
+app refuses DST "until its DST decoder ships"; the app has decoded DST since its
+decode-to-cache shipped (acoseac/1-bit#1445).
+
+### How the codes were enumerated
+
+Every `/v1` route is an entry of `internal/api`'s `routeRegistry`, and every
+listener serves the one handler it builds (`apiHandler()` in `cmd/bridge/main.go`:
+the LAN server, HTTP/3 and the tailnet front). The handlers write the envelope
+through `writeError`, `writeErrorLog` and `writeFileErrorLog` (`api.go`), which
+`writeResolveError` (`files.go`) wraps. A go/parser walk over the package's
+non-test files listed every call with its status and code expressions, and this
+one-liner, which also reads a call split across lines, lists the same 42 literal
+pairs:
+
+```sh
+perl -0777 -ne 'while (/\bwrite(?:Error|ErrorLog|FileErrorLog)\(\s*w,\s*(?:r,\s*)?http\.Status(\w+),\s*"([a-z_]+)"/g) { print "$1\t$2\n" }' $(ls internal/api/*.go | grep -v '_test\.go$') | sort -u
+```
+
+- **Four calls pass a code that is not a literal:** `errCodeUpscaleDisabled` (`upscale_disabled`), `parseVariantDeleteQuery`'s `errCode` (always `bad_request`), `lookupAnalysisForRequest`'s `kind + "_not_found"` (`waveform_not_found`, `spectrum_not_found`), and `proxyUPnP`'s `perr.Code`, from `internal/upnpproxy`'s `PreStreamError` (`upnp_server_offline`, `upnp_bad_res_url`, `upnp_upstream_unreachable`, `internal`).
+- **Three bodies bypass the helpers** (`grep -n 'json:"error' internal/api/*.go`): the favorites and playlist `409`s (`stale`, `base_mismatch`) and the batch `507` (`insufficient_disk_space`, which carries no `message`).
+- **Nothing else writes an error status:** no handler calls `http.Error` or a bare `WriteHeader` with one. `internal/admin` has its own `writeError` for the console's `/api/*`, which this table does not cover.
+
+That is 48 pairs, no code sent with two statuses. `forbidden`, which no route
+sends, stays as the reserved row: 49 rows.
+
+### What changed in PROTOCOL.md
+
+- **27 rows added:** `device_token_required`, `base_revision_required` and `validate` (400); `demo_read_only` and `harvest_base_url_not_allowed` (403); `variant_not_found`, `waveform_not_found`, `spectrum_not_found`, `lyrics_not_found`, `playlist_backup_not_supported`, `playback_history_not_supported`, `atlas_not_supported` and `harvest_not_supported` (404); `variant_stale`, `variant_missing_on_disk`, `waveform_stale`, `waveform_missing_on_disk`, `spectrum_stale` and `lyrics_stale` (410); `persist_failed` (500); `upnp_bad_res_url` and `upnp_upstream_unreachable` (502); `upscale_disabled`, `upnp_server_offline`, `stats_unavailable` and `unavailable` (503); `insufficient_disk_space` (507).
+- **Rows corrected:**
+  1. `scan_in_progress` said the manifest answers it while an initial scan runs. It answers it only on a server built without its manifest provider, artwork cache or config, which `serve` wires before it listens. The handler has sent it only for a missing provider since it was added (#7).
+  2. `not_found` named only library paths and a cover "not cached under the requested MBID + `size`", which the size ladder retired. It now names every route that sends it.
+  3. `pending` gains the booklet's `202`; `queue_full` gains `POST /v1/upscale`'s.
+  4. `events_not_supported` named a pre-v1.2 build, which has no route and so sends no code. A running bridge sends it for `GET /v1/events` in demo mode (`serve` always starts a broker).
+  5. `favorites_not_supported` and `smart_playlists_not_supported` named builds too; they now name the health flag each is advertised against, the CLAUDE.md rule for spec labels.
+  6. `bad_request` covers request bodies and a path that names no library root (`writeResolveError` answers `ErrUnknownRoot` with it).
+  7. `stale`'s whole-document favorites clause applies to a bridge without `favoritesRevisions` only: `PUT /v1/favorites` reaches the store through `SaveFavorites` alone, whose legacy path never answers `409` (`UpsertFavorites`, the last-write-wins path, has no caller outside tests).
+  8. `forbidden` says no route sends it.
+- **The intro said "All errors are JSON".** A note under the table names the three answers that are not: net/http's plain-text `404` / `405` for a path or method no route serves, `http.ServeContent`'s plain-text `416` on the byte routes (go1.26.6 `fs.go`), and the upstream server's own status and body on a UPnP-proxied track.
+- **The DST bullet** now says what the app does, checked at its `a645c85e`: it maps `compression == "DST"` onto `Track.dstCodec` through `canonicalClientCodec` (`BridgeSyncActor.swift:2103-2106`), decodes an eligible track on the phone into an uncompressed DSDIFF in its auto-cache (`DST/DSTDecodeToCache.swift`, over its port of the ISO reference decoder in `DST/`), and refuses the rest. Eligible is stereo DSD64 or DSD128 of the 44.1 kHz family with a library row (`PlayerService.dstDecodeIsEligible`, `:19812`; `eligibleFS44`, `DSTDecodeToCache.swift:140-151`; the stereo check, `:235-238`). A rate it rules out is refused before the download (`PlayerService.swift:14994-15004`); an SACD ISO track's sector window goes through the same decode (`:14947-14958`).
+
+### The app's handling of the added codes (read-only audit, iOS `a645c85e`)
+
+`BridgeSourceClient.ensureOK` (`BridgeSourceClient.swift:2520-2557`) maps `429` to
+`.rateLimited` and `401` to `.unauthorized`, decodes any other envelope into
+`BridgeError.server(status:code:message:)` (`ErrorEnvelope` requires both `error`
+and `message`, `:3340-3343`), and otherwise throws `.http(status:)`.
+`.server` reads "Bridge <status> (<code>): <message>" (`:4292-4293`). The streaming
+download behind playback and offline downloads throws `.http(status:)` for any
+non-`200` and never reads the body (`:5082-5103`). **The app matches one code by
+its string, `base_mismatch` (`:943`)**; every added code is handled by its status
+or reaches the generic error.
+
+| Code | What the app does |
+|---|---|
+| `device_token_required` | Not reachable from a current app: every authed request carries a 64-character lowercase-hex `X-Device-Token` (`BridgeSourceClient.swift:1937`, `SMBStore.swift:292-296`). If sent, the playlist, favorites or telemetry coordinator logs `.server(400, …)` and retries on its next trigger. |
+| `base_revision_required` | Not reachable (the app sends the revision it read). If sent, a failed favorites PUT, logged (`FavoritesService.swift:1613-1615`). |
+| `validate` | The ingest is `try? await performIngestAtlas` (`AtlasMetadataCoordinator.swift:815-845`): dropped without a line. |
+| `demo_read_only` | Not sent to a demo bridge: Atlas excludes it (`isAtlasEnabledBridge`, `AtlasMetadataCoordinator.swift:985-1002`), `provisionHarvest` and `revokeHarvest` return first, and rendition requests pass `BridgeRenditionRequestGate`. If sent, the revoke reads `403` as `.cannotRevoke` by status (`BridgeSourceClient.swift:1280-1283`); `POST /v1/upscale` is logged, the play goes on without the rendition, and a download falls back to the source. |
+| `harvest_base_url_not_allowed` | `.server(403, …)`, logged "atlas harvest: provision failed" (`AtlasMetadataCoordinator.swift:1314-1319`); nothing shown. |
+| `harvest_not_supported` | `POST`: as above. `DELETE`: `404` is `.cannotRevoke` by status. |
+| `atlas_not_supported` | `fetchAtlasMeta` returns nil on any `404` (`BridgeSourceClient.swift:1214`), read as never checked; the ingest that follows is dropped. Gated on `atlasEnrichment`, the flag's own predicate. |
+| `playlist_backup_not_supported` | Gated on `playlistBackup`. If sent, `fetchPlaylist` returns nil and `deletePlaylist` counts it done, for any `404` (`BridgeSourceClient.swift:1005`, `:1101`); `uploadPlaylist` logs `.server`. |
+| `playback_history_not_supported` | Gated on `playbackHistory`. If sent, `uploadHistory` logs `.server` and the events stay queued (`PlaybackTelemetryCoordinator.swift:409-411`). The app never calls `GET /v1/history`. |
+| `variant_not_found`, `variant_stale`, `variant_missing_on_disk` | Playback gets `.http(404)` or `.http(410)`; `isUpscaleVariantStaleError` drops the variant and reloads the next-best one or the source (`PlayerService.swift:18901-18911`). An offline download gets the same `.http`, which is not transient, so the job fails with "Bridge HTTP 410." (`DownloadCoordinator.swift:5159-5177`). The app never calls `DELETE /v1/upscale/variants`. |
+| `waveform_not_found`, `waveform_stale`, `waveform_missing_on_disk` | `fetchWaveform` returns nil on `404` / `410` after the protocol check (`BridgeSourceClient.swift:1536-1539`); on-device analysis takes over. |
+| `spectrum_not_found`, `spectrum_stale` | `fetchSpectrum`, the same (`BridgeSourceClient.swift:1594-1597`). |
+| `lyrics_not_found`, `lyrics_stale` | `fetchLyrics`, the same (`BridgeSourceClient.swift:1561-1564`). |
+| `persist_failed` | Pairing redeem: `BridgePairingError.serverError`, which a failed save shows as "Bridge returned HTTP 500: failed to issue the device's token." (`BridgePairingClient.swift:320-322`, `:713-717`). Harvest `POST`: logged. Harvest `DELETE`: not a revoke outcome, so `ensureOK` throws and the revoke is logged as failed. |
+| `upnp_bad_res_url`, `upnp_upstream_unreachable`, `upnp_server_offline` | Playback reads them as `.http(502)` / `.http(503)`, and the player's status reads "Download failed: Bridge HTTP 503." (`PlayerService.swift:15779`). Not a reachability error (`isUnreachableSourceError`, `:19096-19124`), so the queue does not skip. A `/v1/read` caller gets `.server` with the code. |
+| `upscale_disabled` | `requestVariant` (`POST /v1/upscale`, behind the app's own flag gates) logs `.server`; the play goes on without the rendition, and a download falls back to the source (`DownloadCoordinator.swift:4439`). The app never calls the batch routes. |
+| `stats_unavailable` | The app calls neither stats route. |
+| `unavailable` | Both event streams read any non-`200` other than `404` as transient and reconnect on their own backoff, ignoring `Retry-After`; five failures in a row fall back to polling (`BridgeEventStream.swift:626-631`, `:438-444`). |
+| `insufficient_disk_space` | The app never calls `POST /v1/upscale/batch`. Its body has no `message`, so `ErrorEnvelope` would not decode it: `.http(507)`. |
+
+Every added code reaches a branch keyed on its status, or a logged generic error,
+and none leaves the app in a wrong state. What a code-specific case would change
+is text: for the three `upnp_*` codes the user reads "Bridge HTTP 502." or "503."
+rather than the bridge's message, because the streaming path does not read the
+body. Whether the app should read it is the app's decision.
+
+### Checks
+
+The three packages whose tests read PROTOCOL.md (`cmd/bridge`'s reads every
+tracked `.md`, this log included), run with `GOTOOLCHAIN=go1.26.6 go test
+-count=1`:
+
+| Test | Package | What it pins |
+|---|---|---|
+| `TestEveryDocumentedEndpointIsRouted`, `TestEveryRoutedEndpointIsDocumented` | `internal/api` | the routes, matched against the router both ways |
+| `TestProtocolDocFormatVersionsMatchTheCode` | `internal/analyze` | the waveform and spectrum format versions |
+| `TestEveryCitedTestNameExists` | `cmd/bridge` | every test name a doc cites exists |
+
+All three packages passed on the change at `8bacb117`. Rebased onto `78153974`
+(B100 and B415), the enumeration gave the same status and code pairs, and the four
+tests above passed again, none skipped.
+
+### Not changed
+
+- **The app's copy, `docs/BridgeProtocol.md`.** It equalled PROTOCOL.md at `8bacb117` (`cmp`), so the companion change is a copy of PROTOCOL.md; the iOS repo was read-only for this session.
+- **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
+- **No Go code.**
+
+## 2026-10-16 — a failed search logs its error and answers 500 with a fixed message (backlog B425)
+
+Found by the B413 session while it enumerated the error codes (#1255).
+`GET /v1/search` (`internal/api/search.go:130` at `0d5f43b3`) answered every
+store failure other than a cancel and `ErrSearchUnavailable` with
+`writeError(w, 500, "internal", err.Error())`. `writeError` logs nothing, so
+the error's own text reached the paired client as the message, and the
+operator saw only the access line. The store wraps the query's error as
+`search tracks_fts (served): …`, which names the FTS table and carries
+whatever SQLite or the OS said: an FTS syntax fragment, or an
+`*os.PathError` naming the database file.
+
+**Red first** (`3f71e413`, the tests alone on main at `0d5f43b3`, macOS,
+go1.26.6). `TestASearchStoreFailureAnswersAFixedMessage` drives the handler
+over a stub searcher with two errors under the store's prefix: an FTS fault
+(`SQL logic error: fts5: syntax error near "AND" (1)`) and one naming the
+database file (`open /Users/alice/…/bridge.db-wal: disk I/O error`). Both
+answered 500 `internal` with the error's text as the message, every leak
+fragment in the body (`tracks_fts`, `SQL logic error` and `fts5`;
+`/Users/alice`, `bridge.db-wal` and `disk I/O error`), and no
+request-failed line. `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`
+goes through `Handler()`, a real `manifest.Provider` and a real store: a
+search answers 200 with the seeded track, then the store's database is
+closed, and the same search answered 500 with `search tracks_fts (served):
+sql: database is closed` in the body and no request-failed line. Its access
+line was already Error at 500.
+
+**Fix** (`6471c3c2`). That branch calls `writeErrorLog(w, r, 500,
+"internal", "the bridge couldn't search the library", err)`: the error is
+logged at Error with status 500, and the body carries the fixed message. No
+client abort reaches the call, so B364's 499 never applies there: the early
+return above it, for `context.Canceled` and `context.DeadlineExceeded`, is
+the keystroke path B364 left alone, and `TestSearchSwallowsAClientCancellation`
+still pins it. No wire change: the code stays `internal`, whose PROTOCOL.md
+row says "Server-side failure".
+
+**The sweep for twins.** A throwaway go/ast lister (not committed) printed
+every `writeError`, `writeErrorLog` and `writeFileErrorLog` call in
+`internal/api`'s non-test files whose message is not a string literal: 52 of
+231 calls at `0d5f43b3`, none a `fmt.Sprintf`. Those with a 5xx status:
+- `search.go:130`, `err.Error()`: this fix.
+- `upscale.go:312` and `:381`, the folder walk of `POST /v1/upscale`:
+  `"walk folder: " + redactWalkErr(walkErr)`, which keeps an
+  `*os.PathError`'s `Op` and errno text and drops its path (any other
+  error's text is kept whole). Deliberate: #185's privacy audit chose a
+  redacted reason on the wire ("the same redactor covers both egress
+  channels"), and #1076 copied the shape for the root's `WalkableRoot`
+  error, a 500 that logs no line. Left as they are, and reported.
+- Fixed messages held in a name or built from one: `errMsgInternalError`
+  (the artwork, artist-image, booklet and cover opens, each logging its
+  error first, and two `writeErrorLog` calls), `errMsgUpscalingNotEnabled`
+  (the 503s), `"the bridge couldn't look up this " + kind`, and
+  `proxyUPnP`'s `perr.Message`, a fixed string at each `PreStreamError`
+  literal in `internal/upnpproxy`.
+- `writeErrorLog` and `writeFileErrorLog` passing their own `userMsg` on.
+
+The bodies written without the helpers (the favorites and playlist 409s,
+the batch 507) carry fixed messages or none. The 4xx messages built from an
+error (`enrich.ParseSize`, the Atlas ingest's validation, the event
+stream's topics parse) describe the client's own input, as
+`writeErrorLog`'s docblock asks a 4xx to.
+
+**Negative controls** on the committed fix (`6471c3c2`), each anchor
+count-asserted, the package vetted, the search tests run (`-run
+'TestSearch|TestASearchStoreFailure'`, `-count=1`), restored from git and
+the restore checked against HEAD:
+1. The fix reverted (`writeError(…, err.Error())`). Predicted and observed:
+   exactly the two B425 tests red, at the red run's assertions (the
+   message, every leak fragment, no request-failed line); the ten other
+   search tests green.
+2. `writeErrorLog` with `err.Error()` as the message. Predicted and
+   observed: the two tests red at the message and the leak fragments only;
+   their log assertions green.
+3. `writeError` with the fixed message and no log. Predicted and observed:
+   the two tests red at "want one request-failed line, got 0" only.
+
+**Left open.** The keystroke path's early return also takes
+`context.DeadlineExceeded`, which on this route is the server's own 5 s
+`withCtxTimeout`. A search that runs out its deadline writes nothing, so
+the client gets an empty 200 (net/http's answer to a handler that writes
+nothing: `200`, `Content-Length: 0`, measured with a standalone probe), and
+the log has only the access line at status 0, where B364's rule says a
+server deadline stays Error and 500. B364 named the keystroke path as left
+alone, and this change leaves it too.
+
+## 2026-10-16 — PROTOCOL.md's error table is held to the pairs the `/v1` handlers send, by two guards (backlog B426)
+
+B413 (#1255) completed the table by hand: it had listed 22 codes while the
+handlers sent 48 status and code pairs, and ten of its rows were wrong.
+Nothing kept it in step. `TestEverySentErrorCodeIsInTheProtocolTable` fails
+on a pair a handler sends with no row; `TestEveryProtocolErrorRowIsSent`
+fails on a row naming a pair nothing sends, except a row marked `(reserved;
+no route sends it)`, B413's marking of `forbidden`, and on a reserved row
+something does send. Both are in `internal/api/error_table_test.go`, beside
+the routed-endpoints pair they mirror.
+
+### How the pairs are read
+
+go/ast over `internal/api`'s non-test files; a name starting with `.` or `_`
+is skipped before it is opened (the go tool's rule; an editor's lock file is
+the case). Not go/types: type-checking `internal/api` means type-checking
+every dependency from source, `modernc.org/sqlite` among them, or building
+export data with `go list -export` on every run.
+
+- **The writes.** Every call of `writeError`, `writeErrorLog` and
+  `writeFileErrorLog`, at their status and code positions (their own bodies
+  are not read). And every `writeJSON` / `writeJSONGzip` under a 4xx or 5xx
+  status, whose body must then be a literal (or its address, or a parameter
+  a caller passes one in) of a package struct with a field tagged
+  `json:"error"`: the favorites and playlist 409s and the batch 507. A 2xx
+  body is never an error body, since one may carry `error` as data
+  (`BatchRow`).
+- **The values.** A status or code is read when it is a literal; a package
+  constant; one of net/http's `Status` constants, read from the toolchain's
+  own `net/http` source through `go/build`, so the value is the one the
+  handler compiles against; a sum of those (`kind + "_not_found"`); a
+  parameter, read at each call to its function (up to four calls out), with
+  status and code bound to the same call so two calls stay two pairs, plus
+  whatever the body sets it to; or a local set from a call to a package
+  function, or to a method on the same receiver, read at each of that
+  function's returns (`parseVariantDeleteQuery`'s `errCode`). An empty code is
+  dropped: the caller writes only past a check for one.
+- **Refused**, with the site and the reason, failing both guards: a code
+  built at run time (a call the guard cannot follow), a package variable, a
+  function literal's parameter, a function nothing in the package calls, a
+  status and a code that both take several values (which the guard cannot
+  pair), and a 4xx or 5xx JSON body it cannot read.
+- **One declared flow** (`declaredFieldFlows`). `proxyUPnP` writes
+  `perr.Status` and `perr.Code` of the `*upnpproxy.PreStreamError` that
+  `Proxy.Serve` returns. Only a type checker knows that type, so the flow is
+  declared, and the values are still parsed: the Status and Code of every
+  `PreStreamError` literal in `internal/upnpproxy`, five of them (500
+  `internal` twice, 503 `upnp_server_offline`, 502 `upnp_bad_res_url`, 502
+  `upnp_upstream_unreachable`). A flow that matches no write is reported.
+
+### On main (`5266c664`)
+
+The scan reads 48 pairs and refuses nothing; the table has 49 rows, with
+`forbidden` the reserved one. Those are B413's 48 pairs exactly. Of the four
+non-literal codes B413 listed, three are read by the rules
+(`errCodeUpscaleDisabled` as a constant, `parseVariantDeleteQuery`'s
+`errCode` through its returns, `kind + "_not_found"` at both callers), and
+`perr.Code` through the flow.
+
+### Fixture tests
+
+On a clean tree the guards report nothing, so they cannot show the scan
+still reads each shape. `TestErrorPairScanReadsEveryShapeOnAFixture` scans a
+synthetic package written to a temp dir and requires its 15 pairs exactly
+(each shape above, with the two calls of a status-and-code helper kept
+apart) and exactly eight refusals: a code built at run time, an unreadable
+409 body, a function literal's parameter, a function nothing calls, a status
+and a code that both vary, a package variable read and one set, and a stale
+flow. Its test file, `_` file and lock-shaped file are never read; read, the
+lock fails the parse (measured). `TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair`
+pins the table's reading (a reserved row, a pipe in the When cell, CRLF) and
+eight shapes it refuses: no heading, another table first, no alignment row,
+two codes in a cell, a bare code, a status that is not one, a second row for
+a pair, and no table.
+
+### Negative controls
+
+On the committed guard (`09bf317b`), each predicted by test name, each run
+over the whole `internal/api` package (`-count=1`, go1.26.6), each anchor
+count-asserted, then restored from git and the tree checked clean. Every
+prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| NC1 `writeError(w, http.StatusServiceUnavailable, "search_reindexing", …)` added to the search handler | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "503 search_reindexing, sent at search.go:91 (search)" |
+| NC2 the `lyrics_not_found` row deleted | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "404 lyrics_not_found, sent at lyrics.go:106 (lyrics); lyrics.go:129 (lyrics)" |
+| NC3 a row added for `404 lyrics_missing` | `TestEveryProtocolErrorRowIsSent` alone |
+| NC4 the reserved marker taken off `forbidden`'s row | `TestEveryProtocolErrorRowIsSent` alone: "403 forbidden, which no /v1 handler sends" |
+| NC5 the playlist 409 literal's `base_mismatch` renamed | both guards (the new code has no row, the old row is unsent), and `TestATombstonedBaseMismatchCarriesDeleted` and `TestPlaylistMatchingBaseOnTheWire`, which read that code |
+| NC6 `kind + "_not_found"` made `kind + "_unavailable"` | `TestEverySentErrorCodeIsInTheProtocolTable` alone, naming both callers (`spectrum.go:30`, `waveform.go:136`); the old rows stay sent by the literal 404s |
+| NC7 a `PreStreamError` literal's `upnp_server_offline` renamed | both guards, through the flow, at both `proxyUPnP` writes |
+| NC8 `declaredFieldFlows` emptied | both guards, at the scan: the two `proxyUPnP` writes refused ("perr.Status is not a constant the guard can read") |
+
+### Not read
+
+An error status written with no envelope (`http.Error`, a bare
+`WriteHeader`) carries no code for the table to name; B413 found none in
+`internal/api`, and the note under the table names the three body-less
+answers net/http and the proxy give. A writer called through a function
+value, and an envelope encoded by hand rather than through `writeJSON`, are
+not seen either. `internal/admin`'s writer serves the console's `/api/*`,
+outside the table.
+
+### Checks
+
+GOTOOLCHAIN=go1.26.6: `go test -count=1 ./internal/api/` and the same under
+`-race`, `go test -count=1 ./cmd/bridge/` (its docblock, citation and keeper
+guards read the new file), `go vet ./...`, a `GOOS=windows` build of the
+package's tests, and the pinned gofmt.
+
+**After review** (3.1 Pro on #1259). Two of its three findings are taken in
+`70459717`:
+- **A JSON body held in a local** (`b := conflictBody{...}; writeJSON(w, s, b)`)
+  now resolves when the function sets it exactly once, from a value. A local
+  set twice is still refused, so its write fails the guard. A bound of 16 names
+  stops a local set from itself from looping.
+- **Every cell of the alignment row** must be dashes and colons with at least
+  one dash, not only the first.
+
+Fixture cases: `409 in_a_local` is read and `(bodyReassigned)` is refused; the
+table test refuses "a broken alignment". Negative controls, each predicted and
+restored from git: locals not followed (exactly the fixture test red, the pair
+missing and `bodyInALocal` unresolved), and the alignment check on the first
+cell only (exactly the table test red, at "a broken alignment").
+
+The third finding is declined. It said the guard fails where `$GOROOT/src` is
+missing. Since Go 1.20 the standard library is built from source, so a
+toolchain that can run this test has `net/http`'s source.
+
 ## 2026-10-16 — an ID3v2 tag's TXXX:WORK is its work, and TIT1 only in a tag with none (backlog B127)
 
 **The decision** (the owner, 2026-10-16). MusicBrainz Picard writes an ID3v2
