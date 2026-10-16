@@ -296,6 +296,13 @@ type Deps struct {
 	// turn a diagnostic into a load source.
 	VariantsIndex func(ctx context.Context) (VariantsIndex, error)
 
+	// NameCollisions compares the indexed track paths for names in one
+	// folder that differ only in case or Unicode composition — see
+	// checkNameCollisions. Optional on the same terms: nil skips the check,
+	// an error is reported rather than answered as clean. It reads the
+	// manifest and walks no library folder.
+	NameCollisions func(ctx context.Context) (NameCollisions, error)
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -405,6 +412,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkLogSize,
 		checkSidecarPaths,
 		checkVariantsIndex,
+		checkNameCollisions,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
