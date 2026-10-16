@@ -46,8 +46,11 @@ func macServedJudgedBy(j *judgedAs) *servedAddrs {
 
 // describeOverTCP sends one GET of the device description on a fresh
 // connection and reads until the server closes it. It returns the status the
-// response carries (0 for none) and how many bytes came back.
-func describeOverTCP(t *testing.T, addr string) (status, n int) {
+// response carries (0 for none), how many bytes came back, and the read's
+// error: a refused connection may end in EOF, a reset or an abort,
+// depending on the platform and on whether the request reached the server
+// before its close, and what proves the refusal is that no byte came back.
+func describeOverTCP(t *testing.T, addr string) (status, n int, readErr error) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
@@ -57,21 +60,11 @@ func describeOverTCP(t *testing.T, addr string) (status, n int) {
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	// A write the server's close beat is the same refusal; the read says.
 	_, _ = fmt.Fprintf(conn, "GET /dlna/description.xml HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", addr)
-	body, err := io.ReadAll(conn)
-	if err != nil && !isConnReset(err) {
-		t.Fatalf("read the answer from %s: %v", addr, err)
-	}
+	body, readErr := io.ReadAll(conn)
 	if line, _, found := strings.Cut(string(body), "\r\n"); found {
 		_, _ = fmt.Sscanf(line, "HTTP/1.1 %d", &status)
 	}
-	return status, len(body)
-}
-
-// isConnReset reports whether err is the reset a close with an unread
-// request in its buffer sends, which is how a refused connection can end.
-func isConnReset(err error) bool {
-	s := err.Error()
-	return strings.Contains(s, "reset") || strings.Contains(s, "forcibly closed") || strings.Contains(s, "broken pipe")
+	return status, len(body), readErr
 }
 
 // TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe pins the
@@ -104,10 +97,10 @@ func TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			judged.set(tc.as)
 			defer judged.set("")
-			status, n := describeOverTCP(t, s.cfg.ListenAddress)
+			status, n, err := describeOverTCP(t, s.cfg.ListenAddress)
 			switch {
-			case tc.served && status != 200:
-				t.Errorf("a connection judged as %q was answered %d (%d bytes), want 200", tc.as, status, n)
+			case tc.served && (status != 200 || err != nil):
+				t.Errorf("a connection judged as %q was answered %d (%d bytes, read error %v), want 200", tc.as, status, n, err)
 			case !tc.served && n != 0:
 				t.Errorf("a connection judged as %s was answered %d with %d bytes, want it closed before any", tc.as, status, n)
 			}
@@ -122,7 +115,7 @@ func TestTheDLNAListenerLogsARefusedConnection(t *testing.T) {
 	sink := newLogSink()
 	s := startLoopbackDLNA(t, ServerConfig{Logger: sink.logger()}, func(s *Server) { s.served = macServedJudgedBy(&judged) })
 	judged.set("100.64.0.7")
-	if _, n := describeOverTCP(t, s.cfg.ListenAddress); n != 0 {
+	if _, n, _ := describeOverTCP(t, s.cfg.ListenAddress); n != 0 {
 		t.Errorf("a connection judged as the tailnet address got %d bytes back, want none", n)
 	}
 	if want := "refused a connection to an address it does not serve"; !sink.waitFor(want, 5*time.Second) {
