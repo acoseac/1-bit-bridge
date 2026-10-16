@@ -312,7 +312,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Seventeen claims in this list have been wrong and been corrected** — the
+**Eighteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -329,8 +329,9 @@ LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
 listener to the group address", (2026-09-29) "`isLossyCodec` gates every
 `BitsPerSample` write site", (2026-09-29) "reconciliation never
 crosses directories", (2026-09-29) "`os.SameFile` answers [a
-directory's identity] portably", and (2026-10-02) "an explicit delete
-path list sidesteps the case-fold class entirely". The first five cost a later session real
+directory's identity] portably", (2026-10-02) "an explicit delete
+path list sidesteps the case-fold class entirely", and (2026-10-15) "a
+cover the cap evicts does not come back, a `local-` cover included". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -372,6 +373,12 @@ compared.
 The seventeenth was true of a PREFIX and read as true of a path: a delete
 naming a track in another case moved it on a case-insensitive volume,
 retired no row and rescanned its folder a second time (B219).
+The eighteenth was half true and became the premise of the backlog entry
+that fixed the cap (B84): two tests had pinned the other half since before
+it was written (`TestScanner_RecoversWipedLocalArtworkCache` and
+`TestArtworkLocalSentinelStaysPendingWhenEnrichmentComplete`), and
+measuring the entry's own case end to end showed the `local-` cover come
+back with the next scan.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -4892,11 +4899,47 @@ no failing test — which is the shape to expect in this area.
   the walk would remove a file. A thumbnail under a 16-hex artworkVersion
   alias stays an orphan: the console resolves an alias before it derives
   anything (`TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey`), so no
-  build files or reads one. **A cover the cap evicts does not come back**:
-  its tracks are enriched, so `/v1/artwork` answers the terminal 404
-  `no_image` and nothing fetches it again, a `local-` cover included (the
-  cap's docblock said a 202 and a re-enrichment until 2026-09-29; backlog
-  B84).
+  build files or reads one. **The cap never evicts a cover a track row
+  names, nor a portrait `artwork --gc` keeps** (2026-10-15, backlog B84,
+  the owner's decision of 2026-10-14). It evicted the oldest `.jpg` whatever
+  it was: an enriched track's MBID cover or portrait then answered the
+  terminal 404 `no_image` for good (the enricher takes only rows at
+  `enriched_at = 0`, which this must not reset), and a `local-` cover 202
+  until the next scan wrote it again (`needsLocalArtworkRecovery`), to go
+  again once it was the oldest. This sentence said a `local-` cover never
+  comes back; measured on 67154340 it answered 202 after the pass and 200
+  after the next scan. After the walk, and only over the cap, a pass reads
+  the GC's own keep set (`readArtworkCapKeep`: `artworkKeysInUse` for
+  covers, `artistMBIDsInUse` for `portraitVerdicts`) and evicts, oldest
+  first, only what no row needs: a thumbnail (`thumbs/`, which the console
+  derives again on the next request, `deriveThumb` → `manifest.EnsureThumb`),
+  a cover or portrait no row names, any other `.jpg`. **Never evict on a
+  keep set the pass could not read**: a failed store read, or no store,
+  evicts nothing that pass and WARNs. **Never evict a file modified within
+  `artworkCapGrace`** (`portraitGrace`, ten minutes, counted back from the
+  pass's start): every writer puts its file down before its row commits,
+  the enricher seconds to a few minutes before by its clients' timeouts,
+  the scanner a batch of 500 rows, or the rest of the scan, before (its
+  `local-` covers come back anyway). Left open, as in B85: a writer
+  ADOPTING an old file (a cover already on disk, a new hard link to an old
+  canonical) between its stat and its row's commit. **A pass that could
+  not stat a portrait at the top keeps every canonical**
+  (`artworkCapCandidates`), or a partial pass could evict a canonical a
+  whole one keeps. When what rows name is more than the cap it evicts all
+  the rest and stays over, with one WARN when the streak begins and at most
+  one a day (`msgArtworkCapOver`, naming `artwork.cacheMaxBytes`), and one
+  Info when it ends. Don't fold the
+  thumbnails into the keep set (they are what the cap can always reclaim),
+  and don't read the keep set before the walk (a row that commits during it
+  is missed, and its cover can go)
+  (`TestTheSizeCapNeverEvictsACoverATrackRowNames`,
+  `TestTheSizeCapNeverEvictsAPortraitTheGCKeeps`,
+  `TestTheSizeCapEvictsUnreferencedFilesAndThumbnailsOldestFirst`,
+  `TestTheSizeCapEvictsNothingWhenItCannotReadTheStore`,
+  `TestTheSizeCapKeepsAFileWrittenWithinTheGrace`,
+  `TestTheSizeCapKeepsEveryCanonicalWhenAPortraitWentUnseen`,
+  `TestArtworkCapSweeperWarnsOncePerStreakWhenTrackRowsNameMoreThanTheCap`,
+  `TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould`).
 - **`artwork --gc` collects the portraits of artists no track row names**
   (2026-10-14, backlog B85). The GC judged a file by its size suffix, so the
   portraits at the top of the cache, `artist-<mbid>.jpg` (what the console

@@ -196,6 +196,21 @@ func portraitVerdicts(byMBID, canonical []artworkPortrait, artistMBIDs map[strin
 	return remove, kept
 }
 
+// artistMBIDsInUse returns, lowercased, the artist MBIDs track rows carry
+// (`$.artistMBID`): the set portraitVerdicts keeps portraits by, read by the
+// portrait pass and by the serve size cap (readArtworkCapKeep).
+func artistMBIDsInUse(ctx context.Context, store *manifest.Store) (map[string]bool, error) {
+	names, err := store.DistinctArtistMBIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list referenced artist ids: %w", err)
+	}
+	artistMBIDs := make(map[string]bool, len(names))
+	for _, m := range names {
+		artistMBIDs[strings.ToLower(m)] = true
+	}
+	return artistMBIDs, nil
+}
+
 // portraitTally is what the portrait pass adds to the GC's summary.
 type portraitTally struct {
 	removed, kept, failed int
@@ -218,13 +233,9 @@ func collectPortraits(ctx context.Context, stdout, stderr io.Writer, store *mani
 	var tally portraitTally
 	// The artist set, read here rather than with the covers' keys before
 	// the cover walk: an artist enriched during that walk is in it.
-	names, err := store.DistinctArtistMBIDs(ctx)
+	artistMBIDs, err := artistMBIDsInUse(ctx, store)
 	if err != nil {
-		return tally, fmt.Errorf("list referenced artist ids: %w", err)
-	}
-	artistMBIDs := make(map[string]bool, len(names))
-	for _, m := range names {
-		artistMBIDs[strings.ToLower(m)] = true
+		return tally, err
 	}
 	byMBID, canonical, err := artworkPortraits(walkRoot)
 	if err != nil {
