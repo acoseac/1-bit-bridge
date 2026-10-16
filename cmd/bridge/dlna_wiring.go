@@ -552,6 +552,20 @@ func (a *manifestLibraryAdapter) rebuild() {
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
 	byPath := make(map[string]dlna.TrackInfo, len(tracks))
 	for _, t := range tracks {
+		_, routed := routedPaths[t.Path]
+		// An SACD image's virtual track (`<image>.iso/st/NN.dff`) is not
+		// listed (backlog B415): the bridge never demuxes, so nothing is
+		// at its path, and a renderer told to play it could only fail.
+		// The app vetoes casting one for the same reason. Leaving it out
+		// here leaves it out of every view the ContentDirectory builds
+		// from this list: All Tracks and its count, the folder tree,
+		// Search, BrowseMetadata and the file route's lookup. The test is
+		// the classifier the scanner mints and keeps these rows by, never
+		// a second copy of the grammar. A routed track is listed whatever
+		// its path's shape, as before: the proxy serves it.
+		if !routed && manifest.IsSACDVirtualPath(t.Path) {
+			continue
+		}
 		absPath, resolveErr := a.resolver.Resolve(t.Path)
 		if resolveErr != nil {
 			// Filesystem resolver miss. If this track is backed by
@@ -565,7 +579,7 @@ func (a *manifestLibraryAdapter) rebuild() {
 			// renderer silently 404'd (bug surfaced by the post-pair-A
 			// operator verification of PR #732 — see internal/upnpproxy
 			// package docblock).
-			if _, routed := routedPaths[t.Path]; !routed {
+			if !routed {
 				continue
 			}
 			absPath = ""
