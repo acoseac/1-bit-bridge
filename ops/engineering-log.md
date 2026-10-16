@@ -44462,3 +44462,110 @@ rebuilds. Negative control: the routed set read once and kept (a memo in
 observed: exactly the new test red, at "not listed after the cache rebuilt".
 The review's other finding, that the maps' capacity hint counts the rows
 left out, stands as written: it is a sizing hint.
+
+## 2026-10-16 — PROTOCOL.md's error table lists every code a `/v1` route sends, and the DST bullet says what the app does (backlog B413)
+
+B412 left two items in PROTOCOL.md open. The error table listed 22 codes, and the
+`/v1` handlers send 48 status and code pairs: 27 codes were missing, and ten rows
+were incomplete or said something the code does not do. The DST bullet said the
+app refuses DST "until its DST decoder ships"; the app has decoded DST since its
+decode-to-cache shipped (acoseac/1-bit#1445).
+
+### How the codes were enumerated
+
+Every `/v1` route is an entry of `internal/api`'s `routeRegistry`, and every
+listener serves the one handler it builds (`apiHandler()` in `cmd/bridge/main.go`:
+the LAN server, HTTP/3 and the tailnet front). The handlers write the envelope
+through `writeError`, `writeErrorLog` and `writeFileErrorLog` (`api.go`), which
+`writeResolveError` (`files.go`) wraps. A go/parser walk over the package's
+non-test files listed every call with its status and code expressions, and this
+one-liner, which also reads a call split across lines, lists the same 42 literal
+pairs:
+
+```sh
+perl -0777 -ne 'while (/\bwrite(?:Error|ErrorLog|FileErrorLog)\(\s*w,\s*(?:r,\s*)?http\.Status(\w+),\s*"([a-z_]+)"/g) { print "$1\t$2\n" }' $(ls internal/api/*.go | grep -v '_test\.go$') | sort -u
+```
+
+- **Four calls pass a code that is not a literal:** `errCodeUpscaleDisabled` (`upscale_disabled`), `parseVariantDeleteQuery`'s `errCode` (always `bad_request`), `lookupAnalysisForRequest`'s `kind + "_not_found"` (`waveform_not_found`, `spectrum_not_found`), and `proxyUPnP`'s `perr.Code`, from `internal/upnpproxy`'s `PreStreamError` (`upnp_server_offline`, `upnp_bad_res_url`, `upnp_upstream_unreachable`, `internal`).
+- **Three bodies bypass the helpers** (`grep -n 'json:"error' internal/api/*.go`): the favorites and playlist `409`s (`stale`, `base_mismatch`) and the batch `507` (`insufficient_disk_space`, which carries no `message`).
+- **Nothing else writes an error status:** no handler calls `http.Error` or a bare `WriteHeader` with one. `internal/admin` has its own `writeError` for the console's `/api/*`, which this table does not cover.
+
+That is 48 pairs, no code sent with two statuses. `forbidden`, which no route
+sends, stays as the reserved row: 49 rows.
+
+### What changed in PROTOCOL.md
+
+- **27 rows added:** `device_token_required`, `base_revision_required` and `validate` (400); `demo_read_only` and `harvest_base_url_not_allowed` (403); `variant_not_found`, `waveform_not_found`, `spectrum_not_found`, `lyrics_not_found`, `playlist_backup_not_supported`, `playback_history_not_supported`, `atlas_not_supported` and `harvest_not_supported` (404); `variant_stale`, `variant_missing_on_disk`, `waveform_stale`, `waveform_missing_on_disk`, `spectrum_stale` and `lyrics_stale` (410); `persist_failed` (500); `upnp_bad_res_url` and `upnp_upstream_unreachable` (502); `upscale_disabled`, `upnp_server_offline`, `stats_unavailable` and `unavailable` (503); `insufficient_disk_space` (507).
+- **Rows corrected:**
+  1. `scan_in_progress` said the manifest answers it while an initial scan runs. It answers it only on a server built without its manifest provider, artwork cache or config, which `serve` wires before it listens. The handler has sent it only for a missing provider since it was added (#7).
+  2. `not_found` named only library paths and a cover "not cached under the requested MBID + `size`", which the size ladder retired. It now names every route that sends it.
+  3. `pending` gains the booklet's `202`; `queue_full` gains `POST /v1/upscale`'s.
+  4. `events_not_supported` named a pre-v1.2 build, which has no route and so sends no code. A running bridge sends it for `GET /v1/events` in demo mode (`serve` always starts a broker).
+  5. `favorites_not_supported` and `smart_playlists_not_supported` named builds too; they now name the health flag each is advertised against, the CLAUDE.md rule for spec labels.
+  6. `bad_request` covers request bodies and a path that names no library root (`writeResolveError` answers `ErrUnknownRoot` with it).
+  7. `stale`'s whole-document favorites clause applies to a bridge without `favoritesRevisions` only: `PUT /v1/favorites` reaches the store through `SaveFavorites` alone, whose legacy path never answers `409` (`UpsertFavorites`, the last-write-wins path, has no caller outside tests).
+  8. `forbidden` says no route sends it.
+- **The intro said "All errors are JSON".** A note under the table names the three answers that are not: net/http's plain-text `404` / `405` for a path or method no route serves, `http.ServeContent`'s plain-text `416` on the byte routes (go1.26.6 `fs.go`), and the upstream server's own status and body on a UPnP-proxied track.
+- **The DST bullet** now says what the app does, checked at its `a645c85e`: it maps `compression == "DST"` onto `Track.dstCodec` through `canonicalClientCodec` (`BridgeSyncActor.swift:2103-2106`), decodes an eligible track on the phone into an uncompressed DSDIFF in its auto-cache (`DST/DSTDecodeToCache.swift`, over its port of the ISO reference decoder in `DST/`), and refuses the rest. Eligible is stereo DSD64 or DSD128 of the 44.1 kHz family with a library row (`PlayerService.dstDecodeIsEligible`, `:19812`; `eligibleFS44`, `DSTDecodeToCache.swift:140-151`; the stereo check, `:235-238`). A rate it rules out is refused before the download (`PlayerService.swift:14994-15004`); an SACD ISO track's sector window goes through the same decode (`:14947-14958`).
+
+### The app's handling of the added codes (read-only audit, iOS `a645c85e`)
+
+`BridgeSourceClient.ensureOK` (`BridgeSourceClient.swift:2520-2557`) maps `429` to
+`.rateLimited` and `401` to `.unauthorized`, decodes any other envelope into
+`BridgeError.server(status:code:message:)` (`ErrorEnvelope` requires both `error`
+and `message`, `:3340-3343`), and otherwise throws `.http(status:)`.
+`.server` reads "Bridge <status> (<code>): <message>" (`:4292-4293`). The streaming
+download behind playback and offline downloads throws `.http(status:)` for any
+non-`200` and never reads the body (`:5082-5103`). **The app matches one code by
+its string, `base_mismatch` (`:943`)**; every added code is handled by its status
+or reaches the generic error.
+
+| Code | What the app does |
+|---|---|
+| `device_token_required` | Not reachable from a current app: every authed request carries a 64-character lowercase-hex `X-Device-Token` (`BridgeSourceClient.swift:1937`, `SMBStore.swift:292-296`). If sent, the playlist, favorites or telemetry coordinator logs `.server(400, …)` and retries on its next trigger. |
+| `base_revision_required` | Not reachable (the app sends the revision it read). If sent, a failed favorites PUT, logged (`FavoritesService.swift:1613-1615`). |
+| `validate` | The ingest is `try? await performIngestAtlas` (`AtlasMetadataCoordinator.swift:815-845`): dropped without a line. |
+| `demo_read_only` | Not sent to a demo bridge: Atlas excludes it (`isAtlasEnabledBridge`, `AtlasMetadataCoordinator.swift:985-1002`), `provisionHarvest` and `revokeHarvest` return first, and rendition requests pass `BridgeRenditionRequestGate`. If sent, the revoke reads `403` as `.cannotRevoke` by status (`BridgeSourceClient.swift:1280-1283`); `POST /v1/upscale` is logged, the play goes on without the rendition, and a download falls back to the source. |
+| `harvest_base_url_not_allowed` | `.server(403, …)`, logged "atlas harvest: provision failed" (`AtlasMetadataCoordinator.swift:1314-1319`); nothing shown. |
+| `harvest_not_supported` | `POST`: as above. `DELETE`: `404` is `.cannotRevoke` by status. |
+| `atlas_not_supported` | `fetchAtlasMeta` returns nil on any `404` (`BridgeSourceClient.swift:1214`), read as never checked; the ingest that follows is dropped. Gated on `atlasEnrichment`, the flag's own predicate. |
+| `playlist_backup_not_supported` | Gated on `playlistBackup`. If sent, `fetchPlaylist` returns nil and `deletePlaylist` counts it done, for any `404` (`BridgeSourceClient.swift:1005`, `:1101`); `uploadPlaylist` logs `.server`. |
+| `playback_history_not_supported` | Gated on `playbackHistory`. If sent, `uploadHistory` logs `.server` and the events stay queued (`PlaybackTelemetryCoordinator.swift:409-411`). The app never calls `GET /v1/history`. |
+| `variant_not_found`, `variant_stale`, `variant_missing_on_disk` | Playback gets `.http(404)` or `.http(410)`; `isUpscaleVariantStaleError` drops the variant and reloads the next-best one or the source (`PlayerService.swift:18901-18911`). An offline download gets the same `.http`, which is not transient, so the job fails with "Bridge HTTP 410." (`DownloadCoordinator.swift:5159-5177`). The app never calls `DELETE /v1/upscale/variants`. |
+| `waveform_not_found`, `waveform_stale`, `waveform_missing_on_disk` | `fetchWaveform` returns nil on `404` / `410` after the protocol check (`BridgeSourceClient.swift:1536-1539`); on-device analysis takes over. |
+| `spectrum_not_found`, `spectrum_stale` | `fetchSpectrum`, the same (`BridgeSourceClient.swift:1594-1597`). |
+| `lyrics_not_found`, `lyrics_stale` | `fetchLyrics`, the same (`BridgeSourceClient.swift:1561-1564`). |
+| `persist_failed` | Pairing redeem: `BridgePairingError.serverError`, which a failed save shows as "Bridge returned HTTP 500: failed to issue the device's token." (`BridgePairingClient.swift:320-322`, `:713-717`). Harvest `POST`: logged. Harvest `DELETE`: not a revoke outcome, so `ensureOK` throws and the revoke is logged as failed. |
+| `upnp_bad_res_url`, `upnp_upstream_unreachable`, `upnp_server_offline` | Playback reads them as `.http(502)` / `.http(503)`, and the player's status reads "Download failed: Bridge HTTP 503." (`PlayerService.swift:15779`). Not a reachability error (`isUnreachableSourceError`, `:19096-19124`), so the queue does not skip. A `/v1/read` caller gets `.server` with the code. |
+| `upscale_disabled` | `requestVariant` (`POST /v1/upscale`, behind the app's own flag gates) logs `.server`; the play goes on without the rendition, and a download falls back to the source (`DownloadCoordinator.swift:4439`). The app never calls the batch routes. |
+| `stats_unavailable` | The app calls neither stats route. |
+| `unavailable` | Both event streams read any non-`200` other than `404` as transient and reconnect on their own backoff, ignoring `Retry-After`; five failures in a row fall back to polling (`BridgeEventStream.swift:626-631`, `:438-444`). |
+| `insufficient_disk_space` | The app never calls `POST /v1/upscale/batch`. Its body has no `message`, so `ErrorEnvelope` would not decode it: `.http(507)`. |
+
+Every added code reaches a branch keyed on its status, or a logged generic error,
+and none leaves the app in a wrong state. What a code-specific case would change
+is text: for the three `upnp_*` codes the user reads "Bridge HTTP 502." or "503."
+rather than the bridge's message, because the streaming path does not read the
+body. Whether the app should read it is the app's decision.
+
+### Checks
+
+The three packages whose tests read PROTOCOL.md (`cmd/bridge`'s reads every
+tracked `.md`, this log included), run with `GOTOOLCHAIN=go1.26.6 go test
+-count=1`:
+
+| Test | Package | What it pins |
+|---|---|---|
+| `TestEveryDocumentedEndpointIsRouted`, `TestEveryRoutedEndpointIsDocumented` | `internal/api` | the routes, matched against the router both ways |
+| `TestProtocolDocFormatVersionsMatchTheCode` | `internal/analyze` | the waveform and spectrum format versions |
+| `TestEveryCitedTestNameExists` | `cmd/bridge` | every test name a doc cites exists |
+
+All three packages passed on the change at `8bacb117`. Rebased onto `78153974`
+(B100 and B415), the enumeration gave the same status and code pairs, and the four
+tests above passed again, none skipped.
+
+### Not changed
+
+- **The app's copy, `docs/BridgeProtocol.md`.** It equalled PROTOCOL.md at `8bacb117` (`cmp`), so the companion change is a copy of PROTOCOL.md; the iOS repo was read-only for this session.
+- **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
+- **No Go code.**
