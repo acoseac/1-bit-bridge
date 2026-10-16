@@ -43,7 +43,7 @@ const historyMaxBodyBytes = 4 << 20
 // coordinator batches in the low hundreds). Excess is dropped + counted.
 const historyMaxBatchEvents = 10000
 
-// --- wire DTOs (see PROTOCOL.md Appendix A.4) ---
+// --- wire DTOs (see PROTOCOL.md, "Playback history") ---
 
 type hardwareTargetDTO struct {
 	InterfaceType string `json:"interfaceType,omitempty"`

@@ -11,7 +11,9 @@ import (
 // /api/devices has always carried deviceName; the retired playlists table
 // rendered deviceTokenPrefix beside it, so the console showed an opaque
 // hex string (a3f91c2e…) for a device whose name the bridge already knew,
-// and PROTOCOL.md:664 promises the named surface.
+// and PROTOCOL.md promises the named surface ("Playlist backup", its
+// Scoping paragraph: the write's device token is last-writer provenance
+// shown in the bridge admin console).
 //
 // That table is gone — playlists live in the player now, and their
 // "backed up by" line is resolved SERVER-side (deviceNamesByToken in
