@@ -43566,3 +43566,50 @@ predicted by name and matched:
 10. `admits` without the DSD term: exactly
     `TestAQueuedRenderRunsOnlyWhileItsFamilysGateIsOpen`, at the two
     compact-tier rows with the CarPlay gate open and the DSD gate closed.
+
+**Review round (#1247).** SonarCloud's PR gate failed on duplication, 11.0% of
+new lines against a 3% limit: the drop-run bookkeeping each pool carried (45
+lines in each `pool.go`) and the shapes the two pools' tests shared (56 and 64
+lines). The bookkeeping is now one `dropburst.Tracker` (`internal/dropburst`)
+both pools use. It has no lock of its own: the pool's mutex guards it,
+`AcceptedLocked` and `PassedOverLocked` run inside the pool's sections, `Ran`
+and `Drop` take the mutex themselves, and every line is written with it
+released. finishJob's end check for a job already decided went: a run that
+leaves nothing undecided ends at once, so no run is open with nothing
+undecided, and that check could never fire. The shared test shapes are
+`internal/pooltest`, a test-only package: each pool's test file adapts its
+pool to `pooltest.Start` and keeps its own tests, under their old names, with
+the checks only that pool has. Counting the runs of eight or more identical
+code lines the two files share (comments and blank lines left out), `pool.go`
+went from 90 to 60 lines, of which main's two pools already shared 29 (their
+counters, the constructors' guards, `fireStateChange`, `PoolStats`), and the
+live-gate tests from 46 to 0.
+
+gemini-code-assist's two `sort.Strings` nits are taken. Its two suggestions to
+merge `Drop`'s critical section into finishJob's are declined: one section
+writes the line only after its unlock, so the count is visible before the
+line. As a control, the drop's bookkeeping deferred past its count, under
+`-race`, 20 runs each: `TestAJobStillBeingDecidedKeepsItsBurstOpen` failed 2
+of 20 and `TestARenderStillBeingDecidedKeepsItsBurstOpen` 3 of 20, every other
+B155 test 20 of 20 (the first version of the fix, which had the same order,
+failed the first 6 of 20). The Tracker's doc comment says why.
+
+**Controls re-run on the moved code** (each committed first, its anchors
+count-asserted, restored from git and the tree checked clean):
+1. A dropped job keeps its path (analysis) or its claim (transcode): the red
+   sets of controls 3 and 4, unchanged.
+2. A run ends at an empty queue, in the form it takes now that the end check
+   is the Tracker's, which cannot see the queue: a job leaves the undecided
+   count when a worker TAKES it, with no end check there, instead of when it
+   is decided (`Ran` and `Drop` lose their decrement, `PassedOverLocked` its
+   end check, and each pool decrements at the take). Exactly the two
+   parked-gate tests, with the lines `count=9` and `count=1`, as control 7;
+   and five of the Tracker's six own tests. A first form decremented through
+   `PassedOverLocked` with its end check kept, so it ended the run at the take
+   of the last job, before that job was decided, which the queue-length check
+   never did: it also reddened each pool's single-worker and four-worker burst
+   tests, and is not counted.
+3. New: the end check ignoring undecided jobs reddens the three burst tests of
+   each pool and four of the Tracker's tests; a job that runs not ending the
+   run reddens only `TestAJobThatRunsEndsTheRunBeforeIt`, since no pool test
+   reopens the gate in the middle of a run.

@@ -8557,7 +8557,9 @@ mentions across the four `ops/audit-*.md` files.
   `TestAJobStillBeingDecidedKeepsItsBurstOpen` pins the burst's end,
   `TestAQueuedRenderRunsOnlyWhileItsFamilysGateIsOpen` the family table and
   `TestThePoolsTakeJobsUnderTheV1Gates` the wiring; thirteen controls each
-  reddened exactly the tests predicted (ops/engineering-log.md).
+  reddened exactly the tests predicted (ops/engineering-log.md). The two
+  pools' tests share their scenarios through `internal/pooltest`, a
+  test-only package each pool adapts its own pool to, keeping its own tests.
 - **…and a value runServe DECIDES from the config while it builds Deps is a
   boot snapshot, however live its reader is** (2026-09-28).
   `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals
