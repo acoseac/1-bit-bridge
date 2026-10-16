@@ -195,12 +195,15 @@ func servedSnapshotOf(ifaces []net.Interface, addrsOf interfaceAddrs, advertised
 		addrs []net.Addr
 		err   error
 	}
-	readings := make(map[*net.Interface]reading, len(ifaces))
+	// Keyed by name, which is unique per host, not by pointer: the members
+	// pickAllLANInterfaces returns point into ifaces today, and a copy there
+	// would otherwise read no addresses at all.
+	readings := make(map[string]reading, len(ifaces))
 	snap := servedSnapshot{served: map[netip.Addr]struct{}{}, holder: map[netip.Addr]string{}}
 	for i := range ifaces {
 		ifi := &ifaces[i]
 		addrs, err := addrsOf(ifi)
-		readings[ifi] = reading{addrs: addrs, err: err}
+		readings[ifi.Name] = reading{addrs: addrs, err: err}
 		for _, a := range addrs {
 			if k, ok := interfaceAddrKey(a, ifi.Name); ok {
 				snap.holder[k] = ifi.Name
@@ -208,11 +211,11 @@ func servedSnapshotOf(ifaces []net.Interface, addrsOf interfaceAddrs, advertised
 		}
 	}
 	read := func(ifi *net.Interface) ([]net.Addr, error) {
-		r := readings[ifi]
+		r := readings[ifi.Name]
 		return r.addrs, r.err
 	}
 	for _, member := range pickAllLANInterfaces(ifaces, read, EligibilityOpts{}) {
-		for _, a := range readings[member].addrs {
+		for _, a := range readings[member.Name].addrs {
 			k, ok := interfaceAddrKey(a, member.Name)
 			if !ok {
 				continue
@@ -301,8 +304,8 @@ func (l servedOnlyListener) Accept() (net.Conn, error) {
 			return nil, err
 		}
 		from := ""
-		if ra := c.RemoteAddr(); ra != nil {
-			from = sourceIPOf(ra.String())
+		if ip := netAddrIP(c.RemoteAddr()); ip.IsValid() {
+			from = ip.Unmap().String()
 		}
 		if l.served.admit(l.log, "a connection", netAddrIP(c.LocalAddr()), from) {
 			return c, nil
