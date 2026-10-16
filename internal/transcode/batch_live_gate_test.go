@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/pooltest"
 	"github.com/google/uuid"
 )
 
@@ -39,15 +40,16 @@ func seedGateBatch(t *testing.T, s *manifest.Store) {
 }
 
 // gateCoordinator wires a coordinator over a pool of `workers` workers that
-// runs runner under gate, with the three job callbacks wired the way serve
-// wires them. afterDropped, when set, runs after each OnJobDropped returns.
-func gateCoordinator(t *testing.T, s *manifest.Store, workers int, runner *holdingRunner, gate *testGate, afterDropped func(path string)) (*Coordinator, *Pool) {
+// runs each job through holder under gate, with the three job callbacks
+// wired the way serve wires them. afterDropped, when set, runs after each
+// OnJobDropped returns.
+func gateCoordinator(t *testing.T, s *manifest.Store, workers int, holder *pooltest.Holder, gate func(JobSpec) bool, afterDropped func(path string)) (*Coordinator, *Pool) {
 	t.Helper()
 	p := NewPool(s, workers, 16)
 	t.Cleanup(p.Stop)
 	p.fsyncFn = noopFsync
-	p.runner = runner.run
-	p.SetLiveGate(gate.admits)
+	p.runner = renderWith(holder.Run)
+	p.SetLiveGate(gate)
 	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
@@ -121,10 +123,8 @@ func requireCancelledByTheSwitchOff(t *testing.T, row manifest.UpscaleBatchRow, 
 func TestABatchWhoseQueuedFilesAreDroppedEndsCancelled(t *testing.T) {
 	s := openTempStoreForBatch(t)
 	seedGateBatch(t, s)
-	gate := newTestGate()
-	gate.only = map[string]bool{"Album/01.flac": true}
-	runner := newHoldingRunner("Album/01.flac")
-	c, _ := gateCoordinator(t, s, 2, runner, gate, nil)
+	holder := pooltest.NewHolder(func(path string) bool { return path == "Album/01.flac" })
+	c, _ := gateCoordinator(t, s, 2, holder, func(spec JobSpec) bool { return spec.SourceLibraryRel == "Album/01.flac" }, nil)
 
 	res, err := c.Submit(context.Background(), "Album", 192000, 24, t.TempDir())
 	if err != nil {
@@ -133,7 +133,7 @@ func TestABatchWhoseQueuedFilesAreDroppedEndsCancelled(t *testing.T) {
 	if res.EnqueuedCount != len(gateBatchPaths) {
 		t.Fatalf("EnqueuedCount = %d, want %d", res.EnqueuedCount, len(gateBatchPaths))
 	}
-	<-runner.started
+	holder.WaitHeld(t, 1)
 	deadline := time.Now().Add(10 * time.Second)
 	for remaining(c, res.BatchID) != 1 {
 		if time.Now().After(deadline) {
@@ -141,7 +141,7 @@ func TestABatchWhoseQueuedFilesAreDroppedEndsCancelled(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	close(runner.release)
+	holder.Release()
 
 	row := waitBatchRow(t, s, res.BatchID)
 	requireCancelledByTheSwitchOff(t, row, 1, 0, 4, 3)
@@ -162,10 +162,8 @@ func TestABatchWhoseQueuedFilesAreDroppedEndsCancelled(t *testing.T) {
 func TestABatchWhoseEveryFileIsDroppedEndsCancelled(t *testing.T) {
 	s := openTempStoreForBatch(t)
 	seedGateBatch(t, s)
-	gate := newTestGate()
-	gate.closeAll()
-	runner := newHoldingRunner("")
-	c, _ := gateCoordinator(t, s, 2, runner, gate, nil)
+	holder := pooltest.NewHolder(func(string) bool { return false })
+	c, _ := gateCoordinator(t, s, 2, holder, func(JobSpec) bool { return false }, nil)
 
 	res, err := c.Submit(context.Background(), "Album", 192000, 24, t.TempDir())
 	if err != nil {
@@ -173,7 +171,7 @@ func TestABatchWhoseEveryFileIsDroppedEndsCancelled(t *testing.T) {
 	}
 	row := waitBatchRow(t, s, res.BatchID)
 	requireCancelledByTheSwitchOff(t, row, 0, 0, 4, 4)
-	if got := runner.rendered(); len(got) != 0 {
+	if got := holder.Ran(); len(got) != 0 {
 		t.Errorf("rendered %v with every gate closed, want nothing", got)
 	}
 }
@@ -187,10 +185,8 @@ func TestADroppedFileAndADedupedOneLeaveTheBatchCancelled(t *testing.T) {
 	seedBatchFixture(t, s) // Album/02 + Album/03 are the eligible candidates.
 	const droppedPath = "Album/02.flac"
 	const dedupedPath = "Album/03.flac"
-	gate := newTestGate()
-	gate.closeAll()
 	dropped := make(chan struct{})
-	c, p := gateCoordinator(t, s, 1, newHoldingRunner(""), gate, func(path string) {
+	c, p := gateCoordinator(t, s, 1, pooltest.NewHolder(func(string) bool { return false }), func(JobSpec) bool { return false }, func(path string) {
 		if path == droppedPath {
 			close(dropped)
 		}
