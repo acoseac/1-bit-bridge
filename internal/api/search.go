@@ -115,7 +115,13 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		// bury real failures under noise in the logs and in the error
 		// metrics, and the client is gone anyway so nothing reads the
 		// body. Return silently. (Gemini HIGH.)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		//
+		// A DEADLINE is not that case. The only one on this request is
+		// the route's own 5 s (withCtxTimeout), so the search ran out of
+		// the server's time while the client still waits. Returning here
+		// sent it an empty 200, which reads as "no results" (backlog
+		// B434); it takes the 500 below.
+		if errors.Is(err, context.Canceled) {
 			return
 		}
 		if errors.Is(err, manifest.ErrSearchUnavailable) {
@@ -127,9 +133,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 				"library search is not available on this bridge (FTS5 not compiled in)")
 			return
 		}
-		// Any other failure is the store's. Its text (an FTS fragment, a
-		// table name, a database path) goes to the log, and the client
-		// gets a fixed message (backlog B425).
+		// Any other failure is the server's, a search past the route's
+		// deadline included: a deadline the server set stays Error and
+		// 500 (B364). Its text (an FTS fragment, a table name, a database
+		// path, "context deadline exceeded") goes to the log, and the
+		// client gets a fixed message (backlog B425).
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't search the library", err)
 		return
