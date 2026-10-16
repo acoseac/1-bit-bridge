@@ -615,7 +615,7 @@ const doctorNameCollisionGroups = doctorVariantsIndexSamples
 // folder that differ only in case or Unicode composition, for the doctor's
 // name-collisions check. Opened per call and closed immediately, like the
 // other manifest probes: `bridge doctor` may run beside a live `bridge
-// serve`. It reads the paths and nothing on disk.
+// serve`. It reads the manifest and walks no library folder.
 //
 // TrackPathsLocal, not TrackPaths: a UPnP-routed row's path is made from
 // another server's metadata, and nothing on this host is a copy to fix.

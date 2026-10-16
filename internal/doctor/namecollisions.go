@@ -41,8 +41,8 @@ const nameCollisionsAdvice = "The 1-bit app compares names ignoring case and Uni
 // with nothing detected per host, and a collision is reported for the user
 // to fix the copies (backlog B420, the owner's decision of 2026-10-16).
 //
-// The probe compares the indexed paths and touches nothing on disk; it
-// renames nothing, and the check prints what it found. Warn, not fail:
+// The probe compares the indexed paths and walks no library folder; nothing
+// here renames or writes, and the check prints what it found. Warn, not fail:
 // `bridge init` refuses to proceed on a fail, and a copy in the library is
 // no reason to refuse an install. It is not skipped on a managed bridge:
 // the library is its user's, and the advice names no command. Skipped when

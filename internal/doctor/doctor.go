@@ -300,7 +300,7 @@ type Deps struct {
 	// folder that differ only in case or Unicode composition — see
 	// checkNameCollisions. Optional on the same terms: nil skips the check,
 	// an error is reported rather than answered as clean. It reads the
-	// store's paths and nothing on disk.
+	// manifest and walks no library folder.
 	NameCollisions func(ctx context.Context) (NameCollisions, error)
 
 	// LogPath is the file the service unit redirects this bridge's stderr

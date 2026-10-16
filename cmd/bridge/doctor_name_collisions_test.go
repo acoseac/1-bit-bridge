@@ -226,8 +226,8 @@ func TestDoctorNameCollisionsNamesTheFirstFiveGroupsAndCountsTheRest(t *testing.
 	if !strings.HasPrefix(c.Summary, "7 group(s) ") {
 		t.Errorf("summary does not count all seven groups: %q", c.Summary)
 	}
-	if doctorVariantsIndexSamples != 5 {
-		t.Fatalf("the variants-index sample is %d, and this test names five groups", doctorVariantsIndexSamples)
+	if doctorNameCollisionGroups != 5 {
+		t.Fatalf("the hint names %d group(s), and this test names five", doctorNameCollisionGroups)
 	}
 	named := []string{wantGroup("Alpha", "alpha")}
 	for _, n := range []string{"P", "Q", "R", "S"} {
