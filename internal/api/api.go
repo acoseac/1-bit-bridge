@@ -142,6 +142,7 @@ type Server struct {
 	dlnaEnabled            bool                         // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
+	walkableRootForTest    func(string) (string, error) // nil in production; a test's stand-in for fsutil.WalkableRoot (folderWalkPath)
 	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
 	analysisStore          AnalysisStore                // nil unless WithAnalysis wired one — /v1/waveform lookup; production wires it whatever the gate says
 	lyricsStore            LyricsStore                  // nil unless WithLyrics wired — /v1/lyrics lookup + the "lyrics" health flag

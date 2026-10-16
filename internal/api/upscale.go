@@ -186,9 +186,17 @@ func (s *Server) refuseUpscaleMutationInDemoMode(w http.ResponseWriter) bool {
 // not a directory, and the request's only candidate was the folder itself.
 // Only a root is followed: the scanner indexes nothing behind a link to a
 // directory below one, so there is nothing there to enqueue.
+//
+// walkableRootForTest, when a test sets it, stands in for WalkableRoot. A
+// root whose walk cannot start after the resolve has stat'ed it as a
+// directory (a link chain the separator does not enter, a mount that went
+// away in between) has no fixture these tests can build (backlog B435).
 func (s *Server) folderWalkPath(libraryRel, abs string) (string, error) {
 	if _, suffix, err := s.resolver.SplitRoot(libraryRel); err != nil || suffix != "" {
 		return abs, nil
+	}
+	if s.walkableRootForTest != nil {
+		return s.walkableRootForTest(abs)
 	}
 	return fsutil.WalkableRoot(abs)
 }
