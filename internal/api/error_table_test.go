@@ -26,8 +26,8 @@ import (
 // to the code, as TestEveryRoutedEndpointIsDocumented pins the endpoints
 // (backlog B426). The table is where a client author reads which `error`
 // codes the bridge sends, under which status, and nothing kept it in step:
-// by B413 (#1255) it listed 22 codes while the /v1 handlers sent 48 status
-// and code pairs, and ten of its rows were wrong. B413 completed it by hand.
+// before B413 (#1255) completed it by hand, it listed 22 codes while the /v1
+// handlers sent 48 status and code pairs, and ten of its rows were wrong.
 // Every pair a handler can send needs a row, so a new code fails here until
 // its row lands, in the same PR; the app's copy of the spec follows as usual.
 func TestEverySentErrorCodeIsInTheProtocolTable(t *testing.T) {
@@ -247,12 +247,13 @@ func (s *errorPairScan) add(pairs []errorPair, site string) {
 }
 
 // scanErrorPairs reads every status and code pair the Go package in dir
-// writes through errorWriters and jsonWriters. A status or code is read when
-// it is a constant (a literal, a constant of the package, net/http's Status
-// constants, or a sum of them), a parameter, read at each call to its
-// function so a status and a code stay paired, or a local set from a call
-// whose results are those; flows name the values another package builds.
-// Anything else is unresolved, never skipped.
+// writes through errorWriters, and through jsonWriters under a 4xx or 5xx
+// status. A status or code is read when it is a constant (a literal, a
+// constant of the package, one of net/http's Status constants, or a sum of
+// them), a parameter, read at each call to its function so a status and a
+// code stay paired, or a local set from a call whose results are those;
+// flows name the values another package builds. Anything else is
+// unresolved, never skipped.
 func scanErrorPairs(dir string, flows []fieldFlow) (errorPairScan, error) {
 	scan := errorPairScan{pairs: map[errorPair][]string{}}
 	pkg, err := loadSourcePackage(dir)

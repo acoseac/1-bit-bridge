@@ -44672,3 +44672,10 @@ answers net/http and the proxy give. A writer called through a function
 value, and an envelope encoded by hand rather than through `writeJSON`, are
 not seen either. `internal/admin`'s writer serves the console's `/api/*`,
 outside the table.
+
+### Checks
+
+GOTOOLCHAIN=go1.26.6: `go test -count=1 ./internal/api/` and the same under
+`-race`, `go test -count=1 ./cmd/bridge/` (its docblock, citation and keeper
+guards read the new file), `go vet ./...`, a `GOOS=windows` build of the
+package's tests, and the pinned gofmt.
