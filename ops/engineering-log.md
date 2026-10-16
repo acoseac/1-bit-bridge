@@ -44570,6 +44570,220 @@ tests above passed again, none skipped.
 - **The app's DST refusal text.** `DFFParser.dstUnsupportedMessage` (`DFFParser.swift:74-75`), which an ineligible DST track still shows, says "Playing DST isn't supported yet", and its doc comment says the decoder has not shipped.
 - **No Go code.**
 
+## 2026-10-16 — a failed search logs its error and answers 500 with a fixed message (backlog B425)
+
+Found by the B413 session while it enumerated the error codes (#1255).
+`GET /v1/search` (`internal/api/search.go:130` at `0d5f43b3`) answered every
+store failure other than a cancel and `ErrSearchUnavailable` with
+`writeError(w, 500, "internal", err.Error())`. `writeError` logs nothing, so
+the error's own text reached the paired client as the message, and the
+operator saw only the access line. The store wraps the query's error as
+`search tracks_fts (served): …`, which names the FTS table and carries
+whatever SQLite or the OS said: an FTS syntax fragment, or an
+`*os.PathError` naming the database file.
+
+**Red first** (`3f71e413`, the tests alone on main at `0d5f43b3`, macOS,
+go1.26.6). `TestASearchStoreFailureAnswersAFixedMessage` drives the handler
+over a stub searcher with two errors under the store's prefix: an FTS fault
+(`SQL logic error: fts5: syntax error near "AND" (1)`) and one naming the
+database file (`open /Users/alice/…/bridge.db-wal: disk I/O error`). Both
+answered 500 `internal` with the error's text as the message, every leak
+fragment in the body (`tracks_fts`, `SQL logic error` and `fts5`;
+`/Users/alice`, `bridge.db-wal` and `disk I/O error`), and no
+request-failed line. `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`
+goes through `Handler()`, a real `manifest.Provider` and a real store: a
+search answers 200 with the seeded track, then the store's database is
+closed, and the same search answered 500 with `search tracks_fts (served):
+sql: database is closed` in the body and no request-failed line. Its access
+line was already Error at 500.
+
+**Fix** (`6471c3c2`). That branch calls `writeErrorLog(w, r, 500,
+"internal", "the bridge couldn't search the library", err)`: the error is
+logged at Error with status 500, and the body carries the fixed message. No
+client abort reaches the call, so B364's 499 never applies there: the early
+return above it, for `context.Canceled` and `context.DeadlineExceeded`, is
+the keystroke path B364 left alone, and `TestSearchSwallowsAClientCancellation`
+still pins it. No wire change: the code stays `internal`, whose PROTOCOL.md
+row says "Server-side failure".
+
+**The sweep for twins.** A throwaway go/ast lister (not committed) printed
+every `writeError`, `writeErrorLog` and `writeFileErrorLog` call in
+`internal/api`'s non-test files whose message is not a string literal: 52 of
+231 calls at `0d5f43b3`, none a `fmt.Sprintf`. Those with a 5xx status:
+- `search.go:130`, `err.Error()`: this fix.
+- `upscale.go:312` and `:381`, the folder walk of `POST /v1/upscale`:
+  `"walk folder: " + redactWalkErr(walkErr)`, which keeps an
+  `*os.PathError`'s `Op` and errno text and drops its path (any other
+  error's text is kept whole). Deliberate: #185's privacy audit chose a
+  redacted reason on the wire ("the same redactor covers both egress
+  channels"), and #1076 copied the shape for the root's `WalkableRoot`
+  error, a 500 that logs no line. Left as they are, and reported.
+- Fixed messages held in a name or built from one: `errMsgInternalError`
+  (the artwork, artist-image, booklet and cover opens, each logging its
+  error first, and two `writeErrorLog` calls), `errMsgUpscalingNotEnabled`
+  (the 503s), `"the bridge couldn't look up this " + kind`, and
+  `proxyUPnP`'s `perr.Message`, a fixed string at each `PreStreamError`
+  literal in `internal/upnpproxy`.
+- `writeErrorLog` and `writeFileErrorLog` passing their own `userMsg` on.
+
+The bodies written without the helpers (the favorites and playlist 409s,
+the batch 507) carry fixed messages or none. The 4xx messages built from an
+error (`enrich.ParseSize`, the Atlas ingest's validation, the event
+stream's topics parse) describe the client's own input, as
+`writeErrorLog`'s docblock asks a 4xx to.
+
+**Negative controls** on the committed fix (`6471c3c2`), each anchor
+count-asserted, the package vetted, the search tests run (`-run
+'TestSearch|TestASearchStoreFailure'`, `-count=1`), restored from git and
+the restore checked against HEAD:
+1. The fix reverted (`writeError(…, err.Error())`). Predicted and observed:
+   exactly the two B425 tests red, at the red run's assertions (the
+   message, every leak fragment, no request-failed line); the ten other
+   search tests green.
+2. `writeErrorLog` with `err.Error()` as the message. Predicted and
+   observed: the two tests red at the message and the leak fragments only;
+   their log assertions green.
+3. `writeError` with the fixed message and no log. Predicted and observed:
+   the two tests red at "want one request-failed line, got 0" only.
+
+**Left open.** The keystroke path's early return also takes
+`context.DeadlineExceeded`, which on this route is the server's own 5 s
+`withCtxTimeout`. A search that runs out its deadline writes nothing, so
+the client gets an empty 200 (net/http's answer to a handler that writes
+nothing: `200`, `Content-Length: 0`, measured with a standalone probe), and
+the log has only the access line at status 0, where B364's rule says a
+server deadline stays Error and 500. B364 named the keystroke path as left
+alone, and this change leaves it too.
+
+## 2026-10-16 — PROTOCOL.md's error table is held to the pairs the `/v1` handlers send, by two guards (backlog B426)
+
+B413 (#1255) completed the table by hand: it had listed 22 codes while the
+handlers sent 48 status and code pairs, and ten of its rows were wrong.
+Nothing kept it in step. `TestEverySentErrorCodeIsInTheProtocolTable` fails
+on a pair a handler sends with no row; `TestEveryProtocolErrorRowIsSent`
+fails on a row naming a pair nothing sends, except a row marked `(reserved;
+no route sends it)`, B413's marking of `forbidden`, and on a reserved row
+something does send. Both are in `internal/api/error_table_test.go`, beside
+the routed-endpoints pair they mirror.
+
+### How the pairs are read
+
+go/ast over `internal/api`'s non-test files; a name starting with `.` or `_`
+is skipped before it is opened (the go tool's rule; an editor's lock file is
+the case). Not go/types: type-checking `internal/api` means type-checking
+every dependency from source, `modernc.org/sqlite` among them, or building
+export data with `go list -export` on every run.
+
+- **The writes.** Every call of `writeError`, `writeErrorLog` and
+  `writeFileErrorLog`, at their status and code positions (their own bodies
+  are not read). And every `writeJSON` / `writeJSONGzip` under a 4xx or 5xx
+  status, whose body must then be a literal (or its address, or a parameter
+  a caller passes one in) of a package struct with a field tagged
+  `json:"error"`: the favorites and playlist 409s and the batch 507. A 2xx
+  body is never an error body, since one may carry `error` as data
+  (`BatchRow`).
+- **The values.** A status or code is read when it is a literal; a package
+  constant; one of net/http's `Status` constants, read from the toolchain's
+  own `net/http` source through `go/build`, so the value is the one the
+  handler compiles against; a sum of those (`kind + "_not_found"`); a
+  parameter, read at each call to its function (up to four calls out), with
+  status and code bound to the same call so two calls stay two pairs, plus
+  whatever the body sets it to; or a local set from a call to a package
+  function, or to a method on the same receiver, read at each of that
+  function's returns (`parseVariantDeleteQuery`'s `errCode`). An empty code is
+  dropped: the caller writes only past a check for one.
+- **Refused**, with the site and the reason, failing both guards: a code
+  built at run time (a call the guard cannot follow), a package variable, a
+  function literal's parameter, a function nothing in the package calls, a
+  status and a code that both take several values (which the guard cannot
+  pair), and a 4xx or 5xx JSON body it cannot read.
+- **One declared flow** (`declaredFieldFlows`). `proxyUPnP` writes
+  `perr.Status` and `perr.Code` of the `*upnpproxy.PreStreamError` that
+  `Proxy.Serve` returns. Only a type checker knows that type, so the flow is
+  declared, and the values are still parsed: the Status and Code of every
+  `PreStreamError` literal in `internal/upnpproxy`, five of them (500
+  `internal` twice, 503 `upnp_server_offline`, 502 `upnp_bad_res_url`, 502
+  `upnp_upstream_unreachable`). A flow that matches no write is reported.
+
+### On main (`5266c664`)
+
+The scan reads 48 pairs and refuses nothing; the table has 49 rows, with
+`forbidden` the reserved one. Those are B413's 48 pairs exactly. Of the four
+non-literal codes B413 listed, three are read by the rules
+(`errCodeUpscaleDisabled` as a constant, `parseVariantDeleteQuery`'s
+`errCode` through its returns, `kind + "_not_found"` at both callers), and
+`perr.Code` through the flow.
+
+### Fixture tests
+
+On a clean tree the guards report nothing, so they cannot show the scan
+still reads each shape. `TestErrorPairScanReadsEveryShapeOnAFixture` scans a
+synthetic package written to a temp dir and requires its 15 pairs exactly
+(each shape above, with the two calls of a status-and-code helper kept
+apart) and exactly eight refusals: a code built at run time, an unreadable
+409 body, a function literal's parameter, a function nothing calls, a status
+and a code that both vary, a package variable read and one set, and a stale
+flow. Its test file, `_` file and lock-shaped file are never read; read, the
+lock fails the parse (measured). `TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair`
+pins the table's reading (a reserved row, a pipe in the When cell, CRLF) and
+eight shapes it refuses: no heading, another table first, no alignment row,
+two codes in a cell, a bare code, a status that is not one, a second row for
+a pair, and no table.
+
+### Negative controls
+
+On the committed guard (`09bf317b`), each predicted by test name, each run
+over the whole `internal/api` package (`-count=1`, go1.26.6), each anchor
+count-asserted, then restored from git and the tree checked clean. Every
+prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| NC1 `writeError(w, http.StatusServiceUnavailable, "search_reindexing", …)` added to the search handler | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "503 search_reindexing, sent at search.go:91 (search)" |
+| NC2 the `lyrics_not_found` row deleted | `TestEverySentErrorCodeIsInTheProtocolTable` alone: "404 lyrics_not_found, sent at lyrics.go:106 (lyrics); lyrics.go:129 (lyrics)" |
+| NC3 a row added for `404 lyrics_missing` | `TestEveryProtocolErrorRowIsSent` alone |
+| NC4 the reserved marker taken off `forbidden`'s row | `TestEveryProtocolErrorRowIsSent` alone: "403 forbidden, which no /v1 handler sends" |
+| NC5 the playlist 409 literal's `base_mismatch` renamed | both guards (the new code has no row, the old row is unsent), and `TestATombstonedBaseMismatchCarriesDeleted` and `TestPlaylistMatchingBaseOnTheWire`, which read that code |
+| NC6 `kind + "_not_found"` made `kind + "_unavailable"` | `TestEverySentErrorCodeIsInTheProtocolTable` alone, naming both callers (`spectrum.go:30`, `waveform.go:136`); the old rows stay sent by the literal 404s |
+| NC7 a `PreStreamError` literal's `upnp_server_offline` renamed | both guards, through the flow, at both `proxyUPnP` writes |
+| NC8 `declaredFieldFlows` emptied | both guards, at the scan: the two `proxyUPnP` writes refused ("perr.Status is not a constant the guard can read") |
+
+### Not read
+
+An error status written with no envelope (`http.Error`, a bare
+`WriteHeader`) carries no code for the table to name; B413 found none in
+`internal/api`, and the note under the table names the three body-less
+answers net/http and the proxy give. A writer called through a function
+value, and an envelope encoded by hand rather than through `writeJSON`, are
+not seen either. `internal/admin`'s writer serves the console's `/api/*`,
+outside the table.
+
+### Checks
+
+GOTOOLCHAIN=go1.26.6: `go test -count=1 ./internal/api/` and the same under
+`-race`, `go test -count=1 ./cmd/bridge/` (its docblock, citation and keeper
+guards read the new file), `go vet ./...`, a `GOOS=windows` build of the
+package's tests, and the pinned gofmt.
+
+**After review** (3.1 Pro on #1259). Two of its three findings are taken in
+`70459717`:
+- **A JSON body held in a local** (`b := conflictBody{...}; writeJSON(w, s, b)`)
+  now resolves when the function sets it exactly once, from a value. A local
+  set twice is still refused, so its write fails the guard. A bound of 16 names
+  stops a local set from itself from looping.
+- **Every cell of the alignment row** must be dashes and colons with at least
+  one dash, not only the first.
+
+Fixture cases: `409 in_a_local` is read and `(bodyReassigned)` is refused; the
+table test refuses "a broken alignment". Negative controls, each predicted and
+restored from git: locals not followed (exactly the fixture test red, the pair
+missing and `bodyInALocal` unresolved), and the alignment check on the first
+cell only (exactly the table test red, at "a broken alignment").
+
+The third finding is declined. It said the guard fails where `$GOROOT/src` is
+missing. Since Go 1.20 the standard library is built from source, so a
+toolchain that can run this test has `net/http`'s source.
+
 ## 2026-10-16 — `bridge doctor` names the names in one folder that the app reads as one (backlog B420)
 
 The owner decided on 2026-10-16, from the B375 study in the iOS repo, that

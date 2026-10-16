@@ -3057,6 +3057,24 @@ lost my library."
   A mention in running prose is NOT a contract — the guard accepts only a `### `
   heading or a bold `METHOD /path` lead-in, because prose-mention is the state
   six live endpoints were already in.
+- **PROTOCOL.md's error table lists exactly the status and code pairs the
+  `/v1` handlers send, and two guards hold it there** (2026-10-16, backlog
+  B426). `TestEverySentErrorCodeIsInTheProtocolTable` fails on a pair with
+  no row, and `TestEveryProtocolErrorRowIsSent` on a row nothing sends,
+  except one marked `(reserved; no route sends it)`, which nothing may send
+  (`forbidden`). A new code is a new row in the same PR, and the app's copy
+  follows. The pairs are read by parsing `internal/api` with go/ast: the
+  calls of the three envelope writers, and `writeJSON` / `writeJSONGzip` of
+  a struct literal with a `json:"error"` field under a 4xx or 5xx status.
+  **A status or code must be a constant, a parameter its callers pass one,
+  or a local set from a call the guard can follow; anything else fails the
+  guard rather than go unread.** `declaredFieldFlows` is the one exception:
+  `proxyUPnP` writes a `*upnpproxy.PreStreamError`'s fields, whose values
+  the guard reads from that package's literals. Not read: an error status
+  with no envelope (`http.Error`, a bare `WriteHeader`), which no handler
+  writes, and a writer called through a function value
+  (`TestErrorPairScanReadsEveryShapeOnAFixture`,
+  `TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair`).
 - **`DELETE /v1/atlas-harvest/credential` forgets the harvest credential,
   and a demo bridge refuses it** (#1049). Switching the app's library
   harvest off stopped only the app's renewals: the `bulk_harvest`
@@ -10184,6 +10202,21 @@ its twin.** The top list is older, shorter, and read first.
   lines naming a track) is now what the page describes. **A new log line
   that names a library file uses the relative path; one that cannot is a
   page change in the same release.**
+- **A 5xx body carries a fixed message, never an error's text** (2026-10-16,
+  backlog B425). `GET /v1/search` answered a store or FTS failure with the
+  error as its message (`search tracks_fts (served): sql: database is
+  closed`, an FTS syntax fragment, a database path) and logged nothing. It
+  goes through `writeErrorLog` now: the error is logged at Error with the
+  500, and the body says "the bridge couldn't search the library". **A 5xx
+  with a cause goes through `writeErrorLog` or `writeFileErrorLog`, or logs
+  the error itself and sends a fixed message**; a 4xx may say what the
+  client can fix. The upscale folder walk's two 500s still carry
+  `redactWalkErr`'s text (an `*os.PathError`'s `op: errno`, its path
+  dropped), as #185 chose (#1076 copied it for the root's walk), and were
+  left. The keystroke path's return on a
+  cancelled request is B364's and is unchanged
+  (`TestASearchStoreFailureAnswersAFixedMessage`,
+  `TestASearchStoreFailureThroughTheRouterSendsAFixedMessage`).
 - **The disk probe's missing-directory warning names the directory by
   its role, never by its path** (2026-10-13, backlog B273).
   `AvailableDiskSpaceNearest` walks to the nearest existing ancestor
