@@ -138,7 +138,7 @@ func (c *cappedPlaylistItems) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// --- wire DTOs (the playlists contract; see PROTOCOL.md Appendix A.2/A.3) ---
+// --- wire DTOs (the playlists contract; see PROTOCOL.md, "Playlist backup") ---
 
 type playlistItemDTO struct {
 	Position          int    `json:"position"`
