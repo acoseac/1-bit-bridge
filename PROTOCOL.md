@@ -419,7 +419,7 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 `explicit` is `true` when any of the file's own signals says so. A clean value does not cancel another signal. The bridge's extractor and the iOS app apply the same verdict, in one pure function on each side (the bridge's `ExplicitVerdict`, the app's `ExplicitContent.verdict`):
 
 - an MP4/M4A/ALAC `rtng` atom whose integer is `1` or `4` (`2` is clean, `0` or a missing atom is none). A present `0` or `2` does not hide another signal in the same file;
-- `ITUNESADVISORY` or `EXPLICIT`, the field name matched exactly, ignoring case, with no separator folding (`ITUNES_ADVISORY` is not that field): the MP4 freeform atom `----:<any mean>:ITUNESADVISORY` or `----:<any mean>:EXPLICIT`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` of that description (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). Within one field the first value wins, with two exceptions on the bridge. The MP4 freeform atoms are taken in order, and so are an ID3 `TXXX`, a FLAC comment block and an Ogg FLAC stream's header packets, because the tag map keeps the last duplicate. **Ogg Vorbis and Opus still take that map's last value on the bridge.** **The bridge also skips an empty value, where the iOS app takes an empty first value as the field's (clean) answer**, so `ITUNESADVISORY=` followed by `ITUNESADVISORY=1` is explicit on the bridge and clean in the app. Neither difference is in the shared table below, which has no row with two values for one field. After trim and case-folding the value is explicit when it is exactly `1`, `4`, `true`, `yes`, `explicit` or `e`. `0`, `2`, `false`, `no`, `clean`, an empty value and `01` are not;
+- `ITUNESADVISORY` or `EXPLICIT`, the field name matched exactly, ignoring case, with no separator folding (`ITUNES_ADVISORY` is not that field): the MP4 freeform atom `----:<any mean>:ITUNESADVISORY` or `----:<any mean>:EXPLICIT`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` of that description (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). Within one field the first value wins, with two exceptions on the bridge. The MP4 freeform atoms are taken in order, and so are an ID3 `TXXX`, a FLAC comment block and an Ogg FLAC stream's header packets, because the tag map keeps the last duplicate. **Ogg Vorbis and Opus still take that map's last value on the bridge.** **The bridge also skips an empty value, where the iOS app takes an empty first value as the field's (clean) answer**, so `ITUNESADVISORY=` followed by `ITUNESADVISORY=1` is explicit on the bridge and clean in the app. Neither difference is in the shared truth table (`explicit-verdict-cases.tsv`, below), which has no row with two values for one field. After trim and case-folding the value is explicit when it is exactly `1`, `4`, `true`, `yes`, `explicit` or `e`. `0`, `2`, `false`, `no`, `clean`, an empty value and `01` are not;
 - a marker on the raw track title, before any display cleaning: `[E]`, `[Explicit]` or `[Explicit Version]` anywhere in the title, or a title that ends with `(Explicit)` or `(Explicit Version)`. The match is case-insensitive. The title is the title tag (`©nam`, Vorbis `TITLE`, ID3v2 `TIT2`) when one was read, and the filename stem (the name without its extension) when it was not. `[Clean]`, `(Clean)`, `[Clean Version]`, `(Clean Version)`, the word Explicit with no brackets, and a marker on the album title are not.
 
 `ITUNESRATING` and `rating` are not read. A UPnP/DIDL row has no such tag and omits the field; the client applies the same title markers to the DIDL title. A row from a bridge that predates the field also omits it, and the client applies the markers to the raw wire title: the field being true, or a marker on that title.
@@ -429,7 +429,7 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - **One set of M4A fixtures:** the app's 16 M4A fixtures (base64 in its `ExplicitAdvisoryFixtures.swift`) are the files in the bridge's `internal/manifest/testdata/m4a/`; both sides run their MP4 cases over the same bytes.
 - **A clean answer from a partial read is not a "no".** In the iOS app, only an explicit verdict is written from a read that did not cover the whole tag: a clean field found before a cut says nothing about a field past it. For a file AVFoundation refuses, the app reads the parsed `TIT2` (the raw ID3, or the WAV/AIFF chunk) before the filename stem.
 - **The iOS app applies it on every path:** SMB and on-device rows in its enrich (tags plus the raw title); bridge rows as `explicit == true || titleMarker(raw wire title)`, in both upsert branches, with the raw filename stem when the wire title is empty; UPnP and MPD-library rows as `titleMarker(raw title)`. Both sync paths store the raw title, so a one-shot pass on the device marks the rows synced before the verdict existed, with no network. It shows an Explicit badge beside the title in its track rows and Now Playing, and sets CarPlay's own indicator.
-- A bridge at ExtractorVersion 23 re-extracts every file once. Tracks a signal now marks explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`. The widened rule (any signal, the title markers, a marker on the filename stem, and the first Vorbis value) is part of that same version: nothing shipped at 23 before it. An app that predates the field consumes that delta without it, so the iOS app reaches back to a second fixed date (2026-10-07), once per bridge, as for `compilation`.
+- A bridge at ExtractorVersion 23 re-extracts every file once. Tracks that a signal now marks explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`. The widened rule (any signal, the title markers, a marker on the filename stem, and the first Vorbis value) is part of that same version: nothing shipped at 23 before it. An app that predates the field consumes that delta without it, so the iOS app reaches back to a second fixed date (2026-10-07), once per bridge, as for `compilation`.
 
 #### DSD specifics
 
@@ -461,7 +461,7 @@ granule position; Opus subtracts the pre-skip and divides by 48 kHz. The
 same plausibility gate applies. A Vorbis or Opus file whose last page does
 not end the file (a truncated file) omits the field; a truncated Ogg FLAC
 whose header pages survive keeps its STREAMINFO duration, as a truncated
-`.flac` does. `ProtocolVersion` stays 1.
+`.flac` does. `ProtocolVersion` stays `1`.
 
 **One plausibility gate applies to every duration the bridge stamps, and
 it has BOTH ends.** A value is omitted below **0.1 s** as well as at or
@@ -496,12 +496,12 @@ omit both and clients treat absence as before):
   field is the ONLY wire discriminator. iOS maps `compression == "DST"`
   onto its canonical DST codec marker at its upsert chokepoint and
   refuses playback with an honest pre-flight error until its DST decoder
-  ships (the iOS repo's docs/DSTFeasibility.md).
+  ships (the iOS repo's `docs/DSTFeasibility.md`).
 - `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
   `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
   The DFF extractor populates it, a SACD ISO virtual row carries `2`, and
   since ExtractorVersion 25 an Ogg FLAC, Vorbis or Opus row does too. A
-  native FLAC and the other formats omit it. `ProtocolVersion` stays 1.
+  native FLAC and the other formats omit it. `ProtocolVersion` stays `1`.
 
 DST rows are TYPED like any other DSD row: `isDSD: true`,
 `sampleRate` = the DSD rate, `bitsPerSample: 1` — all stamped together
