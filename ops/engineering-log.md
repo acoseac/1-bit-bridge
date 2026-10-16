@@ -44063,11 +44063,11 @@ answers every failed source open 404 and so already gave the same answer.
 file routes refusing a path whose prefix is a regular file: that is a walk up
 the path in each route, after a stat that already gave the answer, and a route
 keyed on the virtual grammar alone would leave every other path through a file
-at 500. `Resolve`'s path is clean, with no trailing separator, so the ENOTDIR
-never names the file the path itself names: it means a directory on the way
-to the path, or to a link's target, is not one, so nothing is there (a
-dangling link already got ErrNotFound). No wire change, and PROTOCOL.md needed
-no edit: the 404 is what it documents.
+at 500. `Resolve`'s path is clean, with no trailing separator, so the stat
+never asks the path's own last element to be a directory: an ENOTDIR always
+means a component on the way to the path, or to a link's target, is not a
+directory, so nothing is there (a dangling link already got ErrNotFound). No
+wire change, and PROTOCOL.md needed no edit: the 404 is what it documents.
 
 **Every caller of `ResolveChecked`**, at `d83db9b1`:
 - `/v1/list`, `/v1/stat`, `/v1/read` and `/v1/download` (`internal/api/files.go`),
@@ -44093,9 +44093,12 @@ no edit: the 404 is what it documents.
 
 **Windows.** `syscall.ENOTDIR` is `ERROR_PATH_NOT_FOUND` there
 (`zerrors_windows.go`), which `os.ErrNotExist` covers (`syscall_windows.go`),
-so the clause adds nothing on Windows. What the stat itself answers there is
-the CI Windows leg's to measure: `TestAStatThroughARegularFileFailsWithENOTDIR`
-asserts `ERROR_PATH_NOT_FOUND` on Windows.
+so the clause adds nothing on Windows. What the stat itself answers there was
+measured on the CI Windows leg: `TestAStatThroughARegularFileFailsWithENOTDIR`,
+which asserts both on Windows, passed on `windows-latest` (run 38889467567 at
+`d3d8f54a`; `internal/fs`, `internal/api` and `internal/dlna` ok), so a stat
+through a regular file answers `ERROR_PATH_NOT_FOUND` there, and a Windows
+bridge answered a virtual path 404 before this change.
 
 **Negative controls** on the committed fix (`d3edb084`), each anchor
 count-asserted, restored from git and the restore verified against HEAD:

@@ -375,9 +375,10 @@ func (r *Resolver) SplitRoot(clientPath string) (root, suffix string, err error)
 // nothing is there. The live shape is an SACD image's virtual track path,
 // `<image>.iso/st/NN.dff`, which goes through the image, a regular file, and
 // for which PROTOCOL.md promises a 404; on unix Go counts only ENOENT as
-// not-exist, so every route answered it 500 until B414. Resolve's path is
-// clean, with no trailing separator, so the ENOTDIR never names a file the
-// path itself names. On Windows syscall.ENOTDIR is ERROR_PATH_NOT_FOUND,
+// not-exist, so the /v1 file routes answered it 500 until B414. Resolve's
+// path is clean, with no trailing separator, so the stat never asks the
+// path's own last element to be a directory: an ENOTDIR is always about a
+// component on the way. On Windows syscall.ENOTDIR is ERROR_PATH_NOT_FOUND,
 // which os.ErrNotExist covers already (TestAStatThroughARegularFileFailsWithENOTDIR).
 // Every other failure is a stat that could not look (EACCES, EIO, a stale
 // NFS handle) and stays an error, which a route answers 500: a client must

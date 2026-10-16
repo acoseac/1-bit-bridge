@@ -563,8 +563,10 @@ lost my library."
   a regular file, and fails with ENOTDIR on unix, which `os.ErrNotExist`
   does not cover, so `/v1/read`, `/v1/download`, `/v1/stat` and the area's
   `/v1/list` answered 500 from v0.2.0 on, against PROTOCOL.md and an older
-  app's missing-track affordance. On Windows `syscall.ENOTDIR` is
-  `ERROR_PATH_NOT_FOUND`, already not-exist. **Never widen the answer past
+  app's missing-track affordance. On Windows the stat answers
+  `ERROR_PATH_NOT_FOUND` (measured on the CI leg), which is `syscall.ENOTDIR`
+  there and already not-exist, so Windows bridges gave the 404 all along
+  (`TestAStatThroughARegularFileFailsWithENOTDIR`). **Never widen the answer past
   ENOTDIR** (an EACCES, EIO or stale handle could not look, and stays a
   500), **and never special-case the virtual grammar in a route**, which
   leaves every other path through a file at 500
