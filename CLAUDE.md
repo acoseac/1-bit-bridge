@@ -141,7 +141,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 
 ## iOS companion (coupled repo)
 
-The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at `~/dev/com.acoseac.dsdplayer/`. It consumes this server via `BridgeSourceClient.swift` + `LibraryScanner.runBridgeSync` + the artwork prefetch. The wire protocol spec is co-committed as `PROTOCOL.md` here and `docs/BridgeProtocol.md` in the iOS repo — they must stay byte-identical (see `CONTRIBUTING.md` → **Mirror-PR rule**).
+The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at `~/dev/com.acoseac.dsdplayer/`. It consumes this server via `BridgeSourceClient.swift` + `LibraryScanner.runBridgeSync` + the artwork prefetch. The wire protocol spec is co-committed as `PROTOCOL.md` here and `docs/BridgeProtocol.md` in the iOS repo — they must stay byte-identical (see `CONTRIBUTING.md` → **Mirror-PR rule**). **Copy the file; never rewrite it on one side.** Change `PROTOCOL.md` here, then `cp` it over the iOS copy in the companion PR. By 2026-10-16 the two had drifted 37 hunks apart, in both directions, because each side wrote its own text for the same features (backlog B412).
 
 **When editing this repo, also check the iOS app:**
 

@@ -44032,6 +44032,69 @@ Two CodeRabbit findings on #1248 arrived after it merged; both are taken here.
 - **The startup warning said "an address that is not a LAN-eligible interface's".** For a LAN interface's public (SLAAC) address the interface IS eligible and only the address goes unserved (the `lan_slaac_address` row of `served_listener_test.go`), so the line now reads "an address DLNA does not serve". `pinnedOffTheLANLine` follows; the dlna package passes.
 - **`docs/docker.md` now states the routed caveat** the residuals above name for a subnet router. Binding the published port to the LAN address stops a connection to the host's tailnet address, not one routed onto the LAN. A host that forwards tailnet traffic to its LAN (a subnet route, or IP forwarding) still delivers a tailnet peer's connection to `<LAN IP>:7790`. The operator keeps DLNA to the LAN by not advertising the subnet route, or by restricting port 7790 with Tailscale ACLs or the host firewall.
 
+## 2026-10-16 — one protocol spec: PROTOCOL.md and the app's mirror reconciled (backlog B412, and B87's tail)
+
+`CONTRIBUTING.md` and `CLAUDE.md` say the iOS app's `docs/BridgeProtocol.md` is a
+verbatim copy of this file. It was not: compared at `fe6d68d1` and the app's
+`b6be1baf`, the two differed in 37 hunks (171 changed lines), in both
+directions. Each side had written its own text for the same features:
+
+- **The explicit flag:** the app had the shared truth table and the M4A fixtures, this repo had the signal list.
+- **`firstIndexedAt`:** the app had the client's side, this repo had the fill rule.
+- **Favorites revisions:** both sides rewrote it.
+- **The error table's `base_mismatch` row:** only the app had it.
+
+Only this file had the ExtractorVersion 25 Ogg notes, the batch `status`
+values, `/dlna/silence/dsd` and B155's switch-off bullets.
+
+### How the one text was decided
+
+Every hunk was checked against this repo's Go code (wire facts) and the app's
+Swift (client conventions), with a file:line citation for each decision. The
+text keeps every statement the code confirms, from either side. Where both
+sides said the same thing, it keeps the more precise wording, or this file's
+when they were equal. By kind: 14 hunks kept this file's text, 1 kept the
+app's, 18 merged the two, and 4 were rewritten from code. No whole hunk was
+dropped; the drops inside merged hunks are statements the code contradicts.
+The table lives with the app PR.
+
+### Where the code contradicted both copies
+
+These are now written as the code behaves:
+
+1. **The DLNA listener's gate (B87's tail).** Both copies said "the LAN-only bind ... is the gate". The listener binds the wildcard and, since B48, serves only the LAN-eligible interfaces' LAN addresses, a public address the server advertises, and loopback. Any other connection is closed before a byte is read.
+2. **`endpoints`.** LAN IPv6 is a private ULA, not "global unicast". The order now includes the MagicDNS entry (ahead of the tailnet IPs) and `customEndpoints` (last).
+3. **`tailscaleNodeState`.** It is `"disabled"` without tsnet, not `"down"`, and lowercase on the wire.
+4. **`channels`.** A SACD ISO virtual row carries `2`.
+5. **The explicit flag's "first value wins".** The bridge's Ogg Vorbis and Opus readers take the last value, and the bridge skips empty values where the app takes an empty first one. The spec now states both divergences.
+6. **The revisioned favorites PUT.** It replaces the tombstone set too. Every `200` and `409` carries the ETag, and garbage collection commits before the compare-and-swap. The `400` list is now complete.
+7. **A playlist `409 stale` with an identical body** applies to a live playlist only. A tombstoned row with an identical body is `200`.
+8. **The error table's `stale` row.** A tombstoned playlist's `stale` carries no `server` copy, and the row now also covers the revisioned favorites `409`.
+
+### Also in this change
+
+- **B87's three remaining comments** no longer name a LAN-only or LAN/Tailnet-only bind: `WithDLNA`'s doc and the `dlnaServer` feature comment in `internal/api/api.go`, and `internal/upnpproxy/proxy.go`'s package doc.
+- **Three citations that were already broken** now name headings:
+  - `history.go` cited "Appendix A.4" and `playlists.go` cited "Appendix A.2/A.3". Neither appendix exists.
+  - `small_wirings_test.go` cited `PROTOCOL.md:664`, a line number that moves with every edit.
+- **The rule in `CLAUDE.md`:** copy the file, never rewrite it on one side.
+
+### Checks
+
+These tests read this file, and all pass with the new text:
+
+| Test | Package | What it pins |
+|---|---|---|
+| `TestEveryDocumentedEndpointIsRouted`, `TestEveryRoutedEndpointIsDocumented` | `internal/api` | the routes, matched against the router both ways |
+| `TestProtocolDocFormatVersionsMatchTheCode` | `internal/analyze` | the waveform and spectrum format versions |
+| `TestEveryCitedTestNameExists` | `cmd/bridge` | every test name a doc cites exists |
+
+### Left open
+
+- **The error table omits about 25 codes the bridge emits:** `demo_read_only`, `upscale_disabled`, the `variant_*`, `waveform_*`, `spectrum_*` and `lyrics_*` families, `device_token_required` and others. It is a separate backlog item.
+- **The DST bullet's "until its DST decoder ships"** is likely stale, since the app decodes DST. The text is identical in both copies and was not changed here.
+- **Statements no test or code pins** are left as written: the 2.1 binary's favorites behaviour and the DSD-silence measurement date.
+
 ## 2026-10-16 — a fetch of an SACD virtual track path answers 404, because ResolveChecked counts a stat's ENOTDIR as not found (backlog B414)
 
 Found by the B340 study in the iOS repo (`docs/CUESheetFeasibility.md` §2.4).
