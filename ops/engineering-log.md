@@ -44025,6 +44025,13 @@ classes; only removing both (NC3) reopens it.
 - **The operator's probes**: since B48 a probe of `:7790` over the tailnet
   is refused; run it on the host or from the LAN.
 
+### Review follow-up (after #1248 merged): the startup warning names the address, and the Docker note's routed caveat
+
+Two CodeRabbit findings on #1248 arrived after it merged; both are taken here.
+
+- **The startup warning said "an address that is not a LAN-eligible interface's".** For a LAN interface's public (SLAAC) address the interface IS eligible and only the address goes unserved (the `lan_slaac_address` row of `served_listener_test.go`), so the line now reads "an address DLNA does not serve". `pinnedOffTheLANLine` follows; the dlna package passes.
+- **`docs/docker.md` now states the routed caveat** the residuals above name for a subnet router. Binding the published port to the LAN address stops a connection to the host's tailnet address, not one routed onto the LAN. A host that forwards tailnet traffic to its LAN (a subnet route, or IP forwarding) still delivers a tailnet peer's connection to `<LAN IP>:7790`. The operator keeps DLNA to the LAN by not advertising the subnet route, or by restricting port 7790 with Tailscale ACLs or the host firewall.
+
 ## 2026-10-16 — a batch and every coverage bar count a rendition only while it is fresh (backlog B100)
 
 Backlog B100, decided by the owner on 2026-10-14 (option (c), from a Cursor
