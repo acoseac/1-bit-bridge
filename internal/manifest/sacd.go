@@ -5,8 +5,12 @@ package manifest
 // itself gets NO row. The bridge never demuxes audio server-side: clients
 // fetch the CONTAINER's bytes over the ordinary ranged-read endpoint and
 // demux the track's sector window themselves (the iOS materializer), so
-// `/v1/read` on a virtual path 404s cleanly by design and the DLNA file
-// handler's own not-found path covers renderers.
+// `/v1/read` on a virtual path 404s cleanly by design. A DLNA renderer is
+// never offered an image's virtual track: the ContentDirectory leaves those
+// rows out (cmd/bridge's manifest adapter, backlog B415), keeping only a row
+// of the same shape that upnp_track_routing has, since the proxy serves that
+// one, and the DLNA file handler answers 404 to a renderer that names a
+// virtual track anyway.
 //
 // The virtual-path grammar is a PINNED cross-repo wire contract
 // (PROTOCOL.md "SACD ISO expansion"; the iOS mirror is

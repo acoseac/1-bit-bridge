@@ -441,9 +441,11 @@ func newManifestLibraryAdapter(
 	}
 }
 
-// ListTrackInfos returns every track currently in the manifest as
-// `dlna.TrackInfo` values. Returns nil on transient store error
-// (logged); renderers handle empty Browse responses gracefully.
+// ListTrackInfos returns the tracks the ContentDirectory lists, as
+// `dlna.TrackInfo` values: the manifest's served set, less what rebuild
+// leaves out (a resolver miss nothing routes, an SACD virtual track).
+// Returns nil on transient store error (logged); renderers handle empty
+// Browse responses gracefully.
 func (a *manifestLibraryAdapter) ListTrackInfos() []dlna.TrackInfo {
 	a.refreshIfStale()
 	a.mu.Lock()
@@ -516,7 +518,8 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// Served set only: the whole CDS surface (All Tracks list + count,
 	// folder tree, FTS search resolution) derives from this one call, so
 	// duplicate suppression reaches DLNA renderers for free — and DLNA
-	// agrees with what /v1/manifest serves.
+	// agrees with what /v1/manifest serves, less the SACD virtual tracks
+	// the loop below leaves out (no renderer can play one).
 	tracks, err := a.store.ListServedTracks(ctx, nil)
 	if err != nil {
 		a.log.Warn("manifest list failed", slog.String("err", err.Error()))
@@ -552,6 +555,20 @@ func (a *manifestLibraryAdapter) rebuild() {
 	byID := make(map[string]dlna.TrackInfo, len(tracks))
 	byPath := make(map[string]dlna.TrackInfo, len(tracks))
 	for _, t := range tracks {
+		_, routed := routedPaths[t.Path]
+		// An SACD image's virtual track (`<image>.iso/st/NN.dff`) is not
+		// listed (backlog B415): the bridge never demuxes, so nothing is
+		// at its path and a renderer told to play it could only fail,
+		// which is why the app vetoes casting one. Every view the
+		// ContentDirectory builds comes from this list (All Tracks and its
+		// count, the folder tree, Search, BrowseMetadata, the file route's
+		// lookup), so this one check keeps them agreeing. It asks the
+		// classifier the scanner mints and keeps these rows by, never a
+		// copy of the grammar. A routed track stays listed whatever its
+		// path's shape, as before: the proxy serves it.
+		if !routed && manifest.IsSACDVirtualPath(t.Path) {
+			continue
+		}
 		absPath, resolveErr := a.resolver.Resolve(t.Path)
 		if resolveErr != nil {
 			// Filesystem resolver miss. If this track is backed by
@@ -565,7 +582,7 @@ func (a *manifestLibraryAdapter) rebuild() {
 			// renderer silently 404'd (bug surfaced by the post-pair-A
 			// operator verification of PR #732 — see internal/upnpproxy
 			// package docblock).
-			if _, routed := routedPaths[t.Path]; !routed {
+			if !routed {
 				continue
 			}
 			absPath = ""

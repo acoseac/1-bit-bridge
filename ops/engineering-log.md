@@ -44375,3 +44375,90 @@ with git and checked it against HEAD. Every prediction held.
 
 The five ran first on 2a337e37, the fix's first version, whose numerators
 were the per-track EXISTS, with the same outcome.
+
+## 2026-10-16 — the DLNA ContentDirectory lists no SACD virtual track (backlog B415)
+
+Found by the B340 study in the iOS repo (`docs/CUESheetFeasibility.md` §2.4).
+`docs/SACDISOFeasibility.md` §6 there planned "one filter at the adapter" for
+the DLNA side, and it was never built. `manifestLibraryAdapter.rebuild`
+(`cmd/bridge/dlna_wiring.go`) took every row of `ListServedTracks` that
+`resolver.Resolve` accepted, and `Resolve` is lexical. So
+`<image>.iso/st/NN.dff` resolved under the root, and every virtual track
+joined All Tracks, the folder tree (with a folder for the image) and Search.
+A renderer told to play one got the file handler's 404: the stat goes through
+the image, a regular file. The app's own cast veto never sees a control point
+browsing the bridge.
+
+**Red first** (`a51ee180`, the test alone on main at `d83db9b1`, macOS,
+go1.26.6). `TestTheContentDirectoryListsNoSACDVirtualTrack` drives the real
+adapter and ContentDirectory handler over a real store. It holds an ordinary
+album, two virtual rows minted through `manifest.SACDVirtualTrackPath` beside a
+real `.iso` on disk, and two routed tracks, one at a path of the virtual shape
+(`2go/Remote Disc.iso/st/01.dff`; `synthesizeFilename` gives an item titled
+"01" with no track number exactly that name). On main, six assertions failed:
+All Tracks and the Folders tree each listed 5 items, not 3, with a folder for
+the image; Search for the artist returned 5 hits, and for the image's album 2,
+not 0; and BrowseMetadata of a virtual track's id answered its item, not
+NoSuchObject. Green on main: the walk's count checks (every container's
+childCount, in its parent's answer and in its own BrowseMetadata, is the
+TotalMatches of its children; Search's TotalMatches is its hits) and both
+routed tracks listed.
+
+**Fix.** The rebuild hoists the routing lookup and skips a row that
+`manifest.IsSACDVirtualPath` names unless `upnp_track_routing` has it. That is
+the classifier the scanner mints these rows through and keeps them by;
+`eligibility.go`'s GLOB is SQL's own form, and nothing new copies the grammar.
+The resolver-miss branch reads the hoisted lookup, so a routed row is listed
+exactly as before. A routed row of the virtual shape stays because the proxy
+serves it.
+
+**The counts.** Every view the handler builds reads this one list: All Tracks
+(`ListTrackInfos`) and its childCount (`TrackCount`), the folder index
+(`BuildFolderIndex` over `ListTrackInfos`), a track's BrowseMetadata (the
+folder index's `LookupTrack`), Search (`SearchTrackInfos` resolves FTS hits
+through the rebuild's path map, and `handleSearch`'s TotalMatches is
+`len(matches)`), and the file route's `GetTrackInfo`. So the counts agree
+after the filter with no change in `internal/dlna`. A virtual track's file
+URL answers 404 as an unknown id, where before it answered 404 on the failed
+open.
+
+**Residual, accepted.** `SearchTrackInfos` takes the store's top 500 FTS hits
+before resolving them, so a search whose first 500 include virtual rows returns
+fewer than 500 when more matches exist. A suppressed duplicate already behaves
+this way. TotalMatches stays equal to what is returned. **Not changed:**
+PROTOCOL.md (the CDS listing is not part of the `/v1` contract, and its "the
+DLNA handler 404s the same way" stays true, so no Mirror-PR), the app's cast
+veto, and the sacd.go header beyond its DLNA sentence.
+
+**Found on the way** (backlog B422): on a single-root bridge, a routed row
+carries the lexical path under the root, not the empty `AbsolutePath`
+sentinel, which CLAUDE.md's folder-sort bullet says every routed track has.
+Measured with a throwaway probe, not committed.
+
+**Negative controls** on the committed fix (`67fc1844`), each against the
+whole `cmd/bridge` package, each anchor count-asserted, restored from git and
+the restore verified against HEAD:
+1. The exclusion dropped. Predicted and observed: exactly the test above red,
+   at its six red-run assertions.
+2. The routed exemption dropped (the check on the path's shape alone).
+   Predicted and observed: exactly the test red, at All Tracks, the Folders
+   tree and Search (2 of 3, the routed virtual-shaped row missing).
+3. The filter moved to the wrong layer, `ListTrackInfos`' copy, leaving
+   `TrackCount` and Search's map unfiltered, to show the count checks bite.
+   Predicted: the two count checks for All Tracks and the two Search checks.
+   The first form also failed the All Tracks and Folders lists, because the
+   mutated filter had no routed exemption and dropped the routed
+   virtual-shaped row too: a miss in the mutation, not in the test. Rerun with
+   the fixture's routed rows exempted: exactly the predicted four (All Tracks'
+   childCount 5, in the root's answer and in its own BrowseMetadata, against 3
+   children; Search still 5 hits, and 2 for the album).
+
+**After review** (3.1 Pro on #1254). `TestTheSACDVirtualFilterReadsTheRoutingAtEachRebuild`
+pins that the routed exception reads the routing table at each rebuild: a row
+of the virtual shape whose routing lands after a listing stays out of the
+cached listing, since the cache is time-based, and is listed once the cache
+rebuilds. Negative control: the routed set read once and kept (a memo in
+`rebuild`), its anchor count-asserted, restored from git. Predicted and
+observed: exactly the new test red, at "not listed after the cache rebuilt".
+The review's other finding, that the maps' capacity hint counts the rows
+left out, stands as written: it is a sizing hint.
