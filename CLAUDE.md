@@ -2205,11 +2205,11 @@ lost my library."
   which dhowden's MP4 reader does not keep, so an M4A's work has never been read
   (measured; not this rule's). **v26 changes only the rows whose work changes**: a
   tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2 tag
-  holding TT1 or TXX:WORK. They take the
-  full-upsert leg (their enrichment is re-queued once) and are the iOS delta; every
-  other row is stamped, and SACD ISO virtual rows re-expand as on every bump. No wire
-  change and `ProtocolVersion` stays 1; PROTOCOL.md's classical-metadata coverage line
-  now names TXXX:WORK, so the app's mirror copies it.
+  holding TT1 or TXX:WORK. They take the full-upsert leg (their enrichment is
+  re-queued once) and are the iOS delta; every other row is stamped, and SACD ISO
+  virtual rows re-expand as on every bump. No wire change and `ProtocolVersion` stays
+  1; PROTOCOL.md's classical-metadata coverage line now names TXXX:WORK, so the app's
+  mirror copies it.
   (`TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`,
   `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`,
   `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`.)

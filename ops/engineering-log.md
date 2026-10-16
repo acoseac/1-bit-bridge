@@ -44613,6 +44613,21 @@ the tree against HEAD. Every prediction held, with nothing else red.
 | NC4 TT1 not read: a version 2.2 tag's content group stays `tit1` | "version 2.2: TT1 alone is the work", and the scan test at its premise (`v22.mp3` stored no work); the two other version 2.2 cases stay green, a TXX:WORK answering |
 | NC5 `ExtractorVersion` left at 25 | the scan test alone: both changed rows kept their v25 work, `indexed_at` and `enriched_at` |
 
+### Runs
+
+go1.26.6 on the dev Mac (arm64), on `3f967af7` (the head after it changes
+documentation only):
+- `go test -race -count=1 -timeout 40m ./internal/manifest/`: ok, 930 s.
+- The fourteen packages that import `internal/manifest`, without the race
+  detector (`cmd/bridge` and `internal/{admin,albumgain,analyze,api,backup,
+  doctor,enrich,integrity,smartplaylistgen,transcode,upload,upnpingest,
+  upnpproxy}`): all ok, `TestEveryCitedTestNameExists` among them.
+- `go vet ./...` clean, and go1.26.6's `gofmt -l` clean on every changed file.
+- Fuzzed from the committed seeds with `-fuzzminimizetime 1s -parallel 4`:
+  FuzzExtractMP3 for 60 s (509,130 executions), and FuzzExtractDSF,
+  FuzzExtractAIFF, FuzzExtractWAV and FuzzExtractDFF for 30 s each (93,439,
+  160,732, 124,585 and 91,365). All passed, nothing saved.
+
 ### Found on the way, not changed
 
 - An M4A's work is never read: dhowden's MP4 reader drops `©wrk` (above),
