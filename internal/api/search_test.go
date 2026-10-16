@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -240,4 +243,87 @@ func TestSearchSwallowsAClientCancellation(t *testing.T) {
 	if strings.Contains(rr.Body.String(), `"error"`) {
 		t.Errorf("a cancelled request wrote an error body: %s", rr.Body.String())
 	}
+}
+
+// searchFailedMessage is the one message a failed search answers with
+// (backlog B425).
+const searchFailedMessage = "the bridge couldn't search the library"
+
+// TestASearchStoreFailureAnswersAFixedMessage pins backlog B425: a store
+// or FTS failure under GET /v1/search answers 500 `internal` with one
+// fixed message, whatever the error said. The error's own text (an FTS
+// fragment, a table name, a database path) goes to the server log, on a
+// request-failed line at Error with the 500 the client got, and never
+// into the body.
+func TestASearchStoreFailureAnswersAFixedMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		// leaks are parts of the error's text the body must not carry.
+		leaks []string
+		// logged is the part of the error's text the log line must carry.
+		logged string
+	}{
+		{
+			name: "an FTS query fault",
+			err: fmt.Errorf("search tracks_fts (served): %w",
+				errors.New(`SQL logic error: fts5: syntax error near "AND" (1)`)),
+			leaks:  []string{"tracks_fts", "SQL logic error", "fts5"},
+			logged: "SQL logic error",
+		},
+		{
+			name: "a fault that names the database file",
+			err: fmt.Errorf("search tracks_fts (served): %w", &os.PathError{
+				Op:   "open",
+				Path: "/Users/alice/Library/1-bit-bridge/data/bridge.db-wal",
+				Err:  errors.New("disk I/O error"),
+			}),
+			leaks:  []string{"/Users/alice", "bridge.db-wal", "disk I/O error"},
+			logged: "disk I/O error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := withTestSlog(t)
+			st := &stubSearcher{available: true, err: tc.err}
+			rr := doSearch(t, searchServer(t, st), "/v1/search?q=abc")
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body=%s", rr.Code, rr.Body.String())
+			}
+			er := decodeErrorResponse(t, rr.Body.Bytes())
+			if er.Error != "internal" {
+				t.Errorf("code = %q, want internal", er.Error)
+			}
+			if er.Message != searchFailedMessage {
+				t.Errorf("message = %q, want the fixed %q", er.Message, searchFailedMessage)
+			}
+			for _, leak := range tc.leaks {
+				if strings.Contains(rr.Body.String(), leak) {
+					t.Errorf("the 500 body carries %q from the error's text: %s", leak, rr.Body.String())
+				}
+			}
+
+			lines := linesContaining(buf.String(), `msg="request failed"`)
+			if len(lines) != 1 {
+				t.Fatalf("want one request-failed line, got %d; log:\n%s", len(lines), buf.String())
+			}
+			for _, want := range []string{"level=ERROR", "status=500", "code=internal", tc.logged} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("request-failed line lacks %q: %s", want, lines[0])
+				}
+			}
+		})
+	}
+}
+
+// linesContaining returns the lines of a captured log that contain marker.
+func linesContaining(logged, marker string) []string {
+	var out []string
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, marker) {
+			out = append(out, line)
+		}
+	}
+	return out
 }
