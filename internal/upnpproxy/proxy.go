@@ -8,7 +8,8 @@
 //     UPnP-routed tracks proxy via this package from the
 //     `serveFile` fast-path.
 //  2. `internal/dlna`'s unauth `/dlna/file/{trackID}` path serves
-//     DLNA renderers (the bridge's own MediaServer; LAN-only bind);
+//     DLNA renderers (the bridge's own MediaServer, served only on
+//     the LAN-eligible interfaces' addresses);
 //     UPnP-routed tracks also need to proxy here so iOS can cast a
 //     2Go track to any DLNA renderer via the bridge. Pre-this-pkg
 //     `/dlna/file/{trackID}` 404'd on UPnP-routed tracks because the

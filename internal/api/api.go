@@ -839,8 +839,10 @@ func (s *Server) dlnaArtworkActive() bool {
 
 // WithDLNA toggles the `dlnaServer` advertisement in
 // /v1/health.features. The bridge's actual DLNA MediaServer runs on
-// its own parallel http.Server bound LAN-only (and optionally
-// tsnet-routed) — wired separately in `cmd/bridge/main.go`. This
+// its own parallel http.Server, which binds the wildcard and serves
+// only the LAN-eligible interfaces' addresses and loopback (backlog
+// B48; a tailnet peer is refused) — wired separately in
+// `cmd/bridge/main.go`. This
 // option is the iOS-visible capability flag so the app's
 // `OutputPickerSheet` can surface DLNA-capable bridges as a
 // renderer-discovery source candidate.
@@ -1920,8 +1922,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "dlnaArtwork")
 	}
 	// `dlnaServer` advertises the bridge's opt-in LAN-only DLNA
-	// MediaServer (`internal/dlna/` package, parallel http.Server bound
-	// LAN/Tailnet-only). iOS clients can use this to choose between
+	// MediaServer (`internal/dlna/` package, a parallel http.Server that
+	// serves only the LAN-eligible interfaces' addresses and loopback,
+	// backlog B48). iOS clients can use this to choose between
 	// SSDP-discovered renderers and bridge-routed DLNA delivery; the
 	// actual MediaServer binding lives in cmd/bridge/main.go and refuses
 	// to start in public deployment mode regardless of this flag.

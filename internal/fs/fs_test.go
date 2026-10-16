@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -227,6 +228,79 @@ func TestResolveCheckedReturnsInfo(t *testing.T) {
 	}
 	if !strings.HasSuffix(abs, filepath.Join("Artist", "Album", "01.flac")) {
 		t.Errorf("abs = %q", abs)
+	}
+}
+
+// TestResolveCheckedThroughARegularFileIsNotFound: a path whose prefix is a
+// regular file names nothing, and ResolveChecked answers ErrNotFound for it,
+// as for a missing file (backlog B414). The live shape is an SACD image's
+// virtual track path, `<image>.iso/st/NN.dff`, for which PROTOCOL.md promises
+// `/v1/read` and `/v1/download` a 404: the stat goes through the image, a
+// regular file, and on unix fails with ENOTDIR, which Go does not count as
+// not-exist, so until B414 every route answered it 500.
+func TestResolveCheckedThroughARegularFileIsNotFound(t *testing.T) {
+	r, root := newSingleRootResolver(t)
+	if err := os.WriteFile(filepath.Join(root, "Artist", "Album.iso"), []byte("a disc image is a regular file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{
+		"Artist/Album.iso/st/01.dff", // an SACD virtual track
+		"Artist/Album.iso/st",        // its area, as a directory
+		"Artist/Album/01.flac/x",     // any path through a file
+	} {
+		abs, info, err := r.ResolveChecked(rel)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("ResolveChecked(%q) err = %v, want ErrNotFound", rel, err)
+		}
+		if abs != "" || info != nil {
+			t.Errorf("ResolveChecked(%q) = (%q, %v), want no path and no info with the error", rel, abs, info)
+		}
+	}
+}
+
+// TestAStatThroughARegularFileFailsWithENOTDIR pins the platform answer the
+// ENOTDIR clause in ResolveChecked is for, on each platform CI runs: a stat
+// through a regular file fails with syscall.ENOTDIR. On unix that is ENOTDIR
+// itself, which os.ErrNotExist does not cover (only ENOENT). On Windows
+// syscall.ENOTDIR is ERROR_PATH_NOT_FOUND, which os.ErrNotExist does cover,
+// so there the clause adds nothing and the route answered 404 already: the
+// second assertion is the Windows CI leg's measurement of that.
+func TestAStatThroughARegularFileFailsWithENOTDIR(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "Album.iso")
+	if err := os.WriteFile(file, []byte("a disc image is a regular file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(file, "st", "01.dff"))
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("on %s, a stat through a regular file: err = %v (%#v), want syscall.ENOTDIR", runtime.GOOS, err, err)
+	}
+	if runtime.GOOS == "windows" && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("on windows, a stat through a regular file: err = %v (%#v), want one os.ErrNotExist covers", err, err)
+	}
+}
+
+// TestResolveCheckedKeepsAStatThatCouldNotLookAnError: ErrNotFound says
+// nothing is at the path. A stat that could not look, a permission denied
+// here (an EIO, an ESTALE NFS handle, a FUSE mount's ENOTCONN alike), is not
+// that answer and stays an error, which the routes answer 500, so the app
+// does not take a permission problem or a dropped mount for a missing track.
+// B414 widened the not-found answer by ENOTDIR alone.
+func TestResolveCheckedKeepsAStatThatCouldNotLookAnError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a mode bit does not deny a directory search on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root searches a directory its mode denies")
+	}
+	r, root := newSingleRootResolver(t)
+	album := filepath.Join(root, "Artist", "Album")
+	if err := os.Chmod(album, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(album, 0o755) })
+	_, _, err := r.ResolveChecked("Artist/Album/01.flac")
+	if err == nil || errors.Is(err, ErrNotFound) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("ResolveChecked under a directory that cannot be searched: err = %v, want the permission error, not ErrNotFound", err)
 	}
 }
 
