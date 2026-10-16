@@ -126,6 +126,48 @@ func TestTheDLNAListenerLogsARefusedConnection(t *testing.T) {
 	}
 }
 
+// pinnedOffTheLANLine is the Warn Start logs for a listener pinned to an
+// address the server does not serve.
+const pinnedOffTheLANLine = "dlna.listenAddress pins the listener to an address that is not a " +
+	"LAN-eligible interface's: with it, DLNA serves no one"
+
+// TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart pins the
+// startup check (backlog B48): a dlna.listenAddress pinned to an address
+// the server does not serve, the tailnet's say, binds only that address and
+// refuses every connection on it, so DLNA serves no one. Start says so once,
+// naming the pinned address, and each refused connection is still logged, once
+// under its own cap. The listener is pinned to 127.0.0.1 and judged, from
+// before Start, as the tailnet address.
+func TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart(t *testing.T) {
+	var judged judgedAs
+	judged.set("100.64.0.7")
+	sink := newLogSink()
+	s := startLoopbackDLNA(t, ServerConfig{Logger: sink.logger()}, func(s *Server) { s.served = macServedJudgedBy(&judged) })
+	got := sink.String()
+	if n := strings.Count(got, pinnedOffTheLANLine); n != 1 {
+		t.Fatalf("Start logged the pinned-address warning %d times, want once:\n%s", n, got)
+	}
+	if want := "listenAddress=" + s.cfg.ListenAddress + " address=100.64.0.7 interface=utun7"; !strings.Contains(got, want) {
+		t.Errorf("the warning does not name the pinned address (%s):\n%s", want, got)
+	}
+	for range 2 {
+		if _, n, _ := describeOverTCP(t, s.cfg.ListenAddress); n != 0 {
+			t.Errorf("a connection to the pinned address got %d bytes back, want none", n)
+		}
+	}
+	const refused = "refused a connection to an address it does not serve"
+	if !sink.waitFor(refused, 5*time.Second) {
+		t.Fatalf("no per-connection refusal in the log:\n%s", sink.String())
+	}
+	got = sink.String()
+	if n := strings.Count(got, refused); n != 1 {
+		t.Errorf("two refused connections logged %d refusals, want 1 (the per-address cap):\n%s", n, got)
+	}
+	if n := strings.Count(got, pinnedOffTheLANLine); n != 1 {
+		t.Errorf("the pinned-address warning appears %d times after the connections, want once:\n%s", n, got)
+	}
+}
+
 // logSink is a log a test can wait on.
 type logSink struct {
 	mu    sync.Mutex
