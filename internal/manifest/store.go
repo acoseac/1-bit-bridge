@@ -7499,6 +7499,10 @@ type FolderRollup struct {
 	TotalSizeBytes      int64
 	UpscaledSizeBytes   int64
 	OptimizedSizeBytes  int64
+	// UpscaledStaleCount / OptimizedStaleCount: the tracks holding only stale
+	// variants of the kind (backlog B100). Declared ahead of the fix, inert.
+	UpscaledStaleCount  int
+	OptimizedStaleCount int
 }
 
 // ChildFolderRollup represents one folder row in the admin Library

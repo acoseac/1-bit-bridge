@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -46,8 +47,12 @@ func browseTestSeed(t *testing.T, srv *Server) {
 		bits := r.bits
 		isDSD := false
 		if err := srv.deps.Manifest.UpsertTrack(context.Background(), &manifest.Track{
-			Path:          r.path,
-			Size:          r.size,
+			Path: r.path,
+			Size: r.size,
+			// The version the variants below are stamped with (mtime
+			// 1 ns and the row's size), so they are fresh: only a fresh
+			// variant covers its track (backlog B100).
+			ModTime:       time.Unix(0, 1),
 			SampleRate:    &rate,
 			BitsPerSample: &bits,
 			Codec:         "FLAC",

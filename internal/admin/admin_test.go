@@ -1120,13 +1120,17 @@ func TestUpscaleStatsDisabledWithHistory(t *testing.T) {
 func seedSplitVariantFixture(t *testing.T, srv *Server) {
 	t.Helper()
 	ctx := context.Background()
+	// Each variant is stamped with the version its track row records, as a
+	// render after a scan leaves it, so every one is fresh: only a fresh
+	// variant counts toward the composition's tracks (backlog B100).
+	scanned := time.Unix(0, 1)
 	for _, p := range []string{"Music/A/01.flac", "Music/B/01.flac"} {
-		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 100, ModTime: time.Now()}); err != nil {
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 100, ModTime: scanned}); err != nil {
 			t.Fatalf("UpsertTrack %q: %v", p, err)
 		}
 	}
 	mk := func(src, id string, bytes int64) manifest.VariantRow {
-		return manifest.VariantRow{SourcePath: src, VariantID: id, SidecarPath: "/dev/null/" + id, Format: "flac", SampleRate: 96000, BitsPerSample: 24, SizeBytes: bytes, SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1}
+		return manifest.VariantRow{SourcePath: src, VariantID: id, SidecarPath: "/dev/null/" + id, Format: "flac", SampleRate: 96000, BitsPerSample: 24, SizeBytes: bytes, SourceMTimeNS: scanned.UnixNano(), SourceSize: 100, SoxSettings: "{}", CreatedAt: 1}
 	}
 	for _, v := range []manifest.VariantRow{
 		mk("Music/A/01.flac", "upscaled-v2-192000-24", 2000),

@@ -152,6 +152,9 @@ type browseResponse struct {
 	SubtreeUpscaled  int   `json:"subtreeUpscaled,omitempty"`
 	SubtreeOptimized int   `json:"subtreeOptimized,omitempty"`
 	SubtreeSizeBytes int64 `json:"subtreeSizeBytes,omitempty"`
+	// Declared ahead of backlog B100's fix, inert.
+	SubtreeUpscaledStale  int `json:"subtreeUpscaledStale,omitempty"`
+	SubtreeOptimizedStale int `json:"subtreeOptimizedStale,omitempty"`
 	// Subtree*Eligible mirror the per-folder eligible denominators for
 	// the ENTIRE node (manifest.EligibleRollupByPrefix) — the action
 	// panel's coverage header uses these. First page only, like the
