@@ -198,13 +198,16 @@ type Track struct {
 	// iOS decoder treats absent fields as empty / nil.
 	//
 	// Composer / Conductor / Work: classical music listeners (who
-	// favour DSD / FLAC) heavily rely on these. Many classical
-	// taggers store the work title (e.g. "Symphony No. 5 in C
-	// minor, Op. 67") in ID3v2 TIT1 (Content Group) and the
-	// movement name in TIT2 (Title). Track.Title stays mapped to
-	// TIT2; Track.Work adds the grouping axis without overloading
-	// existing fields. iOS PR-H's work-grouping helper depends on
-	// this exact split.
+	// favour DSD / FLAC) heavily rely on these. A classical tag
+	// keeps the work title (e.g. "Symphony No. 5 in C minor,
+	// Op. 67") apart from the movement name in TIT2 (Title): in an
+	// ID3v2 TXXX:WORK, where MusicBrainz Picard writes it by
+	// default, or in TIT1 (Content Group), where iTunes-compatible
+	// taggers write it, and where Picard's default mode writes the
+	// grouping instead, so TXXX:WORK outranks TIT1 (workOf, backlog
+	// B127). Track.Title stays mapped to TIT2; Track.Work adds the
+	// work axis without overloading existing fields. iOS PR-H's
+	// work-grouping helper depends on this exact split.
 	Composer  string `json:"composer,omitempty"`
 	Conductor string `json:"conductor,omitempty"`
 	Work      string `json:"work,omitempty"`
