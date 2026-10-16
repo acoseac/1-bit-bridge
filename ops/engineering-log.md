@@ -44783,3 +44783,72 @@ cell only (exactly the table test red, at "a broken alignment").
 The third finding is declined. It said the guard fails where `$GOROOT/src` is
 missing. Since Go 1.20 the standard library is built from source, so a
 toolchain that can run this test has `net/http`'s source.
+
+## 2026-10-16 — a search past its route's own deadline answers 500, not an empty 200 (backlog B434)
+
+Left open by the B425 session (#1258). `GET /v1/search` runs under
+`withCtxTimeout(5*time.Second, …)` (`internal/api/route_classification.go:215`
+at `cb923d07`), and its error branch began with a silent return for
+`context.Canceled` or `context.DeadlineExceeded` (`internal/api/search.go:118`).
+Nothing else on the request carries a deadline, so the second term was the
+route's own 5 s. A search still running then wrote nothing, net/http sent
+`200` with an empty body, which a client reads as no results, and the log had
+only the access line, at Info with status 0. B364's rule is that a deadline
+the server set stays Error and 500.
+
+**What the store returns.** modernc.org/sqlite v1.60.1 interrupts a query
+whose context ends and returns `ctx.Err()` (`stmt.go:304`, in `query`), and
+database/sql answers a query on an already-expired context with `ctx.Err()`
+before taking a connection (go1.26.6 `database/sql/sql.go:1322`). The store
+wraps either as `search tracks_fts (served): context deadline exceeded`
+(seen in control 4 below, through the real store).
+
+**Red first** (`663ba039`, the tests alone on `cb923d07`'s code, macOS,
+go1.26.6, `-count=1`), in `internal/api/search_deadline_test.go`:
+- `TestASearchThatOutlivesItsDeadlineAnswers500`: the real router
+  (`Handler()`) over a searcher that runs until its context ends, then fails
+  as the store does. Its context carried a deadline and ended with
+  `context.DeadlineExceeded` after the route's real 5 s (5.02 s). The answer
+  was `200` with an empty body, there was no request-failed line, and the
+  access line was `level=INFO … status=0 duration_ms=5001 bytes=0`.
+- `TestASearchPastItsDeadlineThroughTheRealStoreAnswers500`: the router over
+  the real Provider and store. A search with time to spare found the track;
+  the same search on a context already past its deadline answered the same
+  empty 200 with the same log.
+- `TestAClientAbortDuringSearchStaysInfo` passed: a real client cancelling
+  through an `httptest.Server` while the search runs, which leaves no
+  request-failed line, nothing at Error, and an access line at Info with
+  status 0. It pins the branch the fix leaves alone.
+
+**Fix** (`1fe0f10c`). The early return takes `context.Canceled` only. A
+deadline falls through to B425's call, `writeErrorLog(w, r, 500, "internal",
+"the bridge couldn't search the library", err)`, so it is logged at Error
+with the 500 and the client gets the fixed message. No wire change: the pair
+is `500 internal`, whose PROTOCOL.md row says "Server-side failure", so B426's
+guards need no row. Not 503 and no new code: `search_unavailable`'s row says
+terminal, which a timeout is not, and a new code would be a contract with no
+consumer. The app does not call `/v1/search` (no request to it in
+acoseac/1-bit at `b0b346a2`; its library search is local), so neither the
+empty 200 nor the 500 reaches app code. Its `ensureOK` would throw a 500
+envelope as `BridgeError.server(status:code:message:)`.
+
+**The client abort is unchanged, and it is not 499.** The silent return
+writes nothing, so the access line records status 0 at Info. B364's 499 is
+what `writeErrorLog` records, and an abort never reaches it here; B364 left
+this path as it was. Control 2 measured the alternative: through
+`writeErrorLog`, an abort is a request-failed line and an access line, both
+at Info with status 499, one pair per abandoned keystroke, and
+`TestSearchSwallowsAClientCancellation` (a cancel on a live request context)
+becomes a 500. Left as it is.
+
+**Negative controls** on the committed fix (`1fe0f10c`), each anchor
+count-asserted by a script, the package vetted, the 15 search tests run
+(`-run 'TestSearch|TestASearch|TestAClientAbortDuringSearch'`, `-count=1`),
+restored from git and the tree checked against HEAD. Every prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| 1. the fix reverted (`\|\| errors.Is(err, context.DeadlineExceeded)` back in the early return) | the two deadline tests alone, at the red run's four assertions (200, no request-failed line, the access line at Info, the empty body) |
+| 2. the cancel's silent return removed | `TestAClientAbortDuringSearchStaysInfo` (a request-failed line at Info; the access line at `status=499`) and `TestSearchSwallowsAClientCancellation` (500, an error body); the deadline tests green |
+| 3. a deadline answered through `writeError` with the fixed message | the two deadline tests, at "want one request-failed line, got 0" only |
+| 4. a deadline through `writeErrorLog` with `err.Error()` as the message | the two deadline tests, at the message and the three leak fragments (`tracks_fts`, `deadline`, `context`) only |
