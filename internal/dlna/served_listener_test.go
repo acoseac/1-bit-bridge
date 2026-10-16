@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -165,6 +166,52 @@ func TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart(t *testing.T) 
 	}
 	if n := strings.Count(got, pinnedOffTheLANLine); n != 1 {
 		t.Errorf("the pinned-address warning appears %d times after the connections, want once:\n%s", n, got)
+	}
+}
+
+// TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe pins which
+// bound addresses warnIfPinnedOffTheLAN warns about: a wildcard is no pin;
+// loopback, a LAN address, a zero-config link's and an address the server
+// advertises on a member are served; the tailnet's addresses and a member's
+// SLAAC address are not, and the warning names the one bound.
+func TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe(t *testing.T) {
+	publicMember := []fakeIface{lan("eth0", "203.0.113.5", "fd12:3456::5")}
+	cases := []struct {
+		name       string
+		host       []fakeIface
+		advertised []string
+		bound      string
+		warn       bool
+	}{
+		{"ipv4_wildcard", macWithTailscale(), nil, "0.0.0.0", false},
+		{"ipv6_wildcard", macWithTailscale(), nil, "::", false},
+		{"loopback", macWithTailscale(), nil, "127.0.0.1", false},
+		{"lan_ipv4", macWithTailscale(), nil, "192.168.1.20", false},
+		{"zero_config_link", macWithTailscale(), nil, "169.254.7.8", false},
+		{"tailnet_ipv4", macWithTailscale(), nil, "100.64.0.7", true},
+		{"tailnet_ula", macWithTailscale(), nil, "fd7a:115c:a1e0::7", true},
+		{"lan_slaac_address", macWithTailscale(), nil, "2001:db8::20", true},
+		{"a_public_address_the_server_advertises", publicMember, []string{"203.0.113.5"}, "203.0.113.5", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			s := &Server{
+				cfg:    ServerConfig{ListenAddress: net.JoinHostPort(tc.bound, "7790")},
+				log:    slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+				served: newTestHost(tc.host...).served(nil, tc.advertised...),
+			}
+			s.warnIfPinnedOffTheLAN(&net.TCPAddr{IP: net.ParseIP(tc.bound), Port: 7790})
+			got := buf.String()
+			switch n := strings.Count(got, pinnedOffTheLANLine); {
+			case tc.warn && n != 1:
+				t.Errorf("bound to %s: %d warnings, want 1:\n%s", tc.bound, n, got)
+			case !tc.warn && n != 0:
+				t.Errorf("bound to %s: %d warnings, want none:\n%s", tc.bound, n, got)
+			case tc.warn && !strings.Contains(got, "address="+tc.bound+" "):
+				t.Errorf("the warning does not name the bound address %s:\n%s", tc.bound, got)
+			}
+		})
 	}
 }
 

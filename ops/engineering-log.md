@@ -43555,6 +43555,24 @@ the tests.
   connection's local address mapped, and the Warn printed
   `address=::ffff:<MAC-TAILNET-IP>`; `admit` unmaps first. Red first: a fifth
   line in `TestARefusalIsLoggedOncePerKindAndAddress`.
+- **A pinned address off the LAN warns at Start** (round 2, the owner's ask
+  of 2026-10-16). A `dlna.listenAddress` pinned to an address the server
+  does not serve, the tailnet's say, binds that address alone and refuses
+  every connection on it, so DLNA serves no one, and the first refused
+  connection was the only line that said so. Red first (`7f5d6071`): Start
+  logged no warning for a listener pinned to 127.0.0.1 and judged, from
+  before Start, as the tailnet address
+  (`TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart`, which
+  also holds the per-connection refusal to once under its cap beside the
+  startup line). The fix: `warnIfPinnedOffTheLAN`, called on the bound
+  listener's address, so a name pinned in the config is judged by the
+  address it bound, and a wildcard is no pin; `servedAddrs.judge` is the one
+  path `admit` and the check judge an address by. It warns and starts: an
+  address can become served later. Its shapes are
+  `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe` (the two
+  wildcards, loopback, a LAN address, a zero-config link's and an advertised
+  public one on a member stay quiet; the tailnet IPv4 and ULA and a SLAAC
+  address warn, naming the address).
 
 ### Negative controls
 

@@ -374,6 +374,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// another interface's. The listener serves only the LAN-eligible
 	// addresses, and closes every other connection unread (servedAddrs,
 	// backlog B48).
+	s.warnIfPinnedOffTheLAN(bound.Addr())
 	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
@@ -464,6 +465,30 @@ func (s *Server) Start(ctx context.Context) error {
 	)
 	started = true
 	return nil
+}
+
+// warnIfPinnedOffTheLAN logs, once at Start, a listener whose
+// dlna.listenAddress pins it to an address the server does not serve
+// (servedAddrs): it takes connections on that address alone and refuses each
+// one, so DLNA serves no one, and before this a pin to the tailnet's address,
+// say, said so only when a connection arrived. bound is the listener's own
+// address, so a name pinned in the config is judged by the address it bound;
+// a wildcard is no pin. It does not refuse to start: an address can become
+// served later, and every refused connection is still logged under its cap.
+func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
+	a := netAddrIP(bound).Unmap()
+	if !a.IsValid() || a.IsUnspecified() {
+		return
+	}
+	a = s.served.judge(a)
+	if s.served.serves(a) {
+		return
+	}
+	s.log.Warn("dlna.listenAddress pins the listener to an address that is not a LAN-eligible interface's: "+
+		"with it, DLNA serves no one",
+		slog.String("listenAddress", s.cfg.ListenAddress),
+		slog.String("address", a.String()),
+		slog.String("interface", s.served.holderOf(a)))
 }
 
 // advertiseEndpoints returns the SSDP advertise set: the configured

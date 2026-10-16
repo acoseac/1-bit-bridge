@@ -6852,7 +6852,15 @@ no failing test — which is the shape to expect in this area.
   at `servedMissRebuild` (1 s), so a new LAN address is served within a
   second and a flood of refusals lists the interfaces once a second; a
   listing that fails keeps the last snapshot. A refusal is one Warn per kind
-  and address, naming the interface that holds it (bounded at 32).
+  and address, naming the interface that holds it (bounded at 32). **A
+  `dlna.listenAddress` pinned to an address that is not served warns once at
+  Start** (`warnIfPinnedOffTheLAN`, the owner's ask of 2026-10-16): the
+  listener binds that address alone and refuses every connection on it, so
+  DLNA serves no one, and before this the first refused connection was the
+  only line that said so. It judges the address the listener bound, so a
+  pinned name counts, and a wildcard is no pin. **It warns and starts; don't
+  make it refuse** (an address can become served later), and the
+  per-connection Warn keeps its cap beside it.
   **Chosen over binding each served address**, which needs a rebind loop
   with a window where a new address is unreachable, zoned binds for IPv6
   link-local, retries for Windows' tentative addresses, and a new SSDP
@@ -6888,6 +6896,8 @@ no failing test — which is the shape to expect in this area.
   `TestARefusalIsLoggedOncePerKindAndAddress`, `TestTheRefusalLogIsBounded`,
   `TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe`,
   `TestTheDLNAListenerLogsARefusedConnection`,
+  `TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart`,
+  `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe`,
   `TestTheSSDPListenerReadsEachDatagramsDestination`, `TestParseWSAPktinfo`,
   `TestWSAPktinfoConstantsAreWinsocks` (Windows),
   `TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes`,
