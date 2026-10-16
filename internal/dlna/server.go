@@ -426,6 +426,33 @@ func (s *Server) Start(ctx context.Context) error {
 	// single-interface "SSDP failed → Start fails" contract, since that
 	// case has exactly one endpoint).
 	endpoints := s.advertiseEndpoints()
+	s.startAdvertisers(ctx, endpoints)
+	if len(s.ssdps) == 0 {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.httpServer.Shutdown(shutdownCtx)
+		return fmt.Errorf("dlna: SSDP start: no advertiser could bind (tried %d endpoint(s))", len(endpoints))
+	}
+
+	s.log.Info("DLNA server started",
+		slog.String("listenAddress", s.cfg.ListenAddress),
+		slog.String("serverURL", s.cfg.ServerURL),
+		slog.Int("ssdpInterfaces", len(s.ssdps)),
+		slog.String("udn", s.cfg.UDN),
+		slog.String("friendlyName", s.cfg.FriendlyName),
+		slog.Bool("telemetryEnabled", s.cfg.TelemetryStore != nil),
+	)
+	started = true
+	return nil
+}
+
+// startAdvertisers starts one SSDP advertiser per endpoint and keeps those
+// that bind in s.ssdps. A per-interface bind failure (no multicast
+// permission on that NIC, a transient flap) is logged and skipped, so the
+// bridge advertises on whatever interfaces DID bind; Start treats SSDP as
+// down only when none did. Moved out of Start to keep it under the
+// cognitive-complexity limit; the behaviour is Start's, unchanged.
+func (s *Server) startAdvertisers(ctx context.Context, endpoints []AdvertiseEndpoint) {
 	for _, ep := range endpoints {
 		adv := NewSSDPAdvertiser(SSDPConfig{
 			UDN:         s.cfg.UDN,
@@ -448,23 +475,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		s.ssdps = append(s.ssdps, adv)
 	}
-	if len(s.ssdps) == 0 {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.httpServer.Shutdown(shutdownCtx)
-		return fmt.Errorf("dlna: SSDP start: no advertiser could bind (tried %d endpoint(s))", len(endpoints))
-	}
-
-	s.log.Info("DLNA server started",
-		slog.String("listenAddress", s.cfg.ListenAddress),
-		slog.String("serverURL", s.cfg.ServerURL),
-		slog.Int("ssdpInterfaces", len(s.ssdps)),
-		slog.String("udn", s.cfg.UDN),
-		slog.String("friendlyName", s.cfg.FriendlyName),
-		slog.Bool("telemetryEnabled", s.cfg.TelemetryStore != nil),
-	)
-	started = true
-	return nil
 }
 
 // warnIfPinnedOffTheLAN logs, once at Start, a listener whose
@@ -484,7 +494,7 @@ func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
 	if s.served.serves(a) {
 		return
 	}
-	s.log.Warn("dlna.listenAddress pins the listener to an address that is not a LAN-eligible interface's: "+
+	s.log.Warn("dlna.listenAddress pins the listener to an address DLNA does not serve: "+
 		"with it, DLNA serves no one",
 		slog.String("listenAddress", s.cfg.ListenAddress),
 		slog.String("address", a.String()),

@@ -129,8 +129,10 @@ func TestTheDLNAListenerLogsARefusedConnection(t *testing.T) {
 
 // pinnedOffTheLANLine is the Warn Start logs for a listener pinned to an
 // address the server does not serve.
-const pinnedOffTheLANLine = "dlna.listenAddress pins the listener to an address that is not a " +
-	"LAN-eligible interface's: with it, DLNA serves no one"
+// The address, not its interface: a LAN interface's public (SLAAC) address is
+// not served though the interface is eligible (the lan_slaac_address case).
+const pinnedOffTheLANLine = "dlna.listenAddress pins the listener to an address DLNA does not serve: " +
+	"with it, DLNA serves no one"
 
 // TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart pins the
 // startup check (backlog B48): a dlna.listenAddress pinned to an address
