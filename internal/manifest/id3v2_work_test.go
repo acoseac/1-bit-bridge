@@ -43,7 +43,8 @@ func titleFrameIn(version, enc byte) []byte {
 // picardDefaultModeFrames is what MusicBrainz Picard writes for the work and
 // the grouping by default (picard/formats/id3.py: _save_grouping_tag writes
 // the grouping to TIT1, and the work falls through to _save_freetext_tag,
-// which writes it to TXXX:WORK), after the title.
+// which writes it to TXXX:WORK), after the title, in a version 3 or 4 tag
+// (Picard writes no version 2.2 tag; a test builds TT1 and TXX itself).
 func picardDefaultModeFrames(version, enc byte) [][]byte {
 	return [][]byte{
 		titleFrameIn(version, enc),
@@ -54,7 +55,7 @@ func picardDefaultModeFrames(version, enc byte) [][]byte {
 
 // picardITunesModeFrames is what Picard writes with "Save iTunes compatible
 // grouping and work" on: the grouping to GRP1 and the work to TIT1
-// (_save_work_tag, which also deletes TXXX:WORK).
+// (_save_work_tag, which also deletes TXXX:WORK), in a version 3 or 4 tag.
 func picardITunesModeFrames(version, enc byte) [][]byte {
 	return [][]byte{
 		titleFrameIn(version, enc),

@@ -44462,3 +44462,163 @@ rebuilds. Negative control: the routed set read once and kept (a memo in
 observed: exactly the new test red, at "not listed after the cache rebuilt".
 The review's other finding, that the maps' capacity hint counts the rows
 left out, stands as written: it is a sizing hint.
+
+## 2026-10-16 — an ID3v2 tag's TXXX:WORK is its work, and TIT1 only in a tag with none (backlog B127)
+
+**The decision** (the owner, 2026-10-16). MusicBrainz Picard writes an ID3v2
+file's work to TXXX:WORK and its grouping to TIT1, unless "Save iTunes
+compatible grouping and work" is on, which puts the work in TIT1 and the
+grouping in GRP1. The bridge read the work with `stringOf(raw, "tit1", "work",
+"©wrk")`, so a Picard-tagged classical file in the default mode stored its
+grouping as its work. The rule now: TXXX:WORK is the work, and TIT1 (TT1 in
+version 2.2) counts as the work only when no TXXX:WORK is present. The app
+changes its `ID3v2Parser` the same way in its own PR, so both sides give one
+answer for one file. B116's entry above left this open as B127.
+
+### Picard's mapping
+
+Read from `picard/formats/id3.py` at `release-3.0.2` (2026-10-11), the same
+at master `10f384d8` on 2026-10-16; line numbers are release-3.0.2's.
+
+- Loading: TIT1 is left out of the translation table (line 160, its entry
+  commented out as depending on that setting), and `_load_tit1_frame`
+  (404–411) reads it as
+  `name = 'work' if config_params['itunes_compatible'] else 'grouping'`. GRP1
+  is always read as the grouping (199, 202–203). A TXXX described WORK is the
+  work (`__translate_freetext`, 233), and the obsolete description `Work` is
+  renamed to WORK (`__rename_freetext`, 260).
+- Saving (`_save`, 579–590): the grouping always goes to `_save_grouping_tag`
+  (832–838), which writes GRP1 in iTunes mode and TIT1 otherwise. The work
+  goes to `_save_work_tag` only in iTunes mode (581–582); that writes TIT1 and
+  deletes `TXXX:Work` and `TXXX:WORK` (840–845). Otherwise the work falls
+  through to `_save_freetext_tag` (589, 921–927), whose description is
+  `__rtranslate_freetext['work']`, so a TXXX:WORK.
+- The defaults (`picard/options.py`): `itunes_compatible_grouping` off (431),
+  `write_id3v23` off (692), so ID3v2.4, and `id3v2_encoding` UTF-8 (392).
+  `MP3File`, `DSFFile`, `AiffFile` and `DSDIFFFile` (id3.py, 1079–1154) and
+  `WAVFile` (wav.py, 175) all save through `ID3File._save`.
+
+The owner's rule agrees with this mapping.
+
+### Measured
+
+Files mutagen 1.47 wrote with the frames `_save` writes in each mode (TIT2 as
+the title, then TIT1 and TXXX:WORK in the default mode, or GRP1 and TIT1 in
+iTunes mode), saved as `_save_tags` saves (`update_to_v24` with `v2_version=4`
+in UTF-8, or `update_to_v23` with `v2_version=3` and `v23_sep='/'` in UTF-16)
+and without padding, as `testdata/gen/id3_txxx_fixtures.py` writes, on an MP3,
+a DSF, an AIFF, a WAV and a DSDIFF file: twenty files, read back with mutagen. Extracted with `manifest.Extract` through a throwaway harness (not
+committed). On main (`78153974`) all ten default-mode files stored the grouping
+as their work, and the ten iTunes-mode files the work. On the fix all twenty
+store the work. Two controls stayed as they were on both: a FLAC with Vorbis
+WORK and GROUPING (the work), and an M4A with `©wrk` and `©grp` (no work at
+all, below).
+
+### The rule as built
+
+- `workOf` (id3v2_named_values.go), called from `populateFromTagMetadata`:
+  the first of the tag's named values called `work`, else `stringOf(raw,
+  contentGroup, "work", "©wrk")`, where the content group is `tit1`, or `tt1`
+  for a tag whose format is ID3v2.2.
+- **The description is compared as B116's named values are**:
+  `normaliseRawTagKey` lower-cases it and turns spaces into underscores, and
+  the result must equal `work`. For this name that is a case-insensitive
+  comparison (`WORK`, Picard's obsolete `Work` and `work` all match;
+  `WORK TITLE` and `WORK ` do not). The app's B126 reader folds a
+  description the same way.
+- **The first frame wins**: `id3v2NamedValues` orders the frames as the tag
+  holds them (dhowden's renaming suffix), and `id3v2NamedValue`, now the one
+  first-match loop `namedValueOf` also uses, returns the first.
+- **An empty value counts as absent**: `namedFrameOf` already leaves out a
+  frame whose `id3v2TextValue` is empty (white space, NUL and U+FEFF
+  trimmed), so a later TXXX:WORK answers, or with none, TIT1.
+- **TT1 is read for the first time.** dhowden keys a version 2.2 frame by its
+  three-letter id, so the `tit1` alias never matched a TT1: no version 2.2 tag
+  ever gave the bridge a work, while the app's `ID3v2Parser` reads TT1. TT1 is a key
+  only a version 2.2 tag holds, so it is asked only there, and the alias list
+  of every other format is unchanged.
+- **Other containers are unchanged.** A Vorbis or MP4 raw map yields no named
+  values. A Vorbis comment's WORK reads as before. The `©wrk` alias never
+  answers an M4A's work atom: dhowden's MP4 reader keeps only the atoms in its
+  table, `©wrk` is not one, and the bridge's own ilst walk does not read it, so
+  an M4A's work has never been read (measured above). Not this change's.
+
+### ExtractorVersion 26
+
+The bump is what reaches a row already scanned (the skip gate compares
+`extractor_version`); without it the scan test stays red (control NC5). Every
+version-stale row is read again once. The `tags_json` writers were grepped for
+`Work`: the extractor is the only one (the scanner's upsert from it, and
+`coerceStoredUTF8`), so `mergePostScanFields` needs no arm, and the work is not
+one of the four fields B188's reconcile hold judges. A row whose work changes
+takes the full-upsert leg: its `indexed_at` advances (the iOS delta) and its
+`enriched_at` goes to 0, so its enrichment is re-queued once. Those rows are a
+tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2
+tag holding TT1 or TXX:WORK. Every other row re-extracts byte-identical and is
+stamped. SACD ISO virtual rows re-expand, as on every bump. The work is in none
+of the FTS row map, the dupe key and the catalog's album identity, so a changed
+work moves only `tags_json` and the wire. `ProtocolVersion` stays 1 and no field
+changes. PROTOCOL.md's classical-metadata coverage line now names TXXX:WORK
+ahead of TIT1, so the app's paired PR copies PROTOCOL.md over
+`docs/BridgeProtocol.md`.
+
+### Tests
+
+- `TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`: nineteen MP3 tags built in
+  the test, each extracted twenty times, with a title premise each time:
+  Picard's default mode in version 2.4 (UTF-8 and UTF-16) and 2.3 (UTF-16);
+  TXXX:WORK ahead of TIT1; the iTunes-compatible mode in 2.4 and 2.3; TXXX:WORK
+  alone; TIT1 alone; version 2.2's TXX:WORK beside TT1, TT1 alone and TXX:WORK
+  alone; empty TXXX:WORK frames (UTF-8 empty, UTF-16 white space and a byte
+  order mark) beside TIT1; an empty TXXX:WORK, then a TIT1, then one with a
+  value; two TXXX:WORK frames beside TIT1, in both orders; two in version 2.3
+  with no TIT1; the descriptions `Work` and `work`; and TXXX frames of other
+  names beside TIT1 (`MusicBrainz Work Id`, `WORK TITLE`, `WORK `, `GROUPING`).
+- `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`: both modes in an
+  MP3, a DSF, an AIFF, a WAV, a DSDIFF file with the tag at the root and with
+  it in PROP, and a FLAC behind a prepended ID3v2 tag, which dhowden reads in
+  place of its Vorbis comments.
+- `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`: a v25 row
+  set re-extracted. The default-mode MP3 (stored with the grouping) and the
+  version 2.2 MP3 (stored with no work) gain the work, advance `indexed_at`
+  and reset `enriched_at`; the iTunes-mode MP3, a TIT1-only MP3, a plain MP3
+  and a FLAC with a Vorbis WORK are only stamped.
+- `TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX` now expects its
+  TXXX:WORK to be read; its pins for the compilation flag, the composer, the
+  conductor, the original year and the tempo are unchanged.
+- FuzzExtractMP3 gained two seeds: the default-mode tag in UTF-16, and version
+  2.2's TXX:WORK beside TT1.
+
+**Red first** (`c191e9f6`, the tests alone on `78153974`): fourteen of the
+nineteen rule cases (every case with a TXXX:WORK that differs from the TIT1
+beside it or stands alone, and all three version 2.2 cases); the default mode
+in all seven containers; the scan test at its premise (`default.mp3` stored
+"Beethoven Symphonies"); and the scope pin (Work ""). Green on main: the two
+iTunes-mode cases, TIT1 alone, the empty TXXX:WORK beside TIT1 and the other
+names beside TIT1, and every iTunes-mode container.
+
+### Negative controls
+
+On the committed fix (`7fdd0416`), each predicted by name in writing before it
+ran, through a script that refused a dirty tree, count-asserted its anchor
+(exactly one), checked the mutation landed and vetted, ran the whole of
+`internal/manifest` (`-count=1`), then restored the file from git and checked
+the tree against HEAD. Every prediction held, with nothing else red.
+
+| mutation | red, predicted and observed |
+|---|---|
+| NC1 the precedence reversed: TIT1 / TT1 asked first, TXXX:WORK second | ten rule cases (the three default-mode ones, TXXX:WORK ahead of TIT1, version 2.2's TXX:WORK beside TT1, the empty-then-valued case, both two-frame cases beside TIT1, both description-case cases); the default mode in all seven containers; the scan test at its premise. The scope pin stays green: its tag has no TIT1 |
+| NC2 the empty-value rule dropped: `namedFrameOf` keeps a TXXX whose value is empty | two rule cases, both reading Work "" (the empty TXXX:WORK beside TIT1, and the empty one before a valued one); and B116's "a frame the tag leaves empty is no answer", the rule they share |
+| NC3 the last frame winning: `id3v2NamedValue` keeps the last match | the three two-frame rule cases; B116's two "one name twice" cases and "the MusicBrainz UFID is the recording id, ahead of a TXXX of the same name"; `TestExplicit_ID3TXXX` ("the second TXXX overrode the first") |
+| NC4 TT1 not read: a version 2.2 tag's content group stays `tit1` | "version 2.2: TT1 alone is the work", and the scan test at its premise (`v22.mp3` stored no work); the two other version 2.2 cases stay green, a TXX:WORK answering |
+| NC5 `ExtractorVersion` left at 25 | the scan test alone: both changed rows kept their v25 work, `indexed_at` and `enriched_at` |
+
+### Found on the way, not changed
+
+- An M4A's work is never read: dhowden's MP4 reader drops `©wrk` (above),
+  where Picard's MP4 mapping writes the work, and PROTOCOL.md's coverage line
+  still names `©wrk` for MP4. (Picard's MP4 conductor, a
+  `----:com.apple.iTunes:CONDUCTOR` freeform atom, is read: measured.)
+- A version 2.2 tag's TCM, TP3, TOR and TBP are not read for the composer,
+  the conductor, the original year and the tempo (the aliases name only the
+  four-letter ids), while the app's `ID3v2Parser` reads all four.

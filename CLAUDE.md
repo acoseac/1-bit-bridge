@@ -312,7 +312,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Eighteen claims in this list have been wrong and been corrected** — the
+**Nineteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -330,8 +330,9 @@ listener to the group address", (2026-09-29) "`isLossyCodec` gates every
 `BitsPerSample` write site", (2026-09-29) "reconciliation never
 crosses directories", (2026-09-29) "`os.SameFile` answers [a
 directory's identity] portably", (2026-10-02) "an explicit delete
-path list sidesteps the case-fold class entirely", and (2026-10-15) "a
-cover the cap evicts does not come back, a `local-` cover included". The first five cost a later session real
+path list sidesteps the case-fold class entirely", (2026-10-15) "a
+cover the cap evicts does not come back, a `local-` cover included", and
+(2026-10-16) "the two ID3v2 readers still differ on TXXX names (B126)". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -379,6 +380,10 @@ it was written (`TestScanner_RecoversWipedLocalArtworkCache` and
 `TestArtworkLocalSentinelStaysPendingWhenEnrichmentComplete`), and
 measuring the entry's own case end to end showed the `local-` cover come
 back with the next scan.
+The nineteenth was the twelfth's kind, about the other repo: the app shipped
+B126 (acoseac/1-bit #2024) on 2026-09-30, the day B116 merged, and B116's
+bullet said the readers differed for sixteen more days, until B127 rewrote the
+sentence around it.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -2160,13 +2165,15 @@ lost my library."
   Warn) and a gain no number. **Only these fields, never one ID3v2 gives a frame of
   its own**: the compilation flag (TCMP; the app pins that neither side reads
   TXXX:COMPILATION, `test_TXXXCompilationAndV22TCP_areNotRead`), the composer, the
-  conductor, the work, the original year and the tempo stay frame-only on both sides,
-  and the app's ID3v2Parser reads its MusicBrainz ids and ReplayGain from TXXX and
-  UFID too (`TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX`). **Don't widen it
-  without the app**, and don't let `hasAnyRawKey`'s presence gates see a TXXX: they
-  gate dhowden's accessors, which read frames (a TXXX "TRACKNUMBER" would make a nil
-  track number Some(0)). The two readers still differ where the app is wrong or
-  narrower (backlog B126), and neither reads Picard's TXXX:WORK (B127). **v19 changes
+  conductor, the original year and the tempo stay frame-only on both sides, and the
+  app's ID3v2Parser reads its MusicBrainz ids and ReplayGain from TXXX and UFID too
+  (`TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX`). The work was on that list
+  until B127 made TXXX:WORK the work (the next bullet). **Don't widen it without the
+  app**, and don't let `hasAnyRawKey`'s presence gates see a TXXX: they gate
+  dhowden's accessors, which read frames (a TXXX "TRACKNUMBER" would make a nil track
+  number Some(0)). The app has read these names as this reader does since B126
+  (acoseac/1-bit #2024, 2026-09-30); this bullet went on saying the two differed
+  there until 2026-10-16. **v19 changes
   only files whose tag carries such a frame**: they take the full-upsert leg (the tag's
   release id replaces one the enricher found by searching, since the re-extract wins
   `mergePostScanFields`; the enricher's cover stays until it runs again), their
@@ -2180,6 +2187,32 @@ lost my library."
   containers, and ffmpeg); `TestPicardsID3v2IdsAndReplayGainReachTheirFields`,
   `TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes` (each case twenty times: a map-order
   winner flaps) and `TestScanner_V19_ATagNamingItsIDsJoinsTheDelta_APlainID3RowOnlyStamps`.
+- **An ID3v2 tag's TXXX:WORK is its work, and its content group (TIT1, TT1) only when
+  it holds none** (ExtractorVersion 26, 2026-10-16, backlog B127, the owner's decision).
+  MusicBrainz Picard writes the work to TXXX:WORK and the grouping to TIT1 by default,
+  and the work to TIT1 and the grouping to GRP1 under "Save iTunes compatible grouping
+  and work", deleting TXXX:WORK (`picard/formats/id3.py` at release-3.0.2), while the
+  work was read from TIT1 alone: every default-mode MP3, DSF, AIFF, WAV and DFF stored
+  its grouping as its work (measured on files mutagen wrote as Picard's `_save` does, in
+  both modes). `workOf` takes the first named value called `work`, a TXXX or TXX whose
+  description B116's normalisation makes `work` (so case does not matter) and whose
+  value is not empty once trimmed (an empty one counts as absent, and a later frame
+  answers), and only a tag with none takes TIT1, or TT1 in a version 2.2 tag, which was
+  never read before (the app's ID3v2Parser reads TT1). **Don't put TIT1 back in
+  front**, and **don't change the reading on one side alone**: the app's ID3v2Parser
+  must read the work the same way (its paired PR), or one file is two works. A Vorbis
+  comment's WORK is unchanged. The `©wrk` alias never answers an M4A's work atom,
+  which dhowden's MP4 reader does not keep, so an M4A's work has never been read
+  (measured; not this rule's). **v26 changes only the rows whose work changes**: a
+  tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2 tag
+  holding TT1 or TXX:WORK. They take the
+  full-upsert leg (their enrichment is re-queued once) and are the iOS delta; every
+  other row is stamped, and SACD ISO virtual rows re-expand as on every bump. No wire
+  change and `ProtocolVersion` stays 1; PROTOCOL.md's classical-metadata coverage line
+  now names TXXX:WORK, so the app's mirror copies it.
+  (`TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`,
+  `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`,
+  `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`.)
 - **Every dhowden read goes through `dhowdenReadBuffer`, a page at a time**
   (2026-09-29, backlog B117). dhowden's `unsynchroniser.Read` reads its stream ONE BYTE
   per Read call, and the extractors handed dhowden the `*os.File`, so every byte of an
@@ -2293,8 +2326,9 @@ lost my library."
   `testdata/gen/compressed_pcm_fixtures.sh`), `TestAIFCEncodingOf`,
   `TestScanner_V21_ACompressedAIFCOrWAVJoinsTheDelta_ALinearOneOnlyStamps`.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
-  split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
-  explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
+  keep the work apart from TIT2→Title** (the work is TXXX:WORK, else TIT1: the B127
+  bullet above; this said "split TIT1→Work" until then). dhowden returns 0 for both
+  "tag absent" and "an explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
   keep `Some(0)` distinguishable from `nil`. `canSetBitsPerSample`, an allowlist
   of the lossless names, gates every extractor's `BitsPerSample` write
   structurally (this said `isLossyCodec`, a denylist #225's review replaced

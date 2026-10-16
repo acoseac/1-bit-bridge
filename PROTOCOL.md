@@ -391,7 +391,7 @@ Both fields are additive — `ProtocolVersion` stays at `1`. Pre-v1.1 servers om
 
 `composer`, `conductor`, `work`, `originalYear`, and `bpm` are populated by the bridge's extractor when the source tags carry them. All five are `omitempty` — pre-v1.3 bridges emit nothing here and iOS treats absence as "no classical metadata". String fields (`composer` / `conductor` / `work`) ship the tag value verbatim after the standard display-name normalization; integer fields (`originalYear` / `bpm`) ship as `*int` so a zero-valued source can be distinguished from an unset one.
 
-iOS surfaces these on a third subtitle line in track rows ("Composer: X" with conductor fallback) and as a "Conducted by X" header on albums where ≥80% of tracks share a conductor. Source-tag coverage: ID3v2 `TCOM` / `TPE3` / `TIT1` / `TORY` / `TDOR` / `TBPM`; Vorbis-comment `COMPOSER` / `CONDUCTOR` / `WORK` / `ORIGINALDATE` / `BPM`; MP4 `©wrt` / `cond` / `©wrk` / `BPM`. The bridge tag layer is the single source of truth — iOS no longer extracts classical fields from local sources on bridge shares.
+iOS surfaces these on a third subtitle line in track rows ("Composer: X" with conductor fallback) and as a "Conducted by X" header on albums where ≥80% of tracks share a conductor. Source-tag coverage: ID3v2 `TCOM` / `TPE3` / `TXXX:WORK`, else `TIT1` (`TT1` in ID3v2.2; MusicBrainz Picard's default mode writes the work to `TXXX:WORK` and the grouping to `TIT1`) / `TORY` / `TDOR` / `TBPM`; Vorbis-comment `COMPOSER` / `CONDUCTOR` / `WORK` / `ORIGINALDATE` / `BPM`; MP4 `©wrt` / `cond` / `©wrk` / `BPM`. The bridge tag layer is the single source of truth — iOS no longer extracts classical fields from local sources on bridge shares.
 
 #### Multi-value artist preservation (additive, since v1.3)
 
