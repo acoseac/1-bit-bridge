@@ -43596,6 +43596,7 @@ a reset, or on Windows also WSAECONNABORTED): the same seven lines.
 | NC6 | no rebuild at the age | `TestServedAddrsStopServingAnAddressWithinTheMaxAge`, `TestAFailedListingKeepsTheSnapshotItWouldReplace` |
 | NC7 | the link-local zones dropped (both key functions) | the macos host (en0's fe80 served without its zone, and with utun7's) |
 | NC8 | the group judged like a unicast | `TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination`, `TestTheSSDPAdvertiserAnswersASearchSentToTheGroup` |
+| NC9 | the startup check's call removed from Start (round 2, on `775a37fb`) | `TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart` alone; `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe` calls the check directly and stays green |
 
 NC3a and NC4 show the tailnet refused twice over, by the set and by the
 classes; only removing both (NC3) reopens it.
@@ -43607,7 +43608,10 @@ classes; only removing both (NC3) reopens it.
   works as before, and it is reachable from wherever the host's port is, the
   host's tailnet included. Reasoned, not measured (no container runtime on
   the Mac), and pinned by the `container_on_a_bridge_network` row. The
-  operator scopes it with the publish's host IP (`-p <LAN IP>:7790:7790`).
+  operator scopes it with the publish's host IP (`-p <LAN IP>:7790:7790`),
+  which `docs/docker.md` says since round 2 (the owner's ask of 2026-10-16),
+  under "Publishing the DLNA port". The doc publishes no 1900/udp, so the
+  note names 7790 alone.
 - **A subnet router**: a host that advertises its own LAN as a Tailscale
   subnet route carries tailnet peers to its LAN address, which is served.
   Both designs judge the address, not the link a packet arrived on, and no

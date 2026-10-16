@@ -6880,7 +6880,8 @@ no failing test — which is the shape to expect in this area.
   on a bridge network sees a published port's connections on its own eth0
   address after DNAT, so that path works as before and is reachable from
   wherever the HOST's port is, its tailnet included (publish on the LAN
-  address, `-p <LAN IP>:7790:7790`); a host that is a Tailscale subnet
+  address, `-p <LAN IP>:7790:7790`, as `docs/docker.md` says under
+  "Publishing the DLNA port"); a host that is a Tailscale subnet
   router for its own LAN carries tailnet peers to its LAN address; a VPN
   tunnel numbered in RFC 1918 space is a member (eligibility cannot tell it
   from a LAN); and a laptop on a café's private network serves that network.

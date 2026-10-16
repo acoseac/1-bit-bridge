@@ -274,6 +274,22 @@ iOS devices pair against `https://<host>:7788` with the
 fingerprint shown by `docker exec 1-bit-bridge bridge cert info`
 (or via the admin console — see below).
 
+### Publishing the DLNA port
+
+If you turn on the DLNA MediaServer (`dlna.enabled`, port 7790), publish its
+port on the host's LAN address:
+
+```sh
+-p <LAN IP>:7790:7790/tcp
+```
+
+The bridge serves DLNA only on the LAN addresses of the interfaces it sees.
+With a published port, Docker hands the container each connection on the
+container's own address, so it cannot tell where a connection came from: a
+plain `-p 7790:7790` makes DLNA reachable wherever the host's port is, the
+host's tailnet included. On Linux with `--network host` the bridge sees the
+host's interfaces and refuses a tailnet address itself.
+
 ## Environment overrides
 
 The bridge picks up these env vars at startup, **after** loading
