@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -188,7 +189,7 @@ func cdsItemIDs(items []cdsItem) []string {
 	for _, it := range items {
 		ids = append(ids, it.ID)
 	}
-	slices.Sort(ids)
+	sort.Strings(ids)
 	return ids
 }
 
@@ -197,7 +198,7 @@ func dlnaIDsOf(paths []string) []string {
 	for _, p := range paths {
 		ids = append(ids, dlna.TrackID("", p))
 	}
-	slices.Sort(ids)
+	sort.Strings(ids)
 	return ids
 }
 
