@@ -484,7 +484,7 @@ func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
 	if s.served.serves(a) {
 		return
 	}
-	s.log.Warn("dlna.listenAddress pins the listener to an address that is not a LAN-eligible interface's: "+
+	s.log.Warn("dlna.listenAddress pins the listener to an address DLNA does not serve: "+
 		"with it, DLNA serves no one",
 		slog.String("listenAddress", s.cfg.ListenAddress),
 		slog.String("address", a.String()),

@@ -290,6 +290,14 @@ plain `-p 7790:7790` makes DLNA reachable wherever the host's port is, the
 host's tailnet included. On Linux with `--network host` the bridge sees the
 host's interfaces and refuses a tailnet address itself.
 
+Binding the port to the LAN address stops a connection to the host's tailnet
+address, not one routed onto the LAN: if the host forwards tailnet traffic to
+its LAN (a Tailscale subnet router advertising that LAN, or IP forwarding with
+a route to it), a tailnet peer reaches `<LAN IP>:7790`, and Docker hands the
+container that connection like any other. To keep DLNA to the LAN in that
+setup, don't advertise the LAN as a subnet route, or restrict tailnet access to
+port 7790 with Tailscale ACLs or the host's firewall.
+
 ## Environment overrides
 
 The bridge picks up these env vars at startup, **after** loading
