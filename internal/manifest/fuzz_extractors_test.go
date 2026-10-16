@@ -235,5 +235,9 @@ func FuzzExtractMP3(f *testing.F) {
 		id3Fixture(f, "picard_v24_utf16.mp3"),
 		id3Fixture(f, "picard_v23_utf16.mp3"),
 		id3Fixture(f, "ffmpeg_v23.mp3"),
+		// Picard's default-mode work and grouping (TXXX:WORK beside TIT1), and
+		// a version 2.2 tag's TXX:WORK beside TT1 (backlog B127).
+		id3v2MP3(4, picardDefaultModeFrames(4, 1)...),
+		id3v2MP3(2, titleFrameIn(2, 0), textFrameIn(2, 0, "TT1", picardGrouping), txxxFrame(2, 0, "WORK", picardWork)),
 	})
 }
