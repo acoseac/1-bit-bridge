@@ -93,7 +93,7 @@ func TestSweepArtworkCachePassesOverTheDirectoriesALibraryWalkSkips(t *testing.T
 	}
 	writeFixtureFile(t, filepath.Join(dir, "cover-500.jpg"), 30)
 
-	res, err := sweepArtworkCache(context.Background(), dir, 50)
+	res, err := sweepArtworkCache(context.Background(), emptyCatalogStore(t), dir, 50, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,9 +127,9 @@ func TestArtworkWalksWalkACacheNamedLikeASkippedDirectory(t *testing.T) {
 			}
 			mustGone(t, orphan)
 
-			cover := filepath.Join(dir, "cover-500.jpg")
-			writeFixtureFile(t, cover, 100)
-			res, err := sweepArtworkCache(context.Background(), dir, 50)
+			// Older than the cap's write grace, as a cache's covers are.
+			writeArtFile(t, dir, "cover-500.jpg", 100, time.Now().Add(-time.Hour))
+			res, err := sweepArtworkCache(context.Background(), store, dir, 50, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
