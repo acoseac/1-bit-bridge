@@ -329,7 +329,7 @@ func TestRun_FullReportShape(t *testing.T) {
 		"library-roots", "service-manager", "browser-opener",
 		watchLimitRow, "audio-toolchain", "flac-32-bit", "dsd-render-toolchain",
 		"fingerprint-toolchain", "log-file-size", "sidecar-paths",
-		"variants-index",
+		"variants-index", "name-collisions",
 	}
 	if len(r.Checks) != len(wantNames) {
 		t.Fatalf("check count: got %d, want %d", len(r.Checks), len(wantNames))
