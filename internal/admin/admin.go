@@ -1031,7 +1031,9 @@ type AdminVariantDeleteResponse struct {
 var ErrAdminVariantDeleterUnavailable = errors.New("variant deleter not wired")
 
 // UpscalePoolStats mirrors `transcode.PoolStats` field-for-
-// field but lives here so the admin package compiles without
+// field, Dropped aside (no console surface shows it: a drop is
+// reported by the pool's drop-burst line and its batch's row, backlog
+// B155), but lives here so the admin package compiles without
 // importing internal/transcode. The wiring closure in
 // cmd/bridge/main.go translates between the two value types.
 type UpscalePoolStats struct {

@@ -4053,6 +4053,19 @@ no failing test — which is the shape to expect in this area.
   the test names a bucket the line leaves out or shows under another's
   label, and a part that is no bucket at all, such as one read from a field
   the server does not send.
+- **A job a worker takes while its live gate is closed is DROPPED, and a
+  drop is an outcome of its own in both pools** (2026-10-15, backlog B155;
+  the rule, its measurement and the gate a job answers to are under The
+  CLI and the serve wiring). `outcomeDropped`: the job does not run, and
+  finishJob gives its path back and counts it (`droppedCnt`) in its one
+  critical section, so every accepted job is still in exactly one of in
+  flight, done, failed or dropped (both pools' tests check it at every
+  snapshot they take). The transcode pool announces it on `jobDroppedChan`,
+  the same blocking 2×workers buffer a failure has, drained by the one
+  publisher and closed by Stop after `wg.Wait`. **Don't count a drop as a
+  failure** (a batch would read the file as broken, and the throughput
+  window would take a sample of a job that never ran) **or announce
+  nothing for it** (a batch waits on every job it enqueued).
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
@@ -8600,8 +8613,9 @@ mentions across the four `ops/audit-*.md` files.
   B108, 2026-09-29): `/v1/download?variant=`, `/v1/waveform`, `/v1/spectrum`
   and `GET /v1/upscale/batches` answer with their feature off as with it on
   (the list on a demo bridge too), and the manifest's analysis fields have no
-  gate; only its `variants` are stripped. A switch stops NEW work and
-  withdraws nothing made: a client drops a rendition or a curve it gets a 404
+  gate; only its `variants` are stripped. A switch stops new work, drops the
+  work queued for it (backlog B155, the next bullet), and withdraws nothing
+  made: a client drops a rendition or a curve it gets a 404
   for, and a delta sync never carries the stripped `variants` (the switch
   bumps no `indexed_at`), so a phone that listed a rendition keeps asking for
   it. PROTOCOL.md said 404 (and 503 for the list) until then, and the owner
@@ -8609,6 +8623,76 @@ mentions across the four `ops/audit-*.md` files.
   `internal/api/feature_off_reads_test.go` pins each route over stubs and
   `TestServeWithItsFeaturesOffServesWhatItMadeBefore` the wiring, through a
   real serve.
+- **…and a switch-off also stops the work QUEUED for it: each pool asks its
+  live gate when a worker TAKES a job, and drops a job the gate refuses**
+  (2026-10-15, backlog B155, the owner's decision). The gates refused only
+  new work, and serve never stops a pool, so a queue ran to its end after a
+  switch-off, up to 5,000 jobs a lane, while B113's console hid it. Measured
+  with the real serve on the dev Mac, one worker, 40 FLACs: after
+  `PATCH {"analysisEnabled": false}` answered `live`, 34 more analyses
+  landed in 120 s (five-minute files), each a `track_analysis` write and an
+  `indexed_at` delta to every paired device; after `upscaleEnabled: false`,
+  37 more renders (one-minute files, about 300 MB of sidecars) in under a
+  minute, and the batch read `completed 40/40`. With the fix, one more of
+  each: the job already running. The analysis pool takes
+  `analyze.WithLiveGate(analysisActiveFn)`, the gate /v1 reads; the
+  transcode pool `SetLiveGate(kindGates.admits)`, on the one
+  `renditionGates` runServe builds (the closures POST /v1/upscale reads per
+  kind, which the stale-rendition heal reads too). The gate is asked once
+  per job, after the stop check and before anything runs or shows on the
+  worker grid. A refused job is `outcomeDropped`: not run, its dedup claim
+  given back in finishJob's one critical section, counted as neither done
+  nor failed (`PoolStats.Dropped`, which no wire or console DTO carries),
+  and, in the transcode pool, announced (`SetOnJobDropped` →
+  `Coordinator.OnJobDropped`), because a batch waits on every job it
+  enqueued and sat `running` forever without the event. A batch with
+  dropped files ends `cancelled` (`batchState.settle`, from the three job
+  callbacks and both queue-full truncations, and the same error from the
+  post-loop drain check), counting only work that ran, its `error`
+  naming how many files were not rendered and that a resubmit renders them
+  (measured: 36 of 36, the 4 that ran counted covered). The sweepers offer
+  their dropped tracks again at their next pass with the feature on
+  (measured: 36 of 36 analysed after an Analyze-now nudge). Switching a
+  feature on nudges no sweep, so without one that pass is the sweep's tick
+  (`scanIntervalSec`, six hours by default) or the next scan's nudge.
+  **A job already RUNNING when its gate closes
+  finishes**, by decision: one job per worker, 3.5-3.8 s for an analysis
+  and 5.5-5.7 s for a 192/24 sox render of a five-minute FLAC on the dev
+  Mac (a DSD render runs minutes), and cancelling one needs a per-job
+  cancel and a new outcome on every error exit. A run of drops logs ONE
+  line with its count, kept by the one `dropburst.Tracker` both pools use
+  (`internal/dropburst`, guarded by the pool's own mutex): a run ends once
+  no accepted job is left undecided (the queue's length cannot stand in,
+  because a worker holding a job it has not decided would then log a second
+  line) or when a job runs, and the drop that ends it writes the line
+  before its count: `Tracker.Drop` takes a critical section of its own
+  ahead of finishJob's, the order every exit keeps. **Don't fold Drop into
+  finishJob's section** (a review suggestion on #1247, declined): one
+  section writes the line after its unlock, so the count is visible before
+  the line, and a test reading the log once the pool was idle failed 6 of
+  20 runs that way. **The transcode gate is
+  the rendition FAMILY's, never the enqueuer's** (`renditionGates.admits`:
+  the kind's gate, an empty kind being the batch's upscale, AND the
+  DSD-render gate for a DSD source): the pool dedups on (source, variant),
+  so a phone's request for a rendition a sweep or a batch queued rides that
+  job, and a gate only one enqueuer passed would drop the phone's request
+  with it. Residual, for that reason: switching pre-generation alone
+  (`autoOptimize.enabled`) off stops the next sweep, not the up to
+  `maxPerSweep` jobs the last one queued, which are the CarPlay family's.
+  **Don't drop a job at Enqueue, release a dropped job outside finishJob's
+  critical section, count a drop as done or failed, ask the gate before the
+  stop check (a job the stop took is shutdown's), key the transcode gate on
+  `Background` or `BatchID`, or end a burst on the queue's length.**
+  `TestAQueuedAnalysisDoesNotRunOnceTheGateCloses`,
+  `TestAQueuedRenderDoesNotRunOnceItsGateCloses` and
+  `TestABatchWhoseQueuedFilesAreDroppedEndsCancelled` lead the pools' and
+  the batch's tests (`pool_live_gate_test.go`, `batch_live_gate_test.go`),
+  `TestAJobStillBeingDecidedKeepsItsBurstOpen` pins the burst's end,
+  `TestAQueuedRenderRunsOnlyWhileItsFamilysGateIsOpen` the family table and
+  `TestThePoolsTakeJobsUnderTheV1Gates` the wiring; thirteen controls each
+  reddened exactly the tests predicted (ops/engineering-log.md). The two
+  pools' tests share their scenarios through `internal/pooltest`, a
+  test-only package each pool adapts its own pool to, keeping its own tests.
 - **…and a value runServe DECIDES from the config while it builds Deps is a
   boot snapshot, however live its reader is** (2026-09-28).
   `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals
@@ -10700,16 +10784,19 @@ its twin.** The top list is older, shorter, and read first.
   read `cfg.Analysis.Enabled` put the counters back there
   (`TestTheAnalysisPoolLineFollowsTheGate` moves the two apart;
   `TestServeAnalysisPoolLineFollowsTheLiveGate` boots serve both ways).
-  **Residual: a job queued before the gate closed still runs**, and
-  neither tile shows it: a pool drains its queue whatever the gate says
-  (measured: 37 analyses in 114 s after a switch-off, each an `indexed_at`
-  bump; backlog B155). **A comment that explains a gate by a pool, a
+  **Residual: a job already RUNNING when the gate closed finishes**, and
+  neither tile shows it: one per worker, seconds each (a DSD render
+  minutes). A job still QUEUED is dropped since backlog B155 (the
+  switch-off bullet under The CLI and the serve wiring); until then a pool
+  drained its whole queue whatever the gate said (measured: 37 analyses in
+  114 s after a switch-off, each an `indexed_at` bump), which this tile
+  hid. **A comment that explains a gate by a pool, a
   sweeper or a card being ABSENT with the feature off describes the code
   before #770 and #781**: the /v1/health gating comment said no
   `upscale.complete` event can arrive because a disabled bridge has no
   pool and no `SetOnJobComplete` (both exist on every bridge; the flag
-  goes with the feature because no job can be asked for, and a job queued
-  before the switch-off still publishes one), `WithUpscaleEnqueuer` said
+  goes with the feature because no job can be asked for, and a job
+  already rendering at the switch-off still publishes one), `WithUpscaleEnqueuer` said
   it was wired "IFF" the flag and sox, and some thirty more said the same
   in the stats docblocks, the auto-optimize card, its PATCH reason ("the
   upscale pool is absent"), the fingerprint cache and a Settings hint

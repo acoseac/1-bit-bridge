@@ -4173,7 +4173,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// against Enqueue and the publisher drain has produced live panics —
 	// and nothing here stops the pool before shutdown.
 	{
-		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
+		// The pool asks analysisActiveFn, the gate /v1 reads, when a worker
+		// takes a job, so a switch-off drops the queued analyses instead of
+		// running the queue to its end (backlog B155; the sweeper offers them
+		// again once analysis is on).
+		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap(),
+			analyze.WithLiveGate(analysisActiveFn))
 		defer analysisPool.Stop()
 		// Buffered-1 nudge: the scanner's post-scan hook and the admin
 		// "Analyze now" button both non-blocking-send; a pending nudge
@@ -4332,6 +4337,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	{
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
+		// The live gates of the three kinds, the closures /v1 reads per kind
+		// (TestAStaleDownloadRendersUnderTheV1KindGates). The pool asks them
+		// when a worker takes a job, so switching a kind off drops the jobs
+		// queued for it rather than running the queue to its end (backlog
+		// B155; renditionGates.admits says which gate a job answers to), and
+		// the stale-rendition heal below reads the same ones.
+		kindGates := renditionGates{upscale: upscaleActiveFn, optimize: carPlayOptimizeActiveFn, pcm: dsdRenderActiveFn}
+		upscalePool.SetLiveGate(kindGates.admits)
 		// v1.3 Coordinator wraps the Pool with per-batch tracking.
 		// `RecoverInterruptedBatches` runs synchronously inside
 		// NewCoordinator — any rows left in pending/running from a
@@ -4422,7 +4435,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		staleHeal := newStaleRenditionHeal(manifestStore.LookupTrack, rescanner.queue,
 			staleRerender{
 				enqueue:    enqueuer.enqueueKind,
-				open:       renditionGates{upscale: upscaleActiveFn, optimize: carPlayOptimizeActiveFn, pcm: dsdRenderActiveFn}.open,
+				open:       kindGates.open,
 				suppressed: manifestStore.VariantFailureSuppressed,
 				demo:       cfg.Demo.Enabled,
 			}.rerender,
@@ -4789,6 +4802,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		upscalePool.SetOnJobFailed(func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time) {
 			if upscaleCoordinator != nil {
 				upscaleCoordinator.OnJobFailed(path, variantID, errMsg, durationSeconds, batchID, failedAt)
+			}
+		})
+		// A job the pool dropped because its kind's gate closed before a
+		// worker reached it (backlog B155): its batch stops waiting on it and,
+		// once nothing else is left, ends cancelled. No upscale.complete goes
+		// out for it, as none goes out for a failure.
+		upscalePool.SetOnJobDropped(func(path, variantID string, batchID uuid.UUID, droppedAt time.Time) {
+			if upscaleCoordinator != nil {
+				upscaleCoordinator.OnJobDropped(path, variantID, batchID, droppedAt)
 			}
 		})
 	}
@@ -5165,8 +5187,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// `waveform` flag rather than the persisted config flag.
 		AnalysisActive: analysisActiveFn,
 		// Analysis pool + sweeper surfaces, wired on every bridge: the
-		// pool and the sweeper run whatever the gate says (#781). The
-		// console leaves the pool's counters out while the gate is
+		// pool and the sweeper exist whatever the gate says (#781), and
+		// the pool runs no job a worker takes while it is closed (B155).
+		// The console leaves the pool's counters out while the gate is
 		// closed, as the upscale tile does, and keeps the sweeper's
 		// last-run lines.
 		AnalysisPoolStats: analysisPoolStatsClosure(analysisPool),

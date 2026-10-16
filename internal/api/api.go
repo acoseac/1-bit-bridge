@@ -1831,9 +1831,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     with the feature. (Greptile P1 on PR #187.) Not because no
 	//     event can come: since #781 serve builds the transcode pool
 	//     and wires `SetOnJobComplete` on every bridge, and a job
-	//     queued before the gate closed still completes and publishes
-	//     one. This said until 2026-09-29 that a bridge with upscale
-	//     disabled has no pool and no callback (backlog B113).
+	//     already rendering when the gate closed still completes and
+	//     publishes one (a job still queued is dropped and publishes
+	//     none, backlog B155). This said until 2026-09-29 that a bridge
+	//     with upscale disabled has no pool and no callback (backlog
+	//     B113).
 	//   - `operatorDrivenUpscale` additionally requires a wired
 	//     `batchCoordinator` — without it the /v1/upscale/batch
 	//     endpoints surface 503 with nothing to fall back to.

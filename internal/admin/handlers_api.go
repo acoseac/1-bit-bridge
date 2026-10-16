@@ -3278,7 +3278,8 @@ func (s *Server) soxAvailability() *bool {
 // (and the SSE `analysis` event payload). Pool and Sweep surface the
 // serve-side auto-analysis machinery: the long-lived analyze.Pool's
 // counters (same DTO the upscale pool uses — the field sets match
-// one-for-one, ActiveWorkers stays empty) and the sweeper's lifecycle.
+// one-for-one, Dropped aside, ActiveWorkers stays empty) and the
+// sweeper's lifecycle.
 //
 // Pool is present only while Enabled is (the live gate), as the upscale
 // tile's is: counters beside an off or degraded badge read as a feature

@@ -591,7 +591,9 @@ func renditionKindOf(variantID string) (kind transcode.JobKind, ok bool) {
 // renditionGates are the live gates of the three kinds: the closures runServe
 // hands POST /v1/upscale (api.WithUpscale, WithCarPlayOptimize, WithDSDRender),
 // so a stale download renders nothing a client's request for the family
-// would be refused (TestAStaleDownloadRendersUnderTheV1KindGates).
+// would be refused (TestAStaleDownloadRendersUnderTheV1KindGates), and serve's
+// transcode pool runs no queued job whose family is switched off (admits,
+// TestThePoolsTakeJobsUnderTheV1Gates). runServe builds one, for both.
 type renditionGates struct {
 	upscale, optimize, pcm func() bool
 }
@@ -608,6 +610,32 @@ func (g renditionGates) open(kind transcode.JobKind) bool {
 		gate = g.upscale
 	}
 	return gate != nil && gate()
+}
+
+// admits reports whether a job serve's transcode pool takes may still run
+// (transcode.Pool.SetLiveGate, backlog B155): the live gate of the rendition
+// FAMILY the job renders is open. That is its kind's gate (no kind is the
+// legacy upscale), and for a DSD source the DSD-render gate too, the `pcm`
+// kind's: every enqueuer of a DSD rendition refuses one without the caps
+// that gate reads (transcode.DSDRenderEligible), so a compact-tier render is
+// as off as the faithful tier once DSD rendering is.
+//
+// Never the gate of the path that ENQUEUED the job (the pre-generation
+// switch, a batch), and so nothing from Background or BatchID: the pool
+// dedups on (source, variant), so a phone's request for a rendition a sweep
+// or a batch already queued is answered "already queued" and rides that
+// job. A gate only one of those enqueuers passed would drop the phone's
+// request with the sweep's; the family's gate is the one every one of them
+// passed. TestAQueuedRenderRunsOnlyWhileItsFamilysGateIsOpen pins the table.
+func (g renditionGates) admits(spec transcode.JobSpec) bool {
+	kind := spec.Kind
+	if kind == "" {
+		kind = transcode.JobKindUpscale
+	}
+	if !g.open(kind) {
+		return false
+	}
+	return !spec.SourceIsDSD || g.open(transcode.JobKindPCMRender)
 }
 
 // staleRerender is how a stale download has a rendition rendered again: the
