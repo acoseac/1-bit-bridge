@@ -1677,7 +1677,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    410 | `lyrics_stale`           | `GET /v1/lyrics`: the lyrics source changed since extraction (a network-tier document never answers it) |
 |    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
-|    500 | `persist_failed`         | The bridge could not write a harvest credential change (`POST` / `DELETE /v1/atlas-harvest/credential`) or the token a pairing code redeems (`POST /v1/pairing/redeem`) |
+|    500 | `persist_failed`         | The bridge could not write a harvest credential change (`POST /v1/atlas-harvest/credential` or `DELETE /v1/atlas-harvest/credential`) or the token a pairing code redeems (`POST /v1/pairing/redeem`) |
 |    502 | `upnp_bad_res_url`       | `/v1/read` / `/v1/download` of a track proxied from an upstream UPnP server whose `<res>` URL could not be built |
 |    502 | `upnp_upstream_unreachable` | `/v1/read` / `/v1/download` of a UPnP-proxied track: the request to the upstream server failed before it answered |
 |    503 | `scan_in_progress`       | `/v1/manifest`, the artwork and artist-image routes or a cover route on a server built without its manifest provider, artwork cache or config; `serve` wires all three before it listens, so a running bridge never sends it, mid-scan included |
