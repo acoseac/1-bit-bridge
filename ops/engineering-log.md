@@ -44024,3 +44024,205 @@ classes; only removing both (NC3) reopens it.
   The destination read is what B119 needs.
 - **The operator's probes**: since B48 a probe of `:7790` over the tailnet
   is refused; run it on the host or from the LAN.
+
+## 2026-10-16 — a batch and every coverage bar count a rendition only while it is fresh (backlog B100)
+
+Backlog B100, decided by the owner on 2026-10-14 (option (c), from a Cursor
+consult): a rendition covers its track only while its `source_mtime_ns` and
+`source_size` equal the track ROW's. B82 (#1097, 2026-09-29, the entry above
+whose title says the batch and the bars "still count a stale rendition as
+covered") healed a stale rendition on its first download and left the batch
+and the bars counting it, with the costs it measured.
+
+### The sites (on main, fe6d68d1)
+
+A grep for every `track_variants` read; these are the ones whose answer is
+"covered":
+
+- The batch: `trackProjectionSelect`'s `has_variant`
+  (internal/manifest/store.go:8441–8443), read by the three batch walks
+  (internal/transcode/batch.go:580, 1361, 1430) and by the projection
+  endpoint the panel previews a Generate with
+  (internal/admin/handlers_library_browse.go:720).
+- The numerators: `childFolderRollupSelect`'s two counts (store.go:7445–7450,
+  the folder rows); `childTrackRowSelect`'s two marks (store.go:7471–7476);
+  `RollupByPrefix`'s two forms (store.go:8002/8004, the whole library, and
+  8052/8054, a subtree), which the browse header, the dashboard's
+  composition, `/api/stats` and the Roots page read; and the album catalog's,
+  `variantPresenceSelect` (internal/manifest/catalog_refs.go:414–422, whose
+  fresh flags were already right) folded by `foldPresence`
+  (internal/admin/player_variants.go:82–90), which counted PRESENCE as
+  covered.
+- The denominators: the three covered-or-eligible EXISTS
+  (internal/manifest/eligibility.go:183–206).
+
+Read and left alone, because none answers "covered": `variantsAggSQL` (the
+manifest's variant list), `AnyVariantExists` (whether to build the grid's
+coverage at all), the file and byte counts (`CountVariants*`,
+`VariantStatsByKind`), `VariantsForPaths` (rows; the player decides per
+file), the sweep's candidate statements (already "no fresh variant", and for
+a DSD source the current schema), `FreshDSDPeaks`, and the reapers' sidecar
+reads. internal/dlna was not touched (#1249 is open there).
+
+### Measured on main (red first, 6e065e39)
+
+- `TestABatchRendersARenditionThatARetagAndAScanMadeStale`: each kind renders
+  an album of real files, two are retagged and the real scanner reads the
+  change. The next batch answered `enqueued 0, alreadyCovered 2` (upscale),
+  `0, 4` (optimize) and `0, 2` (pcm), as B82 measured on a real serve.
+- `TestTheCoverageBarsDropForAStaleRenditionUntilItIsRenderedAgain`: after the
+  retag and the scan every CarPlay number the console draws read 2/2 (the
+  root and folder tiles, the subtree header, both marks, the album grid and
+  detail) and the projection 2 covered, 0 to render.
+- `TestEveryCoverageReadAgreesWithTheRowFreshnessOfItsRenditions` failed at
+  every site but the presence flags themselves: 6,333 lines.
+
+### Design
+
+- One test, written once (internal/manifest/rendition_coverage.go):
+  `renditionFreshSQL`, and the per-kind EXISTS around it
+  (`freshUpscaledSQL`, `freshOptimizedSQL`, `freshPCMSQL`, and
+  `freshOfBoundKindSQL` for the projection's bound pattern). The projection,
+  the browse marks and the denominators compose the EXISTS; the reads that
+  aggregate `track_variants` rows themselves compose the term through a JOIN
+  to the row. Against the row, never a stat (#1077).
+- The kind test stays the version-agnostic prefix: a fresh `optimized-v1-…`
+  still covers, and a DSD source needs no current-schema rendition here (the
+  sweep alone asks for that). Every size still sums every rendition.
+- A stale rendition of a track that is still eligible stays in the
+  denominator through the eligible arm, as work; one whose track can no
+  longer get one (the DSD caps off, the target moved under it) drops out of
+  both sides, where counting it would hold the bar below 100% with nothing a
+  batch could render.
+- `foldPresence` counts a fresh sidecar as `covered` and a track holding only
+  stale ones as `stale`; the two no longer overlap. So the console's Delete
+  counts `covered + stale` (it would otherwise be disabled over a scope whose
+  copies are all stale), the stale note's remedy is Generate (it said "Delete,
+  then generate again", which was the only route back before B100), the
+  tile's title counts its copies as `covered + stale`, and `RollupByPrefix`
+  returns the stale counts (held minus fresh, from the variants pass it
+  already makes), which the browse response carries for the folder panel.
+  The dashboard says "an up-to-date hi-res variant".
+- No wire change: `alreadyCovered` keeps its shape, PROTOCOL.md never said
+  what it counts, and the app does not call the batch endpoint.
+
+### Measurements
+
+A throwaway store (a `_`-prefixed harness, not committed) in B82's mix:
+50,000 FLAC tracks (500 artists × 10 albums × 10, 70% 96/24 and 30% 44.1/16)
+and 45,000 renditions (50% fresh CarPlay, 10% stale CarPlay, 30% upscaled).
+Each query through the real Store method, one warm-up and seven timed runs,
+medians; main's code and the branch's on two copies of the store,
+interleaved, two rounds. go1.26.6 on the dev Mac (12 cores), shared with
+other sessions: each round's 1-minute load was between 1.2 and 2.0. The
+per-track reads and the presence are from one run (11:03, on 2a337e37,
+whose SQL for them the final commit keeps); the two numerators, in their
+final shapes, from two more (11:07 and 11:08). A later run at load 9 to 14
+is not used.
+
+Each cell holds the two rounds' medians.
+
+| query (Store method) | main (ms) | B100 (ms) |
+|---|---|---|
+| whole-library projection, CarPlay (`ListTrackProjectionsUnderPrefix`) | 348.0 / 348.6 | 370.2 / 372.5 |
+| whole-library projection, hi-res | 349.3 / 350.1 | 368.5 / 370.1 |
+| an artist's 100 tracks (`TrackProjectionsForPaths`) | 0.8 / 0.8 | 0.9 / 0.9 |
+| `AllEligibleKinds` | 90.7 / 92.2 | 110.6 / 111.7 |
+| root listing, 500 folders (`ListChildFoldersPage`) | 73.5 / 74.5 | 111.5 / 111.4 |
+| an artist's 10 folders | 0.8 / 0.9 | 1.0 / 1.0 |
+| an album's 10 track rows (`ListChildTracksPage`) | 7.4 / 7.4 | 7.4 / 7.5 |
+| `RollupByPrefix("")` | 54.3 / 54.0 | 91.6 / 89.8 |
+| `RollupByPrefix`, one artist | 0.1 / 0.1 | 0.2 / 0.2 |
+| `EligibleCountsForFolders`, the 500 root folders | 89.5 / 89.3 | 107.9 / 108.3 |
+| `EligibleRollupByPrefix("")` | 73.4 / 73.8 | 92.1 / 91.9 |
+| `EligibleRollupByPrefix`, one artist | 0.3 / 0.3 | 0.3 / 0.3 |
+| `EligibleCountsForPaths`, one artist | 0.3 / 0.3 | 0.4 / 0.4 |
+| `AllVariantPresence` | 91.6 / 91.5 | 91.5 / 91.5 |
+| `VariantPresenceForPaths`, one artist | 0.3 / 0.3 | 0.3 / 0.3 |
+
+B82 had estimated, on a busier host: the projection 421 → 476 ms,
+`AllEligibleKinds` 122 → 133, and the root listing's CarPlay count alone
+94 → 128 (here both counts are fresh, and the denominators too).
+
+The two numerators were measured in three shapes before choosing (the same
+store and harness, load under 2): the root listing took 73 ms on main,
+111 ms counting through a JOIN to the row and 138 ms through the per-track
+EXISTS, which visits every track row in the folder rather than only its
+renditions; the whole-library rollup took 54 ms on main, 131 ms through the
+EXISTS, 130 ms through the JOIN with four `COUNT(DISTINCT …)` (each builds a
+temporary b-tree of its own) and 90 ms through the JOIN grouped per track in
+the primary key's order.
+
+A covering index was measured on store copies and not added:
+`track_variants(source_path, variant_id, source_mtime_ns, source_size)`
+takes the per-track EXISTS reads back to main's cost (the projection
+370 → 348 ms, `AllEligibleKinds` 111 → 90, the root folder denominators
+108 → 89, the whole-library denominator 92 → 73) and the root listing's JOIN
+from 108 to 102 ms (raw SQL); `tracks(path, mtime_ns, size)` beside it
+takes that to 92. Neither changed the whole-library pass, which reads every
+variant row anyway (its LEFT JOIN shape took 83 ms with either index or
+none). Its write cost (a fourth index on every `UpsertVariant`) is
+unmeasured; proposed as backlog B419.
+
+### Rejected
+
+- The per-track EXISTS for the two numerators that count `track_variants`
+  rows: 27 ms more on the root listing and 41 more on the whole-library
+  rollup than the JOIN (above), for the same answer, which the lockstep table
+  pins against the same Go decision as every other site.
+- Four `COUNT(DISTINCT …)` in `RollupByPrefix`'s pass: 130 ms against 90.
+- Making the sweep's candidate statements compose `renditionFreshSQL`: they
+  ask a different question (a DSD source needs the current schema) through
+  their own alias, and are not a coverage read; left as they are.
+- A DSD-schema requirement in the bars or the batch: the owner's decision
+  keeps them version-agnostic.
+
+### Tests
+
+- `TestABatchRendersARenditionThatARetagAndAScanMadeStale` (internal/transcode:
+  real FLAC and DSF files, the real scanner, a real Coordinator and Pool whose
+  runner commits as `Pool.processJob` does; the re-render records the scan's
+  version, and a third batch renders nothing).
+- `TestTheCoverageBarsDropForAStaleRenditionUntilItIsRenderedAgain`
+  (internal/admin, through the handlers: 2/2, then 1/2 with the copy stale
+  and its bytes still counted, then 2/2 once a render stamped from the new
+  row lands).
+- `TestEveryCoverageReadAgreesWithTheRowFreshnessOfItsRenditions`
+  (internal/admin): the lockstep table. Every case of `eligibilityMatrix` in
+  nine rendition states (none; fresh; stale, stale mtime only, stale size
+  only; fresh beside stale; two stale; an older schema fresh; CarPlay fresh
+  and hi-res stale), against `describeVariants`' freshness (the player's own
+  decision, against the row) and, for the denominators, the Go gates in all
+  three capability states: the projection in both scopes, the browse marks,
+  the root and folder listings, `RollupByPrefix` per folder and whole, both
+  presence reads and `foldPresence`, and the four denominator reads. The
+  shared upscale re-statement moved into `upscaleSubmitGate`.
+- `TestAlbumDetailCountsOnlyAFreshVariantAsCoveredAndSaysWhatIsStale` and
+  `TestAlbumGridStaleFilter` pinned a stale sidecar as covered and now pin
+  the opposite; `TestAVariantTraySaveRedrawsThePanelInPlace` pins the stale
+  note's remedy and a Delete that stays live over stale copies.
+- Fixtures whose "covered" variants recorded a version their rows never had
+  (a zero mtime, or `time.Now()` against a stamp of 1) now record the row's.
+  One of them, `seedBatchFixture`, made
+  `TestSubmit_OverlappingReSubmitDoesNotStickRunning` hang rather than fail:
+  the batch enqueued the stale copy, the test's `Fatalf` ran before its
+  `close(release)`, and the pool's Stop waited on the held runner.
+
+### Negative controls
+
+On e3b9c37b, `-count=1`, each predicted by test name before it ran: a
+script refused a dirty tree, counted the anchor (exactly one), checked the
+mutation landed and the package vetted, ran the batch test, the admin
+coverage tests and the whole of internal/manifest, then restored the file
+with git and checked it against HEAD. Every prediction held.
+
+| mutation | red | green |
+|---|---|---|
+| NC1 the batch's EXISTS without the term | the batch test (all three kinds), the bars test (the projection only), the table (its two projection reads only) | internal/manifest, the other admin tests |
+| NC2 one numerator (the folder rows' CarPlay count) without it | the bars test (the two folder tiles only), the table (the root and folder listings' CarPlay counts only) | the batch test, the rest |
+| NC3 one denominator (the CarPlay covered-or-eligible arm) without it | the table only: its CarPlay denominators at all four reads, for stale-only tracks the Go gate refuses | the bars test (both its tracks are eligible), the batch test |
+| NC4 `renditionFreshSQL` without its size term | the table only: its stale-size and two-stale states, at every site | the batch and bars tests (a retag moves both) |
+| NC5 `foldPresence` counting a present sidecar as covered | the table (the fold only), the bars test (grid and detail only), `TestAlbumGridStaleFilter`, `TestAlbumDetailCountsOnlyAFreshVariant…` | the batch test, the panel harness |
+
+The five ran first on 2a337e37, the fix's first version, whose numerators
+were the per-track EXISTS, with the same outcome.
