@@ -72,9 +72,11 @@ func TestTheSizeCapNeverEvictsAPortraitTheGCKeeps(t *testing.T) {
 	portraitFixture(t, dir, canonicalName("a"), keptArtistMBID)
 	portraitFixture(t, dir, canonicalName("b"), orphanArtistMBID)
 	writeFixtureFile(t, filepath.Join(dir, canonicalName("c")), 64)
-	ageFiles(t, filepath.Join(dir, canonicalName("a")), filepath.Join(dir, canonicalName("b")), filepath.Join(dir, canonicalName("c")))
-
-	res, err := sweepArtworkCache(context.Background(), store, dir, 10, time.Now())
+	// The pass runs an hour on, as the GC's portrait tests do (artworkGCNow),
+	// rather than ageing the files: on Windows a hard link's directory entry
+	// keeps the times it had when the link was made, so ageing a canonical
+	// leaves its portrait link looking freshly written, inside the grace.
+	res, err := sweepArtworkCache(context.Background(), store, dir, 10, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
