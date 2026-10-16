@@ -3049,6 +3049,24 @@ lost my library."
   A mention in running prose is NOT a contract — the guard accepts only a `### `
   heading or a bold `METHOD /path` lead-in, because prose-mention is the state
   six live endpoints were already in.
+- **PROTOCOL.md's error table lists exactly the status and code pairs the
+  `/v1` handlers send, and two guards hold it there** (2026-10-16, backlog
+  B426). `TestEverySentErrorCodeIsInTheProtocolTable` fails on a pair with
+  no row, and `TestEveryProtocolErrorRowIsSent` on a row nothing sends,
+  except one marked `(reserved; no route sends it)`, which nothing may send
+  (`forbidden`). A new code is a new row in the same PR, and the app's copy
+  follows. The pairs are read by parsing `internal/api` with go/ast: the
+  calls of the three envelope writers, and `writeJSON` / `writeJSONGzip` of
+  a struct literal with a `json:"error"` field under a 4xx or 5xx status.
+  **A status or code must be a constant, a parameter its callers pass one,
+  or a local set from a call the guard can follow; anything else fails the
+  guard rather than go unread.** `declaredFieldFlows` is the one exception:
+  `proxyUPnP` writes a `*upnpproxy.PreStreamError`'s fields, whose values
+  the guard reads from that package's literals. Not read: an error status
+  with no envelope (`http.Error`, a bare `WriteHeader`), which no handler
+  writes, and a writer called through a function value
+  (`TestErrorPairScanReadsEveryShapeOnAFixture`,
+  `TestParseErrorTableReadsRowsAndRefusesWhatItCannotPair`).
 - **`DELETE /v1/atlas-harvest/credential` forgets the harvest credential,
   and a demo bridge refuses it** (#1049). Switching the app's library
   harvest off stopped only the app's renewals: the `bulk_harvest`
