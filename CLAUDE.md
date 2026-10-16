@@ -8527,11 +8527,17 @@ mentions across the four `ops/audit-*.md` files.
   and 5.5-5.7 s for a 192/24 sox render of a five-minute FLAC on the dev
   Mac (a DSD render runs minutes), and cancelling one needs a per-job
   cancel and a new outcome on every error exit. A run of drops logs ONE
-  line with its count (`dropBurstMsg`), ended once no accepted job is left
-  undecided (`undecided`; the queue's length cannot stand in, because a
-  worker holding a job it has not decided would then log a second line) or
-  when a job runs, and the drop that ends it writes the line before its
-  count (`noteDrop`), the order every exit keeps. **The transcode gate is
+  line with its count, kept by the one `dropburst.Tracker` both pools use
+  (`internal/dropburst`, guarded by the pool's own mutex): a run ends once
+  no accepted job is left undecided (the queue's length cannot stand in,
+  because a worker holding a job it has not decided would then log a second
+  line) or when a job runs, and the drop that ends it writes the line
+  before its count: `Tracker.Drop` takes a critical section of its own
+  ahead of finishJob's, the order every exit keeps. **Don't fold Drop into
+  finishJob's section** (a review suggestion on #1247, declined): one
+  section writes the line after its unlock, so the count is visible before
+  the line, and a test reading the log once the pool was idle failed 6 of
+  20 runs that way. **The transcode gate is
   the rendition FAMILY's, never the enqueuer's** (`renditionGates.admits`:
   the kind's gate, an empty kind being the batch's upscale, AND the
   DSD-render gate for a DSD source): the pool dedups on (source, variant),

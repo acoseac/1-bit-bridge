@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dropburst"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
@@ -122,14 +123,11 @@ type Pool struct {
 	// droppedCnt counts the jobs a worker took while the live gate of their
 	// kind was closed (SetLiveGate): neither done nor failed.
 	droppedCnt uint64
-	// undecided counts the jobs Enqueue accepted that no worker has yet
-	// decided about (run, drop, or pass over at shutdown): queued, or taken
-	// and not yet past the gate. It tells finishJob a run of drops is over,
-	// exactly: the queue's length misses a job a worker has just received
-	// and not yet decided, whose drop would then log a second line.
-	undecided int
-	// dropBurst counts the drops since the last drop-burst line.
-	dropBurst uint64
+	// drops is the run-of-drops bookkeeping (undecided jobs, the current
+	// run), guarded by p.mu as well: one line per run of dropped jobs,
+	// written before the drop that ends the run is counted
+	// (dropburst.Tracker).
+	drops *dropburst.Tracker
 
 	wg         sync.WaitGroup
 	stopCtx    context.Context
@@ -425,7 +423,11 @@ type jobDroppedEvent struct {
 // conversions to finish, then try again."
 var ErrQueueFull = errors.New("transcode pool queue is full")
 
-// dropBurstMsg is the one line a run of dropped jobs logs, with its count.
+// dropBurstMsg is the one line a run of dropped jobs logs, with its count
+// (internal/dropburst says when a run ends). A master switch-off is one line
+// however many workers drop the queue; a kind switched off beside a kind
+// left on can split into several lines, one per run between two jobs that
+// ran.
 const dropBurstMsg = "pool: dropped the jobs queued before their kind went off"
 
 // ErrPoolClosed is returned when Enqueue is called after Stop.
@@ -485,6 +487,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		jobFailedChan:   make(chan jobFailedEvent, 2*workers),
 		jobDroppedChan:  make(chan jobDroppedEvent, 2*workers),
 	}
+	p.drops = dropburst.New(&p.mu, logger, dropBurstMsg)
 	for i := 0; i < workers; i++ {
 		p.wg.Add(1)
 		go p.workerLoop(i) // stable worker ID for the activeJobs slot
@@ -558,7 +561,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	select {
 	case jobsChan <- poolJob{spec: spec, dedup: dedup, claim: claim}:
 		p.enqueuedCnt++
-		p.undecided++
+		p.drops.AcceptedLocked()
 		// fireStateChange BEFORE the unlock. Stop() must hold p.mu to
 		// close the jobs channels and only closes stateChangeChan
 		// afterward (post wg.Wait), so this non-blocking send strictly
@@ -1324,55 +1327,6 @@ const (
 	outcomeDropped
 )
 
-// decideToRun records that the job a worker took passed the gate and runs:
-// the job leaves the undecided count, and a run of drops before it is over
-// (endDropBurstLocked).
-func (p *Pool) decideToRun() {
-	p.mu.Lock()
-	p.undecided--
-	burst := p.endDropBurstLocked(true)
-	p.mu.Unlock()
-	logDropBurst(burst)
-}
-
-// endDropBurstLocked ends the current run of drops if it is over and returns
-// its count, else 0. A run is over once no accepted job is left undecided
-// (none queued in either lane, and no worker between taking one and deciding
-// it), or as soon as a job is decided to run: a burst is a run of drops with
-// no run between them, so a master switch-off is one line however many
-// workers drop the queue. A kind switched off beside a kind left on can
-// split into several lines, one per run. p.mu is held.
-func (p *Pool) endDropBurstLocked(ran bool) uint64 {
-	if p.dropBurst == 0 || (!ran && p.undecided > 0) {
-		return 0
-	}
-	n := p.dropBurst
-	p.dropBurst = 0
-	return n
-}
-
-// logDropBurst writes a finished run of drops' one line, outside p.mu.
-func logDropBurst(n uint64) {
-	if n > 0 {
-		logger.Info(dropBurstMsg, "count", n)
-	}
-}
-
-// noteDrop is a dropped job's own bookkeeping, done before finishJob gives
-// its claim back: the job leaves the undecided count and joins the burst,
-// and the drop that leaves nothing undecided writes the burst's line. So the
-// count of the drop that ends a burst means its line has landed, the order
-// every exit keeps (its bookkeeping, then its count). Neither field it
-// writes is in a snapshot, so the job is still in exactly one place.
-func (p *Pool) noteDrop() {
-	p.mu.Lock()
-	p.undecided--
-	p.dropBurst++
-	burst := p.endDropBurstLocked(false)
-	p.mu.Unlock()
-	logDropBurst(burst)
-}
-
 // jobEnd is what one exit of processJob decided, applied by its deferred
 // tail once that exit's own bookkeeping has landed: the counter the job
 // joins, and what announce sends for it. The zero value is uncounted.
@@ -1482,7 +1436,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		end = jobEnd{outcome: outcomeDropped}
 		return
 	}
-	p.decideToRun()
+	p.drops.Ran()
 	decided = true
 
 	// Publish this worker's active job for the live grid — AFTER the
@@ -1962,20 +1916,23 @@ func redactSoxErr(s string, spec JobSpec) string {
 // already-nil slot (the cooperative-stop path runs before the slot is set)
 // is a harmless no-op.
 //
-// A job that never reached decideToRun (shutdown, a panic before the
-// decision) leaves the undecided count here, in the same section, and so
-// ends a burst it was the last undecided job of. A drop has left it already
-// (noteDrop).
+// A drop's own bookkeeping comes first, in a section of its own
+// (p.drops.Drop), so the drop that ends a run of drops has written the
+// run's line before it is counted (dropburst.Tracker says why the two
+// sections stay apart). A job that never reached a decision (shutdown, a
+// panic before the gate) leaves the undecided count here, in the counting
+// section, and so ends a run it was the last undecided job of.
 func (p *Pool) finishJob(workerID int, job poolJob, outcome jobOutcome, decided bool) {
 	p.activeJobs[workerID].Store(nil)
 	if outcome == outcomeDropped {
-		p.noteDrop()
+		p.drops.Drop()
 		decided = true
 	}
+	var endedRun uint64
 	p.mu.Lock()
 	p.releaseDedupLocked(job.dedup, job.claim)
 	if !decided {
-		p.undecided--
+		endedRun = p.drops.PassedOverLocked()
 	}
 	switch outcome {
 	case outcomeDone:
@@ -1985,9 +1942,8 @@ func (p *Pool) finishJob(workerID int, job poolJob, outcome jobOutcome, decided 
 	case outcomeDropped:
 		p.droppedCnt++
 	}
-	burst := p.endDropBurstLocked(false)
 	p.mu.Unlock()
-	logDropBurst(burst)
+	p.drops.Write(endedRun)
 	// The Prometheus mirror of the same count, decided by the same outcome.
 	// Outside the lock: a scrape reads it on its own schedule and has no
 	// in-flight figure to agree with.
