@@ -44679,3 +44679,22 @@ GOTOOLCHAIN=go1.26.6: `go test -count=1 ./internal/api/` and the same under
 `-race`, `go test -count=1 ./cmd/bridge/` (its docblock, citation and keeper
 guards read the new file), `go vet ./...`, a `GOOS=windows` build of the
 package's tests, and the pinned gofmt.
+
+**After review** (3.1 Pro on #1259). Two of its three findings are taken in
+`70459717`:
+- **A JSON body held in a local** (`b := conflictBody{...}; writeJSON(w, s, b)`)
+  now resolves when the function sets it exactly once, from a value. A local
+  set twice is still refused, so its write fails the guard. A bound of 16 names
+  stops a local set from itself from looping.
+- **Every cell of the alignment row** must be dashes and colons with at least
+  one dash, not only the first.
+
+Fixture cases: `409 in_a_local` is read and `(bodyReassigned)` is refused; the
+table test refuses "a broken alignment". Negative controls, each predicted and
+restored from git: locals not followed (exactly the fixture test red, the pair
+missing and `bodyInALocal` unresolved), and the alignment check on the first
+cell only (exactly the table test red, at "a broken alignment").
+
+The third finding is declined. It said the guard fails where `$GOROOT/src` is
+missing. Since Go 1.20 the standard library is built from source, so a
+toolchain that can run this test has `net/http`'s source.
