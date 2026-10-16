@@ -268,13 +268,17 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 
 // TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX pins the scope of the
 // named lookup: it serves the fields whose ID3v2 home is a TXXX or UFID frame
-// (the MusicBrainz ids and ReplayGain), which are the ones the app's
-// ID3v2Parser reads there too. A field ID3v2 gives a frame of its own is read
-// from that frame alone, on both sides: the compilation flag (TCMP; the app's
-// test_TXXXCompilationAndV22TCP_areNotRead pins that neither side reads
-// TXXX:COMPILATION, since a flagged file with no album artist is keyed into
-// "Various Artists" on both), the composer (TCOM), the conductor (TPE3), the
-// work (TIT1), the original year (TDOR / TORY) and the tempo (TBPM).
+// (the MusicBrainz ids and ReplayGain, and since backlog B127 the work), which
+// are the ones the app's ID3v2Parser reads there too. A field ID3v2 gives a
+// frame of its own is read from that frame alone, on both sides: the
+// compilation flag (TCMP; the app's test_TXXXCompilationAndV22TCP_areNotRead
+// pins that neither side reads TXXX:COMPILATION, since a flagged file with no
+// album artist is keyed into "Various Artists" on both), the composer (TCOM),
+// the conductor (TPE3), the original year (TDOR / TORY) and the tempo (TBPM).
+// The work is not one of them: MusicBrainz Picard writes it to TXXX:WORK by
+// default, and its grouping to TIT1, the content group, which counts as the
+// work only in a tag with no TXXX:WORK
+// (TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone).
 func TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX(t *testing.T) {
 	tr := extractID3Frames(t, 4,
 		textFrameBytes(4, "TIT2", "t"),
@@ -293,9 +297,12 @@ func TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX(t *testing.T) {
 	if tr.Compilation || tr.AlbumArtist != "" {
 		t.Errorf("TXXX:COMPILATION was read: Compilation %v, AlbumArtist %q", tr.Compilation, tr.AlbumArtist)
 	}
-	if tr.Composer != "" || tr.Conductor != "" || tr.Work != "" {
-		t.Errorf("a TXXX filled a field ID3v2 has a frame for: Composer %q, Conductor %q, Work %q",
-			tr.Composer, tr.Conductor, tr.Work)
+	if tr.Composer != "" || tr.Conductor != "" {
+		t.Errorf("a TXXX filled a field ID3v2 has a frame for: Composer %q, Conductor %q",
+			tr.Composer, tr.Conductor)
+	}
+	if tr.Work != "w" {
+		t.Errorf("Work = %q: TXXX:WORK is the work (backlog B127), want %q", tr.Work, "w")
 	}
 	if tr.OriginalYear != nil {
 		t.Errorf("a TXXX filled OriginalYear: %d", *tr.OriginalYear)
