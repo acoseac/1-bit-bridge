@@ -9,22 +9,25 @@ import (
 
 // EligibilityOpts customizes the per-interface LAN-eligibility check.
 // TsnetIfaceName, when non-empty, opts the Tailscale tsnet interface
-// in to DLNA binding — by default Tailscale's addresses (CGNAT 100.64/10
+// in to the pickers — by default Tailscale's addresses (CGNAT 100.64/10
 // and the ULA fd7a:115c:a1e0::/48) are refused so an operator who hasn't
 // opted in can't accidentally expose DLNA over their tailnet.
 type EligibilityOpts struct {
 	// TsnetIfaceName is the OS-level interface name of the Tailscale
 	// tsnet socket (e.g. "utun7" on macOS, "tailscale0" on Linux).
-	// Empty disables tsnet binding, and it is empty in production: no
-	// caller passes a name yet, so `cfg.DLNA.AllowTsnet` opts nothing in
-	// (cmd/bridge/dlna_wiring.go).
+	// RESERVED: it is empty in production, no caller passes a name, and
+	// servedAddrs, what the DLNA listener and SSDP serve, takes the set
+	// with no opt-in at all, so `cfg.DLNA.AllowTsnet` has no effect
+	// (backlog B48: DLNA serves the home network only).
 	TsnetIfaceName string
 }
 
-// IsLANEligibleInterface reports whether the bridge's DLNA listener may
-// bind to the given interface. This is the load-bearing safety invariant
-// that keeps an unauthenticated DLNA endpoint off any non-LAN interface
-// (a remote VPS public IP, for instance).
+// IsLANEligibleInterface reports whether the bridge's DLNA surface may use
+// the given interface: whether its SSDP advertisers and discovery clients
+// run there, and, through the multicast set (servedAddrs), whether the
+// HTTP listener and SSDP serve its LAN addresses. This is the load-bearing
+// safety invariant that keeps an unauthenticated DLNA endpoint off any
+// non-LAN interface (a remote VPS public IP, for instance).
 //
 // Allowed:
 //   - RFC1918 private ranges: 10/8, 172.16/12, 192.168/16

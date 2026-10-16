@@ -30,9 +30,10 @@ type ArtworkSource interface {
 // carries `/dlna/file/`'s exact posture and nothing more:
 //
 //   - **Unauthenticated on the LAN by design.** Renderers and control points
-//     cannot speak the bearer scheme; the LAN-only bind is the gate — and the
-//     listener never starts in public deployment mode (ShouldEnableDLNA), so
-//     the demo bridge and every public bridge have no such route at all.
+//     cannot speak the bearer scheme; that the listener serves only the LAN
+//     (servedAddrs) is the gate — and the listener never starts in public
+//     deployment mode (ShouldEnableDLNA), so the demo bridge and every
+//     public bridge have no such route at all.
 //   - **Opaque, non-enumerable key.** A cover is addressable only by a key a
 //     caller already holds from the CDS (or, for the app, from the manifest).
 //     No listing, no wildcard, no path walk: a nested path or an empty key is

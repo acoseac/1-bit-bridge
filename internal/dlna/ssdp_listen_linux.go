@@ -33,7 +33,9 @@ import (
 // IP_MULTICAST_ALL = 0 confines the socket to
 // the memberships it holds itself, (group, interface) pairs, which is what
 // macOS and Windows do anyway (ssdp_listen_other.go). It does nothing to a
-// unicast datagram, which the kernel hands to one socket on the port.
+// unicast datagram, which the kernel hands to one socket on the port, sent
+// to any address of the host; the read loop judges that address
+// (SSDPAdvertiser.searchedFor, backlog B48).
 //
 // The option is set in the ListenConfig's Control, BEFORE the bind: from the
 // bind on the socket receives other interfaces' group datagrams, so an option

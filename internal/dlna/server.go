@@ -139,9 +139,12 @@ type ServerConfig struct {
 	ModelNumber      string
 
 	// ListenAddress is the bind address for the HTTP listener (e.g.
-	// "0.0.0.0:7790" or "192.168.0.14:7790"). The bridge picks LAN-only
-	// interfaces — public-mode deployments REFUSE DLNA per
-	// `shouldEnableDLNA` (PR 1 task #4 invariant).
+	// "0.0.0.0:7790" or "192.168.0.14:7790"). Whatever it binds, the
+	// listener serves only the LAN-eligible addresses (servedAddrs, backlog
+	// B48), so a wildcard takes a tailnet peer's connection and closes it,
+	// and a listen address pinned to an address off the LAN serves nothing.
+	// Public-mode deployments REFUSE DLNA per `shouldEnableDLNA` (PR 1 task
+	// #4 invariant).
 	ListenAddress string
 
 	// ServerURL is the absolute URL renderers should use for file
@@ -157,7 +160,9 @@ type ServerConfig struct {
 	// Interface is the LAN-eligible interface for SSDP multicast
 	// (joined to 239.255.255.250:1900). nil = OS picks (works on
 	// single-interface hosts). Multi-interface hosts should pick via
-	// `IsLANEligibleInterface`.
+	// `IsLANEligibleInterface`. It chooses where an advertiser joins and
+	// announces; what the listener and the advertisers answer on is
+	// servedAddrs.
 	//
 	// Used only for the single-advertiser fallback path — when
 	// AdvertiseEndpoints is non-empty, the per-endpoint Interface wins
@@ -360,10 +365,16 @@ func (s *Server) Start(ctx context.Context) error {
 	// Eagerly bind the listener so config errors (e.g. port already
 	// in use) surface as a Start() error rather than as a silent
 	// goroutine crash later.
-	listener, err := net.Listen("tcp", s.cfg.ListenAddress)
+	bound, err := net.Listen("tcp", s.cfg.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("dlna: bind %s: %w", s.cfg.ListenAddress, err)
 	}
+	// The bind is the configured one, a wildcard by default, which takes a
+	// connection on every address of this host: the tailnet's, a VPN's,
+	// another interface's. The listener serves only the LAN-eligible
+	// addresses, and closes every other connection unread (servedAddrs,
+	// backlog B48).
+	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
 	// is called externally; the returned ErrServerClosed is expected

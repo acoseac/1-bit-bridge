@@ -43,9 +43,13 @@ type DLNAConfig struct {
 // no IP allowlist or per-listener auth mechanism today, so a
 // publicly-reachable unauthenticated `/dlna/file/{trackID}` endpoint
 // would let any internet user enumerate and download the library.
-// Operators who genuinely need DLNA over the internet should run a
-// loopback bridge on the home LAN and reach it via Tailscale (which
-// authenticates the peer before the DLNA path runs).
+// DLNA is for the home network only: even in loopback mode the listener
+// and SSDP serve only the LAN-eligible interfaces' addresses
+// (servedAddrs, backlog B48), so a tailnet peer is refused too. This
+// said until 2026-10-16 that an operator should reach DLNA over
+// Tailscale, and every tailnet peer, a node shared from another account
+// included, could; `dlna.allowTsnet` is reserved for an opt-in that does
+// not exist yet and has no effect.
 //
 // **DO NOT add a public-mode override flag.** This isn't a stylistic
 // preference; it's the architectural decision to keep an unauthenticated

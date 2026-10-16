@@ -274,6 +274,46 @@ func (s *servedAddrs) noteRefused(log *slog.Logger, what string, local netip.Add
 		slog.String("from", from))
 }
 
+// servedOnlyListener is the DLNA listener as net/http sees it. Accept hands
+// over only a connection accepted on an address the server serves
+// (servedAddrs), and closes every other one before a byte of it is read, so
+// no handler, the Host check included, ever sees it.
+type servedOnlyListener struct {
+	net.Listener
+	served *servedAddrs
+	log    *slog.Logger
+}
+
+// Accept returns the next connection the server serves.
+func (l servedOnlyListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		from := ""
+		if ra := c.RemoteAddr(); ra != nil {
+			from = sourceIPOf(ra.String())
+		}
+		if l.served.admit(l.log, "a connection", netAddrIP(c.LocalAddr()), from) {
+			return c, nil
+		}
+		_ = c.Close()
+	}
+}
+
+// netAddrIP is the IP address, zone included, of a TCP or UDP socket
+// address, and the zero Addr, which nothing serves, for any other.
+func netAddrIP(a net.Addr) netip.Addr {
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		return v.AddrPort().Addr()
+	case *net.UDPAddr:
+		return v.AddrPort().Addr()
+	}
+	return netip.Addr{}
+}
+
 // holderOf names the interface that holds a in the current snapshot, or
 // "(none)".
 func (s *servedAddrs) holderOf(a netip.Addr) string {
