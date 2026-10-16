@@ -19,9 +19,10 @@ import (
 )
 
 // sacdCDSFixture is a library behind the real manifest adapter and the real
-// ContentDirectory handler: an ordinary album, an SACD image beside it whose
-// two virtual track rows are the rows a scan writes, and two tracks routed
-// from an upstream MediaServer, one of them at a path of the virtual shape.
+// ContentDirectory handler: an ordinary album; an SACD image on disk beside
+// it, with two virtual track rows of the shape a scan writes, minted through
+// manifest.SACDVirtualTrackPath; and two tracks routed from an upstream
+// MediaServer, one of them at a path of the virtual shape.
 type sacdCDSFixture struct {
 	cds http.HandlerFunc
 	// virtual holds the image's virtual track paths, and listed the paths
@@ -68,7 +69,7 @@ func newSACDCDSFixture(t *testing.T) sacdCDSFixture {
 	upsert(&manifest.Track{Path: "Glasswing/Harbour/01 Harbour Light.flac", Size: int64(len(flac)), ModTime: now,
 		Title: "Harbour Light", Artist: "Glasswing", Album: "Harbour", Codec: "FLAC", TrackNumber: intp(1)})
 	f.listed = append(f.listed, "Glasswing/Harbour/01 Harbour Light.flac")
-	// The image's rows as processSACDISO writes them: typed SACD DSD, with
+	// The image's rows, typed as processSACDISO types them: SACD DSD, with
 	// the image's own size and mtime as their identity stat.
 	for i, title := range []string{"Tidewater One", "Tidewater Two"} {
 		p := manifest.SACDVirtualTrackPath(image, i+1)
