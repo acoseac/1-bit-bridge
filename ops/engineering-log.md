@@ -44945,6 +44945,268 @@ rho with psili too) or on every name with a capital (NC2).
   refuse it is a separate question.
 - **README's doctor sample**, which shows a few checks and not every one.
 
+## 2026-10-16 — an ID3v2 tag's TXXX:WORK is its work, and TIT1 only in a tag with none (backlog B127)
+
+**The decision** (the owner, 2026-10-16). MusicBrainz Picard writes an ID3v2
+file's work to TXXX:WORK and its grouping to TIT1, unless "Save iTunes
+compatible grouping and work" is on, which puts the work in TIT1 and the
+grouping in GRP1. The bridge read the work with `stringOf(raw, "tit1", "work",
+"©wrk")`, so a Picard-tagged classical file in the default mode stored its
+grouping as its work. The rule now: TXXX:WORK is the work, and TIT1 (TT1 in
+version 2.2) counts as the work only when no TXXX:WORK is present. The app
+changes its `ID3v2Parser` the same way in its own PR, so both sides give one
+answer for one file. B116's entry above left this open as B127.
+
+### Picard's mapping
+
+Read from `picard/formats/id3.py` at `release-3.0.2` (2026-10-11), the same
+at master `10f384d8` on 2026-10-16; line numbers are release-3.0.2's.
+
+- Loading: TIT1 is left out of the translation table (line 160, its entry
+  commented out as depending on that setting), and `_load_tit1_frame`
+  (404–411) reads it as
+  `name = 'work' if config_params['itunes_compatible'] else 'grouping'`. GRP1
+  is always read as the grouping (199, 202–203). A TXXX described WORK is the
+  work (`__translate_freetext`, 233), and the obsolete description `Work` is
+  renamed to WORK (`__rename_freetext`, 260).
+- Saving (`_save`, 579–590): the grouping always goes to `_save_grouping_tag`
+  (832–838), which writes GRP1 in iTunes mode and TIT1 otherwise. The work
+  goes to `_save_work_tag` only in iTunes mode (581–582); that writes TIT1 and
+  deletes `TXXX:Work` and `TXXX:WORK` (840–845). Otherwise the work falls
+  through to `_save_freetext_tag` (589, 921–927), whose description is
+  `__rtranslate_freetext['work']`, so a TXXX:WORK.
+- The defaults (`picard/options.py`): `itunes_compatible_grouping` off (431),
+  `write_id3v23` off (692), so ID3v2.4, and `id3v2_encoding` UTF-8 (392).
+  `MP3File`, `DSFFile`, `AiffFile` and `DSDIFFFile` (id3.py, 1079–1154) and
+  `WAVFile` (wav.py, 175) all save through `ID3File._save`.
+
+The owner's rule agrees with this mapping.
+
+### Measured
+
+Files mutagen 1.47 wrote with the frames `_save` writes in each mode (TIT2 as
+the title, then TIT1 and TXXX:WORK in the default mode, or GRP1 and TIT1 in
+iTunes mode), saved as `_save_tags` saves (`update_to_v24` with `v2_version=4`
+in UTF-8, or `update_to_v23` with `v2_version=3` and `v23_sep='/'` in UTF-16)
+and without padding, as `testdata/gen/id3_txxx_fixtures.py` writes, on an MP3,
+a DSF, an AIFF, a WAV and a DSDIFF file: twenty files, read back with mutagen. Extracted with `manifest.Extract` through a throwaway harness (not
+committed). On main (`78153974`) all ten default-mode files stored the grouping
+as their work, and the ten iTunes-mode files the work. On the fix all twenty
+store the work. Two controls stayed as they were on both: a FLAC with Vorbis
+WORK and GROUPING (the work), and an M4A with `©wrk` and `©grp` (no work at
+all, below).
+
+### The rule as built
+
+- `workOf` (id3v2_named_values.go), called from `populateFromTagMetadata`:
+  the first of the tag's named values called `work`, else `stringOf(raw,
+  contentGroup, "work", "©wrk")`, where the content group is `tit1`, or `tt1`
+  for a tag whose format is ID3v2.2.
+- **The description is compared as B116's named values are**:
+  `normaliseRawTagKey` lower-cases it and turns spaces into underscores, and
+  the result must equal `work`. For this name that is a case-insensitive
+  comparison (`WORK`, Picard's obsolete `Work` and `work` all match;
+  `WORK TITLE` and `WORK ` do not). The app's B126 reader folds a
+  description the same way.
+- **The first frame wins**: `id3v2NamedValues` orders the frames as the tag
+  holds them (dhowden's renaming suffix), and `id3v2NamedValue`, now the one
+  first-match loop `namedValueOf` also uses, returns the first.
+- **An empty value counts as absent**: `namedFrameOf` already leaves out a
+  frame whose `id3v2TextValue` is empty (white space, NUL and U+FEFF
+  trimmed), so a later TXXX:WORK answers, or with none, TIT1.
+- **TT1 is read for the first time.** dhowden keys a version 2.2 frame by its
+  three-letter id, so the `tit1` alias never matched a TT1: no version 2.2 tag
+  ever gave the bridge a work, while the app's `ID3v2Parser` reads TT1. TT1 is a key
+  only a version 2.2 tag holds, so it is asked only there, and the alias list
+  of every other format is unchanged.
+- **Other containers are unchanged.** A Vorbis or MP4 raw map yields no named
+  values. A Vorbis comment's WORK reads as before. The `©wrk` alias never
+  answers an M4A's work atom: dhowden's MP4 reader keeps only the atoms in its
+  table, `©wrk` is not one, and the bridge's own ilst walk does not read it, so
+  an M4A's work has never been read (measured above). Not this change's.
+
+### ExtractorVersion 26
+
+The bump is what reaches a row already scanned (the skip gate compares
+`extractor_version`); without it the scan test stays red (control NC5). Every
+version-stale row is read again once. The `tags_json` writers were grepped for
+`Work`: the extractor is the only one (the scanner's upsert from it, and
+`coerceStoredUTF8`), so `mergePostScanFields` needs no arm, and the work is not
+one of the four fields B188's reconcile hold judges. A row whose work changes
+takes the full-upsert leg: its `indexed_at` advances (the iOS delta) and its
+`enriched_at` goes to 0, so its enrichment is re-queued once. Those rows are a
+tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2
+tag holding TT1 or TXX:WORK. Every other row re-extracts byte-identical and is
+stamped. SACD ISO virtual rows re-expand, as on every bump. The work is in none
+of the FTS row map, the dupe key and the catalog's album identity, so a changed
+work moves only `tags_json` and the wire. `ProtocolVersion` stays 1 and no field
+changes. PROTOCOL.md's classical-metadata coverage line now names TXXX:WORK
+ahead of TIT1, so the app's paired PR copies PROTOCOL.md over
+`docs/BridgeProtocol.md`.
+
+### Tests
+
+- `TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`: nineteen MP3 tags built in
+  the test, each extracted twenty times, with a title premise each time:
+  Picard's default mode in version 2.4 (UTF-8 and UTF-16) and 2.3 (UTF-16);
+  TXXX:WORK ahead of TIT1; the iTunes-compatible mode in 2.4 and 2.3; TXXX:WORK
+  alone; TIT1 alone; version 2.2's TXX:WORK beside TT1, TT1 alone and TXX:WORK
+  alone; empty TXXX:WORK frames (UTF-8 empty, UTF-16 white space and a byte
+  order mark) beside TIT1; an empty TXXX:WORK, then a TIT1, then one with a
+  value; two TXXX:WORK frames beside TIT1, in both orders; two in version 2.3
+  with no TIT1; the descriptions `Work` and `work`; and TXXX frames of other
+  names beside TIT1 (`MusicBrainz Work Id`, `WORK TITLE`, `WORK `, `GROUPING`).
+- `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`: both modes in an
+  MP3, a DSF, an AIFF, a WAV, a DSDIFF file with the tag at the root and with
+  it in PROP, and a FLAC behind a prepended ID3v2 tag, which dhowden reads in
+  place of its Vorbis comments.
+- `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`: a v25 row
+  set re-extracted. The default-mode MP3 (stored with the grouping) and the
+  version 2.2 MP3 (stored with no work) gain the work, advance `indexed_at`
+  and reset `enriched_at`; the iTunes-mode MP3, a TIT1-only MP3, a plain MP3
+  and a FLAC with a Vorbis WORK are only stamped.
+- `TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX` now expects its
+  TXXX:WORK to be read; its pins for the compilation flag, the composer, the
+  conductor, the original year and the tempo are unchanged.
+- FuzzExtractMP3 gained two seeds: the default-mode tag in UTF-16, and version
+  2.2's TXX:WORK beside TT1.
+
+**Red first** (`c191e9f6`, the tests alone on `78153974`): fourteen of the
+nineteen rule cases (every case with a TXXX:WORK that differs from the TIT1
+beside it or stands alone, and all three version 2.2 cases); the default mode
+in all seven containers; the scan test at its premise (`default.mp3` stored
+"Beethoven Symphonies"); and the scope pin (Work ""). Green on main: the two
+iTunes-mode cases, TIT1 alone, the empty TXXX:WORK beside TIT1 and the other
+names beside TIT1, and every iTunes-mode container.
+
+### Negative controls
+
+On the committed fix (`7fdd0416`), each predicted by name in writing before it
+ran, through a script that refused a dirty tree, count-asserted its anchor
+(exactly one), checked the mutation landed and vetted, ran the whole of
+`internal/manifest` (`-count=1`), then restored the file from git and checked
+the tree against HEAD. Every prediction held, with nothing else red.
+
+| mutation | red, predicted and observed |
+|---|---|
+| NC1 the precedence reversed: TIT1 / TT1 asked first, TXXX:WORK second | ten rule cases (the three default-mode ones, TXXX:WORK ahead of TIT1, version 2.2's TXX:WORK beside TT1, the empty-then-valued case, both two-frame cases beside TIT1, both description-case cases); the default mode in all seven containers; the scan test at its premise. The scope pin stays green: its tag has no TIT1 |
+| NC2 the empty-value rule dropped: `namedFrameOf` keeps a TXXX whose value is empty | two rule cases, both reading Work "" (the empty TXXX:WORK beside TIT1, and the empty one before a valued one); and B116's "a frame the tag leaves empty is no answer", the rule they share |
+| NC3 the last frame winning: `id3v2NamedValue` keeps the last match | the three two-frame rule cases; B116's two "one name twice" cases and "the MusicBrainz UFID is the recording id, ahead of a TXXX of the same name"; `TestExplicit_ID3TXXX` ("the second TXXX overrode the first") |
+| NC4 TT1 not read: a version 2.2 tag's content group stays `tit1` | "version 2.2: TT1 alone is the work", and the scan test at its premise (`v22.mp3` stored no work); the two other version 2.2 cases stay green, a TXX:WORK answering |
+| NC5 `ExtractorVersion` left at 25 | the scan test alone: both changed rows kept their v25 work, `indexed_at` and `enriched_at` |
+
+### Runs
+
+go1.26.6 on the dev Mac (arm64), on `3f967af7` (the head after it changes
+documentation only):
+- `go test -race -count=1 -timeout 40m ./internal/manifest/`: ok, 930 s.
+- The fourteen packages that import `internal/manifest`, without the race
+  detector (`cmd/bridge` and `internal/{admin,albumgain,analyze,api,backup,
+  doctor,enrich,integrity,smartplaylistgen,transcode,upload,upnpingest,
+  upnpproxy}`): all ok, `TestEveryCitedTestNameExists` among them.
+- `go vet ./...` clean, and go1.26.6's `gofmt -l` clean on every changed file.
+- Fuzzed from the committed seeds with `-fuzzminimizetime 1s -parallel 4`:
+  FuzzExtractMP3 for 60 s (509,130 executions), and FuzzExtractDSF,
+  FuzzExtractAIFF, FuzzExtractWAV and FuzzExtractDFF for 30 s each (93,439,
+  160,732, 124,585 and 91,365). All passed, nothing saved.
+
+### Found on the way, not changed
+
+- An M4A's work is never read: dhowden's MP4 reader drops `©wrk` (above),
+  where Picard's MP4 mapping writes the work, and PROTOCOL.md's coverage line
+  still names `©wrk` for MP4. (Picard's MP4 conductor, a
+  `----:com.apple.iTunes:CONDUCTOR` freeform atom, is read: measured.)
+- A version 2.2 tag's TCM, TP3, TOR and TBP are not read for the composer,
+  the conductor, the original year and the tempo (the aliases name only the
+  four-letter ids), while the app's `ID3v2Parser` reads all four.
+
+## 2026-10-16 — a search past its route's own deadline answers 500, not an empty 200 (backlog B434)
+
+Left open by the B425 session (#1258). `GET /v1/search` runs under
+`withCtxTimeout(5*time.Second, …)` (`internal/api/route_classification.go:215`
+at `cb923d07`), and its error branch began with a silent return for
+`context.Canceled` or `context.DeadlineExceeded` (`internal/api/search.go:118`).
+Nothing else on the request carries a deadline, so the second term was the
+route's own 5 s. A search still running then wrote nothing, net/http sent
+`200` with an empty body, which a client reads as no results, and the log had
+only the access line, at Info with status 0. B364's rule is that a deadline
+the server set stays Error and 500.
+
+**What the store returns.** modernc.org/sqlite v1.60.1 interrupts a query
+whose context ends and returns `ctx.Err()` (`stmt.go:304`, in `query`), and
+database/sql answers a query on an already-expired context with `ctx.Err()`
+before taking a connection (go1.26.6 `database/sql/sql.go:1322`). The store
+wraps either as `search tracks_fts (served): context deadline exceeded`
+(seen in control 4 below, through the real store).
+
+**Red first** (`663ba039`, the tests alone on `cb923d07`'s code, macOS,
+go1.26.6, `-count=1`), in `internal/api/search_deadline_test.go`:
+- `TestASearchThatOutlivesItsDeadlineAnswers500`: the real router
+  (`Handler()`) over a searcher that runs until its context ends, then fails
+  as the store does. Its context carried a deadline and ended with
+  `context.DeadlineExceeded` after the route's real 5 s (5.02 s). The answer
+  was `200` with an empty body, there was no request-failed line, and the
+  access line was `level=INFO … status=0 duration_ms=5001 bytes=0`.
+- `TestASearchPastItsDeadlineThroughTheRealStoreAnswers500`: the router over
+  the real Provider and store. A search with time to spare found the track;
+  the same search on a context already past its deadline answered the same
+  empty 200 with the same log.
+- `TestAClientAbortDuringSearchStaysInfo` passed: a real client cancelling
+  through an `httptest.Server` while the search runs, which leaves no
+  request-failed line, nothing at Error, and an access line at Info with
+  status 0. It pins the branch the fix leaves alone.
+
+**Fix** (`1fe0f10c`). The early return takes `context.Canceled` only. A
+deadline falls through to B425's call, `writeErrorLog(w, r, 500, "internal",
+"the bridge couldn't search the library", err)`, so it is logged at Error
+with the 500 and the client gets the fixed message. No wire change: the pair
+is `500 internal`, whose PROTOCOL.md row says "Server-side failure", so B426's
+guards need no row. Not 503 and no new code: `search_unavailable`'s row says
+terminal, which a timeout is not, and a new code would be a contract with no
+consumer. The app does not call `/v1/search` (no request to it in
+acoseac/1-bit at `b0b346a2`; its library search is local), so neither the
+empty 200 nor the 500 reaches app code. Its `ensureOK` would throw a 500
+envelope as `BridgeError.server(status:code:message:)`.
+
+**The client abort is unchanged, and it is not 499.** The silent return
+writes nothing, so the access line records status 0 at Info. B364's 499 is
+what `writeErrorLog` records, and an abort never reaches it here; B364 left
+this path as it was. Control 2 measured the alternative: through
+`writeErrorLog`, an abort is a request-failed line and an access line, both
+at Info with status 499, one pair per abandoned keystroke, and
+`TestSearchSwallowsAClientCancellation` (a cancel on a live request context)
+becomes a 500. Left as it is.
+
+**Negative controls** on the committed fix (`1fe0f10c`), each anchor
+count-asserted by a script, the package vetted, the 15 search tests run
+(`-run 'TestSearch|TestASearch|TestAClientAbortDuringSearch'`, `-count=1`),
+restored from git and the tree checked against HEAD. Every prediction held.
+
+| control | red, predicted and observed |
+|---|---|
+| 1. the fix reverted (`\|\| errors.Is(err, context.DeadlineExceeded)` back in the early return) | the two deadline tests alone, at the red run's four assertions (200, no request-failed line, the access line at Info, the empty body) |
+| 2. the cancel's silent return removed | `TestAClientAbortDuringSearchStaysInfo` (a request-failed line at Info; the access line at `status=499`) and `TestSearchSwallowsAClientCancellation` (500, an error body); the deadline tests green |
+| 3. a deadline answered through `writeError` with the fixed message | the two deadline tests, at "want one request-failed line, got 0" only |
+| 4. a deadline through `writeErrorLog` with `err.Error()` as the message | the two deadline tests, at the message and the three leak fragments (`tracks_fts`, `deadline`, `context`) only |
+
+**After review.** SonarCloud's quality gate failed #1270 on duplicated new
+code (7.2%, against 3%): the real-store test's setup repeated the B425
+router test's. That test, the older real-provider test and the B434 one now
+share `newRealSearchProvider` and `newSearchRouter` (`23e18ef2`, tests
+only). With B425's fix reverted on that commit (`writeError` with
+`err.Error()`), the B425 router test is still red at its own assertions: the
+message, the three leak fragments, and no request-failed line.
+
+**After the 3.1 Pro review.** It found the silent return too broad: it took
+any `context.Canceled`, so a cancel from inside the search while the client
+still waits would also have written nothing and sent an empty 200, against
+B364's rule that a cancel while the request context is live is the server's.
+The return now asks `clientWentAway` (the error is a cancel and the request's
+context is the one cancelled), the helper `writeErrorLog` already uses.
+`TestSearchSwallowsAClientCancellation` sent its cancel with a live request,
+so it now cancels its request's context, as a client abort does; the new
+`TestASearchCancelWhileTheRequestIsLiveAnswers500` pins the other half.
+
 ## 2026-10-16 — both `POST /v1/upscale` folder-walk 500s log their error (backlog B435)
 
 Found by the B425 session's sweep (#1258). `POST /v1/upscale` of a folder
