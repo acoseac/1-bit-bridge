@@ -280,3 +280,54 @@ func TestTheContentDirectoryListsNoSACDVirtualTrack(t *testing.T) {
 		t.Errorf("BrowseMetadata of a virtual track's id: fault %d, items %v; want NoSuchObject (%d)", meta.fault, meta.items, dlna.UPnPErrNoSuchObject)
 	}
 }
+
+// TestTheSACDVirtualFilterReadsTheRoutingAtEachRebuild: the routed exception
+// follows the routing table as it is at each rebuild, not as it was when the
+// adapter was made (a 3.1 Pro review of #1254). A row of the virtual shape
+// whose routing lands after a listing (a MediaServer scan while the bridge
+// runs) stays out of the cached listing, since the cache is time-based
+// (cacheTTL), and is listed once the cache rebuilds.
+func TestTheSACDVirtualFilterReadsTheRoutingAtEachRebuild(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "Music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const p = "2go/Later Disc.iso/st/01.dff"
+	if !manifest.IsSACDVirtualPath(p) {
+		t.Fatalf("%q does not have the virtual shape this case needs", p)
+	}
+	now := time.Now()
+	if err := store.UpsertTrack(ctx, &manifest.Track{Path: p, Size: 1000, ModTime: now,
+		Title: "Later Disc", Artist: "Glasswing", Album: "Later Disc"}); err != nil {
+		t.Fatalf("UpsertTrack: %v", err)
+	}
+	adapter := newManifestLibraryAdapter(store, bridgefs.New([]string{root}), []string{root}, testLogger())
+	id := dlna.TrackID("", p)
+	if _, ok := adapter.GetTrackInfo(id); ok {
+		t.Fatal("an unrouted row of the virtual shape is listed")
+	}
+
+	if err := store.UpsertUPnPRouting(ctx, &manifest.UPnPRouting{
+		SourcePath: p, ServerUDN: "uuid:2go-test", ObjectID: "64$2", ResURL: "http://192.0.2.10:8200/MediaItems/2.dat",
+		ProtocolInfo: "http-get:*:audio/x-dff:*", LastSeenAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertUPnPRouting: %v", err)
+	}
+	if _, ok := adapter.GetTrackInfo(id); ok {
+		t.Fatal("the routing showed before the cache rebuilt: the cache is no longer time-based, so this case no longer tests the rebuild")
+	}
+
+	adapter.mu.Lock()
+	adapter.cachedAt = time.Time{} // the TTL has run out
+	adapter.mu.Unlock()
+	if _, ok := adapter.GetTrackInfo(id); !ok {
+		t.Fatal("a routed row of the virtual shape is not listed after the cache rebuilt: the rebuild did not read the routing again")
+	}
+}
