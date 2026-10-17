@@ -289,18 +289,21 @@ func TestPlaylistParserEndsLinesWhereTheAppDoes(t *testing.T) {
 }
 
 func TestPlaylistParserTrimsWhatTheAppTrims(t *testing.T) {
-	// Unicode White_Space, which is the app's whitespacesAndNewlines set.
-	for _, r := range []rune{0x09, 0x0B, 0x0C, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x2005, 0x200A,
+	// Unicode White_Space, and U+200B: Foundation's whitespace set runs
+	// U+2000 to U+200B. Each is measured at the start of a second line, so
+	// the decoder's own BOM drop (U+FEFF at the start of the text) is not
+	// what is measured.
+	for _, r := range []rune{0x09, 0x0B, 0x0C, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x2005, 0x200A, 0x200B,
 		0x2028, 0x2029, 0x202F, 0x205F, 0x3000} {
-		got, _ := lineEntries(string(r) + "a.flac" + string(r))
-		if len(got) != 1 || got[0] != "Playlists/a.flac" {
+		got, _ := lineEntries("x\n" + string(r) + "a.flac" + string(r))
+		if len(got) != 2 || got[1] != "Playlists/a.flac" {
 			t.Errorf("U+%04X: %q, want it trimmed", r, got)
 		}
 	}
-	// Format and control characters are not trimmed.
-	for _, r := range []rune{0x00, 0x1C, 0x1F, 0x7F, 0x180E, 0x200B, 0x200C, 0x200D} {
-		got, _ := lineEntries(string(r) + "a.flac" + string(r))
-		if len(got) != 1 || got[0] != "Playlists/"+string(r)+"a.flac"+string(r) {
+	// Other format and control characters are not trimmed.
+	for _, r := range []rune{0x00, 0x1C, 0x1F, 0x7F, 0x180E, 0x200C, 0x200D, 0xFEFF} {
+		got, _ := lineEntries("x\n" + string(r) + "a.flac" + string(r))
+		if len(got) != 2 || got[1] != "Playlists/"+string(r)+"a.flac"+string(r) {
 			t.Errorf("U+%04X: %q, want it kept", r, got)
 		}
 	}
