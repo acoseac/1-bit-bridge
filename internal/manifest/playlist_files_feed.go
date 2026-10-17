@@ -29,41 +29,20 @@ type PlaylistFile struct {
 	// track answers. Never nil.
 	Unresolved []string
 	// TooLarge says the entries are not served: the file is
-	// PlaylistFileMaxBytes or more, it holds more than
-	// playlistFileMaxEntries entry lines, or its entries would take this
-	// answer past PlaylistFileFeedBudget. Members and Unresolved are empty
-	// then, which says nothing about the entries the file holds.
+	// PlaylistFileMaxBytes or more, or it holds more than
+	// playlistFileMaxEntries entry lines. Members and Unresolved are empty
+	// then, which says nothing about the entries the file holds. A page's
+	// budget never makes a file tooLarge (PlaylistFilePageBudget).
 	TooLarge bool
 }
-
-// PlaylistFileFeed is the playlist-file feed: the files, and whether the
-// index is complete.
-type PlaylistFileFeed struct {
-	// Complete says a full scan has brought the index up to date since it
-	// was created (the upgrade that adds it) or emptied (a root flip's
-	// wipe): every playlist file that scan saw has a row. Until then Files
-	// can lack files the library holds, and a client must not read a file
-	// missing from it as removed (playlistFilesCompleteKey).
-	Complete bool
-	// Files are the listed playlist files, in path order. Never nil.
-	Files []PlaylistFile
-}
-
-// PlaylistFileFeedBudget bounds the entries one answer holds: each member
-// path and unresolved line costs its length plus 4 (the JSON quotes, the
-// comma, and some slack), and the playlists are filled in path order. A
-// playlist whose entries would pass the budget is served TooLarge, and a
-// later one that fits is still served. 8 MiB is some 80,000 entries of 100
-// bytes, gzip'd on the wire.
-const PlaylistFileFeedBudget = 8 << 20
 
 // playlistFeedBatchBytes bounds the stored lines the feed holds at once. It
 // reads, places and resolves the rows a batch at a time, in path order, each
 // batch at most this many bytes of stored lines (a row larger than that is a
-// batch of its own), so a request holds one batch's lines, every row's path
-// and the answer, whatever the index holds. Resolving takes some six times a
-// batch's stored bytes in live heap (measured: 37 MiB of lines resolved as
-// one batch peaked at 219 MiB; in 4 MiB batches, at 54 MiB).
+// batch of its own), so a request holds one batch's lines, a chunk of the
+// rows' paths and its page, whatever the index holds. Resolving takes some
+// six times a batch's stored bytes in live heap (measured: 37 MiB of lines
+// resolved as one batch peaked at 219 MiB; in 4 MiB batches, at 54 MiB).
 const playlistFeedBatchBytes = 4 << 20
 
 // playlistLookupChunk bounds one json_each path list, as
@@ -113,91 +92,6 @@ type playlistTrackMatch struct {
 	groupID    string
 }
 
-// PlaylistFiles is the playlist-file feed: every playlist file the index
-// holds, in path order, with its entries resolved against the tracks the
-// store holds NOW. Resolution happens here, at each request, never at scan
-// time: a track indexed after its playlist was read (a later folder of the
-// same scan, a later subtree scan, a root that came back) is a member
-// without the file being read again, and a track that went is no member.
-//
-// Every read runs in one read-only transaction, so an answer is one
-// snapshot of the store and the same store gives the same answer (the
-// ETag is a hash of it). The rows are resolved playlistFeedBatchBytes of
-// stored lines at a time, in path order, so the answer is the one a single
-// pass over every row would give and a request never holds every row's lines.
-//
-// An entry the path rule places is looked up by its exact bytes first;
-// with no row there, by unicode_lower (case and composition folded), and
-// taken only when exactly one row answers: the store's read rule, exact
-// first, folded fallback, refuse to pick (LookupTrack). The member is the
-// row's own path. A row the duplicates pass suppressed is served as its
-// group's one served row, or, when its group has none or several, its line
-// is unresolved: the feed names only tracks the manifest serves.
-//
-// An album-folder playlist is not listed (the owner's rule; the app's
-// AlbumFolderPlaylist.isAlbumPlaylist, backlog B421, the same four terms).
-// Its entries are its lines the path rule places (a line the rule drops is
-// no entry), and it is an album playlist only when all four hold:
-//  1. it has at least one entry;
-//  2. EVERY entry names a track at exactly that path, byte for byte: one
-//     that resolves to nothing, or only through the fold, keeps the file
-//     listed (an unresolved line may be a file a scan could not read);
-//  3. every entry's parent folder is the playlist's own folder, by bytes (a
-//     track in a subfolder is not in the folder);
-//  4. the tracks the entries name are exactly the tracks directly in that
-//     folder, order and repeats ignored.
-//
-// And it is judged only on whole evidence about its folder (the app's B421
-// gate): the last scan that saw the file saw its folder whole
-// (playlistFolderEvidence, the row's folder_whole). Without it the index can
-// under-count the folder (a new file a read could not index, a listing cut
-// short), and an ordinary playlist naming the indexed tracks would meet term
-// 4; so an unsure file is listed. That evidence is a finished scan's, taken
-// after its walk's every row landed, never a running scan's: a scan under
-// way only adds rows to a folder until its pass, which can only take a file
-// out of the album rule.
-//
-// A track there is any row the index holds, a suppressed duplicate
-// included, and the rule reads the tracks the lines name, before the
-// duplicate mapping.
-func (s *Store) PlaylistFiles(ctx context.Context) (PlaylistFileFeed, error) {
-	return s.playlistFiles(ctx, PlaylistFileFeedBudget, playlistFeedBatchBytes)
-}
-
-// playlistFiles is PlaylistFiles under budget, resolving batchBytes of
-// stored lines at a time; a test passes small ones.
-func (s *Store) playlistFiles(ctx context.Context, budget, batchBytes int) (PlaylistFileFeed, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return PlaylistFileFeed{}, err
-	}
-	defer tx.Rollback()
-
-	var marked int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM scan_state WHERE k = ?`, playlistFilesCompleteKey).Scan(&marked); err != nil {
-		return PlaylistFileFeed{}, fmt.Errorf("read playlist files: %w", err)
-	}
-	rows, err := readPlaylistFileRows(ctx, tx)
-	if err != nil {
-		return PlaylistFileFeed{}, err
-	}
-	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(rows))}
-	known := map[string]playlistTrackMatch{}
-	folders := &playlistFolderTracks{tx: tx}
-	defer folders.close()
-	for start := 0; start < len(rows); {
-		end := nextPlaylistFeedBatch(rows, start, batchBytes)
-		files, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, folders, &budget)
-		if err != nil {
-			return PlaylistFileFeed{}, err
-		}
-		feed.Files = append(feed.Files, files...)
-		start = end
-	}
-	return feed, nil
-}
-
 // nextPlaylistFeedBatch is the end of the batch that starts at rows[start]:
 // the rows whose stored lines fit in maxBytes together, and always at least
 // one.
@@ -210,13 +104,19 @@ func nextPlaylistFeedBatch(rows []playlistFileRow, start, maxBytes int) int {
 	return end
 }
 
-// resolvePlaylistBatch is the feed entries of one batch of rows, in their
-// order: each file's lines through the path rule, every distinct placed
-// path looked up once (known holds the earlier batches' matches), then each
-// file resolved against the shared budget. An album-folder playlist has no
-// entry.
+// resolvedPlaylistFile is one row resolved: its feed entry, whether it is
+// an album-folder playlist (which no page lists), and what it costs a page.
+type resolvedPlaylistFile struct {
+	file  PlaylistFile
+	album bool
+	cost  int
+}
+
+// resolvePlaylistBatch resolves one batch of rows, in their order: each
+// file's lines through the path rule, every distinct placed path looked up
+// once (known holds the earlier batches' matches), then each file.
 func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow,
-	known map[string]playlistTrackMatch, folders *playlistFolderTracks, budget *int) ([]PlaylistFile, error) {
+	known map[string]playlistTrackMatch, folders *playlistFolderTracks) ([]resolvedPlaylistFile, error) {
 	stored, err := loadPlaylistBatch(ctx, tx, batch)
 	if err != nil {
 		return nil, err
@@ -233,15 +133,13 @@ func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileR
 	if err != nil {
 		return nil, err
 	}
-	out := make([]PlaylistFile, 0, len(stored))
+	out := make([]resolvedPlaylistFile, 0, len(stored))
 	for i := range stored {
-		pf, album, err := stored[i].resolve(ctx, folders, matches, served, budget)
+		r, err := stored[i].resolve(ctx, folders, matches, served)
 		if err != nil {
 			return nil, err
 		}
-		if !album {
-			out = append(out, pf)
-		}
+		out = append(out, r)
 	}
 	return out, nil
 }
@@ -260,49 +158,47 @@ func (f *storedPlaylistFile) place(distinct map[string]struct{}) {
 	}
 }
 
-// resolve is f's feed entry: each placed line that names a served track (or
-// a suppressed one with one served copy) a member, every other line
-// unresolved. album reports an album-folder playlist, which the feed does
-// not list. Entries that would pass *budget leave the entry tooLarge;
-// entries that fit are taken from it.
+// resolve is f resolved: each placed line that names a served track (or a
+// suppressed one with one served copy) a member, every other line
+// unresolved, and what the entry costs a page (PlaylistFilePageBudget).
+// album reports an album-folder playlist, which no page lists.
 func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolderTracks, matches map[string]playlistTrackMatch,
-	served map[string]string, budget *int) (pf PlaylistFile, album bool, err error) {
-	pf = PlaylistFile{
+	served map[string]string) (resolvedPlaylistFile, error) {
+	pf := PlaylistFile{
 		Path: f.path, Name: playlistFileDisplayName(f.path),
 		ModTime: time.Unix(0, f.mtimeNs).UTC(),
 		Members: []string{}, Unresolved: []string{},
 		TooLarge: f.tooLarge,
 	}
+	r := resolvedPlaylistFile{file: pf}
 	if f.tooLarge {
-		return pf, false, nil
+		r.cost = PlaylistFilePageCost(r.file)
+		return r, nil
 	}
 	lines := resolvedPlaylistLines{members: []string{}, unresolved: []string{}, allExact: true}
 	for _, pl := range f.placed {
 		lines.add(pl, matches, served)
 	}
 	if lines.entries > 0 && lines.allExact && f.folderWhole {
-		if album, err = isAlbumFolderPlaylist(ctx, folders, playlistFileDir(f.path), lines.named); err != nil || album {
-			return pf, album, err
+		album, err := isAlbumFolderPlaylist(ctx, folders, playlistFileDir(f.path), lines.named)
+		if err != nil || album {
+			r.album = album
+			return r, err
 		}
 	}
-	if lines.cost > *budget {
-		pf.TooLarge = true
-		return pf, false, nil
-	}
-	*budget -= lines.cost
-	pf.Members, pf.Unresolved = lines.members, lines.unresolved
-	return pf, false, nil
+	r.file.Members, r.file.Unresolved = lines.members, lines.unresolved
+	r.cost = PlaylistFilePageCost(r.file)
+	return r, nil
 }
 
 // resolvedPlaylistLines is a playlist's lines resolved: the members and
-// unresolved lines the feed serves and what they cost against the budget,
-// and the album-folder rule's inputs. Its entries are the placed lines (a
-// line the path rule drops is no entry); named holds the tracks they name
-// at their exact paths, and allExact goes false at the first entry that
-// names none there (unresolved, or found only by the fold).
+// unresolved lines the feed serves, and the album-folder rule's inputs. Its
+// entries are the placed lines (a line the path rule drops is no entry);
+// named holds the tracks they name at their exact paths, and allExact goes
+// false at the first entry that names none there (unresolved, or found only
+// by the fold).
 type resolvedPlaylistLines struct {
 	members, unresolved []string
-	cost                int
 	entries             int
 	named               []string
 	allExact            bool
@@ -312,11 +208,9 @@ type resolvedPlaylistLines struct {
 func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) {
 	if member, ok := r.member(pl, matches, served); ok {
 		r.members = append(r.members, member)
-		r.cost += len(member) + 4
 		return
 	}
 	r.unresolved = append(r.unresolved, pl.line)
-	r.cost += len(pl.line) + 4
 }
 
 // member is the member a placed line names, if any, and records the line
@@ -337,29 +231,6 @@ func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string
 		return copyPath, ok
 	}
 	return m.path, hit
-}
-
-// readPlaylistFileRows reads every playlist_files row but its lines, in
-// path order.
-func readPlaylistFileRows(ctx context.Context, tx *sql.Tx) ([]playlistFileRow, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT path, mtime_ns, too_large, folder_whole, length(CAST(lines AS BLOB)) FROM playlist_files ORDER BY path COLLATE BINARY`)
-	if err != nil {
-		return nil, fmt.Errorf("read playlist files: %w", err)
-	}
-	defer rows.Close()
-	var out []playlistFileRow
-	for rows.Next() {
-		var r playlistFileRow
-		if err := rows.Scan(&r.path, &r.mtimeNs, &r.tooLarge, &r.folderWhole, &r.lineBytes); err != nil {
-			return nil, fmt.Errorf("read playlist files: %w", err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read playlist files: %w", err)
-	}
-	return out, nil
 }
 
 // loadPlaylistBatch reads the lines of batch, a run of rows in path order,

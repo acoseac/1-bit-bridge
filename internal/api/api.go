@@ -195,11 +195,15 @@ type Server struct {
 	playlistStore PlaylistStore
 
 	// playlistFileStore backs GET /v1/playlist-files + the "playlistFiles"
-	// health-feature flag (backlog B431): the playlist files the scanner
-	// read from the library, read-only. Nil unless WithPlaylistFileStore is
+	// and "playlistFilesPaged" health-feature flags (backlogs B431, B442):
+	// the playlist files the scanner read from the library, read-only. Nil unless WithPlaylistFileStore is
 	// wired; serve wires it on every bridge, the demo included, because it
 	// is library data, not user data. *manifest.Store satisfies it.
 	playlistFileStore PlaylistFileStore
+	// playlistCursors signs the feed's cursors with a key this process
+	// draws on first use (playlistCursorSigner), so a cursor this bridge did
+	// not make, or made before it restarted, is a 400.
+	playlistCursors playlistCursorSigner
 
 	// historyStore backs POST /v1/history/batch + the "playbackHistory"
 	// health-feature flag. Nil unless WithHistoryStore is wired. Same
@@ -1868,7 +1872,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistFiles +
-	// playlistListRevision +
+	// playlistFilesPaged + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
 	// search + smartPlaylists + spectrum + syncEvents + trackQuality +
 	// upscaleCompleteEvents + variantBumpsIndex + waveform).
@@ -1876,7 +1880,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 34)
+	feats := make([]string, 0, 35)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2033,8 +2037,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// is library data, read-only, not one of the user-data stores the demo
 	// leaves unwired. Lexically playlistBackup < playlistFiles <
 	// playlistListRevision ('B' < 'F' < 'L'), so it splits that block.
+	// `playlistFilesPaged` says the feed is paged (backlog B442): `version`
+	// and `nextCursor` on every page, `after` to read the next, a 410 for a
+	// cursor the feed has moved past, and no file tooLarge for want of room.
+	// A bridge with playlistFiles alone serves the single document of
+	// B431, whose 8 MiB answer left later files tooLarge; a client that
+	// imports from the feed asks for both. "playlistFiles" < "playlistFilesPaged"
+	// (a prefix sorts first).
 	if s.playlistFileStore != nil {
-		feats = append(feats, "playlistFiles")
+		feats = append(feats, "playlistFiles", "playlistFilesPaged")
 	}
 	if s.playlistStore != nil {
 		feats = append(feats, "playlistListRevision", "playlistsCrossDevice")

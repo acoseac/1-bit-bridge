@@ -45635,7 +45635,7 @@ batches of 1, 64, 200 and 300 bytes, and compares the JSON. Controls on
 | W1. the pass reads every file before it writes (the earlier code) | `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext` alone: all 300 reads found no row written |
 | W2. the window's byte bound ignored | `TestPlaylistReadWindowsHoldTheirBytes` alone, its size case one window, `0-12` |
 | F1. the feed's batch bound ignored (the earlier code's one batch) | `TestPlaylistFeedBatchesHoldTheirBytes` alone, one batch, `0-7` |
-| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; `TestThePlaylistFeedHoldsItsBudget`, which also runs a batch per row, stays green, since its third file fits either way |
+| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; the budget test (B442, which pages the feed, made it `TestAFileThatDoesNotFitStartsTheNextPage`), which also runs a batch per row, stays green, since its third file fits either way |
 | F3. the kept matches taken as complete after the first batch | the same test alone, at 1 and 64 bytes only: at 200 and 300 the first batch already holds every path the later ones name |
 
 What the bound leaves as it was: the work is still in proportion to the
@@ -45756,3 +45756,217 @@ scans.
 - One answer serves at most 8 MiB of entries, some 100,000; past that a
   playlist is `tooLarge` though it is under both file caps. A library with
   more needs a paged feed before B432 depends on the single document.
+
+## 2026-10-17 — `GET /v1/playlist-files` is paged, each page at a version its cursor carries (backlog B442)
+
+B431's single document held at most 8 MiB of entries and listed every file
+past it `tooLarge`: in a measured index of 300 playlists of 2,000 entries,
+64 were served. No client read the feed yet (the app's import, B432, waited
+for this), so it is paged now rather than reshaped later. Branch
+`feat/b442-playlist-files-paging` from `8c765cd9` (B431's merge).
+
+### The shape
+
+- **Request.** The first page is `GET /v1/playlist-files`; the next is
+  `?after=<nextCursor>`. The coordinator asked for `next`; the response field
+  is `nextCursor`, the name `/v1/manifest` and `/v1/history` already give
+  their cursors, with `after` as `/v1/history` names the parameter. Absent on
+  the last page.
+- **Cursor.** Opaque: unpadded base64url of the version, a NUL, the last
+  manifest path the page covers (listed, or left out as an album-folder
+  playlist), and a 16-byte HMAC-SHA256 of the two under a key the process
+  draws on first use (`playlistCursorSigner`). Raw bytes, because a manifest
+  path need not be UTF-8 and JSON would replace what is not; no path holds a
+  NUL. A cursor the bridge did not make (not base64url, padded, unsigned,
+  edited, cut short) or made before it restarted is a 400 `bad_request`, and
+  the store is not read.
+- **Version.** On every page: 16 hex digits of a SHA-256 over
+  `playlistFeedRulesVersion`, the build's `version.ServerVersion`, the backup
+  epoch (a restored database is another history), the generation the new v57
+  triggers keep, and `complete`. Read in the page's own read-only
+  transaction, with the page.
+- **Stale cursor: refused, not restarted.** A cursor of another version is a
+  410 `playlist_files_stale` with a fixed message, the protocol's `_stale`
+  family for "the thing you named changed since". A restart in place (the new
+  first page under a 200) would save a round trip but makes the client tell a
+  first page from a later one by its version alone; the 410 says it.
+- **Budget.** `PlaylistFilePageBudget`, 8 MiB, now by the JSON's own measure
+  (`PlaylistFilePageCost`): a file costs its path and its name in the bytes
+  the encoder writes for them (`jsonStringBytes`) and 112 bytes besides (the
+  keys, the mtime at its longest, the punctuation, `"tooLarge":true`), and
+  each entry its encoded bytes plus 4, never less than the file's JSON, so a
+  page of empty playlists is bounded too. A file that does not fit starts the next page; a
+  page always holds one file, so a file larger than a page has its own,
+  bounded by the per-file caps. `tooLarge` is only the per-file caps again.
+  An empty page is only an empty feed's one page.
+- **Flag.** `playlistFilesPaged` beside `playlistFiles`, on every bridge the
+  index is wired. A bridge with `playlistFiles` alone is B431's single
+  document; B432 can ask for both.
+
+### Decisions
+
+- **The version is a generation the database keeps, not a hash of the
+  answer.** A hash of the whole resolved feed is exact by construction, but
+  every page would resolve every page (the measured index has 24 pages at
+  1,500 playlists). The generation is v51's counter shape: one row, moved by
+  triggers in the writing statement's own transaction, so no writer (a scan,
+  a trash, a root removal, a stamping pass, clear-missing, one added later)
+  can forget to move it. The triggers fire on what a page reads and nothing
+  else: a track inserted or deleted, or one whose `path`, `dupe_suppressed`
+  or `dupe_group_id` changed (the lookups, the duplicate mapping and the
+  album rule's folder reads), and a playlist row inserted, deleted, or
+  changed in `path`, `mtime_ns`, `too_large`, `lines` or `folder_whole`. An
+  upsert's `DO UPDATE` sets columns without changing them, so the update
+  triggers carry `WHEN old.x IS NOT new.x`: enrichment, which writes tags and
+  stamps, moves nothing, and a client paging during an enrich pass is not
+  restarted. `TestTheFeedGenerationTriggersAreInPlace` fails if a later
+  rebuild of either table drops them.
+- **The build and the rules are in the version** so a client paging across a
+  bridge update restarts: `version.ServerVersion` changes with every release,
+  and `playlistFeedRulesVersion` is to be bumped with any change to what the
+  feed answers for the same rows (the path rule, the lookup, the album rule,
+  the budget), for a dev build whose server version does not move.
+- **Each page's ETag stays the hash of its own JSON.** An ETag derived from
+  the version and the cursor would let a 304 skip resolving the page, but it
+  would be right only while the code that builds the body is the code that
+  built the version. The hash costs one page's read and is right by
+  construction.
+- **A page reads the rows after its cursor 1,024 paths at a time**
+  (`playlistPageRowChunk`) and resolves them in the B431 batches
+  (`playlistFeedBatchBytes`, 4 MiB of lines, matches kept across batches), so
+  a request holds one chunk of paths, one batch of lines and its page.
+
+### Red first
+
+On stubs that answer as B431 did, in `cf783a6a`:
+- the store's page answering one document with files past the budget
+  `tooLarge`, no version and no refusal: 6 of the 106 tests red, all predicted
+  (`TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList` at its version,
+  `TestAFileThatDoesNotFitStartsTheNextPage`,
+  `TestPlaylistFilePagesConcatenateToTheWholeFeed`,
+  `TestAFileLargerThanAPageHasAPageOfItsOwn`,
+  `TestTheFeedVersionMovesWithEveryChangeAPageCanShow` at all twelve moving
+  cases, `TestAPageAskedForAtAnotherVersionIsRefused`); the trigger test green;
+- the handler ignoring `after` and never writing `nextCursor`: the four new
+  API tests red, the nine others green.
+
+### Tests
+
+`internal/manifest/playlist_files_page_test.go`:
+- `TestPlaylistFilePagesConcatenateToTheWholeFeed` walks an index whose path
+  order puts album-folder playlists at the start, in the middle and before
+  the last file, beside an empty playlist, a file past the cap and files of
+  one to fifty entries, under budgets of 1, 150, 400, 1,000 and 5,000 bytes
+  and batches of 1, 64 and 2^30. The pages add up to the unbounded read's
+  files byte for byte (JSON), every page holds its budget unless it holds one
+  file, every page has the first page's version, and a budget of 1 makes one
+  page per listed file.
+- `TestAFileLargerThanAPageHasAPageOfItsOwn`.
+- `TestTheFeedVersionMovesWithEveryChangeAPageCanShow`: twelve changes move
+  it (a playlist read again, touched, re-marked, removed or added; a track
+  added, removed, renamed, suppressed, or its group renamed; the index marked
+  complete; the epoch replaced) and four do not (a track's tags written
+  again, a playlist missed once below the threshold, one written again as it
+  was, a page read).
+- `TestAPageAskedForAtAnotherVersionIsRefused`.
+- `TestTheFeedGenerationTriggersAreInPlace`.
+
+`internal/manifest/playlist_files_scan_test.go`:
+`TestAPlaylistFilePastACapStillLetsTheIndexBeComplete`, added at the
+coordinator's word (CodeRabbit on the app's mirror, acoseac/1-bit#2238):
+`complete` said "read, or kept", while a file past a cap "is not read".
+`readPlaylistFile` returns such a file as a completed read with `tooLarge`
+set, so it already counted; the text now says accounted for (read, kept, or
+listed `tooLarge`), and the test pins it with a library whose only playlist
+files are past the byte cap and past the entry cap.
+
+`internal/api/playlist_files_test.go`: `TestPlaylistFilesPagesFollowTheNextCursor`,
+`TestAPlaylistFilesCursorFromAnotherVersionIs410`,
+`TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400` (five malformed cursors,
+none reaching the store), `TestEachPlaylistFilesPageAnswers304ToItsOwnETag`;
+the exact document now carries `version`, and the real-index test asserts the
+version moves with a late track. B431's tests run on the page API, and its
+budget test became `TestAFileThatDoesNotFitStartsTheNextPage`.
+
+### Negative controls
+
+On `cf783a6a` (N9 on `93c09345`), each predicted in writing before it ran:
+
+| control | red, predicted and observed |
+|---|---|
+| N1. the version check dropped | `TestAPageAskedForAtAnotherVersionIsRefused` alone |
+| N2. a page past its budget (the fit check off) | the concatenation test at its page-cost and page-count lines only (the sums still match: one page holds them all), the larger-than-a-page and next-page tests at one page, the refused-cursor test at its first page |
+| N3. the cursor inclusive (`>=`) | **not as predicted.** I named four walks that would stop advancing. The mutation also makes a page re-read the last row of its last chunk until its budget fills, so the default-budget walks of `TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList`, `TestAPlaylistEntryFoldsOnlyToTheOneRowThatAnswers` and `TestASuppressedDuplicateMemberIsServedAsItsServedCopy` failed first, at "does not advance", and `TestTheAlbumFolderRuleTermByTerm` was still filling an 8 MiB page when the run reached the 10-minute limit. The mutation is caught, by failures and a hang, not by the four tests named. |
+| N4. the track trigger blind to the duplicate stamps | the version table at the suppression and the group rename alone |
+| N5. `tooLarge` by budget, the page going on (B431's rule) | as N2, with b.m3u `tooLarge`, and the sums no longer matching |
+| N6. the playlist trigger blind to `folder_whole` | the version table at the folder evidence alone |
+| N7. `complete` left out of the version | the version table at "the index marked complete" alone |
+| N8. the epoch left out of the version | the version table at "the backup epoch replaced" alone. The first form of this control did not compile (the epoch then unused), so it proved nothing; the second keeps it used. |
+| N9. a `tooLarge` read not counted as backed | `TestAPlaylistFilePastACapStillLetsTheIndexBeComplete` alone |
+
+### After review
+
+CodeRabbit's review of `37e531cc` had four comments, all taken in
+`818ab444` and `2ac9323d`:
+
+- **The cursor was not verified.** It carried its path in the clear, so a
+  cursor cut short or mangled into another path that still decoded was taken,
+  and the read went on from the wrong place, skipping or repeating files,
+  where it should have started over. The bearer already reads every page, so
+  this is about integrity, not trust: the cursor is now HMAC-signed with a
+  32-byte key drawn from crypto/rand once per process, and any cursor that
+  does not check is the 400. A bridge restart draws a new key, so a walk
+  across it restarts at a 400 rather than a 410; both say start again.
+- **The budget counted raw lengths.** The encoder writes a quote or a
+  backslash in two bytes, a control character, <, > and & in six (HTML
+  escaping is the json.Encoder default the feed is written with), and a byte
+  of invalid UTF-8 as six. `jsonStringBytes` counts what the encoder writes,
+  without allocating, and `TestJSONStringBytesIsWhatEncodingJSONWrites`
+  holds it to `json.Marshal` over fourteen strings. The file allowance went
+  from 64 bytes to 112: 64 never covered the fixed part of a file's object,
+  which is 92 bytes with a full mtime and 108 with `"tooLarge":true`.
+  `TestAPlaylistFileCostsAtLeastItsJSON` checks the cost against the DTO's
+  actual JSON for escape-heavy files.
+- **Restarts during a scan.** A scan that indexes new tracks moves the
+  version with each one (one that finds nothing new does not, and neither
+  does enrichment, since the triggers fire only on what a page reads), so
+  PROTOCOL.md now tells a client that meets a 410 while a scan runs to wait
+  for it to end, or for the next `library.changed`, and otherwise to back off.
+- **Test complexity.** The concatenation and version tests run each case as
+  a subtest, with the per-page checks in `checkPageWalk`.
+
+Controls on `818ab444`, each predicted in writing first, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| N1 again | `TestAPageAskedForAtAnotherVersionIsRefused` alone |
+| N2 again | the concatenation subtests at budgets 1, 150, 400 and 1,000 (twelve), each at "page 0 holds 16 files costing 3985", budget 1's also at its page count; budget 5,000 green (the whole feed costs 3,985); the larger-than-a-page and next-page tests at one page; the refused-cursor test at its first page |
+| N10. the signature not checked | `TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400` at the edited and the cut-short cursor, and so at the store being read for them |
+| N11. ASCII escapes not costed | `TestJSONStringBytesIsWhatEncodingJSONWrites` at the quote, control and `<a>&b` strings; `TestAPlaylistFileCostsAtLeastItsJSON` at the escape-heavy file |
+
+### Measured
+
+macOS 27, Apple silicon, `go1.26.6`, the B431 harness on the page API (not
+committed): an index of 300 playlists of 2,000 entries (36.9 MiB of lines,
+20,000 tracks). The first page holds 64 playlists, takes 161 ms and peaks at
+41 MiB of live heap over the baseline (B431's whole answer: 370 ms and 54
+MiB, with 236 playlists `tooLarge`). The whole walk is 5 pages and every
+playlist, in 734 ms. Five times the index (1,500 playlists, 185 MiB of
+lines): the first page 176 ms and 47 MiB, the walk 24 pages in 3.9 s. A
+page's peak does not grow with the index.
+
+### For the app (B432)
+
+- Ask for `playlistFiles` and `playlistFilesPaged`. Walk from the first page
+  (no `after`) through `nextCursor` until a page has none; keep the first
+  page's `version`.
+- A 410 `playlist_files_stale` mid-walk: drop what was read and start again
+  from the first page. A completed walk is one state; import from a
+  completed walk only, and reap only when `complete` is true there.
+- A 400 `bad_request` is a cursor not given by this bridge (it never happens
+  to a cursor passed back as it came).
+- `tooLarge` is now only a file past a per-file cap; its empty lists are not
+  its contents.
+- Each page has its own ETag and 304. Polling the first page with
+  `If-None-Match` after each sync answers 304 while nothing changed; a 200
+  with a new `version` means walk again.

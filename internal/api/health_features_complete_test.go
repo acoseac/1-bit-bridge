@@ -50,6 +50,7 @@ var wantAllHealthFeatures = []string{
 	"playbackHistoryRead",
 	"playlistBackup",
 	"playlistFiles",
+	"playlistFilesPaged",
 	"playlistListRevision",
 	"playlistsCrossDevice",
 	"pushEventsSupported",

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -401,6 +402,32 @@ func TestAPlaylistFilePastTheSizeCapIsServedTooLarge(t *testing.T) {
 	}
 }
 
+// TestAPlaylistFilePastACapStillLetsTheIndexBeComplete: a file past the
+// byte cap or the entry cap is a completed read with tooLarge set, so it is
+// accounted for like any read, and a library whose only playlist files are
+// past a cap is complete after a full scan.
+func TestAPlaylistFilePastACapStillLetsTheIndexBeComplete(t *testing.T) {
+	root := t.TempDir()
+	stubTracks(t, root, "A/01.flac")
+	writeLibraryFile(t, root, "Playlists/big.m3u", bytes.Repeat([]byte("../A/01.flac\n"), PlaylistFileMaxBytes/13+1))
+	writeLibraryFile(t, root, "Playlists/many.m3u", bytes.Repeat([]byte("a\n"), playlistFileMaxEntries+1))
+	s, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tooLarge []string
+	for _, f := range page.Files {
+		if f.TooLarge {
+			tooLarge = append(tooLarge, f.Path)
+		}
+	}
+	if !page.Complete || strings.Join(tooLarge, " ") != "Playlists/big.m3u Playlists/many.m3u" {
+		t.Fatalf("complete %v, tooLarge %v; want the index complete with both files listed tooLarge", page.Complete, tooLarge)
+	}
+}
+
 func TestAManifestPathBackslashIsPartOfAName(t *testing.T) {
 	// Only a playlist's LINES fold "\" to "/". A manifest path is "/"-separated
 	// on every platform, and a "\" in it is a character of a name (a Linux
@@ -434,11 +461,11 @@ func TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile(t *testing.T)
 	ctx := context.Background()
 	complete := func(when string) bool {
 		t.Helper()
-		feed, err := s.PlaylistFiles(ctx)
+		page, err := s.PlaylistFilesPage(ctx, "", "")
 		if err != nil {
 			t.Fatalf("%s: %v", when, err)
 		}
-		return feed.Complete
+		return page.Complete
 	}
 	if complete("fresh store") {
 		t.Fatal("a store the migration just made reads complete")

@@ -152,16 +152,13 @@ func stubTracks(t *testing.T, root string, rels ...string) {
 	}
 }
 
-// playlistFeed returns the playlist-file feed by path, failing the test on
-// a read error.
+// playlistFeed returns the playlist-file feed by path, every page of one
+// read, failing the test on a read error.
 func playlistFeed(t *testing.T, s *Store) map[string]PlaylistFile {
 	t.Helper()
-	feed, err := s.PlaylistFiles(context.Background())
-	if err != nil {
-		t.Fatalf("PlaylistFiles: %v", err)
-	}
-	out := make(map[string]PlaylistFile, len(feed.Files))
-	for _, f := range feed.Files {
+	files := walkPlaylistPages(t, s, PlaylistFilePageBudget, playlistFeedBatchBytes).files
+	out := make(map[string]PlaylistFile, len(files))
+	for _, f := range files {
 		out[f.Path] = f
 	}
 	return out
