@@ -1,0 +1,68 @@
+# Playlist parse cases (B430): the ONE table the iOS importer (PlaylistImport) and the
+# bridge's future indexer (backlog B431) must both pass. The iOS copy is canonical; when the
+# bridge gains its copy, keep the two byte-identical and change both in one Mirror-PR pair.
+#
+# Scope: decoding, line splitting, the skipped lines and the path rule. NOT the library lookup:
+# "resolved" means the path rule places the entry inside the share; whether a row exists there,
+# and case or Unicode folding against stored paths, happen after this and are not tested here.
+# Not covered on purpose (docs/PlaylistFileImportStudy.md section 8, PR 4 trimmed): absolute
+# paths, drive letters, UNC paths and URLs. Their handling is not settled, so nothing pins it.
+#
+# Columns are tab-separated: case, playlist, input, resolved, unresolved.
+#   case        a unique name.
+#   playlist    the playlist file's own path, relative to the share root (no leading "/").
+#   input       the file's bytes.
+#   resolved    the entries the path rule places, in file order, as paths relative to the
+#               share root, separated by "|". Duplicates are kept. Empty: none.
+#   unresolved  the entry lines the path rule cannot place inside the share, in file order,
+#               separated by "|", each trimmed and with "\" folded to "/". Empty: none.
+# Every column but case is escaped: \n LF, \r CR, \t TAB, \\ a backslash, \xNN the byte NN
+# (two hex digits). Any other byte stands for itself; a literal "|" in a path is \x7C.
+# Decode input to bytes and feed them to the parser. Decode the other columns to bytes and
+# compare them with the UTF-8 bytes of the parser's output: byte-for-byte, so an NFC and an
+# NFD spelling of one name are different paths.
+#
+# The rules the rows pin:
+#   - A UTF-8 BOM (EF BB BF) at the start is dropped as bytes, before any decoding. Encoding
+#     is then decided for the whole file: UTF-8 if every byte is valid UTF-8, else Windows-1252
+#     if no byte is one it leaves undefined (81, 8D, 8F, 90, 9D), else ISO-8859-1, which maps
+#     each byte to the code point of its value and cannot fail (B437): ASCII lines always
+#     survive, and a name in another code page stays mojibake.
+#   - Lines end at LF, CRLF or CR. Each line is trimmed of whitespace at both ends.
+#     (The app's splitter also ends a line at U+0085 and U+2028, so in a file decoded as
+#     ISO-8859-1 the byte 85 ends a line too; no row pins either.)
+#   - A blank line, or a line whose first non-blank character is "#", is not an entry.
+#   - "\" is folded to "/". A path is relative to the playlist's folder. "." segments are
+#     dropped, ".." pops a segment, and a ".." with nothing left to pop puts the entry outside
+#     the share (unresolved), even if later segments come back down. Empty segments collapse.
+#   - Bytes are kept: no Unicode normalization and no case folding.
+case	playlist	input	resolved	unresolved
+utf8-lf-extinf-two-deep	Playlists/Road Trip.m3u8	#EXTM3U\n#EXTINF:215,Artist - One\n../Artist/Album/01 One.flac\n#EXTINF:301,Artist - Two\n../Artist/Album/02 Two.flac\n	Artist/Album/01 One.flac|Artist/Album/02 Two.flac	
+utf8-no-bom-non-ascii	Playlists/mix.m3u8	#EXTM3U\n#EXTINF:200,Bj\xC3\xB6rk - J\xC3\xB3ga\n../Bj\xC3\xB6rk/Homogenic/02 J\xC3\xB3ga.flac\n	Bj\xC3\xB6rk/Homogenic/02 J\xC3\xB3ga.flac	
+utf8-bom-then-directive	Playlists/mix.m3u8	\xEF\xBB\xBF#EXTM3U\n#EXTINF:-1,A - B\n../A/b.flac\n	A/b.flac	
+utf8-bom-then-path	Playlists/mix.m3u	\xEF\xBB\xBFb.flac\nc.flac\n	Playlists/b.flac|Playlists/c.flac	
+utf8-bom-non-ascii	Playlists/mix.m3u8	\xEF\xBB\xBF../Caf\xC3\xA9 Tacvba/01.flac\n	Caf\xC3\xA9 Tacvba/01.flac	
+cp1252-crlf-accents	Playlists/mix.m3u	#EXTM3U\r\n#EXTINF:-1,Beyonc\xE9 - D\xE9j\xE0 Vu\r\n../Beyonc\xE9/D\xE9j\xE0 Vu.mp3\r\n	Beyonc\xC3\xA9/D\xC3\xA9j\xC3\xA0 Vu.mp3	
+cp1252-smart-quotes-and-euro	Playlists/mix.m3u	\x93Live\x94 \x80 Edition/01.flac\n	Playlists/\xE2\x80\x9CLive\xE2\x80\x9D \xE2\x82\xAC Edition/01.flac	
+cp1252-decides-the-whole-file	Playlists/mix.m3u	Caf\xC3\xA9/1.flac\nBeyonc\xE9.flac\n	Playlists/Caf\xC3\x83\xC2\xA9/1.flac|Playlists/Beyonc\xC3\xA9.flac	
+utf8-bom-then-invalid-utf8	Playlists/mix.m3u	\xEF\xBB\xBFa.flac\nBeyonc\xE9.flac\n	Playlists/a.flac|Playlists/Beyonc\xC3\xA9.flac	
+cp1251-ascii-and-cyrillic	Playlists/mix.m3u	#EXTM3U\n#EXTINF:1,\x80\xEE\xF0\x90\xE5 - One\n../\x80\xEE\xF0\x90\xE5/01 One.flac\n#EXTINF:2,A - Two\n../A/02 Two.flac\n	\xC2\x80\xC3\xAE\xC3\xB0\xC2\x90\xC3\xA5/01 One.flac|A/02 Two.flac	
+crlf	Playlists/mix.m3u	#EXTM3U\r\n#EXTINF:1,A - One\r\n../A/1.flac\r\n#EXTINF:2,A - Two\r\n../A/2.flac\r\n	A/1.flac|A/2.flac	
+cr-only	Playlists/mix.m3u	#EXTM3U\r#EXTINF:1,A - One\r../A/1.flac\r../A/2.flac\r	A/1.flac|A/2.flac	
+mixed-endings-no-final-newline	Playlists/mix.m3u	1.flac\n2.flac\r\n3.flac\r4.flac	Playlists/1.flac|Playlists/2.flac|Playlists/3.flac|Playlists/4.flac	
+hash-lines-are-not-entries	Playlists/mix.m3u8	#EXTM3U\n#PLAYLIST:Mix\n#EXTGRP:Rock\n#EXTALB:Album\n#EXTART:Artist\n#EXTINF:123 tvg-id="x",Artist - Title\n# a comment\n  #EXTINF:5,indented directive\n#\na.flac\n	Playlists/a.flac	
+blank-and-whitespace-lines	Playlists/mix.m3u	\n\n   \n\t\n\t a.flac  \n\n  b c.flac\t\n	Playlists/a.flac|Playlists/b c.flac	
+dot-slash	Playlists/mix.m3u	./a.flac\n./sub/./b.flac\nsub//c.flac\n	Playlists/a.flac|Playlists/sub/b.flac|Playlists/sub/c.flac	
+dot-dot	Music/Playlists/mix.m3u	../Jazz/a.flac\nsub/../b.flac\n../../c.flac\n	Music/Jazz/a.flac|Music/Playlists/b.flac|c.flac	
+climb-above-the-share-root	Playlists/mix.m3u	../ok.flac\n../../Other/a.flac\n../../../b.flac\n	ok.flac	../../Other/a.flac|../../../b.flac
+climb-above-then-back-down	Playlists/mix.m3u	../../Playlists/a.flac\nsub/../../../Playlists/b.flac\n		../../Playlists/a.flac|sub/../../../Playlists/b.flac
+playlist-at-the-share-root	mix.m3u	a.flac\nAlbum/b.flac\n../c.flac\n	a.flac|Album/b.flac	../c.flac
+backslash-separators	Playlists/mix.m3u	..\\Artist\\Album\\01.flac\nsub\\.\\02.flac\n..\\..\\03.flac\n	Artist/Album/01.flac|Playlists/sub/02.flac	../../03.flac
+nfc-name-kept	Playlists/mix.m3u8	../Caf\xC3\xA9/1.flac\n	Caf\xC3\xA9/1.flac	
+nfd-name-kept	Playlists/mix.m3u8	../Cafe\xCC\x81/1.flac\n	Cafe\xCC\x81/1.flac	
+nfc-and-nfd-stay-two-paths	Playlists/mix.m3u8	../Caf\xC3\xA9/1.flac\n../Cafe\xCC\x81/1.flac\n	Caf\xC3\xA9/1.flac|Cafe\xCC\x81/1.flac	
+nfd-playlist-folder	Cafe\xCC\x81 Mixes/mix.m3u8	1.flac\n../Caf\xC3\xA9/2.flac\n	Cafe\xCC\x81 Mixes/1.flac|Caf\xC3\xA9/2.flac	
+duplicates-kept-in-order	Playlists/mix.m3u	a.flac\nb.flac\na.flac\n./a.flac\n../Playlists/a.flac\n	Playlists/a.flac|Playlists/b.flac|Playlists/a.flac|Playlists/a.flac|Playlists/a.flac	
+pipe-in-a-name	Playlists/mix.m3u	A | B.flac\n	Playlists/A \x7C B.flac	
+empty-file	Playlists/mix.m3u			
+directives-only	Playlists/mix.m3u	#EXTM3U\n#EXTINF:-1,Nothing\n		

@@ -2657,6 +2657,57 @@ lost my library."
   caller forwarded a raw one (#536). The result stays keyed by the caller's
   spelling so a lookup by what was passed still hits. (#919)
 
+- **A playlist file is indexed, never a track, and its members resolve when
+  the feed is asked, not when it is read** (2026-10-17, backlog B431). Both
+  walks hand an `.m3u` / `.m3u8` (any case, not a dot-file) to
+  `notePlaylistFile` before the audio gate, so it is no track and no content
+  to the clean-empty guard. `indexPlaylistFiles`, after the deletion passes
+  (Scan's whole library, ScanSubtree's scope), reads a file through
+  `fsutil.OpenAsFile` only when its size, mtime or `playlistFileParserVersion`
+  moved, and stores the parsed lines (`playlist_files`, v56) under the WALK's
+  stat. A failed read keeps the row, a file the walk could not stat is kept,
+  and a row the walk did not see takes the tracks' rules in their order
+  (errored subtree spared first, a backed case-only rename reaped, else the
+  threshold). The root flip's wipe, a root's prefix delete and
+  `clear-missing` take the rows too. `Store.PlaylistFiles` places and
+  resolves the stored lines in one read transaction at each request, so a
+  member indexed later resolves with no new read. Neither side holds the
+  whole index: the pass reads and writes a window at a time
+  (`nextPlaylistReadWindow`, the write batch's bounds by the walk's sizes),
+  and the feed resolves 4 MiB of stored lines at a time in path order
+  (`playlistFeedBatchBytes`), keeping its matches for later batches, so the
+  answer is a single pass's (one request on 37 MiB of lines peaked at 219 MiB
+  of heap in one batch, 54 MiB in batches). Every file the walk saw gets the
+  pass's evidence about its folder (`playlistFolderEvidence`, the row's
+  `folder_whole`): whole only when no errored subtree covers it, nothing
+  directly in it errored, and every audio file the walk saw directly in it is
+  in `backed`; a row the walk did not see keeps its mark. The feed's `complete` is
+  `playlistFilesCompleteKey`: set by a full scan's pass that backs every file
+  its walk saw, deleted only with the rows by the wipe, absent after the
+  migration, so a client can tell a list not yet rebuilt from one with files
+  removed. **Don't resolve members
+  at scan time, don't `path.Clean` a playlist line (a climb above the root is
+  dropped even when it comes back down), don't let a failed read write the
+  row, don't set or clear `complete` anywhere else, don't read every file
+  before writing or load every stored line for a request, don't take the
+  folder evidence from a running scan or from anything but the walk and
+  `backed`, and don't edit
+  `testdata/playlist-parse-cases.tsv`**: it is the app's
+  table, copied byte for byte (iOS `a9a16365`) and pinned to LF in
+  `.gitattributes`; change it there and copy it. The parse is the app's down
+  to Foundation's trim set (U+200B too) and line ends (U+2029 too); it treats
+  "#", "/" and "\" before a combining mark as plain characters where Swift
+  does not, a measured, accepted difference (the log). Tests:
+  `TestPlaylistParseCaseTable`, `TestAPlaylistMemberIndexedLaterResolvesWithoutARead`,
+  `TestAPlaylistFileReadFailureKeepsItsRow`,
+  `TestARemovedPlaylistFileLeavesTheFeedAtTheThreshold`,
+  `TestASubtreeScanCoversOnlyItsOwnPlaylistFiles`,
+  `TestAMultiRootLibraryResolvesFromTheManifestRoot`,
+  `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile`,
+  `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext`,
+  `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`,
+  `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt`.
+
 ### The wire contract
 
 - **`/v1` describes the SERVED set.** The manifest stream/page/total,
@@ -3133,6 +3184,44 @@ lost my library."
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client
   keys on, since no client can ask a bridge its protocol era.
+- **`GET /v1/playlist-files` is read-only, its ETag is a hash of the document,
+  and it names only served tracks** (2026-10-17, backlog B431; flag
+  `playlistFiles`, wired on every bridge, the demo included; no
+  `ProtocolVersion` bump). The ETag is the SHA-256 of the JSON it would send,
+  because members resolve per request; a placed line is its exact path, else
+  the one track a case-and-composition fold answers; a suppressed duplicate is
+  its group's one served copy or unresolved; a file of 2,000,000 bytes or more
+  (the app's cap), of more than 100,000 entry lines, or past the 8 MiB answer
+  budget is listed `tooLarge` with empty lists. **An album-folder playlist is
+  not listed, by the app's four terms** (`AlbumFolderPlaylist.isAlbumPlaylist`,
+  its B421; entries are the lines the path rule places, a dropped line is no
+  entry): (1) at least one entry; (2) EVERY entry names a track at exactly
+  that path, byte for byte, so one unresolved or fold-only entry keeps the
+  file listed; (3) every entry's parent folder is the playlist's own, by
+  bytes; (4) the tracks named are exactly the tracks directly in that folder,
+  order and repeats ignored. A track there is any indexed row, a suppressed
+  duplicate included, judged before the duplicate mapping. **And the file is
+  judged at all only on whole evidence about its folder** (the app's final
+  B421 gate, acoseac/1-bit#2237): the last scan that saw the file saw that
+  folder whole, meaning no failed or cut-short read of it or of a folder
+  above it, no entry in it the walk could not see, and a row for every audio
+  file the walk found directly in it. Unsure, it is listed: an index that
+  under-counts the folder (a new file it could not index) would let an
+  ordinary playlist naming the indexed tracks meet term 4. The evidence is a
+  finished scan's, taken after its walk's rows landed; a scan under way only
+  adds rows to a folder before its pass, which can only take a file out of
+  the rule. Change the rule only with the app's, in the same pair. **Don't
+  serve a suppressed path as a member, don't let an unresolved entry count
+  toward the album rule, don't judge a file whose folder evidence is not
+  whole, and don't put the store's error in the 500** (B425's fixed
+  message). Tests:
+  `TestPlaylistFilesAnswers304ToAMatchingETag`,
+  `TestAlbumFolderPlaylistsAreNotServed`, `TestTheAlbumFolderRuleTermByTerm`,
+  `TestASuppressedDuplicateMemberIsServedAsItsServedCopy`,
+  `TestAPlaylistFilesStoreFailureAnswersAFixedMessage`,
+  `TestAClientAbortDuringThePlaylistFilesReadIsInfoAnd499`,
+  `TestAnAlbumFolderPlaylistIsServedWhileItsFolderHoldsAFileTheIndexLacks`,
+  `TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`.
 
 ### Lyrics — the one document per track
 

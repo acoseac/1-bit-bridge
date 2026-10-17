@@ -45284,3 +45284,475 @@ checked against HEAD. Every prediction held.
 | 2. the log call removed at the root's site only | `TestAFolderWalkThatCannotStartLogsItsError` alone, at the same assertion |
 | 3. `walkErr.Error()` on the wire, still logged | both tests, at the message and the host directory in the body only |
 | 4. the raw error logged (`writeErrorLog`), the redacted text on the wire | both tests, at the host directory in the log, the logged `err`, and the folder missing from the line; the body assertions green |
+
+## 2026-10-17 — the indexer reads playlist files and `GET /v1/playlist-files` serves them (backlog B431)
+
+PR 7 of the playlist-file study the owner accepted on 2026-10-16 (iOS
+`docs/PlaylistFileImportStudy.md`, section 3 option (b) and section 8). Until
+now the scanner queued only `manifest.Ext` audio files, so a bridge source
+never saw the library's `.m3u` / `.m3u8` files: the app's importer runs only on
+its SMB and on-device walks. Branch `feat/b431-playlist-files-feed` from
+`8f819a89`.
+
+### What was built
+
+- **Discovery.** Both walks (`walkRoot`, `ScanSubtree`'s) ask
+  `notePlaylistFile` before the audio gate. An `.m3u` / `.m3u8` name in any
+  case (the app's `MetadataNormalizer.isPlaylist`), not a dot-file, is
+  recorded with the walk's stat (through a link, by `walkedFileInfo`, as a
+  track is) and goes no further: never a track, and not content to the
+  clean-empty guard, which counts exactly what it counted before. An entry
+  that is not a file (a pipe named `x.m3u`) is not recorded; one the walk
+  could not stat is recorded as unreadable.
+- **The pass.** `indexPlaylistFiles` runs after the track and folder
+  deletion passes, over Scan's whole library or ScanSubtree's `relScope`
+  (the same byte-range scope as `TrackPathsUnder`). A file seen at the size
+  and mtime its row was read at, by `playlistFileParserVersion` 1, is not
+  read. Any other is read through `fsutil.OpenAsFile`, eight at a time, and
+  stored in batches of 256 reads or 16 MiB of lines. A read that does not end
+  exactly at the opened size is an error (`errPlaylistFileChanged`), and an
+  error keeps the stored row: only a completed read writes (B134's rule). A
+  file the walk could not stat is kept as it is. A row the walk did not see:
+  spared under an errored subtree (which carries the clean-empty guard's
+  sentinel), reaped at once as the old spelling of a case-only rename this
+  pass backs (`caseOnlyRenames` / `backedSeenFolds` / `reapCaseRename`,
+  shared with tracks), otherwise counted missing and deleted at the
+  scanner's threshold, scoped to the paths this pass counted. One line per
+  pass for the files it could not stat, could not read, or found too large,
+  each with a library-relative example (`walkErrReason`, no host path).
+- **Storage.** `playlist_files` (migration v56): path (manifest form, the
+  primary key), size, mtime_ns, parser_version, too_large, the entry lines
+  LF-joined in a BLOB (a kept line never holds an LF, which ends a line, and
+  never is empty), missing_count. The stamp stored is the WALK's stat, which
+  is what the next walk compares, as for a track: the opened file's can
+  differ (a file written between the walk and the read, or a Windows
+  directory entry whose metadata lags the file's), and stored it would
+  re-read the file every scan.
+- **Root changes.** `deleteFilesystemRowsTx` (the single↔multi flip, both
+  the plain wipe and `RecordFirstIndexedCarryAndWipe`) and `WipeAllTracks`
+  delete every row: their paths flip form with the folders'. A root's
+  `DeleteTracksByPrefix` deletes its rows in the same byte range and
+  transaction; no walk would see them again, and until the threshold the feed
+  would list them with every entry unresolved. `ClearMissingCounts` takes the
+  missing ones too (its total counts them).
+- **The feed.** `Store.PlaylistFiles` reads every row, puts each line through
+  the path rule against the playlist's folder, and resolves every distinct
+  placed path once, in one read-only transaction (one snapshot, so one
+  store gives one answer and one ETag). `GET /v1/playlist-files` wraps it in
+  its DTOs and a strong ETag. Bounded route, 10 s ctx-timeout, `rateNone`,
+  gzip when accepted.
+- **Events.** A batch that changed what the feed serves (a new row, other
+  lines, another too-large mark) or a deletion notes the library, so
+  `library.changed` goes out: once at the end of a full scan as before, and
+  through the 30 s debounce after a subtree scan (the watcher). A file touched
+  with its content unchanged stores the new stamp and notes nothing. The app's
+  event coordinator runs a silent delta on every `library.changed`, whatever
+  its `indexedAt` (iOS `BridgeSyncEvents.pulls`, a9a16365).
+- **Completeness.** The answer's top-level `complete` is the scan_state key
+  `playlist_files_complete`: a full scan's pass sets it once every playlist
+  file its walk saw is backed (read and written, or kept as it was), the
+  root flip's wipe deletes it in the same transaction as the rows, and a store
+  the migration just created has none. No later pass clears it.
+
+### Decisions
+
+- **Members resolve at request time, against the tracks the store holds
+  then; the index stores the parsed lines.** Resolution depends on which
+  tracks exist, and tracks change through paths that never see a playlist
+  file (a scan of another folder, a trash, a UPnP ingest, a root that comes
+  back). Resolving at scan time would need every one of them to re-resolve
+  every playlist, or leave stale unresolved entries until the playlist's own
+  folder changed, which is the first-scan defect the study found in the app
+  (its defect 1). Per request the cost is a few indexed lookups per playlist:
+  the distinct placed paths in json_each chunks of 400 (the
+  `CatalogTrackRowsForPaths` idiom; an ill-formed UTF-8 path is bound alone,
+  `splitIllFormedUTF8Paths`), a fold lookup for the misses, a group lookup for
+  suppressed matches, and one folder read for each playlist whose members all
+  sit in its own folder. `TestAPlaylistMemberIndexedLaterResolvesWithoutARead`
+  pins it, and control 4 below shows it holds with the subtree pass removed.
+- **The lookup.** Exact bytes first; with no row there, `unicode_lower`
+  (case and NFC folded, the expression index), taken only when exactly one
+  row answers: the store's read rule (`LookupTrack`). The app folds bridge
+  shares, and a playlist written on another machine names NFC paths for NFD
+  files. Two rows that fold alike leave the line unresolved; the exact
+  spelling always wins.
+- **Duplicates.** `/v1` describes the served set, so a suppressed track is
+  never a member. It is served as its group's one served row, which is then
+  the winner of every unit in the group (`PlanSuppression` keeps exactly one
+  served winner per unit); a group with none, or several (a DSD and a PCM
+  edition), leaves the line unresolved. The album-folder rule reads the
+  matched rows before this mapping (`TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping`):
+  a ripper's playlist whose folder holds a suppressed copy is still one.
+- **Album-folder playlists** (the owner's decision): the app's predicate,
+  `AlbumFolderPlaylist.isAlbumPlaylist` (iOS B421, branch
+  `feat/b421-skip-album-folder-playlists` at `3cc09a22`), term for term. The
+  entries are the lines the path rule places; a line it drops is no entry.
+  The file is not listed only when (1) it has an entry, (2) EVERY entry names
+  a track at exactly that path, byte for byte, (3) every entry's parent
+  folder is the playlist's, by bytes, and (4) the tracks named are exactly
+  the tracks directly in that folder, order and repeats ignored.
+  `TestTheAlbumFolderRuleTermByTerm` is the app's truth table plus the two
+  rows the bridge adds (a dropped line beside the folder's tracks, an entry
+  found only by the fold). The first version of this PR read term 2 as
+  "every RESOLVED entry lies in the folder", which ignored an unresolved
+  line: a ripper's file with one stale line was skipped where the app imports
+  it, and a fold match counted. The coordinator passed on the app's rule
+  before review; an unresolved line may be a file a scan could not read, so
+  it never counts toward skipping. On the bridge a track is any row the
+  index holds, a suppressed duplicate included, which is what a share's
+  listing shows the app, and the rule reads the matched rows before the
+  duplicate mapping (`TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping`).
+  A disc in a subfolder is not the folder's own, either way
+  (`Disc/Album/Album.m3u` is listed, `Box/Box.m3u` naming only `Box/`'s own
+  track is not).
+- **`complete`, added beyond the brief.** The app's import (B432) is to
+  write nothing from a failed or lossy fetch, and an index that has not yet
+  been through a full scan is lossy in a way only the bridge can see: right
+  after this update the table is empty until the startup scan's pass, and
+  after a single↔multi flip it is empty until the rescan's. An empty or
+  partial list there reads, to a client, exactly like files removed, and an
+  app that reaps on it would drop its imported rows with their hidden flags
+  and downloads and import them again a scan later. `/v1/health` cannot say
+  it: `lastFullScan` predates the update, and `isScanning` misses the moment
+  before the startup scan starts. A boolean rather than a time, so the
+  ETag moves once, not after every six-hourly scan. Strict on what counts:
+  a full scan that could not read a file it had no row for leaves the index
+  incomplete (that file may be one a client holds from before a flip), and a
+  permanently unreadable new file keeps it so, logged every scan. Once set,
+  nothing but a wipe takes a row out other than as a removed file's, so no
+  later pass needs to clear it. Additive; a client that ignores it is where
+  it would be without it.
+- **The name** is the app's for an SMB import, `(entry.name as NSString)
+  .deletingPathExtension`: the file name without its last extension
+  (`Mix..m3u` → `Mix.`, `Mix .m3u` → `Mix `), measured on macOS 27 against
+  Foundation.
+- **Limits.** A file of 2,000,000 bytes or more is not read: the app's guard
+  (`LibraryScanner.readPlaylistFile`, `entry.size < 2_000_000`), which imports
+  such a file as an empty row. A file with more than 100,000 entry lines keeps
+  none (`playlistFileMaxEntries`): under the byte cap that takes lines
+  averaging under 20 bytes, so it binds only a file of very short lines,
+  whose entries a long folder path would multiply in the feed (1M lines of
+  `a` in a 200-byte folder would be 200 MB of members). One answer holds at
+  most 8 MiB of entries (`PlaylistFileFeedBudget`, each entry its length plus
+  4), filled in path order; a playlist that does not fit is listed and a
+  later one that fits is still served. All three are `tooLarge: true` with
+  empty lists, which the spec says tells nothing of the file's contents: the
+  app decides whether that is the empty row its SMB import makes.
+- **Unresolved** holds every entry line that is no member, in file order, in
+  the parser's form (trimmed, `\` folded): a line the path rule drops and a
+  placed line no served track answers. The app's `unresolvedPaths` holds only
+  the second kind (`applyPlaylistImport` drops what the rule drops); here the
+  feed is the only record a client has of the file.
+- **Backslashes.** A playlist LINE folds `\` to `/` (the table's rule). A
+  manifest path is `/`-separated on every platform and a `\` in it is part of
+  a name (`TestAManifestPathBackslashIsPartOfAName`, the scanner half skipped
+  on Windows); manifest paths go through `path`, never `filepath`.
+
+### Parity with the app's parser
+
+The table (`testdata/playlist-parse-cases.tsv`, iOS `a9a16365`, SHA-256
+`de5952e289d044ab6be06864917fd958093141a91d8f013aca40d8ab0f56b4e6`, copied byte
+for byte and pinned `text eol=lf` in a new `.gitattributes`) passes all 29
+rows byte for byte (`TestPlaylistParseCaseTable`), and its two premise tests
+check the copy is the app's table. Beyond the table, the app's
+`PlaylistImport.swift` was compiled with a probe on macOS 27 (Swift 6.4) and
+asked about the edges, and then run against the Go parser on generated
+inputs:
+
+- 30,000 inputs (random joins of path pieces, separators, the five line
+  ends, BOMs, Windows-1252 and undefined bytes, spaces of every kind, NUL,
+  U+200B, U+FEFF, emoji; playlists at five depths) gave 885 mismatches on the
+  first run, every one U+200B: Foundation's `whitespacesAndNewlines` trims
+  it (CoreFoundation's whitespace set runs U+2000–U+200B) though Unicode
+  moved it out of the space separators, and Go's `unicode.IsSpace` does not.
+  The trim is `unicode.IsSpace || U+200B` now (`isPlaylistTrimmed`), and the
+  same 30,000 agree byte for byte.
+- The probe also showed U+2029 ends a line (the table's header names only
+  U+0085 and U+2028), VT, FF, FS–US and NUL do not, and the app's UTF-8
+  decoder drops one more BOM at the start of the text after the raw strip
+  (two BOMs both go, a third stays; Windows-1252 and ISO-8859-1 drop none).
+  `TestPlaylistParserEndsLinesWhereTheAppDoes`,
+  `TestPlaylistParserTrimsWhatTheAppTrims` and
+  `TestPlaylistParserDropsOneMoreBOMAfterTheBytes` pin these;
+  `TestPlaylistPathRuleBeyondTheTable` pins absolute lines, drive letters,
+  URLs, UNC, `.`, `..` at and below the root.
+- With combining marks, zero-width joiners and variation selectors added,
+  628 of 30,000 differed, every one a `#`, `/`, `\`, `:` or `.` followed by
+  one of them (367) or a line that starts with one, which the app joins after
+  a `/` of its own (261). Swift compares those as one Character; here they
+  are plain characters. Accepted, not emulated: no real file name starts a
+  path segment with a combining mark, NFD puts marks after their letters,
+  and a grapheme table in Go would be an approximation of ICU's.
+
+### Red first
+
+- Parser (`6c8cabb8`, the table and the tests on a stub parser):
+  `TestPlaylistParseCaseTable` red at 30 assertions, one per non-empty
+  column of the 27 rows that hold an entry; the seven tests beyond the table
+  red; the two premise tests green.
+- Pass and feed (on `f31e7386`'s tests, the pass a no-op and the feed
+  returning every stored line unresolved with no rule): 16 of the 19 tests
+  red; the 3 green test the store writers the stubs did not touch.
+- Endpoint (the handler a bare 404, route, auth and flag still wired): 6 of
+  8 red; green were the 401 (auth precedes the handler) and the unwired 404
+  with the flag.
+- `complete` (`130778d0`, `markPlaylistFilesComplete` a no-op):
+  `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` red at "a
+  full scan that read every file did not mark the index complete", and
+  `TestPlaylistFilesThroughTheRealIndex` at "not complete".
+- The four-term album rule (`dd74ce42`'s tests on `f31e7386`'s feed):
+  `TestTheAlbumFolderRuleTermByTerm` red at "an entry that does not resolve"
+  and "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed`
+  at the stale-line file missing from the feed.
+
+### Negative controls
+
+On the final code, `13cf391a`: each anchor count-asserted, the package
+vetted, the 32 playlist tests in `internal/manifest` (or the 9 in
+`internal/api`) run with `-count=1`, restored with `git checkout` and the
+tree checked against HEAD. Each prediction was written before its run, and
+every one held exactly.
+
+| control | red, predicted and observed |
+|---|---|
+| 1. the climb rule loosened to `path.Clean("/"+joined)` | `TestPlaylistParseCaseTable` at both columns of four rows (climb-above-the-share-root, climb-above-then-back-down, playlist-at-the-share-root, backslash-separators), `TestPlaylistPathRuleBeyondTheTable` at `/../x.flac`, `../..` and the root playlist's `..`, `TestTheAlbumFolderRuleTermByTerm` at "a dropped line is no entry" and `TestAlbumFolderPlaylistsAreNotServed` at `Dropped/` and the count (a climb above the root that Clean places is an entry that resolves to nothing, so term 2 lists the file) |
+| 2. the album-folder skip removed | `TestAlbumFolderPlaylistsAreNotServed` (Ripped, Dropped and Box served, nine listed for six), `TestTheAlbumFolderRuleTermByTerm` at its three album rows, `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` |
+| 3. If-None-Match ignored | `TestPlaylistFilesAnswers304ToAMatchingETag` at its five validator forms; its stale-ETag check and the other 8 green |
+| 4. ScanSubtree without the pass | `TestASubtreeScanCoversOnlyItsOwnPlaylistFiles` and `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` at its subtree scan; `TestAPlaylistMemberIndexedLaterResolvesWithoutARead` green, as request-time resolution should leave it |
+| 5. a root's prefix delete leaving its rows | `TestAMultiRootLibraryResolvesFromTheManifestRoot`, at the removed root's playlist alone |
+| 6. the fold fallback removed | `TestAPlaylistEntryFoldsOnlyToTheOneRowThatAnswers`, `TestAFullScanServesAPlaylistFileWithItsMembers` and `TestAlbumFolderPlaylistsAreNotServed` (`Case/`), each at members and unresolved |
+| 7. a suppressed path served as a member | `TestASuppressedDuplicateMemberIsServedAsItsServedCopy` alone |
+| 8. a failed read written as an empty read | `TestAPlaylistFileReadFailureKeepsItsRow`, and `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` at the failed read that marked the index complete |
+| 9. the album rule judged after the duplicate mapping | `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` alone |
+| 10a. term 2 ignoring an unresolved entry | `TestTheAlbumFolderRuleTermByTerm` at "an entry that does not resolve", `TestAlbumFolderPlaylistsAreNotServed` at the stale-line file missing |
+| 10b. term 2 taking a fold-only match | `TestTheAlbumFolderRuleTermByTerm` at "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed` at `Case/` missing |
+| 11. the wipe keeping the completeness key | `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` alone, at "the wipe left the index complete" |
+| 12. the mark ignoring whether every file is backed | the same test alone, at "a full scan that could not read a file with no row marked the index complete" |
+| 13. a subtree scan's pass allowed to mark | the same test alone, at the subtree scan's "complete true" |
+
+The rounds before it. Controls 1 and 3 to 9, in their first form, ran on
+`f31e7386` and held exactly (1 then reddened the table and the three lines
+beyond it, 28 green). After the four-term album rule (`dd74ce42`), 2, 9, 10a
+and 10b were predicted and held on `b00ae740`, and 1 and 3 to 8 were re-run
+there on their earlier predictions without new ones written first: 1 and 6
+also reddened the album tests `dd74ce42` had added, which this table now
+predicts. 11 to 13 first ran on `130778d0`. The refactor `13cf391a`
+(SonarCloud's complexity findings on `resolve` and `write`) moved the
+anchors of 6 to 10b, so every control ran again there.
+
+### Tests
+
+`internal/manifest`: `playlist_files_parse_test.go` (the table and the
+parity edges), `playlist_files_scan_test.go` (a full scan, change detection
+and the parser version, removal at the threshold and the reset, the
+clean-empty guard, a subtree's scope, a late member, the album rule,
+multi-root, the root removal and flip, a read failure, the size cap,
+backslashes, completeness, the read windows, the folder evidence; with
+`playlist_files_unix_test.go` for the gate on a real scan) and `playlist_files_feed_test.go`
+(the fold, duplicates, the album rule term by term, the budget, the batches,
+the library note, clear-missing, a settle over two paths per step).
+`internal/api`:
+`playlist_files_test.go` (the exact document, the ETag and 304, `complete`
+sent false and moving the ETag, the flag, auth, a store failure's fixed
+message, a client abort at 499, and the real index end to end with gzip). `TestHealthFeaturesCompleteSet` and
+`TestRouteRegistry_completeness` gained the flag and the route, the feature
+list's capacity is 34, PROTOCOL.md has the section and the
+`playlist_files_not_supported` row.
+
+### After review
+
+SonarCloud passed the gate (0.0% duplication on new code) with 8 new
+issues. Fixed in `13cf391a`: cognitive complexity in `resolve` (22) and in the
+pass's `write` (17), each split into steps with no change in behaviour, and
+three `go:S1135` hits that were a variable named `todo` (now `toRead`). Left
+as they are, with the reason: `walkRoot`'s cognitive complexity (25; the one
+`if` this PR adds is 2 of it, the rest is the walk's existing classification
+chain, the highest-stakes code in the package) and its nine parameters
+(`playlists` is the ninth; moving it into scanner state would hide a
+per-scan map behind the struct, as `heldReconciles` is, for a signature this
+PR otherwise leaves alone); and `godre:S8196` on `PlaylistFileStore`, named
+as the package's other one-method stores are (`SmartPlaylistStore`).
+
+Gemini's four comments asked for one prepared statement where the same SQL
+ran in a loop: the feed's track and duplicate-group lookups
+(`eachPlaylistLookup`, `servedCopies`), the batch write's comparison read
+and the settle step's bump, reap and reset. Taken in `5f1e30fd`, as
+`IncrementMissingTracksAndDeleteAtThreshold` prepares its statement. No line
+a control mutates moved; the playlist tests pass on it under `-race`.
+
+Its second pass asked for three more: `bytes.Equal` for the stored-lines
+comparison, one argument list for every call of a settle step, and an index
+loop over the stored rows. Taken in `d6116152`, none changing behaviour:
+`bytes.Equal` is the comparison the string conversions made (the standard
+library's comment on it: neither compiler allocates for them),
+`database/sql` converts each call's arguments into a list of its own
+(`driverArgsConnLocked`), and the loop reads the slice as `place` does above
+it. Two controls on `d6116152`, each predicted first, held: the comparison
+forced false reddened `TestPlaylistFileWritesNoteTheLibraryOnlyWhenTheFeedChanges`
+alone, at "1 notes after a change, want 2"; the argument list bound to the
+first path for every call reddened nothing, as predicted, because every test
+settled one path per step. `TestASettleStepBindsEachOfItsPaths` (`09765a29`)
+runs each of the four steps over two paths, and the same mutation reddens it
+alone, at its first settle (one row deleted where none should be).
+
+CodeRabbit reviewed `b1c9b7ea`. Its one inline comment: the trim's U+200B
+was a literal character in the source, which a reader cannot see and an
+editor can drop. Written as `'\u200B'` in `251e742b`, with the fold test's
+decomposed é (now `"Cafe\u0301"`), the one other invisible character this PR
+added: an editor that normalized it would leave that test comparing a string
+with itself. The compiled values are the same. Control on `251e742b`,
+predicted: the U+200B clause removed reddens
+`TestPlaylistParserTrimsWhatTheAppTrims` alone, at U+200B; held.
+
+Its summary raised one concern, as moderate and inferred: no aggregate bound
+on memory. It was right on both sides. The pass read every file it had to
+read before it wrote any (a first scan reads them all), and the feed loaded,
+placed and looked up every stored line for each request, so a request's heap
+grew with the index, not with its 8 MiB answer. Measured on macOS 27 (Apple
+silicon, `go1.26.6`) with an index of 300 playlists of 2,000 entries (36.9
+MiB of lines, 20,000 tracks, a tenth of the lines naming nothing): one
+request took 336 ms and peaked at 219 MiB of live heap over a 3.8 MiB
+baseline, allocating 438 MiB. `cd830ad8`:
+
+- the pass reads and writes a window at a time, 256 files or 16 MiB by the
+  walk's sizes (the write batch's bounds), and still logs each of its lines
+  once for the pass;
+- the feed reads the rows' paths first, then loads, places and resolves 4 MiB
+  of stored lines at a time in path order, in the same read transaction and
+  against the same budget, and keeps up to 50,000 matches for later batches
+  (without them, batching tripled the time, to 959 ms).
+
+The same request now peaks at 54 MiB in 370 ms, and five times the index
+(1,500 playlists, 185 MiB of lines) at 60 MiB in 1.8 s. The answer is
+unchanged: `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` resolves one
+index (a line of every kind, lines shared across files, an album-folder
+playlist, a file past the cap, a budget that runs out) as one batch and in
+batches of 1, 64, 200 and 300 bytes, and compares the JSON. Controls on
+`cd830ad8`, each predicted before it ran, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| W1. the pass reads every file before it writes (the earlier code) | `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext` alone: all 300 reads found no row written |
+| W2. the window's byte bound ignored | `TestPlaylistReadWindowsHoldTheirBytes` alone, its size case one window, `0-12` |
+| F1. the feed's batch bound ignored (the earlier code's one batch) | `TestPlaylistFeedBatchesHoldTheirBytes` alone, one batch, `0-7` |
+| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; `TestThePlaylistFeedHoldsItsBudget`, which also runs a batch per row, stays green, since its third file fits either way |
+| F3. the kept matches taken as complete after the first batch | the same test alone, at 1 and 64 bytes only: at 200 and 300 the first batch already holds every path the later ones name |
+
+What the bound leaves as it was: the work is still in proportion to the
+index, since every file is resolved to learn whether it fits, and is bounded
+in time by the route's 10 s; and the 8 MiB budget still lists everything past
+some 100,000 served entries `tooLarge`. In the measured index 64 of the 300
+playlists are served. A library that size needs the feed paged (an `after`
+cursor, a page per budget, each page one snapshot), which changes the
+response's shape: not done here, for B432's design to settle.
+
+Gemini's third pass, on `dd2699fb`, asked for the album-folder rule's two
+folder reads to be prepared once rather than at each candidate playlist (a
+library of ripper playlists has one per album). Taken in `dd01ceea`: both
+statements are prepared on first use and kept for the request
+(`playlistFolderTracks`). The call that control 9 mutates now passes them, so
+controls 2 and 9 ran again there, predicted first, and held: 9 reddens
+`TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` alone, and 2 its
+three tests and, as predicted, `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`
+at its fixture check (the album playlist listed).
+
+### The whole-evidence gate (the app's final B421 term)
+
+The coordinator passed on one more term from the app's final B421 rule
+(acoseac/1-bit#2237): a playlist is judged an album playlist only on whole
+evidence about its folder, and an unsure one is served. After a partial or
+failed listing the stored tracks can under-count the folder (a new file not
+yet indexed), and an ordinary playlist, ten of eleven tracks, then meets term
+4 and is wrongly dropped. On the bridge, in `3307006f`:
+
+- **What counts as whole** (`playlistFolderEvidence`, at the pass). No errored
+  subtree covers the folder: a read of it or of a folder above it that failed
+  or was cut short (`os.ReadDir` returns what it read before the error, so a
+  playlist can be seen in a listing cut short), or a root the clean-empty
+  guard spared. Nothing directly in it errored: an unreadable link keys
+  itself, and a subfolder whose read failed is counted against its parent,
+  the safe way, since unsure only lists. And every audio file the walk saw
+  directly in it has a row the scan stands behind (`backed`: the skip gate's,
+  keepUnread's for a row it had, the writer's). A new file whose read failed
+  gets no row (keepUnread, B134), and neither does one that was no longer a
+  file, one whose extractor panicked, or one whose write did not land: each
+  is "an indexing error pending". An SACD container is not asked; its rows
+  sit under it, not in its folder.
+- **Where it is kept.** On the row, `folder_whole` (added to v56, which has
+  not shipped), taken with the read for a file read, and through
+  `markPlaylistFolders` for a file the pass kept, which notes the library
+  when a mark changed. The feed judges a file only when its row says the
+  folder was whole.
+- **Mid-scan.** The evidence is a finished scan's: the pass runs after the
+  scan's workers and writer have finished and its deletion passes have run,
+  and a request during a later scan reads the last pass's marks. Until that
+  scan's own pass, a folder's rows change only by rows added for new files
+  or deleted for files gone past the threshold, and a playlist's row not at
+  all. An added row can only make term 4 fail, which lists the file, so a
+  running scan cannot drop one wrongly. Withholding every judgment while any
+  scan runs was not done: every album playlist would be listed for the
+  length of each scan and leave after it, and B432 would import and reap them
+  all at every scan.
+- **A file the walk did not see** keeps its mark. The pass learned nothing
+  about its folder, whose rows were spared (an errored subtree) or counted
+  missing, never added to, so its last verdict stands. The app likewise
+  leaves its rows alone when its walk cannot list a folder.
+- **What no scan can know**: a file added to a folder after the last scan
+  saw it. Until a scan sees it, the bridge can judge on an index one file
+  short. That can only keep out a file that was not listed (a playlist
+  naming the old tracks was an album playlist before the file came), never
+  drop one that was, and the next scan that sees the file lists the playlist.
+
+Tests: `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt` (thirteen
+cases: the folder's own read, a folder above, a link and a subfolder in it, a
+file with no row, a container, a file in a subfolder, an error elsewhere, the
+root sentinels of one root and of several), and in the unix-only
+`playlist_files_unix_test.go`
+`TestAnAlbumFolderPlaylistIsServedWhileItsFolderHoldsAFileTheIndexLacks` (the
+coordinator's case: a file locked out with chmod 0 has no row, the playlist
+names exactly the indexed tracks, and it is listed; with the file gone the
+same unchanged file is an album playlist) and
+`TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`. The feed
+tests' `storePlaylist` now writes a row as a scan that saw its folder whole
+would. Controls on `3307006f`, each predicted before it ran, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| G1. the gate removed (the earlier feed) | both scan tests alone, each at its first scan |
+| G2. the evidence ignoring `backed` | the evidence table at "a file it holds has no row", and the locked-out file's test at its first scan |
+| G3. the evidence ignoring entries in the folder | the table at its link and subfolder rows, and the link's test at its first scan |
+| G4. a kept file's mark never rewritten | both scan tests, each at its second scan: the unchanged file kept the mark its first scan gave it |
+| G5. the folder's own key alone, not the subtrees over it | the table at "a folder above it failed" and both root outages |
+
+The pass's call in ScanSubtree changed, so control 4 ran again with it, and
+so did 2, 9, 10a and 10b, whose rule the gate now fronts: all held as the
+table above predicts, 2 now also reddening both scan tests at their second
+scans.
+
+### For the app (B432)
+
+- `members` are manifest paths, `bridgeOriginalPath` as the manifest names
+  it; `unresolved` holds the dropped lines too.
+- `tooLarge` lists a playlist whose entries are not served; its empty lists
+  are not its contents.
+- `complete: false` is the lossy fetch: import what it lists if wanted, and
+  remove nothing it lacks.
+- An album-folder playlist is absent from the feed, by B421's four terms
+  and its whole-evidence gate. A playlist listed while its folder was unsure
+  leaves the list once a scan sees the folder whole and the terms hold, as
+  the app's own launch pass would remove its row.
+  One difference in what reaches the app: a placed line that resolves only by
+  the fold is served as a member here, so the file is listed (term 2 is
+  byte-exact), and its row then names only that folder's tracks. B421's
+  launch pass (`storedRowIsAlbumPlaylist`), judging a row by its stored
+  members, would remove such a row; B432 should leave rows imported from a
+  bridge feed to the bridge's judgment.
+- A playlist-file change publishes `library.changed` with the watermark
+  unchanged when no track moved; an import at the end of every committed sync
+  (a delta with nothing in it included) is what picks it up.
+- The table header's line-end note omits U+2029, and nothing in it pins the
+  trim set (U+200B) or the second BOM; the app's parser does all three, and
+  rows for them would hold both sides to it.
+- One answer serves at most 8 MiB of entries, some 100,000; past that a
+  playlist is `tooLarge` though it is under both file caps. A library with
+  more needs a paged feed before B432 depends on the single document.

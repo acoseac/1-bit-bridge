@@ -1,0 +1,3 @@
+# The shared playlist parse-case table is compared byte for byte with the iOS
+# app's copy; a CRLF checkout (Windows CI) would change every row.
+internal/manifest/testdata/playlist-parse-cases.tsv text eol=lf

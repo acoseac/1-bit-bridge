@@ -49,6 +49,7 @@ var wantAllHealthFeatures = []string{
 	"playbackHistory",
 	"playbackHistoryRead",
 	"playlistBackup",
+	"playlistFiles",
 	"playlistListRevision",
 	"playlistsCrossDevice",
 	"pushEventsSupported",
@@ -107,6 +108,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithLyrics(stubLyricsStore{}).
 		WithHistoryStore(mstore).
 		WithPlaylistStore(mstore).
+		WithPlaylistFileStore(mstore).
 		WithSmartPlaylistStore(mstore).
 		WithDemoMode(true).
 		WithPairing(newPairingStoreForFeaturesTest(t, authStore))

@@ -59,6 +59,23 @@ func playlistListETag(epoch string, canon playlistListCanon) (string, error) {
 	return epoch + "." + hex.EncodeToString(sum[:]), nil
 }
 
+// playlistFilesETag is the SHA-256 hex of the playlist-file document's JSON
+// (backlog B431). The feed resolves its members at each request, so the
+// hash of what it would send is the one value that changes exactly when the
+// answer does: a file read again, a member's track added or gone, a
+// duplicate stamp moved. Unquoted.
+func playlistFilesETag(resp playlistFilesResponse) (string, error) {
+	if resp.Playlists == nil {
+		resp.Playlists = []playlistFileDTO{}
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // ifNoneMatchHits reports whether If-None-Match matches etag. True is a
 // hit: the handler answers 304. Comparison is weak: a W/ prefix is
 // stripped. "*" matches only when starMatches is set (a favorites

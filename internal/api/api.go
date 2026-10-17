@@ -194,6 +194,13 @@ type Server struct {
 	// is omitted. *manifest.Store satisfies it in production.
 	playlistStore PlaylistStore
 
+	// playlistFileStore backs GET /v1/playlist-files + the "playlistFiles"
+	// health-feature flag (backlog B431): the playlist files the scanner
+	// read from the library, read-only. Nil unless WithPlaylistFileStore is
+	// wired; serve wires it on every bridge, the demo included, because it
+	// is library data, not user data. *manifest.Store satisfies it.
+	playlistFileStore PlaylistFileStore
+
 	// historyStore backs POST /v1/history/batch + the "playbackHistory"
 	// health-feature flag. Nil unless WithHistoryStore is wired. Same
 	// feature-off shape as playlistStore. *manifest.Store satisfies it.
@@ -1854,13 +1861,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 33 covers the current maximum
+	// appends in lex order. Capacity 34 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
-	// playbackHistoryRead + playlistBackup + playlistListRevision +
+	// playbackHistoryRead + playlistBackup + playlistFiles +
+	// playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
 	// search + smartPlaylists + spectrum + syncEvents + trackQuality +
 	// upscaleCompleteEvents + variantBumpsIndex + waveform).
@@ -1868,7 +1876,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 33)
+	feats := make([]string, 0, 34)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2017,7 +2025,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// pairingEventsSupported < playlistBackup < playlistListRevision <
 	// playlistsCrossDevice ('B' < 'L' < 's') < pushEventsSupported.
 	if s.playlistStore != nil {
-		feats = append(feats, "playlistBackup", "playlistListRevision", "playlistsCrossDevice")
+		feats = append(feats, "playlistBackup")
+	}
+	// `playlistFiles` advertises GET /v1/playlist-files, the playlist files
+	// the scanner read from the library (backlog B431). Gated on the index
+	// being wired, which serve does on every bridge, the demo included: it
+	// is library data, read-only, not one of the user-data stores the demo
+	// leaves unwired. Lexically playlistBackup < playlistFiles <
+	// playlistListRevision ('B' < 'F' < 'L'), so it splits that block.
+	if s.playlistFileStore != nil {
+		feats = append(feats, "playlistFiles")
+	}
+	if s.playlistStore != nil {
+		feats = append(feats, "playlistListRevision", "playlistsCrossDevice")
 	}
 	if s.eventBroker != nil {
 		feats = append(feats, "pushEventsSupported")
