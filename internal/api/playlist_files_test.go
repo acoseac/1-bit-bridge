@@ -3,12 +3,14 @@ package api
 import (
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,32 +24,53 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// GET /v1/playlist-files (backlog B431): the shape, the ETag and 304, the
-// health flag, auth, and the error paths.
+// GET /v1/playlist-files (backlog B431, paged since B442): the shape, the
+// cursor and its version, the ETag and 304, the health flags, auth, and the
+// error paths.
+
+// fakeFeedVersion is the version a fakePlaylistFiles answers at first.
+const fakeFeedVersion = "0123456789abcdef"
 
 // fakePlaylistFiles is a PlaylistFileStore whose answer a test sets, and
-// can change between requests.
+// can change between requests: files as one page, or pages by the path
+// they start after, at version.
 type fakePlaylistFiles struct {
 	mu         sync.Mutex
 	files      []manifest.PlaylistFile
+	pages      map[string]manifest.PlaylistFilePage
+	version    string
 	incomplete bool
 	err        error
+	// asked records each read's version and after.
+	asked [][2]string
 	// block, when set, is closed by the read once it has started; the read
 	// then waits for its context and fails with it.
 	block chan struct{}
 }
 
-func (f *fakePlaylistFiles) PlaylistFiles(ctx context.Context) (manifest.PlaylistFileFeed, error) {
+func (f *fakePlaylistFiles) PlaylistFilesPage(ctx context.Context, want, after string) (manifest.PlaylistFilePage, error) {
 	f.mu.Lock()
-	feed := manifest.PlaylistFileFeed{Complete: !f.incomplete, Files: f.files}
+	f.asked = append(f.asked, [2]string{want, after})
+	current := f.version
+	if current == "" {
+		current = fakeFeedVersion
+	}
+	page := manifest.PlaylistFilePage{Files: f.files}
+	if f.pages != nil {
+		page = f.pages[after]
+	}
+	page.Version, page.Complete = current, !f.incomplete
 	err, block := f.err, f.block
 	f.mu.Unlock()
 	if block != nil {
 		close(block)
 		<-ctx.Done()
-		return manifest.PlaylistFileFeed{}, fmt.Errorf("read playlist files: %w", ctx.Err())
+		return manifest.PlaylistFilePage{}, fmt.Errorf("read playlist files: %w", ctx.Err())
 	}
-	return feed, err
+	if err == nil && want != "" && want != current {
+		return manifest.PlaylistFilePage{}, manifest.ErrPlaylistFilesChanged
+	}
+	return page, err
 }
 
 func (f *fakePlaylistFiles) set(files []manifest.PlaylistFile) {
@@ -91,7 +114,18 @@ func newPlaylistFilesRouter(t *testing.T, st PlaylistFileStore) (http.Handler, s
 // If-None-Match line, and returns the answer and its body.
 func getPlaylistFiles(t *testing.T, hs *httptest.Server, token string, ifNoneMatch ...string) (*http.Response, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/playlist-files", nil)
+	return getPlaylistFilesAfter(t, hs, token, "", ifNoneMatch...)
+}
+
+// getPlaylistFilesAfter is getPlaylistFiles for the page after cursor (the
+// first page for "").
+func getPlaylistFilesAfter(t *testing.T, hs *httptest.Server, token, cursor string, ifNoneMatch ...string) (*http.Response, []byte) {
+	t.Helper()
+	target := hs.URL + "/v1/playlist-files"
+	if cursor != "" {
+		target += "?after=" + url.QueryEscape(cursor)
+	}
+	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +178,9 @@ func TestPlaylistFilesServesTheFeedWithAStrongETag(t *testing.T) {
 		t.Errorf("ETag %q, want a quoted SHA-256", et)
 	}
 	// The exact document: field names, array members never null, tooLarge
-	// only when true, mtime in UTC to the nanosecond.
-	want := `{"complete":true,"playlists":[` +
+	// only when true, mtime in UTC to the nanosecond, and on the last page
+	// no nextCursor.
+	want := `{"version":"` + fakeFeedVersion + `","complete":true,"playlists":[` +
 		`{"path":"Playlists/Road Trip.m3u8","name":"Road Trip","mtime":"2026-10-16T09:12:44.123456789Z",` +
 		`"members":["Artist/Album/01 One.flac","Artist/Album/01 One.flac"],"unresolved":["../Missing/03.flac"]},` +
 		`{"path":"Playlists/All.m3u","name":"All","mtime":"2026-09-30T22:00:00Z","members":[],"unresolved":[],"tooLarge":true}` +
@@ -202,7 +237,7 @@ func TestPlaylistFilesSaysWhenTheIndexIsIncomplete(t *testing.T) {
 	fake := &fakePlaylistFiles{incomplete: true}
 	hs, token := newPlaylistFilesServer(t, fake)
 	first, body := getPlaylistFiles(t, hs, token)
-	if got := strings.TrimSpace(string(body)); got != `{"complete":false,"playlists":[]}` {
+	if got := strings.TrimSpace(string(body)); got != `{"version":"`+fakeFeedVersion+`","complete":false,"playlists":[]}` {
 		t.Fatalf("body %s", got)
 	}
 	fake.mu.Lock()
@@ -210,7 +245,7 @@ func TestPlaylistFilesSaysWhenTheIndexIsIncomplete(t *testing.T) {
 	fake.mu.Unlock()
 	resp, body := getPlaylistFiles(t, hs, token, first.Header.Get("ETag"))
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("ETag") == first.Header.Get("ETag") ||
-		strings.TrimSpace(string(body)) != `{"complete":true,"playlists":[]}` {
+		strings.TrimSpace(string(body)) != `{"version":"`+fakeFeedVersion+`","complete":true,"playlists":[]}` {
 		t.Fatalf("once complete: status %d, ETag %q (was %q), body %s", resp.StatusCode,
 			resp.Header.Get("ETag"), first.Header.Get("ETag"), body)
 	}
@@ -233,18 +268,18 @@ func TestPlaylistFilesWithoutTheIndexIs404AndUnadvertised(t *testing.T) {
 		t.Errorf("status %d %s, want 404 playlist_files_not_supported", resp.StatusCode, body)
 	}
 	for _, f := range healthOf(t, hs).Features {
-		if f == "playlistFiles" {
-			t.Error("health advertises playlistFiles with no index wired")
+		if f == "playlistFiles" || f == "playlistFilesPaged" {
+			t.Errorf("health advertises %s with no index wired", f)
 		}
 	}
 	wired, _ := newPlaylistFilesServer(t, &fakePlaylistFiles{})
 	feats := healthOf(t, wired).Features
-	found := false
+	found := map[string]bool{}
 	for _, f := range feats {
-		found = found || f == "playlistFiles"
+		found[f] = true
 	}
-	if !found {
-		t.Errorf("health does not advertise playlistFiles with the index wired: %v", feats)
+	if !found["playlistFiles"] || !found["playlistFilesPaged"] {
+		t.Errorf("health does not advertise playlistFiles and playlistFilesPaged with the index wired: %v", feats)
 	}
 	assertAlphaSorted(t, feats)
 }
@@ -368,8 +403,9 @@ func TestPlaylistFilesThroughTheRealIndex(t *testing.T) {
 	if err := json.NewDecoder(zr).Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	if !doc.Complete {
-		t.Error("the feed after a full scan is not complete")
+	if !doc.Complete || doc.Version == "" || doc.NextCursor != "" {
+		t.Errorf("the feed after a full scan: complete %v, version %q, nextCursor %q; want complete, a version, one page",
+			doc.Complete, doc.Version, doc.NextCursor)
 	}
 	if len(doc.Playlists) != 1 || doc.Playlists[0].Path != "Playlists/mix.m3u8" || doc.Playlists[0].Name != "mix" ||
 		strings.Join(doc.Playlists[0].Members, "|") != "Artist/Album/01.flac" ||
@@ -387,5 +423,123 @@ func TestPlaylistFilesThroughTheRealIndex(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"members":["Artist/Album/01.flac","Late/02.flac"],"unresolved":[]`) {
 		t.Errorf("body %s", body)
+	}
+	var moved playlistFilesResponse
+	if err := json.Unmarshal(body, &moved); err != nil || moved.Version == doc.Version {
+		t.Errorf("after the late track: version %q (was %q), %v; a track added moves the version", moved.Version, doc.Version, err)
+	}
+}
+
+// twoPages is a feed of two pages: a.m3u, then b.m3u.
+func twoPages() map[string]manifest.PlaylistFilePage {
+	a := manifest.PlaylistFile{Path: "Playlists/a.m3u", Name: "a", ModTime: time.Unix(1, 0).UTC(),
+		Members: []string{"A/01.flac"}, Unresolved: []string{}}
+	b := manifest.PlaylistFile{Path: "Playlists/b.m3u", Name: "b", ModTime: time.Unix(2, 0).UTC(),
+		Members: []string{"B/01.flac"}, Unresolved: []string{}}
+	return map[string]manifest.PlaylistFilePage{
+		"":                {Files: []manifest.PlaylistFile{a}, Next: "Playlists/a.m3u"},
+		"Playlists/a.m3u": {Files: []manifest.PlaylistFile{b}},
+	}
+}
+
+// decodePage decodes one page's body, failing the test on a bad one.
+func decodePage(t *testing.T, resp *http.Response, body []byte) playlistFilesResponse {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var page playlistFilesResponse
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("%v: %s", err, body)
+	}
+	return page
+}
+
+func TestPlaylistFilesPagesFollowTheNextCursor(t *testing.T) {
+	fake := &fakePlaylistFiles{pages: twoPages()}
+	hs, token := newPlaylistFilesServer(t, fake)
+	resp, body := getPlaylistFiles(t, hs, token)
+	first := decodePage(t, resp, body)
+	if first.NextCursor == "" || len(first.Playlists) != 1 || first.Playlists[0].Path != "Playlists/a.m3u" {
+		t.Fatalf("first page %s", body)
+	}
+	if strings.Contains(first.NextCursor, "Playlists") || strings.ContainsAny(first.NextCursor, "+/=") {
+		t.Errorf("nextCursor %q: want it opaque and query-safe (unpadded base64url)", first.NextCursor)
+	}
+	resp, body = getPlaylistFilesAfter(t, hs, token, first.NextCursor)
+	second := decodePage(t, resp, body)
+	if second.NextCursor != "" || len(second.Playlists) != 1 || second.Playlists[0].Path != "Playlists/b.m3u" ||
+		second.Version != first.Version {
+		t.Fatalf("second page %s", body)
+	}
+	fake.mu.Lock()
+	asked := fake.asked
+	fake.mu.Unlock()
+	if len(asked) != 2 || asked[0] != [2]string{"", ""} || asked[1] != [2]string{fakeFeedVersion, "Playlists/a.m3u"} {
+		t.Errorf("the store was asked %q; want the first page, then the page after a.m3u at the first page's version", asked)
+	}
+}
+
+func TestAPlaylistFilesCursorFromAnotherVersionIs410(t *testing.T) {
+	fake := &fakePlaylistFiles{pages: twoPages()}
+	hs, token := newPlaylistFilesServer(t, fake)
+	resp, body := getPlaylistFiles(t, hs, token)
+	first := decodePage(t, resp, body)
+	fake.mu.Lock()
+	fake.version = "fedcba9876543210"
+	fake.mu.Unlock()
+	resp, body = getPlaylistFilesAfter(t, hs, token, first.NextCursor)
+	var e ErrorResponse
+	if resp.StatusCode != http.StatusGone || json.Unmarshal(body, &e) != nil || e.Error != "playlist_files_stale" ||
+		e.Message != "the playlist files changed since this cursor; start again from the first page" {
+		t.Fatalf("a cursor of the old version: status %d %s; want 410 playlist_files_stale", resp.StatusCode, body)
+	}
+	resp, body = getPlaylistFiles(t, hs, token)
+	if again := decodePage(t, resp, body); again.Version != "fedcba9876543210" || again.NextCursor == "" {
+		t.Errorf("the first page again: %s", body)
+	}
+}
+
+func TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400(t *testing.T) {
+	fake := &fakePlaylistFiles{pages: twoPages()}
+	hs, token := newPlaylistFilesServer(t, fake)
+	enc := func(raw string) string { return base64.RawURLEncoding.EncodeToString([]byte(raw)) }
+	for _, cursor := range []string{
+		"%%%",                         // not base64url
+		enc("Playlists/a.m3u"),        // no separator
+		enc("\x00Playlists/a.m3u"),    // no version
+		enc(fakeFeedVersion + "\x00"), // no path
+		enc(fakeFeedVersion+"\x00Playlists/a.m3u") + "=", // padded
+	} {
+		resp, body := getPlaylistFilesAfter(t, hs, token, cursor)
+		var e ErrorResponse
+		if resp.StatusCode != http.StatusBadRequest || json.Unmarshal(body, &e) != nil || e.Error != "bad_request" ||
+			e.Message != "after is not a cursor this bridge gave; start from the first page" {
+			t.Errorf("after %q: status %d %s; want 400 bad_request", cursor, resp.StatusCode, body)
+		}
+	}
+	fake.mu.Lock()
+	asked := len(fake.asked)
+	fake.mu.Unlock()
+	if asked != 0 {
+		t.Errorf("the store was read %d times for cursors the bridge did not make", asked)
+	}
+}
+
+func TestEachPlaylistFilesPageAnswers304ToItsOwnETag(t *testing.T) {
+	hs, token := newPlaylistFilesServer(t, &fakePlaylistFiles{pages: twoPages()})
+	firstResp, body := getPlaylistFiles(t, hs, token)
+	first := decodePage(t, firstResp, body)
+	secondResp, _ := getPlaylistFilesAfter(t, hs, token, first.NextCursor)
+	etag1, etag2 := firstResp.Header.Get("ETag"), secondResp.Header.Get("ETag")
+	if !strongETag.MatchString(etag2) || etag1 == etag2 {
+		t.Fatalf("ETags %q and %q; want each page its own", etag1, etag2)
+	}
+	if resp, body := getPlaylistFilesAfter(t, hs, token, first.NextCursor, etag2); resp.StatusCode != http.StatusNotModified ||
+		len(body) != 0 || resp.Header.Get("ETag") != etag2 {
+		t.Errorf("the second page's own ETag: status %d, %d body bytes; want 304", resp.StatusCode, len(body))
+	}
+	if resp, _ := getPlaylistFilesAfter(t, hs, token, first.NextCursor, etag1); resp.StatusCode != http.StatusOK {
+		t.Errorf("the first page's ETag on the second page: status %d, want 200", resp.StatusCode)
 	}
 }

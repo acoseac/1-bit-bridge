@@ -45635,7 +45635,7 @@ batches of 1, 64, 200 and 300 bytes, and compares the JSON. Controls on
 | W1. the pass reads every file before it writes (the earlier code) | `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext` alone: all 300 reads found no row written |
 | W2. the window's byte bound ignored | `TestPlaylistReadWindowsHoldTheirBytes` alone, its size case one window, `0-12` |
 | F1. the feed's batch bound ignored (the earlier code's one batch) | `TestPlaylistFeedBatchesHoldTheirBytes` alone, one batch, `0-7` |
-| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; `TestThePlaylistFeedHoldsItsBudget`, which also runs a batch per row, stays green, since its third file fits either way |
+| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; the budget test (B442, which pages the feed, made it `TestAFileThatDoesNotFitStartsTheNextPage`), which also runs a batch per row, stays green, since its third file fits either way |
 | F3. the kept matches taken as complete after the first batch | the same test alone, at 1 and 64 bytes only: at 200 and 300 the first batch already holds every path the later ones name |
 
 What the bound leaves as it was: the work is still in proportion to the

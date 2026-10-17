@@ -2489,6 +2489,59 @@ var migrations = []migration{
 			folder_whole   INTEGER NOT NULL DEFAULT 0
 		)`,
 	},
+	{
+		// v57 is the playlist-file feed's generation (backlog B442): one
+		// counter that moves whenever a page of GET /v1/playlist-files could
+		// read differently, so the feed's version, and with it every
+		// cursor, changes with it (playlistFeedVersion). Triggers keep it,
+		// in the writing statement's own transaction, so no writer (a scan,
+		// a trash, a root removal, a stamping pass, clear-missing, one added
+		// later) can forget to: a track added or removed, or one whose path
+		// or duplicate stamp changed (what the feed's lookups and the
+		// album-folder rule read), and a playlist row added, removed, or
+		// changed in what the feed serves (lines, mtime, too_large,
+		// folder_whole). An enrichment write moves none of those, so it does
+		// not restart a client's paging. The v51 counter's shape.
+		version: 57,
+		name:    "playlist_feed_generation (the playlist-file feed's version)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS playlist_feed_generation (
+			id  INTEGER PRIMARY KEY CHECK (id = 1),
+			gen INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT OR IGNORE INTO playlist_feed_generation(id) VALUES (1);
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_track_added AFTER INSERT ON tracks
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_track_removed AFTER DELETE ON tracks
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_track_changed
+		AFTER UPDATE OF path, dupe_suppressed, dupe_group_id ON tracks
+		WHEN old.path IS NOT new.path OR old.dupe_suppressed IS NOT new.dupe_suppressed
+			OR old.dupe_group_id IS NOT new.dupe_group_id
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_file_added AFTER INSERT ON playlist_files
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_file_removed AFTER DELETE ON playlist_files
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		CREATE TRIGGER IF NOT EXISTS playlist_feed_file_changed AFTER UPDATE ON playlist_files
+		WHEN old.path IS NOT new.path OR old.mtime_ns IS NOT new.mtime_ns
+			OR old.too_large IS NOT new.too_large OR old.lines IS NOT new.lines
+			OR old.folder_whole IS NOT new.folder_whole
+		BEGIN
+			UPDATE playlist_feed_generation SET gen = gen + 1 WHERE id = 1;
+		END;
+		`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

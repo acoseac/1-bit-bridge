@@ -434,11 +434,11 @@ func TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile(t *testing.T)
 	ctx := context.Background()
 	complete := func(when string) bool {
 		t.Helper()
-		feed, err := s.PlaylistFiles(ctx)
+		page, err := s.PlaylistFilesPage(ctx, "", "")
 		if err != nil {
 			t.Fatalf("%s: %v", when, err)
 		}
-		return feed.Complete
+		return page.Complete
 	}
 	if complete("fresh store") {
 		t.Fatal("a store the migration just made reads complete")

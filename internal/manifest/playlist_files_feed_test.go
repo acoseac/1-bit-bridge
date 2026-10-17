@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,9 +56,9 @@ func stampDuplicates(t *testing.T, s *Store, group string, suppressed bool, path
 
 func TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList(t *testing.T) {
 	s := newFeedStore(t)
-	feed, err := s.PlaylistFiles(context.Background())
-	if err != nil || feed.Files == nil || len(feed.Files) != 0 {
-		t.Fatalf("PlaylistFiles = %v, %v; want an empty, non-nil list", feed.Files, err)
+	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	if err != nil || page.Files == nil || len(page.Files) != 0 || page.Next != "" || page.Version == "" {
+		t.Fatalf("PlaylistFilesPage = %+v, %v; want one page, an empty, non-nil list, a version", page, err)
 	}
 	storePlaylist(t, s, "Playlists/none.m3u")
 	pf := playlistFeed(t, s)["Playlists/none.m3u"]
@@ -139,28 +140,28 @@ func TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping(t *testing.T) {
 	}
 }
 
-func TestThePlaylistFeedHoldsItsBudget(t *testing.T) {
+func TestAFileThatDoesNotFitStartsTheNextPage(t *testing.T) {
 	s := newFeedStore(t, "A/01.flac")
-	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 26
-	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 104
-	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 13
-	// One batch, and a batch per row: the budget is the answer's, so it
+	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 70 + 26
+	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 70 + 104
+	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 70 + 13
+	// One batch, and a batch per row: the budget is the page's, so it
 	// carries from one batch to the next.
 	for _, batchBytes := range []int{playlistFeedBatchBytes, 1} {
-		feed, err := s.playlistFiles(context.Background(), 40, batchBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
 		var got []string
-		for _, f := range feed.Files {
-			got = append(got, f.Path+":"+strings.Join(f.Members, ",")+":"+strings.Join(f.Unresolved, ","))
-			if f.Path == "b.m3u" && (!f.TooLarge || len(f.Members)+len(f.Unresolved) != 0) {
-				t.Errorf("batches of %d bytes: b.m3u past the budget: %+v", batchBytes, f)
+		for _, page := range walkPlaylistPages(t, s, 200, batchBytes).pages {
+			var files []string
+			for _, f := range page.Files {
+				files = append(files, f.Path+":"+strings.Join(f.Members, ",")+":"+strings.Join(f.Unresolved, ","))
+				if f.TooLarge {
+					t.Errorf("batches of %d bytes: %s is tooLarge", batchBytes, f.Path)
+				}
 			}
+			got = append(got, strings.Join(files, " "))
 		}
-		want := "a.m3u:A/01.flac,A/01.flac:|b.m3u::|c.m3u:A/01.flac:"
+		want := "a.m3u:A/01.flac,A/01.flac:|b.m3u::" + strings.Repeat("x", 100) + "|c.m3u:A/01.flac:"
 		if strings.Join(got, "|") != want {
-			t.Fatalf("batches of %d bytes: feed %q, want %q", batchBytes, strings.Join(got, "|"), want)
+			t.Fatalf("batches of %d bytes: pages %q, want %q", batchBytes, strings.Join(got, "|"), want)
 		}
 	}
 }
@@ -215,11 +216,11 @@ func TestThePlaylistFeedAnswersTheSameInAnyBatchSize(t *testing.T) {
 	}
 	answer := func(batchBytes int) string {
 		t.Helper()
-		feed, err := s.playlistFiles(context.Background(), 600, batchBytes)
+		page, err := s.playlistFilesPage(context.Background(), "", "", math.MaxInt, batchBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, err := json.Marshal(feed)
+		raw, err := json.Marshal(page)
 		if err != nil {
 			t.Fatal(err)
 		}
