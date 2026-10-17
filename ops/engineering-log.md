@@ -45772,12 +45772,14 @@ for this), so it is paged now rather than reshaped later. Branch
   is `nextCursor`, the name `/v1/manifest` and `/v1/history` already give
   their cursors, with `after` as `/v1/history` names the parameter. Absent on
   the last page.
-- **Cursor.** Opaque: unpadded base64url of the version, a NUL and the last
+- **Cursor.** Opaque: unpadded base64url of the version, a NUL, the last
   manifest path the page covers (listed, or left out as an album-folder
-  playlist). Raw bytes, because a manifest path need not be UTF-8 and JSON
-  would replace what is not; no path holds a NUL. A cursor the bridge did not
-  make (not base64url, padded, no NUL, an empty half) is a 400
-  `bad_request`, and the store is not read.
+  playlist), and a 16-byte HMAC-SHA256 of the two under a key the process
+  draws on first use (`playlistCursorSigner`). Raw bytes, because a manifest
+  path need not be UTF-8 and JSON would replace what is not; no path holds a
+  NUL. A cursor the bridge did not make (not base64url, padded, unsigned,
+  edited, cut short) or made before it restarted is a 400 `bad_request`, and
+  the store is not read.
 - **Version.** On every page: 16 hex digits of a SHA-256 over
   `playlistFeedRulesVersion`, the build's `version.ServerVersion`, the backup
   epoch (a restored database is another history), the generation the new v57
@@ -45788,10 +45790,12 @@ for this), so it is paged now rather than reshaped later. Branch
   family for "the thing you named changed since". A restart in place (the new
   first page under a 200) would save a round trip but makes the client tell a
   first page from a later one by its version alone; the 410 says it.
-- **Budget.** `PlaylistFilePageBudget`, 8 MiB, now by the JSON's own measure:
-  a file costs its path, its name and 64 bytes (the keys, the mtime, the
-  punctuation), and each entry its length plus 4, so a page of empty
-  playlists is bounded too. A file that does not fit starts the next page; a
+- **Budget.** `PlaylistFilePageBudget`, 8 MiB, now by the JSON's own measure
+  (`PlaylistFilePageCost`): a file costs its path and its name in the bytes
+  the encoder writes for them (`jsonStringBytes`) and 112 bytes besides (the
+  keys, the mtime at its longest, the punctuation, `"tooLarge":true`), and
+  each entry its encoded bytes plus 4, never less than the file's JSON, so a
+  page of empty playlists is bounded too. A file that does not fit starts the next page; a
   page always holds one file, so a file larger than a page has its own,
   bounded by the per-file caps. `tooLarge` is only the per-file caps again.
   An empty page is only an empty feed's one page.
@@ -45899,6 +45903,46 @@ On `cf783a6a` (N9 on `93c09345`), each predicted in writing before it ran:
 | N7. `complete` left out of the version | the version table at "the index marked complete" alone |
 | N8. the epoch left out of the version | the version table at "the backup epoch replaced" alone. The first form of this control did not compile (the epoch then unused), so it proved nothing; the second keeps it used. |
 | N9. a `tooLarge` read not counted as backed | `TestAPlaylistFilePastACapStillLetsTheIndexBeComplete` alone |
+
+### After review
+
+CodeRabbit's review of `37e531cc` had four comments, all taken in
+`818ab444` and `2ac9323d`:
+
+- **The cursor was not verified.** It carried its path in the clear, so a
+  cursor cut short or mangled into another path that still decoded was taken,
+  and the read went on from the wrong place, skipping or repeating files,
+  where it should have started over. The bearer already reads every page, so
+  this is about integrity, not trust: the cursor is now HMAC-signed with a
+  32-byte key drawn from crypto/rand once per process, and any cursor that
+  does not check is the 400. A bridge restart draws a new key, so a walk
+  across it restarts at a 400 rather than a 410; both say start again.
+- **The budget counted raw lengths.** The encoder writes a quote or a
+  backslash in two bytes, a control character, <, > and & in six (HTML
+  escaping is the json.Encoder default the feed is written with), and a byte
+  of invalid UTF-8 as six. `jsonStringBytes` counts what the encoder writes,
+  without allocating, and `TestJSONStringBytesIsWhatEncodingJSONWrites`
+  holds it to `json.Marshal` over fourteen strings. The file allowance went
+  from 64 bytes to 112: 64 never covered the fixed part of a file's object,
+  which is 92 bytes with a full mtime and 108 with `"tooLarge":true`.
+  `TestAPlaylistFileCostsAtLeastItsJSON` checks the cost against the DTO's
+  actual JSON for escape-heavy files.
+- **Restarts during a scan.** A scan that indexes new tracks moves the
+  version with each one (one that finds nothing new does not, and neither
+  does enrichment, since the triggers fire only on what a page reads), so
+  PROTOCOL.md now tells a client that meets a 410 while a scan runs to wait
+  for it to end, or for the next `library.changed`, and otherwise to back off.
+- **Test complexity.** The concatenation and version tests run each case as
+  a subtest, with the per-page checks in `checkPageWalk`.
+
+Controls on `818ab444`, each predicted in writing first, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| N1 again | `TestAPageAskedForAtAnotherVersionIsRefused` alone |
+| N2 again | the concatenation subtests at budgets 1, 150, 400 and 1,000 (twelve), each at "page 0 holds 16 files costing 3985", budget 1's also at its page count; budget 5,000 green (the whole feed costs 3,985); the larger-than-a-page and next-page tests at one page; the refused-cursor test at its first page |
+| N10. the signature not checked | `TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400` at the edited and the cut-short cursor, and so at the store being read for them |
+| N11. ASCII escapes not costed | `TestJSONStringBytesIsWhatEncodingJSONWrites` at the quote, control and `<a>&b` strings; `TestAPlaylistFileCostsAtLeastItsJSON` at the escape-heavy file |
 
 ### Measured
 
