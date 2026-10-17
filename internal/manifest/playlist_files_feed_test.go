@@ -114,7 +114,7 @@ func TestTheAlbumFolderRuleTermByTerm(t *testing.T) {
 	} {
 		storePlaylist(t, s, "x/list.m3u", c.lines...)
 		if _, listed := playlistFeed(t, s)["x/list.m3u"]; listed == c.album {
-			t.Errorf("%s: listed %v, want the album rule to say %v", c.label, listed, c.album)
+			t.Errorf("%s: listed %v, want listed %v (an album playlist is not listed)", c.label, listed, !c.album)
 		}
 	}
 	// An empty file in a folder with no tracks is not an album playlist.

@@ -2657,6 +2657,35 @@ lost my library."
   caller forwarded a raw one (#536). The result stays keyed by the caller's
   spelling so a lookup by what was passed still hits. (#919)
 
+- **A playlist file is indexed, never a track, and its members resolve when
+  the feed is asked, not when it is read** (2026-10-17, backlog B431). Both
+  walks hand an `.m3u` / `.m3u8` (any case, not a dot-file) to
+  `notePlaylistFile` before the audio gate, so it is no track and no content
+  to the clean-empty guard. `indexPlaylistFiles`, after the deletion passes
+  (Scan's whole library, ScanSubtree's scope), reads a file through
+  `fsutil.OpenAsFile` only when its size, mtime or `playlistFileParserVersion`
+  moved, and stores the parsed lines (`playlist_files`, v56) under the WALK's
+  stat. A failed read keeps the row, a file the walk could not stat is kept,
+  and a row the walk did not see takes the tracks' rules in their order
+  (errored subtree spared first, a backed case-only rename reaped, else the
+  threshold). The root flip's wipe, a root's prefix delete and
+  `clear-missing` take the rows too. `Store.PlaylistFiles` places and
+  resolves the stored lines in one read transaction at each request, so a
+  member indexed later resolves with no new read. **Don't resolve members
+  at scan time, don't `path.Clean` a playlist line (a climb above the root is
+  dropped even when it comes back down), don't let a failed read write the
+  row, and don't edit `testdata/playlist-parse-cases.tsv`**: it is the app's
+  table, copied byte for byte (iOS `a9a16365`) and pinned to LF in
+  `.gitattributes`; change it there and copy it. The parse is the app's down
+  to Foundation's trim set (U+200B too) and line ends (U+2029 too); it treats
+  "#", "/" and "\" before a combining mark as plain characters where Swift
+  does not, a measured, accepted difference (the log). Tests:
+  `TestPlaylistParseCaseTable`, `TestAPlaylistMemberIndexedLaterResolvesWithoutARead`,
+  `TestAPlaylistFileReadFailureKeepsItsRow`,
+  `TestARemovedPlaylistFileLeavesTheFeedAtTheThreshold`,
+  `TestASubtreeScanCoversOnlyItsOwnPlaylistFiles`,
+  `TestAMultiRootLibraryResolvesFromTheManifestRoot`.
+
 ### The wire contract
 
 - **`/v1` describes the SERVED set.** The manifest stream/page/total,
@@ -3133,6 +3162,31 @@ lost my library."
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client
   keys on, since no client can ask a bridge its protocol era.
+- **`GET /v1/playlist-files` is read-only, its ETag is a hash of the document,
+  and it names only served tracks** (2026-10-17, backlog B431; flag
+  `playlistFiles`, wired on every bridge, the demo included; no
+  `ProtocolVersion` bump). The ETag is the SHA-256 of the JSON it would send,
+  because members resolve per request; a placed line is its exact path, else
+  the one track a case-and-composition fold answers; a suppressed duplicate is
+  its group's one served copy or unresolved; a file of 2,000,000 bytes or more
+  (the app's cap), of more than 100,000 entry lines, or past the 8 MiB answer
+  budget is listed `tooLarge` with empty lists. **An album-folder playlist is
+  not listed, by the app's four terms** (`AlbumFolderPlaylist.isAlbumPlaylist`,
+  its B421; entries are the lines the path rule places, a dropped line is no
+  entry): (1) at least one entry; (2) EVERY entry names a track at exactly
+  that path, byte for byte, so one unresolved or fold-only entry keeps the
+  file listed; (3) every entry's parent folder is the playlist's own, by
+  bytes; (4) the tracks named are exactly the tracks directly in that folder,
+  order and repeats ignored. A track there is any indexed row, a suppressed
+  duplicate included, judged before the duplicate mapping. Change the rule
+  only with the app's, in the same pair. **Don't serve a suppressed path as a
+  member, don't let an unresolved entry count toward the album rule, and
+  don't put the store's error in the 500** (B425's fixed message). Tests:
+  `TestPlaylistFilesAnswers304ToAMatchingETag`,
+  `TestAlbumFolderPlaylistsAreNotServed`, `TestTheAlbumFolderRuleTermByTerm`,
+  `TestASuppressedDuplicateMemberIsServedAsItsServedCopy`,
+  `TestAPlaylistFilesStoreFailureAnswersAFixedMessage`,
+  `TestAClientAbortDuringThePlaylistFilesReadIsInfoAnd499`.
 
 ### Lyrics — the one document per track
 
