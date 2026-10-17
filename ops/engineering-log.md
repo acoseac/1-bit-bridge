@@ -45474,25 +45474,41 @@ inputs:
 - Endpoint (the handler a bare 404, route, auth and flag still wired): 6 of
   8 red; green were the 401 (auth precedes the handler) and the unwired 404
   with the flag.
+- The four-term album rule (`dd74ce42`'s tests on `f31e7386`'s feed):
+  `TestTheAlbumFolderRuleTermByTerm` red at "an entry that does not resolve"
+  and "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed`
+  at the stale-line file missing from the feed.
 
 ### Negative controls
 
-On the committed `f31e7386`, each anchor count-asserted, the package vetted,
-the 30 playlist tests in `internal/manifest` (or the 8 in `internal/api`) run
-with `-count=1`, restored with `git checkout` and the tree checked against
-HEAD. Every prediction held.
+Each anchor count-asserted, the package vetted, the 31 playlist tests in
+`internal/manifest` (or the 8 in `internal/api`) run with `-count=1`,
+restored with `git checkout` and the tree checked against HEAD.
 
-| control | red, predicted and observed |
+Controls 1 to 9 ran first on `f31e7386`, each prediction written before its
+run, and every one held exactly (1: the table at both columns of four rows
+and the three lines beyond it, 28 green; 2: the two album tests; 3: the 304
+test's five validator forms; 4 to 9 as in the table). The album rule then
+changed (`dd74ce42`), so the table below is the final commit, `b00ae740`.
+Controls 2′, 9′, 10a and 10b were predicted before their runs there and held
+exactly. Controls 1, 3 to 8 were re-run there on their `f31e7386`
+predictions without new ones written first; 3, 4, 5, 7 and 8 matched them,
+and 1 and 6 also reddened the album tests `dd74ce42` added, each through
+the album rule, as the table says.
+
+| control | red on `b00ae740` |
 |---|---|
-| 1. the climb rule loosened to `path.Clean("/"+joined)` | `TestPlaylistParseCaseTable` at both columns of four rows (climb-above-the-share-root, climb-above-then-back-down, playlist-at-the-share-root, backslash-separators), `TestPlaylistPathRuleBeyondTheTable` at `/../x.flac`, `../..` and the root playlist's `..`; 28 green |
-| 2. the album-folder skip removed | `TestAlbumFolderPlaylistsAreNotServed` (two album playlists served, six listed for four) and `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` |
-| 3. If-None-Match ignored | `TestPlaylistFilesAnswers304ToAMatchingETag`, at its five validator forms; its stale-ETag check and the other 7 green |
+| 1. the climb rule loosened to `path.Clean("/"+joined)` | `TestPlaylistParseCaseTable` at both columns of four rows (climb-above-the-share-root, climb-above-then-back-down, playlist-at-the-share-root, backslash-separators), `TestPlaylistPathRuleBeyondTheTable` at `/../x.flac`, `../..` and the root playlist's `..`; and, not predicted, `TestTheAlbumFolderRuleTermByTerm` at "a dropped line is no entry" and `TestAlbumFolderPlaylistsAreNotServed` at `Dropped/` (a climb above the root that Clean places is an entry that resolves to nothing, so term 2 lists the file) |
+| 2′. the album-folder skip removed | `TestAlbumFolderPlaylistsAreNotServed` (Ripped, Dropped and Box served, nine listed for six), `TestTheAlbumFolderRuleTermByTerm` at its three album rows, `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` |
+| 3. If-None-Match ignored | `TestPlaylistFilesAnswers304ToAMatchingETag` at its five validator forms; its stale-ETag check and the other 7 green |
 | 4. ScanSubtree without the pass | `TestASubtreeScanCoversOnlyItsOwnPlaylistFiles` alone; `TestAPlaylistMemberIndexedLaterResolvesWithoutARead` green, as request-time resolution should leave it |
 | 5. a root's prefix delete leaving its rows | `TestAMultiRootLibraryResolvesFromTheManifestRoot`, at the removed root's playlist alone |
-| 6. the fold fallback removed | `TestAPlaylistEntryFoldsOnlyToTheOneRowThatAnswers` and `TestAFullScanServesAPlaylistFileWithItsMembers`, each at members and unresolved |
+| 6. the fold fallback removed | `TestAPlaylistEntryFoldsOnlyToTheOneRowThatAnswers` and `TestAFullScanServesAPlaylistFileWithItsMembers`, each at members and unresolved; and, not predicted, `TestAlbumFolderPlaylistsAreNotServed` at `Case/`'s members and unresolved (that file pins the fold's member as well as term 2) |
 | 7. a suppressed path served as a member | `TestASuppressedDuplicateMemberIsServedAsItsServedCopy` alone |
 | 8. a failed read written as an empty read | `TestAPlaylistFileReadFailureKeepsItsRow` alone |
-| 9. the album rule judged after the duplicate mapping | `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` alone |
+| 9′. the album rule judged after the duplicate mapping | `TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` alone |
+| 10a. term 2 ignoring an unresolved entry | `TestTheAlbumFolderRuleTermByTerm` at "an entry that does not resolve", `TestAlbumFolderPlaylistsAreNotServed` at the stale-line file missing |
+| 10b. term 2 taking a fold-only match | `TestTheAlbumFolderRuleTermByTerm` at "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed` at `Case/` missing |
 
 ### Tests
 
@@ -45502,7 +45518,7 @@ and the parser version, removal at the threshold and the reset, the
 clean-empty guard, a subtree's scope, a late member, the album rule,
 multi-root, the root removal and flip, a read failure, the size cap,
 backslashes) and `playlist_files_feed_test.go` (the fold, duplicates, the
-budget, the library note, clear-missing). `internal/api`:
+album rule term by term, the budget, the library note, clear-missing). `internal/api`:
 `playlist_files_test.go` (the exact document, the ETag and 304, the flag,
 auth, a store failure's fixed message, a client abort at 499, and the real
 index end to end with gzip). `TestHealthFeaturesCompleteSet` and
