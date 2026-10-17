@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -33,19 +34,75 @@ type PlaylistFilePage struct {
 	Next string
 }
 
-// PlaylistFilePageBudget bounds one page: a file costs its path and name
-// and 64 bytes besides (the keys, the mtime, the punctuation), and each of
-// its entries its length plus 4, about what the file takes in the JSON. The
-// files are taken in path order while they fit; one that does not starts
-// the next page, so the budget never makes a file tooLarge. A page holds at
-// least one file, so a file whose entries alone pass the budget has a page
-// to itself, bounded by the per-file caps (PlaylistFileMaxBytes,
-// playlistFileMaxEntries). 8 MiB is some 80,000 entries of 100 bytes,
-// gzip'd on the wire.
+// PlaylistFilePageBudget bounds one page by what its files take in the JSON
+// (PlaylistFilePageCost). The files are taken in path order while they fit;
+// one that does not starts the next page, so the budget never makes a file
+// tooLarge. A page holds at least one file, so a file whose entries alone
+// pass the budget has a page to itself, bounded by the per-file caps
+// (PlaylistFileMaxBytes, playlistFileMaxEntries). 8 MiB is some 80,000
+// entries of 100 bytes, gzip'd on the wire.
 const PlaylistFilePageBudget = 8 << 20
 
-// playlistFileOverhead is what a file costs a page before its entries.
-const playlistFileOverhead = 64
+// playlistFileOverhead is what a file's JSON takes besides its strings: the
+// keys, the quotes, the mtime at its longest, the brackets, the comma, and
+// "tooLarge":true (108 bytes), rounded up.
+const playlistFileOverhead = 112
+
+// PlaylistFilePageCost is what f costs a page: its path and its name as
+// the JSON writes them (jsonStringBytes) and playlistFileOverhead besides,
+// and each entry its JSON bytes plus 4 (its quotes, a comma, one spare). It
+// is never less than the bytes f takes in a page's JSON, so a page's files
+// take no more than the budget there (TestAPlaylistFileCostsAtLeastItsJSON).
+func PlaylistFilePageCost(f PlaylistFile) int {
+	cost := jsonStringBytes(f.Path) + jsonStringBytes(f.Name) + playlistFileOverhead
+	for _, e := range f.Members {
+		cost += jsonStringBytes(e) + 4
+	}
+	for _, e := range f.Unresolved {
+		cost += jsonStringBytes(e) + 4
+	}
+	return cost
+}
+
+// jsonStringBytes is the bytes encoding/json writes for s between its
+// quotes, with json.Encoder's defaults, which the feed is written with (HTML
+// escaping on): a quote, a backslash, and \b \f \n \r \t take two bytes;
+// any other control character, <, >, &, U+2028, U+2029 and each byte of
+// invalid UTF-8 (written as \ufffd) take six; every other rune its UTF-8
+// bytes. TestJSONStringBytesIsWhatEncodingJSONWrites holds it to the encoder.
+func jsonStringBytes(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		if b := s[i]; b < utf8.RuneSelf {
+			n += jsonASCIIBytes(b)
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1, r == '\u2028', r == '\u2029':
+			n += 6
+		default:
+			n += size
+		}
+		i += size
+	}
+	return n
+}
+
+// jsonASCIIBytes is what encoding/json writes for the ASCII byte b.
+func jsonASCIIBytes(b byte) int {
+	switch b {
+	case '"', '\\', '\b', '\f', '\n', '\r', '\t':
+		return 2
+	case '<', '>', '&':
+		return 6
+	}
+	if b < 0x20 {
+		return 6
+	}
+	return 1
+}
 
 // playlistPageRowChunk bounds the rows' paths one step of a page reads: a
 // page reads the rows after its cursor this many at a time, in path order,

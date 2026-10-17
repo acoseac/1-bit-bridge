@@ -200,6 +200,10 @@ type Server struct {
 	// wired; serve wires it on every bridge, the demo included, because it
 	// is library data, not user data. *manifest.Store satisfies it.
 	playlistFileStore PlaylistFileStore
+	// playlistCursors signs the feed's cursors with a key this process
+	// draws on first use (playlistCursorSigner), so a cursor this bridge did
+	// not make, or made before it restarted, is a 400.
+	playlistCursors playlistCursorSigner
 
 	// historyStore backs POST /v1/history/batch + the "playbackHistory"
 	// health-feature flag. Nil unless WithHistoryStore is wired. Same

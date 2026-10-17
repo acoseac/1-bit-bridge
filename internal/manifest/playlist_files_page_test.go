@@ -47,16 +47,26 @@ func walkPlaylistPages(t *testing.T, s *Store, budget, batchBytes int) playlistW
 	}
 }
 
-// pageCostOf is what f costs a page, by the budget's documented model.
-func pageCostOf(f PlaylistFile) int {
-	cost := len(f.Path) + len(f.Name) + playlistFileOverhead
-	for _, e := range f.Members {
-		cost += len(e) + 4
+// checkPageWalk fails the test unless every page of w holds its budget
+// (or a single file), carries the first page's version, and, for a budget
+// of 1, every listed file has a page of its own.
+func checkPageWalk(t *testing.T, w playlistWalk, budget, listed int) {
+	t.Helper()
+	for i, page := range w.pages {
+		cost := 0
+		for _, f := range page.Files {
+			cost += PlaylistFilePageCost(f)
+		}
+		if cost > budget && len(page.Files) != 1 {
+			t.Errorf("page %d holds %d files costing %d", i, len(page.Files), cost)
+		}
+		if page.Version != w.pages[0].Version {
+			t.Errorf("page %d at version %q, the first at %q", i, page.Version, w.pages[0].Version)
+		}
 	}
-	for _, e := range f.Unresolved {
-		cost += len(e) + 4
+	if budget == 1 && len(w.pages) != listed {
+		t.Errorf("%d pages, want one per listed file (%d)", len(w.pages), listed)
 	}
-	return cost
 }
 
 // filesJSON is files as the test compares them.
@@ -103,6 +113,8 @@ func newPagedFeedStore(t *testing.T) *Store {
 	storePlaylist(t, s, "Lists/q-fifty.m3u", fifty...)
 	storePlaylist(t, s, "Mid/Album/Album.m3u", "01.flac")
 	storePlaylist(t, s, "Mid/mix.m3u", "../A/01.flac")
+	// Names and lines the JSON escapes: quotes, an ampersand, a tab.
+	storePlaylist(t, s, "Mid/q\"&\tz.m3u", "../A/01.flac", "a&b\"c\td<e>")
 	storePlaylist(t, s, "Z/Album.m3u", "../Mid/Album/01.flac")
 	return s
 }
@@ -122,31 +134,18 @@ func TestPlaylistFilePagesConcatenateToTheWholeFeed(t *testing.T) {
 		}
 	}
 	if !sort.StringsAreSorted(paths) || strings.Contains(strings.Join(paths, "|"), "Album.m3u|") ||
-		len(paths) != 15 {
-		t.Fatalf("the whole feed %v: want the 15 listed files in path order, no album-folder playlist", paths)
+		len(paths) != 16 {
+		t.Fatalf("the whole feed %v: want the 16 listed files in path order, no album-folder playlist", paths)
 	}
 	for _, budget := range []int{1, 150, 400, 1000, 5000} {
 		for _, batchBytes := range []int{1, 64, 1 << 30} {
-			w := walkPlaylistPages(t, s, budget, batchBytes)
-			label := fmt.Sprintf("budget %d, batches of %d bytes", budget, batchBytes)
-			if got := filesJSON(t, w.files); got != wantJSON {
-				t.Errorf("%s: the pages add up to\n%s\nwant the whole feed\n%s", label, got, wantJSON)
-			}
-			for i, page := range w.pages {
-				cost := 0
-				for _, f := range page.Files {
-					cost += pageCostOf(f)
+			t.Run(fmt.Sprintf("budget=%d/batch=%d", budget, batchBytes), func(t *testing.T) {
+				w := walkPlaylistPages(t, s, budget, batchBytes)
+				if got := filesJSON(t, w.files); got != wantJSON {
+					t.Errorf("the pages add up to\n%s\nwant the whole feed\n%s", got, wantJSON)
 				}
-				if cost > budget && len(page.Files) != 1 {
-					t.Errorf("%s: page %d holds %d files costing %d", label, i, len(page.Files), cost)
-				}
-				if page.Version != w.pages[0].Version {
-					t.Errorf("%s: page %d at version %q, the first at %q", label, i, page.Version, w.pages[0].Version)
-				}
-			}
-			if budget == 1 && len(w.pages) != len(whole.files) {
-				t.Errorf("%s: %d pages, want one per listed file (%d)", label, len(w.pages), len(whole.files))
-			}
+				checkPageWalk(t, w, budget, len(whole.files))
+			})
 		}
 	}
 }
@@ -160,7 +159,7 @@ func TestAFileLargerThanAPageHasAPageOfItsOwn(t *testing.T) {
 	}
 	storePlaylist(t, s, "b.m3u", many...)
 	storePlaylist(t, s, "c.m3u", "A/01.flac")
-	const budget = 200 // a.m3u and c.m3u cost 83 each, b.m3u 610
+	const budget = 200 // a.m3u and c.m3u cost 131 each, b.m3u 638
 	w := walkPlaylistPages(t, s, budget, playlistFeedBatchBytes)
 	var got []string
 	for _, page := range w.pages {
@@ -245,13 +244,33 @@ func TestTheFeedVersionMovesWithEveryChangeAPageCanShow(t *testing.T) {
 		}},
 		{"a page read", false, func(t *testing.T, s *Store) { walkPlaylistPages(t, s, 1, playlistFeedBatchBytes) }},
 	} {
-		s := newFeedStore(t, "A/01.flac", "A/02.flac")
-		stampDuplicates(t, s, "g1", false, "A/02.flac")
-		storePlaylist(t, s, "Lists/a.m3u", "../A/01.flac")
-		before := feedVersion(t, s)
-		tc.do(t, s)
-		if moved := feedVersion(t, s) != before; moved != tc.moves {
-			t.Errorf("%s: version moved %v, want %v", tc.name, moved, tc.moves)
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFeedStore(t, "A/01.flac", "A/02.flac")
+			stampDuplicates(t, s, "g1", false, "A/02.flac")
+			storePlaylist(t, s, "Lists/a.m3u", "../A/01.flac")
+			before := feedVersion(t, s)
+			tc.do(t, s)
+			if moved := feedVersion(t, s) != before; moved != tc.moves {
+				t.Errorf("version moved %v, want %v", moved, tc.moves)
+			}
+		})
+	}
+}
+
+// TestJSONStringBytesIsWhatEncodingJSONWrites holds the page cost's string
+// measure to the encoder that writes the page.
+func TestJSONStringBytesIsWhatEncodingJSONWrites(t *testing.T) {
+	for _, s := range []string{
+		"", "plain/01.flac", "Caf\u00e9", "\u65e5\u672c\u8a9e/\u66f2.flac", "\U0001F3B5",
+		`quote" back\slash`, "\b\f\n\r\t", "\x00\x01\x1f\x7f", "<a>&b",
+		"\u2028\u2029", "\xff\xfe", "ok\xe2\x82", "\uFFFD", "\xed\xa0\x80",
+	} {
+		raw, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := jsonStringBytes(s), len(raw)-2; got != want {
+			t.Errorf("%q: jsonStringBytes %d, the encoder writes %d (%s)", s, got, want, raw)
 		}
 	}
 }

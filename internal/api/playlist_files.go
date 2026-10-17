@@ -3,10 +3,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -56,22 +60,54 @@ type playlistFilesResponse struct {
 // errPlaylistFilesCursor is an `after` this bridge did not make.
 var errPlaylistFilesCursor = errors.New("api: not a playlist-files cursor")
 
-// encodePlaylistFilesCursor is the opaque `nextCursor` for the page after
-// the one that ends at path, read at version: both, NUL-separated (no
-// manifest path holds a NUL, and a path's bytes need not be UTF-8), in
-// unpadded base64url so it travels in a query string as it is.
-func encodePlaylistFilesCursor(version, path string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(version + "\x00" + path))
+// playlistCursorMACBytes is the length of a cursor's signature.
+const playlistCursorMACBytes = 16
+
+// playlistCursorSigner signs and checks the feed's cursors with a key it
+// draws on first use and keeps for the process. A cursor is a position in
+// the client's own read, not a credential (the bearer already reads every
+// page), so the signature is not about trust: it makes a cursor that was
+// cut, mangled or made up a 400 the client restarts from, where a path it
+// still decoded to would quietly skip or repeat files. A bridge that
+// restarts draws a new key, and its old cursors are a 400 as well.
+type playlistCursorSigner struct {
+	once sync.Once
+	key  []byte
 }
 
-// decodePlaylistFilesCursor is encodePlaylistFilesCursor's inverse: the
-// version the cursor was made at and the path the next page starts after.
-func decodePlaylistFilesCursor(cursor string) (version, path string, err error) {
+// mac is the signature of payload.
+func (c *playlistCursorSigner) mac(payload []byte) []byte {
+	c.once.Do(func() {
+		c.key = make([]byte, 32)
+		_, _ = rand.Read(c.key) // crypto/rand.Read never fails, and panics if the OS source does
+	})
+	m := hmac.New(sha256.New, c.key)
+	m.Write(payload)
+	return m.Sum(nil)[:playlistCursorMACBytes]
+}
+
+// encode is the opaque `nextCursor` for the page after the one that ends at
+// path, read at version: both, NUL-separated (no manifest path holds a NUL,
+// and a path's bytes need not be UTF-8), then their signature, in unpadded
+// base64url so it travels in a query string as it is.
+func (c *playlistCursorSigner) encode(version, path string) string {
+	payload := []byte(version + "\x00" + path)
+	return base64.RawURLEncoding.EncodeToString(append(payload, c.mac(payload)...))
+}
+
+// decode is encode's inverse: the version the cursor was made at and the
+// path the next page starts after, or errPlaylistFilesCursor for a cursor
+// this process did not make.
+func (c *playlistCursorSigner) decode(cursor string) (version, path string, err error) {
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
+	if err != nil || len(raw) <= playlistCursorMACBytes {
 		return "", "", errPlaylistFilesCursor
 	}
-	v, p, ok := bytes.Cut(raw, []byte{0})
+	payload, sig := raw[:len(raw)-playlistCursorMACBytes], raw[len(raw)-playlistCursorMACBytes:]
+	if !hmac.Equal(sig, c.mac(payload)) {
+		return "", "", errPlaylistFilesCursor
+	}
+	v, p, ok := bytes.Cut(payload, []byte{0})
 	if !ok || len(v) == 0 || len(p) == 0 {
 		return "", "", errPlaylistFilesCursor
 	}
@@ -111,7 +147,7 @@ func (s *Server) playlistFiles(w http.ResponseWriter, r *http.Request) {
 	var want, after string
 	if cursor := r.URL.Query().Get("after"); cursor != "" {
 		var err error
-		if want, after, err = decodePlaylistFilesCursor(cursor); err != nil {
+		if want, after, err = s.playlistCursors.decode(cursor); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"after is not a cursor this bridge gave; start from the first page")
 			return
@@ -131,7 +167,7 @@ func (s *Server) playlistFiles(w http.ResponseWriter, r *http.Request) {
 	resp := playlistFilesResponse{Version: page.Version, Complete: page.Complete,
 		Playlists: make([]playlistFileDTO, 0, len(page.Files))}
 	if page.Next != "" {
-		resp.NextCursor = encodePlaylistFilesCursor(page.Version, page.Next)
+		resp.NextCursor = s.playlistCursors.encode(page.Version, page.Next)
 	}
 	for _, f := range page.Files {
 		resp.Playlists = append(resp.Playlists, playlistFileDTO{

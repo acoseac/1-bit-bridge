@@ -142,9 +142,9 @@ func TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping(t *testing.T) {
 
 func TestAFileThatDoesNotFitStartsTheNextPage(t *testing.T) {
 	s := newFeedStore(t, "A/01.flac")
-	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 70 + 26
-	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 70 + 104
-	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 70 + 13
+	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 118 + 26
+	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 118 + 104
+	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 118 + 13
 	// One batch, and a batch per row: the budget is the page's, so it
 	// carries from one batch to the next.
 	for _, batchBytes := range []int{playlistFeedBatchBytes, 1} {

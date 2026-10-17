@@ -170,8 +170,9 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolde
 		Members: []string{}, Unresolved: []string{},
 		TooLarge: f.tooLarge,
 	}
-	r := resolvedPlaylistFile{file: pf, cost: len(pf.Path) + len(pf.Name) + playlistFileOverhead}
+	r := resolvedPlaylistFile{file: pf}
 	if f.tooLarge {
+		r.cost = PlaylistFilePageCost(r.file)
 		return r, nil
 	}
 	lines := resolvedPlaylistLines{members: []string{}, unresolved: []string{}, allExact: true}
@@ -186,19 +187,18 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolde
 		}
 	}
 	r.file.Members, r.file.Unresolved = lines.members, lines.unresolved
-	r.cost += lines.cost
+	r.cost = PlaylistFilePageCost(r.file)
 	return r, nil
 }
 
 // resolvedPlaylistLines is a playlist's lines resolved: the members and
-// unresolved lines the feed serves and what they cost a page, and the
-// album-folder rule's inputs. Its entries are the placed lines (a
-// line the path rule drops is no entry); named holds the tracks they name
-// at their exact paths, and allExact goes false at the first entry that
-// names none there (unresolved, or found only by the fold).
+// unresolved lines the feed serves, and the album-folder rule's inputs. Its
+// entries are the placed lines (a line the path rule drops is no entry);
+// named holds the tracks they name at their exact paths, and allExact goes
+// false at the first entry that names none there (unresolved, or found only
+// by the fold).
 type resolvedPlaylistLines struct {
 	members, unresolved []string
-	cost                int
 	entries             int
 	named               []string
 	allExact            bool
@@ -208,11 +208,9 @@ type resolvedPlaylistLines struct {
 func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) {
 	if member, ok := r.member(pl, matches, served); ok {
 		r.members = append(r.members, member)
-		r.cost += len(member) + 4
 		return
 	}
 	r.unresolved = append(r.unresolved, pl.line)
-	r.cost += len(pl.line) + 4
 }
 
 // member is the member a placed line names, if any, and records the line

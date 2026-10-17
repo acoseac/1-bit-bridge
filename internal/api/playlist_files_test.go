@@ -503,8 +503,22 @@ func TestAPlaylistFilesCursorFromAnotherVersionIs410(t *testing.T) {
 func TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400(t *testing.T) {
 	fake := &fakePlaylistFiles{pages: twoPages()}
 	hs, token := newPlaylistFilesServer(t, fake)
+	resp, body := getPlaylistFiles(t, hs, token)
+	real := decodePage(t, resp, body).NextCursor
+	raw, err := base64.RawURLEncoding.DecodeString(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := append([]byte{}, raw...)
+	edited[len(fakeFeedVersion)+1+len("Playlists/")] ^= 1 // one bit of the path
+	fake.mu.Lock()
+	fake.asked = nil
+	fake.mu.Unlock()
 	enc := func(raw string) string { return base64.RawURLEncoding.EncodeToString([]byte(raw)) }
 	for _, cursor := range []string{
+		base64.RawURLEncoding.EncodeToString(edited), // the bridge's cursor, one bit of its path changed
+		real[:len(real)-4],                           // the bridge's cursor, cut short
+		enc(fakeFeedVersion + "\x00Playlists/a.m3u"), // the right fields, no signature
 		"%%%",                         // not base64url
 		enc("Playlists/a.m3u"),        // no separator
 		enc("\x00Playlists/a.m3u"),    // no version
@@ -541,5 +555,29 @@ func TestEachPlaylistFilesPageAnswers304ToItsOwnETag(t *testing.T) {
 	}
 	if resp, _ := getPlaylistFilesAfter(t, hs, token, first.NextCursor, etag1); resp.StatusCode != http.StatusOK {
 		t.Errorf("the first page's ETag on the second page: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestAPlaylistFileCostsAtLeastItsJSON: a page's budget is spent by
+// manifest.PlaylistFilePageCost, which must be at least what each file takes
+// in the page's JSON (its object and the comma after it), whatever the JSON
+// escapes, or a page could pass its budget on the wire.
+func TestAPlaylistFileCostsAtLeastItsJSON(t *testing.T) {
+	odd := "q\"&<x>\\\t\x01\u2028\xff" + "Caf\u00e9"
+	for _, f := range []manifest.PlaylistFile{
+		{Path: "Playlists/a.m3u", Name: "a", Members: []string{}, Unresolved: []string{}},
+		{Path: "Playlists/" + odd + ".m3u", Name: odd, ModTime: time.Date(2026, 10, 16, 9, 12, 44, 123456789, time.UTC),
+			Members: []string{"A/" + odd + ".flac", "A/01.flac"}, Unresolved: []string{odd, "../x&y.flac"}},
+		{Path: "Playlists/All.m3u", Name: "All", ModTime: time.Date(2026, 10, 1, 0, 0, 0, 999999999, time.UTC),
+			Members: []string{}, Unresolved: []string{}, TooLarge: true},
+	} {
+		raw, err := json.Marshal(playlistFileDTO{Path: f.Path, Name: f.Name, MTime: f.ModTime.UTC(),
+			Members: f.Members, Unresolved: f.Unresolved, TooLarge: f.TooLarge})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cost := manifest.PlaylistFilePageCost(f); cost < len(raw)+1 {
+			t.Errorf("%q: costs %d, takes %d bytes and a comma in the JSON: %s", f.Path, cost, len(raw), raw)
+		}
 	}
 }
