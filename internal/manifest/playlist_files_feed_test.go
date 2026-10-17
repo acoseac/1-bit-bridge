@@ -65,7 +65,7 @@ func TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList(t *testing.T) {
 }
 
 func TestAPlaylistEntryFoldsOnlyToTheOneRowThatAnswers(t *testing.T) {
-	const nfd, nfc = "Café", "Café"
+	const nfd, nfc = "Cafe\u0301", "Caf\u00e9"
 	s := newFeedStore(t, "A/"+nfd+"/01.flac", "B/x.flac", "B/X.flac")
 	storePlaylist(t, s, "Playlists/mix.m3u",
 		"../A/"+nfc+"/01.flac", // another composition: the one row folds alike

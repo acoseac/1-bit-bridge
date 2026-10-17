@@ -124,7 +124,7 @@ func isPlaylistLineEnd(r rune) bool {
 // the space separators. Measured against the app's parser on macOS 27;
 // U+180E, U+200C, U+200D and U+FEFF are not trimmed there either.
 func isPlaylistTrimmed(r rune) bool {
-	return unicode.IsSpace(r) || r == '​'
+	return unicode.IsSpace(r) || r == '\u200B'
 }
 
 // parsePlaylistLines is the app's parse up to the path rule
