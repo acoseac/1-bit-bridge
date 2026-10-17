@@ -45645,6 +45645,16 @@ playlists are served. A library that size needs the feed paged (an `after`
 cursor, a page per budget, each page one snapshot), which changes the
 response's shape: not done here, for B432's design to settle.
 
+Gemini's third pass, on `dd2699fb`, asked for the album-folder rule's two
+folder reads to be prepared once rather than at each candidate playlist (a
+library of ripper playlists has one per album). Taken in `dd01ceea`: both
+statements are prepared on first use and kept for the request
+(`playlistFolderTracks`). The call that control 9 mutates now passes them, so
+controls 2 and 9 ran again there, predicted first, and held: 9 reddens
+`TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping` alone, and 2 its
+three tests and, as predicted, `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`
+at its fixture check (the album playlist listed).
+
 ### For the app (B432)
 
 - `members` are manifest paths, `bridgeOriginalPath` as the manifest names
