@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -202,4 +203,61 @@ func TestClearMissingCountsClearsMissingPlaylistFiles(t *testing.T) {
 	if _, ok := feed["gone.m3u"]; ok || len(feed) != 1 {
 		t.Fatalf("feed after clear-missing: %v", feedPaths(feed))
 	}
+}
+
+// TestASettleStepBindsEachOfItsPaths runs each of the settle's four steps
+// over two paths at once. Every step prepares its statement once and binds
+// one path per call, so a step that bound the first path for both would
+// count, reset or delete the wrong rows; every other test settles one path
+// per step.
+func TestASettleStepBindsEachOfItsPaths(t *testing.T) {
+	s := newFeedStore(t)
+	for _, p := range []string{"a.m3u", "b.m3u", "c.m3u", "d.m3u"} {
+		storePlaylist(t, s, p)
+	}
+	ctx := context.Background()
+	settle := func(seen, missing, renamed []string, wantDeleted int64) {
+		t.Helper()
+		n, err := s.settlePlaylistFiles(ctx, seen, missing, renamed, 2)
+		if err != nil || n != wantDeleted {
+			t.Fatalf("settlePlaylistFiles(seen %v, missing %v, renamed %v) = %d, %v; want %d deleted",
+				seen, missing, renamed, n, err, wantDeleted)
+		}
+	}
+	missingCounts := func() string {
+		t.Helper()
+		rows, err := s.db.Query(`SELECT path, missing_count FROM playlist_files ORDER BY path`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var p string
+			var n int
+			if err := rows.Scan(&p, &n); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, fmt.Sprintf("%s=%d", p, n))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, " ")
+	}
+	want := func(step, counts string) {
+		t.Helper()
+		if got := missingCounts(); got != counts {
+			t.Fatalf("after %s: %q, want %q", step, got, counts)
+		}
+	}
+
+	settle(nil, []string{"a.m3u", "b.m3u"}, nil, 0)
+	want("a miss each for a and b", "a.m3u=1 b.m3u=1 c.m3u=0 d.m3u=0")
+	settle([]string{"a.m3u", "b.m3u"}, []string{"c.m3u", "d.m3u"}, nil, 0)
+	want("a and b seen, c and d missed", "a.m3u=0 b.m3u=0 c.m3u=1 d.m3u=1")
+	settle(nil, []string{"c.m3u", "d.m3u"}, nil, 2)
+	want("c and d at the threshold", "a.m3u=0 b.m3u=0")
+	settle(nil, nil, []string{"a.m3u", "b.m3u"}, 2)
+	want("a and b renamed", "")
 }
