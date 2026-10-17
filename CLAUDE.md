@@ -2678,7 +2678,7 @@ lost my library."
   (`playlistFeedBatchBytes`), keeping its matches for later batches, so the
   answer is a single pass's (one request on 37 MiB of lines peaked at 219 MiB
   of heap in one batch, 54 MiB in batches; a page of it, since B442, at 41
-  MiB, whatever the index). Every file the walk saw gets the
+  MiB, and of five times that index at 47). Every file the walk saw gets the
   pass's evidence about its folder (`playlistFolderEvidence`, the row's
   `folder_whole`): whole only when no errored subtree covers it, nothing
   directly in it errored, and every audio file the walk saw directly in it is
