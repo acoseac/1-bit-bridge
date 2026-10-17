@@ -2671,14 +2671,21 @@ lost my library."
   threshold). The root flip's wipe, a root's prefix delete and
   `clear-missing` take the rows too. `Store.PlaylistFiles` places and
   resolves the stored lines in one read transaction at each request, so a
-  member indexed later resolves with no new read. The feed's `complete` is
+  member indexed later resolves with no new read. Neither side holds the
+  whole index: the pass reads and writes a window at a time
+  (`nextPlaylistReadWindow`, the write batch's bounds by the walk's sizes),
+  and the feed resolves 4 MiB of stored lines at a time in path order
+  (`playlistFeedBatchBytes`), keeping its matches for later batches, so the
+  answer is a single pass's (one request on 37 MiB of lines peaked at 219 MiB
+  of heap in one batch, 54 MiB in batches). The feed's `complete` is
   `playlistFilesCompleteKey`: set by a full scan's pass that backs every file
   its walk saw, deleted only with the rows by the wipe, absent after the
   migration, so a client can tell a list not yet rebuilt from one with files
   removed. **Don't resolve members
   at scan time, don't `path.Clean` a playlist line (a climb above the root is
   dropped even when it comes back down), don't let a failed read write the
-  row, don't set or clear `complete` anywhere else, and don't edit
+  row, don't set or clear `complete` anywhere else, don't read every file
+  before writing or load every stored line for a request, and don't edit
   `testdata/playlist-parse-cases.tsv`**: it is the app's
   table, copied byte for byte (iOS `a9a16365`) and pinned to LF in
   `.gitattributes`; change it there and copy it. The parse is the app's down
@@ -2690,7 +2697,9 @@ lost my library."
   `TestARemovedPlaylistFileLeavesTheFeedAtTheThreshold`,
   `TestASubtreeScanCoversOnlyItsOwnPlaylistFiles`,
   `TestAMultiRootLibraryResolvesFromTheManifestRoot`,
-  `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile`.
+  `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile`,
+  `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext`,
+  `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`.
 
 ### The wire contract
 

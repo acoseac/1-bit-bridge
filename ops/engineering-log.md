@@ -45547,9 +45547,10 @@ parity edges), `playlist_files_scan_test.go` (a full scan, change detection
 and the parser version, removal at the threshold and the reset, the
 clean-empty guard, a subtree's scope, a late member, the album rule,
 multi-root, the root removal and flip, a read failure, the size cap,
-backslashes, completeness) and `playlist_files_feed_test.go` (the fold, duplicates, the
-album rule term by term, the budget, the library note, clear-missing, a
-settle over two paths per step). `internal/api`:
+backslashes, completeness, the read windows) and `playlist_files_feed_test.go`
+(the fold, duplicates, the album rule term by term, the budget, the batches,
+the library note, clear-missing, a settle over two paths per step).
+`internal/api`:
 `playlist_files_test.go` (the exact document, the ETag and 304, `complete`
 sent false and moving the ETag, the flag, auth, a store failure's fixed
 message, a client abort at 499, and the real index end to end with gzip). `TestHealthFeaturesCompleteSet` and
@@ -45593,6 +45594,57 @@ settled one path per step. `TestASettleStepBindsEachOfItsPaths` (`09765a29`)
 runs each of the four steps over two paths, and the same mutation reddens it
 alone, at its first settle (one row deleted where none should be).
 
+CodeRabbit reviewed `b1c9b7ea`. Its one inline comment: the trim's U+200B
+was a literal character in the source, which a reader cannot see and an
+editor can drop. Written as `'\u200B'` in `251e742b`, with the fold test's
+decomposed é (now `"Cafe\u0301"`), the one other invisible character this PR
+added: an editor that normalized it would leave that test comparing a string
+with itself. The compiled values are the same. Control on `251e742b`,
+predicted: the U+200B clause removed reddens
+`TestPlaylistParserTrimsWhatTheAppTrims` alone, at U+200B; held.
+
+Its summary raised one concern, as moderate and inferred: no aggregate bound
+on memory. It was right on both sides. The pass read every file it had to
+read before it wrote any (a first scan reads them all), and the feed loaded,
+placed and looked up every stored line for each request, so a request's heap
+grew with the index, not with its 8 MiB answer. Measured on macOS 27 (Apple
+silicon, `go1.26.6`) with an index of 300 playlists of 2,000 entries (36.9
+MiB of lines, 20,000 tracks, a tenth of the lines naming nothing): one
+request took 336 ms and peaked at 219 MiB of live heap over a 3.8 MiB
+baseline, allocating 438 MiB. `cd830ad8`:
+
+- the pass reads and writes a window at a time, 256 files or 16 MiB by the
+  walk's sizes (the write batch's bounds), and still logs each of its lines
+  once for the pass;
+- the feed reads the rows' paths first, then loads, places and resolves 4 MiB
+  of stored lines at a time in path order, in the same read transaction and
+  against the same budget, and keeps up to 50,000 matches for later batches
+  (without them, batching tripled the time, to 959 ms).
+
+The same request now peaks at 54 MiB in 370 ms, and five times the index
+(1,500 playlists, 185 MiB of lines) at 60 MiB in 1.8 s. The answer is
+unchanged: `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` resolves one
+index (a line of every kind, lines shared across files, an album-folder
+playlist, a file past the cap, a budget that runs out) as one batch and in
+batches of 1, 64, 200 and 300 bytes, and compares the JSON. Controls on
+`cd830ad8`, each predicted before it ran, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| W1. the pass reads every file before it writes (the earlier code) | `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext` alone: all 300 reads found no row written |
+| W2. the window's byte bound ignored | `TestPlaylistReadWindowsHoldTheirBytes` alone, its size case one window, `0-12` |
+| F1. the feed's batch bound ignored (the earlier code's one batch) | `TestPlaylistFeedBatchesHoldTheirBytes` alone, one batch, `0-7` |
+| F2. each batch spends a copy of the budget | `TestThePlaylistFeedAnswersTheSameInAnyBatchSize` alone, at all four batch sizes; `TestThePlaylistFeedHoldsItsBudget`, which also runs a batch per row, stays green, since its third file fits either way |
+| F3. the kept matches taken as complete after the first batch | the same test alone, at 1 and 64 bytes only: at 200 and 300 the first batch already holds every path the later ones name |
+
+What the bound leaves as it was: the work is still in proportion to the
+index, since every file is resolved to learn whether it fits, and is bounded
+in time by the route's 10 s; and the 8 MiB budget still lists everything past
+some 100,000 served entries `tooLarge`. In the measured index 64 of the 300
+playlists are served. A library that size needs the feed paged (an `after`
+cursor, a page per budget, each page one snapshot), which changes the
+response's shape: not done here, for B432's design to settle.
+
 ### For the app (B432)
 
 - `members` are manifest paths, `bridgeOriginalPath` as the manifest names
@@ -45614,3 +45666,6 @@ alone, at its first settle (one row deleted where none should be).
 - The table header's line-end note omits U+2029, and nothing in it pins the
   trim set (U+200B) or the second BOM; the app's parser does all three, and
   rows for them would hold both sides to it.
+- One answer serves at most 8 MiB of entries, some 100,000; past that a
+  playlist is `tooLarge` though it is under both file caps. A library with
+  more needs a paged feed before B432 depends on the single document.
