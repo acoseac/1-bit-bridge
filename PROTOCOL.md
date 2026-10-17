@@ -1424,9 +1424,9 @@ Each family MAY carry **`imageHash`** (additive, omitted when absent) — the SH
 
 Each family MAY also carry **`energy`** + **`modalRateHz`** (both additive, omitted when absent) — the server-derived inputs for a client's "waveform-signed cover" halo. `energy` is the mix's normalized **0…1** loudness contour: one element per member track (down-sampled to ≤48), mapped **linearly** from each track's ReplayGain across a clamped `[−24 dB, 0 dB]` window (`−12 dB → 0.5`); it is omitted when fewer than half the members are analyzed (the client renders its own seeded waveform instead). `modalRateHz` is the mix's modal sample rate (ties broken toward the **highest** rate, biasing the halo's glow color toward high-res); `0`/absent means "unknown — use a fixed family color". Both are decorative — a client that ignores them renders a plain cover. **Additive — no `ProtocolVersion` bump.**
 
-### `GET /v1/playlist-files` (additive; `playlistFiles`)
+### `GET /v1/playlist-files` (additive; `playlistFiles`, paged with `playlistFilesPaged`)
 
-The `.m3u` and `.m3u8` files in the library, as the bridge's index read them. **Read-only**: the bridge never writes a playlist file, and no route changes one. This is a feed of its own, not the playlist backup: its playlists follow their files, no device authors them, so they carry no `lastModifiedAt`, no epoch and no tombstones. Advertised via the `playlistFiles` flag in `/v1/health.features`; a bridge without it answers `404` `playlist_files_not_supported`. Bearer-authenticated; the `X-Device-Token` header is not required (user-wide). Served on every bridge, a demo bridge included: it is library data. **Additive — no `ProtocolVersion` bump.**
+The `.m3u` and `.m3u8` files in the library, as the bridge's index read them. **Read-only**: the bridge never writes a playlist file, and no route changes one. This is a feed of its own, not the playlist backup: its playlists follow their files, no device authors them, so they carry no `lastModifiedAt`, no epoch and no tombstones. Advertised via the `playlistFiles` flag in `/v1/health.features`; a bridge without it answers `404` `playlist_files_not_supported`. The feed is **paged** (see Paging) on a bridge that also advertises `playlistFilesPaged`; one with `playlistFiles` alone answers the whole feed as one document without `version` or `nextCursor`, in which a file past that document's 8 MiB budget came back `tooLarge`, so a client that imports from the feed asks for both flags. Bearer-authenticated; the `X-Device-Token` header is not required (user-wide). Served on every bridge, a demo bridge included: it is library data. **Additive — no `ProtocolVersion` bump.**
 
 **What is read.** Every file a scan walks whose name ends in `.m3u` or `.m3u8`, in any case, except a dot-file or one under a directory the walk skips. A playlist file is never a track. A scan reads a file once, and again only when its size or mtime changes or the bridge's parser does; a file a scan cannot read keeps what was read before. A removed file leaves the feed after the same missing-count grace as a track (`scanner.deleteAfterMissingScans`, 3 scans by default), and a removed root's files leave with its tracks. A file of 2,000,000 bytes or more is not read (the iOS importer's own cap), and the entries of a file holding more than 100,000 entry lines are not kept: both are listed with `tooLarge`.
 
@@ -1445,10 +1445,17 @@ A track here is any track the bridge has indexed, a suppressed duplicate include
 
 **A file is judged at all only on whole evidence about its folder** (the iOS importer's own gate): the last scan that saw the file saw that folder whole, meaning no failed or cut-short read of it or of a folder above it, no entry in it the scan could not see (a link it could not follow, a subfolder it could not read), and a track for every audio file the scan found directly in it. Without that evidence the bridge's tracks can under-count the folder (a new file it could not index), and an ordinary playlist naming the indexed tracks would meet term 4, so the file is listed. The evidence is a finished scan's: a scan in progress only adds tracks to a folder before it judges the folder again, which can only take a file out of the rule. A file listed for want of evidence leaves the list once a scan sees its folder whole and the four terms hold.
 
-**Response** `200` (gzip when the client accepts it):
+**Paging** (`playlistFilesPaged`). The feed is read a page at a time, in byte order of `path`. The first page is the request with no `after`; each page but the last carries `nextCursor`, and the next page is `GET /v1/playlist-files?after=<nextCursor>`. The last page has no `nextCursor`. A cursor is opaque, unpadded base64url that needs no escaping: pass it back as it came.
+
+- **`version`** is on every page: the same on every page of one consistent read, and different after any change a page could show (a playlist file read anew, added, removed or touched; a track indexed, removed or renamed; a duplicate stamp moved; a file's folder evidence; `complete`; a bridge update; a restore). An enrichment write to a track moves none of these and leaves it as it was.
+- **The restart rule.** A cursor carries the version it was made at. A page asked for with a cursor of another version answers `410` `playlist_files_stale`, and the client starts again from the first page. A read that reaches the last page with no `410` saw one state: every page at one version, every listed file in exactly one page, in path order. A client that keeps the first page's `version` can also tell, at its next poll, whether anything changed.
+- **The page bound.** A page holds the files that fit its budget, taken in path order: a file costs the bytes of its path and its name and 64 more, and each of its entries its length plus 4, about what the file takes in the JSON, against 8 MiB a page. A file that does not fit what is left starts the next page, so the budget never makes a file `tooLarge`. A page holds at least one file (only the one page of an empty feed holds none), so a file larger than a page has a page to itself; the per-file caps above bound it. An album-folder playlist is left out of whichever page its path falls in.
+
+**Response** `200` (gzip when the client accepts it), a feed of two pages. `GET /v1/playlist-files`:
 
 ```json
 {
+  "version": "5f2c0b8e1d9a7c36",
   "complete": true,
   "playlists": [
     {
@@ -1457,24 +1464,38 @@ A track here is any track the bridge has indexed, a suppressed duplicate include
       "mtime": "2026-10-16T09:12:44.123456789Z",
       "members": ["Artist/Album/01 One.flac", "Artist/Album/02 Two.flac", "Artist/Album/01 One.flac"],
       "unresolved": ["../Missing/03.flac", "http://example.com/stream.mp3"]
-    },
-    { "path": "Playlists/All.m3u", "name": "All", "mtime": "2026-10-01T08:00:00Z", "members": [], "unresolved": [], "tooLarge": true }
+    }
+  ],
+  "nextCursor": "NWYyYzBiOGUxZDlhN2MzNgBQbGF5bGlzdHMvUm9hZCBUcmlwLm0zdTg"
+}
+```
+
+then `GET /v1/playlist-files?after=NWYyYzBiOGUxZDlhN2MzNgBQbGF5bGlzdHMvUm9hZCBUcmlwLm0zdTg`, the last page:
+
+```json
+{
+  "version": "5f2c0b8e1d9a7c36",
+  "complete": true,
+  "playlists": [
+    { "path": "Playlists/Workout.m3u", "name": "Workout", "mtime": "2026-10-01T08:00:00Z", "members": [], "unresolved": [], "tooLarge": true }
   ]
 }
 ```
 
-- `complete` — always present. `true` once a full scan has brought the index up to date since it was created (the bridge update that adds this route) or emptied (a single↔multi root flip): every playlist file that scan saw was read, or kept from an earlier read. While it is `false` the list can lack files the library holds, so a client must not read a file missing from it as removed. Once `true` it stays so; a file then leaves the list only as a removed file does, after the grace above.
-- `playlists` — every listed playlist file, in byte order of `path`; `[]` when there is none.
+- `version` — always present; see Paging. Opaque: compare it, never parse it.
+- `complete` — always present. `true` once a full scan has accounted for every playlist file it saw (read it, kept it from an earlier read, or listed it `tooLarge` past a cap) since the index was created (the bridge update that adds this route) or emptied (a single↔multi root flip). While it is `false` the pages can lack files the library holds, so a client must not read a file missing from them as removed. Once `true` it stays so; a file then leaves the feed only as a removed file does, after the grace above. It is part of `version`, so every page of one read agrees on it.
+- `playlists` — this page's listed playlist files, in byte order of `path`; `[]` only on the one page of an empty feed.
+- `nextCursor` — present on every page but the last: the `after` of the next page.
 - `path` — the file's manifest path: library-relative, `/`-separated, no leading `/`, the root's folder name first on a bridge with several roots.
 - `name` — the file name without its last extension: the name the iOS app gives a playlist it imports from a share.
 - `mtime` — the file's modification time when the bridge read it, UTC.
 - `members` — the members, in file order, duplicates kept. Always an array.
 - `unresolved` — every entry line that is no member, in file order, as parsed (trimmed, `\` folded): a line the path rule cannot place, and a placed line no served track answers. Always an array. How the two lists interleave is not kept.
-- `tooLarge` — present, and `true`, only when the entries are not served: the file is past one of the caps above, or its entries would take this answer past its budget (8 MiB of entries, filled in path order; a later playlist that fits is still served). Both lists are empty then, which says nothing about what the file holds.
+- `tooLarge` — present, and `true`, only when the file is past one of the per-file caps above (2,000,000 bytes, more than 100,000 entry lines): its entries are not served, and both lists are empty, which says nothing about what the file holds. A page's budget never sets it.
 
-The response carries a strong `ETag`, the SHA-256 hex of the document's JSON, quoted. `If-None-Match` is compared as for `GET /v1/playlists`: comma-separated validators, weak comparison, several header lines joined with commas, `*` always matches; a match is `304` with an empty body and the same `ETag`. Because members resolve at each request, the hash moves exactly when the answer does: a file read anew, a member's track indexed or removed, a duplicate stamp moved. A change to the index outside a full scan publishes `library.changed` through the library debounce (see `GET /v1/events`).
+Each page carries a strong `ETag`, the SHA-256 hex of that page's JSON (its `version` and `nextCursor` included), quoted. `If-None-Match` is compared as for `GET /v1/playlists`: comma-separated validators, weak comparison, several header lines joined with commas, `*` always matches; a match is `304` with an empty body and the same `ETag`. Because members resolve at each request and `version` moves with any change a page could show, a page's hash moves when its answer does. A change to the index outside a full scan publishes `library.changed` through the library debounce (see `GET /v1/events`).
 
-Errors: `401` `unauthorized`; `404` `playlist_files_not_supported`; `500` `internal` ("the bridge couldn't read its playlist files"), whose message never carries the cause.
+Errors: `400` `bad_request` ("after is not a cursor this bridge gave; start from the first page"); `401` `unauthorized`; `404` `playlist_files_not_supported`; `410` `playlist_files_stale` ("the playlist files changed since this cursor; start again from the first page"); `500` `internal` ("the bridge couldn't read its playlist files"), whose message never carries the cause.
 
 ### Favorites (additive, since v1.10; revisions since the `favoritesRevisions` health key)
 
@@ -1727,6 +1748,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    410 | `waveform_stale`         | `GET /v1/waveform`: the source changed (mtime beyond 2 s, or size) since the waveform was computed |
 |    410 | `waveform_missing_on_disk` | `GET /v1/waveform`: the row exists but the sidecar file is gone |
 |    410 | `spectrum_stale`         | `GET /v1/spectrum`: the source changed since the spectrum was computed |
+|    410 | `playlist_files_stale`   | `GET /v1/playlist-files?after=`: the cursor's version is not the feed's (something a page could show changed since); start again from the first page |
 |    410 | `lyrics_stale`           | `GET /v1/lyrics`: the lyrics source changed since extraction (a network-tier document never answers it) |
 |    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |

@@ -2669,21 +2669,23 @@ lost my library."
   and a row the walk did not see takes the tracks' rules in their order
   (errored subtree spared first, a backed case-only rename reaped, else the
   threshold). The root flip's wipe, a root's prefix delete and
-  `clear-missing` take the rows too. `Store.PlaylistFiles` places and
-  resolves the stored lines in one read transaction at each request, so a
-  member indexed later resolves with no new read. Neither side holds the
-  whole index: the pass reads and writes a window at a time
+  `clear-missing` take the rows too. `Store.PlaylistFilesPage` places and
+  resolves the stored lines of one page in one read transaction at each
+  request, so a member indexed later resolves with no new read. Neither side
+  holds the whole index: the pass reads and writes a window at a time
   (`nextPlaylistReadWindow`, the write batch's bounds by the walk's sizes),
-  and the feed resolves 4 MiB of stored lines at a time in path order
+  and a page resolves 4 MiB of stored lines at a time in path order
   (`playlistFeedBatchBytes`), keeping its matches for later batches, so the
   answer is a single pass's (one request on 37 MiB of lines peaked at 219 MiB
-  of heap in one batch, 54 MiB in batches). Every file the walk saw gets the
+  of heap in one batch, 54 MiB in batches; a page of it, since B442, at 41
+  MiB, whatever the index). Every file the walk saw gets the
   pass's evidence about its folder (`playlistFolderEvidence`, the row's
   `folder_whole`): whole only when no errored subtree covers it, nothing
   directly in it errored, and every audio file the walk saw directly in it is
   in `backed`; a row the walk did not see keeps its mark. The feed's `complete` is
   `playlistFilesCompleteKey`: set by a full scan's pass that backs every file
-  its walk saw, deleted only with the rows by the wipe, absent after the
+  its walk saw (a file past a cap is a completed read with `tooLarge`, so it
+  counts), deleted only with the rows by the wipe, absent after the
   migration, so a client can tell a list not yet rebuilt from one with files
   removed. **Don't resolve members
   at scan time, don't `path.Clean` a playlist line (a climb above the root is
@@ -3184,15 +3186,28 @@ lost my library."
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client
   keys on, since no client can ask a bridge its protocol era.
-- **`GET /v1/playlist-files` is read-only, its ETag is a hash of the document,
-  and it names only served tracks** (2026-10-17, backlog B431; flag
-  `playlistFiles`, wired on every bridge, the demo included; no
-  `ProtocolVersion` bump). The ETag is the SHA-256 of the JSON it would send,
-  because members resolve per request; a placed line is its exact path, else
-  the one track a case-and-composition fold answers; a suppressed duplicate is
-  its group's one served copy or unresolved; a file of 2,000,000 bytes or more
-  (the app's cap), of more than 100,000 entry lines, or past the 8 MiB answer
-  budget is listed `tooLarge` with empty lists. **An album-folder playlist is
+- **`GET /v1/playlist-files` is read-only, paged at one version, each page's
+  ETag is a hash of the page, and it names only served tracks** (2026-10-17,
+  backlog B431, paged by B442; flags `playlistFiles` and
+  `playlistFilesPaged`, wired on every bridge, the demo included; no
+  `ProtocolVersion` bump). A page holds the files that fit
+  `PlaylistFilePageBudget` (8 MiB by the JSON's own measure: path, name and 64
+  bytes a file, length plus 4 an entry), in path order; a file that does not
+  fit starts the next page, and a page always holds one, so a file larger
+  than a page has its own. `nextCursor` (absent on the last page) is the
+  feed's `version` and the last path the page covers; a cursor of another
+  version is a 410 `playlist_files_stale` and the client restarts. The
+  version hashes the rules (`playlistFeedRulesVersion`), the build, the
+  backup epoch, `complete` and a generation the v57 triggers move on every
+  track or playlist row change a page can show (a track added, removed,
+  renamed or restamped; a playlist row added, removed, or changed in its
+  lines, mtime, `too_large` or `folder_whole`); enrichment moves none. The
+  ETag is the SHA-256 of the page's JSON, because members resolve per request;
+  a placed line is its exact path, else the one track a case-and-composition
+  fold answers; a suppressed duplicate is its group's one served copy or
+  unresolved; a file of 2,000,000 bytes or more (the app's cap) or of more
+  than 100,000 entry lines is listed `tooLarge` with empty lists, and no
+  budget ever makes one so. **An album-folder playlist is
   not listed, by the app's four terms** (`AlbumFolderPlaylist.isAlbumPlaylist`,
   its B421; entries are the lines the path rule places, a dropped line is no
   entry): (1) at least one entry; (2) EVERY entry names a track at exactly
@@ -3213,15 +3228,24 @@ lost my library."
   the rule. Change the rule only with the app's, in the same pair. **Don't
   serve a suppressed path as a member, don't let an unresolved entry count
   toward the album rule, don't judge a file whose folder evidence is not
-  whole, and don't put the store's error in the 500** (B425's fixed
-  message). Tests:
+  whole, don't put the store's error in the 500** (B425's fixed message),
+  **don't serve a page at a version its cursor was not made at, don't let a
+  page's budget mark a file `tooLarge`, and don't add a column a page reads
+  without moving the v57 triggers' `WHEN` with it**; bump
+  `playlistFeedRulesVersion` with any change to what the feed answers for
+  the same rows. Tests:
   `TestPlaylistFilesAnswers304ToAMatchingETag`,
   `TestAlbumFolderPlaylistsAreNotServed`, `TestTheAlbumFolderRuleTermByTerm`,
   `TestASuppressedDuplicateMemberIsServedAsItsServedCopy`,
   `TestAPlaylistFilesStoreFailureAnswersAFixedMessage`,
   `TestAClientAbortDuringThePlaylistFilesReadIsInfoAnd499`,
   `TestAnAlbumFolderPlaylistIsServedWhileItsFolderHoldsAFileTheIndexLacks`,
-  `TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`.
+  `TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`,
+  `TestPlaylistFilePagesConcatenateToTheWholeFeed`,
+  `TestTheFeedVersionMovesWithEveryChangeAPageCanShow`,
+  `TestAPageAskedForAtAnotherVersionIsRefused`,
+  `TestTheFeedGenerationTriggersAreInPlace`,
+  `TestAPlaylistFilesCursorFromAnotherVersionIs410`.
 
 ### Lyrics — the one document per track
 
