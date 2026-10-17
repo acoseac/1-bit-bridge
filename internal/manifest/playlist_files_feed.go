@@ -158,8 +158,8 @@ func (s *Store) playlistFiles(ctx context.Context, budget int) (PlaylistFileFeed
 		return PlaylistFileFeed{}, err
 	}
 	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(stored))}
-	for _, f := range stored {
-		pf, album, err := f.resolve(ctx, tx, matches, served, &budget)
+	for i := range stored {
+		pf, album, err := stored[i].resolve(ctx, tx, matches, served, &budget)
 		if err != nil {
 			return PlaylistFileFeed{}, err
 		}

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"strings"
@@ -138,7 +139,7 @@ func (s *Store) writePlaylistFiles(ctx context.Context, reads []playlistFileRead
 			changed = true
 		case err != nil:
 			return false, err
-		case oldTooLarge != r.tooLarge || string(oldLines) != string(blob):
+		case oldTooLarge != r.tooLarge || !bytes.Equal(oldLines, blob):
 			changed = true
 		}
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtimeNs,
@@ -213,7 +214,9 @@ func (s *Store) settlePlaylistFiles(ctx context.Context, seen, missing, renamed 
 }
 
 // execEachPath prepares query once and runs it for each path, with extra
-// bound after the path, and returns how many rows it changed in all.
+// bound after the path, and returns how many rows it changed in all. One
+// argument list serves every call: database/sql converts the arguments
+// before the driver sees them and keeps none.
 func execEachPath(ctx context.Context, tx *sql.Tx, query string, paths []string, extra ...any) (int64, error) {
 	if len(paths) == 0 {
 		return 0, nil
@@ -223,9 +226,12 @@ func execEachPath(ctx context.Context, tx *sql.Tx, query string, paths []string,
 		return 0, err
 	}
 	defer stmt.Close()
+	args := make([]any, 1+len(extra))
+	copy(args[1:], extra)
 	var n int64
 	for _, p := range paths {
-		res, err := stmt.ExecContext(ctx, append([]any{p}, extra...)...)
+		args[0] = p
+		res, err := stmt.ExecContext(ctx, args...)
 		if err != nil {
 			return 0, err
 		}
