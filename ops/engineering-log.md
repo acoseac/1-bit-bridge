@@ -45548,7 +45548,8 @@ and the parser version, removal at the threshold and the reset, the
 clean-empty guard, a subtree's scope, a late member, the album rule,
 multi-root, the root removal and flip, a read failure, the size cap,
 backslashes, completeness) and `playlist_files_feed_test.go` (the fold, duplicates, the
-album rule term by term, the budget, the library note, clear-missing). `internal/api`:
+album rule term by term, the budget, the library note, clear-missing, a
+settle over two paths per step). `internal/api`:
 `playlist_files_test.go` (the exact document, the ETag and 304, `complete`
 sent false and moving the ETag, the flag, auth, a store failure's fixed
 message, a client abort at 499, and the real index end to end with gzip). `TestHealthFeaturesCompleteSet` and
@@ -45576,6 +45577,21 @@ ran in a loop: the feed's track and duplicate-group lookups
 and the settle step's bump, reap and reset. Taken in `5f1e30fd`, as
 `IncrementMissingTracksAndDeleteAtThreshold` prepares its statement. No line
 a control mutates moved; the playlist tests pass on it under `-race`.
+
+Its second pass asked for three more: `bytes.Equal` for the stored-lines
+comparison, one argument list for every call of a settle step, and an index
+loop over the stored rows. Taken in `d6116152`, none changing behaviour:
+`bytes.Equal` is the comparison the string conversions made (the standard
+library's comment on it: neither compiler allocates for them),
+`database/sql` converts each call's arguments into a list of its own
+(`driverArgsConnLocked`), and the loop reads the slice as `place` does above
+it. Two controls on `d6116152`, each predicted first, held: the comparison
+forced false reddened `TestPlaylistFileWritesNoteTheLibraryOnlyWhenTheFeedChanges`
+alone, at "1 notes after a change, want 2"; the argument list bound to the
+first path for every call reddened nothing, as predicted, because every test
+settled one path per step. `TestASettleStepBindsEachOfItsPaths` (`09765a29`)
+runs each of the four steps over two paths, and the same mutation reddens it
+alone, at its first settle (one row deleted where none should be).
 
 ### For the app (B432)
 
