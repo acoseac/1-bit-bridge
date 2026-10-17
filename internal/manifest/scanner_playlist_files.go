@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -100,9 +101,9 @@ const (
 	playlistWriteBatchBytes = 16 << 20
 )
 
-// readPlaylistFiles reads todo, a few at a time, and returns each completed
-// read, in todo's order, beside the failures.
-func (s *Scanner) readPlaylistFiles(ctx context.Context, todo []playlistSighting) ([]playlistFileRead, []playlistReadFailure) {
+// readPlaylistFiles reads toRead, a few at a time, and returns each completed
+// read, in toRead's order, beside the failures.
+func (s *Scanner) readPlaylistFiles(ctx context.Context, toRead []playlistSighting) ([]playlistFileRead, []playlistReadFailure) {
 	read := s.readPlaylist
 	if read == nil {
 		read = readPlaylistFile
@@ -111,10 +112,10 @@ func (s *Scanner) readPlaylistFiles(ctx context.Context, todo []playlistSighting
 		r   playlistFileRead
 		err error
 	}
-	results := make([]result, len(todo))
+	results := make([]result, len(toRead))
 	next := make(chan int)
 	var wg sync.WaitGroup
-	for w := 0; w < min(playlistReadWorkers, len(todo)); w++ {
+	for w := 0; w < min(playlistReadWorkers, len(toRead)); w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -123,11 +124,11 @@ func (s *Scanner) readPlaylistFiles(ctx context.Context, todo []playlistSighting
 					results[i].err = err
 					continue
 				}
-				results[i].r, results[i].err = read(todo[i].abs, todo[i].rel)
+				results[i].r, results[i].err = read(toRead[i].abs, toRead[i].rel)
 			}
 		}()
 	}
-	for i := range todo {
+	for i := range toRead {
 		next <- i
 	}
 	close(next)
@@ -136,7 +137,7 @@ func (s *Scanner) readPlaylistFiles(ctx context.Context, todo []playlistSighting
 	var failed []playlistReadFailure
 	for i, res := range results {
 		if res.err != nil {
-			failed = append(failed, playlistReadFailure{rel: todo[i].rel, err: res.err})
+			failed = append(failed, playlistReadFailure{rel: toRead[i].rel, err: res.err})
 			continue
 		}
 		reads = append(reads, res.r)
@@ -181,8 +182,8 @@ func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full boo
 		return
 	}
 	p := &playlistPass{s: s, before: before, seen: seen, backed: newBackedPaths()}
-	todo := p.plan()
-	p.write(ctx, p.read(ctx, todo))
+	toRead := p.plan()
+	p.write(ctx, p.read(ctx, toRead))
 	if ctx.Err() != nil {
 		return
 	}
@@ -238,7 +239,7 @@ func (p *playlistPass) keep(rel string) {
 // whose row was read at its size and mtime by the current parser, and one
 // the walk could not stat, both kept as they are.
 func (p *playlistPass) plan() []playlistSighting {
-	var todo []playlistSighting
+	var toRead []playlistSighting
 	var unseen walkTally
 	for rel, sg := range p.seen {
 		st, had := p.before[rel]
@@ -250,24 +251,24 @@ func (p *playlistPass) plan() []playlistSighting {
 			st.size == sg.info.Size() && st.mtimeNs == sg.info.ModTime().UnixNano():
 			p.keep(rel)
 		default:
-			todo = append(todo, sg)
+			toRead = append(toRead, sg)
 		}
 	}
 	unseen.report(msgPlaylistFilesUnseen, "err")
-	sort.Slice(todo, func(i, j int) bool { return todo[i].rel < todo[j].rel })
-	return todo
+	sort.Slice(toRead, func(i, j int) bool { return toRead[i].rel < toRead[j].rel })
+	return toRead
 }
 
-// read reads todo and returns the completed reads, each under the WALK's
+// read reads toRead and returns the completed reads, each under the WALK's
 // stat, which is what the next walk compares, as a track's row is. The
 // opened file's can differ (a file written between the walk and the read,
 // or a Windows directory entry whose metadata lags the file's): stored, it
 // would read the file again on every scan, where the walk's converges after
 // one more read. A read that failed keeps the stored row, logged once.
-func (p *playlistPass) read(ctx context.Context, todo []playlistSighting) []playlistFileRead {
-	reads, failed := p.s.readPlaylistFiles(ctx, todo)
-	walked := make(map[string]fs.FileInfo, len(todo))
-	for _, sg := range todo {
+func (p *playlistPass) read(ctx context.Context, toRead []playlistSighting) []playlistFileRead {
+	reads, failed := p.s.readPlaylistFiles(ctx, toRead)
+	walked := make(map[string]fs.FileInfo, len(toRead))
+	for _, sg := range toRead {
 		walked[sg.rel] = sg.info
 	}
 	for i := range reads {
@@ -286,35 +287,22 @@ func (p *playlistPass) read(ctx context.Context, todo []playlistSighting) []play
 	return reads
 }
 
-// write stores reads, a batch per transaction (playlistWriteBatch reads or
-// playlistWriteBatchBytes of lines). A batch that does not land is not
-// backed: a rename whose new spelling it held keeps its old row, and the
-// next scan reads its files again.
+// write stores reads, a batch per transaction (nextPlaylistBatch). A batch
+// that does not land is not backed: a rename whose new spelling it held
+// keeps its old row, and the next scan reads its files again.
 func (p *playlistPass) write(ctx context.Context, reads []playlistFileRead) {
 	tooLarge, example := 0, ""
 	for start := 0; start < len(reads); {
-		end, size := start, 0
-		for end < len(reads) && end-start < playlistWriteBatch && size < playlistWriteBatchBytes {
-			for _, l := range reads[end].lines {
-				size += len(l) + 1
-			}
-			end++
-		}
+		end := nextPlaylistBatch(reads, start)
 		batch := reads[start:end]
 		start = end
-		if _, err := p.s.store.writePlaylistFiles(ctx, batch); err != nil {
-			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-				scanLogger.Error("playlist files pass: write", "err", failure, "files", len(batch))
-			}
+		if !p.writeBatch(ctx, batch) {
 			continue
 		}
 		for _, r := range batch {
-			p.backed.add(r.path)
 			if r.tooLarge {
 				tooLarge++
-				if example == "" {
-					example = r.path
-				}
+				example = cmp.Or(example, r.path)
 			}
 		}
 	}
@@ -322,6 +310,35 @@ func (p *playlistPass) write(ctx context.Context, reads []playlistFileRead) {
 		scanLogger.Info(msgPlaylistFilesTooLarge, "files", tooLarge, "example", example,
 			"maxBytes", PlaylistFileMaxBytes, "maxEntries", playlistFileMaxEntries)
 	}
+}
+
+// nextPlaylistBatch is the end of the write batch that starts at
+// reads[start]: playlistWriteBatch reads, or playlistWriteBatchBytes of
+// lines, whichever comes first, and always at least one read.
+func nextPlaylistBatch(reads []playlistFileRead, start int) int {
+	end, size := start, 0
+	for end < len(reads) && end-start < playlistWriteBatch && size < playlistWriteBatchBytes {
+		for _, l := range reads[end].lines {
+			size += len(l) + 1
+		}
+		end++
+	}
+	return end
+}
+
+// writeBatch stores one batch and backs its rows, and reports whether it
+// landed.
+func (p *playlistPass) writeBatch(ctx context.Context, batch []playlistFileRead) bool {
+	if _, err := p.s.store.writePlaylistFiles(ctx, batch); err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Error("playlist files pass: write", "err", failure, "files", len(batch))
+		}
+		return false
+	}
+	for _, r := range batch {
+		p.backed.add(r.path)
+	}
+	return true
 }
 
 // settle is the deletion step: a row the walk did not see is spared under a

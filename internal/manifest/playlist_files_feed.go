@@ -200,47 +200,67 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, tx *sql.Tx, matches ma
 	if f.tooLarge {
 		return pf, false, nil
 	}
-	// The album-folder rule's entries are the placed lines (a line the path
-	// rule drops is no entry), and named the tracks they name at their exact
-	// paths. allExact goes false at the first entry that names no track at
-	// its exact bytes: unresolved, or found only by the fold.
-	var named []string
-	entries, allExact := 0, true
-	cost := 0
+	lines := resolvedPlaylistLines{members: []string{}, unresolved: []string{}, allExact: true}
 	for _, pl := range f.placed {
-		m, hit := playlistTrackMatch{}, false
-		if pl.ok {
-			entries++
-			m, hit = matches[pl.path]
-			if hit && m.path == pl.path {
-				named = append(named, m.path)
-			} else {
-				allExact = false
-			}
-		}
-		member := m.path
-		if hit && m.suppressed {
-			member, hit = served[m.groupID]
-		}
-		if hit {
-			pf.Members = append(pf.Members, member)
-			cost += len(member) + 4
-		} else {
-			pf.Unresolved = append(pf.Unresolved, pl.line)
-			cost += len(pl.line) + 4
-		}
+		lines.add(pl, matches, served)
 	}
-	if entries > 0 && allExact {
-		if album, err = isAlbumFolderPlaylist(ctx, tx, playlistFileDir(f.path), named); err != nil || album {
+	if lines.entries > 0 && lines.allExact {
+		if album, err = isAlbumFolderPlaylist(ctx, tx, playlistFileDir(f.path), lines.named); err != nil || album {
 			return pf, album, err
 		}
 	}
-	if cost > *budget {
-		pf.Members, pf.Unresolved, pf.TooLarge = []string{}, []string{}, true
-	} else {
-		*budget -= cost
+	if lines.cost > *budget {
+		pf.TooLarge = true
+		return pf, false, nil
 	}
+	*budget -= lines.cost
+	pf.Members, pf.Unresolved = lines.members, lines.unresolved
 	return pf, false, nil
+}
+
+// resolvedPlaylistLines is a playlist's lines resolved: the members and
+// unresolved lines the feed serves and what they cost against the budget,
+// and the album-folder rule's inputs. Its entries are the placed lines (a
+// line the path rule drops is no entry); named holds the tracks they name
+// at their exact paths, and allExact goes false at the first entry that
+// names none there (unresolved, or found only by the fold).
+type resolvedPlaylistLines struct {
+	members, unresolved []string
+	cost                int
+	entries             int
+	named               []string
+	allExact            bool
+}
+
+// add resolves one line and files it as a member or an unresolved line.
+func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) {
+	if member, ok := r.member(pl, matches, served); ok {
+		r.members = append(r.members, member)
+		r.cost += len(member) + 4
+		return
+	}
+	r.unresolved = append(r.unresolved, pl.line)
+	r.cost += len(pl.line) + 4
+}
+
+// member is the member a placed line names, if any, and records the line
+// for the album-folder rule.
+func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) (string, bool) {
+	if !pl.ok {
+		return "", false
+	}
+	r.entries++
+	m, hit := matches[pl.path]
+	if hit && m.path == pl.path {
+		r.named = append(r.named, m.path)
+	} else {
+		r.allExact = false
+	}
+	if hit && m.suppressed {
+		copyPath, ok := served[m.groupID]
+		return copyPath, ok
+	}
+	return m.path, hit
 }
 
 func readStoredPlaylistFiles(ctx context.Context, tx *sql.Tx) ([]storedPlaylistFile, error) {
