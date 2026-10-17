@@ -123,14 +123,17 @@ func (s *Store) writePlaylistFiles(ctx context.Context, reads []playlistFileRead
 		return false, err
 	}
 	defer stmt.Close()
+	readStmt, err := tx.PrepareContext(ctx, `SELECT lines, too_large FROM playlist_files WHERE path = ?`)
+	if err != nil {
+		return false, err
+	}
+	defer readStmt.Close()
 	changed := false
 	for _, r := range reads {
 		blob := joinPlaylistLines(r.lines)
 		var oldLines []byte
 		var oldTooLarge bool
-		switch err := tx.QueryRowContext(ctx,
-			`SELECT lines, too_large FROM playlist_files WHERE path = ?`, r.path,
-		).Scan(&oldLines, &oldTooLarge); {
+		switch err := readStmt.QueryRowContext(ctx, r.path).Scan(&oldLines, &oldTooLarge); {
 		case err == sql.ErrNoRows:
 			changed = true
 		case err != nil:
@@ -176,33 +179,27 @@ func (s *Store) settlePlaylistFiles(ctx context.Context, seen, missing, renamed 
 		return 0, err
 	}
 	defer tx.Rollback()
-	for _, p := range seen {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE playlist_files SET missing_count = 0 WHERE path = ? AND missing_count != 0`, p); err != nil {
-			return 0, err
-		}
+	// Each statement prepared once, as IncrementMissingTracksAndDeleteAtThreshold
+	// does. Every bump lands before any reap: each path is its own row, so
+	// the order across paths changes nothing.
+	steps := []struct {
+		query string
+		paths []string
+		extra []any
+		reaps bool
+	}{
+		{`UPDATE playlist_files SET missing_count = 0 WHERE path = ? AND missing_count != 0`, seen, nil, false},
+		{`UPDATE playlist_files SET missing_count = missing_count + 1 WHERE path = ?`, missing, nil, false},
+		{`DELETE FROM playlist_files WHERE path = ? AND missing_count >= ?`, missing, []any{threshold}, true},
+		{`DELETE FROM playlist_files WHERE path = ?`, renamed, nil, true},
 	}
 	var deleted int64
-	for _, p := range missing {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE playlist_files SET missing_count = missing_count + 1 WHERE path = ?`, p); err != nil {
-			return 0, err
-		}
-		res, err := tx.ExecContext(ctx,
-			`DELETE FROM playlist_files WHERE path = ? AND missing_count >= ?`, p, threshold)
+	for _, step := range steps {
+		n, err := execEachPath(ctx, tx, step.query, step.paths, step.extra...)
 		if err != nil {
 			return 0, err
 		}
-		if n, err := res.RowsAffected(); err == nil {
-			deleted += n
-		}
-	}
-	for _, p := range renamed {
-		res, err := tx.ExecContext(ctx, `DELETE FROM playlist_files WHERE path = ?`, p)
-		if err != nil {
-			return 0, err
-		}
-		if n, err := res.RowsAffected(); err == nil {
+		if step.reaps {
 			deleted += n
 		}
 	}
@@ -213,4 +210,28 @@ func (s *Store) settlePlaylistFiles(ctx context.Context, seen, missing, renamed 
 		s.noteLibrary(ctx)
 	}
 	return deleted, nil
+}
+
+// execEachPath prepares query once and runs it for each path, with extra
+// bound after the path, and returns how many rows it changed in all.
+func execEachPath(ctx context.Context, tx *sql.Tx, query string, paths []string, extra ...any) (int64, error) {
+	if len(paths) == 0 {
+		return 0, nil
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	var n int64
+	for _, p := range paths {
+		res, err := stmt.ExecContext(ctx, append([]any{p}, extra...)...)
+		if err != nil {
+			return 0, err
+		}
+		if k, err := res.RowsAffected(); err == nil {
+			n += k
+		}
+	}
+	return n, nil
 }

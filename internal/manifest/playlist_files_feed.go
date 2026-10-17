@@ -345,46 +345,60 @@ func matchPlaylistEntries(ctx context.Context, tx *sql.Tx, paths map[string]stru
 }
 
 // eachPlaylistLookup runs a track lookup over keys, a chunk at a time,
-// through one bound JSON array (the json_each idiom). A key that is not
-// valid UTF-8 cannot travel in JSON (encoding/json would substitute
-// U+FFFD), so it is bound on its own through single.
+// through one bound JSON array (the json_each idiom), each statement
+// prepared once. A key that is not valid UTF-8 cannot travel in JSON
+// (encoding/json would substitute U+FFFD), so it is bound on its own
+// through single.
 func eachPlaylistLookup(ctx context.Context, tx *sql.Tx, keys []string, batch, single string, fn func(playlistTrackMatch)) error {
 	valid, illFormed := splitIllFormedUTF8Paths(keys)
-	scan := func(rows *sql.Rows) error {
-		defer rows.Close()
-		for rows.Next() {
-			var m playlistTrackMatch
-			if err := rows.Scan(&m.path, &m.suppressed, &m.groupID); err != nil {
-				return err
-			}
-			fn(m)
-		}
-		return rows.Err()
-	}
+	var blobs []string
 	for start := 0; start < len(valid); start += playlistLookupChunk {
-		end := min(start+playlistLookupChunk, len(valid))
-		blob, err := json.Marshal(valid[start:end])
+		blob, err := json.Marshal(valid[start:min(start+playlistLookupChunk, len(valid))])
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, batch, string(blob))
-		if err != nil {
-			return err
-		}
-		if err := scan(rows); err != nil {
-			return err
-		}
+		blobs = append(blobs, string(blob))
 	}
-	for _, k := range illFormed {
-		rows, err := tx.QueryContext(ctx, single, k)
-		if err != nil {
-			return err
-		}
-		if err := scan(rows); err != nil {
+	if err := queryEachArg(ctx, tx, batch, blobs, fn); err != nil {
+		return err
+	}
+	return queryEachArg(ctx, tx, single, illFormed, fn)
+}
+
+// queryEachArg prepares query once, runs it with each arg, and hands fn
+// every row.
+func queryEachArg(ctx context.Context, tx *sql.Tx, query string, args []string, fn func(playlistTrackMatch)) error {
+	if len(args) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, arg := range args {
+		if err := scanPlaylistMatches(ctx, stmt, arg, fn); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// scanPlaylistMatches runs stmt with arg and hands fn each row.
+func scanPlaylistMatches(ctx context.Context, stmt *sql.Stmt, arg string, fn func(playlistTrackMatch)) error {
+	rows, err := stmt.QueryContext(ctx, arg)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m playlistTrackMatch
+		if err := rows.Scan(&m.path, &m.suppressed, &m.groupID); err != nil {
+			return err
+		}
+		fn(m)
+	}
+	return rows.Err()
 }
 
 // servedCopies maps the duplicate group of each suppressed match to its
@@ -392,46 +406,33 @@ func eachPlaylistLookup(ctx context.Context, tx *sql.Tx, keys []string, batch, s
 // PCM edition each keep one), maps to nothing, so its line is unresolved:
 // with one served row, that row is every suppressed member's winner.
 func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTrackMatch) (map[string]string, error) {
-	groups := map[string]struct{}{}
+	var groups []string
+	listed := map[string]bool{}
 	for _, m := range matches {
-		if m.suppressed && m.groupID != "" {
-			groups[m.groupID] = struct{}{}
+		if m.suppressed && m.groupID != "" && !listed[m.groupID] {
+			listed[m.groupID] = true
+			groups = append(groups, m.groupID)
 		}
 	}
 	out := map[string]string{}
 	if len(groups) == 0 {
 		return out, nil
 	}
-	list := make([]string, 0, len(groups))
-	for g := range groups {
-		list = append(list, g)
+	stmt, err := tx.PrepareContext(ctx,
+		`SELECT dupe_group_id, path FROM tracks
+		  WHERE dupe_suppressed = 0 AND dupe_group_id != ''
+		    AND dupe_group_id IN (SELECT value FROM json_each(?))`)
+	if err != nil {
+		return nil, fmt.Errorf("served copies: %w", err)
 	}
+	defer stmt.Close()
 	count := map[string]int{}
-	for start := 0; start < len(list); start += playlistLookupChunk {
-		end := min(start+playlistLookupChunk, len(list))
-		blob, err := json.Marshal(list[start:end])
+	for start := 0; start < len(groups); start += playlistLookupChunk {
+		blob, err := json.Marshal(groups[start:min(start+playlistLookupChunk, len(groups))])
 		if err != nil {
 			return nil, err
 		}
-		rows, err := tx.QueryContext(ctx,
-			`SELECT dupe_group_id, path FROM tracks
-			  WHERE dupe_suppressed = 0 AND dupe_group_id != ''
-			    AND dupe_group_id IN (SELECT value FROM json_each(?))`, string(blob))
-		if err != nil {
-			return nil, fmt.Errorf("served copies: %w", err)
-		}
-		for rows.Next() {
-			var g, p string
-			if err := rows.Scan(&g, &p); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("served copies: %w", err)
-			}
-			count[g]++
-			out[g] = p
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
+		if err := servedCopiesChunk(ctx, stmt, string(blob), out, count); err != nil {
 			return nil, fmt.Errorf("served copies: %w", err)
 		}
 	}
@@ -441,6 +442,25 @@ func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTr
 		}
 	}
 	return out, nil
+}
+
+// servedCopiesChunk reads one chunk of groups' served rows into out, and
+// counts them by group.
+func servedCopiesChunk(ctx context.Context, stmt *sql.Stmt, blob string, out map[string]string, count map[string]int) error {
+	rows, err := stmt.QueryContext(ctx, blob)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g, p string
+		if err := rows.Scan(&g, &p); err != nil {
+			return err
+		}
+		count[g]++
+		out[g] = p
+	}
+	return rows.Err()
 }
 
 // isAlbumFolderPlaylist is terms 3 and 4 of the album-folder rule, for a
