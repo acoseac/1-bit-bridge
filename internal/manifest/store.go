@@ -2466,6 +2466,26 @@ var migrations = []migration{
 			return migrateFTSRowMap(db)
 		},
 	},
+	{
+		// v56 is the playlist-file index (backlog B431): one row per
+		// .m3u / .m3u8 file a scan read, keyed by its manifest path, with
+		// the size and mtime it was read at and the entry lines it parsed
+		// (LF-joined, playlist_files.go). No row is a track and nothing
+		// joins tracks: GET /v1/playlist-files resolves the lines when it
+		// is asked. missing_count is the tracks' grace, for the same
+		// passes.
+		version: 56,
+		name:    "playlist_files (the playlist-file index)",
+		sql: `CREATE TABLE IF NOT EXISTS playlist_files (
+			path           TEXT PRIMARY KEY,
+			size           INTEGER NOT NULL,
+			mtime_ns       INTEGER NOT NULL,
+			parser_version INTEGER NOT NULL,
+			too_large      INTEGER NOT NULL DEFAULT 0,
+			lines          BLOB    NOT NULL,
+			missing_count  INTEGER NOT NULL DEFAULT 0
+		)`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -5504,7 +5524,8 @@ func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, er
 }
 
 // DeleteTracksByPrefix removes all track rows whose path begins with
-// prefix. Returns the number of rows deleted. Used by the admin console
+// prefix, and the playlist-file rows under it (backlog B431). Returns the
+// number of track rows deleted. Used by the admin console
 // after removing a library root so /v1/manifest stops returning tracks
 // that will never resolve. See CountTracksByPrefix for the escaping note.
 //
@@ -5608,10 +5629,25 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 	if err != nil {
 		return 0, err
 	}
+	// The removed root's playlist files go with its tracks (backlog B431),
+	// in the same byte range: no walk sees them again, and until the
+	// missing-count threshold the feed would list them, every entry
+	// unresolved.
+	pfRes, err := tx.ExecContext(ctx,
+		`DELETE FROM playlist_files
+		  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`,
+		base, base)
+	if err != nil {
+		return 0, err
+	}
+	pf, err := pfRes.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if n > 0 {
+	if n > 0 || pf > 0 {
 		s.noteLibrary(ctx)
 	}
 	// Step 2: filesystem cleanup AFTER the commit. Best-effort —
@@ -5819,6 +5855,9 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_files`); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -5907,7 +5946,13 @@ func deleteFilesystemRowsTx(ctx context.Context, tx *sql.Tx, nowNs int64) error 
 	`); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM folders`)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
+		return err
+	}
+	// Playlist files are filesystem rows and their paths flip form with the
+	// folders' (backlog B431); left, the rescan would serve each under both
+	// forms until the old ones reached the missing-count threshold.
+	_, err := tx.ExecContext(ctx, `DELETE FROM playlist_files`)
 	return err
 }
 
@@ -6888,11 +6933,11 @@ func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) e
 	return err
 }
 
-// ClearMissingCounts wipes all rows where missing_count > 0 in tracks +
-// folders. Used by the `bridge manifest clear-missing` operator escape
-// hatch — an operator who KNOWS a mount has been permanently removed
-// and doesn't want to wait N scans for cleanup. Returns the total
-// number of rows deleted across both tables.
+// ClearMissingCounts wipes all rows where missing_count > 0 in tracks,
+// folders and playlist_files. Used by the `bridge manifest clear-missing`
+// operator escape hatch — an operator who KNOWS a mount has been
+// permanently removed and doesn't want to wait N scans for cleanup.
+// Returns the total number of rows deleted across the three tables.
 //
 // UPnP-routed tracks are SPARED regardless of their missing_count — the
 // tracks delete carries a NOT EXISTS anti-join against upnp_track_routing
@@ -6948,7 +6993,13 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Both DELETEs already ran in the tx; a count-read failure
+	// Playlist files the scanner counts missing (backlog B431), with the
+	// tracks and folders: the operator's "drop what is already gone".
+	pRes, err := tx.ExecContext(ctx, `DELETE FROM playlist_files WHERE missing_count > 0`)
+	if err != nil {
+		return 0, err
+	}
+	// The DELETEs already ran in the tx; a count-read failure
 	// (modernc/sqlite permits it, though it shouldn't in practice) must
 	// not silently undercount the operator's cleared total — surface it
 	// and still commit. Matches RecoverInterruptedBatches.
@@ -6960,6 +7011,10 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	if fErr != nil {
 		logger.Warn("ClearMissingCounts: RowsAffected for folders delete failed", "err", fErr)
 	}
+	pCount, pErr := pRes.RowsAffected()
+	if pErr != nil {
+		logger.Warn("ClearMissingCounts: RowsAffected for playlist files delete failed", "err", pErr)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -6967,10 +7022,10 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 	// is logged inside removeSidecarFiles and left for the orphan sweep;
 	// it does not change this return.
 	removeSidecarFiles(doomed)
-	if tCount > 0 {
+	if tCount > 0 || pCount > 0 {
 		s.noteLibrary(ctx)
 	}
-	return tCount + fCount, nil
+	return tCount + fCount + pCount, nil
 }
 
 // ----- scan_state -----

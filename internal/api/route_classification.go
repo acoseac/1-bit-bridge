@@ -322,6 +322,13 @@ func (s *Server) routeRegistry() []route {
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).
 		{pattern: "GET /v1/smart-playlists", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.smartPlaylists))},
+		// Playlist files the scanner read from the library (backlog B431).
+		// Bounded: the entries one answer holds are capped
+		// (manifest.PlaylistFileFeedBudget, 8 MiB, gzip'd on the wire).
+		// 10 s ctx-timeout: the members resolve against the track rows on
+		// each request, a few indexed lookups per playlist; anything near
+		// it is a wedged store, and it answers 500.
+		{pattern: "GET /v1/playlist-files", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.playlistFiles))},
 
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.

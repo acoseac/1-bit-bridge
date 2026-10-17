@@ -270,6 +270,13 @@ type Scanner struct {
 	// says. Nil in production. Set it before Scan, never while one runs.
 	readArt folderArtReader
 
+	// readPlaylist, when set, reads a playlist file in place of
+	// readPlaylistFile (scanner_playlist_files.go): a TEST seam, per
+	// scanner, like readArt, through which a test fails a read no file on
+	// disk can be made to fail on every platform. Nil in production. Set it
+	// before Scan, never while one runs.
+	readPlaylist func(abs, rel string) (playlistFileRead, error)
+
 	// unread counts the audio files a scan's workers could not read whole
 	// (keepUnread), for the one line the scan logs about them. Reset at the
 	// start of each Scan and ScanSubtree, which hold mu for their run, and
@@ -891,6 +898,10 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// walker decides on visibility, not the worker.
 	seen := make(map[string]struct{}, len(before))
 	seenFolders := make(map[string]struct{}, len(beforeFolders))
+	// The playlist files the walk passes (notePlaylistFile), for the
+	// playlist-file pass after the deletion passes (backlog B431). Written
+	// by the walker alone, like seen.
+	playlists := make(map[string]playlistSighting)
 
 	// Subtrees where the walker hit a transient I/O error (NAS drop,
 	// antivirus lock, permission flap). The deletion pass below MUST
@@ -999,7 +1010,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
 		linksBefore := len(tallies.dirLinks.rels)
-		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, &tallies, paths)
+		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -1194,6 +1205,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		scanLogger.Info("folders missing this scan",
 			"missing", len(missingFolders), "deleted", deletedFolders, "threshold", threshold)
 	}
+
+	// The playlist files the walk passed (backlog B431): read the new and
+	// changed ones, keep what the walk could not see, count the rest
+	// missing, under the same errored subtrees and threshold.
+	s.indexPlaylistFiles(ctx, "", playlists, errorSubtrees)
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
@@ -2767,6 +2783,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	seen := make(map[string]struct{}, len(beforeTrackSet))
 	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
 	errorSubtrees := make(map[string]struct{})
+	// The playlist files this walk passes, for the scoped playlist-file
+	// pass after the deletion passes (backlog B431).
+	playlists := make(map[string]playlistSighting)
 	var tallies walkTallies
 
 	paths := make(chan pathInfo, scanChannelBuffer)
@@ -2890,6 +2909,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			if isLibraryEntry(abs, d.Name(), false) {
 				tallies.noteNotAFile(rel, info.Mode())
 			}
+			return nil
+		}
+		// walkRoot's decision for a playlist file (notePlaylistFile).
+		if notePlaylistFile(abs, relPath(owningRoot, abs, multiRoot), d, through.stat, playlists) {
 			return nil
 		}
 		if !isLibraryEntry(abs, d.Name(), false) {
@@ -3069,6 +3092,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			"threshold", threshold)
 	}
 
+	// The playlist files under the scope (backlog B431), Scan's pass with
+	// the scope the deletion passes used.
+	s.indexPlaylistFiles(ctx, relScope, playlists, errorSubtrees)
+
 	// Duplicate stamping, same tail position as the full Scan. A subtree
 	// scan mutates exactly the two inputs the stamps are derived from:
 	// its upserts can retag a row out of (or into) a group — and the
@@ -3207,7 +3234,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // scan that its mount looked empty. A link that dangles (the mount it
 // points into went away) is the unreachable case above, never an
 // empty library.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
 		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
@@ -3314,6 +3341,12 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			if isLibraryEntry(abs, d.Name(), false) {
 				tallies.noteNotAFile(rel, info.Mode())
 			}
+			return nil
+		}
+		// A playlist file is recorded for the playlist-file pass and goes
+		// no further: never a track, and not library content to the
+		// clean-empty guard, which counts what it counted before.
+		if notePlaylistFile(abs, relPath(root, abs, multiRoot), d, through.stat, playlists) {
 			return nil
 		}
 		// Skip dot-files and anything else the walk does not index;

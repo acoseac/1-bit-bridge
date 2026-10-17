@@ -3854,6 +3854,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		WithSmartPlaylistEnabled(func() bool {
 			return liveCfg().SmartPlaylists.EffectiveEnabled()
 		})
+	// The playlist files the scanner reads from the library (backlog B431),
+	// served read-only at GET /v1/playlist-files on every bridge, the demo
+	// included: library data, like the manifest, not one of the user-data
+	// stores the demo leaves unwired.
+	apiSrv.WithPlaylistFileStore(manifestStore)
 
 	// Phase-H bulk harvest (opt-in via cfg.Atlas.HarvestEnabled). The iOS app
 	// provisions a bulk_harvest credential to POST /v1/atlas-harvest/credential;

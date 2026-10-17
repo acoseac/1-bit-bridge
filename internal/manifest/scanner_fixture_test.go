@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -124,4 +125,64 @@ func rowTitle(t *testing.T, store *Store, rel string) (title string, ok bool) {
 		return "", false
 	}
 	return tr.Title, true
+}
+
+// writeLibraryFile writes body at the library-relative path rel under root,
+// making its folders, and returns the absolute path. rel uses "/" on every
+// platform, as a manifest path does.
+func writeLibraryFile(t *testing.T, root, rel string, body []byte) string {
+	t.Helper()
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+// stubTracks drops a stub track at each library-relative path. The body is
+// not audio: the scan still indexes a row for it from its path, which is all
+// a playlist's lookup needs.
+func stubTracks(t *testing.T, root string, rels ...string) {
+	t.Helper()
+	for _, rel := range rels {
+		writeLibraryFile(t, root, rel, []byte("not-a-real-flac"))
+	}
+}
+
+// playlistFeed returns the playlist-file feed by path, failing the test on
+// a read error.
+func playlistFeed(t *testing.T, s *Store) map[string]PlaylistFile {
+	t.Helper()
+	files, err := s.PlaylistFiles(context.Background())
+	if err != nil {
+		t.Fatalf("PlaylistFiles: %v", err)
+	}
+	out := make(map[string]PlaylistFile, len(files))
+	for _, f := range files {
+		out[f.Path] = f
+	}
+	return out
+}
+
+// countPlaylistReads makes sc count its playlist-file reads by
+// library-relative path, reading through the real reader, and returns the
+// counts. fail, when set, answers a read for rel instead.
+func countPlaylistReads(sc *Scanner, fail func(rel string) error) map[string]int {
+	reads := map[string]int{}
+	var mu sync.Mutex
+	sc.readPlaylist = func(abs, rel string) (playlistFileRead, error) {
+		mu.Lock()
+		reads[rel]++
+		mu.Unlock()
+		if fail != nil {
+			if err := fail(rel); err != nil {
+				return playlistFileRead{}, err
+			}
+		}
+		return readPlaylistFile(abs, rel)
+	}
+	return reads
 }
