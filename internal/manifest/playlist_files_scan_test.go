@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -398,6 +399,32 @@ func TestAPlaylistFilePastTheSizeCapIsServedTooLarge(t *testing.T) {
 	}
 	if pf := feed["Playlists/under.m3u"]; pf.TooLarge || len(pf.Members) == 0 {
 		t.Errorf("a file of %d bytes: tooLarge %v, %d members; want it read", PlaylistFileMaxBytes-1, pf.TooLarge, len(pf.Members))
+	}
+}
+
+// TestAPlaylistFilePastACapStillLetsTheIndexBeComplete: a file past the
+// byte cap or the entry cap is a completed read with tooLarge set, so it is
+// accounted for like any read, and a library whose only playlist files are
+// past a cap is complete after a full scan.
+func TestAPlaylistFilePastACapStillLetsTheIndexBeComplete(t *testing.T) {
+	root := t.TempDir()
+	stubTracks(t, root, "A/01.flac")
+	writeLibraryFile(t, root, "Playlists/big.m3u", bytes.Repeat([]byte("../A/01.flac\n"), PlaylistFileMaxBytes/13+1))
+	writeLibraryFile(t, root, "Playlists/many.m3u", bytes.Repeat([]byte("a\n"), playlistFileMaxEntries+1))
+	s, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tooLarge []string
+	for _, f := range page.Files {
+		if f.TooLarge {
+			tooLarge = append(tooLarge, f.Path)
+		}
+	}
+	if !page.Complete || strings.Join(tooLarge, " ") != "Playlists/big.m3u Playlists/many.m3u" {
+		t.Fatalf("complete %v, tooLarge %v; want the index complete with both files listed tooLarge", page.Complete, tooLarge)
 	}
 }
 
