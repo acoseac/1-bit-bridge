@@ -45570,6 +45570,13 @@ per-scan map behind the struct, as `heldReconciles` is, for a signature this
 PR otherwise leaves alone); and `godre:S8196` on `PlaylistFileStore`, named
 as the package's other one-method stores are (`SmartPlaylistStore`).
 
+Gemini's four comments asked for one prepared statement where the same SQL
+ran in a loop: the feed's track and duplicate-group lookups
+(`eachPlaylistLookup`, `servedCopies`), the batch write's comparison read
+and the settle step's bump, reap and reset. Taken in `5f1e30fd`, as
+`IncrementMissingTracksAndDeleteAtThreshold` prepares its statement. No line
+a control mutates moved; the playlist tests pass on it under `-race`.
+
 ### For the app (B432)
 
 - `members` are manifest paths, `bridgeOriginalPath` as the manifest names
