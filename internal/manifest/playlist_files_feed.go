@@ -172,9 +172,11 @@ func (s *Store) playlistFiles(ctx context.Context, budget, batchBytes int) (Play
 	}
 	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(rows))}
 	known := map[string]playlistTrackMatch{}
+	folders := &playlistFolderTracks{tx: tx}
+	defer folders.close()
 	for start := 0; start < len(rows); {
 		end := nextPlaylistFeedBatch(rows, start, batchBytes)
-		files, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, &budget)
+		files, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, folders, &budget)
 		if err != nil {
 			return PlaylistFileFeed{}, err
 		}
@@ -202,7 +204,7 @@ func nextPlaylistFeedBatch(rows []playlistFileRow, start, maxBytes int) int {
 // file resolved against the shared budget. An album-folder playlist has no
 // entry.
 func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow,
-	known map[string]playlistTrackMatch, budget *int) ([]PlaylistFile, error) {
+	known map[string]playlistTrackMatch, folders *playlistFolderTracks, budget *int) ([]PlaylistFile, error) {
 	stored, err := loadPlaylistBatch(ctx, tx, batch)
 	if err != nil {
 		return nil, err
@@ -221,7 +223,7 @@ func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileR
 	}
 	out := make([]PlaylistFile, 0, len(stored))
 	for i := range stored {
-		pf, album, err := stored[i].resolve(ctx, tx, matches, served, budget)
+		pf, album, err := stored[i].resolve(ctx, folders, matches, served, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +253,7 @@ func (f *storedPlaylistFile) place(distinct map[string]struct{}) {
 // unresolved. album reports an album-folder playlist, which the feed does
 // not list. Entries that would pass *budget leave the entry tooLarge;
 // entries that fit are taken from it.
-func (f *storedPlaylistFile) resolve(ctx context.Context, tx *sql.Tx, matches map[string]playlistTrackMatch,
+func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolderTracks, matches map[string]playlistTrackMatch,
 	served map[string]string, budget *int) (pf PlaylistFile, album bool, err error) {
 	pf = PlaylistFile{
 		Path: f.path, Name: playlistFileDisplayName(f.path),
@@ -267,7 +269,7 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, tx *sql.Tx, matches ma
 		lines.add(pl, matches, served)
 	}
 	if lines.entries > 0 && lines.allExact {
-		if album, err = isAlbumFolderPlaylist(ctx, tx, playlistFileDir(f.path), lines.named); err != nil || album {
+		if album, err = isAlbumFolderPlaylist(ctx, folders, playlistFileDir(f.path), lines.named); err != nil || album {
 			return pf, album, err
 		}
 	}
@@ -593,7 +595,7 @@ func servedCopiesChunk(ctx context.Context, stmt *sql.Stmt, blob string, out map
 // tracks directly in dir, order and repeats ignored. A track is any row the
 // index holds, a suppressed duplicate included, as a share's listing holds
 // every file. The folder is read only when term 3 holds.
-func isAlbumFolderPlaylist(ctx context.Context, tx *sql.Tx, dir string, matched []string) (bool, error) {
+func isAlbumFolderPlaylist(ctx context.Context, folders *playlistFolderTracks, dir string, matched []string) (bool, error) {
 	if len(matched) == 0 {
 		return false, nil
 	}
@@ -604,15 +606,7 @@ func isAlbumFolderPlaylist(ctx context.Context, tx *sql.Tx, dir string, matched 
 		}
 		want[m] = struct{}{}
 	}
-	var rows *sql.Rows
-	var err error
-	if dir == "" {
-		rows, err = tx.QueryContext(ctx, `SELECT path FROM tracks WHERE instr(path, '/') = 0`)
-	} else {
-		rows, err = tx.QueryContext(ctx,
-			`SELECT path FROM tracks
-			  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`, dir, dir)
-	}
+	rows, err := folders.query(ctx, dir)
 	if err != nil {
 		return false, fmt.Errorf("album folder %q: %w", dir, err)
 	}
@@ -635,6 +629,52 @@ func isAlbumFolderPlaylist(ctx context.Context, tx *sql.Tx, dir string, matched 
 		return false, fmt.Errorf("album folder: %w", err)
 	}
 	return inFolder == len(want), nil
+}
+
+// playlistFolderTracks reads the tracks under a folder for the album-folder
+// rule, through statements prepared on first use and kept for the request:
+// one for the manifest root, one for any other folder (whose answer holds
+// its subfolders' tracks too; the rule keeps the folder's own).
+type playlistFolderTracks struct {
+	tx          *sql.Tx
+	root, under *sql.Stmt
+}
+
+// query is the tracks under dir, every track at the root for "".
+func (f *playlistFolderTracks) query(ctx context.Context, dir string) (*sql.Rows, error) {
+	if dir == "" {
+		if err := f.prepare(ctx, &f.root, `SELECT path FROM tracks WHERE instr(path, '/') = 0`); err != nil {
+			return nil, err
+		}
+		return f.root.QueryContext(ctx)
+	}
+	if err := f.prepare(ctx, &f.under, `SELECT path FROM tracks
+		  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`); err != nil {
+		return nil, err
+	}
+	return f.under.QueryContext(ctx, dir, dir)
+}
+
+// prepare prepares query into *stmt unless it is there already.
+func (f *playlistFolderTracks) prepare(ctx context.Context, stmt **sql.Stmt, query string) error {
+	if *stmt != nil {
+		return nil
+	}
+	prepared, err := f.tx.PrepareContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	*stmt = prepared
+	return nil
+}
+
+// close closes the statements prepared.
+func (f *playlistFolderTracks) close() {
+	for _, stmt := range []*sql.Stmt{f.root, f.under} {
+		if stmt != nil {
+			_ = stmt.Close()
+		}
+	}
 }
 
 // pathDirOrDot is dir as path.Dir spells it: "." for the manifest root.
