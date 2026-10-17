@@ -80,20 +80,22 @@ const playlistMatchCacheMax = 50_000
 // playlistFileRow is a playlist_files row without its lines: what the feed
 // plans its batches from (lineBytes is the stored blob's length).
 type playlistFileRow struct {
-	path      string
-	mtimeNs   int64
-	tooLarge  bool
-	lineBytes int
+	path        string
+	mtimeNs     int64
+	tooLarge    bool
+	folderWhole bool
+	lineBytes   int
 }
 
 // storedPlaylistFile is one playlist_files row as the feed reads it, and
 // its lines through the path rule (place). It lives for its batch only.
 type storedPlaylistFile struct {
-	path     string
-	mtimeNs  int64
-	tooLarge bool
-	lines    []string
-	placed   []placedPlaylistLine
+	path        string
+	mtimeNs     int64
+	tooLarge    bool
+	folderWhole bool
+	lines       []string
+	placed      []placedPlaylistLine
 }
 
 // placedPlaylistLine is one entry line and where the path rule puts it; ok
@@ -144,6 +146,16 @@ type playlistTrackMatch struct {
 //     track in a subfolder is not in the folder);
 //  4. the tracks the entries name are exactly the tracks directly in that
 //     folder, order and repeats ignored.
+//
+// And it is judged only on whole evidence about its folder (the app's B421
+// gate): the last scan that saw the file saw its folder whole
+// (playlistFolderEvidence, the row's folder_whole). Without it the index can
+// under-count the folder (a new file a read could not index, a listing cut
+// short), and an ordinary playlist naming the indexed tracks would meet term
+// 4; so an unsure file is listed. That evidence is a finished scan's, taken
+// after its walk's every row landed, never a running scan's: a scan under
+// way only adds rows to a folder until its pass, which can only take a file
+// out of the album rule.
 //
 // A track there is any row the index holds, a suppressed duplicate
 // included, and the rule reads the tracks the lines name, before the
@@ -268,7 +280,7 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolde
 	for _, pl := range f.placed {
 		lines.add(pl, matches, served)
 	}
-	if lines.entries > 0 && lines.allExact {
+	if lines.entries > 0 && lines.allExact && f.folderWhole {
 		if album, err = isAlbumFolderPlaylist(ctx, folders, playlistFileDir(f.path), lines.named); err != nil || album {
 			return pf, album, err
 		}
@@ -331,7 +343,7 @@ func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string
 // path order.
 func readPlaylistFileRows(ctx context.Context, tx *sql.Tx) ([]playlistFileRow, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT path, mtime_ns, too_large, length(CAST(lines AS BLOB)) FROM playlist_files ORDER BY path COLLATE BINARY`)
+		`SELECT path, mtime_ns, too_large, folder_whole, length(CAST(lines AS BLOB)) FROM playlist_files ORDER BY path COLLATE BINARY`)
 	if err != nil {
 		return nil, fmt.Errorf("read playlist files: %w", err)
 	}
@@ -339,7 +351,7 @@ func readPlaylistFileRows(ctx context.Context, tx *sql.Tx) ([]playlistFileRow, e
 	var out []playlistFileRow
 	for rows.Next() {
 		var r playlistFileRow
-		if err := rows.Scan(&r.path, &r.mtimeNs, &r.tooLarge, &r.lineBytes); err != nil {
+		if err := rows.Scan(&r.path, &r.mtimeNs, &r.tooLarge, &r.folderWhole, &r.lineBytes); err != nil {
 			return nil, fmt.Errorf("read playlist files: %w", err)
 		}
 		out = append(out, r)
@@ -373,8 +385,8 @@ func loadPlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow)
 		if i == len(batch) || batch[i].path != p {
 			return nil, fmt.Errorf("read playlist files: %q is not the row the batch holds there", p)
 		}
-		out = append(out, storedPlaylistFile{path: p, mtimeNs: batch[i].mtimeNs,
-			tooLarge: batch[i].tooLarge, lines: splitPlaylistLines(blob)})
+		out = append(out, storedPlaylistFile{path: p, mtimeNs: batch[i].mtimeNs, tooLarge: batch[i].tooLarge,
+			folderWhole: batch[i].folderWhole, lines: splitPlaylistLines(blob)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read playlist files: %w", err)

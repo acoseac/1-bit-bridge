@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"path"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -173,7 +175,16 @@ type playlistReadFailure struct {
 // full is a full scan's pass. One that ends with every file its walk saw
 // backed (read, or kept as it was) marks the index complete
 // (playlistFilesCompleteKey); a subtree scan's pass never does.
-func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full bool, seen map[string]playlistSighting, errorSubtrees map[string]struct{}) {
+//
+// Every file the walk saw also gets this pass's evidence about its folder
+// (playlistFolderEvidence, from the audio files the walk saw, tracks, and
+// the rows the scan stands behind, backed), the album-folder rule's gate: a
+// read file's row takes it with the read, a kept row through
+// markPlaylistFolders. A row the walk did not see keeps its mark: this
+// pass learned nothing of its folder, and its folder's rows are spared or
+// counted missing, never added to.
+func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full bool, seen map[string]playlistSighting,
+	errorSubtrees, tracks map[string]struct{}, backed *backedPaths) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -184,7 +195,8 @@ func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full boo
 		}
 		return
 	}
-	p := &playlistPass{s: s, before: before, seen: seen, backed: newBackedPaths()}
+	p := &playlistPass{s: s, before: before, seen: seen, backed: newBackedPaths(),
+		whole: playlistFolderEvidence(seen, errorSubtrees, tracks, backed)}
 	toRead := p.plan()
 	for start := 0; start < len(toRead) && ctx.Err() == nil; {
 		end := nextPlaylistReadWindow(toRead, start)
@@ -194,6 +206,11 @@ func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full boo
 	p.report()
 	if ctx.Err() != nil {
 		return
+	}
+	if _, err := s.store.markPlaylistFolders(ctx, p.markWhole, p.markPartial); err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Error("playlist files pass: folder evidence", "err", failure)
+		}
 	}
 	if !p.settle(ctx, errorSubtrees) || !full || !p.allSeenBacked() {
 		return
@@ -221,9 +238,11 @@ func (p *playlistPass) allSeenBacked() bool {
 // playlistPass is one run of indexPlaylistFiles: the stored rows in scope
 // (before), what the walk saw (seen), the rows this pass can stand behind
 // (backed: kept or written, for the case-only rename reap), the rows
-// whose missing count it clears without a write (reset), and what its one
+// whose missing count it clears without a write (reset), what its one
 // line each reports (report): the files it could not read, and the ones
-// past a cap with the first of them.
+// past a cap with the first of them, and the folder evidence (whole, by
+// folder) with the kept rows whose stored mark it changes (markWhole,
+// markPartial).
 type playlistPass struct {
 	s               *Scanner
 	before          map[string]playlistFileStamp
@@ -233,6 +252,48 @@ type playlistPass struct {
 	unread          walkTally
 	tooLarge        int
 	tooLargeExample string
+	whole           map[string]bool
+	markWhole       []string
+	markPartial     []string
+}
+
+// playlistFolderEvidence is, for the folder of each playlist file the walk
+// saw, whether the walk saw that folder whole, the album-folder rule's gate
+// (the app's B421: judge a playlist only on whole evidence about its
+// folder). A folder is whole when no errored subtree covers it (a read of it
+// or of a folder above it that failed or was cut short, a root the
+// clean-empty guard spared), nothing directly in it errored (an unreadable
+// link, a subfolder whose read failed: counted against the folder, the safe
+// way), and every audio file the walk saw directly in it has a row this scan
+// stands behind (backed). A new file the worker could not read, one that was
+// no longer a file, or one whose row did not land is a file the index does
+// not count, and the folder's indexed tracks would under-count it. An SACD
+// container is not asked: its rows sit under it, not in its folder.
+func playlistFolderEvidence(playlists map[string]playlistSighting, errorSubtrees, tracks map[string]struct{}, backed *backedPaths) map[string]bool {
+	whole := make(map[string]bool)
+	for rel := range playlists {
+		dir := playlistFileDir(rel)
+		if _, judged := whole[dir]; !judged {
+			whole[dir] = !isUnderErroredSubtree(dir, errorSubtrees)
+		}
+	}
+	for sub := range errorSubtrees {
+		if dir := playlistFileDir(sub); whole[dir] {
+			whole[dir] = false
+		}
+	}
+	backed.mu.Lock()
+	defer backed.mu.Unlock()
+	for rel := range tracks {
+		dir := playlistFileDir(rel)
+		if !whole[dir] || strings.EqualFold(path.Ext(rel), ".iso") {
+			continue
+		}
+		if _, ok := backed.m[rel]; !ok {
+			whole[dir] = false
+		}
+	}
+	return whole
 }
 
 // nextPlaylistReadWindow is the end of the read window that starts at
@@ -266,7 +327,8 @@ func (p *playlistPass) report() {
 }
 
 // keep backs the stored row at rel, as it is, and clears its missing count:
-// the walk saw the file, so it is not missing, whatever the read did.
+// the walk saw the file, so it is not missing, whatever the read did. Its
+// folder's evidence is this pass's, as for a file read.
 func (p *playlistPass) keep(rel string) {
 	st, had := p.before[rel]
 	if !had {
@@ -275,6 +337,12 @@ func (p *playlistPass) keep(rel string) {
 	p.backed.add(rel)
 	if st.missingCount > 0 {
 		p.reset = append(p.reset, rel)
+	}
+	switch whole := p.whole[playlistFileDir(rel)]; {
+	case whole && !st.folderWhole:
+		p.markWhole = append(p.markWhole, rel)
+	case !whole && st.folderWhole:
+		p.markPartial = append(p.markPartial, rel)
 	}
 }
 
@@ -319,6 +387,7 @@ func (p *playlistPass) read(ctx context.Context, toRead []playlistSighting) []pl
 		if info := walked[reads[i].path]; info != nil {
 			reads[i].size, reads[i].mtimeNs = info.Size(), info.ModTime().UnixNano()
 		}
+		reads[i].folderWhole = p.whole[playlistFileDir(reads[i].path)]
 	}
 	for _, f := range failed {
 		if ctx.Err() == nil {

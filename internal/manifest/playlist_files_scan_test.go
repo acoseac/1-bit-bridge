@@ -575,3 +575,50 @@ func TestPlaylistReadWindowsHoldTheirBytes(t *testing.T) {
 		t.Errorf("windows by count %s, want %s", got, want)
 	}
 }
+
+// TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt is the
+// album-folder rule's gate, case by case: a playlist's folder is whole only
+// when nothing over it or directly in it errored and every audio file the
+// walk saw directly in it has a row the scan stands behind. Anything else is
+// unsure, and an unsure folder's playlist is listed.
+func TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		playlist        string
+		errored, tracks []string
+		unbacked        []string
+		want            bool
+	}{
+		{"every file it holds has a row", "F/p.m3u", nil, []string{"F/01.flac", "F/02.flac"}, nil, true},
+		{"its own read failed", "F/p.m3u", []string{"F"}, []string{"F/01.flac"}, nil, false},
+		{"a folder above it failed", "Up/F/p.m3u", []string{"Up"}, []string{"Up/F/01.flac"}, nil, false},
+		{"an entry in it errored (a link)", "F/p.m3u", []string{"F/03.flac"}, []string{"F/01.flac"}, nil, false},
+		{"a subfolder of it errored", "F/p.m3u", []string{"F/Scans"}, []string{"F/01.flac"}, nil, false},
+		{"a file it holds has no row", "F/p.m3u", nil, []string{"F/01.flac", "F/02.flac"}, []string{"F/02.flac"}, false},
+		{"a container is no track of it", "F/p.m3u", nil, []string{"F/01.flac", "F/disc.ISO"}, []string{"F/disc.ISO"}, true},
+		{"a subfolder's file is not its own", "F/p.m3u", nil, []string{"F/01.flac", "F/Sub/x.flac"}, []string{"F/Sub/x.flac"}, true},
+		{"an error elsewhere", "F/p.m3u", []string{"G", "G/x.flac"}, []string{"F/01.flac"}, nil, true},
+		{"a whole-root outage", "F/p.m3u", []string{"."}, []string{"F/01.flac"}, nil, false},
+		{"its root's outage (several roots)", "R/F/p.m3u", []string{"R/."}, []string{"R/F/01.flac"}, nil, false},
+		{"another root's outage", "R/F/p.m3u", []string{"S/."}, []string{"R/F/01.flac"}, nil, true},
+		{"at the root, nothing errored", "p.m3u", nil, []string{"01.flac"}, nil, true},
+	} {
+		errored := map[string]struct{}{}
+		for _, e := range tc.errored {
+			errored[e] = struct{}{}
+		}
+		tracks := map[string]struct{}{}
+		backed := newBackedPaths()
+		for _, tr := range tc.tracks {
+			tracks[tr] = struct{}{}
+			backed.add(tr)
+		}
+		for _, u := range tc.unbacked {
+			delete(backed.m, u)
+		}
+		playlists := map[string]playlistSighting{tc.playlist: {}}
+		if got := playlistFolderEvidence(playlists, errored, tracks, backed)[playlistFileDir(tc.playlist)]; got != tc.want {
+			t.Errorf("%s: whole %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -9,23 +9,27 @@ import (
 
 // playlistFileStamp is what the scan pass compares a walked playlist file
 // with: the size and mtime the stored lines were read at, the parser that
-// read them, and the row's missing count.
+// read them, the row's missing count, and whether the scan that last saw the
+// file saw its folder whole.
 type playlistFileStamp struct {
 	size          int64
 	mtimeNs       int64
 	parserVersion int
 	missingCount  int
+	folderWhole   bool
 }
 
 // playlistFileRead is one completed read of a playlist file, which the scan
-// pass writes: its manifest path, the stat of the file the read opened, and
-// the entry lines parsePlaylistLines kept (none when tooLarge).
+// pass writes: its manifest path, the stat of the file the read opened, the
+// entry lines parsePlaylistLines kept (none when tooLarge), and whether the
+// walk saw the file's folder whole (playlistFolderEvidence).
 type playlistFileRead struct {
-	path     string
-	size     int64
-	mtimeNs  int64
-	tooLarge bool
-	lines    []string
+	path        string
+	size        int64
+	mtimeNs     int64
+	tooLarge    bool
+	lines       []string
+	folderWhole bool
 }
 
 // playlistFilesCompleteKey is the scan_state key that marks the index as
@@ -68,10 +72,10 @@ func (s *Store) playlistFileStampsUnder(ctx context.Context, scope string) (map[
 	var err error
 	if base := trackScopeBase(scope); scope == "" || scope == "." || base == "" {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT path, size, mtime_ns, parser_version, missing_count FROM playlist_files`)
+			`SELECT path, size, mtime_ns, parser_version, missing_count, folder_whole FROM playlist_files`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT path, size, mtime_ns, parser_version, missing_count FROM playlist_files
+			`SELECT path, size, mtime_ns, parser_version, missing_count, folder_whole FROM playlist_files
 			  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`,
 			base, base)
 	}
@@ -83,7 +87,7 @@ func (s *Store) playlistFileStampsUnder(ctx context.Context, scope string) (map[
 	for rows.Next() {
 		var p string
 		var st playlistFileStamp
-		if err := rows.Scan(&p, &st.size, &st.mtimeNs, &st.parserVersion, &st.missingCount); err != nil {
+		if err := rows.Scan(&p, &st.size, &st.mtimeNs, &st.parserVersion, &st.missingCount, &st.folderWhole); err != nil {
 			return nil, err
 		}
 		out[p] = st
@@ -93,10 +97,11 @@ func (s *Store) playlistFileStampsUnder(ctx context.Context, scope string) (map[
 
 // writePlaylistFiles stores a batch of reads in one transaction, each with
 // its missing count cleared. It reports whether the batch changed what the
-// feed serves: a new row, or lines or the too-large mark that differ from
-// the stored ones. A file touched with its content unchanged stores the new
-// stamp and changes nothing served. A change notes the library, so a
-// library.changed goes out (once per full scan, debounced otherwise).
+// feed serves: a new row, or lines, the too-large mark or the folder's
+// evidence that differ from the stored ones. A file touched with its content
+// unchanged stores the new stamp and changes nothing served. A change notes
+// the library, so a library.changed goes out (once per full scan, debounced
+// otherwise).
 //
 // Holds `s.mu` per the writer contract on Store.
 func (s *Store) writePlaylistFiles(ctx context.Context, reads []playlistFileRead) (bool, error) {
@@ -111,20 +116,21 @@ func (s *Store) writePlaylistFiles(ctx context.Context, reads []playlistFileRead
 	}
 	defer tx.Rollback()
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO playlist_files (path, size, mtime_ns, parser_version, too_large, lines, missing_count)
-		VALUES (?, ?, ?, ?, ?, ?, 0)
+		INSERT INTO playlist_files (path, size, mtime_ns, parser_version, too_large, lines, missing_count, folder_whole)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size = excluded.size,
 			mtime_ns = excluded.mtime_ns,
 			parser_version = excluded.parser_version,
 			too_large = excluded.too_large,
 			lines = excluded.lines,
-			missing_count = 0`)
+			missing_count = 0,
+			folder_whole = excluded.folder_whole`)
 	if err != nil {
 		return false, err
 	}
 	defer stmt.Close()
-	readStmt, err := tx.PrepareContext(ctx, `SELECT lines, too_large FROM playlist_files WHERE path = ?`)
+	readStmt, err := tx.PrepareContext(ctx, `SELECT lines, too_large, folder_whole FROM playlist_files WHERE path = ?`)
 	if err != nil {
 		return false, err
 	}
@@ -133,23 +139,58 @@ func (s *Store) writePlaylistFiles(ctx context.Context, reads []playlistFileRead
 	for _, r := range reads {
 		blob := joinPlaylistLines(r.lines)
 		var oldLines []byte
-		var oldTooLarge bool
-		switch err := readStmt.QueryRowContext(ctx, r.path).Scan(&oldLines, &oldTooLarge); {
+		var oldTooLarge, oldWhole bool
+		switch err := readStmt.QueryRowContext(ctx, r.path).Scan(&oldLines, &oldTooLarge, &oldWhole); {
 		case err == sql.ErrNoRows:
 			changed = true
 		case err != nil:
 			return false, err
-		case oldTooLarge != r.tooLarge || !bytes.Equal(oldLines, blob):
+		case oldTooLarge != r.tooLarge || oldWhole != r.folderWhole || !bytes.Equal(oldLines, blob):
 			changed = true
 		}
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtimeNs,
-			playlistFileParserVersion, r.tooLarge, blob); err != nil {
+			playlistFileParserVersion, r.tooLarge, blob, r.folderWhole); err != nil {
 			return false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	if changed {
+		s.noteLibrary(ctx)
+	}
+	return changed, nil
+}
+
+// markPlaylistFolders records this pass's folder evidence on rows the pass
+// kept without a read: whole, the rows whose folder the walk saw whole, and
+// partial, the rows whose folder it did not. A row whose mark changed notes
+// the library, as it can change what the feed lists.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) markPlaylistFolders(ctx context.Context, whole, partial []string) (bool, error) {
+	if len(whole) == 0 && len(partial) == 0 {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	set, err := execEachPath(ctx, tx, `UPDATE playlist_files SET folder_whole = 1 WHERE path = ? AND folder_whole != 1`, whole)
+	if err != nil {
+		return false, err
+	}
+	cleared, err := execEachPath(ctx, tx, `UPDATE playlist_files SET folder_whole = 0 WHERE path = ? AND folder_whole != 0`, partial)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	changed := set+cleared > 0
 	if changed {
 		s.noteLibrary(ctx)
 	}

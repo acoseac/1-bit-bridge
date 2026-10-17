@@ -30,11 +30,12 @@ func newFeedStore(t *testing.T, tracks ...string) *Store {
 	return s
 }
 
-// storePlaylist writes one playlist file's row, as a read stores it.
+// storePlaylist writes one playlist file's row, as a read stores it in a
+// scan that saw the file's folder whole.
 func storePlaylist(t *testing.T, s *Store, path string, lines ...string) {
 	t.Helper()
 	if _, err := s.writePlaylistFiles(context.Background(), []playlistFileRead{{
-		path: path, size: 1, mtimeNs: time.Unix(2, 0).UnixNano(), lines: lines,
+		path: path, size: 1, mtimeNs: time.Unix(2, 0).UnixNano(), lines: lines, folderWhole: true,
 	}}); err != nil {
 		t.Fatal(err)
 	}

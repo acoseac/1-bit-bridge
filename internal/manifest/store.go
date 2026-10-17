@@ -2473,7 +2473,9 @@ var migrations = []migration{
 		// lines it parsed (LF-joined, playlist_files_store.go). No row is a track and nothing
 		// joins tracks: GET /v1/playlist-files resolves the lines when it
 		// is asked. missing_count is the tracks' grace, for the same
-		// passes.
+		// passes. folder_whole is whether the last scan that saw the file
+		// saw its folder whole (playlistFolderEvidence), the album-folder
+		// rule's gate; 0 until a scan says so.
 		version: 56,
 		name:    "playlist_files (the playlist-file index)",
 		sql: `CREATE TABLE IF NOT EXISTS playlist_files (
@@ -2483,7 +2485,8 @@ var migrations = []migration{
 			parser_version INTEGER NOT NULL,
 			too_large      INTEGER NOT NULL DEFAULT 0,
 			lines          BLOB    NOT NULL,
-			missing_count  INTEGER NOT NULL DEFAULT 0
+			missing_count  INTEGER NOT NULL DEFAULT 0,
+			folder_whole   INTEGER NOT NULL DEFAULT 0
 		)`,
 	},
 }
