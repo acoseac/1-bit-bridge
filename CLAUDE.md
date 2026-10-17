@@ -3191,12 +3191,15 @@ lost my library."
   backlog B431, paged by B442; flags `playlistFiles` and
   `playlistFilesPaged`, wired on every bridge, the demo included; no
   `ProtocolVersion` bump). A page holds the files that fit
-  `PlaylistFilePageBudget` (8 MiB by the JSON's own measure: path, name and 64
-  bytes a file, length plus 4 an entry), in path order; a file that does not
-  fit starts the next page, and a page always holds one, so a file larger
-  than a page has its own. `nextCursor` (absent on the last page) is the
-  feed's `version` and the last path the page covers; a cursor of another
-  version is a 410 `playlist_files_stale` and the client restarts. The
+  `PlaylistFilePageBudget` (8 MiB by `PlaylistFilePageCost`: path and name
+  in the bytes the JSON writes, escapes included, and 112 a file, JSON bytes
+  plus 4 an entry, never less than the file's JSON), in path order; a file
+  that does not fit starts the next page, and a page always holds one, so a
+  file larger than a page has its own. `nextCursor` (absent on the last page)
+  is the feed's `version` and the last path the page covers, HMAC-signed with
+  a key the process draws (`playlistCursorSigner`): an edited or pre-restart
+  cursor is a 400, one of another version a 410 `playlist_files_stale`, and
+  the client restarts. The
   version hashes the rules (`playlistFeedRulesVersion`), the build, the
   backup epoch, `complete` and a generation the v57 triggers move on every
   track or playlist row change a page can show (a track added, removed,
@@ -3229,9 +3232,11 @@ lost my library."
   serve a suppressed path as a member, don't let an unresolved entry count
   toward the album rule, don't judge a file whose folder evidence is not
   whole, don't put the store's error in the 500** (B425's fixed message),
-  **don't serve a page at a version its cursor was not made at, don't let a
-  page's budget mark a file `tooLarge`, and don't add a column a page reads
-  without moving the v57 triggers' `WHEN` with it**; bump
+  **don't serve a page at a version its cursor was not made at, don't take a
+  cursor whose signature does not check, don't let a page's budget mark a
+  file `tooLarge`, don't cost a string by anything but `jsonStringBytes`, and
+  don't add a column a page reads without moving the v57 triggers' `WHEN`
+  with it**; bump
   `playlistFeedRulesVersion` with any change to what the feed answers for
   the same rows. Tests:
   `TestPlaylistFilesAnswers304ToAMatchingETag`,
@@ -3245,7 +3250,10 @@ lost my library."
   `TestTheFeedVersionMovesWithEveryChangeAPageCanShow`,
   `TestAPageAskedForAtAnotherVersionIsRefused`,
   `TestTheFeedGenerationTriggersAreInPlace`,
-  `TestAPlaylistFilesCursorFromAnotherVersionIs410`.
+  `TestAPlaylistFilesCursorFromAnotherVersionIs410`,
+  `TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400`,
+  `TestAPlaylistFileCostsAtLeastItsJSON`,
+  `TestJSONStringBytesIsWhatEncodingJSONWrites`.
 
 ### Lyrics — the one document per track
 
