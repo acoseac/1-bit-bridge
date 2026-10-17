@@ -1443,6 +1443,8 @@ The `.m3u` and `.m3u8` files in the library, as the bridge's index read them. **
 
 A track here is any track the bridge has indexed, a suppressed duplicate included (the folder's files, as a share lists them), and the rule reads the tracks the lines name, before the duplicate mapping above.
 
+**A file is judged at all only on whole evidence about its folder** (the iOS importer's own gate): the last scan that saw the file saw that folder whole, meaning no failed or cut-short read of it or of a folder above it, no entry in it the scan could not see (a link it could not follow, a subfolder it could not read), and a track for every audio file the scan found directly in it. Without that evidence the bridge's tracks can under-count the folder (a new file it could not index), and an ordinary playlist naming the indexed tracks would meet term 4, so the file is listed. The evidence is a finished scan's: a scan in progress only adds tracks to a folder before it judges the folder again, which can only take a file out of the rule. A file listed for want of evidence leaves the list once a scan sees its folder whole and the four terms hold.
+
 **Response** `200` (gzip when the client accepts it):
 
 ```json

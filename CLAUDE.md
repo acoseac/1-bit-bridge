@@ -2677,7 +2677,11 @@ lost my library."
   and the feed resolves 4 MiB of stored lines at a time in path order
   (`playlistFeedBatchBytes`), keeping its matches for later batches, so the
   answer is a single pass's (one request on 37 MiB of lines peaked at 219 MiB
-  of heap in one batch, 54 MiB in batches). The feed's `complete` is
+  of heap in one batch, 54 MiB in batches). Every file the walk saw gets the
+  pass's evidence about its folder (`playlistFolderEvidence`, the row's
+  `folder_whole`): whole only when no errored subtree covers it, nothing
+  directly in it errored, and every audio file the walk saw directly in it is
+  in `backed`; a row the walk did not see keeps its mark. The feed's `complete` is
   `playlistFilesCompleteKey`: set by a full scan's pass that backs every file
   its walk saw, deleted only with the rows by the wipe, absent after the
   migration, so a client can tell a list not yet rebuilt from one with files
@@ -2685,7 +2689,9 @@ lost my library."
   at scan time, don't `path.Clean` a playlist line (a climb above the root is
   dropped even when it comes back down), don't let a failed read write the
   row, don't set or clear `complete` anywhere else, don't read every file
-  before writing or load every stored line for a request, and don't edit
+  before writing or load every stored line for a request, don't take the
+  folder evidence from a running scan or from anything but the walk and
+  `backed`, and don't edit
   `testdata/playlist-parse-cases.tsv`**: it is the app's
   table, copied byte for byte (iOS `a9a16365`) and pinned to LF in
   `.gitattributes`; change it there and copy it. The parse is the app's down
@@ -2699,7 +2705,8 @@ lost my library."
   `TestAMultiRootLibraryResolvesFromTheManifestRoot`,
   `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile`,
   `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext`,
-  `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`.
+  `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`,
+  `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt`.
 
 ### The wire contract
 
@@ -3193,15 +3200,28 @@ lost my library."
   file listed; (3) every entry's parent folder is the playlist's own, by
   bytes; (4) the tracks named are exactly the tracks directly in that folder,
   order and repeats ignored. A track there is any indexed row, a suppressed
-  duplicate included, judged before the duplicate mapping. Change the rule
-  only with the app's, in the same pair. **Don't serve a suppressed path as a
-  member, don't let an unresolved entry count toward the album rule, and
-  don't put the store's error in the 500** (B425's fixed message). Tests:
+  duplicate included, judged before the duplicate mapping. **And the file is
+  judged at all only on whole evidence about its folder** (the app's final
+  B421 gate, acoseac/1-bit#2237): the last scan that saw the file saw that
+  folder whole, meaning no failed or cut-short read of it or of a folder
+  above it, no entry in it the walk could not see, and a row for every audio
+  file the walk found directly in it. Unsure, it is listed: an index that
+  under-counts the folder (a new file it could not index) would let an
+  ordinary playlist naming the indexed tracks meet term 4. The evidence is a
+  finished scan's, taken after its walk's rows landed; a scan under way only
+  adds rows to a folder before its pass, which can only take a file out of
+  the rule. Change the rule only with the app's, in the same pair. **Don't
+  serve a suppressed path as a member, don't let an unresolved entry count
+  toward the album rule, don't judge a file whose folder evidence is not
+  whole, and don't put the store's error in the 500** (B425's fixed
+  message). Tests:
   `TestPlaylistFilesAnswers304ToAMatchingETag`,
   `TestAlbumFolderPlaylistsAreNotServed`, `TestTheAlbumFolderRuleTermByTerm`,
   `TestASuppressedDuplicateMemberIsServedAsItsServedCopy`,
   `TestAPlaylistFilesStoreFailureAnswersAFixedMessage`,
-  `TestAClientAbortDuringThePlaylistFilesReadIsInfoAnd499`.
+  `TestAClientAbortDuringThePlaylistFilesReadIsInfoAnd499`,
+  `TestAnAlbumFolderPlaylistIsServedWhileItsFolderHoldsAFileTheIndexLacks`,
+  `TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`.
 
 ### Lyrics — the one document per track
 

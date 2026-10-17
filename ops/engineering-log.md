@@ -45547,7 +45547,8 @@ parity edges), `playlist_files_scan_test.go` (a full scan, change detection
 and the parser version, removal at the threshold and the reset, the
 clean-empty guard, a subtree's scope, a late member, the album rule,
 multi-root, the root removal and flip, a read failure, the size cap,
-backslashes, completeness, the read windows) and `playlist_files_feed_test.go`
+backslashes, completeness, the read windows, the folder evidence; with
+`playlist_files_unix_test.go` for the gate on a real scan) and `playlist_files_feed_test.go`
 (the fold, duplicates, the album rule term by term, the budget, the batches,
 the library note, clear-missing, a settle over two paths per step).
 `internal/api`:
@@ -45655,6 +45656,79 @@ controls 2 and 9 ran again there, predicted first, and held: 9 reddens
 three tests and, as predicted, `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`
 at its fixture check (the album playlist listed).
 
+### The whole-evidence gate (the app's final B421 term)
+
+The coordinator passed on one more term from the app's final B421 rule
+(acoseac/1-bit#2237): a playlist is judged an album playlist only on whole
+evidence about its folder, and an unsure one is served. After a partial or
+failed listing the stored tracks can under-count the folder (a new file not
+yet indexed), and an ordinary playlist, ten of eleven tracks, then meets term
+4 and is wrongly dropped. On the bridge, in `3307006f`:
+
+- **What counts as whole** (`playlistFolderEvidence`, at the pass). No errored
+  subtree covers the folder: a read of it or of a folder above it that failed
+  or was cut short (`os.ReadDir` returns what it read before the error, so a
+  playlist can be seen in a listing cut short), or a root the clean-empty
+  guard spared. Nothing directly in it errored: an unreadable link keys
+  itself, and a subfolder whose read failed is counted against its parent,
+  the safe way, since unsure only lists. And every audio file the walk saw
+  directly in it has a row the scan stands behind (`backed`: the skip gate's,
+  keepUnread's for a row it had, the writer's). A new file whose read failed
+  gets no row (keepUnread, B134), and neither does one that was no longer a
+  file, one whose extractor panicked, or one whose write did not land: each
+  is "an indexing error pending". An SACD container is not asked; its rows
+  sit under it, not in its folder.
+- **Where it is kept.** On the row, `folder_whole` (added to v56, which has
+  not shipped), taken with the read for a file read, and through
+  `markPlaylistFolders` for a file the pass kept, which notes the library
+  when a mark changed. The feed judges a file only when its row says the
+  folder was whole.
+- **Mid-scan.** The evidence is a finished scan's: the pass runs after the
+  scan's workers and writer have finished and its deletion passes have run,
+  and a request during a later scan reads the last pass's marks. Until that
+  scan's own pass, a folder's rows change only by rows added for new files
+  or deleted for files gone past the threshold, and a playlist's row not at
+  all. An added row can only make term 4 fail, which lists the file, so a
+  running scan cannot drop one wrongly. Withholding every judgment while any
+  scan runs was not done: every album playlist would be listed for the
+  length of each scan and leave after it, and B432 would import and reap them
+  all at every scan.
+- **A file the walk did not see** keeps its mark. The pass learned nothing
+  about its folder, whose rows were spared (an errored subtree) or counted
+  missing, never added to, so its last verdict stands. The app likewise
+  leaves its rows alone when its walk cannot list a folder.
+- **What no scan can know**: a file added to a folder after the last scan
+  saw it. Until a scan sees it, the bridge can judge on an index one file
+  short. That can only keep out a file that was not listed (a playlist
+  naming the old tracks was an album playlist before the file came), never
+  drop one that was, and the next scan that sees the file lists the playlist.
+
+Tests: `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt` (thirteen
+cases: the folder's own read, a folder above, a link and a subfolder in it, a
+file with no row, a container, a file in a subfolder, an error elsewhere, the
+root sentinels of one root and of several), and in the unix-only
+`playlist_files_unix_test.go`
+`TestAnAlbumFolderPlaylistIsServedWhileItsFolderHoldsAFileTheIndexLacks` (the
+coordinator's case: a file locked out with chmod 0 has no row, the playlist
+names exactly the indexed tracks, and it is listed; with the file gone the
+same unchanged file is an album playlist) and
+`TestAnAlbumFolderPlaylistBesideALinkTheWalkCannotFollowIsServed`. The feed
+tests' `storePlaylist` now writes a row as a scan that saw its folder whole
+would. Controls on `3307006f`, each predicted before it ran, all held:
+
+| control | red, predicted and observed |
+|---|---|
+| G1. the gate removed (the earlier feed) | both scan tests alone, each at its first scan |
+| G2. the evidence ignoring `backed` | the evidence table at "a file it holds has no row", and the locked-out file's test at its first scan |
+| G3. the evidence ignoring entries in the folder | the table at its link and subfolder rows, and the link's test at its first scan |
+| G4. a kept file's mark never rewritten | both scan tests, each at its second scan: the unchanged file kept the mark its first scan gave it |
+| G5. the folder's own key alone, not the subtrees over it | the table at "a folder above it failed" and both root outages |
+
+The pass's call in ScanSubtree changed, so control 4 ran again with it, and
+so did 2, 9, 10a and 10b, whose rule the gate now fronts: all held as the
+table above predicts, 2 now also reddening both scan tests at their second
+scans.
+
 ### For the app (B432)
 
 - `members` are manifest paths, `bridgeOriginalPath` as the manifest names
@@ -45663,7 +45737,10 @@ at its fixture check (the album playlist listed).
   are not its contents.
 - `complete: false` is the lossy fetch: import what it lists if wanted, and
   remove nothing it lacks.
-- An album-folder playlist is absent from the feed, by B421's four terms.
+- An album-folder playlist is absent from the feed, by B421's four terms
+  and its whole-evidence gate. A playlist listed while its folder was unsure
+  leaves the list once a scan sees the folder whole and the terms hold, as
+  the app's own launch pass would remove its row.
   One difference in what reaches the app: a placed line that resolves only by
   the fold is served as a member here, so the file is listed (term 2 is
   byte-exact), and its row then names only that folder's tracks. B421's
