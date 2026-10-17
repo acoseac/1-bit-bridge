@@ -504,8 +504,8 @@ func TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400(t *testing.T) {
 	fake := &fakePlaylistFiles{pages: twoPages()}
 	hs, token := newPlaylistFilesServer(t, fake)
 	resp, body := getPlaylistFiles(t, hs, token)
-	real := decodePage(t, resp, body).NextCursor
-	raw, err := base64.RawURLEncoding.DecodeString(real)
+	issued := decodePage(t, resp, body).NextCursor
+	raw, err := base64.RawURLEncoding.DecodeString(issued)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestAPlaylistFilesCursorTheBridgeDidNotMakeIs400(t *testing.T) {
 	enc := func(raw string) string { return base64.RawURLEncoding.EncodeToString([]byte(raw)) }
 	for _, cursor := range []string{
 		base64.RawURLEncoding.EncodeToString(edited), // the bridge's cursor, one bit of its path changed
-		real[:len(real)-4],                           // the bridge's cursor, cut short
+		issued[:len(issued)-4],                       // the bridge's cursor, cut short
 		enc(fakeFeedVersion + "\x00Playlists/a.m3u"), // the right fields, no signature
 		"%%%",                         // not base64url
 		enc("Playlists/a.m3u"),        // no separator

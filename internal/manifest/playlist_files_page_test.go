@@ -191,25 +191,17 @@ func TestTheFeedVersionMovesWithEveryChangeAPageCanShow(t *testing.T) {
 			writePlaylistRow(t, s, playlistFileRead{path: "Lists/a.m3u", size: 1, mtimeNs: 99, lines: []string{"../A/01.flac"}, folderWhole: true})
 		}},
 		{"a playlist's folder evidence", true, func(t *testing.T, s *Store) {
-			if _, err := s.markPlaylistFolders(ctx, nil, []string{"Lists/a.m3u"}); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, second(s.markPlaylistFolders(ctx, nil, []string{"Lists/a.m3u"})))
 		}},
 		{"a playlist removed", true, func(t *testing.T, s *Store) {
-			if _, err := s.settlePlaylistFiles(ctx, nil, []string{"Lists/a.m3u"}, nil, 1); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, second(s.settlePlaylistFiles(ctx, nil, []string{"Lists/a.m3u"}, nil, 1)))
 		}},
 		{"a playlist added", true, func(t *testing.T, s *Store) { storePlaylist(t, s, "Lists/new.m3u", "../A/01.flac") }},
 		{"a track added", true, func(t *testing.T, s *Store) {
-			if err := s.UpsertTrack(ctx, &Track{Path: "A/03.flac", Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, s.UpsertTrack(ctx, &Track{Path: "A/03.flac", Size: 1, ModTime: time.Unix(1, 0)}))
 		}},
 		{"a track removed", true, func(t *testing.T, s *Store) {
-			if err := s.DeleteTracksBatch(ctx, []string{"A/02.flac"}); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, s.DeleteTracksBatch(ctx, []string{"A/02.flac"}))
 		}},
 		{"a track's path changed", true, func(t *testing.T, s *Store) {
 			execSQL(t, s, `UPDATE tracks SET path = 'A/9.flac' WHERE path = 'A/02.flac'`)
@@ -219,25 +211,17 @@ func TestTheFeedVersionMovesWithEveryChangeAPageCanShow(t *testing.T) {
 			execSQL(t, s, `UPDATE tracks SET dupe_group_id = 'g2' WHERE path = 'A/02.flac'`)
 		}},
 		{"the index marked complete", true, func(t *testing.T, s *Store) {
-			if err := s.markPlaylistFilesComplete(ctx); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, s.markPlaylistFilesComplete(ctx))
 		}},
 		{"the backup epoch replaced (a restore)", true, func(t *testing.T, s *Store) {
-			if _, err := ReplaceBackupEpoch(ctx, s.db); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, second(ReplaceBackupEpoch(ctx, s.db)))
 		}},
 		{"a track's tags written again", false, func(t *testing.T, s *Store) {
-			if err := s.UpsertTrack(ctx, &Track{Path: "A/01.flac", Size: 2, ModTime: time.Unix(2, 0), Title: "Enriched"}); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, s.UpsertTrack(ctx, &Track{Path: "A/01.flac", Size: 2, ModTime: time.Unix(2, 0), Title: "Enriched"}))
 			execSQL(t, s, `UPDATE tracks SET enriched_at = 1 WHERE path = 'A/01.flac'`)
 		}},
 		{"a playlist missed once, below the threshold", false, func(t *testing.T, s *Store) {
-			if _, err := s.settlePlaylistFiles(ctx, nil, []string{"Lists/a.m3u"}, nil, 5); err != nil {
-				t.Fatal(err)
-			}
+			okFeed(t, second(s.settlePlaylistFiles(ctx, nil, []string{"Lists/a.m3u"}, nil, 5)))
 		}},
 		{"a playlist written again as it was", false, func(t *testing.T, s *Store) {
 			storePlaylist(t, s, "Lists/a.m3u", "../A/01.flac")
@@ -274,6 +258,17 @@ func TestJSONStringBytesIsWhatEncodingJSONWrites(t *testing.T) {
 		}
 	}
 }
+
+// okFeed fails the test on err; it keeps the version table's cases flat.
+func okFeed(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// second is the error of a call that returns a value and an error.
+func second[T any](_ T, err error) error { return err }
 
 // writePlaylistRow writes one read as it is.
 func writePlaylistRow(t *testing.T, s *Store, r playlistFileRead) {
