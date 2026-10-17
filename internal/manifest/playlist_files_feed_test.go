@@ -90,6 +90,40 @@ func TestASuppressedDuplicateMemberIsServedAsItsServedCopy(t *testing.T) {
 		[]string{"FLAC/a.flac", "FLAC/a.flac"}, []string{"../Copy/b.dsf", "../Gone/c.flac"})
 }
 
+func TestTheAlbumFolderRuleTermByTerm(t *testing.T) {
+	// The app's truth table (AlbumFolderPlaylistTests.test_isAlbumPlaylist_truthTable,
+	// B421), term by term, for a playlist at x/list.m3u. A subfolder's track
+	// and another folder's are in the store, so each term is the only one
+	// that can decide its case.
+	s := newFeedStore(t, "x/1.flac", "x/2.flac", "x/sub/3.flac", "y/3.flac")
+	for _, c := range []struct {
+		label string
+		lines []string
+		album bool
+	}{
+		{"exactly the folder", []string{"1.flac", "2.flac"}, true},
+		{"another order, a repeat", []string{"2.flac", "1.flac", "2.flac"}, true},
+		{"a dropped line is no entry", []string{"http://h/a.mp3", "../../../z.flac", "1.flac", "2.flac"}, true},
+		{"part of the folder: a folder track left unnamed", []string{"1.flac"}, false},
+		{"an entry outside", []string{"1.flac", "2.flac", "../y/3.flac"}, false},
+		{"a subfolder's entry", []string{"1.flac", "2.flac", "sub/3.flac"}, false},
+		{"an entry that does not resolve", []string{"1.flac", "2.flac", "9.flac"}, false},
+		{"an entry found only by the fold", []string{"1.FLAC", "2.flac"}, false},
+		{"no entry", nil, false},
+		{"only lines the rule drops", []string{"http://h/a.mp3"}, false},
+	} {
+		storePlaylist(t, s, "x/list.m3u", c.lines...)
+		if _, listed := playlistFeed(t, s)["x/list.m3u"]; listed == c.album {
+			t.Errorf("%s: listed %v, want the album rule to say %v", c.label, listed, c.album)
+		}
+	}
+	// An empty file in a folder with no tracks is not an album playlist.
+	storePlaylist(t, s, "empty/list.m3u")
+	if _, listed := playlistFeed(t, s)["empty/list.m3u"]; !listed {
+		t.Error("an empty file in a folder with no tracks was not listed")
+	}
+}
+
 func TestAnAlbumFolderPlaylistIsJudgedBeforeTheDuplicateMapping(t *testing.T) {
 	// The ripper's playlist names its own folder's files; one of them is a
 	// suppressed copy of a track elsewhere. Still an album-folder playlist.

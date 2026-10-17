@@ -322,7 +322,7 @@ func TestAV54StoreWithRowsEndsConsistent(t *testing.T) {
 	rec := loggingtest.Record(t)
 	path := libraryRewoundToV54(t, "")
 	s := openTestStoreAt(t, path)
-	if got := userVersion(t, s.db); got != ftsRowMapVersion {
+	if got := userVersion(t, s.db); got != migrations[len(migrations)-1].version {
 		t.Fatalf("version = %d", got)
 	}
 	requireConsistent(t, s)
@@ -410,7 +410,7 @@ func TestAnErrorAfterTheMapFillLeavesVersion54(t *testing.T) {
 	}
 	ftsRowMapAfterFill = nil
 	s := openTestStoreAt(t, path)
-	if got := userVersion(t, s.db); got != ftsRowMapVersion {
+	if got := userVersion(t, s.db); got != migrations[len(migrations)-1].version {
 		t.Fatalf("version after retry = %d", got)
 	}
 	requireConsistent(t, s)

@@ -92,11 +92,22 @@ type playlistTrackMatch struct {
 // group's one served row, or, when its group has none or several, its line
 // is unresolved: the feed names only tracks the manifest serves.
 //
-// An album-folder playlist is skipped: one with at least one resolved
-// entry, every resolved entry a track directly in the playlist's own
-// folder, and every track directly in that folder among them, matched
-// before the duplicate mapping, in any order (the owner's rule, the app's
-// backlog B421). A playlist with no resolved entry is always served.
+// An album-folder playlist is not listed (the owner's rule; the app's
+// AlbumFolderPlaylist.isAlbumPlaylist, backlog B421, the same four terms).
+// Its entries are its lines the path rule places (a line the rule drops is
+// no entry), and it is an album playlist only when all four hold:
+//  1. it has at least one entry;
+//  2. EVERY entry names a track at exactly that path, byte for byte: one
+//     that resolves to nothing, or only through the fold, keeps the file
+//     listed (an unresolved line may be a file a scan could not read);
+//  3. every entry's parent folder is the playlist's own folder, by bytes (a
+//     track in a subfolder is not in the folder);
+//  4. the tracks the entries name are exactly the tracks directly in that
+//     folder, order and repeats ignored.
+//
+// A track there is any row the index holds, a suppressed duplicate
+// included, and the rule reads the tracks the lines name, before the
+// duplicate mapping.
 func (s *Store) PlaylistFiles(ctx context.Context) ([]PlaylistFile, error) {
 	return s.playlistFiles(ctx, PlaylistFileFeedBudget)
 }
@@ -171,15 +182,23 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, tx *sql.Tx, matches ma
 	if f.tooLarge {
 		return pf, false, nil
 	}
-	var matched []string
+	// The album-folder rule's entries are the placed lines (a line the path
+	// rule drops is no entry), and named the tracks they name at their exact
+	// paths. allExact goes false at the first entry that names no track at
+	// its exact bytes: unresolved, or found only by the fold.
+	var named []string
+	entries, allExact := 0, true
 	cost := 0
 	for _, pl := range f.placed {
 		m, hit := playlistTrackMatch{}, false
 		if pl.ok {
+			entries++
 			m, hit = matches[pl.path]
-		}
-		if hit {
-			matched = append(matched, m.path)
+			if hit && m.path == pl.path {
+				named = append(named, m.path)
+			} else {
+				allExact = false
+			}
 		}
 		member := m.path
 		if hit && m.suppressed {
@@ -193,8 +212,10 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, tx *sql.Tx, matches ma
 			cost += len(pl.line) + 4
 		}
 	}
-	if album, err = isAlbumFolderPlaylist(ctx, tx, playlistFileDir(f.path), matched); err != nil || album {
-		return pf, album, err
+	if entries > 0 && allExact {
+		if album, err = isAlbumFolderPlaylist(ctx, tx, playlistFileDir(f.path), named); err != nil || album {
+			return pf, album, err
+		}
 	}
 	if cost > *budget {
 		pf.Members, pf.Unresolved, pf.TooLarge = []string{}, []string{}, true
@@ -384,11 +405,13 @@ func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTr
 	return out, nil
 }
 
-// isAlbumFolderPlaylist reports the album-folder shape: matched (the track
-// rows the entries named, before the duplicate mapping) is not empty, every
-// one of them sits directly in dir, and every track directly in dir is one
-// of them. Order and repeats do not count. The folder is read only when
-// the first two hold, which no playlist naming another folder passes.
+// isAlbumFolderPlaylist is terms 3 and 4 of the album-folder rule, for a
+// playlist whose every entry names a track at its exact path (terms 1 and 2,
+// resolve): named, those tracks, every one sits directly in dir (its parent
+// folder is dir, by bytes; a subfolder is not dir), and they are exactly the
+// tracks directly in dir, order and repeats ignored. A track is any row the
+// index holds, a suppressed duplicate included, as a share's listing holds
+// every file. The folder is read only when term 3 holds.
 func isAlbumFolderPlaylist(ctx context.Context, tx *sql.Tx, dir string, matched []string) (bool, error) {
 	if len(matched) == 0 {
 		return false, nil

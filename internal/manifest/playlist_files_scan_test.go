@@ -234,39 +234,53 @@ func TestAPlaylistMemberIndexedLaterResolvesWithoutARead(t *testing.T) {
 }
 
 func TestAlbumFolderPlaylistsAreNotServed(t *testing.T) {
+	// The app's four terms (AlbumFolderPlaylist.isAlbumPlaylist, B421), end
+	// to end through a scan; TestTheAlbumFolderRuleTermByTerm has each term.
 	root := t.TempDir()
 	stubTracks(t, root,
 		"Ripped/Album/01.flac", "Ripped/Album/02.flac", "Ripped/Album/03.flac",
 		"Part/Album/01.flac", "Part/Album/02.flac", "Part/Album/03.flac",
 		"Out/Album/01.flac", "Out/Album/02.flac", "Out/Other/x.flac",
-		"Lost/Album/01.flac", "Lost/Album/02.flac",
-		"Disc/Album/01.flac", "Disc/Album/CD2/01.flac")
+		"Stale/Album/01.flac", "Stale/Album/02.flac",
+		"Dropped/Album/01.flac", "Dropped/Album/02.flac",
+		"Case/Album/01.flac", "Case/Album/02.flac",
+		"Disc/Album/01.flac", "Disc/Album/CD2/01.flac",
+		"Box/00 Intro.flac", "Box/CD1/01.flac")
 	// A ripper's playlist, in track order or not: every track of its folder.
 	writeLibraryFile(t, root, "Ripped/Album/Album.m3u", []byte("03.flac\n01.flac\n02.flac\n02.flac\n"))
+	// A line the path rule drops is no entry: a URL and a climb above the
+	// root beside the folder's tracks.
+	writeLibraryFile(t, root, "Dropped/Album/Album.m3u", []byte("http://example.com/x.mp3\n../../../up.flac\n01.flac\n02.flac\n"))
+	// The folder's own tracks only: a subfolder's are not its own.
+	writeLibraryFile(t, root, "Box/Box.m3u", []byte("00 Intro.flac\n"))
 	// Part of its folder.
 	writeLibraryFile(t, root, "Part/Album/Best.m3u", []byte("01.flac\n02.flac\n"))
 	// Its folder and an entry outside it.
 	writeLibraryFile(t, root, "Out/Album/Plus.m3u", []byte("01.flac\n02.flac\n../Other/x.flac\n"))
-	// Every track of its folder, and a line that resolves to nothing.
-	writeLibraryFile(t, root, "Lost/Album/Album.m3u", []byte("01.flac\n02.flac\n03.flac\n"))
-	// Nothing resolves: always served.
+	// A ripper's file with one stale line: every entry must resolve.
+	writeLibraryFile(t, root, "Stale/Album/Album.m3u", []byte("01.flac\n02.flac\n03 Renamed.flac\n"))
+	// An entry found only by the case fold does not resolve at its exact path.
+	writeLibraryFile(t, root, "Case/Album/Album.m3u", []byte("01.FLAC\n02.flac\n"))
+	// Nothing resolves.
 	writeLibraryFile(t, root, "Empty/Album/Album.m3u", []byte("gone.flac\n"))
 	// A disc in a subfolder is not its own folder.
 	writeLibraryFile(t, root, "Disc/Album/Album.m3u", []byte("01.flac\nCD2/01.flac\n"))
 	s, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "scan")
 	feed := playlistFeed(t, s)
-	for _, skipped := range []string{"Ripped/Album/Album.m3u", "Lost/Album/Album.m3u"} {
+	for _, skipped := range []string{"Ripped/Album/Album.m3u", "Dropped/Album/Album.m3u", "Box/Box.m3u"} {
 		if _, ok := feed[skipped]; ok {
 			t.Errorf("%s is an album-folder playlist and was served", skipped)
 		}
 	}
 	wantPlaylist(t, feed, "Part/Album/Best.m3u", []string{"Part/Album/01.flac", "Part/Album/02.flac"}, []string{})
 	wantPlaylist(t, feed, "Out/Album/Plus.m3u", []string{"Out/Album/01.flac", "Out/Album/02.flac", "Out/Other/x.flac"}, []string{})
+	wantPlaylist(t, feed, "Stale/Album/Album.m3u", []string{"Stale/Album/01.flac", "Stale/Album/02.flac"}, []string{"03 Renamed.flac"})
+	wantPlaylist(t, feed, "Case/Album/Album.m3u", []string{"Case/Album/01.flac", "Case/Album/02.flac"}, []string{})
 	wantPlaylist(t, feed, "Empty/Album/Album.m3u", []string{}, []string{"gone.flac"})
 	wantPlaylist(t, feed, "Disc/Album/Album.m3u", []string{"Disc/Album/01.flac", "Disc/Album/CD2/01.flac"}, []string{})
-	if len(feed) != 4 {
-		t.Errorf("the feed lists %v, want the four that are not album-folder playlists", feedPaths(feed))
+	if len(feed) != 6 {
+		t.Errorf("the feed lists %v, want the six that are not album-folder playlists", feedPaths(feed))
 	}
 }
 

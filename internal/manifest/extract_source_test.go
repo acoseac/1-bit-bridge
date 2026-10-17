@@ -22,6 +22,7 @@ var libraryFileReaders = map[string]string{
 	"ExpandSACDISO":         "an .iso container, outside a scan",
 	"readFolderArt":         "a folder's cover",
 	"readSidecarCandidate":  "a lyrics sidecar",
+	"readPlaylistFile":      "a playlist file (.m3u / .m3u8), read whole or not written (backlog B431)",
 	"rescaleOneArtworkFile": "a cover in the artwork cache",
 	"jpegHeaderDimensions":  "a cover in the artwork cache",
 	"EnsureThumb":           "a cover in the artwork cache",

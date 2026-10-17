@@ -1434,7 +1434,14 @@ The `.m3u` and `.m3u8` files in the library, as the bridge's index read them. **
 
 **Members** are resolved when the feed is asked, against the tracks the bridge holds then, so a track indexed after its playlist file was read is a member with no new read of the file. A placed line names the track at its exact bytes, else the one track whose path matches it with case and Unicode composition folded; when two or more match that way, the line is unresolved. A track the duplicate filter suppresses is served as its group's one served copy; with none, or several (a DSD and a PCM edition each keep one), the line is unresolved. Members are manifest paths, exactly as `GET /v1/manifest` names the tracks.
 
-**Album-folder playlists are not listed**: a playlist with at least one member, every member directly in the playlist's own folder, and every track directly in that folder among them, in any order (judged on the tracks the lines name, before the duplicate mapping). A ripper's per-album playlist only repeats its album. A playlist with no member is always listed.
+**Album-folder playlists are not listed.** A ripper's per-album playlist only repeats its album, so the bridge leaves it out by the same rule the iOS importer applies to a share (its `AlbumFolderPlaylist.isAlbumPlaylist`). A playlist file's entries are its lines the path rule places; a line the rule drops (a URL, a drive letter, a climb above the root) is no entry. The file is an album playlist, and is not listed, only when all four hold:
+
+1. it has at least one entry;
+2. **every** entry names a track at exactly that path, byte for byte: an entry that resolves to nothing, or only through the case-and-composition fold, keeps the file listed (an unresolved line may be a file a scan could not read);
+3. every entry's parent folder is the playlist's own folder, compared by bytes: a track in a subfolder is not in the folder;
+4. the tracks the entries name are exactly the tracks directly in that folder, order and repeats ignored.
+
+A track here is any track the bridge has indexed, a suppressed duplicate included (the folder's files, as a share lists them), and the rule reads the tracks the lines name, before the duplicate mapping above.
 
 **Response** `200` (gzip when the client accepts it):
 
