@@ -95,7 +95,10 @@ func readPlaylistFile(abs, rel string) (playlistFileRead, error) {
 const playlistReadWorkers = 8
 
 // playlistWriteBatch bounds one write transaction: this many reads, or
-// playlistWriteBatchBytes of lines, whichever comes first.
+// playlistWriteBatchBytes of lines, whichever comes first. The pass reads a
+// window of the same bounds, by the walk's sizes, and writes it before it
+// reads the next (nextPlaylistReadWindow), so it never holds more than a
+// window of parsed files, however many the library has.
 const (
 	playlistWriteBatch      = 256
 	playlistWriteBatchBytes = 16 << 20
@@ -183,7 +186,12 @@ func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full boo
 	}
 	p := &playlistPass{s: s, before: before, seen: seen, backed: newBackedPaths()}
 	toRead := p.plan()
-	p.write(ctx, p.read(ctx, toRead))
+	for start := 0; start < len(toRead) && ctx.Err() == nil; {
+		end := nextPlaylistReadWindow(toRead, start)
+		p.write(ctx, p.read(ctx, toRead[start:end]))
+		start = end
+	}
+	p.report()
 	if ctx.Err() != nil {
 		return
 	}
@@ -212,14 +220,49 @@ func (p *playlistPass) allSeenBacked() bool {
 
 // playlistPass is one run of indexPlaylistFiles: the stored rows in scope
 // (before), what the walk saw (seen), the rows this pass can stand behind
-// (backed: kept or written, for the case-only rename reap), and the rows
-// whose missing count it clears without a write (reset).
+// (backed: kept or written, for the case-only rename reap), the rows
+// whose missing count it clears without a write (reset), and what its one
+// line each reports (report): the files it could not read, and the ones
+// past a cap with the first of them.
 type playlistPass struct {
-	s      *Scanner
-	before map[string]playlistFileStamp
-	seen   map[string]playlistSighting
-	backed *backedPaths
-	reset  []string
+	s               *Scanner
+	before          map[string]playlistFileStamp
+	seen            map[string]playlistSighting
+	backed          *backedPaths
+	reset           []string
+	unread          walkTally
+	tooLarge        int
+	tooLargeExample string
+}
+
+// nextPlaylistReadWindow is the end of the read window that starts at
+// toRead[start]: playlistWriteBatch files, or playlistWriteBatchBytes of
+// them by the walk's sizes, whichever comes first, and always at least one.
+// A file at or past PlaylistFileMaxBytes costs nothing: it is not read.
+func nextPlaylistReadWindow(toRead []playlistSighting, start int) int {
+	end, size := start, int64(0)
+	for end < len(toRead) && end-start < playlistWriteBatch {
+		n := toRead[end].info.Size()
+		if n >= PlaylistFileMaxBytes {
+			n = 0
+		}
+		if end > start && size+n > playlistWriteBatchBytes {
+			break
+		}
+		size += n
+		end++
+	}
+	return end
+}
+
+// report logs, once for the pass, the files it could not read and the
+// ones past a cap.
+func (p *playlistPass) report() {
+	p.unread.report(msgPlaylistFilesUnread, "err")
+	if p.tooLarge > 0 {
+		scanLogger.Info(msgPlaylistFilesTooLarge, "files", p.tooLarge, "example", p.tooLargeExample,
+			"maxBytes", PlaylistFileMaxBytes, "maxEntries", playlistFileMaxEntries)
+	}
 }
 
 // keep backs the stored row at rel, as it is, and clears its missing count:
@@ -264,7 +307,8 @@ func (p *playlistPass) plan() []playlistSighting {
 // opened file's can differ (a file written between the walk and the read,
 // or a Windows directory entry whose metadata lags the file's): stored, it
 // would read the file again on every scan, where the walk's converges after
-// one more read. A read that failed keeps the stored row, logged once.
+// one more read. A read that failed keeps the stored row, and the pass logs
+// it once (report).
 func (p *playlistPass) read(ctx context.Context, toRead []playlistSighting) []playlistFileRead {
 	reads, failed := p.s.readPlaylistFiles(ctx, toRead)
 	walked := make(map[string]fs.FileInfo, len(toRead))
@@ -276,22 +320,20 @@ func (p *playlistPass) read(ctx context.Context, toRead []playlistSighting) []pl
 			reads[i].size, reads[i].mtimeNs = info.Size(), info.ModTime().UnixNano()
 		}
 	}
-	var unread walkTally
 	for _, f := range failed {
 		if ctx.Err() == nil {
-			unread.note(f.rel, walkErrReason(f.err))
+			p.unread.note(f.rel, walkErrReason(f.err))
 		}
 		p.keep(f.rel)
 	}
-	unread.report(msgPlaylistFilesUnread, "err")
 	return reads
 }
 
 // write stores reads, a batch per transaction (nextPlaylistBatch). A batch
 // that does not land is not backed: a rename whose new spelling it held
-// keeps its old row, and the next scan reads its files again.
+// keeps its old row, and the next scan reads its files again. The files past
+// a cap that landed are counted for the pass's one line (report).
 func (p *playlistPass) write(ctx context.Context, reads []playlistFileRead) {
-	tooLarge, example := 0, ""
 	for start := 0; start < len(reads); {
 		end := nextPlaylistBatch(reads, start)
 		batch := reads[start:end]
@@ -301,14 +343,10 @@ func (p *playlistPass) write(ctx context.Context, reads []playlistFileRead) {
 		}
 		for _, r := range batch {
 			if r.tooLarge {
-				tooLarge++
-				example = cmp.Or(example, r.path)
+				p.tooLarge++
+				p.tooLargeExample = cmp.Or(p.tooLargeExample, r.path)
 			}
 		}
-	}
-	if tooLarge > 0 {
-		scanLogger.Info(msgPlaylistFilesTooLarge, "files", tooLarge, "example", example,
-			"maxBytes", PlaylistFileMaxBytes, "maxEntries", playlistFileMaxEntries)
 	}
 }
 

@@ -3,10 +3,13 @@ package manifest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -487,5 +490,88 @@ func TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile(t *testing.T)
 	scanOnce(t, sc, "full scan whose re-read fails")
 	if !complete("after a failed re-read") {
 		t.Fatal("a failed read of a file with a row cleared the index's completeness")
+	}
+}
+
+// TestThePlaylistPassWritesEachWindowBeforeReadingTheNext: a pass reads and
+// writes its files a window at a time (nextPlaylistReadWindow), so it holds
+// one window of parsed files, not the library's. 300 files are two windows
+// of the count bound: the second window's reads find the first window's 256
+// rows written, and every file is served at the end.
+func TestThePlaylistPassWritesEachWindowBeforeReadingTheNext(t *testing.T) {
+	root := t.TempDir()
+	stubTracks(t, root, "A/01.flac")
+	const files = 300
+	for i := 0; i < files; i++ {
+		writeLibraryFile(t, root, fmt.Sprintf("Lists/%03d.m3u", i), []byte("../A/01.flac\n"))
+	}
+	s, sc := newScanFixture(t, root)
+	var mu sync.Mutex
+	rowsSeen := map[int]int{} // rows already written -> reads that saw that many
+	sc.readPlaylist = func(abs, rel string) (playlistFileRead, error) {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM playlist_files`).Scan(&n); err != nil {
+			return playlistFileRead{}, err
+		}
+		mu.Lock()
+		rowsSeen[n]++
+		mu.Unlock()
+		return readPlaylistFile(abs, rel)
+	}
+	scanOnce(t, sc, "scan")
+	if rowsSeen[0] != playlistWriteBatch || rowsSeen[playlistWriteBatch] != files-playlistWriteBatch || len(rowsSeen) != 2 {
+		t.Fatalf("reads by the rows they found written: %v; want %d reads before any write and %d after the first window's",
+			rowsSeen, playlistWriteBatch, files-playlistWriteBatch)
+	}
+	if feed := playlistFeed(t, s); len(feed) != files {
+		t.Fatalf("%d files served, want %d", len(feed), files)
+	}
+}
+
+// sizeInfo is a stat reporting a size, for the read windows' bounds.
+type sizeInfo int64
+
+func (n sizeInfo) Name() string       { return "entry.m3u" }
+func (n sizeInfo) Size() int64        { return int64(n) }
+func (n sizeInfo) Mode() fs.FileMode  { return 0o644 }
+func (n sizeInfo) ModTime() time.Time { return time.Time{} }
+func (n sizeInfo) IsDir() bool        { return false }
+func (n sizeInfo) Sys() any           { return nil }
+
+// TestPlaylistReadWindowsHoldTheirBytes: a read window is at most
+// playlistWriteBatch files and playlistWriteBatchBytes of them by the walk's
+// sizes, a file past the cap costs nothing (it is not read), and the windows
+// cover every file in order.
+func TestPlaylistReadWindowsHoldTheirBytes(t *testing.T) {
+	windows := func(sizes ...int64) string {
+		toRead := make([]playlistSighting, len(sizes))
+		for i, n := range sizes {
+			toRead[i] = playlistSighting{pathInfo: pathInfo{rel: fmt.Sprintf("%03d.m3u", i), info: sizeInfo(n)}}
+		}
+		var got []string
+		for start := 0; start < len(toRead); {
+			end := nextPlaylistReadWindow(toRead, start)
+			if end <= start {
+				t.Fatalf("the window at %d ends at %d", start, end)
+			}
+			got = append(got, fmt.Sprintf("%d-%d", start, end))
+			start = end
+		}
+		return strings.Join(got, " ")
+	}
+	var bySize []int64
+	for i := 0; i < 9; i++ {
+		bySize = append(bySize, 1_900_000) // eight fit in 16 MiB, nine do not
+	}
+	bySize = append(bySize, PlaylistFileMaxBytes, 5, 5)
+	if got, want := windows(bySize...), "0-8 8-12"; got != want {
+		t.Errorf("windows by size %s, want %s", got, want)
+	}
+	byCount := make([]int64, playlistWriteBatch+1)
+	for i := range byCount {
+		byCount[i] = 1
+	}
+	if got, want := windows(byCount...), fmt.Sprintf("0-%d %d-%d", playlistWriteBatch, playlistWriteBatch, playlistWriteBatch+1); got != want {
+		t.Errorf("windows by count %s, want %s", got, want)
 	}
 }

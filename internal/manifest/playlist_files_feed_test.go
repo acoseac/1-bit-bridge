@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -142,20 +143,96 @@ func TestThePlaylistFeedHoldsItsBudget(t *testing.T) {
 	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 26
 	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 104
 	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 13
-	feed, err := s.playlistFiles(context.Background(), 40)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, f := range feed.Files {
-		got = append(got, f.Path+":"+strings.Join(f.Members, ",")+":"+strings.Join(f.Unresolved, ","))
-		if f.Path == "b.m3u" && (!f.TooLarge || len(f.Members)+len(f.Unresolved) != 0) {
-			t.Errorf("b.m3u past the budget: %+v", f)
+	// One batch, and a batch per row: the budget is the answer's, so it
+	// carries from one batch to the next.
+	for _, batchBytes := range []int{playlistFeedBatchBytes, 1} {
+		feed, err := s.playlistFiles(context.Background(), 40, batchBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, f := range feed.Files {
+			got = append(got, f.Path+":"+strings.Join(f.Members, ",")+":"+strings.Join(f.Unresolved, ","))
+			if f.Path == "b.m3u" && (!f.TooLarge || len(f.Members)+len(f.Unresolved) != 0) {
+				t.Errorf("batches of %d bytes: b.m3u past the budget: %+v", batchBytes, f)
+			}
+		}
+		want := "a.m3u:A/01.flac,A/01.flac:|b.m3u::|c.m3u:A/01.flac:"
+		if strings.Join(got, "|") != want {
+			t.Fatalf("batches of %d bytes: feed %q, want %q", batchBytes, strings.Join(got, "|"), want)
 		}
 	}
-	want := "a.m3u:A/01.flac,A/01.flac:|b.m3u::|c.m3u:A/01.flac:"
-	if strings.Join(got, "|") != want {
-		t.Fatalf("feed %q, want %q", strings.Join(got, "|"), want)
+}
+
+// TestPlaylistFeedBatchesHoldTheirBytes: a batch is the rows whose stored
+// lines fit the bound together, a row larger than the bound is a batch of its
+// own, and the batches cover every row in order. The bound is what keeps a
+// request from holding the whole index.
+func TestPlaylistFeedBatchesHoldTheirBytes(t *testing.T) {
+	sizes := []int{10, 0, 30, 100, 5, 5, 0}
+	rows := make([]playlistFileRow, len(sizes))
+	for i, n := range sizes {
+		rows[i] = playlistFileRow{path: fmt.Sprintf("%02d.m3u", i), lineBytes: n}
+	}
+	var got []string
+	for start := 0; start < len(rows); {
+		end := nextPlaylistFeedBatch(rows, start, 40)
+		if end <= start {
+			t.Fatalf("the batch at %d ends at %d", start, end)
+		}
+		got = append(got, fmt.Sprintf("%d-%d", start, end))
+		start = end
+	}
+	if want := "0-3 3-4 4-7"; strings.Join(got, " ") != want {
+		t.Fatalf("batches %v, want %s", got, want)
+	}
+}
+
+// TestThePlaylistFeedAnswersTheSameInAnyBatchSize resolves one index in a
+// single batch, a batch per row, and batches in between: the answer is the
+// same, so batching changes what a request holds and nothing it serves. The
+// index has a line of each kind (exact, fold-only, a fold two rows answer, a
+// suppressed duplicate with one served copy and with none, a dropped line),
+// the same lines in several files, an album-folder playlist and a file past
+// the cap.
+func TestThePlaylistFeedAnswersTheSameInAnyBatchSize(t *testing.T) {
+	s := newFeedStore(t, "A/01.flac", "A/02.flac", "B/x.flac", "B/X.flac",
+		"C/Caf\u00e9.flac", "D/one.flac", "D/one.dsf", "E/lone.flac", "Album/01.flac", "Album/02.flac")
+	stampDuplicates(t, s, "g1", true, "D/one.dsf")
+	stampDuplicates(t, s, "g1", false, "D/one.flac")
+	stampDuplicates(t, s, "g2", true, "E/lone.flac")
+	shared := []string{"../A/01.flac", "../A/02.FLAC", "../B/x.FLAC", "../C/Cafe\u0301.flac",
+		"../D/one.dsf", "../E/lone.flac", "http://example.com/x.mp3", "../../../up.flac"}
+	for i := 0; i < 6; i++ {
+		storePlaylist(t, s, fmt.Sprintf("Lists/p%d.m3u", i), append(shared[i:], shared[:i]...)...)
+	}
+	storePlaylist(t, s, "Album/Album.m3u", "01.flac", "02.flac")
+	if _, err := s.writePlaylistFiles(context.Background(), []playlistFileRead{{
+		path: "Lists/big.m3u", size: PlaylistFileMaxBytes, mtimeNs: 3, tooLarge: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	answer := func(batchBytes int) string {
+		t.Helper()
+		feed, err := s.playlistFiles(context.Background(), 600, batchBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(feed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	one := answer(1 << 30)
+	if !strings.Contains(one, `"Path":"Lists/p0.m3u"`) || strings.Contains(one, "Album/Album.m3u") ||
+		!strings.Contains(one, `"Path":"Lists/big.m3u"`) || !strings.Contains(one, `"TooLarge":true`) {
+		t.Fatalf("the single-batch answer is not the fixture's: %s", one)
+	}
+	for _, batchBytes := range []int{1, 64, 200, 300} {
+		if got := answer(batchBytes); got != one {
+			t.Errorf("batches of %d bytes answer\n%s\nwant the single batch's\n%s", batchBytes, got, one)
+		}
 	}
 }
 

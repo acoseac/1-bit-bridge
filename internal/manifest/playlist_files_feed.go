@@ -57,12 +57,37 @@ type PlaylistFileFeed struct {
 // bytes, gzip'd on the wire.
 const PlaylistFileFeedBudget = 8 << 20
 
+// playlistFeedBatchBytes bounds the stored lines the feed holds at once. It
+// reads, places and resolves the rows a batch at a time, in path order, each
+// batch at most this many bytes of stored lines (a row larger than that is a
+// batch of its own), so a request holds one batch's lines, every row's path
+// and the answer, whatever the index holds. Resolving takes some six times a
+// batch's stored bytes in live heap (measured: 37 MiB of lines resolved as
+// one batch peaked at 219 MiB; in 4 MiB batches, at 54 MiB).
+const playlistFeedBatchBytes = 4 << 20
+
 // playlistLookupChunk bounds one json_each path list, as
 // CatalogTrackRowsForPaths does.
 const playlistLookupChunk = 400
 
+// playlistMatchCacheMax bounds the matches a request keeps from one batch to
+// the next, so a track that playlists in many batches name is looked up once:
+// the transaction is one snapshot, so a match cannot change between batches.
+// Past the bound a later batch looks its paths up again; a path that named no
+// track is never kept.
+const playlistMatchCacheMax = 50_000
+
+// playlistFileRow is a playlist_files row without its lines: what the feed
+// plans its batches from (lineBytes is the stored blob's length).
+type playlistFileRow struct {
+	path      string
+	mtimeNs   int64
+	tooLarge  bool
+	lineBytes int
+}
+
 // storedPlaylistFile is one playlist_files row as the feed reads it, and
-// its lines through the path rule (place).
+// its lines through the path rule (place). It lives for its batch only.
 type storedPlaylistFile struct {
 	path     string
 	mtimeNs  int64
@@ -95,7 +120,9 @@ type playlistTrackMatch struct {
 //
 // Every read runs in one read-only transaction, so an answer is one
 // snapshot of the store and the same store gives the same answer (the
-// ETag is a hash of it).
+// ETag is a hash of it). The rows are resolved playlistFeedBatchBytes of
+// stored lines at a time, in path order, so the answer is the one a single
+// pass over every row would give and a request never holds every row's lines.
 //
 // An entry the path rule places is looked up by its exact bytes first;
 // with no row there, by unicode_lower (case and composition folded), and
@@ -122,11 +149,12 @@ type playlistTrackMatch struct {
 // included, and the rule reads the tracks the lines name, before the
 // duplicate mapping.
 func (s *Store) PlaylistFiles(ctx context.Context) (PlaylistFileFeed, error) {
-	return s.playlistFiles(ctx, PlaylistFileFeedBudget)
+	return s.playlistFiles(ctx, PlaylistFileFeedBudget, playlistFeedBatchBytes)
 }
 
-// playlistFiles is PlaylistFiles under budget; a test passes a small one.
-func (s *Store) playlistFiles(ctx context.Context, budget int) (PlaylistFileFeed, error) {
+// playlistFiles is PlaylistFiles under budget, resolving batchBytes of
+// stored lines at a time; a test passes small ones.
+func (s *Store) playlistFiles(ctx context.Context, budget, batchBytes int) (PlaylistFileFeed, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return PlaylistFileFeed{}, err
@@ -138,36 +166,70 @@ func (s *Store) playlistFiles(ctx context.Context, budget int) (PlaylistFileFeed
 		`SELECT COUNT(*) FROM scan_state WHERE k = ?`, playlistFilesCompleteKey).Scan(&marked); err != nil {
 		return PlaylistFileFeed{}, fmt.Errorf("read playlist files: %w", err)
 	}
-	stored, err := readStoredPlaylistFiles(ctx, tx)
+	rows, err := readPlaylistFileRows(ctx, tx)
 	if err != nil {
 		return PlaylistFileFeed{}, err
 	}
+	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(rows))}
+	known := map[string]playlistTrackMatch{}
+	for start := 0; start < len(rows); {
+		end := nextPlaylistFeedBatch(rows, start, batchBytes)
+		files, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, &budget)
+		if err != nil {
+			return PlaylistFileFeed{}, err
+		}
+		feed.Files = append(feed.Files, files...)
+		start = end
+	}
+	return feed, nil
+}
 
-	// Each file's lines through the path rule, then every distinct
-	// placed path looked up once.
+// nextPlaylistFeedBatch is the end of the batch that starts at rows[start]:
+// the rows whose stored lines fit in maxBytes together, and always at least
+// one.
+func nextPlaylistFeedBatch(rows []playlistFileRow, start, maxBytes int) int {
+	end, size := start, 0
+	for end < len(rows) && (end == start || size+rows[end].lineBytes <= maxBytes) {
+		size += rows[end].lineBytes
+		end++
+	}
+	return end
+}
+
+// resolvePlaylistBatch is the feed entries of one batch of rows, in their
+// order: each file's lines through the path rule, every distinct placed
+// path looked up once (known holds the earlier batches' matches), then each
+// file resolved against the shared budget. An album-folder playlist has no
+// entry.
+func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow,
+	known map[string]playlistTrackMatch, budget *int) ([]PlaylistFile, error) {
+	stored, err := loadPlaylistBatch(ctx, tx, batch)
+	if err != nil {
+		return nil, err
+	}
 	distinct := map[string]struct{}{}
 	for i := range stored {
 		stored[i].place(distinct)
 	}
-	matches, err := matchPlaylistEntries(ctx, tx, distinct)
+	matches, err := matchPlaylistBatch(ctx, tx, distinct, known)
 	if err != nil {
-		return PlaylistFileFeed{}, err
+		return nil, err
 	}
 	served, err := servedCopies(ctx, tx, matches)
 	if err != nil {
-		return PlaylistFileFeed{}, err
+		return nil, err
 	}
-	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(stored))}
+	out := make([]PlaylistFile, 0, len(stored))
 	for i := range stored {
-		pf, album, err := stored[i].resolve(ctx, tx, matches, served, &budget)
+		pf, album, err := stored[i].resolve(ctx, tx, matches, served, budget)
 		if err != nil {
-			return PlaylistFileFeed{}, err
+			return nil, err
 		}
 		if !album {
-			feed.Files = append(feed.Files, pf)
+			out = append(out, pf)
 		}
 	}
-	return feed, nil
+	return out, nil
 }
 
 // place puts each of f's lines through the path rule, against f's own
@@ -263,27 +325,88 @@ func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string
 	return m.path, hit
 }
 
-func readStoredPlaylistFiles(ctx context.Context, tx *sql.Tx) ([]storedPlaylistFile, error) {
+// readPlaylistFileRows reads every playlist_files row but its lines, in
+// path order.
+func readPlaylistFileRows(ctx context.Context, tx *sql.Tx) ([]playlistFileRow, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT path, mtime_ns, too_large, lines FROM playlist_files ORDER BY path COLLATE BINARY`)
+		`SELECT path, mtime_ns, too_large, length(CAST(lines AS BLOB)) FROM playlist_files ORDER BY path COLLATE BINARY`)
 	if err != nil {
 		return nil, fmt.Errorf("read playlist files: %w", err)
 	}
 	defer rows.Close()
-	var out []storedPlaylistFile
+	var out []playlistFileRow
 	for rows.Next() {
-		var f storedPlaylistFile
-		var blob []byte
-		if err := rows.Scan(&f.path, &f.mtimeNs, &f.tooLarge, &blob); err != nil {
+		var r playlistFileRow
+		if err := rows.Scan(&r.path, &r.mtimeNs, &r.tooLarge, &r.lineBytes); err != nil {
 			return nil, fmt.Errorf("read playlist files: %w", err)
 		}
-		f.lines = splitPlaylistLines(blob)
-		out = append(out, f)
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read playlist files: %w", err)
 	}
 	return out, nil
+}
+
+// loadPlaylistBatch reads the lines of batch, a run of rows in path order,
+// through the one range they span. The transaction is a snapshot, so the
+// range holds exactly those rows; any other answer is an error.
+func loadPlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow) ([]storedPlaylistFile, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT path, lines FROM playlist_files
+		  WHERE path COLLATE BINARY >= ? AND path COLLATE BINARY <= ?
+		  ORDER BY path COLLATE BINARY`, batch[0].path, batch[len(batch)-1].path)
+	if err != nil {
+		return nil, fmt.Errorf("read playlist files: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storedPlaylistFile, 0, len(batch))
+	for rows.Next() {
+		var p string
+		var blob []byte
+		if err := rows.Scan(&p, &blob); err != nil {
+			return nil, fmt.Errorf("read playlist files: %w", err)
+		}
+		i := len(out)
+		if i == len(batch) || batch[i].path != p {
+			return nil, fmt.Errorf("read playlist files: %q is not the row the batch holds there", p)
+		}
+		out = append(out, storedPlaylistFile{path: p, mtimeNs: batch[i].mtimeNs,
+			tooLarge: batch[i].tooLarge, lines: splitPlaylistLines(blob)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read playlist files: %w", err)
+	}
+	if len(out) != len(batch) {
+		return nil, fmt.Errorf("read playlist files: %d of the batch's %d rows", len(out), len(batch))
+	}
+	return out, nil
+}
+
+// matchPlaylistBatch is matchPlaylistEntries for one batch's paths, taking
+// what known already holds and adding what it finds while known has room.
+func matchPlaylistBatch(ctx context.Context, tx *sql.Tx, paths map[string]struct{},
+	known map[string]playlistTrackMatch) (map[string]playlistTrackMatch, error) {
+	matches := make(map[string]playlistTrackMatch, len(paths))
+	lookup := make(map[string]struct{}, len(paths))
+	for p := range paths {
+		if m, ok := known[p]; ok {
+			matches[p] = m
+		} else {
+			lookup[p] = struct{}{}
+		}
+	}
+	found, err := matchPlaylistEntries(ctx, tx, lookup)
+	if err != nil {
+		return nil, err
+	}
+	for p, m := range found {
+		matches[p] = m
+		if len(known) < playlistMatchCacheMax {
+			known[p] = m
+		}
+	}
+	return matches, nil
 }
 
 // matchPlaylistEntries maps each placed path to the track row it names:
