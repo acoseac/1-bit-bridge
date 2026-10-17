@@ -45348,6 +45348,11 @@ its SMB and on-device walks. Branch `feat/b431-playlist-files-feed` from
   with its content unchanged stores the new stamp and notes nothing. The app's
   event coordinator runs a silent delta on every `library.changed`, whatever
   its `indexedAt` (iOS `BridgeSyncEvents.pulls`, a9a16365).
+- **Completeness.** The answer's top-level `complete` is the scan_state key
+  `playlist_files_complete`: a full scan's pass sets it once every playlist
+  file its walk saw is backed (read and written, or kept as it was), the
+  root flip's wipe deletes it in the same transaction as the rows, and a store
+  the migration just created has none. No later pass clears it.
 
 ### Decisions
 
@@ -45400,6 +45405,23 @@ its SMB and on-device walks. Branch `feat/b431-playlist-files-feed` from
   A disc in a subfolder is not the folder's own, either way
   (`Disc/Album/Album.m3u` is listed, `Box/Box.m3u` naming only `Box/`'s own
   track is not).
+- **`complete`, added beyond the brief.** The app's import (B432) is to
+  write nothing from a failed or lossy fetch, and an index that has not yet
+  been through a full scan is lossy in a way only the bridge can see: right
+  after this update the table is empty until the startup scan's pass, and
+  after a single↔multi flip it is empty until the rescan's. An empty or
+  partial list there reads, to a client, exactly like files removed, and an
+  app that reaps on it would drop its imported rows with their hidden flags
+  and downloads and import them again a scan later. `/v1/health` cannot say
+  it: `lastFullScan` predates the update, and `isScanning` misses the moment
+  before the startup scan starts. A boolean rather than a time, so the
+  ETag moves once, not after every six-hourly scan. Strict on what counts:
+  a full scan that could not read a file it had no row for leaves the index
+  incomplete (that file may be one a client holds from before a flip), and a
+  permanently unreadable new file keeps it so, logged every scan. Once set,
+  nothing but a wipe takes a row out other than as a removed file's, so no
+  later pass needs to clear it. Additive; a client that ignores it is where
+  it would be without it.
 - **The name** is the app's for an SMB import, `(entry.name as NSString)
   .deletingPathExtension`: the file name without its last extension
   (`Mix..m3u` → `Mix.`, `Mix .m3u` → `Mix `), measured on macOS 27 against
@@ -45474,6 +45496,10 @@ inputs:
 - Endpoint (the handler a bare 404, route, auth and flag still wired): 6 of
   8 red; green were the 401 (auth precedes the handler) and the unwired 404
   with the flag.
+- `complete` (`130778d0`, `markPlaylistFilesComplete` a no-op):
+  `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` red at "a
+  full scan that read every file did not mark the index complete", and
+  `TestPlaylistFilesThroughTheRealIndex` at "not complete".
 - The four-term album rule (`dd74ce42`'s tests on `f31e7386`'s feed):
   `TestTheAlbumFolderRuleTermByTerm` red at "an entry that does not resolve"
   and "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed`
@@ -45510,6 +45536,15 @@ the album rule, as the table says.
 | 10a. term 2 ignoring an unresolved entry | `TestTheAlbumFolderRuleTermByTerm` at "an entry that does not resolve", `TestAlbumFolderPlaylistsAreNotServed` at the stale-line file missing |
 | 10b. term 2 taking a fold-only match | `TestTheAlbumFolderRuleTermByTerm` at "an entry found only by the fold", `TestAlbumFolderPlaylistsAreNotServed` at `Case/` missing |
 
+Controls 11 to 13 ran on `130778d0`, which added `complete`, over the 32
+playlist tests, each predicted before its run; each held exactly.
+
+| control | red on `130778d0` |
+|---|---|
+| 11. the wipe keeping the completeness key | `TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile` alone, at "the wipe left the index complete" |
+| 12. the mark ignoring whether every file is backed | the same test alone, at "a full scan that could not read a file with no row marked the index complete" |
+| 13. a subtree scan's pass allowed to mark | the same test alone, at the subtree scan's "complete true" |
+
 ### Tests
 
 `internal/manifest`: `playlist_files_parse_test.go` (the table and the
@@ -45517,11 +45552,11 @@ parity edges), `playlist_files_scan_test.go` (a full scan, change detection
 and the parser version, removal at the threshold and the reset, the
 clean-empty guard, a subtree's scope, a late member, the album rule,
 multi-root, the root removal and flip, a read failure, the size cap,
-backslashes) and `playlist_files_feed_test.go` (the fold, duplicates, the
+backslashes, completeness) and `playlist_files_feed_test.go` (the fold, duplicates, the
 album rule term by term, the budget, the library note, clear-missing). `internal/api`:
-`playlist_files_test.go` (the exact document, the ETag and 304, the flag,
-auth, a store failure's fixed message, a client abort at 499, and the real
-index end to end with gzip). `TestHealthFeaturesCompleteSet` and
+`playlist_files_test.go` (the exact document, the ETag and 304, `complete`
+sent false and moving the ETag, the flag, auth, a store failure's fixed
+message, a client abort at 499, and the real index end to end with gzip). `TestHealthFeaturesCompleteSet` and
 `TestRouteRegistry_completeness` gained the flag and the route, the feature
 list's capacity is 34, PROTOCOL.md has the section and the
 `playlist_files_not_supported` row.
@@ -45532,6 +45567,8 @@ list's capacity is 34, PROTOCOL.md has the section and the
   it; `unresolved` holds the dropped lines too.
 - `tooLarge` lists a playlist whose entries are not served; its empty lists
   are not its contents.
+- `complete: false` is the lossy fetch: import what it lists if wanted, and
+  remove nothing it lacks.
 - An album-folder playlist is absent from the feed, by B421's four terms.
   One difference in what reaches the app: a placed line that resolves only by
   the fold is served as a member here, so the file is listed (term 2 is
