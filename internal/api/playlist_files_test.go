@@ -28,24 +28,26 @@ import (
 // fakePlaylistFiles is a PlaylistFileStore whose answer a test sets, and
 // can change between requests.
 type fakePlaylistFiles struct {
-	mu    sync.Mutex
-	files []manifest.PlaylistFile
-	err   error
+	mu         sync.Mutex
+	files      []manifest.PlaylistFile
+	incomplete bool
+	err        error
 	// block, when set, is closed by the read once it has started; the read
 	// then waits for its context and fails with it.
 	block chan struct{}
 }
 
-func (f *fakePlaylistFiles) PlaylistFiles(ctx context.Context) ([]manifest.PlaylistFile, error) {
+func (f *fakePlaylistFiles) PlaylistFiles(ctx context.Context) (manifest.PlaylistFileFeed, error) {
 	f.mu.Lock()
-	files, err, block := f.files, f.err, f.block
+	feed := manifest.PlaylistFileFeed{Complete: !f.incomplete, Files: f.files}
+	err, block := f.err, f.block
 	f.mu.Unlock()
 	if block != nil {
 		close(block)
 		<-ctx.Done()
-		return nil, fmt.Errorf("read playlist files: %w", ctx.Err())
+		return manifest.PlaylistFileFeed{}, fmt.Errorf("read playlist files: %w", ctx.Err())
 	}
-	return files, err
+	return feed, err
 }
 
 func (f *fakePlaylistFiles) set(files []manifest.PlaylistFile) {
@@ -143,7 +145,7 @@ func TestPlaylistFilesServesTheFeedWithAStrongETag(t *testing.T) {
 	}
 	// The exact document: field names, array members never null, tooLarge
 	// only when true, mtime in UTC to the nanosecond.
-	want := `{"playlists":[` +
+	want := `{"complete":true,"playlists":[` +
 		`{"path":"Playlists/Road Trip.m3u8","name":"Road Trip","mtime":"2026-10-16T09:12:44.123456789Z",` +
 		`"members":["Artist/Album/01 One.flac","Artist/Album/01 One.flac"],"unresolved":["../Missing/03.flac"]},` +
 		`{"path":"Playlists/All.m3u","name":"All","mtime":"2026-09-30T22:00:00Z","members":[],"unresolved":[],"tooLarge":true}` +
@@ -191,6 +193,26 @@ func TestPlaylistFilesETagMovesWithTheFeed(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"Missing/03.flac"`) {
 		t.Errorf("body %s", body)
+	}
+}
+
+func TestPlaylistFilesSaysWhenTheIndexIsIncomplete(t *testing.T) {
+	// false is sent, never omitted: it is the answer a client must not reap
+	// on. Its flip moves the ETag like any other change.
+	fake := &fakePlaylistFiles{incomplete: true}
+	hs, token := newPlaylistFilesServer(t, fake)
+	first, body := getPlaylistFiles(t, hs, token)
+	if got := strings.TrimSpace(string(body)); got != `{"complete":false,"playlists":[]}` {
+		t.Fatalf("body %s", got)
+	}
+	fake.mu.Lock()
+	fake.incomplete = false
+	fake.mu.Unlock()
+	resp, body := getPlaylistFiles(t, hs, token, first.Header.Get("ETag"))
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("ETag") == first.Header.Get("ETag") ||
+		strings.TrimSpace(string(body)) != `{"complete":true,"playlists":[]}` {
+		t.Fatalf("once complete: status %d, ETag %q (was %q), body %s", resp.StatusCode,
+			resp.Header.Get("ETag"), first.Header.Get("ETag"), body)
 	}
 }
 
@@ -345,6 +367,9 @@ func TestPlaylistFilesThroughTheRealIndex(t *testing.T) {
 	var doc playlistFilesResponse
 	if err := json.NewDecoder(zr).Decode(&doc); err != nil {
 		t.Fatal(err)
+	}
+	if !doc.Complete {
+		t.Error("the feed after a full scan is not complete")
 	}
 	if len(doc.Playlists) != 1 || doc.Playlists[0].Path != "Playlists/mix.m3u8" || doc.Playlists[0].Name != "mix" ||
 		strings.Join(doc.Playlists[0].Members, "|") != "Artist/Album/01.flac" ||

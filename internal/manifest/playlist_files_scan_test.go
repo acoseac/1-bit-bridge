@@ -424,3 +424,68 @@ func TestAManifestPathBackslashIsPartOfAName(t *testing.T) {
 	scanOnce(t, sc, "scan")
 	wantPlaylist(t, playlistFeed(t, s), `Odd\Dir/mix.m3u`, []string{`Odd\Dir/x.flac`}, []string{})
 }
+
+func TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile(t *testing.T) {
+	root, s, sc := newRoadTripLibrary(t)
+	const rel = "Playlists/Road Trip.m3u8"
+	ctx := context.Background()
+	complete := func(when string) bool {
+		t.Helper()
+		feed, err := s.PlaylistFiles(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", when, err)
+		}
+		return feed.Complete
+	}
+	if complete("fresh store") {
+		t.Fatal("a store the migration just made reads complete")
+	}
+	if _, err := sc.ScanSubtree(ctx, filepath.Join(root, "Playlists")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := playlistFeed(t, s)[rel]; !ok || complete("after a subtree scan") {
+		t.Fatalf("a subtree scan: listed %v, complete %v; want listed and not complete", ok, complete("again"))
+	}
+	scanOnce(t, sc, "full scan")
+	if !complete("after a full scan") {
+		t.Fatal("a full scan that read every file did not mark the index complete")
+	}
+
+	// The root flip's wipe empties the index, and a full scan whose read of
+	// a file with no row fails leaves it incomplete.
+	if err := s.WipeFilesystemTracks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if complete("after the wipe") {
+		t.Fatal("the wipe left the index complete")
+	}
+	failing := true
+	countPlaylistReads(sc, func(r string) error {
+		if failing && r == rel {
+			return errors.New("input/output error")
+		}
+		return nil
+	})
+	scanOnce(t, sc, "full scan whose read fails")
+	if complete("after a failed read") {
+		t.Fatal("a full scan that could not read a file with no row marked the index complete")
+	}
+	failing = false
+	scanOnce(t, sc, "full scan whose read works")
+	if !complete("after the read works") {
+		t.Fatal("not complete once every file was read")
+	}
+
+	// Past that point a failed read keeps the row, and the index stays
+	// complete.
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(abs, later, later); err != nil {
+		t.Fatal(err)
+	}
+	failing = true
+	scanOnce(t, sc, "full scan whose re-read fails")
+	if !complete("after a failed re-read") {
+		t.Fatal("a failed read of a file with a row cleared the index's completeness")
+	}
+}

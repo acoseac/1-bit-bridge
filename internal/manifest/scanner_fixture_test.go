@@ -156,12 +156,12 @@ func stubTracks(t *testing.T, root string, rels ...string) {
 // a read error.
 func playlistFeed(t *testing.T, s *Store) map[string]PlaylistFile {
 	t.Helper()
-	files, err := s.PlaylistFiles(context.Background())
+	feed, err := s.PlaylistFiles(context.Background())
 	if err != nil {
 		t.Fatalf("PlaylistFiles: %v", err)
 	}
-	out := make(map[string]PlaylistFile, len(files))
-	for _, f := range files {
+	out := make(map[string]PlaylistFile, len(feed.Files))
+	for _, f := range feed.Files {
 		out[f.Path] = f
 	}
 	return out

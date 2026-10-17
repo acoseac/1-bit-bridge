@@ -2469,8 +2469,8 @@ var migrations = []migration{
 	{
 		// v56 is the playlist-file index (backlog B431): one row per
 		// .m3u / .m3u8 file a scan read, keyed by its manifest path, with
-		// the size and mtime it was read at and the entry lines it parsed
-		// (LF-joined, playlist_files.go). No row is a track and nothing
+		// the size and mtime the walk saw when it was read and the entry
+		// lines it parsed (LF-joined, playlist_files_store.go). No row is a track and nothing
 		// joins tracks: GET /v1/playlist-files resolves the lines when it
 		// is asked. missing_count is the tracks' grace, for the same
 		// passes.
@@ -5858,6 +5858,9 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_files`); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_state WHERE k = ?`, playlistFilesCompleteKey); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -5951,8 +5954,12 @@ func deleteFilesystemRowsTx(ctx context.Context, tx *sql.Tx, nowNs int64) error 
 	}
 	// Playlist files are filesystem rows and their paths flip form with the
 	// folders' (backlog B431); left, the rescan would serve each under both
-	// forms until the old ones reached the missing-count threshold.
-	_, err := tx.ExecContext(ctx, `DELETE FROM playlist_files`)
+	// forms until the old ones reached the missing-count threshold. The
+	// index is incomplete until the rescan's pass has read them again.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_files`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM scan_state WHERE k = ?`, playlistFilesCompleteKey)
 	return err
 }
 

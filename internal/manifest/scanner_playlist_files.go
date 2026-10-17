@@ -165,7 +165,11 @@ type playlistReadFailure struct {
 // sits under a subtree the walk could not see (errorSubtrees, which also
 // carries the clean-empty root guard's sentinel) or it is the old spelling
 // of a case-only rename this pass read: the tracks' rules, in their order.
-func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, seen map[string]playlistSighting, errorSubtrees map[string]struct{}) {
+//
+// full is a full scan's pass. One that ends with every file its walk saw
+// backed (read, or kept as it was) marks the index complete
+// (playlistFilesCompleteKey); a subtree scan's pass never does.
+func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, full bool, seen map[string]playlistSighting, errorSubtrees map[string]struct{}) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -182,7 +186,27 @@ func (s *Scanner) indexPlaylistFiles(ctx context.Context, scope string, seen map
 	if ctx.Err() != nil {
 		return
 	}
-	p.settle(ctx, errorSubtrees)
+	if !p.settle(ctx, errorSubtrees) || !full || !p.allSeenBacked() {
+		return
+	}
+	if err := s.store.markPlaylistFilesComplete(ctx); err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Error("playlist files pass: mark complete", "err", failure)
+		}
+	}
+}
+
+// allSeenBacked reports whether every playlist file the walk saw has a row
+// this pass stands behind: one it read and wrote, or one it kept.
+func (p *playlistPass) allSeenBacked() bool {
+	p.backed.mu.Lock()
+	defer p.backed.mu.Unlock()
+	for rel := range p.seen {
+		if _, ok := p.backed.m[rel]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // playlistPass is one run of indexPlaylistFiles: the stored rows in scope
@@ -305,7 +329,7 @@ func (p *playlistPass) write(ctx context.Context, reads []playlistFileRead) {
 // case-only rename this pass backs, and otherwise counted missing, in the
 // tracks' order (the errored-subtree check first, before anything that can
 // delete).
-func (p *playlistPass) settle(ctx context.Context, errorSubtrees map[string]struct{}) {
+func (p *playlistPass) settle(ctx context.Context, errorSubtrees map[string]struct{}) bool {
 	beforeSet := make(map[string]struct{}, len(p.before))
 	for rel := range p.before {
 		beforeSet[rel] = struct{}{}
@@ -334,9 +358,11 @@ func (p *playlistPass) settle(ctx context.Context, errorSubtrees map[string]stru
 	sort.Strings(renamed)
 	threshold := p.s.effectiveDeleteThreshold()
 	deleted, err := p.s.store.settlePlaylistFiles(ctx, p.reset, missing, renamed, threshold)
-	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-		scanLogger.Error("playlist files pass: missing count", "err", failure, "missing", len(missing))
-		return
+	if err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Error("playlist files pass: missing count", "err", failure, "missing", len(missing))
+		}
+		return false
 	}
 	if spared > 0 {
 		scanLogger.Warn("spared playlist files from deletion pass (parent walk error)",
@@ -346,6 +372,7 @@ func (p *playlistPass) settle(ctx context.Context, errorSubtrees map[string]stru
 		scanLogger.Info("playlist files missing this scan",
 			"missing", len(missing), "renamed", len(renamed), "deleted", deleted, "threshold", threshold)
 	}
+	return true
 }
 
 func (p *playlistPass) isSeen(rel string) bool {

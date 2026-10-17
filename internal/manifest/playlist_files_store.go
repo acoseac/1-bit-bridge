@@ -27,6 +27,19 @@ type playlistFileRead struct {
 	lines    []string
 }
 
+// playlistFilesCompleteKey is the scan_state key that marks the index as
+// one a full scan has brought up to date: a full scan's pass sets it once
+// every playlist file its walk saw has a row, the wipe of a root flip
+// deletes it with the rows, and a store the migration just created has none.
+// No later pass clears it: past that point a row leaves only as a removed
+// file's, after the missing-count grace. The feed reports it as Complete.
+const playlistFilesCompleteKey = "playlist_files_complete"
+
+// markPlaylistFilesComplete sets playlistFilesCompleteKey.
+func (s *Store) markPlaylistFilesComplete(ctx context.Context) error {
+	return s.SetScanState(ctx, playlistFilesCompleteKey, "1")
+}
+
 // joinPlaylistLines is the stored form of a file's lines. A kept line never
 // holds an LF, which ends a line, and never is empty, which is no entry, so
 // LF separates them and an empty blob is no lines.

@@ -1209,7 +1209,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// The playlist files the walk passed (backlog B431): read the new and
 	// changed ones, keep what the walk could not see, count the rest
 	// missing, under the same errored subtrees and threshold.
-	s.indexPlaylistFiles(ctx, "", playlists, errorSubtrees)
+	s.indexPlaylistFiles(ctx, "", true, playlists, errorSubtrees)
 
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
@@ -3094,7 +3094,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 
 	// The playlist files under the scope (backlog B431), Scan's pass with
 	// the scope the deletion passes used.
-	s.indexPlaylistFiles(ctx, relScope, playlists, errorSubtrees)
+	s.indexPlaylistFiles(ctx, relScope, false, playlists, errorSubtrees)
 
 	// Duplicate stamping, same tail position as the full Scan. A subtree
 	// scan mutates exactly the two inputs the stamps are derived from:

@@ -36,6 +36,19 @@ type PlaylistFile struct {
 	TooLarge bool
 }
 
+// PlaylistFileFeed is the playlist-file feed: the files, and whether the
+// index is complete.
+type PlaylistFileFeed struct {
+	// Complete says a full scan has brought the index up to date since it
+	// was created (the upgrade that adds it) or emptied (a root flip's
+	// wipe): every playlist file that scan saw has a row. Until then Files
+	// can lack files the library holds, and a client must not read a file
+	// missing from it as removed (playlistFilesCompleteKey).
+	Complete bool
+	// Files are the listed playlist files, in path order. Never nil.
+	Files []PlaylistFile
+}
+
 // PlaylistFileFeedBudget bounds the entries one answer holds: each member
 // path and unresolved line costs its length plus 4 (the JSON quotes, the
 // comma, and some slack), and the playlists are filled in path order. A
@@ -108,21 +121,26 @@ type playlistTrackMatch struct {
 // A track there is any row the index holds, a suppressed duplicate
 // included, and the rule reads the tracks the lines name, before the
 // duplicate mapping.
-func (s *Store) PlaylistFiles(ctx context.Context) ([]PlaylistFile, error) {
+func (s *Store) PlaylistFiles(ctx context.Context) (PlaylistFileFeed, error) {
 	return s.playlistFiles(ctx, PlaylistFileFeedBudget)
 }
 
 // playlistFiles is PlaylistFiles under budget; a test passes a small one.
-func (s *Store) playlistFiles(ctx context.Context, budget int) ([]PlaylistFile, error) {
+func (s *Store) playlistFiles(ctx context.Context, budget int) (PlaylistFileFeed, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, err
+		return PlaylistFileFeed{}, err
 	}
 	defer tx.Rollback()
 
+	var marked int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM scan_state WHERE k = ?`, playlistFilesCompleteKey).Scan(&marked); err != nil {
+		return PlaylistFileFeed{}, fmt.Errorf("read playlist files: %w", err)
+	}
 	stored, err := readStoredPlaylistFiles(ctx, tx)
 	if err != nil {
-		return nil, err
+		return PlaylistFileFeed{}, err
 	}
 
 	// Each file's lines through the path rule, then every distinct
@@ -133,23 +151,23 @@ func (s *Store) playlistFiles(ctx context.Context, budget int) ([]PlaylistFile, 
 	}
 	matches, err := matchPlaylistEntries(ctx, tx, distinct)
 	if err != nil {
-		return nil, err
+		return PlaylistFileFeed{}, err
 	}
 	served, err := servedCopies(ctx, tx, matches)
 	if err != nil {
-		return nil, err
+		return PlaylistFileFeed{}, err
 	}
-	out := make([]PlaylistFile, 0, len(stored))
+	feed := PlaylistFileFeed{Complete: marked > 0, Files: make([]PlaylistFile, 0, len(stored))}
 	for _, f := range stored {
 		pf, album, err := f.resolve(ctx, tx, matches, served, &budget)
 		if err != nil {
-			return nil, err
+			return PlaylistFileFeed{}, err
 		}
 		if !album {
-			out = append(out, pf)
+			feed.Files = append(feed.Files, pf)
 		}
 	}
-	return out, nil
+	return feed, nil
 }
 
 // place puts each of f's lines through the path rule, against f's own

@@ -52,9 +52,9 @@ func stampDuplicates(t *testing.T, s *Store, group string, suppressed bool, path
 
 func TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList(t *testing.T) {
 	s := newFeedStore(t)
-	files, err := s.PlaylistFiles(context.Background())
-	if err != nil || files == nil || len(files) != 0 {
-		t.Fatalf("PlaylistFiles = %v, %v; want an empty, non-nil list", files, err)
+	feed, err := s.PlaylistFiles(context.Background())
+	if err != nil || feed.Files == nil || len(feed.Files) != 0 {
+		t.Fatalf("PlaylistFiles = %v, %v; want an empty, non-nil list", feed.Files, err)
 	}
 	storePlaylist(t, s, "Playlists/none.m3u")
 	pf := playlistFeed(t, s)["Playlists/none.m3u"]
@@ -141,12 +141,12 @@ func TestThePlaylistFeedHoldsItsBudget(t *testing.T) {
 	storePlaylist(t, s, "a.m3u", "A/01.flac", "A/01.flac") // costs 26
 	storePlaylist(t, s, "b.m3u", strings.Repeat("x", 100)) // costs 104
 	storePlaylist(t, s, "c.m3u", "A/01.flac")              // costs 13
-	files, err := s.playlistFiles(context.Background(), 40)
+	feed, err := s.playlistFiles(context.Background(), 40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []string
-	for _, f := range files {
+	for _, f := range feed.Files {
 		got = append(got, f.Path+":"+strings.Join(f.Members, ",")+":"+strings.Join(f.Unresolved, ","))
 		if f.Path == "b.m3u" && (!f.TooLarge || len(f.Members)+len(f.Unresolved) != 0) {
 			t.Errorf("b.m3u past the budget: %+v", f)

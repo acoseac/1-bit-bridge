@@ -15,7 +15,7 @@ import (
 // *manifest.Store satisfies it. Read-only: the scanner writes the index,
 // and nothing writes a playlist file.
 type PlaylistFileStore interface {
-	PlaylistFiles(ctx context.Context) ([]manifest.PlaylistFile, error)
+	PlaylistFiles(ctx context.Context) (manifest.PlaylistFileFeed, error)
 }
 
 // WithPlaylistFileStore wires the playlist-file feed and advertises the
@@ -39,8 +39,10 @@ type playlistFileDTO struct {
 }
 
 // playlistFilesResponse is the GET /v1/playlist-files document. Its JSON
-// is what the ETag hashes (playlistFilesETag).
+// is what the ETag hashes (playlistFilesETag). Complete is always sent:
+// false is the answer a client must not reap on.
 type playlistFilesResponse struct {
+	Complete  bool              `json:"complete"`
 	Playlists []playlistFileDTO `json:"playlists"`
 }
 
@@ -54,10 +56,12 @@ func nonNilStrings(s []string) []string {
 }
 
 // playlistFiles handles GET /v1/playlist-files: every playlist file the
-// index holds, in manifest-path order. Bearer-authenticated, user-wide (no
-// X-Device-Token), read-only. The answer carries a strong ETag over its
-// document, and an If-None-Match that matches it is a 304 with no body, so
-// a client that polls after each sync pays a hash, not a transfer.
+// index holds, in manifest-path order, and whether the index is complete (a
+// full scan has brought it up to date since it was created or emptied).
+// Bearer-authenticated, user-wide (no X-Device-Token), read-only. The answer
+// carries a strong ETag over its document, and an If-None-Match that matches
+// it is a 304 with no body, so a client that polls after each sync pays a
+// hash, not a transfer.
 //
 // Errors go through the shared writers with fixed messages (B425): a store
 // failure is a 500 `internal` logged at Error, and a client that went away
@@ -68,14 +72,14 @@ func (s *Server) playlistFiles(w http.ResponseWriter, r *http.Request) {
 			"this bridge does not index playlist files")
 		return
 	}
-	files, err := s.playlistFileStore.PlaylistFiles(r.Context())
+	feed, err := s.playlistFileStore.PlaylistFiles(r.Context())
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't read its playlist files", err)
 		return
 	}
-	resp := playlistFilesResponse{Playlists: make([]playlistFileDTO, 0, len(files))}
-	for _, f := range files {
+	resp := playlistFilesResponse{Complete: feed.Complete, Playlists: make([]playlistFileDTO, 0, len(feed.Files))}
+	for _, f := range feed.Files {
 		resp.Playlists = append(resp.Playlists, playlistFileDTO{
 			Path:       f.Path,
 			Name:       f.Name,

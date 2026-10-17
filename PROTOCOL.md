@@ -1447,6 +1447,7 @@ A track here is any track the bridge has indexed, a suppressed duplicate include
 
 ```json
 {
+  "complete": true,
   "playlists": [
     {
       "path": "Playlists/Road Trip.m3u8",
@@ -1460,6 +1461,7 @@ A track here is any track the bridge has indexed, a suppressed duplicate include
 }
 ```
 
+- `complete` — always present. `true` once a full scan has brought the index up to date since it was created (the bridge update that adds this route) or emptied (a single↔multi root flip): every playlist file that scan saw was read, or kept from an earlier read. While it is `false` the list can lack files the library holds, so a client must not read a file missing from it as removed. Once `true` it stays so; a file then leaves the list only as a removed file does, after the grace above.
 - `playlists` — every listed playlist file, in byte order of `path`; `[]` when there is none.
 - `path` — the file's manifest path: library-relative, `/`-separated, no leading `/`, the root's folder name first on a bridge with several roots.
 - `name` — the file name without its last extension: the name the iOS app gives a playlist it imports from a share.
