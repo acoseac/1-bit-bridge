@@ -306,9 +306,10 @@ func TestADockerMarkerThatCannotBeReadKeepsTheContainerRules(t *testing.T) {
 // certificate does not name, a ULA or a global one, and hands it to
 // HeldBack. A Tailscale address is never judged (the provider publishes
 // it), the `.local` name and a customEndpoints entry are published as
-// before, and the want-set still names a held-back address, so a mint
-// covers it. CertGatedIPs is the set the judgement applies to: the walk's
-// IPv6 addresses, never an IPv4 one.
+// before, an address a customEndpoints entry declares is not held back
+// (CertGatedIPs leaves it out too), and the want-set still names a
+// held-back address, so a mint covers it. CertGatedIPs is the set the
+// judgement applies to: the walk's IPv6 addresses, never an IPv4 one.
 func TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
 	const lan, ula, global, ts = "192.168.1.20", "fd00:db8:1::2", "2001:db8::2", "fd7a:115c:a1e0::2"
 	withIfaces(t, []ifaceAddr{
@@ -341,9 +342,17 @@ func TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
 		t.Errorf("HeldBack saw %v, want exactly [%s %s]", held, ula, global)
 	}
 
+	// A declared address is published as written, so the walk does not hold
+	// it back either: serve would say "not advertised" of an address it
+	// publishes, and the doctor, whose CertGatedIPs leaves it out, would call
+	// the certificate stale for it (CodeRabbit on #1280).
+	held = nil
 	p.CustomEndpoints = []string{httpsIP(ula)}
-	if eps := Endpoints(p); !hasClass(eps, httpsIP(ula), ClassCustom) {
-		t.Errorf("a customEndpoints entry naming the held-back address is not published: %v", eps)
+	if eps := Endpoints(p); !hasURL(eps, httpsIP(ula)) {
+		t.Errorf("an address a customEndpoints entry declares is not published: %v", eps)
+	}
+	if slices.Contains(held, ula) {
+		t.Errorf("HeldBack saw %s, which a customEndpoints entry declares; HeldBack saw %v", ula, held)
 	}
 
 	sans := GatherCertSANIPs(CertSANConfig{})
