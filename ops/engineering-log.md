@@ -46140,3 +46140,97 @@ controls, restored before the fix: big-endian swapped for little-endian in
 `mixWeekHash` failed 6 of the 8 vectors in Go and in SQL (seeds 0 and
 `0xffffffffffffffff` read the same both ways), and hashing runes instead of
 bytes in `hashSeedPath` failed the three non-ASCII ones.
+
+## 2026-10-18 — an address of the walk that the served certificate does not name is not advertised (backlog B457)
+
+### What the deploy found
+
+The 2026-10-18 deploy of main to the operator bridge (the NUC, a
+self-signed pair minted 2026-09-20) showed `bridge doctor`'s
+`tls-cert-sans` at warn: the host had taken an IPv6 ULA (`fd00::/8`) from
+a device on its LAN, `/v1/health` advertised it, and the certificate does
+not name it, so a client that checks the certificate against the URL's
+host fails there. Re-minting covers it and makes every phone re-pair, and
+the owner chose not to; the bridge stops advertising such an address
+instead.
+
+### Where the list comes from
+
+`/v1/health.endpoints`, the pairing QR's alternates and the console's
+Reachable endpoints are one list, `api.(*Server).ReachableEndpoints`: the
+interface walk (`advertise.Endpoints`: LAN v4 and v6, public, the `.local`
+name, `customEndpoints`), then the Tailscale provider's endpoints, or in
+public mode the declared ones alone. mDNS publishes a name and a port, not
+a URL, and a client dialling `<host>.local` checks the name, which the
+certificate carries, so it is not affected. The certificate's want-set is
+`certSANOptions` (the walk's addresses through `GatherCertSANIPs`, the
+Tailscale CLI's, the custom ones), which serve's startup warning, `bridge
+cert rotate`, init and the doctor all use.
+
+### Red first
+
+`TestServeAdvertisesOnlyTheWalkAddressesItsCertificateNames` mints, over
+a fresh data dir, the pair `certSANOptions` would mint less one address
+the host's walk publishes (192.168.0.149 on the dev Mac), and boots the
+real serve. On the test's own commit (6b277d90, main's code, go1.26.6):
+
+    serve_cert_named_addrs_test.go:63: /v1/health advertises 192.168.0.149, which the certificate does not name: [192.168.0.149]
+    serve_cert_named_addrs_test.go:63: (the second health read, the same)
+    serve_cert_named_addrs_test.go:73: serve said 0 time(s) that 192.168.0.149 is not advertised, want once
+    serve_cert_named_addrs_test.go:76: serve called the certificate stale for 192.168.0.149 ("WARN cert SANs are stale … missing_ips=[192.168.0.149]")
+    serve_cert_named_addrs_test.go:81: tls-cert-sans: status warn summary "stale — 1 of 6 address(es) this bridge advertises are not in the certificate"
+
+The second half (`bridge cert rotate`, a restart: every walk address is
+advertised, no held-back line, the doctor line clean) passed there too, as
+it must.
+
+### The rule
+
+- Serve reads the loaded pair's IP addresses and whether this bridge
+  minted it (`servertls.NamedIPs`, the `CheckSignature` test
+  `MintedByBridge` uses) and, for a minted pair, calls
+  `WithCertifiedAddrs`. `advertise.Params.NamedByCert` then drops a walk
+  address of a LAN or public class the certificate does not name, before
+  the dedupe, and `HeldBack` Warns once per address ("address not
+  advertised: the TLS certificate does not name it", `addr`, a hint that
+  names the rotation), for at most 64 addresses.
+- **Not judged**: the Tailscale classes (never emitted by the walk; the
+  provider publishes them), the `.local` name, and a `customEndpoints`
+  entry, which is published as written even when it names a held-back
+  address. A CA leaf holds nothing back: rotation is not advised for it
+  (B232), and nothing would bring the address back.
+- `GatherCertSANIPs` keeps every walk address, so a rotation covers it.
+  `certSANOptions` also marks them (`CertGatedIPs`, the walk's addresses
+  less Tailscale's and the ones a custom entry names), and
+  `InspectSANCoverage` moves one a minted certificate lacks from
+  `MissingIPs` to `HeldBackIPs`: `logIfSANsStale` stays quiet for it,
+  and `tls-cert-sans` stays ok, counts only the advertised addresses, and
+  names the held-back one with `RotationRemediation`.
+- **Considered and not taken**: dropping every ULA (the walk's rule for a
+  point-to-point ULA, B229), which would take away a ULA LAN the
+  certificate does name; and an IPv6-only rule. The cost of the uniform
+  one: an IPv4 address the certificate does not name (a new DHCP lease, a
+  moved data dir) is held back too, though the app pins the fingerprint
+  and could use it there; the `.local` name and Tailscale still reach the
+  bridge, and the doctor line says what a rotation would add.
+
+### After the fix, and the controls
+
+The serve test passes, with the pairing QR checked too, as do
+`TestAWalkAddressTheCertificateDoesNotNameIsHeldBack`,
+`TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing`,
+`TestACertTheBridgeDidNotMintHoldsNothingBack`,
+`TestNamedIPsReadsTheServedCertificate`,
+`TestCheckTLSCertSANs_AHeldBackAddressIsNotStale` and
+`TestAHeldBackAddressIsLoggedOnceAndTheLogIsBounded`. Negative controls
+on the fix commit (60d4142c), each restored before the next:
+
+- serve's `WithCertifiedAddrs` call removed: the serve test failed on the
+  two health reads, the pairing QR and the held-back line, and its stale
+  and doctor checks passed (that half is the certificate's);
+- the held-back split in `InspectSANCoverage` removed: the serve test
+  failed on the stale line and the doctor line, and the tls and doctor
+  unit tests failed;
+- the walk's `NamedByCert` check removed: the serve test failed as in the
+  first control, and the advertise unit test failed (the ULA published,
+  `HeldBack` never called).
