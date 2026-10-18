@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-buildx docker
+.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-buildx docker docs-check
 
 BINARY      := bridge
 IMAGE       := 1-bit-bridge
@@ -119,6 +119,18 @@ check-go-version:
 		exit 1; \
 	fi; \
 	echo "check-go-version: OK (go.mod go $$gomod, Dockerfile GO_VERSION $$dockerfile -> major.minor $$gomm)"
+
+# Guard: the instruction files Claude Code loads on its own stay within their
+# byte budgets: CLAUDE.md <= 64 KB, each .claude/rules/*.md <= 100 KB, and
+# CLAUDE.md plus the rules files one tracked file pulls in <= 480 KB; a rules
+# file without `paths:` and a skill without its name and description fail too.
+# Over budget, move an entry rather than cutting it (scripts/doc-split/README.md).
+# Python 3 stdlib only, so it needs no Go toolchain; CI runs it via gate.yml.
+docs-check:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-doc-budgets.py --self-test
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-doc-budgets.py
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/rules-for.py --self-test
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/doc-split/move_entry.py --self-test
 
 # Guard: the Dockerfile requires BuildKit (see the comment on its builder
 # FROM line), which the docker CLI reaches only through the buildx plugin.
