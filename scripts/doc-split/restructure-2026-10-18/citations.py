@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Resolve every "CLAUDE.md …" citation in the code against the base and the working tree.
+"""Resolve every "CLAUDE.md …" citation in the code of REV against the working tree.
 
   citations.py [--base REV] [--all]
 
-Reads every tracked Go, JavaScript, HTML, CSS, shell, PowerShell, workflow and Makefile line that
-names CLAUDE.md, takes the phrase it cites (a quote, a § title, "under X", "the X bullet", a PR
-number, or the curated phrase in PHRASES for a citation those patterns misread), and looks for it,
-whitespace- and case-folded, in REV's CLAUDE.md and in today's instruction files: CLAUDE.md, the
-rules files, the skills and the ops/History-*.md long forms. It prints one row per citation: where
-the phrase now resolves, or that it was already stale at REV (listed, not failed). It fails when a
-phrase REV's CLAUDE.md held is found nowhere now. --all also prints the rows that resolve.
+Reads every Go, JavaScript, HTML, CSS, shell, PowerShell, workflow and Makefile line of REV that
+names CLAUDE.md, takes the phrase it cites from PHRASES (curated, keyed by file and a unique part
+of the line), and finds it in REV's CLAUDE.md: the block or heading that holds it is the entry
+the citation means. It then finds where that entry is now, verbatim (relative links compared by
+the file they reach), in CLAUDE.md, the rules files, the skills or the ops/History-*.md long
+forms, and names the always-loaded file that carries its line: a rules file, or CLAUDE.md for a
+core long form. A phrase REV's CLAUDE.md does not hold is listed as stale at REV, not failed; an
+entry REV held that is now nowhere fails the run, as does a citation line PHRASES does not read.
+--all prints every row, not only the stale and the unresolved ones.
 """
 import argparse
 import glob
@@ -20,12 +22,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from mdblocks import read_text, safe_rev, git_show, HISTORY_DIR  # noqa: E402
+from mdblocks import (read_text, safe_rev, git_show, parse, split_frontmatter, rebase_links,  # noqa: E402
+                      HISTORY_DIR)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 BASE = "6f816e49"
 SOURCES = ("*.go", "*.js", "*.mjs", "*.html", "*.css", "*.sh", "*.ps1", "*.yml", "*.yaml", "Makefile", "Dockerfile")
-COMMENT = re.compile(r"^\s*(?://+|#+|\*+(?!/)|--|<!--|/\*+)?\s?")
 NOW = ("CLAUDE.md", ".claude/rules/*.md", ".claude/skills/*/SKILL.md", HISTORY_DIR + "/History-*.md")
 
 # The phrase each citation names, by (file, a unique part of its line). A str is looked for as it
@@ -60,8 +62,8 @@ PHRASES = {
         "`ReapOrphans`-style directory reapers must refuse an empty root",
     ("cmd/bridge/retention_sweeper_test.go", "(CLAUDE.md: \"a fixture must be a"):
         "a fixture must be a value the transformation would actually change",
-    ("cmd/bridge/root_owner_jobs_test.go", "(CLAUDE.md, dido)"): "dido",
-    ("cmd/bridge/root_owner_test.go", "(CLAUDE.md, dido)"): "dido",
+    ("cmd/bridge/root_owner_jobs_test.go", "(CLAUDE.md, dido)"): "as root with sox and ffmpeg on dido",
+    ("cmd/bridge/root_owner_test.go", "(CLAUDE.md, dido)"): "skips and dido's container runs",
     ("cmd/bridge/runserve_lifecycle_test.go", "CLAUDE.md's architecture table"): "Architecture at a glance",
     ("cmd/bridge/serve_restart.go", "CLAUDE.md, \"POST"): "`POST /api/restart` must invoke the same cancellation closure",
     ("cmd/bridge/upnp_upstream_wiring.go", "CLAUDE.md's cadence rule"): "A cadence provider needs a rearm",
@@ -118,9 +120,9 @@ PHRASES = {
     ("internal/doctor/stand_in_pid_test.go", "(CLAUDE.md: a test that records a pid of its own"):
         "records a pid of its own choosing forces what the probe says about it",
     ("internal/enrich/cache_key_test.go", "CLAUDE.md's convention for these counters"): "grandfathered bare-int",
-    ("internal/fsutil/owner.go", "(CLAUDE.md, \"Atomic writes\""): "Atomic writes",
-    ("internal/fsutil/owner_create_unix_test.go", "(CLAUDE.md, dido)"): "dido",
-    ("internal/fsutil/owner_unix_test.go", "(CLAUDE.md, dido)"): "dido",
+    ("internal/fsutil/owner.go", "(CLAUDE.md, \"Atomic writes\""): "Atomic writes: stage, then rename with retry",
+    ("internal/fsutil/owner_create_unix_test.go", "(CLAUDE.md, dido)"): "as root with sox and ffmpeg on dido",
+    ("internal/fsutil/owner_unix_test.go", "(CLAUDE.md, dido)"): "skips and dido's container runs",
     ("internal/integrity/sidecars.go", "The reset procedure this repo's own CLAUDE.md documents is"):
         "`rm -f bridge.db*` + restart",
     ("internal/integrity/sidecars_test.go", "own CLAUDE.md documents, and `run` takes a tick at boot"):
@@ -143,7 +145,7 @@ PHRASES = {
     ("internal/manifest/scanner_walk_error_test.go", "CLAUDE.md flags as the most likely cause"):
         "the bridge lost my library",
     ("internal/manifest/store.go", "(see CLAUDE.md \"enriched_at monotonicity\")"): "`enriched_at` monotonicity",
-    ("internal/manifest/store.go", "it carries no `json:` tags (see CLAUDE.md →"): "Wire-type discipline",
+    ("internal/manifest/store.go", "it carries no `json:` tags (see CLAUDE.md →"): "## Wire-type discipline",
     ("internal/manifest/store.go", "the bridge is in single-root or multi-root mode (see CLAUDE.md"):
         "Single ↔ multi-root storage form flips",
     ("internal/manifest/store.go", "No `json:` tags. It is a rows.Scan target in this file, and CLAUDE.md's"):
@@ -167,74 +169,98 @@ PHRASES = {
 }
 
 
-def tracked_sources():
-    out = subprocess.run(["git", "-C", REPO, "ls-files", "-z", "--", *SOURCES], capture_output=True,
-                         text=True, check=True).stdout
-    return [p for p in out.split("\0") if p and not p.startswith("scripts/doc-split/")]
-
-
-def context(lines, k):
-    """The comment text from line K on, joined over its continuation lines (up to four)."""
-    parts = []
-    for line in lines[k:k + 5]:
-        stripped = COMMENT.sub("", line, count=1).strip()
-        if parts and not stripped:
-            break
-        parts.append(stripped)
-    return " ".join(parts)
-
-
 def curated(rel, line):
+    """The PHRASES key for this citation line: the one whose part of the line it holds (the longest
+    when two match)."""
     keys = [k for k in PHRASES if k[0] == rel and k[1] in line]
-    if len(keys) > 1:
-        keys = [max(keys, key=lambda k: len(k[1]))]
-    return keys[0] if keys else None
+    return max(keys, key=lambda k: len(k[1])) if keys else None
+
+
+def sources_at(sha):
+    """{path: text} of REV's tracked files that may carry a citation (the doc-split tooling excepted)."""
+    out = subprocess.run(["git", "-C", REPO, "ls-tree", "-r", "-z", "--name-only", "--end-of-options", sha],
+                         capture_output=True, text=True, check=True).stdout
+    names = [p for p in out.split("\0") if p and not p.startswith("scripts/doc-split/")
+             and (p.endswith(tuple(x[1:] for x in SOURCES if x.startswith("*"))) or p in SOURCES)]
+    return {p: git_show(REPO, sha, p) for p in names}
 
 
 def pattern(phrase):
     """PHRASE as a regex over text with `**` and backticks removed: case-folded, any whitespace
     run for a space, and word boundaries at its ends, so `B17` does not match B170."""
-    body = r"\s+".join(re.escape(t) for t in phrase.replace("**", "").replace("`", "").split())
-    before = r"(?<![\w#])" if re.match(r"[\w#]", phrase.replace("`", "")) else ""
-    after = r"(?!\w)" if re.search(r"\w$", phrase.replace("`", "")) else ""
+    bare = phrase.replace("**", "").replace("`", "")
+    body = r"\s+".join(re.escape(t) for t in bare.split())
+    before = r"(?<![\w#])" if re.match(r"[\w#]", bare) else ""
+    after = r"(?!\w)" if re.search(r"\w$", bare) else ""
     return re.compile(before + body + after, re.I)
 
 
-def find(phrase, files):
-    """(file, line) of the first file in FILES (in order) that holds PHRASE. Stripping `**` and
-    backticks removes no line break, so the line counted in the stripped text is the file's."""
-    rx = pattern(phrase)
-    for rel, text in files:
-        flat = text.replace("**", "").replace("`", "")
-        m = rx.search(flat)
-        if m:
-            return rel, flat.count("\n", 0, m.start()) + 1
-    return None
+def line_of(phrase, text):
+    """The 1-based line where PHRASE first occurs in TEXT, or None. Removing `**` and backticks
+    removes no line break, so the line counted in the stripped text is the file's."""
+    flat = text.replace("**", "").replace("`", "")
+    m = pattern(phrase).search(flat)
+    return flat.count("\n", 0, m.start()) + 1 if m else None
 
 
-def now_files():
-    out = []
-    for pattern in NOW:
-        for path in sorted(glob.glob(os.path.join(REPO, pattern))):
-            out.append((os.path.relpath(path, REPO), read_text(path)))
-    return out
+def items_of(text):
+    """[(first line, last line, item)] for the headings and blocks of TEXT, 1-based."""
+    fm, body = split_frontmatter(text)
+    off = fm.count("\n")
+    _, items = parse(body)
+    return [(it["start"] + 1 + off, max(it["end"], it["start"] + 1) + off, it) for it in items]
+
+
+def now_index():
+    """{root-relative block text: (file, line)} and {heading title: (file, line)} over today's files."""
+    blocks, heads = {}, {}
+    for pat in NOW:
+        for path in sorted(glob.glob(os.path.join(REPO, pat))):
+            rel = os.path.relpath(path, REPO)
+            for first, _, it in items_of(read_text(path)):
+                if it["type"] == "heading":
+                    heads.setdefault(it["title"], (rel, first))
+                else:
+                    blocks.setdefault(rebase_links(it["text"], os.path.dirname(rel), ""), (rel, first))
+    return blocks, heads
+
+
+def carrier(rel):
+    """The always-loaded file that holds the line of an entry whose text is in REL."""
+    name = os.path.basename(rel)
+    if rel.startswith(HISTORY_DIR + "/History-rules-"):
+        return ".claude/rules/" + name[len("History-rules-"):]
+    if rel.startswith(HISTORY_DIR + "/History-"):
+        return "CLAUDE.md"
+    return rel
+
+
+def resolve(phrase, base_text, base_items, blocks, heads):
+    """(base line, base label, now location or None) for PHRASE, or None when the base lacks it."""
+    line = line_of(phrase, base_text)
+    if line is None:
+        return None
+    item = next((it for first, last, it in base_items if first <= line <= last), None)
+    if item is None:
+        return line, "?", None
+    label = " › ".join(t for lvl, t in item["path"] if lvl >= 2) or "(top)"
+    if item["type"] == "heading":
+        return line, label, heads.get(item["title"])
+    return line, label, blocks.get(item["text"])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default=BASE)
-    ap.add_argument("--all", action="store_true", help="print the rows that resolve, too")
+    ap.add_argument("--all", action="store_true", help="print every row, not only stale and unresolved ones")
     a = ap.parse_args()
     sha = safe_rev(REPO, a.base)
-    base = [("CLAUDE.md@" + a.base, git_show(REPO, sha, "CLAUDE.md"))]
-    now = now_files()
-    rows, broken, stale, unread, used = [], [], [], [], set()
-    for rel in tracked_sources():
-        path = os.path.join(REPO, rel)
-        if not os.path.isfile(path):
-            continue
-        lines = read_text(path).split("\n")
-        for k, line in enumerate(lines):
+    base_text = git_show(REPO, sha, "CLAUDE.md")
+    base_items = items_of(base_text)
+    blocks, heads = now_index()
+    rows, unread, used = [], [], set()
+    for rel, text in sorted(sources_at(sha).items()):
+        for k, line in enumerate(text.split("\n")):
             if "CLAUDE.md" not in line:
                 continue
             key = curated(rel, line)
@@ -245,35 +271,34 @@ def main():
             entry = PHRASES[key]
             where = "%s:%d" % (rel, k + 1)
             if entry is None:
-                rows.append((where, "(names no section or phrase)", "-", "-"))
+                rows.append((where, "(names no section or phrase)", "-", "-", "-"))
                 continue
             cited, meaning = entry if isinstance(entry, tuple) else (entry, entry)
-            at_base = find(cited, base)
-            label = cited
-            if not at_base and meaning != cited:
-                at_base = find(meaning, base)
-                label = "%s (stale wording; means: %s)" % (cited, meaning)
-                cited = meaning
-            at_now = find(cited, now)
-            if at_base and not at_now:
-                broken.append(where)
-            if not at_base:
-                stale.append(where)
-            rows.append((where, label, "L%d" % at_base[1] if at_base else "STALE at base",
-                         "%s:%d" % at_now if at_now else ("BROKEN" if at_base else "-")))
+            found, label = resolve(cited, base_text, base_items, blocks, heads), cited
+            if found is None and meaning != cited:
+                found = resolve(meaning, base_text, base_items, blocks, heads)
+                label = "%s (its wording was stale; it means: %s)" % (cited, meaning)
+            if found is None:
+                rows.append((where, label, "STALE at base", "-", "-"))
+                continue
+            line_no, section, now = found
+            rows.append((where, label, "L%d (%s)" % (line_no, section[:60]),
+                         "%s:%d" % now if now else "UNRESOLVED", carrier(now[0]) if now else "-"))
+    unresolved = [r for r in rows if r[3] == "UNRESOLVED"]
+    for where, phrase, b, n, c in rows:
+        if a.all or n == "UNRESOLVED" or b == "STALE at base" or phrase.startswith("("):
+            print("%s\n    cites: %s\n    base: %s\n    now:  %s   (its line loads from %s)" % (where, phrase, b, n, c))
     missing = sorted(set(PHRASES) - used)
-    for where, phrase, b, n in rows:
-        if a.all or n == "BROKEN" or b == "STALE at base" or phrase.startswith("("):
-            print("%s\n    cites: %s\n    base CLAUDE.md: %s    now: %s" % (where, phrase, b, n))
-    print("\n%d citation lines: %d resolve now, %d name no phrase, %d stale at the base (listed, not failed), "
-          "%d BROKEN; %d lines the table does not read; %d table rows match no line" % (
-              len(rows), sum(1 for r in rows if r[3] not in ("BROKEN", "-")), sum(1 for r in rows if r[2] == "-"),
-              len(stale), len(broken), len(unread), len(missing)))
+    print("\n%d citation lines at %s: %d resolve to an entry now, %d name no phrase, %d stale at the base "
+          "(listed, not failed), %d UNRESOLVED; %d lines PHRASES does not read; %d PHRASES rows match no line" % (
+              len(rows), a.base, sum(1 for r in rows if r[3] not in ("UNRESOLVED", "-")),
+              sum(1 for r in rows if r[1].startswith("(")), sum(1 for r in rows if r[2] == "STALE at base"),
+              len(unresolved), len(unread), len(missing)))
     for u in unread:
         print("  UNREAD", u)
     for m in missing:
         print("  UNUSED", m)
-    sys.exit(1 if broken or unread or missing else 0)
+    sys.exit(1 if unresolved or unread or missing else 0)
 
 
 if __name__ == "__main__":
