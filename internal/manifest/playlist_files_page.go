@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -67,9 +68,10 @@ func PlaylistFilePageCost(f PlaylistFile) int {
 // jsonStringBytes is the bytes encoding/json writes for s between its
 // quotes, with json.Encoder's defaults, which the feed is written with (HTML
 // escaping on): a quote, a backslash, and \b \f \n \r \t take two bytes;
-// any other control character, <, >, &, U+2028, U+2029 and each byte of
-// invalid UTF-8 (written as \ufffd) take six; every other rune its UTF-8
-// bytes. TestJSONStringBytesIsWhatEncodingJSONWrites holds it to the encoder.
+// any other control character, <, >, &, U+2028 and U+2029 take six; each
+// byte of invalid UTF-8 takes jsonInvalidByteBytes; every other rune its
+// UTF-8 bytes. TestJSONStringBytesIsWhatEncodingJSONWrites holds it to the
+// encoder.
 func jsonStringBytes(s string) int {
 	n := 0
 	for i := 0; i < len(s); {
@@ -80,7 +82,9 @@ func jsonStringBytes(s string) int {
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
-		case r == utf8.RuneError && size == 1, r == '\u2028', r == '\u2029':
+		case r == utf8.RuneError && size == 1:
+			n += jsonInvalidByteBytes
+		case r == '\u2028', r == '\u2029':
 			n += 6
 		default:
 			n += size
@@ -89,6 +93,20 @@ func jsonStringBytes(s string) int {
 	}
 	return n
 }
+
+// jsonInvalidByteBytes is what encoding/json writes for one byte of invalid
+// UTF-8, asked of the encoder this binary is built with (backlog B452). Go
+// 1.27 builds encoding/json on json/v2 by default (goexperiment.jsonv2), and
+// that encoder writes the replacement character raw, three bytes; Go 1.26's
+// encoder, and Go 1.27's under GOEXPERIMENT=nojsonv2, writes the \ufffd
+// escape, six. Marshalling a string does not fail; were it to, six is the
+// larger answer, and a page's cost must not fall short of its JSON.
+var jsonInvalidByteBytes = func() int {
+	if raw, err := json.Marshal("\xff"); err == nil {
+		return len(raw) - 2
+	}
+	return 6
+}()
 
 // jsonASCIIBytes is what encoding/json writes for the ASCII byte b.
 func jsonASCIIBytes(b byte) int {
@@ -118,15 +136,23 @@ var ErrPlaylistFilesChanged = errors.New("manifest: the playlist files changed s
 // any change to what the feed answers for the same stored rows (the path
 // rule, the lookup, the album-folder rule, the page budget), so a client
 // paging across a bridge that took the change restarts. A release's own
-// version is folded in as well.
-const playlistFeedRulesVersion = 1
+// version is folded in as well. 2: a byte of invalid UTF-8 costs what the
+// encoder writes for it, three bytes from Go 1.27 (B452).
+const playlistFeedRulesVersion = 2
 
 // playlistFeedVersion is the feed's version: a hash of the rules, the
-// build, the install's backup epoch (a restored database is another
-// history), the generation the v57 triggers keep (any track or playlist
-// row change a page could show) and the completeness mark. Read in the
-// page's own transaction.
+// encoder's cost of a byte of invalid UTF-8 (jsonInvalidByteBytes, which
+// decides where pages split for the same rows), the build, the install's
+// backup epoch (a restored database is another history), the generation
+// the v57 triggers keep (any track or playlist row change a page could
+// show) and the completeness mark. Read in the page's own transaction.
 func playlistFeedVersion(ctx context.Context, tx *sql.Tx) (string, bool, error) {
+	return playlistFeedVersionAt(ctx, tx, jsonInvalidByteBytes)
+}
+
+// playlistFeedVersionAt is playlistFeedVersion for an encoder that writes
+// a byte of invalid UTF-8 in invalidByteBytes; a test passes another.
+func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int) (string, bool, error) {
 	epoch, err := readEpoch(ctx, tx)
 	if err != nil {
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
@@ -141,8 +167,8 @@ func playlistFeedVersion(ctx context.Context, tx *sql.Tx) (string, bool, error) 
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
 	}
 	complete := marked > 0
-	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%s\x00%s\x00%d\x00%t",
-		playlistFeedRulesVersion, version.ServerVersion, epoch, gen, complete))
+	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%d\x00%s\x00%s\x00%d\x00%t",
+		playlistFeedRulesVersion, invalidByteBytes, version.ServerVersion, epoch, gen, complete))
 	return hex.EncodeToString(sum[:8]), complete, nil
 }
 

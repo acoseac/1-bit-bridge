@@ -9,12 +9,12 @@ import (
 
 func sampleFavorites() ([]FavoriteTrackRow, []FavoriteAlbumRow) {
 	return []FavoriteTrackRow{
-			{Path: "Pink Floyd/DSOTM/Money.flac", FavoritedAt: 300},
-			{OriginFingerprint: "smb", OriginPath: "/music/x.flac",
-				Title: "X", Artist: "Y", FavoritedAt: 200},
-		}, []FavoriteAlbumRow{
-			{AlbumArtist: "Pink Floyd", Album: "DSOTM", Year: 1973, FavoritedAt: 100},
-		}
+		{Path: "Pink Floyd/DSOTM/Money.flac", FavoritedAt: 300},
+		{OriginFingerprint: "smb", OriginPath: "/music/x.flac",
+			Title: "X", Artist: "Y", FavoritedAt: 200},
+	}, []FavoriteAlbumRow{
+		{AlbumArtist: "Pink Floyd", Album: "DSOTM", Year: 1973, FavoritedAt: 100},
+	}
 }
 
 func TestUpsertGetFavoritesRoundTrip(t *testing.T) {

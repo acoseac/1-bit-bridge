@@ -36,7 +36,7 @@
 # Keep GO_VERSION in step with the `go` directive in go.mod: the alpine
 # golang image sets GOTOOLCHAIN=local, so a stale value fails the build
 # with "go.mod requires go >= X" instead of auto-downloading a toolchain.
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 ARG ALPINE_VERSION=3.22
 
 # --- builder ---

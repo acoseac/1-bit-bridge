@@ -3,9 +3,12 @@ package enrich
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,6 +135,13 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 // 0-byte file to the artwork cache, and because existence is checked via
 // os.Stat (size-blind) it would become a permanent broken cache hit the
 // enricher never retries.
+//
+// The client's transport is the server's own (backlog B456). On
+// http.DefaultTransport a parallel test's httptest.Server.Close, which
+// closes that transport's idle connections, failed the request when it
+// landed in the window where net/http has pooled a body-less answer's
+// connection and not yet handed the answer over.
+// siblingCloseInTheIdleWindow puts that Close there on every run.
 func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,16 +149,59 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second, Transport: srv.Client().Transport})
 	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
-	buf, err := c.FetchImage(context.Background(), srv.URL+"/picture.jpg")
+	ctx, fetched := siblingCloseInTheIdleWindow(context.Background())
+	defer fetched() // releases the read loop on any way out, a panic included
+	buf, err := c.FetchImage(ctx, srv.URL+"/picture.jpg")
+	fetched()
 	if buf != nil {
 		t.Fatalf("expected nil buffer on empty body, got %d bytes", len(buf))
 	}
 	if !errors.Is(err, errNotFound) {
 		t.Fatalf("expected errNotFound on empty body, got %v", err)
 	}
+}
+
+// siblingCloseInTheIdleWindow returns a context whose trace does what every
+// httptest.Server.Close does, http.DefaultTransport.CloseIdleConnections,
+// at the moment a body-less answer's connection has joined its transport's
+// idle pool and the answer is not yet handed to the request: net/http's
+// read loop pools such a connection first, and calls PutIdleConn there.
+// When that Close took the request's own connection, the trace holds the
+// read loop until done is called, so the request sees its connection
+// closed before its answer, as it does when a parallel test's Close lands
+// there; otherwise the loop goes on at once. Call done when the request
+// has returned: the request's client Timeout bounds that wait.
+func siblingCloseInTheIdleWindow(ctx context.Context) (_ context.Context, done func()) {
+	var mu sync.Mutex
+	var conn net.Conn
+	returned := make(chan struct{})
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			mu.Lock()
+			conn = info.Conn
+			mu.Unlock()
+		},
+		PutIdleConn: func(err error) {
+			if err != nil {
+				return
+			}
+			// What httptest.Server.Close does, by the same assertion.
+			if tr, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
+				tr.CloseIdleConnections()
+			}
+			mu.Lock()
+			c := conn
+			mu.Unlock()
+			// A deadline cannot be set on a closed connection.
+			if c != nil && errors.Is(c.SetReadDeadline(time.Time{}), net.ErrClosed) {
+				<-returned
+			}
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace), sync.OnceFunc(func() { close(returned) })
 }
 
 // TestNewDeezerClient_DoesNotMutateSharedHTTPClient pins the shallow-copy
