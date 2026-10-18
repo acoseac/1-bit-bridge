@@ -46241,9 +46241,11 @@ encoder change without one.
 ### Go 1.27.2, not 1.27.1 (backlog B460)
 
 CodeRabbit on this PR: GO-2026-6617 (CVE-2026-97032), an HTTP/2 server
-crash (an HPACK encoder race in net/http), affects the stdlib from 1.27.0
-up to 1.27.2 and below 1.26.9, so main's 1.26.6 had it too. The PR moves
-on to 1.27.2, the release that fixes it.
+crash (an HPACK encoder race in net/http). The advisory at vuln.go.dev
+gives two stdlib ranges: `net/http` before 1.26.9, and
+`net/http/internal/http2`, where 1.27 keeps its HTTP/2 code, from 1.27.0
+before 1.27.2. So main's 1.26.6 had it too. The PR moves on to 1.27.2,
+the release that fixes it.
 
 - `go.mod`: `go 1.27.2`, still with no `toolchain` line. The toolchain
   came through the go command's own download (`GOTOOLCHAIN=go1.27.2 go
@@ -46281,10 +46283,9 @@ on to 1.27.2, the release that fixes it.
     three-byte replacement character `jsonInvalidByteBytes` measures.
     1.27.2's json changes are in error values, float parsing and when the
     legacy mode calls `MarshalText` on a map key.
-- golang.org/x/net stays v0.59.0. GO-2026-6617 also names x/net below
-  0.60.0, for its HTTP/2 package. The binary does not link
-  `golang.org/x/net/http2`: of x/net's HTTP packages, `go list -deps
-  ./cmd/bridge` finds only `http2/hpack` (which quic-go's qpack and http3
-  use), `http/httpguts` and `http/httpproxy`, for darwin, linux and
-  windows alike. The bridge's HTTP/2 server is the stdlib's, which 1.27.2
-  fixes.
+- golang.org/x/net stays v0.59.0. GO-2026-6617 also names
+  `golang.org/x/net/http2` before x/net 0.60.0, and the binary does not
+  link it: of x/net's HTTP packages, `go list -deps ./cmd/bridge` finds
+  only `http2/hpack` (which quic-go's qpack and http3 use), `http/httpguts`
+  and `http/httpproxy`, for darwin, linux and windows alike. The bridge's
+  HTTP/2 server is the stdlib's, which 1.27.2 fixes.
