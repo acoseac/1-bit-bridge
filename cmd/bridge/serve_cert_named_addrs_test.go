@@ -39,8 +39,8 @@ const (
 
 // TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName is
 // backlog B457, as the owner chose it on 2026-10-18 (option B). A deployed
-// bridge picked up an IPv6 ULA from another device's router advertisement
-// after its certificate was minted, and advertised it in /v1/health, where
+// bridge picked up an IPv6 ULA from a device on its LAN after its
+// certificate was minted, and advertised it in /v1/health, where
 // a client that checks the certificate against the URL's host cannot use
 // it. The certificate is kept (a rotation makes every phone re-pair), so
 // serve holds back an IPv6 address of its interfaces that the certificate

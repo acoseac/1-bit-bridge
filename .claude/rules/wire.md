@@ -446,42 +446,52 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `TestAULAOnAPhysicalInterfaceIsPublished`,
   `TestAWintunShapedULAIsPublished`,
   `TestACustomEndpointKeepsAnAddressTheWalkSkipped`.)
-- **…and an address of the walk that the served certificate does not name
-  is not advertised, and is said once** (2026-10-18, backlog B457; the
-  owner's decision). The operator bridge took an IPv6 ULA (`fd00::/8`)
-  from a device on its LAN after its certificate was minted, and
-  `/v1/health` advertised it, where a client that checks the certificate
-  against the URL's host fails; `bridge doctor` called the SANs stale.
-  Re-minting makes every phone re-pair, so the owner kept the
+- **…and an IPv6 address of the walk that the served certificate does not
+  name is not advertised, and is said once; an IPv4 address is advertised
+  either way** (2026-10-18, backlog B457; option B, the owner's
+  decision). The operator bridge took an IPv6 ULA (`fd00::/8`) from a
+  device on its LAN after its certificate was minted, and `/v1/health`
+  advertised it, where a client that checks the
+  certificate against the URL's host fails; `bridge doctor` called the
+  SANs stale. Re-minting makes every phone re-pair, so the owner kept the
   certificate. Serve reads the IP addresses of the pair it loaded
   (`servertls.NamedIPs`) and, for a pair this bridge minted, hands them to
   `api.(*Server).WithCertifiedAddrs`: `advertise.Endpoints` then
-  publishes a walk address (a LAN or public class) only while the
-  certificate names it, through `Params.NamedByCert`, and passes each
-  other one to `HeldBack`, which Warns once per address
-  (`heldBackMessage`, 64 addresses at most, since temporary IPv6
-  addresses change daily). `/v1/health`, the pairing QR and the
-  console's Reachable endpoints read that one list. A rotation
-  (`bridge cert rotate`, a restart) brings the address back, because the
-  want-set a mint covers (`GatherCertSANIPs`) keeps it; the doctor and
-  the startup warning do not call the certificate stale for it (under
-  Auth, pairing, TLS). **Not judged**: the Tailscale endpoints (the
-  provider's), the `.local` name, and a `customEndpoints` entry, which is
-  published as written even when it names a held-back address. **A
-  certificate this bridge did not mint holds nothing back**: rotation is
-  not advised for it. **The cost**: an IPv4 address the certificate does
-  not name (a new DHCP lease, a data directory moved to another host) is
-  held back too, though the app pins the fingerprint rather than checking
-  the host and could use it; the `.local` name and Tailscale still reach
-  the bridge, and the doctor line names the address with the rotation
-  that would advertise it. **Don't take a walk address out of the
-  want-set, don't judge the `.local` name, the Tailscale endpoints or a
-  `customEndpoints` entry, and don't hold back for a certificate this
-  bridge did not mint.** No wire change: the list only gets shorter.
-  (`TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName`, which
-  boots the real serve over a minted pair less one of the host's
-  addresses and then rotates,
+  publishes an IPv6 address of the walk (a LAN or public class, not
+  Tailscale's: `certGated`) only while the certificate names it, through
+  `Params.NamedByCert`, and passes each other one to `HeldBack`, which
+  Warns once per address (`heldBackMessage`, 64 addresses at most, since
+  temporary IPv6 addresses change daily). **An IPv4 address of the walk
+  is published whatever the certificate names**: the app pins the
+  fingerprint rather than checking the host, and its LAN path, a VPN
+  route (which cannot use the `.local` name) and the URLs it hands a DLNA
+  renderer all need one, so a new DHCP lease or a data directory moved
+  to another host must not take it away. The certificate is stale for
+  such an address, and the startup warning and `tls-cert-sans` say so,
+  as they did before B457. `CertGatedIPs` asks the same `certGated`, so
+  the doctor holds back exactly what serve does. `/v1/health`, the
+  pairing QR and the console's Reachable endpoints read that one list. A
+  rotation (`bridge cert rotate`, a restart) brings an address back,
+  because the want-set a mint covers (`GatherCertSANIPs`) keeps it; the
+  doctor and the startup warning do not call the certificate stale for a
+  held-back one (under Auth, pairing, TLS). **Not judged**: the Tailscale
+  endpoints (the provider's), the `.local` name, and a `customEndpoints`
+  entry, which is published as written even when it names a held-back
+  address. **A certificate this bridge did not mint holds nothing back**:
+  rotation is not advised for it. The first rule (option A) held back an
+  IPv4 address too, which cost the app its LAN address after a lease
+  change; the owner chose this one. **Don't hold back an IPv4 address,
+  don't give `Endpoints` and `CertGatedIPs` two rules, don't take a walk
+  address out of the want-set, don't judge the `.local` name, the
+  Tailscale endpoints or a `customEndpoints` entry, and don't hold back
+  for a certificate this bridge did not mint.** No wire change: the list
+  only gets shorter.
+  (`TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName`,
+  which boots the real serve over a fixed walk
+  (`advertise.SetInterfacesForTest`) and a minted pair less one IPv4 and
+  both IPv6 addresses of it, and then rotates,
   `TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack`,
+  `TestAnIPv4WalkAddressTheCertificateDoesNotNameIsPublished`,
   `TestAHeldBackAddressIsLoggedOnceAndTheLogIsBounded`.)
 - **The Bonjour instance name is ONE DNS label, 63 bytes, and hashicorp/mdns
   does not check it** (#1046). The instance is the library name:
