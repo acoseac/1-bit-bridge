@@ -188,8 +188,9 @@ def read_text(path):
 def open_for_write(path):
     """PATH opened for writing as UTF-8 text, refusing to follow a symlink there: O_NOFOLLOW where
     the platform has it, and where it does not (Windows) an os.path.islink check first, which
-    refuses a link that is there when this is called. The file is opened in binary mode and its
-    text written with no newline translation, so it holds exactly the text written to it."""
+    refuses a link that is there when this is called. The descriptor is opened with O_BINARY where
+    the platform has it, and the returned UTF-8 text stream uses newline="", so no newline is
+    translated and the file holds exactly the text written to it."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow and os.path.islink(path):
         sys.exit("refusing to write through a symlink: %s" % path)

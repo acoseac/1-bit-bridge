@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/check-doc-budgets.py\"; [ -f \"$f\" ] || exit 0; py=$(command -v python3 || command -v python) || exit 0; PYTHONDONTWRITEBYTECODE=1 \"$py\" \"$f\" --hook"
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/check-doc-budgets.py\"; [ -f \"$f\" ] || exit 0; for py in python3 python; do if command -v \"$py\" >/dev/null 2>&1 && \"$py\" -c \"\" >/dev/null 2>&1; then PYTHONDONTWRITEBYTECODE=1 exec \"$py\" \"$f\" --hook; fi; done; exit 0"
           }
         ]
       }
