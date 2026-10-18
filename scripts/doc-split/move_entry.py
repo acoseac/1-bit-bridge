@@ -359,21 +359,23 @@ def self_test():
             expect("and no temporary file behind it either", not leftovers())
             expect("and is not papered over with fsync", not fsyncs)
             del fsyncs[:]
-            mdblocks.fcntl = Fcntl(errno.ENOTSUP)
+            mdblocks.fcntl = Fcntl(mdblocks.NO_FULLFSYNC[0])
             try:
                 mdblocks.write_text(target, "fell back\n")
             except OSError:
                 pass
             expect("a file system without F_FULLFSYNC still writes", read_text(target) == "fell back\n")
-            expect("syncing the file and its folder with fsync instead", len(fsyncs) == 2)
+            expect("syncing the file and its folder with fsync instead",
+                   len(fsyncs) == (2 if mdblocks.SYNCS_DIRECTORIES else 1))
         finally:
             mdblocks.fcntl, mdblocks.os.fsync = real_fcntl, real_fsync
         mdblocks.write_text(target, kept + "\n")
-        expect("a replaced file keeps its permissions", os.stat(target).st_mode & 0o777 == 0o644)
+        if os.name != "nt":  # Windows keeps a read-only flag, not a mode
+            expect("a replaced file keeps its permissions", os.stat(target).st_mode & 0o777 == 0o644)
 
         # The History file must be on disk, directory entry included, before the source changes.
         folder = os.stat(os.path.dirname(target)).st_ino
-        events, real_replace, real_fchmod = [], mdblocks.os.replace, mdblocks.os.fchmod
+        events, real_replace, real_fchmod = [], mdblocks.os.replace, getattr(mdblocks.os, "fchmod", None)
 
         def sync(fd):
             st = os.fstat(fd)
@@ -390,13 +392,127 @@ def self_test():
         def set_mode(fd, mode):
             events.append("set the mode")
             real_fchmod(fd, mode)
-        mdblocks.sync_fd, mdblocks.os.replace, mdblocks.os.fchmod = sync, rename, set_mode
+        mdblocks.sync_fd, mdblocks.os.replace = sync, rename
+        if real_fchmod is not None:
+            mdblocks.os.fchmod = set_mode
         try:
             mdblocks.write_text(target, kept)
         finally:
-            mdblocks.sync_fd, mdblocks.os.replace, mdblocks.os.fchmod = real_sync, real_replace, real_fchmod
-        expect("a write sets the mode, syncs, renames, then syncs its folder: %s" % events,
-               events == ["set the mode", "sync the file", "rename", "sync its folder"])
+            mdblocks.sync_fd, mdblocks.os.replace = real_sync, real_replace
+            if real_fchmod is not None:
+                mdblocks.os.fchmod = real_fchmod
+        want = ((["set the mode"] if real_fchmod is not None else []) + ["sync the file", "rename"]
+                + (["sync its folder"] if mdblocks.SYNCS_DIRECTORIES else []))
+        expect("a write sets the mode, syncs, renames, then syncs its folder: %s" % events, events == want)
+
+        # Windows, simulated: there is no fcntl module, no os.O_NOFOLLOW and (before Python 3.13) no
+        # os.fchmod, os.open refuses a directory, and a text-mode write turns "\n" into "\r\n". Each
+        # write must still land byte for byte, and a symlink must still be refused.
+        import subprocess
+        probe = subprocess.run([sys.executable, "-B", "-c", "import sys; sys.modules['fcntl'] = None; "
+                                "sys.path.insert(0, %r); import mdblocks" % HERE], capture_output=True, text=True)
+        expect("mdblocks imports where there is no fcntl module (Windows): %s"
+               % (probe.stderr.strip().splitlines() or [""])[-1], probe.returncode == 0)
+
+        absent = object()  # a patch value meaning "this attribute does not exist here"
+
+        def lands(label, text, *patches):
+            """Write TEXT to target with each (object, name, value) patched in, the value `absent`
+            deleting the attribute; restore, then expect the exact bytes on disk."""
+            saved = [(obj, name, getattr(obj, name, None), hasattr(obj, name)) for obj, name, _ in patches]
+            try:
+                for obj, name, value in patches:
+                    if value is absent:
+                        if hasattr(obj, name):
+                            delattr(obj, name)
+                    else:
+                        setattr(obj, name, value)
+                mdblocks.write_text(target, text)
+                with open(target, "rb") as f:
+                    got = f.read()
+                why = "" if got == text.encode("utf-8") else "wrote %r" % got[:40]
+            except BaseException as e:  # SystemExit included: a refusal is a failure here
+                why = "%s: %s" % (type(e).__name__, e)
+            finally:
+                for obj, name, value, present in saved:
+                    if present:
+                        setattr(obj, name, value)
+                    elif hasattr(obj, name):
+                        delattr(obj, name)
+            expect("%s%s" % (label, " (%s)" % why if why else ""), not why)
+
+        fsyncs = []
+
+        def counting(fd):
+            fsyncs.append(fd)
+            real_fsync(fd)
+        lands("a write where there is no fcntl module syncs with fsync (Windows)", "no fcntl\n",
+              (mdblocks, "fcntl", None), (mdblocks.os, "fsync", counting))
+        expect("and fsync ran", bool(fsyncs))
+        lands("a write where there is no os.fchmod still lands (Windows, Python 3.12 and older)", "no fchmod\n",
+              (mdblocks.os, "fchmod", absent))
+
+        def no_directories(path, flags, *args):
+            if os.path.isdir(path):
+                raise PermissionError(errno.EACCES, "Permission denied", path)
+            return real_os_open(path, flags, *args)
+        real_os_open = os.open
+        lands("a write where os.open refuses a directory still lands (Windows)", "no folder sync\n",
+              (mdblocks.os, "open", no_directories), (mdblocks, "SYNCS_DIRECTORIES", False))
+
+        real_fdopen = os.fdopen
+
+        def crlf_fdopen(fd, mode="r", *args, **kwargs):
+            if "b" not in mode:
+                kwargs.setdefault("newline", "\r\n")  # what a text-mode write does on Windows
+            return real_fdopen(fd, mode, *args, **kwargs)
+        lands("a write keeps its bytes where a text write turns \\n into \\r\\n (Windows)", "one\ntwo\n",
+              (mdblocks.os, "fdopen", crlf_fdopen))
+
+        tsv = os.path.join(root, "out.tsv")
+        with open(tsv, "wb") as f:
+            f.write(b"before\n")  # so the link below has a target even when the write fails
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        try:
+            if nofollow is not None:
+                del os.O_NOFOLLOW
+            os.fdopen = crlf_fdopen
+            with mdblocks.open_for_write(tsv) as f:
+                f.write("a\tb\n")
+            with open(tsv, "rb") as f:
+                why = "" if f.read() == b"a\tb\n" else "the bytes changed"
+        except BaseException as e:
+            why = "%s: %s" % (type(e).__name__, e)
+        finally:
+            os.fdopen = real_fdopen
+            if nofollow is not None:
+                os.O_NOFOLLOW = nofollow
+        expect("open_for_write writes where there is no O_NOFOLLOW (Windows), byte for byte%s"
+               % (" (%s)" % why if why else ""), not why)
+        link = os.path.join(root, "link.tsv")
+        try:
+            os.symlink(tsv, link)
+        except (OSError, NotImplementedError):
+            link = None  # a Windows account without the symlink privilege: nothing to refuse
+        if link:
+            with open(tsv, "rb") as f:
+                held = f.read()
+            try:
+                if nofollow is not None:
+                    del os.O_NOFOLLOW
+                try:
+                    mdblocks.open_for_write(link).close()
+                    refused = "it wrote through the link"
+                except SystemExit:
+                    refused = ""
+                except BaseException as e:
+                    refused = "%s: %s" % (type(e).__name__, e)
+            finally:
+                if nofollow is not None:
+                    os.O_NOFOLLOW = nofollow
+            expect("and still refuses a symlink there%s" % (" (%s)" % refused if refused else ""), not refused)
+            with open(tsv, "rb") as f:
+                expect("leaving the link's target as it was", f.read() == held)
 
         bad = "- **Rule B stays binding.** → History-Two.md"
         try:

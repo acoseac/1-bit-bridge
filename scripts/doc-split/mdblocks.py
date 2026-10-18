@@ -5,19 +5,29 @@ Ported from the iOS repo (acoseac/1-bit, scripts/doc-split/) on 2026-10-18. Two 
 the long forms live in ops/ (HISTORY_DIR), because docs/ here is the public GitHub Pages site;
 and there is no test-count checker, so load_claim_regex returns a pattern that matches nothing.
 
+It also runs on Windows, where the POSIX-only steps of a write degrade: no fcntl (so no
+F_FULLFSYNC, a plain fsync instead), no os.O_NOFOLLOW (a symlink is refused by os.path.islink
+instead), no os.fchmod before Python 3.13 (the replaced file's mode is not copied), and no
+directory sync (os.open refuses a directory there; NTFS journals the rename). Every write is
+byte for byte: no platform newline translation.
+
 A *block* is a top-level bullet (with its indented continuation and sub-bullets), a
 paragraph, a table, or a fenced code block. Headings are separate items. `text` is the
 exact original lines joined with "\n" — the unit the lossless checks compare byte-for-byte.
 """
 import argparse
 import errno
-import fcntl
 import fnmatch
 import os
 import re
 import subprocess
 import sys
 import tempfile
+
+try:
+    import fcntl  # POSIX only; sync_fd uses its F_FULLFSYNC on macOS
+except ImportError:  # Windows: sync_fd falls back to os.fsync
+    fcntl = None
 
 HEAD_RE = re.compile(r"^(#{1,6}) (.*)")
 BULLET_RE = re.compile(r"^(?:[-*] |\d+\. )")
@@ -176,26 +186,38 @@ def read_text(path):
 
 
 def open_for_write(path):
-    """PATH opened for writing as UTF-8 text, refusing to follow a symlink there (O_NOFOLLOW)."""
+    """PATH opened for writing as UTF-8 text, refusing to follow a symlink there: O_NOFOLLOW where
+    the platform has it, and where it does not (Windows) an os.path.islink check first, which
+    refuses a link that is there when this is called. The file is opened in binary mode and its
+    text written with no newline translation, so it holds exactly the text written to it."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and os.path.islink(path):
+        sys.exit("refusing to write through a symlink: %s" % path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow | getattr(os, "O_BINARY", 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+        fd = os.open(path, flags, 0o666)
     except OSError as e:
-        if e.errno == errno.ELOOP:
+        if e.errno == getattr(errno, "ELOOP", None):
             sys.exit("refusing to write through a symlink: %s" % path)
         raise
-    return os.fdopen(fd, "w", encoding="utf-8")
+    return os.fdopen(fd, "w", encoding="utf-8", newline="")
 
 
 # What a file system without F_FULLFSYNC answers (an SMB mount says ENOTSUP). Any other failure
 # is real, and falling back to fsync would report a flush that never happened.
-NO_FULLFSYNC = (errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOTTY)
+NO_FULLFSYNC = tuple(getattr(errno, name) for name in ("ENOTSUP", "EOPNOTSUPP", "ENOTTY") if hasattr(errno, name))
+
+# Whether a rename is made durable by syncing its directory. Windows opens no directory with
+# os.open (PermissionError) and journals the rename itself (NTFS), so there sync_dir does nothing.
+SYNCS_DIRECTORIES = os.name != "nt"
 
 
 def sync_fd(fd):
     """Flush FD to the storage device. On macOS a plain fsync stops at the drive's own cache, which
     may reorder writes, so F_FULLFSYNC comes first; only a file system that lacks it falls back to
-    fsync. Every other error is raised."""
-    if hasattr(fcntl, "F_FULLFSYNC"):
+    fsync. Every other error is raised. Where there is no fcntl (Windows) or no F_FULLFSYNC (Linux),
+    this is fsync."""
+    if fcntl is not None and hasattr(fcntl, "F_FULLFSYNC"):
         try:
             fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
             return
@@ -207,7 +229,9 @@ def sync_fd(fd):
 
 def sync_dir(path):
     """Make a rename inside the directory PATH durable: syncing the renamed file alone leaves its
-    new directory entry unwritten."""
+    new directory entry unwritten. Nothing where SYNCS_DIRECTORIES is false (Windows)."""
+    if not SYNCS_DIRECTORIES:
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         sync_fd(fd)
@@ -220,7 +244,8 @@ def write_text(path, text):
     sync it, rename it over PATH, then sync the directory. An interruption leaves the old file or
     the new one, never a truncated one, and a file written after this returns cannot reach the disk
     before it. A symlink at PATH is refused rather than replaced; an existing file keeps its
-    permissions."""
+    permissions (where there is os.fchmod: on Windows before Python 3.13 the new file has the
+    default mode). TEXT goes to disk as its UTF-8 bytes, with no newline translation."""
     if os.path.islink(path):
         sys.exit("refusing to write through a symlink: %s" % path)
     if os.path.exists(path):
@@ -232,10 +257,12 @@ def write_text(path, text):
     folder = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".doc-split-")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8"))
             f.flush()
-            os.fchmod(f.fileno(), mode)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(f.fileno(), mode)
             sync_fd(f.fileno())
         os.replace(tmp, path)
     except BaseException:

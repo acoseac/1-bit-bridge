@@ -119,7 +119,12 @@ def governing(rules, rel):
 def repo_relative(root, path):
     """A path as the globs see it: relative to the root, with forward slashes."""
     real_root = os.path.realpath(root)
-    rel = os.path.relpath(os.path.realpath(os.path.abspath(path)), real_root)
+    try:
+        rel = os.path.relpath(os.path.realpath(os.path.abspath(path)), real_root)
+    except ValueError:
+        # Windows: the path and the root are on different drives, so it is not under the root
+        # from here either.
+        rel = os.pardir
     if rel == os.pardir or rel.startswith(os.pardir + os.sep):
         # Not under the root from here: read it as already repo-relative.
         rel = os.path.normpath(path)
@@ -222,6 +227,30 @@ def self_test(root):
     check(rules_for("AGENTS.md") == [], "AGENTS.md is governed by no rules file")
     check(repo_relative(root, os.path.join(root, "AGENTS.md")) == "AGENTS.md",
           "an absolute path inside the root becomes repo-relative")
+
+    # Windows: os.path.relpath raises ValueError for a path on another drive than the root.
+    real_relpath = os.path.relpath
+
+    def other_drive(path, start=os.curdir):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+    os.path.relpath = other_drive
+    try:
+        try:
+            repo_relative(root, os.path.abspath(os.sep + "elsewhere/x.go"))
+            outside = "accepted"
+        except RulesError:
+            outside = "refused"
+        except ValueError as e:
+            outside = "ValueError: %s" % e
+        try:
+            relative = repo_relative(root, "internal/manifest/scanner.go")
+        except (RulesError, ValueError) as e:
+            relative = "%s: %s" % (type(e).__name__, e)
+    finally:
+        os.path.relpath = real_relpath
+    check(outside == "refused", f"a path on another drive is refused, not a traceback (got {outside})")
+    check(relative == "internal/manifest/scanner.go",
+          f"a relative path from another drive's working directory reads as repo-relative (got {relative})")
     print(f"rules-for self-test: {passed} checks passed")
 
 

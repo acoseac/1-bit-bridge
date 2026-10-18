@@ -83,7 +83,12 @@ def rules_globs(text):
 
 
 def tracked_files(root):
-    r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, text=True)
+    """The files git tracks under ROOT, or [] when git cannot say: not a checkout, or no git on
+    PATH (the hook's shell on Windows may have none), where a load is then not measured."""
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, text=True)
+    except OSError:
+        return []
     return [p for p in r.stdout.split("\0") if p] if r.returncode == 0 else []
 
 
@@ -98,7 +103,8 @@ def frontmatter_scalar(front, key):
     'single'- or "double"-quoted, or | / > block scalar. That is all of YAML a skill's name and
     description need, and it keeps these scripts free of a YAML dependency. Raises ValueError for
     a value YAML would not read as that string: an unclosed quote, ": " in a plain scalar, or a
-    plain scalar YAML reads as null, a boolean or a number (`description: null`)."""
+    plain scalar YAML reads as null, a boolean or a number (`description: null`). A plain value
+    that is only a comment (`description: # x`) is empty, as YAML reads it."""
     lines = front.split("\n")
     for i, line in enumerate(lines):
         m = re.match(r"%s:(?:[ \t]+(.*))?$" % re.escape(key), line)
@@ -121,7 +127,7 @@ def frontmatter_scalar(front, key):
             if len(value) < 2 or not value.endswith("'"):
                 raise ValueError("%s: an unclosed single-quoted value" % key)
             return value[1:-1].replace("''", "'")
-        value = re.sub(r"\s+#.*$", "", value)
+        value = re.sub(r"(?:^|\s+)#.*$", "", value)  # a comment, which YAML starts after whitespace
         if YAML_NON_STRING.fullmatch(value):
             raise ValueError("%s: YAML reads %r as a null, boolean or number, not text; quote it" % (key, value))
         if ": " in value:
@@ -256,7 +262,10 @@ def hook(root, stdin, budgets=BUDGETS):
         return 0, ""
     if not isinstance(path, str):
         return 0, ""
-    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/")
+    try:
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/")
+    except ValueError:  # Windows: a file on another drive than the repository is none of these
+        return 0, ""
     if rel != "CLAUDE.md" and not re.fullmatch(r"\.claude/(rules/[^/]+\.md|skills/[^/]+/SKILL\.md)", rel):
         return 0, ""
     m = measure(root)
@@ -345,6 +354,10 @@ def self_test():
                ["cannot read" in " ".join(scalar("name: s\ndescription: %s" % v)) for v in ("123", "1.5e3", "true", "False")],
                [True] * 4)
         expect("a quoted \"null\" is text", scalar('name: s\ndescription: "null"'), [])
+        expect("a description that is only a comment is empty", len(scalar("name: s\ndescription: # x")), 1)
+        expect("and so is a name", len(scalar("name: # x\ndescription: d")), 1)
+        expect("a quoted '#' is text", scalar('name: s\ndescription: "# x"'), [])
+        expect("a '#' inside a plain description is text", scalar("name: s\ndescription: a#b, c"), [])
         expect("a plain description that merely starts with a number is text", scalar("name: s\ndescription: 3 ways to x"), [])
         code, msg = hook(root, event_for(os.path.join(root, ".claude/skills/bad/SKILL.md")))
         expect("hook speaks on an edit that breaks a skill", (code, "non-empty `description:`" in msg), (2, True))
@@ -355,6 +368,30 @@ def self_test():
         event = lambda p: json.dumps({"tool_name": "Edit", "tool_input": {"file_path": p}})
         expect("hook ignores other files", hook(root, event(os.path.join(root, "src/A.go")), small)[0], 0)
         expect("hook ignores unreadable input", hook(root, "not json", small)[0], 0)
+        real_relpath = os.path.relpath
+
+        def other_drive(path, start=None):  # what ntpath.relpath does across drives
+            raise ValueError("path is on mount 'D:', start on mount 'C:'")
+        os.path.relpath = other_drive
+        try:
+            code = hook(root, event(os.path.join(root, "CLAUDE.md")), small)[0]
+        except ValueError as e:
+            code = "ValueError: %s" % e
+        finally:
+            os.path.relpath = real_relpath
+        expect("hook stays quiet on a file on another drive (Windows)", code, 0)
+        real_run = subprocess.run
+
+        def no_git(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        subprocess.run = no_git
+        try:
+            files = tracked_files(root)
+        except OSError as e:
+            files = "%s: %s" % (type(e).__name__, e)
+        finally:
+            subprocess.run = real_run
+        expect("no git on PATH means no tracked files, not a traceback", files, [])
         code, msg = hook(root, event(os.path.join(root, "CLAUDE.md")), small)
         expect("hook speaks on an over-budget edit", code, 2)
         expect("hook message names the file and the budget", "CLAUDE.md is" in msg and "budget 500" in msg, True)
