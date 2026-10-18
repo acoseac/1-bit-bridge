@@ -46061,3 +46061,82 @@ Not changed, and real: Daily Mix's subtitle stays "Favorites and a few
 you might've missed" when the discovery slice is empty. The owner left it
 out of this release, with the Rediscover shelf, a new deep-cut ranking,
 reasons, neighbourhoods, a mood journey and a novelty quota.
+
+## 2026-10-18 — a same-day rebuild keeps the discovery shelves (backlog B451)
+
+The exclusion in the entry above read every path served since
+`now − 7 × 24 h`, and each build appended its rows. Regeneration does not
+run only daily: it also runs 120 s after every bridge start
+(`smartPlaylistSettleDelay`), on the console's "Regenerate now"
+(`POST /api/smart-playlists/regenerate`) and per family
+(`POST /api/smart-playlists/{slug}/regenerate`, `RegenerateFamily`). The
+engine's only seeds are the ISO week and the slug, so before B451 a second
+build on one day rebuilt the same shelves. With the exclusion, each such
+build skipped what the previous build of the same day had just served: a
+restart or a "Regenerate now" reshuffled Daily Mix's discovery slice, Auto
+Mix and the two mood bands within the day, and the table kept rows for
+shelves that were replaced before anyone was shown them.
+
+Measured red on the tests' own commit, against the code before the fix
+(go1.26.6, macOS), with one fixture that fills all five discovery shelves
+and leaves every pool but deep cuts' room for a second shelf without the
+first one's tracks:
+
+- `TestRegenerate_SameDayRunsBuildTheSameDiscoveryShelves`: a 09:00 and a
+  15:00 build differed in four shelves ("daily-mix changed within the
+  day", and the same for auto-mix, lift-off and wind-down). Auto Mix went
+  from `/disc/08` … `/disc/03` to `/disc/02`, `/disc/09` … `/disc/13`.
+  Deep cuts matched only because its pool, one track larger than the
+  shelf, relaxed the exclusion.
+- `TestRegenerate_SameDayRunsLeaveOneRunOfServedRows`: after builds at
+  00:00:00, 12:00 and 23:59:59.999999999 every shelf held three builds'
+  rows ("auto-mix holds rows from 3 builds (6 rows at
+  2026-10-14T00:00:00Z, 6 rows at 2026-10-14T12:00:00Z, 6 rows at
+  2026-10-14T23:59:59.999999999Z)").
+- `TestRegenerateFamily_ReplacesOnlyItsOwnSlugsRowsForToday`: a 15:00
+  per-family run rebuilt Lift Off from other tracks ("lift-off changed
+  within the day") and left the 09:00 rows ("lift-off row /lift/01.flac is
+  stamped 2026-10-14T09:00:00Z"): eight rows for a shelf of four.
+- `TestSmartPlaylistServed_ExclusionStartsAtUTCMidnight` and
+  `TestSmartPlaylistServed_ReplaceTouchesOnlyTheRunsUTCDay` call the two
+  store methods the fix adds. On that commit a test-only adapter answered
+  them with the old bounds, so they failed by name: at the day's first
+  nanosecond the read excluded that day's rows (`/midnight.flac`,
+  `/today.flac`, `/late.flac`) and the next day's (`/tomorrow.flac`), and a
+  write left the day's rows beside the new one.
+- `TestRegenerate_NextDayExcludesThePreviousDaysPicks` passed there, as it
+  had to, since the old window covered the day before too. It pins what the
+  fix keeps: a build the next day skips the previous day's picks, and deep
+  cuts, which that would leave under its minimum, is built without the skip
+  and logs one line naming it.
+
+The fix: the table is read and written by UTC days, the zone of the week
+seed. `SmartPlaylistServedOnEarlierDays(ctx, nowNS, 7)` reads
+`[dayStart − 7 days, dayStart)`, where `dayStart` is the UTC midnight of
+`NowNS` and belongs to its day. `ReplaceSmartPlaylistServedToday(ctx,
+nowNS, 7, served)` deletes each passed slug's rows from
+`[dayStart, dayStart + 24 h)`, inserts the run's rows stamped `NowNS`, and
+deletes the rows before `dayStart − 7 days`, in one transaction under
+`s.mu`. A per-family regeneration passes only its own slug. A slug not
+passed keeps its rows, including a family that dropped out of a later full
+run that day: it was shown until then. Both methods refuse a window under
+one day. `RecordSmartPlaylistServed`, `SmartPlaylistServedSince` and
+`SmartPlaylistServedRow` are gone; v58 and the table are unchanged. The
+window no longer slides with the hour either: a row stamped 01:00 seven
+days back stays excluded for the whole of today, where `now − 7 × 24 h`
+let it go at 01:00.
+
+The parity pin: `mixWeekHash` (manifest, which the SQL windows order by)
+and `hashSeedPath` (the engine's shuffle) were documented as one
+construction and tested by nothing.
+`TestMixWeekHash_MatchesTheEngineGoldenVectors` and
+`TestHashSeedPath_MatchesTheManifestGoldenVectors` hold the same eight
+vectors, FNV-1a 64 over the seed's big-endian bytes and then the path's
+bytes as `hash/fnv` computes it (checked against a separate implementation
+when the table was written): three seeds with the high bit set, and three
+non-ASCII paths (a composed and a decomposed "ö", and CJK). The manifest
+test also runs SQL `mix_week_hash` with the seed bound as int64. Negative
+controls, restored before the fix: big-endian swapped for little-endian in
+`mixWeekHash` failed 6 of the 8 vectors in Go and in SQL (seeds 0 and
+`0xffffffffffffffff` read the same both ways), and hashing runes instead of
+bytes in `hashSeedPath` failed the three non-ASCII ones.
