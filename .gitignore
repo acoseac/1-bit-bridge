@@ -25,8 +25,13 @@
 .vscode/
 *.swp
 
-# Claude Code local config
-/.claude/
+# Claude Code local config. The instruction files are tracked: the rules, the
+# skills, and the project settings that run the doc-budget hook. Everything
+# else under .claude/ (settings.local.json, agent worktrees) stays local.
+/.claude/*
+!/.claude/rules/
+!/.claude/skills/
+!/.claude/settings.json
 
 # Docker compose local overrides + the operator's env file. `.env` may hold
 # secrets (TS_AUTHKEY, etc.) — never commit it. The `.env.example` template
