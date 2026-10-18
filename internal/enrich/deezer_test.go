@@ -172,7 +172,7 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 // read loop until done is called, so the request sees its connection
 // closed before its answer, as it does when a parallel test's Close lands
 // there; otherwise the loop goes on at once. Call done when the request
-// has returned.
+// has returned: the request's client Timeout bounds that wait.
 func siblingCloseInTheIdleWindow(ctx context.Context) (_ context.Context, done func()) {
 	var mu sync.Mutex
 	var conn net.Conn
@@ -187,7 +187,10 @@ func siblingCloseInTheIdleWindow(ctx context.Context) (_ context.Context, done f
 			if err != nil {
 				return
 			}
-			http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+			// What httptest.Server.Close does, by the same assertion.
+			if tr, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
+				tr.CloseIdleConnections()
+			}
 			mu.Lock()
 			c := conn
 			mu.Unlock()
