@@ -152,16 +152,17 @@ findings, whereas an unswept package should not.
 **State the window in the plan.** A review whose scope is "recently" cannot be
 checked for completeness later.
 
-### [BRIDGE] The structural check has no rules files to measure
+### [BRIDGE] The structural check: which rules file binds the surface
 
 The iOS repo binds invariants to files with `.claude/rules/*.md` globs, and every
 iOS LOUPE run since the lyrics one has opened by measuring how many files matched
-no glob. **This repo has no `.claude/rules/` at all** — every invariant lives in
-`CLAUDE.md`, organised under `## Things that have bitten before` by subsystem
-heading. So the equivalent structural question is:
+no glob. **Since 2026-10-18 this repo does too**: the invariants live in
+`.claude/rules/*.md` by subsystem, each under the section title it had in
+`CLAUDE.md`'s `## Things that have bitten before`. So the structural question
+is the iOS one:
 
-- Does the surface have a `### ` section under `## Things that have bitten
-  before`? Name it. If it does not, that absence is itself a finding worth
+- Does the surface have a rules file its files load (`python3 scripts/rules-for.py
+  <path>`)? Name it. If it does not, that absence is itself a finding worth
   recording — it is the same "nothing binds this code to its rules" shape.
 - Are that section's claims still true? Grep every symbol, file path, test name
   and count it cites. **Doc drift has been the highest-yield dimension on every
@@ -449,10 +450,12 @@ make fmt vet test build-all
 
 ## Phase 9 — write down what generalises
 
-[BRIDGE] A dated entry in `CLAUDE.md` — there are no rules files here, so
-everything lands in the subsystem section under `## Things that have bitten
-before`, and a cross-cutting run gets its own `### <date> — LOUPE on <surface>`
-entry. Include the invariants, the rejected-and-why list, and the **process**
+[BRIDGE] A dated entry, and the invariants in the rules file that loads with
+the surface's code, under its section (CLAUDE.md's "Where things live" lists
+them; a condensed file takes one line per entry and its long form goes to
+`ops/History-rules-<name>.md`). A cross-cutting run gets one dated line under
+CLAUDE.md's "Review and fix batches — one line each", its record in
+`ops/History-Batches.md`. Include the invariants, the rejected-and-why list, and the **process**
 failures. **Correct any existing claim the batch falsified — a stale fact in
 that file is more dangerous than an absent one.** Docs-only changes go direct to
 `main`, per the bridge's own convention.
