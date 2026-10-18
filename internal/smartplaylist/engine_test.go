@@ -83,8 +83,9 @@ func TestNormalizedBPMDistance(t *testing.T) {
 		{75, 150, 0},   // double-time
 		{150, 75, 0},   // half-time
 		{120, 122, 2},  // close
-		{0, 120, 0},    // unknown a
-		{120, 0, 0},    // unknown b
+		{0, 120, 60},   // unknown a: half the known tempo
+		{120, 0, 60},   // unknown b
+		{0, 0, 0},      // both unknown: no anchor
 		{120, 180, 60}, // not a clean multiple
 	}
 	for _, c := range cases {
@@ -114,6 +115,27 @@ func TestSequenceHarmonic_DeterministicFlow(t *testing.T) {
 		if order[i] != want[i] {
 			t.Fatalf("sequence order = %v want %v", order, want)
 		}
+	}
+}
+
+// An unknown tempo used to cost 0, so it beat a same-key track a few BPM
+// away (path order then filled the rest of that key with untempoed files).
+// The penalty is the discovery scorer's mid-range charge: half the known tempo.
+func TestSequenceHarmonic_UnknownBPMDoesNotWinAKeyTie(t *testing.T) {
+	seed := feat("seed", "", 120, 0, "major", 0)
+	unknown := feat("a-unknown", "", 0, 0, "major", 0) // same key, no tempo, sorts first
+	close := feat("z-close", "", 122, 0, "major", 0)
+	if normalizedBPMDistance(0, 120) <= normalizedBPMDistance(120, 122) {
+		t.Fatalf("unknown tempo distance %v is still cheaper than a 2 BPM gap %v",
+			normalizedBPMDistance(0, 120), normalizedBPMDistance(120, 122))
+	}
+	seq := sequenceHarmonic(seed, []TrackFeature{seed, unknown, close}, 3)
+	if len(seq) < 2 || seq[1].Path != close.Path {
+		got := []string{}
+		for _, f := range seq {
+			got = append(got, f.Path)
+		}
+		t.Fatalf("unknown BPM won the same-key tie: order %v, want %s then %s", got, seed.Path, close.Path)
 	}
 }
 
@@ -225,10 +247,51 @@ func testOpts(analysis bool) Options {
 	}
 }
 
+// One qualifying play must not become a time-of-day hour. The family still
+// turns on from the busiest hour; a thinner hour stays out.
+func TestBuildTimeOfDay_ASinglePlayHourIsNotServed(t *testing.T) {
+	features := map[string]TrackFeature{
+		"busy": TrackFeature{Path: "busy", Title: "Busy", Artist: "A"},
+		"once": TrackFeature{Path: "once", Title: "Once", Artist: "B"},
+		"pair": TrackFeature{Path: "pair", Title: "Pair", Artist: "C"},
+	}
+	in := Inputs{
+		Features: features,
+		HourBuckets: []HourPath{
+			{Hour: 20, Path: "busy", Plays: 20},
+			{Hour: 8, Path: "once", Plays: 1},
+			{Hour: 9, Path: "pair", Plays: 2},
+		},
+	}
+	pl, ok := buildTimeOfDay(in, DefaultOptions(true))
+	if !ok {
+		t.Fatal("the busiest hour meets the family gate")
+	}
+	if _, served := pl.HourlyItems[8]; served {
+		t.Fatal("an hour with a single play was served")
+	}
+	if len(pl.HourlyItems[20]) == 0 {
+		t.Fatal("the busy hour should be served")
+	}
+	if len(pl.HourlyItems[9]) == 0 {
+		t.Fatal("an hour at the per-hour minimum should be served")
+	}
+}
+
+func TestGenerate_DefaultOrderLeadsWithDailyMix(t *testing.T) {
+	out := Generate(richInputs(), testOpts(true))
+	if len(out) == 0 || out[0].Kind != KindDailyMix {
+		t.Fatalf("homepage order = %v, want Daily Mix first", kinds(out))
+	}
+	if byKind(out, KindHeavyRotation) == nil {
+		t.Fatal("Heavy Rotation must still be generated, after Daily Mix")
+	}
+}
+
 func TestGenerate_AllFamiliesInOrder(t *testing.T) {
 	out := Generate(richInputs(), testOpts(true))
 	want := []Kind{
-		KindHeavyRotation, KindAutoMix, KindDailyMix, KindTimeOfDay,
+		KindDailyMix, KindHeavyRotation, KindAutoMix, KindTimeOfDay,
 		KindRecentlyPlayed, KindForgottenFavorites, KindFinishLine,
 	}
 	if len(out) != len(want) {

@@ -106,6 +106,11 @@ type GeneratedPlaylist struct {
 	// members (iOS falls back to a seeded waveform / fixed family color).
 	Energy      []float64
 	ModalRateHz int
+
+	// ExclusionRelaxed is set when the 7-day already-shown exclusion would
+	// have left this family under its minimum, so the family was built
+	// without it. The regenerator logs that once. Not serialized.
+	ExclusionRelaxed bool
 }
 
 // Inputs is the data snapshot the engine generates from, assembled by the
@@ -145,6 +150,21 @@ type Inputs struct {
 	// discovery anti-join).
 	PlayedPaths map[string]bool
 
+	// ServedRecently is the set of paths a discovery shelf served on the 7
+	// UTC days before the run's own. The run's own day is never in it, so
+	// every build on one day gets the same set. Daily Mix's discovery
+	// slice, deep cuts, the mood bands and Auto Mix skip these plus the
+	// familiar shelves (Heavy Rotation, Favorites, Recently Played), unless
+	// that would hide the family.
+	ServedRecently map[string]bool
+
+	// exclusions memoizes discoveryExclusions for one Generate: the five
+	// discovery shelves read the same set, so it is built once rather than
+	// once per shelf, each time rebuilding Heavy Rotation, Favorites and
+	// Recently Played (Gemini on #1276). Nil outside Generate, where a
+	// builder computes the set on demand.
+	exclusions *exclusionMemo
+
 	// Features maps every candidate path (PlayStat lists + hour buckets) to
 	// its hydrated feature, for item building + harmonic sort.
 	Features map[string]TrackFeature
@@ -159,9 +179,10 @@ type Inputs struct {
 	PreviouslyVisible map[string]bool
 
 	// WeekSeed is a deterministic seed derived from the UTC ISO week of the
-	// generating run (regenerator computes it via SeedFromISOWeek). Drives the
-	// deterministic weekly shuffle for Artist Deep Cuts + the two mood bands —
-	// stable for a 7-day window, rotates on Monday-UTC. Same input → same
+	// generating run (regenerator computes it via SeedFromISOWeek). It orders
+	// the analyzed-pool and deep-cut candidate windows, and drives the
+	// weekly shuffle for Artist Deep Cuts, Favorites and the two mood bands.
+	// Stable for a 7-day window, rotates on Monday-UTC. Same input → same
 	// output, keeping the engine pure (no clock read inside).
 	WeekSeed uint64
 }
@@ -183,8 +204,12 @@ type Options struct {
 	MinForgotten              int
 	MinAutoMixPool            int // analyzed-pool size gate for Auto Mix
 	MinTimeOfDayPlays         int // the busiest single hour must reach this
-	MinDailyFamiliar          int
-	MinSessions               int // sessions needed to trust the Finish Line target
+	// MinTimeOfDayHourPlays is the floor for storing one hour's pool. The
+	// family still turns on from the busiest hour; a thinner hour is not
+	// served. <= 0 uses the production floor (2).
+	MinTimeOfDayHourPlays int
+	MinDailyFamiliar      int
+	MinSessions           int // sessions needed to trust the Finish Line target
 
 	SessionGapSeconds   float64 // idle gap that ends a session (Gemini: 60 min)
 	DailyDiscoveryRatio float64 // fraction of the Daily Mix that is discovery
@@ -230,6 +255,7 @@ func DefaultOptions(analysisEnabled bool) Options {
 		MinForgotten:              10,
 		MinAutoMixPool:            20,
 		MinTimeOfDayPlays:         15,
+		MinTimeOfDayHourPlays:     2,
 		MinDailyFamiliar:          10,
 		MinSessions:               20,
 		SessionGapSeconds:         60 * 60, // 60-min idle = new session (Gemini 2026-06-14)
@@ -251,4 +277,11 @@ func DefaultOptions(analysisEnabled bool) Options {
 		MinFavorites:      5,
 		MaxFavoritesItems: 100,
 	}
+}
+
+// exclusionMemo holds one Generate's discovery exclusions once computed. The
+// builders only read the set; discoveryExclusions is its only writer.
+type exclusionMemo struct {
+	done bool
+	set  map[string]bool
 }

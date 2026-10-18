@@ -3,6 +3,7 @@ package smartplaylistgen
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -192,6 +193,130 @@ func TestRegenerate_PipelineEndToEnd(t *testing.T) {
 	n2, err := Regenerate(ctx, s, opts)
 	if err != nil || n2 != n {
 		t.Fatalf("re-run: n2=%d err=%v (want %d, nil)", n2, err, n)
+	}
+}
+
+// The diversity caps used to see only the display cap's worth of rows. One
+// artist filling that prefix fell through to the uncapped list, and every
+// other artist who had already cleared the play floor was past LIMIT.
+func TestRegenerate_HeavyRotationCapsSeePastOneArtist(t *testing.T) {
+	s := openGenStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	var dominant []string
+	for i := 0; i < 10; i++ {
+		p := fmt.Sprintf("/dom/%02d.flac", i)
+		dominant = append(dominant, p)
+		if err := s.UpsertTrack(ctx, &manifest.Track{
+			Path: p, Size: 1, ModTime: time.Unix(1, 0),
+			Title: "Dom", Artist: "Dom", Album: "Box",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var others []string
+	for i := 0; i < 10; i++ {
+		p := fmt.Sprintf("/other/%02d.flac", i)
+		others = append(others, p)
+		if err := s.UpsertTrack(ctx, &manifest.Track{
+			Path: p, Size: 1, ModTime: time.Unix(1, 0),
+			Title: "Other", Artist: fmt.Sprintf("Other%d", i), Album: fmt.Sprintf("Alb%d", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Six plays outranks three, so the display cap is entirely Dom.
+	seedDailyPlays(t, s, now, "BuiltInSpeakers", []int{1, 2, 3, 4, 5, 6}, dominant...)
+	seedDailyPlays(t, s, now, "BuiltInSpeakers", []int{1, 2, 3}, others...)
+
+	opts := DefaultOptions(now.UnixNano(), false)
+	opts.Engine.MaxItems = 10
+	opts.Engine.MinHeavyRotation = 10
+	n, err := Regenerate(ctx, s, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("expected a heavy rotation")
+	}
+	rows, err := s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hr *manifest.StoredSmartPlaylist
+	for i := range rows {
+		if rows[i].Kind == "heavyRotation" {
+			hr = &rows[i]
+			break
+		}
+	}
+	if hr == nil {
+		t.Fatal("heavy rotation was not written")
+	}
+	var items []manifest.SmartPlaylistItem
+	if err := json.Unmarshal(hr.ItemsJSON, &items); err != nil {
+		t.Fatal(err)
+	}
+	othersInMix := 0
+	for _, it := range items {
+		if len(it.Path) >= 6 && it.Path[:6] == "/other" {
+			othersInMix++
+		}
+	}
+	if othersInMix == 0 {
+		t.Fatalf("diversity caps fell back to the dominant prefix: %+v", items)
+	}
+}
+
+// A path recorded as served is loaded on the next build and left out of
+// Auto Mix, which is the shelf the row names.
+func TestRegenerate_SkipsAPathServedThisWeek(t *testing.T) {
+	s := openGenStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	var paths []string
+	for i := 0; i < 6; i++ {
+		p := fmt.Sprintf("/m%d.flac", i)
+		paths = append(paths, p)
+		track(t, s, p, "Jazz")
+		analysis(t, s, p, 0, "major", 120)
+	}
+	served := paths[0]
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now.Add(-24*time.Hour).UnixNano(), discoveryServedDays,
+		map[string][]string{"auto-mix": {served}}); err != nil {
+		t.Fatal(err)
+	}
+	opts := regenTestOptions(now.UnixNano(), true)
+	opts.Engine.MaxItems = 10
+	if _, err := Regenerate(ctx, s, opts); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.LoadSmartPlaylists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var auto *manifest.StoredSmartPlaylist
+	for i := range rows {
+		if rows[i].Kind == "autoMix" {
+			auto = &rows[i]
+			break
+		}
+	}
+	if auto == nil {
+		t.Fatal("auto mix was not written")
+	}
+	var items []manifest.SmartPlaylistItem
+	if err := json.Unmarshal(auto.ItemsJSON, &items); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Path == served {
+			t.Fatalf("auto mix included %s, served yesterday", served)
+		}
+	}
+	if len(items) < 5 {
+		t.Fatalf("auto mix has %d items, want the other keyed tracks", len(items))
 	}
 }
 

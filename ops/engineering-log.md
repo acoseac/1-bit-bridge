@@ -45970,3 +45970,173 @@ page's peak does not grow with the index.
 - Each page has its own ETag and 304. Polling the first page with
   `If-None-Match` after each sync answers 304 while nothing changed; a 200
   with a new `version` means walk again.
+
+## 2026-10-18 — discovery shelves rotate, and stop repeating the last week (backlog B451)
+
+The review at the time measured seven bugs in the smart-mix builders. Each
+was confirmed in the code before the fix, and each new test failed on that
+code first.
+
+The analyzed pool (`AnalyzedTrackFeatures`) and the deep-cut pool
+(`LovedArtistDeepCuts`) were `ORDER BY path` / `ORDER BY artist` and then
+a cap: 5,000 keyed paths, each loved artist's three lowest paths, then the
+alphabetical first 200. On a library larger than the cap, everything past
+the prefix never entered Daily Mix discovery or Auto Mix, and a loved
+artist past the alphabetical cut never entered deep cuts. Both queries now
+order by `mix_week_hash`, FNV-1a of the UTC ISO-week seed and the path,
+the same bytes as `hashSeedPath`, and the cap is applied after that order.
+The per-artist cap stays 3 and the pool stays 200; the 5,000 cap stays.
+The seed is bound as `int64` of the uint64 bit pattern: `database/sql`
+rejects a uint64 whose high bit is set. `mix_week_hash` returns 16 hex
+digits so the sort is the unsigned order. It is registered next to
+`unicode_lower` and is not visible to a `sqlite3` CLI. The same seed is
+deterministic; sweeping seeds reaches every keyed row and every eligible
+deep cut (`TestAnalyzedTrackFeatures_WeekSeedMovesTheWindow`, including a
+seed with the high bit set,
+`TestLovedArtistDeepCuts_WeekSeedRotatesArtistsAndTracks`).
+
+`normalizedBPMDistance` returned 0 when either tempo was missing, cheaper
+than any real gap, so an untempoed track won a same-key tie. One missing
+tempo now costs half the known tempo, the fraction discovery scoring
+already uses. Both missing stays 0.
+`TestSequenceHarmonic_UnknownBPMDoesNotWinAKeyTie` failed on the old
+distance with the untempoed track placed first.
+
+Favorites asked `sequenceHarmonic` for the whole cap and appended hearts
+with no usable key after it, so they were dropped once the chain was full.
+A nil key root and a mode `ToCamelot` rejects are both unkeyed. The chain
+is capped to leave them a slot; if they outnumber the cap, they fill it.
+`TestBuildFavorites_UnkeyedHeartsFitInsideTheCap` and
+`TestBuildFavorites_UnmappedKeyStillFitsInsideTheCap` both failed by
+naming the dropped paths.
+
+Heavy Rotation's diversity caps read `MaxItems` (50) rows. Ten tracks by
+one artist filled that window, the 4/4 caps kept fewer than the floor, and
+the mix fell back to those ten. The read is now 5,000, the query's own
+ceiling, and the fallback remains when the pool really is one artist.
+`TestRegenerate_HeavyRotationCapsSeePastOneArtist` failed with all ten
+items from the one artist.
+
+`OrderedPlayEvents(limit 0)` clamped to 5,000 and ordered `started_at ASC`,
+so the newest plays were the ones cut. The inner query takes the newest
+rows (`started_at DESC, id DESC`) and the outer returns them
+chronological. The outer list does not name `id`.
+`TestOrderedPlayEvents_KeepsTheNewestWindow` failed wanting the newest
+three starts and getting the oldest three.
+
+A time-of-day hour with one play was stored. The family gate stays the
+busiest hour (`MinTimeOfDayPlays`, 15). A separate floor,
+`MinTimeOfDayHourPlays`, is 2; an hour at 2 is served and an hour at 1 is
+not. Raising it to 15 would have hidden hours the existing fixtures serve.
+`TestBuildTimeOfDay_ASinglePlayHourIsNotServed` failed because hour 8 was
+present.
+
+Discovery shelves (Daily Mix, Auto Mix, deep cuts, Lift Off, Wind Down)
+now skip paths any of them served in the last 7 days and the paths on the
+familiar shelves. The served set is `smart_playlist_served` (migration
+v58: `served_at` UnixNano, `slug`, `path`), appended when the cache is
+built and pruned in the same transaction at `now − 7d`. Daily Mix records
+every track it showed and filters only its discovery slice; an empty
+discovery slice does not relax it. The familiar shelves are the built
+items of Heavy Rotation, Favorites and Recently Played, not Heavy
+Rotation's candidate window. If the filter would leave a family under its
+minimum, that family is rebuilt without the filter and the regenerator
+logs one Info line. No wire change: the table is not served, and
+`ExclusionRelaxed` is not serialized.
+`TestDailyDiscoverySkipsAPathServedThisWeek`,
+`TestDiscoverySkipsTheFamiliarShelves`,
+`TestDiscoveryKeepsAFamilyThatTheExclusionWouldHide`,
+`TestSmartPlaylistServed_RecordsAndPrunesPastSevenDays`,
+`TestRegenerate_SkipsAPathServedThisWeek`.
+
+`Generate` puts Daily Mix first and Heavy Rotation second. The cache
+position is the slice index, read `ORDER BY position`. The app's hero is
+`families.first` after hides and an optional pin (`HomeView.swift`,
+`SmartPlaylistSettings.visible`); it does not rerank. Nothing pinned or
+hidden means the wire order is the hero.
+`TestGenerate_DefaultOrderLeadsWithDailyMix` failed with Heavy Rotation
+first.
+
+Not changed, and real: Daily Mix's subtitle stays "Favorites and a few
+you might've missed" when the discovery slice is empty. The owner left it
+out of this release, with the Rediscover shelf, a new deep-cut ranking,
+reasons, neighbourhoods, a mood journey and a novelty quota.
+
+## 2026-10-18 — a same-day rebuild keeps the discovery shelves (backlog B451)
+
+The exclusion in the entry above read every path served since
+`now − 7 × 24 h`, and each build appended its rows. Regeneration does not
+run only daily: it also runs 120 s after every bridge start
+(`smartPlaylistSettleDelay`), on the console's "Regenerate now"
+(`POST /api/smart-playlists/regenerate`) and per family
+(`POST /api/smart-playlists/{slug}/regenerate`, `RegenerateFamily`). The
+engine's only seeds are the ISO week and the slug, so before B451 a second
+build on one day rebuilt the same shelves. With the exclusion, each such
+build skipped what the previous build of the same day had just served: a
+restart or a "Regenerate now" reshuffled Daily Mix's discovery slice, Auto
+Mix and the two mood bands within the day, and the table kept rows for
+shelves that were replaced before anyone was shown them.
+
+Measured red on the tests' own commit, against the code before the fix
+(go1.26.6, macOS), with one fixture that fills all five discovery shelves
+and leaves every pool but deep cuts' room for a second shelf without the
+first one's tracks:
+
+- `TestRegenerate_SameDayRunsBuildTheSameDiscoveryShelves`: a 09:00 and a
+  15:00 build differed in four shelves ("daily-mix changed within the
+  day", and the same for auto-mix, lift-off and wind-down). Auto Mix went
+  from `/disc/08` … `/disc/03` to `/disc/02`, `/disc/09` … `/disc/13`.
+  Deep cuts matched only because its pool, one track larger than the
+  shelf, relaxed the exclusion.
+- `TestRegenerate_SameDayRunsLeaveOneRunOfServedRows`: after builds at
+  00:00:00, 12:00 and 23:59:59.999999999 every shelf held three builds'
+  rows ("auto-mix holds rows from 3 builds (6 rows at
+  2026-10-14T00:00:00Z, 6 rows at 2026-10-14T12:00:00Z, 6 rows at
+  2026-10-14T23:59:59.999999999Z)").
+- `TestRegenerateFamily_ReplacesOnlyItsOwnSlugsRowsForToday`: a 15:00
+  per-family run rebuilt Lift Off from other tracks ("lift-off changed
+  within the day") and left the 09:00 rows ("lift-off row /lift/01.flac is
+  stamped 2026-10-14T09:00:00Z"): eight rows for a shelf of four.
+- `TestSmartPlaylistServed_ExclusionStartsAtUTCMidnight` and
+  `TestSmartPlaylistServed_ReplaceTouchesOnlyTheRunsUTCDay` call the two
+  store methods the fix adds. On that commit a test-only adapter answered
+  them with the old bounds, so they failed by name: at the day's first
+  nanosecond the read excluded that day's rows (`/midnight.flac`,
+  `/today.flac`, `/late.flac`) and the next day's (`/tomorrow.flac`), and a
+  write left the day's rows beside the new one.
+- `TestRegenerate_NextDayExcludesThePreviousDaysPicks` passed there, as it
+  had to, since the old window covered the day before too. It pins what the
+  fix keeps: a build the next day skips the previous day's picks, and deep
+  cuts, which that would leave under its minimum, is built without the skip
+  and logs one line naming it.
+
+The fix: the table is read and written by UTC days, the zone of the week
+seed. `SmartPlaylistServedOnEarlierDays(ctx, nowNS, 7)` reads
+`[dayStart − 7 days, dayStart)`, where `dayStart` is the UTC midnight of
+`NowNS` and belongs to its day. `ReplaceSmartPlaylistServedToday(ctx,
+nowNS, 7, served)` deletes each passed slug's rows from
+`[dayStart, dayStart + 24 h)`, inserts the run's rows stamped `NowNS`, and
+deletes the rows before `dayStart − 7 days`, in one transaction under
+`s.mu`. A per-family regeneration passes only its own slug. A slug not
+passed keeps its rows, including a family that dropped out of a later full
+run that day: it was shown until then. Both methods refuse a window under
+one day. `RecordSmartPlaylistServed`, `SmartPlaylistServedSince` and
+`SmartPlaylistServedRow` are gone; v58 and the table are unchanged. The
+window no longer slides with the hour either: a row stamped 01:00 seven
+days back stays excluded for the whole of today, where `now − 7 × 24 h`
+let it go at 01:00.
+
+The parity pin: `mixWeekHash` (manifest, which the SQL windows order by)
+and `hashSeedPath` (the engine's shuffle) were documented as one
+construction and tested by nothing.
+`TestMixWeekHash_MatchesTheEngineGoldenVectors` and
+`TestHashSeedPath_MatchesTheManifestGoldenVectors` hold the same eight
+vectors, FNV-1a 64 over the seed's big-endian bytes and then the path's
+bytes as `hash/fnv` computes it (checked against a separate implementation
+when the table was written): three seeds with the high bit set, and three
+non-ASCII paths (a composed and a decomposed "ö", and CJK). The manifest
+test also runs SQL `mix_week_hash` with the seed bound as int64. Negative
+controls, restored before the fix: big-endian swapped for little-endian in
+`mixWeekHash` failed 6 of the 8 vectors in Go and in SQL (seeds 0 and
+`0xffffffffffffffff` read the same both ways), and hashing runes instead of
+bytes in `hashSeedPath` failed the three non-ASCII ones.

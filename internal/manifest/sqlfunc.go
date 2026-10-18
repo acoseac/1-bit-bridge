@@ -149,26 +149,98 @@ func NFCCompose(s string) string {
 	return norm.NFC.String(s)
 }
 
-// init registers `unicode_lower(text)` against the modernc.org/sqlite
-// driver at package-load time. The registration is global to the
-// driver — every connection opened with `sql.Open("sqlite", …)` after
-// this point sees the function.
+// mixWeekHash is the week-seeded order key for a smart-mix candidate
+// window: FNV-1a over the seed's big-endian bytes and then the path,
+// the same construction internal/smartplaylist.hashSeedPath uses.
+// Both the per-artist cut and the pool cap order by it, so the window
+// moves with the seed instead of staying a path prefix. Keep the two
+// functions identical; the manifest package cannot import the engine.
+func mixWeekHash(seed uint64, path string) uint64 {
+	const (
+		fnvOffsetBasis uint64 = 14695981039346656037
+		fnvPrime       uint64 = 1099511628211
+	)
+	hash := fnvOffsetBasis
+	var buf [8]byte
+	for i := 0; i < 8; i++ {
+		buf[i] = byte(seed >> (8 * (7 - i)))
+	}
+	for _, b := range buf {
+		hash ^= uint64(b)
+		hash *= fnvPrime
+	}
+	for i := 0; i < len(path); i++ {
+		hash ^= uint64(path[i])
+		hash *= fnvPrime
+	}
+	return hash
+}
+
+// mixWeekHashScalar is SQL `mix_week_hash(seed, path)`. The seed arrives
+// as the int64 bit pattern of the uint64 week seed (a uint64 with the
+// high bit set does not survive database/sql's binder). The result is
+// 16 hex digits so ORDER BY follows the unsigned hash, then the caller
+// applies its LIMIT. Deterministic: the same seed and path always
+// order the same way.
+func mixWeekHashScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("mix_week_hash: expected 2 arguments, got %d", len(args))
+	}
+	seed, ok := driverUint64(args[0])
+	if !ok {
+		return nil, fmt.Errorf("mix_week_hash: seed is not an integer")
+	}
+	path, ok := driverText(args[1])
+	if !ok {
+		return nil, fmt.Errorf("mix_week_hash: path is not text")
+	}
+	return fmt.Sprintf("%016x", mixWeekHash(seed, path)), nil
+}
+
+func driverUint64(v driver.Value) (uint64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return uint64(n), true
+	case int:
+		return uint64(n), true
+	default:
+		return 0, false
+	}
+}
+
+func driverText(v driver.Value) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case []byte:
+		return string(t), true
+	default:
+		return "", false
+	}
+}
+
+// init registers `unicode_lower(text)` and `mix_week_hash(seed, path)`
+// against the modernc.org/sqlite driver at package-load time. The
+// registration is global to the driver — every connection opened with
+// `sql.Open("sqlite", …)` after this point sees the functions.
 //
 // **Why init() is the right home**: modernc.org/sqlite (v1.50.0) does
 // not expose a per-connection ConnectHook (mattn/go-sqlite3 does, but
 // that driver isn't pure-Go). The driver-level registration is the
-// idiomatic path; the registered scalar function is stateless (the
+// idiomatic path; the registered scalar functions are stateless (the
 // per-call Caser is constructed inside the function body, not
 // captured), so global registration carries no race or lifecycle
 // risk.
 //
 // **Operator note**: a plain `sqlite3 bridge.db` CLI session does NOT
-// see `unicode_lower(...)` — the function only exists inside processes
-// that import this Go package. Operators reaching for raw sqlite3 for
-// ad-hoc inspection should use the built-in `lower()` instead; the
-// underlying TEXT data is preserved in original case in the column,
-// so manual queries still work, just with the ASCII-only folding
-// semantics the v3 indexes had.
+// see `unicode_lower(...)` or `mix_week_hash(...)` — the functions only
+// exist inside processes that import this Go package. Operators
+// reaching for raw sqlite3 for ad-hoc inspection should use the
+// built-in `lower()` instead of `unicode_lower`; the underlying TEXT
+// data is preserved in original case in the column, so manual queries
+// still work, just with the ASCII-only folding semantics the v3
+// indexes had.
 func init() {
 	sqlite.MustRegisterDeterministicScalarFunction("unicode_lower", 1, unicodeLowerScalar)
+	sqlite.MustRegisterDeterministicScalarFunction("mix_week_hash", 2, mixWeekHashScalar)
 }

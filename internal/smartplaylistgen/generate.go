@@ -12,9 +12,32 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 )
+
+// logger records a discovery shelf that dropped the already-shown exclusion
+// so it could keep its minimum. One line per family per regeneration.
+var logger = logging.Component("smartplaylist")
+
+// discoveryServedDays is how many UTC days a path a discovery shelf served
+// stays excluded: the days before the run's own, never the run's own day.
+// A build later that day (the settle run after a restart, "Regenerate now",
+// a per-family regenerate) then sees the inputs the day's first build saw
+// and builds the same shelves. Rows older than the window are pruned when
+// the cache is built.
+const discoveryServedDays = 7
+
+// heavyRotationCandidateLimit is how many play-ranked rows Heavy Rotation
+// reads before the diversity caps run. The display cap is Engine.MaxItems
+// (50). Reading only that many lets one artist fill the window; the caps
+// then keep a handful, which is under the floor, and the mix falls back to
+// that uncapped prefix. The query's own ceiling is 5000. Reading the
+// ceiling gives the caps a pool that can fill the shelf from every artist
+// who met the play floor. The fallback stays for a pool that really is one
+// artist.
+const heavyRotationCandidateLimit = 5000
 
 // Options carries the query windows + thresholds + the injected clock. NowNS
 // is supplied by the caller (the ticker passes time.Now; tests pin it) so
@@ -53,13 +76,10 @@ type Options struct {
 	LovedMinPlays           int
 	DeepCutsCutoff          time.Duration
 	ArtistDeepCutsPerArtist int
-	// Candidate pool size handed to LovedArtistDeepCuts. Must be > the engine's
-	// display cap (`Engine.MaxArtistDeepCutsItems`) for the weekly shuffle to
-	// have meaningful rotation — passing the display cap directly to the SQL
-	// LIMIT would always return the same first-N rows (sorted by artist+rn),
-	// and the shuffle would rotate within that static subset every week. Sized
-	// to ~10× the display cap so a library with 60+ loved artists still
-	// rotates cleanly week to week.
+	// Candidate pool size handed to LovedArtistDeepCuts, applied AFTER the
+	// week-seeded hash (3 per artist, then this many rows). Must stay above
+	// the display cap so the weekly shuffle has room inside the window.
+	// Sized to ~10× that cap.
 	ArtistDeepCutsPoolLimit int
 
 	// Mood band BPM + ReplayGain thresholds. Wind Down: bpm ≤ WindDownBPMMax
@@ -113,7 +133,8 @@ func DefaultOptions(nowNS int64, analysisEnabled bool) Options {
 	}
 }
 
-// Regenerate assembles inputs, runs the generator, and replaces the cache.
+// Regenerate assembles inputs, runs the generator, and replaces the cache,
+// then replaces the day's served rows of each discovery shelf it built.
 // Returns the number of populated families written.
 func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, error) {
 	in, err := assembleInputs(ctx, store, opts)
@@ -121,11 +142,15 @@ func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, 
 		return 0, err
 	}
 	gen := smartplaylist.Generate(in, opts.Engine)
+	logExclusionRelaxations(gen)
 	snapshot, err := toStored(gen, opts.NowNS)
 	if err != nil {
 		return 0, err
 	}
 	if err := store.ReplaceSmartPlaylists(ctx, snapshot); err != nil {
+		return 0, err
+	}
+	if err := recordDiscoveryServed(ctx, store, gen, opts.NowNS); err != nil {
 		return 0, err
 	}
 	return len(snapshot), nil
@@ -138,7 +163,9 @@ func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, 
 // identical either way); only the requested slug's output is written. A slug
 // the fresh run no longer populates is REMOVED from the cache, matching the
 // wholesale path where an empty family simply isn't written — a mix whose
-// source signal dried up must not linger stale forever.
+// source signal dried up must not linger stale forever. Of the served
+// rows, only the slug's own for the day are replaced, and only when the
+// slug is a discovery shelf the run built.
 //
 // Returns generated (the slug is in the fresh engine output and was
 // written), existed (a cached row was present before the call), and the
@@ -150,6 +177,7 @@ func RegenerateFamily(ctx context.Context, store *manifest.Store, opts Options, 
 	}
 	gen := smartplaylist.Generate(in, opts.Engine)
 	var fresh *manifest.StoredSmartPlaylist
+	var served []smartplaylist.GeneratedPlaylist
 	for i := range gen {
 		if gen[i].Slug != slug {
 			continue
@@ -162,11 +190,16 @@ func RegenerateFamily(ctx context.Context, store *manifest.Store, opts Options, 
 		}
 		fresh = &rows[0]
 		itemCount = generatedItemCount(gen[i])
+		served = gen[i : i+1]
 		break
 	}
 	existed, err = store.ReplaceSmartPlaylistFamily(ctx, slug, fresh)
 	if err != nil {
 		return false, existed, 0, err
+	}
+	logExclusionRelaxations(served)
+	if err := recordDiscoveryServed(ctx, store, served, opts.NowNS); err != nil {
+		return fresh != nil, existed, itemCount, err
 	}
 	return fresh != nil, existed, itemCount, nil
 }
@@ -191,6 +224,12 @@ func generatedItemCount(g smartplaylist.GeneratedPlaylist) int {
 func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (smartplaylist.Inputs, error) {
 	now := opts.NowNS
 	eng := opts.Engine
+	// Week seed — UTC ISO week, so the candidate windows and the
+	// deterministic weekly shuffles rotate on Monday-UTC and stay stable
+	// across a 7-day window. Computed up front: the analyzed pool and the
+	// deep-cut query order by it.
+	yr, wk := time.Unix(0, opts.NowNS).UTC().ISOWeek()
+	weekSeed := smartplaylist.SeedFromISOWeek(yr, wk)
 
 	// Heavy Rotation: prefer a ≥HeavyRotationMinPlays floor so one-time and
 	// twice-played tracks don't flood the mix, but DEGRADE the floor (…→2→1)
@@ -205,7 +244,7 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	// no-op HAVING = the full pool.
 	for floor := max(1, opts.HeavyRotationMinPlays); floor >= 1; floor-- {
 		var qerr error
-		heavy, qerr = store.PlayStatsInWindow(ctx, now-opts.HeavyWindow.Nanoseconds(), 0, opts.MinPlaySeconds, floor, eng.MaxItems)
+		heavy, qerr = store.PlayStatsInWindow(ctx, now-opts.HeavyWindow.Nanoseconds(), 0, opts.MinPlaySeconds, floor, heavyRotationCandidateLimit)
 		if qerr != nil {
 			return smartplaylist.Inputs{}, qerr
 		}
@@ -258,13 +297,12 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		return smartplaylist.Inputs{}, err
 	}
 
-	// From Artists You Love: per-artist-capped deep cuts. Pass the dedicated
-	// `ArtistDeepCutsPoolLimit` (200) instead of the engine's display cap
-	// (`Engine.MaxItems` = 50) — passing the display cap to the SQL LIMIT
-	// would always return the same first-50 rows (sorted by artist + rn), and
-	// `buildArtistDeepCuts`'s weekly shuffle would rotate within that static
-	// subset every week. A larger candidate pool gives the shuffle real
-	// rotation surface (Gemini + CodeRabbit on PR #431).
+	// From Artists You Love: three tracks per loved artist, then a pool of
+	// ArtistDeepCutsPoolLimit (200). Both cuts order by the week seed, so
+	// the pool is not the alphabetical first 200 and not each artist's
+	// lowest paths. The pool stays larger than the display cap so the
+	// weekly shuffle still has room inside the window (Gemini + CodeRabbit
+	// on PR #431).
 	deepCuts, err := store.LovedArtistDeepCuts(ctx,
 		now-opts.LovedWindow.Nanoseconds(),
 		opts.LovedMinPlays,
@@ -272,6 +310,7 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		opts.MinPlaySeconds,
 		opts.ArtistDeepCutsPerArtist,
 		opts.ArtistDeepCutsPoolLimit,
+		weekSeed,
 	)
 	if err != nil {
 		return smartplaylist.Inputs{}, err
@@ -311,17 +350,23 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		previouslyVisible[p.Slug] = true
 	}
 
-	// Week seed — UTC ISO week, so the deterministic weekly shuffle for
-	// Artist Deep Cuts + the mood bands rotates on Monday-UTC and is stable
-	// across a 7-day window.
-	yr, wk := time.Unix(0, opts.NowNS).UTC().ISOWeek()
-	weekSeed := smartplaylist.SeedFromISOWeek(yr, wk)
-
 	var pool []manifest.TrackFeatureRow
 	if opts.AnalysisEnabled {
-		if pool, err = store.AnalyzedTrackFeatures(ctx, "", opts.PoolLimit); err != nil {
+		if pool, err = store.AnalyzedTrackFeatures(ctx, "", weekSeed, opts.PoolLimit); err != nil {
 			return smartplaylist.Inputs{}, err
 		}
+	}
+
+	// The days before this run's own, in UTC like the week seed. What this
+	// day already served excludes nothing, so a second build today gets
+	// the inputs the first one got.
+	servedSet, err := store.SmartPlaylistServedOnEarlierDays(ctx, now, discoveryServedDays)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+	servedRecently := make(map[string]bool, len(servedSet))
+	for p := range servedSet {
+		servedRecently[p] = true
 	}
 
 	// Hydrate features for every candidate path (listening lists + hour
@@ -405,7 +450,38 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		Features:          features,
 		PreviouslyVisible: previouslyVisible,
 		WeekSeed:          weekSeed,
+		ServedRecently:    servedRecently,
 	}, nil
+}
+
+func logExclusionRelaxations(gen []smartplaylist.GeneratedPlaylist) {
+	for _, g := range gen {
+		if g.ExclusionRelaxed {
+			logger.Info("smart mix dropped the already-shown exclusion to keep its minimum", "slug", g.Slug)
+		}
+	}
+}
+
+// recordDiscoveryServed replaces the run's own UTC day's served rows for each
+// discovery shelf gen holds with that shelf's items, and prunes past the
+// window. A shelf gen does not hold keeps its rows: a per-family run passes
+// only its own family, and a family that dropped out of a later full run
+// was still shown until it did.
+func recordDiscoveryServed(ctx context.Context, store *manifest.Store, gen []smartplaylist.GeneratedPlaylist, nowNS int64) error {
+	served := map[string][]string{}
+	for _, g := range gen {
+		if !smartplaylist.DiscoveryShelf(g.Slug) {
+			continue
+		}
+		paths := make([]string, 0, len(g.Items))
+		for _, it := range g.Items {
+			if it.Path != "" {
+				paths = append(paths, it.Path)
+			}
+		}
+		served[g.Slug] = paths
+	}
+	return store.ReplaceSmartPlaylistServedToday(ctx, nowNS, discoveryServedDays, served)
 }
 
 // toStored converts the engine output into cache rows, serializing each

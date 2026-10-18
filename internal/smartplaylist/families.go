@@ -137,28 +137,46 @@ func buildAutoMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	if !opts.AnalysisEnabled || len(in.AnalyzedPool) < opts.MinAutoMixPool {
 		return GeneratedPlaylist{}, false
 	}
-	seed := pickHarmonicSeed(in)
-	seq := sequenceHarmonic(seed, in.AnalyzedPool, opts.MaxItems)
+	ex := discoveryExclusions(in, opts)
+	seq := autoMixSequence(in, opts, ex)
+	relaxed := false
+	if len(seq) < 5 && len(ex) > 0 {
+		seq = autoMixSequence(in, opts, nil)
+		relaxed = len(seq) >= 5
+	}
 	if len(seq) < 5 {
 		return GeneratedPlaylist{}, false
 	}
 	return GeneratedPlaylist{
 		Slug: "auto-mix", Kind: KindAutoMix,
 		Title: "Auto Mix", Subtitle: "A harmonic flow through your library",
-		Items: itemsFromFeatures(seq, opts.MaxItems),
+		Items:            itemsFromFeatures(seq, opts.MaxItems),
+		ExclusionRelaxed: relaxed,
 	}, true
 }
 
+func autoMixSequence(in Inputs, opts Options, ex map[string]bool) []TrackFeature {
+	pool := filterFeatures(in.AnalyzedPool, ex)
+	if len(pool) < opts.MinAutoMixPool {
+		return nil
+	}
+	return sequenceHarmonic(pickHarmonicSeed(in, pool, ex), pool, opts.MaxItems)
+}
+
 // pickHarmonicSeed prefers the top heavy-rotation track that has a key (so the
-// mix starts from a favourite); falls back to the first analyzed-pool track.
-func pickHarmonicSeed(in Inputs) TrackFeature {
+// mix starts from a favourite) and is not excluded; falls back to the first
+// track of the pool it was given.
+func pickHarmonicSeed(in Inputs, pool []TrackFeature, ex map[string]bool) TrackFeature {
 	for _, s := range in.HeavyRotation {
+		if ex[s.Path] {
+			continue
+		}
 		if f, ok := in.Features[s.Path]; ok && f.KeyRoot != nil {
 			return f
 		}
 	}
-	if len(in.AnalyzedPool) > 0 {
-		return in.AnalyzedPool[0]
+	if len(pool) > 0 {
+		return pool[0]
 	}
 	return TrackFeature{}
 }
@@ -192,8 +210,17 @@ func buildTimeOfDay(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 		return GeneratedPlaylist{}, false
 	}
 
+	// One play is not "what you usually play around this time". The family
+	// still turns on from the busiest hour; a thinner hour is left out.
+	minHour := opts.MinTimeOfDayHourPlays
+	if minHour <= 0 {
+		minHour = 2
+	}
 	hourly := map[int][]Item{}
 	for h, lst := range byHour {
+		if hourTotal[h] < minHour {
+			continue
+		}
 		sort.SliceStable(lst, func(i, j int) bool {
 			if lst[i].plays != lst[j].plays {
 				return lst[i].plays > lst[j].plays
@@ -243,6 +270,9 @@ func buildDailyMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	var discovery []TrackFeature
 	if opts.AnalysisEnabled {
 		discovery = discoveryCandidates(familiar, in.AnalyzedPool, in.PlayedPaths)
+		// The familiar slice stays. Only the discovery slice skips tracks
+		// already shown, and tracks sitting on the familiar shelves.
+		discovery = filterFeatures(discovery, discoveryExclusions(in, opts))
 	}
 
 	target := opts.MaxItems
@@ -502,34 +532,58 @@ func buildFavorites(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	// would render the same prefix forever.
 	shuffled := shuffleFeaturesByWeek(in.Favorites, in.WeekSeed^favoritesSeedOffset)
 
-	// Harmonic when analysis is on and enough of the pool carries a key —
-	// the Auto Mix treatment applied to the user's own curation. Un-keyed
-	// favorites append after the harmonic run (week-shuffled) so a heart
-	// is never dropped just because its track wasn't analyzable.
+	// Harmonic when analysis is on and enough hearts map onto the wheel.
+	// Hearts the chain cannot place (no key, or a mode ToCamelot rejects)
+	// reserve slots inside the cap and fill that tail. Asking the chain
+	// for the whole cap filled it with keyed tracks and the append never ran.
 	var ordered []TrackFeature
 	if opts.AnalysisEnabled {
 		keyed := make([]TrackFeature, 0, len(shuffled))
+		unkeyed := make([]TrackFeature, 0)
 		for _, f := range shuffled {
-			if f.KeyRoot != nil {
+			if camelotOK(f) {
 				keyed = append(keyed, f)
+			} else {
+				unkeyed = append(unkeyed, f)
 			}
 		}
 		if len(keyed) >= 5 {
-			seq := sequenceHarmonic(keyed[0], keyed, capN)
-			if len(seq) >= 5 {
-				used := make(map[string]bool, len(seq))
-				for _, f := range seq {
-					used[f.Path] = true
+			reserve := len(unkeyed)
+			if reserve > capN {
+				reserve = capN
+			}
+			chainCap := capN - reserve
+			var seq []TrackFeature
+			if chainCap > 0 {
+				seq = sequenceHarmonic(keyed[0], keyed, chainCap)
+			}
+			ordered = make([]TrackFeature, 0, capN)
+			used := make(map[string]bool, capN)
+			for _, f := range seq {
+				if len(ordered) >= capN {
+					break
 				}
-				ordered = seq
-				for _, f := range shuffled {
-					if len(ordered) >= capN {
-						break
-					}
-					if !used[f.Path] {
-						ordered = append(ordered, f)
-					}
+				ordered = append(ordered, f)
+				used[f.Path] = true
+			}
+			for _, f := range unkeyed {
+				if len(ordered) >= capN {
+					break
 				}
+				if used[f.Path] {
+					continue
+				}
+				ordered = append(ordered, f)
+				used[f.Path] = true
+			}
+			for _, f := range keyed {
+				if len(ordered) >= capN {
+					break
+				}
+				if used[f.Path] {
+					continue
+				}
+				ordered = append(ordered, f)
 			}
 		}
 	}
@@ -592,24 +646,33 @@ func buildOnRepeat(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 // --- From Artists You Love (per-artist-capped library deep cuts) ---
 
 func buildArtistDeepCuts(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	// The manifest query already balanced per-artist via ROW_NUMBER PARTITION
-	// + ordered (artist, rn). Re-order via a deterministic weekly shuffle so
-	// the visible window rotates Monday-to-Monday without churning daily.
-	paths := shufflePathsByWeek(pathsOf(in.ArtistDeepCuts), in.WeekSeed)
-
-	cap := opts.MaxArtistDeepCutsItems
-	if cap <= 0 {
-		cap = opts.MaxItems
+	// The manifest query already kept three tracks per artist and a pool,
+	// both ordered by the week seed. Re-order that pool with the same seed
+	// so the visible window rotates Monday-to-Monday without churning daily.
+	capN := opts.MaxArtistDeepCutsItems
+	if capN <= 0 {
+		capN = opts.MaxItems
 	}
-	items := itemsFromPaths(paths, in.Features, cap)
+	ex := discoveryExclusions(in, opts)
+	items := artistDeepCutItems(in, capN, ex)
+	relaxed := false
+	if len(items) < opts.MinArtistDeepCuts && len(ex) > 0 {
+		items = artistDeepCutItems(in, capN, nil)
+		relaxed = len(items) >= opts.MinArtistDeepCuts
+	}
 	if len(items) < opts.MinArtistDeepCuts {
 		return GeneratedPlaylist{}, false
 	}
 	return GeneratedPlaylist{
 		Slug: "artist-deep-cuts", Kind: KindArtistDeepCuts,
 		Title: "From Artists You Love", Subtitle: "Hidden gems by artists in your rotation",
-		Items: items,
+		Items: items, ExclusionRelaxed: relaxed,
 	}, true
+}
+
+func artistDeepCutItems(in Inputs, capN int, ex map[string]bool) []Item {
+	paths := shufflePathsByWeek(pathsOf(filterStats(in.ArtistDeepCuts, ex)), in.WeekSeed)
+	return itemsFromPaths(paths, in.Features, capN)
 }
 
 // --- Mood bands (Wind Down / Lift Off) ---
@@ -623,43 +686,121 @@ const (
 )
 
 func buildWindDown(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	if len(in.QuietSlowPool) < opts.MinMoodBand {
-		return GeneratedPlaylist{}, false
-	}
-	shuffled := shuffleFeaturesByWeek(in.QuietSlowPool, in.WeekSeed^moodSeedOffsetWindDown)
-	cap := opts.MaxMoodBandItems
-	if cap <= 0 {
-		cap = opts.MaxItems
-	}
-	items := itemsFromFeatures(shuffled, cap)
-	if len(items) < opts.MinMoodBand {
-		return GeneratedPlaylist{}, false
-	}
-	return GeneratedPlaylist{
-		Slug: "wind-down", Kind: KindWindDown,
-		Title: "Wind Down", Subtitle: "Calm music for slow moments",
-		Items: items,
-	}, true
+	return buildMoodBand(in.QuietSlowPool, in, opts, in.WeekSeed^moodSeedOffsetWindDown,
+		"wind-down", KindWindDown, "Wind Down", "Calm music for slow moments")
 }
 
 func buildLiftOff(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	if len(in.LoudFastPool) < opts.MinMoodBand {
+	return buildMoodBand(in.LoudFastPool, in, opts, in.WeekSeed^moodSeedOffsetLiftOff,
+		"lift-off", KindLiftOff, "Lift Off", "Tracks to get moving")
+}
+
+func buildMoodBand(pool []TrackFeature, in Inputs, opts Options, seed uint64, slug string, kind Kind, title, subtitle string) (GeneratedPlaylist, bool) {
+	if len(pool) < opts.MinMoodBand {
 		return GeneratedPlaylist{}, false
 	}
-	shuffled := shuffleFeaturesByWeek(in.LoudFastPool, in.WeekSeed^moodSeedOffsetLiftOff)
-	cap := opts.MaxMoodBandItems
-	if cap <= 0 {
-		cap = opts.MaxItems
+	capN := opts.MaxMoodBandItems
+	if capN <= 0 {
+		capN = opts.MaxItems
 	}
-	items := itemsFromFeatures(shuffled, cap)
+	ex := discoveryExclusions(in, opts)
+	items := itemsFromFeatures(shuffleFeaturesByWeek(filterFeatures(pool, ex), seed), capN)
+	relaxed := false
+	if len(items) < opts.MinMoodBand && len(ex) > 0 {
+		items = itemsFromFeatures(shuffleFeaturesByWeek(pool, seed), capN)
+		relaxed = len(items) >= opts.MinMoodBand
+	}
 	if len(items) < opts.MinMoodBand {
 		return GeneratedPlaylist{}, false
 	}
 	return GeneratedPlaylist{
-		Slug: "lift-off", Kind: KindLiftOff,
-		Title: "Lift Off", Subtitle: "Tracks to get moving",
-		Items: items,
+		Slug: slug, Kind: kind, Title: title, Subtitle: subtitle,
+		Items: items, ExclusionRelaxed: relaxed,
 	}, true
+}
+
+// DiscoveryShelf reports whether slug is a shelf that records what it
+// served and skips what the discovery shelves served on the 7 UTC days
+// before the run's own: Daily Mix, Auto Mix, deep cuts, Lift Off and Wind
+// Down. Daily Mix records every track it showed; only its discovery slice
+// is filtered on the way in.
+func DiscoveryShelf(slug string) bool {
+	switch slug {
+	case "daily-mix", "auto-mix", "artist-deep-cuts", "wind-down", "lift-off":
+		return true
+	default:
+		return false
+	}
+}
+
+func camelotOK(f TrackFeature) bool {
+	if f.KeyRoot == nil {
+		return false
+	}
+	_, ok := ToCamelot(*f.KeyRoot, f.KeyMode)
+	return ok
+}
+
+// discoveryExclusions is the set a discovery shelf skips: paths any of
+// those shelves served on the 7 UTC days before the run's own
+// (Inputs.ServedRecently), plus the paths on the familiar shelves as those
+// shelves will actually be built (Heavy Rotation, Favorites, Recently
+// Played). The Heavy Rotation input is a candidate window, not the shelf,
+// so the built items are what counts. Nil when there is nothing to skip,
+// so a builder can tell "no exclusion" from "an exclusion that removed
+// nothing".
+func discoveryExclusions(in Inputs, opts Options) map[string]bool {
+	if m := in.exclusions; m != nil && m.done {
+		return m.set
+	}
+	ex := map[string]bool{}
+	add := func(p GeneratedPlaylist, ok bool) {
+		if !ok {
+			return
+		}
+		for _, it := range p.Items {
+			ex[it.Path] = true
+		}
+	}
+	add(buildHeavyRotation(in, opts))
+	add(buildFavorites(in, opts))
+	add(buildRecentlyPlayed(in, opts))
+	for p := range in.ServedRecently {
+		ex[p] = true
+	}
+	if len(ex) == 0 {
+		ex = nil
+	}
+	if m := in.exclusions; m != nil {
+		m.done, m.set = true, ex
+	}
+	return ex
+}
+
+func filterFeatures(feats []TrackFeature, ex map[string]bool) []TrackFeature {
+	if len(ex) == 0 {
+		return feats
+	}
+	out := make([]TrackFeature, 0, len(feats))
+	for _, f := range feats {
+		if !ex[f.Path] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func filterStats(stats []PlayStat, ex map[string]bool) []PlayStat {
+	if len(ex) == 0 {
+		return stats
+	}
+	out := make([]PlayStat, 0, len(stats))
+	for _, s := range stats {
+		if !ex[s.Path] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // --- shared deterministic shuffle helpers ---
@@ -724,6 +865,9 @@ func shuffleFeaturesByWeek(pool []TrackFeature, seed uint64) []TrackFeature {
 // hot path runs this up to 50_000× per mood-band regeneration and the per-
 // call hasher allocation was visible GC pressure (Gemini bot review on PR
 // #431). Functionally identical to the prior `hash/fnv` implementation.
+// manifest.mixWeekHash is the same bytes; the SQL windows order by it.
+// The packages cannot import each other, so a change here has to change
+// both.
 func hashSeedPath(seed uint64, path string) uint64 {
 	const (
 		fnvOffsetBasis uint64 = 14695981039346656037

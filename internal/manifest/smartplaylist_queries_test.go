@@ -339,6 +339,28 @@ func TestOrderedPlayEvents(t *testing.T) {
 	}
 }
 
+// The cap used to keep the oldest rows (ORDER BY started_at ASC LIMIT), so a
+// window with more qualifying plays than the cap lost the newest ones. The
+// session walk still needs chronological order inside the newest window.
+func TestOrderedPlayEvents_KeepsTheNewestWindow(t *testing.T) {
+	s := newSPStore(t)
+	ctx := context.Background()
+	mustUpsertTrack(t, s, &Track{Path: "/a.flac"})
+	for _, at := range []int64{100, 200, 300, 400, 500} {
+		mustInsertHistory(t, s, PlaybackHistoryRow{Path: "/a.flac", StartedAt: at, DurationUsed: 60})
+	}
+	ev, err := s.OrderedPlayEvents(ctx, 0, 30.0, 3)
+	if err != nil {
+		t.Fatalf("OrderedPlayEvents: %v", err)
+	}
+	if len(ev) != 3 {
+		t.Fatalf("want the newest 3 events, got %d (%+v)", len(ev), ev)
+	}
+	if ev[0].StartedAt != 300 || ev[1].StartedAt != 400 || ev[2].StartedAt != 500 {
+		t.Fatalf("newest window must come back chronological, got %+v", ev)
+	}
+}
+
 // --- feature hydration: effective values + tag-wins-over-analysis ---
 
 func TestTrackFeatures_EffectiveValuesAndTagWins(t *testing.T) {
@@ -418,7 +440,7 @@ func TestAnalyzedTrackFeatures_PoolAndGenreFilter(t *testing.T) {
 	mustUpsertTrack(t, s, &Track{Path: "/nokey.flac", Genre: "Jazz"})
 	mustUpsertAnalysis(t, s, AnalysisRow{SourcePath: "/nokey.flac", ReplayGainTrackDB: spFloat(-5.0)})
 
-	all, err := s.AnalyzedTrackFeatures(ctx, "", 100)
+	all, err := s.AnalyzedTrackFeatures(ctx, "", 0, 100)
 	if err != nil {
 		t.Fatalf("AnalyzedTrackFeatures: %v", err)
 	}
@@ -426,7 +448,7 @@ func TestAnalyzedTrackFeatures_PoolAndGenreFilter(t *testing.T) {
 		t.Fatalf("pool should exclude key-less rows: want 2, got %d (%+v)", len(all), all)
 	}
 
-	jazz, err := s.AnalyzedTrackFeatures(ctx, "Jazz", 100)
+	jazz, err := s.AnalyzedTrackFeatures(ctx, "Jazz", 0, 100)
 	if err != nil {
 		t.Fatalf("AnalyzedTrackFeatures (Jazz): %v", err)
 	}
@@ -605,6 +627,7 @@ func TestLovedArtistDeepCuts_PerArtistCapAndRecentExclusion(t *testing.T) {
 		30.0,
 		3,  // perArtistCap
 		50, // limit
+		0,  // week seed
 	)
 	if err != nil {
 		t.Fatalf("LovedArtistDeepCuts: %v", err)
@@ -615,10 +638,10 @@ func TestLovedArtistDeepCuts_PerArtistCapAndRecentExclusion(t *testing.T) {
 	for _, r := range rows {
 		pathSet[r.Path] = true
 	}
-	for _, p := range []string{
-		"/loved-a/deep-1.flac", "/loved-a/deep-2.flac", "/loved-a/deep-3.flac",
-		"/loved-b/deep-2.flac", "/loved-b/deep-3.flac",
-	} {
+	// LovedB has only two eligible tracks, so both are in any seed's window.
+	// Which three of LovedA's four the seed keeps is the rotation test's
+	// question; here the cap is what matters.
+	for _, p := range []string{"/loved-b/deep-2.flac", "/loved-b/deep-3.flac"} {
 		if !pathSet[p] {
 			t.Errorf("eligible deep cut missing: %s", p)
 		}
