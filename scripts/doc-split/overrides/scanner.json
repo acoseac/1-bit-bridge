@@ -1,0 +1,3 @@
+{
+ "- **The threshold reap unlinks its sidecars**": "- **The threshold reap unlinks its sidecars**, and both DELETE arms and both sidecar enumerations are derived at compile time from one shared `where` const so the unlink set and the row set cannot diverge; **`ClearMissingCounts` does the same for the rows it deletes** (2026-10-14, backlog B186). → History-rules-scanner.md"
+}

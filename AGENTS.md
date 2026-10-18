@@ -2,24 +2,32 @@
 
 Guidance for AI coding agents working in this repository. Assumes no prior
 knowledge of the project. [`CLAUDE.md`](CLAUDE.md) is the deeper
-institutional-knowledge companion — its "things that have bitten before"
-section carries the project's invariants grouped by subsystem. Consult it
+institutional-knowledge companion, and the project's invariants, grouped by
+subsystem, are in the `.claude/rules/*.md` files whose `paths:` globs match
+the code (`python3 scripts/rules-for.py <path>` names them). Consult them
 before touching concurrency, the wire protocol, or any subsystem flagged
 below. The evidence behind each invariant (the measurement, the rejected
 alternative, the test that pins it, the PR) lives in
 [`ops/engineering-log.md`](ops/engineering-log.md); grep it by symbol or PR
 number when a rule looks arbitrary.
 
-**Agent-doc maintenance.** `CLAUDE.md` is the authority, and it is a living
-document: new invariants — the "things that have bitten before" entries a
-fix produces — go THERE, in the same PR as the fix they describe, with the
-supporting record appended to `ops/engineering-log.md` in that PR too, so a
-review reads the rule beside the code it is about. A push straight to `main`
+**Agent-doc maintenance.** `CLAUDE.md` and the rules files are the authority,
+and they are living documents. A new invariant, the entry a fix produces,
+goes in the same PR as the fix it describes: in the `.claude/rules/*.md`
+file whose `paths:` globs match the code it binds (CLAUDE.md's "Where things
+live"), or in `CLAUDE.md` when every session needs it. A long entry is one
+line there, and its long form goes to the `ops/History-*.md` file the line
+points to. The supporting record is appended to `ops/engineering-log.md` in
+that PR too, so a review reads the rule beside the code it is about. A push straight to `main`
 is the one exception `CLAUDE.md`'s Development workflow makes, for a change
 to `CLAUDE.md` alone (a corrected claim, a stale count); it is never the
 route for a rule that ships with code, and a change to this file goes
-through a PR like any other. Only `CLAUDE.md` is auto-loaded into an agent
-session, so a finding written only into the log is inert. This file is the
+through a PR like any other. Claude Code loads `CLAUDE.md` into every
+session and a rules file whenever it reads a file the globs match, and a
+finding written only into the log is inert. Cursor loads this file and
+`CLAUDE.md` but not `.claude/rules/`, so before changing a file, run
+`python3 scripts/rules-for.py <path>` and read every rules file it prints;
+before committing, run `python3 scripts/rules-for.py --changed`. This file is the
 onboarding layer: project shape, build commands, module map. Keep it current
 when those change, and don't duplicate invariant history into it.
 
@@ -64,6 +72,7 @@ it).
 | `make fmt` / `make vet` | `go fmt ./...` / `go vet ./...`. |
 | `make run` | `go run ./cmd/bridge serve --config config/bridge.yaml.example`. |
 | `make check-go-version` | Guards that `Dockerfile`'s `ARG GO_VERSION` matches `go.mod`'s major.minor (alpine sets `GOTOOLCHAIN=local`, so a stale ARG fails the image build). |
+| `make docs-check` | Holds `CLAUDE.md`, the rules files and the skills to their byte budgets (`scripts/check-doc-budgets.py`; Python stdlib only), and runs the doc tools' self-tests. CI runs it too. |
 | `make docker` | Builds the container image (runs `check-go-version` first). |
 | `make clean` | Removes `bin/` and `dist/`. |
 
@@ -338,7 +347,7 @@ in place.
 - For jobs spanning 3+ PRs use the stack-and-batch pattern (each branch based
   on the prior tip, PRs opened together, one review wait, merge bottom-up)
   unless the PRs are genuinely independent — then open them in parallel.
-  Details in `CLAUDE.md` → "Multi-PR batch workflow".
+  Details in the `multi-pr-batch` skill (`.claude/skills/multi-pr-batch/SKILL.md`).
 - Post-merge, deploy to the two reachable bridges (see above) so paired iOS
   clients actually get the change.
 
@@ -349,7 +358,10 @@ in place.
 | `README.md` | User-facing intro, install, Tailscale modes |
 | `PROTOCOL.md` | Wire protocol v1 — source of truth |
 | `CONTRIBUTING.md` | Branch/PR conventions, mirror-PR rule, pre-push checklist |
-| `CLAUDE.md` | Deep agent knowledge: invariants by subsystem, workflows, external-review processes |
+| `CLAUDE.md` | Deep agent knowledge: build and workflow rules, the cross-repo contract, where everything else lives |
+| `.claude/rules/*.md` | The invariants by subsystem, each file loading with the code its `paths:` globs match (`scripts/rules-for.py`) |
+| `.claude/skills/*/SKILL.md` | Procedures: the local fixture, deploys, release day, consults, LOUPE and DeepSeek, multi-PR batches |
+| `ops/History-*.md` | The long form of every condensed entry in CLAUDE.md and the rules files (binding, not auto-loaded) |
 | `ops/engineering-log.md` | The record behind each invariant — measurement, rejected alternatives, tests, PRs (not auto-loaded) |
 | `SECURITY.md` | Vulnerability reporting, scope |
 | `docs/release-process.md` | Per-release doc/publish checklist |

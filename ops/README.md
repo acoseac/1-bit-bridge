@@ -26,16 +26,21 @@ Two different reasons put a file in `ops/`, and only the first is about secrecy:
 1. **It must not be published** — the table above. Host coordinates, exploit
    indexes. These are placeholdered or untracked.
 2. **It is internal working material** — `engineering-log.md`,
-   `settings-apply-semantics.md`, `plan-*.md`. Nothing in them is sensitive;
+   `History-*.md`, `settings-apply-semantics.md`, `plan-*.md`. Nothing in them is sensitive;
    they simply aren't user-facing documentation, and `docs/` is the public
    website. They are tracked, and normal.
 
-`engineering-log.md` is the record behind every invariant in `CLAUDE.md` — the
+`engineering-log.md` is the record behind every invariant in `CLAUDE.md` and
+the rules files — the
 measurement that settled it, the alternative that was rejected, the test that
 pins it, the PR. It was extracted from `CLAUDE.md` on 2026-09-02 because that
 file is auto-loaded into every agent session and had grown to 520 KB. **Only
-`CLAUDE.md` is auto-loaded**, so a finding written only into the log never
-reaches a session: put the *rule* in `CLAUDE.md` and the *record* here.
+`CLAUDE.md` and the rules files are auto-loaded** (`.claude/rules/*.md`, each
+with the code its globs match), so a finding written only into the log never
+reaches a session: put the *rule* in `CLAUDE.md` or the rules file that loads
+with its code, and the *record* here. The `History-*.md` files hold the long
+form of every condensed entry in those files, verbatim, since 2026-10-18; they
+are binding, and not auto-loaded either.
 
 **Don't move these back into `docs/`, and don't re-`git add` the untracked ones.** If a future
 document names a live host, an IP, a port-forward, a key path, or enumerates unfixed

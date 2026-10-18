@@ -1,0 +1,5 @@
+{
+ "The largest package in the repo": "The largest package in the repo (`main.go` alone 4,698 lines) had **no section here** until 2026-09-06, and some of its invariants still sit by subject in other sections: the `bgWriters` join under Scanner, `SetPostScanHook` under Job pools, the cadence rearm under Config. → History-rules-cli-serve.md",
+ "- **A `stopFn` that signals is not a join.**": "- **A `stopFn` that signals is not a join.** A stop deferred ahead of `Store.Close()` must wait for its loop, grace-bounded. **And the work has to be cancellable for the wait to mean anything**. → History-rules-cli-serve.md",
+ "- **Shutdown joins every background writer**": "- **Shutdown joins every background writer**, and the wait must be written INLINE in the defer, never routed through a variable assigned later in `runServe`; both this wait and the watcher's are grace-BOUNDED. → History-rules-cli-serve.md"
+}

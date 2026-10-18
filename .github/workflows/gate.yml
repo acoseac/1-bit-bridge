@@ -66,6 +66,13 @@ name: gate
 # Action references are commit-pinned (not tag-pinned) so a hijacked
 # upstream can't silently alter what runs here — matches gofmt.yml and
 # codeql.yml. Version comments are what Dependabot reads to bump the SHAs.
+#
+# A seventh, `docs-check`, is a text check like `go-version` (Python 3
+# stdlib, no Go toolchain): `make docs-check` holds the instruction files
+# Claude Code loads on its own to their byte budgets (CLAUDE.md, each
+# .claude/rules/*.md, the worst single-file load) and runs the doc tools'
+# self-tests. The repo has no git hooks, so this job is where an
+# over-budget CLAUDE.md goes red. See scripts/doc-split/README.md.
 
 on:
   push:
@@ -279,6 +286,22 @@ jobs:
       - name: Dockerfile GO_VERSION matches go.mod
         run: make check-go-version
 
+  # The instruction-file budgets (see the header). Python 3 stdlib only, which
+  # the runner image ships; the scripts read the tree through git, so the
+  # checkout's .git is all they need.
+  docs-check:
+    name: docs-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instruction-file budgets and the doc tools' self-tests
+        run: make docs-check
+
   # Executes the suite on the two platforms `build-all` only ever
   # CROSS-COMPILES. ~1,600 lines are behind `//go:build windows`
   # (service install, SCM lifecycle, binary swap, startup launcher,
@@ -442,7 +465,7 @@ jobs:
   # comment above for the evidence the promotion was gated on.
   gate:
     name: gate
-    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}

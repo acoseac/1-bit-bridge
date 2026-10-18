@@ -308,7 +308,8 @@ You own ONE backlog entry end to end: reproduce, fix, PR, bot rounds, merge, bac
 The operator is fixing every relevant bug before tagging the release, so correctness beats speed.
 
 Repo and tree
-- CLAUDE.md is ALREADY in your context (loaded automatically, ~200k tokens) and is the spec.
+- CLAUDE.md is ALREADY in your context (loaded automatically) and is the spec, with the rules
+  files Claude Code loads beside the files you Read.
   Do NOT Read it again; grep it for line numbers. Grep ops/engineering-log.md by symbol / file /
   PR before changing anything a rule names, and read only what you need.
 - Keep your context small: ranged reads, capped output (| tail -40, grep -c), never cat a big log.
@@ -323,8 +324,9 @@ Workflow
   files a newer gofmt rewrites (CLAUDE.md "Build").
 - Inner loop: your packages under -race. Before pushing: make vet test build-all P=2; remove dist/.
   A test timing out at exactly 600 s is the default -timeout, not a failure.
-- The rule goes in CLAUDE.md (the matching group under "Things that have bitten before"), the record
-  in ops/engineering-log.md, both in the SAME PR as the code. Correct any stale claim you find.
+- The rule goes in the rules file that loads with the code (CLAUDE.md "Where things live"; a
+  condensed file takes one line, the long form its ops/History-rules-*.md), the record in
+  ops/engineering-log.md, all in the SAME PR as the code. Correct any stale claim you find.
 - NO Claude attribution anywhere: no Co-Authored-By trailer, no "Generated with" footer.
 - Follow-ups outside your entry: a new Open entry in ~/Desktop/to-do/bridge-backlog.md (next free
   id; the file's shape; re-read before each edit; Edit tool). Never spawn_task.

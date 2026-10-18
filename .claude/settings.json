@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/check-doc-budgets.py\"; [ -f \"$f\" ] || exit 0; for py in python3 python; do if command -v \"$py\" >/dev/null 2>&1 && \"$py\" -c \"\" >/dev/null 2>&1; then PYTHONDONTWRITEBYTECODE=1 exec \"$py\" \"$f\" --hook; fi; done; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
