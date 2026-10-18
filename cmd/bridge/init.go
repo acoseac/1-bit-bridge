@@ -1541,6 +1541,11 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) (loaded bool) {
 	// helper copied the cert fields beside it and not this one, so the
 	// two commands graded the same host differently.
 	d.Managed = cfg.Deployment.IsManaged()
+	// The other half of the posture, for the same reason: tls-cert-sans
+	// asks a loopback bridge, and only a loopback one, for a LAN IPv4
+	// address (doctor.Deps.PublicMode), and `bridge doctor` sets it from
+	// the same file.
+	d.PublicMode = cfg.IsPublic()
 	// The PORTS this install actually listens on. 7788/7789 are the
 	// DEFAULTS, and the preflight hard-coded them: a public-mode install
 	// on :443 was graded against two ports nothing was using, which are

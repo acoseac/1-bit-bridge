@@ -167,8 +167,9 @@ type Server struct {
 
 	// certIPs are the IP addresses the certificate this bridge minted and
 	// serves names (WithCertifiedAddrs, backlog B457): the interface walk
-	// publishes an address only while it is one of them. Nil publishes the
-	// walk whole. Set before serving, read-only after.
+	// publishes an IPv6 address only while it is one of them, and an IPv4
+	// address either way. Nil publishes the walk whole. Set before
+	// serving, read-only after.
 	certIPs map[netip.Addr]bool
 	// heldBack says once per address that the walk left one out.
 	heldBack heldBackLog
@@ -1120,15 +1121,16 @@ func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
 }
 
 // WithCertifiedAddrs makes the endpoint list (/v1/health, the pairing QR,
-// the console's Reachable endpoints) publish an address of the interface
-// walk only while ips names it (backlog B457). cmd/bridge passes the IP
-// addresses of the certificate it serves, from servertls.NamedIPs, and
-// only when the bridge minted that certificate: an address a client that
-// checks the certificate against the URL's host cannot use is left out,
-// and `bridge cert rotate` and a restart bring it back. Each address left
-// out is logged once. The `.local` name, the Tailscale endpoints and
-// customEndpoints are never judged. Without the call the walk is
-// published whole.
+// the console's Reachable endpoints) publish an IPv6 address of the
+// interface walk only while ips names it (backlog B457). cmd/bridge passes
+// the IP addresses of the certificate it serves, from servertls.NamedIPs,
+// and only when the bridge minted that certificate: an address a client
+// that checks the certificate against the URL's host cannot use is left
+// out, and `bridge cert rotate` and a restart bring it back. Each address
+// left out is logged once. An IPv4 address is published whether or not ips
+// names it, and the `.local` name, the Tailscale endpoints and
+// customEndpoints are never judged. Without the call the walk is published
+// whole.
 func (s *Server) WithCertifiedAddrs(ips []net.IP) *Server {
 	set := make(map[netip.Addr]bool, len(ips))
 	for _, ip := range ips {

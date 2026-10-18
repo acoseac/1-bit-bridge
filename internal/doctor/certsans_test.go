@@ -129,6 +129,10 @@ func TestACertTheBridgeDidNotMintIsNotToldToRotate(t *testing.T) {
 			return servertls.GenerateOptions{
 				Hostname:      "bridge-7f3a",
 				ExtraDNSNames: []string{"abc.cloud.1-bit.app"},
+				// A LAN IPv4 address, so the line is about the certificate
+				// alone: a loopback bridge advertising none is warned about
+				// that (TestCheckTLSCertSANs_NoLANIPv4AdvertisedWarns).
+				ExtraIPs: []net.IP{net.ParseIP("192.168.1.20")},
 			}
 		},
 	})
@@ -560,17 +564,18 @@ func TestExpiryFixturesAreInsideTheirValidityWindow(t *testing.T) {
 }
 
 // TestCheckTLSCertSANs_AHeldBackAddressIsNotStale is backlog B457: serve
-// does not advertise an address of the interface walk that a certificate it
-// minted does not name, so the line stays ok, counts only what is
-// advertised, and names the held-back address with the rotation that would
-// advertise it. A missing address that is not held back still warns.
+// does not advertise an IPv6 address of the interface walk that a
+// certificate it minted does not name, so the line stays ok, counts only
+// what is advertised, and names the held-back address with the rotation
+// that would advertise it. A missing address that is not held back still
+// warns. The gated set is the walk's IPv6 addresses (advertise.CertGatedIPs).
 func TestCheckTLSCertSANs_AHeldBackAddressIsNotStale(t *testing.T) {
 	lan, ula := net.ParseIP("192.168.1.20"), net.ParseIP("fdcc:cccf:784b::2")
 	minted := servertls.GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan}}
 	want := servertls.GenerateOptions{
 		Hostname:     "nuc",
 		ExtraIPs:     []net.IP{lan, ula},
-		CertGatedIPs: []net.IP{lan, ula},
+		CertGatedIPs: []net.IP{ula},
 	}
 	c := checkTLSCertSANs(t.Context(), certFixture(t, minted, want))
 	if c.Status != OK {
@@ -637,5 +642,24 @@ func TestCheckTLSCertSANs_NoLANIPv4AdvertisedWarns(t *testing.T) {
 	c = checkTLSCertSANs(t.Context(), certFixture(t, minted, want))
 	if c.Status != OK || strings.Contains(c.Summary, "no LAN IPv4") || !strings.Contains(c.Summary, ula.String()) {
 		t.Errorf("with %s advertised: status %q summary %q, want ok naming the held-back %s", lan, c.Status, c.Summary, ula)
+	}
+}
+
+// TestCheckTLSCertSANs_APublicBridgeIsNotAskedForALANIPv4: a public-mode
+// bridge advertises its declared endpoints alone, never its interface
+// walk, so the line asks it for no LAN IPv4 address. The same Deps on a
+// loopback bridge are the control, warned about the one they lack.
+func TestCheckTLSCertSANs_APublicBridgeIsNotAskedForALANIPv4(t *testing.T) {
+	ts := net.ParseIP("100.64.0.99")
+	opts := servertls.GenerateOptions{Hostname: "host-a", ExtraIPs: []net.IP{ts}}
+	d := certFixture(t, opts, opts)
+	d.PublicMode = true
+	if c := checkTLSCertSANs(t.Context(), d); c.Status != OK || strings.Contains(c.Summary, "no LAN IPv4") {
+		t.Errorf("a public bridge: status %q summary %q, want ok with no LAN IPv4 claim", c.Status, c.Summary)
+	}
+	d.PublicMode = false
+	if c := checkTLSCertSANs(t.Context(), d); c.Status != Warn || !strings.Contains(c.Summary, "no LAN IPv4") {
+		t.Errorf("the same Deps on a loopback bridge: status %q summary %q, want the no-LAN-IPv4 warn",
+			c.Status, c.Summary)
 	}
 }

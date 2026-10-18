@@ -259,10 +259,11 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 // TTL-cached for 30 s process-wide (see internal/advertise) — the same
 // probe `/v1/health` runs per request.
 //
-// CertGatedIPs marks the walk's addresses, which a mint covers and which
-// serve publishes only while the certificate it serves names them
+// CertGatedIPs marks the walk's IPv6 addresses, which a mint covers and
+// which serve publishes only while the certificate it serves names them
 // (backlog B457), so the two graders do not call a certificate stale for
-// an address the bridge holds back.
+// an address the bridge holds back. An IPv4 address is published either
+// way, so a certificate that lacks one is stale for it.
 func certSANOptions(cfg *config.Config) servertls.GenerateOptions {
 	hostname := advertise.CertHostname()
 	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}

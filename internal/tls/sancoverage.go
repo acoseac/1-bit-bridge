@@ -133,7 +133,7 @@ func (c SANCoverage) HeldBackIPStrings() []string { return ipsToStrings(c.HeldBa
 
 // NamedIPs returns the IP addresses the certificate cert names, and
 // whether this bridge minted it (the test MintedByBridge reads). Serve
-// hands the addresses to the API, which publishes an address of the
+// hands the addresses to the API, which publishes an IPv6 address of the
 // interface walk only while the certificate it serves names it (backlog
 // B457), and only for a certificate the bridge minted: a rotation is what
 // brings an address back, and rotation is not advised for any other.

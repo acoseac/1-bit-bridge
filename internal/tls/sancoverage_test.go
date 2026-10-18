@@ -400,14 +400,16 @@ func TestAPartialLabelWildcardCoversNothing(t *testing.T) {
 }
 
 // TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing is backlog
-// B457. Serve does not advertise an address of the interface walk that a
-// certificate it minted does not name, so the certificate is not stale for
-// that address: it is held back, and the startup warning stays quiet. A
-// missing address that is not gated (a Tailscale one) is still missing.
+// B457. Serve does not advertise an IPv6 address of the interface walk
+// that a certificate it minted does not name, so the certificate is not
+// stale for that address: it is held back, and the startup warning stays
+// quiet. A missing address that is not gated (a Tailscale one) is still
+// missing. The gated set is the walk's IPv6 addresses
+// (advertise.CertGatedIPs).
 func TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing(t *testing.T) {
 	lan, ula, ts := net.ParseIP("192.168.1.20"), net.ParseIP("fdcc:cccf:784b::2"), net.ParseIP("100.64.0.24")
 	certPath := mintCert(t, GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan}})
-	want := GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan, ula}, CertGatedIPs: []net.IP{lan, ula}}
+	want := GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan, ula}, CertGatedIPs: []net.IP{ula}}
 	cov, err := InspectSANCoverage(certPath, want)
 	if err != nil {
 		t.Fatal(err)

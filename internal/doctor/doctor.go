@@ -342,6 +342,12 @@ type Deps struct {
 	// Not a Managed: a container's operator has a shell (`docker exec`),
 	// so every other check's advice still applies to them.
 	InContainer bool
+
+	// PublicMode mirrors cfg.IsPublic(): the bridge advertises its
+	// declared endpoints alone, never its interface walk, so
+	// checkTLSCertSANs does not ask it for a LAN IPv4 address (backlog
+	// B457). False is a loopback bridge, which is asked.
+	PublicMode bool
 }
 
 // Report is the collection of checks from a single doctor run.
