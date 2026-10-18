@@ -128,6 +128,61 @@ func TestBuildFavorites_HarmonicArm_KeepsUnkeyedHearts(t *testing.T) {
 	}
 }
 
+// Once the harmonic chain is asked for the whole cap, hearts with no usable
+// key never reach the append. Every unkeyed heart has to fit inside the cap.
+func TestBuildFavorites_UnkeyedHeartsFitInsideTheCap(t *testing.T) {
+	opts := favOpts()
+	opts.AnalysisEnabled = true
+	opts.MaxFavoritesItems = 10
+	pool := favFeatures(12, 12)
+	for i := 0; i < 3; i++ {
+		f := TrackFeature{Path: fmt.Sprintf("/heart%02d.flac", i), Title: fmt.Sprintf("H%02d", i), Artist: "A"}
+		pool = append(pool, f)
+	}
+	got, ok := buildFavorites(Inputs{Favorites: pool, WeekSeed: 9}, opts)
+	if !ok {
+		t.Fatal("populated pool must build")
+	}
+	if len(got.Items) != 10 {
+		t.Fatalf("cap of 10: got %d items", len(got.Items))
+	}
+	have := map[string]bool{}
+	for _, it := range got.Items {
+		have[it.Path] = true
+	}
+	for i := 0; i < 3; i++ {
+		p := fmt.Sprintf("/heart%02d.flac", i)
+		if !have[p] {
+			t.Errorf("unkeyed heart %s was dropped once the chain filled the cap", p)
+		}
+	}
+}
+
+// A heart whose key_root is set but whose mode ToCamelot rejects is not in
+// the chain, and it used to count toward the keyed gate and then lose the
+// append. It has to keep a slot too.
+func TestBuildFavorites_UnmappedKeyStillFitsInsideTheCap(t *testing.T) {
+	opts := favOpts()
+	opts.AnalysisEnabled = true
+	opts.MaxFavoritesItems = 8
+	pool := favFeatures(10, 10)
+	pool[8].KeyMode = ""
+	pool[9].KeyMode = "dorian"
+	got, ok := buildFavorites(Inputs{Favorites: pool, WeekSeed: 3}, opts)
+	if !ok {
+		t.Fatal("populated pool must build")
+	}
+	have := map[string]bool{}
+	for _, it := range got.Items {
+		have[it.Path] = true
+	}
+	for _, p := range []string{pool[8].Path, pool[9].Path} {
+		if !have[p] {
+			t.Errorf("heart %s whose key does not map was dropped", p)
+		}
+	}
+}
+
 // Too few keyed hearts → the harmonic arm stands down and the seeded
 // shuffle carries the whole pool (never an empty/short mix).
 func TestBuildFavorites_FallsBackWhenTooFewKeyed(t *testing.T) {

@@ -4,12 +4,21 @@ import "math"
 
 // normalizedBPMDistance is the smallest tempo gap between two tracks,
 // accounting for half/double-time equivalence (75 ↔ 150 BPM is a perfect
-// match). Returns 0 when either tempo is unknown (an unknown tempo must not
-// penalise an otherwise-harmonic transition). Per the Gemini consult
-// (2026-06-14): min(|a−b|, |2a−b|, |a/2−b|).
+// match). An unknown tempo (non-positive) costs half the known tempo, the
+// same mid-range fraction discovery scoring uses, so an untempoed track
+// does not win a same-key tie against a real tempo. Both unknown returns
+// 0: there is no tempo to measure against. Per the Gemini consult
+// (2026-06-14): min(|a−b|, |2a−b|, |a/2−b|) when both tempos are known.
 func normalizedBPMDistance(a, b float64) float64 {
 	if a <= 0 || b <= 0 {
-		return 0
+		known := a
+		if known <= 0 {
+			known = b
+		}
+		if known <= 0 {
+			return 0
+		}
+		return known * unknownBPMPenaltyFraction
 	}
 	d := math.Abs(a - b)
 	d2 := math.Abs(a*2 - b)

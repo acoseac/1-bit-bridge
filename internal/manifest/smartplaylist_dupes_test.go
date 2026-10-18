@@ -27,7 +27,7 @@ func TestSmartPlaylistPoolsExcludeSuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, err := s.AnalyzedTrackFeatures(ctx, "", 100)
+	pool, err := s.AnalyzedTrackFeatures(ctx, "", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

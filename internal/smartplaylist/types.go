@@ -106,6 +106,11 @@ type GeneratedPlaylist struct {
 	// members (iOS falls back to a seeded waveform / fixed family color).
 	Energy      []float64
 	ModalRateHz int
+
+	// ExclusionRelaxed is set when the 7-day already-shown exclusion would
+	// have left this family under its minimum, so the family was built
+	// without it. The regenerator logs that once. Not serialized.
+	ExclusionRelaxed bool
 }
 
 // Inputs is the data snapshot the engine generates from, assembled by the
@@ -145,6 +150,12 @@ type Inputs struct {
 	// discovery anti-join).
 	PlayedPaths map[string]bool
 
+	// ServedRecently is the set of paths a discovery shelf served in the
+	// last 7 days. Daily Mix's discovery slice, deep cuts, the mood bands
+	// and Auto Mix skip these plus the familiar shelves (Heavy Rotation,
+	// Favorites, Recently Played), unless that would hide the family.
+	ServedRecently map[string]bool
+
 	// Features maps every candidate path (PlayStat lists + hour buckets) to
 	// its hydrated feature, for item building + harmonic sort.
 	Features map[string]TrackFeature
@@ -159,9 +170,10 @@ type Inputs struct {
 	PreviouslyVisible map[string]bool
 
 	// WeekSeed is a deterministic seed derived from the UTC ISO week of the
-	// generating run (regenerator computes it via SeedFromISOWeek). Drives the
-	// deterministic weekly shuffle for Artist Deep Cuts + the two mood bands —
-	// stable for a 7-day window, rotates on Monday-UTC. Same input → same
+	// generating run (regenerator computes it via SeedFromISOWeek). It orders
+	// the analyzed-pool and deep-cut candidate windows, and drives the
+	// weekly shuffle for Artist Deep Cuts, Favorites and the two mood bands.
+	// Stable for a 7-day window, rotates on Monday-UTC. Same input → same
 	// output, keeping the engine pure (no clock read inside).
 	WeekSeed uint64
 }
@@ -183,8 +195,12 @@ type Options struct {
 	MinForgotten              int
 	MinAutoMixPool            int // analyzed-pool size gate for Auto Mix
 	MinTimeOfDayPlays         int // the busiest single hour must reach this
-	MinDailyFamiliar          int
-	MinSessions               int // sessions needed to trust the Finish Line target
+	// MinTimeOfDayHourPlays is the floor for storing one hour's pool. The
+	// family still turns on from the busiest hour; a thinner hour is not
+	// served. <= 0 uses the production floor (2).
+	MinTimeOfDayHourPlays int
+	MinDailyFamiliar      int
+	MinSessions           int // sessions needed to trust the Finish Line target
 
 	SessionGapSeconds   float64 // idle gap that ends a session (Gemini: 60 min)
 	DailyDiscoveryRatio float64 // fraction of the Daily Mix that is discovery
@@ -230,6 +246,7 @@ func DefaultOptions(analysisEnabled bool) Options {
 		MinForgotten:              10,
 		MinAutoMixPool:            20,
 		MinTimeOfDayPlays:         15,
+		MinTimeOfDayHourPlays:     2,
 		MinDailyFamiliar:          10,
 		MinSessions:               20,
 		SessionGapSeconds:         60 * 60, // 60-min idle = new session (Gemini 2026-06-14)

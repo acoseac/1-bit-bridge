@@ -2542,6 +2542,22 @@ var migrations = []migration{
 		END;
 		`,
 	},
+	{
+		// v58 records what a discovery shelf served, so the next builds can
+		// skip it for 7 days (backlog B451). served_at is UnixNano. The
+		// regenerator inserts the paths it just wrote and deletes rows
+		// older than the window in the same transaction. The table is not
+		// on the wire: /v1/smart-playlists still serves the cache.
+		version: 58,
+		name:    "smart_playlist_served (discovery shelves already shown)",
+		sql: `CREATE TABLE IF NOT EXISTS smart_playlist_served (
+			served_at INTEGER NOT NULL,
+			slug      TEXT    NOT NULL,
+			path      TEXT    NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_smart_playlist_served_at
+			ON smart_playlist_served(served_at);`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

@@ -12,18 +12,18 @@ func Generate(in Inputs, opts Options) []GeneratedPlaylist {
 			out = append(out, p)
 		}
 	}
-	// Homepage order: the marquee mixes first, then the listening shelves.
-	// New families (Drive / On Repeat / Artist Deep Cuts / Lift Off / Wind
-	// Down) are interleaved per the plan in
-	// ~/.claude/plans/we-now-have-some-playful-sedgewick.md.
+	// Homepage order. Daily Mix leads: the app's hero is the first family
+	// after per-mix hides and an optional pin, and that follows this
+	// order. Heavy Rotation is the next shelf. The families after it
+	// keep the order they had.
+	add(buildDailyMix(in, opts))
 	add(buildHeavyRotation(in, opts))
 	// Favorites sits high — it is the one family sourced from an EXPLICIT
-	// user signal (hearts), so it outranks the play-derived shelves.
+	// user signal (hearts), so it outranks the play-derived shelves below it.
 	add(buildFavorites(in, opts))
 	add(buildDriveMix(in, opts))
 	add(buildOnRepeat(in, opts))
 	add(buildAutoMix(in, opts))
-	add(buildDailyMix(in, opts))
 	add(buildTimeOfDay(in, opts))
 	add(buildArtistDeepCuts(in, opts))
 	add(buildLiftOff(in, opts))

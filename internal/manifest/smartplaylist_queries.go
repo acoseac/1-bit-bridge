@@ -193,6 +193,70 @@ func (s *Store) LoadSmartPlaylists(ctx context.Context) ([]StoredSmartPlaylist, 
 	return out, rows.Err()
 }
 
+// SmartPlaylistServedRow is one path a discovery shelf served when the cache
+// was built (migration v58). Not a wire type: the columns are served_at
+// (UnixNano), slug and path, and nothing in /v1 reads the table.
+type SmartPlaylistServedRow struct {
+	ServedAt int64
+	Slug     string
+	Path     string
+}
+
+// RecordSmartPlaylistServed appends the paths a regeneration served and
+// drops rows older than retainAfterNS (the 7-day exclusion window). An
+// empty rows slice still prunes. Holds s.mu (writer contract).
+func (s *Store) RecordSmartPlaylistServed(ctx context.Context, rows []SmartPlaylistServedRow, retainAfterNS int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit; unwind guard otherwise
+
+	if len(rows) > 0 {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO smart_playlist_served (served_at, slug, path) VALUES (?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, r := range rows {
+			if r.Slug == "" || r.Path == "" {
+				continue
+			}
+			if _, err := stmt.ExecContext(ctx, r.ServedAt, r.Slug, r.Path); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_playlist_served WHERE served_at < ?`, retainAfterNS); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SmartPlaylistServedSince returns the distinct paths a discovery shelf
+// served at or after sinceNS. Read path — no s.mu.
+func (s *Store) SmartPlaylistServedSince(ctx context.Context, sinceNS int64) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT path FROM smart_playlist_served WHERE served_at >= ?`, sinceNS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out[p] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // --- play-history aggregations ---
 
 // PlayStatRow aggregates qualifying plays for one track path.
@@ -345,15 +409,22 @@ type EventTimeRow struct {
 // OrderedPlayEvents returns qualifying play events since sinceNS in
 // chronological order — the regenerator segments them into listening
 // sessions (a gap larger than the session threshold starts a new session) to
-// derive the average session length for The Finish Line. Capped to bound
-// memory. Read path — no s.mu.
+// derive the average session length for The Finish Line. The cap keeps the
+// NEWEST events (a lookback that holds more than the cap must not drop the
+// plays that would move the average) and the outer order is chronological,
+// which the session walk requires. Capped to bound memory. Read path — no s.mu.
 func (s *Store) OrderedPlayEvents(ctx context.Context, sinceNS int64, minDuration float64, limit int) ([]EventTimeRow, error) {
 	limit = clampLimit(limit, 5000, 50000)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT started_at, duration_used
-		  FROM playback_history
-		 WHERE duration_used >= ? AND started_at >= ?
-		 ORDER BY started_at ASC LIMIT ?
+		  FROM (
+			SELECT started_at, duration_used
+			  FROM playback_history
+			 WHERE duration_used >= ? AND started_at >= ?
+			 ORDER BY started_at DESC, id DESC
+			 LIMIT ?
+		  )
+		 ORDER BY started_at ASC
 	`, minDuration, sinceNS, limit)
 	if err != nil {
 		return nil, err
@@ -577,14 +648,17 @@ func (s *Store) OnRepeatCandidates(ctx context.Context, sinceNS int64, minDurati
 // qualifying plays in [lovedSinceNS, now)) that have NO qualifying play in
 // [deepCutCutoffNS, now) — for the "From Artists You Love" family. Per-artist
 // cap is enforced in SQL via a window function (`ROW_NUMBER() OVER (PARTITION
-// BY artist ORDER BY t.path)`), not by a Go-side scan, so a single high-volume
-// catalog can't dominate the list.
+// BY artist ORDER BY mix_week_hash(weekSeed, path))`), and the pool cap is
+// the same hash, so both the three tracks and the artists rotate with the
+// week instead of a path prefix and an alphabetical cut. A single
+// high-volume catalog still cannot dominate the list: the per-artist cap
+// stays.
 //
 // The returned rows are unplayed-or-stale tracks; Plays/LastPlayed/FirstPlayed
 // carry placeholder values (the engine shuffles deterministically by week and
 // doesn't read those fields for this family). Path is the sole load-bearing
 // column. Read path — no s.mu.
-func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lovedMinPlays int, deepCutCutoffNS int64, minDuration float64, perArtistCap, limit int) ([]PlayStatRow, error) {
+func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lovedMinPlays int, deepCutCutoffNS int64, minDuration float64, perArtistCap, limit int, weekSeed uint64) ([]PlayStatRow, error) {
 	limit = clampLimit(limit, 100, 5000)
 	if perArtistCap < 1 {
 		perArtistCap = 3
@@ -618,24 +692,30 @@ func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lov
 		eligible AS (
 			SELECT t.path,
 			       la.artist AS artist,
-			       ROW_NUMBER() OVER (
-			         PARTITION BY la.artist
-			         ORDER BY t.path
-			       ) AS rn
+			       mix_week_hash(?, t.path) AS h
 			  FROM tracks t
 			  JOIN loved_artists la
 			    ON la.artist = json_extract(t.tags_json, '$.artist')
 			 WHERE t.path NOT IN (SELECT path FROM recently_played)
 			   AND t.dupe_suppressed = 0
+		),
+		ranked AS (
+			SELECT path, h,
+			       ROW_NUMBER() OVER (
+			         PARTITION BY artist
+			         ORDER BY h, path
+			       ) AS rn
+			  FROM eligible
 		)
 		SELECT path, 1 AS plays, 0 AS last_played, 0 AS first_played
-		  FROM eligible
+		  FROM ranked
 		 WHERE rn <= ?
-		 ORDER BY artist ASC, rn ASC
+		 ORDER BY h, path
 		 LIMIT ?`
 	return s.scanPlayStats(ctx, q,
 		minDuration, lovedSinceNS, lovedMinPlays,
 		minDuration, deepCutCutoffNS,
+		int64(weekSeed),
 		perArtistCap, limit)
 }
 
@@ -692,10 +772,11 @@ const smartPlaylistPoolSafetyLimit = 50_000
 
 // AnalyzedTrackFeatures returns the candidate pool for harmonic sequencing +
 // Daily Mix discovery: tracks WITH an estimated key (key_root NOT NULL).
-// Optional exact genre filter. Ordered by path (deterministic, so the daily
-// cache is stable) and capped so a huge library doesn't materialize
-// everything — the engine only needs a working set. Read path — no s.mu.
-func (s *Store) AnalyzedTrackFeatures(ctx context.Context, genre string, limit int) ([]TrackFeatureRow, error) {
+// Optional exact genre filter. Ordered by mix_week_hash(weekSeed, path)
+// and only then capped, so the working set is a window of the whole keyed
+// library that moves with the week seed rather than a permanent path
+// prefix. The same seed returns the same window. Read path — no s.mu.
+func (s *Store) AnalyzedTrackFeatures(ctx context.Context, genre string, weekSeed uint64, limit int) ([]TrackFeatureRow, error) {
 	limit = clampLimit(limit, 5000, 50000)
 	q := trackFeatureSelect + ` AND ta.key_root IS NOT NULL`
 	var args []any
@@ -703,8 +784,8 @@ func (s *Store) AnalyzedTrackFeatures(ctx context.Context, genre string, limit i
 		q += ` AND COALESCE(json_extract(t.tags_json, '$.genre'), '') = ?`
 		args = append(args, genre)
 	}
-	q += ` ORDER BY t.path ASC LIMIT ?`
-	args = append(args, limit)
+	q += ` ORDER BY mix_week_hash(?, t.path), t.path LIMIT ?`
+	args = append(args, int64(weekSeed), limit)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
