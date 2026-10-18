@@ -279,7 +279,9 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 // first), which is what the iOS app's own M3U8 export writes for a bridge
 // source. Saved at the library's root, the file then resolves for any
 // player, for this bridge's playlist-file index and for the app's
-// importer. A path that would read as something else is written
+// importer. In a multi-root library each line starts with its root's
+// folder name, so the file resolves only beside the root folders (roots
+// in separate places have no such folder). A path that would read as something else is written
 // `./`-prefixed, as the app's exporter does: a leading `#` is a comment
 // line, and importers trim leading whitespace. An item that no longer
 // resolves stays a comment in both modes, never a dead location.
