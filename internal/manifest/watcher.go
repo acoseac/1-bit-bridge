@@ -274,9 +274,10 @@ func (wt *Watcher) watchRoots(roots []string) bool {
 func (wt *Watcher) loop(ctx context.Context) error {
 	events, errs := wt.w.Events, wt.w.Errors
 	// quiet is wait's channel while new folders wait for their watch, nil
-	// otherwise: one timer serves every wait, Reset each time (since Go 1.23,
-	// which go.mod's go 1.26 selects, a Reset timer delivers nothing from
-	// before it, so a wait the loop abandoned cannot end the next one early).
+	// otherwise: one timer serves every wait, Reset each time (since Go 1.23
+	// a Reset timer delivers nothing from before it, and Go 1.27 removed the
+	// asynctimerchan setting that could turn that off, so a wait the loop
+	// abandoned cannot end the next one early).
 	var quiet, reconcile <-chan time.Time
 	var wait *time.Timer
 	if wt.fds != nil {

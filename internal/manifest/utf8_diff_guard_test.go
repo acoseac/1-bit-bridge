@@ -13,6 +13,8 @@ import (
 // never matches and every later re-read takes the full upsert. A clean FLAC
 // only stamps. The two tagged files must come back as the characters the
 // formats define, and two re-reads after the version is rewound must stamp.
+// go1.27's default encoder writes the raw replacement and hides the stamp
+// half: run it with GOEXPERIMENT=nojsonv2 to see that half fail (B452).
 func TestScanner_AVersionStaleRereadOfID3v1AndWindows1252Stamps(t *testing.T) {
 	root := t.TempDir()
 	writeID3v1OnlyMP3(t, filepath.Join(root, "id3v1.mp3"), "Caf\xe9")
