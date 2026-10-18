@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -300,18 +301,20 @@ func TestADockerMarkerThatCannotBeReadKeepsTheContainerRules(t *testing.T) {
 	}
 }
 
-// TestAWalkAddressTheCertificateDoesNotNameIsHeldBack is backlog B457.
-// With NamedByCert set, the walk publishes only the addresses it names and
-// hands each other one to HeldBack. A Tailscale address is never judged
-// (the provider publishes it), the `.local` name and a customEndpoints
-// entry are published as before, and the want-set still names the held-back
-// address, so a mint covers it. CertGatedIPs is the set the judgement
-// applies to.
-func TestAWalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
-	const lan, ula, ts = "192.168.1.20", "fdcc:cccf:784b::2", "fd7a:115c:a1e0::2"
+// TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack is backlog
+// B457. With NamedByCert set, the walk holds back an IPv6 address the
+// certificate does not name, a ULA or a global one, and hands it to
+// HeldBack. A Tailscale address is never judged (the provider publishes
+// it), the `.local` name and a customEndpoints entry are published as
+// before, and the want-set still names a held-back address, so a mint
+// covers it. CertGatedIPs is the set the judgement applies to: the walk's
+// IPv6 addresses, never an IPv4 one.
+func TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
+	const lan, ula, global, ts = "192.168.1.20", "fd00:db8:1::2", "2001:db8::2", "fd7a:115c:a1e0::2"
 	withIfaces(t, []ifaceAddr{
 		oneAddr("en0", net.FlagUp, lan),
 		oneAddr("en0", net.FlagUp, ula),
+		oneAddr("en0", net.FlagUp, global),
 		oneAddr("utun5", net.FlagUp|net.FlagPointToPoint, ts),
 	})
 	named := net.ParseIP(lan)
@@ -326,14 +329,16 @@ func TestAWalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
 	if !hasClass(eps, httpsIP(lan), ClassLANv4) {
 		t.Errorf("the address the certificate names is not published: %v", eps)
 	}
-	if hasURL(eps, httpsIP(ula)) {
-		t.Errorf("an address the certificate does not name is published: %v", eps)
+	for _, v6 := range []string{ula, global} {
+		if hasURL(eps, httpsIP(v6)) {
+			t.Errorf("%s, an IPv6 address the certificate does not name, is published: %v", v6, eps)
+		}
 	}
 	if !hasURL(eps, "https://musicbox.local:7788") {
 		t.Errorf("the .local name was judged: %v", eps)
 	}
-	if len(held) != 1 || held[0] != ula {
-		t.Errorf("HeldBack saw %v, want exactly [%s]", held, ula)
+	if !slices.Equal(held, []string{ula, global}) {
+		t.Errorf("HeldBack saw %v, want exactly [%s %s]", held, ula, global)
 	}
 
 	p.CustomEndpoints = []string{httpsIP(ula)}
@@ -341,14 +346,55 @@ func TestAWalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
 		t.Errorf("a customEndpoints entry naming the held-back address is not published: %v", eps)
 	}
 
-	if !hasIP(GatherCertSANIPs(CertSANConfig{}), ula) {
-		t.Error("the held-back address left the want-set, so a rotation would not cover it")
+	sans := GatherCertSANIPs(CertSANConfig{})
+	for _, v6 := range []string{ula, global} {
+		if !hasIP(sans, v6) {
+			t.Errorf("%s left the want-set, so a rotation would not cover it", v6)
+		}
 	}
 	gated := CertGatedIPs(CertSANConfig{})
-	if !hasIP(gated, lan) || !hasIP(gated, ula) || hasIP(gated, ts) {
-		t.Errorf("CertGatedIPs = %v, want the walk's two LAN addresses and not the Tailscale one", gated)
+	if hasIP(gated, lan) || !hasIP(gated, ula) || !hasIP(gated, global) || hasIP(gated, ts) {
+		t.Errorf("CertGatedIPs = %v, want the walk's two IPv6 addresses: not the IPv4 one, not Tailscale's", gated)
 	}
 	if hasIP(CertGatedIPs(CertSANConfig{CustomEndpoints: []string{httpsIP(ula)}}), ula) {
 		t.Error("CertGatedIPs holds back an address a customEndpoints entry declares")
+	}
+}
+
+// TestAnIPv4WalkAddressTheCertificateDoesNotNameIsPublished is backlog
+// B457's option B (the owner's choice, 2026-10-18): an IPv4 address of the
+// walk is published whether or not the certificate names it, a private one
+// or a public one, and HeldBack never sees one. The app pins the
+// certificate's fingerprint and does not check the host, so a new DHCP
+// lease or a data directory moved to another host must not take the
+// bridge's LAN address out of /v1/health.
+func TestAnIPv4WalkAddressTheCertificateDoesNotNameIsPublished(t *testing.T) {
+	const named, unnamed, public = "192.168.1.20", "192.168.1.21", "203.0.113.7"
+	withIfaces(t, []ifaceAddr{
+		oneAddr("en0", net.FlagUp, named),
+		oneAddr("en0", net.FlagUp, unnamed),
+		oneAddr("en1", net.FlagUp, public),
+	})
+	n := net.ParseIP(named)
+	var held []string
+	eps := Endpoints(Params{
+		Port:         7788,
+		HostOverride: "musicbox",
+		NamedByCert:  func(ip net.IP) bool { return ip.Equal(n) },
+		HeldBack:     func(ip net.IP) { held = append(held, ip.String()) },
+	})
+	for _, want := range []struct {
+		ip    string
+		class Class
+	}{{named, ClassLANv4}, {unnamed, ClassLANv4}, {public, ClassPublic}} {
+		if !hasClass(eps, httpsIP(want.ip), want.class) {
+			t.Errorf("%s is not published as class %v: %v", want.ip, want.class, eps)
+		}
+	}
+	if len(held) != 0 {
+		t.Errorf("HeldBack saw %v; an IPv4 address is never held back", held)
+	}
+	if gated := CertGatedIPs(CertSANConfig{}); len(gated) != 0 {
+		t.Errorf("CertGatedIPs = %v over a walk of IPv4 addresses, want none", gated)
 	}
 }

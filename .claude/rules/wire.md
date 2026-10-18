@@ -478,10 +478,10 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   want-set, don't judge the `.local` name, the Tailscale endpoints or a
   `customEndpoints` entry, and don't hold back for a certificate this
   bridge did not mint.** No wire change: the list only gets shorter.
-  (`TestServeAdvertisesOnlyTheWalkAddressesItsCertificateNames`, which
+  (`TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName`, which
   boots the real serve over a minted pair less one of the host's
   addresses and then rotates,
-  `TestAWalkAddressTheCertificateDoesNotNameIsHeldBack`,
+  `TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack`,
   `TestAHeldBackAddressIsLoggedOnceAndTheLogIsBounded`.)
 - **The Bonjour instance name is ONE DNS label, 63 bytes, and hashicorp/mdns
   does not check it** (#1046). The instance is the library name:

@@ -46169,7 +46169,7 @@ cert rotate`, init and the doctor all use.
 
 ### Red first
 
-`TestServeAdvertisesOnlyTheWalkAddressesItsCertificateNames` mints, over
+`TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName` mints, over
 a fresh data dir, the pair `certSANOptions` would mint less one address
 the host's walk publishes (192.168.0.149 on the dev Mac), and boots the
 real serve. On the test's own commit (6b277d90, main's code, go1.26.6):
@@ -46217,7 +46217,7 @@ it must.
 ### After the fix, and the controls
 
 The serve test passes, with the pairing QR checked too, as do
-`TestAWalkAddressTheCertificateDoesNotNameIsHeldBack`,
+`TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack`,
 `TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing`,
 `TestACertTheBridgeDidNotMintHoldsNothingBack`,
 `TestNamedIPsReadsTheServedCertificate`,
