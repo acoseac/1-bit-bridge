@@ -69,13 +69,13 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 - **No server-side transcoding, ever.** 1-bit is bit-exact by mission: `/v1/download` serves the file as-is via `http.ServeContent`, renditions are OFFLINE sidecar files served through `serveVariant`, and a rendition never substitutes for the bit-exact source when the client asked for the source. → History-Cross-Repo.md
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
-- **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the `cmd/bridge` bullet on what a rewrite keeps).
+- **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the bullet on what a rewrite keeps, in `.claude/rules/cli-serve.md`).
 - **`enriched_at` monotonicity.** Upsert resets it to 0 on track change and the enricher stamps it on completion; the other sanctioned writers are a CLOSED SET of four (`ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix`, `ResetEnrichedByPaths`). Never touch it anywhere else: `WHERE enriched_at = 0` drives the worker. → History-Cross-Repo.md
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`). Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy; for remote admin, SSH-tunnel the port. → History-Cross-Repo.md
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly: it invokes the same cancellation closure that handles `SIGINT/SIGTERM`, and a restart exits with `supervision.RestartExitCode` (75) where a stop exits 0. → History-Cross-Repo.md
 - **Dual-stack HTTP/2 and HTTP/3 API.** QUIC is enabled by default (`disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true` turns it off); shutdown uses `.Shutdown(ctx)` with ONE 5s window the LAN and tailnet servers drain under together, and never waits on a handler past it. → History-Cross-Repo.md
 - **A request the client abandons is an Info line and status 499, and a server failure stays Error and 500** (2026-10-13, backlog B364): `writeErrorLog` and `writeFileErrorLog` are the one place, and a deadline the server set (`context.DeadlineExceeded`) stays Error and 500. → History-Cross-Repo.md
-- **A recorded sidecar path is a claim, never proof the file is gone.** The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row, and a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** (2026-09-20). → History-Cross-Repo.md
+- **A recorded sidecar path is a claim, never proof the file is gone.** The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row, and a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** in `.claude/rules/jobs.md` (2026-09-20). → History-Cross-Repo.md
 - **Single ↔ multi-root storage form flips.** The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing`; a root add or remove goes through `Scanner.CommitRootChange`. → History-Cross-Repo.md
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo; the one exception, on this repo only, is a change to `CLAUDE.md` alone (**Development workflow**, step 1), and a rule that describes code lands in the PR that changes the code.
@@ -237,7 +237,7 @@ Take the accurate half of a wrong finding when there is one — the backslash an
 
 **Merging with review comments outstanding is a process failure, not a shortcut.** The documented loop — *"don't merge after round 1 — expect 2 rounds minimum"* — is what catches this, and a same-day multi-PR batch is exactly when it gets skipped. → History-Workflow.md
 
-**And check the bot actually reviewed before counting the round.** A rate-limited CodeRabbit hides its notice in an HTML comment inside the walkthrough, so a PR with no new comments after a fix round looks identical to a clean pass — full rule, the grep that detects it, and the two commands that ask for the pass, under **### Build, CI, and test discipline**.
+**And check the bot actually reviewed before counting the round.** A rate-limited CodeRabbit hides its notice in an HTML comment inside the walkthrough, so a PR with no new comments after a fix round looks identical to a clean pass — full rule, the grep that detects it, and the two commands that ask for the pass, under **Build, CI, and test discipline** in `.claude/rules/build-ci-tests.md`.
 
 - **Stacked PRs get NO gate CI here** (the workflows are `pull_request:
   branches: [main]`), and retargeting alone doesn't fire them — amend for a
@@ -267,7 +267,7 @@ Standard single-PR loop for any non-trivial change:
 8. **Merge once reviews are quiet** and `make fmt vet test build-all` is clean.
 9. **Post-merge deploy.** Once main carries the fix, deploy it to the two reachable bridges so the change is actually live — see [Post-merge deployment](#post-merge-deployment) below. Skipping this step leaves the codebase ahead of every actual bridge a paired iOS client can reach.
 
-For jobs spanning 3+ PRs, use the stacking pattern below instead.
+For jobs spanning 3+ PRs, use the stacking pattern in the `multi-pr-batch` skill instead.
 
 ## Post-merge deployment
 

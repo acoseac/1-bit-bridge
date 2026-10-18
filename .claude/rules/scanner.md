@@ -26,7 +26,7 @@ paths:
   - "internal/manifest/playlist_files*.go"
   - "internal/manifest/sqlfunc*.go"
   - "internal/manifest/store.go"
-  - "internal/manifest/testdata/gen/**"
+  - "internal/manifest/testdata/**"
   - "internal/fsutil/walkroot*.go"
   - "internal/fsutil/notafile*.go"
   - "internal/fsutil/resolve*.go"
