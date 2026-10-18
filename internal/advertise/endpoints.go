@@ -129,10 +129,10 @@ type Params struct {
 	// checks the certificate against the URL's host fails there. Each
 	// such address goes to HeldBack instead. The want-set a mint covers
 	// (GatherCertSANIPs) keeps it, so a rotation brings it back. An IPv4
-	// address is published whatever the certificate names (certGated).
-	// Nil publishes the walk whole: no certificate, or one this bridge
-	// did not mint. The `.local` name and CustomEndpoints are never
-	// judged.
+	// address is published whatever the certificate names (certGated),
+	// and so is an address a CustomEndpoints entry declares. Nil
+	// publishes the walk whole: no certificate, or one this bridge did
+	// not mint. The `.local` name and CustomEndpoints are never judged.
 	NamedByCert func(net.IP) bool
 	// HeldBack is called with each walk address NamedByCert refused.
 	HeldBack func(net.IP)
@@ -153,6 +153,9 @@ func Endpoints(p Params) []Endpoint {
 		port = 7788
 	}
 	out := make([]Endpoint, 0, 8)
+	// An address a custom entry declares is published as written, so the
+	// walk never holds its copy back (certGated, as CertGatedIPs asks it).
+	declared := declaredIPs(p.CustomEndpoints)
 
 	eachUsableAddr(func(iface net.Interface, ip net.IP) {
 		class := classify(iface, ip)
@@ -164,7 +167,7 @@ func Endpoints(p Params) []Endpoint {
 		if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
 			return
 		}
-		if p.NamedByCert != nil && certGated(iface, ip) && !p.NamedByCert(ip) {
+		if p.NamedByCert != nil && certGated(iface, ip, declared) && !p.NamedByCert(ip) {
 			if p.HeldBack != nil {
 				p.HeldBack(ip)
 			}

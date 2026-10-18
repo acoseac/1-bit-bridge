@@ -476,8 +476,11 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   doctor and the startup warning do not call the certificate stale for a
   held-back one (under Auth, pairing, TLS). **Not judged**: the Tailscale
   endpoints (the provider's), the `.local` name, and a `customEndpoints`
-  entry, which is published as written even when it names a held-back
-  address. **A certificate this bridge did not mint holds nothing back**:
+  entry. An address one declares is published as written, and the walk
+  does not hold back its own copy of it either (`declaredIPs`, which
+  `certGated` reads for `Endpoints` and `CertGatedIPs` alike), so where
+  the certificate does not name it, it is stale on both surfaces, never
+  "not advertised". **A certificate this bridge did not mint holds nothing back**:
   rotation is not advised for it. The first rule (option A) held back an
   IPv4 address too, which cost the app its LAN address after a lease
   change; the owner chose this one. **Don't hold back an IPv4 address,

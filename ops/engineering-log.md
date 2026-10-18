@@ -46516,3 +46516,27 @@ each turning red exactly the tests named:
   test passed.
 - `PublicMode` left out of `buildDoctorDepsFor`, then out of
   `withExistingInstallDeps`: the posture test's public half, each time.
+
+### Review round 1: an address a custom entry declares is not held back
+
+CodeRabbit on #1280: `CertGatedIPs` left out an IPv6 address a
+`customEndpoints` entry names, since a declared address is published as
+written, but `Endpoints` still held back the walk's copy of it. Serve then
+logged "address not advertised" for an address `/v1/health` published
+through the custom entry, while the doctor called the certificate stale
+for it: two answers about one address, where the rule says the two
+callers share one. `declaredIPs` builds the set once from the entries,
+and `certGated` reads it for both callers, so the walk publishes its copy
+(the URL dedupe keeps that one, the first) and, where the certificate
+does not name the address, both surfaces call it stale. The defect was
+option A's too. Red first on 3d65e448 (go1.27.2):
+
+    reach_test.go:355: HeldBack saw fd00:db8:1::2, which a customEndpoints entry declares; HeldBack saw [fd00:db8:1::2 2001:db8::2]
+
+It passes on the fix, the commit after it. Negative control there: `Endpoints` handed an
+empty declared set failed exactly that assertion, while the test's
+`CertGatedIPs` half and the IPv4 walk test passed.
+
+Its other note, to record these rules in CLAUDE.md, was not taken: since
+2026-10-18 a rule about particular code lives in the rules file that
+loads with that code, `.claude/rules/wire.md` and `auth-tls.md` here.

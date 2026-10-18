@@ -86,8 +86,10 @@ func GatherCertSANIPs(cfg CertSANConfig) []net.IP {
 
 // certGated reports whether the walk publishes ip only while the
 // certificate this bridge minted and serves names it (backlog B457): an
-// IPv6 address that is not Tailscale's. Endpoints and CertGatedIPs both
-// ask it, so serve and the doctor hold back the same addresses.
+// IPv6 address that is not Tailscale's, and that no CustomEndpoints entry
+// declares (declared, from declaredIPs), since a declared address is
+// published as written. Endpoints and CertGatedIPs both ask it, so serve
+// and the doctor hold back the same addresses.
 //
 // An IPv4 address is published whether or not the certificate names it
 // (option B, the owner's choice on 2026-10-18). The app pins the
@@ -97,31 +99,38 @@ func GatherCertSANIPs(cfg CertSANConfig) []net.IP {
 // URLs it hands a DLNA renderer all need one. IPv6 addresses come and go
 // on their own (temporary addresses, a prefix another device's router
 // advertisement hands out), so a certificate cannot keep up with them.
-func certGated(iface net.Interface, ip net.IP) bool {
-	return ip.To4() == nil && !isTailscale(iface, ip)
+func certGated(iface net.Interface, ip net.IP, declared map[string]bool) bool {
+	return ip.To4() == nil && !isTailscale(iface, ip) && !declared[string(ip.To16())]
 }
 
-// CertGatedIPs returns the addresses Endpoints publishes only while the
-// certificate names them (Params.NamedByCert, backlog B457): every IPv6
-// address of the interface walk that is not Tailscale's (certGated), less
-// those a CustomEndpoints entry names, since a declared address is
-// published as written. Each is also in GatherCertSANIPs, so a mint
-// covers it. A certificate that lacks one is not stale for it: the bridge
-// does not publish it (servertls.SANCoverage.HeldBackIPs).
-func CertGatedIPs(cfg CertSANConfig) []net.IP {
+// declaredIPs is the set of IP literals the CustomEndpoints entries name,
+// keyed by their 16-byte form, for certGated.
+func declaredIPs(customEndpoints []string) map[string]bool {
 	declared := make(map[string]bool)
-	for _, raw := range cfg.CustomEndpoints {
+	for _, raw := range customEndpoints {
 		if host, isIP := parseHostFromURL(raw); isIP {
 			if ip := net.ParseIP(host); ip != nil {
 				declared[string(ip.To16())] = true
 			}
 		}
 	}
+	return declared
+}
+
+// CertGatedIPs returns the addresses Endpoints publishes only while the
+// certificate names them (Params.NamedByCert, backlog B457): every IPv6
+// address of the interface walk that is not Tailscale's and that no
+// CustomEndpoints entry declares (certGated). Each is also in
+// GatherCertSANIPs, so a mint covers it. A certificate that lacks one is
+// not stale for it: the bridge does not publish it
+// (servertls.SANCoverage.HeldBackIPs).
+func CertGatedIPs(cfg CertSANConfig) []net.IP {
+	declared := declaredIPs(cfg.CustomEndpoints)
 	var out []net.IP
 	seen := make(map[string]bool)
 	eachUsableAddr(func(iface net.Interface, ip net.IP) {
 		key := string(ip.To16())
-		if !certGated(iface, ip) || declared[key] || seen[key] {
+		if !certGated(iface, ip, declared) || seen[key] {
 			return
 		}
 		seen[key] = true
