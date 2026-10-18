@@ -17,6 +17,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Lyrics: embedded, sidecar, and the Atlas network tier | `lyrics.md` |
 | Enrichment (MusicBrainz, Cover Art Archive, Deezer, iTunes, the Atlas harvest), artwork, fingerprinting, duplicates | `enrichment.md` |
 | The job pools (upscale, optimize, analysis), renditions and their staleness, the sidecar, variant and artwork reapers | `jobs.md` |
+| Smart mixes: the families and the harmonic engine, the regenerator and its week-seeded windows, the served table and the 7-day exclusion, the regeneration loop | `smart-mixes.md` |
 | DLNA, UPnP and SSDP discovery, the upstream ingest and proxy, interface eligibility, mDNS | `dlna-upnp.md` |
 | Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
