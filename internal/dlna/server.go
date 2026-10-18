@@ -38,8 +38,8 @@ const (
 	// How long a keep-alive connection may sit idle after a response.
 	dlnaIdleTimeout = 120 * time.Second
 
-	// Extra bytes net/http reads past MaxHeaderBytes. Go 1.26.6's
-	// initialReadLimitSize adds this bufio lookahead.
+	// Extra bytes net/http reads past MaxHeaderBytes. Its
+	// initialReadLimitSize (Go 1.26.6 and 1.27.2) adds this bufio lookahead.
 	dlnaHeaderReadSlop = 4096
 
 	// Largest header block the listener reads. A SOAP or GENA request

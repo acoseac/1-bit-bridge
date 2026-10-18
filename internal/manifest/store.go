@@ -2977,9 +2977,12 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 // coerceStoredUTF8 replaces every byte that is not UTF-8 in the text
 // tags_json stores. json.Marshal on go1.26.6 writes such a byte as the
 // \ufffd escape, and the value read back marshals the replacement character
-// itself, so the version-stale diff never matches (backlog B181). A string
-// that is already UTF-8 is unchanged. Path is the row key and is not
-// touched here; marshalForStorage coerces its own copy.
+// itself, so the version-stale diff never matches (backlog B181). go1.27's
+// default encoder writes the replacement raw, which hides that, and its
+// GOEXPERIMENT=nojsonv2 build still writes the escape: coerced, the stored
+// text marshals the same under either. A string that is already UTF-8 is
+// unchanged. Path is the row key and is not touched here;
+// marshalForStorage coerces its own copy.
 func coerceStoredUTF8(t *Track) {
 	const repl = "\uFFFD"
 	t.Title = strings.ToValidUTF8(t.Title, repl)
