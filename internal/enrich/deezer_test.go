@@ -3,9 +3,12 @@ package enrich
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,6 +135,10 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 // 0-byte file to the artwork cache, and because existence is checked via
 // os.Stat (size-blind) it would become a permanent broken cache hit the
 // enricher never retries.
+//
+// The request runs under siblingCloseInTheIdleWindow, which puts the
+// CloseIdleConnections of a parallel test's httptest.Server.Close into
+// the one window where it fails a body-less answer (backlog B456).
 func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,13 +149,52 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
 	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
-	buf, err := c.FetchImage(context.Background(), srv.URL+"/picture.jpg")
+	ctx, fetched := siblingCloseInTheIdleWindow(context.Background())
+	buf, err := c.FetchImage(ctx, srv.URL+"/picture.jpg")
+	fetched()
 	if buf != nil {
 		t.Fatalf("expected nil buffer on empty body, got %d bytes", len(buf))
 	}
 	if !errors.Is(err, errNotFound) {
 		t.Fatalf("expected errNotFound on empty body, got %v", err)
 	}
+}
+
+// siblingCloseInTheIdleWindow returns a context whose trace does what every
+// httptest.Server.Close does, http.DefaultTransport.CloseIdleConnections,
+// at the moment a body-less answer's connection has joined its transport's
+// idle pool and the answer is not yet handed to the request: net/http's
+// read loop pools such a connection first, and calls PutIdleConn there.
+// When that Close took the request's own connection, the trace holds the
+// read loop until done is called, so the request sees its connection
+// closed before its answer, as it does when a parallel test's Close lands
+// there; otherwise the loop goes on at once. Call done when the request
+// has returned.
+func siblingCloseInTheIdleWindow(ctx context.Context) (_ context.Context, done func()) {
+	var mu sync.Mutex
+	var conn net.Conn
+	returned := make(chan struct{})
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			mu.Lock()
+			conn = info.Conn
+			mu.Unlock()
+		},
+		PutIdleConn: func(err error) {
+			if err != nil {
+				return
+			}
+			http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+			mu.Lock()
+			c := conn
+			mu.Unlock()
+			// A deadline cannot be set on a closed connection.
+			if c != nil && errors.Is(c.SetReadDeadline(time.Time{}), net.ErrClosed) {
+				<-returned
+			}
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace), sync.OnceFunc(func() { close(returned) })
 }
 
 // TestNewDeezerClient_DoesNotMutateSharedHTTPClient pins the shallow-copy
