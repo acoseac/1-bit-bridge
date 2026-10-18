@@ -109,20 +109,20 @@ func lyricsClient(t *testing.T, stub *atlasStub, sink *fakeLyricsSink) (*Client,
 	t.Helper()
 	srv := stub.server(t)
 	return &Client{
-			Lyrics:         sink,
-			HTTP:           srv.Client(),
-			RequestTimeout: 5 * time.Second,
-			LyricsPacing:   time.Nanosecond,
-			// The live gate belongs in the BASE fixture. A fixture that omits
-			// one describes a different bridge than production — which is how
-			// the upscale batch suite came to assert 202 against a bridge with
-			// the feature off (#878). A test wanting it off overrides here.
-			LyricsEnabled: func() bool { return true },
-		}, State{
-			Token:        "tok",
-			AtlasBaseURL: srv.URL,
-			ExpiresAt:    time.Now().Add(time.Hour),
-		}
+		Lyrics:         sink,
+		HTTP:           srv.Client(),
+		RequestTimeout: 5 * time.Second,
+		LyricsPacing:   time.Nanosecond,
+		// The live gate belongs in the BASE fixture. A fixture that omits
+		// one describes a different bridge than production — which is how
+		// the upscale batch suite came to assert 202 against a bridge with
+		// the feature off (#878). A test wanting it off overrides here.
+		LyricsEnabled: func() bool { return true },
+	}, State{
+		Token:        "tok",
+		AtlasBaseURL: srv.URL,
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
 }
 
 // `instrumental` is a SUCCESS. It must write no document and must record a
