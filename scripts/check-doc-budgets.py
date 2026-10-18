@@ -392,6 +392,12 @@ def self_test():
         finally:
             subprocess.run = real_run
         expect("no git on PATH means no tracked files, not a traceback", files, [])
+        subprocess.run = no_git
+        try:
+            code = check(root)
+        finally:
+            subprocess.run = real_run
+        expect("the command-line check fails when git lists no files", code, 1)
         code, msg = hook(root, event(os.path.join(root, "CLAUDE.md")), small)
         expect("hook speaks on an over-budget edit", code, 2)
         expect("hook message names the file and the budget", "CLAUDE.md is" in msg and "budget 500" in msg, True)
@@ -413,6 +419,17 @@ def self_test():
     return 0 if ok else 1
 
 
+def check(root):
+    """The command-line and CI check. Unlike the hook, it fails when git lists no files: a checkout
+    always has some, so none means git failed, and the per-file load budget would go unmeasured."""
+    files = tracked_files(root)
+    if not files:
+        print("check-doc-budgets: git listed no tracked files (not a checkout, or git is missing), "
+              "so the per-file load budget cannot be measured", file=sys.stderr)
+        return 1
+    return report(root, measure(root, files))
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -423,7 +440,7 @@ def main():
         return code
     if sys.argv[1:]:
         sys.exit(__doc__)
-    return report(REPO, measure(REPO))
+    return check(REPO)
 
 
 if __name__ == "__main__":

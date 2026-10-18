@@ -292,6 +292,7 @@ jobs:
   docs-check:
     name: docs-check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

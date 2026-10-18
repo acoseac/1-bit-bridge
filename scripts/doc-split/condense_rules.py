@@ -140,7 +140,7 @@ def build(sha, name, date, raw=None, overrides=None):
     return fm + text + "\n", "".join(parts) + "\n", entries
 
 
-def refuse_recondense(name, rules, hist):
+def refuse_recondense(name, rules, hist, base_raw):
     """Condensing is one-shot. Writing into the repository must not replace a rules file that is
     already condensed, or a long-form file that already exists, with anything but what they hold:
     later edits and entries moved there by move_entry.py would be lost. Once condensed, a file
@@ -153,6 +153,9 @@ def refuse_recondense(name, rules, hist):
         if old != new and (rel.startswith(HISTORY_DIR + "/") or MARK in old):
             sys.exit("%s is already condensed and differs from this run — condensing again would drop what "
                      "was added since. Move further entries with scripts/doc-split/move_entry.py." % rel)
+        if rel.startswith(".claude/rules/") and MARK not in old and old != base_raw:
+            sys.exit("%s differs from its copy at --base, so condensing from --base would drop the changes made "
+                     "since. Commit them and pass that commit as --base." % rel)
 
 
 def prefix_key(block):
@@ -199,7 +202,7 @@ def main():
                 print("  L%d %s" % (e["key"], e["mechanical_line"][:200]))
         if writes_files:
             if root == REPO:
-                refuse_recondense(name, rules, hist)
+                refuse_recondense(name, rules, hist, raw)
             os.makedirs(os.path.join(root, ".claude", "rules"), exist_ok=True)
             os.makedirs(os.path.join(root, HISTORY_DIR), exist_ok=True)
             write_text(os.path.join(root, ".claude", "rules", name + ".md"), rules)
