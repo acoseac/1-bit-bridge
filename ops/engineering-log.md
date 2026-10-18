@@ -46289,3 +46289,70 @@ the release that fixes it.
   only `http2/hpack` (which quic-go's qpack and http3 use), `http/httpguts`
   and `http/httpproxy`, for darwin, linux and windows alike. The bridge's
   HTTP/2 server is the stdlib's, which 1.27.2 fixes.
+
+## 2026-10-18 — a body-less answer's request rides a transport of its own in the Deezer tests (backlog B456)
+
+### What failed
+
+Dependabot's #1260 (golang.org/x/sys 0.48.0 → 0.49.0) failed `test -race
+(rest)` once, in `internal/enrich`:
+
+    --- FAIL: TestFetchImage_RejectsEmptyBody (0.00s)
+        deezer_test.go:150: expected errNotFound on empty body, got Get
+        "http://127.0.0.1:36083/picture.jpg": net/http: HTTP/1.x transport
+        connection broken: http: CloseIdleConnections called
+
+### Not the bump
+
+- `go test -race -run '^TestFetchImage_RejectsEmptyBody$' -count=50
+  ./internal/enrich/` (go1.26.6, macOS arm64) passed 50 of 50 on main
+  (27108208) and 50 of 50 on #1260's head (058400b3, x/sys 0.49.0).
+- #1263 (x/term 0.47.0) carries the same x/sys 0.49.0 and its `test -race
+  (rest)` passed.
+- The test is net/http over loopback. x/sys 0.49.0's changes (windows/arm
+  dropped, z/OS, linux/sparc64 stat, the getdents buffer, BSD xattr and
+  darwin fcntl pointer passing, new constants) touch nothing it runs, and
+  the bridge calls none of the changed functions.
+
+### The cause
+
+The test's client was `&http.Client{Timeout: 2 * time.Second}`, so
+`http.DefaultTransport`. For an answer with no body, net/http's read loop
+calls `tryPutIdleConn` before it sends the response to `roundTrip`
+(transport.go: "Put the idle conn back into the pool before we send the
+response", the same in 1.26.6 and 1.27.1). `httptest.Server.Close` calls
+`http.DefaultTransport.CloseIdleConnections`, and three of the four
+parallel Deezer tests close servers. A Close in that window closes the
+connection; `roundTrip` sees `pcClosed` while the response is not yet on
+its channel, and returns the error above (`nothingWrittenError` does not
+apply: the request was written, so it is not retried). An answer with a
+body is pooled only after the caller has read it to EOF, so the other
+three tests, whose answers have bodies, are not exposed. No production
+code calls CloseIdleConnections. In the repo's other packages, no parallel
+test sends a body-less request on the default transport (the parallel
+`internal/api` tests' answers carry JSON bodies).
+
+### Reproduced in the window, not by stress
+
+Stress did not reproduce it: the parallel group (`TestHostAllowed_…`,
+`TestFetchImage_…`, `TestNewDeezerClient_…`) passed 500 of 500 runs in one
+process and 300 of 300 beside 24 `yes` processes. 36 processes of it at
+once exhausted the ephemeral ports (22,240 sockets in TIME_WAIT on a range
+of 16,384): every failure was `connect: can't assign requested address`, or
+httptest falling back to `[::1]` and the allowlist refusing it, and none
+was this one. That load is shared with every other session on the host.
+
+`siblingCloseInTheIdleWindow` puts the sibling's Close in the window:
+`httptrace.ClientTrace.PutIdleConn`, which net/http calls on the read loop
+right after the pool put and before the send, calls
+`http.DefaultTransport.CloseIdleConnections`, and when that closed the
+request's own connection (`SetReadDeadline` answers `net.ErrClosed`) holds
+the loop until the request has returned, so `roundTrip` decides with the
+connection closed and no response. On the test's own commit (the old
+client) it failed 5 of 5 with CI's message.
+
+### The fix
+
+The client's transport is the server's (`srv.Client().Transport`), which
+no other test's Close touches. 50 of 50 under `-race` with the hook
+(go1.26.6), 20 of 20 on go1.27.1, and the parallel group 200 of 200.
