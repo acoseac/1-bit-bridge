@@ -133,6 +133,7 @@ before. Citations that were already stale before the condensation are listed, no
 | Files | Base | Command |
 |---|---|---|
 | `CLAUDE.md` as the core, 12 rules files (uncondensed), 6 skills, `ops/History-{Build,Cross-Repo,Docs,Workflow,Batches}.md`, and the corrections in `AGENTS.md`, `ops/README.md`, `ops/release-playbook.md` and `docs/LoupeReviewCycle.md` (restructure step 1) | `6f816e49` | `python3 scripts/doc-split/restructure-2026-10-18/split.py --out /tmp/x`, and in the repo `verify_moves.py --base 6f816e49` with the arguments `split.py --edits` prints |
+| `scanner`, `jobs`, `cli-serve`, `build-ci-tests` rules + their `ops/History-rules-*.md` (restructure step 2: the three over 100 KB, and the one that loads with every test file) | `5fe4cf08` | `scripts/doc-split/condense_rules.py --base 5fe4cf08 --date 2026-10-18 --out /tmp/x scanner jobs cli-serve build-ci-tests`, then `verify_rules.py --base 5fe4cf08` with the same names |
 
 On a newer `main`, `split.py --base origin/main` regenerates step 1 from that commit: every prefix
 and title in `routes.py` and `prose.py` must still match exactly one block or heading, so a moved

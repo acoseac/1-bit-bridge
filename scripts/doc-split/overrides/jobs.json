@@ -1,0 +1,3 @@
+{
+ "- **…and so does `upscale --gc`'s reverse sweep**": "- **…and so does `upscale --gc`'s reverse sweep** (2026-10-02, backlog B250): it deletes through `DeleteVariantIfUnchanged` with the row as listed, not the unconditional `DeleteVariant`, and counts `ErrVariantChanged` as `changed`, which is no failure. → History-rules-jobs.md"
+}

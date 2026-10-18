@@ -1,0 +1,3 @@
+{
+ "- **Windows CI catches wall-clock assumptions**": "- **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two stamps milliseconds apart are not reliably ordered: assert on counted events, and detect \"was this rewritten?\" by planted CONTENT, never by comparing mtimes. **An mtime compare is wrong in BOTH directions** (B52). → History-rules-build-ci-tests.md"
+}
