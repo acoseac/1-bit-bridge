@@ -45970,3 +45970,94 @@ page's peak does not grow with the index.
 - Each page has its own ETag and 304. Polling the first page with
   `If-None-Match` after each sync answers 304 while nothing changed; a 200
   with a new `version` means walk again.
+
+## 2026-10-18 — discovery shelves rotate, and stop repeating the last week (backlog B451)
+
+The review at the time measured seven bugs in the smart-mix builders. Each
+was confirmed in the code before the fix, and each new test failed on that
+code first.
+
+The analyzed pool (`AnalyzedTrackFeatures`) and the deep-cut pool
+(`LovedArtistDeepCuts`) were `ORDER BY path` / `ORDER BY artist` and then
+a cap: 5,000 keyed paths, each loved artist's three lowest paths, then the
+alphabetical first 200. On a library larger than the cap, everything past
+the prefix never entered Daily Mix discovery or Auto Mix, and a loved
+artist past the alphabetical cut never entered deep cuts. Both queries now
+order by `mix_week_hash`, FNV-1a of the UTC ISO-week seed and the path,
+the same bytes as `hashSeedPath`, and the cap is applied after that order.
+The per-artist cap stays 3 and the pool stays 200; the 5,000 cap stays.
+The seed is bound as `int64` of the uint64 bit pattern: `database/sql`
+rejects a uint64 whose high bit is set. `mix_week_hash` returns 16 hex
+digits so the sort is the unsigned order. It is registered next to
+`unicode_lower` and is not visible to a `sqlite3` CLI. The same seed is
+deterministic; sweeping seeds reaches every keyed row and every eligible
+deep cut (`TestAnalyzedTrackFeatures_WeekSeedMovesTheWindow`, including a
+seed with the high bit set,
+`TestLovedArtistDeepCuts_WeekSeedRotatesArtistsAndTracks`).
+
+`normalizedBPMDistance` returned 0 when either tempo was missing, cheaper
+than any real gap, so an untempoed track won a same-key tie. One missing
+tempo now costs half the known tempo, the fraction discovery scoring
+already uses. Both missing stays 0.
+`TestSequenceHarmonic_UnknownBPMDoesNotWinAKeyTie` failed on the old
+distance with the untempoed track placed first.
+
+Favorites asked `sequenceHarmonic` for the whole cap and appended hearts
+with no usable key after it, so they were dropped once the chain was full.
+A nil key root and a mode `ToCamelot` rejects are both unkeyed. The chain
+is capped to leave them a slot; if they outnumber the cap, they fill it.
+`TestBuildFavorites_UnkeyedHeartsFitInsideTheCap` and
+`TestBuildFavorites_UnmappedKeyStillFitsInsideTheCap` both failed by
+naming the dropped paths.
+
+Heavy Rotation's diversity caps read `MaxItems` (50) rows. Ten tracks by
+one artist filled that window, the 4/4 caps kept fewer than the floor, and
+the mix fell back to those ten. The read is now 5,000, the query's own
+ceiling, and the fallback remains when the pool really is one artist.
+`TestRegenerate_HeavyRotationCapsSeePastOneArtist` failed with all ten
+items from the one artist.
+
+`OrderedPlayEvents(limit 0)` clamped to 5,000 and ordered `started_at ASC`,
+so the newest plays were the ones cut. The inner query takes the newest
+rows (`started_at DESC, id DESC`) and the outer returns them
+chronological. The outer list does not name `id`.
+`TestOrderedPlayEvents_KeepsTheNewestWindow` failed wanting the newest
+three starts and getting the oldest three.
+
+A time-of-day hour with one play was stored. The family gate stays the
+busiest hour (`MinTimeOfDayPlays`, 15). A separate floor,
+`MinTimeOfDayHourPlays`, is 2; an hour at 2 is served and an hour at 1 is
+not. Raising it to 15 would have hidden hours the existing fixtures serve.
+`TestBuildTimeOfDay_ASinglePlayHourIsNotServed` failed because hour 8 was
+present.
+
+Discovery shelves (Daily Mix, Auto Mix, deep cuts, Lift Off, Wind Down)
+now skip paths any of them served in the last 7 days and the paths on the
+familiar shelves. The served set is `smart_playlist_served` (migration
+v58: `served_at` UnixNano, `slug`, `path`), appended when the cache is
+built and pruned in the same transaction at `now − 7d`. Daily Mix records
+every track it showed and filters only its discovery slice; an empty
+discovery slice does not relax it. The familiar shelves are the built
+items of Heavy Rotation, Favorites and Recently Played, not Heavy
+Rotation's candidate window. If the filter would leave a family under its
+minimum, that family is rebuilt without the filter and the regenerator
+logs one Info line. No wire change: the table is not served, and
+`ExclusionRelaxed` is not serialized.
+`TestDailyDiscoverySkipsAPathServedThisWeek`,
+`TestDiscoverySkipsTheFamiliarShelves`,
+`TestDiscoveryKeepsAFamilyThatTheExclusionWouldHide`,
+`TestSmartPlaylistServed_RecordsAndPrunesPastSevenDays`,
+`TestRegenerate_SkipsAPathServedThisWeek`.
+
+`Generate` puts Daily Mix first and Heavy Rotation second. The cache
+position is the slice index, read `ORDER BY position`. The app's hero is
+`families.first` after hides and an optional pin (`HomeView.swift`,
+`SmartPlaylistSettings.visible`); it does not rerank. Nothing pinned or
+hidden means the wire order is the hero.
+`TestGenerate_DefaultOrderLeadsWithDailyMix` failed with Heavy Rotation
+first.
+
+Not changed, and real: Daily Mix's subtitle stays "Favorites and a few
+you might've missed" when the discovery slice is empty. The owner left it
+out of this release, with the Rediscover shelf, a new deep-cut ranking,
+reasons, neighbourhoods, a mood journey and a novelty quota.
