@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -391,4 +392,108 @@ func doExport(t *testing.T, h http.Handler, path string) *httptest.ResponseRecor
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	return rw
+}
+
+// TestM3U8ExportRelativePaths pins the console's "relative to the library"
+// export: each local item that resolves is written as its library path
+// (the manifest path, what the iOS app's own export writes for a bridge
+// source), while the default stays the absolute path on this host, and a
+// foreign or unresolvable item stays a comment in both modes.
+func TestM3U8ExportRelativePaths(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	h := srv.Handler()
+
+	locations := func(body string) []string {
+		var out []string
+		for _, line := range strings.Split(body, "\n") {
+			if line != "" && !strings.HasPrefix(line, "#") {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+
+	rec := doExport(t, h, "/api/playlists/export?device=abcdef01&id=pl-1&format=m3u8&paths=relative")
+	if rec.Code != 200 {
+		t.Fatalf("relative export: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if got := locations(body); len(got) != 1 || got[0] != "Artist/Album/01.flac" {
+		t.Errorf("relative locations = %q, want [Artist/Album/01.flac]:\n%s", got, body)
+	}
+	if !strings.Contains(body, "#EXTINF:-1,A - First\nArtist/Album/01.flac\n") || !strings.Contains(body, "# foreign") {
+		t.Errorf("relative body malformed:\n%s", body)
+	}
+
+	// The default, and an explicit absolute, write the path on this host.
+	for _, url := range []string{
+		"/api/playlists/export?device=abcdef01&id=pl-1&format=m3u8",
+		"/api/playlists/export?device=abcdef01&id=pl-1&format=m3u8&paths=absolute",
+	} {
+		rec = doExport(t, h, url)
+		got := locations(rec.Body.String())
+		if len(got) != 1 || !filepath.IsAbs(got[0]) || !strings.HasSuffix(filepath.ToSlash(got[0]), "/Artist/Album/01.flac") {
+			t.Errorf("%s: locations = %q, want one absolute path ending in the library path", url, got)
+		}
+	}
+
+	// Any other value is refused before the lookup.
+	if rec = doExport(t, h, "/api/playlists/export?device=abcdef01&id=pl-1&format=m3u8&paths=both"); rec.Code != 400 {
+		t.Errorf("paths=both: got %d, want 400", rec.Code)
+	}
+}
+
+// TestM3U8ExportRelativePathsEscapeWhatAnImporterWouldMisread pins the
+// `./` prefix: a library path that starts with `#` would be read as a
+// comment and one that starts with whitespace would be trimmed, so both
+// are written `./`-prefixed (the iOS exporter's rule); an item that no
+// longer resolves stays a comment in the relative mode too.
+func TestM3U8ExportRelativePathsEscapeWhatAnImporterWouldMisread(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.deps.Manifest.UpsertDeviceRegistration(ctx, testDeviceToken, "tok-1", "Test iPhone"); err != nil {
+		t.Fatalf("UpsertDeviceRegistration: %v", err)
+	}
+	pl := manifest.PlaylistRow{ID: "pl-edge", Name: "Edges", LastModifiedAt: 1_700_000_000_000_000_000}
+	items := []manifest.PlaylistItemRow{
+		{Position: 0, Path: "#1 Hits/01.flac", Title: "One", Artist: "A"},
+		{Position: 1, Path: " Lead/02.flac", Title: "Two", Artist: "B"},
+		{Position: 2, Path: "Plain/03.flac", Title: "Three", Artist: "C"},
+		{Position: 3, Path: "../escape/04.flac", Title: "Four", Artist: "D"},
+	}
+	if err := srv.deps.Manifest.UpsertPlaylist(ctx, testDeviceToken, pl, items); err != nil {
+		t.Fatalf("UpsertPlaylist: %v", err)
+	}
+	rec := doExport(t, srv.Handler(), "/api/playlists/export?device=abcdef01&id=pl-edge&format=m3u8&paths=relative")
+	if rec.Code != 200 {
+		t.Fatalf("export: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"#EXTINF:-1,A - One\n./#1 Hits/01.flac\n",
+		"#EXTINF:-1,B - Two\n./ Lead/02.flac\n",
+		"#EXTINF:-1,C - Three\nPlain/03.flac\n",
+		"# unresolved: ../escape/04.flac\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestM3URelativeLocation(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"Artist/Album/01.flac", "Artist/Album/01.flac"},
+		{"/Artist/Album/01.flac", "Artist/Album/01.flac"},
+		{"#1 Hits/01.flac", "./#1 Hits/01.flac"},
+		{" Lead/02.flac", "./ Lead/02.flac"},
+		{"\tTab/03.flac", "./\tTab/03.flac"},
+		{"A\nB/04.flac", "A B/04.flac"},
+		{"Root A/Album/05.flac", "Root A/Album/05.flac"},
+	} {
+		if got := m3uRelativeLocation(c.in); got != c.want {
+			t.Errorf("m3uRelativeLocation(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }

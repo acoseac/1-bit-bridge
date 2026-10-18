@@ -1970,7 +1970,12 @@ function mixActions(c, view, ctx) {
  * — a playlist you cannot get out of the bridge is not backed up in any
  * useful sense. Three formats, unchanged from that page: JSON (the
  * document verbatim), CSV (a spreadsheet), M3U8 (openable by a player
- * on the bridge host).
+ * on the bridge host). A fourth button is the M3U8 with each track's
+ * library path, relative to the library's root, as the iOS app's own
+ * export writes it: saved at that root, it resolves for any player and
+ * for the bridge's and the app's playlist-file imports. With several
+ * roots each path starts with its root's name, so the file belongs beside
+ * the root folders.
  *
  * location assignment, not fetch: the response carries
  * Content-Disposition, so it has to reach the browser's own download
@@ -1986,6 +1991,11 @@ function playlistActions(c) {
       on: { click: () => { location.href = playlistExportURL(c.id, fmt); } },
     }));
   }
+  box.appendChild(el("button", {
+    class: "btn btn-quiet", text: "M3U8 (RELATIVE)",
+    attrs: { title: "Each track's path relative to the library. Save the file at the library's root; with several roots, beside the root folders, since each path starts with its root's name." },
+    on: { click: () => { location.href = playlistExportURL(c.id, "m3u8", "relative"); } },
+  }));
   box.appendChild(coverControl("playlist", c, status));
   return el("div", {}, box, status);
 }

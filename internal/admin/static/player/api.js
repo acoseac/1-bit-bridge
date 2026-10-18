@@ -256,7 +256,10 @@ export function audioURL(path, variantID) {
 }
 
 /**
- * A one-playlist export download, in json / csv / m3u8.
+ * A one-playlist export download, in json / csv / m3u8. `paths` is for
+ * m3u8 only: "relative" writes each track's library path instead of its
+ * absolute path on the bridge host; omitted, the server's default
+ * (absolute) applies.
  *
  * The OPERATOR endpoint, unchanged: /api/playlists/export already wrote
  * all three formats (including the M3U8 whose every interpolated field
@@ -269,8 +272,9 @@ export function audioURL(path, variantID) {
  * Content-Disposition, so it has to reach the browser's own download
  * path. The caller assigns location.
  */
-export function playlistExportURL(id, format) {
-  return `/api/playlists/export?id=${encodeURIComponent(id)}&format=${encodeURIComponent(format)}`;
+export function playlistExportURL(id, format, paths) {
+  const tail = paths ? `&paths=${encodeURIComponent(paths)}` : "";
+  return `/api/playlists/export?id=${encodeURIComponent(id)}&format=${encodeURIComponent(format)}${tail}`;
 }
 
 export function downloadURL(path) {
