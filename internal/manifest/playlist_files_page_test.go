@@ -242,7 +242,10 @@ func TestTheFeedVersionMovesWithEveryChangeAPageCanShow(t *testing.T) {
 }
 
 // TestJSONStringBytesIsWhatEncodingJSONWrites holds the page cost's string
-// measure to the encoder that writes the page.
+// measure to the encoder that writes the page, whichever one the binary is
+// built with: Go 1.27's default writes a byte of invalid UTF-8 as the raw
+// replacement character, and GOEXPERIMENT=nojsonv2 as the \ufffd escape
+// (backlog B452). Run it both ways after a toolchain move.
 func TestJSONStringBytesIsWhatEncodingJSONWrites(t *testing.T) {
 	for _, s := range []string{
 		"", "plain/01.flac", "Caf\u00e9", "\u65e5\u672c\u8a9e/\u66f2.flac", "\U0001F3B5",
