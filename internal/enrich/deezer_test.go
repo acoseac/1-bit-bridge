@@ -136,9 +136,12 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 // os.Stat (size-blind) it would become a permanent broken cache hit the
 // enricher never retries.
 //
-// The request runs under siblingCloseInTheIdleWindow, which puts the
-// CloseIdleConnections of a parallel test's httptest.Server.Close into
-// the one window where it fails a body-less answer (backlog B456).
+// The client's transport is the server's own (backlog B456). On
+// http.DefaultTransport a parallel test's httptest.Server.Close, which
+// closes that transport's idle connections, failed the request when it
+// landed in the window where net/http has pooled a body-less answer's
+// connection and not yet handed the answer over.
+// siblingCloseInTheIdleWindow puts that Close there on every run.
 func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +149,7 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second, Transport: srv.Client().Transport})
 	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
 	ctx, fetched := siblingCloseInTheIdleWindow(context.Background())

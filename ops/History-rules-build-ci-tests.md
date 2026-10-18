@@ -540,6 +540,31 @@
   the runs, where the transport form stayed on the write in 50 of 50 under
   `-race` (#1001).
 
+- **A test whose request gets an answer with no body sends it on a transport
+  of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456).
+  Every `httptest.Server.Close` calls
+  `http.DefaultTransport.CloseIdleConnections`. For an answer with no body (a
+  200 with none, a bare status, a 204, a 304, any HEAD) net/http's read loop
+  puts the connection in the idle pool BEFORE it hands the response over, so
+  a Close another test makes in that window closes the request's connection,
+  and the request fails with `net/http: HTTP/1.x transport connection broken:
+  http: CloseIdleConnections called`. `TestFetchImage_RejectsEmptyBody` did,
+  once, in #1260's `test -race (rest)`, beside the three parallel Deezer tests
+  that close servers. An answer with a body is safe: its connection is pooled
+  only after the caller has read it. Give the client `srv.Client().Transport`,
+  a transport per server that another test's Close never touches. **Reproduce
+  it by putting the Close in the window, not by stress**:
+  `siblingCloseInTheIdleWindow` (internal/enrich) calls it from an
+  `httptrace.ClientTrace.PutIdleConn` hook, which net/http runs on the read
+  loop inside the window, and when that took the request's own connection it
+  holds the loop until the request has returned. The old client failed 5 of
+  5 that way, with CI's message; alone it passed 50 of 50, and its parallel
+  group 300 of 300 under 24 CPU hogs. **Don't oversubscribe HTTP tests to hunt
+  it**: 36 processes of that group exhausted the ephemeral ports (22,240
+  sockets in TIME_WAIT, which other sessions on the Mac share), and every
+  failure was `can't assign requested address` or httptest falling back to
+  `[::1]`, none of them this one.
+
 - **A docblock that names a test is a claim, and six of them were false.** Two
   stood in for an invariant nothing pinned at all; one was a false safety claim
   on a security boundary (`managed_controls.go` said a test "walks the registered
