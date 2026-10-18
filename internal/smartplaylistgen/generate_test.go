@@ -283,11 +283,8 @@ func TestRegenerate_SkipsAPathServedThisWeek(t *testing.T) {
 		analysis(t, s, p, 0, "major", 120)
 	}
 	served := paths[0]
-	if err := s.RecordSmartPlaylistServed(ctx, []manifest.SmartPlaylistServedRow{{
-		ServedAt: now.Add(-24 * time.Hour).UnixNano(),
-		Slug:     "auto-mix",
-		Path:     served,
-	}}, now.Add(-30*24*time.Hour).UnixNano()); err != nil {
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now.Add(-24*time.Hour).UnixNano(), discoveryServedDays,
+		map[string][]string{"auto-mix": {served}}); err != nil {
 		t.Fatal(err)
 	}
 	opts := regenTestOptions(now.UnixNano(), true)

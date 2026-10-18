@@ -150,10 +150,12 @@ type Inputs struct {
 	// discovery anti-join).
 	PlayedPaths map[string]bool
 
-	// ServedRecently is the set of paths a discovery shelf served in the
-	// last 7 days. Daily Mix's discovery slice, deep cuts, the mood bands
-	// and Auto Mix skip these plus the familiar shelves (Heavy Rotation,
-	// Favorites, Recently Played), unless that would hide the family.
+	// ServedRecently is the set of paths a discovery shelf served on the 7
+	// UTC days before the run's own. The run's own day is never in it, so
+	// every build on one day gets the same set. Daily Mix's discovery
+	// slice, deep cuts, the mood bands and Auto Mix skip these plus the
+	// familiar shelves (Heavy Rotation, Favorites, Recently Played), unless
+	// that would hide the family.
 	ServedRecently map[string]bool
 
 	// Features maps every candidate path (PlayStat lists + hour buckets) to

@@ -21,9 +21,13 @@ import (
 // so it could keep its minimum. One line per family per regeneration.
 var logger = logging.Component("smartplaylist")
 
-// discoveryServedRetention is how long a path a discovery shelf served
-// stays excluded. Rows older than this are pruned when the cache is built.
-const discoveryServedRetention = 7 * 24 * time.Hour
+// discoveryServedDays is how many UTC days a path a discovery shelf served
+// stays excluded: the days before the run's own, never the run's own day.
+// A build later that day (the settle run after a restart, "Regenerate now",
+// a per-family regenerate) then sees the inputs the day's first build saw
+// and builds the same shelves. Rows older than the window are pruned when
+// the cache is built.
+const discoveryServedDays = 7
 
 // heavyRotationCandidateLimit is how many play-ranked rows Heavy Rotation
 // reads before the diversity caps run. The display cap is Engine.MaxItems
@@ -129,7 +133,8 @@ func DefaultOptions(nowNS int64, analysisEnabled bool) Options {
 	}
 }
 
-// Regenerate assembles inputs, runs the generator, and replaces the cache.
+// Regenerate assembles inputs, runs the generator, and replaces the cache,
+// then replaces the day's served rows of each discovery shelf it built.
 // Returns the number of populated families written.
 func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, error) {
 	in, err := assembleInputs(ctx, store, opts)
@@ -158,7 +163,9 @@ func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, 
 // identical either way); only the requested slug's output is written. A slug
 // the fresh run no longer populates is REMOVED from the cache, matching the
 // wholesale path where an empty family simply isn't written — a mix whose
-// source signal dried up must not linger stale forever.
+// source signal dried up must not linger stale forever. Of the served
+// rows, only the slug's own for the day are replaced, and only when the
+// slug is a discovery shelf the run built.
 //
 // Returns generated (the slug is in the fresh engine output and was
 // written), existed (a cached row was present before the call), and the
@@ -350,8 +357,10 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		}
 	}
 
-	servedSince := now - int64(discoveryServedRetention)
-	servedSet, err := store.SmartPlaylistServedSince(ctx, servedSince)
+	// The days before this run's own, in UTC like the week seed. What this
+	// day already served excludes nothing, so a second build today gets
+	// the inputs the first one got.
+	servedSet, err := store.SmartPlaylistServedOnEarlierDays(ctx, now, discoveryServedDays)
 	if err != nil {
 		return smartplaylist.Inputs{}, err
 	}
@@ -453,22 +462,26 @@ func logExclusionRelaxations(gen []smartplaylist.GeneratedPlaylist) {
 	}
 }
 
+// recordDiscoveryServed replaces the run's own UTC day's served rows for each
+// discovery shelf gen holds with that shelf's items, and prunes past the
+// window. A shelf gen does not hold keeps its rows: a per-family run passes
+// only its own family, and a family that dropped out of a later full run
+// was still shown until it did.
 func recordDiscoveryServed(ctx context.Context, store *manifest.Store, gen []smartplaylist.GeneratedPlaylist, nowNS int64) error {
-	var rows []manifest.SmartPlaylistServedRow
+	served := map[string][]string{}
 	for _, g := range gen {
 		if !smartplaylist.DiscoveryShelf(g.Slug) {
 			continue
 		}
+		paths := make([]string, 0, len(g.Items))
 		for _, it := range g.Items {
-			if it.Path == "" {
-				continue
+			if it.Path != "" {
+				paths = append(paths, it.Path)
 			}
-			rows = append(rows, manifest.SmartPlaylistServedRow{
-				ServedAt: nowNS, Slug: g.Slug, Path: it.Path,
-			})
 		}
+		served[g.Slug] = paths
 	}
-	return store.RecordSmartPlaylistServed(ctx, rows, nowNS-int64(discoveryServedRetention))
+	return store.ReplaceSmartPlaylistServedToday(ctx, nowNS, discoveryServedDays, served)
 }
 
 // toStored converts the engine output into cache rows, serializing each

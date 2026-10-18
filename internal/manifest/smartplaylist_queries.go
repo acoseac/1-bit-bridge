@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
+	"time"
 )
 
 // This file holds the read-path aggregations + the cache read/write that
@@ -193,19 +196,45 @@ func (s *Store) LoadSmartPlaylists(ctx context.Context) ([]StoredSmartPlaylist, 
 	return out, rows.Err()
 }
 
-// SmartPlaylistServedRow is one path a discovery shelf served when the cache
-// was built (migration v58). Not a wire type: the columns are served_at
-// (UnixNano), slug and path, and nothing in /v1 reads the table.
-type SmartPlaylistServedRow struct {
-	ServedAt int64
-	Slug     string
-	Path     string
+// --- smart_playlist_served, what the discovery shelves served (migration v58) ---
+//
+// The table is read and written by whole UTC days, UTC being the zone the
+// week seed is taken in. A run excludes what was served on the days before
+// its own, and writing a shelf replaces that shelf's rows for the run's own
+// day. Regeneration runs daily, 120 s after every start, on "Regenerate now"
+// and per family, and the engine's only seeds are the week and the slug, so
+// a second run on one day has to see the inputs the first one saw: a run
+// that excluded what its own day had served would build the day's shelves
+// again without the tracks just put on them. Not a wire type: the columns
+// are served_at (UnixNano), slug and path, and nothing in /v1 reads them.
+
+// smartPlaylistServedDayNS is one UTC day in nanoseconds. Unix time counts
+// no leap seconds, so every UTC day is exactly this long.
+const smartPlaylistServedDayNS = int64(24 * time.Hour)
+
+// smartPlaylistServedDayStart returns the start of the UTC day that holds
+// nowNS, as UnixNano: its midnight, which belongs to that day.
+func smartPlaylistServedDayStart(nowNS int64) int64 {
+	t := time.Unix(0, nowNS).UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).UnixNano()
 }
 
-// RecordSmartPlaylistServed appends the paths a regeneration served and
-// drops rows older than retainAfterNS (the 7-day exclusion window). An
-// empty rows slice still prunes. Holds s.mu (writer contract).
-func (s *Store) RecordSmartPlaylistServed(ctx context.Context, rows []SmartPlaylistServedRow, retainAfterNS int64) error {
+// ReplaceSmartPlaylistServedToday records what one run's discovery shelves
+// served. For each slug in served it deletes that slug's rows stamped on the
+// UTC day that holds nowNS, then inserts the slug's paths stamped nowNS; a
+// slug not in served keeps its rows, that day's included. Then it deletes
+// the rows stamped before the window, the `days` UTC days before nowNS's
+// own. So any number of runs on one day leave one run's rows per slug, the
+// last one's, and an empty map only prunes. One transaction, under s.mu
+// (writer contract).
+func (s *Store) ReplaceSmartPlaylistServedToday(ctx context.Context, nowNS int64, days int, served map[string][]string) error {
+	if days < 1 {
+		return errors.New("manifest: ReplaceSmartPlaylistServedToday needs a window of at least one day")
+	}
+	dayStart := smartPlaylistServedDayStart(nowNS)
+	dayEnd := dayStart + smartPlaylistServedDayNS
+	windowStart := dayStart - int64(days)*smartPlaylistServedDayNS
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -215,33 +244,52 @@ func (s *Store) RecordSmartPlaylistServed(ctx context.Context, rows []SmartPlayl
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit; unwind guard otherwise
 
-	if len(rows) > 0 {
-		stmt, err := tx.PrepareContext(ctx, `
+	if len(served) > 0 {
+		ins, err := tx.PrepareContext(ctx, `
 			INSERT INTO smart_playlist_served (served_at, slug, path) VALUES (?, ?, ?)`)
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
-		for _, r := range rows {
-			if r.Slug == "" || r.Path == "" {
-				continue
+		defer ins.Close()
+		for _, slug := range slices.Sorted(maps.Keys(served)) {
+			if slug == "" {
+				return errors.New("manifest: ReplaceSmartPlaylistServedToday received an empty slug")
 			}
-			if _, err := stmt.ExecContext(ctx, r.ServedAt, r.Slug, r.Path); err != nil {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM smart_playlist_served
+				 WHERE slug = ? AND served_at >= ? AND served_at < ?`, slug, dayStart, dayEnd); err != nil {
 				return err
+			}
+			for _, p := range served[slug] {
+				if p == "" {
+					continue
+				}
+				if _, err := ins.ExecContext(ctx, nowNS, slug, p); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_playlist_served WHERE served_at < ?`, retainAfterNS); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_playlist_served WHERE served_at < ?`, windowStart); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// SmartPlaylistServedSince returns the distinct paths a discovery shelf
-// served at or after sinceNS. Read path — no s.mu.
-func (s *Store) SmartPlaylistServedSince(ctx context.Context, sinceNS int64) (map[string]struct{}, error) {
+// SmartPlaylistServedOnEarlierDays returns the distinct paths a discovery
+// shelf served on the `days` UTC days before the one that holds nowNS:
+// served_at in [dayStart − days, dayStart). What nowNS's own day served is
+// never in it, so every run on one day reads the same set. Read path — no
+// s.mu.
+func (s *Store) SmartPlaylistServedOnEarlierDays(ctx context.Context, nowNS int64, days int) (map[string]struct{}, error) {
+	if days < 1 {
+		return nil, errors.New("manifest: SmartPlaylistServedOnEarlierDays needs a window of at least one day")
+	}
+	dayStart := smartPlaylistServedDayStart(nowNS)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT path FROM smart_playlist_served WHERE served_at >= ?`, sinceNS)
+		SELECT DISTINCT path FROM smart_playlist_served
+		 WHERE served_at >= ? AND served_at < ?`,
+		dayStart-int64(days)*smartPlaylistServedDayNS, dayStart)
 	if err != nil {
 		return nil, err
 	}

@@ -2543,10 +2543,11 @@ var migrations = []migration{
 		`,
 	},
 	{
-		// v58 records what a discovery shelf served, so the next builds can
-		// skip it for 7 days (backlog B451). served_at is UnixNano. The
-		// regenerator inserts the paths it just wrote and deletes rows
-		// older than the window in the same transaction. The table is not
+		// v58 records what a discovery shelf served, so the builds of the
+		// next 7 UTC days can skip it (backlog B451). served_at is UnixNano.
+		// The regenerator replaces the run's own day's rows for each shelf
+		// it wrote and deletes rows older than the window in the same
+		// transaction (ReplaceSmartPlaylistServedToday). The table is not
 		// on the wire: /v1/smart-playlists still serves the cache.
 		version: 58,
 		name:    "smart_playlist_served (discovery shelves already shown)",

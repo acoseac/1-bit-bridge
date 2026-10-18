@@ -2,27 +2,35 @@ package manifest
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"testing"
 	"time"
 )
 
+// What earlier days' runs served is stored and read back, and a run prunes
+// what its 7-day window has passed: eight days back goes, yesterday stays.
 func TestSmartPlaylistServed_RecordsAndPrunesPastSevenDays(t *testing.T) {
 	s := newSPStore(t)
 	ctx := context.Background()
 	day := int64(24 * time.Hour)
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC).UnixNano()
 
-	// Plant both ages with a cutoff that keeps them, then prune at 7 days.
-	if err := s.RecordSmartPlaylistServed(ctx, []SmartPlaylistServedRow{
-		{ServedAt: now - 8*day, Slug: "auto-mix", Path: "/old.flac"},
-		{ServedAt: now - day, Slug: "daily-mix", Path: "/recent.flac"},
-		{ServedAt: now - day, Slug: "lift-off", Path: "/recent.flac"},
-	}, now-30*day); err != nil {
-		t.Fatalf("record: %v", err)
+	// A run eight days ago and a run yesterday, each with a window that
+	// keeps the other's rows; then today's run prunes at 7 days.
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now-8*day, 30, map[string][]string{
+		"auto-mix": {"/old.flac"},
+	}); err != nil {
+		t.Fatalf("record eight days ago: %v", err)
 	}
-	got, err := s.SmartPlaylistServedSince(ctx, now-30*day)
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now-day, 30, map[string][]string{
+		"daily-mix": {"/recent.flac"},
+		"lift-off":  {"/recent.flac"},
+	}); err != nil {
+		t.Fatalf("record yesterday: %v", err)
+	}
+	got, err := s.SmartPlaylistServedOnEarlierDays(ctx, now, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,10 +41,10 @@ func TestSmartPlaylistServed_RecordsAndPrunesPastSevenDays(t *testing.T) {
 		t.Fatal("recent row was not stored")
 	}
 
-	if err := s.RecordSmartPlaylistServed(ctx, nil, now-7*day); err != nil {
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now, 7, nil); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	got, err = s.SmartPlaylistServedSince(ctx, now-30*day)
+	got, err = s.SmartPlaylistServedOnEarlierDays(ctx, now, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +55,21 @@ func TestSmartPlaylistServed_RecordsAndPrunesPastSevenDays(t *testing.T) {
 		t.Fatal("a path served yesterday was pruned")
 	}
 	// The lookup the regenerator uses is the same 7-day window.
-	got, err = s.SmartPlaylistServedSince(ctx, now-7*day)
+	got, err = s.SmartPlaylistServedOnEarlierDays(ctx, now, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := got["/recent.flac"]; !ok || len(got) != 1 {
 		t.Fatalf("7-day lookup = %v, want only /recent.flac", got)
+	}
+
+	// Both refuse a window of no days, which would read nothing and prune
+	// every earlier day's rows.
+	if err := s.ReplaceSmartPlaylistServedToday(ctx, now, 0, nil); err == nil {
+		t.Error("ReplaceSmartPlaylistServedToday accepted a window of 0 days")
+	}
+	if _, err := s.SmartPlaylistServedOnEarlierDays(ctx, now, 0); err == nil {
+		t.Error("SmartPlaylistServedOnEarlierDays accepted a window of 0 days")
 	}
 }
 
@@ -69,6 +86,11 @@ type servedBoundaryRow struct {
 	at   int64
 	slug string
 	path string
+}
+
+// String renders the row with its instant in UTC, for failure messages.
+func (r servedBoundaryRow) String() string {
+	return fmt.Sprintf("%s %s@%s", r.slug, r.path, time.Unix(0, r.at).UTC().Format(time.RFC3339Nano))
 }
 
 // servedBoundaryRows stamps a row at each edge the day math has: the

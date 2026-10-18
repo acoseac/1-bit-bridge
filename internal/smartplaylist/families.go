@@ -720,9 +720,10 @@ func buildMoodBand(pool []TrackFeature, in Inputs, opts Options, seed uint64, sl
 }
 
 // DiscoveryShelf reports whether slug is a shelf that records what it
-// served and skips the 7-day already-shown set: Daily Mix, Auto Mix,
-// deep cuts, Lift Off and Wind Down. Daily Mix records every track it
-// showed; only its discovery slice is filtered on the way in.
+// served and skips what the discovery shelves served on the 7 UTC days
+// before the run's own: Daily Mix, Auto Mix, deep cuts, Lift Off and Wind
+// Down. Daily Mix records every track it showed; only its discovery slice
+// is filtered on the way in.
 func DiscoveryShelf(slug string) bool {
 	switch slug {
 	case "daily-mix", "auto-mix", "artist-deep-cuts", "wind-down", "lift-off":
@@ -741,12 +742,13 @@ func camelotOK(f TrackFeature) bool {
 }
 
 // discoveryExclusions is the set a discovery shelf skips: paths any of
-// those shelves served in the last 7 days, plus the paths on the familiar
-// shelves as those shelves will actually be built (Heavy Rotation,
-// Favorites, Recently Played). The Heavy Rotation input is a candidate
-// window, not the shelf, so the built items are what counts. Nil when
-// there is nothing to skip, so a builder can tell "no exclusion" from
-// "an exclusion that removed nothing".
+// those shelves served on the 7 UTC days before the run's own
+// (Inputs.ServedRecently), plus the paths on the familiar shelves as those
+// shelves will actually be built (Heavy Rotation, Favorites, Recently
+// Played). The Heavy Rotation input is a candidate window, not the shelf,
+// so the built items are what counts. Nil when there is nothing to skip,
+// so a builder can tell "no exclusion" from "an exclusion that removed
+// nothing".
 func discoveryExclusions(in Inputs, opts Options) map[string]bool {
 	ex := map[string]bool{}
 	add := func(p GeneratedPlaylist, ok bool) {
