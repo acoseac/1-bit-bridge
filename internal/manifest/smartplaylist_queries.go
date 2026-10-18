@@ -251,13 +251,18 @@ func (s *Store) ReplaceSmartPlaylistServedToday(ctx context.Context, nowNS int64
 			return err
 		}
 		defer ins.Close()
+		del, err := tx.PrepareContext(ctx, `
+			DELETE FROM smart_playlist_served
+			 WHERE slug = ? AND served_at >= ? AND served_at < ?`)
+		if err != nil {
+			return err
+		}
+		defer del.Close()
 		for _, slug := range slices.Sorted(maps.Keys(served)) {
 			if slug == "" {
 				return errors.New("manifest: ReplaceSmartPlaylistServedToday received an empty slug")
 			}
-			if _, err := tx.ExecContext(ctx, `
-				DELETE FROM smart_playlist_served
-				 WHERE slug = ? AND served_at >= ? AND served_at < ?`, slug, dayStart, dayEnd); err != nil {
+			if _, err := del.ExecContext(ctx, slug, dayStart, dayEnd); err != nil {
 				return err
 			}
 			for _, p := range served[slug] {

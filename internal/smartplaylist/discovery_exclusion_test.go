@@ -171,3 +171,33 @@ func TestDiscoveryKeepsAFamilyThatTheExclusionWouldHide(t *testing.T) {
 		t.Fatalf("relaxed deep cuts has %d items", len(deep.Items))
 	}
 }
+
+// The five discovery shelves read one exclusion set per Generate: the first
+// builder computes it into the memo Generate installs and the rest read it
+// back, rather than each rebuilding Heavy Rotation, Favorites and Recently
+// Played (Gemini on #1276). Outside Generate (no memo) it is computed per call.
+func TestDiscoveryExclusions_OneGenerateComputesThemOnce(t *testing.T) {
+	opts := testOpts(false)
+	in := Inputs{ServedRecently: map[string]bool{"/served.flac": true}}
+
+	sentinel := map[string]bool{"/sentinel.flac": true}
+	in.exclusions = &exclusionMemo{done: true, set: sentinel}
+	if got := discoveryExclusions(in, opts); len(got) != 1 || !got["/sentinel.flac"] {
+		t.Fatalf("a filled memo must be returned as it is, got %v", got)
+	}
+
+	in.exclusions = &exclusionMemo{}
+	first := discoveryExclusions(in, opts)
+	if !in.exclusions.done || !first["/served.flac"] {
+		t.Fatalf("the first call must fill the memo with the computed set, memo %+v, got %v", *in.exclusions, first)
+	}
+	in.ServedRecently = map[string]bool{"/other.flac": true}
+	if again := discoveryExclusions(in, opts); !again["/served.flac"] || again["/other.flac"] {
+		t.Fatalf("a later call in the same Generate must read the memo, not recompute, got %v", again)
+	}
+
+	in.exclusions = nil
+	if fresh := discoveryExclusions(in, opts); !fresh["/other.flac"] || fresh["/served.flac"] {
+		t.Fatalf("without a memo the set is computed from the inputs, got %v", fresh)
+	}
+}

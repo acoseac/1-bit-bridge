@@ -750,6 +750,9 @@ func camelotOK(f TrackFeature) bool {
 // so a builder can tell "no exclusion" from "an exclusion that removed
 // nothing".
 func discoveryExclusions(in Inputs, opts Options) map[string]bool {
+	if m := in.exclusions; m != nil && m.done {
+		return m.set
+	}
 	ex := map[string]bool{}
 	add := func(p GeneratedPlaylist, ok bool) {
 		if !ok {
@@ -766,7 +769,10 @@ func discoveryExclusions(in Inputs, opts Options) map[string]bool {
 		ex[p] = true
 	}
 	if len(ex) == 0 {
-		return nil
+		ex = nil
+	}
+	if m := in.exclusions; m != nil {
+		m.done, m.set = true, ex
 	}
 	return ex
 }

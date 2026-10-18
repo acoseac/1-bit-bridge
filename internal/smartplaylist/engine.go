@@ -6,6 +6,7 @@ package smartplaylist
 // end). The returned slice order is the homepage order; the caller stamps a
 // dense Position from the index. Pure + deterministic given the same inputs.
 func Generate(in Inputs, opts Options) []GeneratedPlaylist {
+	in.exclusions = &exclusionMemo{} // the discovery shelves share one set
 	var out []GeneratedPlaylist
 	add := func(p GeneratedPlaylist, ok bool) {
 		if ok {

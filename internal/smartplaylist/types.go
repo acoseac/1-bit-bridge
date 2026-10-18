@@ -158,6 +158,13 @@ type Inputs struct {
 	// that would hide the family.
 	ServedRecently map[string]bool
 
+	// exclusions memoizes discoveryExclusions for one Generate: the five
+	// discovery shelves read the same set, so it is built once rather than
+	// once per shelf, each time rebuilding Heavy Rotation, Favorites and
+	// Recently Played (Gemini on #1276). Nil outside Generate, where a
+	// builder computes the set on demand.
+	exclusions *exclusionMemo
+
 	// Features maps every candidate path (PlayStat lists + hour buckets) to
 	// its hydrated feature, for item building + harmonic sort.
 	Features map[string]TrackFeature
@@ -270,4 +277,11 @@ func DefaultOptions(analysisEnabled bool) Options {
 		MinFavorites:      5,
 		MaxFavoritesItems: 100,
 	}
+}
+
+// exclusionMemo holds one Generate's discovery exclusions once computed. The
+// builders only read the set; discoveryExclusions is its only writer.
+type exclusionMemo struct {
+	done bool
+	set  map[string]bool
 }
