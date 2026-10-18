@@ -46221,3 +46221,18 @@ note, the test's docblock and `coerceStoredUTF8`'s say so now.
 - Go 1.27 removed the `asynctimerchan` setting, so a `Reset` timer's
   behaviour that the watcher's loop relies on no longer depends on the
   `go` directive.
+
+### Review round 1: the version names the cost
+
+CodeRabbit on #1277: the cost of an invalid byte decides where pages
+split for the same rows, so two builds of one `ServerVersion` with
+different encoders (the default and `GOEXPERIMENT=nojsonv2`) answered one
+feed version with different pages. `playlistFeedVersion` now hashes
+`jsonInvalidByteBytes` too (`playlistFeedVersionAt` takes it, so a test
+can pass both). `TestTheFeedVersionNamesTheEncodersCostOfAnInvalidByte`
+failed by name on its own commit, where a test-only file answered with
+the version that ignored the cost ("the version is 0b28fa73906424a2
+whatever an invalid byte costs"), and passes on the default build and
+under `nojsonv2`. The `playlistFeedRulesVersion` bump to 2 stays: it
+records this release's rule change, and the hash input catches the next
+encoder change without one.

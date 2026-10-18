@@ -528,8 +528,9 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   a key the process draws (`playlistCursorSigner`): an edited or pre-restart
   cursor is a 400, one of another version a 410 `playlist_files_stale`, and
   the client restarts. The
-  version hashes the rules (`playlistFeedRulesVersion`), the build, the
-  backup epoch, `complete` and a generation the v57 triggers move on every
+  version hashes the rules (`playlistFeedRulesVersion`), the encoder's
+  cost of a byte of invalid UTF-8 (`jsonInvalidByteBytes`, B452), the
+  build, the backup epoch, `complete` and a generation the v57 triggers move on every
   track or playlist row change a page can show (a track added, removed,
   renamed or restamped; a playlist row added, removed, or changed in its
   lines, mtime, `too_large` or `folder_whole`); enrichment moves none. The

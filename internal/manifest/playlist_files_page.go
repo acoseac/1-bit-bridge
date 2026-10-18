@@ -141,11 +141,18 @@ var ErrPlaylistFilesChanged = errors.New("manifest: the playlist files changed s
 const playlistFeedRulesVersion = 2
 
 // playlistFeedVersion is the feed's version: a hash of the rules, the
-// build, the install's backup epoch (a restored database is another
-// history), the generation the v57 triggers keep (any track or playlist
-// row change a page could show) and the completeness mark. Read in the
-// page's own transaction.
+// encoder's cost of a byte of invalid UTF-8 (jsonInvalidByteBytes, which
+// decides where pages split for the same rows), the build, the install's
+// backup epoch (a restored database is another history), the generation
+// the v57 triggers keep (any track or playlist row change a page could
+// show) and the completeness mark. Read in the page's own transaction.
 func playlistFeedVersion(ctx context.Context, tx *sql.Tx) (string, bool, error) {
+	return playlistFeedVersionAt(ctx, tx, jsonInvalidByteBytes)
+}
+
+// playlistFeedVersionAt is playlistFeedVersion for an encoder that writes
+// a byte of invalid UTF-8 in invalidByteBytes; a test passes another.
+func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int) (string, bool, error) {
 	epoch, err := readEpoch(ctx, tx)
 	if err != nil {
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
@@ -160,8 +167,8 @@ func playlistFeedVersion(ctx context.Context, tx *sql.Tx) (string, bool, error) 
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
 	}
 	complete := marked > 0
-	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%s\x00%s\x00%d\x00%t",
-		playlistFeedRulesVersion, version.ServerVersion, epoch, gen, complete))
+	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%d\x00%s\x00%s\x00%d\x00%t",
+		playlistFeedRulesVersion, invalidByteBytes, version.ServerVersion, epoch, gen, complete))
 	return hex.EncodeToString(sum[:8]), complete, nil
 }
 
