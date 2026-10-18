@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -198,6 +200,11 @@ func playlistToDetailDTO(id, name, prefix string, lastModNS, updatedNS int64, it
 
 // apiPlaylistExport handles GET /api/playlists/export?device=&id=&format=json|csv|m3u8
 // — a downloadable copy of one playlist in the requested format.
+//
+// `paths` applies to m3u8 only: `absolute` (the default, and what a blank
+// value means) writes each local item's filesystem path on this host;
+// `relative` writes its library path instead (see writeM3U8). json and csv
+// already carry the library path and ignore it.
 func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgManifestNotWired)
@@ -208,6 +215,11 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 	// Reject an unsupported format before the playlist lookup.
 	if format != "json" && format != "csv" && format != "m3u8" {
 		writeError(w, http.StatusBadRequest, errCodeBadFormat, "format must be one of json, csv, m3u8")
+		return
+	}
+	paths := strings.ToLower(q.Get("paths"))
+	if paths != "" && paths != "absolute" && paths != "relative" {
+		writeError(w, http.StatusBadRequest, errCodeBadFormat, "paths must be absolute or relative")
 		return
 	}
 	// Optional — see apiPlaylistDetail for why. `id` alone identifies a
@@ -250,7 +262,7 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		}
 	case "m3u8":
 		setDownloadHeaders(w, "audio/x-mpegurl", base+".m3u8")
-		s.writeM3U8(w, row.Name, items)
+		s.writeM3U8(w, row.Name, items, paths == "relative")
 	default:
 		writeError(w, http.StatusBadRequest, errCodeBadFormat, "format must be one of json, csv, m3u8")
 	}
@@ -261,12 +273,23 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 // VLC opened on this machine); items that don't resolve and foreign items
 // are emitted as comments so the file stays valid and self-documenting.
 //
+// With `relative`, a local item that resolves is written as its library
+// path instead: the manifest path, forward-slashed and relative to the
+// library's root (in a multi-root library its root's folder name comes
+// first), which is what the iOS app's own M3U8 export writes for a bridge
+// source. Saved at the library's root, the file then resolves for any
+// player, for this bridge's playlist-file index and for the app's
+// importer. A path that would read as something else is written
+// `./`-prefixed, as the app's exporter does: a leading `#` is a comment
+// line, and importers trim leading whitespace. An item that no longer
+// resolves stays a comment in both modes, never a dead location.
+//
 // Every device-supplied value interpolated into a line goes through
 // m3uLine first — M3U is a line-oriented format, so an embedded newline
 // in a playlist name / tag / path would inject arbitrary playlist lines
 // (a bare non-comment line is a media LOCATION; an exported playlist
 // opened by the operator would beacon to an attacker-chosen URL).
-func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.PlaylistItemRow) {
+func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.PlaylistItemRow, relative bool) {
 	// Buffer the per-item writes — a playlist near the 50k-item cap would
 	// otherwise push tens of thousands of tiny writes down the response
 	// chain (same streaming philosophy as /v1/manifest). Headers are set
@@ -307,8 +330,24 @@ func (s *Server) writeM3U8(w http.ResponseWriter, name string, items []manifest.
 		// The location line derives from the device-supplied path too;
 		// a path with an embedded newline can't be represented as one
 		// M3U location anyway, so flattening it is strictly no worse.
-		fmt.Fprintf(bw, "#EXTINF:-1,%s\n%s\n", title, m3uLine(abs))
+		location := m3uLine(abs)
+		if relative {
+			location = m3uRelativeLocation(it.Path)
+		}
+		fmt.Fprintf(bw, "#EXTINF:-1,%s\n%s\n", title, location)
 	}
+}
+
+// m3uRelativeLocation is the location line for a library path: flattened
+// like every other value, without a leading `/`, and `./`-prefixed when it
+// would otherwise start with `#` (a comment line) or whitespace (which an
+// importer trims). The iOS exporter's locationLine applies the same rule.
+func m3uRelativeLocation(libraryPath string) string {
+	flat := strings.TrimLeft(m3uLine(libraryPath), "/")
+	if r, _ := utf8.DecodeRuneInString(flat); r == '#' || unicode.IsSpace(r) {
+		return "./" + flat
+	}
+	return flat
 }
 
 // m3uReplacer flattens line breaks to a single space — CRLF first so a

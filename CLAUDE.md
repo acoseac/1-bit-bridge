@@ -11155,6 +11155,8 @@ its twin.** The top list is older, shorter, and read first.
   browser at 375 / 430 / 1280, dark and light, with and without the
   meter; the Go suite sees only the containment. (#934)
 
+- **A playlist's M3U8 export can write library paths (backlog B339, question 5; the owner's decision of 2026-10-18).** `GET /api/playlists/export?…&format=m3u8` writes each local item's absolute path on this host, as before; `&paths=relative` writes its manifest path instead, which the iOS app's own M3U8 export writes for a bridge source: relative to the library's root, the root's folder name first in a multi-root library. A path that starts with `#` or whitespace is written `./`-prefixed (`m3uRelativeLocation`, the app's `locationLine` rule), an item that no longer resolves stays an `# unresolved:` comment in both modes, and any other `paths` value is a 400. The playlist page's export row has a fourth button for it. **Don't change the default (a player on this host opens the absolute form), don't write an unresolvable item as a location, and don't let a relative line start with `#` or whitespace.** Locked by `TestM3U8ExportRelativePaths`, `TestM3U8ExportRelativePathsEscapeWhatAnImporterWouldMisread` and `TestM3URelativeLocation`.
+
 ### Build, CI, and test discipline
 
 - **SonarCloud's `go:S2077` follows a named const to its concatenation.** A
