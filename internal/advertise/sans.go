@@ -84,6 +84,35 @@ func GatherCertSANIPs(cfg CertSANConfig) []net.IP {
 	return out
 }
 
+// CertGatedIPs returns the addresses Endpoints publishes only while the
+// certificate names them (Params.NamedByCert, backlog B457): every address
+// of the interface walk that is not Tailscale's, less those a
+// CustomEndpoints entry names, since a declared address is published as
+// written. Each is also in GatherCertSANIPs, so a mint covers it. A
+// certificate that lacks one is not stale for it: the bridge does not
+// publish it (servertls.SANCoverage.HeldBackIPs).
+func CertGatedIPs(cfg CertSANConfig) []net.IP {
+	declared := make(map[string]bool)
+	for _, raw := range cfg.CustomEndpoints {
+		if host, isIP := parseHostFromURL(raw); isIP {
+			if ip := net.ParseIP(host); ip != nil {
+				declared[string(ip.To16())] = true
+			}
+		}
+	}
+	var out []net.IP
+	seen := make(map[string]bool)
+	eachUsableAddr(func(iface net.Interface, ip net.IP) {
+		key := string(ip.To16())
+		if isTailscale(iface, ip) || declared[key] || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, ip)
+	})
+	return out
+}
+
 // GatherCertSANDNS returns the operator-relevant DNS hostname set the
 // cert SAN list should cover, on top of `localhost` + `os.Hostname`
 // which the cert template adds unconditionally.

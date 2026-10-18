@@ -258,6 +258,11 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 // The Tailscale half of the gather shells out, bounded at 1.5 s and
 // TTL-cached for 30 s process-wide (see internal/advertise) — the same
 // probe `/v1/health` runs per request.
+//
+// CertGatedIPs marks the walk's addresses, which a mint covers and which
+// serve publishes only while the certificate it serves names them
+// (backlog B457), so the two graders do not call a certificate stale for
+// an address the bridge holds back.
 func certSANOptions(cfg *config.Config) servertls.GenerateOptions {
 	hostname := advertise.CertHostname()
 	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
@@ -265,6 +270,7 @@ func certSANOptions(cfg *config.Config) servertls.GenerateOptions {
 		Hostname:      hostname,
 		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
 		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
+		CertGatedIPs:  advertise.CertGatedIPs(sanCfg),
 	}
 }
 

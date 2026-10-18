@@ -15,14 +15,19 @@ const checkNameTLSCertSANs = "tls-cert-sans"
 //
 // The state it catches: a data directory carried to another host keeps
 // the old host's `server.crt`, whose SANs name the machine it was
-// minted on. Every endpoint the new host advertises and the old cert
-// does not carry fails TLS — `/v1/health` withholds them, the
-// Tailscale and custom-endpoint URLs in the pairing QR do not
-// handshake — and nothing says so until `bridge serve` is already up
-// and has warned once into a log. The fix (`bridge cert rotate`,
-// restart, re-pair) is cheap BEFORE devices have pinned the old cert
-// and much less so after, which is the whole reason this belongs in a
-// preflight rather than only in the startup path.
+// minted on. Every Tailscale, custom-endpoint and host-name URL the new
+// host advertises and the old cert does not carry fails TLS for a
+// client that checks the certificate against the URL's host, and
+// nothing says so until `bridge serve` is already up and has warned
+// once into a log. The fix (`bridge cert rotate`, restart, re-pair) is
+// cheap BEFORE devices have pinned the old cert and much less so after,
+// which is the whole reason this belongs in a preflight rather than only
+// in the startup path.
+//
+// An address of the interface walk is the exception (backlog B457):
+// serve does not advertise one a certificate it minted does not name,
+// so such an address is not stale. The line stays ok and names it, with
+// the rotation that would advertise it.
 //
 // It reuses servertls.InspectSANCoverage — the comparison the startup
 // warning makes — against the want-set cmd/bridge builds from the one
@@ -76,8 +81,13 @@ func checkTLSCertSANs(ctx context.Context, d Deps) Check {
 			fmt.Sprintf("%s: %v", certPath, err))
 	}
 	if cov.Covered() {
-		return ok(checkNameTLSCertSANs, fmt.Sprintf("covers all %d name(s) and %d address(es) this bridge advertises",
-			len(cov.WantDNS), len(cov.WantIPs)))
+		summary := fmt.Sprintf("covers all %d name(s) and %d address(es) this bridge advertises",
+			len(cov.WantDNS), len(cov.WantIPs)-len(cov.HeldBackIPs))
+		if len(cov.HeldBackIPs) > 0 {
+			summary += ". Not advertised, since the certificate does not name it: " +
+				strings.Join(cov.HeldBackIPStrings(), ", ") + ". To advertise it: " + servertls.RotationRemediation
+		}
+		return ok(checkNameTLSCertSANs, summary)
 	}
 	if !cov.MintedByBridge {
 		// The startup warning uses this same field. A CA leaf can leave
@@ -97,7 +107,7 @@ func sansSummary(cov servertls.SANCoverage) string {
 		parts = append(parts, fmt.Sprintf("%d of %d name(s)", n, len(cov.WantDNS)))
 	}
 	if n := len(cov.MissingIPs); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d of %d address(es)", n, len(cov.WantIPs)))
+		parts = append(parts, fmt.Sprintf("%d of %d address(es)", n, len(cov.WantIPs)-len(cov.HeldBackIPs)))
 	}
 	return "stale — " + strings.Join(parts, " and ") + " this bridge advertises are not in the certificate"
 }

@@ -122,6 +122,18 @@ type Params struct {
 	Port            int
 	HostOverride    string   // pass "" to use os.Hostname()
 	CustomEndpoints []string // pass nil/empty to skip
+
+	// NamedByCert, when set, says whether the certificate the bridge
+	// serves names an address (backlog B457). An address of the
+	// interface walk it does not name is not published: a client that
+	// checks the certificate against the URL's host fails there. Each
+	// such address goes to HeldBack instead. The want-set a mint covers
+	// (GatherCertSANIPs) keeps it, so a rotation brings it back. Nil
+	// publishes the walk whole: no certificate, or one this bridge did
+	// not mint. The `.local` name and CustomEndpoints are never judged.
+	NamedByCert func(net.IP) bool
+	// HeldBack is called with each walk address NamedByCert refused.
+	HeldBack func(net.IP)
 }
 
 // Endpoints returns every reachable `https://<host>:<port>` URL for
@@ -148,6 +160,12 @@ func Endpoints(p Params) []Endpoint {
 		// path so cli/tsnet modes use one consistent source.
 		// See Params docblock.
 		if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
+			return
+		}
+		if p.NamedByCert != nil && !p.NamedByCert(ip) {
+			if p.HeldBack != nil {
+				p.HeldBack(ip)
+			}
 			return
 		}
 		out = append(out, Endpoint{

@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/api"
@@ -66,6 +68,15 @@ func TestServeAdvertisesOnlyTheWalkAddressesItsCertificateNames(t *testing.T) {
 				if !containsIP(eps, ip) {
 					t.Errorf("/v1/health dropped %s, which the certificate names: %v", ip, eps)
 				}
+			}
+		}
+		// The pairing QR reads the same list, so it carries the address no
+		// more than health does.
+		mint := pairViaAdmin(t, t.Context(), &http.Client{Timeout: 10 * time.Second},
+			"http://"+s.admin+"/api/tokens", `{"name":"b457"}`, http.StatusCreated, s.stderr)
+		for _, alt := range mint.Alternates {
+			if ip := urlIP(alt); ip != nil && ip.Equal(held) {
+				t.Errorf("the pairing QR carries %s, which the certificate does not name: %v", held, mint.Alternates)
 			}
 		}
 		lines := rec.All()

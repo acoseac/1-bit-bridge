@@ -105,6 +105,14 @@ type GenerateOptions struct {
 	// Tailscale CGNAT addresses surfaced by `tailscale status`.
 	// loopback is always included regardless of this slice.
 	ExtraIPs []net.IP
+
+	// CertGatedIPs are the ExtraIPs entries the bridge publishes only
+	// while its certificate names them: the interface walk's addresses
+	// (advertise.CertGatedIPs, backlog B457). A mint reads nothing here,
+	// since ExtraIPs carries them. InspectSANCoverage reports one a
+	// certificate this bridge minted lacks as held back, not missing:
+	// /v1/health does not publish it, so no client is sent to it.
+	CertGatedIPs []net.IP
 }
 
 // LoadOrGenerate loads the cert+key at the given paths, or mints a new

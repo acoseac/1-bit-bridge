@@ -482,6 +482,24 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestALeftmostWildcardCoversOneLabel`,
   `TestAPartialLabelWildcardCoversNothing`,
   `TestACertTheBridgeDidNotMintIsNotToldToRotate`.)
+- **…and an address serve holds back is not stale** (2026-10-18, backlog
+  B457). Serve does not advertise an address of the interface walk that a
+  certificate it minted does not name (the bullet under **The wire
+  contract**), so `certSANOptions` marks the walk's addresses
+  (`GenerateOptions.CertGatedIPs`, from `advertise.CertGatedIPs`: not
+  Tailscale's, not one a `customEndpoints` entry names), and
+  `InspectSANCoverage` moves one a minted certificate lacks from
+  `MissingIPs` to `HeldBackIPs`. `Covered` ignores those, so
+  `logIfSANsStale` stays quiet for them, and `tls-cert-sans` stays ok,
+  counts only the addresses advertised, and names each held-back one with
+  `RotationRemediation`. A missing Tailscale, custom or host-name entry
+  still warns. A CA leaf holds nothing back. **The mint still covers
+  them**: `ExtraIPs` keeps every walk address, which is what lets a
+  rotation advertise one again.
+  (`TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing`,
+  `TestACertTheBridgeDidNotMintHoldsNothingBack`,
+  `TestNamedIPsReadsTheServedCertificate`,
+  `TestCheckTLSCertSANs_AHeldBackAddressIsNotStale`.)
 - **The pairing QR carries an address a phone can dial, and a name that
   left the want-set stops the stale-SAN warning** (2026-10-13, backlog
   B189, B199, B229). `certSANOptions` takes `advertise.CertHostname`.

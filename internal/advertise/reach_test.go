@@ -299,3 +299,56 @@ func TestADockerMarkerThatCannotBeReadKeepsTheContainerRules(t *testing.T) {
 		t.Fatal("a marker whose stat failed with a permission error read as no container")
 	}
 }
+
+// TestAWalkAddressTheCertificateDoesNotNameIsHeldBack is backlog B457.
+// With NamedByCert set, the walk publishes only the addresses it names and
+// hands each other one to HeldBack. A Tailscale address is never judged
+// (the provider publishes it), the `.local` name and a customEndpoints
+// entry are published as before, and the want-set still names the held-back
+// address, so a mint covers it. CertGatedIPs is the set the judgement
+// applies to.
+func TestAWalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
+	const lan, ula, ts = "192.168.1.20", "fdcc:cccf:784b::2", "fd7a:115c:a1e0::2"
+	withIfaces(t, []ifaceAddr{
+		oneAddr("en0", net.FlagUp, lan),
+		oneAddr("en0", net.FlagUp, ula),
+		oneAddr("utun5", net.FlagUp|net.FlagPointToPoint, ts),
+	})
+	named := net.ParseIP(lan)
+	var held []string
+	p := Params{
+		Port:         7788,
+		HostOverride: "musicbox",
+		NamedByCert:  func(ip net.IP) bool { return ip.Equal(named) },
+		HeldBack:     func(ip net.IP) { held = append(held, ip.String()) },
+	}
+	eps := Endpoints(p)
+	if !hasClass(eps, httpsIP(lan), ClassLANv4) {
+		t.Errorf("the address the certificate names is not published: %v", eps)
+	}
+	if hasURL(eps, httpsIP(ula)) {
+		t.Errorf("an address the certificate does not name is published: %v", eps)
+	}
+	if !hasURL(eps, "https://musicbox.local:7788") {
+		t.Errorf("the .local name was judged: %v", eps)
+	}
+	if len(held) != 1 || held[0] != ula {
+		t.Errorf("HeldBack saw %v, want exactly [%s]", held, ula)
+	}
+
+	p.CustomEndpoints = []string{httpsIP(ula)}
+	if eps := Endpoints(p); !hasClass(eps, httpsIP(ula), ClassCustom) {
+		t.Errorf("a customEndpoints entry naming the held-back address is not published: %v", eps)
+	}
+
+	if !hasIP(GatherCertSANIPs(CertSANConfig{}), ula) {
+		t.Error("the held-back address left the want-set, so a rotation would not cover it")
+	}
+	gated := CertGatedIPs(CertSANConfig{})
+	if !hasIP(gated, lan) || !hasIP(gated, ula) || hasIP(gated, ts) {
+		t.Errorf("CertGatedIPs = %v, want the walk's two LAN addresses and not the Tailscale one", gated)
+	}
+	if hasIP(CertGatedIPs(CertSANConfig{CustomEndpoints: []string{httpsIP(ula)}}), ula) {
+		t.Error("CertGatedIPs holds back an address a customEndpoints entry declares")
+	}
+}

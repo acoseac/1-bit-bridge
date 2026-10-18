@@ -558,3 +558,38 @@ func TestExpiryFixturesAreInsideTheirValidityWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckTLSCertSANs_AHeldBackAddressIsNotStale is backlog B457: serve
+// does not advertise an address of the interface walk that a certificate it
+// minted does not name, so the line stays ok, counts only what is
+// advertised, and names the held-back address with the rotation that would
+// advertise it. A missing address that is not held back still warns.
+func TestCheckTLSCertSANs_AHeldBackAddressIsNotStale(t *testing.T) {
+	lan, ula := net.ParseIP("192.168.1.20"), net.ParseIP("fdcc:cccf:784b::2")
+	minted := servertls.GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan}}
+	want := servertls.GenerateOptions{
+		Hostname:     "nuc",
+		ExtraIPs:     []net.IP{lan, ula},
+		CertGatedIPs: []net.IP{lan, ula},
+	}
+	c := checkTLSCertSANs(t.Context(), certFixture(t, minted, want))
+	if c.Status != OK {
+		t.Fatalf("status = %q, want ok (summary %q, hint %q)", c.Status, c.Summary, c.Hint)
+	}
+	// Loopback's three defaults and lan: four advertised, ula held back.
+	for _, part := range []string{"and 4 address(es) this bridge advertises", ula.String(), servertls.RotationRemediation} {
+		if !strings.Contains(c.Summary, part) {
+			t.Errorf("summary = %q, want it to carry %q", c.Summary, part)
+		}
+	}
+
+	ts := net.ParseIP("100.64.0.24")
+	want.ExtraIPs = append(want.ExtraIPs, ts)
+	c = checkTLSCertSANs(t.Context(), certFixture(t, minted, want))
+	if c.Status != Warn || !strings.Contains(c.Summary, "1 of 5 address(es)") {
+		t.Fatalf("status %q summary %q, want warn counting 1 of the 5 advertised", c.Status, c.Summary)
+	}
+	if got := hintedMissing(t, c.Hint); !equalStrings(got, []string{ts.String()}) {
+		t.Errorf("hint names %v, want only %s", got, ts)
+	}
+}
