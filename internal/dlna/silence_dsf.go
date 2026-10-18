@@ -46,7 +46,7 @@ const (
 // play of the 60 s file plus read-ahead. The app stops the silence after
 // about ten seconds. A test shortens the bound.
 //
-// Go 1.26.6 clears a ResponseController deadline after the handler
+// Go 1.26.6 and 1.27.1 clear a ResponseController deadline after the handler
 // returns (net/http conn.serve calls SetWriteDeadline(time.Time{})) even
 // when WriteTimeout is 0, and the next request is given a write deadline
 // only when WriteTimeout is positive. The silence response still sends

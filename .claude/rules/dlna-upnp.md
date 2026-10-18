@@ -538,7 +538,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (`strings.Clone`), so the entry does not keep the rest of the header;
   a string that already fits is stored as it arrived. The listener reads
   at most 16 KiB of headers. net/http's `initialReadLimitSize` (Go
-  1.26.6) is `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
+  1.26.6 and 1.27.1) is `MaxHeaderBytes` plus 4 KiB of bufio lookahead, so
   `dlnaMaxHeaderBytes` is 16 KiB minus that 4 KiB and the read stops
   at 16 KiB. A header block past that read is 431 and is not stored;
   after the bound the same eight requests answered 431, stored
@@ -592,8 +592,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   sets a 120 s deadline (`dsdSilenceWriteBound`, shortened in tests)
   through `ResponseController` when the body starts: a real-time play
   of the file plus read-ahead, and the app stops it after about ten
-  seconds. The response sends `Connection: close`. Go 1.26.6 still
-  clears a `ResponseController` deadline after the handler returns
+  seconds. The response sends `Connection: close`. Go 1.26.6 and 1.27.1
+  still clear a `ResponseController` deadline after the handler returns
   (`conn.serve` → `SetWriteDeadline(time.Time{})`) when `WriteTimeout`
   is 0, and the next request gets one only when `WriteTimeout` is
   positive; `Connection: close` is sent anyway. Telemetry (on by
