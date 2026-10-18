@@ -153,6 +153,7 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
 	ctx, fetched := siblingCloseInTheIdleWindow(context.Background())
+	defer fetched() // releases the read loop on any way out, a panic included
 	buf, err := c.FetchImage(ctx, srv.URL+"/picture.jpg")
 	fetched()
 	if buf != nil {
