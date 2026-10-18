@@ -46141,7 +46141,7 @@ controls, restored before the fix: big-endian swapped for little-endian in
 `0xffffffffffffffff` read the same both ways), and hashing runes instead of
 bytes in `hashSeedPath` failed the three non-ASCII ones.
 
-## 2026-10-18 — the bridge builds with Go 1.27.1, and the playlist-file page cost asks the encoder what a byte of invalid UTF-8 takes (backlog B452)
+## 2026-10-18 — the bridge builds with Go 1.27.2, and the playlist-file page cost asks the encoder what a byte of invalid UTF-8 takes (backlog B452, B460)
 
 ### Why the move
 
@@ -46154,8 +46154,9 @@ alone.
 
 ### What moved
 
-- `go.mod`: `go 1.27.1`, no `toolchain` line (it would equal the `go`
-  directive, and `go mod tidy` changed nothing else).
+- `go.mod`: `go 1.27.1`, then 1.27.2 (B460, below); no `toolchain` line
+  (it would equal the `go` directive, and `go mod tidy` changed nothing
+  else).
 - `Dockerfile`: `ARG GO_VERSION=1.27`; `check-go-version` compares
   major.minor, and `golang:1.27-alpine` was 1.27.2 on 2026-10-18.
 - Every workflow's `setup-go` reads `go-version-file: go.mod`, so none
@@ -46236,3 +46237,54 @@ whatever an invalid byte costs"), and passes on the default build and
 under `nojsonv2`. The `playlistFeedRulesVersion` bump to 2 stays: it
 records this release's rule change, and the hash input catches the next
 encoder change without one.
+
+### Go 1.27.2, not 1.27.1 (backlog B460)
+
+CodeRabbit on this PR: GO-2026-6617 (CVE-2026-97032), an HTTP/2 server
+crash (an HPACK encoder race in net/http), affects the stdlib from 1.27.0
+up to 1.27.2 and below 1.26.9, so main's 1.26.6 had it too. The PR moves
+on to 1.27.2, the release that fixes it.
+
+- `go.mod`: `go 1.27.2`, still with no `toolchain` line. The toolchain
+  came through the go command's own download (`GOTOOLCHAIN=go1.27.2 go
+  version`), which checks it against sum.golang.org.
+- The Dockerfile keeps `ARG GO_VERSION=1.27`. `check-go-version` compares
+  major.minor, and `golang:1.27-alpine` has been 1.27.2 since 2026-10-08
+  (docker-library/official-images#22453), so the image's
+  `GOTOOLCHAIN=local` build meets the `go` directive.
+- CLAUDE.md's Build line, its long form in `ops/History-Build.md`, the
+  README's requirement and the B181 stamp test's note name 1.27.2.
+- The 1.27.2 source, read against 1.27.1:
+  - The fix is in `net/http/internal/http2`: the server applies a
+    SETTINGS_HEADER_TABLE_SIZE change to its HPACK encoder only while no
+    frame is being written. Its connection-level flow control changed in
+    the same release. The vendored `golang.org/x/net/http2/hpack` is
+    unchanged.
+  - net/http's `initialReadLimitSize` is still `maxHeaderBytes() + 4096`.
+    `conn.serve` still calls `SetWriteDeadline(time.Time{})` after the
+    handler, and `readRequest` still sets a write deadline only when
+    `WriteTimeout` is positive. The two DLNA rules and their code comments
+    name 1.27.2 beside 1.26.6.
+  - net/http's other changes don't touch a path the bridge uses:
+    - `ServeContent` ignores a `Range` header that asks for more than 200
+      ranges (`GODEBUG=httpservecontentmaxranges`), and the app asks for
+      one;
+    - the trailer names a message may announce are capped, and a client
+      discards a drained body's trailers;
+    - neither side reuses a connection that carried a CONNECT, which the
+      bridge neither sends nor serves.
+  - `cmd/gofmt`, `go/printer`, `go/format`, `go/ast`, `go/parser`,
+    `go/scanner` and `go/token` are unchanged, so gofmt 1.27.2 formats as
+    1.27.1 did.
+  - `encoding/json/jsontext` and `encoding/json/internal/jsonwire` are
+    unchanged, so the encoder still writes a byte of invalid UTF-8 as the
+    three-byte replacement character `jsonInvalidByteBytes` measures.
+    1.27.2's json changes are in error values, float parsing and when the
+    legacy mode calls `MarshalText` on a map key.
+- golang.org/x/net stays v0.59.0. GO-2026-6617 also names x/net below
+  0.60.0, for its HTTP/2 package. The binary does not link
+  `golang.org/x/net/http2`: of x/net's HTTP packages, `go list -deps
+  ./cmd/bridge` finds only `http2/hpack` (which quic-go's qpack and http3
+  use), `http/httpguts` and `http/httpproxy`, for darwin, linux and
+  windows alike. The bridge's HTTP/2 server is the stdlib's, which 1.27.2
+  fixes.

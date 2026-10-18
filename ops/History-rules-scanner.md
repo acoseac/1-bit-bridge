@@ -1425,12 +1425,13 @@
   re-read by this change; the next re-read (a later bump, a changed file,
   a cover or a lyrics sidecar) upserts once, because the decoded character
   differs, and the scan after that stamps. Run the stamp test under
-  `GOEXPERIMENT=nojsonv2`: since `go.mod` moved to go1.27.1 (2026-10-18,
-  B452) `GOTOOLCHAIN=go1.26.6` no longer builds the module, and that
+  `GOEXPERIMENT=nojsonv2`: since `go.mod` moved to go1.27.2 (2026-10-18,
+  B452, B460) `GOTOOLCHAIN=go1.26.6` no longer builds the module, and that
   experiment keeps the encoder that writes the `\ufffd` escape. go1.27's
   default `encoding/json` is built on json/v2 and marshals the invalid bytes
   as the raw replacement, so the stamp half of the bug is invisible there
-  (measured 2026-10-18 with the decodes and the coercion reverted: the
+  (measured 2026-10-18 on go1.27.1, whose `encoding/json/jsontext` is
+  1.27.2's too, with the decodes and the coercion reverted: the
   default build failed only the four title checks; `nojsonv2` also moved
   `indexed_at` and reset `enriched_at` on both files).
 
