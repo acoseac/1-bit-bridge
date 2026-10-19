@@ -47481,3 +47481,13 @@ that deadline is not cached. `TestCancelledCallerDoesNotSpoilTheBuild`
 failed first with `waiter status 200 state unknown`.
 `TestBuildDeadlineIsNotCached` failed first with
 `status calls 1, a deadline was cached`.
+
+## 2026-10-19 — path rules use the scanner's root prefix (B473 step 2b)
+
+`pathBase` trimmed a path by hand. It turned `/` into an empty prefix,
+and it did not share `fs.FoldRootBasename`, so a stored path whose
+first segment differed only in case was left off that root. The prefix
+is now `filepath.Base`, which is what the scanner stores in multi-root
+mode, and a track belongs to the root when that basename matches or
+folds to the same key. `TestPathRulesUseTheStoredRootPrefix` failed
+first with `filesystem root prefix ""`.

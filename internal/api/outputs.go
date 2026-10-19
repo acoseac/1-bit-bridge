@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/mpd"
 	"github.com/acoseac/1-bit-bridge/internal/mpd/conf"
 )
@@ -546,10 +548,10 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 	multi := len(roots) > 1
 	libs := make([]mpd.LibraryRoot, len(roots))
 	for i, path := range roots {
-		id := pathBase(path)
+		id := filepath.Base(path)
 		var own []string
 		for _, stored := range tracks {
-			if !multi || strings.HasPrefix(stored, id+"/") {
+			if !multi || trackUnderRoot(stored, path) {
 				own = append(own, stored)
 			}
 		}
@@ -774,12 +776,17 @@ func outputID(identity, endpoint, alsaID, usbID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func pathBase(path string) string {
-	path = strings.TrimRight(path, `/\`)
-	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
-		return path[i+1:]
+// trackUnderRoot reports whether a stored library path belongs to root.
+// Multi-root paths are stored under filepath.Base(root). Ownership also
+// accepts a first segment that folds to the same basename, which is the
+// comparison fs.FoldRootBasename uses for two roots.
+func trackUnderRoot(stored, root string) bool {
+	id := filepath.Base(root)
+	if strings.HasPrefix(stored, id+"/") {
+		return true
 	}
-	return path
+	head, _, _ := strings.Cut(stored, "/")
+	return head != "" && fs.FoldRootBasename(head) == fs.FoldRootBasename(root)
 }
 
 func greetMPD(ctx context.Context, addr string) bool {

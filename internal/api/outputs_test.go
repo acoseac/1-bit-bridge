@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -537,6 +538,39 @@ func TestBuildDeadlineIsNotCached(t *testing.T) {
 	}
 	if statuses.Load() != 2 {
 		t.Fatalf("status calls %d, a deadline was cached", statuses.Load())
+	}
+}
+
+func TestPathRulesUseTheStoredRootPrefix(t *testing.T) {
+	dir := t.TempDir()
+	music := filepath.Join(dir, "Music")
+	other := filepath.Join(dir, "Archive")
+	if err := os.Mkdir(music, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := &localOutputs{
+		roots: func() []string { return []string{"/", music, other} },
+		tracks: func(context.Context) ([]string, error) {
+			return []string{"Music/a.flac", "music/b.flac", "Archive/c.flac"}, nil
+		},
+	}
+	rules := o.pathRules(context.Background(), music, func(context.Context, string) (bool, error) {
+		return true, nil
+	})
+	if rules[0].Root != filepath.Base("/") {
+		t.Fatalf("filesystem root prefix %q", rules[0].Root)
+	}
+	var musicRule OutputPathRule
+	for _, rule := range rules {
+		if rule.Root == "Music" {
+			musicRule = rule
+		}
+	}
+	if musicRule.StripBridgePrefix != "Music/" || musicRule.Checked != 2 {
+		t.Fatalf("strip %q checked %d", musicRule.StripBridgePrefix, musicRule.Checked)
 	}
 }
 
