@@ -47671,3 +47671,14 @@ already failed the file. Any stanza whose root name is `pcm` and that
 is not `pcm.NAME { … }` or `pcm.!NAME { … }` now fails the file.
 `TestUnmodeledPCMStanzaIsUnusable` failed first with
 `nested pcm = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — an @ directive inside a skipped block makes the file unusable (B473 step 2b)
+
+`@func` and `@args` are identifiers. Inside a `ctl` or `defaults`
+block they were skipped with the rest of that block, so a `pcm.out`
+in the same file still resolved, and `@args.NAME` at the top level was
+skipped the same way. An identifier that starts with `@` now fails the
+file wherever it appears. `TestAtDirectiveInsideSkippedBlock` failed
+first with `at inside block = 2, 0, true; want unresolved` for
+`defaults.pcm { @func getenv }` and for `ctl.name { @args.CARD { … } }`.
+`TestNonPCMStanzaIsSkipped` failed first with `@args.NAME 1 resolved`.

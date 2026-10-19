@@ -207,6 +207,9 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 		if p.peek().kind == tokEOF {
 			return defs, true
 		}
+		if atDirective(p.peek()) {
+			return nil, false
+		}
 		if p.peek().kind == tokIdent && p.peek().val == "pcm" {
 			if !p.isPCM() {
 				return nil, false
@@ -258,8 +261,13 @@ func (p *pcmParser) skipSep() {
 	}
 }
 
+func atDirective(tok pcmTok) bool {
+	return tok.kind == tokIdent && strings.HasPrefix(tok.val, "@")
+}
+
 func (p *pcmParser) skipStanza() bool {
-	if p.next().kind != tokIdent {
+	name := p.next()
+	if name.kind != tokIdent || atDirective(name) {
 		return false
 	}
 	for p.peek().kind == tokDot {
@@ -268,7 +276,7 @@ func (p *pcmParser) skipStanza() bool {
 			p.next()
 		}
 		n := p.next()
-		if n.kind != tokIdent && n.kind != tokString && n.kind != tokNumber {
+		if atDirective(n) || (n.kind != tokIdent && n.kind != tokString && n.kind != tokNumber) {
 			return false
 		}
 	}
@@ -285,7 +293,11 @@ func (p *pcmParser) skipBlock() bool {
 	}
 	depth := 1
 	for depth > 0 {
-		switch p.next().kind {
+		t := p.next()
+		if atDirective(t) {
+			return false
+		}
+		switch t.kind {
 		case tokEOF:
 			return false
 		case tokLBrace:
@@ -452,7 +464,7 @@ func (p *pcmParser) parseSlaveBlock() (slaveBlock, bool) {
 
 func (p *pcmParser) parseKey() (string, bool) {
 	t := p.next()
-	if t.kind != tokIdent {
+	if t.kind != tokIdent || atDirective(t) {
 		return "", false
 	}
 	key := t.val
@@ -548,11 +560,11 @@ func lexPCM(src string) ([]pcmTok, bool) {
 }
 
 func isPCMIdentStart(r rune) bool {
-	return r == '_' || unicode.IsLetter(r)
+	return r == '_' || r == '@' || unicode.IsLetter(r)
 }
 
 func isPCMIdentCont(r rune) bool {
-	return isPCMIdentStart(r) || (r >= '0' && r <= '9') || r == '-'
+	return r == '_' || unicode.IsLetter(r) || (r >= '0' && r <= '9') || r == '-'
 }
 
 func lexPCMString(src string) (string, int, bool) {
