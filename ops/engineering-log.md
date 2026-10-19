@@ -47096,3 +47096,41 @@ byte, and the second assignment wins`. The assignment was restored to
 the last value. `TestRepeatedParameterKeepsTheLast` stayed green during
 that control, because an include is applied by `mergeFile`, which still
 overwrote `volume_normalization`.
+
+## 2026-10-19 — review of `bridge output player`, round 3 (B473 step 2a, PR #1284)
+
+### The question
+
+Two findings on the confirmation pass. Each was checked against the
+code, then against a test that failed before the change. The rules
+that changed are in `.claude/rules/output.md`.
+
+### What was wrong, and what changed
+
+- **A bad `binary:` size is a framing error.** `binarySize` returns
+  false when the size is missing, signed, padded with a zero, not a
+  decimal, or above `MaxReplyBytes`. Both readers then kept the line
+  as a pair (`Key: "binary"`), so a payload that is itself a reply
+  ended on the `OK` inside it. `TestMalformedBinarySizeIsAFramingError`
+  failed with `ParseReply "binary: -1": <nil>`. A line whose key is
+  `binary` (`binary:` with or without a value) is now
+  `mpd: binary chunk has a bad size` in `ParseReply` and
+  `readReplyText`, unless it is `binary: N` with N inside the cap.
+  N equal to the cap stays a size; the reply-cap error is the other
+  one, for a valid N whose payload does not fit. `binary: 0` stays a
+  size. `FuzzReadReplyMatchesParseReply` requires the two readers to
+  return that same error when both would reach the line, and a
+  successful reply has no `binary` pair.
+- **An undiallable path is not stored, and `_` ends a short secret.**
+  When `resolveDial` failed, `Inspect` still set `mpd.endpoint` to the
+  path. The red test showed `$XDG_RUNTIME_DIR/socket_abc`,
+  `~/mpd/socket`, `$HOME/socket_abc`, `relative/socket` and
+  `~nobody/socket`. The endpoint stays empty. The problem already says
+  why and does not quote the path, so the path is nowhere in the
+  report. A short secret was a token of letters, digits and `_`, so
+  `password "abc@read"` left `abc` in `$XDG_RUNTIME_DIR/socket_abc`
+  and `$HOME_abc` (`TestShortSecretBoundaryIsALetterOrDigit` still
+  had those binds). A token is letters and digits. `_`, `/`, `.` and
+  `-` are boundaries. A secret inside a plain word stays: `admin` for
+  `a`, and `a1`, are not rewritten. `/`, `.` and `-` were already
+  boundaries; `_` was the one that was not.

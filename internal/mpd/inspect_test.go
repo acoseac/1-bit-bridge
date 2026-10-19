@@ -2,6 +2,7 @@ package mpd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,6 +142,74 @@ func TestUnsetRuntimeDirIsNotDialled(t *testing.T) {
 	}
 	if joined == "" {
 		t.Fatal("no problem for an unexpanded endpoint")
+	}
+}
+
+// TestUndiallableEndpointIsAbsentFromTheReport pins that a path
+// resolveDial refuses is not stored on the report. The problem says
+// why; the path, and a short secret inside it, are nowhere in the JSON.
+func TestUndiallableEndpointIsAbsentFromTheReport(t *testing.T) {
+	home := t.TempDir()
+	cases := []struct {
+		name     string
+		conf     string
+		endpoint string
+		home     string
+		leaks    []string
+	}{
+		{
+			name:  "unset runtime dir",
+			conf:  "password \"abc@read\"\nbind_to_address \"$XDG_RUNTIME_DIR/socket_abc\"\nmusic_directory \"/music\"\n",
+			home:  home,
+			leaks: []string{"$XDG_RUNTIME_DIR/socket_abc", "XDG_RUNTIME_DIR", "socket_abc", "abc@read", "abc"},
+		},
+		{
+			name:  "tilde without home",
+			conf:  "bind_to_address \"~/mpd/socket\"\nmusic_directory \"/music\"\n",
+			leaks: []string{"~/mpd/socket"},
+		},
+		{
+			name:     "flag",
+			endpoint: "$HOME/socket_abc",
+			leaks:    []string{"$HOME/socket_abc", "socket_abc"},
+		},
+		{
+			name:     "relative",
+			endpoint: "relative/socket",
+			leaks:    []string{"relative/socket"},
+		},
+		{
+			name:     "tilde user",
+			endpoint: "~nobody/socket",
+			leaks:    []string{"~nobody/socket"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opt := Options{Endpoint: tc.endpoint, Home: tc.home}
+			if tc.conf != "" {
+				dir := t.TempDir()
+				writeFile(t, filepath.Join(dir, "etc", "mpd.conf"), tc.conf)
+				opt.Root = dir
+			}
+			rep := Inspect(context.Background(), opt)
+			if rep.MPD.Endpoint != "" || rep.MPD.Version != "" {
+				t.Fatalf("dialled %#v", rep.MPD)
+			}
+			if len(rep.Problems) == 0 {
+				t.Fatal("no problem for an undiallable endpoint")
+			}
+			body, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(body) + "\n" + strings.Join(rep.Problems, "\n")
+			for _, leak := range tc.leaks {
+				if strings.Contains(text, leak) {
+					t.Fatalf("report contains %q:\n%s", leak, text)
+				}
+			}
+		})
 	}
 }
 

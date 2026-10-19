@@ -90,7 +90,9 @@ func ParseGreeting(line string) (string, error) {
 // before it are still on the Reply. A `binary: N` line is followed by
 // exactly N bytes and a newline (Response::WriteBinary); those bytes
 // are not lines, so a payload that contains `\nOK\n` does not end the
-// reply. The success line is exactly `OK` (doc/protocol.rst, Responses).
+// reply. A line whose key is binary but whose size is missing,
+// malformed or over the cap is a framing error, not a pair. The success
+// line is exactly `OK` (doc/protocol.rst, Responses).
 // Padding is not an OK.
 func ParseReply(text string) (Reply, error) {
 	if text == "" {
@@ -116,7 +118,11 @@ func ParseReply(text string) (Reply, error) {
 			}
 			return Reply{Pairs: pairs}, ack
 		}
-		if n, isBinary := binarySize(line); isBinary {
+		n, isBinary, err := binaryHeader(line)
+		if err != nil {
+			return Reply{}, err
+		}
+		if isBinary {
 			if len(next) < n+1 || next[n] != '\n' {
 				return Reply{}, errors.New("mpd: binary chunk is not terminated")
 			}
@@ -138,9 +144,33 @@ func ParseReply(text string) (Reply, error) {
 	}
 }
 
+// errBadBinarySize is a line whose key is binary but which is not
+// `binary: N`. N is a decimal without a sign or a leading zero, and it
+// fits in MaxReplyBytes. A missing size, `binary: -1`, `binary: 01`,
+// `binary: abc` and a size over the cap are this error. The bytes after
+// the line are not lines, so keeping the line as a pair would end the
+// reply on an OK inside the payload.
+var errBadBinarySize = errors.New("mpd: binary chunk has a bad size")
+
+// binaryHeader classifies a reply line. A line whose key is binary
+// (`binary:` with or without a value) is a chunk header. ok is true
+// only for the form Response::WriteBinary writes. Any other binary
+// header is errBadBinarySize, in ParseReply and in readReplyText.
+func binaryHeader(line string) (n int, ok bool, err error) {
+	if !strings.HasPrefix(line, "binary:") {
+		return 0, false, nil
+	}
+	n, ok = binarySize(line)
+	if !ok {
+		return 0, false, errBadBinarySize
+	}
+	return n, true, nil
+}
+
 // binarySize reports N for a line that is exactly `binary: N`, the
 // form Response::WriteBinary writes. N is a decimal without a sign or
-// a leading zero.
+// a leading zero, and it is at most MaxReplyBytes. A line that merely
+// starts with `binary:` is not this form; binaryHeader reports that.
 func binarySize(line string) (int, bool) {
 	rest, ok := strings.CutPrefix(line, "binary: ")
 	if !ok || rest == "" {

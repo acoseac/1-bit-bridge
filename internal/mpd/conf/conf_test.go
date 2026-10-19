@@ -229,6 +229,48 @@ func TestPasswordSecretIsRedactedInAnIncludePath(t *testing.T) {
 	}
 }
 
+// TestShortSecretBoundaryIsALetterOrDigit pins the short-secret
+// boundary. A token is letters and digits. '_', '/', '.' and '-' end
+// it, so a secret beside a socket name is removed. A secret inside a
+// plain word, or glued to a digit, is not.
+func TestShortSecretBoundaryIsALetterOrDigit(t *testing.T) {
+	f, err := Parse(strings.Join([]string{
+		`password "abc@read"`,
+		`password "a@read"`,
+		`bind_to_address "$XDG_RUNTIME_DIR/socket_abc"`,
+		`bind_to_address "$HOME_abc"`,
+		`bind_to_address "/run/abc.sock"`,
+		`bind_to_address "/run/abc-sock"`,
+		`music_directory "/admin/a/a1/music"`,
+		``,
+	}, "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := f.Display()
+	got := strings.Join(shown.BindAddresses, "\n")
+	for _, want := range []string{
+		"$XDG_RUNTIME_DIR/socket_[redacted]",
+		"$HOME_[redacted]",
+		"/run/[redacted].sock",
+		"/run/[redacted]-sock",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("bind %q missing %q", got, want)
+		}
+	}
+	if shown.MusicDirectory != "/admin/[redacted]/a1/music" {
+		t.Fatalf("directory %q; a letter inside admin, and a digit after a, stay", shown.MusicDirectory)
+	}
+	if strings.Contains(got, "socket_abc") || strings.Contains(got, "HOME_abc") || strings.Contains(got, "abc@read") {
+		t.Fatalf("secret survived in the binds: %q", got)
+	}
+	summary := f.String()
+	if strings.Contains(summary, "socket_abc") || strings.Contains(summary, "abc@read") || strings.Contains(summary, "a@read") {
+		t.Fatalf("summary leaked:\n%s", summary)
+	}
+}
+
 func TestShortPasswordRedactsWholeTokensOnly(t *testing.T) {
 	f, err := Parse("password \"a@read\"\nmusic_directory \"/admin/a/music\"\nbind_to_address \"/var/run/a\"\n")
 	if err != nil {

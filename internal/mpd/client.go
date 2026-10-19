@@ -270,7 +270,8 @@ func (c *Client) readReply() (Reply, error) {
 // readReplyText reads one reply the way ParseReply reads it. A
 // `binary: N` line consumes the next N bytes and the newline after
 // them before the next line is parsed, so a payload containing
-// `\nOK\n` is not the end of the reply.
+// `\nOK\n` is not the end of the reply. A binary line that is not that
+// form is the same framing error ParseReply returns.
 func readReplyText(r *bufio.Reader) (string, error) {
 	var b strings.Builder
 	for {
@@ -281,7 +282,11 @@ func readReplyText(r *bufio.Reader) (string, error) {
 		if b.Len()+len(line)+1 > MaxReplyBytes {
 			return "", errors.New("mpd: reply exceeds the size cap")
 		}
-		if n, ok := binarySize(line); ok {
+		n, isBinary, err := binaryHeader(line)
+		if err != nil {
+			return "", err
+		}
+		if isBinary {
 			if n > MaxReplyBytes-b.Len()-len(line)-2 {
 				return "", errors.New("mpd: reply exceeds the size cap")
 			}

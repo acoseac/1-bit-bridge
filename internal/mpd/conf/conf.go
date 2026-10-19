@@ -26,9 +26,10 @@
 // A password value is never printed, serialised or put in an error. The
 // field is unexported. What is removed is the whole value and, when the
 // value is secret@permissions, the part before '@'. A secret shorter
-// than four bytes is removed only where it is a whole token. String and
-// JSON say only that one is set, and a problem about a password line
-// does not quote the line.
+// than four bytes is removed only where it is a whole token: a letter
+// or a digit on either side keeps it, and '_', '/', '.' and '-' do not.
+// String and JSON say only that one is set, and a problem about a
+// password line does not quote the line.
 package conf
 
 import (
@@ -331,8 +332,10 @@ func (f File) display() File {
 // it is also a letter that occurs in ordinary words: replacing every
 // occurrence would turn "admin" into a lie. Four bytes is the point at
 // which a substring replacement no longer collides with ordinary words
-// in this report. A shorter secret is replaced only when the bytes on
-// either side are not a letter, a digit or '_'.
+// in this report. A shorter secret is replaced only when the rune on
+// either side is not a letter or a digit. '_', '/', '.' and '-' are
+// boundaries, so a secret beside a socket name is removed and a secret
+// inside a word such as "admin" is not.
 const shortSecret = 4
 
 // redactionKeys is every string that must not be printed: the whole
@@ -385,7 +388,7 @@ func redactText(s string, passwords []string) string {
 }
 
 // redactTokens replaces secret only where it is a whole token. The
-// runes on either side must not be a letter, a digit or '_'.
+// runes on either side must not be a letter or a digit.
 func redactTokens(s, secret string) string {
 	var b strings.Builder
 	i := 0
@@ -428,7 +431,7 @@ func tokenBoundaryAfter(s string, i int) bool {
 }
 
 func isTokenRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 func (f *File) finish() {

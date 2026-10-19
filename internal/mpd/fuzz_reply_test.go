@@ -53,7 +53,9 @@ func FuzzParseReply(f *testing.F) {
 // FuzzReadReplyMatchesParseReply holds the client loop to the same
 // framing ParseReply accepts. A text the reader treats as one complete
 // reply parses, twice, as that reply. A binary payload is part of that
-// text, so an OK inside the payload is not a second reply.
+// text, so an OK inside the payload is not a second reply. A line whose
+// key is binary but whose size is not valid is the same framing error
+// in both, and neither keeps it as a pair.
 func FuzzReadReplyMatchesParseReply(f *testing.F) {
 	f.Add([]byte("OK\n"))
 	f.Add([]byte("key: value\nOK\n"))
@@ -61,11 +63,24 @@ func FuzzReadReplyMatchesParseReply(f *testing.F) {
 	f.Add([]byte("ACK [2@0] {play} bad\n"))
 	f.Add([]byte("  OK  \n"))
 	f.Add([]byte("OK \n"))
+	f.Add([]byte("binary: -1\nkey: value\nOK\n"))
+	f.Add([]byte("binary: 01\nkey: value\nOK\n"))
+	f.Add([]byte("binary: abc\nkey: value\nOK\n"))
+	f.Add([]byte("binary:\nkey: value\nOK\n"))
+	f.Add([]byte("binary: 99999999\nkey: value\nOK\n"))
+	f.Add([]byte("binary: 1000000\n\nOK\nOK\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > MaxReplyBytes {
 			data = data[:MaxReplyBytes]
 		}
 		text, err := readReplyText(bufio.NewReader(bytes.NewReader(data)))
+		if badBinaryIsReached(data) {
+			_, perr := ParseReply(string(data))
+			if err == nil || perr == nil || err.Error() != perr.Error() || err.Error() != errBadBinarySize.Error() {
+				t.Fatalf("binary size: reader %v parser %v", err, perr)
+			}
+			return
+		}
 		if err != nil {
 			return
 		}
@@ -81,11 +96,57 @@ func FuzzReadReplyMatchesParseReply(f *testing.F) {
 			if a.Pairs[i] != b.Pairs[i] {
 				t.Fatalf("framed reply is not deterministic")
 			}
+			if a.Pairs[i].Key == "binary" {
+				t.Fatalf("binary line kept as a pair: %q", text)
+			}
 		}
 		if fmt.Sprint(errA) != fmt.Sprint(errB) {
 			t.Fatalf("framed reply is not deterministic: %v %v", errA, errB)
 		}
 	})
+}
+
+// badBinaryIsReached reports whether both readers would see a binary
+// line that is not a valid size. A line past the length cap or the
+// reply cap, or after a line either reader already rejects, is not
+// reached: those are different errors, and this only holds the binary
+// rule together.
+func badBinaryIsReached(data []byte) bool {
+	rest := string(data)
+	acc := 0
+	for {
+		line, next, ok := cutProtoLine(rest)
+		if !ok {
+			return false
+		}
+		if len(line) > MaxLineBytes || acc+len(line)+1 > MaxReplyBytes {
+			return false
+		}
+		n, isBinary, err := binaryHeader(line)
+		if err != nil {
+			return true
+		}
+		if isBinary {
+			if len(next) < n+1 || next[n] != '\n' || n > MaxReplyBytes-acc-len(line)-2 {
+				return false
+			}
+			acc += len(line) + 1 + n + 1
+			rest = next[n+1:]
+			continue
+		}
+		acc += len(line) + 1
+		if line == "OK" || strings.HasPrefix(line, "ACK ") {
+			return false
+		}
+		if line == "" || strings.TrimSpace(line) == "" {
+			return false
+		}
+		key, _, found := strings.Cut(line, ":")
+		if !found || key == "" || strings.ContainsAny(key, " \t") {
+			return false
+		}
+		rest = next
+	}
 }
 
 // replyFramed is true when ParseReply accepted the text: a reply that

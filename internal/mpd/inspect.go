@@ -151,8 +151,9 @@ func Inspect(ctx context.Context, opt Options) Report {
 	})
 	if endpoint != "" {
 		if err != nil {
+			// Leave the endpoint empty. The problem says why, and the
+			// path can hold a password, so it stays out of the report.
 			rep.Problems = append(rep.Problems, redactConf(file, err.Error()))
-			rep.MPD.Endpoint = redactConf(file, endpoint)
 		} else {
 			askDaemon(ctx, &rep, addr, opt.Password)
 			rep.MPD.Endpoint = redactConf(file, rep.MPD.Endpoint)
@@ -545,7 +546,8 @@ type pathEnv struct {
 // directory (only '~' and '~/', not '~user'). A leading '$' is one of
 // the five variables, then an optional '/rest'. Anything that does not
 // expand to an absolute path is an error and is not a TCP address.
-// The error does not quote the endpoint: the path can hold a password.
+// The error does not quote the endpoint, and the report leaves the
+// endpoint empty: the path can hold a password, and it is not shown.
 func resolveDial(endpoint string, env pathEnv) (addr, network string, err error) {
 	if endpoint == "" {
 		return "", "", nil

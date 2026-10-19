@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -176,6 +177,52 @@ func TestBinaryChunkDoesNotEndTheReply(t *testing.T) {
 	}
 	if v, ok := got.Get("key"); !ok || v != "kept" {
 		t.Fatalf("status %#v", got)
+	}
+}
+
+// TestMalformedBinarySizeIsAFramingError pins that a line whose key is
+// binary, but whose size is missing, malformed or over the cap, is a
+// framing error in both readers. The payload below is itself a reply,
+// so a reader that keeps the line as a pair ends on the OK inside it.
+func TestMalformedBinarySizeIsAFramingError(t *testing.T) {
+	const want = "mpd: binary chunk has a bad size"
+	const payload = "key: value\nOK\n"
+	lines := []string{
+		"binary: -1",
+		"binary: 01",
+		"binary: 04",
+		"binary: abc",
+		"binary:",
+		"binary: ",
+		"binary:4",
+		"binary: " + strconv.Itoa(MaxReplyBytes+1),
+		"binary: 99999999",
+		"binary: 1000000",
+	}
+	for _, line := range lines {
+		text := line + "\n" + payload
+		if _, err := ParseReply(text); err == nil || err.Error() != want {
+			t.Fatalf("ParseReply %q: %v", line, err)
+		}
+		if _, err := readReplyText(bufio.NewReader(strings.NewReader(text))); err == nil || err.Error() != want {
+			t.Fatalf("readReplyText %q: %v", line, err)
+		}
+	}
+	// N equal to the cap is a size. The chunk is short of N bytes, so
+	// the failure is the chunk, not a bad size.
+	atCap := "binary: " + strconv.Itoa(MaxReplyBytes) + "\nOK\n"
+	if _, err := ParseReply(atCap); err == nil || err.Error() == want {
+		t.Fatalf("ParseReply at cap: %v", err)
+	}
+	if _, err := readReplyText(bufio.NewReader(strings.NewReader(atCap))); err == nil || err.Error() == want {
+		t.Fatalf("readReplyText at cap: %v", err)
+	}
+	// A zero length is a size. The chunk is the newline that follows it.
+	if _, err := ParseReply("binary: 0\n\nOK\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readReplyText(bufio.NewReader(strings.NewReader("binary: 0\n\nOK\n"))); err != nil {
+		t.Fatal(err)
 	}
 }
 
