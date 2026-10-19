@@ -63,7 +63,7 @@ and each status file holds only the first lines a real one opens with.
   frame rates 705600 and 768000, which are DSD512 (those rates times 32).
   The card id, name and USB id are made up. No substream is playing.
 
-`volumio-asound-chain/` (`etc/asound.conf` and `proc/asound/cards`) was captured on 2026-10-19 from a Volumio 4.119 Raspberry Pi 5 via `cat`, byte for byte, and is not edited.
+`volumio-asound-chain/` (`etc/asound.conf` and `proc/asound/cards`) was captured on 2026-10-19 from a Volumio 4.119 Raspberry Pi 5 via `cat`, byte for byte, and is not edited. `etc/alsa/conf.d/` in that directory is the fourteen files from the same box's `/etc/alsa/conf.d/`, captured the same day via `cat`, and is not edited.
 
 `volumio-with-ctl/` is synthetic: that captured `asound.conf`, unchanged, with a `ctl.!default` block, a `ctl.name` block and a `defaults.pcm.card` assignment in front of it.
 
