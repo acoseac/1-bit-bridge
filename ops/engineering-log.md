@@ -46619,8 +46619,10 @@ padding that its size counts, where dhowden's frame loop stops.
 ### Negative controls
 
 Eight, each a one-anchor mutation of production code on the test's commit
-(69834df9), restored from HEAD after its run. Each turned red exactly the
-subtests predicted for it:
+(69834df9), restored from HEAD after its run, and again after the row
+checks moved into `requireExplicitRow` for SonarCloud's go:S3776
+(9dba4da3). Each turned red exactly the subtests predicted for it, both
+times:
 
 | Mutation | Red |
 |---|---|
