@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -424,6 +426,62 @@ func TestIncludeAndIncludeOptional(t *testing.T) {
 	}
 }
 
+// TestUnreadableIncludeIsReported pins that a file an include can see
+// the name of, but cannot stat, is unreadable. Both directives say so.
+// A missing include_optional stays quiet. The host path stays out of
+// the problem, and a password in the include name is still redacted.
+func TestUnreadableIncludeIsReported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("0o000-parent EACCES probe is POSIX-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits")
+	}
+	root := t.TempDir()
+	const secret = "unreadable-include-secret"
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(locked, secret+".conf"), "music_directory \"/hidden\"\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	// A file that stats, and whose open is refused, is the same fact.
+	bare := filepath.Join(root, "bare.conf")
+	mustWrite(t, bare, "music_directory \"/no\"\n")
+	if err := os.Chmod(bare, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	mustWrite(t, filepath.Join(root, "mpd.conf"),
+		"password \""+secret+"@read\"\n"+
+			"include \"locked/"+secret+".conf\"\n"+
+			"include_optional \"locked/"+secret+".conf\"\n"+
+			"include \"bare.conf\"\n"+
+			"include_optional \"no-such.conf\"\n"+
+			"music_directory \"/kept\"\n")
+	f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.MusicDirectory != "/kept" {
+		t.Fatalf("music directory %q", f.MusicDirectory)
+	}
+	joined := strings.Join(f.Problems, "\n")
+	if strings.Count(joined, "unreadable") != 3 {
+		t.Fatalf("problems %q, want both directives, and a file that will not open, to say unreadable", f.Problems)
+	}
+	if strings.Contains(joined, "file not found") || strings.Contains(joined, "no-such.conf") {
+		t.Fatalf("a missing include_optional was reported, or the unreadable file was called missing: %q", f.Problems)
+	}
+	if strings.Contains(joined, root) || strings.Contains(joined, secret) {
+		t.Fatalf("the host path or the password is in the problem: %q", f.Problems)
+	}
+	assertNoSecret(t, secret, f)
+}
+
 func TestIncludeCycleAndDepth(t *testing.T) {
 	root := t.TempDir()
 	const secret = "cycle-secret-value"
@@ -493,6 +551,45 @@ func TestIncludeStaysInsideTheRoot(t *testing.T) {
 	assertNoSecret(t, secret, f)
 	if !strings.Contains(strings.Join(f.Problems, "\n"), "path leaves the root") {
 		t.Errorf("problems %q", f.Problems)
+	}
+}
+
+func TestConfCandidateKeepsACloudPlaceholder(t *testing.T) {
+	if !confCandidate(fs.ModeIrregular | 0o666) {
+		t.Fatal("a Windows cloud placeholder (ModeIrregular) was refused; IsRegular rejects it")
+	}
+	for _, m := range []fs.FileMode{
+		fs.ModeDir | 0o755,
+		fs.ModeNamedPipe | 0o644,
+		fs.ModeSocket | 0o644,
+		fs.ModeDevice | 0o660,
+		fs.ModeDevice | fs.ModeCharDevice | 0o666,
+		fs.ModeIrregular | fs.ModeDir | 0o755,
+	} {
+		if confCandidate(m) {
+			t.Fatalf("mode %v was accepted as a conf", m)
+		}
+	}
+	if !confCandidate(0o644) {
+		t.Fatal("a regular file was refused")
+	}
+}
+
+func TestFindSkipsADirectory(t *testing.T) {
+	root := t.TempDir()
+	home := "/home/pi"
+	if err := os.MkdirAll(hostPath(root, home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// ~/.mpdconf is the first candidate when ~/.config does not exist,
+	// and here it is a directory. The system file is the one left.
+	if err := os.MkdirAll(hostPath(root, home+"/.mpdconf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, hostPath(root, "/etc/mpd.conf"), "music_directory \"/etc-one\"\n")
+	logical, _, ok := (Locate{Root: root, Home: home}).Find()
+	if !ok || logical != SystemPath {
+		t.Fatalf("found %q ok %v, want %s", logical, ok, SystemPath)
 	}
 }
 

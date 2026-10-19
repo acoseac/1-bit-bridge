@@ -207,8 +207,10 @@ func redact(err error, secret string) error {
 		}
 	}
 	msg := err.Error()
-	if strings.Contains(msg, secret) {
-		return errors.New(strings.ReplaceAll(msg, secret, "[redacted]"))
+	// ReplaceAll returns msg unchanged when the secret is absent, so the
+	// original error is kept. Contains before it would scan twice.
+	if redacted := strings.ReplaceAll(msg, secret, "[redacted]"); redacted != msg {
+		return errors.New(redacted)
 	}
 	return err
 }
@@ -216,7 +218,11 @@ func redact(err error, secret string) error {
 // arm sets one deadline for the command: the sooner of DefaultTimeout
 // and the context's deadline. It is not re-armed per line, so a server
 // that dribbles bytes cannot refresh it. Cancelling the context expires
-// the deadline immediately.
+// the deadline immediately. The callback runs on another goroutine, and
+// AfterFunc's stop does not wait for it. done waits until that callback
+// has finished setting an expired deadline, then clears it, so a cancel
+// that loses the race cannot put the deadline back. The channel lives
+// only for this command. The client still holds no password.
 func (c *Client) arm(ctx context.Context) func() {
 	if ctx == nil {
 		ctx = context.Background()
@@ -226,11 +232,17 @@ func (c *Client) arm(ctx context.Context) func() {
 		deadline = d
 	}
 	_ = c.conn.SetDeadline(deadline)
+	finished := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		_ = c.conn.SetDeadline(time.Now())
+		close(finished)
 	})
 	return func() {
-		stop()
+		if stop() {
+			// The callback will not run, so it will not close finished.
+			close(finished)
+		}
+		<-finished
 		_ = c.conn.SetDeadline(time.Time{})
 	}
 }

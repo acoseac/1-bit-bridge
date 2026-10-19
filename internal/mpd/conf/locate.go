@@ -18,6 +18,12 @@ var errOutside = errors.New("path leaves the root")
 // include_optional treats it as success.
 var errNotFound = errors.New("file not found")
 
+// errUnreadable is an include path that could not be stat'd for a
+// reason other than absence. The host path stays out of the text: a
+// path can hold a password, and the problem already quotes the name
+// from the file. Both directives report it.
+var errUnreadable = errors.New("unreadable")
+
 // errTooLong is a file longer than MaxConfBytes.
 var errTooLong = fmt.Errorf("longer than %d bytes", MaxConfBytes)
 
@@ -74,7 +80,7 @@ func (l Locate) Candidates() []string {
 	return out
 }
 
-// Find returns the first candidate that is a regular file inside Root.
+// Find returns the first candidate inside Root that can be a conf file.
 func (l Locate) Find() (logical, host string, ok bool) {
 	for _, c := range l.Candidates() {
 		h := hostPath(l.root(), c)
@@ -82,7 +88,7 @@ func (l Locate) Find() (logical, host string, ok bool) {
 			continue
 		}
 		fi, err := os.Stat(h)
-		if err != nil || !fi.Mode().IsRegular() {
+		if err != nil || !confCandidate(fi.Mode()) {
 			continue
 		}
 		return c, h, true
@@ -166,18 +172,34 @@ func ReadFile(root, logical, host string) (File, error) {
 				if errors.Is(err, fs.ErrNotExist) {
 					return "", errNotFound
 				}
-				return "", err
+				return "", errUnreadable
 			}
 			if err := staysInRoot(root, path); err != nil {
 				return "", err
 			}
-			return readCapped(path)
+			text, err := readCapped(path)
+			// Open's error names the host path. An include problem
+			// already quotes the name from the file, and that path
+			// can hold a password.
+			if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
+				return "", errUnreadable
+			}
+			return text, err
 		},
 	}
 	f := parseFile(text, logical, filepath.Dir(host), load)
 	f.Path = logical
 	f.finish()
 	return f, nil
+}
+
+// confCandidate reports whether a stat mode can be an mpd.conf.
+// A directory, a pipe, a socket or a device cannot. A Windows cloud
+// placeholder is ModeIrregular and is still a file, so this is not
+// IsRegular: that would skip every OneDrive file on demand. os.Stat
+// follows a symlink, so the mode is the target's.
+func confCandidate(m fs.FileMode) bool {
+	return m&(fs.ModeDir|fs.ModeNamedPipe|fs.ModeSocket|fs.ModeDevice) == 0
 }
 
 func (l Locate) dirExists(logical string) bool {
@@ -217,7 +239,7 @@ func (l *loader) resolve(dir, name string) (string, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return host, nil
 		}
-		return "", errNotFound
+		return "", errUnreadable
 	}
 	if err := staysInRoot(l.root, host); err != nil {
 		return "", err

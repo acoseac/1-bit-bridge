@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -681,3 +683,128 @@ func holdsSecret(v reflect.Value, secret string, seen map[uintptr]struct{}) bool
 	}
 	return false
 }
+
+// TestCancelBesideAFinishedReplyDoesNotStickTheDeadline parks the
+// cancel callback inside SetDeadline, which is the window where it
+// can put an expired deadline back after done has cleared one. The
+// reply is released while that call is parked. done must not return
+// until the callback has finished, and the next command must run.
+func TestCancelBesideAFinishedReplyDoesNotStickTheDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reply1 := make(chan struct{})
+		reply2 := make(chan struct{})
+		release := make(chan struct{})
+		conn := &scriptConn{
+			chunks: []string{"state: stop\nOK\n", "state: play\nOK\n"},
+			reply:  []chan struct{}{reply1, reply2},
+			park:   release,
+		}
+		c := &Client{conn: conn, br: bufio.NewReaderSize(conn, 4096)}
+		ctx, cancel := context.WithCancel(context.Background())
+		first := make(chan error, 1)
+		go func() {
+			_, err := c.Status(ctx)
+			first <- err
+		}()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		close(reply1)
+		synctest.Wait()
+		select {
+		case err := <-first:
+			close(release)
+			synctest.Wait()
+			t.Fatalf("done returned while the cancel callback was still in SetDeadline (reply %v, deadline %s)", err, conn.deadlineText())
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		if err := <-first; err != nil {
+			t.Fatalf("reply: %v", err)
+		}
+		if text := conn.deadlineText(); text != "cleared" {
+			t.Fatalf("deadline left at %s after the command returned", text)
+		}
+		close(reply2)
+		got, err := c.Status(context.Background())
+		if err != nil {
+			t.Fatalf("next command: %v", err)
+		}
+		if v, ok := got.Get("state"); !ok || v != "play" {
+			t.Fatalf("next command read %q", v)
+		}
+	})
+}
+
+// scriptConn is a connection whose reads wait for the test to release
+// each reply, and whose expired SetDeadline waits until released. That
+// is the cancel callback parked inside the call that would clobber a
+// cleared deadline.
+type scriptConn struct {
+	mu       sync.Mutex
+	deadline time.Time
+	chunks   []string
+	reply    []chan struct{}
+	next     int
+	rest     string
+	park     chan struct{}
+}
+
+func (s *scriptConn) Read(p []byte) (int, error) {
+	if s.expired() {
+		return 0, os.ErrDeadlineExceeded
+	}
+	if s.rest == "" {
+		if s.next >= len(s.chunks) {
+			return 0, io.EOF
+		}
+		<-s.reply[s.next]
+		if s.expired() {
+			return 0, os.ErrDeadlineExceeded
+		}
+		s.rest = s.chunks[s.next]
+		s.next++
+	}
+	n := copy(p, s.rest)
+	s.rest = s.rest[n:]
+	return n, nil
+}
+
+func (s *scriptConn) Write(p []byte) (int, error) { return len(p), nil }
+func (s *scriptConn) Close() error                { return nil }
+func (s *scriptConn) LocalAddr() net.Addr         { return scriptAddr{} }
+func (s *scriptConn) RemoteAddr() net.Addr        { return scriptAddr{} }
+
+func (s *scriptConn) SetDeadline(t time.Time) error {
+	if !t.IsZero() && !t.After(time.Now()) {
+		<-s.park
+	}
+	s.mu.Lock()
+	s.deadline = t
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *scriptConn) SetReadDeadline(t time.Time) error  { return s.SetDeadline(t) }
+func (s *scriptConn) SetWriteDeadline(t time.Time) error { return s.SetDeadline(t) }
+
+func (s *scriptConn) expired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.deadline.IsZero() && !s.deadline.After(time.Now())
+}
+
+func (s *scriptConn) deadlineText() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deadline.IsZero() {
+		return "cleared"
+	}
+	return s.deadline.Format(time.RFC3339Nano)
+}
+
+type scriptAddr struct{}
+
+func (scriptAddr) Network() string { return "tcp" }
+func (scriptAddr) String() string  { return "script" }

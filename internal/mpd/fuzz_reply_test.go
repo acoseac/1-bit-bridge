@@ -59,7 +59,8 @@ func FuzzParseReply(f *testing.F) {
 func FuzzReadReplyMatchesParseReply(f *testing.F) {
 	f.Add([]byte("OK\n"))
 	f.Add([]byte("key: value\nOK\n"))
-	f.Add([]byte("binary: 4\n\nOK\nkey: kept\nOK\n"))
+	// Four payload bytes are "\nOK\n", then the chunk's own newline.
+	f.Add([]byte("binary: 4\n\nOK\n\nkey: kept\nOK\n"))
 	f.Add([]byte("ACK [2@0] {play} bad\n"))
 	f.Add([]byte("  OK  \n"))
 	f.Add([]byte("OK \n"))

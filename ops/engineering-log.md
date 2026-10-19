@@ -47134,3 +47134,91 @@ that changed are in `.claude/rules/output.md`.
   `-` are boundaries. A secret inside a plain word stays: `admin` for
   `a`, and `a1`, are not rewritten. `/`, `.` and `-` were already
   boundaries; `_` was the one that was not.
+
+## 2026-10-19 — review of `bridge output player`, round 4 (B473 step 2a, PR #1284)
+
+### The question
+
+Eight bot threads on the first push, checked against the code at
+`b90d9603`. Six were still worth a change. The rules that changed
+are in `.claude/rules/output.md`.
+
+### What was wrong, and what changed
+
+- **A cancel can expire the deadline after the command has finished.**
+  `context.AfterFunc` runs its callback on another goroutine, and
+  `stop` does not wait for it. `done` cleared the deadline and
+  returned while the callback was still inside `SetDeadline`, and the
+  callback then set an expired one. `TestCancelBesideAFinishedReplyDoesNotStickTheDeadline`
+  parks that call and releases the reply while it is parked. Before
+  the change it failed with `done returned while the cancel callback
+  was still in SetDeadline` and the deadline left at the bubble's
+  `time.Now()`. `done` now waits until the callback has finished, then
+  clears. The channel lives only for the command. The client still
+  holds no password. A mutex around both updates would order them
+  too; the wait is the coordination `AfterFunc` says the caller has
+  to do itself, and it does not hold a lock across `SetDeadline`.
+- **An unreadable include was "file not found".** `resolve` mapped
+  every `Lstat` error other than absence to `errNotFound`, so both
+  directives reported a file that was there. `include_optional` was
+  not swallowing it: a `resolve` error is reported for either
+  directive. The message was the bug. A permission error is now
+  `unreadable`, and so is an open that fails for a reason other than
+  absence or the size cap. The host path stays out of the problem; the
+  name from the file is what is quoted, and a password in it is still
+  redacted. `TestUnreadableIncludeIsReported` failed with
+  `file not found` on the unsearchable directory. With the open error
+  passed through, the same test showed
+  `open /private/var/.../bare.conf: permission denied`.
+- **`IsRegular` refuses a Windows cloud placeholder.** `--conf` is in
+  scope off Linux, and it does not use this check: it opens the file.
+  `Find` does, and `Find` runs on Windows when `--root` names a tree.
+  A directory, a pipe, a socket or a device is skipped. `ModeIrregular`
+  is kept. `TestConfCandidateKeepsACloudPlaceholder` failed while the
+  check was `IsRegular`.
+- **The top-level usage said the two commands read nothing.** They
+  read, and they change nothing. `TestOutputCommandUsage` failed on
+  the old sentence.
+- **The binary fuzz seed omitted the chunk's newline.** The four
+  payload bytes are `\nOK\n`, and the next byte was `k`, so
+  `readReplyText` returned `mpd: binary chunk is not terminated`
+  before the parser assertions. The seed is the framing the unit test
+  already uses.
+- **The client's `redact` checked `Contains` before `ReplaceAll`.**
+  `ReplaceAll` already returns the same string when the secret is
+  absent, so the check scanned twice. It now replaces, and keeps the
+  original error when the text does not change.
+
+### Not taken
+
+- **`strings.Contains` before `ReplaceAll` in `redactText`.** The
+  suggested body drops the short-secret path. `ReplaceAll` is the
+  fast path for a secret of four bytes or more; a shorter one is a
+  whole token, and the `Contains` check there avoids building a copy
+  when the secret is absent. An empty password must not be replaced:
+  `ReplaceAll` of an empty old inserts the replacement between every
+  byte.
+- **The import of `sync`.** The deadline coordination is a channel, so
+  the import is not added.
+
+### Negative controls
+
+`done` made to clear the deadline without waiting.
+`TestCancelBesideAFinishedReplyDoesNotStickTheDeadline` went red with
+`done returned while the cancel callback was still in SetDeadline`.
+The wait was put back.
+
+`resolve` made to return `errNotFound` for a stat that is not
+absence. `TestUnreadableIncludeIsReported` went red with
+`file not found` on both directives. The open of `bare.conf` still
+said `unreadable`. The return was put back.
+
+The open error passed through unchanged.
+`TestUnreadableIncludeIsReported` went red with
+`open /private/var/.../bare.conf: permission denied`. The host path
+was put back out of the problem.
+
+`confCandidate` made to be `IsRegular`.
+`TestConfCandidateKeepsACloudPlaceholder` went red with
+`a Windows cloud placeholder (ModeIrregular) was refused`. The list
+of kinds was put back.
