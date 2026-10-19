@@ -63,6 +63,8 @@ and each status file holds only the first lines a real one opens with.
   frame rates 705600 and 768000, which are DSD512 (those rates times 32).
   The card id, name and USB id are made up. No substream is playing.
 
+`volumio-asound-chain/` (`etc/asound.conf` and `proc/asound/cards`) was captured on 2026-10-19 from a Volumio 4.119 Raspberry Pi 5 via `cat`, byte for byte, and is not edited.
+
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 
 ## Adding a case
