@@ -131,8 +131,8 @@ func NativeDSDRate(format string, frameRate int) (int, bool) {
 }
 
 // devicePlugins are the ALSA plugin names whose device string names a
-// card directly. default, volumio and anything else are not resolved:
-// they are not a card, and guessing one would report the wrong DAC.
+// card directly. A bare PCM name is not one of these; ResolveOutputDevice
+// follows that name through asound.conf, and does not guess a card.
 var devicePlugins = map[string]struct{}{
 	"hw": {}, "plughw": {}, "plug": {}, "front": {},
 }

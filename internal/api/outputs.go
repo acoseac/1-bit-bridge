@@ -649,7 +649,7 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	var hits []hit
 	seen := map[int]bool{}
 	for _, device := range alsaDevices(rep) {
-		idx, pcm, ok := alsa.ResolveALSADevice(device, cards)
+		idx, pcm, ok := alsa.ResolveOutputDevice(alsa.ConfigRoot(snap.ProcRoot), device, cards)
 		if !ok || seen[idx] {
 			continue
 		}

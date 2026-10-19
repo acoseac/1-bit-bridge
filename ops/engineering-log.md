@@ -47589,3 +47589,18 @@ timeout, and a result whose own deadline fired is not stored.
 `TestProbeCacheFollowsTheConfig` failed first with `inspects 1, a
 config change stayed cached`. `TestCancelledProbeIsNotCached` failed
 first with `found false inspects 1, a cancelled probe was cached`.
+
+## 2026-10-19 — an MPD PCM name follows empty and plug to a hw card (B473 step 2b)
+
+On the Volumio 4.119 Pi, `device "volumio"` is a PCM. `/etc/asound.conf`
+defines `pcm.volumio` (`empty`) → `pcm.volumioOutput` (`plug`) →
+`pcm.volumioHw` (`hw`, card `Audio`), and card `Audio` is the iFi on
+card 2. `ResolveALSADevice` only accepts `hw`, `plughw`, `plug` and
+`front`, so both USB cards were listed with `isMPDsOutput` null.
+`ResolveOutputDevice` follows `slave.pcm` through `empty` and `plug`
+only, at most 8 hops, in `etc/asound.conf` and then `etc/alsa/conf.d`,
+read beside the proc root. Anything else in the chain stays unresolved,
+and the route keeps today's USB list. The captured chain is in
+`internal/alsa/testdata/volumio-asound-chain/` and is not edited.
+`TestResolveOutputDeviceVolumioChain` failed first with `volumio = 0, 0, false; want card 2 pcm 0`.
+`TestResolveOutputDevice` failed first with `slave block = 0, 0, false`.

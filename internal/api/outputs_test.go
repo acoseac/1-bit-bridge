@@ -1216,6 +1216,20 @@ func TestIsMPDsOutputIsTrueOrNull(t *testing.T) {
 	}
 }
 
+func TestVolumioPCMNamesTheDAC(t *testing.T) {
+	snap, err := (alsa.Reader{ProcRoot: filepath.Join("..", "alsa", "testdata", "volumio-asound-chain", "proc")}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, raw := outputAt(t, snap, "volumio")
+	if got.DAC == nil || got.DAC.Card != 2 || got.DAC.ID != "Audio" || got.DAC.IsMPDsOutput == nil || !*got.DAC.IsMPDsOutput {
+		t.Fatalf("dac %+v", got.DAC)
+	}
+	if jsonContains(raw, `"isMPDsOutput":null`) || jsonContains(raw, `"isMPDsOutput":false`) {
+		t.Fatalf("the resolved card was not true: %s", raw)
+	}
+}
+
 func outputAt(t *testing.T, snap alsa.Snapshot, device string) (OutputInfo, []byte) {
 	t.Helper()
 	cfg := LocalOutputsConfig{
