@@ -542,16 +542,30 @@ func TestOutputDACWatchPrintsOnlyOnAChange(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var stdout, stderr bytes.Buffer
-			done := make(chan int)
+			// Buffered, so a test that fails before reading it leaves no
+			// goroutine blocked on the send.
+			done := make(chan int, 1)
 			go func() { done <- watchDAC(ctx, readNext, testOutputEnv("linux", ticks), asJSON, &stdout, &stderr) }()
 			// Each tick is taken only once the read before it has been
-			// printed or skipped, so the script advances in step.
+			// printed or skipped, so the script advances in step. A watch
+			// that stops taking ticks or never returns fails this case
+			// within the bound, not the whole binary at its deadline.
+			const bound = 30 * time.Second
 			for range script[1:] {
-				ticks <- time.Time{}
+				select {
+				case ticks <- time.Time{}:
+				case <-time.After(bound):
+					t.Fatalf("watch stopped taking ticks after %d reads", next)
+				}
 			}
 			cancel()
-			if code := <-done; code != 0 {
-				t.Errorf("watch exited %d, want 0 when its context ends", code)
+			select {
+			case code := <-done:
+				if code != 0 {
+					t.Errorf("watch exited %d, want 0 when its context ends", code)
+				}
+			case <-time.After(bound):
+				t.Fatal("watch did not return after its context ended")
 			}
 			if next != len(script) {
 				t.Fatalf("%d reads, want %d", next, len(script))
