@@ -155,25 +155,33 @@ func TestScanner_AWAVsID3ChunkCarriesItsAdvisoryIntoTheManifest(t *testing.T) {
 	wire := servedTracksByPath(t, store, root)
 	for _, f := range files {
 		t.Run(f.name, func(t *testing.T) {
-			rel := rels[f.name]
-			row := storedTrack(t, store, rel)
-			if row.Title != f.title {
-				t.Errorf("Title = %q, want %q", row.Title, f.title)
-			}
-			if row.Explicit != f.want {
-				t.Errorf("the stored row's Explicit = %v, want %v", row.Explicit, f.want)
-			}
-			served, ok := wire[rel]
-			if !ok {
-				t.Fatalf("the manifest does not serve %s", rel)
-			}
-			got, present := served["explicit"]
-			switch {
-			case f.want && got != true:
-				t.Errorf(`the manifest's "explicit" = %v (present %v), want true`, got, present)
-			case !f.want && present:
-				t.Errorf(`the manifest carries "explicit": %v, want the key absent`, got)
-			}
+			requireExplicitRow(t, store, wire, rels[f.name], f.title, f.want)
 		})
+	}
+}
+
+// requireExplicitRow fails unless the row the scan stored at rel carries title
+// and the explicit verdict want, and the manifest (wire, servedTracksByPath's
+// answer) serves the row with "explicit": true when want is true and without
+// the key when it is not.
+func requireExplicitRow(t *testing.T, store *Store, wire map[string]map[string]any, rel, title string, want bool) {
+	t.Helper()
+	row := storedTrack(t, store, rel)
+	if row.Title != title {
+		t.Errorf("Title = %q, want %q", row.Title, title)
+	}
+	if row.Explicit != want {
+		t.Errorf("the stored row's Explicit = %v, want %v", row.Explicit, want)
+	}
+	served, ok := wire[rel]
+	if !ok {
+		t.Fatalf("the manifest does not serve %s", rel)
+	}
+	got, present := served["explicit"]
+	switch {
+	case want && got != true:
+		t.Errorf(`the manifest's "explicit" = %v (present %v), want true`, got, present)
+	case !want && present:
+		t.Errorf(`the manifest carries "explicit": %v, want the key absent`, got)
 	}
 }
