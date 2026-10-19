@@ -3859,6 +3859,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// included: library data, like the manifest, not one of the user-data
 	// stores the demo leaves unwired.
 	apiSrv.WithPlaylistFileStore(manifestStore)
+	// The endpoint list publishes an IPv6 address of the interface walk
+	// only while the certificate this process serves names it (backlog
+	// B457), and only for a pair this bridge minted: `bridge cert rotate`
+	// and a restart bring an address back, and rotation is not advised for
+	// any other certificate, whose walk is published whole, as before. An
+	// IPv4 address is published either way. `cert` is the pair loaded
+	// above, so a rotation on disk takes effect at the restart, as the
+	// certificate itself does.
+	if certIPs, minted, err := servertls.NamedIPs(cert); err != nil {
+		logger.Warn("could not read the served certificate's addresses; every address of the host is advertised",
+			"err", err)
+	} else if minted {
+		apiSrv.WithCertifiedAddrs(certIPs)
+	}
 
 	// Phase-H bulk harvest (opt-in via cfg.Atlas.HarvestEnabled). The iOS app
 	// provisions a bulk_harvest credential to POST /v1/atlas-harvest/credential;

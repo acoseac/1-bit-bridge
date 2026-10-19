@@ -30,6 +30,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -163,6 +164,15 @@ type Server struct {
 	endpointsCache         *endpointsCache              // TTL cache for /v1/health advertised-endpoint interface walk
 	fingerprint            string
 	startedAt              time.Time
+
+	// certIPs are the IP addresses the certificate this bridge minted and
+	// serves names (WithCertifiedAddrs, backlog B457): the interface walk
+	// publishes an IPv6 address only while it is one of them, and an IPv4
+	// address either way. Nil publishes the walk whole. Set before
+	// serving, read-only after.
+	certIPs map[netip.Addr]bool
+	// heldBack says once per address that the walk left one out.
+	heldBack heldBackLog
 
 	// openDir opens the directory /v1/list lists (openListDir). New sets
 	// it to fsutil.OpenDir; a test wraps it to change the directory inside
@@ -1108,6 +1118,72 @@ func (s *Server) WithPairingCodes(c PairingCodeTaker) *Server {
 func (s *Server) WithCertExpiry(notAfter time.Time) *Server {
 	s.certNotAfter = notAfter
 	return s
+}
+
+// WithCertifiedAddrs makes the endpoint list (/v1/health, the pairing QR,
+// the console's Reachable endpoints) publish an IPv6 address of the
+// interface walk only while ips names it (backlog B457). cmd/bridge passes
+// the IP addresses of the certificate it serves, from servertls.NamedIPs,
+// and only when the bridge minted that certificate: an address a client
+// that checks the certificate against the URL's host cannot use is left
+// out, and `bridge cert rotate` and a restart bring it back. Each address
+// left out is logged once. An IPv4 address is published whether or not ips
+// names it, and the `.local` name, the Tailscale endpoints and
+// customEndpoints are never judged. Without the call the walk is published
+// whole.
+func (s *Server) WithCertifiedAddrs(ips []net.IP) *Server {
+	set := make(map[netip.Addr]bool, len(ips))
+	for _, ip := range ips {
+		if a, ok := netip.AddrFromSlice(ip); ok {
+			set[a.Unmap()] = true
+		}
+	}
+	s.certIPs = set
+	return s
+}
+
+// certNames reports whether the served certificate names ip.
+func (s *Server) certNames(ip net.IP) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	return ok && s.certIPs[a.Unmap()]
+}
+
+// heldBackMessage is the line logged, once per address, for a walk
+// address the endpoint list leaves out because the certificate does not
+// name it.
+const heldBackMessage = "address not advertised: the TLS certificate does not name it"
+
+// heldBackLogMax bounds how many addresses heldBackLog remembers: a host's
+// temporary IPv6 addresses change daily, so a long-running process would
+// otherwise remember one more every day.
+const heldBackLogMax = 64
+
+// heldBackLog logs heldBackMessage once per address, for at most
+// heldBackLogMax addresses.
+type heldBackLog struct {
+	mu   sync.Mutex
+	seen map[netip.Addr]bool
+}
+
+// note logs that ip is not advertised, the first time it is held back.
+func (l *heldBackLog) note(ip net.IP) {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return
+	}
+	a = a.Unmap()
+	l.mu.Lock()
+	if l.seen[a] || len(l.seen) >= heldBackLogMax {
+		l.mu.Unlock()
+		return
+	}
+	if l.seen == nil {
+		l.seen = make(map[netip.Addr]bool)
+	}
+	l.seen[a] = true
+	l.mu.Unlock()
+	logger.Warn(heldBackMessage, "addr", a.String(),
+		"hint", "a rotation would advertise it: bridge cert rotate, a restart, and a re-pair of every paired device")
 }
 
 // WithLECertExpiry wires the live Let's Encrypt cert expiry provider.
@@ -2209,10 +2285,15 @@ func (s *Server) ReachableEndpoints() []advertise.Endpoint {
 		eps := publicModeEndpoints(cfg, portStr)
 		return classStableUnique(eps)
 	}
-	eps := advertise.Endpoints(advertise.Params{
+	params := advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
-	})
+	}
+	if s.certIPs != nil {
+		params.NamedByCert = s.certNames
+		params.HeldBack = s.heldBack.note
+	}
+	eps := advertise.Endpoints(params)
 	// Tailscale advertising now flows ENTIRELY through the api-layer
 	// provider for both `cli` and `tsnet` modes. The advertise package
 	// is no longer Tailscale-aware (no CLI shell-out, no utun

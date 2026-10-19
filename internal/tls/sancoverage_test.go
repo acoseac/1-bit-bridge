@@ -398,3 +398,111 @@ func TestAPartialLabelWildcardCoversNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing is backlog
+// B457. Serve does not advertise an IPv6 address of the interface walk
+// that a certificate it minted does not name, so the certificate is not
+// stale for that address: it is held back, and the startup warning stays
+// quiet. A missing address that is not gated (a Tailscale one) is still
+// missing. The gated set is the walk's IPv6 addresses
+// (advertise.CertGatedIPs).
+func TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing(t *testing.T) {
+	lan, ula, ts := net.ParseIP("192.168.1.20"), net.ParseIP("fdcc:cccf:784b::2"), net.ParseIP("100.64.0.24")
+	certPath := mintCert(t, GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan}})
+	want := GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan, ula}, CertGatedIPs: []net.IP{ula}}
+	cov, err := InspectSANCoverage(certPath, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cov.Covered() || len(cov.MissingIPs) != 0 {
+		t.Errorf("a held-back address reads as missing: %v", cov.MissingIPStrings())
+	}
+	if got := cov.HeldBackIPStrings(); !equalStrings(got, []string{ula.String()}) {
+		t.Errorf("HeldBackIPs = %v, want [%s]", got, ula)
+	}
+
+	rec := loggingtest.Record(t)
+	certDir := filepath.Dir(certPath)
+	if _, _, err := LoadOrGenerateWithOptions(certPath, filepath.Join(certDir, KeyFileName), want); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range rec.Failures() {
+		if strings.Contains(line, "cert SANs are stale") {
+			t.Errorf("startup called the certificate stale for a held-back address: %s", line)
+		}
+	}
+
+	want.ExtraIPs = append(want.ExtraIPs, ts)
+	cov, err = InspectSANCoverage(certPath, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cov.Covered() || !equalStrings(cov.MissingIPStrings(), []string{ts.String()}) ||
+		!equalStrings(cov.HeldBackIPStrings(), []string{ula.String()}) {
+		t.Errorf("missing %v held back %v, want missing [%s] held back [%s]",
+			cov.MissingIPStrings(), cov.HeldBackIPStrings(), ts, ula)
+	}
+}
+
+// TestACertTheBridgeDidNotMintHoldsNothingBack: serve holds addresses back
+// only for a certificate it minted (NamedIPs), so for a CA leaf a gated
+// address the certificate does not name is missing, as before.
+func TestACertTheBridgeDidNotMintHoldsNothingBack(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	tlstest.WriteCASignedCert(t, certPath, keyPath, []string{"*.cloud.1-bit.app"})
+	ula := net.ParseIP("fdcc:cccf:784b::2")
+	cov, err := InspectSANCoverage(certPath, GenerateOptions{
+		Hostname: "bridge-7f3a", ExtraIPs: []net.IP{ula}, CertGatedIPs: []net.IP{ula},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cov.HeldBackIPs) != 0 || !containsString(cov.MissingIPStrings(), ula.String()) {
+		t.Errorf("a CA leaf: held back %v, missing %v; want nothing held back", cov.HeldBackIPStrings(), cov.MissingIPStrings())
+	}
+}
+
+// TestNamedIPsReadsTheServedCertificate: the addresses serve gates the walk
+// on are the loaded pair's, and so is the minted verdict, with or without
+// the parsed leaf.
+func TestNamedIPsReadsTheServedCertificate(t *testing.T) {
+	lan := net.ParseIP("192.168.1.20")
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	if err := GenerateWithOptions(certPath, keyPath, GenerateOptions{Hostname: "nuc", ExtraIPs: []net.IP{lan}}); err != nil {
+		t.Fatal(err)
+	}
+	pair, err := cryptotls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaf := range []bool{true, false} {
+		c := pair
+		if !leaf {
+			c.Leaf = nil
+		}
+		ips, minted, err := NamedIPs(&c)
+		if err != nil || !minted {
+			t.Fatalf("leaf %v: minted %v err %v, want a minted certificate", leaf, minted, err)
+		}
+		got := ipsToStrings(ips)
+		if !containsString(got, lan.String()) || !containsString(got, "127.0.0.1") {
+			t.Errorf("leaf %v: NamedIPs = %v, want the minted addresses", leaf, got)
+		}
+	}
+
+	ca := t.TempDir()
+	caCert, caKey := DefaultPaths(ca)
+	tlstest.WriteCASignedCert(t, caCert, caKey, []string{"*.cloud.1-bit.app"})
+	caPair, err := cryptotls.LoadX509KeyPair(caCert, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, minted, err := NamedIPs(&caPair); err != nil || minted {
+		t.Errorf("a CA leaf: minted %v err %v, want not minted", minted, err)
+	}
+	if _, _, err := NamedIPs(nil); err == nil {
+		t.Error("NamedIPs(nil) answered without an error")
+	}
+}

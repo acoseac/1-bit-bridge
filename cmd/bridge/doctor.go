@@ -354,6 +354,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 			// Skips the two checks that are advice for whoever started
 			// the process — see doctor.Deps.Managed.
 			d.Managed = cfg.Deployment.IsManaged()
+			// A public-mode bridge advertises no interface walk, so
+			// tls-cert-sans does not ask it for a LAN IPv4 address
+			// (doctor.Deps.PublicMode). init's preflight sets it too.
+			d.PublicMode = cfg.IsPublic()
 			if port, ok := configuredPort(cfg.ListenAddress); ok {
 				d.APIPort = port
 			}

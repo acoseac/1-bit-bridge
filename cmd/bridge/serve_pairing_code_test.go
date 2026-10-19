@@ -116,7 +116,14 @@ type pairingServe struct {
 // extraConfig (YAML lines, or "") appended to its config.
 func bootPairingServe(t *testing.T, extraConfig string) pairingServe {
 	t.Helper()
-	dir := t.TempDir()
+	return bootPairingServeIn(t, t.TempDir(), extraConfig)
+}
+
+// bootPairingServeIn is bootPairingServe over dir's Music and data
+// directories, which may hold what an earlier boot or the test left there.
+// It writes dir/bridge.yaml for this boot's ports.
+func bootPairingServeIn(t *testing.T, dir, extraConfig string) pairingServe {
+	t.Helper()
 	lib := filepath.Join(dir, "Music")
 	if err := os.MkdirAll(lib, 0o755); err != nil {
 		t.Fatal(err)

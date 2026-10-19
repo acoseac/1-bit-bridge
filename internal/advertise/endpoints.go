@@ -122,6 +122,20 @@ type Params struct {
 	Port            int
 	HostOverride    string   // pass "" to use os.Hostname()
 	CustomEndpoints []string // pass nil/empty to skip
+
+	// NamedByCert, when set, says whether the certificate the bridge
+	// serves names an address (backlog B457). An IPv6 address of the
+	// interface walk it does not name is not published: a client that
+	// checks the certificate against the URL's host fails there. Each
+	// such address goes to HeldBack instead. The want-set a mint covers
+	// (GatherCertSANIPs) keeps it, so a rotation brings it back. An IPv4
+	// address is published whatever the certificate names (certGated),
+	// and so is an address a CustomEndpoints entry declares. Nil
+	// publishes the walk whole: no certificate, or one this bridge did
+	// not mint. The `.local` name and CustomEndpoints are never judged.
+	NamedByCert func(net.IP) bool
+	// HeldBack is called with each walk address NamedByCert refused.
+	HeldBack func(net.IP)
 }
 
 // Endpoints returns every reachable `https://<host>:<port>` URL for
@@ -139,6 +153,9 @@ func Endpoints(p Params) []Endpoint {
 		port = 7788
 	}
 	out := make([]Endpoint, 0, 8)
+	// An address a custom entry declares is published as written, so the
+	// walk never holds its copy back (certGated, as CertGatedIPs asks it).
+	declared := declaredIPs(p.CustomEndpoints)
 
 	eachUsableAddr(func(iface net.Interface, ip net.IP) {
 		class := classify(iface, ip)
@@ -148,6 +165,12 @@ func Endpoints(p Params) []Endpoint {
 		// path so cli/tsnet modes use one consistent source.
 		// See Params docblock.
 		if class == ClassTailscaleV4 || class == ClassTailscaleV6 {
+			return
+		}
+		if p.NamedByCert != nil && certGated(iface, ip, declared) && !p.NamedByCert(ip) {
+			if p.HeldBack != nil {
+				p.HeldBack(ip)
+			}
 			return
 		}
 		out = append(out, Endpoint{

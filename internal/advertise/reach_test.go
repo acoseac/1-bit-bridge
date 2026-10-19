@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -297,5 +298,112 @@ func TestADockerMarkerThatCannotBeReadKeepsTheContainerRules(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 	if !dockerMarkerAt(filepath.Join(locked, "dockerenv")) {
 		t.Fatal("a marker whose stat failed with a permission error read as no container")
+	}
+}
+
+// TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack is backlog
+// B457. With NamedByCert set, the walk holds back an IPv6 address the
+// certificate does not name, a ULA or a global one, and hands it to
+// HeldBack. A Tailscale address is never judged (the provider publishes
+// it), the `.local` name and a customEndpoints entry are published as
+// before, an address a customEndpoints entry declares is not held back
+// (CertGatedIPs leaves it out too), and the want-set still names a
+// held-back address, so a mint covers it. CertGatedIPs is the set the
+// judgement applies to: the walk's IPv6 addresses, never an IPv4 one.
+func TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack(t *testing.T) {
+	const lan, ula, global, ts = "192.168.1.20", "fd00:db8:1::2", "2001:db8::2", "fd7a:115c:a1e0::2"
+	withIfaces(t, []ifaceAddr{
+		oneAddr("en0", net.FlagUp, lan),
+		oneAddr("en0", net.FlagUp, ula),
+		oneAddr("en0", net.FlagUp, global),
+		oneAddr("utun5", net.FlagUp|net.FlagPointToPoint, ts),
+	})
+	named := net.ParseIP(lan)
+	var held []string
+	p := Params{
+		Port:         7788,
+		HostOverride: "musicbox",
+		NamedByCert:  func(ip net.IP) bool { return ip.Equal(named) },
+		HeldBack:     func(ip net.IP) { held = append(held, ip.String()) },
+	}
+	eps := Endpoints(p)
+	if !hasClass(eps, httpsIP(lan), ClassLANv4) {
+		t.Errorf("the address the certificate names is not published: %v", eps)
+	}
+	for _, v6 := range []string{ula, global} {
+		if hasURL(eps, httpsIP(v6)) {
+			t.Errorf("%s, an IPv6 address the certificate does not name, is published: %v", v6, eps)
+		}
+	}
+	if !hasURL(eps, "https://musicbox.local:7788") {
+		t.Errorf("the .local name was judged: %v", eps)
+	}
+	if !slices.Equal(held, []string{ula, global}) {
+		t.Errorf("HeldBack saw %v, want exactly [%s %s]", held, ula, global)
+	}
+
+	// A declared address is published as written, so the walk does not hold
+	// it back either: serve would say "not advertised" of an address it
+	// publishes, and the doctor, whose CertGatedIPs leaves it out, would call
+	// the certificate stale for it (CodeRabbit on #1280).
+	held = nil
+	p.CustomEndpoints = []string{httpsIP(ula)}
+	if eps := Endpoints(p); !hasURL(eps, httpsIP(ula)) {
+		t.Errorf("an address a customEndpoints entry declares is not published: %v", eps)
+	}
+	if slices.Contains(held, ula) {
+		t.Errorf("HeldBack saw %s, which a customEndpoints entry declares; HeldBack saw %v", ula, held)
+	}
+
+	sans := GatherCertSANIPs(CertSANConfig{})
+	for _, v6 := range []string{ula, global} {
+		if !hasIP(sans, v6) {
+			t.Errorf("%s left the want-set, so a rotation would not cover it", v6)
+		}
+	}
+	gated := CertGatedIPs(CertSANConfig{})
+	if hasIP(gated, lan) || !hasIP(gated, ula) || !hasIP(gated, global) || hasIP(gated, ts) {
+		t.Errorf("CertGatedIPs = %v, want the walk's two IPv6 addresses: not the IPv4 one, not Tailscale's", gated)
+	}
+	if hasIP(CertGatedIPs(CertSANConfig{CustomEndpoints: []string{httpsIP(ula)}}), ula) {
+		t.Error("CertGatedIPs holds back an address a customEndpoints entry declares")
+	}
+}
+
+// TestAnIPv4WalkAddressTheCertificateDoesNotNameIsPublished is backlog
+// B457's option B (the owner's choice, 2026-10-18): an IPv4 address of the
+// walk is published whether or not the certificate names it, a private one
+// or a public one, and HeldBack never sees one. The app pins the
+// certificate's fingerprint and does not check the host, so a new DHCP
+// lease or a data directory moved to another host must not take the
+// bridge's LAN address out of /v1/health.
+func TestAnIPv4WalkAddressTheCertificateDoesNotNameIsPublished(t *testing.T) {
+	const named, unnamed, public = "192.168.1.20", "192.168.1.21", "203.0.113.7"
+	withIfaces(t, []ifaceAddr{
+		oneAddr("en0", net.FlagUp, named),
+		oneAddr("en0", net.FlagUp, unnamed),
+		oneAddr("en1", net.FlagUp, public),
+	})
+	n := net.ParseIP(named)
+	var held []string
+	eps := Endpoints(Params{
+		Port:         7788,
+		HostOverride: "musicbox",
+		NamedByCert:  func(ip net.IP) bool { return ip.Equal(n) },
+		HeldBack:     func(ip net.IP) { held = append(held, ip.String()) },
+	})
+	for _, want := range []struct {
+		ip    string
+		class Class
+	}{{named, ClassLANv4}, {unnamed, ClassLANv4}, {public, ClassPublic}} {
+		if !hasClass(eps, httpsIP(want.ip), want.class) {
+			t.Errorf("%s is not published as class %v: %v", want.ip, want.class, eps)
+		}
+	}
+	if len(held) != 0 {
+		t.Errorf("HeldBack saw %v; an IPv4 address is never held back", held)
+	}
+	if gated := CertGatedIPs(CertSANConfig{}); len(gated) != 0 {
+		t.Errorf("CertGatedIPs = %v over a walk of IPv4 addresses, want none", gated)
 	}
 }

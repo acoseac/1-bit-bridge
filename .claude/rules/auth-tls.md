@@ -3,6 +3,7 @@ paths:
   - "internal/auth/**"
   - "internal/adminauth/**"
   - "internal/tls/**"
+  - "internal/doctor/certsans*.go"
   - "internal/tlsacme/**"
   - "internal/pairing/**"
   - "internal/pairingcode/**"
@@ -482,6 +483,40 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestALeftmostWildcardCoversOneLabel`,
   `TestAPartialLabelWildcardCoversNothing`,
   `TestACertTheBridgeDidNotMintIsNotToldToRotate`.)
+- **…and an address serve holds back is not stale, and a loopback bridge
+  that advertises no LAN IPv4 address is warned** (2026-10-18, backlog
+  B457; option B, the owner's decision). Serve does not advertise an IPv6
+  address of the interface walk that a certificate it minted does not
+  name (the bullet under **The wire contract**), so `certSANOptions`
+  marks the walk's IPv6 addresses (`GenerateOptions.CertGatedIPs`, from
+  `advertise.CertGatedIPs`: not Tailscale's, not one a `customEndpoints`
+  entry names, never an IPv4 one), and `InspectSANCoverage` moves one a
+  minted certificate lacks from `MissingIPs` to `HeldBackIPs`. `Covered`
+  ignores those, so `logIfSANsStale` stays quiet for them, and
+  `tls-cert-sans` stays ok, counts only the addresses advertised, and
+  names each held-back one with `RotationRemediation`. An IPv4 address
+  the certificate lacks is advertised, so it is missing and warns, as a
+  missing Tailscale, custom or host-name entry does. A CA leaf holds
+  nothing back. **The mint still covers them**: `ExtraIPs` keeps every
+  walk address, which is what lets a rotation advertise one again.
+  **`tls-cert-sans` also warns when a loopback bridge advertises no LAN
+  IPv4 address at all**: no private IPv4 address from its interfaces or
+  `customEndpoints` that it does not hold back. A phone on a VPN route
+  cannot use the `.local` name, and the app has no IPv4 address to hand
+  a DLNA renderer. The warning keeps everything the comparison said, a
+  held-back address included, and does not wait for a certificate.
+  `doctor.Deps.PublicMode` skips it for a public-mode bridge, which
+  advertises no walk; `bridge doctor` and `bridge init`'s preflight set
+  it from `cfg.IsPublic()`, as they set `Managed`. **Don't ask a
+  public-mode bridge for a LAN IPv4 address, and don't set the posture in
+  one builder of the doctor's Deps without the other.**
+  (`TestAGatedAddressAMintedCertDoesNotNameIsHeldBackNotMissing`,
+  `TestACertTheBridgeDidNotMintHoldsNothingBack`,
+  `TestNamedIPsReadsTheServedCertificate`,
+  `TestCheckTLSCertSANs_AHeldBackAddressIsNotStale`,
+  `TestCheckTLSCertSANs_NoLANIPv4AdvertisedWarns`,
+  `TestCheckTLSCertSANs_APublicBridgeIsNotAskedForALANIPv4`,
+  `TestTheDoctorAsksOnlyALoopbackBridgeForALANIPv4`.)
 - **The pairing QR carries an address a phone can dial, and a name that
   left the want-set stops the stale-SAN warning** (2026-10-13, backlog
   B189, B199, B229). `certSANOptions` takes `advertise.CertHostname`.

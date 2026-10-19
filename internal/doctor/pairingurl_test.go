@@ -10,8 +10,13 @@ import (
 )
 
 func TestAWantSetThatDroppedAContainerNameIsCovered(t *testing.T) {
-	minted := servertls.GenerateOptions{Hostname: "0123456789ab"}
-	c := checkTLSCertSANs(t.Context(), certFixture(t, minted, servertls.GenerateOptions{}))
+	// A LAN IPv4 address on both sides, as a customEndpoints entry gives a
+	// container, so the line is about the name alone: a loopback bridge
+	// advertising none is warned about that
+	// (TestCheckTLSCertSANs_NoLANIPv4AdvertisedWarns).
+	lan := []net.IP{net.ParseIP("192.168.1.20")}
+	minted := servertls.GenerateOptions{Hostname: "0123456789ab", ExtraIPs: lan}
+	c := checkTLSCertSANs(t.Context(), certFixture(t, minted, servertls.GenerateOptions{ExtraIPs: lan}))
 	if c.Status != OK {
 		t.Fatalf("status = %q, want ok\nsummary %s\nhint %s", c.Status, c.Summary, c.Hint)
 	}

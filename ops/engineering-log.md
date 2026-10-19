@@ -46356,3 +46356,187 @@ client) it failed 5 of 5 with CI's message.
 The client's transport is the server's (`srv.Client().Transport`), which
 no other test's Close touches. 50 of 50 under `-race` with the hook
 (go1.26.6), 20 of 20 on go1.27.1, and the parallel group 200 of 200.
+
+## 2026-10-18 — an IPv6 address of the walk that the served certificate does not name is not advertised, and an IPv4 one is (backlog B457)
+
+### What the deploy found
+
+The 2026-10-18 deploy of main to the operator bridge (the NUC, a
+self-signed pair minted 2026-09-20) showed `bridge doctor`'s
+`tls-cert-sans` at warn: the host had taken an IPv6 ULA (`fd00::/8`) from
+a device on its LAN, `/v1/health` advertised it, and the certificate does
+not name it, so a client that checks the certificate against the URL's
+host fails there. Re-minting covers it and makes every phone re-pair, and
+the owner chose not to; the bridge stops advertising such an address
+instead.
+
+### Where the list comes from
+
+`/v1/health.endpoints`, the pairing QR's alternates and the console's
+Reachable endpoints are one list, `api.(*Server).ReachableEndpoints`: the
+interface walk (`advertise.Endpoints`: LAN v4 and v6, public, the `.local`
+name, `customEndpoints`), then the Tailscale provider's endpoints, or in
+public mode the declared ones alone. mDNS publishes a name and a port, not
+a URL, and a client dialling `<host>.local` checks the name, which the
+certificate carries, so it is not affected. The certificate's want-set is
+`certSANOptions` (the walk's addresses through `GatherCertSANIPs`, the
+Tailscale CLI's, the custom ones), which serve's startup warning, `bridge
+cert rotate`, init and the doctor all use.
+
+### The first rule (option A), superseded by option B below
+
+The PR's first commits held back every walk address the certificate does
+not name, IPv4 included. That record follows as it was measured.
+
+The serve test (renamed for option B, below) minted, over a fresh data
+dir, the pair `certSANOptions` would mint less one address the host's own
+walk published (an IPv4 address of the dev Mac's LAN), and booted the real
+serve. On the test's own commit (6b277d90, main's code, go1.26.6), with
+the address written `<lan>` here:
+
+    serve_cert_named_addrs_test.go:63: /v1/health advertises <lan>, which the certificate does not name: [<lan>]
+    serve_cert_named_addrs_test.go:63: (the second health read, the same)
+    serve_cert_named_addrs_test.go:73: serve said 0 time(s) that <lan> is not advertised, want once
+    serve_cert_named_addrs_test.go:76: serve called the certificate stale for <lan> ("WARN cert SANs are stale … missing_ips=[<lan>]")
+    serve_cert_named_addrs_test.go:81: tls-cert-sans: status warn summary "stale — 1 of 6 address(es) this bridge advertises are not in the certificate"
+
+The second half (`bridge cert rotate`, a restart: every walk address is
+advertised, no held-back line, the doctor line clean) passed there too, as
+it must.
+
+- Serve reads the loaded pair's IP addresses and whether this bridge
+  minted it (`servertls.NamedIPs`, the `CheckSignature` test
+  `MintedByBridge` uses) and, for a minted pair, calls
+  `WithCertifiedAddrs`. `advertise.Params.NamedByCert` then dropped a walk
+  address of a LAN or public class the certificate does not name, before
+  the dedupe, and `HeldBack` Warns once per address ("address not
+  advertised: the TLS certificate does not name it", `addr`, a hint that
+  names the rotation), for at most 64 addresses.
+- **Not judged**: the Tailscale classes (never emitted by the walk; the
+  provider publishes them), the `.local` name, and a `customEndpoints`
+  entry, which is published as written even when it names a held-back
+  address. A CA leaf holds nothing back: rotation is not advised for it
+  (B232), and nothing would bring the address back.
+- `GatherCertSANIPs` keeps every walk address, so a rotation covers it.
+  `certSANOptions` also marks the gated ones (`CertGatedIPs`), and
+  `InspectSANCoverage` moves one a minted certificate lacks from
+  `MissingIPs` to `HeldBackIPs`: `logIfSANsStale` stays quiet for it,
+  and `tls-cert-sans` stays ok, counts only the advertised addresses, and
+  names the held-back one with `RotationRemediation`.
+- Considered then and not taken: dropping every ULA (the walk's rule for
+  a point-to-point ULA, B229), which would take away a ULA LAN the
+  certificate does name, and an IPv6-only rule, which option B is.
+
+Negative controls on that fix commit (60d4142c), each restored before the
+next: serve's `WithCertifiedAddrs` call removed failed the serve test on
+the two health reads, the pairing QR and the held-back line, its stale and
+doctor checks passing (that half is the certificate's); the held-back
+split in `InspectSANCoverage` removed failed the serve test on the stale
+line and the doctor line, and the tls and doctor unit tests; the walk's
+`NamedByCert` check removed failed the serve test as in the first control,
+and the walk test (the ULA published, `HeldBack` never called).
+
+### Option B: only an IPv6 address is held back, and the doctor warns when no LAN IPv4 is advertised
+
+The cost of option A was an IPv4 address the certificate does not name (a
+new DHCP lease, a moved data dir), held back though the app pins the
+fingerprint and could use it. The app needs one: for its LAN path, over a
+VPN route, where it cannot use the `.local` name, and for the URLs it hands
+a DLNA renderer, built from the first private IPv4 address it has (many
+renderers cannot resolve the name it falls back to). The owner chose
+option B on 2026-10-18, after a consult that recommended it.
+
+- `advertise.certGated` is the one rule `Endpoints` and `CertGatedIPs`
+  ask: an IPv6 address of the walk that is not Tailscale's. An IPv4
+  address is published whatever the certificate names; the certificate is
+  stale for one it lacks, and the startup warning and `tls-cert-sans` say
+  so, as they did before B457. IPv6 addresses come and go on their own
+  (temporary addresses, a prefix another device hands out), which a
+  certificate cannot keep up with.
+- `tls-cert-sans` warns when a loopback bridge advertises no LAN IPv4
+  address at all: no private IPv4 address of the want-set (the walk, the
+  IP literals of `customEndpoints`) that it does not hold back. Tailscale's
+  addresses are in 100.64.0.0/10, which is not private, and a public IPv4
+  address is not a LAN one. The warning keeps everything the comparison
+  said, a held-back IPv6 address included, and does not wait for a
+  certificate. `doctor.Deps.PublicMode`, from `cfg.IsPublic()` in both
+  builders of the doctor's Deps (`buildDoctorDepsFor` and init's
+  `withExistingInstallDeps`, beside `Managed`), skips it for a public-mode
+  bridge, which advertises no walk.
+- `advertise.SetInterfacesForTest` hands the walk a fixed set of
+  interfaces, so the serve tests no longer depend on the host's own
+  addresses: the dev Mac's only IPv6 address the walk sees is
+  Tailscale's, which is never judged, and the serve test must not depend
+  on a CI runner having one. Its type is
+  `InterfaceForTest`: a name beginning `Test` reads to
+  `TestEveryCitedTestNameExists` as a test it cannot find.
+- The tests were renamed for the rule: the serve test is
+  `TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName`, over
+  a walk of two LAN IPv4 addresses, a ULA and a global IPv6 address with
+  a pair less one IPv4 address and both IPv6 ones, and the walk test is
+  `TestAnIPv6WalkAddressTheCertificateDoesNotNameIsHeldBack`. Two doctor
+  fixtures that advertised no address at all (the CA-leaf rotation test
+  and the container-name test) now advertise a LAN IPv4 address, so each
+  stays about what it tests, and the gated sets in the fixtures name IPv6
+  addresses only.
+
+Red first, on the tests' commit (11a3b11c, go1.26.6), with the host and
+port of the dev Mac written `<host>` and `<port>`:
+
+    reach_test.go:357: CertGatedIPs = [192.168.1.20 fd00:db8:1::2 2001:db8::2], want the walk's two IPv6 addresses: not the IPv4 one, not Tailscale's
+    reach_test.go:391: 192.168.1.21 is not published as class LAN: [{https://192.168.1.20:7788 LAN} {https://musicbox.local:7788 mDNS}]
+    reach_test.go:391: 203.0.113.7 is not published as class Public: [{https://192.168.1.20:7788 LAN} {https://musicbox.local:7788 mDNS}]
+    reach_test.go:395: HeldBack saw [192.168.1.21 203.0.113.7]; an IPv4 address is never held back
+    reach_test.go:398: CertGatedIPs = [192.168.1.20 192.168.1.21 203.0.113.7] over a walk of IPv4 addresses, want none
+    certsans_test.go:616: only a Tailscale address and a held-back ULA: status "ok" summary "covers all 3 name(s) and 4 address(es) this bridge advertises. Not advertised, since the certificate does not name it: fd00:db8:1::2. …", want warn: no LAN IPv4
+    certsans_test.go:623: hint = "", want it to say how to advertise one
+    certsans_test.go:631: a public IPv4 address read as a LAN one: status "ok" summary "covers all 3 name(s) and 5 address(es) …"
+    serve_cert_named_addrs_test.go:87: /v1/health dropped 192.168.1.21, an IPv4 address it advertises whatever the certificate names: [192.168.1.20]   (both reads)
+    serve_cert_named_addrs_test.go:102: the pairing QR does not carry 192.168.1.21: [https://<host>.local:<port> https://192.168.1.20:<port>]
+    serve_cert_named_addrs_test.go:116: serve held back 192.168.1.21, an IPv4 address
+    serve_cert_named_addrs_test.go:121: the startup warning named 192.168.1.21 0 time(s), want once
+    serve_cert_named_addrs_test.go:131: tls-cert-sans: status ok summary "covers all 3 name(s) and 6 address(es) this bridge advertises. Not advertised, since the certificate does not name it: 192.168.1.21, fd00:db8:1::2, 2001:db8::2. …", want warn naming 192.168.1.21
+    doctor_lan_ipv4_test.go:60: bridge doctor over a loopback bridge: status ok summary "no certificate yet — the first mint covers the current endpoints", want the no-LAN-IPv4 warn only on loopback
+    doctor_lan_ipv4_test.go:60: init's preflight over a loopback bridge: (the same)
+
+The posture test's public half passed there, as did every other
+`tls-cert-sans` test and `TestEveryCitedTestNameExists`. On the fix
+(1b0b9193) all of them pass.
+
+Negative controls on the fix commit, each restored before the next and
+each turning red exactly the tests named:
+
+- `certGated` judging an IPv4 address too (option A's rule): both walk
+  tests and the serve test; the posture test passed.
+- the doctor's LAN IPv4 question removed: `TestCheckTLSCertSANs_NoLANIPv4AdvertisedWarns`,
+  `TestCheckTLSCertSANs_APublicBridgeIsNotAskedForALANIPv4` (its loopback
+  control) and the posture test's loopback half; the other six
+  `tls-cert-sans` tests and the serve test passed.
+- serve's `WithCertifiedAddrs` call removed: the serve test; the posture
+  test passed.
+- `PublicMode` left out of `buildDoctorDepsFor`, then out of
+  `withExistingInstallDeps`: the posture test's public half, each time.
+
+### Review round 1: an address a custom entry declares is not held back
+
+CodeRabbit on #1280: `CertGatedIPs` left out an IPv6 address a
+`customEndpoints` entry names, since a declared address is published as
+written, but `Endpoints` still held back the walk's copy of it. Serve then
+logged "address not advertised" for an address `/v1/health` published
+through the custom entry, while the doctor called the certificate stale
+for it: two answers about one address, where the rule says the two
+callers share one. `declaredIPs` builds the set once from the entries,
+and `certGated` reads it for both callers, so the walk publishes its copy
+(the URL dedupe keeps that one, the first) and, where the certificate
+does not name the address, both surfaces call it stale. The defect was
+option A's too. Red first on 3d65e448 (go1.27.2):
+
+    reach_test.go:355: HeldBack saw fd00:db8:1::2, which a customEndpoints entry declares; HeldBack saw [fd00:db8:1::2 2001:db8::2]
+
+It passes on the fix, the commit after it. Negative control there: `Endpoints` handed an
+empty declared set failed exactly that assertion, while the test's
+`CertGatedIPs` half and the IPv4 walk test passed.
+
+Its other note, to record these rules in CLAUDE.md, was not taken: since
+2026-10-18 a rule about particular code lives in the rules file that
+loads with that code, `.claude/rules/wire.md` and `auth-tls.md` here.

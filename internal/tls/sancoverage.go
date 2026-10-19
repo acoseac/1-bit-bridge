@@ -21,7 +21,9 @@
 package tls
 
 import (
+	cryptotls "crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -101,15 +103,23 @@ const NotYetValidRemediation = "clients reject a certificate before its NotBefor
 // its signature. That is how GenerateWithOptions signs (the parent and
 // the leaf are the same template). A CA leaf is false, and neither
 // surface advises rotation for it.
+//
+// HeldBackIPs are the wanted addresses a certificate this bridge minted
+// lacks that the bridge does not publish because of it
+// (GenerateOptions.CertGatedIPs, backlog B457). They are not in
+// MissingIPs: no client is sent to them, so the certificate is not stale
+// for them, and a rotation would only add them.
 type SANCoverage struct {
 	WantDNS        []string
 	WantIPs        []net.IP
 	MissingDNS     []string
 	MissingIPs     []net.IP
+	HeldBackIPs    []net.IP
 	MintedByBridge bool
 }
 
-// Covered reports whether the cert carries every wanted SAN.
+// Covered reports whether the cert carries every wanted SAN of an
+// endpoint the bridge publishes. HeldBackIPs do not count.
 func (c SANCoverage) Covered() bool {
 	return len(c.MissingDNS) == 0 && len(c.MissingIPs) == 0
 }
@@ -117,6 +127,33 @@ func (c SANCoverage) Covered() bool {
 // MissingIPStrings renders MissingIPs for a log attribute or an
 // operator-facing hint.
 func (c SANCoverage) MissingIPStrings() []string { return ipsToStrings(c.MissingIPs) }
+
+// HeldBackIPStrings renders HeldBackIPs the same way.
+func (c SANCoverage) HeldBackIPStrings() []string { return ipsToStrings(c.HeldBackIPs) }
+
+// NamedIPs returns the IP addresses the certificate cert names, and
+// whether this bridge minted it (the test MintedByBridge reads). Serve
+// hands the addresses to the API, which publishes an IPv6 address of the
+// interface walk only while the certificate it serves names it (backlog
+// B457), and only for a certificate the bridge minted: a rotation is what
+// brings an address back, and rotation is not advised for any other.
+func NamedIPs(cert *cryptotls.Certificate) ([]net.IP, bool, error) {
+	if cert == nil {
+		return nil, false, errors.New("no certificate")
+	}
+	leaf := cert.Leaf
+	if leaf == nil {
+		if len(cert.Certificate) == 0 {
+			return nil, false, errors.New("no certificate in the chain")
+		}
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("parse: %w", err)
+		}
+		leaf = parsed
+	}
+	return leaf.IPAddresses, signedByOwnKey(leaf), nil
+}
 
 // InspectSANCoverage parses the PEM cert at certPath and reports which
 // of the SANs `opts` would mint are absent from it.
@@ -150,7 +187,32 @@ func InspectSANCoverage(certPath string, opts GenerateOptions) (SANCoverage, err
 	}
 	cov.MissingDNS = stringDiff(cov.WantDNS, parsed.DNSNames)
 	cov.MissingIPs = ipDiff(cov.WantIPs, parsed.IPAddresses)
+	if cov.MintedByBridge {
+		// The serve path holds these back only for a certificate it
+		// minted (NamedIPs); for any other the walk is published whole,
+		// so every missing address stays missing.
+		cov.MissingIPs, cov.HeldBackIPs = splitIPs(cov.MissingIPs, opts.CertGatedIPs)
+	}
 	return cov, nil
+}
+
+// splitIPs splits ips into those not in gated and those in it, each in
+// ips order.
+func splitIPs(ips, gated []net.IP) (rest, in []net.IP) {
+	g := make(map[string]bool, len(gated))
+	for _, ip := range gated {
+		if b := ip.To16(); b != nil {
+			g[string(b)] = true
+		}
+	}
+	for _, ip := range ips {
+		if g[string(ip.To16())] {
+			in = append(in, ip)
+		} else {
+			rest = append(rest, ip)
+		}
+	}
+	return rest, in
 }
 
 // signedByOwnKey reports whether cert's public key verifies its

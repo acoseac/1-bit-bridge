@@ -95,6 +95,43 @@ func SetHostProbeForTest(host func() (string, error), docker func() bool) func()
 	}
 }
 
+// InterfaceForTest is one interface SetInterfacesForTest hands the walk: its
+// name, its flags and its addresses, written as IP literals.
+type InterfaceForTest struct {
+	Name  string
+	Flags net.Flags
+	Addrs []string
+}
+
+// SetInterfacesForTest makes the interface walk (Endpoints,
+// GatherCertSANIPs, CertGatedIPs) see exactly ifaces, each address a host
+// route, for the rest of this process until the returned function runs. A
+// string that is not an IP literal is left out. A test that boots serve
+// registers the restore BEFORE the boot: cleanups run last-registered-first,
+// so the one that stops serve runs first and nothing reads the walk after
+// the restore.
+func SetInterfacesForTest(ifaces []InterfaceForTest) func() {
+	list := make([]ifaceAddr, 0, len(ifaces))
+	for _, ti := range ifaces {
+		ia := ifaceAddr{iface: net.Interface{Name: ti.Name, Flags: ti.Flags}}
+		for _, s := range ti.Addrs {
+			ip := net.ParseIP(s)
+			if ip == nil {
+				continue
+			}
+			bits := 8 * net.IPv6len
+			if ip.To4() != nil {
+				bits = 8 * net.IPv4len
+			}
+			ia.addrs = append(ia.addrs, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		}
+		list = append(list, ia)
+	}
+	prev := enumerateIfaces
+	enumerateIfaces = func() ([]ifaceAddr, error) { return list, nil }
+	return func() { enumerateIfaces = prev }
+}
+
 // OmitContainerHostname reports whether host is Docker's generated
 // container id while the process is inside a container. The short
 // label, cut at the first dot, must be exactly 12 lowercase hex digits,

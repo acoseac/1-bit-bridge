@@ -186,10 +186,11 @@ func assertCertPathsCallCertSANOptions(t *testing.T) {
 		if file == "cert.go" {
 			continue
 		}
-		for _, direct := range []string{"GatherCertSANDNS", "GatherCertSANIPs"} {
+		// CertGatedIPs by its call: the GenerateOptions field shares the name.
+		for _, direct := range []string{"GatherCertSANDNS", "GatherCertSANIPs", "CertGatedIPs("} {
 			if strings.Contains(src, direct) {
 				t.Errorf("%s calls advertise.%s directly — put it behind certSANOptions "+
-					"so the doctor grades the set a rotation would mint", file, direct)
+					"so the doctor grades the set a rotation would mint", file, strings.TrimSuffix(direct, "("))
 			}
 		}
 	}
