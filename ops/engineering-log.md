@@ -47721,3 +47721,12 @@ The path-rule sentence described only the multi-root stored form,
 to the root with no basename prefix (`relPath` in the scanner),
 `proveRoot` leaves `StripBridgePrefix` empty, and `pathRules` includes
 every indexed track. The rule and `PROTOCOL.md` now say both.
+
+## 2026-10-19 — a probe caches the configuration it read (B473 step 2b)
+
+`probe` computed its cache key from one read of the output configuration
+and built `mpd.Options` from a second. A reload between the two stored
+the new result under the old key and handed it to waiters of that key.
+The key and the options now come from one snapshot.
+`TestProbeCachesTheConfigurationItProbed` failed first with
+`inspects 2 opt "127.0.0.1:6601", cached under a key other than "127.0.0.1:6601"`.

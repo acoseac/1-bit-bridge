@@ -287,7 +287,11 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
-	key := o.probeKey()
+	cfg := config.OutputConfig{}
+	if o.output != nil {
+		cfg = o.output()
+	}
+	key := probeKey(cfg)
 	o.mu.Lock()
 	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
 		p := o.probed
@@ -313,10 +317,6 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	o.probeFlights[key] = f
 	o.mu.Unlock()
 
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
 	opt, refuse := mpd.OptionsForHost(o.goos, "", cfg.Conf, cfg.Endpoint, cfg.Password, o.getenv)
 	var rep mpd.Report
 	found := false
@@ -345,11 +345,7 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	return found, rep, opt
 }
 
-func (o *localOutputs) probeKey() string {
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
+func probeKey(cfg config.OutputConfig) string {
 	return strings.Join([]string{cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password}, "\n")
 }
 

@@ -650,6 +650,34 @@ func TestBuildDeadlineIsNotCached(t *testing.T) {
 	}
 }
 
+func TestProbeCachesTheConfigurationItProbed(t *testing.T) {
+	var reads atomic.Int32
+	var probed string
+	cfg := quietOutputs("linux", "auto")
+	cfg.Output = func() config.OutputConfig {
+		if reads.Add(1) == 1 {
+			return config.OutputConfig{MPD: "auto", Endpoint: "127.0.0.1:6600"}
+		}
+		if probed != "" {
+			return config.OutputConfig{MPD: "auto", Endpoint: probed}
+		}
+		return config.OutputConfig{MPD: "auto", Endpoint: "127.0.0.1:6601"}
+	}
+	var inspects atomic.Int32
+	cfg.Inspect = func(_ context.Context, opt mpd.Options) mpd.Report {
+		inspects.Add(1)
+		probed = opt.Endpoint
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: opt.Endpoint}}
+	}
+	o := newLocalOutputs(cfg)
+	if _, _, opt := o.probe(context.Background()); opt.Endpoint != probed || inspects.Load() != 1 {
+		t.Fatalf("probed %q opt %q inspects %d", probed, opt.Endpoint, inspects.Load())
+	}
+	if _, _, opt := o.probe(context.Background()); inspects.Load() != 1 || opt.Endpoint != probed {
+		t.Fatalf("inspects %d opt %q, cached under a key other than %q", inspects.Load(), opt.Endpoint, probed)
+	}
+}
+
 func TestProbeCacheFollowsTheConfig(t *testing.T) {
 	endpoint := "127.0.0.1:6600"
 	var inspects atomic.Int32
