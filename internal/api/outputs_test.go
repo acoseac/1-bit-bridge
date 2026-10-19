@@ -464,6 +464,47 @@ func TestOutputsCacheAndIdle(t *testing.T) {
 	}
 }
 
+func TestIdleCloseSkipsABuildInFlight(t *testing.T) {
+	clock := &manualClock{}
+	hold := make(chan struct{})
+	started := make(chan struct{})
+	var closed atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{state: "stop", version: "0.24.0", block: hold, started: started, closed: &closed}, nil
+	}
+	store := outputsToken(t)
+	raw, _, err := store.Mint("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	srv := New(&config.Config{
+		ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789",
+		ScanIntervalSec: 3600, LibraryName: "T", LibraryRoots: []string{dir},
+	}, store, nil, "fp").WithLocalOutputs(cfg)
+	done := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/v1/outputs", nil)
+		req.Header.Set("Authorization", "Bearer "+raw)
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	<-started
+	clock.Advance(outputIdle)
+	if closed.Load() != 0 {
+		t.Fatalf("closed the session mid-build: %d", closed.Load())
+	}
+	close(hold)
+	<-done
+	clock.Advance(outputIdle)
+	if closed.Load() != 1 {
+		t.Fatalf("idle close after the build: closed %d", closed.Load())
+	}
+}
+
 func TestOutputsOneBuildInFlight(t *testing.T) {
 	hold := make(chan struct{})
 	started := make(chan struct{})

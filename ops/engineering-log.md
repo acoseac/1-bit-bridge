@@ -47462,3 +47462,11 @@ closed 0`. `TestSessionFollowsTheEndpoint` failed with
 `password change dialed [127.0.0.1:6600 ]` when the cache ignored the
 password. `TestDeadFindRedialsOnce` failed with
 `dials 1` and `State:mismatch`.
+
+## 2026-10-19 — idle close waits out a build (B473 step 2b)
+
+The idle timer is armed at the start of a call. A build that is still
+running when it fires was closed underneath itself. `idleClose` now
+returns while `flight` is set, and the build's end arms the timer
+again. `TestIdleCloseSkipsABuildInFlight` failed first with
+`closed the session mid-build: 1`.

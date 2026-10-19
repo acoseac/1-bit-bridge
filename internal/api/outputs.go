@@ -335,7 +335,7 @@ func (o *localOutputs) armIdle() {
 
 func (o *localOutputs) idleClose() {
 	o.mu.Lock()
-	if o.now().Sub(o.last) < outputIdle {
+	if o.flight != nil || o.now().Sub(o.last) < outputIdle {
 		o.mu.Unlock()
 		return
 	}
