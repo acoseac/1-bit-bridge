@@ -195,6 +195,55 @@ func TestProveRootsStates(t *testing.T) {
 	})
 }
 
+func TestProveRootsVolumioLayout(t *testing.T) {
+	base := t.TempDir()
+	music := filepath.Join(base, "var", "lib", "mpd", "music")
+	dataInternal := filepath.Join(base, "data", "INTERNAL")
+	mntInternal := filepath.Join(base, "mnt", "INTERNAL")
+	mntNAS := filepath.Join(base, "mnt", "NAS")
+	media := filepath.Join(base, "media")
+	nvme := filepath.Join(media, "NVME", "music")
+	nested := filepath.Join(music, "a", "b", "c")
+	for _, dir := range []string{music, dataInternal, mntNAS, nvme, nested, filepath.Dir(mntInternal)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(dataInternal, mntInternal); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ name, target string }{
+		{"INTERNAL", mntInternal},
+		{"NAS", mntNAS},
+		{"USB", media},
+	} {
+		if err := os.Symlink(link.target, filepath.Join(music, link.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asked []string
+	rules := ProveRoots(context.Background(), music, []LibraryRoot{
+		{ID: "INTERNAL", Path: dataInternal, Tracks: []string{"t.flac"}},
+		{ID: "music", Path: nvme, Tracks: []string{"t.flac"}},
+		{ID: "c", Path: nested, Tracks: []string{"t.flac"}},
+	}, func(_ context.Context, path string) (bool, error) {
+		asked = append(asked, path)
+		return true, nil
+	})
+	want := []string{"INTERNAL/", "USB/NVME/music/", "a/b/c/"}
+	if len(rules) != len(want) {
+		t.Fatalf("rules %#v", rules)
+	}
+	for i, prefix := range want {
+		if rules[i].State != PathProven || rules[i].PrependMpdPrefix != prefix {
+			t.Fatalf("root %s: %#v", rules[i].Root, rules[i])
+		}
+	}
+	if !reflect.DeepEqual(asked, []string{"INTERNAL/t.flac", "USB/NVME/music/t.flac", "a/b/c/t.flac"}) {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
 func TestProveRootsAmbiguousMatchIsUnproven(t *testing.T) {
 	music := t.TempDir()
 	link := filepath.Join(music, "AGAIN")

@@ -47502,3 +47502,13 @@ same deadline as the dial. `TestLANProbesRunTogetherAndSkipLinkLocal`
 failed first with `in flight map[192.168.1.42:6600:{}]`.
 `TestGreetDeadlineCoversDialAndRead` failed first with
 `read kept its own deadline: 302.609083ms`.
+
+## 2026-10-19 — a library root deeper than one level can be proved (B473 step 2b)
+
+`musicPrefix` compared only the entries directly inside
+`music_directory`. On Volumio that directory holds `USB -> /mnt/USB`
+(real path `/media`), and a bridge root at `/media/NVME/music` is
+`USB/NVME/music/`, so the rule stayed `unproven`. Each top-level entry
+is now resolved, and a root whose real path is that path or lies under
+it is proved only when `os.SameFile` agrees. `TestProveRootsVolumioLayout`
+failed first with `root music: ... State:"unproven"`.

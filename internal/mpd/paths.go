@@ -50,9 +50,9 @@ type PathRule struct {
 type PathLookup func(ctx context.Context, mpdPath string) (bool, error)
 
 // ProveRoots returns one rule per root, in order. musicDir is MPD's
-// music_directory. A root matches when it is that directory, or one
-// direct child of it (a mount or a link), and only when exactly one of
-// those is the same file. Deeper than one level stays unproven. find is
+// music_directory. A root matches when it is that directory, or when
+// exactly one top-level entry's real path is the root or contains it.
+// The prefix is that entry plus the relative path under it. find is
 // asked for at most 20 tracks, evenly from the sorted list, and only
 // after a match.
 func ProveRoots(ctx context.Context, musicDir string, roots []LibraryRoot, lookup PathLookup) []PathRule {
@@ -100,8 +100,10 @@ func proveRoot(ctx context.Context, musicDir string, root LibraryRoot, lookup Pa
 }
 
 // musicPrefix returns the MPD prefix of root inside musicDir. The
-// directory itself is an empty prefix. A direct child is its name plus
-// a slash. More than one SameFile match, or none, is not a match.
+// directory itself is an empty prefix. A top-level entry matches when
+// the root's real path is that entry's real path or lies under it, and
+// os.SameFile agrees on musicDir/entry plus that relative path. More
+// than one match, or none, is not a match.
 func musicPrefix(musicDir, root string) (string, bool) {
 	musicInfo, err := os.Stat(musicDir)
 	if err != nil || !musicInfo.IsDir() {
@@ -115,26 +117,60 @@ func musicPrefix(musicDir, root string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	if os.SameFile(musicInfo, rootInfo) {
+		for _, e := range entries {
+			info, err := os.Stat(filepath.Join(musicDir, e.Name()))
+			if err == nil && info.IsDir() && os.SameFile(info, rootInfo) {
+				return "", false
+			}
+		}
+		return "", true
+	}
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
 	matches := 0
 	prefix := ""
-	if os.SameFile(musicInfo, rootInfo) {
-		matches = 1
-	}
 	for _, e := range entries {
-		info, err := os.Stat(filepath.Join(musicDir, e.Name()))
-		if err != nil || !info.IsDir() {
+		entryPath := filepath.Join(musicDir, e.Name())
+		real, err := filepath.EvalSymlinks(entryPath)
+		if err != nil {
 			continue
 		}
-		if !os.SameFile(info, rootInfo) {
+		rel, ok := pathUnder(real, rootReal)
+		if !ok {
+			continue
+		}
+		proved := filepath.Join(entryPath, rel)
+		info, err := os.Stat(proved)
+		if err != nil || !info.IsDir() || !os.SameFile(info, rootInfo) {
 			continue
 		}
 		matches++
-		prefix = e.Name() + "/"
+		if rel == "." {
+			prefix = e.Name() + "/"
+		} else {
+			prefix = e.Name() + "/" + filepath.ToSlash(rel) + "/"
+		}
 	}
 	if matches != 1 {
 		return "", false
 	}
 	return prefix, true
+}
+
+// pathUnder reports whether target is base or a path beneath it, and
+// the relative path from base to target.
+func pathUnder(base, target string) (string, bool) {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return "", false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
 }
 
 // bridgePathToMPD applies the prefix swap. strip has to be a prefix of
