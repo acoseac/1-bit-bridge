@@ -47423,3 +47423,11 @@ run: `GET /v1/outputs` had no contract.
 
 `TestLocalOutputsGate/darwin_on` was run with the Linux check taken
 out of `Active`. The route answered `status 200, want 404`.
+
+## 2026-10-19 — the in-flight outputs test has to fail, not hang (B473 step 2b)
+
+`TestOutputsOneBuildInFlight` waited on the join signal the second
+caller sends when it finds a build already running. Skipping that
+branch let a second build start, and the test blocked on the signal
+until the process timeout. It now stops when a second `Status` begins,
+releases the first build, and the dial and status counts fail.

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -496,7 +497,21 @@ func TestOutputsOneBuildInFlight(t *testing.T) {
 	<-started
 	wg.Add(1)
 	go call(1)
-	<-joined
+	// joined fires when the second caller waits on the build in flight.
+	// A second build does not: it enters Status, and waiting here forever
+	// would hide that. Stop when that happens, then the counts below fail.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case <-joined:
+			deadline = time.Time{}
+		default:
+		}
+		if deadline.IsZero() || statuses.Load() >= 2 || time.Now().After(deadline) {
+			break
+		}
+		runtime.Gosched()
+	}
 	close(hold)
 	wg.Wait()
 	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
