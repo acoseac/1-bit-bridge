@@ -46540,3 +46540,30 @@ empty declared set failed exactly that assertion, while the test's
 Its other note, to record these rules in CLAUDE.md, was not taken: since
 2026-10-18 a rule about particular code lives in the rules file that
 loads with that code, `.claude/rules/wire.md` and `auth-tls.md` here.
+
+## 2026-10-19 — the runbook's journal counts read JSON lines too, and the two NUC deploys of 2026-10-18/19 are in the ledger (backlog B455)
+
+### What the 2026-10-18 deploy found
+
+The runbook counted a host's errors and warnings with `grep -c 'level=ERROR'`
+and `'level=WARN'`, slog's text form, which is what the demo writes (the
+2026-08-26 measurement in the same section: 1325 `level=WARN` lines in 24 h).
+The NUC's journal is JSON (`"level":"ERROR"`), so both counts were 0 on that
+host whatever it logged. Its real 24 h baseline on 2026-10-18 was 0 ERROR and
+184 WARN, every one a `GET /v1/artist-image` 404 access line. The ledger's
+earlier "0 WARN" figures for the NUC were probably measured that blind way.
+
+### The change
+
+- **Both forms:** each count matches both forms (`grep -E 'level=ERROR|"level":"ERROR"'`), and so does the http exclusion.
+- **A positive control:** the INFO count comes first, and a zero below it is a result only when that count is not zero.
+- **Per-host formats:** the demo logs text and the NUC logs JSON. home-pc's format is unmeasured: it has been offline since 2026-10-18.
+
+### The ledger
+
+Two rows:
+
+- **`v0.2.1-124-g27108208` (2026-10-18 13:21:29Z):** migrations v56–v58 and extractor 26.
+- **`v0.2.1-133-gf67d0dac` (2026-10-19 00:57:40Z):** Go 1.27.2, B457 checked on the host, no migration.
+
+Each row carries its sha256, its rollback binary, its snapshot and its checks. The 2026-10-16 row named the NUC's LAN and tailnet addresses; they are now the runbook's placeholders, as its coordinate rule asks. Git history keeps the old text; both are private-range addresses.
