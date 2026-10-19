@@ -2,7 +2,9 @@
 // reading of the player that daemon is part of.
 //
 // The client dials a TCP address or a unix socket, reads the greeting, and
-// sends only the commands in allowedCommands. There is no method that
+// sends only the commands in allowedCommands. find asks whether one path
+// is in the database, and commandLine builds the filter from that path;
+// a caller never supplies the filter text. There is no method that
 // starts, stops or seeks playback, and no method that edits the queue or
 // the database: exchange refuses a command that is not on that list before
 // anything is written. password is on the list only so a caller who already

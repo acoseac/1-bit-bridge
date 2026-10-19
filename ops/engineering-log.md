@@ -47222,3 +47222,49 @@ was put back out of the problem.
 `TestConfCandidateKeepsACloudPlaceholder` went red with
 `a Windows cloud placeholder (ModeIrregular) was refused`. The list
 of kinds was put back.
+
+## 2026-10-19 — `find` is a read, and the client builds both quoting levels (B473 step 2b)
+
+### The question
+
+`GET /v1/outputs` confirms a path rule by asking MPD whether a sampled
+track is in the database. That is `find`, one filter, and it has to be
+a read the client builds. A caller that passed protocol text could
+close the filter string and add another comparison.
+
+### What MPD 0.24.4 does
+
+`doc/protocol.rst` "Escaping String Values" quotes a string with `'` or
+`"` and escapes a special character with `\`. Its worked example is the
+artist `foo'bar"`, the filter `(Artist == "foo\'bar\"")`, and the wire
+`find "(Artist == \"foo\\'bar\\\"\")"`. Two levels: the value, then the
+whole expression as one protocol argument.
+
+`src/song/Filter.cxx` `ExpectQuoted` is the filter reader. It accepts
+either quote, a backslash copies the next byte, and the string ends at
+the matching unescaped quote. A `)` inside the quotes is a literal, so
+escaping `"` is what keeps `x") OR (file == "y` inside one comparison.
+`file ==` matches the song URI relative to `music_directory`.
+
+The protocol argument uses the same escapes the client already applies
+to a password: wrap in `"`, and escape `\` and `"`. A newline, a
+carriage return or a NUL is not an argument. The protocol is one line,
+and a NUL would end the C string MPD parses. Those paths are refused
+before a byte is written.
+
+### What was rejected
+
+A `find` whose argument was the filter text. The caller would be the
+one quoting, and a missed escape is an injection. The path is the
+argument; `commandLine` builds `(file == "...")` and then quotes that
+expression. `)` is not escaped inside the value, because `ExpectQuoted`
+does not treat it as special.
+
+### Red first
+
+`TestFindQuotingRoundTrips` and `TestFindRefusesALineBreakOrNUL` were
+run before `find` was on the allowlist. Both failed with
+`mpd: command refused`: the quoting case on `foo'bar"`, the refusal
+case on `a\nb` (the error was `mpd: command refused`, not
+`mpd: path refused`, because a line break was not yet a distinct
+refusal).
