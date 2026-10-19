@@ -1,0 +1,10 @@
+Name:	aplay
+Umask:	0022
+State:	S (sleeping)
+Tgid:	812
+Ngid:	0
+Pid:	812
+PPid:	790
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	29	29	29	29

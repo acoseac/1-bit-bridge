@@ -46650,3 +46650,157 @@ has an artist and no title, and `Song [E].aiff`, `Song [E].dff` and
 and DSF walks have no such branch. A fix changes what the extractor writes
 (an `ExtractorVersion` bump), so it was reported for the backlog rather
 than made here.
+
+## 2026-10-19 — `bridge output dac` reads the box's sound cards and what its DAC receives (the bridge as an output, step one)
+
+### The question
+
+The owner chose "the bridge drives the box's MPD" as the way a bridge
+becomes an output: on a Linux box with a DAC and MPD (Volumio, moOde,
+Raspberry Pi OS with mpd) the bridge reports the DAC and a live reading of
+what the DAC receives, so the app's Signal Path can prove it. Step one
+reads, and changes no wire format, route or config key: `internal/alsa`
+parses the kernel's own account of the hardware, and `bridge output dac`
+prints it. The rules are in `.claude/rules/output.md`.
+
+### What the box said
+
+Captured on 2026-10-19 from a Raspberry Pi 5 running Volumio 4.119 and MPD
+0.24.0, with an iFi GO bar (USB id `20b1:3009`) as ALSA card 5 (id
+`Audio`), stopped and playing five formats. The files are the fixtures in
+`internal/alsa/testdata`, byte for byte:
+
+| MPD played | hw_params | running altset | momentary freq | packet size |
+|---|---|---|---|---|
+| nothing | `closed` | (stream0 says `Stop`) | | |
+| DSD256, native | `DSD_U32_BE`, 2 ch, 352800 | 4 | 355053 Hz (0x2c.61b2) | 400 |
+| 44.1 kHz / 16 | `S16_LE`, 44100 | 3 | 44101 Hz (0x5.833b) | 36 |
+| 96 kHz / 24 | `S24_3LE`, 96000 | 2 | 96010 Hz (0xc.0051) | 108 |
+| 192 kHz / 24 | `S24_3LE`, 192000 | 2 | 192030 Hz (0x18.00f5) | 216 |
+| 384 kHz / 24 | `S24_3LE`, 384000 | 2 | 384000 Hz (0x30.0000) | 300 |
+
+- **The altset list is the same in all six**: `S32_LE` (32 bit),
+  `S24_3LE` (24), `S16_LE` (16) and `SPECIAL DSD_U32_BE` (32, `DSD raw:
+  DOP=0, bitrev=0`), each at the eight rates 44100 to 384000. The
+  DSD altset's Format line names two formats, `SPECIAL` and `DSD_U32_BE`,
+  so a parser that kept one token per line would keep `SPECIAL` and lose
+  the format the DAC is fed.
+- **DSD256 reaches the DAC natively**: `DSD_U32_BE` at 352800 frames/s is
+  11.2896 MHz of one-bit audio per channel, and `DOP=0` says it is not
+  packed into DoP frames. MPD's own status said `audio: dsd256:2`.
+- **The momentary frequency is not the nominal rate**: 355053 for 352800
+  (+0.64%), 44101, 96010 and 192030, and exactly 384000 at 384 kHz. It is
+  the asynchronous endpoint's rate at the moment of the read, which the
+  device's feedback steers, so a reading reports it beside the nominal
+  rate and never in its place.
+- **`owner_pid` was 6584 in all five**, and on the box `/proc/6584/comm`
+  read `output:alsa`: the thread MPD opens the device from, not MPD's main
+  thread. The kernel stamps the substream with the opening task's pid
+  (`substream->pid`, `task_pid(current)`), which is a thread id.
+- 44.1 kHz and DSD were opened `RW_INTERLEAVED`, 96 kHz and up
+  `MMAP_INTERLEAVED`.
+
+### Decisions
+
+- **The process is the thread's Tgid.** `/proc/<tid>/status` names it on
+  its `Tgid:` line, and `/proc/<tgid>/comm` names the process (`mpd`).
+  Reading `/proc/<owner_pid>/comm` as the process would print
+  `output:alsa`; walking `/proc/*/task/` for the thread would read every
+  process to learn what one line says. The capture has the thread's comm
+  but not its process's id, so the fixtures' 6551 is made up and the
+  README says so. A `bridge output dac --raw` capture records the real
+  entries now.
+- **An owner that cannot be named is unknown, never an error**: a missing
+  or unreadable entry (hidepid, a thread that has exited) or an
+  `owner_pid` of 0 (the owner is outside the reader's pid namespace, which
+  `pid_vnr` reports as 0) leaves the name null and the reading whole.
+- **No build tag on the reader.** It reads files under roots it is given,
+  so the captured trees test it on macOS and Windows CI as well as Linux.
+  Rejected: a `//go:build linux` reader with a stub elsewhere, which would
+  have run those tests on one of the three OSes. The CLI refuses the
+  host's own tree off Linux and reads `--proc-root` anywhere.
+- **One CLI root, `--proc-root`, with ALSA under its `asound/`.** The
+  reader keeps both roots configurable; the command takes one, because an
+  ALSA tree captured elsewhere read beside this host's live `/proc` would
+  name whatever thread holds the captured id here.
+- **Lenient on keys, strict on values.** An unknown key is ignored, since
+  kernels add lines; a known key
+  whose value does not parse, a key printed twice and a block missing a
+  line the kernel always prints are reported, and the value is null. A
+  strict parser would fail on the next kernel; a guessing one would hand
+  the app a reading nothing proved.
+- **`--watch` ignores what moves on every read while audio plays**: the
+  buffer pointers, delay and avail, the timestamps, the momentary
+  frequency and the packet size (the captures' momentary frequencies show
+  why). Compared with them, it would print once a second.
+- **The `--json` shape is stable and diagnostic**: every key present, null
+  for a value not read, `[]` for an empty list, pinned per object kind by
+  `TestOutputDACJSONHasOneShapeInEveryState`. A later `/v1` route wraps a
+  reading in its own DTO under `internal/api`.
+- **`--raw` dumps what a reading reads**, plus each substream's `info` and
+  `sw_params`, under `==> path <==` headers in a `/proc` tree's layout, and
+  marks a file without a final newline, so a dump lays out as a tree that
+  reads back the same (`TestOutputDACRawDumpReadsBackAsTheSameReading`,
+  byte for byte).
+- **One fuzz target per parser**, though the #1033 entry (2026-09-26) gave
+  the doctor's netlink parser none, because kernel replies were not one of
+  the untrusted surfaces. These read text a tree copied off another box can
+  hold through `--proc-root`, and the step's brief asked for them.
+
+### The fuzz finding
+
+`FuzzParseStream` failed within ten seconds of its first run, on
+`Playback:\nStatus:Running\nStatus:`: a second Status line replaced the
+state and left the first one's Running block, so the section read status
+`""` with a running endpoint, against the property that a Running block
+exists exactly when the status is `Running`. The kernel prints one Status
+line per section; a second is now reported and the first stands, and an
+empty one is reported too. The input is kept under
+`internal/alsa/testdata/fuzz/FuzzParseStream/`, and a seed with a second
+non-empty state reaches the rule now that the empty case has a branch of
+its own (control C4 below).
+
+Then each target ran for sixty seconds on the parsers as committed, with
+`-fuzzminimizetime 1s` (go1.27.2, darwin/arm64): `FuzzParseCards` 15.4 M
+executions, `FuzzParseUSBID` 20.3 M, `FuzzParseStream` 13.1 M,
+`FuzzParseHWParams` 14.3 M and `FuzzParseStatus` 14.5 M, with no failure.
+Each holds its parser to the output being bounded by the input (at most
+64 bytes of JSON per input byte, at most `maxProblems` problems and a
+count, none over 1 KiB), to returning nothing the input does not hold
+(every string a one-line substring, every number from a digit string), to
+a one-line verdict (`closed`, `no setup`, `error N`) carrying no fields,
+and to two parses agreeing; the usbid target asks that an id reads back
+as itself.
+
+### Negative controls
+
+Thirteen, each one anchor of production code changed (count-asserted) on
+the committed change, run against the named tests, then restored from
+HEAD and checked clean; C4 was run again once the seed it names was
+added, and C13 came with the error text it guards. Each went red where
+predicted.
+
+| Mutation | Red |
+|---|---|
+| C1: the process named from owner_pid's own comm | `TestReaderResolvesTheOwnerThroughTheThreadsTgid`; `TestReaderOnEveryCapture`'s five playing cases; two cases of `TestReaderLeavesAnOwnerItCannotNameUnknown`; the CLI's DSD256 text and JSON |
+| C2: the DSD raw line ignored | `TestParseStreamOnEveryCapture` (all six), `TestParseStreamReportsTheGarbledFixture`, every CLI test that compares a printed DSD raw line (both captured outputs, the synthetic trees, the off-Linux test's idle read), the JSON shape's DSD256 case |
+| C3: the cut-short check skips Bits | `TestParseStreamReportsTheGarbledFixture`, `TestReaderReportsAGarbledStreamAndKeepsTheRest`, the CLI's synthetic-tree test |
+| C4: a second Status line read as the first | `TestParseStreamShapes`, `FuzzParseStream`'s new seed (first written as `case false:`, which did not build; rewritten to `case sawStatus && false:`) |
+| C5: the card id keeps its padding | `TestParseCardsOnEveryCapture` (six), four `TestParseCardsShapes` cases, both captured CLI outputs |
+| C6: a three-digit USB product accepted | `TestParseUSBIDShapes` |
+| C7: hw_params' `closed` not recognised | `TestParseHWParamsOnEveryCapture`'s idle case and `TestParseHWParamsShapes`, the reader's idle and HDMI readings, the CLI's idle text (twice) and watch JSON |
+| C8: status' `owner_pid` never read | `TestParseStatusOnEveryCapture`'s five playing cases, every owner test in the reader, the CLI's text and JSON |
+| C9: `--watch` compares the momentary frequency | `TestOutputDACWatchPrintsOnlyOnAChange` (text and JSON), `TestSteadyViewLeavesTheReadingItCopies` |
+| C10: the host's tree read off Linux | `TestOutputDACRefusesTheHostsTreeOffLinux` |
+| C11: `--raw` drops the no-newline marker, keeps the newline | `TestOutputDACRawDumpReadsBackAsTheSameReading`'s garbled case, by the byte comparison added for it (the parsed readings agree) |
+| C12: an owner whose thread has no readable comm dropped | `TestReaderLeavesAnOwnerItCannotNameUnknown`'s two cases, `TestReaderReportsAGarbledStreamAndKeepsTheRest`, the CLI's synthetic-tree test |
+| C13: the cards error keeps the `*fs.PathError`, naming its path twice | `TestOutputDACRefusesTheHostsTreeOffLinux` |
+
+### Not in this change
+
+- The capture side (`pcmNc`) is not read: an output plays.
+- The two HDMI cards' directories were not captured, so the captured
+  trees list them with no device; `i2s-and-hdmi` stands in for a non-USB
+  card's files.
+- `mpd_status` is kept beside each playing capture for the step that
+  reads MPD; nothing reads it yet.

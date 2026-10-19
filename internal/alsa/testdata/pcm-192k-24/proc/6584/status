@@ -1,0 +1,10 @@
+Name:	output:alsa
+Umask:	0022
+State:	S (sleeping)
+Tgid:	6551
+Ngid:	0
+Pid:	6584
+PPid:	1
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000

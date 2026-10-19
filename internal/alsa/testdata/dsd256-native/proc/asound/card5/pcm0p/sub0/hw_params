@@ -1,0 +1,7 @@
+access: RW_INTERLEAVED
+format: DSD_U32_BE
+subformat: STD
+channels: 2
+rate: 352800 (352800/1)
+period_size: 44100
+buffer_size: 176400
