@@ -46573,14 +46573,14 @@ Each row carries its sha256, its rollback binary, its snapshot and its checks. T
 ### The question
 
 A 2.1 user tags with Mp3tag, which writes a WAV's tag as ID3v2.3 into the
-RIFF `id3 ` chunk, with the advisory as `TXXX:ITUNESADVISORY=1`. A read-only
+RIFF `"id3 "` chunk, with the advisory as `TXXX:ITUNESADVISORY=1`. A read-only
 check on 2026-10-18 traced the read and found no test of it: the WAV walk
-hands an `id3 ` or `ID3 ` chunk to `applyEmbeddedID3`,
+hands an `"id3 "` or `"ID3 "` chunk to `applyEmbeddedID3`,
 `populateFromTagMetadata` reads the TXXX by its description
 (`namedValueOf`), and `containerText.applyUnder` decides the flag again from
 the same TXXX when the LIST/INFO title answers because the ID3 tag has none.
 One shape was read already, by `TestExplicit_EmbeddedID3Chunks`: version
-2.4, UTF-8, `id3 `, the value 1, extracted from an empty Track.
+2.4, UTF-8, `"id3 "`, the value 1, extracted from an empty Track.
 
 ### The pin
 
@@ -46591,7 +46591,7 @@ body, the one `/v1/manifest` serves:
 
 - **Explicit:** the advisory 1 in ID3v2.3 (ISO-8859-1; UTF-16 behind a byte
   order mark, the value unterminated and terminated) and ID3v2.4 (UTF-8,
-  UTF-16) in `id3 `; versions 2.3 and 2.4 in `ID3 `; beside a LIST/INFO
+  UTF-16) in `"id3 "`; versions 2.3 and 2.4 in `"ID3 "`; beside a LIST/INFO
   title, where the ID3 title outranks it; and under a LIST/INFO title that
   answers because the tag has none, either chunk first.
 - **Not explicit:** the values 0 and 2; an INFO title that answers beside
@@ -46601,8 +46601,8 @@ body, the one `/v1/manifest` serves:
 Each row's title is asserted too, so each case is known to have taken its
 branch, and every title differs, so the duplicate pass holds none back from
 the wire. Against `main`'s code (7a735b92) every case passed on go1.27.2.
-No read site missed, so nothing was fixed: `ExtractorVersion` stays 26, `ProtocolVersion`
-stays 1, and no rule changed.
+No read site missed, so nothing was fixed: `ExtractorVersion` stays 26,
+`ProtocolVersion` stays 1, and no rule changed.
 
 ### The bytes
 
@@ -46624,7 +46624,7 @@ subtests predicted for it:
 
 | Mutation | Red |
 |---|---|
-| C1: the WAV walk reads only `id3 ` | the two `ID3 ` cases |
+| C1: the WAV walk reads only `"id3 "` | the two `"ID3 "` cases |
 | C2: `populateFromTagMetadata` asks for a name no TXXX has | the eight explicit cases whose ID3 tag has a title |
 | C3: `applyUnder` asks for a name no TXXX has | the two explicit cases whose ID3 tag has no title |
 | C4: `applyUnder` does not set the flag | `Marked [E].wav` |
