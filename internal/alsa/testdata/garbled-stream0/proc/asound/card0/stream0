@@ -1,0 +1,26 @@
+Garbled DAC at usb-0000:01:00.0-1.2, high speed : USB Audio
+
+Playback:
+  Status: Running
+    Interface = 1
+    Altset = two
+    Packet Size = 400
+    Momentary freq = fast Hz
+    Feedback Format = 16.16
+  Interface 1
+    Altset 1
+    Format: S32_LE
+    Channels: 2
+    Endpoint: 0x01 (1 OUT) (ASYNC)
+    Rates: 44100, 48000, x96000
+    Data packet interval: 125 us
+    Bits: 32
+    Channel map: FL FR
+@@@@ not a stream0 line @@@@
+  Interface 1
+    Altset 2
+    Format: SPECIAL DSD_U32_BE
+    Channels: 2
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
+    DSD raw: DOP=0, bitrev=
+    Bi

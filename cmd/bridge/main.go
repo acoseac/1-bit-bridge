@@ -2454,6 +2454,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return adminCmd(args[1:], os.Stdin, stdout, stderr)
 	case "manifest":
 		return manifestCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "output":
+		return outputCmd(ctx, args[1:], stdout, stderr)
 	case "tsnet":
 		return tsnetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "start":
@@ -2529,6 +2531,10 @@ Subcommands:
            evidence (different-format / same-format / inconclusive, plus self-nested
            upload accidents). Read-only: deletes and moves are structurally absent.
   doctor   Preflight: check ports, directories, service manager before init.
+  output   This box as an audio output: bridge output dac lists its ALSA sound cards,
+           each one's USB id and stream formats, and what an open playback
+           substream receives (format, rate, altset, the thread holding it).
+           Linux only; reads /proc and writes nothing.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.

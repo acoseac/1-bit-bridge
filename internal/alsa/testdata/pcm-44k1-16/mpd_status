@@ -1,0 +1,17 @@
+repeat: 0
+random: 0
+single: 0
+consume: 0
+partition: default
+playlist: 26
+playlistlength: 1
+mixrampdb: 0
+state: play
+lastloadedplaylist: 
+song: 0
+songid: 13
+time: 5:182
+elapsed: 4.722
+bitrate: 672
+duration: 181.546
+audio: 44100:16:2

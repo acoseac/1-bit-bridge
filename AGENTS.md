@@ -132,6 +132,7 @@ automation is unaffected.
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/packaging` | launchd plist / systemd unit rendering + install/uninstall, used by `bridge init` |
 | `internal/doctor` | Environment preflight checks for `bridge doctor` / `bridge init` |
+| `internal/alsa` | The box's ALSA state read from a `/proc` tree (cards, USB ids, stream altsets, what an open substream receives and the thread and process holding it), for `bridge output dac` |
 | `internal/supervision` | Answers "if this process exits, will something relaunch us?" |
 | `internal/pairing` | In-memory state machine for the admin-approval pairing flow |
 | `internal/analyze` | Offline audio analysis: sox(1) PCM decode → peak waveform sidecars; worker pool (opt-in via `analysis.enabled`) |

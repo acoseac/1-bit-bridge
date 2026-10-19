@@ -11,8 +11,8 @@
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **44** targets across **ten** packages —
-  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **50** targets across **twelve** packages —
+  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest,handshakelog,alsa}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
@@ -22,15 +22,21 @@
   `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`; 40 until
   2026-09-29, when it gained `FuzzExtractOGG`, 41 until later that day,
   when it gained `FuzzID3v2WalkAgreesWithDhowden`, 42 until later still, when
-  it gained `FuzzOggFLACReadsBackTheMetadataItCarries`, and 43 until backlog B117 added
-  `FuzzDhowdenReadBufferReadsAsItsStreamDoes`.) They cover
+  it gained `FuzzOggFLACReadsBackTheMetadataItCarries`, 43 until backlog B117 added
+  `FuzzDhowdenReadBufferReadsAsItsStreamDoes`, and 44 across ten until 2026-10-19, when
+  `internal/alsa` gained its five parser targets; by then the tree held 45 across eleven,
+  since backlog B246 had added `FuzzPeerAddressSpansMatchThePattern` in
+  `internal/handshakelog` and nobody counted it.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
-  release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 44 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 43, because
+  release matcher (`internal/atlasharvest`); beside them, the peer redaction of a log
+  line (`internal/handshakelog`) and, since 2026-10-19, the `/proc/asound` parsers
+  (`internal/alsa`), whose input is kernel text and, through `bridge output dac
+  --proc-root`, a tree copied off another box.
+  **Count them by file:name pair** to get 50 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 49, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -40,7 +46,7 @@
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twenty-five carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Thirty-one carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -66,13 +72,19 @@
   `FuzzID3v2WalkAgreesWithDhowden` (wherever dhowden reads an ID3v2 tag, the ID3v2 guard's
   walk counts what dhowden stores, per frame id; the rule is under **Scanner** too),
   `FuzzOggFLACReadsBackTheMetadataItCarries` (a FLAC stream's metadata laid out as Ogg FLAC
-  pages of any size reads back byte for byte as a .flac file's; also under **Scanner**) and
+  pages of any size reads back byte for byte as a .flac file's; also under **Scanner**),
   `FuzzDhowdenReadBufferReadsAsItsStreamDoes` (the page buffer dhowden reads through holds
   the bytes its stream holds, where it holds them, over any tape of reads and seeks; under
-  **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
+  **Scanner**), `FuzzPeerAddressSpansMatchThePattern` (the hand-written walk finds exactly
+  the spans of the regular expression it replaced, so no peer address stays in a log line)
+  and the five `/proc/asound` parser targets (`FuzzParse{Cards,USBID,Stream,HWParams,Status}`:
+  output bounded by the input, nothing returned that the input does not hold, a one-line
+  verdict such as `closed` with no fields beside it, and two parses that agree; under
+  `output.md`). This said "Four" until 2026-09-28, while eight more were added beside
   them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
-  2026-09-29, "Twenty-two" until later that day, "Twenty-three" until later still, and
-  "Twenty-four" until backlog B117: **count them
+  2026-09-29, "Twenty-two" until later that day, "Twenty-three" until later still,
+  "Twenty-four" until backlog B117, and "Twenty-five" until 2026-10-19, one short since
+  B246: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of

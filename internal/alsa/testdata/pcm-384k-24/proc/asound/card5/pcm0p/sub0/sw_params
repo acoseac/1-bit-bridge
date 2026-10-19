@@ -1,0 +1,8 @@
+tstamp_mode: NONE
+period_step: 1
+avail_min: 48000
+start_threshold: 144000
+stop_threshold: 192000
+silence_threshold: 0
+silence_size: 0
+boundary: 1572864000
