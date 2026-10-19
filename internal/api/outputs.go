@@ -410,7 +410,7 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 	var outputs []OutputInfo
 	if len(dacs) == 0 {
 		one := base
-		one.ID = outputID(o.identity, endpoint, "")
+		one.ID = outputID(o.identity, endpoint, "", "")
 		outputs = []OutputInfo{one}
 	} else {
 		outputs = make([]OutputInfo, len(dacs))
@@ -420,7 +420,7 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 			one.PathRules = copied
 			d := dac
 			one.DAC = &d
-			one.ID = outputID(o.identity, endpoint, strconv.Itoa(dac.Card))
+			one.ID = outputID(o.identity, endpoint, dac.ID, dac.USBID)
 			outputs[i] = one
 		}
 	}
@@ -697,8 +697,12 @@ func playerSoftware(name string) string {
 	}
 }
 
-func outputID(identity, endpoint, card string) string {
-	sum := sha256.Sum256([]byte(identity + "\n" + endpoint + "\n" + card))
+// outputID is what the app stores for an output. The card index is not
+// an input: it changes when a DAC is replugged or the box reboots.
+// alsaID is the id string from /proc/asound/cards, and usbID is
+// vendor:product. Both are empty when the element names no card.
+func outputID(identity, endpoint, alsaID, usbID string) string {
+	sum := sha256.Sum256([]byte(identity + "\n" + endpoint + "\n" + alsaID + "\n" + usbID))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -775,7 +775,7 @@ Without the flag the route answers `404` `local_outputs_not_supported`. With it,
 
 Every key is present. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge with the flag on and no card does not answer `outputs: []`.
 
-`id` is the hex SHA-256 of the bridge's TLS fingerprint, a newline, the MPD endpoint, a newline, and the card index when `dac` is present (an empty card key when `dac` is null). The same bridge, endpoint and card keep the same id across restarts. Two cards do not share an id.
+`id` is the hex SHA-256 of the bridge's TLS fingerprint, a newline, the MPD endpoint, a newline, the card's ALSA id (the id string in `/proc/asound/cards`, for example `A20`), a newline, and its USB id (`vendor:product`). The card index is not an input: it changes when a DAC is replugged or the box reboots, and the app remembers an output by this id. A null `dac` uses an empty ALSA id and an empty USB id. The same bridge, endpoint, ALSA id and USB id keep the same id across restarts. Two cards do not share an id.
 
 `player.software` is `volumio`, `moode`, `mpd`, or `""` when the box is none of those. `player.version` is that player's version.
 

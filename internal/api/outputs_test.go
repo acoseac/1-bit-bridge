@@ -576,6 +576,90 @@ func TestOutputsIDStableAcrossRestarts(t *testing.T) {
 	}
 }
 
+func TestOutputIDIgnoresTheCardIndex(t *testing.T) {
+	snap, err := (alsa.Reader{ProcRoot: filepath.Join("..", "alsa", "testdata", "dsd256-native", "proc")}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at5 := outputAt(t, snap, "hw:5,0")
+	moved := moveUSBCard(snap, 5, 6)
+	at6 := outputAt(t, moved, "hw:6,0")
+	if at5.ID == "" || at5.ID != at6.ID {
+		t.Fatalf("index changed the id: %q vs %q", at5.ID, at6.ID)
+	}
+	if at5.DAC == nil || at6.DAC == nil || at5.DAC.Card != 5 || at6.DAC.Card != 6 {
+		t.Fatalf("cards %+v %+v", at5.DAC, at6.DAC)
+	}
+	if at5.DAC.ID != at6.DAC.ID || at5.DAC.USBID != at6.DAC.USBID {
+		t.Fatalf("stable names differ: %+v %+v", at5.DAC, at6.DAC)
+	}
+	renamed := moveUSBCard(snap, 5, 5)
+	for i := range renamed.Cards {
+		if renamed.Cards[i].Index == 5 && renamed.Cards[i].USBID != nil {
+			renamed.Cards[i].ID = "Other"
+		}
+	}
+	if outputAt(t, renamed, "hw:5,0").ID == at5.ID {
+		t.Fatal("a different ALSA id kept the same output id")
+	}
+	rewired := moveUSBCard(snap, 5, 5)
+	for i := range rewired.Cards {
+		if rewired.Cards[i].USBID != nil && rewired.Cards[i].Index == 5 {
+			id := *rewired.Cards[i].USBID
+			id.Product++
+			rewired.Cards[i].USBID = &id
+		}
+	}
+	if outputAt(t, rewired, "hw:5,0").ID == at5.ID {
+		t.Fatal("a different USB id kept the same output id")
+	}
+}
+
+func outputAt(t *testing.T, snap alsa.Snapshot, device string) OutputInfo {
+	t.Helper()
+	cfg := LocalOutputsConfig{
+		GOOS:     "linux",
+		Identity: "same-fingerprint",
+		Output: func() config.OutputConfig {
+			return config.OutputConfig{MPD: "on"}
+		},
+		Inspect: func(context.Context, mpd.Options) mpd.Report {
+			return mpd.Report{
+				MPD:     mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"},
+				Outputs: []mpd.Output{{Type: "alsa", Device: device, Enabled: "yes"}},
+			}
+		},
+		Dial: func(context.Context, string, string) (outputSession, error) {
+			return &fakeOutputSession{version: "0.24.0", state: "stop"}, nil
+		},
+		Greet:      func(context.Context, string) bool { return false },
+		Advertised: func() []string { return nil },
+		Cards:      func() (alsa.Snapshot, error) { return snap, nil },
+	}
+	hs, token := newOutputsHTTP(t, cfg.Identity, cfg)
+	resp := outputsGet(t, hs, token, "/v1/outputs")
+	body, _ := decodeOutputs(t, resp)
+	if len(body.Outputs) != 1 {
+		t.Fatalf("outputs %+v", body.Outputs)
+	}
+	return body.Outputs[0]
+}
+
+func moveUSBCard(snap alsa.Snapshot, from, to int) alsa.Snapshot {
+	cards := append([]alsa.CardReading(nil), snap.Cards...)
+	for i := range cards {
+		if cards[i].USBID != nil {
+			id := *cards[i].USBID
+			cards[i].USBID = &id
+		}
+		if cards[i].Index == from && cards[i].USBID != nil {
+			cards[i].Index = to
+		}
+	}
+	snap.Cards = cards
+	return snap
+}
+
 func outputIDOf(t *testing.T, cfg LocalOutputsConfig) string {
 	t.Helper()
 	hs, token := newOutputsHTTP(t, cfg.Identity, cfg)

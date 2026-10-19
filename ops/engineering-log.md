@@ -47431,3 +47431,13 @@ caller sends when it finds a build already running. Skipping that
 branch let a second build start, and the test blocked on the signal
 until the process timeout. It now stops when a second `Status` begins,
 releases the first build, and the dial and status counts fail.
+
+## 2026-10-19 — the output id does not use the ALSA card index (B473 step 2b)
+
+The first derivation hashed the card index. That number changes when a
+DAC is replugged or the box reboots, and the app remembers an output by
+its id, so the same card would look new. The id is now the hex SHA-256
+of the TLS fingerprint, the MPD endpoint, the card's ALSA id string
+(`/proc/asound/cards`, for example `A20`) and its USB id. A null dac
+uses empty strings for both. `TestOutputIDIgnoresTheCardIndex` reads the
+iFi card at index 5 and at index 6.
