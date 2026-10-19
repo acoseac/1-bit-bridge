@@ -683,12 +683,12 @@ func (o *localOutputs) lanAddresses(ctx context.Context, port int) []string {
 	if port <= 0 || o.advertised == nil {
 		return []string{}
 	}
-	var out []string
+	var cands []string
 	seen := map[string]struct{}{}
 	for _, raw := range o.advertised() {
 		host := hostOf(raw)
 		ip := net.ParseIP(host)
-		if ip == nil || ip.IsLoopback() {
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			continue
 		}
 		s := ip.String()
@@ -696,11 +696,24 @@ func (o *localOutputs) lanAddresses(ctx context.Context, port int) []string {
 			continue
 		}
 		seen[s] = struct{}{}
-		addr := net.JoinHostPort(s, strconv.Itoa(port))
-		if o.greet(ctx, addr) {
-			out = append(out, s)
-		}
+		cands = append(cands, s)
 	}
+	var mu sync.Mutex
+	var out []string
+	var wg sync.WaitGroup
+	for _, s := range cands {
+		wg.Add(1)
+		go func(s string) {
+			defer wg.Done()
+			addr := net.JoinHostPort(s, strconv.Itoa(port))
+			if o.greet(ctx, addr) {
+				mu.Lock()
+				out = append(out, s)
+				mu.Unlock()
+			}
+		}(s)
+	}
+	wg.Wait()
 	sort.Strings(out)
 	if out == nil {
 		return []string{}
@@ -798,7 +811,9 @@ func greetMPD(ctx context.Context, addr string) bool {
 		return false
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(outputGreetLimit))
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		return false

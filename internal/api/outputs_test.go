@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -386,6 +387,7 @@ func TestOutputKindIsOpen(t *testing.T) {
 
 func TestOutputsLANAddresses(t *testing.T) {
 	var greeted []string
+	var greetMu sync.Mutex
 	cfg := LocalOutputsConfig{
 		GOOS: "linux",
 		Output: func() config.OutputConfig {
@@ -398,7 +400,9 @@ func TestOutputsLANAddresses(t *testing.T) {
 			return &fakeOutputSession{state: "stop", version: "0.24.0"}, nil
 		},
 		Greet: func(_ context.Context, addr string) bool {
+			greetMu.Lock()
 			greeted = append(greeted, addr)
+			greetMu.Unlock()
 			return addr == "192.168.1.42:6600"
 		},
 		Advertised: func() []string {
@@ -424,6 +428,88 @@ func TestOutputsLANAddresses(t *testing.T) {
 	}
 	if body.Outputs[0].MPD.Port != 6600 {
 		t.Fatalf("socket endpoint used port %d", body.Outputs[0].MPD.Port)
+	}
+}
+
+func TestLANProbesRunTogetherAndSkipLinkLocal(t *testing.T) {
+	entered := make(chan string, 8)
+	release := make(chan struct{})
+	cfg := quietOutputs("linux", "on")
+	cfg.Greet = func(ctx context.Context, addr string) bool {
+		entered <- addr
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return true
+	}
+	cfg.Advertised = func() []string {
+		return []string{
+			"https://192.168.1.42:7788",
+			"https://192.168.1.43:7788",
+			"https://[fe80::1]:7788",
+			"https://169.254.1.1:7788",
+		}
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	done := make(chan struct{})
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/outputs", nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := hs.Client().Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}
+		close(done)
+	}()
+	got := map[string]struct{}{}
+	deadline := time.After(300 * time.Millisecond)
+	for len(got) < 2 {
+		select {
+		case addr := <-entered:
+			got[addr] = struct{}{}
+		case <-deadline:
+			t.Fatalf("in flight %v", got)
+		}
+	}
+	select {
+	case addr := <-entered:
+		t.Fatalf("greeted an extra address %s", addr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	if _, ok := got["192.168.1.42:6600"]; !ok {
+		t.Fatalf("missing 192.168.1.42 in %v", got)
+	}
+	if _, ok := got["192.168.1.43:6600"]; !ok {
+		t.Fatalf("missing 192.168.1.43 in %v", got)
+	}
+}
+
+func TestGreetDeadlineCoversDialAndRead(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			time.Sleep(time.Second)
+			c.Close()
+		}
+	}()
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if greetMPD(ctx, ln.Addr().String()) {
+		t.Fatal("greeting succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > 280*time.Millisecond {
+		t.Fatalf("read kept its own deadline: %s", elapsed)
 	}
 }
 

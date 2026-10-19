@@ -47491,3 +47491,14 @@ is now `filepath.Base`, which is what the scanner stores in multi-root
 mode, and a track belongs to the root when that basename matches or
 folds to the same key. `TestPathRulesUseTheStoredRootPrefix` failed
 first with `filesystem root prefix ""`.
+
+## 2026-10-19 — LAN greets run together under one deadline (B473 step 2b)
+
+Each advertised address was greeted in turn, and a successful dial
+started a fresh read deadline, so two addresses cost two dials plus
+two reads. Link-local addresses were greeted too. The probes now run
+together, skip `fe80::/10` and `169.254/16`, and the read uses the
+same deadline as the dial. `TestLANProbesRunTogetherAndSkipLinkLocal`
+failed first with `in flight map[192.168.1.42:6600:{}]`.
+`TestGreetDeadlineCoversDialAndRead` failed first with
+`read kept its own deadline: 302.609083ms`.
