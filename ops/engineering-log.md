@@ -46898,3 +46898,103 @@ Negative control, on the Bits fix: `"Bits"` put back into the required
 set. `TestParseStreamShapes/a_pre-5.1_altset_has_no_Bits_line_and_is_not_cut_short`
 went red with the two "no Bits line (cut short?)" problems. The slice
 was restored to Format, Channels and Rates.
+
+## 2026-10-19 — `bridge output player` reads the box's MPD, and only reads it (B473 step 2a)
+
+### The question
+
+Step one reads the DAC. This step finds the player and reads how it is
+set, still with no wire change and no `bridge.yaml` key: a read-only MPD
+client, an `mpd.conf` reader, and `bridge output player`. The later
+verdict needs the settings (replay gain, volume, the mixer, DoP,
+resampling, filters). The rules are in `.claude/rules/output.md`.
+
+### What the box and MPD's source said
+
+Captured on 2026-10-19 from the same Raspberry Pi 5, Volumio 4.119, MPD
+0.24.0. The files are `internal/mpd/testdata`, byte for byte:
+`volumio-mpd.conf` (the box's `/etc/mpd.conf`), `volumio-mpd-replies.json`
+(the greeting `OK MPD 0.24.0` and the raw replies) and `volumio-os-release`.
+
+- The configuration binds `"any"`, leaves `port` commented, and sets
+  `music_directory` to `/var/lib/mpd/music`. Two outputs: `alsa` named
+  `alsa`, device `volumio`, `dop "no"`, `enabled` omitted; `fifo` named
+  `multiroom`, `enabled "no"`, path `/tmp/snapfifo`, format
+  `44100:16:2`. Resampler `soxr` at quality `high`.
+  `volume_normalization "no"`. The only password-like line is a
+  commented `proxy_password` inside `input {}`.
+- Over TCP, `config` is `ACK [4@0] {config} Command only permitted to
+  local clients`. `replay_gain_status` is `replay_gain_mode: off`. The
+  live `outputs` reply says the alsa output is enabled and the fifo is
+  not, with `attribute: dop=0` on the alsa output.
+- MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine` (the 0.24.0 tag
+  was not published as a source tarball that fetched; 0.24.4 has the
+  same function) does not search `/etc/mpd.conf` first. On the Linux
+  `USE_XDG` build, `GetUserConfigDir` is `$XDG_CONFIG_HOME` when that
+  variable is an absolute path of a directory that exists, otherwise
+  `$HOME/.config` when that directory exists. They are alternatives. If
+  the XDG directory exists and `mpd/mpd.conf` does not, `~/.config` is
+  not tried. Then `~/.mpdconf`, `~/.mpd/mpd.conf`, and
+  `SYSTEM_CONFIG_FILE_LOCATION`, which is `/etc/mpd.conf`. The Apple
+  build looks in `~/Library/Application Support` and is not what a
+  Volumio or moOde box runs. The default port is 6600
+  (`src/Listen.cxx` `DEFAULT_PORT`).
+- A value is a double-quoted string; a backslash escapes the next byte
+  only, so `\n` is the letter n. `{` opens a block and the rest of that
+  line must be empty or a comment. `include` is relative to the
+  including file. MPD expands include globs and, as of the open PR
+  that proposes `MAX_INCLUDE_DEPTH` 16, does not bound the recursion.
+- moOde installs `/usr/local/bin/moodeutl`. `moodeutl --mooderel` reads
+  `Release: ` in `/var/www/footer.min.php` (the unminified `footer.php`
+  is the same string). This reader parses that file and does not run
+  the binary. Volumio is the pair `/volumio` and `/data/configuration`;
+  the build ids are the `VOLUMIO_*` keys in `/etc/os-release`.
+
+### What was decided
+
+- A password that is the word `password` sits inside the JSON keys
+  `passwordSet` and `passwordCount`. The marshal backstop therefore
+  looks for the JSON string encoding of the value, and the printed copy
+  replaces the value wherever it occurs in a setting. `TestPasswordWordMarshals`
+  pins both.
+- The allowlist is checked inside `exchange`, the only place a command
+  is written: `status`, `stats`, `outputs`, `replay_gain_status`,
+  `currentsong`, `config`, `commands`, and `password` only as `Dial`'s
+  argument. A refusal is `mpd: command refused` and carries neither the
+  command nor the argument. The client keeps no password, and an ACK
+  that echoes one is rewritten to `[redacted]`.
+- The configuration parser ignores keys it does not extract, so a newer
+  file still yields the settings. MPD itself rejects an unknown key.
+  Includes are relative to the including file, confined to the root,
+  bounded at depth 16 and 32 files, and refused on a cycle. Globs are
+  not expanded. A password inside an `audio_output` block is that
+  output's, not the client's.
+- The dial is the first `bind_to_address` that is a socket (`/`, `~`,
+  `@` or `$`), else `127.0.0.1` and the port setting or 6600. A TCP
+  bind that embeds a port is not what this dials. `$XDG_RUNTIME_DIR` is
+  expanded at dial time when the variable is set.
+- `music_directory` over TCP comes from the file, because `config` is
+  local-socket only. An omitted `enabled` is MPD's yes, and the live
+  `outputenabled` replaces it. A `dop` the file set is kept.
+- `bridge output player` takes `--json`, `--conf`, `--mpd` and `--root`.
+  `--root` is the flag the tests need: off Linux the command reads only
+  what a flag names, and a `--root` search does not use the process's
+  home. There is no password flag. The value never enters the command;
+  the report says whether one is set.
+- The JSON shape has every key, lists are `[]`, and `configPermitted`
+  is null when `config` was not attempted. It is a diagnostic shape,
+  not a wire type.
+
+### Negative controls
+
+`play` added to the allowlist and `Status` pointed at it.
+`TestEveryExportedMethodSendsAnAllowlistedCommand` went red with
+`Status sent [play], want [status]`. `TestAllowlistIsExactlyTheReadCommands`
+went red with `allowlist has 9 commands, want 8`.
+`TestExchangeRefusesMutatingCommands` went red because `play` was
+written and the server answered `ACK [5@0]`. The allowlist and `Status`
+were restored.
+
+`File.String` made to append the password values.
+`TestPasswordIsRedacted` went red at `conf_test.go:174`: the secret
+appeared in the summary. The line was removed.

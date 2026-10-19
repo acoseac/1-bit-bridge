@@ -2534,7 +2534,8 @@ Subcommands:
   output   This box as an audio output: bridge output dac lists its ALSA sound cards,
            each one's USB id and stream formats, and what an open playback
            substream receives (format, rate, altset, the thread holding it).
-           Linux only; reads /proc and writes nothing.
+           bridge output player reports the box's MPD and how it is set.
+           Linux only; both read and write nothing.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.

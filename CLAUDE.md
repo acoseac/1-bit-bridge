@@ -22,7 +22,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
-| The box as an audio output: the ALSA reader (`internal/alsa`) and `bridge output` | `output.md` |
+| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`) and `bridge output` | `output.md` |
 | Auth, pairing, sessions and login tickets, TLS and the pin, what logs and error bodies may say | `auth-tls.md` |
 | The admin console, the web player, uploads and the trash | `admin-console.md` |
 | Test discipline, CI, SonarCloud and Docker (loads with every test file) | `build-ci-tests.md` |
@@ -55,6 +55,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/admin` | Local web console on 127.0.0.1:7789 — library/devices/stats/settings pages + JSON API + bridge:// QR pair URL. Loopback-only, no auth. |
 | `internal/packaging` | launchd plist + systemd unit templates + install/uninstall helpers, used by `bridge init` |
 | `internal/alsa` | Reads the box's ALSA state from a `/proc` tree: the cards, a USB card's id and stream altsets, what an open playback substream was opened with, and the thread and process holding it (`bridge output dac`) |
+| `internal/mpd` | Read-only MPD client and `mpd.conf` reader: the box's player (Volumio, moOde or MPD) and how MPD is set (`bridge output player`). Sends only an allowlist; a password is never printed |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/version` | `ServerVersion` + `ProtocolVersion` constants (source of truth for `PROTOCOL.md`) |
 

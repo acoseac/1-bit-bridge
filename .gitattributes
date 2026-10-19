@@ -4,3 +4,4 @@ internal/manifest/testdata/playlist-parse-cases.tsv text eol=lf
 # The ALSA fixtures are /proc files as a box wrote them, kept LF on every
 # checkout so a raw dump of one is the capture's bytes.
 internal/alsa/testdata/** text eol=lf
+internal/mpd/testdata/** text eol=lf
