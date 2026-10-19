@@ -157,11 +157,15 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	probeFlights map[string]*probeFlight
 	paths        outputPathCache
 	// joined, when set, runs after a caller has found a build in flight
 	// and before it waits. Production leaves it nil. Tests use it to
 	// release that build only once the second caller is waiting on it.
 	joined func()
+	// probeWait, when set, runs after a caller has found a probe in
+	// flight and before it waits. Production leaves it nil.
+	probeWait func()
 }
 
 type outputFlight struct {
@@ -187,6 +191,15 @@ type outputProbe struct {
 	at    time.Time
 	until time.Time
 	key   string
+	found bool
+	rep   mpd.Report
+	opt   mpd.Options
+}
+
+// probeFlight is one inspection shared by every caller that asks for
+// the same configuration while it is running.
+type probeFlight struct {
+	done  chan struct{}
 	found bool
 	rep   mpd.Report
 	opt   mpd.Options
@@ -281,7 +294,25 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 		o.mu.Unlock()
 		return p.found, p.rep, p.opt
 	}
+	if f := o.probeFlights[key]; f != nil {
+		o.mu.Unlock()
+		if o.probeWait != nil {
+			o.probeWait()
+		}
+		select {
+		case <-f.done:
+			return f.found, f.rep, f.opt
+		case <-ctx.Done():
+			return false, mpd.Report{}, mpd.Options{}
+		}
+	}
+	f := &probeFlight{done: make(chan struct{})}
+	if o.probeFlights == nil {
+		o.probeFlights = map[string]*probeFlight{}
+	}
+	o.probeFlights[key] = f
 	o.mu.Unlock()
+
 	cfg := config.OutputConfig{}
 	if o.output != nil {
 		cfg = o.output()
@@ -289,24 +320,27 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	opt, refuse := mpd.OptionsForHost(o.goos, "", cfg.Conf, cfg.Endpoint, cfg.Password, o.getenv)
 	var rep mpd.Report
 	found := false
+	expired := false
 	if !refuse {
 		// Detached from the caller: a cancelled /v1/health must not
 		// store a miss that hides the output for the miss TTL.
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
 		rep = o.inspect(pctx, opt)
-		expired := pctx.Err() != nil
+		expired = pctx.Err() != nil
 		cancel()
 		found = rep.Found()
-		if expired {
-			return found, rep, opt
-		}
-	}
-	ttl := outputProbeMiss
-	if found {
-		ttl = outputProbeHit
 	}
 	o.mu.Lock()
-	o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
+	if !expired {
+		ttl := outputProbeMiss
+		if found {
+			ttl = outputProbeHit
+		}
+		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
+	}
+	delete(o.probeFlights, key)
+	f.found, f.rep, f.opt = found, rep, opt
+	close(f.done)
 	o.mu.Unlock()
 	return found, rep, opt
 }

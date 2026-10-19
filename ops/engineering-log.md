@@ -47700,3 +47700,16 @@ unresolved. The fourteen captured files are in
 `TestPluginPCMDoesNotSpoilTheFile` failed first with
 `keep = 0, 0, false; want card 2 pcm 0`.
 `TestVolumioPCMNamesTheDAC` failed first with `dac <nil>`.
+
+## 2026-10-19 — concurrent auto probes share one inspection (B473 step 2b)
+
+`GET /v1/health` is unauthenticated, and in auto mode each call whose
+probe cache has expired started its own `Inspect`: mpd.conf, player
+detection, and a greet. A burst could open that many MPD connections.
+Callers for one configuration key now share the in-flight probe. The
+hit and miss TTLs, the detached context, and the refusal to store a
+result whose own deadline fired are unchanged.
+`TestProbeMissesShareOneFlight` failed first with
+`inspects 8 waiting 0, want one inspection`.
+`TestProbeDeadlineIsNotCached` passed before that change: a probe that
+blocks until its own deadline is not reused.

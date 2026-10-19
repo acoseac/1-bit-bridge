@@ -672,6 +672,57 @@ func TestProbeCacheFollowsTheConfig(t *testing.T) {
 	}
 }
 
+func TestProbeMissesShareOneFlight(t *testing.T) {
+	var inspects atomic.Int32
+	release := make(chan struct{})
+	cfg := quietOutputs("linux", "auto")
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		inspects.Add(1)
+		<-release
+		return mpd.Report{}
+	}
+	o := newLocalOutputs(cfg)
+	const n = 8
+	var waiting atomic.Int32
+	o.probeWait = func() {
+		waiting.Add(1)
+	}
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			o.probe(context.Background())
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for waiting.Load() < n-1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	if inspects.Load() != 1 || waiting.Load() != n-1 {
+		t.Fatalf("inspects %d waiting %d, want one inspection", inspects.Load(), waiting.Load())
+	}
+}
+
+func TestProbeDeadlineIsNotCached(t *testing.T) {
+	var inspects atomic.Int32
+	cfg := quietOutputs("linux", "auto")
+	cfg.Inspect = func(ctx context.Context, _ mpd.Options) mpd.Report {
+		inspects.Add(1)
+		<-ctx.Done()
+		return mpd.Report{}
+	}
+	o := newLocalOutputs(cfg)
+	if found, _, _ := o.probe(context.Background()); found || inspects.Load() != 1 {
+		t.Fatalf("first found %v inspects %d", found, inspects.Load())
+	}
+	if _, _, _ = o.probe(context.Background()); inspects.Load() != 2 {
+		t.Fatalf("inspects %d, a deadline was cached", inspects.Load())
+	}
+}
+
 func TestCancelledProbeIsNotCached(t *testing.T) {
 	var inspects atomic.Int32
 	cfg := quietOutputs("linux", "auto")
