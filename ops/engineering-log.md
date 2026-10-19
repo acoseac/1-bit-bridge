@@ -47449,3 +47449,16 @@ USB card with `null`, and several resolved cards are listed with `null`.
 The bridge does not list the other cards once one resolved, so it never
 has a card to mark `false`. `TestIsMPDsOutputIsTrueOrNull` pins both
 answers and rejects the JSON `false`.
+
+## 2026-10-19 — a dead MPD session is dropped (B473 step 2b)
+
+`session` returned the cached client until the idle timer, and every
+poll re-armed that timer, so an MPD restart left `state: unknown` and
+path rules `mismatch` for as long as the app kept asking. A non-context
+error from `status` or `find` now closes that client and dials once
+more in the same build. The cache is keyed on endpoint and password.
+`TestDeadMPDSessionIsRedialed` failed first with `state unknown dials 1
+closed 0`. `TestSessionFollowsTheEndpoint` failed with
+`password change dialed [127.0.0.1:6600 ]` when the cache ignored the
+password. `TestDeadFindRedialsOnce` failed with
+`dials 1` and `State:mismatch`.

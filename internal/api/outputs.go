@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -142,13 +143,15 @@ type localOutputs struct {
 	cards      func() (alsa.Snapshot, error)
 	getenv     func(string) string
 
-	mu       sync.Mutex
-	client   outputSession
-	stopIdle func()
-	last     time.Time
-	flight   *outputFlight
-	cached   outputCache
-	probed   outputProbe
+	mu           sync.Mutex
+	client       outputSession
+	sessEndpoint string
+	sessPassword string
+	stopIdle     func()
+	last         time.Time
+	flight       *outputFlight
+	cached       outputCache
+	probed       outputProbe
 	// joined, when set, runs after a caller has found a build in flight
 	// and before it waits. Production leaves it nil. Tests use it to
 	// release that build only once the second caller is waiting on it.
@@ -350,12 +353,19 @@ func (o *localOutputs) session(ctx context.Context, endpoint, password string) (
 		return nil, nil
 	}
 	o.mu.Lock()
-	if o.client != nil {
+	if o.client != nil && o.sessEndpoint == endpoint && o.sessPassword == password {
 		c := o.client
 		o.mu.Unlock()
 		return c, nil
 	}
+	old := o.client
+	o.client = nil
+	o.sessEndpoint = ""
+	o.sessPassword = ""
 	o.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 	c, err := o.dial(ctx, endpoint, password)
 	if err != nil {
 		return nil, err
@@ -370,8 +380,30 @@ func (o *localOutputs) session(ctx context.Context, endpoint, password string) (
 		return kept, nil
 	}
 	o.client = c
+	o.sessEndpoint = endpoint
+	o.sessPassword = password
 	o.mu.Unlock()
 	return c, nil
+}
+
+// dropSession closes c and forgets it when it is still the cached one.
+// A context cancellation is not a dead daemon: the caller went away.
+func (o *localOutputs) dropSession(c outputSession) {
+	if c == nil {
+		return
+	}
+	o.mu.Lock()
+	if o.client == c {
+		o.client = nil
+		o.sessEndpoint = ""
+		o.sessPassword = ""
+	}
+	o.mu.Unlock()
+	_ = c.Close()
+}
+
+func sessionBroken(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
@@ -382,13 +414,31 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 		endpoint = opt.Endpoint
 	}
 	sess, _ := o.session(ctx, endpoint, cfg.Password)
+	redialed := false
+	// again drops a dead session and dials once more in this build.
+	again := func(err error) bool {
+		if !sessionBroken(err) || redialed {
+			return false
+		}
+		o.dropSession(sess)
+		redialed = true
+		sess, _ = o.session(ctx, endpoint, cfg.Password)
+		return sess != nil
+	}
 	state := "unknown"
 	version := rep.MPD.Version
 	if sess != nil {
 		if v := sess.Version(); v != "" {
 			version = v
 		}
-		if reply, err := sess.Status(ctx); err == nil {
+		reply, err := sess.Status(ctx)
+		if again(err) {
+			if v := sess.Version(); v != "" {
+				version = v
+			}
+			reply, err = sess.Status(ctx)
+		}
+		if err == nil {
 			state = playbackState(reply)
 		}
 	}
@@ -398,7 +448,24 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 	if player.Version == "" && player.Software == "mpd" {
 		player.Version = version
 	}
-	rules := o.pathRules(ctx, rep.MusicDirectory, sess)
+	var lookup mpd.PathLookup
+	if sess != nil && rep.MusicDirectory != "" {
+		lookup = func(ctx context.Context, mpdPath string) (bool, error) {
+			if sess == nil {
+				return false, errors.New("mpd: no session")
+			}
+			reply, err := sess.Find(ctx, mpdPath)
+			if again(err) {
+				reply, err = sess.Find(ctx, mpdPath)
+			}
+			if err != nil {
+				return false, err
+			}
+			_, ok := reply.Get("file")
+			return ok, nil
+		}
+	}
+	rules := o.pathRules(ctx, rep.MusicDirectory, lookup)
 	mpdInfo := OutputMPD{
 		Port:             port,
 		Addresses:        addrs,
@@ -457,7 +524,7 @@ func (resp *OutputsResponse) normalize() {
 	}
 }
 
-func (o *localOutputs) pathRules(ctx context.Context, musicDir string, sess outputSession) []OutputPathRule {
+func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mpd.PathLookup) []OutputPathRule {
 	roots := o.roots()
 	var tracks []string
 	if o.tracks != nil {
@@ -476,17 +543,6 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, sess outp
 			}
 		}
 		libs[i] = mpd.LibraryRoot{ID: id, Path: path, Multi: multi, Tracks: own}
-	}
-	var lookup mpd.PathLookup
-	if sess != nil && musicDir != "" {
-		lookup = func(ctx context.Context, mpdPath string) (bool, error) {
-			reply, err := sess.Find(ctx, mpdPath)
-			if err != nil {
-				return false, err
-			}
-			_, ok := reply.Get("file")
-			return ok, nil
-		}
 	}
 	proved := mpd.ProveRoots(ctx, musicDir, libs, lookup)
 	out := make([]OutputPathRule, len(proved))

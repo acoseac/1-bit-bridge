@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,14 +21,16 @@ import (
 )
 
 type fakeOutputSession struct {
-	version  string
-	state    string
-	found    map[string]bool
-	statuses *atomic.Int32
-	closed   *atomic.Int32
-	block    chan struct{}
-	started  chan struct{}
-	once     sync.Once
+	version   string
+	state     string
+	found     map[string]bool
+	statuses  *atomic.Int32
+	closed    *atomic.Int32
+	block     chan struct{}
+	started   chan struct{}
+	once      sync.Once
+	statusErr error
+	findErr   error
 }
 
 func (f *fakeOutputSession) Status(context.Context) (mpd.Reply, error) {
@@ -40,10 +43,16 @@ func (f *fakeOutputSession) Status(context.Context) (mpd.Reply, error) {
 	if f.block != nil {
 		<-f.block
 	}
+	if f.statusErr != nil {
+		return mpd.Reply{}, f.statusErr
+	}
 	return mpd.Reply{Pairs: []mpd.Pair{{Key: "state", Value: f.state}}}, nil
 }
 
 func (f *fakeOutputSession) Find(_ context.Context, path string) (mpd.Reply, error) {
+	if f.findErr != nil {
+		return mpd.Reply{}, f.findErr
+	}
 	if f.found[path] {
 		return mpd.Reply{Pairs: []mpd.Pair{{Key: "file", Value: path}}}, nil
 	}
@@ -537,6 +546,88 @@ func quietOutputs(goos, mode string) LocalOutputsConfig {
 		Greet:      func(context.Context, string) bool { return false },
 		Advertised: func() []string { return nil },
 		Cards:      func() (alsa.Snapshot, error) { return alsa.Snapshot{}, nil },
+	}
+}
+
+func TestDeadMPDSessionIsRedialed(t *testing.T) {
+	var dials atomic.Int32
+	var closed atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		n := dials.Add(1)
+		if n == 1 {
+			return &fakeOutputSession{statusErr: errors.New("eof"), closed: &closed}, nil
+		}
+		return &fakeOutputSession{state: "play", version: "0.24.4", closed: &closed}, nil
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	resp := outputsGet(t, hs, token, "/v1/outputs")
+	body, _ := decodeOutputs(t, resp)
+	if body.Outputs[0].MPD.State != "play" || dials.Load() != 2 || closed.Load() != 1 {
+		t.Fatalf("state %s dials %d closed %d", body.Outputs[0].MPD.State, dials.Load(), closed.Load())
+	}
+}
+
+func TestSessionFollowsTheEndpoint(t *testing.T) {
+	clock := &manualClock{}
+	endpoint := "127.0.0.1:6600"
+	password := ""
+	var dialed []string
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Output = func() config.OutputConfig {
+		return config.OutputConfig{MPD: "on", Password: password}
+	}
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: endpoint}}
+	}
+	cfg.Dial = func(_ context.Context, ep, pw string) (outputSession, error) {
+		dialed = append(dialed, ep+" "+pw)
+		return &fakeOutputSession{state: "stop", version: "0.24.0"}, nil
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	one := func() {
+		t.Helper()
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		resp.Body.Close()
+	}
+	one()
+	password = "next"
+	clock.Advance(outputCacheTTL)
+	one()
+	if len(dialed) != 2 || dialed[1] != "127.0.0.1:6600 next" {
+		t.Fatalf("password change dialed %v", dialed)
+	}
+	endpoint = "127.0.0.1:6601"
+	clock.Advance(outputProbeHit)
+	one()
+	if len(dialed) != 3 || dialed[2] != "127.0.0.1:6601 next" {
+		t.Fatalf("endpoint change dialed %v", dialed)
+	}
+}
+
+func TestDeadFindRedialsOnce(t *testing.T) {
+	music := t.TempDir()
+	var dials atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Roots = func() []string { return []string{music} }
+	cfg.Tracks = func(context.Context) ([]string, error) { return []string{"a.flac"}, nil }
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}, MusicDirectory: music}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		n := dials.Add(1)
+		if n == 1 {
+			return &fakeOutputSession{state: "stop", version: "0.24.0", findErr: errors.New("eof")}, nil
+		}
+		return &fakeOutputSession{state: "stop", version: "0.24.0", found: map[string]bool{"a.flac": true}}, nil
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	resp := outputsGet(t, hs, token, "/v1/outputs")
+	body, _ := decodeOutputs(t, resp)
+	if dials.Load() != 2 || len(body.Outputs[0].PathRules) != 1 || body.Outputs[0].PathRules[0].State != "proven" {
+		t.Fatalf("dials %d rules %+v", dials.Load(), body.Outputs[0].PathRules)
 	}
 }
 
