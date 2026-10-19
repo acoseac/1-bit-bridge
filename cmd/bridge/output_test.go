@@ -127,15 +127,64 @@ func TestOutputDACPrintsWhatTheSyntheticTreesShow(t *testing.T) {
 		t.Fatalf("garbled: exit %d, stderr %q; a problem on a card is not a failed reading", code, stderr)
 	}
 	for _, line := range []string{
-		"    interface 1 altset 2: SPECIAL DSD_U32_BE, ? bit, 2 ch, 44100 48000 88200 96000 176400 192000 352800 384000 Hz, DSD raw (DOP=0, bitrev=?)\n",
+		"    interface 1 altset 2: SPECIAL DSD_U32_BE, unknown, 2 ch, 44100 48000 88200 96000 176400 192000 352800 384000 Hz, DSD raw (DOP=0, bitrev=?)\n",
 		"      running altset: interface 1 altset ?\n      momentary freq: unknown\n",
 		"      owner:          thread 4242 (name unknown), process unknown\n",
 		"  problems:\n    card0/stream0: line 6: Altset \"two\" is not a number\n",
-		"    card0/stream0: line 20: interface 1 altset 2 has no Bits line (cut short?)\n",
 	} {
 		if !strings.Contains(stdout, line) {
 			t.Errorf("garbled output lacks %q:\n%s", line, stdout)
 		}
+	}
+	if strings.Contains(stdout, "no Bits line") {
+		t.Errorf("a missing Bits line was called cut short:\n%s", stdout)
+	}
+}
+
+// TestOutputDACPrintsEveryFormatAndAnUnknownBitDepth: one Format line is
+// the whole list, and a stream from before Linux 5.1 has no Bits line.
+func TestOutputDACPrintsEveryFormatAndAnUnknownBitDepth(t *testing.T) {
+	stdout, stderr, code := runCapture(t, "output", "dac", "--proc-root", outputFixtureRoot(t, "multi-format"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	for _, line := range []string{
+		"    interface 1 altset 1: S16_LE S24_3LE, 24 bit, 2 ch, 44100 48000 96000 Hz\n",
+		"    interface 1 altset 2: SPECIAL DSD_U32_BE, 32 bit, 2 ch, 352800 Hz, DSD raw (DOP=0, bitrev=0)\n",
+		"    interface 1 altset 3: S32_LE DSD_U32_LE, 32 bit, 2 ch, 44100 Hz\n",
+	} {
+		if !strings.Contains(stdout, line) {
+			t.Errorf("output lacks %q:\n%s", line, stdout)
+		}
+	}
+
+	stdout, stderr, code = runCapture(t, "output", "dac", "--json", "--proc-root", outputFixtureRoot(t, "multi-format"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("json: exit %d, stderr %q", code, stderr)
+	}
+	var rep dacReport
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatal(err)
+	}
+	alts := rep.Cards[0].Devices[0].Stream.Playback.Altsets
+	if len(alts) != 3 || alts[1].DSDFormat() != "DSD_U32_BE" || alts[2].DSDFormat() != "DSD_U32_LE" || alts[0].DSDFormat() != "" {
+		t.Fatalf("json altsets = %+v", alts)
+	}
+
+	stdout, stderr, code = runCapture(t, "output", "dac", "--proc-root", outputFixtureRoot(t, "uac1-bits-less"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("bits-less: exit %d, stderr %q", code, stderr)
+	}
+	for _, line := range []string{
+		"    interface 1 altset 1: S16_LE, unknown, 2 ch, 44100 48000 Hz\n",
+		"    interface 1 altset 2: S24_3LE, unknown, 2 ch, 44100 48000 96000 Hz\n",
+	} {
+		if !strings.Contains(stdout, line) {
+			t.Errorf("bits-less output lacks %q:\n%s", line, stdout)
+		}
+	}
+	if strings.Contains(stdout, "cut short") {
+		t.Errorf("a pre-5.1 stream was called cut short:\n%s", stdout)
 	}
 }
 

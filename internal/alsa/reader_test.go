@@ -218,13 +218,12 @@ func TestReaderLeavesAnOwnerItCannotNameUnknown(t *testing.T) {
 			}
 		})
 	}
-	t.Run("an unreadable comm", func(t *testing.T) {
+	t.Run("an unreadable comm is unused when status has Name", func(t *testing.T) {
 		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 			t.Skip("needs a POSIX permission bit a non-root reader honours")
 		}
 		root := copyTree(t, "dsd256-native")
-		comm := filepath.Join(root, "6584", "comm")
-		if err := os.Chmod(comm, 0); err != nil {
+		if err := os.Chmod(filepath.Join(root, "6584", "comm"), 0); err != nil {
 			t.Fatal(err)
 		}
 		snap, err := Reader{ProcRoot: root}.Read()
@@ -232,7 +231,26 @@ func TestReaderLeavesAnOwnerItCannotNameUnknown(t *testing.T) {
 			t.Fatal(err)
 		}
 		o := snap.Cards[2].Devices[0].Substreams[0].Owner
-		want := &Owner{TID: 6584, PID: intPtr(6551), Process: strPtr("mpd")}
+		if !reflect.DeepEqual(o, mpdOwner) || len(snap.Cards[2].Problems) != 0 {
+			t.Errorf("owner = %s (problems %q), want %s", describeOwner(o), snap.Cards[2].Problems, describeOwner(mpdOwner))
+		}
+	})
+	t.Run("an unreadable status falls back to comm", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs a POSIX permission bit a non-root reader honours")
+		}
+		root := copyTree(t, "dsd256-native")
+		if err := os.Chmod(filepath.Join(root, "6584", "status"), 0); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := Reader{ProcRoot: root}.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := snap.Cards[2].Devices[0].Substreams[0].Owner
+		// Tgid was in the status that could not be read, so the process
+		// stays unknown. The thread's name is its comm. Neither is a problem.
+		want := &Owner{TID: 6584, Thread: strPtr("output:alsa")}
 		if !reflect.DeepEqual(o, want) || len(snap.Cards[2].Problems) != 0 {
 			t.Errorf("owner = %s (problems %q), want %s", describeOwner(o), snap.Cards[2].Problems, describeOwner(want))
 		}
@@ -279,9 +297,9 @@ func TestReaderReadsCardsWithNoStreamFile(t *testing.T) {
 }
 
 // TestReaderReportsAGarbledStreamAndKeepsTheRest reads the synthetic tree
-// whose stream0 is garbled and cut short: its problems land on the card
-// under the file's path, and the card's id, the substream and its
-// (unnamed) owner are read as if the stream file were whole.
+// whose stream0 is garbled: its problems land on the card under the
+// file's path, and the card's id, the substream and its (unnamed) owner
+// are read as if the stream file were whole.
 func TestReaderReportsAGarbledStreamAndKeepsTheRest(t *testing.T) {
 	snap, err := Reader{ProcRoot: procRootOf("garbled-stream0")}.Read()
 	if err != nil {
@@ -289,8 +307,8 @@ func TestReaderReportsAGarbledStreamAndKeepsTheRest(t *testing.T) {
 	}
 	c := snap.Cards[0]
 	_, streamProbs := ParseStream(readFixture(t, "garbled-stream0", "asound/card0/stream0"))
-	if !reflect.DeepEqual(c.Problems, prefixed("card0/stream0", streamProbs)) || len(c.Problems) != 7 {
-		t.Errorf("card problems = %q; want stream0's seven, prefixed", c.Problems)
+	if !reflect.DeepEqual(c.Problems, prefixed("card0/stream0", streamProbs)) || len(c.Problems) != 6 {
+		t.Errorf("card problems = %q; want stream0's six, prefixed", c.Problems)
 	}
 	if c.USBID == nil || c.USBID.String() != "1234:abcd" {
 		t.Errorf("usb id = %v", c.USBID)
@@ -378,9 +396,10 @@ func TestReaderDevicesComeFromPCMDirectoriesAndStreamFiles(t *testing.T) {
 
 // TestRawReturnsEveryFileTheReadingReads lists the files a raw dump of the
 // dsd256 capture holds, in order, each byte for byte as it is on disk:
-// the card files, the substream's four, and the three /proc entries its
-// owner was named from. A file read twice (aplay's comm, as thread and as
-// process) is listed once.
+// the card files, the substream's four, and the /proc entries its owner
+// was named from. The thread's name is its status Name, so its comm is
+// not read; the process has no status in this tree, so its comm is the
+// fallback. A file read twice is listed once.
 func TestRawReturnsEveryFileTheReadingReads(t *testing.T) {
 	files, err := Reader{ProcRoot: procRootOf("dsd256-native")}.Raw()
 	if err != nil {
@@ -390,7 +409,7 @@ func TestRawReturnsEveryFileTheReadingReads(t *testing.T) {
 		"asound/cards", "asound/card5/usbid", "asound/card5/stream0",
 		"asound/card5/pcm0p/sub0/info", "asound/card5/pcm0p/sub0/hw_params",
 		"asound/card5/pcm0p/sub0/sw_params", "asound/card5/pcm0p/sub0/status",
-		"6584/comm", "6584/status", "6551/comm",
+		"6584/status", "6551/comm",
 	}
 	var got []string
 	for _, f := range files {
@@ -411,13 +430,213 @@ func TestRawReturnsEveryFileTheReadingReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var comms int
+	var comms, statuses int
 	for _, f := range files {
-		if f.Path == "812/comm" {
+		switch f.Path {
+		case "812/comm":
 			comms++
+		case "812/status":
+			statuses++
 		}
 	}
-	if comms != 1 {
-		t.Errorf("812/comm listed %d times, want once", comms)
+	if comms != 0 || statuses != 1 {
+		t.Errorf("812/comm listed %d times and 812/status %d; the process name is that status Name", comms, statuses)
 	}
+}
+
+// linkSymlinkedPCM turns the symlinked-pcm fixture's real directories into
+// the tree a reading should walk: stream0, pcm0p and sub0 are symlinks,
+// and Audio points at card0 the way /proc/asound/<id> points at cardN.
+func linkSymlinkedPCM(t *testing.T, root string) {
+	t.Helper()
+	card := filepath.Join(root, "asound", "card0")
+	links := [][2]string{
+		{"stream0.body", filepath.Join(card, "stream0")},
+		{"pcm0-real", filepath.Join(card, "pcm0p")},
+		{"sub0-real", filepath.Join(card, "pcm1p", "sub0")},
+		// A directory is not a stream file, even through a symlink.
+		{"pcm0-real", filepath.Join(card, "stream1")},
+		{"card0", filepath.Join(root, "asound", "Audio")},
+	}
+	for _, l := range links {
+		if err := os.Symlink(l[0], l[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestReaderFollowsSymlinkedPCMAndSubdirectories: DirEntry.IsDir does not
+// follow a symlink, so a tree that links pcmNp and subM would otherwise
+// read as having no playback device. An in-root link, including the card
+// id pointing at cardN, is the target's own file.
+func TestReaderFollowsSymlinkedPCMAndSubdirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege this test does not have")
+	}
+	root := copyTree(t, "symlinked-pcm")
+	linkSymlinkedPCM(t, root)
+	snap, err := Reader{ProcRoot: root}.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Cards) != 1 || len(snap.Cards[0].Problems) != 0 {
+		t.Fatalf("card = %+v problems %q", snap.Cards[0].Card, snap.Cards[0].Problems)
+	}
+	if snap.Cards[0].USBID == nil || snap.Cards[0].USBID.String() != "1234:abcd" {
+		t.Fatalf("usb id = %v", snap.Cards[0].USBID)
+	}
+	devs := snap.Cards[0].Devices
+	if len(devs) != 2 {
+		t.Fatalf("devices = %+v; want 0 (linked pcm and stream) and 1 (linked sub)", devs)
+	}
+	if devs[0].Device != 0 || devs[0].Stream == nil || devs[0].Stream.Playback == nil ||
+		len(devs[0].Substreams) != 1 || devs[0].Substreams[0].HWParams == nil || !devs[0].Substreams[0].HWParams.Closed {
+		t.Errorf("device 0 = %+v; want its stream and the linked substream closed", devs[0])
+	}
+	if devs[1].Device != 1 || devs[1].Stream != nil || len(devs[1].Substreams) != 1 ||
+		devs[1].Substreams[0].Status == nil || !devs[1].Substreams[0].Status.Closed {
+		t.Errorf("device 1 = %+v; want the linked substream and no stream", devs[1])
+	}
+	// The id symlink resolves inside the root. A read through it is the
+	// card's own stream, not a refusal.
+	throughID := filepath.Join(root, "asound", "Audio", "stream0")
+	if err := staysInRoot(filepath.Join(root, "asound"), throughID); err != nil {
+		t.Errorf("Audio -> card0 leaves the root: %v", err)
+	}
+}
+
+// TestReaderRefusesAFileThatLeavesTheRoot: a stream symlink to a file
+// outside the tree is not read, and --raw does not receive its bytes.
+func TestReaderRefusesAFileThatLeavesTheRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege this test does not have")
+	}
+	const secret = "OUTSIDE-ROOT-SECRET"
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte(secret+"\nPlayback:\n  Status: Stop\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, root, map[string]string{
+		"asound/cards":                      " 0 [X              ]: USB-Audio - X\n                      X at usb-1\n",
+		"asound/card0/pcm0p/sub0/hw_params": "closed\n",
+		"asound/card0/pcm0p/sub0/status":    "closed\n",
+	})
+	if err := os.Symlink(outside, filepath.Join(root, "asound", "card0", "stream0")); err != nil {
+		t.Fatal(err)
+	}
+	// The substream's hw_params also points outside, so the refusal is
+	// every read, not only stream files.
+	hp := filepath.Join(root, "asound", "card0", "pcm0p", "sub0", "hw_params")
+	if err := os.Remove(hp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, hp); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := Reader{ProcRoot: root}.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := Reader{ProcRoot: root}.Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused []string
+	for _, f := range files {
+		if bytes.Contains(f.Data, []byte(secret)) {
+			t.Errorf("raw %s holds the file outside the root", f.Path)
+		}
+		if errors.Is(f.Err, errOutsideRoot) {
+			refused = append(refused, f.Path)
+		}
+	}
+	if !reflect.DeepEqual(refused, []string{"asound/card0/stream0", "asound/card0/pcm0p/sub0/hw_params"}) {
+		t.Errorf("refused = %q", refused)
+	}
+	c := snap.Cards[0]
+	if c.Devices == nil || len(c.Devices) != 1 || c.Devices[0].Stream != nil {
+		t.Errorf("devices = %+v; the outside stream is not a stream", c.Devices)
+	}
+	for _, p := range c.Problems {
+		if strings.Contains(p, secret) {
+			t.Errorf("a problem quotes the outside file: %s", p)
+		}
+	}
+	if !strings.Contains(strings.Join(c.Problems, "\n"), "path leaves the root") {
+		t.Errorf("problems = %q; want the read refused", c.Problems)
+	}
+}
+
+// TestReaderNamesTheOwnerFromOneStatusRead: Name and Tgid are one file.
+// comm is a different read and is only the fallback when Name is absent.
+// When the thread is the process, that same Name is the process name.
+func TestReaderNamesTheOwnerFromOneStatusRead(t *testing.T) {
+	t.Run("names come from status, not comm", func(t *testing.T) {
+		root := copyTree(t, "dsd256-native")
+		writeTree(t, root, map[string]string{
+			"6584/status": "Name:\tfrom-status\nTgid:\t6551\n",
+			"6584/comm":   "from-comm\n",
+			"6551/status": "Name:\tmpd-status\nTgid:\t6551\n",
+			"6551/comm":   "mpd-comm\n",
+		})
+		snap, err := Reader{ProcRoot: root}.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := snap.Cards[2].Devices[0].Substreams[0].Owner
+		want := &Owner{TID: 6584, Thread: strPtr("from-status"), PID: intPtr(6551), Process: strPtr("mpd-status")}
+		if !reflect.DeepEqual(o, want) {
+			t.Errorf("owner = %s, want %s", describeOwner(o), describeOwner(want))
+		}
+		files, err := Reader{ProcRoot: root}.Raw()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var procs []string
+		for _, f := range files {
+			if strings.HasPrefix(f.Path, "65") {
+				procs = append(procs, f.Path)
+			}
+		}
+		if !reflect.DeepEqual(procs, []string{"6584/status", "6551/status"}) {
+			t.Errorf("owner files = %q; comm is not read when status has Name", procs)
+		}
+	})
+	t.Run("the process name is that Name when the thread is the process", func(t *testing.T) {
+		root := copyTree(t, "i2s-and-hdmi")
+		writeTree(t, root, map[string]string{
+			"812/status": "Name:\taplay-status\nTgid:\t812\n",
+			"812/comm":   "aplay-comm\n",
+		})
+		snap, err := Reader{ProcRoot: root}.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := snap.Cards[1].Devices[0].Substreams[0].Owner
+		want := &Owner{TID: 812, Thread: strPtr("aplay-status"), PID: intPtr(812), Process: strPtr("aplay-status")}
+		if !reflect.DeepEqual(o, want) {
+			t.Errorf("owner = %s, want %s", describeOwner(o), describeOwner(want))
+		}
+	})
+	t.Run("comm is the fallback when status has no Name", func(t *testing.T) {
+		root := copyTree(t, "dsd256-native")
+		writeTree(t, root, map[string]string{
+			"6584/status": "Tgid:\t6551\nPid:\t6584\n",
+			"6584/comm":   "output:alsa\n",
+		})
+		removeAll(t, root, "6551/status")
+		snap, err := Reader{ProcRoot: root}.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := snap.Cards[2].Devices[0].Substreams[0].Owner
+		want := &Owner{TID: 6584, Thread: strPtr("output:alsa"), PID: intPtr(6551), Process: strPtr("mpd")}
+		if !reflect.DeepEqual(o, want) {
+			t.Errorf("owner = %s, want %s", describeOwner(o), describeOwner(want))
+		}
+		if len(snap.Cards[2].Problems) != 0 {
+			t.Errorf("a fallback name became a problem: %q", snap.Cards[2].Problems)
+		}
+	})
 }

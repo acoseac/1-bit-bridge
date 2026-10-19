@@ -60,19 +60,37 @@ type RunningEndpoint struct {
 type Altset struct {
 	Interface *int `json:"interface"`
 	Altset    *int `json:"altset"`
-	// Formats are the ALSA sample formats the altset takes, as printed:
-	// ["S24_3LE"], or ["SPECIAL", "DSD_U32_BE"] for a native-DSD one.
+	// Formats are the ALSA sample formats the altset takes, every name on
+	// its one Format line, in the kernel's order: ["S24_3LE"], or
+	// ["SPECIAL", "DSD_U32_BE"] for a native-DSD one. SPECIAL is the
+	// format name of SNDRV_PCM_FORMAT_SPECIAL, not a prefix.
 	Formats  []string `json:"formats"`
 	Channels *int     `json:"channels"`
 	// Rates are the discrete rates, empty when the altset takes a
 	// continuous range (RateRange) or lists none.
 	Rates     []int      `json:"rates"`
 	RateRange *RateRange `json:"rateRange"`
-	Bits      *int       `json:"bits"`
+	// Bits is the altset's significant-bit count. Nil when the stream has
+	// no Bits line: unknown, not a guess. Kernels before 5.1 never print
+	// one; from 5.1 on they print one per altset for UAC1 and UAC2 alike.
+	Bits *int `json:"bits"`
 	// DSDRaw is present when the altset carries DSD without DoP framing
 	// ("DSD raw: DOP=0, bitrev=0"), nil for every other altset.
 	DSDRaw     *DSDRaw  `json:"dsdRaw"`
 	ChannelMap []string `json:"channelMap"`
+}
+
+// DSDFormat returns the altset's DSD sample format, the first name with
+// the kernel's DSD_ prefix, wherever that name sits on the Format line.
+// SPECIAL is not one: a native-DSD altset lists it beside the DSD format.
+// The result is empty when the altset offers no DSD format.
+func (a Altset) DSDFormat() string {
+	for _, name := range a.Formats {
+		if strings.HasPrefix(name, "DSD_") && len(name) > len("DSD_") {
+			return name
+		}
+	}
+	return ""
 }
 
 // RateRange is an altset's continuous rate range ("8000 - 96000
@@ -122,12 +140,15 @@ func ParseStream(b []byte) (Stream, []string) {
 	var sawStatus bool          // the section's Status line has been read
 	var runSeen map[string]bool // the endpoint block's lines read, by key
 	// finish closes the altset being read, reporting each line the kernel
-	// always prints that it never saw.
+	// has printed for every altset since v4.19 that it never saw. Bits is
+	// not one of them: proc_dump_substream_formats gained it in 5.1
+	// (c7a13264918b) and prints it for UAC1 and UAC2 alike, so a stream
+	// from before that has no Bits line and the count is unknown.
 	finish := func() {
 		if cur == nil {
 			return
 		}
-		for _, need := range []string{"Format", "Channels", "Rates", "Bits"} {
+		for _, need := range []string{"Format", "Channels", "Rates"} {
 			if !cur.seen[need] {
 				p.addf(cur.line, "%s has no %s line (cut short?)", describeAltset(cur.Altset), need)
 			}

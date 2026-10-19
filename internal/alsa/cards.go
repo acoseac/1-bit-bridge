@@ -30,8 +30,10 @@ const noSoundcards = "--- no soundcards ---"
 
 // ParseCards parses /proc/asound/cards. Each card is two lines, the head
 // and its long name indented by 22 spaces; a line that begins with two
-// spaces is therefore the long name of the entry before it, never a head,
-// since the head's index is printed "%2i" and has at most one.
+// spaces is therefore the long name of the entry before it, never a head.
+// The head's index is printed "%2i", a minimum width: one leading space
+// below 10, none from 10 up, including 100 and above, so a head never
+// begins with two spaces.
 //
 // A card whose index repeats an earlier one is reported and left out, so
 // the reader never reads one card directory twice. A head with no

@@ -1,7 +1,9 @@
 package alsa
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -61,12 +63,42 @@ func TestParseStreamOnEveryCapture(t *testing.T) {
 	}
 }
 
+// TestParseStreamOrdersProblemsByLineWhenTheCapIsReached: a cut-short
+// report is filed when the altset ends, on the line the altset began,
+// which is earlier than the problems already filed. At the cap those
+// kept lines are still in line order, and the count of the ones left
+// out is last.
+func TestParseStreamOrdersProblemsByLineWhenTheCapIsReached(t *testing.T) {
+	// Seven problems on the first altset, then its missing Format line
+	// (filed when the next altset starts, on the earlier line), which
+	// fills the cap. The second altset's problems are the ones left out.
+	in := "Playback:\n  Interface 1\n    Altset 1\n    Channels: x\n" +
+		"    Rates: a, b, c, d, e, f\n    Bits: 16\n" +
+		"  Interface 1\n    Altset 2\n    Channels: y\n"
+	_, probs := ParseStream([]byte(in))
+	if len(probs) != maxProblems+1 || !strings.HasSuffix(probs[len(probs)-1], " more not shown") {
+		t.Fatalf("problems =\n%s\nwant %d entries and a count last", strings.Join(probs, "\n"), maxProblems+1)
+	}
+	prev := 0
+	for _, p := range probs[:len(probs)-1] {
+		var line int
+		if _, err := fmt.Sscanf(p, "line %d:", &line); err != nil || line < prev {
+			t.Fatalf("problems out of line order at %q:\n%s", p, strings.Join(probs, "\n"))
+		}
+		prev = line
+	}
+	if !strings.Contains(probs[0], "no Format line") {
+		t.Errorf("first problem = %q; the cut-short report is on the altset's first line", probs[0])
+	}
+}
+
 // TestParseStreamReportsTheGarbledFixture reads testdata's garbled stream0:
 // an endpoint block with two values that do not parse, a rate that is not
 // a number, a line no stream file has, a DSD raw flag with no value, and
-// a file cut off in the middle of the second altset's Bits line. Each is
-// reported where it is, the values around them are kept, and none of the
-// broken ones is guessed.
+// a file cut off in the middle of a line. The truncated "Bi" is not a
+// stream line; a Bits line that never arrived is unknown, not cut short.
+// Each defect is reported where it is, the values around them are kept,
+// and none of the broken ones is guessed.
 func TestParseStreamReportsTheGarbledFixture(t *testing.T) {
 	s, probs := ParseStream(readFixture(t, "garbled-stream0", "asound/card0/stream0"))
 	wantProbs := []string{
@@ -74,7 +106,6 @@ func TestParseStreamReportsTheGarbledFixture(t *testing.T) {
 		`line 8: momentary freq "fast Hz" is not "N Hz (0xI.FFFF)"`,
 		`line 15: rate "x96000" is not a number`,
 		`line 19: not a stream line: "@@@@ not a stream0 line @@@@"`,
-		`line 20: interface 1 altset 2 has no Bits line (cut short?)`,
 		`line 25: DSD raw field "bitrev=" is not DOP=0|1 or bitrev=0|1`,
 		`line 26: not a stream line: "    Bi"`,
 	}
@@ -193,6 +224,66 @@ func TestParseStreamShapes(t *testing.T) {
 		}
 		if p := s.Playback; p == nil || deref(p.Running.Altset) != 4 || len(p.Altsets) != 1 || deref(p.Altsets[0].Bits) != 32 {
 			t.Errorf("playback = %+v; want the running altset 4 and 32 bits, the first values", p)
+		}
+	})
+	t.Run("every format on one line, and a DSD name that is not first", func(t *testing.T) {
+		// proc_dump_substream_formats prints the altset's bitmask on one
+		// Format line (v4.19 through v6.17). SPECIAL is a format name.
+		s, probs := ParseStream(readFixture(t, "multi-format", "asound/card0/stream0"))
+		if len(probs) != 0 {
+			t.Fatalf("problems: %q", probs)
+		}
+		p := s.Playback
+		if p == nil || len(p.Altsets) != 3 {
+			t.Fatalf("playback = %+v; want three altsets", p)
+		}
+		if !reflect.DeepEqual(p.Altsets[0].Formats, []string{"S16_LE", "S24_3LE"}) || deref(p.Altsets[0].Bits) != 24 {
+			t.Errorf("altset 1 = %+v; want both PCM formats and the one Bits line", p.Altsets[0])
+		}
+		if !reflect.DeepEqual(p.Altsets[1].Formats, []string{"SPECIAL", "DSD_U32_BE"}) ||
+			p.Altsets[1].DSDFormat() != "DSD_U32_BE" {
+			t.Errorf("altset 2 formats = %v, DSD %q; want SPECIAL kept and DSD_U32_BE found second",
+				p.Altsets[1].Formats, p.Altsets[1].DSDFormat())
+		}
+		if !reflect.DeepEqual(p.Altsets[2].Formats, []string{"S32_LE", "DSD_U32_LE"}) ||
+			p.Altsets[2].DSDFormat() != "DSD_U32_LE" {
+			t.Errorf("altset 3 formats = %v, DSD %q; want DSD_U32_LE found after S32_LE",
+				p.Altsets[2].Formats, p.Altsets[2].DSDFormat())
+		}
+		if p.Altsets[0].DSDFormat() != "" {
+			t.Errorf("a PCM altset read as DSD %q", p.Altsets[0].DSDFormat())
+		}
+	})
+	t.Run("a second Format line is a repeated key, not more formats", func(t *testing.T) {
+		// One altset is one Format line. A second line is not the kernel
+		// listing another format of the same altset.
+		in := "Playback:\n  Interface 1\n    Altset 1\n    Format: S16_LE S24_3LE\n" +
+			"    Format: DSD_U32_BE\n    Channels: 2\n    Rates: 48000\n    Bits: 16\n"
+		s, probs := ParseStream([]byte(in))
+		if !reflect.DeepEqual(probs, []string{"line 5: a second Format line; the first is kept"}) {
+			t.Errorf("problems = %q", probs)
+		}
+		if p := s.Playback; p == nil || len(p.Altsets) != 1 ||
+			!reflect.DeepEqual(p.Altsets[0].Formats, []string{"S16_LE", "S24_3LE"}) ||
+			p.Altsets[0].DSDFormat() != "" {
+			t.Errorf("formats = %+v; want the first line only", s.Playback)
+		}
+	})
+	t.Run("a pre-5.1 altset has no Bits line and is not cut short", func(t *testing.T) {
+		// v4.19 and v5.0 print no Bits line, for every USB device. v5.1
+		// and later print one per altset, UAC1 and UAC2 alike.
+		s, probs := ParseStream(readFixture(t, "uac1-bits-less", "asound/card0/stream0"))
+		if len(probs) != 0 {
+			t.Fatalf("problems = %q; a missing Bits line is unknown, not cut short", probs)
+		}
+		p := s.Playback
+		if p == nil || len(p.Altsets) != 2 {
+			t.Fatalf("playback = %+v", p)
+		}
+		for _, a := range p.Altsets {
+			if a.Bits != nil || len(a.Formats) == 0 {
+				t.Errorf("altset %+v; want formats and unknown bits", a)
+			}
 		}
 	})
 	t.Run("empty file", func(t *testing.T) {

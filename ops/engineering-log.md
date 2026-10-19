@@ -46804,3 +46804,97 @@ predicted.
   card's files.
 - `mpd_status` is kept beside each playing capture for the step that
   reads MPD; nothing reads it yet.
+
+## 2026-10-19 — review of `bridge output dac`: a Bits line the kernel did not always print, and a proc-root read that followed a symlink out
+
+Argon's review of 27b7b9c0. Checked against `sound/usb/proc.c`
+(`proc_dump_substream_formats`, `proc_dump_ep_status`,
+`proc_pcm_format_read`) at the v4.19, v5.0, v5.1 and v6.17 tags, and
+against `sound/core/pcm.c`'s hw_params and status printers and
+`sound/core/init.c`'s `snd_card_info_read`. The rules that changed are
+in `.claude/rules/output.md`.
+
+### What those kernels print
+
+- **One altset, one `Format:` line.** v4.19 and v5.0 loop
+  `fmt` from 0 to `SNDRV_PCM_FORMAT_LAST` and append
+  `snd_pcm_format_name` for each set bit, then one newline. v6.17 does
+  the same walk with `pcm_for_each_format`. A multi-format altset is
+  still one line (`Format: SPECIAL DSD_U32_BE` on the iFi capture).
+  Several `Format:` lines are several `audioformat` entries, which the
+  parser already treats as several altsets. A second `Format:` line on
+  one altset is a repeated key. The claim that one altset prints a
+  `Format:`/`Bits:` pair per format does not hold on any of these tags.
+- **`SPECIAL` is a format name**, `snd_pcm_format_name` of
+  `SNDRV_PCM_FORMAT_SPECIAL`. It is printed before `DSD_*` because those
+  values sit later in the enum. It stays in the list, in the kernel's
+  order. A DSD format is any name with the `DSD_` prefix, wherever it
+  sits (`Altset.DSDFormat`). hw_params is a different file and a single
+  opened format (`format: %s`); that parser was already one word and
+  was not changed.
+- **`Bits:` arrived in 5.1, for every USB device.** Absent from the
+  v4.19 and v5.0 printers. Commit c7a13264918b (2019-02-17, Jussi Laako,
+  signed off by Takashi Iwai, "ALSA: usb-audio: Expose sample resolution
+  through proc interface") added `Bits: %d` from `fp->fmt_bits`. The
+  v5.1 tag has that line, with no `UAC_VERSION` test around it, and
+  v6.17 still prints it unconditionally. Full speed omits only
+  `Data packet interval`. A stream with no Bits line is a kernel before
+  5.1, not a UAC1 device on a current kernel. `--proc-root` reads such
+  a tree, so a missing Bits line is unknown, never "cut short". Format,
+  Channels and Rates are in the v4.19 printer and a missing one of those
+  is still cut short.
+- **Card index `%2i` is a minimum width** (`snd_card_info_read`:
+  `"%2i [%-15s]: %s - %s"`). Below 10 there is one leading space; from
+  10 up, including 100, there is none. A long-name line is the one that
+  begins with two spaces, so 100 stays a head. The parser already
+  accepted it. No change.
+- **Problem lines are sorted after the cap.** `addf` keeps the first
+  eight and drops the rest; `result` then sorts that kept list by line
+  number, whole-file reports last, and appends the dropped count. A
+  cut-short report filed at the end, on the altset's first line, still
+  prints in line order when the cap is full. No change.
+
+### What was already true, and what changed
+
+The Format line was already `strings.Fields`, and the text and the JSON
+already showed every name. The multi-format fixture's test was green
+before the Bits change. What was wrong:
+
+- Bits was in the "always printed" set, so a complete pre-5.1 stream
+  was reported cut short, and the text rendered a missing depth as
+  `? bit`. It is now null and the text says `unknown`. The step-one
+  control C3 had proved Bits was required, against the garbled fixture;
+  that fixture is cut off at the letters `Bi`, which is still "not a
+  stream line". Requiring the line rejected a whole older stream.
+- `DirEntry.IsDir` does not follow a symlink, so a `pcmNp` or `subM`
+  that is a link was "no playback device". They are recognised with
+  `Stat`. A stream counts only when the target is a regular file.
+  Every read and directory listing resolves the path and refuses one
+  that leaves its root (`errOutsideRoot`, which names no target), so
+  `--raw` cannot print a file from outside the tree. The kernel's
+  `/proc/asound/<id>` link to `cardN` resolves inside and still reads.
+- The owner was `/proc/<tid>/comm`, then `status` for Tgid, then
+  `/proc/<tgid>/comm`. Name and Tgid are one file, so they now come
+  from one read of `/proc/<tid>/status`. When Tgid is that tid, the
+  process name is the same Name; otherwise it is the Name of
+  `/proc/<tgid>/status`. `comm` is the fallback only when that status
+  has no Name line. A name that cannot be read is still null, and still
+  not a problem. The captured trees have no `6551/status`, so the
+  process name there is still the `6551/comm` fallback (`mpd`).
+
+### Tests, and the control
+
+Red before the change, then green: `TestParseStreamShapes/a_pre-5.1_altset_has_no_Bits_line_and_is_not_cut_short`,
+`TestReaderFollowsSymlinkedPCMAndSubdirectories`,
+`TestReaderRefusesAFileThatLeavesTheRoot`,
+`TestReaderNamesTheOwnerFromOneStatusRead/names_come_from_status,_not_comm`
+and `the_process_name_is_that_Name_when_the_thread_is_the_process`.
+The multi-format subtest and `a second Format line is a repeated key`
+were already green. `TestParseCardsShapes`'s index 100 and
+`TestParseStreamOrdersProblemsByLineWhenTheCapIsReached` were green on
+the code under review.
+
+Negative control, on the Bits fix: `"Bits"` put back into the required
+set. `TestParseStreamShapes/a_pre-5.1_altset_has_no_Bits_line_and_is_not_cut_short`
+went red with the two "no Bits line (cut short?)" problems. The slice
+was restored to Format, Channels and Rates.

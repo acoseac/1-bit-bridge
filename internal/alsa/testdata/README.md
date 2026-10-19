@@ -46,7 +46,18 @@ and each status file holds only the first lines a real one opens with.
 - `garbled-stream0`: a USB DAC whose `stream0` has values that do not
   parse, a line no stream file has, and an end cut off in the middle of a
   line, with no newline. Its substream plays for thread 4242, which has no
-  `/proc` entry here.
+  `/proc` entry here. The cut leaves altset 2 with no Bits line; that is
+  unknown, not a file cut short.
+- `multi-format`: one Format line per altset carrying more than one name,
+  the way the kernel prints an altset's bitmask (`S16_LE S24_3LE`,
+  `SPECIAL DSD_U32_BE`, `S32_LE DSD_U32_LE`). `SPECIAL` is a format name.
+- `uac1-bits-less`: the printer from before Linux 5.1, which is the same
+  for every USB device, UAC1 or UAC2: a full-speed endpoint line and no
+  Bits line. Current kernels print Bits for both.
+- `symlinked-pcm`: real directories the tests link as `stream0`, `pcm0p`
+  and `sub0`, plus `Audio` pointing at `card0` the way `/proc/asound/<id>`
+  does. The links are made by the test, not stored: a checkout of a symlink
+  is not the same file on Windows.
 
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 

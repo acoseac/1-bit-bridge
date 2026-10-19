@@ -46,6 +46,12 @@ func TestParseCardsShapes(t *testing.T) {
 			want: []Card{},
 		},
 		{
+			name: "index 100, which %2i prints with no leading space",
+			in: "100 [Audio          ]: USB-Audio - Hundred\n" +
+				"                      Hundred at usb-1\n",
+			want: []Card{{Index: 100, ID: "Audio", Driver: "USB-Audio", Name: "Hundred", LongName: "Hundred at usb-1"}},
+		},
+		{
 			name: "two-digit index, a 15-column id, an empty short name",
 			in: "10 [sndrpihifiberry]: HifiberryDacp - \n" +
 				"                      snd_rpi_hifiberry_dacplus\n",

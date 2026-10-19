@@ -21,7 +21,10 @@
 //     value is left out (null in JSON), never guessed. A key the kernel
 //     prints once that arrives twice is reported and the first value
 //     stands, and so is a block the kernel always prints in full that
-//     arrives without one of its lines: that is a file cut short.
+//     arrives without one of its lines: that is a file cut short. A line
+//     a kernel added later is not one of those. An altset's Bits line
+//     dates from Linux 5.1, so a stream without it is unknown, not cut
+//     short.
 //   - What they report is bounded: at most maxProblems lines per file,
 //     each holding at most maxQuoted bytes of the input it quotes.
 package alsa

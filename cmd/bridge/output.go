@@ -375,7 +375,7 @@ func renderSubstream(w io.Writer, s alsa.Substream, play *alsa.StreamDirection) 
 		if run.Interface != nil || run.Altset != nil {
 			alt = "interface " + intOr(run.Interface, "?") + " altset " + intOr(run.Altset, "?")
 			if a, ok := findAltset(play.Altsets, run); ok {
-				alt += " (" + strings.Join(a.Formats, " ") + ", " + intOr(a.Bits, "?") + " bit)"
+				alt += " (" + strings.Join(a.Formats, " ") + ", " + bitsPhrase(a.Bits) + ")"
 			}
 		}
 		fmt.Fprintf(w, "      running altset: %s\n", alt)
@@ -402,7 +402,7 @@ func altsetName(a alsa.Altset) string {
 // altsetSummary is an altset's formats, bits, channels, rates and DSD
 // framing on one line.
 func altsetSummary(a alsa.Altset) string {
-	parts := []string{orUnknown(strings.Join(a.Formats, " ")), intOr(a.Bits, "?") + " bit", intOr(a.Channels, "?") + " ch"}
+	parts := []string{orUnknown(strings.Join(a.Formats, " ")), bitsPhrase(a.Bits), intOr(a.Channels, "?") + " ch"}
 	switch {
 	case a.RateRange != nil:
 		parts = append(parts, fmt.Sprintf("%d - %d Hz", a.RateRange.Min, a.RateRange.Max))
@@ -454,6 +454,15 @@ func nameOr(s *string) string {
 		return "(name unknown)"
 	}
 	return strconv.Quote(*s)
+}
+
+// bitsPhrase is an altset's bit depth. A stream with no Bits line — every
+// USB device on a kernel before 5.1 — reads "unknown", not a guessed width.
+func bitsPhrase(n *int) string {
+	if n == nil {
+		return "unknown"
+	}
+	return strconv.Itoa(*n) + " bit"
 }
 
 // intOr renders an optional number.
