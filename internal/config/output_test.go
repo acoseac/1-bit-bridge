@@ -41,24 +41,20 @@ func TestOutputModeRejectsAnythingElse(t *testing.T) {
 	if strings.Contains(err.Error(), "s3cret-value") {
 		t.Fatal("the error names the password")
 	}
-	for _, mode := range []string{"", "auto", "AUTO", " on "} {
+	for _, mode := range []string{"", "auto", "AUTO", " on ", "on", "off"} {
 		cfg.Output.MPD = mode
-		if cfg.Output.Mode() != "auto" && mode != " on " {
-			// " on " trims to on
+		want := "auto"
+		if mode == " on " || mode == "on" {
+			want = "on"
+		} else if mode == "off" {
+			want = "off"
 		}
-		if mode == " on " {
-			if cfg.Output.Mode() != "on" {
-				t.Fatalf("mode %q -> %q", mode, cfg.Output.Mode())
-			}
-			continue
-		}
-		if cfg.Output.Mode() != "auto" {
+		if cfg.Output.Mode() != want {
 			t.Fatalf("mode %q -> %q", mode, cfg.Output.Mode())
 		}
-	}
-	cfg.Output.MPD = "off"
-	if cfg.Output.Mode() != "off" {
-		t.Fatalf("off -> %q", cfg.Output.Mode())
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("validate %q: %v", mode, err)
+		}
 	}
 }
 
