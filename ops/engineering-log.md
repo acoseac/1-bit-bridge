@@ -47682,3 +47682,21 @@ file wherever it appears. `TestAtDirectiveInsideSkippedBlock` failed
 first with `at inside block = 2, 0, true; want unresolved` for
 `defaults.pcm { @func getenv }` and for `ctl.name { @args.CARD { … } }`.
 `TestNonPCMStanzaIsSkipped` failed first with `@args.NAME 1 resolved`.
+
+## 2026-10-19 — a plugin PCM does not discard the Volumio chain (B473 step 2b)
+
+The Pi's `/etc/alsa/conf.d/` is Debian's alsa-plugins files. Each
+`pcm.pulse` (and the ctl beside it) holds `@args`, `@func` and
+`$DEVICE`. Treating that as a file that does not parse discarded
+`asound.conf` too, so `volumio` no longer resolved to card `Audio`.
+Inside a `pcm.NAME` block that syntax makes the name opaque and the
+file stays usable. A `ctl` or `defaults` block is still skipped,
+directives inside it included. `@hooks`, `@args`, `@func` and an
+include at the top level still make the whole configuration
+unresolved. The fourteen captured files are in
+`volumio-asound-chain/etc/alsa/conf.d/` and are not edited.
+`TestResolveOutputDeviceVolumioChain` failed first with
+`volumio = 0, 0, false; want card 2 pcm 0`.
+`TestPluginPCMDoesNotSpoilTheFile` failed first with
+`keep = 0, 0, false; want card 2 pcm 0`.
+`TestVolumioPCMNamesTheDAC` failed first with `dac <nil>`.

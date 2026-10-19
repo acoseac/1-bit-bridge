@@ -26,6 +26,54 @@ func TestResolveOutputDeviceVolumioChain(t *testing.T) {
 	if !ok || card != 2 || pcm != 0 {
 		t.Fatalf("volumio = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
 	}
+	if _, _, ok := ResolveOutputDevice(root, "pulse", cards); ok {
+		t.Fatal("pulse resolved")
+	}
+}
+
+func TestPluginPCMDoesNotSpoilTheFile(t *testing.T) {
+	cards := []Card{{Index: 2, ID: "Audio"}}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `
+pcm.keep { type hw
+    card "Audio" }
+pcm.pulse {
+    @args [ DEVICE ]
+    @args.DEVICE { type string default "" }
+    type pulse
+    device $DEVICE
+    hint { show { @func refer name defaults.namehint.basic } }
+}
+pcm.via { type plug
+    slave.pcm "pulse" }
+`
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "keep", cards); !ok || card != 2 || pcm != 0 {
+		t.Fatalf("keep = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
+	}
+	for _, name := range []string{"pulse", "via"} {
+		if _, _, ok := ResolveOutputDevice(root, name, cards); ok {
+			t.Fatalf("%s resolved", name)
+		}
+	}
+	for _, extra := range []string{"@hooks [0]", "<include>", "@args.CARD { type string }"} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		text := "pcm.keep { type hw\n    card \"Audio\" }\n" + extra + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "etc", "asound.conf"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := ResolveOutputDevice(dir, "keep", cards); ok {
+			t.Fatalf("%s resolved", extra)
+		}
+	}
 }
 
 func TestResolveOutputDevice(t *testing.T) {
@@ -475,8 +523,8 @@ func TestAtDirectiveInsideSkippedBlock(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if card, pcm, ok := ResolveOutputDevice(root, "out", cards); ok {
-			t.Errorf("at inside block = %d, %d, %v; want unresolved\n%s", card, pcm, ok, body)
+		if card, pcm, ok := ResolveOutputDevice(root, "out", cards); !ok || card != 2 || pcm != 0 {
+			t.Errorf("at inside block = %d, %d, %v; want card 2\n%s", card, pcm, ok, body)
 		}
 	}
 }

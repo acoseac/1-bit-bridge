@@ -46,11 +46,13 @@ func ConfigRoot(procRoot string) string {
 // and then etc/asound.conf, and slave.pcm is followed through type empty
 // and type plug only, until a type hw. A slave that contains ":" is a
 // device string, never a PCM of that name. A name defined more than once
-// is unresolved. A ctl or defaults stanza is skipped. One file that
-// cannot be read, or that this parser does not fully understand, makes
-// the whole configuration unresolved. A dmix, a softvol, any other
-// plugin, a hook, an include, a cycle, more than maxPCMHops follows, or
-// syntax this parser does not understand leaves the device unresolved.
+// is unresolved. Inside that block, @args, @func, a $ variable and a
+// nested block this parser does not model make the name opaque and leave
+// the rest of the file usable. A ctl or defaults stanza is skipped. One
+// file that cannot be read, or a top-level @hooks, @args, @func or
+// include, makes the whole configuration unresolved. A dmix, a softvol,
+// any other plugin, a cycle, or more than maxPCMHops follows leaves the
+// device unresolved.
 func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
 	if idx, pcm, found := ResolveALSADevice(device, cards); found {
 		return idx, pcm, true
@@ -183,6 +185,10 @@ const (
 	tokRBrace
 	tokSemi
 	tokComma
+	tokVar
+	tokLBrack
+	tokRBrack
+	tokColon
 )
 
 type pcmTok struct {
@@ -293,17 +299,42 @@ func (p *pcmParser) skipBlock() bool {
 	}
 	depth := 1
 	for depth > 0 {
-		t := p.next()
-		if atDirective(t) {
-			return false
-		}
-		switch t.kind {
+		switch p.next().kind {
 		case tokEOF:
 			return false
 		case tokLBrace:
 			depth++
 		case tokRBrace:
 			depth--
+		}
+	}
+	return true
+}
+
+func (p *pcmParser) skipBrackets() bool {
+	if p.next().kind != tokLBrack {
+		return false
+	}
+	depth := 1
+	brace := 0
+	for depth > 0 || brace > 0 {
+		switch p.next().kind {
+		case tokEOF:
+			return false
+		case tokLBrack:
+			depth++
+		case tokRBrack:
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case tokLBrace:
+			brace++
+		case tokRBrace:
+			if brace == 0 {
+				return false
+			}
+			brace--
 		}
 	}
 	return true
@@ -332,79 +363,166 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 	var sawType, sawCard, sawDevice bool
 	for {
 		p.skipSep()
-		if p.peek().kind == tokRBrace {
-			break
-		}
-		if p.peek().kind == tokEOF {
+		switch p.peek().kind {
+		case tokRBrace:
+			p.next()
+			if def.typ != "hw" && def.typ != "empty" && def.typ != "plug" {
+				def.opaque = true
+			}
+			return def, true
+		case tokEOF:
 			return pcmDef{}, false
-		}
-		key, ok := p.parseKey()
-		if !ok {
-			return pcmDef{}, false
-		}
-		if p.peek().kind == tokLBrace {
-			inner, ok := p.parseSlaveBlock()
-			if !ok {
+		default:
+			if !p.parsePCMField(&def, &sawType, &sawCard, &sawDevice) {
 				return pcmDef{}, false
 			}
-			if key != "slave" || def.slave != "" || inner.unknown || inner.pcm == "" {
+		}
+	}
+}
+
+// parsePCMField reads one field of a pcm block. A field this parser does
+// not model makes the definition opaque and is still consumed, so the
+// block's closing brace stays the end of this PCM and the rest of the
+// file remains usable.
+func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool) bool {
+	key, plain, ok := p.readFieldKey()
+	if !ok {
+		return false
+	}
+	if p.peek().kind == tokLBrace {
+		if plain && key == "slave" {
+			inner, ok := p.parseSlaveBlock()
+			if !ok {
+				return false
+			}
+			if def.slave != "" || inner.unknown || inner.pcm == "" {
 				def.opaque = true
 			} else {
 				def.slave = inner.pcm
 			}
-			continue
+			return true
 		}
-		val, ok := p.parseValue()
-		if !ok {
-			return pcmDef{}, false
-		}
-		switch key {
-		case "type":
-			if sawType {
-				def.opaque = true
-			}
-			sawType = true
-			def.typ = val
-		case "slave.pcm":
-			if def.slave != "" {
-				def.opaque = true
-			} else {
-				def.slave = val
-			}
-		case "card":
-			if sawCard {
-				def.opaque = true
-			}
-			sawCard = true
-			if n, err := strconv.Atoi(val); err == nil && cardNumber(val) {
-				def.cardIsIndex = true
-				def.cardIndex = n
-				def.card = ""
-			} else {
-				def.cardIsIndex = false
-				def.card = val
-			}
-		case "device":
-			if sawDevice {
-				def.opaque = true
-			}
-			sawDevice = true
-			n, err := strconv.Atoi(val)
-			if err != nil || !cardNumber(val) {
-				def.opaque = true
-			} else {
-				def.hasDevice = true
-				def.device = n
-			}
-		default:
+		def.opaque = true
+		return p.skipBlock()
+	}
+	if p.peek().kind == tokLBrack {
+		def.opaque = true
+		return p.skipBrackets()
+	}
+	val, plainVal, ok := p.readFieldValue()
+	if !ok {
+		return false
+	}
+	if !plain || !plainVal {
+		def.opaque = true
+		return true
+	}
+	switch key {
+	case "type":
+		if *sawType {
 			def.opaque = true
 		}
-	}
-	p.next()
-	if def.typ != "hw" && def.typ != "empty" && def.typ != "plug" {
+		*sawType = true
+		def.typ = val
+	case "slave.pcm":
+		if def.slave != "" {
+			def.opaque = true
+		} else {
+			def.slave = val
+		}
+	case "card":
+		if *sawCard {
+			def.opaque = true
+		}
+		*sawCard = true
+		if n, err := strconv.Atoi(val); err == nil && cardNumber(val) {
+			def.cardIsIndex = true
+			def.cardIndex = n
+			def.card = ""
+		} else {
+			def.cardIsIndex = false
+			def.card = val
+		}
+	case "device":
+		if *sawDevice {
+			def.opaque = true
+		}
+		*sawDevice = true
+		n, err := strconv.Atoi(val)
+		if err != nil || !cardNumber(val) {
+			def.opaque = true
+		} else {
+			def.hasDevice = true
+			def.device = n
+		}
+	default:
 		def.opaque = true
 	}
-	return def, true
+	return true
+}
+
+func (p *pcmParser) readFieldKey() (string, bool, bool) {
+	tok := p.next()
+	plain := true
+	var b strings.Builder
+	switch tok.kind {
+	case tokIdent:
+		if atDirective(tok) {
+			plain = false
+		}
+		b.WriteString(tok.val)
+	case tokVar, tokNumber:
+		plain = false
+		b.WriteString(tok.val)
+	default:
+		return "", false, false
+	}
+	for p.peek().kind == tokDot || p.peek().kind == tokColon {
+		sep := p.next()
+		if sep.kind == tokColon {
+			plain = false
+		}
+		n := p.next()
+		if n.kind != tokIdent && n.kind != tokNumber && n.kind != tokVar && n.kind != tokString {
+			return "", false, false
+		}
+		if n.kind != tokIdent || atDirective(n) {
+			plain = false
+		}
+		if sep.kind == tokDot {
+			b.WriteByte('.')
+		} else {
+			b.WriteByte(':')
+		}
+		b.WriteString(n.val)
+	}
+	return b.String(), plain, true
+}
+
+func (p *pcmParser) readFieldValue() (string, bool, bool) {
+	tok := p.next()
+	plain := true
+	var b strings.Builder
+	switch tok.kind {
+	case tokString, tokIdent, tokNumber:
+		b.WriteString(tok.val)
+	case tokVar:
+		plain = false
+		b.WriteString(tok.val)
+	default:
+		return "", false, false
+	}
+	for p.peek().kind == tokColon {
+		p.next()
+		n := p.next()
+		if n.kind != tokIdent && n.kind != tokNumber && n.kind != tokString && n.kind != tokVar {
+			return "", false, false
+		}
+		plain = false
+		b.WriteByte(':')
+		b.WriteString(n.val)
+	}
+	return b.String(), plain, true
 }
 
 func cardNumber(val string) bool {
@@ -432,51 +550,40 @@ func (p *pcmParser) parseSlaveBlock() (slaveBlock, bool) {
 	for {
 		p.skipSep()
 		if p.peek().kind == tokRBrace {
-			break
+			p.next()
+			return b, true
 		}
 		if p.peek().kind == tokEOF {
 			return slaveBlock{}, false
 		}
-		key, ok := p.parseKey()
+		key, plain, ok := p.readFieldKey()
 		if !ok {
 			return slaveBlock{}, false
 		}
 		if p.peek().kind == tokLBrace {
-			if _, ok := p.parseSlaveBlock(); !ok {
+			b.unknown = true
+			if !p.skipBlock() {
 				return slaveBlock{}, false
 			}
-			b.unknown = true
 			continue
 		}
-		val, ok := p.parseValue()
+		if p.peek().kind == tokLBrack {
+			b.unknown = true
+			if !p.skipBrackets() {
+				return slaveBlock{}, false
+			}
+			continue
+		}
+		val, plainVal, ok := p.readFieldValue()
 		if !ok {
 			return slaveBlock{}, false
 		}
-		if key == "pcm" && b.pcm == "" {
+		if plain && plainVal && key == "pcm" && b.pcm == "" {
 			b.pcm = val
 		} else {
 			b.unknown = true
 		}
 	}
-	p.next()
-	return b, true
-}
-
-func (p *pcmParser) parseKey() (string, bool) {
-	t := p.next()
-	if t.kind != tokIdent || atDirective(t) {
-		return "", false
-	}
-	key := t.val
-	if p.peek().kind == tokDot {
-		p.next()
-		rest := p.next()
-		if rest.kind != tokIdent {
-			return "", false
-		}
-		key += "." + rest.val
-	}
-	return key, true
 }
 
 func (p *pcmParser) parseValue() (string, bool) {
@@ -523,6 +630,34 @@ func lexPCM(src string) ([]pcmTok, bool) {
 		case ',':
 			out = append(out, pcmTok{kind: tokComma})
 			i += size
+		case '[':
+			out = append(out, pcmTok{kind: tokLBrack})
+			i += size
+		case ']':
+			out = append(out, pcmTok{kind: tokRBrack})
+			i += size
+		case ':':
+			out = append(out, pcmTok{kind: tokColon})
+			i += size
+		case '$':
+			j := i + size
+			if j >= len(src) {
+				return nil, false
+			}
+			r2, n2 := utf8.DecodeRuneInString(src[j:])
+			if r2 == '@' || !(r2 == '_' || unicode.IsLetter(r2)) {
+				return nil, false
+			}
+			j += n2
+			for j < len(src) {
+				c, n := utf8.DecodeRuneInString(src[j:])
+				if !isPCMIdentCont(c) {
+					break
+				}
+				j += n
+			}
+			out = append(out, pcmTok{kind: tokVar, val: src[i:j]})
+			i = j
 		case '"':
 			s, n, ok := lexPCMString(src[i:])
 			if !ok {
