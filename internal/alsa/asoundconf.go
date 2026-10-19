@@ -546,7 +546,12 @@ func lexPCMString(src string) (string, int, bool) {
 				return "", 0, false
 			}
 			i++
-			b.WriteByte(src[i])
+			switch src[i] {
+			case '"', '\\', '\'':
+				b.WriteByte(src[i])
+			default:
+				return "", 0, false
+			}
 		case '\n', '\r':
 			return "", 0, false
 		default:

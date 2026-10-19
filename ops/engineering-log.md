@@ -47644,3 +47644,12 @@ Those stanzas are skipped, and `;` and `,` are separators. `@hooks`,
 the capture itself is not edited. `TestNonPCMStanzaIsSkipped` failed
 first with `volumio with ctl = 0, 0, false; want card 2 pcm 0` and
 `separators = 0, 0, false; want card 2 pcm 0`.
+
+## 2026-10-19 — a string escape other than quote or backslash is unresolved (B473 step 2b)
+
+`\n`, `\t`, `\x41` and `\060` were kept as the next byte, so `card "Au\dio"`
+was card `Audio`. A string accepts only `\"`, `\\` and `\'`. Any other
+escape makes the file unusable. `TestStringEscapeIsOnlyQuoteOrBackslash`
+failed first with `letter = 2, 0, true; want unresolved`,
+`newline = 2, 0, true; want unresolved`, `tab = 2, 0, true; want unresolved`,
+`hex = 2, 0, true; want unresolved`, and `octal = 2, 0, true; want unresolved`.

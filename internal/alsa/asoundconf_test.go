@@ -317,3 +317,75 @@ func TestNonPCMStanzaIsSkipped(t *testing.T) {
 		}
 	}
 }
+
+func TestStringEscapeIsOnlyQuoteOrBackslash(t *testing.T) {
+	cards := []Card{{Index: 2, ID: "Audio"}, {Index: 5, ID: "A20"}}
+	bad := []struct {
+		name string
+		body string
+	}{
+		{"letter", "pcm.out { type hw\n    card \"Au\\dio\" }\n"},
+		{"newline", "pcm.keep { type hw\n    card \"Audio\" }\npcm.bad { type hw\n    card \"\\nAudio\" }\n"},
+		{"tab", "pcm.keep { type hw\n    card \"Audio\" }\npcm.bad { type hw\n    card \"\\tAudio\" }\n"},
+		{"hex", "pcm.keep { type hw\n    card \"Audio\" }\npcm.bad { type hw\n    card \"\\x41udio\" }\n"},
+		{"octal", "pcm.keep { type hw\n    card \"Audio\" }\npcm.bad { type hw\n    card \"\\060\" }\n"},
+	}
+	for _, tc := range bad {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		name := "out"
+		if tc.name != "letter" {
+			name = "keep"
+		}
+		if card, pcm, ok := ResolveOutputDevice(root, name, cards); ok {
+			t.Errorf("%s = %d, %d, %v; want unresolved", tc.name, card, pcm, ok)
+		}
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	good := `
+pcm.quote {
+    type empty
+    slave.pcm "a\"b"
+}
+pcm."a\"b" {
+    type hw
+    card 5
+}
+pcm.back {
+    type empty
+    slave.pcm "a\\b"
+}
+pcm."a\\b" {
+    type hw
+    card "Audio"
+}
+pcm.apos {
+    type empty
+    slave.pcm "a\'b"
+}
+pcm."a\'b" {
+    type hw
+    card 5
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "quote", cards); !ok || card != 5 || pcm != 0 {
+		t.Errorf("quote = %d, %d, %v", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "back", cards); !ok || card != 2 || pcm != 0 {
+		t.Errorf("backslash = %d, %d, %v", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "apos", cards); !ok || card != 5 || pcm != 0 {
+		t.Errorf("apostrophe = %d, %d, %v", card, pcm, ok)
+	}
+}
