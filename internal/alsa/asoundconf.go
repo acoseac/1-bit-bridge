@@ -41,11 +41,12 @@ func ConfigRoot(procRoot string) string {
 
 // ResolveOutputDevice maps an MPD alsa device onto a card that is in
 // cards. A hw or plughw string (and plug and front) names the card
-// directly. Any other name is a PCM: it is looked up in etc/asound.conf
-// and then etc/alsa/conf.d, and slave.pcm is followed through type empty
-// and type plug only, until a type hw. A dmix, a softvol, any other
-// plugin, a hook, an include, a cycle, more than maxPCMHops follows, or
-// syntax this parser does not understand leaves the device unresolved.
+// directly. Any other name is a PCM: it is looked up in etc/alsa/conf.d
+// and then etc/asound.conf, and slave.pcm is followed through type empty
+// and type plug only, until a type hw. A name defined more than once is
+// unresolved. A dmix, a softvol, any other plugin, a hook, an include, a
+// cycle, more than maxPCMHops follows, or syntax this parser does not
+// understand leaves the device unresolved.
 func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
 	if idx, pcm, found := ResolveALSADevice(device, cards); found {
 		return idx, pcm, true
@@ -129,17 +130,20 @@ func loadPCMDefs(root string) map[string]pcmDef {
 			return
 		}
 		for name, def := range parsed {
-			if _, exists := defs[name]; !exists {
-				defs[name] = def
+			if prev, exists := defs[name]; exists {
+				prev.opaque = true
+				defs[name] = prev
+				continue
 			}
+			defs[name] = def
 		}
 	}
-	add(filepath.Join(root, "etc", "asound.conf"))
 	matches, _ := filepath.Glob(filepath.Join(root, "etc", "alsa", "conf.d", "*.conf"))
 	sort.Strings(matches)
 	for _, path := range matches {
 		add(path)
 	}
+	add(filepath.Join(root, "etc", "asound.conf"))
 	return defs
 }
 
@@ -190,9 +194,12 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 		if !ok {
 			return nil, false
 		}
-		if _, exists := defs[name.val]; !exists {
-			defs[name.val] = def
+		if prev, exists := defs[name.val]; exists {
+			prev.opaque = true
+			defs[name.val] = prev
+			continue
 		}
+		defs[name.val] = def
 	}
 	return defs, true
 }

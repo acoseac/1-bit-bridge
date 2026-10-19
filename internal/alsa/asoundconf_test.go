@@ -137,3 +137,57 @@ pcm.q8 { type hw
 		t.Fatal("a missing asound.conf resolved")
 	}
 }
+
+func TestDuplicatePCMIsUnresolved(t *testing.T) {
+	cards := []Card{{Index: 0, ID: "vc4hdmi0"}, {Index: 2, ID: "Audio"}, {Index: 5, ID: "A20"}}
+	root := t.TempDir()
+	etc := filepath.Join(root, "etc")
+	if err := os.MkdirAll(filepath.Join(etc, "alsa", "conf.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	twice := `
+pcm.out { type hw
+    card 0 }
+pcm.out { type hw
+    card "Audio" }
+pcm.bang { type hw
+    card 5 }
+pcm.!bang { type hw
+    card "Audio" }
+`
+	if err := os.WriteFile(filepath.Join(etc, "asound.conf"), []byte(twice), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "out", cards); ok {
+		t.Errorf("twice = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "bang", cards); ok {
+		t.Errorf("pcm.!name = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+
+	across := t.TempDir()
+	etc = filepath.Join(across, "etc")
+	if err := os.MkdirAll(filepath.Join(etc, "alsa", "conf.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(etc, "asound.conf"), []byte("pcm.out { type hw\n    card \"Audio\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(etc, "alsa", "conf.d", "10-first.conf"), []byte("pcm.out { type hw\n    card 0 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(across, "out", cards); ok {
+		t.Errorf("across files = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+
+	only := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(only, "etc", "alsa", "conf.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(only, "etc", "alsa", "conf.d", "10.conf"), []byte("pcm.out { type hw\n    card \"Audio\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(only, "out", cards); !ok || card != 2 || pcm != 0 {
+		t.Fatalf("conf.d only = %d, %d, %v", card, pcm, ok)
+	}
+}

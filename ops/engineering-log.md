@@ -47604,3 +47604,13 @@ and the route keeps today's USB list. The captured chain is in
 `internal/alsa/testdata/volumio-asound-chain/` and is not edited.
 `TestResolveOutputDeviceVolumioChain` failed first with `volumio = 0, 0, false; want card 2 pcm 0`.
 `TestResolveOutputDevice` failed first with `slave block = 0, 0, false`.
+
+## 2026-10-19 — a PCM name defined twice is unresolved (B473 step 2b)
+
+alsa-lib reads `conf.d` before `asound.conf`, and a later `pcm` or
+`pcm.!name` replaces the earlier one. Keeping the first definition
+named whichever card that file happened to hold. A name defined more
+than once, in one file or across files, is now opaque, and `conf.d` is
+read first. `TestDuplicatePCMIsUnresolved` failed first with
+`twice = 0, 0, true; want unresolved`, `pcm.!name = 5, 0, true; want unresolved`,
+and `across files = 2, 0, true; want unresolved`.
