@@ -425,6 +425,42 @@ func TestUnparsedFileDropsTheRest(t *testing.T) {
 	}
 }
 
+func TestUnmodeledPCMStanzaIsUnusable(t *testing.T) {
+	cards := []Card{{Index: 0, ID: "vc4hdmi0"}, {Index: 2, ID: "Audio"}}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `
+pcm.keep { type hw
+    card "Audio" }
+pcm { out { type hw
+    card 0 } }
+`
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "keep", cards); ok {
+		t.Errorf("nested pcm = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+
+	dotted := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dotted, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dottedBody := `
+pcm.keep { type hw
+    card "Audio" }
+pcm.out.card 2
+`
+	if err := os.WriteFile(filepath.Join(dotted, "etc", "asound.conf"), []byte(dottedBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(dotted, "keep", cards); ok {
+		t.Errorf("dotted pcm = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+}
+
 func TestAtDirectiveInsideSkippedBlock(t *testing.T) {
 	cards := []Card{{Index: 2, ID: "Audio"}}
 	for _, body := range []string{

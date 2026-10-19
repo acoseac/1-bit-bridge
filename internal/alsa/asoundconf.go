@@ -207,7 +207,10 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 		if p.peek().kind == tokEOF {
 			return defs, true
 		}
-		if p.isPCM() {
+		if p.peek().kind == tokIdent && p.peek().val == "pcm" {
+			if !p.isPCM() {
+				return nil, false
+			}
 			name, def, ok := p.parsePCMDef()
 			if !ok {
 				return nil, false

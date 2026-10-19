@@ -47662,3 +47662,12 @@ A directory where asound.conf should be was the same. A missing file
 is still ignored. `TestUnparsedFileDropsTheRest` failed first with
 `unparsed asound.conf = 0, 0, true; want unresolved` and
 `unreadable asound.conf = 0, 0, true; want unresolved`.
+
+## 2026-10-19 — a pcm stanza this parser does not model makes the file unusable (B473 step 2b)
+
+`pcm { out { … } }` was skipped as a non-pcm stanza, so a `pcm.keep`
+beside it still resolved. A dotted assignment such as `pcm.out.card`
+already failed the file. Any stanza whose root name is `pcm` and that
+is not `pcm.NAME { … }` or `pcm.!NAME { … }` now fails the file.
+`TestUnmodeledPCMStanzaIsUnusable` failed first with
+`nested pcm = 2, 0, true; want unresolved`.
