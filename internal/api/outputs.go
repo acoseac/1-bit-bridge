@@ -558,8 +558,12 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 	}
 	o.mu.Unlock()
 	var tracks []string
+	trackErr := false
 	if o.tracks != nil {
-		if got, err := o.tracks(ctx); err == nil {
+		got, err := o.tracks(ctx)
+		if err != nil {
+			trackErr = true
+		} else {
 			tracks = got
 		}
 	}
@@ -587,9 +591,9 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 			Found:             rule.Found,
 		}
 	}
-	cacheable := true
+	cacheable := lookup != nil && !trackErr
 	for _, rule := range proved {
-		if rule.State == mpd.PathMismatch || rule.Errored {
+		if rule.State == mpd.PathUnchecked || rule.State == mpd.PathMismatch || rule.Errored {
 			cacheable = false
 			break
 		}

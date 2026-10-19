@@ -47555,3 +47555,15 @@ not found stays `mismatch`. The `find error` case of
 `TestProveRootsStates` failed first with `State:"mismatch"`.
 `TestLookupErrorIsNotCached` failed first with `finds 2, a lookup
 error was cached`.
+
+## 2026-10-19 — an unchecked path rule from a down daemon or an empty index is not cached (B473 step 2b)
+
+The 60s cache kept every `unchecked` that was not a lookup error. The
+first build with no MPD session, or with the scanner still empty,
+stayed `unchecked` after MPD came up or the index filled.
+`TestUncheckedWithoutASessionIsNotCached` failed first with `finds 0,
+an unchecked with no session was cached`.
+`TestUncheckedWithNoTracksIsNotCached` failed first with `finds 0, an
+empty index was cached`. A result is cached only when a lookup was
+available, the track read did not error, and no rule is `unchecked`,
+`mismatch` or errored.

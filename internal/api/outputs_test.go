@@ -848,6 +848,71 @@ func TestLookupErrorIsNotCached(t *testing.T) {
 	}
 }
 
+func TestUncheckedWithoutASessionIsNotCached(t *testing.T) {
+	clock := &manualClock{}
+	music := t.TempDir()
+	up := false
+	var finds atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}, MusicDirectory: music}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		if !up {
+			return nil, errors.New("connection refused")
+		}
+		return &fakeOutputSession{version: "0.24.0", state: "stop", found: map[string]bool{"a.flac": true}, finds: &finds}, nil
+	}
+	cfg.Roots = func() []string { return []string{music} }
+	cfg.Tracks = func(context.Context) ([]string, error) { return []string{"a.flac"}, nil }
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	get := func() {
+		t.Helper()
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		resp.Body.Close()
+	}
+	get()
+	up = true
+	clock.Advance(outputCacheTTL)
+	get()
+	if finds.Load() == 0 {
+		t.Fatalf("finds %d, an unchecked with no session was cached", finds.Load())
+	}
+}
+
+func TestUncheckedWithNoTracksIsNotCached(t *testing.T) {
+	clock := &manualClock{}
+	music := t.TempDir()
+	var tracks []string
+	var finds atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}, MusicDirectory: music}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{version: "0.24.0", state: "stop", found: map[string]bool{"a.flac": true}, finds: &finds}, nil
+	}
+	cfg.Roots = func() []string { return []string{music} }
+	cfg.Tracks = func(context.Context) ([]string, error) { return tracks, nil }
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	get := func() {
+		t.Helper()
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		resp.Body.Close()
+	}
+	get()
+	tracks = []string{"a.flac"}
+	clock.Advance(outputCacheTTL)
+	get()
+	if finds.Load() == 0 {
+		t.Fatalf("finds %d, an empty index was cached", finds.Load())
+	}
+}
+
 func TestPathRulesOutliveTheResponseCache(t *testing.T) {
 	clock := &manualClock{}
 	music := t.TempDir()
