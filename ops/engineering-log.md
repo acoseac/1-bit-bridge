@@ -47577,3 +47577,15 @@ the folded path counted as a miss and the rule was `mismatch`. The
 scanner stores the exact `filepath.Base` prefix, so membership is that
 prefix only. `TestPathRulesUseTheStoredRootPrefix` failed first with
 `State:mismatch Checked:2 Found:1`.
+
+## 2026-10-19 — the MPD probe cache follows the config and ignores a cancelled caller (B473 step 2b)
+
+The probe result was cached for 30s on a hit and 5s on a miss with no
+key, so a change of mode, endpoint, conf or password waited out that
+TTL. A cancelled `/v1/health` on a cold cache stored the miss, and
+`/v1/outputs` then 404ed for 5s. The cache is keyed on those four
+fields. The probe runs on `context.WithoutCancel` with its own
+timeout, and a result whose own deadline fired is not stored.
+`TestProbeCacheFollowsTheConfig` failed first with `inspects 1, a
+config change stayed cached`. `TestCancelledProbeIsNotCached` failed
+first with `found false inspects 1, a cancelled probe was cached`.

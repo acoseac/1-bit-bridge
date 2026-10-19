@@ -650,6 +650,51 @@ func TestBuildDeadlineIsNotCached(t *testing.T) {
 	}
 }
 
+func TestProbeCacheFollowsTheConfig(t *testing.T) {
+	endpoint := "127.0.0.1:6600"
+	var inspects atomic.Int32
+	cfg := quietOutputs("linux", "auto")
+	cfg.Output = func() config.OutputConfig {
+		return config.OutputConfig{MPD: "auto", Endpoint: endpoint}
+	}
+	cfg.Inspect = func(_ context.Context, opt mpd.Options) mpd.Report {
+		inspects.Add(1)
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: opt.Endpoint}}
+	}
+	o := newLocalOutputs(cfg)
+	if _, _, _ = o.probe(context.Background()); inspects.Load() != 1 {
+		t.Fatalf("first inspects %d", inspects.Load())
+	}
+	endpoint = "127.0.0.1:6601"
+	o.probe(context.Background())
+	if inspects.Load() != 2 {
+		t.Fatalf("inspects %d, a config change stayed cached", inspects.Load())
+	}
+}
+
+func TestCancelledProbeIsNotCached(t *testing.T) {
+	var inspects atomic.Int32
+	cfg := quietOutputs("linux", "auto")
+	cfg.Inspect = func(ctx context.Context, _ mpd.Options) mpd.Report {
+		inspects.Add(1)
+		if ctx.Err() != nil {
+			return mpd.Report{}
+		}
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}}
+	}
+	o := newLocalOutputs(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	found, _, _ := o.probe(ctx)
+	if !found {
+		t.Fatalf("found %v inspects %d, a cancelled probe was cached", found, inspects.Load())
+	}
+	found, _, _ = o.probe(context.Background())
+	if !found {
+		t.Fatalf("second probe found %v inspects %d", found, inspects.Load())
+	}
+}
+
 func TestPathRulesUseTheStoredRootPrefix(t *testing.T) {
 	dir := t.TempDir()
 	musicDir := filepath.Join(dir, "mpd")

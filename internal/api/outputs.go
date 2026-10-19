@@ -186,6 +186,7 @@ type outputPathCache struct {
 type outputProbe struct {
 	at    time.Time
 	until time.Time
+	key   string
 	found bool
 	rep   mpd.Report
 	opt   mpd.Options
@@ -273,30 +274,49 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
+	key := o.probeKey()
 	o.mu.Lock()
-	if !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
+	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
 		p := o.probed
 		o.mu.Unlock()
 		return p.found, p.rep, p.opt
 	}
 	o.mu.Unlock()
-	opt, refuse := mpd.OptionsForHost(o.goos, "", o.output().Conf, o.output().Endpoint, o.output().Password, o.getenv)
+	cfg := config.OutputConfig{}
+	if o.output != nil {
+		cfg = o.output()
+	}
+	opt, refuse := mpd.OptionsForHost(o.goos, "", cfg.Conf, cfg.Endpoint, cfg.Password, o.getenv)
 	var rep mpd.Report
 	found := false
 	if !refuse {
-		pctx, cancel := context.WithTimeout(ctx, outputProbeLimit)
+		// Detached from the caller: a cancelled /v1/health must not
+		// store a miss that hides the output for the miss TTL.
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
 		rep = o.inspect(pctx, opt)
+		expired := pctx.Err() != nil
 		cancel()
 		found = rep.Found()
+		if expired {
+			return found, rep, opt
+		}
 	}
 	ttl := outputProbeMiss
 	if found {
 		ttl = outputProbeHit
 	}
 	o.mu.Lock()
-	o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), found: found, rep: rep, opt: opt}
+	o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	o.mu.Unlock()
 	return found, rep, opt
+}
+
+func (o *localOutputs) probeKey() string {
+	cfg := config.OutputConfig{}
+	if o.output != nil {
+		cfg = o.output()
+	}
+	return strings.Join([]string{cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password}, "\n")
 }
 
 // Response builds the route body. One build runs at a time, on a context
