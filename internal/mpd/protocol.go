@@ -64,16 +64,21 @@ const ACKPermission = 4
 // ACKPassword is the code MPD returns for a wrong password.
 const ACKPassword = 3
 
-var ackLine = regexp.MustCompile(`^ACK \[(\d+)@(\d+)\] \{([^}]*)\} ?(.*)$`)
+// Response::Error writes the space after '}' unconditionally
+// (src/client/Response.cxx). A line without it is not an ACK.
+var ackLine = regexp.MustCompile(`^ACK \[(\d+)@(\d+)\] \{([^}]*)\} (.*)$`)
 
-// ParseGreeting reads the line a server sends on connect, `OK MPD 0.24.0`.
+// ParseGreeting reads the line a server sends on connect. MPD 0.24.4
+// writes exactly `OK MPD ` + PROTOCOL_VERSION + `\n` (src/client/New.cxx,
+// GREETING). A space before OK, or more than one space before the
+// version, is not that line.
 func ParseGreeting(line string) (string, error) {
-	line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+	line = strings.TrimSuffix(line, "\r")
 	const prefix = "OK MPD "
 	if !strings.HasPrefix(line, prefix) {
 		return "", errors.New("mpd: greeting is not OK MPD")
 	}
-	version := strings.TrimSpace(line[len(prefix):])
+	version := line[len(prefix):]
 	if version == "" || strings.ContainsAny(version, " \t") {
 		return "", errors.New("mpd: greeting has no version")
 	}
@@ -82,45 +87,91 @@ func ParseGreeting(line string) (string, error) {
 
 // ParseReply reads one command's reply, lines of `key: value` and a
 // closing OK, or an ACK. An ACK is returned as an *ACKError; any pairs
-// before it are still on the Reply.
+// before it are still on the Reply. A `binary: N` line is followed by
+// exactly N bytes and a newline (Response::WriteBinary); those bytes
+// are not lines, so a payload that contains `\nOK\n` does not end the
+// reply. The success line is exactly `OK` (doc/protocol.rst, Responses).
+// Padding is not an OK.
 func ParseReply(text string) (Reply, error) {
-	text = strings.TrimSuffix(text, "\n")
 	if text == "" {
 		return Reply{}, errors.New("mpd: empty reply")
 	}
-	lines := strings.Split(text, "\n")
-	last := strings.TrimSuffix(lines[len(lines)-1], "\r")
-	pairs := make([]Pair, 0, len(lines)-1)
-	for _, line := range lines[:len(lines)-1] {
-		line = strings.TrimSuffix(line, "\r")
-		if strings.TrimSpace(line) == "" {
+	pairs := make([]Pair, 0)
+	rest := text
+	for {
+		line, next, ok := cutProtoLine(rest)
+		if !ok {
+			return Reply{}, errors.New("mpd: reply does not end with OK or ACK")
+		}
+		if line == "OK" || strings.HasPrefix(line, "ACK ") {
+			if next != "" {
+				return Reply{}, errors.New("mpd: reply does not end with OK or ACK")
+			}
+			if line == "OK" {
+				return Reply{Pairs: pairs}, nil
+			}
+			ack, err := parseACK(line)
+			if err != nil {
+				return Reply{}, err
+			}
+			return Reply{Pairs: pairs}, ack
+		}
+		if n, isBinary := binarySize(line); isBinary {
+			if len(next) < n+1 || next[n] != '\n' {
+				return Reply{}, errors.New("mpd: binary chunk is not terminated")
+			}
+			rest = next[n+1:]
+			continue
+		}
+		if line == "" || strings.TrimSpace(line) == "" {
 			return Reply{}, errors.New("mpd: empty line in reply")
 		}
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
+		key, value, found := strings.Cut(line, ":")
+		if !found || key == "" || strings.ContainsAny(key, " \t") {
 			return Reply{}, errors.New("mpd: reply line has no key")
-		}
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return Reply{}, errors.New("mpd: empty key")
 		}
 		if strings.HasPrefix(value, " ") {
 			value = value[1:]
 		}
 		pairs = append(pairs, Pair{Key: key, Value: value})
+		rest = next
 	}
-	switch {
-	case strings.TrimSpace(last) == "OK":
-		return Reply{Pairs: pairs}, nil
-	case strings.HasPrefix(last, "ACK "):
-		ack, err := parseACK(last)
-		if err != nil {
-			return Reply{}, err
+}
+
+// binarySize reports N for a line that is exactly `binary: N`, the
+// form Response::WriteBinary writes. N is a decimal without a sign or
+// a leading zero.
+func binarySize(line string) (int, bool) {
+	rest, ok := strings.CutPrefix(line, "binary: ")
+	if !ok || rest == "" {
+		return 0, false
+	}
+	if len(rest) > 1 && rest[0] == '0' {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if c < '0' || c > '9' {
+			return 0, false
 		}
-		return Reply{Pairs: pairs}, ack
-	default:
-		return Reply{}, errors.New("mpd: reply does not end with OK or ACK")
+		d := int(c - '0')
+		if n > (MaxReplyBytes-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
 	}
+	return n, true
+}
+
+func cutProtoLine(s string) (line, rest string, ok bool) {
+	i := strings.IndexByte(s, '\n')
+	if i < 0 {
+		return "", "", false
+	}
+	line = s[:i]
+	line = strings.TrimSuffix(line, "\r")
+	return line, s[i+1:], true
 }
 
 func parseACK(line string) (*ACKError, error) {

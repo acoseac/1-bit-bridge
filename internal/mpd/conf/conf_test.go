@@ -197,6 +197,127 @@ func TestPasswordIsRedacted(t *testing.T) {
 	assertNoSecret(t, secret, trailed)
 }
 
+func TestRepeatedParameterKeepsTheLast(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "mpd.conf"), "volume_normalization \"yes\"\ninclude \"drop.conf\"\n")
+	mustWrite(t, filepath.Join(root, "drop.conf"), "volume_normalization \"no\"\n")
+	f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.VolumeNormalization != "no" {
+		t.Fatalf("normalization %q; MPD ReadConfigParam keeps the last value", f.VolumeNormalization)
+	}
+}
+
+func TestPasswordSecretIsRedactedInAnIncludePath(t *testing.T) {
+	root := t.TempDir()
+	const secret = "secret123"
+	mustWrite(t, filepath.Join(root, "mpd.conf"),
+		"password \""+secret+"@read,control\"\ninclude \"/home/"+secret+"/missing.conf\"\n")
+	f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.PasswordSet || f.PasswordCount != 1 {
+		t.Fatalf("password count %d", f.PasswordCount)
+	}
+	assertNoSecret(t, secret, f)
+	assertNoSecret(t, secret+"@read,control", f)
+	if !strings.Contains(strings.Join(f.Problems, "\n"), "[redacted]") {
+		t.Fatalf("the include path was not redacted: %q", f.Problems)
+	}
+}
+
+func TestShortPasswordRedactsWholeTokensOnly(t *testing.T) {
+	f, err := Parse("password \"a@read\"\nmusic_directory \"/admin/a/music\"\nbind_to_address \"/var/run/a\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.MusicDirectory != "/admin/a/music" {
+		t.Fatalf("stored directory %q", f.MusicDirectory)
+	}
+	got := f.String()
+	if !strings.Contains(got, "/admin/[redacted]/music") || !strings.Contains(got, "/var/run/[redacted]") {
+		t.Fatalf("short secret was not redacted as a token:\n%s", got)
+	}
+	if strings.Contains(got, "/admin/a/") || strings.Contains(got, "run/a") {
+		t.Fatalf("token survived:\n%s", got)
+	}
+	if !strings.Contains(got, "admin") {
+		t.Fatalf("a letter inside a word was redacted:\n%s", got)
+	}
+	b := mustJSON(t, f)
+	if bytes.Contains(b, []byte(`"/admin/a/music"`)) || bytes.Contains(b, []byte("a@read")) {
+		t.Fatalf("json kept the secret: %s", b)
+	}
+}
+
+func TestAnUnclosedBlockDoesNotAbsorbTheNext(t *testing.T) {
+	const text = "" +
+		"audio_output {\n" +
+		"type \"alsa\"\n" +
+		"name \"DAC\"\n" +
+		"audio_output {\n" +
+		"type \"fifo\"\n" +
+		"name \"Snapcast\"\n" +
+		"format \"44100:16:2\"\n" +
+		"}\n"
+	f, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Outputs) != 2 {
+		t.Fatalf("outputs %+v problems %v", f.Outputs, f.Problems)
+	}
+	if f.Outputs[0].Name != "DAC" || f.Outputs[0].Type != "alsa" || f.Outputs[0].Format != "" {
+		t.Fatalf("DAC absorbed the next block: %+v", f.Outputs[0])
+	}
+	if f.Outputs[1].Name != "Snapcast" || f.Outputs[1].Type != "fifo" || f.Outputs[1].Format != "44100:16:2" {
+		t.Fatalf("fifo %+v", f.Outputs[1])
+	}
+	if !strings.Contains(strings.Join(f.Problems, "\n"), "not closed") {
+		t.Fatalf("problems %v", f.Problems)
+	}
+}
+
+func TestARepeatedKeyInsideABlockIsAProblem(t *testing.T) {
+	f, err := Parse("resampler {\nplugin \"soxr\"\nthreads \"1\"\nthreads \"2\"\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Resampler.Plugin != "soxr" || f.Resampler.Quality != "" {
+		t.Fatalf("resampler %+v", f.Resampler)
+	}
+	if !strings.Contains(strings.Join(f.Problems, "\n"), "repeats threads") {
+		t.Fatalf("problems %v", f.Problems)
+	}
+}
+
+func TestReadHostResolvesBothSidesBeforeTheLogicalPath(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	mustWrite(t, filepath.Join(real, "etc", "mpd.conf"), "music_directory \"/m\"\n")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlink: " + err.Error())
+	}
+	f, err := ReadHost(real, filepath.Join(link, "etc", "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Path != "/etc/mpd.conf" || f.MusicDirectory != "/m" {
+		t.Fatalf("path %q music %q", f.Path, f.MusicDirectory)
+	}
+	other, err := ReadHost(link, filepath.Join(real, "etc", "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Path != "/etc/mpd.conf" {
+		t.Fatalf("path from the link root %q", other.Path)
+	}
+}
+
 func TestPasswordWordMarshals(t *testing.T) {
 	f, err := Parse("password \"password\"\nmusic_directory \"/secret-password/music\"\n")
 	if err != nil {

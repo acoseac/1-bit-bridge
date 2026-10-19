@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -75,10 +76,105 @@ func TestDetectMoodeAndVolumioWins(t *testing.T) {
 func TestMoodeFooterFallback(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "usr", "local", "bin", "moodeutl"), "")
-	writeFile(t, filepath.Join(root, "var", "www", "footer.php"), "Release: 9.0.0 2024-01-02\n")
+	writeFile(t, filepath.Join(root, "var", "www", "footer.php"),
+		"<!-- Release: 1.0.0 1999-01-01 -->\n"+
+			"<script>var x = \"Release: 2.0.0 2000-01-01\";</script>\n"+
+			"<li>Release: 9.0.0 2024-01-02</li> <!-- NOTE: getMoodeRel() parses this -->\n")
 	sw, _ := detectSoftware(root)
 	if sw.Version != "9.0.0" || sw.BuildDate != "2024-01-02" {
 		t.Fatalf("footer.php %#v", sw)
+	}
+	version, date := moodeRelease("<li>Release: 8.3.1 2024-08-21)</li>\n")
+	if version != "8.3.1" || date != "2024-08-21" {
+		t.Fatalf("delimiter stayed in the value: %q %q", version, date)
+	}
+	version, date = moodeRelease("<li>Release: 8.3.1;</li>")
+	if version != "8.3.1" || date != "" {
+		t.Fatalf("semicolon stayed in the value: %q %q", version, date)
+	}
+}
+
+func TestOSReleaseFollowsTheShellQuoting(t *testing.T) {
+	text := "" +
+		"# VOLUMIO_VERSION=hidden\n" +
+		"\n" +
+		"VOLUMIO_VERSION=\"4.119\"\n" +
+		"PRETTY_NAME=\"say \\\"hi\\\" \\$x `y`\"\n" +
+		"ID=raspbian # not part of the value\n" +
+		"NAME=\"foo # bar\"\n" +
+		"VOLUMIO_BUILD_DATE='Tue Mar 24'\n"
+	kv := parseOSRelease(text)
+	if kv["VOLUMIO_VERSION"] != "4.119" {
+		t.Fatalf("version %q", kv["VOLUMIO_VERSION"])
+	}
+	if kv["PRETTY_NAME"] != "say \"hi\" $x `y`" {
+		t.Fatalf("pretty %q", kv["PRETTY_NAME"])
+	}
+	tick := parseOSRelease("NOTE=\"tick \\` end\"\n")
+	if tick["NOTE"] != "tick ` end" {
+		t.Fatalf("backtick %q", tick["NOTE"])
+	}
+	if kv["ID"] != "raspbian" {
+		t.Fatalf("unquoted comment stayed: %q", kv["ID"])
+	}
+	if kv["NAME"] != "foo # bar" {
+		t.Fatalf("quoted comment was stripped: %q", kv["NAME"])
+	}
+	if kv["VOLUMIO_BUILD_DATE"] != "Tue Mar 24" {
+		t.Fatalf("single quotes %q", kv["VOLUMIO_BUILD_DATE"])
+	}
+	if _, ok := kv["# VOLUMIO_VERSION"]; ok {
+		t.Fatal("a comment line was a key")
+	}
+}
+
+func TestUnsetRuntimeDirIsNotDialled(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc", "mpd.conf"), "bind_to_address \"$XDG_RUNTIME_DIR/socket\"\nmusic_directory \"/music\"\n")
+	rep := Inspect(context.Background(), Options{Root: root, Home: root})
+	if rep.MPD.Version != "" || rep.MusicDirectory != "/music" {
+		t.Fatalf("mpd %#v music %q", rep.MPD, rep.MusicDirectory)
+	}
+	joined := strings.Join(rep.Problems, "\n")
+	if strings.Contains(joined, "dial") || strings.Contains(joined, "$XDG_RUNTIME_DIR") {
+		t.Fatalf("unexpanded endpoint was dialled or echoed: %q", joined)
+	}
+	if joined == "" {
+		t.Fatal("no problem for an unexpanded endpoint")
+	}
+}
+
+func TestTildeWithoutHomeIsNotDialled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets")
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc", "mpd.conf"), "bind_to_address \"~/mpd/socket\"\nmusic_directory \"/music\"\n")
+	rep := Inspect(context.Background(), Options{Root: root})
+	if rep.MPD.Version != "" {
+		t.Fatalf("dialled %#v", rep.MPD)
+	}
+	joined := strings.Join(rep.Problems, "\n")
+	if strings.Contains(joined, "dial") || strings.Contains(joined, "~/") {
+		t.Fatalf("relative tilde path was dialled or echoed: %q", joined)
+	}
+}
+
+func TestTildeFlagExpandsBeforeDial(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets")
+	}
+	dir, err := os.MkdirTemp("/tmp", "mpd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "socket")
+	fx := loadReplies(t)
+	startFake(t, fakeOpts{network: "unix", addr: sock, greeting: fx.Greeting, replies: fx.replies()})
+	rep := Inspect(context.Background(), Options{Endpoint: "~/socket", Home: dir})
+	if rep.MPD.Version != "0.24.0" || rep.MPD.Endpoint != sock {
+		t.Fatalf("mpd %#v problems %v", rep.MPD, rep.Problems)
 	}
 }
 

@@ -40,14 +40,19 @@ type Client struct {
 }
 
 // Dial connects to endpoint, reads the greeting, and authenticates when
-// password is not empty. endpoint is "host:port" or a unix-socket path
-// (an absolute path, a path starting with ~, or an abstract name
-// starting with @). The password is not stored on the Client, and an
-// error from the password command does not contain it.
+// password is not empty. endpoint is "host:port", an absolute unix-socket
+// path, or an abstract name starting with @. A path that still starts
+// with '~' or '$', or a relative path, is refused before the dial: the
+// caller expands those (resolveDial) and a relative socket would be a
+// file in the working directory. The password is not stored on the
+// Client. On any error the connection is closed and the Client is not
+// returned, so the bufio.Reader that may hold an ACK echoing the
+// password does not outlive the call. The error does not contain the
+// password.
 func Dial(ctx context.Context, endpoint, password string) (*Client, error) {
-	network := "tcp"
-	if socketEndpoint(endpoint) {
-		network = "unix"
+	network, err := dialNetwork(endpoint)
+	if err != nil {
+		return nil, err
 	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, network, endpoint)
@@ -231,9 +236,13 @@ func (c *Client) arm(ctx context.Context) func() {
 }
 
 func (c *Client) readLine() (string, error) {
+	return readLineFrom(c.br)
+}
+
+func readLineFrom(r io.ByteReader) (string, error) {
 	var buf []byte
 	for {
-		b, err := c.br.ReadByte()
+		b, err := r.ReadByte()
 		if err != nil {
 			return "", wrapIO(err)
 		}
@@ -251,19 +260,69 @@ func (c *Client) readLine() (string, error) {
 }
 
 func (c *Client) readReply() (Reply, error) {
+	text, err := readReplyText(c.br)
+	if err != nil {
+		return Reply{}, err
+	}
+	return ParseReply(text)
+}
+
+// readReplyText reads one reply the way ParseReply reads it. A
+// `binary: N` line consumes the next N bytes and the newline after
+// them before the next line is parsed, so a payload containing
+// `\nOK\n` is not the end of the reply.
+func readReplyText(r *bufio.Reader) (string, error) {
 	var b strings.Builder
 	for {
-		line, err := c.readLine()
+		line, err := readLineFrom(r)
 		if err != nil {
-			return Reply{}, err
+			return "", err
 		}
 		if b.Len()+len(line)+1 > MaxReplyBytes {
-			return Reply{}, errors.New("mpd: reply exceeds the size cap")
+			return "", errors.New("mpd: reply exceeds the size cap")
+		}
+		if n, ok := binarySize(line); ok {
+			if n > MaxReplyBytes-b.Len()-len(line)-2 {
+				return "", errors.New("mpd: reply exceeds the size cap")
+			}
+			payload := make([]byte, n)
+			if _, err := io.ReadFull(r, payload); err != nil {
+				return "", wrapIO(err)
+			}
+			nl, err := r.ReadByte()
+			if err != nil {
+				return "", wrapIO(err)
+			}
+			if nl != '\n' {
+				return "", errors.New("mpd: binary chunk is not terminated")
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+			b.Write(payload)
+			b.WriteByte('\n')
+			continue
 		}
 		b.WriteString(line)
 		b.WriteByte('\n')
-		if line == "OK" || strings.HasPrefix(line, "ACK ") {
-			return ParseReply(b.String())
+		// The same lines ParseReply accepts. A malformed ACK or a line
+		// with no key is an error here, not a wait for a later OK: the
+		// two readers have to agree, and a deadline is the wrong answer
+		// to a line that is already not a reply.
+		if line == "OK" {
+			return b.String(), nil
+		}
+		if strings.HasPrefix(line, "ACK ") {
+			if _, err := parseACK(line); err != nil {
+				return "", err
+			}
+			return b.String(), nil
+		}
+		if line == "" || strings.TrimSpace(line) == "" {
+			return "", errors.New("mpd: empty line in reply")
+		}
+		key, _, found := strings.Cut(line, ":")
+		if !found || key == "" || strings.ContainsAny(key, " \t") {
+			return "", errors.New("mpd: reply line has no key")
 		}
 	}
 }
@@ -282,14 +341,23 @@ func wrapIO(err error) error {
 	return errors.New("mpd: " + err.Error())
 }
 
-func socketEndpoint(endpoint string) bool {
+// dialNetwork classifies an endpoint that is ready to dial. '~' and '$'
+// are still unexpanded, and a relative path is not a socket this client
+// will open in the working directory. Both are errors, not a TCP dial.
+func dialNetwork(endpoint string) (string, error) {
 	if endpoint == "" {
-		return false
+		return "", errors.New("mpd: empty endpoint")
 	}
 	switch endpoint[0] {
-	case '/', '~', '@':
-		return true
-	default:
-		return false
+	case '/':
+		return "unix", nil
+	case '@':
+		return "unix", nil
+	case '~', '$':
+		return "", errors.New("mpd: endpoint was not expanded")
 	}
+	if strings.Contains(endpoint, "/") {
+		return "", errors.New("mpd: relative socket path")
+	}
+	return "tcp", nil
 }

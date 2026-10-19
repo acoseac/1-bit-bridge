@@ -7,7 +7,8 @@
 // the database: exchange refuses a command that is not on that list before
 // anything is written. password is on the list only so a caller who already
 // holds one can authenticate, and the value is not kept, logged or placed
-// in an error.
+// in an error. A failed Dial returns no Client, so the bufio.Reader that
+// may have read an ACK echoing the password does not outlive the call.
 //
 // config is one of the read commands. Over a TCP connection MPD answers it
 // with ACK [4@0] {config} Command only permitted to local clients, so a

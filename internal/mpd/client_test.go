@@ -89,7 +89,10 @@ func TestWrongPasswordIsAnACKAndDropsTheSecret(t *testing.T) {
 		greeting: fx.Greeting, replies: fx.replies(),
 		password: "right-mpd-password-value", echoPassword: true,
 	})
-	_, err := Dial(context.Background(), srv.addr, secret)
+	c, err := Dial(context.Background(), srv.addr, secret)
+	if c != nil {
+		t.Fatal("a failed Dial returned the client, whose read buffer can still hold the echoed password")
+	}
 	if err == nil {
 		t.Fatal("wrong password was accepted")
 	}
@@ -122,6 +125,84 @@ func TestDialDoesNotKeepThePassword(t *testing.T) {
 	}
 	if holdsSecret(reflect.ValueOf(c), secret, map[uintptr]struct{}{}) {
 		t.Fatal("the client holds the password after a command")
+	}
+}
+
+func TestDialRefusesAnUnexpandedSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := Dial(ctx, "~/socket", "")
+	if err == nil || strings.Contains(err.Error(), "dial") {
+		t.Fatalf("relative socket was dialled: %v", err)
+	}
+	_, err = Dial(ctx, "$XDG_RUNTIME_DIR/socket", "")
+	if err == nil || strings.Contains(err.Error(), "dial") || strings.Contains(err.Error(), "XDG_RUNTIME_DIR") {
+		t.Fatalf("unexpanded socket was dialled: %v", err)
+	}
+}
+
+func TestGreetingAndReplyFramingIsExact(t *testing.T) {
+	version, err := ParseGreeting("OK MPD 0.24.0")
+	if err != nil || version != "0.24.0" {
+		t.Fatalf("greeting %q %v", version, err)
+	}
+	for _, line := range []string{"  OK MPD 0.24.0", "OK MPD    0.24.0", "OK MPD 0.24.0 "} {
+		if _, err := ParseGreeting(line); err == nil {
+			t.Fatalf("accepted greeting %q", line)
+		}
+	}
+	if _, err := ParseReply("key: value\nOK\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"  OK  \n", "OK \n", "OK MPD 0.24.0\n"} {
+		if _, err := ParseReply(text); err == nil {
+			t.Fatalf("accepted reply %q", text)
+		}
+	}
+}
+
+func TestBinaryChunkDoesNotEndTheReply(t *testing.T) {
+	fx := loadReplies(t)
+	// Four payload bytes are "\nOK\n", then the chunk's own newline, then
+	// the real pair and the real OK. A line reader that stops on OK ends
+	// inside the payload.
+	body := "binary: 4\n\nOK\n\nkey: kept\nOK\n"
+	srv := startFake(t, fakeOpts{greeting: fx.Greeting, replies: map[string]string{"status": body}})
+	c := mustDial(t, srv.addr, "")
+	t.Cleanup(func() { _ = c.Close() })
+	got, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got.Get("key"); !ok || v != "kept" {
+		t.Fatalf("status %#v", got)
+	}
+}
+
+func TestHoldsSecretWalksContainers(t *testing.T) {
+	const secret = "container-secret-value"
+	type inner struct{ S string }
+	type box struct{ V any }
+	var word [1]string
+	word[0] = secret
+	var raw [8]byte
+	copy(raw[:], "secret12")
+	seen := map[uintptr]struct{}{}
+	for _, v := range []reflect.Value{
+		reflect.ValueOf(map[string]string{"k": secret}),
+		reflect.ValueOf(word),
+		reflect.ValueOf(&inner{S: secret}),
+		reflect.ValueOf(box{V: secret}),
+	} {
+		if !holdsSecret(v, secret, seen) {
+			t.Fatalf("%s hid the secret", v.Type())
+		}
+	}
+	if !holdsSecret(reflect.ValueOf(raw), "secret12", seen) {
+		t.Fatal("a byte array hid the secret")
+	}
+	if holdsSecret(reflect.ValueOf(map[string]int{"a": 1}), secret, seen) {
+		t.Fatal("a map without the secret was reported")
 	}
 }
 
@@ -476,9 +557,14 @@ func unquoteArg(s string) string {
 	return b.String()
 }
 
-// holdsSecret walks the value the client keeps. The socket itself is not
-// walked: Write copies the bytes and does not retain the caller's slice,
-// and that copy is the kernel's, not a field of Client.
+// holdsSecret walks the value the client keeps. It follows pointers,
+// interfaces, structs, slices, arrays and maps, including a [N]byte, so
+// a later field of any of those shapes that stores the password fails
+// TestDialDoesNotKeepThePassword. The socket itself is not walked:
+// Write copies the bytes and does not retain the caller's slice, and
+// that copy is the kernel's, not a field of Client. A failed Dial
+// returns no Client, so the bufio.Reader that read an ACK is not
+// reachable after the call returns.
 func holdsSecret(v reflect.Value, secret string, seen map[uintptr]struct{}) bool {
 	if !v.IsValid() || secret == "" {
 		return false
@@ -517,6 +603,31 @@ func holdsSecret(v reflect.Value, secret string, seen map[uintptr]struct{}) bool
 		}
 		for i := 0; i < v.Len(); i++ {
 			if holdsSecret(v.Index(i), secret, seen) {
+				return true
+			}
+		}
+	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 && v.Len() > 0 {
+			buf := make([]byte, v.Len())
+			for i := 0; i < v.Len(); i++ {
+				buf[i] = byte(v.Index(i).Uint())
+			}
+			if strings.Contains(string(buf), secret) {
+				return true
+			}
+		}
+		for i := 0; i < v.Len(); i++ {
+			if holdsSecret(v.Index(i), secret, seen) {
+				return true
+			}
+		}
+	case reflect.Map:
+		if v.IsNil() {
+			return false
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			if holdsSecret(iter.Key(), secret, seen) || holdsSecret(iter.Value(), secret, seen) {
 				return true
 			}
 		}

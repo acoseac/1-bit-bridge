@@ -38,17 +38,11 @@ func runOutputPlayer(ctx context.Context, args []string, goos string, stdout, st
 		fmt.Fprintf(stderr, "output player: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	opt := mpd.Options{Conf: *confPath, Endpoint: *endpoint, Root: *root}
-	if opt.Root == "" && opt.Conf == "" && opt.Endpoint == "" {
-		if goos != "linux" {
-			fmt.Fprintf(stderr, "output player: the player is read from a Linux box, and this is %s\n", goos)
-			fmt.Fprintln(stderr, "  --root reads a tree captured from one, --conf a configuration file, --mpd an endpoint.")
-			return 1
-		}
-		opt.Root = "/"
-		opt.Home = os.Getenv("HOME")
-		opt.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
-		opt.XDGRuntimeDir = os.Getenv("XDG_RUNTIME_DIR")
+	opt, refuse := playerOptions(goos, *root, *confPath, *endpoint, os.Getenv)
+	if refuse {
+		fmt.Fprintf(stderr, "output player: the player is read from a Linux box, and this is %s\n", goos)
+		fmt.Fprintln(stderr, "  --root reads a tree captured from one, --conf a configuration file, --mpd an endpoint.")
+		return 1
 	}
 	ctx, cancel := context.WithTimeout(ctx, mpd.DefaultTimeout)
 	defer cancel()
@@ -64,6 +58,38 @@ func runOutputPlayer(ctx context.Context, args []string, goos string, stdout, st
 		return 1
 	}
 	return 0
+}
+
+// playerOptions decides what Inspect is allowed to read.
+//
+// On Linux the host tree is always the root, unless --root names
+// another tree. --mpd replaces only the endpoint, and --conf only the
+// configuration path; neither skips detection. Off Linux the command
+// reads only what a flag names, and never the host's /. A --root
+// search does not use the process's home. The home and XDG variables
+// are taken from the environment whenever --root is not set, so a '~'
+// or '$' in --mpd or in the configuration can expand. They are the
+// variables MPD's ParsePath expands.
+func playerOptions(goos, root, confPath, endpoint string, getenv func(string) string) (mpd.Options, bool) {
+	opt := mpd.Options{Conf: confPath, Endpoint: endpoint}
+	if root != "" {
+		opt.Root = root
+		return opt, false
+	}
+	if goos != "linux" && confPath == "" && endpoint == "" {
+		return opt, true
+	}
+	if goos == "linux" {
+		opt.Root = "/"
+	}
+	if getenv != nil {
+		opt.Home = getenv("HOME")
+		opt.XDGConfigHome = getenv("XDG_CONFIG_HOME")
+		opt.XDGRuntimeDir = getenv("XDG_RUNTIME_DIR")
+		opt.XDGCacheHome = getenv("XDG_CACHE_HOME")
+		opt.XDGMusicDir = getenv("XDG_MUSIC_DIR")
+	}
+	return opt, false
 }
 
 func renderPlayer(w io.Writer, r mpd.Report) {

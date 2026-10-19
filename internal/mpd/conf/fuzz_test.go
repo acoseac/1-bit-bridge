@@ -41,7 +41,7 @@ func FuzzParseConf(f *testing.F) {
 			rendered += "\n" + errA.Error()
 		}
 		rendered = stripFixed(stripPublic(rendered, a))
-		for _, secret := range a.passwordValues() {
+		for _, secret := range a.redactionKeys() {
 			if len(secret) < 8 {
 				continue
 			}
@@ -75,7 +75,7 @@ func stripFixed(s string) string {
 }
 
 func leaked(err error, f File) bool {
-	for _, secret := range f.passwordValues() {
+	for _, secret := range f.redactionKeys() {
 		if len(secret) >= 8 && strings.Contains(err.Error(), secret) {
 			return true
 		}

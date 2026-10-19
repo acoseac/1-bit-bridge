@@ -46998,3 +46998,101 @@ were restored.
 `File.String` made to append the password values.
 `TestPasswordIsRedacted` went red at `conf_test.go:174`: the secret
 appeared in the summary. The line was removed.
+
+## 2026-10-19 — review of `bridge output player` (B473 step 2a, PR #1284)
+
+### The question
+
+Eight findings on the player reader. Each was checked against MPD
+0.24.4 (`src/config/File.cxx`, `Data.hxx`, `Block.cxx`, `Templates.cxx`,
+`Net.cxx`, `Path.cxx`, `src/Permission.cxx`, `src/client/New.cxx`,
+`src/client/Response.cxx`, `doc/protocol.rst`) and, for the two low
+findings, against os-release(5) and moOde's `www/footer.php`. The rules
+that changed are in `.claude/rules/output.md`.
+
+### What the source said, and what changed
+
+- **Repeated top-level parameters: not a defect.** `ReadConfigParam`
+  clears a non-repeatable option's list and then adds the new value, so
+  the last definition wins. `GetParam` returns `list.front()`, which is
+  that only element. `bind_to_address` and `password` are the repeatable
+  parameters and stay a list. A second `resampler` block is different:
+  `ReadConfigBlock` throws, and this reader keeps the first and reports
+  the second. The report therefore still claims the last
+  `volume_normalization`. An include is applied by the same rule.
+- **Password redaction.** `PERMISSION_PASSWORD_CHAR` is `@` and
+  `Permission.cxx` splits on the first one, so the secret is the part
+  before `@` as well as the whole value. Both are removed, at every
+  length. Under four bytes the removal is a whole token only (not a
+  letter, digit or `_` on either side). A problem that names an include
+  path is scrubbed with those keys, and the error for an endpoint that
+  cannot be dialled does not quote the endpoint.
+- **Socket expansion.** `ServerSocketAddGeneric` treats a leading `/`,
+  `~` or `$` as a path (`ParsePath`), and anything else as a host.
+  `ParsePath` expands a leading `~` / `~/` and a leading `$NAME` or
+  `$NAME/rest`, and throws when the result is not absolute. The
+  variables are `HOME`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`,
+  `XDG_CACHE_HOME` and `XDG_MUSIC_DIR`. `XDG_RUNTIME_DIR` is used only
+  when it is an absolute directory that exists. This reader does not
+  call `getpwnam` (`~user` is a problem) and does not parse
+  `user-dirs.dirs` (`$XDG_MUSIC_DIR` is the absolute value the caller
+  passed, or a problem). A relative path is refused before `Dial`.
+- **`--mpd` and `--conf` on Linux.** Detection and the search for
+  `mpd.conf` use `/` unless `--root` names a tree. The two flags
+  replace only the endpoint and the path. `ReadHost` resolves both the
+  root and the file with `EvalSymlinks` before the logical path, so a
+  macOS `/var` → `/private/var` link does not store `../`.
+- **Unclosed blocks.** `config_read_block` accepts a name and a quoted
+  value until `}`; EOF before `}` throws, and a nested `audio_output {`
+  is not a quoted value, so MPD does not load the file. This reader
+  closes the open block with a problem and starts the next, and does
+  not copy the next block's fields onto the previous one.
+  `config_read_name_value` throws when `GetBlockParam` already has the
+  name, for every name. The first value stands, including a key this
+  reader does not extract.
+- **Framing.** The greeting is exactly `OK MPD ` plus the version
+  (`New.cxx` `GREETING`). A reply ends on a line that is exactly `OK`
+  (`doc/protocol.rst`) or `ACK ` plus the bracket form. `WriteBinary`
+  writes `binary: N`, then N bytes, then a newline; the reader consumes
+  those bytes before it looks for the next line. `ParseGreeting` and
+  `ParseReply` do not trim.
+- **os-release and moOde.** os-release(5): `#` comments, shell-style
+  double quotes (`\"`, `\\`, `` \` ``, `\$` unescaped), no stripping of
+  `#` inside quotes, unquoted values ending at whitespace or `#`.
+  moOde's footer line is `<li>Release: 10.2.2 2026-05-31</li>`. The
+  reader anchors on `<li>Release:` and stops at `<`, `"`, `;`, `)` or
+  the end of the line. HTML comments are skipped first.
+
+### Tests, and the control
+
+Red before the change, then green:
+`TestPasswordSecretIsRedactedInAnIncludePath` (the include problem still
+contained `/home/secret123/missing.conf`),
+`TestShortPasswordRedactsWholeTokensOnly` (the summary still showed
+`/admin/a/music` and `/var/run/a`),
+`TestAnUnclosedBlockDoesNotAbsorbTheNext` (one output, the DAC's format
+`44100:16:2`),
+`TestARepeatedKeyInsideABlockIsAProblem` (no problem for a second
+`threads`),
+`TestReadHostResolvesBothSidesBeforeTheLogicalPath` (the stored path was
+`/../link/etc/mpd.conf`),
+`TestUnsetRuntimeDirIsNotDialled` (the problem was
+`mpd: dial $XDG_RUNTIME_DIR/socket: dial tcp: ... missing port`),
+`TestTildeWithoutHomeIsNotDialled` (`dial unix ~/mpd/socket`),
+`TestTildeFlagExpandsBeforeDial` (the endpoint stayed `~/socket`),
+`TestGreetingAndReplyFramingIsExact` (`  OK MPD 0.24.0` was accepted),
+`TestBinaryChunkDoesNotEndTheReply` (`mpd: empty line in reply`),
+`TestHoldsSecretWalksContainers` (`map[string]string hid the secret`),
+`TestOSReleaseFollowsTheShellQuoting` (the pretty name kept the
+backslashes),
+`TestMoodeFooterFallback` (the comment's `Release: 1.0.0` won).
+`TestWrongPasswordIsAnACKAndDropsTheSecret` was already green: `Dial`
+already returned no client.
+
+Negative control, on the repeated-parameter finding: `setScalar` kept
+the first `music_directory`. `TestParseQuotingEscapesCommentsAndUnknownKeys`
+went red with `music directory "a\"b\\c"; a backslash escapes the next
+byte, and the second assignment wins`. The assignment was restored to
+the last value. `TestRepeatedParameterKeepsTheLast` stayed green during
+that control, because an include is applied by `mergeFile`, which still
+overwrote `volume_normalization`.

@@ -106,7 +106,23 @@ func ReadHost(root, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	return ReadFile(root, logicalFromHost(absRoot, absHost), absHost)
+	// Both sides are resolved before the logical path is computed.
+	// filepath.Abs does not follow a symlink, so a root of /private/var
+	// and a host of /var (macOS /var → /private/var), or the reverse,
+	// make Rel walk out with "../" and the stored path is not the
+	// path inside the root.
+	resolvedRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return File{}, err
+	}
+	resolvedHost, err := filepath.EvalSymlinks(absHost)
+	if err != nil {
+		return File{}, err
+	}
+	if !lexicalInside(resolvedRoot, resolvedHost) {
+		return File{}, errOutside
+	}
+	return ReadFile(root, logicalFromHost(resolvedRoot, resolvedHost), absHost)
 }
 
 // ReadFile reads the configuration file at host, following includes, and

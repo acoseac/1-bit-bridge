@@ -88,6 +88,38 @@ func TestOutputPlayerNeverPrintsAPassword(t *testing.T) {
 	}
 }
 
+func TestMPDAndConfFlagsDoNotSkipTheHost(t *testing.T) {
+	env := func(k string) string {
+		switch k {
+		case "HOME":
+			return "/home/pi"
+		case "XDG_RUNTIME_DIR":
+			return "/run/user/1000"
+		default:
+			return ""
+		}
+	}
+	opt, refuse := playerOptions("linux", "", "", "127.0.0.1:6601", env)
+	if refuse || opt.Root != "/" || opt.Endpoint != "127.0.0.1:6601" || opt.Home != "/home/pi" || opt.XDGRuntimeDir != "/run/user/1000" {
+		t.Fatalf("linux --mpd %+v refuse %v", opt, refuse)
+	}
+	opt, refuse = playerOptions("linux", "", "/etc/mpd.conf", "", env)
+	if refuse || opt.Root != "/" || opt.Conf != "/etc/mpd.conf" || opt.Home != "/home/pi" {
+		t.Fatalf("linux --conf %+v refuse %v", opt, refuse)
+	}
+	opt, refuse = playerOptions("linux", "/tree", "", "127.0.0.1:1", env)
+	if refuse || opt.Root != "/tree" || opt.Home != "" || opt.XDGRuntimeDir != "" {
+		t.Fatalf("--root used the process home: %+v", opt)
+	}
+	if _, refuse = playerOptions("darwin", "", "", "", env); !refuse {
+		t.Fatal("darwin with no flag would scan the host")
+	}
+	opt, refuse = playerOptions("darwin", "", "", "~/socket", env)
+	if refuse || opt.Root != "" || opt.Home != "/home/pi" || opt.Endpoint != "~/socket" {
+		t.Fatalf("darwin --mpd %+v refuse %v", opt, refuse)
+	}
+}
+
 func TestOutputPlayerUsageAndOffLinux(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runOutputPlayer(context.Background(), nil, "darwin", &stdout, &stderr)

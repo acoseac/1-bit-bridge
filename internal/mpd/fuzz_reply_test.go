@@ -1,7 +1,11 @@
 package mpd
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -44,4 +48,52 @@ func FuzzParseReply(f *testing.F) {
 			t.Fatalf("an error spans a line: %q", errA.Error())
 		}
 	})
+}
+
+// FuzzReadReplyMatchesParseReply holds the client loop to the same
+// framing ParseReply accepts. A text the reader treats as one complete
+// reply parses, twice, as that reply. A binary payload is part of that
+// text, so an OK inside the payload is not a second reply.
+func FuzzReadReplyMatchesParseReply(f *testing.F) {
+	f.Add([]byte("OK\n"))
+	f.Add([]byte("key: value\nOK\n"))
+	f.Add([]byte("binary: 4\n\nOK\nkey: kept\nOK\n"))
+	f.Add([]byte("ACK [2@0] {play} bad\n"))
+	f.Add([]byte("  OK  \n"))
+	f.Add([]byte("OK \n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > MaxReplyBytes {
+			data = data[:MaxReplyBytes]
+		}
+		text, err := readReplyText(bufio.NewReader(bytes.NewReader(data)))
+		if err != nil {
+			return
+		}
+		a, errA := ParseReply(text)
+		b, errB := ParseReply(text)
+		// An ACK is a complete reply: ParseReply returns *ACKError and
+		// the pairs that preceded it. Any other error means the reader
+		// accepted text the parser rejects.
+		if !replyFramed(errA) || !replyFramed(errB) || len(a.Pairs) != len(b.Pairs) {
+			t.Fatalf("framed reply %q did not parse: %v %v", text, errA, errB)
+		}
+		for i := range a.Pairs {
+			if a.Pairs[i] != b.Pairs[i] {
+				t.Fatalf("framed reply is not deterministic")
+			}
+		}
+		if fmt.Sprint(errA) != fmt.Sprint(errB) {
+			t.Fatalf("framed reply is not deterministic: %v %v", errA, errB)
+		}
+	})
+}
+
+// replyFramed is true when ParseReply accepted the text: a reply that
+// ends in OK, or an ACK, which is a complete reply that carries an error.
+func replyFramed(err error) bool {
+	if err == nil {
+		return true
+	}
+	var ack *ACKError
+	return errors.As(err, &ack)
 }

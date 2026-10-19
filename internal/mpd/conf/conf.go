@@ -16,9 +16,19 @@
 // MPD does not bound include recursion (MusicPlayerDaemon/MPD#2505); this
 // reader refuses a cycle and a chain longer than maxIncludeDepth.
 //
+// A non-repeatable parameter keeps the last value: ReadConfigParam
+// clears that option's list before adding the new one. bind_to_address
+// and password are appended. A key repeated inside a block is a problem
+// and the first value stands. A block keyword, or a '{', while a block
+// is open closes that block with a problem; the next block's fields are
+// not merged into it.
+//
 // A password value is never printed, serialised or put in an error. The
-// field is unexported, String and JSON say only that one is set, and a
-// problem about a password line does not quote the line.
+// field is unexported. What is removed is the whole value and, when the
+// value is secret@permissions, the part before '@'. A secret shorter
+// than four bytes is removed only where it is a whole token. String and
+// JSON say only that one is set, and a problem about a password line
+// does not quote the line.
 package conf
 
 import (
@@ -28,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -235,20 +246,21 @@ func (f File) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if leak := leakedSecret(body, f.passwords); leak != "" {
+	if leak := leakedSecret(body, f.redactionKeys()); leak != "" {
 		return nil, errors.New("mpd conf: refusing to serialise a password")
 	}
 	return body, nil
 }
 
-// leakedSecret reports a password of at least 4 bytes that the JSON
-// holds as a string value. The raw bytes are not enough: the word
-// "password" is inside the keys passwordSet and passwordCount, and a
-// password that is that word would refuse a document that does not
-// contain the value.
+// leakedSecret reports a password the JSON holds as a string value.
+// The raw bytes are not enough: the word "password" is inside the keys
+// passwordSet and passwordCount, and a password that is that word
+// would refuse a document that does not contain the value. The check
+// is the JSON encoding of the value, quotes included, so a short
+// password does not match a longer string that merely contains it.
 func leakedSecret(body []byte, passwords []string) string {
 	for _, p := range passwords {
-		if len(p) < 4 {
+		if p == "" {
 			continue
 		}
 		enc, err := json.Marshal(p)
@@ -265,7 +277,7 @@ func leakedSecret(body []byte, passwords []string) string {
 func (f File) Display() File { return f.display() }
 
 func (f File) display() File {
-	pw := append([]string(nil), f.passwords...)
+	pw := f.redactionKeys()
 	out := f
 	out.passwords = nil
 	out.BindAddresses = append([]string(nil), f.BindAddresses...)
@@ -314,13 +326,109 @@ func (f File) display() File {
 	return out
 }
 
-func redactText(s string, passwords []string) string {
-	for _, p := range passwords {
-		if len(p) >= 4 && strings.Contains(s, p) {
-			s = strings.ReplaceAll(s, p, "[redacted]")
+// shortSecret is the longest password that is redacted only as a whole
+// token. A one-byte password is a real password (MPD accepts it), and
+// it is also a letter that occurs in ordinary words: replacing every
+// occurrence would turn "admin" into a lie. Four bytes is the point at
+// which a substring replacement no longer collides with ordinary words
+// in this report. A shorter secret is replaced only when the bytes on
+// either side are not a letter, a digit or '_'.
+const shortSecret = 4
+
+// redactionKeys is every string that must not be printed: the whole
+// password value, and, when the value is MPD's "secret@permissions"
+// form (Permission.cxx splits on the first '@'), the secret on its own.
+// Longer keys come first so "secret@read" is replaced whole rather than
+// leaving the "@read".
+func (f File) redactionKeys() []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		keys = append(keys, s)
+	}
+	for _, p := range f.passwords {
+		add(p)
+		if i := strings.IndexByte(p, '@'); i > 0 {
+			add(p[:i])
 		}
 	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	return keys
+}
+
+// Redact returns s with every password value removed. Callers that
+// print a path or an error from outside this file use it so a path
+// that happens to contain the secret is not shown.
+func (f File) Redact(s string) string {
+	return redactText(s, f.redactionKeys())
+}
+
+func redactText(s string, passwords []string) string {
+	for _, p := range passwords {
+		if p == "" || !strings.Contains(s, p) {
+			continue
+		}
+		if len(p) < shortSecret {
+			s = redactTokens(s, p)
+			continue
+		}
+		s = strings.ReplaceAll(s, p, "[redacted]")
+	}
 	return s
+}
+
+// redactTokens replaces secret only where it is a whole token. The
+// runes on either side must not be a letter, a digit or '_'.
+func redactTokens(s, secret string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		j := strings.Index(s[i:], secret)
+		if j < 0 {
+			b.WriteString(s[i:])
+			break
+		}
+		j += i
+		if tokenBoundaryBefore(s, j) && tokenBoundaryAfter(s, j+len(secret)) {
+			b.WriteString(s[i:j])
+			b.WriteString("[redacted]")
+			i = j + len(secret)
+			continue
+		}
+		// The match sits inside a longer token. Keep the byte it
+		// starts on and look again just after it, so the text before
+		// the match is not dropped.
+		b.WriteString(s[i : j+1])
+		i = j + 1
+	}
+	return b.String()
+}
+
+func tokenBoundaryBefore(s string, i int) bool {
+	if i <= 0 {
+		return true
+	}
+	r, _ := utf8.DecodeLastRuneInString(s[:i])
+	return !isTokenRune(r)
+}
+
+func tokenBoundaryAfter(s string, i int) bool {
+	if i >= len(s) {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(s[i:])
+	return !isTokenRune(r)
+}
+
+func isTokenRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
 
 func (f *File) finish() {
@@ -345,12 +453,9 @@ func (f *File) finish() {
 // written without one; this is the backstop for a path that happens to
 // be the password.
 func (f *File) scrub() {
+	keys := f.redactionKeys()
 	for i := range f.Problems {
-		for _, s := range f.passwords {
-			if len(s) >= 4 {
-				f.Problems[i] = strings.ReplaceAll(f.Problems[i], s, "[redacted]")
-			}
-		}
+		f.Problems[i] = redactText(f.Problems[i], keys)
 	}
 }
 
@@ -507,6 +612,31 @@ func parseFile(text, name, dir string, load *loader) File {
 				block = nil
 				continue
 			}
+			// MPD's config_read_block accepts only a name and a quoted
+			// value until '}'. A block keyword here means the previous
+			// block was not closed (File.cxx throws, so the file is not
+			// used). Close what we have and start the new block, so the
+			// new block's fields cannot land on the previous one.
+			if word, rest, wok := nextWord(trim); wok && strings.HasPrefix(trimLeft(rest), "{") {
+				p.add(ln, "block %s is not closed", block.kind)
+				p.closeBlock(block)
+				after := trimLeft(trimLeft(rest)[1:])
+				if after != "" && !strings.HasPrefix(after, "#") {
+					p.add(ln, "trailing tokens after '{'")
+					inBlock = false
+					block = nil
+					continue
+				}
+				block = newBlock(word)
+				continue
+			}
+			if strings.HasPrefix(trim, "{") {
+				p.add(ln, "block %s is not closed", block.kind)
+				p.closeBlock(block)
+				inBlock = false
+				block = nil
+				continue
+			}
 			key, value, ok := p.assignment(ln, trim, true)
 			if !ok {
 				continue
@@ -616,6 +746,14 @@ func (p *prober) quoted(line int, rest string, secret bool) (value, leftover str
 	return value, leftover, true
 }
 
+// setScalar records one top-level parameter. A non-repeatable
+// parameter keeps the last value: MPD 0.24.4 ReadConfigParam
+// (src/config/File.cxx) clears that option's list before adding the
+// new value, and GetParam (src/config/Data.hxx) returns the only
+// element left. bind_to_address and password are the repeatable
+// parameters (Templates.cxx) and are appended. A second resampler
+// block is the other shape: ReadConfigBlock throws, and closeBlock
+// keeps the first.
 func (p *prober) setScalar(line int, key, value string) {
 	switch key {
 	case "music_directory":
@@ -659,14 +797,17 @@ func newBlock(kind string) *blockState {
 	return &blockState{kind: kind, seen: map[string]int{}}
 }
 
+// set records one line of a block. File.cxx config_read_name_value
+// throws when GetBlockParam already has the name, for every name,
+// including ones this reader does not extract. The first value is the
+// one GetBlockParam would have returned; the line is a problem either
+// way, and the message does not quote the value.
 func (b *blockState) set(line int, key, value string, p *prober) {
-	if prev, ok := b.seen[key]; ok && b.keeps(key) {
+	if prev, ok := b.seen[key]; ok {
 		p.add(line, "%s repeats %s, first set on line %d", b.kind, key, prev)
 		return
 	}
-	if b.keeps(key) {
-		b.seen[key] = line
-	}
+	b.seen[key] = line
 	switch b.kind {
 	case "audio_output":
 		switch key {
@@ -711,21 +852,6 @@ func (b *blockState) set(line int, key, value string, p *prober) {
 		// decoder, input, database, and the rest: parsed so a bad
 		// quote is still a problem, and not extracted.
 	}
-}
-
-func (b *blockState) keeps(key string) bool {
-	switch b.kind {
-	case "audio_output":
-		switch key {
-		case "type", "name", "device", "path", "dop", "mixer_type", "mixer_control", "mixer_device", "enabled", "format", "allowed_formats":
-			return true
-		}
-	case "resampler":
-		return key == "plugin" || key == "quality"
-	case "filter":
-		return key == "name" || key == "plugin"
-	}
-	return false
 }
 
 func (p *prober) closeBlock(b *blockState) {
