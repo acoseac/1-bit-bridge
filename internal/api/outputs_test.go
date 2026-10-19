@@ -581,9 +581,9 @@ func TestOutputIDIgnoresTheCardIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	at5 := outputAt(t, snap, "hw:5,0")
+	at5, _ := outputAt(t, snap, "hw:5,0")
 	moved := moveUSBCard(snap, 5, 6)
-	at6 := outputAt(t, moved, "hw:6,0")
+	at6, _ := outputAt(t, moved, "hw:6,0")
 	if at5.ID == "" || at5.ID != at6.ID {
 		t.Fatalf("index changed the id: %q vs %q", at5.ID, at6.ID)
 	}
@@ -599,7 +599,8 @@ func TestOutputIDIgnoresTheCardIndex(t *testing.T) {
 			renamed.Cards[i].ID = "Other"
 		}
 	}
-	if outputAt(t, renamed, "hw:5,0").ID == at5.ID {
+	renamedOut, _ := outputAt(t, renamed, "hw:5,0")
+	if renamedOut.ID == at5.ID {
 		t.Fatal("a different ALSA id kept the same output id")
 	}
 	rewired := moveUSBCard(snap, 5, 5)
@@ -610,12 +611,34 @@ func TestOutputIDIgnoresTheCardIndex(t *testing.T) {
 			rewired.Cards[i].USBID = &id
 		}
 	}
-	if outputAt(t, rewired, "hw:5,0").ID == at5.ID {
+	rewiredOut, _ := outputAt(t, rewired, "hw:5,0")
+	if rewiredOut.ID == at5.ID {
 		t.Fatal("a different USB id kept the same output id")
 	}
 }
 
-func outputAt(t *testing.T, snap alsa.Snapshot, device string) OutputInfo {
+func TestIsMPDsOutputIsTrueOrNull(t *testing.T) {
+	snap, err := (alsa.Reader{ProcRoot: filepath.Join("..", "alsa", "testdata", "dsd256-native", "proc")}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, rawResolved := outputAt(t, snap, "hw:5,0")
+	if resolved.DAC == nil || resolved.DAC.IsMPDsOutput == nil || !*resolved.DAC.IsMPDsOutput {
+		t.Fatalf("resolved card %+v", resolved.DAC)
+	}
+	if jsonContains(rawResolved, `"isMPDsOutput":false`) {
+		t.Fatalf("resolved card sent false: %s", rawResolved)
+	}
+	unresolved, rawUnresolved := outputAt(t, snap, "volumio")
+	if unresolved.DAC == nil || unresolved.DAC.IsMPDsOutput != nil {
+		t.Fatalf("unresolved card %+v", unresolved.DAC)
+	}
+	if !jsonContains(rawUnresolved, `"isMPDsOutput":null`) || jsonContains(rawUnresolved, `"isMPDsOutput":false`) {
+		t.Fatalf("unresolved card was not null: %s", rawUnresolved)
+	}
+}
+
+func outputAt(t *testing.T, snap alsa.Snapshot, device string) (OutputInfo, []byte) {
 	t.Helper()
 	cfg := LocalOutputsConfig{
 		GOOS:     "linux",
@@ -638,11 +661,11 @@ func outputAt(t *testing.T, snap alsa.Snapshot, device string) OutputInfo {
 	}
 	hs, token := newOutputsHTTP(t, cfg.Identity, cfg)
 	resp := outputsGet(t, hs, token, "/v1/outputs")
-	body, _ := decodeOutputs(t, resp)
+	body, raw := decodeOutputs(t, resp)
 	if len(body.Outputs) != 1 {
 		t.Fatalf("outputs %+v", body.Outputs)
 	}
-	return body.Outputs[0]
+	return body.Outputs[0], raw
 }
 
 func moveUSBCard(snap alsa.Snapshot, from, to int) alsa.Snapshot {

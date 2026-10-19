@@ -47441,3 +47441,11 @@ of the TLS fingerprint, the MPD endpoint, the card's ALSA id string
 (`/proc/asound/cards`, for example `A20`) and its USB id. A null dac
 uses empty strings for both. `TestOutputIDIgnoresTheCardIndex` reads the
 iFi card at index 5 and at index 6.
+
+## 2026-10-19 — isMPDsOutput is true or null, never false (B473 step 2b)
+
+One resolved card is listed with `true`. An unresolved device lists each
+USB card with `null`, and several resolved cards are listed with `null`.
+The bridge does not list the other cards once one resolved, so it never
+has a card to mark `false`. `TestIsMPDsOutputIsTrueOrNull` pins both
+answers and rejects the JSON `false`.

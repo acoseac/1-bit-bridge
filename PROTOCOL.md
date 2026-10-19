@@ -783,7 +783,7 @@ Every key is present. A list is `[]`, never `null`. `dac` is `null` when the ele
 
 `mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
 
-`dac` is the card MPD's ALSA device names when that device resolves to exactly one card, and `isMPDsOutput` is then `true`. When it does not resolve, each USB card is listed with `isMPDsOutput: null`. When several devices resolve to several cards, those cards are listed with `isMPDsOutput: null`. This bridge does not send `false`: once one card resolved, the others are not listed. A client treats `false` as "this card is not the one MPD plays to" if a later response lists it. `usbId` is `vendor:product` or `""`.
+`dac` is the card MPD's ALSA device names when that device resolves to exactly one card, and `isMPDsOutput` is then `true`. When it does not resolve, each USB card is listed with `isMPDsOutput` null. When several devices resolve to several cards, those cards are listed with `isMPDsOutput` null. `isMPDsOutput` is `true` or `null`, never `false`. `usbId` is `vendor:product` or `""`.
 
 `capabilities` come from every playback altset of that card's PCM device, not from the running `hw_params`. `maxPCMRate` and `pcmBitDepths` count only PCM formats (`S` or `U` plus a bit depth). A native DSD rate is the altset's frame rate times the format's width: `DSD_U32_*` ×32, `DSD_U16_*` ×16, `DSD_U8` ×8. A DSD format of another width is listed in `dsdFormats` and adds no rate.
 

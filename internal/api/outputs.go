@@ -64,10 +64,11 @@ type OutputMPD struct {
 	ReachableFromLAN bool     `json:"reachableFromLAN"`
 }
 
-// OutputDAC is one sound card. IsMPDsOutput is true when this card is
-// the device MPD's alsa output names, and null when that device did
-// not resolve to one card. The bridge does not emit false: it does not
-// list the other cards once one resolved.
+// OutputDAC is one sound card. IsMPDsOutput is true or null, never
+// false. It is true when this card is the one device MPD's alsa output
+// names, and null when that device did not resolve to one card. The
+// bridge does not list the other cards once one resolved, so it has no
+// card to mark false.
 type OutputDAC struct {
 	Card         int                `json:"card"`
 	ID           string             `json:"id"`
