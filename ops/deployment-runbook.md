@@ -315,7 +315,7 @@ This is a health check that looks like it passed. Use:
 ```sh
 journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep -c -E 'level=INFO|"level":"INFO"'    # the control: must be > 0
 journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep -c -E 'level=ERROR|"level":"ERROR"'
-journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep -E 'level=WARN|"level":"WARN"' | grep -v -E 'component=http|"component":"http"'
+journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep -E 'level=WARN|"level":"WARN"' | grep -v -E 'component=http|"component":"http"'    # lists them: read each one, don't just count
 ```
 
 **The hosts do not all log the same format, so the grep matches both, and the INFO count is its positive control** (backlog B455, 2026-10-18). The demo logs slog's text form (`level=WARN`, measured above), and the NUC logs JSON (`"level":"WARN"`). A text-only grep on the NUC returned 0 ERROR and 0 WARN however bad things were: its real 24 h baseline on 2026-10-18 was 0 ERROR and 184 WARN, all `GET /v1/artist-image` 404 access lines. So the ledger's earlier "0 WARN" figures for the NUC were probably measured blind. home-pc's format is not yet measured (it was offline from 2026-10-18). On any host, a zero is a result only when the INFO count above it is not.
