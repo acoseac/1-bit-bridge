@@ -47653,3 +47653,12 @@ escape makes the file unusable. `TestStringEscapeIsOnlyQuoteOrBackslash`
 failed first with `letter = 2, 0, true; want unresolved`,
 `newline = 2, 0, true; want unresolved`, `tab = 2, 0, true; want unresolved`,
 `hex = 2, 0, true; want unresolved`, and `octal = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — one file that does not parse makes the configuration unresolved (B473 step 2b)
+
+A conf.d file that parsed was kept when asound.conf did not. `pcm.!out`
+with `@args` was dropped and `pcm.out` from conf.d resolved to card 0.
+A directory where asound.conf should be was the same. A missing file
+is still ignored. `TestUnparsedFileDropsTheRest` failed first with
+`unparsed asound.conf = 0, 0, true; want unresolved` and
+`unreadable asound.conf = 0, 0, true; want unresolved`.

@@ -389,3 +389,58 @@ pcm."a\'b" {
 		t.Errorf("apostrophe = %d, %d, %v", card, pcm, ok)
 	}
 }
+
+func TestUnparsedFileDropsTheRest(t *testing.T) {
+	cards := []Card{{Index: 0, ID: "vc4hdmi0"}, {Index: 2, ID: "Audio"}}
+	write := func(t *testing.T, root, rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := t.TempDir()
+	write(t, root, filepath.Join("etc", "alsa", "conf.d", "10.conf"), "pcm.out {\n    type hw\n    card 0\n}\n")
+	write(t, root, filepath.Join("etc", "asound.conf"), "pcm.!out {\n    @args.CARD { type string }\n    type hw\n    card \"Audio\"\n}\n")
+	if card, pcm, ok := ResolveOutputDevice(root, "out", cards); ok {
+		t.Errorf("unparsed asound.conf = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+
+	unreadable := t.TempDir()
+	write(t, unreadable, filepath.Join("etc", "alsa", "conf.d", "10.conf"), "pcm.out {\n    type hw\n    card 0\n}\n")
+	if err := os.Mkdir(filepath.Join(unreadable, "etc", "asound.conf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(unreadable, "out", cards); ok {
+		t.Errorf("unreadable asound.conf = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+
+	only := t.TempDir()
+	write(t, only, filepath.Join("etc", "alsa", "conf.d", "10.conf"), "pcm.out {\n    type hw\n    card \"Audio\"\n}\n")
+	if card, pcm, ok := ResolveOutputDevice(only, "out", cards); !ok || card != 2 || pcm != 0 {
+		t.Fatalf("missing asound.conf = %d, %d, %v", card, pcm, ok)
+	}
+}
+
+func TestAtDirectiveInsideSkippedBlock(t *testing.T) {
+	cards := []Card{{Index: 2, ID: "Audio"}}
+	for _, body := range []string{
+		"ctl.!default {\n    type hw\n    @hooks [0]\n}\npcm.out { type hw\n    card \"Audio\" }\n",
+		"defaults.pcm {\n    @func getenv\n}\npcm.out { type hw\n    card \"Audio\" }\n",
+		"ctl.name {\n    @args.CARD { type string }\n}\npcm.out { type hw\n    card \"Audio\" }\n",
+	} {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if card, pcm, ok := ResolveOutputDevice(root, "out", cards); ok {
+			t.Errorf("at inside block = %d, %d, %v; want unresolved\n%s", card, pcm, ok, body)
+		}
+	}
+}

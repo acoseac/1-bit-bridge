@@ -1,6 +1,7 @@
 package alsa
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -45,10 +46,11 @@ func ConfigRoot(procRoot string) string {
 // and then etc/asound.conf, and slave.pcm is followed through type empty
 // and type plug only, until a type hw. A slave that contains ":" is a
 // device string, never a PCM of that name. A name defined more than once
-// is unresolved. A ctl or defaults stanza is skipped. A dmix, a softvol,
-// any other plugin, a hook, an include, a cycle, more than maxPCMHops
-// follows, or syntax this parser does not understand leaves the device
-// unresolved.
+// is unresolved. A ctl or defaults stanza is skipped. One file that
+// cannot be read, or that this parser does not fully understand, makes
+// the whole configuration unresolved. A dmix, a softvol, any other
+// plugin, a hook, an include, a cycle, more than maxPCMHops follows, or
+// syntax this parser does not understand leaves the device unresolved.
 func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
 	if idx, pcm, found := ResolveALSADevice(device, cards); found {
 		return idx, pcm, true
@@ -57,7 +59,11 @@ func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevic
 	if device == "" || strings.Contains(device, ":") {
 		return 0, 0, false
 	}
-	return walkPCM(loadPCMDefs(root), device, cards, map[string]bool{}, 0)
+	defs, ok := loadPCMDefs(root)
+	if !ok {
+		return 0, 0, false
+	}
+	return walkPCM(defs, device, cards, map[string]bool{}, 0)
 }
 
 type pcmDef struct {
@@ -113,25 +119,36 @@ func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]
 	}
 }
 
-func loadPCMDefs(root string) map[string]pcmDef {
+// loadPCMDefs reads conf.d and then asound.conf. ok is false when any
+// file that is present cannot be read, or parses as something this
+// reader does not fully model. A missing file is not that: the other
+// files still count. A false ok means no definition may be used.
+func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 	defs := map[string]pcmDef{}
 	var files int
 	var total int
+	bad := false
 	add := func(path string) {
-		if files >= maxAsoundFiles || total >= maxAsoundBytes {
+		if bad {
 			return
 		}
 		b, err := readCapped(path, maxFileBytes)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return
+			}
+			bad = true
+			return
+		}
+		if files >= maxAsoundFiles || total+len(b) > maxAsoundBytes {
+			bad = true
 			return
 		}
 		files++
 		total += len(b)
-		if total > maxAsoundBytes {
-			return
-		}
 		parsed, ok := parsePCMFile(string(b))
 		if !ok {
+			bad = true
 			return
 		}
 		for name, def := range parsed {
@@ -149,7 +166,10 @@ func loadPCMDefs(root string) map[string]pcmDef {
 		add(path)
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
-	return defs
+	if bad {
+		return nil, false
+	}
+	return defs, true
 }
 
 const (
