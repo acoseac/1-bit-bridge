@@ -388,6 +388,9 @@ func TestOutputCommandUsage(t *testing.T) {
 	if !strings.Contains(b.String(), "\n  output   This box as an audio output: bridge output dac") {
 		t.Errorf("bridge's usage does not list output:\n%s", b.String())
 	}
+	if !strings.Contains(b.String(), "Linux only; both read, and change nothing.") {
+		t.Errorf("usage says the output commands do not read:\n%s", b.String())
+	}
 }
 
 // rawHeader is a --raw dump's line naming the file that follows.

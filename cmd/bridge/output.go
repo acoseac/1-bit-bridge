@@ -18,8 +18,8 @@ import (
 )
 
 // outputCmd dispatches `bridge output <verb>`: the box the bridge runs on,
-// as an audio output. The first verb is `dac`, which reads what the box's
-// sound cards say and writes nothing; later ones will drive the box's MPD.
+// as an audio output. `dac` reads what the box's sound cards say and
+// `player` reads the box's MPD and how it is set. Both write nothing.
 func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		outputUsage(stderr)
@@ -28,6 +28,8 @@ func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	switch args[0] {
 	case "dac":
 		return outputDACCmd(ctx, args[1:], stdout, stderr)
+	case "player":
+		return outputPlayerCmd(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		outputUsage(stdout)
 		return 0
@@ -47,6 +49,10 @@ Subcommands:
            open, what the DAC receives (format, rate, channels, the running
            altset, the measured rate) and the thread and process holding it.
            Linux only; reads /proc and writes nothing.
+  player   Report this box's player (Volumio, moOde or MPD) and how MPD is
+           set: its version, music directory, outputs, replay gain,
+           normalization, resampler and filters. Read-only. Linux only;
+           --root, --conf and --mpd name a tree, a file or an endpoint.
 
 Run "bridge output <subcommand> -h" for subcommand-specific flags.
 `)

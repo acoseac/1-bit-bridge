@@ -46898,3 +46898,327 @@ Negative control, on the Bits fix: `"Bits"` put back into the required
 set. `TestParseStreamShapes/a_pre-5.1_altset_has_no_Bits_line_and_is_not_cut_short`
 went red with the two "no Bits line (cut short?)" problems. The slice
 was restored to Format, Channels and Rates.
+
+## 2026-10-19 — `bridge output player` reads the box's MPD, and only reads it (B473 step 2a)
+
+### The question
+
+Step one reads the DAC. This step finds the player and reads how it is
+set, still with no wire change and no `bridge.yaml` key: a read-only MPD
+client, an `mpd.conf` reader, and `bridge output player`. The later
+verdict needs the settings (replay gain, volume, the mixer, DoP,
+resampling, filters). The rules are in `.claude/rules/output.md`.
+
+### What the box and MPD's source said
+
+Captured on 2026-10-19 from the same Raspberry Pi 5, Volumio 4.119, MPD
+0.24.0. The files are `internal/mpd/testdata`, byte for byte:
+`volumio-mpd.conf` (the box's `/etc/mpd.conf`), `volumio-mpd-replies.json`
+(the greeting `OK MPD 0.24.0` and the raw replies) and `volumio-os-release`.
+
+- The configuration binds `"any"`, leaves `port` commented, and sets
+  `music_directory` to `/var/lib/mpd/music`. Two outputs: `alsa` named
+  `alsa`, device `volumio`, `dop "no"`, `enabled` omitted; `fifo` named
+  `multiroom`, `enabled "no"`, path `/tmp/snapfifo`, format
+  `44100:16:2`. Resampler `soxr` at quality `high`.
+  `volume_normalization "no"`. The only password-like line is a
+  commented `proxy_password` inside `input {}`.
+- Over TCP, `config` is `ACK [4@0] {config} Command only permitted to
+  local clients`. `replay_gain_status` is `replay_gain_mode: off`. The
+  live `outputs` reply says the alsa output is enabled and the fifo is
+  not, with `attribute: dop=0` on the alsa output.
+- MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine` (the 0.24.0 tag
+  was not published as a source tarball that fetched; 0.24.4 has the
+  same function) does not search `/etc/mpd.conf` first. On the Linux
+  `USE_XDG` build, `GetUserConfigDir` is `$XDG_CONFIG_HOME` when that
+  variable is an absolute path of a directory that exists, otherwise
+  `$HOME/.config` when that directory exists. They are alternatives. If
+  the XDG directory exists and `mpd/mpd.conf` does not, `~/.config` is
+  not tried. Then `~/.mpdconf`, `~/.mpd/mpd.conf`, and
+  `SYSTEM_CONFIG_FILE_LOCATION`, which is `/etc/mpd.conf`. The Apple
+  build looks in `~/Library/Application Support` and is not what a
+  Volumio or moOde box runs. The default port is 6600
+  (`src/Listen.cxx` `DEFAULT_PORT`).
+- A value is a double-quoted string; a backslash escapes the next byte
+  only, so `\n` is the letter n. `{` opens a block and the rest of that
+  line must be empty or a comment. `include` is relative to the
+  including file. MPD expands include globs and, as of the open PR
+  that proposes `MAX_INCLUDE_DEPTH` 16, does not bound the recursion.
+- moOde installs `/usr/local/bin/moodeutl`. `moodeutl --mooderel` reads
+  `Release: ` in `/var/www/footer.min.php` (the unminified `footer.php`
+  is the same string). This reader parses that file and does not run
+  the binary. Volumio is the pair `/volumio` and `/data/configuration`;
+  the build ids are the `VOLUMIO_*` keys in `/etc/os-release`.
+
+### What was decided
+
+- A password that is the word `password` sits inside the JSON keys
+  `passwordSet` and `passwordCount`. The marshal backstop therefore
+  looks for the JSON string encoding of the value, and the printed copy
+  replaces the value wherever it occurs in a setting. `TestPasswordWordMarshals`
+  pins both.
+- The allowlist is checked inside `exchange`, the only place a command
+  is written: `status`, `stats`, `outputs`, `replay_gain_status`,
+  `currentsong`, `config`, `commands`, and `password` only as `Dial`'s
+  argument. A refusal is `mpd: command refused` and carries neither the
+  command nor the argument. The client keeps no password, and an ACK
+  that echoes one is rewritten to `[redacted]`.
+- The configuration parser ignores keys it does not extract, so a newer
+  file still yields the settings. MPD itself rejects an unknown key.
+  Includes are relative to the including file, confined to the root,
+  bounded at depth 16 and 32 files, and refused on a cycle. Globs are
+  not expanded. A password inside an `audio_output` block is that
+  output's, not the client's.
+- The dial is the first `bind_to_address` that is a socket (`/`, `~`,
+  `@` or `$`), else `127.0.0.1` and the port setting or 6600. A TCP
+  bind that embeds a port is not what this dials. `$XDG_RUNTIME_DIR` is
+  expanded at dial time when the variable is set.
+- `music_directory` over TCP comes from the file, because `config` is
+  local-socket only. An omitted `enabled` is MPD's yes, and the live
+  `outputenabled` replaces it. A `dop` the file set is kept.
+- `bridge output player` takes `--json`, `--conf`, `--mpd` and `--root`.
+  `--root` is the flag the tests need: off Linux the command reads only
+  what a flag names, and a `--root` search does not use the process's
+  home. There is no password flag. The value never enters the command;
+  the report says whether one is set.
+- The JSON shape has every key, lists are `[]`, and `configPermitted`
+  is null when `config` was not attempted. It is a diagnostic shape,
+  not a wire type.
+
+### Negative controls
+
+`play` added to the allowlist and `Status` pointed at it.
+`TestEveryExportedMethodSendsAnAllowlistedCommand` went red with
+`Status sent [play], want [status]`. `TestAllowlistIsExactlyTheReadCommands`
+went red with `allowlist has 9 commands, want 8`.
+`TestExchangeRefusesMutatingCommands` went red because `play` was
+written and the server answered `ACK [5@0]`. The allowlist and `Status`
+were restored.
+
+`File.String` made to append the password values.
+`TestPasswordIsRedacted` went red at `conf_test.go:174`: the secret
+appeared in the summary. The line was removed.
+
+## 2026-10-19 — review of `bridge output player` (B473 step 2a, PR #1284)
+
+### The question
+
+Eight findings on the player reader. Each was checked against MPD
+0.24.4 (`src/config/File.cxx`, `Data.hxx`, `Block.cxx`, `Templates.cxx`,
+`Net.cxx`, `Path.cxx`, `src/Permission.cxx`, `src/client/New.cxx`,
+`src/client/Response.cxx`, `doc/protocol.rst`) and, for the two low
+findings, against os-release(5) and moOde's `www/footer.php`. The rules
+that changed are in `.claude/rules/output.md`.
+
+### What the source said, and what changed
+
+- **Repeated top-level parameters: not a defect.** `ReadConfigParam`
+  clears a non-repeatable option's list and then adds the new value, so
+  the last definition wins. `GetParam` returns `list.front()`, which is
+  that only element. `bind_to_address` and `password` are the repeatable
+  parameters and stay a list. A second `resampler` block is different:
+  `ReadConfigBlock` throws, and this reader keeps the first and reports
+  the second. The report therefore still claims the last
+  `volume_normalization`. An include is applied by the same rule.
+- **Password redaction.** `PERMISSION_PASSWORD_CHAR` is `@` and
+  `Permission.cxx` splits on the first one, so the secret is the part
+  before `@` as well as the whole value. Both are removed, at every
+  length. Under four bytes the removal is a whole token only (not a
+  letter, digit or `_` on either side). A problem that names an include
+  path is scrubbed with those keys, and the error for an endpoint that
+  cannot be dialled does not quote the endpoint.
+- **Socket expansion.** `ServerSocketAddGeneric` treats a leading `/`,
+  `~` or `$` as a path (`ParsePath`), and anything else as a host.
+  `ParsePath` expands a leading `~` / `~/` and a leading `$NAME` or
+  `$NAME/rest`, and throws when the result is not absolute. The
+  variables are `HOME`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`,
+  `XDG_CACHE_HOME` and `XDG_MUSIC_DIR`. `XDG_RUNTIME_DIR` is used only
+  when it is an absolute directory that exists. This reader does not
+  call `getpwnam` (`~user` is a problem) and does not parse
+  `user-dirs.dirs` (`$XDG_MUSIC_DIR` is the absolute value the caller
+  passed, or a problem). A relative path is refused before `Dial`.
+- **`--mpd` and `--conf` on Linux.** Detection and the search for
+  `mpd.conf` use `/` unless `--root` names a tree. The two flags
+  replace only the endpoint and the path. `ReadHost` resolves both the
+  root and the file with `EvalSymlinks` before the logical path, so a
+  macOS `/var` → `/private/var` link does not store `../`.
+- **Unclosed blocks.** `config_read_block` accepts a name and a quoted
+  value until `}`; EOF before `}` throws, and a nested `audio_output {`
+  is not a quoted value, so MPD does not load the file. This reader
+  closes the open block with a problem and starts the next, and does
+  not copy the next block's fields onto the previous one.
+  `config_read_name_value` throws when `GetBlockParam` already has the
+  name, for every name. The first value stands, including a key this
+  reader does not extract.
+- **Framing.** The greeting is exactly `OK MPD ` plus the version
+  (`New.cxx` `GREETING`). A reply ends on a line that is exactly `OK`
+  (`doc/protocol.rst`) or `ACK ` plus the bracket form. `WriteBinary`
+  writes `binary: N`, then N bytes, then a newline; the reader consumes
+  those bytes before it looks for the next line. `ParseGreeting` and
+  `ParseReply` do not trim.
+- **os-release and moOde.** os-release(5): `#` comments, shell-style
+  double quotes (`\"`, `\\`, `` \` ``, `\$` unescaped), no stripping of
+  `#` inside quotes, unquoted values ending at whitespace or `#`.
+  moOde's footer line is `<li>Release: 10.2.2 2026-05-31</li>`. The
+  reader anchors on `<li>Release:` and stops at `<`, `"`, `;`, `)` or
+  the end of the line. HTML comments are skipped first.
+
+### Tests, and the control
+
+Red before the change, then green:
+`TestPasswordSecretIsRedactedInAnIncludePath` (the include problem still
+contained `/home/secret123/missing.conf`),
+`TestShortPasswordRedactsWholeTokensOnly` (the summary still showed
+`/admin/a/music` and `/var/run/a`),
+`TestAnUnclosedBlockDoesNotAbsorbTheNext` (one output, the DAC's format
+`44100:16:2`),
+`TestARepeatedKeyInsideABlockIsAProblem` (no problem for a second
+`threads`),
+`TestReadHostResolvesBothSidesBeforeTheLogicalPath` (the stored path was
+`/../link/etc/mpd.conf`),
+`TestUnsetRuntimeDirIsNotDialled` (the problem was
+`mpd: dial $XDG_RUNTIME_DIR/socket: dial tcp: ... missing port`),
+`TestTildeWithoutHomeIsNotDialled` (`dial unix ~/mpd/socket`),
+`TestTildeFlagExpandsBeforeDial` (the endpoint stayed `~/socket`),
+`TestGreetingAndReplyFramingIsExact` (`  OK MPD 0.24.0` was accepted),
+`TestBinaryChunkDoesNotEndTheReply` (`mpd: empty line in reply`),
+`TestHoldsSecretWalksContainers` (`map[string]string hid the secret`),
+`TestOSReleaseFollowsTheShellQuoting` (the pretty name kept the
+backslashes),
+`TestMoodeFooterFallback` (the comment's `Release: 1.0.0` won).
+`TestWrongPasswordIsAnACKAndDropsTheSecret` was already green: `Dial`
+already returned no client.
+
+Negative control, on the repeated-parameter finding: `setScalar` kept
+the first `music_directory`. `TestParseQuotingEscapesCommentsAndUnknownKeys`
+went red with `music directory "a\"b\\c"; a backslash escapes the next
+byte, and the second assignment wins`. The assignment was restored to
+the last value. `TestRepeatedParameterKeepsTheLast` stayed green during
+that control, because an include is applied by `mergeFile`, which still
+overwrote `volume_normalization`.
+
+## 2026-10-19 — review of `bridge output player`, round 3 (B473 step 2a, PR #1284)
+
+### The question
+
+Two findings on the confirmation pass. Each was checked against the
+code, then against a test that failed before the change. The rules
+that changed are in `.claude/rules/output.md`.
+
+### What was wrong, and what changed
+
+- **A bad `binary:` size is a framing error.** `binarySize` returns
+  false when the size is missing, signed, padded with a zero, not a
+  decimal, or above `MaxReplyBytes`. Both readers then kept the line
+  as a pair (`Key: "binary"`), so a payload that is itself a reply
+  ended on the `OK` inside it. `TestMalformedBinarySizeIsAFramingError`
+  failed with `ParseReply "binary: -1": <nil>`. A line whose key is
+  `binary` (`binary:` with or without a value) is now
+  `mpd: binary chunk has a bad size` in `ParseReply` and
+  `readReplyText`, unless it is `binary: N` with N inside the cap.
+  N equal to the cap stays a size; the reply-cap error is the other
+  one, for a valid N whose payload does not fit. `binary: 0` stays a
+  size. `FuzzReadReplyMatchesParseReply` requires the two readers to
+  return that same error when both would reach the line, and a
+  successful reply has no `binary` pair.
+- **An undiallable path is not stored, and `_` ends a short secret.**
+  When `resolveDial` failed, `Inspect` still set `mpd.endpoint` to the
+  path. The red test showed `$XDG_RUNTIME_DIR/socket_abc`,
+  `~/mpd/socket`, `$HOME/socket_abc`, `relative/socket` and
+  `~nobody/socket`. The endpoint stays empty. The problem already says
+  why and does not quote the path, so the path is nowhere in the
+  report. A short secret was a token of letters, digits and `_`, so
+  `password "abc@read"` left `abc` in `$XDG_RUNTIME_DIR/socket_abc`
+  and `$HOME_abc` (`TestShortSecretBoundaryIsALetterOrDigit` still
+  had those binds). A token is letters and digits. `_`, `/`, `.` and
+  `-` are boundaries. A secret inside a plain word stays: `admin` for
+  `a`, and `a1`, are not rewritten. `/`, `.` and `-` were already
+  boundaries; `_` was the one that was not.
+
+## 2026-10-19 — review of `bridge output player`, round 4 (B473 step 2a, PR #1284)
+
+### The question
+
+Eight bot threads on the first push, checked against the code at
+`b90d9603`. Six were still worth a change. The rules that changed
+are in `.claude/rules/output.md`.
+
+### What was wrong, and what changed
+
+- **A cancel can expire the deadline after the command has finished.**
+  `context.AfterFunc` runs its callback on another goroutine, and
+  `stop` does not wait for it. `done` cleared the deadline and
+  returned while the callback was still inside `SetDeadline`, and the
+  callback then set an expired one. `TestCancelBesideAFinishedReplyDoesNotStickTheDeadline`
+  parks that call and releases the reply while it is parked. Before
+  the change it failed with `done returned while the cancel callback
+  was still in SetDeadline` and the deadline left at the bubble's
+  `time.Now()`. `done` now waits until the callback has finished, then
+  clears. The channel lives only for the command. The client still
+  holds no password. A mutex around both updates would order them
+  too; the wait is the coordination `AfterFunc` says the caller has
+  to do itself, and it does not hold a lock across `SetDeadline`.
+- **An unreadable include was "file not found".** `resolve` mapped
+  every `Lstat` error other than absence to `errNotFound`, so both
+  directives reported a file that was there. `include_optional` was
+  not swallowing it: a `resolve` error is reported for either
+  directive. The message was the bug. A permission error is now
+  `unreadable`, and so is an open that fails for a reason other than
+  absence or the size cap. The host path stays out of the problem; the
+  name from the file is what is quoted, and a password in it is still
+  redacted. `TestUnreadableIncludeIsReported` failed with
+  `file not found` on the unsearchable directory. With the open error
+  passed through, the same test showed
+  `open /private/var/.../bare.conf: permission denied`.
+- **`IsRegular` refuses a Windows cloud placeholder.** `--conf` is in
+  scope off Linux, and it does not use this check: it opens the file.
+  `Find` does, and `Find` runs on Windows when `--root` names a tree.
+  A directory, a pipe, a socket or a device is skipped. `ModeIrregular`
+  is kept. `TestConfCandidateKeepsACloudPlaceholder` failed while the
+  check was `IsRegular`.
+- **The top-level usage said the two commands read nothing.** They
+  read, and they change nothing. `TestOutputCommandUsage` failed on
+  the old sentence.
+- **The binary fuzz seed omitted the chunk's newline.** The four
+  payload bytes are `\nOK\n`, and the next byte was `k`, so
+  `readReplyText` returned `mpd: binary chunk is not terminated`
+  before the parser assertions. The seed is the framing the unit test
+  already uses.
+- **The client's `redact` checked `Contains` before `ReplaceAll`.**
+  `ReplaceAll` already returns the same string when the secret is
+  absent, so the check scanned twice. It now replaces, and keeps the
+  original error when the text does not change.
+
+### Not taken
+
+- **`strings.Contains` before `ReplaceAll` in `redactText`.** The
+  suggested body drops the short-secret path. `ReplaceAll` is the
+  fast path for a secret of four bytes or more; a shorter one is a
+  whole token, and the `Contains` check there avoids building a copy
+  when the secret is absent. An empty password must not be replaced:
+  `ReplaceAll` of an empty old inserts the replacement between every
+  byte.
+- **The import of `sync`.** The deadline coordination is a channel, so
+  the import is not added.
+
+### Negative controls
+
+`done` made to clear the deadline without waiting.
+`TestCancelBesideAFinishedReplyDoesNotStickTheDeadline` went red with
+`done returned while the cancel callback was still in SetDeadline`.
+The wait was put back.
+
+`resolve` made to return `errNotFound` for a stat that is not
+absence. `TestUnreadableIncludeIsReported` went red with
+`file not found` on both directives. The open of `bare.conf` still
+said `unreadable`. The return was put back.
+
+The open error passed through unchanged.
+`TestUnreadableIncludeIsReported` went red with
+`open /private/var/.../bare.conf: permission denied`. The host path
+was put back out of the problem.
+
+`confCandidate` made to be `IsRegular`.
+`TestConfCandidateKeepsACloudPlaceholder` went red with
+`a Windows cloud placeholder (ModeIrregular) was refused`. The list
+of kinds was put back.
