@@ -588,8 +588,8 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 		}
 	}
 	cacheable := true
-	for _, rule := range out {
-		if rule.State == mpd.PathMismatch {
+	for _, rule := range proved {
+		if rule.State == mpd.PathMismatch || rule.Errored {
 			cacheable = false
 			break
 		}

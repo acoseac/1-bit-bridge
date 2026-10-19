@@ -9,9 +9,9 @@ import (
 )
 
 // Path-rule states. proven is a SameFile match that find confirmed.
-// mismatch is a SameFile match a find did not. unproven is no single
-// SameFile match. unchecked is no music directory, no lookup, or no
-// tracks to sample.
+// mismatch is a SameFile match a find answered as not found. unproven
+// is no single SameFile match. unchecked is no music directory, no
+// lookup, no tracks to sample, or a lookup that returned an error.
 const (
 	PathProven    = "proven"
 	PathMismatch  = "mismatch"
@@ -43,10 +43,14 @@ type PathRule struct {
 	State             string
 	Checked           int
 	Found             int
+	// Errored is set when a sampled lookup returned an error. State is
+	// then unchecked. The route does not cache that result.
+	Errored bool
 }
 
-// PathLookup reports whether an MPD URI is in the database. A false or
-// an error is a miss.
+// PathLookup reports whether an MPD URI is in the database. false with
+// a nil error is not found. An error is not evidence the file is
+// missing: ProveRoots leaves the rule unchecked.
 type PathLookup func(ctx context.Context, mpdPath string) (bool, error)
 
 // ProveRoots returns one rule per root, in order. musicDir is MPD's
@@ -87,9 +91,17 @@ func proveRoot(ctx context.Context, musicDir string, root LibraryRoot, lookup Pa
 			continue
 		}
 		found, err := lookup(ctx, mpdPath)
-		if err == nil && found {
+		if err != nil {
+			rule.Errored = true
+			continue
+		}
+		if found {
 			rule.Found++
 		}
+	}
+	if rule.Errored {
+		rule.State = PathUnchecked
+		return rule
 	}
 	if rule.Found == rule.Checked {
 		rule.State = PathProven

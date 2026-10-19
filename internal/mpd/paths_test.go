@@ -118,8 +118,11 @@ func TestProveRootsStates(t *testing.T) {
 		}}, func(context.Context, string) (bool, error) {
 			return false, errors.New("mpd: closed")
 		})
-		if rules[0].State != PathMismatch || rules[0].Checked != 1 || rules[0].Found != 0 {
+		if rules[0].State != PathUnchecked || rules[0].Checked != 1 || rules[0].Found != 0 || !rules[0].Errored {
 			t.Fatalf("rule %#v", rules[0])
+		}
+		if rules[0].PrependMpdPrefix != "" {
+			t.Fatalf("matched prefix dropped: %#v", rules[0])
 		}
 	})
 

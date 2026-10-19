@@ -47543,3 +47543,15 @@ version stays empty when there is no session. `TestOutputKindIsOpen`
 failed first with `kind bridge included mpd`.
 `TestMPDVersionIsEmptyWhenTheDaemonIsDown` failed first with
 `Version:0.24.0`.
+
+## 2026-10-19 — an MPD lookup error is not a missing file (B473 step 2b)
+
+`ProveRoots` counted a `find` error as a miss, so a daemon error was
+reported as `mismatch` and would have been retried only because
+`mismatch` is not cached. A sampled lookup that returns an error now
+leaves the rule `unchecked`, with the SameFile prefixes kept, and that
+result is not held in the 60s path-rule cache. A lookup that answers
+not found stays `mismatch`. The `find error` case of
+`TestProveRootsStates` failed first with `State:"mismatch"`.
+`TestLookupErrorIsNotCached` failed first with `finds 2, a lookup
+error was cached`.

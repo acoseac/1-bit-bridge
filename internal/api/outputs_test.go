@@ -808,6 +808,46 @@ func quietOutputs(goos, mode string) LocalOutputsConfig {
 	}
 }
 
+func TestLookupErrorIsNotCached(t *testing.T) {
+	clock := &manualClock{}
+	music := t.TempDir()
+	var finds atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}, MusicDirectory: music}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{version: "0.24.0", state: "stop", findErr: errors.New("mpd: closed"), finds: &finds}, nil
+	}
+	cfg.Roots = func() []string { return []string{music} }
+	cfg.Tracks = func(context.Context) ([]string, error) { return []string{"a.flac"}, nil }
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	get := func() OutputPathRule {
+		t.Helper()
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		body, _ := decodeOutputs(t, resp)
+		if len(body.Outputs) != 1 || len(body.Outputs[0].PathRules) != 1 {
+			t.Fatalf("body %+v", body)
+		}
+		return body.Outputs[0].PathRules[0]
+	}
+	rule := get()
+	if rule.State != "unchecked" {
+		t.Fatalf("state %s", rule.State)
+	}
+	first := finds.Load()
+	if first == 0 {
+		t.Fatal("find was not called")
+	}
+	clock.Advance(outputCacheTTL)
+	get()
+	if finds.Load() == first {
+		t.Fatalf("finds %d, a lookup error was cached", finds.Load())
+	}
+}
+
 func TestPathRulesOutliveTheResponseCache(t *testing.T) {
 	clock := &manualClock{}
 	music := t.TempDir()
