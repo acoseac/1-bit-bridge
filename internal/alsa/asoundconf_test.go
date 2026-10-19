@@ -191,3 +191,49 @@ pcm.!bang { type hw
 		t.Fatalf("conf.d only = %d, %d, %v", card, pcm, ok)
 	}
 }
+
+func TestDuplicateKeyIsOpaque(t *testing.T) {
+	cards := []Card{{Index: 0, ID: "vc4hdmi0"}, {Index: 2, ID: "Audio"}, {Index: 5, ID: "A20"}}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `
+pcm.card {
+    type hw
+    card 5
+    card "Audio"
+}
+pcm.dev {
+    type hw
+    card "Audio"
+    device 0
+    device 1
+}
+pcm.typ {
+    type empty
+    slave.pcm "hwcard"
+    type hw
+    card 5
+}
+pcm.hwcard {
+    type hw
+    card "Audio"
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "card", cards); ok {
+		t.Errorf("second card = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "dev", cards); ok {
+		t.Errorf("second device = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "typ", cards); ok {
+		t.Errorf("second type = %d, %d, %v; want unresolved", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "hwcard", cards); !ok || card != 2 || pcm != 0 {
+		t.Fatalf("one card = %d, %d, %v", card, pcm, ok)
+	}
+}

@@ -47614,3 +47614,12 @@ than once, in one file or across files, is now opaque, and `conf.d` is
 read first. `TestDuplicatePCMIsUnresolved` failed first with
 `twice = 0, 0, true; want unresolved`, `pcm.!name = 5, 0, true; want unresolved`,
 and `across files = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — a second type, card or device in one PCM block is unresolved (B473 step 2b)
+
+A repeated key overwrote the first, so the block resolved to whichever
+value came last. A second `type`, `card` or `device` makes the block
+opaque, as a second `slave` already did. `TestDuplicateKeyIsOpaque`
+failed first with `second card = 2, 0, true; want unresolved`,
+`second device = 2, 1, true; want unresolved`, and
+`second type = 5, 0, true; want unresolved`.

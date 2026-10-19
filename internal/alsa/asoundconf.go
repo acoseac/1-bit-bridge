@@ -224,6 +224,7 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 		return pcmDef{}, false
 	}
 	var def pcmDef
+	var sawType, sawCard, sawDevice bool
 	for p.peek().kind != tokRBrace {
 		if p.peek().kind == tokEOF {
 			return pcmDef{}, false
@@ -250,6 +251,10 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 		}
 		switch key {
 		case "type":
+			if sawType {
+				def.opaque = true
+			}
+			sawType = true
 			def.typ = val
 		case "slave.pcm":
 			if def.slave != "" {
@@ -258,6 +263,10 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 				def.slave = val
 			}
 		case "card":
+			if sawCard {
+				def.opaque = true
+			}
+			sawCard = true
 			if n, err := strconv.Atoi(val); err == nil && cardNumber(val) {
 				def.cardIsIndex = true
 				def.cardIndex = n
@@ -267,6 +276,10 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 				def.card = val
 			}
 		case "device":
+			if sawDevice {
+				def.opaque = true
+			}
+			sawDevice = true
 			n, err := strconv.Atoi(val)
 			if err != nil || !cardNumber(val) {
 				def.opaque = true
