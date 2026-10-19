@@ -47713,3 +47713,11 @@ result whose own deadline fired are unchanged.
 `inspects 8 waiting 0, want one inspection`.
 `TestProbeDeadlineIsNotCached` passed before that change: a probe that
 blocks until its own deadline is not reused.
+
+## 2026-10-19 — the path-rule strip prefix depends on the root count (B473 step 2b)
+
+The path-rule sentence described only the multi-root stored form,
+`filepath.Base(root) + "/"`. A single-root scan stores the path relative
+to the root with no basename prefix (`relPath` in the scanner),
+`proveRoot` leaves `StripBridgePrefix` empty, and `pathRules` includes
+every indexed track. The rule and `PROTOCOL.md` now say both.
