@@ -47341,3 +47341,37 @@ child.
 
 `TestProveRootsStates` was run before `ProveRoots` existed. The package
 did not compile: `undefined: ProveRoots`.
+
+## 2026-10-19 — an output-only bridge has no library root (B473 step 2b)
+
+### The question
+
+A box whose library lives on MPD's music directory, or a bridge that
+only reports the DAC, has nothing for `libraryRoots`. Loopback Validate
+refused an empty list, so the process never started and `bridge doctor`
+failed `config-file` before the library check, which already says
+"none configured" is fine.
+
+### What is allowed
+
+`output.mpd` is `auto`, `on` or `off`. Empty is `auto`. Only an
+explicit `on` loads with no roots, in loopback as well as public.
+`auto` still requires a root: Validate does not dial MPD, and a default
+install must not become output-only because a daemon happens to be
+there. `off` is the same shape as before. Endpoint, conf and password
+are the overrides `bridge output player` takes. The password is a YAML
+field and not a JSON field, and a mode error does not quote it.
+
+A root that is configured and not readable still refuses a loopback
+start. A network mount that is down is that case. This does not special-
+case it.
+
+`TestOutputOnlyBridgeStarts` boots `bridge serve` on that config and
+waits until the console answers. `TestDoctorPassesWithNoRoots` grades
+the same shape and requires no failing check.
+
+### Red first
+
+`TestOutputOnlyConfigHasNoRoots` was run after the field existed and
+before Validate allowed it. Load failed with
+`libraryRoots: must have at least one entry`.

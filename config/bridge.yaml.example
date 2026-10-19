@@ -25,6 +25,23 @@ scanIntervalSec: 3600
 
 libraryName: "My Music Library"
 
+# output.mpd: "auto" (default) | "on" | "off"
+#
+# auto: report this box as an audio output when it has an MPD (a
+#   configuration was read, or a daemon greeted). A library root is
+#   still required.
+# on: always report it. A bridge with no libraryRoots is valid in this
+#   mode: it serves the player and the DAC, and no tracks.
+# off: do not report it.
+#
+# endpoint, conf and password are optional overrides of what
+# `bridge output player` finds on its own. The password is not logged.
+# output:
+#   mpd: auto
+#   # endpoint: "127.0.0.1:6600"
+#   # conf: "/etc/mpd.conf"
+#   # password: ""
+
 # deployment.mode: "loopback" (default) | "public"
 #
 # loopback (default): admin console binds 127.0.0.1, no auth — the

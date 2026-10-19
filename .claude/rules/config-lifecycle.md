@@ -247,7 +247,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `CheckLibraryRootsAccessible`, called only by `serve`.** Putting `os.Stat` back
   in `Validate` breaks `bridge update` on any host where the daemon user and the
   binary owner differ (the public-mode VPS layout). Loopback installs fail fast
-  on an inaccessible root; public installs warn and continue.
+  on an inaccessible root; public installs warn and continue. An output-only
+  bridge (`output.mpd: on`) is a loopback install with no library root:
+  Validate allows that and does not dial MPD to decide, and `auto` still
+  requires a root. **Don't treat `auto` as on inside Validate.**
 - **Cadence ceilings are unit-appropriate and ports admit 0.**
   `time.Duration(n)*time.Second` overflows negative past ~9.2e9 and
   `time.NewTicker` PANICS, crashing `bridge serve` at startup; a single seconds
