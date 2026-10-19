@@ -65,6 +65,7 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/smart-playlists",
 		"GET /v1/playlist-files",
 		"GET /v1/renderers",
+		"GET /v1/outputs",
 		"GET /v1/events",
 		"GET /v1/pairing/{requestID}/events",
 		"POST /v1/pairing/requests",

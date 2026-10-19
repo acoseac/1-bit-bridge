@@ -42,6 +42,7 @@ var wantAllHealthFeatures = []string{
 	"favoritesRevisions",
 	"firstIndexedAt",
 	"keyTempo",
+	"localOutputs",
 	"loudness",
 	"lyrics",
 	"operatorDrivenUpscale",
@@ -112,7 +113,13 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithPlaylistFileStore(mstore).
 		WithSmartPlaylistStore(mstore).
 		WithDemoMode(true).
-		WithPairing(newPairingStoreForFeaturesTest(t, authStore))
+		WithPairing(newPairingStoreForFeaturesTest(t, authStore)).
+		WithLocalOutputs(LocalOutputsConfig{
+			GOOS: "linux",
+			Output: func() config.OutputConfig {
+				return config.OutputConfig{MPD: "on"}
+			},
+		})
 	srv.EnableSyncEvents()
 	t.Cleanup(srv.StartEventBroker())
 	return srv

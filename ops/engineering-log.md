@@ -47375,3 +47375,51 @@ the same shape and requires no failing check.
 `TestOutputOnlyConfigHasNoRoots` was run after the field existed and
 before Validate allowed it. Load failed with
 `libraryRoots: must have at least one entry`.
+
+## 2026-10-19 — GET /v1/outputs (B473 step 2b)
+
+### What the route is
+
+`localOutputs` is advertised, and `GET /v1/outputs` answers, only when
+`output.mpd` resolves on and the process is Linux. `on` does not need a
+daemon. `auto` does: a configuration was read or a daemon greeted, and
+that probe is cached (30s when found, 5s when not) so `/v1/health` does
+not dial on every poll. The route itself is separate. Off Linux,
+including `output.mpd: on`, the flag is absent and the route is `404`
+`local_outputs_not_supported`. `ProtocolVersion` stays 1.
+
+The body is a DTO in `internal/api`. It does not encode an `alsa` or
+`mpd` type. Every key is present and every list is `[]`. `dac` is null
+when no card is named, and the array still has one element: a flag-on
+bridge with no card is not `outputs: []`. `kind` is the string `mpd`.
+A client ignores a kind it does not know.
+
+`addresses` are the LAN addresses from the set health and mDNS already
+advertise, restricted to those on which MPD's port greets `OK MPD`.
+Loopback is never dialled for that list. A hostname is not an address.
+None means `reachableFromLAN` false. The app matches the box by resolved
+IP.
+
+The id is the hex SHA-256 of the TLS fingerprint, a newline, the MPD
+endpoint, a newline, and the card index when a dac is named. Two
+processes with the same fingerprint and endpoint and card return the
+same id. `isMPDsOutput` is true only when one ALSA device resolves to
+one card. An unresolved device lists each USB card with null, and does
+not guess. This bridge does not send false.
+
+The MPD connection opens on the first call that can dial, is reused,
+and closes 60s after the last call. The clock is `Now` and `AfterFunc`,
+so the idle close is tested by advancing a clock, not by sleeping. A
+successful body is reused for 500ms. One build is in flight; a second
+caller waits on it. A dial that fails is still 200, with `state`
+`unknown`.
+
+### Red first
+
+`TestEverySentErrorCodeIsInTheProtocolTable` failed before the error
+row existed: `404 local_outputs_not_supported, sent at outputs.go:762
+(outputs)`. `TestEveryRoutedEndpointIsDocumented` failed in the same
+run: `GET /v1/outputs` had no contract.
+
+`TestLocalOutputsGate/darwin_on` was run with the Linux check taken
+out of `Active`. The route answered `status 200, want 404`.

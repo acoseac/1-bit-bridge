@@ -60,36 +60,11 @@ func runOutputPlayer(ctx context.Context, args []string, goos string, stdout, st
 	return 0
 }
 
-// playerOptions decides what Inspect is allowed to read.
-//
-// On Linux the host tree is always the root, unless --root names
-// another tree. --mpd replaces only the endpoint, and --conf only the
-// configuration path; neither skips detection. Off Linux the command
-// reads only what a flag names, and never the host's /. A --root
-// search does not use the process's home. The home and XDG variables
-// are taken from the environment whenever --root is not set, so a '~'
-// or '$' in --mpd or in the configuration can expand. They are the
-// variables MPD's ParsePath expands.
+// playerOptions decides what Inspect is allowed to read. The rules live
+// in mpd.OptionsForHost, which GET /v1/outputs uses as well, so the
+// command and the route cannot drift. The command has no password flag.
 func playerOptions(goos, root, confPath, endpoint string, getenv func(string) string) (mpd.Options, bool) {
-	opt := mpd.Options{Conf: confPath, Endpoint: endpoint}
-	if root != "" {
-		opt.Root = root
-		return opt, false
-	}
-	if goos != "linux" && confPath == "" && endpoint == "" {
-		return opt, true
-	}
-	if goos == "linux" {
-		opt.Root = "/"
-	}
-	if getenv != nil {
-		opt.Home = getenv("HOME")
-		opt.XDGConfigHome = getenv("XDG_CONFIG_HOME")
-		opt.XDGRuntimeDir = getenv("XDG_RUNTIME_DIR")
-		opt.XDGCacheHome = getenv("XDG_CACHE_HOME")
-		opt.XDGMusicDir = getenv("XDG_MUSIC_DIR")
-	}
-	return opt, false
+	return mpd.OptionsForHost(goos, root, confPath, endpoint, "", getenv)
 }
 
 func renderPlayer(w io.Writer, r mpd.Report) {

@@ -108,6 +108,37 @@ type Options struct {
 	Password      string
 }
 
+// OptionsForHost is what `bridge output player` and the local-output
+// route read. On Linux the host tree is the root unless root names
+// another tree. endpoint replaces only the dial address, and confPath
+// only the configuration file; neither skips detection. Off Linux the
+// host's / is never read: with no root, no conf and no endpoint the
+// second result is true and the caller refuses. A root search does not
+// use the process home. Home and the XDG variables are taken from
+// getenv whenever root is empty, so a '~' or '$' can expand. password
+// is sent once if set, and is not retained.
+func OptionsForHost(goos, root, confPath, endpoint, password string, getenv func(string) string) (Options, bool) {
+	opt := Options{Conf: confPath, Endpoint: endpoint, Password: password}
+	if root != "" {
+		opt.Root = root
+		return opt, false
+	}
+	if goos != "linux" && confPath == "" && endpoint == "" {
+		return opt, true
+	}
+	if goos == "linux" {
+		opt.Root = "/"
+	}
+	if getenv != nil {
+		opt.Home = getenv("HOME")
+		opt.XDGConfigHome = getenv("XDG_CONFIG_HOME")
+		opt.XDGRuntimeDir = getenv("XDG_RUNTIME_DIR")
+		opt.XDGCacheHome = getenv("XDG_CACHE_HOME")
+		opt.XDGMusicDir = getenv("XDG_MUSIC_DIR")
+	}
+	return opt, false
+}
+
 // Inspect detects the player, reads its mpd.conf and asks the daemon
 // the read commands. A daemon that is down is a problem on the report,
 // not a failure of the call: the file is still worth printing.

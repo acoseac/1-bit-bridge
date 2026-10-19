@@ -163,6 +163,7 @@ type Server struct {
 	publicServers          *publicServersCache          // TTL cache for /v1/health UPnP upstream per-server COUNT(*) scans
 	endpointsCache         *endpointsCache              // TTL cache for /v1/health advertised-endpoint interface walk
 	fingerprint            string
+	localOutputs           *localOutputs
 	startedAt              time.Time
 
 	// certIPs are the IP addresses the certificate this bridge minted and
@@ -1941,11 +1942,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 34 covers the current maximum
+	// appends in lex order. Capacity 36 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
-	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + loudness + lyrics +
+	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
+	// loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistFiles +
 	// playlistFilesPaged + playlistListRevision +
@@ -1956,7 +1958,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 35)
+	feats := make([]string, 0, 36)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2059,15 +2061,23 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// `keyTempo` advertises that this bridge fills Track.keyRoot /
 		// keyMode (estimated musical key) and Track.bpm (when the source
 		// has no BPM tag) from offline analysis. Same analysis-active gate
-		// as `waveform`/`loudness`. Alpha-sorted between `dlnaServer` and
-		// `loudness` (d < k < l).
+		// as `waveform`/`loudness`. Alpha-sorted between `firstIndexedAt`
+		// and `localOutputs`.
 		feats = append(feats, "keyTempo")
+	}
+	// `localOutputs` advertises GET /v1/outputs. It is on only when
+	// output.mpd resolves on and this host is Linux. Alpha-sorted
+	// between `keyTempo` and `loudness`.
+	if s.localOutputs != nil && s.localOutputs.Active(r.Context()) {
+		feats = append(feats, "localOutputs")
+	}
+	if s.analysisActive() {
 		// `loudness` advertises that this bridge populates
 		// Track.replayGainTrackDB from offline EBU R128 analysis when the
 		// source carries no ReplayGain tag, so iOS can trust a present
 		// value as either tag-curated or analysis-derived. Same
 		// analysis-active gate as `waveform`. Alpha-sorted between
-		// `keyTempo` and `operatorDrivenUpscale` (k < l < o).
+		// `localOutputs` and `lyrics`.
 		feats = append(feats, "loudness")
 	}
 	// `lyrics` advertises GET /v1/lyrics?path=… plus the additive
