@@ -781,7 +781,7 @@ A kind `mpd` element has every key. A list is `[]`, never `null`. `dac` is `null
 
 `mpd.port` is the TCP port in the endpoint. A socket endpoint uses the `port` from `mpd.conf`, or 6600. `mpd.version` is the daemon's greeting, and `""` when the daemon is down. `mpd.state` is `play`, `pause`, `stop`, or `unknown` when `status` did not answer; a daemon that is down is `unknown` and still `200`.
 
-`mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
+`mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a link-local address (`fe80::/10`, `169.254/16`) or a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
 
 `dac` is the card MPD's ALSA device names when that device resolves to exactly one card, and `isMPDsOutput` is then `true`. When it does not resolve, each USB card is listed with `isMPDsOutput` null. When several devices resolve to several cards, those cards are listed with `isMPDsOutput` null. `isMPDsOutput` is `true` or `null`, never `false`. `usbId` is `vendor:product` or `""`.
 
