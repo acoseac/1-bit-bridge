@@ -58,6 +58,10 @@ and each status file holds only the first lines a real one opens with.
   and `sub0`, plus `Audio` pointing at `card0` the way `/proc/asound/<id>`
   does. The links are made by the test, not stored: a checkout of a symlink
   is not the same file on Windows.
+- `pcm768-dsd512`: a USB card whose `stream0` playback altsets offer PCM
+  through 768000 (S32_LE, S24_3LE, S16_LE) and native `DSD_U32_BE` at
+  frame rates 705600 and 768000, which are DSD512 (those rates times 32).
+  The card id, name and USB id are made up. No substream is playing.
 
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 

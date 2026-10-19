@@ -47268,3 +47268,41 @@ run before `find` was on the allowlist. Both failed with
 case on `a\nb` (the error was `mpd: command refused`, not
 `mpd: path refused`, because a line break was not yet a distinct
 refusal).
+
+## 2026-10-19 — a DAC's capabilities are every playback altset, not the rate it is playing (B473 step 2b)
+
+### The question
+
+`GET /v1/outputs` tells the app what the DAC can receive, so the app can
+say whether a file is within that. The running altset is one setting.
+The iFi GO bar's `stream0` lists four, and the DSD one prints frame
+rates, not the DSD rate.
+
+### What the capture says
+
+`testdata/dsd256-native` is the iFi (USB `20b1:3009`, card 5). Playback
+altsets 1–3 are `S32_LE`, `S24_3LE` and `S16_LE`, each with rates
+through 384000. Altset 4 is `SPECIAL DSD_U32_BE` with the same frame
+rates and `Bits: 32`. The native DSD rate is the frame rate times 32:
+352800 frames/s is DSD256 (11289600). The `Bits` line on that altset is
+not a PCM depth, and those frame rates are not PCM rates. PCM depth
+comes from the format name: `S24_3LE` is 24.
+
+`DSD_U16_*` is times 16 and `DSD_U8` is times 8. A `DSD_` name with
+another width is listed and adds no rate. `SPECIAL` is not DSD.
+
+`pcm768-dsd512` is synthetic, listed in `testdata/README.md`. PCM
+altsets reach 768000. The DSD altset's frame rates are 705600 and
+768000, which times 32 are 22579200 and 24576000 (DSD512). No captured
+file was edited.
+
+An MPD `audio_output` device resolves to a card when the string names
+one: `hw`, `plughw`, `plug` or `front`, by index or by an exact card
+id, including `CARD=`. `volumio` and `default` do not. Two cards with
+the same id do not.
+
+### Red first
+
+`TestCapabilitiesFromTheIFiCapture` was run before the function
+existed. The package did not compile:
+`undefined: CapabilitiesFromAltsets`.

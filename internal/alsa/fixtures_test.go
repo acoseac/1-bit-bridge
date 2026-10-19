@@ -64,7 +64,7 @@ var capturedAltsets = []capturedAltset{
 var capturedRates = []int{44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000}
 
 // syntheticCases are the trees testdata/README.md marks as made up.
-var syntheticCases = []string{"i2s-and-hdmi", "garbled-stream0", "multi-format", "uac1-bits-less", "symlinked-pcm"}
+var syntheticCases = []string{"i2s-and-hdmi", "garbled-stream0", "multi-format", "uac1-bits-less", "symlinked-pcm", "pcm768-dsd512"}
 
 // procRootOf is a test case's /proc tree.
 func procRootOf(name string) string { return filepath.Join("testdata", name, "proc") }
