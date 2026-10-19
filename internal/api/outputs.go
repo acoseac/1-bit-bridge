@@ -20,7 +20,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/config"
-	"github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/mpd"
 	"github.com/acoseac/1-bit-bridge/internal/mpd/conf"
 )
@@ -841,16 +840,12 @@ func outputID(identity, endpoint, alsaID, usbID string) string {
 }
 
 // trackUnderRoot reports whether a stored library path belongs to root.
-// Multi-root paths are stored under filepath.Base(root). Ownership also
-// accepts a first segment that folds to the same basename, which is the
-// comparison fs.FoldRootBasename uses for two roots.
+// Multi-root paths are stored under the exact filepath.Base(root), which
+// is also the prefix the client strips. A case-folded first segment is
+// not this root's: CutPrefix would miss it and the rule would read
+// mismatch.
 func trackUnderRoot(stored, root string) bool {
-	id := filepath.Base(root)
-	if strings.HasPrefix(stored, id+"/") {
-		return true
-	}
-	head, _, _ := strings.Cut(stored, "/")
-	return head != "" && fs.FoldRootBasename(head) == fs.FoldRootBasename(root)
+	return strings.HasPrefix(stored, filepath.Base(root)+"/")
 }
 
 func greetMPD(ctx context.Context, addr string) bool {

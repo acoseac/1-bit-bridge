@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -651,21 +652,31 @@ func TestBuildDeadlineIsNotCached(t *testing.T) {
 
 func TestPathRulesUseTheStoredRootPrefix(t *testing.T) {
 	dir := t.TempDir()
-	music := filepath.Join(dir, "Music")
+	musicDir := filepath.Join(dir, "mpd")
+	root := filepath.Join(dir, "Music")
 	other := filepath.Join(dir, "Archive")
-	if err := os.Mkdir(music, 0o755); err != nil {
+	if err := os.MkdirAll(musicDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(root, filepath.Join(musicDir, "Disk")); err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
 	o := &localOutputs{
-		roots: func() []string { return []string{"/", music, other} },
+		now:   time.Now,
+		roots: func() []string { return []string{"/", root, other} },
 		tracks: func(context.Context) ([]string, error) {
 			return []string{"Music/a.flac", "music/b.flac", "Archive/c.flac"}, nil
 		},
 	}
-	rules := o.pathRules(context.Background(), music, func(context.Context, string) (bool, error) {
+	rules := o.pathRules(context.Background(), musicDir, func(_ context.Context, path string) (bool, error) {
+		asked = append(asked, path)
 		return true, nil
 	})
 	if rules[0].Root != filepath.Base("/") {
@@ -677,8 +688,11 @@ func TestPathRulesUseTheStoredRootPrefix(t *testing.T) {
 			musicRule = rule
 		}
 	}
-	if musicRule.StripBridgePrefix != "Music/" || musicRule.Checked != 2 {
-		t.Fatalf("strip %q checked %d", musicRule.StripBridgePrefix, musicRule.Checked)
+	if musicRule.StripBridgePrefix != "Music/" || musicRule.PrependMpdPrefix != "Disk/" || musicRule.State != "proven" || musicRule.Checked != 1 {
+		t.Fatalf("rule %+v asked %q", musicRule, asked)
+	}
+	if !reflect.DeepEqual(asked, []string{"Disk/a.flac"}) {
+		t.Fatalf("asked %q", asked)
 	}
 }
 

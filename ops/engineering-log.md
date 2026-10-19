@@ -47567,3 +47567,13 @@ an unchecked with no session was cached`.
 empty index was cached`. A result is cached only when a lookup was
 available, the track read did not error, and no rule is `unchecked`,
 `mismatch` or errored.
+
+## 2026-10-19 — a case-folded path is not a member of a root (B473 step 2b)
+
+`trackUnderRoot` accepted a stored path whose first segment only
+case-folded to the root basename. `StripBridgePrefix` is that exact
+basename plus `/`, and `bridgePathToMPD` cuts it with `CutPrefix`, so
+the folded path counted as a miss and the rule was `mismatch`. The
+scanner stores the exact `filepath.Base` prefix, so membership is that
+prefix only. `TestPathRulesUseTheStoredRootPrefix` failed first with
+`State:mismatch Checked:2 Found:1`.
