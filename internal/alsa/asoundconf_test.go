@@ -285,3 +285,35 @@ pcm.other {
 		t.Error("default:CARD resolved")
 	}
 }
+
+func TestNonPCMStanzaIsSkipped(t *testing.T) {
+	cards := volumioCards(t)
+	root := filepath.Join("testdata", "volumio-with-ctl")
+	if card, pcm, ok := ResolveOutputDevice(root, "volumio", cards); !ok || card != 2 || pcm != 0 {
+		t.Errorf("volumio with ctl = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
+	}
+	semi := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(semi, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "pcm.semi { type hw; card \"Audio\", }\n"
+	if err := os.WriteFile(filepath.Join(semi, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(semi, "semi", cards); !ok || card != 2 || pcm != 0 {
+		t.Errorf("separators = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
+	}
+	for _, extra := range []string{"@hooks [0]", "<include>", "@args.NAME 1"} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		text := "pcm.out { type hw\n    card \"Audio\" }\n" + extra + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "etc", "asound.conf"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := ResolveOutputDevice(dir, "out", cards); ok {
+			t.Errorf("%s resolved", extra)
+		}
+	}
+}

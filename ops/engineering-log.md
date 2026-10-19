@@ -47633,3 +47633,14 @@ rules and is never a definition. `TestSlaveDeviceString` failed first
 with `hw slave = 0, 0, false; want card 2 pcm 0`,
 `plughw slave = 0, 0, false; want card 2 pcm 0`, and
 `named hw string = 2, 0, true; want card 0`.
+
+## 2026-10-19 — a ctl or defaults stanza does not reject the file (B473 step 2b)
+
+A top-level name other than `pcm` made the whole file unusable, so a
+Volumio `asound.conf` that also holds `ctl.!default` did not resolve.
+Those stanzas are skipped, and `;` and `,` are separators. `@hooks`,
+`@args`, `<include>` and `<file>` still make the file unusable.
+`volumio-with-ctl/` is the captured file with those stanzas in front;
+the capture itself is not edited. `TestNonPCMStanzaIsSkipped` failed
+first with `volumio with ctl = 0, 0, false; want card 2 pcm 0` and
+`separators = 0, 0, false; want card 2 pcm 0`.

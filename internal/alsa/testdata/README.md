@@ -65,6 +65,8 @@ and each status file holds only the first lines a real one opens with.
 
 `volumio-asound-chain/` (`etc/asound.conf` and `proc/asound/cards`) was captured on 2026-10-19 from a Volumio 4.119 Raspberry Pi 5 via `cat`, byte for byte, and is not edited.
 
+`volumio-with-ctl/` is synthetic: that captured `asound.conf`, unchanged, with a `ctl.!default` block, a `ctl.name` block and a `defaults.pcm.card` assignment in front of it.
+
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 
 ## Adding a case

@@ -45,9 +45,10 @@ func ConfigRoot(procRoot string) string {
 // and then etc/asound.conf, and slave.pcm is followed through type empty
 // and type plug only, until a type hw. A slave that contains ":" is a
 // device string, never a PCM of that name. A name defined more than once
-// is unresolved. A dmix, a softvol, any other plugin, a hook, an include, a
-// cycle, more than maxPCMHops follows, or syntax this parser does not
-// understand leaves the device unresolved.
+// is unresolved. A ctl or defaults stanza is skipped. A dmix, a softvol,
+// any other plugin, a hook, an include, a cycle, more than maxPCMHops
+// follows, or syntax this parser does not understand leaves the device
+// unresolved.
 func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
 	if idx, pcm, found := ResolveALSADevice(device, cards); found {
 		return idx, pcm, true
@@ -160,6 +161,8 @@ const (
 	tokBang
 	tokLBrace
 	tokRBrace
+	tokSemi
+	tokComma
 )
 
 type pcmTok struct {
@@ -179,33 +182,96 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 	}
 	p := pcmParser{tok: toks}
 	defs := map[string]pcmDef{}
-	for p.peek().kind != tokEOF {
-		if p.peek().kind != tokIdent || p.peek().val != "pcm" {
+	for {
+		p.skipSep()
+		if p.peek().kind == tokEOF {
+			return defs, true
+		}
+		if p.isPCM() {
+			name, def, ok := p.parsePCMDef()
+			if !ok {
+				return nil, false
+			}
+			if prev, exists := defs[name]; exists {
+				prev.opaque = true
+				defs[name] = prev
+				continue
+			}
+			defs[name] = def
+			continue
+		}
+		if !p.skipStanza() {
 			return nil, false
 		}
+	}
+}
+
+func (p *pcmParser) isPCM() bool {
+	return p.peek().kind == tokIdent && p.peek().val == "pcm" && p.i+1 < len(p.tok) && p.tok[p.i+1].kind == tokDot
+}
+
+func (p *pcmParser) parsePCMDef() (string, pcmDef, bool) {
+	p.next()
+	if p.next().kind != tokDot {
+		return "", pcmDef{}, false
+	}
+	if p.peek().kind == tokBang {
 		p.next()
-		if p.next().kind != tokDot {
-			return nil, false
-		}
+	}
+	name := p.next()
+	if name.kind != tokIdent && name.kind != tokString {
+		return "", pcmDef{}, false
+	}
+	def, ok := p.parsePCMBlock()
+	if !ok {
+		return "", pcmDef{}, false
+	}
+	return name.val, def, true
+}
+
+func (p *pcmParser) skipSep() {
+	for p.peek().kind == tokSemi || p.peek().kind == tokComma {
+		p.next()
+	}
+}
+
+func (p *pcmParser) skipStanza() bool {
+	if p.next().kind != tokIdent {
+		return false
+	}
+	for p.peek().kind == tokDot {
+		p.next()
 		if p.peek().kind == tokBang {
 			p.next()
 		}
-		name := p.next()
-		if name.kind != tokIdent && name.kind != tokString {
-			return nil, false
+		n := p.next()
+		if n.kind != tokIdent && n.kind != tokString && n.kind != tokNumber {
+			return false
 		}
-		def, ok := p.parsePCMBlock()
-		if !ok {
-			return nil, false
-		}
-		if prev, exists := defs[name.val]; exists {
-			prev.opaque = true
-			defs[name.val] = prev
-			continue
-		}
-		defs[name.val] = def
 	}
-	return defs, true
+	if p.peek().kind == tokLBrace {
+		return p.skipBlock()
+	}
+	_, ok := p.parseValue()
+	return ok
+}
+
+func (p *pcmParser) skipBlock() bool {
+	if p.next().kind != tokLBrace {
+		return false
+	}
+	depth := 1
+	for depth > 0 {
+		switch p.next().kind {
+		case tokEOF:
+			return false
+		case tokLBrace:
+			depth++
+		case tokRBrace:
+			depth--
+		}
+	}
+	return true
 }
 
 func (p *pcmParser) peek() pcmTok {
@@ -229,7 +295,11 @@ func (p *pcmParser) parsePCMBlock() (pcmDef, bool) {
 	}
 	var def pcmDef
 	var sawType, sawCard, sawDevice bool
-	for p.peek().kind != tokRBrace {
+	for {
+		p.skipSep()
+		if p.peek().kind == tokRBrace {
+			break
+		}
 		if p.peek().kind == tokEOF {
 			return pcmDef{}, false
 		}
@@ -324,7 +394,11 @@ func (p *pcmParser) parseSlaveBlock() (slaveBlock, bool) {
 		return slaveBlock{}, false
 	}
 	var b slaveBlock
-	for p.peek().kind != tokRBrace {
+	for {
+		p.skipSep()
+		if p.peek().kind == tokRBrace {
+			break
+		}
 		if p.peek().kind == tokEOF {
 			return slaveBlock{}, false
 		}
@@ -407,6 +481,12 @@ func lexPCM(src string) ([]pcmTok, bool) {
 			i += size
 		case '!':
 			out = append(out, pcmTok{kind: tokBang})
+			i += size
+		case ';':
+			out = append(out, pcmTok{kind: tokSemi})
+			i += size
+		case ',':
+			out = append(out, pcmTok{kind: tokComma})
 			i += size
 		case '"':
 			s, n, ok := lexPCMString(src[i:])
