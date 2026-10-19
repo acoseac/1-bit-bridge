@@ -47524,3 +47524,12 @@ the music directory, the roots, or the MPD endpoint, conf or password
 changes. `TestDirEntrySkipsRegularFiles` failed first with `a regular
 file was stat-eligible`. `TestPathRulesOutliveTheResponseCache` failed
 first with `finds 2 after the response cache expired`.
+
+## 2026-10-19 — an output id does not follow the TLS certificate (B473 step 2b)
+
+The bridge half of the id was the TLS fingerprint. A tsnet or ACME
+renewal changes that fingerprint and so every output id the app has
+stored. It is now the hex SHA-256 of the data directory, which is the
+directory `deriveDLNAUDN` hashes, without the friendly name, so a
+rename does not change it either. `TestOutputsIDStableAcrossRestarts`
+failed first with `fingerprint or name changed the id`.

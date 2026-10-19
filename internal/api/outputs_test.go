@@ -928,10 +928,19 @@ func TestOutputsIDStableAcrossRestarts(t *testing.T) {
 		MPD:     mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"},
 		Outputs: []mpd.Output{{Type: "alsa", Device: "hw:5,0", Enabled: "yes"}},
 	}
-	cfgFor := func(identity string) LocalOutputsConfig {
-		return LocalOutputsConfig{
-			GOOS:     "linux",
-			Identity: identity,
+	idFor := func(fingerprint, dataDir, name string) string {
+		t.Helper()
+		store := outputsToken(t)
+		c := &config.Config{
+			ListenAddress:   ":7788",
+			AdminAddress:    "127.0.0.1:7789",
+			ScanIntervalSec: 3600,
+			LibraryName:     name,
+			LibraryRoots:    []string{t.TempDir()},
+			DataDir:         dataDir,
+		}
+		cfg := LocalOutputsConfig{
+			GOOS: "linux",
 			Output: func() config.OutputConfig {
 				return config.OutputConfig{MPD: "on"}
 			},
@@ -942,16 +951,24 @@ func TestOutputsIDStableAcrossRestarts(t *testing.T) {
 			Greet:      func(context.Context, string) bool { return false },
 			Advertised: func() []string { return nil },
 			Cards:      func() (alsa.Snapshot, error) { return snap, nil },
+			Getenv:     func(string) string { return "" },
 		}
+		srv := New(c, store, nil, fingerprint).WithLocalOutputs(cfg)
+		body, err := srv.localOutputs.Response(context.Background())
+		if err != nil || len(body.Outputs) != 1 {
+			t.Fatalf("body %+v err %v", body, err)
+		}
+		return body.Outputs[0].ID
 	}
-	one := outputIDOf(t, cfgFor("same-fingerprint"))
-	two := outputIDOf(t, cfgFor("same-fingerprint"))
+	dir := t.TempDir()
+	one := idFor("fingerprint-a", dir, "Library")
+	two := idFor("fingerprint-b", dir, "Renamed")
 	if one != two || one == "" {
-		t.Fatalf("ids %q and %q", one, two)
+		t.Fatalf("fingerprint or name changed the id: %q and %q", one, two)
 	}
-	other := outputIDOf(t, cfgFor("other-fingerprint"))
+	other := idFor("fingerprint-a", t.TempDir(), "Library")
 	if other == one {
-		t.Fatal("identity did not change the id")
+		t.Fatal("data dir did not change the id")
 	}
 }
 

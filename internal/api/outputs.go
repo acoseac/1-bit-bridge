@@ -816,6 +816,15 @@ func playerSoftware(name string) string {
 	}
 }
 
+// OutputIdentity is the bridge half of an output id: the hex SHA-256 of
+// the data directory. A renewing certificate changes the TLS fingerprint,
+// and a rename changes the friendly name; neither is an input. This is
+// the same directory deriveDLNAUDN hashes, without the friendly name.
+func OutputIdentity(dataDir string) string {
+	sum := sha256.Sum256([]byte(dataDir))
+	return hex.EncodeToString(sum[:])
+}
+
 // outputID is what the app stores for an output. The card index is not
 // an input: it changes when a DAC is replugged or the box reboots.
 // alsaID is the id string from /proc/asound/cards, and usbID is
@@ -862,8 +871,8 @@ func greetMPD(ctx context.Context, addr string) bool {
 // request, so they see the live config and the addresses the bridge
 // is advertising then.
 func (s *Server) WithLocalOutputs(cfg LocalOutputsConfig) *Server {
-	if cfg.Identity == "" {
-		cfg.Identity = s.fingerprint
+	if cfg.Identity == "" && s.cfgHolder != nil {
+		cfg.Identity = OutputIdentity(s.cfgHolder.Load().DataDir)
 	}
 	if cfg.Output == nil && s.cfgHolder != nil {
 		cfg.Output = func() config.OutputConfig { return s.cfgHolder.Load().Output }
