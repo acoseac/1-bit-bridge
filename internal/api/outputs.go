@@ -30,6 +30,7 @@ const (
 	outputProbeMiss  = 5 * time.Second
 	outputProbeLimit = 750 * time.Millisecond
 	outputGreetLimit = 300 * time.Millisecond
+	outputBuildLimit = 15 * time.Second
 )
 
 // OutputsResponse is GET /v1/outputs. Outputs is never null. A client
@@ -126,6 +127,7 @@ type LocalOutputsConfig struct {
 	Greet      func(context.Context, string) bool
 	Cards      func() (alsa.Snapshot, error)
 	Getenv     func(string) string
+	BuildLimit time.Duration
 }
 
 type localOutputs struct {
@@ -142,6 +144,7 @@ type localOutputs struct {
 	greet      func(context.Context, string) bool
 	cards      func() (alsa.Snapshot, error)
 	getenv     func(string) string
+	buildLimit time.Duration
 
 	mu           sync.Mutex
 	client       outputSession
@@ -193,6 +196,7 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		greet:      cfg.Greet,
 		cards:      cfg.Cards,
 		getenv:     cfg.Getenv,
+		buildLimit: cfg.BuildLimit,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -222,6 +226,9 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 	}
 	if o.getenv == nil {
 		o.getenv = os.Getenv
+	}
+	if o.buildLimit <= 0 {
+		o.buildLimit = outputBuildLimit
 	}
 	if o.output == nil {
 		o.output = func() config.OutputConfig { return config.OutputConfig{} }
@@ -282,9 +289,11 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	return found, rep, opt
 }
 
-// Response builds the route body. One build runs at a time. A success
-// is reused for outputCacheTTL. The MPD connection opens on the first
-// build that can dial and closes outputIdle after the last call.
+// Response builds the route body. One build runs at a time, on a context
+// detached from the caller with its own deadline. A success that finished
+// inside that deadline is reused for outputCacheTTL. The MPD connection
+// opens on the first build that can dial and closes outputIdle after the
+// last call.
 func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
 	o.armIdle()
 	o.mu.Lock()
@@ -310,9 +319,11 @@ func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
 	o.flight = f
 	o.mu.Unlock()
 
-	body, err := o.build(ctx)
+	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.buildLimit)
+	defer cancel()
+	body, err := o.build(buildCtx)
 	o.mu.Lock()
-	if err == nil {
+	if err == nil && buildCtx.Err() == nil {
 		o.cached = outputCache{at: o.now(), body: body, ok: true}
 	}
 	o.flight = nil

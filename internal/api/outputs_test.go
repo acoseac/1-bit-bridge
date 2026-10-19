@@ -31,17 +31,26 @@ type fakeOutputSession struct {
 	once      sync.Once
 	statusErr error
 	findErr   error
+	waitCtx   bool
 }
 
-func (f *fakeOutputSession) Status(context.Context) (mpd.Reply, error) {
+func (f *fakeOutputSession) Status(ctx context.Context) (mpd.Reply, error) {
 	if f.statuses != nil {
 		f.statuses.Add(1)
 	}
 	if f.started != nil {
 		f.once.Do(func() { close(f.started) })
 	}
+	if f.waitCtx {
+		<-ctx.Done()
+		return mpd.Reply{}, ctx.Err()
+	}
 	if f.block != nil {
-		<-f.block
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return mpd.Reply{}, ctx.Err()
+		}
 	}
 	if f.statusErr != nil {
 		return mpd.Reply{}, f.statusErr
@@ -461,6 +470,73 @@ func TestOutputsCacheAndIdle(t *testing.T) {
 	get()
 	if dials.Load() != 2 {
 		t.Fatalf("after idle, dials %d, want a new session", dials.Load())
+	}
+}
+
+func TestCancelledCallerDoesNotSpoilTheBuild(t *testing.T) {
+	hold := make(chan struct{})
+	started := make(chan struct{})
+	joined := make(chan struct{})
+	cfg := quietOutputs("linux", "on")
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{state: "play", version: "0.24.4", block: hold, started: started}, nil
+	}
+	store := outputsToken(t)
+	raw, _, err := store.Mint("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	srv := New(&config.Config{
+		ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789",
+		ScanIntervalSec: 3600, LibraryName: "T", LibraryRoots: []string{dir},
+	}, store, nil, "fp").WithLocalOutputs(cfg)
+	srv.localOutputs.joined = func() { close(joined) }
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/outputs", nil)
+		req.Header.Set("Authorization", "Bearer "+raw)
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+		close(firstDone)
+	}()
+	<-started
+	secondDone := make(chan *httptest.ResponseRecorder)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/v1/outputs", nil)
+		req.Header.Set("Authorization", "Bearer "+raw)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		secondDone <- rr
+	}()
+	<-joined
+	cancel()
+	close(hold)
+	<-firstDone
+	rr := <-secondDone
+	var body OutputsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || body.Outputs[0].MPD.State != "play" {
+		t.Fatalf("waiter status %d state %s", rr.Code, body.Outputs[0].MPD.State)
+	}
+}
+
+func TestBuildDeadlineIsNotCached(t *testing.T) {
+	var statuses atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.BuildLimit = time.Millisecond
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{waitCtx: true, version: "0.24.0", statuses: &statuses}, nil
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	for i := 0; i < 2; i++ {
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		resp.Body.Close()
+	}
+	if statuses.Load() != 2 {
+		t.Fatalf("status calls %d, a deadline was cached", statuses.Load())
 	}
 }
 

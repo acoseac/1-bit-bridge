@@ -47470,3 +47470,14 @@ running when it fires was closed underneath itself. `idleClose` now
 returns while `flight` is set, and the build's end arms the timer
 again. `TestIdleCloseSkipsABuildInFlight` failed first with
 `closed the session mid-build: 1`.
+
+## 2026-10-19 — the shared build does not run on the caller's context (B473 step 2b)
+
+The first caller owned the build. Disconnecting cancelled it, and the
+degraded body (unknown state, no addresses, mismatch rules) was cached
+and served to the waiters as 200. The build now runs on
+`context.WithoutCancel` with its own deadline, and a build that hits
+that deadline is not cached. `TestCancelledCallerDoesNotSpoilTheBuild`
+failed first with `waiter status 200 state unknown`.
+`TestBuildDeadlineIsNotCached` failed first with
+`status calls 1, a deadline was cached`.
