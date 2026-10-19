@@ -28,8 +28,9 @@ libraryName: "My Music Library"
 # output.mpd: "auto" (default) | "on" | "off"
 #
 # auto: report this box as an audio output when it has an MPD (a
-#   configuration was read, or a daemon greeted). A library root is
-#   still required.
+#   configuration was read, or a daemon greeted). A loopback bridge
+#   still requires a library root. A public bridge may start with
+#   none; Validate warns.
 # on: always report it. A bridge with no libraryRoots is valid in this
 #   mode: it serves the player and the DAC, and no tracks.
 # off: do not report it.
