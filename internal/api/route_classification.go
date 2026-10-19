@@ -284,6 +284,12 @@ func (s *Server) routeRegistry() []route {
 		// single cache-snapshot RLock + JSON marshal, returns in
 		// <1 ms in steady state.
 		{pattern: "GET /v1/renderers", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
+		// Local outputs — the box this bridge runs on, as an MPD output.
+		// A cold call dials MPD, greets the advertised addresses and
+		// samples path rules, so the deadline is the long-op one rather
+		// than the 2s of a cache snapshot. The flag in /v1/health is
+		// what a client gates on; the route 404s when it is off.
+		{pattern: "GET /v1/outputs", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(15*time.Second, s.authed(s.outputs))},
 
 		// Playlists — user-wide backup safe (any paired device can
 		// list / restore / update / delete). Small JSON on list /

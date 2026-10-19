@@ -257,7 +257,7 @@ func TestHoldsSecretWalksContainers(t *testing.T) {
 
 func TestAllowlistIsExactlyTheReadCommands(t *testing.T) {
 	want := []string{
-		"commands", "config", "currentsong", "outputs",
+		"commands", "config", "currentsong", "find", "outputs",
 		"password", "replay_gain_status", "stats", "status",
 	}
 	if len(allowedCommands) != len(want) {
@@ -299,13 +299,15 @@ func TestExchangeRefusesMutatingCommands(t *testing.T) {
 
 func TestEveryExportedMethodSendsAnAllowlistedCommand(t *testing.T) {
 	fx := loadReplies(t)
-	srv := startFake(t, fakeOpts{greeting: fx.Greeting, replies: fx.replies()})
+	replies := fx.replies()
+	replies["find"] = "OK\n"
+	srv := startFake(t, fakeOpts{greeting: fx.Greeting, replies: replies})
 	c := mustDial(t, srv.addr, "")
 	t.Cleanup(func() { _ = c.Close() })
 	want := map[string]string{
 		"Status": "status", "Stats": "stats", "Outputs": "outputs",
 		"ReplayGainStatus": "replay_gain_status", "CurrentSong": "currentsong",
-		"Config": "config", "Commands": "commands",
+		"Config": "config", "Commands": "commands", "Find": "find",
 	}
 	typ := reflect.TypeOf(c)
 	called := 0
@@ -314,18 +316,29 @@ func TestEveryExportedMethodSendsAnAllowlistedCommand(t *testing.T) {
 		if m.Name == "Close" || m.Name == "Version" {
 			continue
 		}
-		if m.Type.NumIn() != 2 || m.Type.NumOut() != 2 {
-			t.Fatalf("exported method %s has shape %s; every read is (context.Context) (Reply, error)", m.Name, m.Type)
-		}
 		cmd, ok := want[m.Name]
 		if !ok {
 			t.Fatalf("exported method %s has no allowlisted command", m.Name)
 		}
-		srv.clear()
-		out := m.Func.Call([]reflect.Value{
+		args := []reflect.Value{
 			reflect.ValueOf(c),
 			reflect.ValueOf(context.Background()),
-		})
+		}
+		switch m.Name {
+		case "Find":
+			// The path is data. The command name is still the only
+			// thing this test allows onto the wire as a verb.
+			if m.Type.NumIn() != 3 || m.Type.NumOut() != 2 {
+				t.Fatalf("Find has shape %s; want (context.Context, string) (Reply, error)", m.Type)
+			}
+			args = append(args, reflect.ValueOf("Album/t.flac"))
+		default:
+			if m.Type.NumIn() != 2 || m.Type.NumOut() != 2 {
+				t.Fatalf("exported method %s has shape %s; every read is (context.Context) (Reply, error)", m.Name, m.Type)
+			}
+		}
+		srv.clear()
+		out := m.Func.Call(args)
 		got := srv.commands()
 		if len(got) != 1 || got[0] != cmd {
 			t.Fatalf("%s sent %v, want [%s]", m.Name, got, cmd)
@@ -476,6 +489,7 @@ type fakeMPD struct {
 	stop chan struct{}
 	mu   sync.Mutex
 	cmds []string
+	raw  []string
 }
 
 func startFake(t *testing.T, opt fakeOpts) *fakeMPD {
@@ -516,15 +530,24 @@ func (s *fakeMPD) commands() []string {
 	return append([]string(nil), s.cmds...)
 }
 
+func (s *fakeMPD) lines() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.raw...)
+}
+
 func (s *fakeMPD) clear() {
 	s.mu.Lock()
 	s.cmds = nil
+	s.raw = nil
 	s.mu.Unlock()
 }
 
-func (s *fakeMPD) record(name string) {
+func (s *fakeMPD) record(line string) {
+	name, _ := splitCommand(line)
 	s.mu.Lock()
 	s.cmds = append(s.cmds, name)
+	s.raw = append(s.raw, line)
 	s.mu.Unlock()
 }
 
@@ -562,8 +585,9 @@ func (s *fakeMPD) serve(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		name, arg := splitCommand(strings.TrimRight(line, "\r\n"))
-		s.record(name)
+		trimmed := strings.TrimRight(line, "\r\n")
+		name, arg := splitCommand(trimmed)
+		s.record(trimmed)
 		if name == "password" {
 			if arg == s.opt.password {
 				_, _ = conn.Write([]byte("OK\n"))
@@ -586,10 +610,11 @@ func (s *fakeMPD) serve(conn net.Conn) {
 }
 
 func splitCommand(line string) (name, arg string) {
-	if rest, ok := strings.CutPrefix(line, "password "); ok {
-		return "password", unquoteArg(strings.TrimSpace(rest))
+	name, rest, _ := strings.Cut(line, " ")
+	if name == "password" || name == "find" {
+		return name, unquoteArg(strings.TrimSpace(rest))
 	}
-	return line, ""
+	return name, rest
 }
 
 func unquoteArg(s string) string {

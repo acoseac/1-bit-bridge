@@ -722,6 +722,75 @@ Gate on the **`rendererDiscovery`** feature flag — present only when the DLNA 
 
 **Response** (`404 not_found`): renderer discovery is not enabled on this bridge. Gate on the `rendererDiscovery` feature flag.
 
+### `GET /v1/outputs` (additive; `localOutputs`)
+
+Gate on the **`localOutputs`** feature flag. It sorts between `keyTempo` and `loudness`, and it is present only when `output.mpd` resolves on and this bridge is running on Linux. `on` resolves on even when the daemon is down. `auto` (the default, and the empty value) resolves on when a configuration was read or a daemon greeted. `off` does not. Off Linux the flag is absent even when the config says `on`: the readers refuse the host. `ProtocolVersion` stays `1`.
+
+Without the flag the route answers `404` `local_outputs_not_supported`. With it, the route is bearer-authenticated like the other library routes and returns one snapshot of the MPD and DAC on this box. The answer may be a fraction of a second old. It is not a live meter, and it never changes playback.
+
+`kind` is an open string. This bridge sends `mpd`. A client ignores an output whose `kind` it does not know, so a later kind is not a breaking change.
+
+```json
+{
+  "outputs": [
+    {
+      "id": "…",
+      "kind": "mpd",
+      "player": { "software": "volumio", "version": "4.119" },
+      "mpd": {
+        "port": 6600,
+        "addresses": ["192.168.1.42"],
+        "version": "0.24.0",
+        "state": "play",
+        "reachableFromLAN": true
+      },
+      "dac": {
+        "card": 5,
+        "id": "Audio",
+        "name": "iFi (by AMR) HD USB Audio",
+        "usbId": "20b1:3009",
+        "isMPDsOutput": true,
+        "capabilities": {
+          "maxPCMRate": 384000,
+          "pcmBitDepths": [16, 24, 32],
+          "nativeDSD": true,
+          "nativeDSDRates": [2822400, 5644800],
+          "dsdFormats": ["DSD_U32_BE"]
+        }
+      },
+      "pathRules": [
+        {
+          "root": "Music",
+          "stripBridgePrefix": "Music/",
+          "prependMpdPrefix": "",
+          "state": "proven",
+          "checked": 20,
+          "found": 20
+        }
+      ]
+    }
+  ]
+}
+```
+
+A kind `mpd` element has every key. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge with the flag on and no card does not answer `outputs: []`. `mpd` is present for kind `mpd` and omitted for any other kind. A client decodes `mpd` as optional, so the bridge's own player (kind `bridge`) can be listed without one. When MPD's device does not resolve to one card, each candidate card is its own element of `outputs`: the same `mpd` and `pathRules`, a different `id` and `dac`.
+
+`id` is the hex SHA-256 of the bridge identity, a newline, the MPD endpoint, a newline, the card's ALSA id (the id string in `/proc/asound/cards`, for example `A20`), a newline, and its USB id (`vendor:product`). The bridge identity is the hex SHA-256 of the data directory, the same directory the DLNA UDN is derived from, without the friendly name. The TLS certificate and the library name are not inputs: a renewing certificate and a rename keep the id. The card index is not an input either: it changes when a DAC is replugged or the box reboots, and the app remembers an output by this id. A null `dac` uses an empty ALSA id and an empty USB id. The same data directory, endpoint, ALSA id and USB id keep the same id across restarts. Two cards do not share an id.
+
+`player.software` is `volumio`, `moode`, `mpd`, or `""` when the box is none of those. `player.version` is that player's version.
+
+`mpd.port` is the TCP port in the endpoint. A socket endpoint uses the `port` from `mpd.conf`, or 6600. `mpd.version` is the daemon's greeting, and `""` when the daemon is down. `mpd.state` is `play`, `pause`, `stop`, or `unknown` when `status` did not answer; a daemon that is down is `unknown` and still `200`.
+
+`mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a link-local address (`fe80::/10`, `169.254/16`) or a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
+
+`dac` is the card MPD's enabled ALSA output names when that device resolves to exactly one card, and `isMPDsOutput` is then `true`. `hw:N`, `hw:N,D`, `hw:CARD=ID`, `hw:CARD=ID,DEV=D`, and the same forms with `plughw:`, name that card directly. Any other device string is a PCM name. It is looked up in `/etc/alsa/conf.d/*.conf` and then `/etc/asound.conf`. A PCM name defined more than once is not resolved. A `pcm` stanza that is not `pcm.NAME { … }` or `pcm.!NAME { … }` makes the file unresolved. `slave.pcm` (the dotted key, or a `slave { pcm }` block) is followed through `type empty` and `type plug` only, at most 8 hops, until a `type hw` with a `card` id or index. A slave that contains `:` is that device string, not a PCM whose name is the string. A `ctl` block and a `defaults` assignment beside the PCM blocks are ignored. Inside one `pcm.NAME` block, `@args`, `@func`, a `$` variable, or a nested block this reader does not model makes that name unresolved and leaves the rest of the file in force. A `ctl` or `defaults` block is skipped, directives inside it included. `@hooks`, `@args`, `@func` or an include at the top level, and a file that does not parse, make the whole configuration unresolved. A file that is present but cannot be read, or that does not parse, makes the whole configuration unresolved: the other files are not used. A missing file does not. A quoted string accepts `\"`, `\\` and `\'` only; any other escape makes the file unresolved. A chain through anything else (`dmix`, `softvol`, `rate`, `route`, `multi`, another plugin, a hook, an include), a repeated `type`, `card`, `device` or `slave` in one block, a cycle, a longer chain, a file the reader cannot parse, or a missing file does not resolve. When it does not resolve, each USB card is listed with `isMPDsOutput` null. When several devices resolve to several cards, those cards are listed with `isMPDsOutput` null. `isMPDsOutput` is `true` or `null`, never `false`. `usbId` is `vendor:product` or `""`.
+
+`capabilities` come from every playback altset of that card's PCM device, not from the running `hw_params`. `maxPCMRate` and `pcmBitDepths` count only PCM formats (`S` or `U` plus a bit depth). A native DSD rate is the altset's frame rate times the format's width: `DSD_U32_*` ×32, `DSD_U16_*` ×16, `DSD_U8` ×8. A DSD format of another width is listed in `dsdFormats` and adds no rate.
+
+`pathRules` has one element per library root, never per track. `state` is `proven` (the root is MPD's music directory, or lies under exactly one top-level entry of it, and every sampled track was found), `mismatch` (that match, and a sample's lookup answered that the file is not there), `unproven` (no single match), or `unchecked` (a match, and no connection, no tracks, or a lookup that returned an error). An error is not evidence the file is missing. `checked` and `found` are those counts, at most 20. `stripBridgePrefix` and `prependMpdPrefix` are filled for `proven`, `mismatch`, and `unchecked` when `os.SameFile` matched, and empty for `unproven`. The client applies them only when `state` is `proven`. It does not re-derive the prefixes. A multi-root library stores `filepath.Base(root)/` in front of each path within that root, and that string is `stripBridgePrefix`. A single-root library stores paths with no root-basename prefix, and `stripBridgePrefix` is empty.
+
+**Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `localOutputs` feature flag.
+
 ### DLNA listener: `GET /dlna/artwork/{key}` (additive; `dlnaArtwork`)
 
 The bridge's opt-in DLNA MediaServer (`dlnaServer`) runs on its own LAN-only HTTP listener, beside the bearer-authed `/v1` API. That listener has always served track bytes at `/dlna/file/{trackID}` **without authentication**, because a renderer cannot send a bearer token; reach is the gate. The listener binds the wildcard (`:7790` by default) but serves only the LAN-eligible interfaces' LAN addresses (RFC 1918, a ULA outside Tailscale's range, link-local), a public address the bridge itself advertises, and loopback. A connection accepted on any other local address (the tailnet's, a VPN's, another interface's) is closed before a byte is read, and SSDP answers an M-SEARCH sent to the multicast group or unicast to a served address, and no other. Public deployment mode refuses the listener outright (`ShouldEnableDLNA`). Cover art was the gap: `/v1/artwork/{key}` lives on the authed listener, so a DLNA renderer or third-party control point browsing the bridge's ContentDirectory had no cover it could fetch, and the CDS emitted no `<upnp:albumArtURI>` at all.
@@ -1734,6 +1803,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
 |    404 | `events_not_supported`   | `GET /v1/events` on a demo bridge, or either event stream with no event broker running (`serve` always starts one); iOS falls back to polling |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (no `smartPlaylists` flag) — no `/v1/smart-playlists` |
+|    404 | `local_outputs_not_supported` | `GET /v1/outputs` when `localOutputs` is absent (`output.mpd` resolves off, or this host is not Linux) |
 |    404 | `playlist_files_not_supported` | No playlist-file index (no `playlistFiles` flag) — no `GET /v1/playlist-files`; `serve` wires it on every bridge |
 |    404 | `favorites_not_supported` | No favorites store, as on a demo bridge (no `favorites` flag) — no `/v1/favorites` |
 |    404 | `playlist_backup_not_supported` | No playlist store, as on a demo bridge (no `playlistBackup` flag) — no `/v1/playlists` route |

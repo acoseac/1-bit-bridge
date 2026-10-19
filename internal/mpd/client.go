@@ -17,9 +17,11 @@ const DefaultTimeout = 5 * time.Second
 
 // allowedCommands is the only set exchange will write. password is
 // here so Dial can authenticate; it is not a method, and the argument
-// is the one value the client ever sends. Every other command takes
-// none. A name that changes playback, the queue or the database is
-// absent on purpose.
+// is the one value the client ever sends. find takes one path, and
+// commandLine builds both quoting levels from it: a caller never
+// supplies the filter text. Every other command takes none. A name
+// that changes playback, the queue or the database is absent on
+// purpose.
 var allowedCommands = map[string]struct{}{
 	"status":             {},
 	"stats":              {},
@@ -28,6 +30,7 @@ var allowedCommands = map[string]struct{}{
 	"currentsong":        {},
 	"config":             {},
 	"commands":           {},
+	"find":               {},
 	"password":           {},
 }
 
@@ -136,6 +139,15 @@ func (c *Client) Commands(ctx context.Context) (Reply, error) {
 	return c.exchange(ctx, "commands", "")
 }
 
+// Find asks whether path is in the database. path is an MPD URI, not
+// filter text: commandLine builds `(file == "...")` and quotes that
+// expression as the one protocol argument. A path containing a
+// newline, a carriage return or a NUL is refused and nothing is
+// written.
+func (c *Client) Find(ctx context.Context, path string) (Reply, error) {
+	return c.exchange(ctx, "find", path)
+}
+
 // exchange is the only place a command is written. The name is checked
 // against allowedCommands before the line is built, so a refused
 // command's argument is never written and never appears in the error.
@@ -154,10 +166,11 @@ func (c *Client) exchange(ctx context.Context, name, arg string) (Reply, error) 
 }
 
 func commandLine(name, arg string) ([]byte, error) {
-	if _, ok := allowedCommands[name]; !ok || (arg != "" && name != "password") {
+	if _, ok := allowedCommands[name]; !ok {
 		return nil, errors.New("mpd: command refused")
 	}
-	if name == "password" {
+	switch name {
+	case "password":
 		if strings.ContainsAny(arg, "\r\n\x00") {
 			return nil, errors.New("mpd: password contains a line break")
 		}
@@ -166,8 +179,57 @@ func commandLine(name, arg string) ([]byte, error) {
 		b = appendQuoted(b, arg)
 		b = append(b, '\n')
 		return b, nil
+	case "find":
+		return findCommand(arg)
+	default:
+		if arg != "" {
+			return nil, errors.New("mpd: command refused")
+		}
+		return append([]byte(name), '\n'), nil
 	}
-	return append([]byte(name), '\n'), nil
+}
+
+// findCommand builds `find` from a path. Two quoting levels, both from
+// MPD 0.24.4. The filter value is inside double quotes, and
+// src/song/Filter.cxx ExpectQuoted treats a backslash as an escape of
+// the next byte and ends the value at the matching quote, so `\`, `"`
+// and `'` are escaped there. doc/protocol.rst "Escaping String Values"
+// then quotes that whole expression as one protocol argument, escaping
+// `\` and `"` again (the same rule appendQuoted uses for a password).
+// A newline, a carriage return or a NUL cannot be an argument: the
+// protocol is one line, and a NUL would end the C string MPD parses.
+// The path is not returned in the error.
+func findCommand(path string) ([]byte, error) {
+	if strings.ContainsAny(path, "\r\n\x00") {
+		return nil, errors.New("mpd: path refused")
+	}
+	expr := findExpression(path)
+	b := make([]byte, 0, len("find ")+len(expr)*2+3)
+	b = append(b, "find "...)
+	b = appendQuoted(b, expr)
+	b = append(b, '\n')
+	return b, nil
+}
+
+// findExpression is `(file == "<path>")` with the filter-level escapes.
+// `)` is not escaped: ExpectQuoted copies it until the closing quote,
+// which is what keeps a value such as x") OR (file == "y inside the
+// string.
+func findExpression(path string) string {
+	var b strings.Builder
+	b.Grow(len(path) + len(`(file == "")`))
+	b.WriteString(`(file == "`)
+	for i := 0; i < len(path); i++ {
+		switch path[i] {
+		case '\\', '"', '\'':
+			b.WriteByte('\\')
+			b.WriteByte(path[i])
+		default:
+			b.WriteByte(path[i])
+		}
+	}
+	b.WriteString(`")`)
+	return b.String()
 }
 
 func appendQuoted(b []byte, s string) []byte {

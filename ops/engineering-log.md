@@ -47222,3 +47222,511 @@ was put back out of the problem.
 `TestConfCandidateKeepsACloudPlaceholder` went red with
 `a Windows cloud placeholder (ModeIrregular) was refused`. The list
 of kinds was put back.
+
+## 2026-10-19 — `find` is a read, and the client builds both quoting levels (B473 step 2b)
+
+### The question
+
+`GET /v1/outputs` confirms a path rule by asking MPD whether a sampled
+track is in the database. That is `find`, one filter, and it has to be
+a read the client builds. A caller that passed protocol text could
+close the filter string and add another comparison.
+
+### What MPD 0.24.4 does
+
+`doc/protocol.rst` "Escaping String Values" quotes a string with `'` or
+`"` and escapes a special character with `\`. Its worked example is the
+artist `foo'bar"`, the filter `(Artist == "foo\'bar\"")`, and the wire
+`find "(Artist == \"foo\\'bar\\\"\")"`. Two levels: the value, then the
+whole expression as one protocol argument.
+
+`src/song/Filter.cxx` `ExpectQuoted` is the filter reader. It accepts
+either quote, a backslash copies the next byte, and the string ends at
+the matching unescaped quote. A `)` inside the quotes is a literal, so
+escaping `"` is what keeps `x") OR (file == "y` inside one comparison.
+`file ==` matches the song URI relative to `music_directory`.
+
+The protocol argument uses the same escapes the client already applies
+to a password: wrap in `"`, and escape `\` and `"`. A newline, a
+carriage return or a NUL is not an argument. The protocol is one line,
+and a NUL would end the C string MPD parses. Those paths are refused
+before a byte is written.
+
+### What was rejected
+
+A `find` whose argument was the filter text. The caller would be the
+one quoting, and a missed escape is an injection. The path is the
+argument; `commandLine` builds `(file == "...")` and then quotes that
+expression. `)` is not escaped inside the value, because `ExpectQuoted`
+does not treat it as special.
+
+### Red first
+
+`TestFindQuotingRoundTrips` and `TestFindRefusesALineBreakOrNUL` were
+run before `find` was on the allowlist. Both failed with
+`mpd: command refused`: the quoting case on `foo'bar"`, the refusal
+case on `a\nb` (the error was `mpd: command refused`, not
+`mpd: path refused`, because a line break was not yet a distinct
+refusal).
+
+## 2026-10-19 — a DAC's capabilities are every playback altset, not the rate it is playing (B473 step 2b)
+
+### The question
+
+`GET /v1/outputs` tells the app what the DAC can receive, so the app can
+say whether a file is within that. The running altset is one setting.
+The iFi GO bar's `stream0` lists four, and the DSD one prints frame
+rates, not the DSD rate.
+
+### What the capture says
+
+`testdata/dsd256-native` is the iFi (USB `20b1:3009`, card 5). Playback
+altsets 1–3 are `S32_LE`, `S24_3LE` and `S16_LE`, each with rates
+through 384000. Altset 4 is `SPECIAL DSD_U32_BE` with the same frame
+rates and `Bits: 32`. The native DSD rate is the frame rate times 32:
+352800 frames/s is DSD256 (11289600). The `Bits` line on that altset is
+not a PCM depth, and those frame rates are not PCM rates. PCM depth
+comes from the format name: `S24_3LE` is 24.
+
+`DSD_U16_*` is times 16 and `DSD_U8` is times 8. A `DSD_` name with
+another width is listed and adds no rate. `SPECIAL` is not DSD.
+
+`pcm768-dsd512` is synthetic, listed in `testdata/README.md`. PCM
+altsets reach 768000. The DSD altset's frame rates are 705600 and
+768000, which times 32 are 22579200 and 24576000 (DSD512). No captured
+file was edited.
+
+An MPD `audio_output` device resolves to a card when the string names
+one: `hw`, `plughw`, `plug` or `front`, by index or by an exact card
+id, including `CARD=`. `volumio` and `default` do not. Two cards with
+the same id do not.
+
+### Red first
+
+`TestCapabilitiesFromTheIFiCapture` was run before the function
+existed. The package did not compile:
+`undefined: CapabilitiesFromAltsets`.
+
+## 2026-10-19 — a path rule is one root, proved by SameFile and then by find (B473 step 2b)
+
+### The question
+
+The app has to turn a bridge path into the path MPD has indexed. On a
+Volumio box the bridge root `/data/INTERNAL` is MPD's `INTERNAL/` when
+`music_directory` is `/var/lib/mpd/music` and `INTERNAL` there is a
+mount or a link of that root. The swap is a prefix, one per root, not
+per track. `config` over TCP does not answer `music_directory`, so it
+comes from `mpd.conf`.
+
+### What counts as proved
+
+`os.SameFile` of the root against the music directory, and against each
+direct child. Exactly one match. A directory of the same basename that
+is a different file is not a match, and find is not asked. Two matches
+(the directory and a link back to it) are not a match either. Nothing
+deeper than that child is walked.
+
+Then `find` on at most 20 tracks, evenly spaced through the sorted
+indexed paths of that root. Every one found is `proven`. A miss, or a
+lookup error, is `mismatch`. No music directory, no lookup, or no
+tracks is `unchecked`. Prefixes are filled on a match, including
+`unchecked` when there are no tracks to sample, and left empty
+otherwise. A single-root stored path has no basename prefix, so strip
+is empty. A multi-root stored path starts with the root's basename, and
+that is what strip removes. Prepend is empty when the root is the music
+directory, and the child's name plus a slash when the root is that
+child.
+
+### Red first
+
+`TestProveRootsStates` was run before `ProveRoots` existed. The package
+did not compile: `undefined: ProveRoots`.
+
+## 2026-10-19 — an output-only bridge has no library root (B473 step 2b)
+
+### The question
+
+A box whose library lives on MPD's music directory, or a bridge that
+only reports the DAC, has nothing for `libraryRoots`. Loopback Validate
+refused an empty list, so the process never started and `bridge doctor`
+failed `config-file` before the library check, which already says
+"none configured" is fine.
+
+### What is allowed
+
+`output.mpd` is `auto`, `on` or `off`. Empty is `auto`. Only an
+explicit `on` loads with no roots, in loopback as well as public.
+`auto` still requires a root: Validate does not dial MPD, and a default
+install must not become output-only because a daemon happens to be
+there. `off` is the same shape as before. Endpoint, conf and password
+are the overrides `bridge output player` takes. The password is a YAML
+field and not a JSON field, and a mode error does not quote it.
+
+A root that is configured and not readable still refuses a loopback
+start. A network mount that is down is that case. This does not special-
+case it.
+
+`TestOutputOnlyBridgeStarts` boots `bridge serve` on that config and
+waits until the console answers. `TestDoctorPassesWithNoRoots` grades
+the same shape and requires no failing check.
+
+### Red first
+
+`TestOutputOnlyConfigHasNoRoots` was run after the field existed and
+before Validate allowed it. Load failed with
+`libraryRoots: must have at least one entry`.
+
+## 2026-10-19 — GET /v1/outputs (B473 step 2b)
+
+### What the route is
+
+`localOutputs` is advertised, and `GET /v1/outputs` answers, only when
+`output.mpd` resolves on and the process is Linux. `on` does not need a
+daemon. `auto` does: a configuration was read or a daemon greeted, and
+that probe is cached (30s when found, 5s when not) so `/v1/health` does
+not dial on every poll. The route itself is separate. Off Linux,
+including `output.mpd: on`, the flag is absent and the route is `404`
+`local_outputs_not_supported`. `ProtocolVersion` stays 1.
+
+The body is a DTO in `internal/api`. It does not encode an `alsa` or
+`mpd` type. Every key is present and every list is `[]`. `dac` is null
+when no card is named, and the array still has one element: a flag-on
+bridge with no card is not `outputs: []`. `kind` is the string `mpd`.
+A client ignores a kind it does not know.
+
+`addresses` are the LAN addresses from the set health and mDNS already
+advertise, restricted to those on which MPD's port greets `OK MPD`.
+Loopback is never dialled for that list. A hostname is not an address.
+None means `reachableFromLAN` false. The app matches the box by resolved
+IP.
+
+The id is the hex SHA-256 of the TLS fingerprint, a newline, the MPD
+endpoint, a newline, and the card index when a dac is named. Two
+processes with the same fingerprint and endpoint and card return the
+same id. `isMPDsOutput` is true only when one ALSA device resolves to
+one card. An unresolved device lists each USB card with null, and does
+not guess. This bridge does not send false.
+
+The MPD connection opens on the first call that can dial, is reused,
+and closes 60s after the last call. The clock is `Now` and `AfterFunc`,
+so the idle close is tested by advancing a clock, not by sleeping. A
+successful body is reused for 500ms. One build is in flight; a second
+caller waits on it. A dial that fails is still 200, with `state`
+`unknown`.
+
+### Red first
+
+`TestEverySentErrorCodeIsInTheProtocolTable` failed before the error
+row existed: `404 local_outputs_not_supported, sent at outputs.go:762
+(outputs)`. `TestEveryRoutedEndpointIsDocumented` failed in the same
+run: `GET /v1/outputs` had no contract.
+
+`TestLocalOutputsGate/darwin_on` was run with the Linux check taken
+out of `Active`. The route answered `status 200, want 404`.
+
+## 2026-10-19 — the in-flight outputs test has to fail, not hang (B473 step 2b)
+
+`TestOutputsOneBuildInFlight` waited on the join signal the second
+caller sends when it finds a build already running. Skipping that
+branch let a second build start, and the test blocked on the signal
+until the process timeout. It now stops when a second `Status` begins,
+releases the first build, and the dial and status counts fail.
+
+## 2026-10-19 — the output id does not use the ALSA card index (B473 step 2b)
+
+The first derivation hashed the card index. That number changes when a
+DAC is replugged or the box reboots, and the app remembers an output by
+its id, so the same card would look new. The id is now the hex SHA-256
+of the TLS fingerprint, the MPD endpoint, the card's ALSA id string
+(`/proc/asound/cards`, for example `A20`) and its USB id. A null dac
+uses empty strings for both. `TestOutputIDIgnoresTheCardIndex` reads the
+iFi card at index 5 and at index 6.
+
+## 2026-10-19 — isMPDsOutput is true or null, never false (B473 step 2b)
+
+One resolved card is listed with `true`. An unresolved device lists each
+USB card with `null`, and several resolved cards are listed with `null`.
+The bridge does not list the other cards once one resolved, so it never
+has a card to mark `false`. `TestIsMPDsOutputIsTrueOrNull` pins both
+answers and rejects the JSON `false`.
+
+## 2026-10-19 — a dead MPD session is dropped (B473 step 2b)
+
+`session` returned the cached client until the idle timer, and every
+poll re-armed that timer, so an MPD restart left `state: unknown` and
+path rules `mismatch` for as long as the app kept asking. A non-context
+error from `status` or `find` now closes that client and dials once
+more in the same build. The cache is keyed on endpoint and password.
+`TestDeadMPDSessionIsRedialed` failed first with `state unknown dials 1
+closed 0`. `TestSessionFollowsTheEndpoint` failed with
+`password change dialed [127.0.0.1:6600 ]` when the cache ignored the
+password. `TestDeadFindRedialsOnce` failed with
+`dials 1` and `State:mismatch`.
+
+## 2026-10-19 — idle close waits out a build (B473 step 2b)
+
+The idle timer is armed at the start of a call. A build that is still
+running when it fires was closed underneath itself. `idleClose` now
+returns while `flight` is set, and the build's end arms the timer
+again. `TestIdleCloseSkipsABuildInFlight` failed first with
+`closed the session mid-build: 1`.
+
+## 2026-10-19 — the shared build does not run on the caller's context (B473 step 2b)
+
+The first caller owned the build. Disconnecting cancelled it, and the
+degraded body (unknown state, no addresses, mismatch rules) was cached
+and served to the waiters as 200. The build now runs on
+`context.WithoutCancel` with its own deadline, and a build that hits
+that deadline is not cached. `TestCancelledCallerDoesNotSpoilTheBuild`
+failed first with `waiter status 200 state unknown`.
+`TestBuildDeadlineIsNotCached` failed first with
+`status calls 1, a deadline was cached`.
+
+## 2026-10-19 — path rules use the scanner's root prefix (B473 step 2b)
+
+`pathBase` trimmed a path by hand. It turned `/` into an empty prefix,
+and it did not share `fs.FoldRootBasename`, so a stored path whose
+first segment differed only in case was left off that root. The prefix
+is now `filepath.Base`, which is what the scanner stores in multi-root
+mode, and a track belongs to the root when that basename matches or
+folds to the same key. `TestPathRulesUseTheStoredRootPrefix` failed
+first with `filesystem root prefix ""`.
+
+## 2026-10-19 — LAN greets run together under one deadline (B473 step 2b)
+
+Each advertised address was greeted in turn, and a successful dial
+started a fresh read deadline, so two addresses cost two dials plus
+two reads. Link-local addresses were greeted too. The probes now run
+together, skip `fe80::/10` and `169.254/16`, and the read uses the
+same deadline as the dial. `TestLANProbesRunTogetherAndSkipLinkLocal`
+failed first with `in flight map[192.168.1.42:6600:{}]`.
+`TestGreetDeadlineCoversDialAndRead` failed first with
+`read kept its own deadline: 302.609083ms`.
+
+## 2026-10-19 — a library root deeper than one level can be proved (B473 step 2b)
+
+`musicPrefix` compared only the entries directly inside
+`music_directory`. On Volumio that directory holds `USB -> /mnt/USB`
+(real path `/media`), and a bridge root at `/media/NVME/music` is
+`USB/NVME/music/`, so the rule stayed `unproven`. Each top-level entry
+is now resolved, and a root whose real path is that path or lies under
+it is proved only when `os.SameFile` agrees. `TestProveRootsVolumioLayout`
+failed first with `root music: ... State:"unproven"`.
+
+## 2026-10-19 — path rules are not rebuilt on every poll (B473 step 2b)
+
+`musicPrefix` stat-ed every entry of `music_directory`, including
+regular files, and the route ran up to 20 `find`s on every build. A
+regular file is now skipped from the directory entry's type; a
+directory, a symlink, or an unknown type is still considered. A path
+result that is not `mismatch` is reused for about 60s and dropped when
+the music directory, the roots, or the MPD endpoint, conf or password
+changes. `TestDirEntrySkipsRegularFiles` failed first with `a regular
+file was stat-eligible`. `TestPathRulesOutliveTheResponseCache` failed
+first with `finds 2 after the response cache expired`.
+
+## 2026-10-19 — an output id does not follow the TLS certificate (B473 step 2b)
+
+The bridge half of the id was the TLS fingerprint. A tsnet or ACME
+renewal changes that fingerprint and so every output id the app has
+stored. It is now the hex SHA-256 of the data directory, which is the
+directory `deriveDLNAUDN` hashes, without the friendly name, so a
+rename does not change it either. `TestOutputsIDStableAcrossRestarts`
+failed first with `fingerprint or name changed the id`.
+
+## 2026-10-19 — mpd is optional on an output, and empty when the daemon is down (B473 step 2b)
+
+`mpd` was a value, so a kind `bridge` element could not omit it, and a
+failed dial still published the probed version. `mpd` is now a pointer,
+present only for kind `mpd`. A client decodes it as optional. The
+version stays empty when there is no session. `TestOutputKindIsOpen`
+failed first with `kind bridge included mpd`.
+`TestMPDVersionIsEmptyWhenTheDaemonIsDown` failed first with
+`Version:0.24.0`.
+
+## 2026-10-19 — an MPD lookup error is not a missing file (B473 step 2b)
+
+`ProveRoots` counted a `find` error as a miss, so a daemon error was
+reported as `mismatch` and would have been retried only because
+`mismatch` is not cached. A sampled lookup that returns an error now
+leaves the rule `unchecked`, with the SameFile prefixes kept, and that
+result is not held in the 60s path-rule cache. A lookup that answers
+not found stays `mismatch`. The `find error` case of
+`TestProveRootsStates` failed first with `State:"mismatch"`.
+`TestLookupErrorIsNotCached` failed first with `finds 2, a lookup
+error was cached`.
+
+## 2026-10-19 — an unchecked path rule from a down daemon or an empty index is not cached (B473 step 2b)
+
+The 60s cache kept every `unchecked` that was not a lookup error. The
+first build with no MPD session, or with the scanner still empty,
+stayed `unchecked` after MPD came up or the index filled.
+`TestUncheckedWithoutASessionIsNotCached` failed first with `finds 0,
+an unchecked with no session was cached`.
+`TestUncheckedWithNoTracksIsNotCached` failed first with `finds 0, an
+empty index was cached`. A result is cached only when a lookup was
+available, the track read did not error, and no rule is `unchecked`,
+`mismatch` or errored.
+
+## 2026-10-19 — a case-folded path is not a member of a root (B473 step 2b)
+
+`trackUnderRoot` accepted a stored path whose first segment only
+case-folded to the root basename. `StripBridgePrefix` is that exact
+basename plus `/`, and `bridgePathToMPD` cuts it with `CutPrefix`, so
+the folded path counted as a miss and the rule was `mismatch`. The
+scanner stores the exact `filepath.Base` prefix, so membership is that
+prefix only. `TestPathRulesUseTheStoredRootPrefix` failed first with
+`State:mismatch Checked:2 Found:1`.
+
+## 2026-10-19 — the MPD probe cache follows the config and ignores a cancelled caller (B473 step 2b)
+
+The probe result was cached for 30s on a hit and 5s on a miss with no
+key, so a change of mode, endpoint, conf or password waited out that
+TTL. A cancelled `/v1/health` on a cold cache stored the miss, and
+`/v1/outputs` then 404ed for 5s. The cache is keyed on those four
+fields. The probe runs on `context.WithoutCancel` with its own
+timeout, and a result whose own deadline fired is not stored.
+`TestProbeCacheFollowsTheConfig` failed first with `inspects 1, a
+config change stayed cached`. `TestCancelledProbeIsNotCached` failed
+first with `found false inspects 1, a cancelled probe was cached`.
+
+## 2026-10-19 — an MPD PCM name follows empty and plug to a hw card (B473 step 2b)
+
+On the Volumio 4.119 Pi, `device "volumio"` is a PCM. `/etc/asound.conf`
+defines `pcm.volumio` (`empty`) → `pcm.volumioOutput` (`plug`) →
+`pcm.volumioHw` (`hw`, card `Audio`), and card `Audio` is the iFi on
+card 2. `ResolveALSADevice` only accepts `hw`, `plughw`, `plug` and
+`front`, so both USB cards were listed with `isMPDsOutput` null.
+`ResolveOutputDevice` follows `slave.pcm` through `empty` and `plug`
+only, at most 8 hops, in `etc/asound.conf` and then `etc/alsa/conf.d`,
+read beside the proc root. Anything else in the chain stays unresolved,
+and the route keeps today's USB list. The captured chain is in
+`internal/alsa/testdata/volumio-asound-chain/` and is not edited.
+`TestResolveOutputDeviceVolumioChain` failed first with `volumio = 0, 0, false; want card 2 pcm 0`.
+`TestResolveOutputDevice` failed first with `slave block = 0, 0, false`.
+
+## 2026-10-19 — a PCM name defined twice is unresolved (B473 step 2b)
+
+alsa-lib reads `conf.d` before `asound.conf`, and a later `pcm` or
+`pcm.!name` replaces the earlier one. Keeping the first definition
+named whichever card that file happened to hold. A name defined more
+than once, in one file or across files, is now opaque, and `conf.d` is
+read first. `TestDuplicatePCMIsUnresolved` failed first with
+`twice = 0, 0, true; want unresolved`, `pcm.!name = 5, 0, true; want unresolved`,
+and `across files = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — a second type, card or device in one PCM block is unresolved (B473 step 2b)
+
+A repeated key overwrote the first, so the block resolved to whichever
+value came last. A second `type`, `card` or `device` makes the block
+opaque, as a second `slave` already did. `TestDuplicateKeyIsOpaque`
+failed first with `second card = 2, 0, true; want unresolved`,
+`second device = 2, 1, true; want unresolved`, and
+`second type = 5, 0, true; want unresolved`.
+
+## 2026-10-19 — a slave that names a device is not a PCM (B473 step 2b)
+
+`slave.pcm "hw:2,0"` was looked up as a PCM name, so it did not resolve,
+and a block literally named `pcm."hw:0,0"` was walked instead of the
+device string. A name containing `:` is resolved with the hw and plughw
+rules and is never a definition. `TestSlaveDeviceString` failed first
+with `hw slave = 0, 0, false; want card 2 pcm 0`,
+`plughw slave = 0, 0, false; want card 2 pcm 0`, and
+`named hw string = 2, 0, true; want card 0`.
+
+## 2026-10-19 — a ctl or defaults stanza does not reject the file (B473 step 2b)
+
+A top-level name other than `pcm` made the whole file unusable, so a
+Volumio `asound.conf` that also holds `ctl.!default` did not resolve.
+Those stanzas are skipped, and `;` and `,` are separators. `@hooks`,
+`@args`, `<include>` and `<file>` still make the file unusable.
+`volumio-with-ctl/` is the captured file with those stanzas in front;
+the capture itself is not edited. `TestNonPCMStanzaIsSkipped` failed
+first with `volumio with ctl = 0, 0, false; want card 2 pcm 0` and
+`separators = 0, 0, false; want card 2 pcm 0`.
+
+## 2026-10-19 — a string escape other than quote or backslash is unresolved (B473 step 2b)
+
+`\n`, `\t`, `\x41` and `\060` were kept as the next byte, so `card "Au\dio"`
+was card `Audio`. A string accepts only `\"`, `\\` and `\'`. Any other
+escape makes the file unusable. `TestStringEscapeIsOnlyQuoteOrBackslash`
+failed first with `letter = 2, 0, true; want unresolved`,
+`newline = 2, 0, true; want unresolved`, `tab = 2, 0, true; want unresolved`,
+`hex = 2, 0, true; want unresolved`, and `octal = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — one file that does not parse makes the configuration unresolved (B473 step 2b)
+
+A conf.d file that parsed was kept when asound.conf did not. `pcm.!out`
+with `@args` was dropped and `pcm.out` from conf.d resolved to card 0.
+A directory where asound.conf should be was the same. A missing file
+is still ignored. `TestUnparsedFileDropsTheRest` failed first with
+`unparsed asound.conf = 0, 0, true; want unresolved` and
+`unreadable asound.conf = 0, 0, true; want unresolved`.
+
+## 2026-10-19 — a pcm stanza this parser does not model makes the file unusable (B473 step 2b)
+
+`pcm { out { … } }` was skipped as a non-pcm stanza, so a `pcm.keep`
+beside it still resolved. A dotted assignment such as `pcm.out.card`
+already failed the file. Any stanza whose root name is `pcm` and that
+is not `pcm.NAME { … }` or `pcm.!NAME { … }` now fails the file.
+`TestUnmodeledPCMStanzaIsUnusable` failed first with
+`nested pcm = 2, 0, true; want unresolved`.
+
+## 2026-10-19 — an @ directive inside a skipped block makes the file unusable (B473 step 2b)
+
+`@func` and `@args` are identifiers. Inside a `ctl` or `defaults`
+block they were skipped with the rest of that block, so a `pcm.out`
+in the same file still resolved, and `@args.NAME` at the top level was
+skipped the same way. An identifier that starts with `@` now fails the
+file wherever it appears. `TestAtDirectiveInsideSkippedBlock` failed
+first with `at inside block = 2, 0, true; want unresolved` for
+`defaults.pcm { @func getenv }` and for `ctl.name { @args.CARD { … } }`.
+`TestNonPCMStanzaIsSkipped` failed first with `@args.NAME 1 resolved`.
+
+## 2026-10-19 — a plugin PCM does not discard the Volumio chain (B473 step 2b)
+
+The Pi's `/etc/alsa/conf.d/` is Debian's alsa-plugins files. Each
+`pcm.pulse` (and the ctl beside it) holds `@args`, `@func` and
+`$DEVICE`. Treating that as a file that does not parse discarded
+`asound.conf` too, so `volumio` no longer resolved to card `Audio`.
+Inside a `pcm.NAME` block that syntax makes the name opaque and the
+file stays usable. A `ctl` or `defaults` block is still skipped,
+directives inside it included. `@hooks`, `@args`, `@func` and an
+include at the top level still make the whole configuration
+unresolved. The fourteen captured files are in
+`volumio-asound-chain/etc/alsa/conf.d/` and are not edited.
+`TestResolveOutputDeviceVolumioChain` failed first with
+`volumio = 0, 0, false; want card 2 pcm 0`.
+`TestPluginPCMDoesNotSpoilTheFile` failed first with
+`keep = 0, 0, false; want card 2 pcm 0`.
+`TestVolumioPCMNamesTheDAC` failed first with `dac <nil>`.
+
+## 2026-10-19 — concurrent auto probes share one inspection (B473 step 2b)
+
+`GET /v1/health` is unauthenticated, and in auto mode each call whose
+probe cache has expired started its own `Inspect`: mpd.conf, player
+detection, and a greet. A burst could open that many MPD connections.
+Callers for one configuration key now share the in-flight probe. The
+hit and miss TTLs, the detached context, and the refusal to store a
+result whose own deadline fired are unchanged.
+`TestProbeMissesShareOneFlight` failed first with
+`inspects 8 waiting 0, want one inspection`.
+`TestProbeDeadlineIsNotCached` passed before that change: a probe that
+blocks until its own deadline is not reused.
+
+## 2026-10-19 — the path-rule strip prefix depends on the root count (B473 step 2b)
+
+The path-rule sentence described only the multi-root stored form,
+`filepath.Base(root) + "/"`. A single-root scan stores the path relative
+to the root with no basename prefix (`relPath` in the scanner),
+`proveRoot` leaves `StripBridgePrefix` empty, and `pathRules` includes
+every indexed track. The rule and `PROTOCOL.md` now say both.
+
+## 2026-10-19 — a probe caches the configuration it read (B473 step 2b)
+
+`probe` computed its cache key from one read of the output configuration
+and built `mpd.Options` from a second. A reload between the two stored
+the new result under the old key and handed it to waiters of that key.
+The key and the options now come from one snapshot.
+`TestProbeCachesTheConfigurationItProbed` failed first with
+`inspects 2 opt "127.0.0.1:6601", cached under a key other than "127.0.0.1:6601"`.

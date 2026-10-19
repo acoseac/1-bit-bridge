@@ -3866,6 +3866,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// included: library data, like the manifest, not one of the user-data
 	// stores the demo leaves unwired.
 	apiSrv.WithPlaylistFileStore(manifestStore)
+	// The box as an output. The flag and the route read output.mpd at
+	// request time, and the track list is the filesystem index only.
+	apiSrv.WithLocalOutputs(api.LocalOutputsConfig{
+		Tracks: func(ctx context.Context) ([]string, error) {
+			return manifestStore.TrackPathsLocal(ctx)
+		},
+	})
 	// The endpoint list publishes an IPv6 address of the interface walk
 	// only while the certificate this process serves names it (backlog
 	// B457), and only for a pair this bridge minted: `bridge cert rotate`

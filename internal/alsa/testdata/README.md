@@ -58,6 +58,14 @@ and each status file holds only the first lines a real one opens with.
   and `sub0`, plus `Audio` pointing at `card0` the way `/proc/asound/<id>`
   does. The links are made by the test, not stored: a checkout of a symlink
   is not the same file on Windows.
+- `pcm768-dsd512`: a USB card whose `stream0` playback altsets offer PCM
+  through 768000 (S32_LE, S24_3LE, S16_LE) and native `DSD_U32_BE` at
+  frame rates 705600 and 768000, which are DSD512 (those rates times 32).
+  The card id, name and USB id are made up. No substream is playing.
+
+`volumio-asound-chain/` (`etc/asound.conf` and `proc/asound/cards`) was captured on 2026-10-19 from a Volumio 4.119 Raspberry Pi 5 via `cat`, byte for byte, and is not edited. `etc/alsa/conf.d/` in that directory is the fourteen files from the same box's `/etc/alsa/conf.d/`, captured the same day via `cat`, and is not edited.
+
+`volumio-with-ctl/` is synthetic: that captured `asound.conf`, unchanged, with a `ctl.!default` block, a `ctl.name` block and a `defaults.pcm.card` assignment in front of it.
 
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 

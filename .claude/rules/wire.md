@@ -40,6 +40,7 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
 
 ## The wire contract
 
+- **`GET /v1/outputs` is additive and `ProtocolVersion` stays 1.** `localOutputs` is advertised only when `output.mpd` resolves on and the host is Linux; otherwise the route is `404` `local_outputs_not_supported`. The body is an `internal/api` DTO: a kind `mpd` element has every key, every list `[]`, `dac` null when no card, `mpd` a pointer present only for kind `mpd` so a client decodes it as optional, `isMPDsOutput` `true` or `null` and never `false`, `kind` an open string a client ignores when it does not know it. Each unresolved candidate card is its own element, sharing `mpd` and `pathRules`. `mpd.version` is empty when the daemon is down. Prefixes are filled for `mismatch` and `unchecked` when SameFile matched, and empty for `unproven`. **Don't encode an `alsa` or `mpd` type from the handler.** The contract is the `GET /v1/outputs` section of `PROTOCOL.md`.
 - **`/v1` describes the SERVED set.** The manifest stream/page/total,
   `enrichmentProgress`, health's `tracksIndexed`, the DLNA adapter and the
   smart-playlist pools all go through the `ListServed*` / `CountServedTracks`

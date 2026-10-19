@@ -95,10 +95,38 @@ type Config struct {
 	Metrics         MetricsConfig        `yaml:"metrics,omitempty"`
 	Demo            DemoConfig           `yaml:"demo,omitempty"`
 	Retention       RetentionConfig      `yaml:"retention,omitempty"`
+	Output          OutputConfig         `yaml:"output,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
+}
+
+// OutputConfig is the bridge reporting the player beside it. MPD is
+// auto (the default, including an empty value), on, or off. Endpoint,
+// Conf and Password are the optional overrides bridge output player
+// takes. Password is not a JSON field: a settings response must not
+// carry it.
+type OutputConfig struct {
+	MPD      string `yaml:"mpd,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty"`
+	Conf     string `yaml:"conf,omitempty"`
+	Password string `yaml:"password,omitempty" json:"-"`
+}
+
+// Mode is auto, on or off. An empty value is auto. Anything else is
+// empty, which Validate refuses.
+func (o OutputConfig) Mode() string {
+	switch strings.ToLower(strings.TrimSpace(o.MPD)) {
+	case "", "auto":
+		return "auto"
+	case "on":
+		return "on"
+	case "off":
+		return "off"
+	default:
+		return ""
+	}
 }
 
 // MetricsConfig controls who may scrape /metrics without a session.
@@ -3162,6 +3190,9 @@ func (c *Config) Validate() error {
 	if _, err := c.Deployment.EffectiveMode(); err != nil {
 		return err
 	}
+	if c.Output.Mode() == "" {
+		return fmt.Errorf("output.mpd: %q is not auto, on or off", c.Output.MPD)
+	}
 
 	// Retention: a NON-ZERO playback-history window below the longest
 	// bounded smart-mix window is REFUSED, not clamped. 30 days would
@@ -3211,7 +3242,10 @@ func (c *Config) Validate() error {
 	// (operator hasn't mounted the FUSE drive yet, will add via
 	// `bridge library add` after the bridge is up) — log a warn so
 	// the breadcrumb is visible without failing startup.
-	if len(c.LibraryRoots) == 0 {
+	// An output-only bridge (output.mpd: on) reports the player and the
+	// DAC and serves no tracks, so it has no library root. auto stays a
+	// library install: Validate does not dial MPD to decide.
+	if len(c.LibraryRoots) == 0 && c.Output.Mode() != "on" {
 		if !c.IsPublic() {
 			return errors.New("libraryRoots: must have at least one entry")
 		}
