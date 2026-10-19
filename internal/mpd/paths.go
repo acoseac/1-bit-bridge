@@ -119,6 +119,9 @@ func musicPrefix(musicDir, root string) (string, bool) {
 	}
 	if os.SameFile(musicInfo, rootInfo) {
 		for _, e := range entries {
+			if !dirEntryMayHoldMusic(e) {
+				continue
+			}
 			info, err := os.Stat(filepath.Join(musicDir, e.Name()))
 			if err == nil && info.IsDir() && os.SameFile(info, rootInfo) {
 				return "", false
@@ -133,6 +136,9 @@ func musicPrefix(musicDir, root string) (string, bool) {
 	matches := 0
 	prefix := ""
 	for _, e := range entries {
+		if !dirEntryMayHoldMusic(e) {
+			continue
+		}
 		entryPath := filepath.Join(musicDir, e.Name())
 		real, err := filepath.EvalSymlinks(entryPath)
 		if err != nil {
@@ -158,6 +164,13 @@ func musicPrefix(musicDir, root string) (string, bool) {
 		return "", false
 	}
 	return prefix, true
+}
+
+// dirEntryMayHoldMusic reports whether an entry can be a library root.
+// A regular file cannot. An unknown type still can, so it is not skipped.
+func dirEntryMayHoldMusic(e os.DirEntry) bool {
+	typ := e.Type()
+	return typ != 0 && (typ&os.ModeDir != 0 || typ&os.ModeSymlink != 0)
 }
 
 // pathUnder reports whether target is base or a path beneath it, and

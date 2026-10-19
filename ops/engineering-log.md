@@ -47512,3 +47512,15 @@ failed first with `in flight map[192.168.1.42:6600:{}]`.
 is now resolved, and a root whose real path is that path or lies under
 it is proved only when `os.SameFile` agrees. `TestProveRootsVolumioLayout`
 failed first with `root music: ... State:"unproven"`.
+
+## 2026-10-19 — path rules are not rebuilt on every poll (B473 step 2b)
+
+`musicPrefix` stat-ed every entry of `music_directory`, including
+regular files, and the route ran up to 20 `find`s on every build. A
+regular file is now skipped from the directory entry's type; a
+directory, a symlink, or an unknown type is still considered. A path
+result that is not `mismatch` is reused for about 60s and dropped when
+the music directory, the roots, or the MPD endpoint, conf or password
+changes. `TestDirEntrySkipsRegularFiles` failed first with `a regular
+file was stat-eligible`. `TestPathRulesOutliveTheResponseCache` failed
+first with `finds 2 after the response cache expired`.

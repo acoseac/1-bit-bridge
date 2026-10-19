@@ -195,6 +195,28 @@ func TestProveRootsStates(t *testing.T) {
 	})
 }
 
+type typedEntry struct {
+	name string
+	mode os.FileMode
+}
+
+func (e typedEntry) Name() string               { return e.name }
+func (e typedEntry) IsDir() bool                { return e.mode&os.ModeDir != 0 }
+func (e typedEntry) Type() os.FileMode          { return e.mode }
+func (e typedEntry) Info() (os.FileInfo, error) { return nil, errors.New("no stat") }
+
+func TestDirEntrySkipsRegularFiles(t *testing.T) {
+	if dirEntryMayHoldMusic(typedEntry{name: "track.flac", mode: 0}) {
+		t.Fatal("a regular file was stat-eligible")
+	}
+	if !dirEntryMayHoldMusic(typedEntry{mode: os.ModeDir}) || !dirEntryMayHoldMusic(typedEntry{mode: os.ModeSymlink}) {
+		t.Fatal("directory or symlink skipped")
+	}
+	if !dirEntryMayHoldMusic(typedEntry{mode: ^os.FileMode(0)}) {
+		t.Fatal("unknown type skipped")
+	}
+}
+
 func TestProveRootsVolumioLayout(t *testing.T) {
 	base := t.TempDir()
 	music := filepath.Join(base, "var", "lib", "mpd", "music")

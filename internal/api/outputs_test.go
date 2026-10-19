@@ -34,6 +34,7 @@ type fakeOutputSession struct {
 	statusErr error
 	findErr   error
 	waitCtx   bool
+	finds     *atomic.Int32
 }
 
 func (f *fakeOutputSession) Status(ctx context.Context) (mpd.Reply, error) {
@@ -61,6 +62,9 @@ func (f *fakeOutputSession) Status(ctx context.Context) (mpd.Reply, error) {
 }
 
 func (f *fakeOutputSession) Find(_ context.Context, path string) (mpd.Reply, error) {
+	if f.finds != nil {
+		f.finds.Add(1)
+	}
 	if f.findErr != nil {
 		return mpd.Reply{}, f.findErr
 	}
@@ -783,6 +787,53 @@ func quietOutputs(goos, mode string) LocalOutputsConfig {
 		Greet:      func(context.Context, string) bool { return false },
 		Advertised: func() []string { return nil },
 		Cards:      func() (alsa.Snapshot, error) { return alsa.Snapshot{}, nil },
+	}
+}
+
+func TestPathRulesOutliveTheResponseCache(t *testing.T) {
+	clock := &manualClock{}
+	music := t.TempDir()
+	endpoint := ""
+	var finds atomic.Int32
+	cfg := quietOutputs("linux", "on")
+	cfg.Now = clock.Now
+	cfg.AfterFunc = clock.AfterFunc
+	cfg.Output = func() config.OutputConfig {
+		return config.OutputConfig{MPD: "on", Endpoint: endpoint}
+	}
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}, MusicDirectory: music}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return &fakeOutputSession{version: "0.24.0", state: "stop", found: map[string]bool{"a.flac": true}, finds: &finds}, nil
+	}
+	cfg.Roots = func() []string { return []string{music} }
+	cfg.Tracks = func(context.Context) ([]string, error) { return []string{"a.flac"}, nil }
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	get := func() {
+		t.Helper()
+		resp := outputsGet(t, hs, token, "/v1/outputs")
+		resp.Body.Close()
+	}
+	get()
+	if finds.Load() != 1 {
+		t.Fatalf("first find count %d", finds.Load())
+	}
+	clock.Advance(outputCacheTTL)
+	get()
+	if finds.Load() != 1 {
+		t.Fatalf("finds %d after the response cache expired", finds.Load())
+	}
+	clock.Advance(outputIdle)
+	get()
+	if finds.Load() != 2 {
+		t.Fatalf("finds %d after the path-rule cache", finds.Load())
+	}
+	endpoint = "192.0.2.10:6600"
+	clock.Advance(outputCacheTTL)
+	get()
+	if finds.Load() != 3 {
+		t.Fatalf("finds %d after a config change", finds.Load())
 	}
 }
 

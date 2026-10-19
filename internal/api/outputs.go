@@ -157,6 +157,7 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	paths        outputPathCache
 	// joined, when set, runs after a caller has found a build in flight
 	// and before it waits. Production leaves it nil. Tests use it to
 	// release that build only once the second caller is waiting on it.
@@ -173,6 +174,13 @@ type outputCache struct {
 	at   time.Time
 	body OutputsResponse
 	ok   bool
+}
+
+type outputPathCache struct {
+	at    time.Time
+	key   string
+	rules []OutputPathRule
+	ok    bool
 }
 
 type outputProbe struct {
@@ -539,6 +547,14 @@ func (resp *OutputsResponse) normalize() {
 
 func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mpd.PathLookup) []OutputPathRule {
 	roots := o.roots()
+	key := o.pathRuleKey(musicDir, roots)
+	o.mu.Lock()
+	if o.paths.ok && o.paths.key == key && o.now().Sub(o.paths.at) < outputIdle {
+		rules := append([]OutputPathRule(nil), o.paths.rules...)
+		o.mu.Unlock()
+		return rules
+	}
+	o.mu.Unlock()
 	var tracks []string
 	if o.tracks != nil {
 		if got, err := o.tracks(ctx); err == nil {
@@ -569,7 +585,27 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 			Found:             rule.Found,
 		}
 	}
+	cacheable := true
+	for _, rule := range out {
+		if rule.State == mpd.PathMismatch {
+			cacheable = false
+			break
+		}
+	}
+	if cacheable {
+		o.mu.Lock()
+		o.paths = outputPathCache{at: o.now(), key: key, rules: append([]OutputPathRule(nil), out...), ok: true}
+		o.mu.Unlock()
+	}
 	return out
+}
+
+func (o *localOutputs) pathRuleKey(musicDir string, roots []string) string {
+	cfg := config.OutputConfig{}
+	if o.output != nil {
+		cfg = o.output()
+	}
+	return strings.Join([]string{musicDir, cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password, strings.Join(roots, "\n")}, "\n")
 }
 
 func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
