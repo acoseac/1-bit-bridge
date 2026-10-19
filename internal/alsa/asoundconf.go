@@ -43,8 +43,9 @@ func ConfigRoot(procRoot string) string {
 // cards. A hw or plughw string (and plug and front) names the card
 // directly. Any other name is a PCM: it is looked up in etc/alsa/conf.d
 // and then etc/asound.conf, and slave.pcm is followed through type empty
-// and type plug only, until a type hw. A name defined more than once is
-// unresolved. A dmix, a softvol, any other plugin, a hook, an include, a
+// and type plug only, until a type hw. A slave that contains ":" is a
+// device string, never a PCM of that name. A name defined more than once
+// is unresolved. A dmix, a softvol, any other plugin, a hook, an include, a
 // cycle, more than maxPCMHops follows, or syntax this parser does not
 // understand leaves the device unresolved.
 func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
@@ -70,6 +71,9 @@ type pcmDef struct {
 }
 
 func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
+	if strings.Contains(name, ":") {
+		return ResolveALSADevice(name, cards)
+	}
 	if hops > maxPCMHops || seen[name] {
 		return 0, 0, false
 	}

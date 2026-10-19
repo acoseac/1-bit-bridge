@@ -237,3 +237,51 @@ pcm.hwcard {
 		t.Fatalf("one card = %d, %d, %v", card, pcm, ok)
 	}
 }
+
+func TestSlaveDeviceString(t *testing.T) {
+	cards := []Card{{Index: 0, ID: "vc4hdmi0"}, {Index: 2, ID: "Audio"}, {Index: 5, ID: "A20"}}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `
+pcm.out {
+    type plug
+    slave.pcm "hw:2,0"
+}
+pcm.plugout {
+    type empty
+    slave.pcm "plughw:CARD=Audio,DEV=0"
+}
+pcm.named {
+    type empty
+    slave.pcm "hw:0,0"
+}
+pcm."hw:0,0" {
+    type hw
+    card "Audio"
+}
+pcm.other {
+    type plug
+    slave.pcm "default:CARD=Audio"
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "out", cards); !ok || card != 2 || pcm != 0 {
+		t.Errorf("hw slave = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "plugout", cards); !ok || card != 2 || pcm != 0 {
+		t.Errorf("plughw slave = %d, %d, %v; want card 2 pcm 0", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "named", cards); !ok || card != 0 || pcm != 0 {
+		t.Errorf("named hw string = %d, %d, %v; want card 0", card, pcm, ok)
+	}
+	if card, pcm, ok := ResolveOutputDevice(root, "hw:0,0", cards); !ok || card != 0 || pcm != 0 {
+		t.Errorf("device hw:0,0 = %d, %d, %v; want card 0", card, pcm, ok)
+	}
+	if _, _, ok := ResolveOutputDevice(root, "other", cards); ok {
+		t.Error("default:CARD resolved")
+	}
+}

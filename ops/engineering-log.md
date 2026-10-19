@@ -47623,3 +47623,13 @@ opaque, as a second `slave` already did. `TestDuplicateKeyIsOpaque`
 failed first with `second card = 2, 0, true; want unresolved`,
 `second device = 2, 1, true; want unresolved`, and
 `second type = 5, 0, true; want unresolved`.
+
+## 2026-10-19 — a slave that names a device is not a PCM (B473 step 2b)
+
+`slave.pcm "hw:2,0"` was looked up as a PCM name, so it did not resolve,
+and a block literally named `pcm."hw:0,0"` was walked instead of the
+device string. A name containing `:` is resolved with the hw and plughw
+rules and is never a definition. `TestSlaveDeviceString` failed first
+with `hw slave = 0, 0, false; want card 2 pcm 0`,
+`plughw slave = 0, 0, false; want card 2 pcm 0`, and
+`named hw string = 2, 0, true; want card 0`.
