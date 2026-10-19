@@ -47306,3 +47306,38 @@ the same id do not.
 `TestCapabilitiesFromTheIFiCapture` was run before the function
 existed. The package did not compile:
 `undefined: CapabilitiesFromAltsets`.
+
+## 2026-10-19 — a path rule is one root, proved by SameFile and then by find (B473 step 2b)
+
+### The question
+
+The app has to turn a bridge path into the path MPD has indexed. On a
+Volumio box the bridge root `/data/INTERNAL` is MPD's `INTERNAL/` when
+`music_directory` is `/var/lib/mpd/music` and `INTERNAL` there is a
+mount or a link of that root. The swap is a prefix, one per root, not
+per track. `config` over TCP does not answer `music_directory`, so it
+comes from `mpd.conf`.
+
+### What counts as proved
+
+`os.SameFile` of the root against the music directory, and against each
+direct child. Exactly one match. A directory of the same basename that
+is a different file is not a match, and find is not asked. Two matches
+(the directory and a link back to it) are not a match either. Nothing
+deeper than that child is walked.
+
+Then `find` on at most 20 tracks, evenly spaced through the sorted
+indexed paths of that root. Every one found is `proven`. A miss, or a
+lookup error, is `mismatch`. No music directory, no lookup, or no
+tracks is `unchecked`. Prefixes are filled on a match, including
+`unchecked` when there are no tracks to sample, and left empty
+otherwise. A single-root stored path has no basename prefix, so strip
+is empty. A multi-root stored path starts with the root's basename, and
+that is what strip removes. Prepend is empty when the root is the music
+directory, and the child's name plus a slash when the root is that
+child.
+
+### Red first
+
+`TestProveRootsStates` was run before `ProveRoots` existed. The package
+did not compile: `undefined: ProveRoots`.
