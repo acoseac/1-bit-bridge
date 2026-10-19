@@ -41,13 +41,14 @@ type OutputsResponse struct {
 	Outputs []OutputInfo `json:"outputs"`
 }
 
-// OutputInfo is one local output. Every key is present. DAC is null
-// when this element names no card.
+// OutputInfo is one local output. DAC is null when this element names
+// no card. MPD is present for kind mpd and omitted for any other kind,
+// so a client decodes it as optional.
 type OutputInfo struct {
 	ID        string           `json:"id"`
 	Kind      string           `json:"kind"`
 	Player    OutputPlayer     `json:"player"`
-	MPD       OutputMPD        `json:"mpd"`
+	MPD       *OutputMPD       `json:"mpd,omitempty"`
 	DAC       *OutputDAC       `json:"dac"`
 	PathRules []OutputPathRule `json:"pathRules"`
 }
@@ -447,10 +448,11 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 		return sess != nil
 	}
 	state := "unknown"
-	version := rep.MPD.Version
+	version := ""
 	if sess != nil {
-		if v := sess.Version(); v != "" {
-			version = v
+		version = sess.Version()
+		if version == "" {
+			version = rep.MPD.Version
 		}
 		reply, err := sess.Status(ctx)
 		if again(err) {
@@ -487,7 +489,7 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 		}
 	}
 	rules := o.pathRules(ctx, rep.MusicDirectory, lookup)
-	mpdInfo := OutputMPD{
+	mpdInfo := &OutputMPD{
 		Port:             port,
 		Addresses:        addrs,
 		Version:          version,
@@ -524,7 +526,7 @@ func (resp *OutputsResponse) normalize() {
 	}
 	for i := range resp.Outputs {
 		o := &resp.Outputs[i]
-		if o.MPD.Addresses == nil {
+		if o.MPD != nil && o.MPD.Addresses == nil {
 			o.MPD.Addresses = []string{}
 		}
 		if o.PathRules == nil {

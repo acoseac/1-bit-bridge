@@ -47533,3 +47533,13 @@ stored. It is now the hex SHA-256 of the data directory, which is the
 directory `deriveDLNAUDN` hashes, without the friendly name, so a
 rename does not change it either. `TestOutputsIDStableAcrossRestarts`
 failed first with `fingerprint or name changed the id`.
+
+## 2026-10-19 — mpd is optional on an output, and empty when the daemon is down (B473 step 2b)
+
+`mpd` was a value, so a kind `bridge` element could not omit it, and a
+failed dial still published the probed version. `mpd` is now a pointer,
+present only for kind `mpd`. A client decodes it as optional. The
+version stays empty when there is no session. `TestOutputKindIsOpen`
+failed first with `kind bridge included mpd`.
+`TestMPDVersionIsEmptyWhenTheDaemonIsDown` failed first with
+`Version:0.24.0`.

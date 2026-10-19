@@ -373,19 +373,37 @@ func TestOutputsJSONKeepsEveryKey(t *testing.T) {
 func TestOutputKindIsOpen(t *testing.T) {
 	extra := OutputsResponse{Outputs: []OutputInfo{{
 		Kind:      "bridge",
-		MPD:       OutputMPD{Addresses: []string{}, State: "unknown"},
 		PathRules: []OutputPathRule{},
 	}}}
 	raw, err := json.Marshal(extra)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(string(raw), `"mpd"`) {
+		t.Fatalf("kind bridge included mpd: %s", raw)
+	}
 	var back OutputsResponse
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.Outputs[0].Kind != "bridge" {
-		t.Fatalf("kind %q was dropped", back.Outputs[0].Kind)
+	if back.Outputs[0].Kind != "bridge" || back.Outputs[0].MPD != nil {
+		t.Fatalf("kind %q mpd %#v", back.Outputs[0].Kind, back.Outputs[0].MPD)
+	}
+}
+
+func TestMPDVersionIsEmptyWhenTheDaemonIsDown(t *testing.T) {
+	cfg := quietOutputs("linux", "on")
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		return mpd.Report{MPD: mpd.Daemon{Version: "0.24.0", Endpoint: "127.0.0.1:6600"}}
+	}
+	cfg.Dial = func(context.Context, string, string) (outputSession, error) {
+		return nil, errors.New("connection refused")
+	}
+	hs, token := newOutputsHTTP(t, "fp", cfg)
+	resp := outputsGet(t, hs, token, "/v1/outputs")
+	body, _ := decodeOutputs(t, resp)
+	if body.Outputs[0].MPD.Version != "" || body.Outputs[0].MPD.State != "unknown" {
+		t.Fatalf("mpd %+v", body.Outputs[0].MPD)
 	}
 }
 

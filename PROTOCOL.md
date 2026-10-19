@@ -773,13 +773,13 @@ Without the flag the route answers `404` `local_outputs_not_supported`. With it,
 }
 ```
 
-Every key is present. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge with the flag on and no card does not answer `outputs: []`.
+A kind `mpd` element has every key. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge with the flag on and no card does not answer `outputs: []`. `mpd` is present for kind `mpd` and omitted for any other kind. A client decodes `mpd` as optional, so the bridge's own player (kind `bridge`) can be listed without one. When MPD's device does not resolve to one card, each candidate card is its own element of `outputs`: the same `mpd` and `pathRules`, a different `id` and `dac`.
 
 `id` is the hex SHA-256 of the bridge identity, a newline, the MPD endpoint, a newline, the card's ALSA id (the id string in `/proc/asound/cards`, for example `A20`), a newline, and its USB id (`vendor:product`). The bridge identity is the hex SHA-256 of the data directory, the same directory the DLNA UDN is derived from, without the friendly name. The TLS certificate and the library name are not inputs: a renewing certificate and a rename keep the id. The card index is not an input either: it changes when a DAC is replugged or the box reboots, and the app remembers an output by this id. A null `dac` uses an empty ALSA id and an empty USB id. The same data directory, endpoint, ALSA id and USB id keep the same id across restarts. Two cards do not share an id.
 
 `player.software` is `volumio`, `moode`, `mpd`, or `""` when the box is none of those. `player.version` is that player's version.
 
-`mpd.port` is the TCP port in the endpoint. A socket endpoint uses the `port` from `mpd.conf`, or 6600. `mpd.version` is the daemon's greeting. `mpd.state` is `play`, `pause`, `stop`, or `unknown` when `status` did not answer; a daemon that is down is `unknown` and still `200`.
+`mpd.port` is the TCP port in the endpoint. A socket endpoint uses the `port` from `mpd.conf`, or 6600. `mpd.version` is the daemon's greeting, and `""` when the daemon is down. `mpd.state` is `play`, `pause`, `stop`, or `unknown` when `status` did not answer; a daemon that is down is `unknown` and still `200`.
 
 `mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
 
@@ -787,7 +787,7 @@ Every key is present. A list is `[]`, never `null`. `dac` is `null` when the ele
 
 `capabilities` come from every playback altset of that card's PCM device, not from the running `hw_params`. `maxPCMRate` and `pcmBitDepths` count only PCM formats (`S` or `U` plus a bit depth). A native DSD rate is the altset's frame rate times the format's width: `DSD_U32_*` ×32, `DSD_U16_*` ×16, `DSD_U8` ×8. A DSD format of another width is listed in `dsdFormats` and adds no rate.
 
-`pathRules` has one element per library root, never per track. `state` is `proven` (the root is MPD's music directory, or exactly one direct child of it, and every sampled track was found), `mismatch` (that match, and a sample was missing), `unproven` (the basename matched a different directory, or more than one child matched), or `unchecked` (no music directory, no connection, or no tracks). `checked` and `found` are those counts, at most 20. The client applies `stripBridgePrefix` and `prependMpdPrefix` only when `state` is `proven`. It does not re-derive the prefixes. A single-root library has an empty `stripBridgePrefix`.
+`pathRules` has one element per library root, never per track. `state` is `proven` (the root is MPD's music directory, or lies under exactly one top-level entry of it, and every sampled track was found), `mismatch` (that match, and a sample was missing), `unproven` (no single match), or `unchecked` (a match, and no connection or no tracks). `checked` and `found` are those counts, at most 20. `stripBridgePrefix` and `prependMpdPrefix` are filled for `proven`, `mismatch`, and `unchecked` when `os.SameFile` matched, and empty for `unproven`. The client applies them only when `state` is `proven`. It does not re-derive the prefixes. A single-root library has an empty `stripBridgePrefix`.
 
 **Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `localOutputs` feature flag.
 
