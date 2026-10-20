@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
 - [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
 - [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
 - [2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test](#2026-10-20--b470-pr-1a-round-4-mp4-extended-size-panic-and-cancel-seek-test)
@@ -47839,6 +47840,24 @@ bind.
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
 
+## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
+
+### Trigger
+
+SonarCloud quality gate: 4.0% duplication on new code (limit 3%), driven by
+near-identical WAV/AIFF `ReadFrames` loops (78 + 74 lines) after round 6's
+seek-back, plus duplicated R6 test wrappers (30 lines).
+
+### What changed
+
+`pcm_region.go` holds the shared linear PCM reader (`bytePos`, `seekToPos`,
+region cap, `ReadFull` + post-read `ctx` + seek-back, truncated-tail
+handling, frame loop). `wavDecoder` / `aiffDecoder` embed it and supply
+`unpack` plus refusal strings. R6 tests are table-driven under
+`TestReviewR6CancelThenRetryNoGap` and `TestReviewR6IOErrorThenRetryNoGap`.
+Refusal message text is unchanged. FLAC untouched. `dupl` no longer reports
+the ReadFrames clone pair.
+
 ## 2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error
 
 ### Trigger
@@ -47860,9 +47879,9 @@ successful `Seek`.
 
 ### Tests
 
-`TestReviewR6WAVCancelThenRetryNoGap`, `…AIFFCancel…`, `…WAVIOError…`,
-`…AIFFIOError…`. Negative control: removing the cancel seek-back makes
-the WAV cancel/retry test fail with a truncated refusal again.
+`TestReviewR6CancelThenRetryNoGap` / `TestReviewR6IOErrorThenRetryNoGap`
+(table-driven over wav and aiff). Negative control: removing the cancel
+seek-back makes the WAV cancel/retry case fail with a truncated refusal again.
 
 ## 2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut
 
