@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
+	"math"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
@@ -126,6 +128,78 @@ func TestDSDAbsurdSizesRefused(t *testing.T) {
 				t.Fatalf("got %v, want refusal %s", err, c.reason)
 			}
 		})
+	}
+}
+
+// hugeDSF declares samples one-bit samples per channel and a data chunk just
+// large enough for them, so the open-time checks pass and the byte arithmetic
+// that follows is what is tested. The file still holds only the golden's data.
+func hugeDSF(t testing.TB, raw []byte, samples uint64) []byte {
+	t.Helper()
+	perCh := samples / 8
+	if samples%8 != 0 {
+		perCh++
+	}
+	groups := (perCh + 4095) / 4096
+	out := putLE64(raw, dsfSamples, samples)
+	return putLE64(out, dsfDataSize, 12+groups*4096*2)
+}
+
+// A sample count near math.MaxInt64 whose data chunk is declared large
+// enough opens, and its byte count stays positive and exact: (Frames+7)/8
+// wrapped negative there, so the length and the seek to the end broke.
+func TestDSFHugeSampleCountKeepsItsByteArithmetic(t *testing.T) {
+	g := loadDSDGoldens(t)
+	f, raw := g.fixture(t, "msb_dsd128_partial_block.dsf")
+	for _, c := range []struct {
+		samples uint64
+		perCh   int64
+	}{
+		{math.MaxInt64, 1 << 60},
+		{math.MaxInt64 - 6, 1 << 60},
+		{math.MaxInt64 - 7, 1<<60 - 1}, // the largest count whose +7 did not wrap
+	} {
+		d, err := openDSD(bytes.NewReader(hugeDSF(t, raw, c.samples)))
+		if err != nil {
+			t.Fatalf("samples %d: %v", c.samples, err)
+		}
+		fm := d.Format()
+		if fm.Frames != int64(c.samples) {
+			t.Fatalf("samples %d: Frames %d", c.samples, fm.Frames)
+		}
+		if err := fm.Validate(); err != nil {
+			t.Fatalf("samples %d: %v", c.samples, err)
+		}
+		if got := fm.BytesPerChannel(); got != c.perCh {
+			t.Fatalf("samples %d: BytesPerChannel %d, want %d", c.samples, got, c.perCh)
+		}
+		ctx := context.Background()
+		// The audio the file holds still decodes to the pattern...
+		dst := dsdBufs(2, int(f.BytesPerChannel))
+		n, err := d.ReadDSD(ctx, dst)
+		if err != nil || n != int(f.BytesPerChannel) {
+			t.Fatalf("samples %d: first read n=%d err=%v", c.samples, n, err)
+		}
+		requireSameDSD(t, [][]byte{dst[0][:n], dst[1][:n]}, g.want(f))
+		// ...the end is where the declared length says...
+		if err := d.Seek(ctx, fm.BytesPerChannel()); err != nil {
+			t.Fatalf("samples %d: seek to the end: %v", c.samples, err)
+		}
+		if n, err := d.ReadDSD(ctx, dst); n != 0 || !errors.Is(err, io.EOF) {
+			t.Fatalf("samples %d: read at the end: n=%d err=%v", c.samples, n, err)
+		}
+		if err := d.Seek(ctx, fm.BytesPerChannel()+1); !decode.IsRefusal(err) {
+			t.Fatalf("samples %d: seek past the end: %v, want a refusal", c.samples, err)
+		}
+		// ...and the last byte, which the file does not hold, is truncation.
+		if err := d.Seek(ctx, fm.BytesPerChannel()-1); err != nil {
+			t.Fatalf("samples %d: seek to the last byte: %v", c.samples, err)
+		}
+		_, err = d.ReadDSD(ctx, dst)
+		if r, ok := decode.AsRefusal(err); !ok || r.Reason != decode.ReasonTruncated {
+			t.Fatalf("samples %d: read of the last byte: %v, want truncated", c.samples, err)
+		}
+		d.Close()
 	}
 }
 

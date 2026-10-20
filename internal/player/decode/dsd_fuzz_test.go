@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 )
 
-func FuzzDSFOpen(f *testing.F) { fuzzDSD(f, ".dsf") }
+func FuzzDSFOpen(f *testing.F) {
+	// A sample count of math.MaxInt64 with a data chunk declared to fit it:
+	// the byte count wrapped negative there (round 2), and the fuzzer had
+	// not reached it.
+	g := loadDSDGoldens(f)
+	_, raw := g.fixture(f, "msb_dsd128_partial_block.dsf")
+	f.Add(hugeDSF(f, raw, math.MaxInt64))
+	fuzzDSD(f, ".dsf")
+}
 
 func FuzzDFFOpen(f *testing.F) { fuzzDSD(f, ".dff") }
 

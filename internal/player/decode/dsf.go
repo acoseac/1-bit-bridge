@@ -155,16 +155,19 @@ func newDSF(rs io.ReadSeeker, f dsfFmt, dataStart int64, dataBytes uint64) (DSDD
 	if f.samples > math.MaxInt64 {
 		return nil, refuse(ReasonUnsupportedLayout, "DSF sample count %d exceeds addressable length", f.samples)
 	}
+	dsd := format.NativeDSD{
+		BitRateHz: int(f.rate),
+		Channels:  dsdChannels,
+		Container: format.ContainerDSF,
+		Frames:    int64(f.samples),
+	}
+	// The decoder's end is the length Format reports, from one function, so
+	// a caller's seek to BytesPerChannel is always the decoder's end.
 	return &dsfDecoder{
-		rs: rs,
-		dsd: format.NativeDSD{
-			BitRateHz: int(f.rate),
-			Channels:  dsdChannels,
-			Container: format.ContainerDSF,
-			Frames:    int64(f.samples),
-		},
+		rs:        rs,
+		dsd:       dsd,
 		dataStart: dataStart,
-		perCh:     int64(perCh),
+		perCh:     dsd.BytesPerChannel(),
 		lsbFirst:  f.lsbFirst,
 	}, nil
 }

@@ -98,9 +98,21 @@ type NativeDSD struct {
 }
 
 // BytesPerChannel is the number of whole DSD bytes per channel a decoder
-// emits: Frames rounded up to a byte.
+// emits: Frames rounded up to a byte. It divides before it rounds, because
+// (Frames+7)/8 wraps negative for a Frames within 7 of math.MaxInt64, which a
+// DSF header can declare. The result is bounded: 0 for a Frames of 0 or less
+// (Validate refuses a negative one) and at most 2^60, so BytesPerChannel
+// times the channel count, and any byte offset derived from it, fits in an
+// int64.
 func (d NativeDSD) BytesPerChannel() int64 {
-	return (d.Frames + 7) / 8
+	if d.Frames <= 0 {
+		return 0
+	}
+	n := d.Frames / 8
+	if d.Frames%8 != 0 {
+		n++
+	}
+	return n
 }
 
 // Validate reports whether d is a shape the 0.2.2 player accepts for DSD:
