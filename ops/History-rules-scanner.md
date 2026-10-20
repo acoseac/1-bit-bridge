@@ -2249,6 +2249,24 @@
   wants the same name back, then one new folder watched as one open
   file.
 
+- **Carry the `acoseac/fsnotify` replace for the kqueue remove/Close
+  order race until upstream ships a fix for fsnotify/fsnotify#795**
+  (2026-10-20, backlog B401). Stock fsnotify v1.10.1's kqueue `remove`
+  closes a watch's descriptor before dropping its table entry, so a
+  concurrent `addWatch` can be handed the same number and the delete that
+  follows drops the NEW watch's entry, which nothing closes afterwards.
+  Upstream issue fsnotify/fsnotify#795 is open and unfixed. Measured under
+  twelve `yes >/dev/null` hogs: `TestKqueueWatcherReleasesARenamedFoldersFiles`
+  `-count=600` failed twice on main (`after round 2 … holds 135 … want 134`
+  and `after round 3 … holds 136 … want 135`, 538 s, load ~12–16) and
+  passed 600/600 on the fork (537 s, load ~8–14). The bridge `replace`s
+  `github.com/fsnotify/fsnotify` with `github.com/acoseac/fsnotify` at
+  `bda6368c20de` (branch `kqueue-remove-order-v1.10.1`: v1.10.1 plus the
+  reorder in `remove` and in `Close`'s teardown loop). The require stays
+  on v1.10.1. **Don't drop the replace or bump fsnotify past it until a
+  release carries that fix, and then remove the replace in the same
+  change.**
+
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.**
   `WalkDir` orders by base name and visits a directory before its children, so
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —

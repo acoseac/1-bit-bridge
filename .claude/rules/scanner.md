@@ -175,6 +175,7 @@ lost my library."
 - **…and on macOS every watch is an open file, so the watcher keeps to a budget and releases what fsnotify keeps** (2026-10-02, backlog B212) **Never Add a folder from its Create handler on kqueue** → History-rules-scanner.md
 - **A folder on the watch list is watched before the event that flushed it is handled** (2026-10-13, backlog B337) → History-rules-scanner.md
 - **A quiet kqueue flush writes a file outside the library, and that file's event is what watches the waiting folder** (2026-10-13, backlog B361) → History-rules-scanner.md
+- **Carry the `acoseac/fsnotify` replace for the kqueue remove/Close order race until upstream ships a fix for fsnotify/fsnotify#795** (2026-10-20, backlog B401) **Don't drop the replace or bump fsnotify past it until a release carries that fix, and then remove the replace in the same change.** → History-rules-scanner.md
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.** → History-rules-scanner.md
 - **New shared scanner fixtures go in the untagged `scanner_fixture_test.go`**,
   never a build-tagged file — untagged siblings referencing them broke the
