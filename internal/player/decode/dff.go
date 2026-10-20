@@ -60,7 +60,10 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		chunkHdr [dffChunkHeader]byte
 	)
 	for i := 0; i < maxDSDChunks; i++ {
-		if pos+dffChunkHeader > frmEnd {
+		// What remains of the form, never pos+12: a position within 12 of
+		// math.MaxInt64 wraps that sum negative, and the walk then read a
+		// header past the form. pos never passes frmEnd, so this cannot wrap.
+		if frmEnd-pos < dffChunkHeader {
 			return nil, refuse(ReasonTruncated, "DFF has no DSD sound data")
 		}
 		if _, err := io.ReadFull(rs, chunkHdr[:]); err != nil {
@@ -72,14 +75,9 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		id := string(chunkHdr[0:4])
 		size := binary.BigEndian.Uint64(chunkHdr[4:12])
 		body := pos + dffChunkHeader
-		// Compare as uint64 before any int64 conversion; the +1 is the
-		// pad byte after an odd body.
-		if size > uint64(math.MaxInt64-body-1) {
-			return nil, refuse(ReasonUnsupportedLayout, "DFF chunk %q size %d exceeds addressable length", id, size)
-		}
-		end := body + int64(size) + int64(size&1)
-		if end > frmEnd {
-			return nil, refuse(ReasonTruncated, "DFF chunk %q extends past the FRM8 body", id)
+		end, err := dffChunkEnd(id, body, frmEnd, size)
+		if err != nil {
+			return nil, err
 		}
 		if i == 0 && id != "FVER" {
 			return nil, refuse(ReasonUnsupportedLayout, "DFF's first chunk is %q; FVER must come first", id)
@@ -122,6 +120,26 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		pos = end
 	}
 	return nil, refuse(ReasonUnsupportedLayout, "DFF has more than %d chunks before its sound data", maxDSDChunks)
+}
+
+// dffChunkEnd returns where a chunk whose body starts at body and holds size
+// bytes ends, its pad byte after an odd body included, given the end of the
+// FRM8 body (0 <= body, limit <= math.MaxInt64). Each bound subtracts from
+// what remains and never adds to a position: near math.MaxInt64 a sum wraps
+// negative and passes the check meant to stop it. A chunk that cannot end
+// inside math.MaxInt64 is unaddressable; one that ends past limit is cut
+// short.
+func dffChunkEnd(id string, body, limit int64, size uint64) (int64, error) {
+	pad := size & 1
+	// size <= room <= math.MaxInt64 before size+pad is formed, so it
+	// cannot wrap either.
+	if room := uint64(math.MaxInt64 - body); size > room || size+pad > room {
+		return 0, refuse(ReasonUnsupportedLayout, "DFF chunk %q size %d exceeds addressable length", id, size)
+	}
+	if body > limit || size+pad > uint64(limit-body) {
+		return 0, refuse(ReasonTruncated, "DFF chunk %q extends past the FRM8 body", id)
+	}
+	return body + int64(size+pad), nil
 }
 
 // readDFFVersion reads FVER's body: exactly four bytes, major version 1.
