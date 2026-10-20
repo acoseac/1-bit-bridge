@@ -2,8 +2,11 @@ package admin
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -98,6 +101,111 @@ func TestCSRFOriginAllowlist(t *testing.T) {
 				t.Errorf("CSRF blocked when it should have allowed: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+// TestCSRFCrossOriginRefusalCarriesCodeAndTunnelHint pins the B471
+// contract: a loopback Origin on another port is still refused (the
+// allowlist is unchanged), the matching Origin is still admitted, and a
+// refusal carries the typed `cross_origin` code plus the admin-listener
+// port in the message the console shows — not a bare "403 Forbidden".
+func TestCSRFCrossOriginRefusalCarriesCodeAndTunnelHint(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	post := func(origin string) *httptest.ResponseRecorder {
+		body := bytes.NewBufferString(`{"path":"/tmp/whatever"}`)
+		r := httptest.NewRequest(http.MethodPost, "/api/roots", body)
+		r.RemoteAddr = "127.0.0.1:54321"
+		r.Host = testConsoleHost
+		r.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	wrong := post("http://127.0.0.1:17789")
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("loopback Origin on another port: status %d, want 403; body=%s", wrong.Code, wrong.Body.String())
+	}
+	var env map[string]string
+	if err := json.Unmarshal(wrong.Body.Bytes(), &env); err != nil {
+		t.Fatalf("refusal body must be JSON errorFromResponse can read, got %q: %v", wrong.Body.String(), err)
+	}
+	if env["error"] != errCodeCrossOrigin {
+		t.Errorf("error code = %q, want %q", env["error"], errCodeCrossOrigin)
+	}
+	msg := env["message"]
+	if !strings.Contains(msg, "admin refused: cross-origin request") {
+		t.Errorf("message %q must keep the server's own refusal text", msg)
+	}
+	if !strings.Contains(msg, "http://127.0.0.1:7789") {
+		t.Errorf("message %q must name the admin listener (7789), not the page Origin's port", msg)
+	}
+	if !strings.Contains(msg, "ssh -L 7789:127.0.0.1:7789") {
+		t.Errorf("message %q must show an equal-port tunnel example using the admin port", msg)
+	}
+	if strings.Contains(msg, "17789") {
+		t.Errorf("message %q must not take the port from the page URL", msg)
+	}
+
+	ok := post("http://127.0.0.1:7789")
+	if ok.Code == http.StatusForbidden && strings.Contains(ok.Body.String(), "cross-origin") {
+		t.Fatalf("matching loopback Origin must pass the guard; got %d %s", ok.Code, ok.Body.String())
+	}
+}
+
+// TestErrorFromResponseSurfacesCrossOriginRefusal runs the console's
+// errorFromResponse under node against the typed refusal body, so a
+// regression that drops the JSON (or the code) shows as "403 Forbidden"
+// again instead of the server's message.
+func TestErrorFromResponseSurfacesCrossOriginRefusal(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; this test executes the shipped client source")
+	}
+	fn := extractJSFunction(t, readFile(t, "static/app.js"), "errorFromResponse")
+	script := t.TempDir() + "/cross_origin_err.js"
+	src := fn + `
+(async () => {
+  const body = {
+    error: "cross_origin",
+    message: "admin refused: cross-origin request. This console must be opened at http://127.0.0.1:7789. An SSH tunnel has to keep that port on both ends, for example ssh -L 7789:127.0.0.1:7789 …",
+  };
+  const r = {
+    ok: false,
+    status: 403,
+    statusText: "Forbidden",
+    async json() { return body; },
+  };
+  const e = await errorFromResponse(r);
+  if (e.code !== "cross_origin") {
+    throw new Error("code=" + e.code);
+  }
+  if (!String(e.message).includes("admin refused: cross-origin request")) {
+    throw new Error("message lost the server text: " + e.message);
+  }
+  if (!String(e.message).includes("http://127.0.0.1:7789")) {
+    throw new Error("message lost the admin-port hint: " + e.message);
+  }
+  if (String(e.message) === "403 Forbidden") {
+    throw new Error("fell back to status text");
+  }
+  process.stdout.write("ok");
+})().catch((err) => { console.error(err); process.exit(1); });
+`
+	if err := os.WriteFile(script, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("unexpected output %q", out)
 	}
 }
 

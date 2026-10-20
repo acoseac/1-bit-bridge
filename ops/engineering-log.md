@@ -47730,3 +47730,44 @@ the new result under the old key and handed it to waiters of that key.
 The key and the options now come from one snapshot.
 `TestProbeCachesTheConfigurationItProbed` failed first with
 `inspects 2 opt "127.0.0.1:6601", cached under a key other than "127.0.0.1:6601"`.
+
+## 2026-10-20 — console cross-origin refusal shows the admin port (B471)
+
+An operator forwarded a loopback console to another local port
+(`ssh -L 17789:127.0.0.1:7789`) and opened it there. Every mutation
+answered 403; "Generate token" showed only `Pair failed: 403 Forbidden`.
+
+### Cause
+
+Correct behaviour. `originMatchesLoopbackMode` requires a loopback
+Origin's port to equal the admin listener's — another local page on
+another port is exactly what the CSRF Origin allowlist guards against
+(B193; measured on the B170 fix). The defect was the body:
+`csrfGuard` (and the SSE Origin gate) used `http.Error` with the plain
+text `admin refused: cross-origin request`. The console's
+`errorFromResponse` only surfaces `j.message` when the body is JSON; on
+plain text it falls back to `${status} ${statusText}`.
+
+### Fix (allowlist unchanged)
+
+- `writeCrossOriginRefusal` answers with the admin API envelope
+  `{"error":"cross_origin","message":…}` via `writeError`. In loopback
+  mode the message keeps the original refusal text and appends a hint
+  that names the admin listener's port (from `boundAdminAddr` /
+  `AdminAddress`, never the page URL) and an equal-port
+  `ssh -L <port>:127.0.0.1:<port>` example.
+- Docs that give a tunnel command (`docs/docker.md`, the demo row in
+  `ops/deployment-runbook.md`, CLAUDE.md / History-Cross-Repo) say the
+  local port must equal the admin port and what the refusal looks like.
+- Rules: auth-tls.md (don't widen the allowlist; typed refusal) and
+  admin-console.md (console shows the typed message).
+
+### Tests
+
+`TestCSRFCrossOriginRefusalCarriesCodeAndTunnelHint` failed first with
+`refusal body must be JSON … got "admin refused: cross-origin request\n"`.
+`TestErrorFromResponseSurfacesCrossOriginRefusal` runs the shipped
+`errorFromResponse` under node against that body.
+`TestEventsRejectsCrossOriginGET` now asserts the same code on the SSE
+gate. No separate JS test framework beyond the existing node
+extractions.

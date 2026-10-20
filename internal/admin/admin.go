@@ -2205,12 +2205,61 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 		// carry Origin: https://attacker.com.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !s.originMatchesAdmin(origin) {
-				http.Error(w, "admin refused: cross-origin request", http.StatusForbidden)
+				s.writeCrossOriginRefusal(w)
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// errCodeCrossOrigin is the stable admin-API error code for an Origin
+// the csrfGuard (and the long-lived GET Origin gate) refuse. The
+// console's errorFromResponse reads it as e.code; never match the
+// message text instead.
+const errCodeCrossOrigin = "cross_origin"
+
+// writeCrossOriginRefusal answers a mismatched Origin with the typed
+// JSON envelope every other admin refusal uses. The allowlist itself is
+// unchanged: a loopback Origin on another port stays refused (B193 /
+// B471). In loopback mode the message names the admin listener's port —
+// taken from the server, never the page URL — so an operator who
+// forwarded the console onto a different local port sees what to change
+// instead of a bare "403 Forbidden".
+func (s *Server) writeCrossOriginRefusal(w http.ResponseWriter) {
+	msg := "admin refused: cross-origin request"
+	cfg := s.deps.CfgHolder.Load()
+	if cfg == nil || !cfg.IsPublic() {
+		if port := s.adminListenPort(); port != "" {
+			msg = fmt.Sprintf(
+				"%s. This console must be opened at http://127.0.0.1:%s. An SSH tunnel has to keep that port on both ends, for example ssh -L %s:127.0.0.1:%s …",
+				msg, port, port, port,
+			)
+		}
+	}
+	writeError(w, http.StatusForbidden, errCodeCrossOrigin, msg)
+}
+
+// adminListenPort returns the port half of the address the admin
+// listener is bound to (or configured for), used by the cross-origin
+// refusal hint. Empty when the address cannot be split.
+func (s *Server) adminListenPort() string {
+	adminAddr := s.boundAdminAddr
+	if adminAddr == "" {
+		cfg := s.deps.CfgHolder.Load()
+		if cfg == nil {
+			return ""
+		}
+		adminAddr = cfg.AdminAddress
+		if adminAddr == "" {
+			adminAddr = config.DefaultAdminAddress
+		}
+	}
+	_, port, err := net.SplitHostPort(adminAddr)
+	if err != nil {
+		return ""
+	}
+	return port
 }
 
 // originMatchesAdmin compares an Origin header against the admin

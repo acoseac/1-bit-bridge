@@ -73,7 +73,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   carry). The DLNA listener takes the same rule on its own addresses (under
   **DLNA, UPnP and discovery**). A console POST through a tunnel on ANOTHER
   local port is still refused by the Origin check, which compares the
-  admin port (backlog B193).
+  admin port (backlog B193) — **don't widen `originMatchesLoopbackMode` to
+  admit it**; the refusal is a typed JSON `cross_origin` body whose message
+  names the admin listener's port so the console can say what to change
+  (backlog B471).
 - **`csrfGuard`**: body-bearing mutations must be `application/json`; body
   detection uses `ContentLength != 0 || len(TransferEncoding) > 0` because
   net/http strips the header. **A bodyless POST is deliberately allowed
@@ -82,7 +85,12 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `application/octet-stream` on PUT (upload); **`multipart/form-data` stays
   refused everywhere**, because it is a CORS *simple type* and therefore
   forgeable cross-origin, while octet-stream + PUT forces a preflight the bridge
-  never answers.
+  never answers. **A mismatched Origin answers with `writeCrossOriginRefusal`
+  (`error: cross_origin`), never a bare `http.Error` status line** — the
+  console's `errorFromResponse` reads the JSON, and in loopback mode the
+  message names the admin port (from the listener, not the page URL) plus an
+  equal-port `ssh -L` example (B471). The SSE Origin gate reuses the same
+  writer.
 - **Any long-lived GET needs its own Origin gate** — `csrfGuard` lets GETs
   through, which is right for one-shot reads and wrong for a held SSE
   connection.

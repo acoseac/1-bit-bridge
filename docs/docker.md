@@ -498,6 +498,20 @@ docker exec 1-bit-bridge bridge cert info
 docker exec 1-bit-bridge bridge library add /library2
 ```
 
+### SSH tunnel (remote operator)
+
+Forward the console to the same port on your machine — the CSRF Origin
+check compares the browser's Origin port to the admin listener's, so a
+different local port (for example `-L 17789:127.0.0.1:7789` when 7789 is
+already taken) makes every mutation answer `403` with JSON
+`{"error":"cross_origin",…}` naming the admin port and an equal-port
+example. Keep both ends equal:
+
+```sh
+ssh -L 7789:127.0.0.1:7789 user@bridge-host
+# then open http://127.0.0.1:7789/
+```
+
 ### Reverse proxy with auth (advanced)
 
 If you genuinely need the admin UI from a browser, run a reverse

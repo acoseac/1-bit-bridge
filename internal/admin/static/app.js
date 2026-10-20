@@ -109,6 +109,11 @@ function isUpdateLastCheckZero(u) {
 async function errorFromResponse(r) {
   try {
     const j = await r.json();
+    // Prefer j.message so a typed refusal's operator-facing text reaches
+    // every alert. A cross_origin body (csrfGuard / the SSE Origin gate)
+    // carries the admin-listener port in that message — recognise it by
+    // e.code === "cross_origin", never by matching prose (B471). A
+    // plain-text 403 still falls through to status text in the catch.
     const e = new Error(j.message || j.error || `${r.status} ${r.statusText}`);
     // The stable machine-readable half. Callers that need to tell one failure
     // from another must never have to match on prose.
