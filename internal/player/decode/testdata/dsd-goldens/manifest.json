@@ -1,0 +1,136 @@
+{
+  "pattern_file": "pattern.bin",
+  "pattern_bytes_per_channel": 13288,
+  "fixtures": [
+    {
+      "file": "lsb_dsd64_partial_block.dsf",
+      "container": "dsf",
+      "bit_rate_hz": 2822400,
+      "channels": 2,
+      "frames": 106304,
+      "bytes_per_channel": 13288,
+      "source_bit_order": "lsb",
+      "seek_bytes": [
+        0,
+        1,
+        1234,
+        4090,
+        4096,
+        4097,
+        13287,
+        13288
+      ]
+    },
+    {
+      "file": "msb_dsd128_partial_block.dsf",
+      "container": "dsf",
+      "bit_rate_hz": 5644800,
+      "channels": 2,
+      "frames": 106304,
+      "bytes_per_channel": 13288,
+      "source_bit_order": "msb",
+      "seek_bytes": [
+        0,
+        1,
+        1234,
+        4090,
+        4096,
+        4097,
+        13287,
+        13288
+      ]
+    },
+    {
+      "file": "lsb_dsd64_whole_blocks.dsf",
+      "container": "dsf",
+      "bit_rate_hz": 2822400,
+      "channels": 2,
+      "frames": 65536,
+      "bytes_per_channel": 8192,
+      "source_bit_order": "lsb",
+      "seek_bytes": [
+        0,
+        1,
+        1234,
+        4090,
+        4096,
+        4097,
+        8191,
+        8192
+      ]
+    },
+    {
+      "file": "lsb_dsd64_797_samples.dsf",
+      "container": "dsf",
+      "bit_rate_hz": 2822400,
+      "channels": 2,
+      "frames": 797,
+      "bytes_per_channel": 100,
+      "source_bit_order": "lsb",
+      "seek_bytes": [
+        0,
+        1,
+        99,
+        100
+      ]
+    },
+    {
+      "file": "dsd64.dff",
+      "container": "dff",
+      "bit_rate_hz": 2822400,
+      "channels": 2,
+      "frames": 106304,
+      "bytes_per_channel": 13288,
+      "source_bit_order": "msb",
+      "seek_bytes": [
+        0,
+        1,
+        1234,
+        4090,
+        4096,
+        4097,
+        13287,
+        13288
+      ]
+    },
+    {
+      "file": "dsd256_right_first.dff",
+      "container": "dff",
+      "bit_rate_hz": 11289600,
+      "channels": 2,
+      "frames": 106304,
+      "bytes_per_channel": 13288,
+      "source_bit_order": "msb",
+      "seek_bytes": [
+        0,
+        1,
+        1234,
+        4090,
+        4096,
+        4097,
+        13287,
+        13288
+      ]
+    },
+    {
+      "file": "mono.dsf",
+      "refusal": "unsupported_channel_count"
+    },
+    {
+      "file": "six_channel.dsf",
+      "refusal": "unsupported_channel_count"
+    },
+    {
+      "file": "mono.dff",
+      "refusal": "unsupported_channel_count"
+    },
+    {
+      "file": "six_channel.dff",
+      "refusal": "unsupported_channel_count"
+    },
+    {
+      "file": "dst.dff",
+      "refusal": "unsupported_compression"
+    }
+  ]
+}

@@ -113,8 +113,10 @@ func TestReviewR3ID3PrefixedFullSniff(t *testing.T) {
 		payload []byte
 		reason  decode.Reason
 	}{
-		{"dsf", []byte("DSD \x00\x00\x00\x00"), decode.ReasonNotYetSupported},
-		{"dff", []byte("FRM8\x00\x00\x00\x00"), decode.ReasonNotYetSupported},
+		// Since PR 1b these open the DSF and DFF demuxers, which refuse an
+		// 8-byte header as truncated.
+		{"dsf", []byte("DSD \x00\x00\x00\x00"), decode.ReasonTruncated},
+		{"dff", []byte("FRM8\x00\x00\x00\x00"), decode.ReasonTruncated},
 		{"rf64", []byte("RF64\x00\x00\x00\x00WAVE"), decode.ReasonUnsupportedLayout},
 		{"alac", id3ALACPayload(t), decode.ReasonNotYetSupported},
 	} {

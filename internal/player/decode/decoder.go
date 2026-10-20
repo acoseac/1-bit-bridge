@@ -84,8 +84,10 @@ func Open(rs io.ReadSeeker) (Source, error) {
 		return openAIFF(view)
 	case sniffALAC:
 		return nil, refuse(ReasonNotYetSupported, "ALAC is not enabled in this release")
-	case sniffDSF, sniffDFF:
-		return nil, refuse(ReasonNotYetSupported, "DSD containers are not enabled in this release")
+	case sniffDSF:
+		return openDSF(view)
+	case sniffDFF:
+		return openDFF(view)
 	case sniffMP3:
 		return nil, refuse(ReasonLossy, "MP3 is refused; the bridge player is bit-exact lossless only")
 	case sniffAAC:
