@@ -182,51 +182,61 @@ func TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps(t
 	before := map[string]int64{}
 	for _, f := range files {
 		rel := rels[f.name]
-		if got := storedTrack(t, store, rel); got.Explicit != f.want || got.Title != f.title {
-			t.Fatalf("premise: %s stores title %q Explicit %v, want %q / %v",
-				f.name, got.Title, got.Explicit, f.title, f.want)
-		}
-		q := `UPDATE tracks SET extractor_version = 26, enriched_at = 1,
-			tags_json = json_remove(tags_json, '$.explicit') WHERE path = ?`
-		if _, err := store.db.Exec(q, rel); err != nil {
-			t.Fatalf("rewind %s to v26: %v", f.name, err)
-		}
-		if got := storedTrack(t, store, rel); got.Explicit {
-			t.Fatalf("premise: the rewound %s still carries Explicit", f.name)
-		}
-		before[rel] = trackIndexedAt(t, store, rel)
+		before[rel] = rewindStemExplicitRowToV26(t, store, f.name, rel, f.title, f.want)
 	}
 
 	scanOnce(t, sc, "v27")
 
 	for _, f := range files {
 		rel := rels[f.name]
-		got := storedTrack(t, store, rel)
-		if got.Explicit != f.want || got.Title != f.title {
-			t.Errorf("%s: title %q Explicit %v after the upgrade scan, want %q / %v",
-				f.name, got.Title, got.Explicit, f.title, f.want)
+		assertStemExplicitRowUpgraded(t, store, f.name, rel, f.title, f.want, before[rel])
+	}
+}
+
+func rewindStemExplicitRowToV26(t *testing.T, store *Store, name, rel, title string, want bool) int64 {
+	t.Helper()
+	if got := storedTrack(t, store, rel); got.Explicit != want || got.Title != title {
+		t.Fatalf("premise: %s stores title %q Explicit %v, want %q / %v",
+			name, got.Title, got.Explicit, title, want)
+	}
+	q := `UPDATE tracks SET extractor_version = 26, enriched_at = 1,
+			tags_json = json_remove(tags_json, '$.explicit') WHERE path = ?`
+	if _, err := store.db.Exec(q, rel); err != nil {
+		t.Fatalf("rewind %s to v26: %v", name, err)
+	}
+	if got := storedTrack(t, store, rel); got.Explicit {
+		t.Fatalf("premise: the rewound %s still carries Explicit", name)
+	}
+	return trackIndexedAt(t, store, rel)
+}
+
+func assertStemExplicitRowUpgraded(t *testing.T, store *Store, name, rel, title string, want bool, before int64) {
+	t.Helper()
+	got := storedTrack(t, store, rel)
+	if got.Explicit != want || got.Title != title {
+		t.Errorf("%s: title %q Explicit %v after the upgrade scan, want %q / %v",
+			name, got.Title, got.Explicit, title, want)
+	}
+	if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+		t.Errorf("%s: extractor_version = %d, want %d", name, v, ExtractorVersion)
+	}
+	after := trackIndexedAt(t, store, rel)
+	if want {
+		if after <= before {
+			t.Errorf("%s: indexed_at did not advance (%d -> %d): iOS would never pull Explicit",
+				name, before, after)
 		}
-		if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
-			t.Errorf("%s: extractor_version = %d, want %d", f.name, v, ExtractorVersion)
+		if v := trackColumn(t, store, rel, "enriched_at"); v != 0 {
+			t.Errorf("%s: enriched_at = %d, want 0: the full upsert re-queues a changed row's enrichment",
+				name, v)
 		}
-		after := trackIndexedAt(t, store, rel)
-		if f.want {
-			if after <= before[rel] {
-				t.Errorf("%s: indexed_at did not advance (%d -> %d): iOS would never pull Explicit",
-					f.name, before[rel], after)
-			}
-			if v := trackColumn(t, store, rel, "enriched_at"); v != 0 {
-				t.Errorf("%s: enriched_at = %d, want 0: the full upsert re-queues a changed row's enrichment",
-					f.name, v)
-			}
-			continue
-		}
-		if after != before[rel] {
-			t.Errorf("%s: indexed_at moved (%d -> %d): a row whose Explicit stays must only be stamped",
-				f.name, before[rel], after)
-		}
-		if v := trackColumn(t, store, rel, "enriched_at"); v != 1 {
-			t.Errorf("%s: enriched_at = %d: a row whose Explicit stays must not be re-enriched", f.name, v)
-		}
+		return
+	}
+	if after != before {
+		t.Errorf("%s: indexed_at moved (%d -> %d): a row whose Explicit stays must only be stamped",
+			name, before, after)
+	}
+	if v := trackColumn(t, store, rel, "enriched_at"); v != 1 {
+		t.Errorf("%s: enriched_at = %d: a row whose Explicit stays must not be re-enriched", name, v)
 	}
 }
