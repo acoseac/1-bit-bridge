@@ -18,11 +18,9 @@ file whose `paths:` globs match the code it binds (CLAUDE.md's "Where things
 live"), or in `CLAUDE.md` when every session needs it. A long entry is one
 line there, and its long form goes to the `ops/History-*.md` file the line
 points to. The supporting record is appended to `ops/engineering-log.md` in
-that PR too, so a review reads the rule beside the code it is about. A push straight to `main`
-is the one exception `CLAUDE.md`'s Development workflow makes, for a change
-to `CLAUDE.md` alone (a corrected claim, a stale count); it is never the
-route for a rule that ships with code, and a change to this file goes
-through a PR like any other. Claude Code loads `CLAUDE.md` into every
+that PR too, so a review reads the rule beside the code it is about. For corrections to agent-instruction files, including this file, follow
+[CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow):
+a correction (a stale fact or count, or a broken pointer) may go straight to `main` once `make docs-check` passes; a new or changed rule, a move between files, `PROTOCOL.md`, the other docs and runbooks, and anything touching code take a PR. Claude Code loads `CLAUDE.md` into every
 session and a rules file whenever it reads a file the globs match, and a
 finding written only into the log is inert. Cursor loads this file and
 `CLAUDE.md` but not `.claude/rules/`, so before changing a file, run
@@ -92,7 +90,7 @@ it).
 
 ```text
 cmd/bridge/    CLI entry point (package main) + wiring
-internal/      38 packages, one concern each (map below; incl. dlna/discovery)
+internal/      Go packages, one concern each (map below; incl. dlna/discovery)
 config/        bridge.yaml.example — annotated sample config
 deploy/        operator deploy scripts (canonical copies; sync FROM here)
 docs/          PUBLIC website (GitHub Pages) — see Security section
@@ -230,9 +228,10 @@ mode). iOS never talks to the admin listener.
 
   Any folder with a few dozen tagged FLAC / DSF / MP3 / M4A files works.
 - **`UPDATE tracks SET enriched_at = 0` only re-triggers the enricher**, not
-  tag re-extraction (the scanner's skip gate compares file mtime against
-  `Track.ModTime` inside the `tags_json` BLOB — `mtime_ns = 0` does nothing).
-  To force re-extraction, delete the affected `tracks` rows and rescan.
+  tag re-extraction. The scanner's skip gate reads the `size` and `mtime_ns`
+  columns through `GetTrackStat`. To force re-extraction, zero `mtime_ns`
+  on the affected rows through a Go helper (see the
+  [local-test-fixture skill](.claude/skills/local-test-fixture/SKILL.md)), then rescan.
 - **Since migration v4, an external `sqlite3` CLI cannot DELETE/UPDATE/INSERT
   on `tracks` / `track_variants`** — the expression index uses the
   Go-registered `unicode_lower()` function (`unknown function` error). Either
@@ -267,6 +266,9 @@ mode). iOS never talks to the admin listener.
   everything behind `adminauth`, `/metrics` included: a scraper without a
   session needs its address in `metrics.allowCidrs` and a direct connection,
   and loopback is not implied (a same-host proxy connects from it too).
+  For remote admin, SSH-tunnel with the **same local port as the admin
+  listener** — a different local port is refused by the Origin check with
+  a typed `cross_origin` body naming that port (B471).
 - **Graceful shutdown triggers full cleanup**: `POST /api/restart` must invoke
   the same cancellation closure as SIGINT/SIGTERM (honors the `bgScans`
   WaitGroup, cleans up transcode jobs, flushes the auth last-used-at buffer) —
@@ -308,8 +310,9 @@ mode). iOS never talks to the admin listener.
 CI workflows (`.github/workflows/`):
 
 - `gofmt.yml` — read-only formatting check on PRs/pushes to main.
-- `gate.yml` — `vet` + `test-race` + `build-all` + `go-version` as four
-  parallel jobs with a `gate` fan-in; mirrors the local pre-push gate.
+- `gate.yml` — seven prerequisite jobs (`vet`, `test`, `dsd-measure`,
+  `build-all`, `go-version`, `cross-platform`, `docs-check`) with a `gate`
+  fan-in; includes the local pre-push gate.
 - `codeql.yml` — security static analysis (PRs, main, weekly cron).
 - `release.yml` — goreleaser on `v*` tag push: signed + notarized macOS
   archives (Developer ID; Windows Authenticode signing pending via SignPath),
@@ -338,8 +341,8 @@ in place.
 ## Development workflow
 
 - Work on `feat/<topic>` branches; open a PR against `main`. **Never push
-  directly to `main`**: the sole exception is a change to `CLAUDE.md` alone
-  (see "Agent-doc maintenance" above), and a rule that describes code lands
+  directly to `main`**: the exception for corrections to agent-instruction
+  files is defined in [CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow), and a rule that describes code lands
   in the PR that changes the code. One logical theme per PR; avoid
   micro-PRs — ~5 cohesive ~200-line PRs beat 15 tiny ones.
 - Pre-push: `make fmt vet test build-all` clean; paste the output into the PR

@@ -62,7 +62,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// browsers). Qodo on PR #107.
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if !s.originMatchesAdmin(origin) {
-			http.Error(w, "admin refused: cross-origin request", http.StatusForbidden)
+			s.writeCrossOriginRefusal(w)
 			return
 		}
 	}

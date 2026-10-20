@@ -7,6 +7,9 @@ description: "The bridge's named review procedures: LOUPE (the recent-work revie
 
 Moved verbatim from CLAUDE.md on 2026-10-18. Paths are relative to the repository root. Each procedure's full write-up is the doc it names; read that doc in full before starting. The PR-time bot-review rules stay in CLAUDE.md.
 
+Before running harness commands, set `GEMINI_REVIEW_DIR` and
+`DEEPSEEK_REVIEW_DIR` to their respective harness checkouts.
+
 ## LOUPE — the recent-work review cycle (user-invoked by name)
 
 Full procedure: **[docs/LoupeReviewCycle.md](../../../docs/LoupeReviewCycle.md)** — the
@@ -31,12 +34,12 @@ product direction, a production deploy, a wire change that commits the iOS side
 (the Mirror-PR contract above), or a refusal condition.
 
 It is the third named procedure beside PRISM (bug review) and VISTA (design
-briefs), and it uses PRISM as one phase. **The Gemini API key lives at
-`~/dev/gemini.api`** (override `GEMINI_API_KEY_FILE`), is sent as an
+briefs), and it uses PRISM as one phase. **The Gemini API key file is selected by
+`GEMINI_API_KEY_FILE`**; the key is sent as an
 `x-goog-api-key` header, and must never reach a URL, a log, or a commit; the
 three harnesses (`consult.py`, `relay.py`, `prism.py`) live at
-`~/dev/gemini-review/`, outside both repos, and work from here unchanged.
+`"$GEMINI_REVIEW_DIR"`, outside both repos, and work from here unchanged.
 
 ## External code review (DeepSeek sweep)
 
-The repeatable external-LLM (DeepSeek v4-pro) review process spans BOTH repos — full procedure is documented on the iOS side at `1-bit/docs/DeepSeekReviewProcess.md`. Harness at `~/dev/deepseek-review/` (`plan.py` collects last-week's changed files incl. `**/*.go`; user runs `run_all.py`; agent triages `responses/*.md`). **Value is in the triage** — the 2026-06 baseline ran ~70% false-positive, so verify EVERY finding against the actual code + the invariants in `## Things that have bitten before` before acting (zero false fixes shipped that way). Go-specific FP classes are pre-encoded in `review.py` + `~/dev/deepseek-review/known_fp.md` (append confirmed FPs there so re-runs stay quiet): `&local` in an atomic ≠ use-after-free (escape analysis heap-promotes); defers run during panic unwind (no "permanent deadlock"); builder/`With*` setters are construction-time not racy; partial-file chunk views can't see paired Close/shutdown elsewhere; check multi-return signatures before "swallowed error". Real fixes ship via the Multi-PR batch workflow below (themed, parallel-off-main when disjoint, `make fmt vet test build-all` before push, fast-forward-never-force on bot-review commits). `run_all.py bridge` limits a run to this repo.
+The repeatable external-LLM (DeepSeek v4-pro) review process spans BOTH repos — full procedure is documented on the iOS side at `1-bit/docs/DeepSeekReviewProcess.md`. Harness at `"$DEEPSEEK_REVIEW_DIR"` (`plan.py` collects last-week's changed files incl. `**/*.go`; user runs `run_all.py`; agent triages `responses/*.md`). **Value is in the triage** — the 2026-06 baseline ran ~70% false-positive, so verify EVERY finding against the actual code + the invariants in `## Things that have bitten before` before acting (zero false fixes shipped that way). Go-specific FP classes are pre-encoded in `review.py` + `"$DEEPSEEK_REVIEW_DIR/known_fp.md"` (append confirmed FPs there so re-runs stay quiet): `&local` in an atomic ≠ use-after-free (escape analysis heap-promotes); defers run during panic unwind (no "permanent deadlock"); builder/`With*` setters are construction-time not racy; partial-file chunk views can't see paired Close/shutdown elsewhere; check multi-return signatures before "swallowed error". Real fixes ship via the Multi-PR batch workflow below (themed, parallel-off-main when disjoint, `make fmt vet test build-all` before push, fast-forward-never-force on bot-review commits). `run_all.py bridge` limits a run to this repo.

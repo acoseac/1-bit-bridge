@@ -31,7 +31,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
-- `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
+- `make test` — pure-Go race-enabled suite.
 - **Fuzz targets are fuzzed NIGHTLY in CI, and are NOT fuzzed by `make test`.** **`-fuzzminimizetime` is not optional on a target that keeps finding new coverage.** **Count them by file:name pair**, and their properties by the assertions in each `f.Fuzz` body. **A crash found by the extractor targets is a REAL defect, not a nicety.** **The nightly job runs every fuzz process under a 5 GiB address-space limit.** → History-Build.md
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` in the inner loop and `make build-all` once before pushing; on a RAM-constrained box lower `P` (default 4), which caps Go's `-p`. → History-Build.md
 - **Run the gate on `go.mod`'s toolchain: `GOTOOLCHAIN=go1.27.2` since 2026-10-18 (B452, B460).** CI runs that toolchain (`go-version-file: go.mod`), and under it `make fmt` runs that toolchain's gofmt, which is CI's. **On a host whose Go is newer than `go.mod`'s, a bare `make fmt` can rewrite files CI calls clean: never commit such a rewrite.** Restore those files, and check your own with the pinned gofmt, `$(GOTOOLCHAIN=go1.27.2 go env GOROOT)/bin/gofmt -l <files>`. → History-Build.md
@@ -77,14 +77,14 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the bullet on what a rewrite keeps, in `.claude/rules/cli-serve.md`).
 - **`enriched_at` monotonicity.** Upsert resets it to 0 on track change and the enricher stamps it on completion; the other sanctioned writers are a CLOSED SET of four (`ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix`, `ResetEnrichedByPaths`). Never touch it anywhere else: `WHERE enriched_at = 0` drives the worker. → History-Cross-Repo.md
-- **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`). Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy; for remote admin, SSH-tunnel the port. → History-Cross-Repo.md
+- **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`). Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy; for remote admin, SSH-tunnel the port — **local port must equal the admin port**, or the Origin check refuses with a typed `cross_origin` hint (B471). → History-Cross-Repo.md
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly: it invokes the same cancellation closure that handles `SIGINT/SIGTERM`, and a restart exits with `supervision.RestartExitCode` (75) where a stop exits 0. → History-Cross-Repo.md
 - **Dual-stack HTTP/2 and HTTP/3 API.** QUIC is enabled by default (`disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true` turns it off); shutdown uses `.Shutdown(ctx)` with ONE 5s window the LAN and tailnet servers drain under together, and never waits on a handler past it. → History-Cross-Repo.md
 - **A request the client abandons is an Info line and status 499, and a server failure stays Error and 500** (2026-10-13, backlog B364): `writeErrorLog` and `writeFileErrorLog` are the one place, and a deadline the server set (`context.DeadlineExceeded`) stays Error and 500. → History-Cross-Repo.md
 - **A recorded sidecar path is a claim, never proof the file is gone.** The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row, and a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** in `.claude/rules/jobs.md` (2026-09-20). → History-Cross-Repo.md
 - **Single ↔ multi-root storage form flips.** The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing`; a root add or remove goes through `Scanner.CommitRootChange`. → History-Cross-Repo.md
 
-**Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo; the one exception, on this repo only, is a change to `CLAUDE.md` alone (**Development workflow**, step 1), and a rule that describes code lands in the PR that changes the code.
+**Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo; the one exception, the same in both repos (the owner, 2026-10-20), is a correction in an agent-instruction file (**Development workflow**, step 1), and a rule that describes code lands in the PR that changes the code.
 
 ## Production deployments
 
@@ -116,7 +116,7 @@ The user works across **multiple Claude accounts and machines**. Per-account pri
 
 **Stays in private memory — and only this:** secrets-adjacent coordinates (SSH key paths, private hosts — these can't go in `ops/` either if the repo is public); the user's personal working preferences; and perishable state ("deployed vX on `<date>`, rollback at …") that would rot in git — anything *actionable* belongs in `~/Desktop/to-do/` instead.
 
-**Three rules that make this hold:**
+**Four rules that make this hold:**
 1. **Don't commit the memory *files*** into a `.claude/memory/` folder — the harness doesn't auto-load them from there, so they'd be inert paper. Fold the **content** into files that do auto-load.
 2. **Never cite a private memory from a repo file** — it's a dangling reference for every other account. If a repo file needs the fact, put the **fact** in the repo.
 3. **Repo first, then the pointer.** When something is both shareable and worth a personal reminder, write the repo entry first and leave the private memory as a one-line pointer.
@@ -263,7 +263,7 @@ Take the accurate half of a wrong finding when there is one — the backslash an
 
 Standard single-PR loop for any non-trivial change:
 
-1. **Branch off main.** `git checkout -b feat/<topic>`. Never push code directly to main (CLAUDE.md-only docs changes are the sole exception; a rule that describes code is not one: it lands in the PR that changes the code, with its log record, so a review reads the two together).
+1. **Branch off main.** `git checkout -b feat/<topic>`. Never push directly to main. The sole exception (the owner, 2026-10-20; the iOS repo's CLAUDE.md says the same) is a correction, meaning a stale fact or count or a broken pointer, in an agent-instruction file (`CLAUDE.md`, `AGENTS.md`, `.claude/rules/*.md`, a skill, an `ops/History-*.md` file), with `make docs-check` clean. A new or changed rule, a move between files, `PROTOCOL.md` (the iOS app mirrors it), the other docs and runbooks, and anything touching code go through a PR. A rule that describes code lands in the PR that changes the code, with its log record, so a review reads the two together.
 2. **Pre-push gate.** `make fmt vet test build-all` — clean before pushing. Paste the output into the PR body.
 3. **Open PR to main.** One PR per logical theme. Push the branch and open the PR; don't wait to batch unrelated changes into it.
 4. **Wait ~6 min for bot reviews.** CodeRabbit, Gemini, and Qodo/Greptile each post within ~3 min; 6 min covers the slow tail. Don't poll.

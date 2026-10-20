@@ -287,6 +287,13 @@ func TestEventsRejectsCrossOriginGET(t *testing.T) {
 	if rw.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d want 403", rw.Code)
 	}
+	var env map[string]string
+	if err := json.Unmarshal(rw.Body.Bytes(), &env); err != nil {
+		t.Fatalf("refusal body must be JSON, got %q: %v", rw.Body.String(), err)
+	}
+	if env["error"] != errCodeCrossOrigin {
+		t.Errorf("error code = %q, want %q", env["error"], errCodeCrossOrigin)
+	}
 }
 
 // TestStatsSSESnapshotZeroesUptime locks in the contract that
