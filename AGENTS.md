@@ -265,6 +265,9 @@ mode). iOS never talks to the admin listener.
   everything behind `adminauth`, `/metrics` included: a scraper without a
   session needs its address in `metrics.allowCidrs` and a direct connection,
   and loopback is not implied (a same-host proxy connects from it too).
+  For remote admin, SSH-tunnel with the **same local port as the admin
+  listener** — a different local port is refused by the Origin check with
+  a typed `cross_origin` body naming that port (B471).
 - **Graceful shutdown triggers full cleanup**: `POST /api/restart` must invoke
   the same cancellation closure as SIGINT/SIGTERM (honors the `bgScans`
   WaitGroup, cleans up transcode jobs, flushes the auth last-used-at buffer) —

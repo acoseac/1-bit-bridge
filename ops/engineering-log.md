@@ -47769,3 +47769,66 @@ No second close-before-record: HTTP handlers (`authRecorder`,
 `handshakelog` waits on `StateClosed` after the failed-handshake line is
 written. The rule is under **Build, CI, and test discipline** in
 `.claude/rules/build-ci-tests.md`.
+
+## 2026-10-20 — console cross-origin refusal shows the admin port (B471)
+
+An operator forwarded a loopback console to another local port
+(`ssh -L 17789:127.0.0.1:7789`) and opened it there. Every mutation
+answered 403; "Generate token" showed only `Pair failed: 403 Forbidden`.
+
+### Cause
+
+Correct behaviour. `originMatchesLoopbackMode` requires a loopback
+Origin's port to equal the admin listener's — another local page on
+another port is exactly what the CSRF Origin allowlist guards against
+(B193; measured on the B170 fix). The defect was the body:
+`csrfGuard` (and the SSE Origin gate) used `http.Error` with the plain
+text `admin refused: cross-origin request`. The console's
+`errorFromResponse` only surfaces `j.message` when the body is JSON; on
+plain text it falls back to `${status} ${statusText}`.
+
+### Fix (allowlist unchanged)
+
+- `writeCrossOriginRefusal` answers with the admin API envelope
+  `{"error":"cross_origin","message":…}` via `writeError`. In loopback
+  mode the message keeps the original refusal text and appends a hint
+  that names the admin listener's port (from `boundAdminAddr` /
+  `AdminAddress`, never the page URL) and an equal-port
+  `ssh -L <port>:127.0.0.1:<port>` example.
+- Docs that give a tunnel command (`docs/docker.md`, the demo row in
+  `ops/deployment-runbook.md`, CLAUDE.md / History-Cross-Repo) say the
+  local port must equal the admin port and what the refusal looks like.
+- Rules: auth-tls.md (don't widen the allowlist; typed refusal) and
+  admin-console.md (console shows the typed message).
+
+### Tests
+
+`TestCSRFCrossOriginRefusalCarriesCodeAndTunnelHint` failed first with
+`refusal body must be JSON … got "admin refused: cross-origin request\n"`.
+`TestErrorFromResponseSurfacesCrossOriginRefusal` runs the shipped
+`errorFromResponse` under node against that body.
+`TestEventsRejectsCrossOriginGET` now asserts the same code on the SSE
+gate. No separate JS test framework beyond the existing node
+extractions.
+
+## 2026-10-20 — cross-origin refusal hint follows the admin listen host (B471 review)
+
+CodeRabbit on #1287: `writeCrossOriginRefusal` hard-coded
+`http://127.0.0.1:<port>` and `ssh -L <port>:127.0.0.1:<port>` even when
+the listener was `[::1]:7789`, so the hint could not reach an IPv6-only
+bind.
+
+### Fix (allowlist unchanged)
+
+`adminListenHostPort` returns both halves of `boundAdminAddr` /
+`AdminAddress`; `adminHintHost` brackets an IPv6 literal, leaves
+`localhost` and IPv4 as written, and maps an empty or unspecified host
+(`""`, `0.0.0.0`, `::`) to `127.0.0.1`. The open-at URL and the
+`ssh -L` destination share that host string.
+
+### Tests
+
+`TestCrossOriginRefusalHintUsesAdminListenHost` failed first on the
+`[::1]` and `localhost` rows with the old IPv4-only hint text; the
+`127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
+already green.

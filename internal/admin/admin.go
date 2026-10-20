@@ -2205,12 +2205,83 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 		// carry Origin: https://attacker.com.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !s.originMatchesAdmin(origin) {
-				http.Error(w, "admin refused: cross-origin request", http.StatusForbidden)
+				s.writeCrossOriginRefusal(w)
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// errCodeCrossOrigin is the stable admin-API error code for an Origin
+// the csrfGuard (and the long-lived GET Origin gate) refuse. The
+// console's errorFromResponse reads it as e.code; never match the
+// message text instead.
+const errCodeCrossOrigin = "cross_origin"
+
+// writeCrossOriginRefusal answers a mismatched Origin with the typed
+// JSON envelope every other admin refusal uses. The allowlist itself is
+// unchanged: a loopback Origin on another port stays refused (B193 /
+// B471). In loopback mode the message names the admin listener's host
+// and port — taken from the server, never the page URL — so an operator
+// who forwarded the console onto a different local port sees what to
+// change instead of a bare "403 Forbidden". An IPv6-bound listener
+// yields `[::1]` in both the open-at URL and the `ssh -L` destination;
+// an empty or unspecified host falls back to `127.0.0.1`.
+func (s *Server) writeCrossOriginRefusal(w http.ResponseWriter) {
+	msg := "admin refused: cross-origin request"
+	cfg := s.deps.CfgHolder.Load()
+	if cfg == nil || !cfg.IsPublic() {
+		if host, port := s.adminListenHostPort(); port != "" {
+			hintHost := adminHintHost(host)
+			msg = fmt.Sprintf(
+				"%s. This console must be opened at http://%s:%s. An SSH tunnel has to keep that port on both ends, for example ssh -L %s:%s:%s …",
+				msg, hintHost, port, port, hintHost, port,
+			)
+		}
+	}
+	writeError(w, http.StatusForbidden, errCodeCrossOrigin, msg)
+}
+
+// adminListenHostPort returns the host and port halves of the address
+// the admin listener is bound to (or configured for), used by the
+// cross-origin refusal hint. Both empty when the address cannot be split.
+func (s *Server) adminListenHostPort() (host, port string) {
+	adminAddr := s.boundAdminAddr
+	if adminAddr == "" {
+		cfg := s.deps.CfgHolder.Load()
+		if cfg == nil {
+			return "", ""
+		}
+		adminAddr = cfg.AdminAddress
+		if adminAddr == "" {
+			adminAddr = config.DefaultAdminAddress
+		}
+	}
+	host, port, err := net.SplitHostPort(adminAddr)
+	if err != nil {
+		return "", ""
+	}
+	return host, port
+}
+
+// adminHintHost formats the admin listen host for the cross-origin
+// refusal's open-at URL and `ssh -L` destination. IPv6 literals are
+// bracketed; an empty or unspecified address falls back to 127.0.0.1;
+// localhost and IPv4 loopback stay as written.
+func adminHintHost(host string) string {
+	if host == "" {
+		return "127.0.0.1"
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() {
+			return "127.0.0.1"
+		}
+		if ip.To4() == nil {
+			return "[" + host + "]"
+		}
+	}
+	return host
 }
 
 // originMatchesAdmin compares an Origin header against the admin
