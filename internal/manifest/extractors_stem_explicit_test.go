@@ -45,21 +45,18 @@ func dsfNoID3(sampleRate uint32) []byte {
 	return buf.Bytes()
 }
 
-// stemExplicitFixtureFiles are the untagged chunk-walk cases B466 heals, plus
-// a plain WAV that must only stamp across the v27 bump.
-func stemExplicitFixtureFiles(t *testing.T) []struct {
+type stemExplicitFixture struct {
 	name  string
 	data  []byte
 	title string
 	want  bool
-} {
+}
+
+// stemExplicitFixtureFiles are the untagged chunk-walk cases B466 heals, plus
+// a plain WAV that must only stamp across the v27 bump.
+func stemExplicitFixtureFiles(t *testing.T) []stemExplicitFixture {
 	t.Helper()
-	return []struct {
-		name  string
-		data  []byte
-		title string
-		want  bool
-	}{
+	return []stemExplicitFixture{
 		{"Song [E].wav", wavWithChunks(), "Song [E]", true},
 		{"Aiff [E].aiff", buildAIFFWithID3(t, nil), "Aiff [E]", true},
 		{"Dff [E].dff", dffWithChunks(t, 2822400), "Dff [E]", true},
@@ -77,20 +74,7 @@ func stemExplicitFixtureFiles(t *testing.T) []struct {
 // stays unset. Each file sits alone under writeAlone so the path's guess is
 // the stem and no sibling unifies its album.
 func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
-	files := stemExplicitFixtureFiles(t)
-	root := t.TempDir()
-	rels := map[string]string{}
-	for _, f := range files {
-		rels[f.name] = writeAlone(t, root, f.name, f.data)
-	}
-	store, sc := newScanFixture(t, root)
-	scanOnce(t, sc, "scan")
-	wire := servedTracksByPath(t, store, root)
-	for _, f := range files {
-		t.Run(f.name, func(t *testing.T) {
-			requireExplicitRow(t, store, wire, rels[f.name], f.title, f.want)
-		})
-	}
+	checkStemExplicitScan(t, stemExplicitFixtureFiles(t))
 }
 
 // cleanAdvisoryNoTitle is an ID3v2.3 tag with TXXX:ITUNESADVISORY=2 and no
@@ -119,12 +103,7 @@ func cleanAdvisoryWithTitle(title, value string) []byte {
 // also beside an untitled ID3 chunk, whose advisory still counts.
 func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.T) {
 	id3 := func(tag []byte) []byte { return riffChunk("id3 ", tag) }
-	files := []struct {
-		name  string
-		data  []byte
-		title string
-		want  bool
-	}{
+	files := []stemExplicitFixture{
 		// Clean advisory, no TIT2, stem has [E]: the stem stands in for the
 		// absent title and any signal wins.
 		{"WavClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("2"))), "WavClean [E]", true},
@@ -148,13 +127,24 @@ func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.
 		{"Id3NoTitleInfoClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("2")), listInfo("INAM", "Clean Title")), "Clean Title", false},
 		{"Id3ExplicitInfoClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("1")), listInfo("INAM", "Clean Title")), "Clean Title", true},
 	}
-	root := t.TempDir()
+	checkStemExplicitScan(t, files)
+}
+
+func newStemExplicitScan(t *testing.T, root string, files []stemExplicitFixture, label string) (*Store, *Scanner, map[string]string) {
+	t.Helper()
 	rels := map[string]string{}
 	for _, f := range files {
 		rels[f.name] = writeAlone(t, root, f.name, f.data)
 	}
 	store, sc := newScanFixture(t, root)
-	scanOnce(t, sc, "scan")
+	scanOnce(t, sc, label)
+	return store, sc, rels
+}
+
+func checkStemExplicitScan(t *testing.T, files []stemExplicitFixture) {
+	t.Helper()
+	root := t.TempDir()
+	store, _, rels := newStemExplicitScan(t, root, files, "scan")
 	wire := servedTracksByPath(t, store, root)
 	for _, f := range files {
 		t.Run(f.name, func(t *testing.T) {
@@ -172,12 +162,7 @@ func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.
 func TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps(t *testing.T) {
 	files := stemExplicitFixtureFiles(t)
 	root := t.TempDir()
-	rels := map[string]string{}
-	for _, f := range files {
-		rels[f.name] = writeAlone(t, root, f.name, f.data)
-	}
-	store, sc := newScanFixture(t, root)
-	scanOnce(t, sc, "initial")
+	store, sc, rels := newStemExplicitScan(t, root, files, "initial")
 
 	before := map[string]int64{}
 	for _, f := range files {
