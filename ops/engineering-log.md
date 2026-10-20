@@ -48154,3 +48154,25 @@ after round 3 of renaming 10 folders of 12 files the watcher holds 136 open file
 ```
 
 The test's expected counts were not widened.
+
+## 2026-10-20 — Dependabot groups the three github/codeql-action steps (backlog B459)
+
+### What failed
+
+Dependabot opened one PR per `github/codeql-action/{init,autobuild,analyze}`
+step. Each failed `analyze (go)` alone: `init` writes a config stamped with
+its own version, and the other two refuse a config from a different release
+("Loaded a configuration file for version '4.38.3', but running version
+'4.38.2'"). The 4.38.3 batch was #1264 / #1265 / #1268, superseded by the
+combined pin in #1278.
+
+### What changed
+
+`.github/dependabot.yml`'s github-actions ecosystem gained a `codeql-action`
+group with `patterns: ["github/codeql-action*"]`. `update-types` is left
+unset so major, minor and patch all join that PR (Dependabot's documented
+default for groups). Schedule, directory and the gomod/docker ecosystems
+are unchanged. `codeql.yml`'s comment now names the group instead of telling
+a maintainer to close singles by hand; the three SHAs must still be equal.
+The rule is under **Build, CI, and test discipline** in
+`.claude/rules/build-ci-tests.md`.
