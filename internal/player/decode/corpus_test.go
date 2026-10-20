@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
@@ -38,9 +39,9 @@ func TestPrivateFormatCorpus(t *testing.T) {
 			}
 			return nil
 		}
-		switch filepath.Ext(d.Name()) {
-		case ".aif", ".aiff", ".aifc", ".wav", ".WAV", ".flac", ".m4a", ".alac",
-			".mp3", ".ogg", ".opus", ".aac":
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".aif", ".aiff", ".aifc", ".wav", ".flac", ".m4a", ".alac",
+			".dsf", ".dff", ".mp3", ".ogg", ".opus", ".aac":
 			files = append(files, path)
 		}
 		return nil
