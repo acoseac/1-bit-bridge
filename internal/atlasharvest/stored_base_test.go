@@ -85,9 +85,12 @@ func newConnRecorder(t *testing.T) *connRecorder {
 			_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			buf := make([]byte, 4096)
 			n, _ := c.Read(buf)
-			_ = c.Close()
+			// Record under the lock before Close: the client's handshake
+			// fails as soon as Close lands, and a connections() read right
+			// after the tick would otherwise miss this leg (backlog B461).
 			r.mu.Lock()
 			r.seen = append(r.seen, buf[:n])
+			_ = c.Close()
 			r.mu.Unlock()
 		}
 	}()
