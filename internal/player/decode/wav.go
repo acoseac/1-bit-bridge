@@ -21,15 +21,13 @@ var guidPCM = [16]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x0
 // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: 00000003-0000-0010-8000-00aa00389b71
 var guidFloat = [16]byte{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
 
-const (
-	maxWAVChunks     = 256
-	maxWAVHeaderScan = 8 << 20 // 8 MiB of leading non-data chunks
-)
+const maxWAVChunks = 256
 
 type wavDecoder struct {
 	rs            io.ReadSeeker
 	pcm           format.PCM
 	dataStart     int64
+	dataEnd       int64 // exclusive; confines reads to the data chunk
 	containerBits int
 	frameBytes    int
 	posFrame      int64
@@ -43,6 +41,12 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 	}
 	if string(hdr[0:4]) != "RIFF" || string(hdr[8:12]) != "WAVE" {
 		return nil, refuse(ReasonUnknownContainer, "not a RIFF/WAVE file")
+	}
+	riffSize := binary.LittleEndian.Uint32(hdr[4:8])
+	// RIFF size covers WAVE+chunks; absolute end of the declared RIFF body.
+	riffEnd := int64(8) + int64(riffSize)
+	if riffSize < 4 {
+		return nil, refuse(ReasonTruncated, "WAVE RIFF body too small")
 	}
 
 	var (
@@ -59,6 +63,13 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 	)
 
 	for i := 0; i < maxWAVChunks; i++ {
+		pos, err := rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		if pos+8 > riffEnd {
+			break
+		}
 		var ch [8]byte
 		if _, err := io.ReadFull(rs, ch[:]); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -68,13 +79,10 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 		}
 		id := string(ch[0:4])
 		size := binary.LittleEndian.Uint32(ch[4:8])
-		pos, err := rs.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return nil, err
-		}
-		scanned += 8 + int64(size) + int64(size&1)
-		if !formatSeen && scanned > maxWAVHeaderScan {
-			return nil, refuse(ReasonUnsupportedLayout, "WAVE header exceeds scan bound before fmt chunk")
+		chunkDataPos := pos + 8
+		chunkEnd := chunkDataPos + int64(size) + int64(size&1)
+		if chunkEnd > riffEnd {
+			return nil, refuse(ReasonTruncated, "WAVE chunk %q extends past RIFF body", id)
 		}
 
 		switch id {
@@ -84,6 +92,9 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 			}
 			if size < 16 {
 				return nil, refuse(ReasonTruncated, "WAVE fmt chunk too small")
+			}
+			if size > maxHeaderChunkBody {
+				return nil, refuse(ReasonUnsupportedLayout, "WAVE fmt chunk size %d exceeds bound", size)
 			}
 			body := make([]byte, size)
 			if _, err := io.ReadFull(rs, body); err != nil {
@@ -130,17 +141,23 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 					return nil, err
 				}
 			}
+			scanned += 8 + int64(size) + int64(size&1)
 		case "data":
 			if dataSeen {
 				return nil, refuse(ReasonUnsupportedLayout, "WAVE has more than one data chunk")
 			}
-			dataStart = pos
+			dataStart = chunkDataPos
 			dataSize = size
 			dataSeen = true
 			if _, err := rs.Seek(int64(size)+int64(size&1), io.SeekCurrent); err != nil {
 				return nil, err
 			}
+			// data payload does not count toward the non-audio header scan.
 		default:
+			scanned += 8 + int64(size) + int64(size&1)
+			if scanned > maxNonAudioHeaderScan {
+				return nil, refuse(ReasonUnsupportedLayout, "WAVE header exceeds scan bound before data")
+			}
 			if _, err := rs.Seek(int64(size)+int64(size&1), io.SeekCurrent); err != nil {
 				return nil, err
 			}
@@ -155,6 +172,9 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 	if !dataSeen {
 		return nil, refuse(ReasonTruncated, "WAVE missing data chunk")
 	}
+	if err := acceptRate(int(rate)); err != nil {
+		return nil, err
+	}
 
 	containerBits := int(bits)
 	vb := int(validBits)
@@ -164,13 +184,14 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 		return nil, refuse(ReasonUnsupportedBits, "WAVE container %d bits is refused", containerBits)
 	}
 	if err := acceptPCMShape(int(channels), vb); err != nil {
-		// 8/12-bit etc.: acceptPCMShape already refuses. For extensible with
-		// validBits in {16,24,32} but odd container, also refuse.
 		return nil, err
 	}
 	fb := int(channels) * (containerBits / 8)
 	if blockAlign != 0 && int(blockAlign) != fb {
 		return nil, refuse(ReasonUnsupportedLayout, "WAVE block align %d disagrees with %d-byte frames", blockAlign, fb)
+	}
+	if dataSize%uint32(fb) != 0 {
+		return nil, refuse(ReasonTruncated, "WAVE data size %d is not a whole number of frames", dataSize)
 	}
 	frames := int64(dataSize) / int64(fb)
 	d := &wavDecoder{
@@ -183,6 +204,7 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 			Frames:    frames,
 		},
 		dataStart:     dataStart,
+		dataEnd:       dataStart + int64(dataSize),
 		containerBits: containerBits,
 		frameBytes:    fb,
 	}
@@ -204,6 +226,9 @@ func (d *wavDecoder) Seek(ctx context.Context, frame int64) error {
 		return refuse(ReasonUnsupportedLayout, "WAVE seek frame %d out of range (0..%d)", frame, d.pcm.Frames)
 	}
 	off := d.dataStart + frame*int64(d.frameBytes)
+	if off > d.dataEnd {
+		return refuse(ReasonUnsupportedLayout, "WAVE seek past data chunk")
+	}
 	if _, err := d.rs.Seek(off, io.SeekStart); err != nil {
 		return err
 	}
@@ -226,55 +251,76 @@ func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
 	if int64(framesWant) > left {
 		framesWant = int(left)
 	}
-	need := framesWant * d.frameBytes
-	if cap(d.byteBuf) < need {
-		d.byteBuf = make([]byte, need)
-	} else {
-		d.byteBuf = d.byteBuf[:need]
-	}
-	n, err := io.ReadFull(d.rs, d.byteBuf)
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		whole := n / d.frameBytes
-		if whole == 0 {
-			return 0, io.EOF
+	out := 0
+	for framesWant > 0 {
+		if err := ctx.Err(); err != nil {
+			return out, err
 		}
-		d.byteBuf = d.byteBuf[:whole*d.frameBytes]
-		framesWant = whole
-		if n%d.frameBytes != 0 {
-			err = refuse(ReasonTruncated, "WAVE data ends mid-frame")
+		chunk := framesPerRead(d.frameBytes, framesWant)
+		need := chunk * d.frameBytes
+		if cap(d.byteBuf) < need {
+			d.byteBuf = make([]byte, need)
+		} else {
+			d.byteBuf = d.byteBuf[:need]
+		}
+		n, err := io.ReadFull(d.rs, d.byteBuf)
+		// Check cancellation after the read: a single chunk can cover the
+		// whole dst, so a pre-read check alone would miss a cancel that
+		// fires during ReadFull (Codex M8).
+		if cerr := ctx.Err(); cerr != nil {
+			return out, cerr
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if n == 0 {
+				if d.posFrame < d.pcm.Frames {
+					return out, refuse(ReasonTruncated, "WAVE data ends before declared frame count")
+				}
+				return out, io.EOF
+			}
+			whole := n / d.frameBytes
+			if whole == 0 || n%d.frameBytes != 0 {
+				return out, refuse(ReasonTruncated, "WAVE data ends mid-frame")
+			}
+			d.byteBuf = d.byteBuf[:whole*d.frameBytes]
+			chunk = whole
+			err = refuse(ReasonTruncated, "WAVE data ends before declared frame count")
+		} else if err != nil {
+			return out, err
 		} else {
 			err = nil
 		}
-	} else if err != nil {
-		return 0, err
-	} else {
-		err = nil
-	}
-	out := 0
-	bytesPerSample := d.containerBits / 8
-	for f := 0; f < framesWant; f++ {
-		base := f * d.frameBytes
-		for c := 0; c < d.pcm.Channels; c++ {
-			off := base + c*bytesPerSample
-			var u uint32
-			switch d.containerBits {
-			case 16:
-				u = uint32(binary.LittleEndian.Uint16(d.byteBuf[off:]))
-			case 24:
-				u = uint32(d.byteBuf[off]) | uint32(d.byteBuf[off+1])<<8 | uint32(d.byteBuf[off+2])<<16
-			case 32:
-				u = binary.LittleEndian.Uint32(d.byteBuf[off:])
+		bytesPerSample := d.containerBits / 8
+		shift := d.containerBits - d.pcm.ValidBits
+		for f := 0; f < chunk; f++ {
+			base := f * d.frameBytes
+			for c := 0; c < d.pcm.Channels; c++ {
+				off := base + c*bytesPerSample
+				var u uint32
+				switch d.containerBits {
+				case 16:
+					u = uint32(binary.LittleEndian.Uint16(d.byteBuf[off:]))
+				case 24:
+					u = uint32(d.byteBuf[off]) | uint32(d.byteBuf[off+1])<<8 | uint32(d.byteBuf[off+2])<<16
+				case 32:
+					u = binary.LittleEndian.Uint32(d.byteBuf[off:])
+				}
+				// WAVE_FORMAT_EXTENSIBLE stores valid bits MSB-aligned
+				// (left-justified) in the container; low bits are padding.
+				if shift > 0 {
+					u >>= uint(shift)
+				}
+				dst[out] = signExtend(u, d.pcm.ValidBits)
+				out++
 			}
-			if d.pcm.ValidBits < d.containerBits {
-				u &= (uint32(1) << d.pcm.ValidBits) - 1
-			}
-			dst[out] = signExtend(u, d.pcm.ValidBits)
-			out++
+		}
+		d.posFrame += int64(chunk)
+		framesWant -= chunk
+		if err != nil {
+			return out, err
 		}
 	}
-	d.posFrame += int64(framesWant)
-	if err == nil && d.posFrame >= d.pcm.Frames {
-		err = io.EOF
+	if d.posFrame >= d.pcm.Frames {
+		return out, io.EOF
 	}
-	return out, err
+	return out, nil
 }

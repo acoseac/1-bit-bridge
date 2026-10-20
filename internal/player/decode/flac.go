@@ -2,66 +2,185 @@ package decode
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
-	flac "github.com/mewkiz/flac"
+	"github.com/mewkiz/flac/frame"
+	"github.com/mewkiz/flac/meta"
 )
 
-// flacDecoder wraps mewkiz/flac v1.0.14 integer subframe decoding.
+// flacDecoder decodes integer FLAC via mewkiz frame parsing, with its own
+// metadata walk and seeking.
 //
-// Seek inspection (PR 1a): Stream.Seek uses an embedded SEEKTABLE when
-// present; otherwise makeSeekTable walks every frame once and builds a full
-// point list. It does not bisect on unvalidated frame sync. For this PR's
-// short goldens that is enough; a bounded lazy sparse index is deferred until
-// measurement on Pi storage shows it is required. Exact sample-frame seeks
-// discard samples inside the frame Seek returns to the start of.
+// mewkiz Stream.Seek is not used: its SampleNumber() multiplies the frame
+// number by the *current* BlockSize (wrong for the short final block under
+// fixed blocking), and NewSeek's makeSeekTable / PICTURE Parse are unbounded
+// and uncancellable. Seeking here uses an optional bounded SEEKTABLE or a
+// cancellable forward scan, and sample positions use STREAMINFO's nominal
+// block size for fixed-blocksize streams.
 type flacDecoder struct {
-	rs       io.ReadSeeker
-	stream   *flac.Stream
-	pcm      format.PCM
-	posFrame int64
-	// pending holds interleaved samples already decoded but not yet returned.
-	pending []int32
-	// pendingFrame is the absolute frame index of pending[0]/channels].
+	rs         io.ReadSeeker
+	info       *meta.StreamInfo
+	dataStart  int64
+	pcm        format.PCM
+	seekPoints []meta.SeekPoint
+	posFrame   int64
+	// nextSample is the absolute sample index of the next frame at the
+	// current rs offset. Positioning accumulates BlockSize rather than
+	// trusting frame-header sample numbers: a short final block makes
+	// STREAMINFO min≠max, and mewkiz SampleNumber() then multiplies the
+	// frame number by that short BlockSize (Argon H4 / Codex H4/M9).
+	nextSample   int64
+	pending      []int32
 	pendingFrame int64
 	closed       bool
 }
 
 func openFLAC(rs io.ReadSeeker) (Decoder, error) {
-	stream, err := flac.NewSeek(rs)
+	info, points, dataStart, err := parseFLACMetadata(rs)
 	if err != nil {
-		if IsRefusal(err) {
-			return nil, err
-		}
-		return nil, refuse(ReasonTruncated, "FLAC open failed: %v", err)
-	}
-	info := stream.Info
-	if info == nil {
-		return nil, refuse(ReasonTruncated, "FLAC missing STREAMINFO")
+		return nil, err
 	}
 	bits := int(info.BitsPerSample)
-	// mewkiz/flac v1.0.14 still treats frame sample-size code 111 as reserved,
-	// which modern flac(1) emits for 32-bit streams. Refuse up front rather
-	// than fail mid-decode; 32-bit WAV/AIFF remain supported.
 	if bits == 32 {
 		return nil, refuse(ReasonNotYetSupported, "32-bit FLAC is not supported with mewkiz/flac v1.0.14 (frame sample-size code 111)")
 	}
 	if err := acceptPCMShape(int(info.NChannels), bits); err != nil {
 		return nil, err
 	}
-	frames := int64(info.NSamples)
-	return &flacDecoder{
-		rs:     rs,
-		stream: stream,
+	if err := acceptRate(int(info.SampleRate)); err != nil {
+		return nil, err
+	}
+	d := &flacDecoder{
+		rs:         rs,
+		info:       info,
+		dataStart:  dataStart,
+		seekPoints: points,
 		pcm: format.PCM{
 			RateHz:    int(info.SampleRate),
 			Channels:  int(info.NChannels),
-			ValidBits: int(info.BitsPerSample),
+			ValidBits: bits,
 			Container: format.ContainerFLAC,
-			Frames:    frames,
+			Frames:    int64(info.NSamples), // 0 means unknown length
 		},
-	}, nil
+	}
+	if _, err := rs.Seek(dataStart, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// parseFLACMetadata walks metadata with size caps. PICTURE and other large
+// bodies are skipped by seeking (no allocation of declared image data).
+func parseFLACMetadata(rs io.ReadSeeker) (*meta.StreamInfo, []meta.SeekPoint, int64, error) {
+	var sig [4]byte
+	if _, err := io.ReadFull(rs, sig[:]); err != nil {
+		return nil, nil, 0, refuse(ReasonTruncated, "FLAC header truncated")
+	}
+	if string(sig[:]) != "fLaC" {
+		return nil, nil, 0, refuse(ReasonUnknownContainer, "invalid FLAC signature")
+	}
+	var (
+		info    *meta.StreamInfo
+		points  []meta.SeekPoint
+		isLast  bool
+		nBlocks int
+	)
+	for !isLast {
+		nBlocks++
+		if nBlocks > 256 {
+			return nil, nil, 0, refuse(ReasonUnsupportedLayout, "FLAC metadata block count exceeds bound")
+		}
+		var hdr [4]byte
+		if _, err := io.ReadFull(rs, hdr[:]); err != nil {
+			return nil, nil, 0, refuse(ReasonTruncated, "FLAC metadata header truncated")
+		}
+		isLast = hdr[0]&0x80 != 0
+		typ := meta.Type(hdr[0] & 0x7f)
+		length := int64(hdr[1])<<16 | int64(hdr[2])<<8 | int64(hdr[3])
+		if length < 0 {
+			return nil, nil, 0, refuse(ReasonTruncated, "FLAC metadata length invalid")
+		}
+		switch typ {
+		case meta.TypeStreamInfo:
+			if info != nil {
+				return nil, nil, 0, refuse(ReasonUnsupportedLayout, "FLAC has more than one STREAMINFO")
+			}
+			if length != 34 {
+				return nil, nil, 0, refuse(ReasonTruncated, "FLAC STREAMINFO length %d, want 34", length)
+			}
+			body := make([]byte, 34)
+			if _, err := io.ReadFull(rs, body); err != nil {
+				return nil, nil, 0, refuse(ReasonTruncated, "FLAC STREAMINFO truncated")
+			}
+			si, err := parseStreamInfoBody(body)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			info = si
+		case meta.TypeSeekTable:
+			if length%18 != 0 {
+				return nil, nil, 0, refuse(ReasonTruncated, "FLAC SEEKTABLE length %d is not a multiple of 18", length)
+			}
+			if length > maxFLACMetaBody {
+				return nil, nil, 0, refuse(ReasonUnsupportedLayout, "FLAC SEEKTABLE size %d exceeds bound", length)
+			}
+			body := make([]byte, length)
+			if _, err := io.ReadFull(rs, body); err != nil {
+				return nil, nil, 0, refuse(ReasonTruncated, "FLAC SEEKTABLE truncated")
+			}
+			n := int(length / 18)
+			points = make([]meta.SeekPoint, 0, n)
+			for i := 0; i < n; i++ {
+				off := i * 18
+				sampleNum := binary.BigEndian.Uint64(body[off:])
+				if sampleNum == meta.PlaceholderPoint {
+					continue
+				}
+				points = append(points, meta.SeekPoint{
+					SampleNum: sampleNum,
+					Offset:    binary.BigEndian.Uint64(body[off+8:]),
+					NSamples:  binary.BigEndian.Uint16(body[off+16:]),
+				})
+			}
+		default:
+			// Skip without allocating the body (PICTURE may declare hundreds of MiB).
+			if _, err := rs.Seek(length, io.SeekCurrent); err != nil {
+				return nil, nil, 0, refuse(ReasonTruncated, "FLAC metadata skip failed: %v", err)
+			}
+		}
+	}
+	if info == nil {
+		return nil, nil, 0, refuse(ReasonTruncated, "FLAC missing STREAMINFO")
+	}
+	dataStart, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return info, points, dataStart, nil
+}
+
+func parseStreamInfoBody(b []byte) (*meta.StreamInfo, error) {
+	if len(b) != 34 {
+		return nil, refuse(ReasonTruncated, "FLAC STREAMINFO body length %d", len(b))
+	}
+	si := &meta.StreamInfo{}
+	si.BlockSizeMin = binary.BigEndian.Uint16(b[0:2])
+	si.BlockSizeMax = binary.BigEndian.Uint16(b[2:4])
+	si.FrameSizeMin = uint32(b[4])<<16 | uint32(b[5])<<8 | uint32(b[6])
+	si.FrameSizeMax = uint32(b[7])<<16 | uint32(b[8])<<8 | uint32(b[9])
+	// bytes 10-17: 20-bit rate | 3-bit (channels-1) | 5-bit (bits-1) | 36-bit samples.
+	v := binary.BigEndian.Uint64(b[10:18])
+	si.SampleRate = uint32(v >> 44)
+	si.NChannels = uint8((v>>41)&0x7) + 1
+	si.BitsPerSample = uint8((v>>36)&0x1f) + 1
+	si.NSamples = v & 0xFFFFFFFFF
+	copy(si.MD5sum[:], b[18:34])
+	if si.BlockSizeMin < 16 {
+		return nil, refuse(ReasonTruncated, "FLAC invalid minimum block size %d", si.BlockSizeMin)
+	}
+	return si, nil
 }
 
 func (d *flacDecoder) Format() format.PCM { return d.pcm }
@@ -69,7 +188,6 @@ func (d *flacDecoder) Format() format.PCM { return d.pcm }
 func (d *flacDecoder) Close() error {
 	d.closed = true
 	d.pending = nil
-	d.stream = nil
 	return nil
 }
 
@@ -80,34 +198,88 @@ func (d *flacDecoder) Seek(ctx context.Context, frame int64) error {
 	if d.closed {
 		return refuse(ReasonTruncated, "FLAC decoder closed")
 	}
-	if frame < 0 || (d.pcm.Frames > 0 && frame > d.pcm.Frames) {
+	if frame < 0 {
+		return refuse(ReasonUnsupportedLayout, "FLAC seek frame %d out of range", frame)
+	}
+	if d.pcm.Frames > 0 && frame > d.pcm.Frames {
 		return refuse(ReasonUnsupportedLayout, "FLAC seek frame %d out of range (0..%d)", frame, d.pcm.Frames)
 	}
-	if frame == d.pcm.Frames {
+	if d.pcm.Frames > 0 && frame == d.pcm.Frames {
 		d.pending = nil
 		d.posFrame = frame
 		return nil
 	}
-	// mewkiz Seek positions at the start of the frame containing sampleNum
-	// and returns that frame's first sample number.
-	first, err := d.stream.Seek(uint64(frame))
-	if err != nil {
-		return refuse(ReasonTruncated, "FLAC seek failed: %v", err)
+	// Unknown length (Frames==0): Seek(0) must rewind; other seeks scan.
+	if frame == 0 {
+		if _, err := d.rs.Seek(d.dataStart, io.SeekStart); err != nil {
+			return err
+		}
+		d.pending = nil
+		d.pendingFrame = 0
+		d.posFrame = 0
+		d.nextSample = 0
+		return nil
 	}
-	d.pending = nil
-	d.posFrame = int64(first)
-	// Decode the frame and discard samples before the target.
-	if err := d.fillPending(ctx); err != nil && err != io.EOF {
+	startOff := d.dataStart
+	startSample := int64(0)
+	if len(d.seekPoints) > 0 {
+		p := seekPointBefore(d.seekPoints, uint64(frame))
+		startOff = d.dataStart + int64(p.Offset)
+		startSample = int64(p.SampleNum)
+	}
+	if _, err := d.rs.Seek(startOff, io.SeekStart); err != nil {
 		return err
 	}
-	skip := int(frame - d.pendingFrame)
-	if skip < 0 || skip*d.pcm.Channels > len(d.pending) {
-		return refuse(ReasonTruncated, "FLAC seek landed outside decoded frame")
+	d.pending = nil
+	d.nextSample = startSample
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		off, err := d.rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		first := d.nextSample
+		f, err := d.parseFrame(ctx)
+		if err == io.EOF {
+			return refuse(ReasonTruncated, "FLAC seek past end of stream")
+		}
+		if err != nil {
+			return err
+		}
+		next := first + int64(f.BlockSize)
+		d.nextSample = next
+		if next > frame {
+			// Rewind to frame start and decode into pending from target.
+			if _, err := d.rs.Seek(off, io.SeekStart); err != nil {
+				return err
+			}
+			d.nextSample = first
+			if err := d.fillPending(ctx); err != nil {
+				return err
+			}
+			skip := int(frame - d.pendingFrame)
+			if skip < 0 || skip*d.pcm.Channels > len(d.pending) {
+				return refuse(ReasonTruncated, "FLAC seek landed outside decoded frame")
+			}
+			d.pending = d.pending[skip*d.pcm.Channels:]
+			d.pendingFrame = frame
+			d.posFrame = frame
+			return nil
+		}
 	}
-	d.pending = d.pending[skip*d.pcm.Channels:]
-	d.pendingFrame = frame
-	d.posFrame = frame
-	return nil
+}
+
+func seekPointBefore(points []meta.SeekPoint, sample uint64) meta.SeekPoint {
+	prev := points[0]
+	for _, p := range points {
+		if p.SampleNum > sample {
+			return prev
+		}
+		prev = p
+	}
+	return prev
 }
 
 func (d *flacDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
@@ -128,10 +300,22 @@ func (d *flacDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) 
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
+		if d.pcm.Frames > 0 && d.posFrame >= d.pcm.Frames {
+			return out, io.EOF
+		}
 		if len(d.pending) == 0 {
 			if err := d.fillPending(ctx); err != nil {
-				if err == io.EOF && out > 0 {
-					return out, io.EOF
+				if err == io.EOF {
+					if d.pcm.Frames > 0 && d.posFrame < d.pcm.Frames {
+						if out > 0 {
+							return out, refuse(ReasonTruncated, "FLAC ends before declared sample count")
+						}
+						return 0, refuse(ReasonTruncated, "FLAC ends before declared sample count")
+					}
+					if out > 0 {
+						return out, io.EOF
+					}
+					return 0, io.EOF
 				}
 				return out, err
 			}
@@ -152,15 +336,10 @@ func (d *flacDecoder) fillPending(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	f, err := d.stream.ParseNext()
-	if err == io.EOF {
-		return io.EOF
-	}
+	first := d.nextSample
+	f, err := d.parseFrame(ctx)
 	if err != nil {
-		return refuse(ReasonTruncated, "FLAC frame decode failed: %v", err)
-	}
-	if len(f.Subframes) != d.pcm.Channels {
-		return refuse(ReasonTruncated, "FLAC frame has %d subframes, want %d", len(f.Subframes), d.pcm.Channels)
+		return err
 	}
 	n := len(f.Subframes[0].Samples)
 	for _, sf := range f.Subframes {
@@ -168,13 +347,89 @@ func (d *flacDecoder) fillPending(ctx context.Context) error {
 			return refuse(ReasonTruncated, "FLAC subframe length mismatch")
 		}
 	}
+	if int(f.BlockSize) != n {
+		return refuse(ReasonTruncated, "FLAC subframe length %d disagrees with block size %d", n, f.BlockSize)
+	}
+	if d.pcm.Frames > 0 && first+int64(n) > d.pcm.Frames {
+		return refuse(ReasonUnsupportedLayout, "FLAC frame sample range exceeds STREAMINFO total")
+	}
+	// Reject samples outside the advertised valid-bit range.
+	maxMag := int32(1) << (d.pcm.ValidBits - 1)
 	interleaved := make([]int32, n*d.pcm.Channels)
 	for i := 0; i < n; i++ {
 		for c := 0; c < d.pcm.Channels; c++ {
-			interleaved[i*d.pcm.Channels+c] = f.Subframes[c].Samples[i]
+			s := f.Subframes[c].Samples[i]
+			if s < -maxMag || s >= maxMag {
+				return refuse(ReasonTruncated, "FLAC sample exceeds STREAMINFO bit depth")
+			}
+			interleaved[i*d.pcm.Channels+c] = s
 		}
 	}
 	d.pending = interleaved
-	d.pendingFrame = int64(f.SampleNumber())
+	d.pendingFrame = first
+	d.nextSample = first + int64(n)
 	return nil
+}
+
+func (d *flacDecoder) parseFrame(ctx context.Context) (*frame.Frame, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Bind the context into every byte read so mewkiz frame.New/Parse cannot
+	// keep scanning after cancellation (Argon H4 / Codex M5).
+	rs := &ctxReadSeeker{rs: d.rs, ctx: ctx}
+	f, err := frame.New(rs)
+	if err == io.EOF {
+		return nil, io.EOF
+	}
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return nil, err
+	}
+	if err != nil {
+		return nil, refuse(ReasonTruncated, "FLAC frame header failed: %v", err)
+	}
+	// Resolve inherited (zero) fields from STREAMINFO before subframe decode.
+	if f.BitsPerSample == 0 {
+		f.BitsPerSample = d.info.BitsPerSample
+	}
+	if f.SampleRate == 0 {
+		f.SampleRate = d.info.SampleRate
+	}
+	if int(f.BitsPerSample) != d.pcm.ValidBits {
+		return nil, refuse(ReasonUnsupportedLayout, "FLAC frame bit depth %d disagrees with STREAMINFO %d", f.BitsPerSample, d.pcm.ValidBits)
+	}
+	if int(f.SampleRate) != d.pcm.RateHz {
+		return nil, refuse(ReasonUnsupportedLayout, "FLAC frame rate %d disagrees with STREAMINFO %d", f.SampleRate, d.pcm.RateHz)
+	}
+	if f.Channels.Count() != d.pcm.Channels {
+		return nil, refuse(ReasonTruncated, "FLAC frame has %d channels, want %d", f.Channels.Count(), d.pcm.Channels)
+	}
+	if err := f.Parse(); err != nil {
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			return nil, err
+		}
+		return nil, refuse(ReasonTruncated, "FLAC frame decode failed: %v", err)
+	}
+	if len(f.Subframes) != d.pcm.Channels {
+		return nil, refuse(ReasonTruncated, "FLAC frame has %d subframes, want %d", len(f.Subframes), d.pcm.Channels)
+	}
+	return f, nil
+}
+
+// ctxReadSeeker forwards Seek to the underlying reader and aborts Read when
+// ctx is done, so uncancellable third-party parsers stop promptly.
+type ctxReadSeeker struct {
+	rs  io.ReadSeeker
+	ctx context.Context
+}
+
+func (c *ctxReadSeeker) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.rs.Read(p)
+}
+
+func (c *ctxReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return c.rs.Seek(offset, whence)
 }

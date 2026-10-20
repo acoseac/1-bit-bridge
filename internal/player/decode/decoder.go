@@ -13,8 +13,8 @@ import (
 // ReadFrames writes interleaved, sign-extended int32 samples into dst. The
 // length of dst must be a multiple of Channels. The returned n is the number
 // of sample values written (channels × frames). io.EOF means the stream ended
-// cleanly; a short read before EOF is not an error when the file ends mid-
-// request.
+// cleanly at a known endpoint; premature EOF against a declared length is a
+// *Refusal with ReasonTruncated.
 type Decoder interface {
 	Format() format.PCM
 	ReadFrames(ctx context.Context, dst []int32) (n int, err error)
@@ -31,20 +31,27 @@ func Open(rs io.ReadSeeker) (Decoder, error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	kind, err := sniff(rs)
+	res, err := sniff(rs)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+	view := rs
+	if res.start > 0 {
+		os, err := newOffsetSeeker(rs, res.start)
+		if err != nil {
+			return nil, err
+		}
+		view = os
+	} else if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	switch kind {
+	switch res.kind {
 	case sniffFLAC:
-		return openFLAC(rs)
+		return openFLAC(view)
 	case sniffWAV:
-		return openWAV(rs)
+		return openWAV(view)
 	case sniffAIFF:
-		return openAIFF(rs)
+		return openAIFF(view)
 	case sniffALAC:
 		return nil, refuse(ReasonNotYetSupported, "ALAC is not enabled in this release")
 	case sniffDSF, sniffDFF:

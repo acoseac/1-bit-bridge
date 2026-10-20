@@ -20,139 +20,139 @@ const (
 	sniffOgg
 )
 
-// sniff peeks at the start of rs without requiring a later Seek(0) from the
-// caller (Open resets). It never decides by file extension.
-func sniff(rs io.ReadSeeker) (sniffKind, error) {
+type sniffResult struct {
+	kind  sniffKind
+	start int64 // absolute byte offset of the container origin
+}
+
+// sniff peeks at rs. It never decides by file extension. start is non-zero
+// when an ID3v2 tag precedes a recognised lossless container.
+func sniff(rs io.ReadSeeker) (sniffResult, error) {
 	var hdr [12]byte
 	n, err := io.ReadFull(rs, hdr[:])
 	if err == io.ErrUnexpectedEOF || err == io.EOF {
-		return sniffBuf(hdr[:n]), nil
+		res, _ := sniffFrom(hdr[:n], nil, 0)
+		return res, nil
 	}
 	if err != nil {
-		return sniffUnknown, err
+		return sniffResult{}, err
 	}
-
-	return sniffBufFull(rs, hdr[:])
+	return sniffFrom(hdr[:], rs, 0)
 }
 
-func sniffBuf(hdr []byte) sniffKind {
-	k, _ := sniffFrom(hdr, nil)
-	return k
-}
-
-func sniffBufFull(rs io.ReadSeeker, hdr []byte) (sniffKind, error) {
-	return sniffFrom(hdr, rs)
-}
-
-func sniffFrom(hdr []byte, rs io.ReadSeeker) (sniffKind, error) {
+func sniffFrom(hdr []byte, rs io.ReadSeeker, base int64) (sniffResult, error) {
 	if len(hdr) >= 4 && string(hdr[:4]) == "fLaC" {
-		return sniffFLAC, nil
+		return sniffResult{kind: sniffFLAC, start: base}, nil
 	}
 	if len(hdr) >= 12 && string(hdr[:4]) == "RIFF" && string(hdr[8:12]) == "WAVE" {
-		return sniffWAV, nil
+		return sniffResult{kind: sniffWAV, start: base}, nil
 	}
 	if len(hdr) >= 12 && string(hdr[:4]) == "RF64" && string(hdr[8:12]) == "WAVE" {
-		return sniffUnknown, refuse(ReasonUnsupportedLayout, "RF64 WAVE is not supported")
+		return sniffResult{}, refuse(ReasonUnsupportedLayout, "RF64 WAVE is not supported")
 	}
 	if len(hdr) >= 12 && string(hdr[:4]) == "FORM" && (string(hdr[8:12]) == "AIFF" || string(hdr[8:12]) == "AIFC") {
-		return sniffAIFF, nil
+		return sniffResult{kind: sniffAIFF, start: base}, nil
 	}
 	if len(hdr) >= 4 && string(hdr[:4]) == "DSD " {
-		return sniffDSF, nil
+		return sniffResult{kind: sniffDSF, start: base}, nil
 	}
 	if len(hdr) >= 4 && string(hdr[:4]) == "FRM8" {
-		return sniffDFF, nil
+		return sniffResult{kind: sniffDFF, start: base}, nil
 	}
 	if len(hdr) >= 4 && string(hdr[:4]) == "OggS" {
-		return sniffOgg, nil
+		return sniffResult{kind: sniffOgg, start: base}, nil
 	}
 	if len(hdr) >= 3 && string(hdr[:3]) == "ID3" {
 		if rs == nil {
-			return sniffMP3, nil
+			return sniffResult{kind: sniffMP3, start: base}, nil
 		}
-		return sniffAfterID3(rs, hdr)
+		return sniffAfterID3(rs, hdr, base)
 	}
 	if len(hdr) >= 8 && string(hdr[4:8]) == "ftyp" {
 		if rs == nil {
-			return sniffAAC, nil
+			return sniffResult{kind: sniffUnknown, start: base}, nil
 		}
 		return sniffMP4Brand(rs, hdr)
 	}
-	// MP3 frame sync: 11 set bits.
 	if len(hdr) >= 2 && hdr[0] == 0xFF && hdr[1]&0xE0 == 0xE0 {
-		return sniffMP3, nil
+		return sniffResult{kind: sniffMP3, start: base}, nil
 	}
-	return sniffUnknown, nil
+	return sniffResult{kind: sniffUnknown, start: base}, nil
 }
 
-func sniffAfterID3(rs io.ReadSeeker, hdr []byte) (sniffKind, error) {
+func sniffAfterID3(rs io.ReadSeeker, hdr []byte, base int64) (sniffResult, error) {
 	if len(hdr) < 10 {
 		var more [10]byte
 		copy(more[:], hdr)
 		if _, err := io.ReadFull(rs, more[len(hdr):]); err != nil {
-			return sniffMP3, nil // ID3-tagged lossy is the common case
+			return sniffResult{kind: sniffMP3, start: base}, nil
 		}
 		hdr = more[:]
 	}
-	// ID3v2 size is synchsafe in bytes 6..9.
 	size := int(hdr[6]&0x7F)<<21 | int(hdr[7]&0x7F)<<14 | int(hdr[8]&0x7F)<<7 | int(hdr[9]&0x7F)
 	if size < 0 || size > 16<<20 {
-		return sniffMP3, nil
+		return sniffResult{kind: sniffMP3, start: base}, nil
 	}
-	if _, err := rs.Seek(int64(10+size), io.SeekStart); err != nil {
-		return sniffUnknown, err
+	start := base + int64(10+size)
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return sniffResult{}, err
 	}
-	var next [4]byte
-	if _, err := io.ReadFull(rs, next[:]); err != nil {
-		return sniffMP3, nil
+	var next [12]byte
+	n, err := io.ReadFull(rs, next[:])
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if n >= 2 && next[0] == 0xFF && next[1]&0xE0 == 0xE0 {
+			return sniffResult{kind: sniffMP3, start: start}, nil
+		}
+		return sniffResult{kind: sniffUnknown, start: start}, nil
 	}
-	if string(next[:]) == "fLaC" {
-		return sniffFLAC, nil
+	if err != nil {
+		return sniffResult{}, err
+	}
+	// Re-sniff the post-ID3 header; do not recurse into another ID3 tag.
+	if string(next[:4]) == "fLaC" {
+		return sniffResult{kind: sniffFLAC, start: start}, nil
+	}
+	if string(next[:4]) == "RIFF" && string(next[8:12]) == "WAVE" {
+		return sniffResult{kind: sniffWAV, start: start}, nil
+	}
+	if string(next[:4]) == "FORM" && (string(next[8:12]) == "AIFF" || string(next[8:12]) == "AIFC") {
+		return sniffResult{kind: sniffAIFF, start: start}, nil
+	}
+	if string(next[:4]) == "OggS" {
+		return sniffResult{kind: sniffOgg, start: start}, nil
 	}
 	if next[0] == 0xFF && next[1]&0xE0 == 0xE0 {
-		return sniffMP3, nil
+		return sniffResult{kind: sniffMP3, start: start}, nil
 	}
-	return sniffMP3, nil
+	// ID3 before an unrecognised payload: refuse as unsupported layout,
+	// not as lossy MP3.
+	return sniffResult{}, refuse(ReasonUnsupportedLayout, "ID3v2 tag not followed by a supported lossless container")
 }
 
-func sniffMP4Brand(rs io.ReadSeeker, hdr []byte) (sniffKind, error) {
-	boxSize := binary.BigEndian.Uint32(hdr[0:4])
-	if boxSize < 8 {
-		return sniffUnknown, nil
-	}
-	// Walk top-level boxes from the start, skipping mdat by size so an
-	// mdat-first ALAC file still reveals its moov/alac sample entry.
+func sniffMP4Brand(rs io.ReadSeeker, hdr []byte) (sniffResult, error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
-		return sniffUnknown, err
+		return sniffResult{}, err
 	}
 	alac, aac, err := scanMP4Codecs(rs)
 	if err != nil {
-		return sniffUnknown, err
+		return sniffResult{}, err
 	}
 	if alac {
-		return sniffALAC, nil
+		return sniffResult{kind: sniffALAC}, nil
 	}
 	if aac {
-		return sniffAAC, nil
+		return sniffResult{kind: sniffAAC}, nil
 	}
-	// ftyp said MP4/M4A but no codec we recognise — refuse as not-yet /
-	// unknown rather than guessing lossy.
-	_ = boxSize
-	return sniffAAC, nil
+	_ = hdr
+	return sniffResult{kind: sniffUnknown}, nil
 }
 
-// scanMP4Codecs walks top-level ISO-BMFF boxes looking for 'alac' or AAC
-// sample-entry fourccs. It skips mdat payloads without reading them.
+// scanMP4Codecs walks ISO-BMFF boxes looking for stsd sample-entry fourccs.
 func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
-	const maxBoxes = 64
-	const maxMoovScan = 4 << 20 // 4 MiB of moov is plenty
-	for i := 0; i < maxBoxes; i++ {
+	for i := 0; i < maxMP4Boxes; i++ {
 		var hdr [8]byte
 		n, rerr := io.ReadFull(rs, hdr[:])
-		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
-			if n == 0 {
-				return alac, aac, nil
-			}
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF || n == 0 {
 			return alac, aac, nil
 		}
 		if rerr != nil {
@@ -160,27 +160,22 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 		}
 		size := uint64(binary.BigEndian.Uint32(hdr[0:4]))
 		typ := string(hdr[4:8])
-		var payload uint64
-		switch {
-		case size == 0:
-			// Extends to EOF — nothing useful left to walk.
-			return alac, aac, nil
-		case size == 1:
+		headerLen := uint64(8)
+		if size == 1 {
 			var big [8]byte
 			if _, err := io.ReadFull(rs, big[:]); err != nil {
 				return alac, aac, nil
 			}
 			size = binary.BigEndian.Uint64(big[:])
-			if size < 16 {
-				return alac, aac, nil
-			}
-			payload = size - 16
-		default:
-			if size < 8 {
-				return alac, aac, nil
-			}
-			payload = size - 8
+			headerLen = 16
 		}
+		if size == 0 {
+			return alac, aac, nil
+		}
+		if size < headerLen {
+			return alac, aac, nil
+		}
+		payload := size - headerLen
 		switch typ {
 		case "mdat", "free", "skip", "wide":
 			if _, err := rs.Seek(int64(payload), io.SeekCurrent); err != nil {
@@ -188,18 +183,15 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 			}
 		case "moov", "moof":
 			scan := payload
-			if scan > maxMoovScan {
-				scan = maxMoovScan
+			if scan > maxMoovBytes {
+				scan = maxMoovBytes
 			}
 			buf := make([]byte, scan)
 			n, _ := io.ReadFull(rs, buf)
 			buf = buf[:n]
-			if containsFourCC(buf, "alac") {
-				alac = true
-			}
-			if containsFourCC(buf, "mp4a") {
-				aac = true
-			}
+			a, c := codecsInBoxes(buf)
+			alac = alac || a
+			aac = aac || c
 			remain := int64(payload) - int64(n)
 			if remain > 0 {
 				if _, err := rs.Seek(remain, io.SeekCurrent); err != nil {
@@ -218,14 +210,54 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 	return alac, aac, nil
 }
 
-func containsFourCC(buf []byte, cc string) bool {
-	if len(cc) != 4 {
-		return false
-	}
-	for i := 0; i+4 <= len(buf); i++ {
-		if string(buf[i:i+4]) == cc {
-			return true
+// codecsInBoxes walks nested ISO-BMFF boxes looking for stsd sample entries.
+func codecsInBoxes(buf []byte) (alac, aac bool) {
+	walkBoxes(buf, func(typ string, payload []byte) {
+		if typ != "stsd" {
+			a, c := codecsInBoxes(payload)
+			alac = alac || a
+			aac = aac || c
+			return
 		}
+		// stsd: 1 byte version, 3 flags, 4 entry count, then entries.
+		if len(payload) < 8 {
+			return
+		}
+		rest := payload[8:]
+		for len(rest) >= 8 {
+			esz := binary.BigEndian.Uint32(rest[0:4])
+			if esz < 8 || int(esz) > len(rest) {
+				return
+			}
+			entryType := string(rest[4:8])
+			switch entryType {
+			case "alac":
+				alac = true
+			case "mp4a":
+				aac = true
+			}
+			rest = rest[esz:]
+		}
+	})
+	return alac, aac
+}
+
+func walkBoxes(buf []byte, fn func(typ string, payload []byte)) {
+	for len(buf) >= 8 {
+		size := uint64(binary.BigEndian.Uint32(buf[0:4]))
+		typ := string(buf[4:8])
+		headerLen := uint64(8)
+		if size == 1 {
+			if len(buf) < 16 {
+				return
+			}
+			size = binary.BigEndian.Uint64(buf[8:16])
+			headerLen = 16
+		}
+		if size == 0 || size < headerLen || int(size) > len(buf) {
+			return
+		}
+		fn(typ, buf[headerLen:size])
+		buf = buf[size:]
 	}
-	return false
 }

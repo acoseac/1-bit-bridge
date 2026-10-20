@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,8 +112,10 @@ func TestGoldensExactSeek(t *testing.T) {
 					t.Fatalf("seek %d: %v", frame, err)
 				}
 				n, err := d.ReadFrames(ctx, buf)
-				if n != g.Channels && err != io.EOF {
-					t.Fatalf("seek %d: n=%d err=%v", frame, n, err)
+				// In-range seeks must return a full frame of samples. A broken
+				// seek that yields (0, EOF) must not pass.
+				if n != g.Channels {
+					t.Fatalf("seek %d: n=%d err=%v, want %d samples", frame, n, err, g.Channels)
 				}
 				off := int(frame) * g.Channels
 				for c := 0; c < n; c++ {

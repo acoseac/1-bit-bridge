@@ -363,9 +363,20 @@ func floatToExtended80(f float64) []byte {
 		return b
 	}
 	sign := 0
-	if f < 0 {
+	if f < 0 || math.Signbit(f) {
 		sign = 1
-		f = -f
+		if !math.IsInf(f, 0) && !math.IsNaN(f) {
+			f = -f
+		}
+	}
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		// IEEE-754 extended: exp all-ones; Inf has zero mantissa, NaN non-zero.
+		se := uint16(sign<<15) | 0x7FFF
+		binary.BigEndian.PutUint16(b[0:], se)
+		if math.IsNaN(f) {
+			b[2] = 0xc0 // quiet NaN payload
+		}
+		return b
 	}
 	frac, exp := math.Frexp(f)
 	// frac in [0.5, 1); extended wants [1, 2) with explicit integer bit
