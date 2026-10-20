@@ -47771,3 +47771,25 @@ plain text it falls back to `${status} ${statusText}`.
 `TestEventsRejectsCrossOriginGET` now asserts the same code on the SSE
 gate. No separate JS test framework beyond the existing node
 extractions.
+
+## 2026-10-20 — cross-origin refusal hint follows the admin listen host (B471 review)
+
+CodeRabbit on #1287: `writeCrossOriginRefusal` hard-coded
+`http://127.0.0.1:<port>` and `ssh -L <port>:127.0.0.1:<port>` even when
+the listener was `[::1]:7789`, so the hint could not reach an IPv6-only
+bind.
+
+### Fix (allowlist unchanged)
+
+`adminListenHostPort` returns both halves of `boundAdminAddr` /
+`AdminAddress`; `adminHintHost` brackets an IPv6 literal, leaves
+`localhost` and IPv4 as written, and maps an empty or unspecified host
+(`""`, `0.0.0.0`, `::`) to `127.0.0.1`. The open-at URL and the
+`ssh -L` destination share that host string.
+
+### Tests
+
+`TestCrossOriginRefusalHintUsesAdminListenHost` failed first on the
+`[::1]` and `localhost` rows with the old IPv4-only hint text; the
+`127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
+already green.

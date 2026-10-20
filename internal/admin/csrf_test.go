@@ -158,6 +158,83 @@ func TestCSRFCrossOriginRefusalCarriesCodeAndTunnelHint(t *testing.T) {
 	}
 }
 
+// TestCrossOriginRefusalHintUsesAdminListenHost pins that the loopback
+// tunnel hint takes its host from the same bound/configured admin
+// address as the port (B471 review): IPv6 gets brackets in the URL and
+// ssh -L destination, localhost and IPv4 stay literal, and an empty or
+// unspecified host falls back to 127.0.0.1. The Origin allowlist is
+// unchanged — every case still refuses a wrong-port loopback Origin.
+func TestCrossOriginRefusalHintUsesAdminListenHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		adminAddr string
+		wantURL   string
+		wantSSH   string
+	}{
+		{
+			name:      "ipv4 loopback",
+			adminAddr: "127.0.0.1:7789",
+			wantURL:   "http://127.0.0.1:7789",
+			wantSSH:   "ssh -L 7789:127.0.0.1:7789",
+		},
+		{
+			name:      "ipv6 loopback",
+			adminAddr: "[::1]:7789",
+			wantURL:   "http://[::1]:7789",
+			wantSSH:   "ssh -L 7789:[::1]:7789",
+		},
+		{
+			name:      "localhost",
+			adminAddr: "localhost:7789",
+			wantURL:   "http://localhost:7789",
+			wantSSH:   "ssh -L 7789:localhost:7789",
+		},
+		{
+			name:      "unspecified host",
+			adminAddr: "0.0.0.0:7789",
+			wantURL:   "http://127.0.0.1:7789",
+			wantSSH:   "ssh -L 7789:127.0.0.1:7789",
+		},
+		{
+			name:      "empty host",
+			adminAddr: ":7789",
+			wantURL:   "http://127.0.0.1:7789",
+			wantSSH:   "ssh -L 7789:127.0.0.1:7789",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			srv.boundAdminAddr = tc.adminAddr
+			body := bytes.NewBufferString(`{"path":"/tmp/whatever"}`)
+			r := httptest.NewRequest(http.MethodPost, "/api/roots", body)
+			r.RemoteAddr = "127.0.0.1:54321"
+			r.Host = testConsoleHost
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Origin", "http://127.0.0.1:17789")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status %d, want 403; body=%s", w.Code, w.Body.String())
+			}
+			var env map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				t.Fatalf("refusal body must be JSON, got %q: %v", w.Body.String(), err)
+			}
+			msg := env["message"]
+			if !strings.Contains(msg, tc.wantURL) {
+				t.Errorf("message %q must contain URL %q", msg, tc.wantURL)
+			}
+			if !strings.Contains(msg, tc.wantSSH) {
+				t.Errorf("message %q must contain tunnel example %q", msg, tc.wantSSH)
+			}
+			if tc.name == "ipv6 loopback" && strings.Contains(msg, "127.0.0.1") {
+				t.Errorf("IPv6-bound admin must not hardcode 127.0.0.1 in the hint; got %q", msg)
+			}
+		})
+	}
+}
+
 // TestErrorFromResponseSurfacesCrossOriginRefusal runs the console's
 // errorFromResponse under node against the typed refusal body, so a
 // regression that drops the JSON (or the code) shows as "403 Forbidden"

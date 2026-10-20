@@ -18,9 +18,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   Origin gate) answer with JSON `error: cross_origin` via
   `writeCrossOriginRefusal`; `errorFromResponse` prefers `j.message` and
   exposes `e.code`. In loopback mode that message names the admin
-  listener's port — never the page URL's — and an equal-port SSH tunnel
-  example. **Don't widen `originMatchesLoopbackMode` to admit another local
-  port** (B193 / B471); fix the tunnel instead.
+  listener's host and port — never the page URL's — and an equal-port SSH
+  tunnel example (`[::1]` when bound there; empty/unspecified host falls
+  back to `127.0.0.1`). **Don't widen `originMatchesLoopbackMode` to admit
+  another local port** (B193 / B471); fix the tunnel instead.
 - **The cert tiles grade and PHRASE from one number.** #952 gave all three
   one ladder (`certExpiryBadge`, which returns `expired` for `left <= 0`)
   and left each tile's wording alone — wording written against the

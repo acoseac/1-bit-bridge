@@ -504,12 +504,16 @@ Forward the console to the same port on your machine — the CSRF Origin
 check compares the browser's Origin port to the admin listener's, so a
 different local port (for example `-L 17789:127.0.0.1:7789` when 7789 is
 already taken) makes every mutation answer `403` with JSON
-`{"error":"cross_origin",…}` naming the admin port and an equal-port
-example. Keep both ends equal:
+`{"error":"cross_origin",…}` whose loopback-mode message names the admin
+listener's host and port (an `[::1]` bind yields
+`http://[::1]:7789` / `ssh -L 7789:[::1]:7789`; a `127.0.0.1` or
+`localhost` bind keeps that host; an empty or unspecified host falls
+back to `127.0.0.1`) and an equal-port example. Keep both ends equal:
 
 ```sh
 ssh -L 7789:127.0.0.1:7789 user@bridge-host
 # then open http://127.0.0.1:7789/
+# IPv6-only admin listener: ssh -L 7789:[::1]:7789 … and open http://[::1]:7789/
 ```
 
 ### Reverse proxy with auth (advanced)
