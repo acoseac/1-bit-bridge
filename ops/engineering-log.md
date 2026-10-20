@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
 - [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
 - [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
 - [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
@@ -47839,6 +47840,96 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD
+
+### What shipped
+
+`decode.Open` returns a `Source`: a PCM `Decoder` or a `DSDDecoder`, chosen
+by content. `DSDDecoder` reads channel-separated bytes, bit 7 earliest
+(`format.NativeDSD`, which gains `Container`, `BytesPerChannel` and
+`Validate`), with an exact per-channel byte `Seek`. `sniffDSF`/`sniffDFF`
+now open `openDSF`/`openDFF` instead of refusing `not_yet_supported`.
+Stereo DSD64..DSD512 only. DST and other DFF compressions, other channel
+counts, the 48 kHz family and DSD1024 are typed refusals.
+
+### Shared code
+
+PR 1a round 7 had to remove a WAV/AIFF clone pair SonarCloud refused, so DFF
+does not add a third: `pcmRegion`'s linear read became `linearRegion`
+(frames handed to a callback), which `pcmRegion` embeds for WAV and AIFF and
+`dffDecoder` embeds for DFF. The round-6 seek-back on cancel or I/O error and
+the region cap are therefore one implementation for all three. DSF cannot
+share it, because its positions are not linear: each read covers one block
+group's span (channel 0's run to the last channel's) and seeks to that
+span's absolute offset first, so there is no reader state to restore after a
+cancel or an I/O error.
+
+### Decisions
+
+- **A DSF sample count that is not a multiple of eight.** The decoder emits
+  whole bytes, so `BytesPerChannel` rounds up and the last byte's trailing
+  bits are the file's padding, unchanged. Rounding down would drop real
+  samples; refusing such files would refuse files that are otherwise sound.
+  `NativeDSD.Frames` keeps the exact count so the transport (PRs 2c/2d) can
+  account for the tail. Pinned by `lsb_dsd64_797_samples.dsf`.
+- **DFF channel order.** `CHNL` may list `SRGT` before `SLFT`; the decoder
+  maps the file's order back to left, right. Other ids (`C001`…, `MLFT`…)
+  on a stereo file are refused rather than guessed.
+- **DSF block size is 4096 only**, as the specification fixes it; any other
+  value is refused rather than trusted as an allocation or stride.
+- **The DSF metadata pointer and total size are never used**: reads end at
+  the sample count, so a pointer into the audio, past the file or to
+  `2^64-1` changes nothing (`TestDSFMetadataPointerIgnored`).
+
+### Goldens
+
+`scripts/player-dsd-goldens/generate.py` (standard library only; no
+reference tool for DSD containers was installed on the host, and none is
+needed) writes the DSF and DFF fixtures from Sony's DSF 1.01 and Philips'
+DSDIFF 1.5 around a pattern specified in canonical form: every byte drawn
+from the 240 non-palindromic bytes, left `NP[7i mod 240]` and right
+`NP[(11i+3) mod 240]` (`4i+3` is odd, so they differ at every index), and
+`0x00` never occurs. A missed or extra bit reversal, a channel swap or
+padding read as audio therefore each change bytes. The generator is
+deterministic: rerunning it left the committed fixtures byte-identical.
+`pattern.bin` has no NUL, so git would call it text: the fixtures are
+`binary` in `.gitattributes`.
+
+### Red first and negative controls
+
+Before `openDSF`/`openDFF` existed, all eleven new tests failed with
+`not_yet_supported`: `TestDSDGoldensMatchPattern`,
+`TestDSDGoldensExactSeek`, `TestDSDGoldensEOFAtSampleCount`,
+`TestDSDGoldensRefused`, `TestDSDTruncatedMidBlock`, `TestDSDAfterID3Prefix`,
+`TestDSDAbsurdSizesRefused`, `TestDSFMetadataPointerIgnored`,
+`TestDSDCancelThenRetryNoGap`, `TestDSDIOErrorThenRetryNoGap`,
+`TestDSDReadBufferShape`. Each control below was run against the committed
+decoders and reverted:
+
+| Mutation | Tests that failed |
+|---|---|
+| LSB-first DSF not reversed | MatchPattern, ExactSeek, EOFAtSampleCount on the three LSB fixtures; TruncatedMidBlock, MetadataPointerIgnored, CancelThenRetryNoGap (LSB) |
+| MSB-first DSF reversed too | the same set on `msb_dsd128_partial_block.dsf`; AfterID3Prefix, IOErrorThenRetryNoGap (MSB) |
+| Final block's padding read as audio | the partial-block and 797-sample fixtures (not `whole_blocks`), AfterID3Prefix, MetadataPointerIgnored, both retry tests |
+| DSF block group stride of one channel | every DSF golden test |
+| `CHNL` order ignored | `dsd256_right_first.dff` in MatchPattern, ExactSeek, EOFAtSampleCount, IOErrorThenRetryNoGap |
+| `linearRegion` seek-back on cancel removed | `TestDSDCancelThenRetryNoGap/dsd64.dff` and PR 1a's `TestReviewR6CancelThenRetryNoGap` (wav, aiff) |
+| DSF cancel advances past unreturned bytes | `TestDSDCancelThenRetryNoGap/lsb_dsd64_partial_block.dsf` |
+| DSF `uint64` addressable-length check removed | `TestDSDAbsurdSizesRefused/dsf_data_size_huge` |
+| DST accepted in `CMPR` and as a sound chunk | `TestDSDGoldensRefused` (`dst.dff`) |
+| Any channel count accepted | `TestDSDGoldensRefused` (all four), `TestDSDAbsurdSizesRefused` (count 2^31, 0) |
+
+### Fuzzing
+
+`FuzzDSFOpen` and `FuzzDFFOpen` are seeded with every golden of their
+container. Each body checks that an opened input has an accepted shape;
+that a read never returns more than asked, more than `BytesPerChannel` or
+more audio than the input holds; that a clean EOF comes exactly at
+`BytesPerChannel`; and that seeks to the start and the end succeed while
+one past the end is refused. Each ran 75 s locally (`-fuzzminimizetime 1s`):
+DSF 19,213,313 execs and 94 corpus entries; DFF 21,270,304 execs and 144
+entries. Neither found a crasher, so no regression input was committed.
 
 ## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
 
