@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
 - [2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test](#2026-10-20--b470-pr-1a-round-4-mp4-extended-size-panic-and-cancel-seek-test)
 - [2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups](#2026-10-20--b470-pr-1a-round-3-argon-seektableid3mp4aiff-follow-ups)
 - [2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening](#2026-10-20--b470-pr-1a-round-2-argon--codex-decoder-hardening)
@@ -47836,6 +47837,32 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut
+
+### Trigger
+
+CodeRabbit on the R4 commits: when `moov`/`moof` exceeds `maxMoovBytes`
+(4 MiB), only the first 4 MiB are read. A later `udta`/`covr` or an `stbl`
+that crosses the cut made `walkBoxes` return `unsupported_layout`, and
+`scanMP4Codecs` discarded the `alac`/`aac` already found — `Open` reported
+the wrong refusal reason.
+
+### What changed
+
+`scanMP4Codecs` sets `truncated` when the 4 MiB bound is applied.
+`walkBoxes` / `codecsInBoxes` take that flag: a size past the buffer end is
+a scan boundary (partial descend into `isoBMFFContainers` / `meta` with the
+flag still set, then stop) rather than an error. Complete boxes inside the
+buffer are walked with the flag clear so a finished moov with an invalid
+child size still refuses. uint64 size compares and depth/box caps stay.
+
+### Tests
+
+`TestReviewR5MoovCapKeepsALACBeforeCover`, `…AACBeforeCover`,
+`…ALACWhenSTBLCrossesCut`, `…CompleteMoovStillRefusesOversizeChild`.
+Negative control: ignoring `truncated` makes the ALAC+covr case fail with
+`unsupported_layout` again.
 
 ## 2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test
 
