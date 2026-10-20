@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules](#2026-10-20--b470-pr-1b-round-3-the-dff-walks-bounds-the-goldens-layout-checks-and-two-overstated-rules)
 - [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
 - [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
 - [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
@@ -47841,6 +47842,101 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
+
+### Trigger
+
+Codex reviewed round 2 of PR #1293; the owner verified three findings.
+
+### 1. An offset sum in the DFF walk could wrap
+
+The walk checked for room for a chunk header with `pos+12 > frmEnd`. A form
+may declare a body ending at `math.MaxInt64`, and a chunk's declared size
+may end it at `math.MaxInt64-1` (positions in a form are always even), so
+`pos+12` wrapped negative, passed, and the walk asked for a 12-byte header
+past the form. The read returned EOF and the file was refused as truncated,
+so nothing but the read request showed the defect: Codex found it with a
+probe. The check is now `frmEnd-pos < 12`, which cannot wrap because `pos`
+never passes `frmEnd`.
+
+A chunk's own bounds moved into `dffChunkEnd`, which subtracts too. Its old
+addressable check, `size > uint64(math.MaxInt64-body-1)`, wrapped at
+`body = math.MaxInt64` to `uint64(-1)` and admitted any size, and
+`body+size+pad` then wrapped negative and passed the form's bound. `Open`
+cannot produce that body today, because a body is a form position plus 12
+and so even, while `math.MaxInt64` is odd: the check was safe by parity
+alone, and is now safe by its arithmetic.
+
+Red first: `TestDFFWalkReadsNothingPastItsForm` wraps the reader in one that
+records every read request (offset and length asked for), and failed with a
+read of 12 bytes at 9223372036854775806 past a form ending at
+9223372036854775807; it also checks every DFF golden's walk stays inside its
+form. `TestDFFChunkEndBoundsBySubtraction` (in package `decode`, since the
+helper is unexported) failed at `body = math.MaxInt64`: a one-byte chunk
+was accepted ending at -9223372036854775807, and a `math.MaxUint64` size
+ending at `math.MaxInt64`. Controls on the committed fix: putting
+`pos+12 > frmEnd` back reddens the first test alone; putting the old
+addressable expression back reddens the second alone (its one- and
+two-byte cases then come back as truncated, and the largest size is
+accepted). The limit check in `dffChunkEnd` subtracts for the same shape,
+but cannot wrap once the addressable check holds, so no control tells it
+apart from a sum.
+
+The audit of the other sums found nothing else that wraps. `PROP`'s walk is
+in memory and compares each size with what is left of the slice. The sound
+chunk's end, `dataStart+size`, is inside the addressable bound
+`dffChunkEnd` checked. `linearRegion`'s offsets stay below that end. DSF's
+chunk walk already subtracts (`size > MaxInt64-pos`, and `pos` only grows
+by a size that passed it), the data chunk's end is therefore at most
+`math.MaxInt64`, and each block group's span (`dataStart` plus the group's
+offset plus at most 8192 bytes) stays inside the `need` bytes the data
+chunk was checked to hold. `dsf.go` is unchanged.
+
+### 2. The COMT padding fix had no regression
+
+The demuxer skips COMT by its size, so regenerating round 2's goldens with
+the comment's pad outside COMT's size again (`COMT declares 39 bytes`) left
+the player suite green, and the same held for dropping MANF, the only odd
+chunk the form's walk skips. `TestDFFGoldensCOMTFollowsSection36` reads each
+DFF golden's COMT from the committed bytes (§3.6): one comment, its 14-byte
+header, the odd count of 23, the text, the `0x00` pad inside the body, and a
+declared size of exactly 2+14+23+1 = 40. `TestDFFGoldensGiveTheWalksAnOddChunk`
+checks every DFF golden has an odd chunk before `PROP`, and every one but
+`dst.dff` (whose "DST Encoded" `CMPR` is 16 bytes) an odd chunk in `PROP`.
+
+To prove them red without touching the committed fixtures, `generate.py`
+takes `--out DIR` and the golden tests take `-dsd-goldens=DIR`. A wrapper
+outside the repo loaded the committed generator, replaced only `comt` (the
+round-1 layout) or only `manf` (no chunk), and wrote into a scratch
+directory. Against the round-1 COMT, the whole decode suite failed only
+`TestDFFGoldensCOMTFollowsSection36`, on all five DFF goldens ("COMT
+declares 39 bytes; its one comment of 23 bytes and its pad need 40");
+without MANF, only `TestDFFGoldensGiveTheWalksAnOddChunk`, on all five ("no
+odd chunk before PROP"). A nonexistent `-dsd-goldens` directory fails the
+golden tests, so the flag is what the tests read.
+
+### 3. Two rules said more than the code does
+
+The round-2 rule refused "a second `FVER`" anywhere, but the walk returns at
+the sound chunk and never reads past it, so a second `FVER` after the sound
+data is not seen; the rule now says "before the sound data", and so does
+the sentence on skipped chunks (`DIIN` and `ID3 ` usually follow the sound
+data and are never read). Walking past the sound data was not taken: it
+would read a tail no decode needs, and could refuse a playable file for a
+damaged tag. The rule that "each DFF golden gives both chunk walks an odd
+chunk" left out `dst.dff`, whose `CMPR` is 16 bytes; it now names which
+goldens give which walk one, which `TestDFFGoldensGiveTheWalksAnOddChunk`
+pins.
+
+### Fuzzing
+
+Each target ran 3 minutes on the round-3 code (`-fuzzminimizetime 1s`),
+continuing from the cached corpus: `FuzzDFFOpen` 53,837,871 execs, 12 new
+entries (204 in all); `FuzzDSFOpen` 48,433,692 execs, 9 new (124 in all).
+Neither found a crasher. The wrap in finding 1 needs a form size and a
+chunk size that together reach `math.MaxInt64-1` exactly, which the fuzzer
+had not reached in any round.
 
 ## 2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding
 
