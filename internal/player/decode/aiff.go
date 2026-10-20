@@ -3,6 +3,7 @@ package decode
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 
@@ -12,18 +13,8 @@ import (
 const maxAIFFChunks = 256
 
 type aiffDecoder struct {
-	rs            io.ReadSeeker
-	pcm           format.PCM
-	ssndStart     int64 // first sample byte
-	ssndEnd       int64 // exclusive end of sample bytes
-	littleEndian  bool
-	containerBits int
-	frameBytes    int
-	posFrame      int64
-	byteBuf       []byte
-	// readStuck is set when a seek-back after a failed/cancelled read fails;
-	// later ReadFrames return it until a successful Seek clears it.
-	readStuck error
+	pcmRegion
+	littleEndian bool
 }
 
 func openAIFF(rs io.ReadSeeker) (Decoder, error) {
@@ -206,177 +197,77 @@ func openAIFF(rs io.ReadSeeker) (Decoder, error) {
 	if ssndDataBytes < needBytes {
 		return nil, refuse(ReasonTruncated, "AIFF SSND payload shorter than declared sample frames")
 	}
-	d := &aiffDecoder{
-		rs: rs,
-		pcm: format.PCM{
-			RateHz:    rate,
-			Channels:  int(channels),
-			ValidBits: bits,
-			Container: format.ContainerAIFF,
-			Frames:    int64(numSampleFrames),
-		},
-		ssndStart:     ssndDataStart,
-		ssndEnd:       ssndDataStart + needBytes,
-		littleEndian:  littleEndian,
-		containerBits: bits,
-		frameBytes:    fb,
+	pcm := format.PCM{
+		RateHz:    rate,
+		Channels:  int(channels),
+		ValidBits: bits,
+		Container: format.ContainerAIFF,
+		Frames:    int64(numSampleFrames),
 	}
+	d := &aiffDecoder{
+		pcmRegion: pcmRegion{
+			rs:          rs,
+			pcm:         pcm,
+			regionStart: ssndDataStart,
+			regionEnd:   ssndDataStart + needBytes,
+			frameBytes:  fb,
+			earlyEnd:    "AIFF SSND ends before declared frame count",
+			midFrame:    "AIFF SSND ends mid-frame",
+		},
+		littleEndian: littleEndian,
+	}
+	d.unpack = d.unpackAIFF
 	if _, err := rs.Seek(ssndDataStart, io.SeekStart); err != nil {
 		return nil, err
 	}
 	return d, nil
 }
 
-func (d *aiffDecoder) Format() format.PCM { return d.pcm }
-func (d *aiffDecoder) Close() error       { return nil }
+func (d *aiffDecoder) Close() error { return nil }
 
 func (d *aiffDecoder) Seek(ctx context.Context, frame int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if frame < 0 || frame > d.pcm.Frames {
-		return refuse(ReasonUnsupportedLayout, "AIFF seek frame %d out of range (0..%d)", frame, d.pcm.Frames)
-	}
-	off := d.ssndStart + frame*int64(d.frameBytes)
-	if off > d.ssndEnd {
-		return refuse(ReasonUnsupportedLayout, "AIFF seek past SSND payload")
-	}
-	if _, err := d.rs.Seek(off, io.SeekStart); err != nil {
-		return err
-	}
-	d.posFrame = frame
-	d.readStuck = nil
-	return nil
-}
-
-func (d *aiffDecoder) bytePos() int64 {
-	return d.ssndStart + d.posFrame*int64(d.frameBytes)
-}
-
-func (d *aiffDecoder) seekToPos() error {
-	if _, err := d.rs.Seek(d.bytePos(), io.SeekStart); err != nil {
-		d.readStuck = err
-		return err
-	}
-	return nil
+	return d.seekFrame(ctx, frame,
+		fmt.Sprintf("AIFF seek frame %d out of range (0..%d)", frame, d.pcm.Frames),
+		"AIFF seek past SSND payload")
 }
 
 func (d *aiffDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
-	if d.readStuck != nil {
-		return 0, d.readStuck
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := checkReadBuf(dst, d.pcm.Channels); err != nil {
-		return 0, err
-	}
-	left := d.pcm.Frames - d.posFrame
-	if left <= 0 {
-		return 0, io.EOF
-	}
-	framesWant := len(dst) / d.pcm.Channels
-	if int64(framesWant) > left {
-		framesWant = int(left)
-	}
-	out := 0
-	for framesWant > 0 {
-		if err := ctx.Err(); err != nil {
-			return out, err
-		}
-		chunk := framesPerRead(d.frameBytes, framesWant)
-		regionLeft := d.ssndEnd - d.bytePos()
-		if regionLeft < 0 {
-			regionLeft = 0
-		}
-		maxByRegion := int(regionLeft / int64(d.frameBytes))
-		if chunk > maxByRegion {
-			chunk = maxByRegion
-		}
-		if chunk == 0 {
-			if d.posFrame < d.pcm.Frames {
-				return out, refuse(ReasonTruncated, "AIFF SSND ends before declared frame count")
-			}
-			return out, io.EOF
-		}
-		need := chunk * d.frameBytes
-		if cap(d.byteBuf) < need {
-			d.byteBuf = make([]byte, need)
-		} else {
-			d.byteBuf = d.byteBuf[:need]
-		}
-		n, err := io.ReadFull(d.rs, d.byteBuf)
-		if cerr := ctx.Err(); cerr != nil {
-			if e := d.seekToPos(); e != nil {
-				return out, e
-			}
-			return out, cerr
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			if n == 0 {
-				if d.posFrame < d.pcm.Frames {
-					return out, refuse(ReasonTruncated, "AIFF SSND ends before declared frame count")
+	return d.readFrames(ctx, dst)
+}
+
+// unpackAIFF converts AIFF (big-endian) or AIFF-C sowt (little-endian) samples.
+func (d *aiffDecoder) unpackAIFF(dst []int32, out int, buf []byte, chunk int) int {
+	bytesPerSample := d.frameBytes / d.pcm.Channels
+	for f := 0; f < chunk; f++ {
+		base := f * d.frameBytes
+		for c := 0; c < d.pcm.Channels; c++ {
+			off := base + c*bytesPerSample
+			var u uint32
+			switch bytesPerSample {
+			case 2:
+				if d.littleEndian {
+					u = uint32(binary.LittleEndian.Uint16(buf[off:]))
+				} else {
+					u = uint32(binary.BigEndian.Uint16(buf[off:]))
 				}
-				return out, io.EOF
-			}
-			whole := n / d.frameBytes
-			if whole == 0 || n%d.frameBytes != 0 {
-				if e := d.seekToPos(); e != nil {
-					return out, e
+			case 3:
+				if d.littleEndian {
+					u = uint32(buf[off]) | uint32(buf[off+1])<<8 | uint32(buf[off+2])<<16
+				} else {
+					u = uint32(buf[off])<<16 | uint32(buf[off+1])<<8 | uint32(buf[off+2])
 				}
-				return out, refuse(ReasonTruncated, "AIFF SSND ends mid-frame")
-			}
-			d.byteBuf = d.byteBuf[:whole*d.frameBytes]
-			chunk = whole
-			err = refuse(ReasonTruncated, "AIFF SSND ends before declared frame count")
-		} else if err != nil {
-			if e := d.seekToPos(); e != nil {
-				return out, e
-			}
-			return out, err
-		} else {
-			err = nil
-		}
-		bytesPerSample := d.frameBytes / d.pcm.Channels
-		for f := 0; f < chunk; f++ {
-			base := f * d.frameBytes
-			for c := 0; c < d.pcm.Channels; c++ {
-				off := base + c*bytesPerSample
-				var u uint32
-				switch bytesPerSample {
-				case 2:
-					if d.littleEndian {
-						u = uint32(binary.LittleEndian.Uint16(d.byteBuf[off:]))
-					} else {
-						u = uint32(binary.BigEndian.Uint16(d.byteBuf[off:]))
-					}
-				case 3:
-					if d.littleEndian {
-						u = uint32(d.byteBuf[off]) | uint32(d.byteBuf[off+1])<<8 | uint32(d.byteBuf[off+2])<<16
-					} else {
-						u = uint32(d.byteBuf[off])<<16 | uint32(d.byteBuf[off+1])<<8 | uint32(d.byteBuf[off+2])
-					}
-				case 4:
-					if d.littleEndian {
-						u = binary.LittleEndian.Uint32(d.byteBuf[off:])
-					} else {
-						u = binary.BigEndian.Uint32(d.byteBuf[off:])
-					}
+			case 4:
+				if d.littleEndian {
+					u = binary.LittleEndian.Uint32(buf[off:])
+				} else {
+					u = binary.BigEndian.Uint32(buf[off:])
 				}
-				dst[out] = signExtend(u, d.pcm.ValidBits)
-				out++
 			}
-		}
-		d.posFrame += int64(chunk)
-		framesWant -= chunk
-		if err != nil {
-			return out, err
+			dst[out] = signExtend(u, d.pcm.ValidBits)
+			out++
 		}
 	}
-	if d.posFrame >= d.pcm.Frames {
-		return out, io.EOF
-	}
-	return out, nil
+	return out
 }
 
 // extended80ToFloat decodes an 80-bit IEEE-754 extended float (AIFF sample rate).

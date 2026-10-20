@@ -3,6 +3,7 @@ package decode
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -24,17 +25,8 @@ var guidFloat = [16]byte{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0
 const maxWAVChunks = 256
 
 type wavDecoder struct {
-	rs            io.ReadSeeker
-	pcm           format.PCM
-	dataStart     int64
-	dataEnd       int64 // exclusive; confines reads to the data chunk
+	pcmRegion
 	containerBits int
-	frameBytes    int
-	posFrame      int64
-	byteBuf       []byte
-	// readStuck is set when a seek-back after a failed/cancelled read fails;
-	// later ReadFrames return it until a successful Seek clears it.
-	readStuck error
 }
 
 func openWAV(rs io.ReadSeeker) (Decoder, error) {
@@ -197,176 +189,68 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 		return nil, refuse(ReasonTruncated, "WAVE data size %d is not a whole number of frames", dataSize)
 	}
 	frames := int64(dataSize) / int64(fb)
-	d := &wavDecoder{
-		rs: rs,
-		pcm: format.PCM{
-			RateHz:    int(rate),
-			Channels:  int(channels),
-			ValidBits: vb,
-			Container: format.ContainerWAV,
-			Frames:    frames,
-		},
-		dataStart:     dataStart,
-		dataEnd:       dataStart + int64(dataSize),
-		containerBits: containerBits,
-		frameBytes:    fb,
+	pcm := format.PCM{
+		RateHz:    int(rate),
+		Channels:  int(channels),
+		ValidBits: vb,
+		Container: format.ContainerWAV,
+		Frames:    frames,
 	}
+	d := &wavDecoder{
+		pcmRegion: pcmRegion{
+			rs:          rs,
+			pcm:         pcm,
+			regionStart: dataStart,
+			regionEnd:   dataStart + int64(dataSize),
+			frameBytes:  fb,
+			earlyEnd:    "WAVE data ends before declared frame count",
+			midFrame:    "WAVE data ends mid-frame",
+		},
+		containerBits: containerBits,
+	}
+	d.unpack = d.unpackWAV
 	if _, err := rs.Seek(dataStart, io.SeekStart); err != nil {
 		return nil, err
 	}
 	return d, nil
 }
 
-func (d *wavDecoder) Format() format.PCM { return d.pcm }
-
 func (d *wavDecoder) Close() error { return nil }
 
 func (d *wavDecoder) Seek(ctx context.Context, frame int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if frame < 0 || frame > d.pcm.Frames {
-		return refuse(ReasonUnsupportedLayout, "WAVE seek frame %d out of range (0..%d)", frame, d.pcm.Frames)
-	}
-	off := d.dataStart + frame*int64(d.frameBytes)
-	if off > d.dataEnd {
-		return refuse(ReasonUnsupportedLayout, "WAVE seek past data chunk")
-	}
-	if _, err := d.rs.Seek(off, io.SeekStart); err != nil {
-		return err
-	}
-	d.posFrame = frame
-	d.readStuck = nil
-	return nil
-}
-
-func (d *wavDecoder) bytePos() int64 {
-	return d.dataStart + d.posFrame*int64(d.frameBytes)
-}
-
-// seekToPos rewinds the underlying reader to posFrame so a cancelled or
-// failed read that consumed bytes cannot leave a gap into trailing chunks.
-func (d *wavDecoder) seekToPos() error {
-	if _, err := d.rs.Seek(d.bytePos(), io.SeekStart); err != nil {
-		d.readStuck = err
-		return err
-	}
-	return nil
+	return d.seekFrame(ctx, frame,
+		fmt.Sprintf("WAVE seek frame %d out of range (0..%d)", frame, d.pcm.Frames),
+		"WAVE seek past data chunk")
 }
 
 func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
-	if d.readStuck != nil {
-		return 0, d.readStuck
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := checkReadBuf(dst, d.pcm.Channels); err != nil {
-		return 0, err
-	}
-	left := d.pcm.Frames - d.posFrame
-	if left <= 0 {
-		return 0, io.EOF
-	}
-	framesWant := len(dst) / d.pcm.Channels
-	if int64(framesWant) > left {
-		framesWant = int(left)
-	}
-	out := 0
-	for framesWant > 0 {
-		if err := ctx.Err(); err != nil {
-			return out, err
-		}
-		chunk := framesPerRead(d.frameBytes, framesWant)
-		// Second guard: never read past the declared data chunk.
-		regionLeft := d.dataEnd - d.bytePos()
-		if regionLeft < 0 {
-			regionLeft = 0
-		}
-		maxByRegion := int(regionLeft / int64(d.frameBytes))
-		if chunk > maxByRegion {
-			chunk = maxByRegion
-		}
-		if chunk == 0 {
-			if d.posFrame < d.pcm.Frames {
-				return out, refuse(ReasonTruncated, "WAVE data ends before declared frame count")
+	return d.readFrames(ctx, dst)
+}
+
+// unpackWAV converts little-endian container samples; extensible valid bits
+// are MSB-aligned in the container (shift right before sign-extend).
+func (d *wavDecoder) unpackWAV(dst []int32, out int, buf []byte, chunk int) int {
+	bytesPerSample := d.containerBits / 8
+	shift := d.containerBits - d.pcm.ValidBits
+	for f := 0; f < chunk; f++ {
+		base := f * d.frameBytes
+		for c := 0; c < d.pcm.Channels; c++ {
+			off := base + c*bytesPerSample
+			var u uint32
+			switch d.containerBits {
+			case 16:
+				u = uint32(binary.LittleEndian.Uint16(buf[off:]))
+			case 24:
+				u = uint32(buf[off]) | uint32(buf[off+1])<<8 | uint32(buf[off+2])<<16
+			case 32:
+				u = binary.LittleEndian.Uint32(buf[off:])
 			}
-			return out, io.EOF
-		}
-		need := chunk * d.frameBytes
-		if cap(d.byteBuf) < need {
-			d.byteBuf = make([]byte, need)
-		} else {
-			d.byteBuf = d.byteBuf[:need]
-		}
-		n, err := io.ReadFull(d.rs, d.byteBuf)
-		// Check cancellation after the read: a single chunk can cover the
-		// whole dst, so a pre-read check alone would miss a cancel that
-		// fires during ReadFull (Codex M8). Bytes already consumed must be
-		// seeked back so posFrame and the reader stay aligned (R6).
-		if cerr := ctx.Err(); cerr != nil {
-			if e := d.seekToPos(); e != nil {
-				return out, e
+			if shift > 0 {
+				u >>= uint(shift)
 			}
-			return out, cerr
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			if n == 0 {
-				if d.posFrame < d.pcm.Frames {
-					return out, refuse(ReasonTruncated, "WAVE data ends before declared frame count")
-				}
-				return out, io.EOF
-			}
-			whole := n / d.frameBytes
-			if whole == 0 || n%d.frameBytes != 0 {
-				if e := d.seekToPos(); e != nil {
-					return out, e
-				}
-				return out, refuse(ReasonTruncated, "WAVE data ends mid-frame")
-			}
-			d.byteBuf = d.byteBuf[:whole*d.frameBytes]
-			chunk = whole
-			err = refuse(ReasonTruncated, "WAVE data ends before declared frame count")
-		} else if err != nil {
-			if e := d.seekToPos(); e != nil {
-				return out, e
-			}
-			return out, err
-		} else {
-			err = nil
-		}
-		bytesPerSample := d.containerBits / 8
-		shift := d.containerBits - d.pcm.ValidBits
-		for f := 0; f < chunk; f++ {
-			base := f * d.frameBytes
-			for c := 0; c < d.pcm.Channels; c++ {
-				off := base + c*bytesPerSample
-				var u uint32
-				switch d.containerBits {
-				case 16:
-					u = uint32(binary.LittleEndian.Uint16(d.byteBuf[off:]))
-				case 24:
-					u = uint32(d.byteBuf[off]) | uint32(d.byteBuf[off+1])<<8 | uint32(d.byteBuf[off+2])<<16
-				case 32:
-					u = binary.LittleEndian.Uint32(d.byteBuf[off:])
-				}
-				// WAVE_FORMAT_EXTENSIBLE stores valid bits MSB-aligned
-				// (left-justified) in the container; low bits are padding.
-				if shift > 0 {
-					u >>= uint(shift)
-				}
-				dst[out] = signExtend(u, d.pcm.ValidBits)
-				out++
-			}
-		}
-		d.posFrame += int64(chunk)
-		framesWant -= chunk
-		if err != nil {
-			return out, err
+			dst[out] = signExtend(u, d.pcm.ValidBits)
+			out++
 		}
 	}
-	if d.posFrame >= d.pcm.Frames {
-		return out, io.EOF
-	}
-	return out, nil
+	return out
 }

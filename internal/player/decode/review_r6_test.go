@@ -15,20 +15,20 @@ import (
 // stay ahead of posFrame or the next read skips audio and can decode a
 // trailing LIST/ID3 chunk as samples.
 
-func TestReviewR6WAVCancelThenRetryNoGap(t *testing.T) {
-	testPCMCancelThenRetry(t, "wav")
+func TestReviewR6CancelThenRetryNoGap(t *testing.T) {
+	for _, kind := range []string{"wav", "aiff"} {
+		t.Run(kind, func(t *testing.T) {
+			testPCMCancelThenRetry(t, kind)
+		})
+	}
 }
 
-func TestReviewR6AIFFCancelThenRetryNoGap(t *testing.T) {
-	testPCMCancelThenRetry(t, "aiff")
-}
-
-func TestReviewR6WAVIOErrorThenRetryNoGap(t *testing.T) {
-	testPCMIOErrorThenRetry(t, "wav")
-}
-
-func TestReviewR6AIFFIOErrorThenRetryNoGap(t *testing.T) {
-	testPCMIOErrorThenRetry(t, "aiff")
+func TestReviewR6IOErrorThenRetryNoGap(t *testing.T) {
+	for _, kind := range []string{"wav", "aiff"} {
+		t.Run(kind, func(t *testing.T) {
+			testPCMIOErrorThenRetry(t, kind)
+		})
+	}
 }
 
 func testPCMCancelThenRetry(t *testing.T, kind string) {
