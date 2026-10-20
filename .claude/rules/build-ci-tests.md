@@ -62,6 +62,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A running SQLite statement is parked from INSIDE it, by a Go collation** (#998) → History-rules-build-ci-tests.md
 - **A test handler that holds a request until the client gives up must DRAIN a POST's body first** (#1003) → History-rules-build-ci-tests.md
 - **A test whose request gets an answer with no body sends it on a transport of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456) **Don't put such a client back on the default transport, and don't hunt the window by oversubscribing HTTP tests.** → History-rules-build-ci-tests.md
+- **A test connection recorder that an assertion reads after the client returns must record under the lock before it closes the connection** (2026-10-20, backlog B461). **Don't Close first and append after: the client's handshake fails as soon as Close lands, so the assertion can run while the append is still pending.** → History-rules-build-ci-tests.md
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a

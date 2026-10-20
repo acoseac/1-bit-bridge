@@ -85,10 +85,14 @@ func newConnRecorder(t *testing.T) *connRecorder {
 			_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			buf := make([]byte, 4096)
 			n, _ := c.Read(buf)
-			_ = c.Close()
+			// Append under the lock, then Close outside it: the client
+			// returns only after Close, so a connections() read right
+			// after the tick still sees this leg (backlog B461). Close
+			// itself does not need the lock.
 			r.mu.Lock()
 			r.seen = append(r.seen, buf[:n])
 			r.mu.Unlock()
+			_ = c.Close()
 		}
 	}()
 	t.Cleanup(func() {
@@ -380,32 +384,46 @@ func TestTheStoreHoldsABaseInItsCanonicalForm(t *testing.T) {
 		" https://atlas.example ",
 	} {
 		t.Run("SetCredential "+in, func(t *testing.T) {
-			state := mustOpenState(t, filepath.Join(t.TempDir(), "atlas-harvest.json"))
-			if err := state.SetCredential("tok", in, time.Time{}); err != nil {
-				t.Fatalf("SetCredential: %v", err)
-			}
-			if _, base, ok := state.AtlasCredential(); !ok || base != want {
-				t.Errorf("AtlasCredential = %q, %v; want %q", base, ok, want)
-			}
+			mustHoldCanonicalBaseViaSetCredential(t, in, want)
 		})
 		t.Run("a file holding "+in, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "atlas-harvest.json")
-			writeHarvestState(t, path, in)
-			state, err := OpenStateStore(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			token, base, ok := state.AtlasCredential()
-			if !ok || token != storedToken || base != want {
-				t.Fatalf("AtlasCredential = %q, %q, %v; want the stored token against %q", token, base, ok, want)
-			}
-			if err := state.SetCredential("bh-renewed", want, time.Time{}); err != nil {
-				t.Fatal(err)
-			}
-			if got := state.Snapshot().ResultCursor; got != 42 {
-				t.Errorf("a re-provision of the same host reset the cursor to %d, want 42", got)
-			}
+			mustHoldCanonicalBaseViaFile(t, in, want)
 		})
+	}
+}
+
+// mustHoldCanonicalBaseViaSetCredential fails t unless SetCredential holds
+// in as want through AtlasCredential.
+func mustHoldCanonicalBaseViaSetCredential(t *testing.T, in, want string) {
+	t.Helper()
+	state := mustOpenState(t, filepath.Join(t.TempDir(), "atlas-harvest.json"))
+	if err := state.SetCredential("tok", in, time.Time{}); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+	if _, base, ok := state.AtlasCredential(); !ok || base != want {
+		t.Errorf("AtlasCredential = %q, %v; want %q", base, ok, want)
+	}
+}
+
+// mustHoldCanonicalBaseViaFile fails t unless a file holding in opens as
+// the stored token against want, and a re-provision of want keeps cursor 42.
+func mustHoldCanonicalBaseViaFile(t *testing.T, in, want string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+	writeHarvestState(t, path, in)
+	state, err := OpenStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, base, ok := state.AtlasCredential()
+	if !ok || token != storedToken || base != want {
+		t.Fatalf("AtlasCredential = %q, %q, %v; want the stored token against %q", token, base, ok, want)
+	}
+	if err := state.SetCredential("bh-renewed", want, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Snapshot().ResultCursor; got != 42 {
+		t.Errorf("a re-provision of the same host reset the cursor to %d, want 42", got)
 	}
 }
 

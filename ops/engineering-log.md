@@ -47731,6 +47731,45 @@ The key and the options now come from one snapshot.
 `TestProbeCachesTheConfigurationItProbed` failed first with
 `inspects 2 opt "127.0.0.1:6601", cached under a key other than "127.0.0.1:6601"`.
 
+## 2026-10-20 — the atlasharvest connRecorder records a connection before it closes it (backlog B461)
+
+### What failed
+
+CI on Dependabot #1263's rebased head (67c1eaec, run 39153293216, job
+`test -race (rest)`) failed once:
+
+    --- FAIL: TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed/a_base_in_the_stored_form_is_used,_and_its_errors_are_logged
+        stored_base_test.go:261: the harvest client made 1 connections, want one per due leg (submit, poll)
+
+A re-run of the failed jobs on the same commit passed, so the race is in
+main's test code, not the bump.
+
+### The cause
+
+`newConnRecorder` accepted, read the first bytes, `Close()`d the
+connection, and only then appended to `seen` under the lock. The client's
+TLS handshake fails with EOF as soon as Close lands. The tick can finish
+both due legs (submit, poll) and the subtest can call `connections()`
+before the second append. The same window can make the shape cases above
+that subtest pass when they should fail: they assert no connection
+reached the recorder.
+
+### Reproduced in the window
+
+A 50 ms `time.Sleep` between Close and the append failed the subtest 20
+of 20 under `-race` with CI's message (always 1 connection). Recording
+under the lock before Close passed 200 of 200 under `-race`, and the
+package's full suite under `-race`.
+
+### Grep of other test listeners
+
+No second close-before-record: HTTP handlers (`authRecorder`,
+`genaSink`) record inside the handler before the response returns;
+`fakeMPD` / `servePlayer` record commands before their deferred Close;
+`handshakelog` waits on `StateClosed` after the failed-handshake line is
+written. The rule is under **Build, CI, and test discipline** in
+`.claude/rules/build-ci-tests.md`.
+
 ## 2026-10-20 — console cross-origin refusal shows the admin port (B471)
 
 An operator forwarded a loopback console to another local port
