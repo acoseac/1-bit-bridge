@@ -99,21 +99,6 @@ The largest package in the repo (`main.go` alone 4,698 lines) had **no section h
 - **…and a kept line's REASON names the peer again, after the `->` of a socket error, which is redacted too** (2026-09-29, backlog B172) **Don't redact every lone address after `read tcp`** → History-rules-cli-serve.md
 - **`RedactPeers` walks the line once** (2026-10-12, backlog B246) → History-rules-cli-serve.md
 
-**The four stale claims this run corrected in THIS file** — all four sat in the
-"Don't regress these cross-cutting invariants" list at the top, which reads as
-the most authoritative place in the document and had drifted from the hardened
-sections that superseded it:
-
-1. **`WipeAllTracks` on a root flip** — the exact CASCADE the Scanner section
-   forbids and explains. No production path has ever called it.
-2. **Two sanctioned `enriched_at` resets** where there are four, two of them live.
-3. **"Admin console is loopback-only, no auth"** with no mention of public
-   mode's credentialed posture — which is what the VPS runs.
-4. **Five subcommands** in the architecture table where `run()` dispatches 28.
-
-**When you correct a rule in a hardened section, check the top-of-file list for
-its twin.** The top list is older, shorter, and read first.
-
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written INLINE in the defer, never routed through a variable assigned later in `runServe`; both this wait and the watcher's are grace-BOUNDED. → History-rules-cli-serve.md

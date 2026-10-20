@@ -113,7 +113,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   own inter-batch pause too: the pacer only fires when a network call is made.
 - **A configured base URL's user information travels in a header, never in a
   request URL** (backlog B69). `enrich.musicbrainzBaseURL` and
-  `coverArtBaseURL` may carry a mirror's credential (`https://user:password@mirror/ws/2`,
+  `coverArtBaseURL` may carry a mirror's credential (`<MIRROR_BASE_URL_WITH_USERINFO>`,
   or a token written as the user name), and net/http both sends it as Basic
   auth and names the request URL in every error it returns, through a
   `stripPassword` that masks a PASSWORD and nothing else. So a token written

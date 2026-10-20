@@ -92,7 +92,7 @@ it).
 
 ```text
 cmd/bridge/    CLI entry point (package main) + wiring
-internal/      38 packages, one concern each (map below; incl. dlna/discovery)
+internal/      Go packages, one concern each (map below; incl. dlna/discovery)
 config/        bridge.yaml.example — annotated sample config
 deploy/        operator deploy scripts (canonical copies; sync FROM here)
 docs/          PUBLIC website (GitHub Pages) — see Security section
@@ -228,9 +228,9 @@ mode). iOS never talks to the admin listener.
 
   Any folder with a few dozen tagged FLAC / DSF / MP3 / M4A files works.
 - **`UPDATE tracks SET enriched_at = 0` only re-triggers the enricher**, not
-  tag re-extraction (the scanner's skip gate compares file mtime against
-  `Track.ModTime` inside the `tags_json` BLOB — `mtime_ns = 0` does nothing).
-  To force re-extraction, delete the affected `tracks` rows and rescan.
+  tag re-extraction. The scanner's skip gate reads the `size` and `mtime_ns`
+  columns through `GetTrackStat`. To force re-extraction, zero `mtime_ns`
+  on the affected rows through a Go helper (see below), then rescan.
 - **Since migration v4, an external `sqlite3` CLI cannot DELETE/UPDATE/INSERT
   on `tracks` / `track_variants`** — the expression index uses the
   Go-registered `unicode_lower()` function (`unknown function` error). Either
@@ -306,8 +306,9 @@ mode). iOS never talks to the admin listener.
 CI workflows (`.github/workflows/`):
 
 - `gofmt.yml` — read-only formatting check on PRs/pushes to main.
-- `gate.yml` — `vet` + `test-race` + `build-all` + `go-version` as four
-  parallel jobs with a `gate` fan-in; mirrors the local pre-push gate.
+- `gate.yml` — seven prerequisite jobs (`vet`, `test`, `dsd-measure`,
+  `build-all`, `go-version`, `cross-platform`, `docs-check`) with a `gate`
+  fan-in; includes the local pre-push gate.
 - `codeql.yml` — security static analysis (PRs, main, weekly cron).
 - `release.yml` — goreleaser on `v*` tag push: signed + notarized macOS
   archives (Developer ID; Windows Authenticode signing pending via SignPath),
