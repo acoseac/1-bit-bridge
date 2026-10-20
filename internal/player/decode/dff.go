@@ -12,11 +12,16 @@ import (
 
 // DFF (Philips, DSDIFF 1.5): a big-endian "FRM8" form of type "DSD " whose
 // chunks each carry an 8-byte size that excludes the 12-byte header and the
-// pad byte after an odd body. PROP ("SND ") holds FS, CHNL and CMPR and
-// precedes the sound data; the "DSD " chunk is the uncompressed sound data,
-// byte-interleaved in CHNL order, MSB first. Other chunks (FVER, COMT, DIIN,
-// ID3, MANF) are skipped by their sizes.
+// pad byte after an odd body. FVER is the form's first chunk (§3, §3.1): a
+// four-byte version whose first byte is the major version. PROP ("SND ")
+// holds FS, CHNL and CMPR and precedes the sound data; the "DSD " chunk is
+// the uncompressed sound data, byte-interleaved in CHNL order, MSB first.
+// Other chunks (COMT, DIIN, ID3, MANF) are skipped by their sizes.
 const dffChunkHeader = 12
+
+// dffMajorVersion is the only DSDIFF major version read: FVER's first byte
+// (1.5 is 0x01050000, and 1.4 files have the same layout).
+const dffMajorVersion = 1
 
 type dffDecoder struct {
 	linearRegion
@@ -76,7 +81,17 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		if end > frmEnd {
 			return nil, refuse(ReasonTruncated, "DFF chunk %q extends past the FRM8 body", id)
 		}
+		if i == 0 && id != "FVER" {
+			return nil, refuse(ReasonUnsupportedLayout, "DFF's first chunk is %q; FVER must come first", id)
+		}
 		switch id {
+		case "FVER":
+			if i != 0 {
+				return nil, refuse(ReasonUnsupportedLayout, "DFF has a second FVER chunk")
+			}
+			if err := readDFFVersion(rs, size); err != nil {
+				return nil, err
+			}
 		case "PROP":
 			if prop != nil {
 				return nil, refuse(ReasonUnsupportedLayout, "DFF has two PROP chunks")
@@ -107,6 +122,25 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		pos = end
 	}
 	return nil, refuse(ReasonUnsupportedLayout, "DFF has more than %d chunks before its sound data", maxDSDChunks)
+}
+
+// readDFFVersion reads FVER's body: exactly four bytes, major version 1.
+func readDFFVersion(r io.Reader, size uint64) error {
+	if size != 4 {
+		return refuse(ReasonUnsupportedLayout, "DFF FVER chunk is %d bytes, want 4", size)
+	}
+	var v [4]byte
+	if _, err := io.ReadFull(r, v[:]); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return refuse(ReasonTruncated, "DFF FVER chunk truncated")
+		}
+		return err
+	}
+	if v[0] != dffMajorVersion {
+		return refuse(ReasonUnsupportedLayout, "DFF FVER version %d.%d.%d.%d: only major version %d is read",
+			v[0], v[1], v[2], v[3], dffMajorVersion)
+	}
+	return nil
 }
 
 // parseDFFProp reads a PROP body held in memory: "SND " and its sub-chunks.

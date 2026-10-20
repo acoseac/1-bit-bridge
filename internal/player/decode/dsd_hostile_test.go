@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
@@ -236,19 +237,26 @@ func putTag(b []byte, off int, tag string) []byte {
 	return out
 }
 
-// dffChunkBomb is a FRM8 of 100,000 empty unknown chunks: the walk stops at
-// its chunk cap instead of seeking through all of them.
+// dffChunkBomb is a FRM8 of a valid FVER and then 100,000 empty unknown
+// chunks: the walk stops at its chunk cap instead of seeking through all of
+// them. Without the FVER it would be refused at its first chunk, and would
+// no longer test the cap.
 func dffChunkBomb() []byte {
-	var body bytes.Buffer
-	body.WriteString("DSD ")
+	chunks := [][]byte{dffChunk("FVER", be32(0x01050000))}
+	empty := dffChunk("FOO ", nil)
 	for i := 0; i < 100000; i++ {
-		body.WriteString("FOO ")
-		body.Write(make([]byte, 8))
+		chunks = append(chunks, empty)
 	}
-	head := make([]byte, 12)
-	copy(head, "FRM8")
-	binary.BigEndian.PutUint64(head[4:], uint64(body.Len()))
-	return append(head, body.Bytes()...)
+	return dffForm(chunks...)
+}
+
+// The bomb is refused by the chunk cap, not by anything before it.
+func TestDFFChunkBombStopsAtTheCap(t *testing.T) {
+	_, err := decode.Open(bytes.NewReader(dffChunkBomb()))
+	r, ok := decode.AsRefusal(err)
+	if !ok || r.Reason != decode.ReasonUnsupportedLayout || !strings.Contains(r.Message, "more than 256 chunks") {
+		t.Fatalf("got %v, want the chunk cap's refusal", err)
+	}
 }
 
 // A cancel during a read, or an I/O error after it, leaves the decoder where
