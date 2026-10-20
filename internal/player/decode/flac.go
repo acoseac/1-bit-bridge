@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/mewkiz/flac/frame"
 	"github.com/mewkiz/flac/meta"
 )
+
+// maxSeekPointField is the largest SEEKTABLE sample/offset we will use.
+// Larger uint64 values cannot be added to dataStart as int64 without wrap.
+const maxSeekPointField = uint64(math.MaxInt64 / 2)
 
 // flacDecoder decodes integer FLAC via mewkiz frame parsing, with its own
 // metadata walk and seeking.
@@ -138,9 +143,15 @@ func parseFLACMetadata(rs io.ReadSeeker) (*meta.StreamInfo, []meta.SeekPoint, in
 				if sampleNum == meta.PlaceholderPoint {
 					continue
 				}
+				offset := binary.BigEndian.Uint64(body[off+8:])
+				// Ignore points that cannot be represented safely as int64
+				// offsets from dataStart (Argon R3 H1).
+				if sampleNum > maxSeekPointField || offset > maxSeekPointField {
+					continue
+				}
 				points = append(points, meta.SeekPoint{
 					SampleNum: sampleNum,
-					Offset:    binary.BigEndian.Uint64(body[off+8:]),
+					Offset:    offset,
 					NSamples:  binary.BigEndian.Uint16(body[off+16:]),
 				})
 			}
@@ -222,8 +233,7 @@ func (d *flacDecoder) Seek(ctx context.Context, frame int64) error {
 	}
 	startOff := d.dataStart
 	startSample := int64(0)
-	if len(d.seekPoints) > 0 {
-		p := seekPointBefore(d.seekPoints, uint64(frame))
+	if p, ok := seekPointBefore(d.seekPoints, uint64(frame)); ok {
 		startOff = d.dataStart + int64(p.Offset)
 		startSample = int64(p.SampleNum)
 	}
@@ -271,15 +281,25 @@ func (d *flacDecoder) Seek(ctx context.Context, frame int64) error {
 	}
 }
 
-func seekPointBefore(points []meta.SeekPoint, sample uint64) meta.SeekPoint {
-	prev := points[0]
+// seekPointBefore returns the seek point with the greatest SampleNum that is
+// still <= sample. Points after the target, overflow-sized fields, and empty
+// tables yield ok=false so the caller scans from the stream start.
+func seekPointBefore(points []meta.SeekPoint, sample uint64) (meta.SeekPoint, bool) {
+	var best meta.SeekPoint
+	found := false
 	for _, p := range points {
 		if p.SampleNum > sample {
-			return prev
+			continue
 		}
-		prev = p
+		if p.Offset > maxSeekPointField || p.SampleNum > maxSeekPointField {
+			continue
+		}
+		if !found || p.SampleNum >= best.SampleNum {
+			best = p
+			found = true
+		}
 	}
-	return prev
+	return best, found
 }
 
 func (d *flacDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {

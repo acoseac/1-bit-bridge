@@ -41,6 +41,19 @@ func sniff(rs io.ReadSeeker) (sniffResult, error) {
 }
 
 func sniffFrom(hdr []byte, rs io.ReadSeeker, base int64) (sniffResult, error) {
+	if len(hdr) >= 3 && string(hdr[:3]) == "ID3" {
+		if rs == nil {
+			return sniffResult{kind: sniffMP3, start: base}, nil
+		}
+		return sniffAfterID3(rs, hdr, base)
+	}
+	return sniffContainer(hdr, rs, base)
+}
+
+// sniffContainer classifies a non-ID3 payload at base. Shared by the top-level
+// sniff and the post-ID3 path so ID3-prefixed DSF/DFF/RF64/MP4 match the
+// unprefixed reasons (Argon R3 M1).
+func sniffContainer(hdr []byte, rs io.ReadSeeker, base int64) (sniffResult, error) {
 	if len(hdr) >= 4 && string(hdr[:4]) == "fLaC" {
 		return sniffResult{kind: sniffFLAC, start: base}, nil
 	}
@@ -62,17 +75,11 @@ func sniffFrom(hdr []byte, rs io.ReadSeeker, base int64) (sniffResult, error) {
 	if len(hdr) >= 4 && string(hdr[:4]) == "OggS" {
 		return sniffResult{kind: sniffOgg, start: base}, nil
 	}
-	if len(hdr) >= 3 && string(hdr[:3]) == "ID3" {
-		if rs == nil {
-			return sniffResult{kind: sniffMP3, start: base}, nil
-		}
-		return sniffAfterID3(rs, hdr, base)
-	}
 	if len(hdr) >= 8 && string(hdr[4:8]) == "ftyp" {
 		if rs == nil {
 			return sniffResult{kind: sniffUnknown, start: base}, nil
 		}
-		return sniffMP4Brand(rs, hdr)
+		return sniffMP4Brand(rs, base)
 	}
 	if len(hdr) >= 2 && hdr[0] == 0xFF && hdr[1]&0xE0 == 0xE0 {
 		return sniffResult{kind: sniffMP3, start: base}, nil
@@ -93,44 +100,43 @@ func sniffAfterID3(rs io.ReadSeeker, hdr []byte, base int64) (sniffResult, error
 	if size < 0 || size > 16<<20 {
 		return sniffResult{kind: sniffMP3, start: base}, nil
 	}
+	// ID3v2 size covers frames (and an extended header, when present). A
+	// v2.4 footer (flag 0x10) sits after that size and is not included.
 	start := base + int64(10+size)
+	if hdr[5]&0x10 != 0 {
+		start += 10
+	}
 	if _, err := rs.Seek(start, io.SeekStart); err != nil {
 		return sniffResult{}, err
 	}
 	var next [12]byte
 	n, err := io.ReadFull(rs, next[:])
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		if n >= 2 && next[0] == 0xFF && next[1]&0xE0 == 0xE0 {
+		res, _ := sniffContainer(next[:n], nil, start)
+		if res.kind == sniffUnknown && n >= 2 && next[0] == 0xFF && next[1]&0xE0 == 0xE0 {
 			return sniffResult{kind: sniffMP3, start: start}, nil
 		}
-		return sniffResult{kind: sniffUnknown, start: start}, nil
+		return res, nil
 	}
 	if err != nil {
 		return sniffResult{}, err
 	}
-	// Re-sniff the post-ID3 header; do not recurse into another ID3 tag.
-	if string(next[:4]) == "fLaC" {
-		return sniffResult{kind: sniffFLAC, start: start}, nil
+	// A second ID3 tag is not a nested skip — refuse rather than recurse.
+	if string(next[:3]) == "ID3" {
+		return sniffResult{}, refuse(ReasonUnsupportedLayout, "stacked ID3v2 tags are not supported")
 	}
-	if string(next[:4]) == "RIFF" && string(next[8:12]) == "WAVE" {
-		return sniffResult{kind: sniffWAV, start: start}, nil
+	res, err := sniffContainer(next[:], rs, start)
+	if err != nil {
+		return sniffResult{}, err
 	}
-	if string(next[:4]) == "FORM" && (string(next[8:12]) == "AIFF" || string(next[8:12]) == "AIFC") {
-		return sniffResult{kind: sniffAIFF, start: start}, nil
+	if res.kind == sniffUnknown {
+		return sniffResult{}, refuse(ReasonUnsupportedLayout, "ID3v2 tag not followed by a supported lossless container")
 	}
-	if string(next[:4]) == "OggS" {
-		return sniffResult{kind: sniffOgg, start: start}, nil
-	}
-	if next[0] == 0xFF && next[1]&0xE0 == 0xE0 {
-		return sniffResult{kind: sniffMP3, start: start}, nil
-	}
-	// ID3 before an unrecognised payload: refuse as unsupported layout,
-	// not as lossy MP3.
-	return sniffResult{}, refuse(ReasonUnsupportedLayout, "ID3v2 tag not followed by a supported lossless container")
+	return res, nil
 }
 
-func sniffMP4Brand(rs io.ReadSeeker, hdr []byte) (sniffResult, error) {
-	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+func sniffMP4Brand(rs io.ReadSeeker, base int64) (sniffResult, error) {
+	if _, err := rs.Seek(base, io.SeekStart); err != nil {
 		return sniffResult{}, err
 	}
 	alac, aac, err := scanMP4Codecs(rs)
@@ -138,13 +144,12 @@ func sniffMP4Brand(rs io.ReadSeeker, hdr []byte) (sniffResult, error) {
 		return sniffResult{}, err
 	}
 	if alac {
-		return sniffResult{kind: sniffALAC}, nil
+		return sniffResult{kind: sniffALAC, start: base}, nil
 	}
 	if aac {
-		return sniffResult{kind: sniffAAC}, nil
+		return sniffResult{kind: sniffAAC, start: base}, nil
 	}
-	_ = hdr
-	return sniffResult{kind: sniffUnknown}, nil
+	return sniffResult{kind: sniffUnknown, start: base}, nil
 }
 
 // scanMP4Codecs walks ISO-BMFF boxes looking for stsd sample-entry fourccs.
@@ -189,7 +194,8 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 			buf := make([]byte, scan)
 			n, _ := io.ReadFull(rs, buf)
 			buf = buf[:n]
-			a, c := codecsInBoxes(buf)
+			boxCount := 0
+			a, c := codecsInBoxes(buf, 0, &boxCount)
 			alac = alac || a
 			aac = aac || c
 			remain := int64(payload) - int64(n)
@@ -210,35 +216,67 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 	return alac, aac, nil
 }
 
+// isoBMFFContainers are boxes whose payload is a sequence of child boxes.
+// meta is a FullBox (version/flags before children) and is handled separately.
+var isoBMFFContainers = map[string]bool{
+	"moov": true, "moof": true, "trak": true, "mdia": true,
+	"minf": true, "stbl": true, "edts": true, "dinf": true,
+	"mvex": true, "traf": true, "udta": true,
+}
+
 // codecsInBoxes walks nested ISO-BMFF boxes looking for stsd sample entries.
-func codecsInBoxes(buf []byte) (alac, aac bool) {
+// depth and boxCount cap recursion against crafted moov buffers (Argon R3 M2).
+func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool) {
+	if depth > maxMP4BoxDepth {
+		return false, false
+	}
 	walkBoxes(buf, func(typ string, payload []byte) {
-		if typ != "stsd" {
-			a, c := codecsInBoxes(payload)
+		if *boxCount >= maxMP4Boxes {
+			return
+		}
+		*boxCount++
+		switch {
+		case typ == "stsd":
+			a, c := parseSTSD(payload)
 			alac = alac || a
 			aac = aac || c
-			return
-		}
-		// stsd: 1 byte version, 3 flags, 4 entry count, then entries.
-		if len(payload) < 8 {
-			return
-		}
-		rest := payload[8:]
-		for len(rest) >= 8 {
-			esz := binary.BigEndian.Uint32(rest[0:4])
-			if esz < 8 || int(esz) > len(rest) {
+		case typ == "meta":
+			// FullBox: 1 byte version + 3 bytes flags, then child boxes.
+			if len(payload) < 4 {
 				return
 			}
-			entryType := string(rest[4:8])
-			switch entryType {
-			case "alac":
-				alac = true
-			case "mp4a":
-				aac = true
-			}
-			rest = rest[esz:]
+			a, c := codecsInBoxes(payload[4:], depth+1, boxCount)
+			alac = alac || a
+			aac = aac || c
+		case isoBMFFContainers[typ]:
+			a, c := codecsInBoxes(payload, depth+1, boxCount)
+			alac = alac || a
+			aac = aac || c
 		}
 	})
+	return alac, aac
+}
+
+func parseSTSD(payload []byte) (alac, aac bool) {
+	// stsd: 1 byte version, 3 flags, 4 entry count, then entries.
+	if len(payload) < 8 {
+		return false, false
+	}
+	rest := payload[8:]
+	for len(rest) >= 8 {
+		esz := binary.BigEndian.Uint32(rest[0:4])
+		if esz < 8 || int(esz) > len(rest) {
+			return alac, aac
+		}
+		entryType := string(rest[4:8])
+		switch entryType {
+		case "alac":
+			alac = true
+		case "mp4a":
+			aac = true
+		}
+		rest = rest[esz:]
+	}
 	return alac, aac
 }
 

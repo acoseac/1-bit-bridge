@@ -17,6 +17,8 @@ const (
 	maxSampleRateHz = 768000
 	// maxMP4Boxes bounds ISO-BMFF walks.
 	maxMP4Boxes = 256
+	// maxMP4BoxDepth caps nested box recursion inside a moov buffer.
+	maxMP4BoxDepth = 8
 	// maxMoovBytes is the largest moov/moof payload we will load to find stsd.
 	maxMoovBytes = 4 << 20
 )

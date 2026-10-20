@@ -355,7 +355,13 @@ func extended80ToFloat(b []byte) (float64, bool) {
 	if exp == 0 && mant == 0 {
 		return 0, true
 	}
-	if exp == 0x7FFF {
+	if exp == 0 || exp == 0x7FFF {
+		return 0, false
+	}
+	// Normalised extended floats have the explicit integer bit set. A
+	// non-zero exponent with that bit clear is unnormalised / pseudo and
+	// must not silently become a plausible sample rate (Argon R3 M3).
+	if hi&0x80000000 == 0 {
 		return 0, false
 	}
 	f := float64(mant) / (1 << 63)

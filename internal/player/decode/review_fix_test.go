@@ -202,6 +202,8 @@ func TestReviewTruncation(t *testing.T) {
 		case "aiff":
 			raw = writeAIFF(t, 44100, 2, 16, []int32{1, -1, 2, -2, 3, -3, 4, -4}, false)
 		case "flac":
+			// Cut inside the frame payload after STREAMINFO so Open still
+			// succeeds (metadata-only) and ReadFrames must refuse.
 			raw = encodeFLACPCM(t, 44100, 16, constantStereo(8192, 1))
 		}
 		cut := 4
@@ -211,26 +213,30 @@ func TestReviewTruncation(t *testing.T) {
 		b := raw[:len(raw)-cut]
 		d, err := decode.Open(bytes.NewReader(b))
 		if err != nil {
+			t.Errorf("%s: Open on truncated stream: %v", kind, err)
 			continue
 		}
 		buf := make([]int32, 20000)
 		sawTrunc := false
 		for j := 0; j < 8; j++ {
-			_, err := d.ReadFrames(context.Background(), buf)
+			n, err := d.ReadFrames(context.Background(), buf)
 			if err == io.EOF {
 				t.Errorf("%s missing %d bytes: clean EOF declared=%d", kind, cut, d.Format().Frames)
 				break
 			}
 			if decode.IsRefusal(err) {
+				// Short mid-stream reads may return n>0 with the Refusal
+				// on the same call (Decoder contract).
+				_ = n
 				sawTrunc = true
 				break
 			}
 			if err != nil {
+				t.Errorf("%s: unexpected err=%v n=%d", kind, err, n)
 				break
 			}
 		}
-		if !sawTrunc && kind != "flac" {
-			// flac cut may fail at open depending on where the cut lands
+		if !sawTrunc {
 			t.Errorf("%s: expected truncated refusal before clean EOF", kind)
 		}
 	}

@@ -15,6 +15,11 @@ import (
 // of sample values written (channels × frames). io.EOF means the stream ended
 // cleanly at a known endpoint; premature EOF against a declared length is a
 // *Refusal with ReasonTruncated.
+//
+// A short mid-stream read may return n > 0 together with a non-nil error on
+// the same call: the n samples are valid, and the error (typically a
+// truncated Refusal, or a cancelled context) applies after them. Callers must
+// not discard n when err != nil.
 type Decoder interface {
 	Format() format.PCM
 	ReadFrames(ctx context.Context, dst []int32) (n int, err error)
