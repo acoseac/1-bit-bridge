@@ -47852,7 +47852,7 @@ the wrong refusal reason.
 
 `scanMP4Codecs` sets `truncated` when the 4 MiB bound is applied.
 `walkBoxes` / `codecsInBoxes` take that flag: a size past the buffer end is
-a scan boundary (partial descend into `isoBMFFContainers` / `meta` with the
+a scan boundary (partial descent into `isoBMFFContainers` / `meta` with the
 flag still set, then stop) rather than an error. Complete boxes inside the
 buffer are walked with the flag clear so a finished moov with an invalid
 child size still refuses. uint64 size compares and depth/box caps stay.

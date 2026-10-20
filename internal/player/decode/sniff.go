@@ -326,17 +326,7 @@ func walkBoxes(buf []byte, truncated bool, fn func(typ string, payload []byte, t
 			return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d is smaller than its header", typ, size)
 		}
 		if size > uint64(len(buf)) {
-			if !truncated {
-				return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d exceeds buffer (%d bytes)", typ, size, len(buf))
-			}
-			if headerLen > uint64(len(buf)) {
-				return nil
-			}
-			// Partial payload of the box that crosses the 4 MiB cut.
-			if err := fn(typ, buf[headerLen:], true); err != nil {
-				return err
-			}
-			return nil
+			return crossingBox(buf, typ, size, headerLen, truncated, fn)
 		}
 		if err := fn(typ, buf[headerLen:size], false); err != nil {
 			return err
@@ -344,4 +334,16 @@ func walkBoxes(buf []byte, truncated bool, fn func(typ string, payload []byte, t
 		buf = buf[size:]
 	}
 	return nil
+}
+
+// crossingBox handles a box whose declared size runs past buf. In a complete
+// buffer that is a layout error. When the moov/moof read was capped, the
+// partial payload of the box that crosses the 4 MiB cut is walked with
+// trunc=true, and the walk then stops. walkBoxes guarantees headerLen <=
+// len(buf): its loop needs 8 bytes, and a 16-byte header returns earlier.
+func crossingBox(buf []byte, typ string, size, headerLen uint64, truncated bool, fn func(typ string, payload []byte, trunc bool) error) error {
+	if !truncated {
+		return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d exceeds buffer (%d bytes)", typ, size, len(buf))
+	}
+	return fn(typ, buf[headerLen:], true)
 }
