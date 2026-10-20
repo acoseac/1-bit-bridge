@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test](#2026-10-20--b470-pr-1a-round-4-mp4-extended-size-panic-and-cancel-seek-test)
 - [2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups](#2026-10-20--b470-pr-1a-round-3-argon-seektableid3mp4aiff-follow-ups)
 - [2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening](#2026-10-20--b470-pr-1a-round-2-argon--codex-decoder-hardening)
 - [2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens](#2026-10-20--b470-pr-1a-player-pcm-representations-decoders-and-goldens)
@@ -47835,6 +47836,30 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test
+
+### Trigger
+
+CodeRabbit on the R3 commits: `walkBoxes` converted a 64-bit extended box
+size to `int` before comparing with `len(buf)`, so `0x8000000000000000`
+became negative, passed the check, and `buf[headerLen:size]` panicked.
+Also `errors.Is` for EOF/cancel in review tests, and
+`TestReviewCancelDuringSeek` sought into the first block (a scan that
+ignored `ctx` still passed).
+
+### What changed
+
+Compare MP4 box sizes as `uint64` against `uint64(len(buf))` / `MaxInt64`
+before slicing or seeking; refuse oversized boxes. `parseSTSD` uses the same
+pattern for entry sizes. Cancel-seek targets near the end of a 40-block
+stream and requires `errors.Is(err, context.Canceled)` plus a read bound;
+removing the Seek/`ctxReadSeeker` cancellation checks makes that test fail
+(~8200 reads).
+
+### Tests
+
+`TestReviewR4MP4ExtendedSizeNoPanic`; updated `TestReviewCancelDuringSeek`.
 
 ## 2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups
 
