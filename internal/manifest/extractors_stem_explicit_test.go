@@ -115,7 +115,8 @@ func cleanAdvisoryWithTitle(title, value string) []byte {
 // [E]-named file is explicit, as TestExplicitVerdict's
 // clean_advisory_does_not_cancel_a_title says for a title. A clean advisory
 // with no marker anywhere stays clean, and a WAV with no ID3 whose LIST/INFO
-// title is clean stays clean (a title was read, so the stem does not count).
+// title is clean stays clean (a title was read, so the stem does not count),
+// also beside an untitled ID3 chunk, whose advisory still counts.
 func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.T) {
 	id3 := func(tag []byte) []byte { return riffChunk("id3 ", tag) }
 	files := []struct {
@@ -141,6 +142,11 @@ func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.
 		{"DsfTIT2 [E].dsf", minimalDSFBytes(2822400, cleanAdvisoryWithTitle("Song [E]", "2")), "Song [E]", true},
 		// No ID3; LIST/INFO title is clean on a [E]-named file.
 		{"InfoClean [E].wav", wavWithChunks(listInfo("INAM", "Clean Title")), "Clean Title", false},
+		// An untitled ID3 chunk beside a LIST/INFO title: the title was read,
+		// so applyUnder recomputes without the stem; the ID3's advisory still
+		// counts.
+		{"Id3NoTitleInfoClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("2")), listInfo("INAM", "Clean Title")), "Clean Title", false},
+		{"Id3ExplicitInfoClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("1")), listInfo("INAM", "Clean Title")), "Clean Title", true},
 	}
 	root := t.TempDir()
 	rels := map[string]string{}
