@@ -48033,6 +48033,44 @@ fixed decoded (including bext-bearing files); 32-bit float refused. AAC/Ogg
 refused as lossy; ALAC refused as not-yet-supported (mdat-first files found
 via top-level box walk, not a short head scan).
 
+## 2026-10-20 — B401: carry patched fsnotify for kqueue remove/Close race
+
+### Trigger
+
+`TestKqueueWatcherReleasesARenamedFoldersFiles` failed about once in 300
+runs under CPU load with one open descriptor too many
+(`watcher holds N open files … want N-1`). Traced 2026-10-15 to a race in
+fsnotify v1.10.1's kqueue backend: `remove` closes a watch's descriptor
+before dropping its table entry, so a concurrent `addWatch` can reuse the
+fd number and the subsequent map delete drops the NEW watch — which then
+leaks. Upstream: fsnotify/fsnotify#795 (open, unfixed).
+
+### What shipped
+
+`go.mod` `replace`s `github.com/fsnotify/fsnotify` with
+`github.com/acoseac/fsnotify` at `bda6368c20de` (branch
+`kqueue-remove-order-v1.10.1`: v1.10.1 plus reorder in `remove` and in
+`Close`'s teardown). Require stays `v1.10.1`. Comment on the replace names
+#795 / B401 and says to drop it when a released fsnotify carries the fix
+(bump require + delete replace in the same change). Binding rule under
+**Scanner** in `.claude/rules/scanner.md`.
+
+### Stress (12× `yes >/dev/null`)
+
+| | runs | failures | wall | `go test` | uptime load (start → end) |
+|---|---|---|---|---|---|
+| main (stock v1.10.1) | 600 | 2 | 543 s | 538.093 s | 12.38 19.63 12.55 → 15.18 15.93 13.80 |
+| branch (fork) | 600 | 0 | 542 s | 537.436 s | 8.05 13.95 13.18 → 13.28 14.84 14.41 |
+
+Exact failure lines on main:
+
+```
+after round 2 of renaming 10 folders of 12 files the watcher holds 135 open files on the library, want 134
+after round 3 of renaming 10 folders of 12 files the watcher holds 136 open files on the library, want 135
+```
+
+The test's expected counts were not widened.
+
 ## 2026-10-20 — Dependabot groups the three github/codeql-action steps (backlog B459)
 
 ### What failed
