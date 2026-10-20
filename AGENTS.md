@@ -20,7 +20,7 @@ line there, and its long form goes to the `ops/History-*.md` file the line
 points to. The supporting record is appended to `ops/engineering-log.md` in
 that PR too, so a review reads the rule beside the code it is about. For corrections to agent-instruction files, including this file, follow
 [CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow):
-a correction may go straight to `main`; anything else takes a PR. Claude Code loads `CLAUDE.md` into every
+a correction (a stale fact or count, or a broken pointer) may go straight to `main` once `make docs-check` passes; a new or changed rule, a move between files, `PROTOCOL.md`, the other docs and runbooks, and anything touching code take a PR. Claude Code loads `CLAUDE.md` into every
 session and a rules file whenever it reads a file the globs match, and a
 finding written only into the log is inert. Cursor loads this file and
 `CLAUDE.md` but not `.claude/rules/`, so before changing a file, run
