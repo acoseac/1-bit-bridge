@@ -25,6 +25,13 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
+- [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
+- [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
+- [2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test](#2026-10-20--b470-pr-1a-round-4-mp4-extended-size-panic-and-cancel-seek-test)
+- [2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups](#2026-10-20--b470-pr-1a-round-3-argon-seektableid3mp4aiff-follow-ups)
+- [2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening](#2026-10-20--b470-pr-1a-round-2-argon--codex-decoder-hardening)
+- [2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens](#2026-10-20--b470-pr-1a-player-pcm-representations-decoders-and-goldens)
 
 - [LOUPE on the lyrics surface (PRs #849 / #850 / #851, 2026-09-06)](#loupe-on-the-lyrics-surface-prs-849--850--851-2026-09-06)
 - [ALAC upscaling — the ffmpeg fallback, and three things only measurement settled (issue #127, 2026-09-02)](#alac-upscaling--the-ffmpeg-fallback-and-three-things-only-measurement-settled-issue-127-2026-09-02)
@@ -47832,3 +47839,196 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
+
+### Trigger
+
+SonarCloud quality gate: 4.0% duplication on new code (limit 3%), driven by
+near-identical WAV/AIFF `ReadFrames` loops (78 + 74 lines) after round 6's
+seek-back, plus duplicated R6 test wrappers (30 lines).
+
+### What changed
+
+`pcm_region.go` holds the shared linear PCM reader (`bytePos`, `seekToPos`,
+region cap, `ReadFull` + post-read `ctx` + seek-back, truncated-tail
+handling, frame loop). `wavDecoder` / `aiffDecoder` embed it and supply
+`unpack` plus refusal strings. R6 tests are table-driven under
+`TestReviewR6CancelThenRetryNoGap` and `TestReviewR6IOErrorThenRetryNoGap`.
+Refusal message text is unchanged. FLAC untouched. `dupl` no longer reports
+the ReadFrames clone pair.
+
+## 2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error
+
+### Trigger
+
+CodeRabbit (verified): after `ReadFull` in WAV/AIFF `ReadFrames`, a
+post-read `ctx.Err()` or non-EOF I/O error returned without advancing
+`posFrame`, leaving the reader ahead. A later `ReadFrames` with a live
+context skipped those frames and could decode trailing `LIST`/`ID3`
+bytes as samples. FLAC keeps unreturned samples in `pending` and was
+left unchanged.
+
+### What changed
+
+On cancel, mid-frame truncation, or other I/O error after a read whose
+bytes are not committed to `posFrame`, seek the reader back to
+`dataStart/ssndStart + posFrame*frameBytes`. Cap each chunk by the
+bytes left to the audio-region end. A failed seek-back sticks until a
+successful `Seek`.
+
+### Tests
+
+`TestReviewR6CancelThenRetryNoGap` / `TestReviewR6IOErrorThenRetryNoGap`
+(table-driven over wav and aiff). Negative control: removing the cancel
+seek-back makes the WAV cancel/retry case fail with a truncated refusal again.
+
+## 2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut
+
+### Trigger
+
+CodeRabbit on the R4 commits: when `moov`/`moof` exceeds `maxMoovBytes`
+(4 MiB), only the first 4 MiB are read. A later `udta`/`covr` or an `stbl`
+that crosses the cut made `walkBoxes` return `unsupported_layout`, and
+`scanMP4Codecs` discarded the `alac`/`aac` already found — `Open` reported
+the wrong refusal reason.
+
+### What changed
+
+`scanMP4Codecs` sets `truncated` when the 4 MiB bound is applied.
+`walkBoxes` / `codecsInBoxes` take that flag: a size past the buffer end is
+a scan boundary (partial descent into `isoBMFFContainers` / `meta` with the
+flag still set, then stop) rather than an error. Complete boxes inside the
+buffer are walked with the flag clear so a finished moov with an invalid
+child size still refuses. uint64 size compares and depth/box caps stay.
+
+### Tests
+
+`TestReviewR5MoovCapKeepsALACBeforeCover`, `…AACBeforeCover`,
+`…ALACWhenSTBLCrossesCut`, `…CompleteMoovStillRefusesOversizeChild`.
+Negative control: ignoring `truncated` makes the ALAC+covr case fail with
+`unsupported_layout` again.
+
+## 2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test
+
+### Trigger
+
+CodeRabbit on the R3 commits: `walkBoxes` converted a 64-bit extended box
+size to `int` before comparing with `len(buf)`, so `0x8000000000000000`
+became negative, passed the check, and `buf[headerLen:size]` panicked.
+Also `errors.Is` for EOF/cancel in review tests, and
+`TestReviewCancelDuringSeek` sought into the first block (a scan that
+ignored `ctx` still passed).
+
+### What changed
+
+Compare MP4 box sizes as `uint64` against `uint64(len(buf))` / `MaxInt64`
+before slicing or seeking; refuse oversized boxes. `parseSTSD` uses the same
+pattern for entry sizes. Cancel-seek targets near the end of a 40-block
+stream and requires `errors.Is(err, context.Canceled)` plus a read bound;
+removing the Seek/`ctxReadSeeker` cancellation checks makes that test fail
+(~8200 reads).
+
+### Tests
+
+`TestReviewR4MP4ExtendedSizeNoPanic`; updated `TestReviewCancelDuringSeek`.
+
+## 2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups
+
+### Trigger
+
+`.review-argon-r2.md` on the round-2 decoder: unvalidated SEEKTABLE points,
+ID3v2.4 footer offset, partial post-ID3 sniff, MP4 `meta` FullBox / depth,
+unnormalised AIFF 80-bit rates, and the short-read / FLAC truncation test gap.
+
+### What changed
+
+`seekPointBefore` only uses a point with `SampleNum <= target` and ignores
+overflow-sized fields; SEEKTABLE parse drops the same. ID3 start adds 10 when
+flag `0x10` (footer); post-ID3 classification shares `sniffContainer` with the
+unprefixed path (DSF/DFF/RF64/MP4). MP4 walk treats `meta` as FullBox, recurses
+only into known containers, caps depth and box count. `extended80ToFloat`
+requires the explicit integer bit when exp ≠ 0. Decoder docs: `n > 0` with a
+truncated Refusal on the same call is intentional; `TestReviewTruncation` no
+longer exempts FLAC.
+
+### Tests
+
+`TestReviewR3*` in `review_r3_test.go`; strengthened `TestReviewTruncation`.
+
+## 2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening
+
+### Trigger
+
+PR #1289 reviews `.review-argon.md` (Gemini static) and `.review-codex.md`
+(Codex with hostile probes). High/Medium findings overlapped on WAV
+extensible alignment, FLAC STREAMINFO vs frame, unbounded metadata
+allocations, AIFF rates/confinement, sniffing, cancellation and seeking.
+
+### What changed
+
+Stopped using `flac.NewSeek` entirely: custom metadata walk skips PICTURE
+bodies by seeking (Codex H3: 78-byte file no longer allocates 128 MiB);
+seeking uses optional SEEKTABLE + cancellable forward scan with
+`ctxReadSeeker` wrapping every mewkiz byte read. Sample positions accumulate
+`BlockSize` from the scan start — mewkiz `SampleNumber()` multiplies frame
+number by the *current* (short final) block size, which broke seeks to
+8192/8193/8999 on a 9000-frame stream (Argon H4 / Codex M5). Unknown
+`NSamples==0` still opens; `Seek(0)` rewinds to `dataStart`. Inherited
+frame bit-depth/rate (code 000) resolved from STREAMINFO before `Parse`.
+
+WAVE_FORMAT_EXTENSIBLE: `>>= container-valid` then sign-extend (was masking
+low bits → sample corruption). AIFF: exact integer rate (no `Round`), reject
+Inf/NaN/negative; SSND offset and payload length vs COMM frames; reads
+confined to `ssndStart..ssndEnd`. WAV: RIFF body bound, `dataSize%frame==0`,
+chunk size caps. PCM reads chunk at 64 KiB and check `ctx` after each
+`ReadFull`. ID3: sniff returns start offset; `Open` wraps `offsetSeeker`.
+MP4: walk `stsd` sample entries; unknown brand → unknown, not AAC.
+
+Goldens: in-range seek requires `n == Channels` (Codex M10 control: broken
+seek returning `(0,EOF)` used to pass).
+
+### Not taken
+
+Codex Low 14 (corpus as qualification): the private corpus remains a
+diagnostic census over untracked `~/medialibtest-formats/`; support
+contracts stay on goldens + synth/review tests. Splitting census vs
+qualification needs a committed fixture set and is out of this round.
+
+### Tests
+
+`TestReview*` in `review_fix_test.go` (red-first probes from both reviews);
+`TestGoldensExactSeek`; existing FLAC/WAV/AIFF suites.
+
+## 2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens
+
+### What shipped
+
+internal/player/format holds the canonical PCM stream description (rate,
+channels, valid bits, container) and the Native DSD / DoP shapes for later
+PRs, plus ALSA packers S16_LE, S24_3LE, S24_LE and S32_LE (24-bit source
+shifted left eight bits). internal/player/decode is the streaming,
+cancellable decoder seam: content inspection opens FLAC / WAV / AIFF, and
+refuses lossy and unsupported shapes with a typed Refusal.
+
+### FLAC Seek
+
+Round 1 used mewkiz Stream.Seek; round 2 replaced it (see the round-2 entry
+above). 32-bit FLAC remains refused: modern flac(1) emits sample-size code
+111, which mewkiz still treats as reserved. 32-bit WAV and AIFF remain
+supported.
+
+### Goldens
+
+scripts/player-pcm-goldens/generate.py (not run by ordinary tests) builds
+small fixtures with flac, ffmpeg and afconvert, hashes samples from the
+reference decode path, and writes manifest.json. Tests check the bridge
+decoder against those hashes and exact seeks.
+
+### Private corpus (medialibtest-formats)
+
+McGill AIFF int16/24/32 and sowt decoded; 8/12-bit, float, mu-law and A-law
+refused. McGill WAV int24 and int32 extensible decoded. Sound Devices 24-bit
+fixed decoded (including bext-bearing files); 32-bit float refused. AAC/Ogg
+refused as lossy; ALAC refused as not-yet-supported (mdat-first files found
+via top-level box walk, not a short head scan).

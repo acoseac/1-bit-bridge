@@ -132,6 +132,8 @@ automation is unaffected.
 | `internal/doctor` | Environment preflight checks for `bridge doctor` / `bridge init` |
 | `internal/alsa` | The box's ALSA state read from a `/proc` tree (cards, USB ids, stream altsets, what an open substream receives and the thread and process holding it), for `bridge output dac` |
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader (`internal/mpd/conf`): the box's player and how MPD is set, for `bridge output player` |
+| `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
+| `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF) and typed refusals |
 | `internal/supervision` | Answers "if this process exits, will something relaunch us?" |
 | `internal/pairing` | In-memory state machine for the admin-approval pairing flow |
 | `internal/analyze` | Offline audio analysis: sox(1) PCM decode → peak waveform sidecars; worker pool (opt-in via `analysis.enabled`) |
