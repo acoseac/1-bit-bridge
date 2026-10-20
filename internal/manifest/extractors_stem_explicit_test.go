@@ -45,14 +45,16 @@ func dsfNoID3(sampleRate uint32) []byte {
 	return buf.Bytes()
 }
 
-// TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle is backlog B466's
-// pin. A WAV, AIFF, DFF or DSF named with [E] and carrying no ID3 tag (and a
-// WAV whose LIST/INFO has an artist but no title) stores Explicit true from
-// the filename stem, as a FLAC with no TITLE tag does. A plain untagged WAV
-// stays unset. Each file sits alone under writeAlone so the path's guess is
-// the stem and no sibling unifies its album.
-func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
-	files := []struct {
+// stemExplicitFixtureFiles are the untagged chunk-walk cases B466 heals, plus
+// a plain WAV that must only stamp across the v27 bump.
+func stemExplicitFixtureFiles(t *testing.T) []struct {
+	name  string
+	data  []byte
+	title string
+	want  bool
+} {
+	t.Helper()
+	return []struct {
 		name  string
 		data  []byte
 		title string
@@ -66,6 +68,16 @@ func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
 		{"Info [E].wav", wavWithChunks(listInfo("IART", "Info Artist")), "Info [E]", true},
 		{"plain.wav", wavWithChunks(), "plain", false},
 	}
+}
+
+// TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle is backlog B466's
+// pin. A WAV, AIFF, DFF or DSF named with [E] and carrying no ID3 tag (and a
+// WAV whose LIST/INFO has an artist but no title) stores Explicit true from
+// the filename stem, as a FLAC with no TITLE tag does. A plain untagged WAV
+// stays unset. Each file sits alone under writeAlone so the path's guess is
+// the stem and no sibling unifies its album.
+func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
+	files := stemExplicitFixtureFiles(t)
 	root := t.TempDir()
 	rels := map[string]string{}
 	for _, f := range files {
@@ -78,5 +90,73 @@ func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			requireExplicitRow(t, store, wire, rels[f.name], f.title, f.want)
 		})
+	}
+}
+
+// TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps is
+// the v27 upgrade end to end. Rows a v26 bridge indexed re-extract once. An
+// untagged WAV/AIFF/DFF/DSF whose filename stem carries [E], and a WAV whose
+// LIST/INFO has no title, gain Explicit, advance indexed_at (the iOS delta)
+// and reset enriched_at. A plain untagged WAV re-extracts byte-identical and
+// is only stamped.
+func TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps(t *testing.T) {
+	files := stemExplicitFixtureFiles(t)
+	root := t.TempDir()
+	rels := map[string]string{}
+	for _, f := range files {
+		rels[f.name] = writeAlone(t, root, f.name, f.data)
+	}
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "initial")
+
+	before := map[string]int64{}
+	for _, f := range files {
+		rel := rels[f.name]
+		if got := storedTrack(t, store, rel); got.Explicit != f.want || got.Title != f.title {
+			t.Fatalf("premise: %s stores title %q Explicit %v, want %q / %v",
+				f.name, got.Title, got.Explicit, f.title, f.want)
+		}
+		q := `UPDATE tracks SET extractor_version = 26, enriched_at = 1,
+			tags_json = json_remove(tags_json, '$.explicit') WHERE path = ?`
+		if _, err := store.db.Exec(q, rel); err != nil {
+			t.Fatalf("rewind %s to v26: %v", f.name, err)
+		}
+		if got := storedTrack(t, store, rel); got.Explicit {
+			t.Fatalf("premise: the rewound %s still carries Explicit", f.name)
+		}
+		before[rel] = trackIndexedAt(t, store, rel)
+	}
+
+	scanOnce(t, sc, "v27")
+
+	for _, f := range files {
+		rel := rels[f.name]
+		got := storedTrack(t, store, rel)
+		if got.Explicit != f.want || got.Title != f.title {
+			t.Errorf("%s: title %q Explicit %v after the upgrade scan, want %q / %v",
+				f.name, got.Title, got.Explicit, f.title, f.want)
+		}
+		if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+			t.Errorf("%s: extractor_version = %d, want %d", f.name, v, ExtractorVersion)
+		}
+		after := trackIndexedAt(t, store, rel)
+		if f.want {
+			if after <= before[rel] {
+				t.Errorf("%s: indexed_at did not advance (%d -> %d): iOS would never pull Explicit",
+					f.name, before[rel], after)
+			}
+			if v := trackColumn(t, store, rel, "enriched_at"); v != 0 {
+				t.Errorf("%s: enriched_at = %d, want 0: the full upsert re-queues a changed row's enrichment",
+					f.name, v)
+			}
+			continue
+		}
+		if after != before[rel] {
+			t.Errorf("%s: indexed_at moved (%d -> %d): a row whose Explicit stays must only be stamped",
+				f.name, before[rel], after)
+		}
+		if v := trackColumn(t, store, rel, "enriched_at"); v != 1 {
+			t.Errorf("%s: enriched_at = %d: a row whose Explicit stays must not be re-enriched", f.name, v)
+		}
 	}
 }

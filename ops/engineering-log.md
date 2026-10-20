@@ -47840,6 +47840,67 @@ bind.
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
 
+## 2026-10-20 — AIFF, WAV, DFF and DSF apply the filename-stem explicit marker (ExtractorVersion 27, backlog B466)
+
+### The question
+
+The B446 pin (2026-10-19) measured a gap beside its WAV ID3 cases: a chunk
+walk that reads no ID3 tag never asked the filename stem, so
+`Song [E].wav`, `.aiff`, `.dff` and `.dsf` (metadata pointer 0) and
+`Info [E].wav` whose LIST/INFO has an artist and no title all stored
+`Explicit` false. The v23 rule already said the stem counts when no title
+tag was read, and `readDhowdenTags` applied it on its no-tags branch. A WAV
+with an untitled ID3 chunk already counted the stem through
+`populateFromTagMetadata`.
+
+### Red first
+
+`TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle` on
+`d7d03830` (the test alone, against ExtractorVersion 26) failed the five
+marked cases and left `plain.wav` green:
+
+```
+--- FAIL: TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle (0.05s)
+    --- FAIL: …/Song_[E].wav — Explicit = false, want true
+    --- FAIL: …/Aiff_[E].aiff — Explicit = false, want true
+    --- FAIL: …/Dff_[E].dff — Explicit = false, want true
+    --- FAIL: …/Dsf_[E].dsf — Explicit = false, want true
+    --- FAIL: …/Info_[E].wav — Explicit = false, want true
+```
+
+Each case is a real `Scanner` scan (fillFromPath before extract) and a
+`WriteManifest` wire check via `requireExplicitRow`.
+
+### Fix
+
+`applyStemExplicitMark` is the no-title-tag half of the v23 rule that
+`readDhowdenTags` already ran inline. The AIFF, WAV, DFF and DSF walks call
+it after their chunk walk (WAV and DFF after `containerText.applyUnder`,
+which already recomputes from a container title that replaced the stem).
+`readDhowdenTags` and `populateFromTagMetadata`'s nil-raw branch call the
+same helper. ExtractorVersion 27. ProtocolVersion stays 1; the wire field
+and its documented rule are unchanged — only the four walks now honour the
+stem half.
+
+### Delta
+
+`TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps`:
+rows rewound to v26 with `explicit` removed re-extract once. The five stem
+cases gain Explicit, advance `indexed_at` and reset `enriched_at`;
+`plain.wav` is only stamped.
+
+### iOS verdict
+
+`BridgeSyncActor` sets
+`explicit = ExplicitContent.verdict(tagSignals: [bt.explicit], rawTitle:)`
+with `rawTitle = nonEmpty(bt.title) ?? filenameStem`. For these files the
+wire title is already the stem (`Song [E]`…), so the app's badge was true
+from `titleMarker` even while the bridge stored `Explicit` false. After the
+fix the wire field is true too: the badge still shows, and the two sides
+agree on the field as well as the display. No iOS change required.
+`Track.Explicit`'s doc ("clients apply title markers themselves when the
+field is absent") is why the badge already covered them.
+
 ## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
 
 ### Trigger

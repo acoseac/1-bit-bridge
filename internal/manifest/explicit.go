@@ -51,6 +51,22 @@ func explicitTrackTitle(tagTitle, pathTitle string) string {
 	return strings.TrimSpace(pathTitle)
 }
 
+// applyStemExplicitMark sets t.Explicit when no earlier signal already set
+// it and the path-derived title already on the track (fillFromPath's
+// filename stem) carries a marker. It is the no-title-tag half of the v23
+// rule: readDhowdenTags calls it when dhowden finds no tags, and the AIFF,
+// WAV, DFF and DSF walks call it when their chunk walk left no title tag
+// either. An untitled ID3 chunk already goes through populateFromTagMetadata,
+// which asks the stem via explicitTrackTitle.
+func applyStemExplicitMark(t *Track) {
+	if t.Explicit {
+		return
+	}
+	if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
+		t.Explicit = true
+	}
+}
+
 // explicitFieldName classifies a field name the way every reader matches
 // it: exactly ITUNESADVISORY or EXPLICIT, ignoring case, with no separator
 // folding. "advisory" and "explicit" are those two fields. "" means the

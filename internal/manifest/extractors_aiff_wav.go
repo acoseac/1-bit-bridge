@@ -205,6 +205,8 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 	}
 
 	stampIFFDuration(t, aiffDurationSeconds(numSampleFrames, t.SampleRate), ssnd, physicalSize)
+	// No ID3 title (or no ID3 chunk): the path stem's marker still counts.
+	applyStemExplicitMark(t)
 
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		// Pass the dhowden Metadata (or nil if no ID3 chunk surfaced)
@@ -539,6 +541,9 @@ chunkLoop:
 
 	stampIFFDuration(t, wavDurationSeconds(data, bytesPerSecond), data, physicalSize)
 	info.applyUnder(t, idTagMetadata)
+	// No ID3 or LIST/INFO title: the path stem's marker still counts.
+	// applyUnder already recomputed from a container title that replaced it.
+	applyStemExplicitMark(t)
 
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, idTagMetadata, ec)
