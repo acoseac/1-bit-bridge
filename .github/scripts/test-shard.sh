@@ -45,7 +45,7 @@
 #
 # FUZZ TARGETS ARE IN THE PARTITION ON PURPOSE. Without `-fuzz` a target
 # runs its seed corpus as an ordinary test, which is how `make test`
-# absorbs 39 of them for free; dropping `Fuzz*` from the name list here
+# absorbs their seed corpora for free; dropping `Fuzz*` from the name list here
 # would retire every seed corpus from CI without a single red X.
 # `Benchmark*` is excluded because `go test` does not run benchmarks
 # without `-bench`, so including them would only pad the regex.
