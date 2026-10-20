@@ -18,11 +18,9 @@ file whose `paths:` globs match the code it binds (CLAUDE.md's "Where things
 live"), or in `CLAUDE.md` when every session needs it. A long entry is one
 line there, and its long form goes to the `ops/History-*.md` file the line
 points to. The supporting record is appended to `ops/engineering-log.md` in
-that PR too, so a review reads the rule beside the code it is about. A push straight to `main`
-is the one exception `CLAUDE.md`'s Development workflow makes, for a change
-to `CLAUDE.md` alone (a corrected claim, a stale count); it is never the
-route for a rule that ships with code, and a change to this file goes
-through a PR like any other. Claude Code loads `CLAUDE.md` into every
+that PR too, so a review reads the rule beside the code it is about. For corrections to agent-instruction files, including this file, follow
+[CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow):
+a correction may go straight to `main`; anything else takes a PR. Claude Code loads `CLAUDE.md` into every
 session and a rules file whenever it reads a file the globs match, and a
 finding written only into the log is inert. Cursor loads this file and
 `CLAUDE.md` but not `.claude/rules/`, so before changing a file, run
@@ -230,7 +228,8 @@ mode). iOS never talks to the admin listener.
 - **`UPDATE tracks SET enriched_at = 0` only re-triggers the enricher**, not
   tag re-extraction. The scanner's skip gate reads the `size` and `mtime_ns`
   columns through `GetTrackStat`. To force re-extraction, zero `mtime_ns`
-  on the affected rows through a Go helper (see below), then rescan.
+  on the affected rows through a Go helper (see the
+  [local-test-fixture skill](.claude/skills/local-test-fixture/SKILL.md)), then rescan.
 - **Since migration v4, an external `sqlite3` CLI cannot DELETE/UPDATE/INSERT
   on `tracks` / `track_variants`** — the expression index uses the
   Go-registered `unicode_lower()` function (`unknown function` error). Either
@@ -337,8 +336,8 @@ in place.
 ## Development workflow
 
 - Work on `feat/<topic>` branches; open a PR against `main`. **Never push
-  directly to `main`**: the sole exception is a change to `CLAUDE.md` alone
-  (see "Agent-doc maintenance" above), and a rule that describes code lands
+  directly to `main`**: the exception for corrections to agent-instruction
+  files is defined in [CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow), and a rule that describes code lands
   in the PR that changes the code. One logical theme per PR; avoid
   micro-PRs — ~5 cohesive ~200-line PRs beat 15 tiny ones.
 - Pre-push: `make fmt vet test build-all` clean; paste the output into the PR
