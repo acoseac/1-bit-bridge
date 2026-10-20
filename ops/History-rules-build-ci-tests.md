@@ -565,6 +565,26 @@
   failure was `can't assign requested address` or httptest falling back to
   `[::1]`, none of them this one.
 
+- **A test connection recorder that an assertion reads after the client
+  returns must record under the lock before it closes the connection**
+  (2026-10-20, backlog B461). `newConnRecorder`
+  (`internal/atlasharvest/stored_base_test.go`) accepted, read the first
+  bytes, `Close()`d, and only then appended to `seen`. The client's TLS
+  handshake fails with EOF as soon as Close lands, so the tick can finish
+  both legs and the subtest can call `connections()` before the second
+  append: CI on Dependabot #1263 failed once with `the harvest client made
+  1 connections, want one per due leg (submit, poll)`, and a re-run of the
+  same commit passed. The same race can let the shape cases above that
+  subtest pass when they should fail: they assert no connection reached
+  the recorder, and a connection the client did make can still be
+  unrecorded. A 50 ms sleep between Close and the append failed the
+  subtest 20 of 20; recording under the lock before Close passed 200 of
+  200 under `-race`. Grep of the repo's other test Accept loops found no
+  second close-before-record: HTTP handlers (`authRecorder`, `genaSink`)
+  record inside the handler before the response returns; `fakeMPD` records
+  commands before its deferred Close; `handshakelog` waits on
+  `StateClosed` after the line is written.
+
 - **A docblock that names a test is a claim, and six of them were false.** Two
   stood in for an invariant nothing pinned at all; one was a false safety claim
   on a security boundary (`managed_controls.go` said a test "walks the registered
