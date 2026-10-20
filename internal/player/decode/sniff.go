@@ -193,15 +193,18 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 				return alac, aac, nil
 			}
 		case "moov", "moof":
+			// Cap the in-memory walk; a large covr or sample table must not
+			// discard codecs already found earlier in the same moov.
+			truncated := payload > maxMoovBytes
 			scan := payload
-			if scan > maxMoovBytes {
+			if truncated {
 				scan = maxMoovBytes
 			}
 			buf := make([]byte, scan)
 			n, _ := io.ReadFull(rs, buf)
 			buf = buf[:n]
 			boxCount := 0
-			a, c, werr := codecsInBoxes(buf, 0, &boxCount)
+			a, c, werr := codecsInBoxes(buf, 0, &boxCount, truncated)
 			if werr != nil {
 				return false, false, werr
 			}
@@ -235,11 +238,14 @@ var isoBMFFContainers = map[string]bool{
 
 // codecsInBoxes walks nested ISO-BMFF boxes looking for stsd sample entries.
 // depth and boxCount cap recursion against crafted moov buffers (Argon R3 M2).
-func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool, err error) {
+// truncated is true when the top-level moov/moof read hit maxMoovBytes: a child
+// whose declared size runs past the buffer is the scan boundary (descend into
+// containers with the flag still set, then stop), not UnsupportedLayout.
+func codecsInBoxes(buf []byte, depth int, boxCount *int, truncated bool) (alac, aac bool, err error) {
 	if depth > maxMP4BoxDepth {
 		return false, false, nil
 	}
-	err = walkBoxes(buf, func(typ string, payload []byte) error {
+	err = walkBoxes(buf, truncated, func(typ string, payload []byte, trunc bool) error {
 		if *boxCount >= maxMP4Boxes {
 			return nil
 		}
@@ -254,12 +260,12 @@ func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool, err er
 			if len(payload) < 4 {
 				return nil
 			}
-			a, c, e := codecsInBoxes(payload[4:], depth+1, boxCount)
+			a, c, e := codecsInBoxes(payload[4:], depth+1, boxCount, trunc)
 			alac = alac || a
 			aac = aac || c
 			return e
 		case isoBMFFContainers[typ]:
-			a, c, e := codecsInBoxes(payload, depth+1, boxCount)
+			a, c, e := codecsInBoxes(payload, depth+1, boxCount, trunc)
 			alac = alac || a
 			aac = aac || c
 			return e
@@ -296,7 +302,12 @@ func parseSTSD(payload []byte) (alac, aac bool) {
 // against uint64(len(buf)) before any conversion used for slicing — a size
 // with the high bit set (e.g. 0x8000000000000000) must not become a negative
 // int that passes int(size) > len(buf) and then panics on the slice.
-func walkBoxes(buf []byte, fn func(typ string, payload []byte) error) error {
+//
+// When truncated is set (moov/moof scan hit maxMoovBytes), a size past the
+// buffer end is the scan boundary: fn receives the partial payload with
+// trunc=true and walking stops. Complete boxes (size ≤ len(buf)) are handed
+// to fn with trunc=false so invalid sizes inside a finished buffer still refuse.
+func walkBoxes(buf []byte, truncated bool, fn func(typ string, payload []byte, trunc bool) error) error {
 	for len(buf) >= 8 {
 		size := uint64(binary.BigEndian.Uint32(buf[0:4]))
 		typ := string(buf[4:8])
@@ -315,9 +326,19 @@ func walkBoxes(buf []byte, fn func(typ string, payload []byte) error) error {
 			return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d is smaller than its header", typ, size)
 		}
 		if size > uint64(len(buf)) {
-			return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d exceeds buffer (%d bytes)", typ, size, len(buf))
+			if !truncated {
+				return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d exceeds buffer (%d bytes)", typ, size, len(buf))
+			}
+			if headerLen > uint64(len(buf)) {
+				return nil
+			}
+			// Partial payload of the box that crosses the 4 MiB cut.
+			if err := fn(typ, buf[headerLen:], true); err != nil {
+				return err
+			}
+			return nil
 		}
-		if err := fn(typ, buf[headerLen:size]); err != nil {
+		if err := fn(typ, buf[headerLen:size], false); err != nil {
 			return err
 		}
 		buf = buf[size:]
