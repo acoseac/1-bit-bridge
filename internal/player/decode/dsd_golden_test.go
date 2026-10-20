@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -40,8 +41,16 @@ type dsdGoldens struct {
 	pattern      []byte
 }
 
+// -dsd-goldens points every DSD golden test at another directory, such as a
+// scratch regeneration (generate.py --out DIR), so a change to the generator
+// can be checked without touching the committed fixtures:
+//
+//	go test ./internal/player/decode -args -dsd-goldens=DIR
+var dsdGoldensDir = flag.String("dsd-goldens", filepath.Join("testdata", "dsd-goldens"),
+	"directory of the DSD goldens and their manifest")
+
 func dsdGoldenPath(name string) string {
-	return filepath.Join("testdata", "dsd-goldens", name)
+	return filepath.Join(*dsdGoldensDir, name)
 }
 
 func loadDSDGoldens(t testing.TB) dsdGoldens {

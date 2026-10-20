@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,7 +31,7 @@ func FuzzDFFOpen(f *testing.F) { fuzzDSD(f, ".dff") }
 // than the input holds; a clean EOF comes exactly at BytesPerChannel; and
 // seeks to the start and the end succeed while one past the end is refused.
 func fuzzDSD(f *testing.F, ext string) {
-	entries, err := os.ReadDir(filepath.Join("testdata", "dsd-goldens"))
+	entries, err := os.ReadDir(*dsdGoldensDir)
 	if err != nil {
 		f.Fatal(err)
 	}

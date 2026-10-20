@@ -32,6 +32,7 @@ its body as §3.6 requires, so it is always even.
 
 from __future__ import annotations
 
+import argparse
 import json
 import struct
 from pathlib import Path
@@ -215,16 +216,16 @@ def interleave(channels: list[bytes]) -> bytes:
 # ---------------------------------------------------------------- fixtures
 
 
-def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+def main(out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
     full = 3 * BLOCK + 1000  # three whole blocks and a partial fourth
     left, right = pattern(full)
-    (OUT / "pattern.bin").write_bytes(left + right)
+    (out / "pattern.bin").write_bytes(left + right)
 
     entries = []
 
     def add(name: str, raw: bytes, **meta) -> None:
-        (OUT / name).write_bytes(raw)
+        (out / name).write_bytes(raw)
         entries.append({"file": name, **meta})
 
     def seeks(per_channel: int) -> list[int]:
@@ -327,9 +328,18 @@ def main() -> None:
         "pattern_bytes_per_channel": full,
         "fixtures": entries,
     }
-    (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"wrote {len(entries)} fixtures to {OUT}")
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"wrote {len(entries)} fixtures to {out}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=OUT,
+        help="directory to write into (default: the committed goldens); a "
+        "scratch directory lets a change be checked without touching them, "
+        "with go test ./internal/player/decode -args -dsd-goldens=DIR",
+    )
+    main(parser.parse_args().out)
