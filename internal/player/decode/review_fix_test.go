@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"runtime"
@@ -137,7 +138,7 @@ func TestReviewFLACBoundarySeeks(t *testing.T) {
 		b := make([]int32, 2)
 		n, err := d.ReadFrames(context.Background(), b)
 		if f == frames {
-			if n != 0 || err != io.EOF {
+			if n != 0 || !errors.Is(err, io.EOF) {
 				t.Errorf("end: n=%d err=%v", n, err)
 			}
 			continue
@@ -164,7 +165,7 @@ func TestReviewFLACUnknownLengthRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := make([]int32, 2)
-	if _, err := d.ReadFrames(context.Background(), b); err != nil && err != io.EOF {
+	if _, err := d.ReadFrames(context.Background(), b); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
 	if err := d.Seek(context.Background(), 0); err != nil {
@@ -188,7 +189,7 @@ func TestReviewFLACInheritedBits(t *testing.T) {
 	}
 	b := make([]int32, 64)
 	n, err := d.ReadFrames(context.Background(), b)
-	if err != io.EOF || n != 64 || b[0] != 37 {
+	if !errors.Is(err, io.EOF) || n != 64 || b[0] != 37 {
 		t.Errorf("valid inherited sample size: n=%d err=%v samples=%v", n, err, b[:4])
 	}
 }
@@ -220,7 +221,7 @@ func TestReviewTruncation(t *testing.T) {
 		sawTrunc := false
 		for j := 0; j < 8; j++ {
 			n, err := d.ReadFrames(context.Background(), buf)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				t.Errorf("%s missing %d bytes: clean EOF declared=%d", kind, cut, d.Format().Frames)
 				break
 			}
@@ -292,7 +293,12 @@ func TestReviewID3FLAC(t *testing.T) {
 }
 
 func TestReviewCancelDuringSeek(t *testing.T) {
-	raw := encodeFLACPCM(t, 44100, 16, constantStereo(4096*40, 1))
+	// Seek near the end of a multi-block stream so a scan that ignores ctx
+	// keeps reading frames. Seeking into the first block alone would still
+	// pass even if the loop stopped checking cancellation.
+	const blocks = 40
+	const block = 4096
+	raw := encodeFLACPCM(t, 44100, 16, constantStereo(block*blocks, 1))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := &cancelReader{Reader: bytes.NewReader(raw), cancel: cancel}
@@ -302,9 +308,15 @@ func TestReviewCancelDuringSeek(t *testing.T) {
 	}
 	r.armed = true
 	start := time.Now()
-	err = d.Seek(ctx, 5)
+	target := int64(block*(blocks-1) + 10) // inside the final full block
+	err = d.Seek(ctx, target)
 	t.Logf("Seek err=%v reads after arm=%d time=%v", err, r.reads, time.Since(start))
-	if r.reads > 20 {
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+	// One cancelled frame parse is a handful of reads; a full uncancellable
+	// scan of ~40 verbatim frames is thousands.
+	if r.reads > 200 {
 		t.Errorf("seek continues full scan after cancellation (%d reads)", r.reads)
 	}
 }
@@ -326,7 +338,7 @@ func TestReviewCancelDuringPCMRead(t *testing.T) {
 		r.armed = true
 		_, err = d.ReadFrames(ctx, make([]int32, 8000))
 		cancel()
-		if err != context.Canceled {
+		if !errors.Is(err, context.Canceled) {
 			t.Errorf("%s canceled during Read: e=%v", kind, err)
 		}
 	}

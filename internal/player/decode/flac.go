@@ -3,6 +3,7 @@ package decode
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 
@@ -402,7 +403,7 @@ func (d *flacDecoder) parseFrame(ctx context.Context) (*frame.Frame, error) {
 	if err == io.EOF {
 		return nil, io.EOF
 	}
-	if err == context.Canceled || err == context.DeadlineExceeded {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, err
 	}
 	if err != nil {
@@ -425,7 +426,7 @@ func (d *flacDecoder) parseFrame(ctx context.Context) (*frame.Frame, error) {
 		return nil, refuse(ReasonTruncated, "FLAC frame has %d channels, want %d", f.Channels.Count(), d.pcm.Channels)
 	}
 	if err := f.Parse(); err != nil {
-		if err == context.Canceled || err == context.DeadlineExceeded {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
 		return nil, refuse(ReasonTruncated, "FLAC frame decode failed: %v", err)

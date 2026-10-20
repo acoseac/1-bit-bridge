@@ -3,6 +3,7 @@ package decode
 import (
 	"encoding/binary"
 	"io"
+	"math"
 )
 
 type sniffKind int
@@ -178,9 +179,14 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 			return alac, aac, nil
 		}
 		if size < headerLen {
-			return alac, aac, nil
+			return false, false, refuse(ReasonUnsupportedLayout, "MP4 box size %d is smaller than its header", size)
 		}
 		payload := size - headerLen
+		// Seek offsets and slice lengths are int64/int; a file-supplied size
+		// that does not fit must not be converted before the bound check.
+		if payload > uint64(math.MaxInt64) {
+			return false, false, refuse(ReasonUnsupportedLayout, "MP4 box size %d exceeds addressable length", size)
+		}
 		switch typ {
 		case "mdat", "free", "skip", "wide":
 			if _, err := rs.Seek(int64(payload), io.SeekCurrent); err != nil {
@@ -195,7 +201,10 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 			n, _ := io.ReadFull(rs, buf)
 			buf = buf[:n]
 			boxCount := 0
-			a, c := codecsInBoxes(buf, 0, &boxCount)
+			a, c, werr := codecsInBoxes(buf, 0, &boxCount)
+			if werr != nil {
+				return false, false, werr
+			}
 			alac = alac || a
 			aac = aac || c
 			remain := int64(payload) - int64(n)
@@ -226,13 +235,13 @@ var isoBMFFContainers = map[string]bool{
 
 // codecsInBoxes walks nested ISO-BMFF boxes looking for stsd sample entries.
 // depth and boxCount cap recursion against crafted moov buffers (Argon R3 M2).
-func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool) {
+func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool, err error) {
 	if depth > maxMP4BoxDepth {
-		return false, false
+		return false, false, nil
 	}
-	walkBoxes(buf, func(typ string, payload []byte) {
+	err = walkBoxes(buf, func(typ string, payload []byte) error {
 		if *boxCount >= maxMP4Boxes {
-			return
+			return nil
 		}
 		*boxCount++
 		switch {
@@ -243,18 +252,21 @@ func codecsInBoxes(buf []byte, depth int, boxCount *int) (alac, aac bool) {
 		case typ == "meta":
 			// FullBox: 1 byte version + 3 bytes flags, then child boxes.
 			if len(payload) < 4 {
-				return
+				return nil
 			}
-			a, c := codecsInBoxes(payload[4:], depth+1, boxCount)
+			a, c, e := codecsInBoxes(payload[4:], depth+1, boxCount)
 			alac = alac || a
 			aac = aac || c
+			return e
 		case isoBMFFContainers[typ]:
-			a, c := codecsInBoxes(payload, depth+1, boxCount)
+			a, c, e := codecsInBoxes(payload, depth+1, boxCount)
 			alac = alac || a
 			aac = aac || c
+			return e
 		}
+		return nil
 	})
-	return alac, aac
+	return alac, aac, err
 }
 
 func parseSTSD(payload []byte) (alac, aac bool) {
@@ -264,8 +276,8 @@ func parseSTSD(payload []byte) (alac, aac bool) {
 	}
 	rest := payload[8:]
 	for len(rest) >= 8 {
-		esz := binary.BigEndian.Uint32(rest[0:4])
-		if esz < 8 || int(esz) > len(rest) {
+		esz := uint64(binary.BigEndian.Uint32(rest[0:4]))
+		if esz < 8 || esz > uint64(len(rest)) {
 			return alac, aac
 		}
 		entryType := string(rest[4:8])
@@ -280,22 +292,35 @@ func parseSTSD(payload []byte) (alac, aac bool) {
 	return alac, aac
 }
 
-func walkBoxes(buf []byte, fn func(typ string, payload []byte)) {
+// walkBoxes iterates ISO-BMFF boxes in buf. Box sizes are compared as uint64
+// against uint64(len(buf)) before any conversion used for slicing — a size
+// with the high bit set (e.g. 0x8000000000000000) must not become a negative
+// int that passes int(size) > len(buf) and then panics on the slice.
+func walkBoxes(buf []byte, fn func(typ string, payload []byte) error) error {
 	for len(buf) >= 8 {
 		size := uint64(binary.BigEndian.Uint32(buf[0:4]))
 		typ := string(buf[4:8])
 		headerLen := uint64(8)
 		if size == 1 {
-			if len(buf) < 16 {
-				return
+			if uint64(len(buf)) < 16 {
+				return nil
 			}
 			size = binary.BigEndian.Uint64(buf[8:16])
 			headerLen = 16
 		}
-		if size == 0 || size < headerLen || int(size) > len(buf) {
-			return
+		if size == 0 {
+			return nil
 		}
-		fn(typ, buf[headerLen:size])
+		if size < headerLen {
+			return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d is smaller than its header", typ, size)
+		}
+		if size > uint64(len(buf)) {
+			return refuse(ReasonUnsupportedLayout, "MP4 box %q size %d exceeds buffer (%d bytes)", typ, size, len(buf))
+		}
+		if err := fn(typ, buf[headerLen:size]); err != nil {
+			return err
+		}
 		buf = buf[size:]
 	}
+	return nil
 }
