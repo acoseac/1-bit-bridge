@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
 - [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
 - [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
 - [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
@@ -47841,6 +47842,105 @@ bind.
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
 
+## 2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding
+
+### Trigger
+
+Codex reviewed PR #1293 against the DSF and DSDIFF 1.5 specifications; the
+owner verified three findings.
+
+### 1. `BytesPerChannel` wrapped negative
+
+`format.NativeDSD.BytesPerChannel` was `(Frames+7)/8`, which wraps for a
+`Frames` within 7 of `math.MaxInt64`. A DSF can declare such a count: its
+fmt chunk's sample count is a `uint64`, and `newDSF` refused only a count
+past `MaxInt64`, so with a data chunk declared large enough (2^61 bytes for
+`MaxInt64` samples) the file opened and passed `Validate`, while its length
+was −1,152,921,504,606,846,975 and a seek to its end was refused. The
+round-1 hostile tests enlarged the sample count alone, which the data-size
+check refuses first, so none reached the arithmetic; the fuzzer did not
+reach it either (it needs two eight-byte fields set together).
+`BytesPerChannel` now divides and adds one for a remainder: 0 for a
+`Frames` of 0 or less, at most 2^60, so any byte offset derived from it
+fits in an `int64`. The DSF decoder takes its end from the same function,
+where it used to compute its own, so the reported length and the decoder's
+end cannot disagree. DFF was not affected (its count is the sound chunk's
+size, bounded by `MaxInt64/8` per channel), and shares the fix.
+
+Red first: `TestNativeDSDBytesPerChannel` (expectations in arbitrary
+precision) failed at `MaxInt64-6`, `MaxInt64-1`, `MaxInt64` and
+`MinInt64`; `TestDSFHugeSampleCountKeepsItsByteArithmetic`, which enlarges
+both the sample count and the declared data size of a golden, failed with
+the negative length; and `FuzzDSFOpen`, seeded with that file, failed its
+"never more than `BytesPerChannel`" property.
+
+### 2. DFF never checked FVER
+
+DSDIFF 1.5 §3 makes `FVER` the form's first chunk and §3.1 its body the
+four-byte version, whose first byte is the major version. The walk skipped
+`FVER` like any unknown chunk, so a file without one, with it elsewhere or
+twice, of another size or of major version 2 opened. The first chunk must
+now be `FVER`; a second is refused; its size must be 4; its major version
+must be 1 (`dffMajorVersion`; 1.4 files share the layout, so the minor
+version is not checked). Each refusal is `unsupported_layout` and names
+`FVER`, and a file cut inside the version is `truncated_or_corrupt`.
+
+Red first: `TestDFFFormatVersionRequired` failed in all eleven refusal
+cases (ten opened; the cut file was refused as "no DSD sound data", not
+for its `FVER`); its two accepted versions (1.4, 1.255) already opened.
+The chunk-bomb fixture had no `FVER`: once one was required it would have
+been refused at its first chunk, still `unsupported_layout`, and stopped
+testing the chunk cap with `TestDSDAbsurdSizesRefused` still green. It now
+starts with a valid `FVER`, and `TestDFFChunkBombStopsAtTheCap` checks the
+cap's own message; taking the `FVER` back out reddens that test alone.
+
+Controls, each check removed alone: the first-chunk check reddens
+`missing` (the cases with `FVER` second or after `PROP` are also caught by
+the second-`FVER` check); the second-`FVER` check reddens `twice in a row`
+and `again before the sound data`; the size check reddens `two bytes` and
+`eight bytes` (`empty` is then still refused, by the major-version check
+reading the next chunk's id); the major-version check reddens `major 2`
+and `major 0`.
+
+### 3. The generator's DFF padding
+
+`pstring` put the pad byte of CMPR's compressionName inside CMPR's size (20
+bytes for "not compressed"; §3.2.3 has compressionType, Count and the name,
+19 bytes, and §2.3 the chunk's own pad after the size), and `comt` wrote the
+comment's pad outside COMT's size (§3.6 puts it inside, uncounted by the
+comment's `count`). So every `PROP` sub-chunk of the accepted goldens was
+even. Measured before the fix: with `PROP`'s pad skip removed
+(`next := 12 + size`), the whole package passed.
+
+The generator now writes the 19-byte `CMPR` and pads the comment inside
+`COMT`. That alone would have traded one blind spot for another: COMT's odd
+size was the only odd chunk the form's own walk skipped before the sound
+data, and a spec `COMT` is always even. Measured: with only the COMT fix,
+removing the form walk's pad skip also left the package green. So each DFF
+golden now carries a 7-byte `MANF` (manufacturer id `1BIT`, three bytes of
+data) between `COMT` and `PROP`. After the fix, removing either pad skip
+reddens every DFF golden test: `PROP`'s walk misreads the chunk after
+`CMPR` as `"\x00ABS"`, the form's walk the chunk after `MANF` as
+`"\x00PRO"`. The pattern and the DSF fixtures are unchanged, the DFF goldens
+still decode to the pattern byte for byte, and rerunning the generator
+leaves the committed fixtures byte-identical.
+
+The demuxer reads only CMPR's four-byte compressionType, so a CMPR that
+counts the name's pad inside its size still opens. That is the form the
+bridge's own `internal/dsdtone.WriteDFF` writes.
+`TestDFFCMPRWithItsNamePadInsideStillOpens`
+rewrites a golden's CMPR into that form and checks it decodes, and checks
+the golden itself carries the 19-byte form.
+
+### Fuzzing
+
+`FuzzDSFOpen` is also seeded with finding 1's file (`MaxInt64` samples, a
+data chunk declared to fit them), so its properties check that file on
+every `go test`. Each target ran 60 s on the round-2 code
+(`-fuzzminimizetime 1s`), continuing from round 1's cached corpus: DSF
+15,322,108 execs, 20 new entries (115 in all); DFF 18,207,845 execs, 48 new
+(192 in all). Neither found a crasher.
+
 ## 2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD
 
 ### What shipped
@@ -47894,7 +47994,8 @@ from the 240 non-palindromic bytes, left `NP[7i mod 240]` and right
 padding read as audio therefore each change bytes. The generator is
 deterministic: rerunning it left the committed fixtures byte-identical.
 `pattern.bin` has no NUL, so git would call it text: the fixtures are
-`binary` in `.gitattributes`.
+`binary` in `.gitattributes`. (Round 2, the entry above, found the DFF
+fixtures' CMPR and COMT padding was not to the specification and fixed it.)
 
 ### Red first and negative controls
 
