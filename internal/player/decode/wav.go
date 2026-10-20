@@ -198,13 +198,16 @@ func openWAV(rs io.ReadSeeker) (Decoder, error) {
 	}
 	d := &wavDecoder{
 		pcmRegion: pcmRegion{
-			rs:          rs,
-			pcm:         pcm,
-			regionStart: dataStart,
-			regionEnd:   dataStart + int64(dataSize),
-			frameBytes:  fb,
-			earlyEnd:    "WAVE data ends before declared frame count",
-			midFrame:    "WAVE data ends mid-frame",
+			linearRegion: linearRegion{
+				rs:          rs,
+				regionStart: dataStart,
+				regionEnd:   dataStart + int64(dataSize),
+				frameBytes:  fb,
+				frames:      pcm.Frames,
+				earlyEnd:    "WAVE data ends before declared frame count",
+				midFrame:    "WAVE data ends mid-frame",
+			},
+			pcm: pcm,
 		},
 		containerBits: containerBits,
 	}

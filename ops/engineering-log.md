@@ -25,6 +25,9 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules](#2026-10-20--b470-pr-1b-round-3-the-dff-walks-bounds-the-goldens-layout-checks-and-two-overstated-rules)
+- [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
+- [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
 - [2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames](#2026-10-20--b470-pr-1a-round-7-shared-pcmregion-for-wavaiff-readframes)
 - [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
 - [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
@@ -47923,6 +47926,303 @@ them: clean advisory with no TIT2 on an `[E]` stem is explicit (WAV, AIFF,
 DFF, DSF, and `EXPLICIT=0`); a clean advisory with no marker anywhere is
 clean; a TIT2 carrying `[E]` beside a clean advisory is explicit; a WAV with
 no ID3 whose LIST/INFO title is clean is clean.
+
+## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
+
+### Trigger
+
+Codex reviewed round 2 of PR #1293; all three findings were verified.
+
+### 1. An offset sum in the DFF walk could wrap
+
+The walk checked for room for a chunk header with `pos+12 > frmEnd`. A form
+may declare a body ending at `math.MaxInt64`, and a chunk's declared size
+may end it at `math.MaxInt64-1` (positions in a form are always even), so
+`pos+12` wrapped negative, passed, and the walk asked for a 12-byte header
+past the form. The read returned EOF and the file was refused as truncated,
+so nothing but the read request showed the defect: Codex found it with a
+probe. The check is now `frmEnd-pos < 12`, which cannot wrap because `pos`
+never passes `frmEnd`.
+
+A chunk's own bounds moved into `dffChunkEnd`, which subtracts too. Its old
+addressable check, `size > uint64(math.MaxInt64-body-1)`, wrapped at
+`body = math.MaxInt64` to `uint64(-1)` and admitted any size, and
+`body+size+pad` then wrapped negative and passed the form's bound. `Open`
+cannot produce that body today, because a body is a form position plus 12
+and so even, while `math.MaxInt64` is odd: the check was safe by parity
+alone, and is now safe by its arithmetic.
+
+Red first: `TestDFFWalkReadsNothingPastItsForm` wraps the reader in one that
+records every read request (offset and length asked for), and failed with a
+read of 12 bytes at 9223372036854775806 past a form ending at
+9223372036854775807; it also checks every DFF golden's walk stays inside its
+form. `TestDFFChunkEndBoundsBySubtraction` (in package `decode`, since the
+helper is unexported) failed at `body = math.MaxInt64`: a one-byte chunk
+was accepted ending at -9223372036854775807, and a `math.MaxUint64` size
+ending at `math.MaxInt64`. Controls on the committed fix: putting
+`pos+12 > frmEnd` back reddens the first test alone; putting the old
+addressable expression back reddens the second alone (its one- and
+two-byte cases then come back as truncated, and the largest size is
+accepted). The limit check in `dffChunkEnd` subtracts for the same shape,
+but cannot wrap once the addressable check holds, so no control tells it
+apart from a sum.
+
+The audit of the other sums found nothing else that wraps. `PROP`'s walk is
+in memory and compares each size with what is left of the slice. The sound
+chunk's end, `dataStart+size`, is inside the addressable bound
+`dffChunkEnd` checked. `linearRegion`'s offsets stay below that end. DSF's
+chunk walk already subtracts (`size > MaxInt64-pos`, and `pos` only grows
+by a size that passed it), the data chunk's end is therefore at most
+`math.MaxInt64`, and each block group's span (`dataStart` plus the group's
+offset plus at most 8192 bytes) stays inside the `need` bytes the data
+chunk was checked to hold. `dsf.go` is unchanged.
+
+### 2. The COMT padding fix had no regression
+
+The demuxer skips COMT by its size, so regenerating round 2's goldens with
+the comment's pad outside COMT's size again (`COMT declares 39 bytes`) left
+the player suite green, and the same held for dropping MANF, the only odd
+chunk the form's walk skips. `TestDFFGoldensCOMTFollowsSection36` reads each
+DFF golden's COMT from the committed bytes (§3.6): one comment, its 14-byte
+header, the odd count of 23, the text, the `0x00` pad inside the body, and a
+declared size of exactly 2+14+23+1 = 40. `TestDFFGoldensGiveTheWalksAnOddChunk`
+checks every DFF golden has an odd chunk before `PROP`, and every one but
+`dst.dff` (whose "DST Encoded" `CMPR` is 16 bytes) an odd chunk in `PROP`.
+
+To prove them red without touching the committed fixtures, `generate.py`
+takes `--out DIR` and the golden tests take `-dsd-goldens=DIR`. A wrapper
+outside the repo loaded the committed generator, replaced only `comt` (the
+round-1 layout) or only `manf` (no chunk), and wrote into a scratch
+directory. Against the round-1 COMT, the whole decode suite failed only
+`TestDFFGoldensCOMTFollowsSection36`, on all five DFF goldens ("COMT
+declares 39 bytes; its one comment of 23 bytes and its pad need 40");
+without MANF, only `TestDFFGoldensGiveTheWalksAnOddChunk`, on all five ("no
+odd chunk before PROP"). A nonexistent `-dsd-goldens` directory fails the
+golden tests, so the flag is what the tests read.
+
+### 3. Two rules said more than the code does
+
+The round-2 rule refused "a second `FVER`" anywhere, but the walk returns at
+the sound chunk and never reads past it, so a second `FVER` after the sound
+data is not seen; the rule now says "before the sound data", and so does
+the sentence on skipped chunks (`DIIN` and `ID3 ` usually follow the sound
+data and are never read). Walking past the sound data was not taken: it
+would read a tail no decode needs, and could refuse a playable file for a
+damaged tag. The rule that "each DFF golden gives both chunk walks an odd
+chunk" left out `dst.dff`, whose `CMPR` is 16 bytes; it now names which
+goldens give which walk one, which `TestDFFGoldensGiveTheWalksAnOddChunk`
+pins.
+
+### A correction to a commit message
+
+`TestDFFChunkEndBoundsBySubtraction`'s doc first opened "dffChunkEnd bounds
+…", naming the helper rather than the test, and 9c04ec51 reworded it. Its
+message says this is the shape `TestNoDocblockNamesAnotherDeclaration`
+refuses. A control says otherwise: with the old wording put back, that guard
+passes. It looks a doc's subject up among the declarations of its own scope,
+and a test file's scope is its package's test files alone, while
+`dffChunkEnd` is declared in `dff.go`. The rewording stands on the
+convention the guard enforces elsewhere (a doc opens with the name it
+documents); the guard did not require it.
+
+### Fuzzing
+
+Each target ran 3 minutes on the round-3 code (`-fuzzminimizetime 1s`),
+continuing from the cached corpus: `FuzzDFFOpen` 53,837,871 execs, 12 new
+entries (204 in all); `FuzzDSFOpen` 48,433,692 execs, 9 new (124 in all).
+Neither found a crasher. The wrap in finding 1 needs a form size and a
+chunk size that together reach `math.MaxInt64-1` exactly, which the fuzzer
+had not reached in any round.
+
+## 2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding
+
+### Trigger
+
+Codex reviewed PR #1293 against the DSF and DSDIFF 1.5 specifications; the
+owner verified three findings.
+
+### 1. `BytesPerChannel` wrapped negative
+
+`format.NativeDSD.BytesPerChannel` was `(Frames+7)/8`, which wraps for a
+`Frames` within 7 of `math.MaxInt64`. A DSF can declare such a count: its
+fmt chunk's sample count is a `uint64`, and `newDSF` refused only a count
+past `MaxInt64`, so with a data chunk declared large enough (2^61 bytes for
+`MaxInt64` samples) the file opened and passed `Validate`, while its length
+was −1,152,921,504,606,846,975 and a seek to its end was refused. The
+round-1 hostile tests enlarged the sample count alone, which the data-size
+check refuses first, so none reached the arithmetic; the fuzzer did not
+reach it either (it needs two eight-byte fields set together).
+`BytesPerChannel` now divides and adds one for a remainder: 0 for a
+`Frames` of 0 or less, at most 2^60, so any byte offset derived from it
+fits in an `int64`. The DSF decoder takes its end from the same function,
+where it used to compute its own, so the reported length and the decoder's
+end cannot disagree. DFF was not affected (its count is the sound chunk's
+size, bounded by `MaxInt64/8` per channel), and shares the fix.
+
+Red first: `TestNativeDSDBytesPerChannel` (expectations in arbitrary
+precision) failed at `MaxInt64-6`, `MaxInt64-1`, `MaxInt64` and
+`MinInt64`; `TestDSFHugeSampleCountKeepsItsByteArithmetic`, which enlarges
+both the sample count and the declared data size of a golden, failed with
+the negative length; and `FuzzDSFOpen`, seeded with that file, failed its
+"never more than `BytesPerChannel`" property.
+
+### 2. DFF never checked FVER
+
+DSDIFF 1.5 §3 makes `FVER` the form's first chunk and §3.1 its body the
+four-byte version, whose first byte is the major version. The walk skipped
+`FVER` like any unknown chunk, so a file without one, with it elsewhere or
+twice, of another size or of major version 2 opened. The first chunk must
+now be `FVER`; a second is refused; its size must be 4; its major version
+must be 1 (`dffMajorVersion`; 1.4 files share the layout, so the minor
+version is not checked). Each refusal is `unsupported_layout` and names
+`FVER`, and a file cut inside the version is `truncated_or_corrupt`.
+
+Red first: `TestDFFFormatVersionRequired` failed in all eleven refusal
+cases (ten opened; the cut file was refused as "no DSD sound data", not
+for its `FVER`); its two accepted versions (1.4, 1.255) already opened.
+The chunk-bomb fixture had no `FVER`: once one was required it would have
+been refused at its first chunk, still `unsupported_layout`, and stopped
+testing the chunk cap with `TestDSDAbsurdSizesRefused` still green. It now
+starts with a valid `FVER`, and `TestDFFChunkBombStopsAtTheCap` checks the
+cap's own message; taking the `FVER` back out reddens that test alone.
+
+Controls, each check removed alone: the first-chunk check reddens
+`missing` (the cases with `FVER` second or after `PROP` are also caught by
+the second-`FVER` check); the second-`FVER` check reddens `twice in a row`
+and `again before the sound data`; the size check reddens `two bytes` and
+`eight bytes` (`empty` is then still refused, by the major-version check
+reading the next chunk's id); the major-version check reddens `major 2`
+and `major 0`.
+
+### 3. The generator's DFF padding
+
+`pstring` put the pad byte of CMPR's compressionName inside CMPR's size (20
+bytes for "not compressed"; §3.2.3 has compressionType, Count and the name,
+19 bytes, and §2.3 the chunk's own pad after the size), and `comt` wrote the
+comment's pad outside COMT's size (§3.6 puts it inside, uncounted by the
+comment's `count`). So every `PROP` sub-chunk of the accepted goldens was
+even. Measured before the fix: with `PROP`'s pad skip removed
+(`next := 12 + size`), the whole package passed.
+
+The generator now writes the 19-byte `CMPR` and pads the comment inside
+`COMT`. That alone would have traded one blind spot for another: COMT's odd
+size was the only odd chunk the form's own walk skipped before the sound
+data, and a spec `COMT` is always even. Measured: with only the COMT fix,
+removing the form walk's pad skip also left the package green. So each DFF
+golden now carries a 7-byte `MANF` (manufacturer id `1BIT`, three bytes of
+data) between `COMT` and `PROP`. After the fix, removing either pad skip
+reddens every DFF golden test: `PROP`'s walk misreads the chunk after
+`CMPR` as `"\x00ABS"`, the form's walk the chunk after `MANF` as
+`"\x00PRO"`. The pattern and the DSF fixtures are unchanged, the DFF goldens
+still decode to the pattern byte for byte, and rerunning the generator
+leaves the committed fixtures byte-identical.
+
+The demuxer reads only CMPR's four-byte compressionType, so a CMPR that
+counts the name's pad inside its size still opens. That is the form the
+bridge's own `internal/dsdtone.WriteDFF` writes.
+`TestDFFCMPRWithItsNamePadInsideStillOpens`
+rewrites a golden's CMPR into that form and checks it decodes, and checks
+the golden itself carries the 19-byte form.
+
+### Fuzzing
+
+`FuzzDSFOpen` is also seeded with finding 1's file (`MaxInt64` samples, a
+data chunk declared to fit them), so its properties check that file on
+every `go test`. Each target ran 60 s on the round-2 code
+(`-fuzzminimizetime 1s`), continuing from round 1's cached corpus: DSF
+15,322,108 execs, 20 new entries (115 in all); DFF 18,207,845 execs, 48 new
+(192 in all). Neither found a crasher.
+
+## 2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD
+
+### What shipped
+
+`decode.Open` returns a `Source`: a PCM `Decoder` or a `DSDDecoder`, chosen
+by content. `DSDDecoder` reads channel-separated bytes, bit 7 earliest
+(`format.NativeDSD`, which gains `Container`, `BytesPerChannel` and
+`Validate`), with an exact per-channel byte `Seek`. `sniffDSF`/`sniffDFF`
+now open `openDSF`/`openDFF` instead of refusing `not_yet_supported`.
+Stereo DSD64..DSD512 only. DST and other DFF compressions, other channel
+counts, the 48 kHz family and DSD1024 are typed refusals.
+
+### Shared code
+
+PR 1a round 7 had to remove a WAV/AIFF clone pair SonarCloud refused, so DFF
+does not add a third: `pcmRegion`'s linear read became `linearRegion`
+(frames handed to a callback), which `pcmRegion` embeds for WAV and AIFF and
+`dffDecoder` embeds for DFF. The round-6 seek-back on cancel or I/O error and
+the region cap are therefore one implementation for all three. DSF cannot
+share it, because its positions are not linear: each read covers one block
+group's span (channel 0's run to the last channel's) and seeks to that
+span's absolute offset first, so there is no reader state to restore after a
+cancel or an I/O error.
+
+### Decisions
+
+- **A DSF sample count that is not a multiple of eight.** The decoder emits
+  whole bytes, so `BytesPerChannel` rounds up and the last byte's trailing
+  bits are the file's padding, unchanged. Rounding down would drop real
+  samples; refusing such files would refuse files that are otherwise sound.
+  `NativeDSD.Frames` keeps the exact count so the transport (PRs 2c/2d) can
+  account for the tail. Pinned by `lsb_dsd64_797_samples.dsf`.
+- **DFF channel order.** `CHNL` may list `SRGT` before `SLFT`; the decoder
+  maps the file's order back to left, right. Other ids (`C001`…, `MLFT`…)
+  on a stereo file are refused rather than guessed.
+- **DSF block size is 4096 only**, as the specification fixes it; any other
+  value is refused rather than trusted as an allocation or stride.
+- **The DSF metadata pointer and total size are never used**: reads end at
+  the sample count, so a pointer into the audio, past the file or to
+  `2^64-1` changes nothing (`TestDSFMetadataPointerIgnored`).
+
+### Goldens
+
+`scripts/player-dsd-goldens/generate.py` (standard library only; no
+reference tool for DSD containers was installed on the host, and none is
+needed) writes the DSF and DFF fixtures from Sony's DSF 1.01 and Philips'
+DSDIFF 1.5 around a pattern specified in canonical form: every byte drawn
+from the 240 non-palindromic bytes, left `NP[7i mod 240]` and right
+`NP[(11i+3) mod 240]` (`4i+3` is odd, so they differ at every index), and
+`0x00` never occurs. A missed or extra bit reversal, a channel swap or
+padding read as audio therefore each change bytes. The generator is
+deterministic: rerunning it left the committed fixtures byte-identical.
+`pattern.bin` has no NUL, so git would call it text: the fixtures are
+`binary` in `.gitattributes`. (Round 2, the entry above, found the DFF
+fixtures' CMPR and COMT padding was not to the specification and fixed it.)
+
+### Red first and negative controls
+
+Before `openDSF`/`openDFF` existed, all eleven new tests failed with
+`not_yet_supported`: `TestDSDGoldensMatchPattern`,
+`TestDSDGoldensExactSeek`, `TestDSDGoldensEOFAtSampleCount`,
+`TestDSDGoldensRefused`, `TestDSDTruncatedMidBlock`, `TestDSDAfterID3Prefix`,
+`TestDSDAbsurdSizesRefused`, `TestDSFMetadataPointerIgnored`,
+`TestDSDCancelThenRetryNoGap`, `TestDSDIOErrorThenRetryNoGap`,
+`TestDSDReadBufferShape`. Each control below was run against the committed
+decoders and reverted:
+
+| Mutation | Tests that failed |
+|---|---|
+| LSB-first DSF not reversed | MatchPattern, ExactSeek, EOFAtSampleCount on the three LSB fixtures; TruncatedMidBlock, MetadataPointerIgnored, CancelThenRetryNoGap (LSB) |
+| MSB-first DSF reversed too | the same set on `msb_dsd128_partial_block.dsf`; AfterID3Prefix, IOErrorThenRetryNoGap (MSB) |
+| Final block's padding read as audio | the partial-block and 797-sample fixtures (not `whole_blocks`), AfterID3Prefix, MetadataPointerIgnored, both retry tests |
+| DSF block group stride of one channel | every DSF golden test |
+| `CHNL` order ignored | `dsd256_right_first.dff` in MatchPattern, ExactSeek, EOFAtSampleCount, IOErrorThenRetryNoGap |
+| `linearRegion` seek-back on cancel removed | `TestDSDCancelThenRetryNoGap/dsd64.dff` and PR 1a's `TestReviewR6CancelThenRetryNoGap` (wav, aiff) |
+| DSF cancel advances past unreturned bytes | `TestDSDCancelThenRetryNoGap/lsb_dsd64_partial_block.dsf` |
+| DSF `uint64` addressable-length check removed | `TestDSDAbsurdSizesRefused/dsf_data_size_huge` |
+| DST accepted in `CMPR` and as a sound chunk | `TestDSDGoldensRefused` (`dst.dff`) |
+| Any channel count accepted | `TestDSDGoldensRefused` (all four), `TestDSDAbsurdSizesRefused` (count 2^31, 0) |
+
+### Fuzzing
+
+`FuzzDSFOpen` and `FuzzDFFOpen` are seeded with every golden of their
+container. Each body checks that an opened input has an accepted shape;
+that a read never returns more than asked, more than `BytesPerChannel` or
+more audio than the input holds; that a clean EOF comes exactly at
+`BytesPerChannel`; and that seeks to the start and the end succeed while
+one past the end is refused. Each ran 75 s locally (`-fuzzminimizetime 1s`):
+DSF 19,213,313 execs and 94 corpus entries; DFF 21,270,304 execs and 144
+entries. Neither found a crasher, so no regression input was committed.
 
 ## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
 

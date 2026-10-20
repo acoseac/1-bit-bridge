@@ -18,7 +18,7 @@ func TestFLACConstantStereo16(t *testing.T) {
 		value  = 1234
 	)
 	raw := encodeFLACPCM(t, rate, bits, constantStereo(frames, value))
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestFLACSeekExact(t *testing.T) {
 		interleaved[i*2+1] = -int32(i)
 	}
 	raw := encodeFLACPCM(t, 48000, 24, interleaved)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestFLACMonoRefused(t *testing.T) {
 
 func TestFLACCancelRead(t *testing.T) {
 	raw := encodeFLACPCM(t, 44100, 16, constantStereo(20000, 1))
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestFLACCancelRead(t *testing.T) {
 
 func TestFLACEOF(t *testing.T) {
 	raw := encodeFLACPCM(t, 44100, 16, constantStereo(32, 7))
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}

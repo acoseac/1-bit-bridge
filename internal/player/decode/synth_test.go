@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -11,6 +12,20 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
+
+// openPCM opens rs and requires a PCM Decoder; a DSD source is an error.
+func openPCM(rs io.ReadSeeker) (decode.Decoder, error) {
+	s, err := decode.Open(rs)
+	if err != nil {
+		return nil, err
+	}
+	d, ok := s.(decode.Decoder)
+	if !ok {
+		s.Close()
+		return nil, fmt.Errorf("opened %T, want a PCM Decoder", s)
+	}
+	return d, nil
+}
 
 func readAll(t *testing.T, d decode.Decoder) []int32 {
 	t.Helper()
@@ -36,7 +51,7 @@ func readAll(t *testing.T, d decode.Decoder) []int32 {
 func TestWAVStereo16RoundTrip(t *testing.T) {
 	samples := []int32{-32768, 32767, -1, 1, 0, 100, -100, 200}
 	raw := writeWAV(t, 44100, 2, 16, 16, samples, false, nil)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +74,7 @@ func TestWAVStereo16RoundTrip(t *testing.T) {
 func TestWAVExtensible24(t *testing.T) {
 	samples := []int32{-8388608, 8388607, -1, 1, 0x000001, 0x400000}
 	raw := writeWAV(t, 48000, 2, 24, 24, samples, true, nil)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +92,7 @@ func TestWAVChunkOrderBextBeforeFmt(t *testing.T) {
 	bext := make([]byte, 100)
 	copy(bext, []byte("bext-metadata-placeholder"))
 	raw := writeWAV(t, 44100, 2, 16, 16, samples, false, bext)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +121,7 @@ func TestWAVSeekExact(t *testing.T) {
 		samples = append(samples, i, -i)
 	}
 	raw := writeWAV(t, 8000, 2, 16, 16, samples, false, nil)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +143,7 @@ func TestWAVSeekExact(t *testing.T) {
 func TestAIFFStereo16(t *testing.T) {
 	samples := []int32{-32768, 32767, -1, 1}
 	raw := writeAIFF(t, 8000, 2, 16, samples, false)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +159,7 @@ func TestAIFFStereo16(t *testing.T) {
 func TestAIFCsowt(t *testing.T) {
 	samples := []int32{-1000, 1000, -2, 2}
 	raw := writeAIFF(t, 8000, 2, 16, samples, true)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}

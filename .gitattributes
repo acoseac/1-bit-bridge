@@ -5,3 +5,8 @@ internal/manifest/testdata/playlist-parse-cases.tsv text eol=lf
 # checkout so a raw dump of one is the capture's bytes.
 internal/alsa/testdata/** text eol=lf
 internal/mpd/testdata/** text eol=lf
+# The DSD goldens are compared byte for byte; pattern.bin has no NUL byte by
+# design, so git would call it text and a CRLF checkout would change it.
+internal/player/decode/testdata/dsd-goldens/*.bin binary
+internal/player/decode/testdata/dsd-goldens/*.dsf binary
+internal/player/decode/testdata/dsd-goldens/*.dff binary

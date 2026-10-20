@@ -57,7 +57,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/alsa` | Reads the box's ALSA state from a `/proc` tree: the cards, a USB card's id and stream altsets, what an open playback substream was opened with, and the thread and process holding it (`bridge output dac`) |
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader: the box's player (Volumio, moOde or MPD) and how MPD is set (`bridge output player`). Sends only an allowlist; a password is never printed |
 | `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
-| `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF) and typed refusals |
+| `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF), DSF and DFF demuxers into canonical native DSD (B470 PR 1b), and typed refusals |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/version` | `ServerVersion` + `ProtocolVersion` constants (source of truth for `PROTOCOL.md`) |
 

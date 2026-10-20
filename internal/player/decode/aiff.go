@@ -206,13 +206,16 @@ func openAIFF(rs io.ReadSeeker) (Decoder, error) {
 	}
 	d := &aiffDecoder{
 		pcmRegion: pcmRegion{
-			rs:          rs,
-			pcm:         pcm,
-			regionStart: ssndDataStart,
-			regionEnd:   ssndDataStart + needBytes,
-			frameBytes:  fb,
-			earlyEnd:    "AIFF SSND ends before declared frame count",
-			midFrame:    "AIFF SSND ends mid-frame",
+			linearRegion: linearRegion{
+				rs:          rs,
+				regionStart: ssndDataStart,
+				regionEnd:   ssndDataStart + needBytes,
+				frameBytes:  fb,
+				frames:      pcm.Frames,
+				earlyEnd:    "AIFF SSND ends before declared frame count",
+				midFrame:    "AIFF SSND ends mid-frame",
+			},
+			pcm: pcm,
 		},
 		littleEndian: littleEndian,
 	}
