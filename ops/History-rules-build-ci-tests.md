@@ -585,6 +585,23 @@
   commands before its deferred Close; `handshakelog` waits on
   `StateClosed` after the line is written.
 
+- **Dependabot's github-actions ecosystem groups `github/codeql-action*`
+  so the three CodeQL steps arrive in one PR** (2026-10-20, backlog
+  B459). `init` stamps its own version into a config file that
+  `autobuild` and `analyze` refuse when the versions differ ("Loaded a
+  configuration file for version '4.38.3', but running version
+  '4.38.2'"). Without a group, Dependabot treats the three
+  `uses:` lines as independent dependencies and opens one PR per step;
+  the 4.38.3 batch (#1264 init, #1265 analyze, #1268 autobuild) each
+  failed `analyze (go)` alone and was superseded by one combined PR
+  (#1278). `.github/dependabot.yml` therefore has a `codeql-action`
+  group under the github-actions ecosystem with
+  `patterns: ["github/codeql-action*"]`; `update-types` is left unset so
+  major, minor and patch all join the same PR (Dependabot's default for
+  groups). The three SHAs in `codeql.yml` must still be equal — a hand
+  edit can diverge them — and the workflow comment names the group
+  instead of telling a maintainer to close singles by hand.
+
 - **A docblock that names a test is a claim, and six of them were false.** Two
   stood in for an invariant nothing pinned at all; one was a false safety claim
   on a security boundary (`managed_controls.go` said a test "walks the registered
