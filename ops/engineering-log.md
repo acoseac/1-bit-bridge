@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening](#2026-10-20--b470-pr-1a-round-2-argon--codex-decoder-hardening)
 - [2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens](#2026-10-20--b470-pr-1a-player-pcm-representations-decoders-and-goldens)
 
 - [LOUPE on the lyrics surface (PRs #849 / #850 / #851, 2026-09-06)](#loupe-on-the-lyrics-surface-prs-849--850--851-2026-09-06)
@@ -47834,6 +47835,50 @@ bind.
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
 
+## 2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening
+
+### Trigger
+
+PR #1289 reviews `.review-argon.md` (Gemini static) and `.review-codex.md`
+(Codex with hostile probes). High/Medium findings overlapped on WAV
+extensible alignment, FLAC STREAMINFO vs frame, unbounded metadata
+allocations, AIFF rates/confinement, sniffing, cancellation and seeking.
+
+### What changed
+
+Stopped using `flac.NewSeek` entirely: custom metadata walk skips PICTURE
+bodies by seeking (Codex H3: 78-byte file no longer allocates 128 MiB);
+seeking uses optional SEEKTABLE + cancellable forward scan with
+`ctxReadSeeker` wrapping every mewkiz byte read. Sample positions accumulate
+`BlockSize` from the scan start — mewkiz `SampleNumber()` multiplies frame
+number by the *current* (short final) block size, which broke seeks to
+8192/8193/8999 on a 9000-frame stream (Argon H4 / Codex M5). Unknown
+`NSamples==0` still opens; `Seek(0)` rewinds to `dataStart`. Inherited
+frame bit-depth/rate (code 000) resolved from STREAMINFO before `Parse`.
+
+WAVE_FORMAT_EXTENSIBLE: `>>= container-valid` then sign-extend (was masking
+low bits → sample corruption). AIFF: exact integer rate (no `Round`), reject
+Inf/NaN/negative; SSND offset and payload length vs COMM frames; reads
+confined to `ssndStart..ssndEnd`. WAV: RIFF body bound, `dataSize%frame==0`,
+chunk size caps. PCM reads chunk at 64 KiB and check `ctx` after each
+`ReadFull`. ID3: sniff returns start offset; `Open` wraps `offsetSeeker`.
+MP4: walk `stsd` sample entries; unknown brand → unknown, not AAC.
+
+Goldens: in-range seek requires `n == Channels` (Codex M10 control: broken
+seek returning `(0,EOF)` used to pass).
+
+### Not taken
+
+Codex Low 14 (corpus as qualification): the private corpus remains a
+diagnostic census over untracked `~/medialibtest-formats/`; support
+contracts stay on goldens + synth/review tests. Splitting census vs
+qualification needs a committed fixture set and is out of this round.
+
+### Tests
+
+`TestReview*` in `review_fix_test.go` (red-first probes from both reviews);
+`TestGoldensExactSeek`; existing FLAC/WAV/AIFF suites.
+
 ## 2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens
 
 ### What shipped
@@ -47847,12 +47892,10 @@ refuses lossy and unsupported shapes with a typed Refusal.
 
 ### FLAC Seek
 
-mewkiz/flac v1.0.14 Stream.Seek uses an embedded SEEKTABLE when present;
-otherwise makeSeekTable walks every frame once. It does not bisect on
-frame sync. On a seektable-less ~100k-frame stereo stream the first seek
-took ~6 ms in-process; no bounded lazy index in this PR. 32-bit FLAC is
-refused: modern flac(1) emits sample-size code 111, which mewkiz still
-treats as reserved. 32-bit WAV and AIFF remain supported.
+Round 1 used mewkiz Stream.Seek; round 2 replaced it (see the round-2 entry
+above). 32-bit FLAC remains refused: modern flac(1) emits sample-size code
+111, which mewkiz still treats as reserved. 32-bit WAV and AIFF remain
+supported.
 
 ### Goldens
 
