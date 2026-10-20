@@ -584,7 +584,19 @@ var Ext = map[string]bool{
 // and a version 2.2 tag holding TT1 or TXX:WORK. Every other row re-extracts
 // byte-identical and rides the version-stamp leg; SACD ISO virtual rows
 // re-expand as on every bump. ProtocolVersion stays 1.
-const ExtractorVersion = 26
+//
+// v27 — the AIFF, WAV, DFF and DSF walks apply the filename-stem explicit
+// marker when they read no title tag (backlog B466). The v23 rule already
+// said the stem counts when no title tag was read, and readDhowdenTags
+// applied it on its no-tags branch, but a chunk walk that found no ID3 (or,
+// for WAV, a LIST/INFO with no title) left Explicit false. applyStemExplicitMark
+// is that branch, shared. A WAV with an untitled ID3 chunk already counted
+// the stem through populateFromTagMetadata. Only a row the stem now marks
+// explicit takes the full-upsert leg (its enrichment re-queued once) and is
+// the iOS delta. Every other row re-extracts byte-identical and rides the
+// version-stamp leg; SACD ISO virtual rows re-expand as on every bump.
+// ProtocolVersion stays 1.
+const ExtractorVersion = 27
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1076,9 +1088,7 @@ func readDhowdenTags(f io.ReadSeeker, absPath string, t *Track, ec *ExtractConte
 	if errors.Is(err, tag.ErrNoTagsFound) {
 		// No embedded tags. A marker on the filename stem still counts;
 		// fillFromPath stored that stem before this read.
-		if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
-			t.Explicit = true
-		}
+		applyStemExplicitMark(t)
 		// A folder.jpg next to the file is still possible. Run
 		// extractLocalArtwork with m=nil so the embedded branch is
 		// skipped and only the folder-level fallback fires.
@@ -1342,8 +1352,8 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 				t.BPM = &n
 			}
 		}
-	} else if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
-		t.Explicit = true
+	} else {
+		applyStemExplicitMark(t)
 	}
 	decodeID3v1Text(m, t)
 }
@@ -2495,6 +2505,12 @@ func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *Extract
 	// without them, since the directory-level cache does not depend on
 	// tag-read success.
 	dsfMeta := readDSFTags(f, metadataPointer, absPath, t)
+	// No ID3 tag (pointer 0, or a tag that could not be read): the path
+	// stem's marker still counts. When an ID3 tag was read,
+	// populateFromTagMetadata already decided.
+	if dsfMeta == nil {
+		applyStemExplicitMark(t)
+	}
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, dsfMeta, ec)
 	}
@@ -2643,6 +2659,12 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			id3 = applyEmbeddedID3(prop.id3, t, nil, absPath, "dff")
 		}
 		diin.applyUnder(t, id3)
+		// No ID3 chunk: the path stem's marker still counts. applyUnder
+		// already recomputed from a DIIN title that replaced it. When an
+		// ID3 chunk was read, populateFromTagMetadata already decided.
+		if id3 == nil {
+			applyStemExplicitMark(t)
+		}
 		if ec != nil && ec.ArtworkCacheDir != "" {
 			extractLocalArtwork(absPath, t, id3, ec)
 		}

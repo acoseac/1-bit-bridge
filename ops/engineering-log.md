@@ -47843,11 +47843,95 @@ bind.
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
 
+## 2026-10-20 — AIFF, WAV, DFF and DSF apply the filename-stem explicit marker (ExtractorVersion 27, backlog B466)
+
+### The question
+
+The B446 pin (2026-10-19) measured a gap beside its WAV ID3 cases: a chunk
+walk that reads no ID3 tag never asked the filename stem, so
+`Song [E].wav`, `.aiff`, `.dff` and `.dsf` (metadata pointer 0) and
+`Info [E].wav` whose LIST/INFO has an artist and no title all stored
+`Explicit` false. The v23 rule already said the stem counts when no title
+tag was read, and `readDhowdenTags` applied it on its no-tags branch. A WAV
+with an untitled ID3 chunk already counted the stem through
+`populateFromTagMetadata`.
+
+### Red first
+
+`TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle` on
+`d7d03830` (the test alone, against ExtractorVersion 26) failed the five
+marked cases and left `plain.wav` green:
+
+```
+--- FAIL: TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle (0.05s)
+    --- FAIL: …/Song_[E].wav — Explicit = false, want true
+    --- FAIL: …/Aiff_[E].aiff — Explicit = false, want true
+    --- FAIL: …/Dff_[E].dff — Explicit = false, want true
+    --- FAIL: …/Dsf_[E].dsf — Explicit = false, want true
+    --- FAIL: …/Info_[E].wav — Explicit = false, want true
+```
+
+Each case is a real `Scanner` scan (fillFromPath before extract) and a
+`WriteManifest` wire check via `requireExplicitRow`.
+
+### Fix
+
+`applyStemExplicitMark` is the no-title-tag half of the v23 rule that
+`readDhowdenTags` already ran inline. The AIFF, WAV, DFF and DSF walks call
+it after their chunk walk (WAV and DFF after `containerText.applyUnder`,
+which already recomputes from a container title that replaced the stem).
+`readDhowdenTags` and `populateFromTagMetadata`'s nil-raw branch call the
+same helper. ExtractorVersion 27. ProtocolVersion stays 1; the wire field
+and its documented rule are unchanged — only the four walks now honour the
+stem half.
+
+### Delta
+
+`TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps`:
+rows rewound to v26 with `explicit` removed re-extract once. The five stem
+cases gain Explicit, advance `indexed_at` and reset `enriched_at`;
+`plain.wav` is only stamped.
+
+### iOS verdict
+
+`BridgeSyncActor` sets
+`explicit = ExplicitContent.verdict(tagSignals: [bt.explicit], rawTitle:)`
+with `rawTitle = nonEmpty(bt.title) ?? filenameStem`. For these files the
+wire title is already the stem (`Song [E]`…), so the app's badge was true
+from `titleMarker` even while the bridge stored `Explicit` false. After the
+fix the wire field is true too: the badge still shows, and the two sides
+agree on the field as well as the display. No iOS change required.
+`Track.Explicit`'s doc ("clients apply title markers themselves when the
+field is absent") is why the badge already covered them.
+
+### Round 2 (PR #1290 review)
+
+A review read the unconditional end-of-walk `applyStemExplicitMark` as
+flipping a clean ID3 advisory (`ITUNESADVISORY=2` / `EXPLICIT=0`, no TIT2)
+to explicit on an `[E]`-named file. It does not change the verdict: when an
+ID3 chunk was read, `populateFromTagMetadata` had already decided through
+`ExplicitVerdict`, where the stem stands in for an absent title and any
+signal wins, so that file was explicit before B466 too, as
+`TestExplicitVerdict/clean_advisory_does_not_cancel_a_title` says for a
+title. A first round-2 draft made `populateFromTagMetadata` drop the stem
+whenever an advisory field was present; that would have changed the v23
+rule for every tagged format and made a stem marker weaker than the same
+marker in a title, so it was not kept.
+
+What changed: the four calls now run only when no ID3 metadata was read
+(`idTagMetadata == nil` / `dsfMeta == nil` / `id3 == nil`), which is what
+the helper's comment said; the verdicts are unchanged.
+`TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle` pins
+them: clean advisory with no TIT2 on an `[E]` stem is explicit (WAV, AIFF,
+DFF, DSF, and `EXPLICIT=0`); a clean advisory with no marker anywhere is
+clean; a TIT2 carrying `[E]` beside a clean advisory is explicit; a WAV with
+no ID3 whose LIST/INFO title is clean is clean.
+
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 
 ### Trigger
 
-Codex reviewed round 2 of PR #1293; the owner verified three findings.
+Codex reviewed round 2 of PR #1293; all three findings were verified.
 
 ### 1. An offset sum in the DFF walk could wrap
 
@@ -48370,3 +48454,25 @@ after round 3 of renaming 10 folders of 12 files the watcher holds 136 open file
 ```
 
 The test's expected counts were not widened.
+
+## 2026-10-20 — Dependabot groups the three github/codeql-action steps (backlog B459)
+
+### What failed
+
+Dependabot opened one PR per `github/codeql-action/{init,autobuild,analyze}`
+step. Each failed `analyze (go)` alone: `init` writes a config stamped with
+its own version, and the other two refuse a config from a different release
+("Loaded a configuration file for version '4.38.3', but running version
+'4.38.2'"). The 4.38.3 batch was #1264 / #1265 / #1268, superseded by the
+combined pin in #1278.
+
+### What changed
+
+`.github/dependabot.yml`'s github-actions ecosystem gained a `codeql-action`
+group with `patterns: ["github/codeql-action*"]`. `update-types` is left
+unset so major, minor and patch all join that PR (Dependabot's documented
+default for groups). Schedule, directory and the gomod/docker ecosystems
+are unchanged. `codeql.yml`'s comment now names the group instead of telling
+a maintainer to close singles by hand; the three SHAs must still be equal.
+The rule is under **Build, CI, and test discipline** in
+`.claude/rules/build-ci-tests.md`.
