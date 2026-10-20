@@ -32,6 +32,9 @@ type wavDecoder struct {
 	frameBytes    int
 	posFrame      int64
 	byteBuf       []byte
+	// readStuck is set when a seek-back after a failed/cancelled read fails;
+	// later ReadFrames return it until a successful Seek clears it.
+	readStuck error
 }
 
 func openWAV(rs io.ReadSeeker) (Decoder, error) {
@@ -233,10 +236,28 @@ func (d *wavDecoder) Seek(ctx context.Context, frame int64) error {
 		return err
 	}
 	d.posFrame = frame
+	d.readStuck = nil
+	return nil
+}
+
+func (d *wavDecoder) bytePos() int64 {
+	return d.dataStart + d.posFrame*int64(d.frameBytes)
+}
+
+// seekToPos rewinds the underlying reader to posFrame so a cancelled or
+// failed read that consumed bytes cannot leave a gap into trailing chunks.
+func (d *wavDecoder) seekToPos() error {
+	if _, err := d.rs.Seek(d.bytePos(), io.SeekStart); err != nil {
+		d.readStuck = err
+		return err
+	}
 	return nil
 }
 
 func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
+	if d.readStuck != nil {
+		return 0, d.readStuck
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -257,6 +278,21 @@ func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
 			return out, err
 		}
 		chunk := framesPerRead(d.frameBytes, framesWant)
+		// Second guard: never read past the declared data chunk.
+		regionLeft := d.dataEnd - d.bytePos()
+		if regionLeft < 0 {
+			regionLeft = 0
+		}
+		maxByRegion := int(regionLeft / int64(d.frameBytes))
+		if chunk > maxByRegion {
+			chunk = maxByRegion
+		}
+		if chunk == 0 {
+			if d.posFrame < d.pcm.Frames {
+				return out, refuse(ReasonTruncated, "WAVE data ends before declared frame count")
+			}
+			return out, io.EOF
+		}
 		need := chunk * d.frameBytes
 		if cap(d.byteBuf) < need {
 			d.byteBuf = make([]byte, need)
@@ -266,8 +302,12 @@ func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
 		n, err := io.ReadFull(d.rs, d.byteBuf)
 		// Check cancellation after the read: a single chunk can cover the
 		// whole dst, so a pre-read check alone would miss a cancel that
-		// fires during ReadFull (Codex M8).
+		// fires during ReadFull (Codex M8). Bytes already consumed must be
+		// seeked back so posFrame and the reader stay aligned (R6).
 		if cerr := ctx.Err(); cerr != nil {
+			if e := d.seekToPos(); e != nil {
+				return out, e
+			}
 			return out, cerr
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -279,12 +319,18 @@ func (d *wavDecoder) ReadFrames(ctx context.Context, dst []int32) (int, error) {
 			}
 			whole := n / d.frameBytes
 			if whole == 0 || n%d.frameBytes != 0 {
+				if e := d.seekToPos(); e != nil {
+					return out, e
+				}
 				return out, refuse(ReasonTruncated, "WAVE data ends mid-frame")
 			}
 			d.byteBuf = d.byteBuf[:whole*d.frameBytes]
 			chunk = whole
 			err = refuse(ReasonTruncated, "WAVE data ends before declared frame count")
 		} else if err != nil {
+			if e := d.seekToPos(); e != nil {
+				return out, e
+			}
 			return out, err
 		} else {
 			err = nil
