@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error](#2026-10-20--b470-pr-1a-round-6-wavaiff-seek-back-after-cancel-or-io-error)
 - [2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut](#2026-10-20--b470-pr-1a-round-5-moov-4-mib-scan-must-keep-codecs-past-the-cut)
 - [2026-10-20 — B470 PR 1a round 4: MP4 extended-size panic and cancel-seek test](#2026-10-20--b470-pr-1a-round-4-mp4-extended-size-panic-and-cancel-seek-test)
 - [2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups](#2026-10-20--b470-pr-1a-round-3-argon-seektableid3mp4aiff-follow-ups)
@@ -47837,6 +47838,31 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1a round 6: WAV/AIFF seek-back after cancel or I/O error
+
+### Trigger
+
+CodeRabbit (verified): after `ReadFull` in WAV/AIFF `ReadFrames`, a
+post-read `ctx.Err()` or non-EOF I/O error returned without advancing
+`posFrame`, leaving the reader ahead. A later `ReadFrames` with a live
+context skipped those frames and could decode trailing `LIST`/`ID3`
+bytes as samples. FLAC keeps unreturned samples in `pending` and was
+left unchanged.
+
+### What changed
+
+On cancel, mid-frame truncation, or other I/O error after a read whose
+bytes are not committed to `posFrame`, seek the reader back to
+`dataStart/ssndStart + posFrame*frameBytes`. Cap each chunk by the
+bytes left to the audio-region end. A failed seek-back sticks until a
+successful `Seek`.
+
+### Tests
+
+`TestReviewR6WAVCancelThenRetryNoGap`, `…AIFFCancel…`, `…WAVIOError…`,
+`…AIFFIOError…`. Negative control: removing the cancel seek-back makes
+the WAV cancel/retry test fail with a truncated refusal again.
 
 ## 2026-10-20 — B470 PR 1a round 5: moov 4 MiB scan must keep codecs past the cut
 
