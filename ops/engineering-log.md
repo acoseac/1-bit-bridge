@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups](#2026-10-20--b470-pr-1a-round-3-argon-seektableid3mp4aiff-follow-ups)
 - [2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening](#2026-10-20--b470-pr-1a-round-2-argon--codex-decoder-hardening)
 - [2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens](#2026-10-20--b470-pr-1a-player-pcm-representations-decoders-and-goldens)
 
@@ -47834,6 +47835,29 @@ bind.
 `[::1]` and `localhost` rows with the old IPv4-only hint text; the
 `127.0.0.1`, unspecified (`0.0.0.0`) and empty-host (`:7789`) rows were
 already green.
+
+## 2026-10-20 — B470 PR 1a round 3: Argon SEEKTABLE/ID3/MP4/AIFF follow-ups
+
+### Trigger
+
+`.review-argon-r2.md` on the round-2 decoder: unvalidated SEEKTABLE points,
+ID3v2.4 footer offset, partial post-ID3 sniff, MP4 `meta` FullBox / depth,
+unnormalised AIFF 80-bit rates, and the short-read / FLAC truncation test gap.
+
+### What changed
+
+`seekPointBefore` only uses a point with `SampleNum <= target` and ignores
+overflow-sized fields; SEEKTABLE parse drops the same. ID3 start adds 10 when
+flag `0x10` (footer); post-ID3 classification shares `sniffContainer` with the
+unprefixed path (DSF/DFF/RF64/MP4). MP4 walk treats `meta` as FullBox, recurses
+only into known containers, caps depth and box count. `extended80ToFloat`
+requires the explicit integer bit when exp ≠ 0. Decoder docs: `n > 0` with a
+truncated Refusal on the same call is intentional; `TestReviewTruncation` no
+longer exempts FLAC.
+
+### Tests
+
+`TestReviewR3*` in `review_r3_test.go`; strengthened `TestReviewTruncation`.
 
 ## 2026-10-20 — B470 PR 1a round 2: Argon + Codex decoder hardening
 
