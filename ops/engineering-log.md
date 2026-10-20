@@ -47929,6 +47929,18 @@ chunk" left out `dst.dff`, whose `CMPR` is 16 bytes; it now names which
 goldens give which walk one, which `TestDFFGoldensGiveTheWalksAnOddChunk`
 pins.
 
+### A correction to a commit message
+
+`TestDFFChunkEndBoundsBySubtraction`'s doc first opened "dffChunkEnd bounds
+…", naming the helper rather than the test, and 9c04ec51 reworded it. Its
+message says this is the shape `TestNoDocblockNamesAnotherDeclaration`
+refuses. A control says otherwise: with the old wording put back, that guard
+passes. It looks a doc's subject up among the declarations of its own scope,
+and a test file's scope is its package's test files alone, while
+`dffChunkEnd` is declared in `dff.go`. The rewording stands on the
+convention the guard enforces elsewhere (a doc opens with the name it
+documents); the guard did not require it.
+
 ### Fuzzing
 
 Each target ran 3 minutes on the round-3 code (`-fuzzminimizetime 1s`),
