@@ -83,3 +83,8 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// Patched kqueue remove/Close order for fsnotify/fsnotify#795 (backlog B401).
+// Drop this replace when a released fsnotify carries the fix: bump the require
+// above and delete this line in the same change.
+replace github.com/fsnotify/fsnotify => github.com/acoseac/fsnotify v1.10.2-0.20261020172534-bda6368c20de
