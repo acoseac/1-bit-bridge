@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens](#2026-10-20--b470-pr-1a-player-pcm-representations-decoders-and-goldens)
 
 - [LOUPE on the lyrics surface (PRs #849 / #850 / #851, 2026-09-06)](#loupe-on-the-lyrics-surface-prs-849--850--851-2026-09-06)
 - [ALAC upscaling — the ffmpeg fallback, and three things only measurement settled (issue #127, 2026-09-02)](#alac-upscaling--the-ffmpeg-fallback-and-three-things-only-measurement-settled-issue-127-2026-09-02)
@@ -47769,3 +47770,38 @@ No second close-before-record: HTTP handlers (`authRecorder`,
 `handshakelog` waits on `StateClosed` after the failed-handshake line is
 written. The rule is under **Build, CI, and test discipline** in
 `.claude/rules/build-ci-tests.md`.
+
+## 2026-10-20 — B470 PR 1a: player PCM representations, decoders and goldens
+
+### What shipped
+
+internal/player/format holds the canonical PCM stream description (rate,
+channels, valid bits, container) and the Native DSD / DoP shapes for later
+PRs, plus ALSA packers S16_LE, S24_3LE, S24_LE and S32_LE (24-bit source
+shifted left eight bits). internal/player/decode is the streaming,
+cancellable decoder seam: content inspection opens FLAC / WAV / AIFF, and
+refuses lossy and unsupported shapes with a typed Refusal.
+
+### FLAC Seek
+
+mewkiz/flac v1.0.14 Stream.Seek uses an embedded SEEKTABLE when present;
+otherwise makeSeekTable walks every frame once. It does not bisect on
+frame sync. On a seektable-less ~100k-frame stereo stream the first seek
+took ~6 ms in-process; no bounded lazy index in this PR. 32-bit FLAC is
+refused: modern flac(1) emits sample-size code 111, which mewkiz still
+treats as reserved. 32-bit WAV and AIFF remain supported.
+
+### Goldens
+
+scripts/player-pcm-goldens/generate.py (not run by ordinary tests) builds
+small fixtures with flac, ffmpeg and afconvert, hashes samples from the
+reference decode path, and writes manifest.json. Tests check the bridge
+decoder against those hashes and exact seeks.
+
+### Private corpus (medialibtest-formats)
+
+McGill AIFF int16/24/32 and sowt decoded; 8/12-bit, float, mu-law and A-law
+refused. McGill WAV int24 and int32 extensible decoded. Sound Devices 24-bit
+fixed decoded (including bext-bearing files); 32-bit float refused. AAC/Ogg
+refused as lossy; ALAC refused as not-yet-supported (mdat-first files found
+via top-level box walk, not a short head scan).

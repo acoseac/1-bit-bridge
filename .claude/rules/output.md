@@ -2,11 +2,21 @@
 paths:
   - "internal/alsa/**"
   - "internal/mpd/**"
+  - "internal/player/**"
   - "cmd/bridge/output*.go"
+  - "scripts/player-pcm-goldens/**"
 ---
-# The box as an audio output (`internal/alsa`, `internal/mpd`, `bridge output`)
+# The box as an audio output (`internal/alsa`, `internal/mpd`, `bridge output`, player PCM)
 
 The bridge as an output: on a Linux box with a DAC and MPD, it reports the DAC and a live reading of what the DAC receives, so the app's Signal Path can show it. Step one (2026-10-19) reads `/proc` and adds `bridge output dac`. Step two (the same day) finds the player and reads how MPD is set: `internal/mpd` is a read-only client, `internal/mpd/conf` reads `mpd.conf`, and `bridge output player` prints both. Step 2b adds `output.mpd` (`auto`, `on` or `off`) and `GET /v1/outputs` when that resolves on and the host is Linux. The record is in `ops/engineering-log.md` under that date.
+
+## Player PCM format and decode (B470 PR 1a)
+
+- **PCM is stereo signed integer, 16/24/32 valid bits only.** No downmixing, truncation, resampling, floating intermediates, ReplayGain, normalization, dither or crossfade. Native DSD and DoP types exist as shapes for later PRs; they are not produced yet. **Don't add a transform that changes samples.**
+- **Content inspection chooses the decoder**, never the file extension or the library index. Lossy containers (MP3, AAC, Ogg/Opus/Vorbis) are refused with a typed reason; ALAC/DSF/DFF are `not_yet_supported` until a later PR. **Don't decide support from a path suffix.**
+- **Supported containers:** integer FLAC via `mewkiz/flac` v1.0.14 (16/24-bit; 32-bit FLAC is refused because that library still treats frame sample-size code 111 as reserved); integer WAV including validated `WAVE_FORMAT_EXTENSIBLE` PCM (chunks may precede `fmt `); integer AIFF and AIFF-C `NONE`/`sowt`. Float WAV/AIFF, 8/12-bit, mono and multichannel are refused. **Don't bisect on unvalidated FLAC frame sync**; mewkiz `Stream.Seek` uses an embedded SEEKTABLE or builds a full frame table — a bounded lazy index waits on Pi measurement.
+- **ALSA PCM packers preserve every source bit under lossless widening:** `S16_LE`, `S24_3LE`, `S24_LE` (4-byte container, low 24 significant), `S32_LE` from 24-bit (shift left 8, low byte zero). Container width alone does not establish precision.
+- **Golden hashes come from reference tools**, never from the bridge decoder. `scripts/player-pcm-goldens/generate.py` produces committed fixtures; ordinary tests do not run it. Private corpus files under `~/medialibtest-formats/` stay untracked.
 
 - **`owner_pid` in a substream's `status` is a THREAD id**: the thread that opened the PCM, which for MPD is its output thread (`output:alsa`, not `mpd`). **Name and Tgid come from one read of `/proc/<tid>/status`.** When Tgid is that tid, the process name is the same Name; otherwise it is the Name line of `/proc/<tgid>/status`. **`comm` is only the fallback when that status has no Name line. Never read `/proc/<owner_pid>/comm` as the process's name**, and report both names.
 - **An owner nobody can name is unknown, never an error**: a missing or unreadable `/proc` entry (hidepid, a thread that exited) or an `owner_pid` of 0 (outside this pid namespace) leaves that name null, and the reading is whole. **Don't turn it into a problem or a failed read.**
