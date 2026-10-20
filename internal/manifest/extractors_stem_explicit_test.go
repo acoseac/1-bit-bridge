@@ -93,6 +93,70 @@ func TestScanner_AStemMarkerCountsWhenTheChunkWalkReadsNoTitle(t *testing.T) {
 	}
 }
 
+// cleanAdvisoryNoTitle is an ID3v2.3 tag with TXXX:ITUNESADVISORY=2 and no
+// TIT2. A clean EXPLICIT=0 tag is the same shape under the other field name.
+func cleanAdvisoryNoTitle(value string) []byte {
+	return advisoryTag(3, 1, "", unterminatedTXXX(3, 1, "ITUNESADVISORY", value))
+}
+
+func cleanExplicitFieldNoTitle(value string) []byte {
+	return advisoryTag(3, 1, "", unterminatedTXXX(3, 1, "EXPLICIT", value))
+}
+
+func cleanAdvisoryWithTitle(title, value string) []byte {
+	return advisoryTag(3, 1, title, unterminatedTXXX(3, 1, "ITUNESADVISORY", value))
+}
+
+// TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle is round 2
+// of B466. The end-of-walk helper now runs only when no ID3 chunk was read;
+// when one was, populateFromTagMetadata decides with the v23 rule: the
+// filename stem stands in for an absent title, and any signal wins, so a
+// clean advisory (ITUNESADVISORY=2 or EXPLICIT=0) with no TIT2 on an
+// [E]-named file is explicit, as TestExplicitVerdict's
+// clean_advisory_does_not_cancel_a_title says for a title. A clean advisory
+// with no marker anywhere stays clean, and a WAV with no ID3 whose LIST/INFO
+// title is clean stays clean (a title was read, so the stem does not count).
+func TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle(t *testing.T) {
+	id3 := func(tag []byte) []byte { return riffChunk("id3 ", tag) }
+	files := []struct {
+		name  string
+		data  []byte
+		title string
+		want  bool
+	}{
+		// Clean advisory, no TIT2, stem has [E]: the stem stands in for the
+		// absent title and any signal wins.
+		{"WavClean [E].wav", wavWithChunks(id3(cleanAdvisoryNoTitle("2"))), "WavClean [E]", true},
+		{"AiffClean [E].aiff", buildAIFFWithID3(t, cleanAdvisoryNoTitle("2")), "AiffClean [E]", true},
+		{"DffClean [E].dff", dffWithChunks(t, 2822400, dffChunk("ID3 ", cleanAdvisoryNoTitle("2"))), "DffClean [E]", true},
+		{"DsfClean [E].dsf", minimalDSFBytes(2822400, cleanAdvisoryNoTitle("2")), "DsfClean [E]", true},
+		{"WavExplicit0 [E].wav", wavWithChunks(id3(cleanExplicitFieldNoTitle("0"))), "WavExplicit0 [E]", true},
+		// Clean advisory, no TIT2, no marker on the stem: clean.
+		{"WavCleanPlain.wav", wavWithChunks(id3(cleanAdvisoryNoTitle("2"))), "WavCleanPlain", false},
+		{"DsfCleanPlain.dsf", minimalDSFBytes(2822400, cleanAdvisoryNoTitle("2")), "DsfCleanPlain", false},
+		// Clean advisory, TIT2 carries [E]: the title marker still wins.
+		{"WavTIT2 [E].wav", wavWithChunks(id3(cleanAdvisoryWithTitle("Song [E]", "2"))), "Song [E]", true},
+		{"AiffTIT2 [E].aiff", buildAIFFWithID3(t, cleanAdvisoryWithTitle("Song [E]", "2")), "Song [E]", true},
+		{"DffTIT2 [E].dff", dffWithChunks(t, 2822400, dffChunk("ID3 ", cleanAdvisoryWithTitle("Song [E]", "2"))), "Song [E]", true},
+		{"DsfTIT2 [E].dsf", minimalDSFBytes(2822400, cleanAdvisoryWithTitle("Song [E]", "2")), "Song [E]", true},
+		// No ID3; LIST/INFO title is clean on a [E]-named file.
+		{"InfoClean [E].wav", wavWithChunks(listInfo("INAM", "Clean Title")), "Clean Title", false},
+	}
+	root := t.TempDir()
+	rels := map[string]string{}
+	for _, f := range files {
+		rels[f.name] = writeAlone(t, root, f.name, f.data)
+	}
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	wire := servedTracksByPath(t, store, root)
+	for _, f := range files {
+		t.Run(f.name, func(t *testing.T) {
+			requireExplicitRow(t, store, wire, rels[f.name], f.title, f.want)
+		})
+	}
+}
+
 // TestScanner_V27_AStemMarkerOnAChunkWalkJoinsTheDelta_APlainFileOnlyStamps is
 // the v27 upgrade end to end. Rows a v26 bridge indexed re-extract once. An
 // untagged WAV/AIFF/DFF/DSF whose filename stem carries [E], and a WAV whose

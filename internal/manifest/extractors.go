@@ -2506,9 +2506,11 @@ func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *Extract
 	// tag-read success.
 	dsfMeta := readDSFTags(f, metadataPointer, absPath, t)
 	// No ID3 tag (pointer 0, or a tag that could not be read): the path
-	// stem's marker still counts. An untitled ID3 tag already asked the
-	// stem through populateFromTagMetadata.
-	applyStemExplicitMark(t)
+	// stem's marker still counts. When an ID3 tag was read,
+	// populateFromTagMetadata already decided.
+	if dsfMeta == nil {
+		applyStemExplicitMark(t)
+	}
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, dsfMeta, ec)
 	}
@@ -2657,9 +2659,12 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			id3 = applyEmbeddedID3(prop.id3, t, nil, absPath, "dff")
 		}
 		diin.applyUnder(t, id3)
-		// No ID3 or DIIN title: the path stem's marker still counts.
-		// applyUnder already recomputed from a DIIN title that replaced it.
-		applyStemExplicitMark(t)
+		// No ID3 chunk: the path stem's marker still counts. applyUnder
+		// already recomputed from a DIIN title that replaced it. When an
+		// ID3 chunk was read, populateFromTagMetadata already decided.
+		if id3 == nil {
+			applyStemExplicitMark(t)
+		}
 		if ec != nil && ec.ArtworkCacheDir != "" {
 			extractLocalArtwork(absPath, t, id3, ec)
 		}

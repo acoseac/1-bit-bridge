@@ -47901,6 +47901,29 @@ agree on the field as well as the display. No iOS change required.
 `Track.Explicit`'s doc ("clients apply title markers themselves when the
 field is absent") is why the badge already covered them.
 
+### Round 2 (PR #1290 review)
+
+A review read the unconditional end-of-walk `applyStemExplicitMark` as
+flipping a clean ID3 advisory (`ITUNESADVISORY=2` / `EXPLICIT=0`, no TIT2)
+to explicit on an `[E]`-named file. It does not change the verdict: when an
+ID3 chunk was read, `populateFromTagMetadata` had already decided through
+`ExplicitVerdict`, where the stem stands in for an absent title and any
+signal wins, so that file was explicit before B466 too, as
+`TestExplicitVerdict/clean_advisory_does_not_cancel_a_title` says for a
+title. A first round-2 draft made `populateFromTagMetadata` drop the stem
+whenever an advisory field was present; that would have changed the v23
+rule for every tagged format and made a stem marker weaker than the same
+marker in a title, so it was not kept.
+
+What changed: the four calls now run only when no ID3 metadata was read
+(`idTagMetadata == nil` / `dsfMeta == nil` / `id3 == nil`), which is what
+the helper's comment said; the verdicts are unchanged.
+`TestScanner_AnID3ChunkDecidesAndTheStemStandsInForAnAbsentTitle` pins
+them: clean advisory with no TIT2 on an `[E]` stem is explicit (WAV, AIFF,
+DFF, DSF, and `EXPLICIT=0`); a clean advisory with no marker anywhere is
+clean; a TIT2 carrying `[E]` beside a clean advisory is explicit; a WAV with
+no ID3 whose LIST/INFO title is clean is clean.
+
 ## 2026-10-20 — B470 PR 1a round 7: shared pcmRegion for WAV/AIFF ReadFrames
 
 ### Trigger
