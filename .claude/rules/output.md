@@ -20,9 +20,6 @@ The bridge as an output: on a Linux box with a DAC and MPD, it reports the DAC a
 - **ALSA PCM packers preserve every source bit under lossless widening:** `S16_LE`, `S24_3LE`, `S24_LE` (4-byte container, low 24 significant), `S32_LE` from 24-bit (shift left 8, low byte zero). Container width alone does not establish precision.
 - **Golden hashes come from reference tools**, never from the bridge decoder. `scripts/player-pcm-goldens/generate.py` produces committed fixtures; ordinary tests do not run it. Private corpus files under `~/medialibtest-formats/` stay untracked. In-range golden seeks must return exactly `Channels` samples — `(0, EOF)` must not pass.
 
-## Player DSD containers (B470 PR 1b)" section (its
-   five bullets) with the following:
-
 ## Player DSD containers (B470 PR 1b)
 
 - **Canonical native DSD is stereo, channel-separated bytes, bit 7 earliest** (`format.NativeDSD`). DSF with 1 bit per sample is LSB-first and each byte is bit-reversed; DSF with 8 is MSB-first and passes unchanged; uncompressed DFF passes unchanged. `Frames` is one-bit samples per channel and `BytesPerChannel` rounds it up: when the DSF sample count is not a multiple of eight, the last byte's trailing bits are the file's padding, passed as they are, and the transport accounts for them. `BytesPerChannel` divides before it rounds, because `(Frames+7)/8` wraps negative for a `Frames` within 7 of `math.MaxInt64`, which a DSF header can declare beside a data chunk declared large enough to pass open (round 2). It is 0 for a `Frames` of 0 or less and at most 2^60, and the DSF decoder's end is that same value, so a seek to `BytesPerChannel` is always the decoder's end. **Don't convert DSD to PCM, don't reverse a byte the container declared MSB-first, and don't round a DSD count up by adding before dividing.** `TestNativeDSDBytesPerChannel` and `TestDSFHugeSampleCountKeepsItsByteArithmetic` pin the count.
