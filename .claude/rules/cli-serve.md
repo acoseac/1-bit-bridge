@@ -99,6 +99,9 @@ The largest package in the repo (`main.go` alone 4,698 lines) had **no section h
 - **…and a kept line's REASON names the peer again, after the `->` of a socket error, which is redacted too** (2026-09-29, backlog B172) **Don't redact every lone address after `read tcp`** → History-rules-cli-serve.md
 - **`RedactPeers` walks the line once** (2026-10-12, backlog B246) → History-rules-cli-serve.md
 
+**When you correct a rule in a hardened section, check the top-of-file list for
+its twin.** The top list is older, shorter, and read first.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written INLINE in the defer, never routed through a variable assigned later in `runServe`; both this wait and the watcher's are grace-BOUNDED. → History-rules-cli-serve.md
