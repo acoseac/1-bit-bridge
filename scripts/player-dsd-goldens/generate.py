@@ -22,6 +22,12 @@ make shows as a byte mismatch:
 An LSB-first DSF stores each canonical byte bit-reversed; an MSB-first DSF and
 a DFF store it unchanged. The test compares the decoder's output with
 pattern.bin byte for byte.
+
+Each DFF gives both of the demuxer's chunk walks an odd-sized chunk to skip
+before the sound data, so a walk that forgets the pad byte after an odd body
+(DSDIFF 1.5 §2.3) misreads every later chunk: CMPR inside PROP (19 bytes for
+"not compressed", §3.2.3) and MANF in the form itself. COMT is padded inside
+its body as §3.6 requires, so it is always even.
 """
 
 from __future__ import annotations
@@ -131,27 +137,41 @@ def be64(v: int) -> bytes:
 
 
 def chunk(ck_id: bytes, body: bytes) -> bytes:
-    """A DSDIFF chunk; an odd body is followed by one pad byte not counted."""
+    """A DSDIFF chunk (§2.3): ckDataSize counts the body only, and an odd
+    body is followed by one pad byte that ckDataSize does not count."""
     assert len(ck_id) == 4
     return ck_id + be64(len(body)) + body + (b"\x00" if len(body) % 2 else b"")
 
 
-def pstring(text: bytes) -> bytes:
-    """Count byte plus text, padded to an even total length."""
-    s = bytes([len(text)]) + text
-    return s + (b"\x00" if len(s) % 2 else b"")
+def cmpr(compression: bytes, name: bytes) -> bytes:
+    """CMPR (§3.2.3): compressionType, Count, then compressionName, with no
+    pad inside the body. "not compressed" makes a 19-byte body, so the
+    chunk's own pad follows it and PROP's walk has an odd chunk to skip."""
+    return chunk(b"CMPR", compression + bytes([len(name)]) + name)
 
 
 def comt(text: bytes) -> bytes:
-    """COMT with one comment; text length chosen odd to exercise the pad."""
+    """COMT (§3.6) with one comment. An odd-length commentText is followed by
+    a pad byte inside the comment: ckDataSize counts it, count does not."""
     comment = (
         be16(2026) + bytes([10, 20, 12, 0])  # year, month, day, hour, minutes
         + be16(0)  # cmtType: general
         + be16(0)  # cmtRef
         + be32(len(text))
         + text
+        + (b"\x00" if len(text) % 2 else b"")
     )
-    return chunk(b"COMT", be16(1) + comment)
+    body = be16(1) + comment
+    assert len(body) % 2 == 0  # so a COMT never needs the chunk pad
+    return chunk(b"COMT", body)
+
+
+def manf(man_id: bytes, data: bytes) -> bytes:
+    """MANF: a four-byte manufacturer id and free-form data. Unlike COMT, its
+    body may be odd, so it is the chunk that gives the form's own walk an odd
+    chunk to skip before the sound data."""
+    assert len(man_id) == 4
+    return chunk(b"MANF", man_id + data)
 
 
 def dff(
@@ -168,14 +188,15 @@ def dff(
         b"SND "
         + chunk(b"FS  ", be32(rate))
         + chunk(b"CHNL", be16(len(channel_ids)) + b"".join(channel_ids))
-        + chunk(b"CMPR", compression + pstring(compression_name))
+        + cmpr(compression, compression_name)
         + chunk(b"ABSS", be16(0) + bytes([0, 0]) + be32(0))
         + chunk(b"LSCO", be16(0)),
     )
     body = (
         b"DSD "
-        + chunk(b"FVER", be32(0x01050000))
+        + chunk(b"FVER", be32(0x01050000))  # §3.1: the form's first chunk
         + comt(b"B470 golden, odd length")
+        + manf(b"1BIT", b"\x01\x02\x03")  # a 7-byte body: odd
         + prop
         + chunk(sound_id, interleaved)
         + chunk(b"DIIN", chunk(b"DIAR", be32(5) + b"1-bit"))

@@ -20,7 +20,7 @@ reversal, a channel swap, or padding read as audio each change bytes.
 | `msb_dsd128_partial_block.dsf` | MSB-first DSF passes bytes unchanged; DSD128 |
 | `lsb_dsd64_whole_blocks.dsf` | Sample count ends exactly at a block boundary: EOF with no padding |
 | `lsb_dsd64_797_samples.dsf` | 797 one-bit samples: 100 bytes per channel, the last carrying three bits of padding |
-| `dsd64.dff` | DFF byte interleave (L, R), MSB first; COMT (odd length, padded) before PROP, DIIN and ID3 chunks after the sound data |
+| `dsd64.dff` | DFF byte interleave (L, R), MSB first; FVER first (DSDIFF 1.5 §3.1); both chunk walks skip an odd chunk's pad byte before the sound data (§2.3): a 7-byte MANF in the form and the 19-byte CMPR of §3.2.3 in PROP; COMT carries its comment's pad inside its size (§3.6); DIIN and ID3 chunks after the sound data |
 | `dsd256_right_first.dff` | CHNL lists SRGT before SLFT: the decoder still emits left first |
 | `mono.dsf`, `six_channel.dsf`, `mono.dff`, `six_channel.dff` | Refused: `unsupported_channel_count` |
 | `dst.dff` | CMPR `DST ` with a DST sound chunk: refused, `unsupported_compression` |

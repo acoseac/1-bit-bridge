@@ -127,3 +127,44 @@ func TestDFFFormatVersionRequired(t *testing.T) {
 		d.Close()
 	}
 }
+
+// The goldens write CMPR as §3.2.3 has it: compressionType, Count and
+// compressionName, 19 bytes for "not compressed", the chunk's pad after the
+// size. A writer that counts a pad inside CMPR's size instead (20 bytes; the
+// bridge's own internal/dsdtone writes that form) opens the same, because the
+// demuxer reads only compressionType.
+func TestDFFCMPRWithItsNamePadInsideStillOpens(t *testing.T) {
+	g := loadDSDGoldens(t)
+	f, raw := g.fixture(t, "dsd64.dff")
+	chunks := dffTopChunks(t, raw)
+	replaced := false
+	for i, c := range chunks {
+		if string(c[0:4]) != "PROP" {
+			continue
+		}
+		// A PROP chunk is a 12-byte header and "SND ", then its sub-chunks:
+		// the same 16-byte prefix as the form, so the same splitter reads it.
+		subs := dffTopChunks(t, c)
+		prop := []byte("SND ")
+		for _, s := range subs {
+			if string(s[0:4]) == "CMPR" {
+				if size := binary.BigEndian.Uint64(s[4:12]); size != 19 {
+					t.Fatalf("the golden's CMPR is %d bytes, want §3.2.3's 19", size)
+				}
+				s = dffChunk("CMPR", []byte("DSD \x0enot compressed\x00"))
+				replaced = true
+			}
+			prop = append(prop, s...)
+		}
+		chunks[i] = dffChunk("PROP", prop)
+	}
+	if !replaced {
+		t.Fatal("the golden has no CMPR in PROP")
+	}
+	d, err := openDSD(bytes.NewReader(dffForm(chunks...)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	requireSameDSD(t, readAllDSD(t, d, 4096), g.want(f))
+}
