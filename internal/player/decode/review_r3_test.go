@@ -24,7 +24,7 @@ func TestReviewR3SeekTableIgnoresPointsAfterTarget(t *testing.T) {
 	// Single SEEKTABLE point after the seek target: old seekPointBefore
 	// returned it anyway and Seek(100) failed.
 	raw = injectFLACSeekTable(t, raw, []seekPoint{{sample: 5000, offset: 0}})
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestReviewR3SeekTableIgnoresOverflowOffsets(t *testing.T) {
 		{sample: 0, offset: 1 << 63}, // would wrap int64(dataStart)+int64(offset)
 		{sample: 64, offset: math.MaxUint64},
 	})
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestReviewR3SeekTableUnsortedUsesBestAtOrBefore(t *testing.T) {
 		{sample: 8000, offset: 0},
 		{sample: 0, offset: 0},
 	})
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestReviewR3ID3FooterOffset(t *testing.T) {
 	tag := []byte{'I', 'D', '3', 4, 0, 0x10, 0, 0, 0, 0}
 	footer := []byte{'3', 'D', 'I', 4, 0, 0x10, 0, 0, 0, 0}
 	b := append(append(tag, footer...), flac...)
-	d, err := decode.Open(bytes.NewReader(b))
+	d, err := openPCM(bytes.NewReader(b))
 	if err != nil {
 		t.Fatalf("ID3v2.4 footer before FLAC: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestReviewR3AIFFUnnormalisedRate(t *testing.T) {
 	// mantissa hi without 0x80000000
 	binary.BigEndian.PutUint32(rate[2:6], 0x40000000)
 	copy(b[28:38], rate)
-	if d, err := decode.Open(bytes.NewReader(b)); err == nil {
+	if d, err := openPCM(bytes.NewReader(b)); err == nil {
 		t.Fatalf("unnormalised 80-bit rate accepted as %d", d.Format().RateHz)
 	}
 }
@@ -195,7 +195,7 @@ func TestReviewR3ShortReadReturnsSamplesAndError(t *testing.T) {
 	}
 	keep := dataOff + 8 + 40*4
 	b := raw[:keep]
-	d, err := decode.Open(bytes.NewReader(b))
+	d, err := openPCM(bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}

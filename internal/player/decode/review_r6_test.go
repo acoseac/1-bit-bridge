@@ -7,8 +7,6 @@ import (
 	"errors"
 	"io"
 	"testing"
-
-	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 )
 
 // Round-6: after a cancel or I/O error mid-ReadFrames, the reader must not
@@ -38,7 +36,7 @@ func testPCMCancelThenRetry(t *testing.T, kind string) {
 
 	ctx1, cancel := context.WithCancel(context.Background())
 	r := &cancelReader{Reader: bytes.NewReader(raw), cancel: cancel}
-	d, err := decode.Open(r)
+	d, err := openPCM(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +77,7 @@ func testPCMIOErrorThenRetry(t *testing.T, kind string) {
 	want, raw := pcmWithTrailingJunk(t, kind, 8000)
 	inj := errShortRead
 	r := &ioErrorReader{Reader: bytes.NewReader(raw), failAfter: 1, err: inj}
-	d, err := decode.Open(r)
+	d, err := openPCM(r)
 	if err != nil {
 		t.Fatal(err)
 	}

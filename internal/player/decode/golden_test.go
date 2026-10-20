@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 )
 
 type goldenEntry struct {
@@ -48,7 +46,7 @@ func TestGoldensDecodeAndHash(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, err := decode.Open(bytes.NewReader(raw))
+			d, err := openPCM(bytes.NewReader(raw))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,14 +88,14 @@ func TestGoldensExactSeek(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Full decode once for expected samples at seek points.
-			d0, err := decode.Open(bytes.NewReader(raw))
+			d0, err := openPCM(bytes.NewReader(raw))
 			if err != nil {
 				t.Fatal(err)
 			}
 			all := readAll(t, d0)
 			d0.Close()
 
-			d, err := decode.Open(bytes.NewReader(raw))
+			d, err := openPCM(bytes.NewReader(raw))
 			if err != nil {
 				t.Fatal(err)
 			}

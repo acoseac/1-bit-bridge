@@ -11,7 +11,9 @@ const (
 	ContainerFLAC Container = "flac"
 	ContainerWAV  Container = "wav"
 	ContainerAIFF Container = "aiff"
-	// Later: ContainerALAC, ContainerDSF, ContainerDFF.
+	ContainerDSF  Container = "dsf"
+	ContainerDFF  Container = "dff"
+	// Later: ContainerALAC.
 )
 
 // Kind is the playback transport representation.
@@ -21,7 +23,7 @@ const (
 	// KindPCM is interleaved signed-integer PCM.
 	KindPCM Kind = iota
 	// KindNativeDSD is channel-separated DSD bytes with bit 7 earliest.
-	// Declared for later PRs; not produced by this package yet.
+	// The DSF and DFF decoders produce it; its ALSA packers are later PRs.
 	KindNativeDSD
 	// KindDoP is DSD-over-PCM with alternating 0x05/0xFA markers.
 	// Declared for later PRs; not produced by this package yet.
@@ -75,15 +77,47 @@ func (p PCM) Validate() error {
 	return nil
 }
 
-// NativeDSD is the shape later PRs fill for native ALSA DSD transport.
+// DSD64RateHz is the one-bit rate of DSD64; DSD128..DSD512 are its
+// multiples by 2, 4 and 8.
+const DSD64RateHz = 2_822_400
+
+// NativeDSD is the canonical DSD stream the DSF and DFF decoders produce, and
+// the shape the native ALSA DSD packers (later PRs) consume.
 // Channel-separated bytes; bit 7 is earliest in time. DSF declared LSB-first
 // is reversed into this form; MSB-first DSF and uncompressed DFF pass through.
 type NativeDSD struct {
 	// BitRateHz is the one-bit sample rate per channel (DSD64 = 2_822_400).
 	BitRateHz int
 	Channels  int
-	// Frames is the number of one-bit sample frames when known.
+	Container Container
+	// Frames is the number of one-bit samples per channel. A decoder emits
+	// whole bytes, so when Frames is not a multiple of eight the last byte's
+	// trailing bits are the container's padding, unchanged; BytesPerChannel
+	// counts that byte.
 	Frames int64
+}
+
+// BytesPerChannel is the number of whole DSD bytes per channel a decoder
+// emits: Frames rounded up to a byte.
+func (d NativeDSD) BytesPerChannel() int64 {
+	return (d.Frames + 7) / 8
+}
+
+// Validate reports whether d is a shape the 0.2.2 player accepts for DSD:
+// stereo, DSD64, DSD128, DSD256 or DSD512.
+func (d NativeDSD) Validate() error {
+	if d.Channels != 2 {
+		return fmt.Errorf("player format: want 2 DSD channels, got %d", d.Channels)
+	}
+	switch d.BitRateHz {
+	case DSD64RateHz, 2 * DSD64RateHz, 4 * DSD64RateHz, 8 * DSD64RateHz:
+	default:
+		return fmt.Errorf("player format: DSD bit rate %d Hz is not DSD64..DSD512", d.BitRateHz)
+	}
+	if d.Frames < 0 {
+		return fmt.Errorf("player format: negative DSD sample count %d", d.Frames)
+	}
+	return nil
 }
 
 // DoP is the shape later PRs fill for DSD-over-PCM.

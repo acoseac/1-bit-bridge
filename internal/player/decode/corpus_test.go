@@ -61,7 +61,7 @@ func TestPrivateFormatCorpus(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer f.Close()
-			d, err := decode.Open(f)
+			s, err := decode.Open(f)
 			if err != nil {
 				if r, ok := decode.AsRefusal(err); ok {
 					t.Logf("REFUSED %s: %s", r.Reason, r.Message)
@@ -69,7 +69,18 @@ func TestPrivateFormatCorpus(t *testing.T) {
 				}
 				t.Fatalf("unexpected error: %v", err)
 			}
-			defer d.Close()
+			defer s.Close()
+			if dsd, ok := s.(decode.DSDDecoder); ok {
+				f := dsd.Format()
+				n, err := drainDSD(dsd)
+				if err != nil && err != io.EOF {
+					t.Fatalf("decode after open: %v", err)
+				}
+				t.Logf("DECODED DSD bitrate=%d ch=%d frames=%d bytes_per_channel=%d container=%s",
+					f.BitRateHz, f.Channels, f.Frames, n, f.Container)
+				return
+			}
+			d := s.(decode.Decoder)
 			pcm := d.Format()
 			n, err := drain(d)
 			if err != nil && err != io.EOF {
@@ -78,6 +89,27 @@ func TestPrivateFormatCorpus(t *testing.T) {
 			t.Logf("DECODED rate=%d ch=%d bits=%d frames=%d samples_read=%d container=%s",
 				pcm.RateHz, pcm.Channels, pcm.ValidBits, pcm.Frames, n, pcm.Container)
 		})
+	}
+}
+
+// drainDSD reads d to its end and returns the bytes read per channel.
+func drainDSD(d decode.DSDDecoder) (int, error) {
+	ctx := context.Background()
+	ch := d.Format().Channels
+	dst := make([][]byte, ch)
+	for c := range dst {
+		dst[c] = make([]byte, 4096)
+	}
+	total := 0
+	for {
+		n, err := d.ReadDSD(ctx, dst)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.EOF
+		}
 	}
 }
 

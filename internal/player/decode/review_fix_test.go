@@ -25,7 +25,7 @@ func TestReviewExtensibleAlignment(t *testing.T) {
 			stored[i] = s << uint(shift)
 		}
 		raw := writeWAV(t, 44100, 2, c.container, c.valid, stored, true, nil)
-		d, err := decode.Open(bytes.NewReader(raw))
+		d, err := openPCM(bytes.NewReader(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -49,7 +49,7 @@ func TestReviewAIFFChunkConfinement(t *testing.T) {
 			binary.BigEndian.PutUint32(b[ssnd+8:], 8)
 			b = append(b, []byte("JUNK\x00\x00\x00\x00")...)
 		}
-		d, err := decode.Open(bytes.NewReader(b))
+		d, err := openPCM(bytes.NewReader(b))
 		if err != nil {
 			continue // refusal at open is success
 		}
@@ -64,7 +64,7 @@ func TestReviewAIFFChunkConfinement(t *testing.T) {
 func TestReviewWAVRIFFBodyBound(t *testing.T) {
 	wav := writeWAV(t, 44100, 2, 16, 16, []int32{1, 2}, false, nil)
 	binary.LittleEndian.PutUint32(wav[4:], 4)
-	if d, err := decode.Open(bytes.NewReader(wav)); err == nil {
+	if d, err := openPCM(bytes.NewReader(wav)); err == nil {
 		t.Errorf("RIFF body of 4 still accepted: %+v", d.Format())
 	}
 }
@@ -105,7 +105,7 @@ func TestReviewFLACMismatch(t *testing.T) {
 		case "total-small":
 			raw[25] = 1
 		}
-		d, err := decode.Open(bytes.NewReader(raw))
+		d, err := openPCM(bytes.NewReader(raw))
 		if err != nil {
 			continue // open-time refusal is fine
 		}
@@ -125,7 +125,7 @@ func TestReviewFLACBoundarySeeks(t *testing.T) {
 		samples[2*i+1] = -int32(i)
 	}
 	raw := encodeFLACPCM(t, 44100, 16, samples)
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestReviewFLACUnknownLengthRestart(t *testing.T) {
 	for i := 22; i < 26; i++ {
 		raw[i] = 0
 	}
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestReviewFLACInheritedBits(t *testing.T) {
 	raw[45] &= 0xf1
 	raw[48] = crc8FLAC(raw[42:48])
 	binary.BigEndian.PutUint16(raw[len(raw)-2:], crc16FLAC(raw[42:len(raw)-2]))
-	d, err := decode.Open(bytes.NewReader(raw))
+	d, err := openPCM(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestReviewTruncation(t *testing.T) {
 			cut = (len(raw) - 42) / 2
 		}
 		b := raw[:len(raw)-cut]
-		d, err := decode.Open(bytes.NewReader(b))
+		d, err := openPCM(bytes.NewReader(b))
 		if err != nil {
 			t.Errorf("%s: Open on truncated stream: %v", kind, err)
 			continue
@@ -264,7 +264,7 @@ func TestReviewRates(t *testing.T) {
 		} else {
 			b = writeAIFF(t, 0, 2, 16, []int32{1, 2}, false)
 		}
-		if d, err := decode.Open(bytes.NewReader(b)); err == nil {
+		if d, err := openPCM(bytes.NewReader(b)); err == nil {
 			t.Errorf("%s accepts zero rate: %+v", kind, d.Format())
 		}
 	}
@@ -274,7 +274,7 @@ func TestReviewAIFFNonIntegerRate(t *testing.T) {
 	for _, r := range []float64{44100.25, -8000, math.Inf(1)} {
 		b := writeAIFF(t, 44100, 2, 16, []int32{1, 2}, false)
 		copy(b[28:38], floatToExtended80(r))
-		if d, err := decode.Open(bytes.NewReader(b)); err == nil {
+		if d, err := openPCM(bytes.NewReader(b)); err == nil {
 			t.Errorf("AIFF rate %v accepted as %d", r, d.Format().RateHz)
 		}
 	}
@@ -283,7 +283,7 @@ func TestReviewAIFFNonIntegerRate(t *testing.T) {
 func TestReviewID3FLAC(t *testing.T) {
 	raw := encodeFLACPCM(t, 44100, 16, constantStereo(32, 37))
 	b := append([]byte{'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0}, raw...)
-	d, err := decode.Open(bytes.NewReader(b))
+	d, err := openPCM(bytes.NewReader(b))
 	if err != nil {
 		t.Fatalf("ID3-tagged FLAC: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestReviewCancelDuringSeek(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := &cancelReader{Reader: bytes.NewReader(raw), cancel: cancel}
-	d, err := decode.Open(r)
+	d, err := openPCM(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestReviewCancelDuringPCMRead(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		r := &cancelReader{Reader: bytes.NewReader(raw), cancel: cancel}
-		d, err := decode.Open(r)
+		d, err := openPCM(r)
 		if err != nil {
 			t.Fatal(err)
 		}
