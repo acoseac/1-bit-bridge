@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// dffChunkEnd bounds a chunk by subtraction from what remains, so no input
-// wraps past its checks. body = math.MaxInt64 cannot come from Open today
-// (positions in a form are even and math.MaxInt64 is odd), so it is tested
-// here: math.MaxInt64-body-1 was -1 there, which as a uint64 admitted any
-// size, and body+size+pad then wrapped negative and passed the form's bound.
+// TestDFFChunkEndBoundsBySubtraction pins that a chunk is bounded by
+// subtraction from what remains, so no input wraps past the checks. body =
+// math.MaxInt64 cannot come from Open today (positions in a form are even
+// and math.MaxInt64 is odd), so it is tested here: math.MaxInt64-body-1 was
+// -1 there, which as a uint64 admitted any size, and body+size+pad then
+// wrapped negative and passed the form's bound.
 func TestDFFChunkEndBoundsBySubtraction(t *testing.T) {
 	const top = math.MaxInt64
 	cases := []struct {
