@@ -50,6 +50,8 @@ build-all:
 # genuine deadlock at the 30m ceiling.
 test:
 	go test -p $(P) -race -timeout 30m ./...
+	# third_party/saprobe-alac is a module of its own, so ./... skips it (B470 PR 1c).
+	go -C third_party/saprobe-alac test -race ./...
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while

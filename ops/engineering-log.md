@@ -48147,8 +48147,9 @@ is a follow-up beyond this PR.
 
 **The owner's decision (2026-10-21).** Option B stands: the library stays
 behind the demuxer, the cookie and packet checks, and the `recover`; the
-channel-pair check covers the silent stereo case, and no other check is
-added for the panic, which none can prevent. The library's maintainers were
+channel-pair check covers the silent stereo case, and no check of ours can
+prevent the panic (round 3 below: after Codex found two silent decodes, the
+owner chose to carry a patched copy, which refuses that packet itself). The library's maintainers were
 told first, privately, through the repository's vulnerability reporting,
 before this branch made the ten-byte input public. Porting Apple's
 reference decoder stays the fallback if upstream does not fix the panic.
