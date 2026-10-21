@@ -84,17 +84,23 @@ func TestAfterRunReturnsEveryCommandIsClosed(t *testing.T) {
 	h := startHarness(t)
 	h.insert("a")
 	h.shutdown()
-	for name, err := range map[string]error{
-		"play":   h.eng.Play(context.Background()),
-		"stop":   h.eng.Stop(context.Background()),
-		"output": h.eng.ReportOutput(context.Background(), OutputReport{Generation: 9, Available: true}),
+	// Each waits under the watchdog: a command that blocked after Run would
+	// otherwise hang the test rather than fail it.
+	for name, f := range map[string]func() error{
+		"play":   func() error { return h.eng.Play(context.Background()) },
+		"stop":   func() error { return h.eng.Stop(context.Background()) },
+		"output": func() error { return h.eng.ReportOutput(context.Background(), OutputReport{Generation: 9, Available: true}) },
+		"insert": func() error {
+			_, err := h.eng.InsertAfter(context.Background(), 0, ref("b"), nil)
+			return err
+		},
+		"enter": func() error {
+			_, err := h.eng.EnterMaintenance(context.Background(), h.snap().Generation(), "after")
+			return err
+		},
 	} {
-		h.refused(name+" after Run", err, ReasonClosed)
+		h.refused(name+" after Run", h.result(name, async(f)), ReasonClosed)
 	}
-	_, err := h.eng.InsertAfter(context.Background(), 0, ref("b"), nil)
-	h.refused("insert after Run", err, ReasonClosed)
-	_, err = h.eng.EnterMaintenance(context.Background(), h.snap().Generation(), "after")
-	h.refused("enter after Run", err, ReasonClosed)
 	if !h.snap().Closed() {
 		t.Fatal("the last snapshot is not closed")
 	}
