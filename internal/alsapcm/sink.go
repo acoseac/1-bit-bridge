@@ -145,6 +145,30 @@ type SinkConfig struct {
 	// ReleaseAfter is how long a pause holds the device before the sink
 	// releases it; 0 means DefaultReleaseAfter.
 	ReleaseAfter time.Duration
+	// Admit, when set, is asked about each node the sink opens, at the
+	// open and at every reopen after a release, before a frame is written
+	// to it, with what the kernel says the node is (Device.Node). An error
+	// closes the device and refuses the open or the resume as
+	// ReasonWrongDevice, carrying it. The player's check after open
+	// (internal/player/binding) goes here, so a DAC swapped in while the
+	// device was free is refused like one swapped in before the open.
+	Admit func(NodeInfo) error
+}
+
+// admit asks cfg.Admit about the node dev has open; op is the open or the
+// resume it decides.
+func admit(cfg SinkConfig, dev *Device, op string) error {
+	if cfg.Admit == nil {
+		return nil
+	}
+	n, err := dev.Node()
+	if err != nil {
+		return err
+	}
+	if err := cfg.Admit(n); err != nil {
+		return &Error{Reason: ReasonWrongDevice, Op: op, Endpoint: cfg.Endpoint, Detail: "the check after open refused the node", Err: err}
+	}
+	return nil
 }
 
 // SinkState is where a sink is.
@@ -421,6 +445,10 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	}
 	p := dev.Params()
 	if err := checkSetup(cfg, p); err != nil {
+		_ = dev.Close()
+		return nil, err
+	}
+	if err := admit(cfg, dev, "open"); err != nil {
 		_ = dev.Close()
 		return nil, err
 	}
