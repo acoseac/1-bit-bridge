@@ -228,6 +228,17 @@ func (p *PlayerConfig) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// Unread is why the block did not read at all, or nil when it read. Such a
+// block is kept as the file holds it, so a writer that sets a field on it
+// would see Save write the old text back: bridge output dac bind refuses
+// it instead.
+func (p PlayerConfig) Unread() error {
+	if p.unread == "" {
+		return nil
+	}
+	return errors.New(p.unread)
+}
+
 // Problem says why the block cannot run as written, naming the field: the
 // first refusal, or nil. Every value outside what this release takes is
 // refused, and a value the design names for a later PR is said to be not in

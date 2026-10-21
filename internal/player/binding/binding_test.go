@@ -3,6 +3,7 @@ package binding
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -425,6 +426,35 @@ func TestForWritesOnlyTheBindingsOwnFields(t *testing.T) {
 	}
 	if _, err := For(inv, 5, "card", Endpoint{}); err == nil {
 		t.Error("For took a binding kind that is none")
+	}
+}
+
+// TestWhatResolveReturnsLogsNoSerial: an inventory, a card, a resolution
+// and a check's refusal, logged through slog's text and JSON handlers as a
+// watcher or the engine would log them, never carry the serial; each holds
+// it as a usbid.Serial, which logs as its redaction.
+func TestWhatResolveReturnsLogsNoSerial(t *testing.T) {
+	root := pi5(t)
+	inv := observe(t, root)
+	r := Resolve(bySerial(goBarSerial), inv)
+	c, _ := inv.Card(5)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(goBar, 5, "1234:0f04", "SWAPPED-IN-UNIT-0001"))
+	refusal := Checker{Sysfs: alsa.SysfsReader{Root: filepath.Join(root, "sys")}, Want: r}.Check(alsapcm.NodeInfo{Card: 5, Playback: true})
+	var buf strings.Builder
+	for _, h := range []slog.Handler{slog.NewTextHandler(&buf, nil), slog.NewJSONHandler(&buf, nil)} {
+		l := slog.New(h)
+		l.Info("resolved", "resolution", r, "identity", r.Identity, "card", c, "inventory", inv, "refusal", refusal)
+		l.Warn("cards", slog.Any("cards", inv.Cards), slog.Any("usb", c.USB))
+	}
+	for _, s := range []string{goBarSerial, "SWAPPED-IN-UNIT-0001"} {
+		for i := 0; i+8 <= len(s); i++ {
+			if strings.Contains(buf.String(), s[i:i+8]) {
+				t.Fatalf("a log line carries a serial:\n%s", buf.String())
+			}
+		}
+	}
+	if !strings.Contains(buf.String(), "[redacted]") {
+		t.Errorf("the logs carry no redaction, so the serial was not logged at all:\n%s", buf.String())
 	}
 }
 

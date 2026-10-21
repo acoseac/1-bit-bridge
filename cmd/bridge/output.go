@@ -53,6 +53,15 @@ Subcommands:
            open, what the DAC receives (format, rate, channels, the running
            altset, the measured rate) and the thread and process holding it.
            Linux only; reads /proc and writes nothing.
+  dac inspect
+           Each card's unit (vendor and product id, the serial's last four
+           characters, the anchored port) and how the player's binding,
+           output.player.device, resolves; --verify-card N runs the check the
+           player makes after opening a DAC against card N, opening nothing.
+  dac bind <card> --binding serial|uniqueModel|port
+           Write that card's unit into the config as the player's binding,
+           the serial into the file alone; refused when it would be
+           ambiguous, or while a bridge runs on the data dir.
   player   Report this box's player (Volumio, moOde or MPD) and how MPD is
            set: its version, music directory, outputs, replay gain,
            normalization, resampler and filters. Read-only. Linux only;
@@ -74,8 +83,12 @@ type outputDACEnv struct {
 	ticks func() (<-chan time.Time, func())
 }
 
-// outputDACCmd implements `bridge output dac` on this host.
+// outputDACCmd implements `bridge output dac` on this host, and its
+// player-binding verbs, inspect and bind (output_dac_bind.go).
 func outputDACCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if isOutputDACBinding(args) {
+		return outputDACBindingCmd(ctx, args, stdout, stderr)
+	}
 	return runOutputDAC(ctx, args, outputDACEnv{
 		goos: runtime.GOOS,
 		now:  time.Now,

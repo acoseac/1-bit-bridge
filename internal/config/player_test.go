@@ -1,16 +1,21 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
@@ -134,6 +139,22 @@ func TestThePlayerBlockLoadsAndRoundTrips(t *testing.T) {
 	}
 	if !again.Output.Player.Device.Serial.Equal(d.Serial) || again.Output.Player.Room != p.Room || again.Output.Player.PauseRelease() != p.PauseRelease() {
 		t.Errorf("reloaded %+v", again.Output.Player)
+	}
+	// Every JSON form of what holds the serial carries the redaction, and
+	// every printed one too.
+	for _, v := range []any{again, again.Output, again.Output.Player, again.Output.Player.Device, Clone(again)} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal(%T): %v", v, err)
+		}
+		if playerLeaks(string(b)) || !strings.Contains(string(b), `"[redacted]"`) {
+			t.Errorf("JSON of %T: %s", v, b)
+		}
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			if out := fmt.Sprintf(verb, v); playerLeaks(out) {
+				t.Errorf("%s of %T prints the serial: %s", verb, v, out)
+			}
+		}
 	}
 }
 
@@ -372,6 +393,45 @@ func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
 	}
 	if got := rec.Failures(playerOffMessage); len(got) != 2 || len(rec.All()) != before {
 		t.Errorf("a player that runs was logged: %q", rec.All()[before:])
+	}
+}
+
+// TestValidateReadsNoHardware: the player's checks read the block and
+// nothing else. With the readers' tripwire refusing any read of the host's
+// /proc or /sys, and the PCM guard refusing any open, a Load and a
+// Validate of an enabled, bound player, and its predicate, touch neither.
+func TestValidateReadsNoHardware(t *testing.T) {
+	var mu sync.Mutex
+	var touched []string
+	stopReads := alsa.WatchHostReads(func(root string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		touched = append(touched, "read "+root)
+		return errors.New("the config read the host's " + root)
+	})
+	defer stopReads()
+	stopOpens := alsapcm.GuardNodeOpens(func(path string) {
+		mu.Lock()
+		defer mu.Unlock()
+		touched = append(touched, "open "+path)
+	})
+	defer stopOpens()
+	cfg, err := Load(writePlayerConfig(t, fullPlayerBlock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.playerGOOS = "linux"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		_, _ = cfg.PlayerEnabled(goos)
+	}
+	_ = cfg.Output.Player.Problem()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(touched) != 0 {
+		t.Errorf("the config's checks touched the hardware: %q", touched)
 	}
 }
 

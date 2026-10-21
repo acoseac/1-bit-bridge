@@ -2533,9 +2533,11 @@ Subcommands:
   doctor   Preflight: check ports, directories, service manager before init.
   output   This box as an audio output: bridge output dac lists its ALSA sound cards,
            each one's USB id and stream formats, and what an open playback
-           substream receives (format, rate, altset, the thread holding it).
-           bridge output player reports the box's MPD and how it is set.
-           Linux only; both read, and change nothing.
+           substream receives (format, rate, altset, the thread holding it);
+           bridge output dac inspect shows each card's unit and port and how
+           the player's binding resolves, and bridge output dac bind writes
+           one. bridge output player reports the box's MPD and how it is set.
+           Linux only; only dac bind changes anything (the config file).
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.
