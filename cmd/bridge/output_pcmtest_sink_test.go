@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -313,6 +314,11 @@ func newSinkHarness(t *testing.T) *sinkHarness {
 			h.opened = append(h.opened, cfg)
 			if h.openErr != nil {
 				return nil, h.openErr
+			}
+			// As the backend's open does, a rate outside its range opens nothing.
+			if r := cfg.Transport.RateHz; r < alsapcm.MinRateHz || r > alsapcm.MaxRateHz {
+				return nil, &alsapcm.Error{Reason: alsapcm.ReasonBadConfig, Op: "open", Endpoint: cfg.Endpoint,
+					Detail: fmt.Sprintf("rate %d Hz is outside %d..%d", r, alsapcm.MinRateHz, alsapcm.MaxRateHz)}
 			}
 			f := newFakeSink(cfg)
 			if h.prepare != nil {
@@ -923,13 +929,18 @@ func TestOutputPCMTestSinkNamesTheHolderWhenAResumeIsBusy(t *testing.T) {
 // does not play (exit 1), each before any sink is opened. A file of other
 // than two channels is the decoder's to refuse, before the run sees its
 // transport (#1303's review asked for a channel check in pcmTestOpenFiles,
-// which no decoded file could reach).
+// which no decoded file could reach). A rate the decoders take and the ALSA
+// backend does not open (below 8 kHz) is refused with the other checks,
+// so a second file at one stops nothing half way (#1303's review: it was
+// refused only by its sink's open, once the first file had played).
 func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 	dir := t.TempDir()
 	wav := filepath.Join(dir, "a.wav")
 	writePCMWAV(t, wav, 44100, 16, 100, 0)
 	mono := filepath.Join(dir, "mono.wav")
 	writeWAV(t, mono, 44100, 16, 1, 100, 0)
+	slow := filepath.Join(dir, "slow.wav")
+	writePCMWAV(t, slow, 4000, 16, 100, 0)
 	mp3 := filepath.Join(dir, "a.mp3")
 	if err := os.WriteFile(mp3, append([]byte("ID3\x04\x00\x00\x00\x00\x00\x00"), bytes.Repeat([]byte{0xff, 0xfb, 0x90, 0x00}, 64)...), 0o644); err != nil {
 		t.Fatal(err)
@@ -958,6 +969,8 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 		{[]string{"--passive", "--card", "5", "--sink"}, 2, "--passive opens nothing and plays nothing, and takes no --sink"},
 		{[]string{"--card", "5", "--device", "0", "--file", dsf, "--ack-full-level"}, 1, "native DSD"},
 		{[]string{"--card", "5", "--device", "0", "--file", mono, "--ack-full-level"}, 1, "want stereo (2 channels), got 1"},
+		{[]string{"--card", "5", "--device", "0", "--file", slow, "--ack-full-level"}, 1, "slow.wav is 4000 Hz, outside the 8000 to 1536000 Hz the ALSA backend opens"},
+		{[]string{"--card", "5", "--device", "0", "--file", wav, "--file", slow, "--ack-full-level"}, 1, "slow.wav is 4000 Hz, outside the 8000 to 1536000 Hz the ALSA backend opens"},
 		{[]string{"--card", "5", "--device", "0", "--file", mp3, "--ack-full-level"}, 1, "refused"},
 		{[]string{"--card", "5", "--device", "0", "--file", filepath.Join(dir, "missing.flac"), "--ack-full-level"}, 1, "missing.flac"},
 		{[]string{"--card", "5", "--device", "0", "--file", wav, "--ack-full-level", "--format", "S32_LE"}, 1, "--format S32_LE does not carry"},

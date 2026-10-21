@@ -204,7 +204,9 @@ func (r pcmTestRun) playThroughSink(ctx context.Context, env outputPCMTestEnv, s
 // transport each needs: the file's own rate and valid bits, in alsaFormat
 // when it carries them, in the format the tone takes for those bits
 // otherwise. Every file is checked before the device is opened, so a file
-// the player refuses never stops a run half way.
+// the player refuses never stops a run half way: its decoder's own checks,
+// the format, and the rate, which the decoders take from 1 Hz and the ALSA
+// backend opens from alsapcm.MinRateHz.
 func pcmTestOpenFiles(paths []string, alsaFormat string) ([]pcmTestTrack, error) {
 	var tracks []pcmTestTrack
 	fail := func(err error) ([]pcmTestTrack, error) {
@@ -239,6 +241,9 @@ func pcmTestOpenFiles(paths []string, alsaFormat string) ([]pcmTestTrack, error)
 		tracks = append(tracks, track)
 		if !pcmTestPacks(af, pcm.ValidBits) {
 			return fail(fmt.Errorf("%s has %d-bit samples, which --format %s does not carry: S16_LE takes 16, S24_3LE and S24_LE take 24, S32_LE takes 24 or 32", path, pcm.ValidBits, af))
+		}
+		if pcm.RateHz < alsapcm.MinRateHz || pcm.RateHz > alsapcm.MaxRateHz {
+			return fail(fmt.Errorf("%s is %d Hz, outside the %d to %d Hz the ALSA backend opens", path, pcm.RateHz, alsapcm.MinRateHz, alsapcm.MaxRateHz))
 		}
 	}
 	return tracks, nil
