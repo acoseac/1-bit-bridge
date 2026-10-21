@@ -86,12 +86,16 @@ func (s *Sink) do(c *sinkCmd) (bool, error) {
 }
 
 // waitContext is the context a wait on the device runs with: it ends with
-// the sink's life, and at the next command (command cancels it). With a
-// command already pending it is done, so the wait ends at once.
+// the sink's life, at the next command (command cancels it), and when the
+// Drain under way is cancelled (startDrain's callback cancels it). With a
+// command already pending, or that Drain's context already ended, it is
+// done, so the wait ends at once: the callback cancels under the lock this
+// looks under, so a cancel that came after the loop last looked at the
+// drain is seen here or cancels what this returns, never neither.
 func (s *Sink) waitContext() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.cmds) > 0 {
+	if len(s.cmds) > 0 || (s.drainCmd != nil && s.drainCmd.ctx.Err() != nil) {
 		return doneCtx
 	}
 	if s.wake == nil || s.wake.Err() != nil {
@@ -603,38 +607,46 @@ func (s *Sink) recover() error {
 // writing what the store holds, pauses included, until it is empty and
 // finishDrain has the kernel play out the buffer. It is answered then, or
 // when the drain ends some other way. The drain's context ending wakes the
-// writer, which drops the stream (abandonDrain).
+// writer, which drops the stream (abandonDrain). The callback that wakes it
+// cancels a wait only while its own Drain is under way: one that runs late,
+// after the Drain was answered (an xrun), leaves the next Drain's waits
+// alone.
 func (s *Sink) startDrain(c *sinkCmd) (bool, error) {
 	if s.state != SinkPlaying {
 		return true, s.badState("drain")
 	}
+	s.mu.Lock()
 	s.drainCmd = c
-	s.drainStop = context.AfterFunc(c.ctx, func() {
+	s.finishing = true
+	s.setStateLocked(SinkDraining, nil)
+	s.mu.Unlock()
+	s.drainStop = s.afterFunc(c.ctx, func() {
 		s.mu.Lock()
-		if s.wakeStop != nil {
+		if s.drainCmd == c && s.wakeStop != nil {
 			s.wakeStop()
 		}
 		s.mu.Unlock()
 		poke(s.kick)
 	})
-	s.mu.Lock()
-	s.finishing = true
-	s.setStateLocked(SinkDraining, nil)
-	s.mu.Unlock()
 	return false, nil
 }
 
-// answerDrain answers the Drain under way, if there is one, with err.
+// answerDrain answers the Drain under way, if there is one, with err, once
+// the sink no longer counts it as under way: its caller acts on the answer
+// at once, and a Recover sent the moment a Drain reports an xrun must not
+// find the drain still playing out its last frames.
 func (s *Sink) answerDrain(err error) {
-	if s.drainCmd == nil {
+	c := s.drainCmd
+	if c == nil {
 		return
 	}
 	s.drainStop()
-	s.drainCmd.reply <- err
-	s.drainCmd, s.drainStop = nil, nil
+	s.drainStop = nil
 	s.mu.Lock()
-	s.finishing = false
+	s.drainCmd = nil
+	s.finishing, s.finalDrain = false, false
 	s.mu.Unlock()
+	c.reply <- err
 }
 
 // finishDrain has the kernel play out the buffer once the store is empty,
@@ -657,7 +669,7 @@ func (s *Sink) finishDrain() {
 	}()
 	dctx, cancel := context.WithCancel(s.waitContext())
 	defer cancel()
-	defer context.AfterFunc(s.drainCmd.ctx, cancel)()
+	defer s.afterFunc(s.drainCmd.ctx, cancel)()
 	if err := s.dev.Drain(dctx, s.params.BufferTime()+drainSlack); err != nil {
 		s.drainFailed(err)
 		return

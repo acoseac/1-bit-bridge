@@ -282,6 +282,7 @@ type Sink struct {
 	now               func() time.Time
 	producerWaits     func()
 	producerPublishes func()
+	afterFunc         func(context.Context, func()) func() bool
 
 	// The writer's own: nothing else reads or writes them.
 	dev         *Device
@@ -290,19 +291,19 @@ type Sink struct {
 	zeros       []byte
 	deadline    time.Time // when the pause releases the device
 	unexplained int       // POLLERRs in a row that woke a wait on the stream and its state explained away
-	drainCmd    *sinkCmd  // the Drain waiting for its end
 	drainStop   func() bool
 
 	wmu sync.Mutex // one producer at a time
 
 	// Under mu. The writer is the only one that changes state, err,
-	// pausedBy and params, so it reads them without the lock.
+	// pausedBy, params and drainCmd, so it reads them without the lock.
 	mu       sync.Mutex
 	ring     ring
 	state    SinkState
 	err      error
 	pausedBy string
 	params   Params
+	drainCmd *sinkCmd // the Drain waiting for its end, which its cancel's callback looks for
 	pos      Position // Stream, Played, Queued and Measured
 	silence  int64
 	counters Counters // the devices closed
@@ -349,14 +350,17 @@ type sinkCmd struct {
 }
 
 // sinkSeams is what openSink takes from its caller: the opener of a
-// device, the clock, and for the tests two hooks: one called each time
-// the producer starts to wait for room, and one each time it has copied
-// frames into the store and is about to publish them.
+// device and the clock, and for the tests a hook called each time the
+// producer starts to wait for room, one called each time it has copied
+// frames into the store and is about to publish them, and how the sink
+// registers what the end of a Drain's context runs (context.AfterFunc
+// when nil), which a test can hold back.
 type sinkSeams struct {
 	open              func(Endpoint, Config) (*Device, error)
 	now               func() time.Time
 	producerWaits     func()
 	producerPublishes func()
+	afterFunc         func(context.Context, func()) func() bool
 }
 
 // OpenSink opens cfg.Endpoint for cfg.Transport and starts the sink's
@@ -429,9 +433,12 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 		return nil, &Error{Reason: ReasonBadConfig, Op: "open", Endpoint: cfg.Endpoint, Detail: fmt.Sprintf(
 			"a store of at most %d bytes cannot hold the hardware buffer of %d frames and a period of %d more", MaxRingBytes, keep, p.PeriodFrames)}
 	}
+	if seams.afterFunc == nil {
+		seams.afterFunc = context.AfterFunc
+	}
 	s := &Sink{
 		cfg: cfg, devCfg: devCfg, life: ctx,
-		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes,
+		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc,
 		dev:     dev,
 		zeros:   make([]byte, p.PeriodFrames*fb),
 		ring:    newRing(frames, fb, keep),

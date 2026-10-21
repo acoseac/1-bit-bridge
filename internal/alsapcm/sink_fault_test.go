@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -175,6 +176,50 @@ func TestSinkDrainReportsAnUnderrunBeforeIt(t *testing.T) {
 	}
 	sameFrames(t, "what the DAC heard", heard(k), in)
 	k.checkClosedEach(t)
+}
+
+// TestSinkTakesRecoverAsSoonAsADrainReportsAnXrun pins the order of a
+// Drain's answer: everything the answer says is settled before it is
+// sent, so a Recover sent the moment a Drain reports an xrun is taken, not
+// refused as a drain still playing out its last frames. The writer is held
+// where the kernel drain lets go of the Drain's context, after the answer,
+// until a command pokes it.
+func TestSinkTakesRecoverAsSoonAsADrainReportsAnXrun(t *testing.T) {
+	k := newModel(t)
+	var s *Sink
+	var calls atomic.Int32
+	held := make(chan struct{})
+	s = openTestSinkWith(t, context.Background(), k, sinkConfig(), sinkSeams{afterFunc: func(ctx context.Context, f func()) func() bool {
+		stop := context.AfterFunc(ctx, f)
+		if calls.Add(1) != 2 {
+			return stop
+		}
+		// The second is the kernel drain's own, let go of once that drain
+		// has ended: on the writer's goroutine, after the answer.
+		return func() bool {
+			select {
+			case <-s.kick:
+			default:
+			}
+			close(held)
+			<-s.kick
+			return stop()
+		}
+	}})
+	in := content(0, 0, 9600)
+	submit(t, s, in)
+	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
+	k.advanceUnwatched(300 * time.Millisecond)
+	wantReason(t, s.Drain(context.Background()), ReasonXrun)
+	await(t, held, "the writer to let go of the drain's context")
+	recovered := make(chan error, 1)
+	go func() { recovered <- s.Recover() }()
+	if err := receive(t, recovered, "Recover to be answered"); err != nil {
+		t.Fatalf("Recover the moment the Drain reported the xrun: %v", err)
+	}
+	k.free()
+	drain(t, s)
+	sameFrames(t, "what the DAC heard", heard(k), in)
 }
 
 // TestSinkEndsOnADisconnectOrASuspendAndClosesOnce pins the end of a
@@ -397,6 +442,97 @@ func TestSinkDropIsImmediate(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Errorf("Close after Drop: %v", err)
+	}
+	k.checkClosedEach(t)
+}
+
+// TestSinkAnAnsweredDrainsCancelLeavesTheNextDrainAlone pins the cancel of
+// a Drain's context to that Drain (#1303's review: an answered drain's
+// cancel could cut the next one short). The first Drain's context ends as
+// the drain reaches the kernel, and its cancel is held back while that
+// drain ends with the underrun found before it. After Recover a second
+// Drain reaches the kernel's drain, and only then does the first one's
+// cancel run: the second drain plays out, and the DAC hears every frame.
+func TestSinkAnAnsweredDrainsCancelLeavesTheNextDrainAlone(t *testing.T) {
+	k := newModel(t)
+	var first atomic.Bool
+	first.Store(true)
+	fired, release, ran := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	s := openTestSinkWith(t, context.Background(), k, sinkConfig(), sinkSeams{afterFunc: func(ctx context.Context, f func()) func() bool {
+		if !first.CompareAndSwap(true, false) {
+			return context.AfterFunc(ctx, f)
+		}
+		return context.AfterFunc(ctx, func() {
+			close(fired)
+			<-release
+			f()
+			close(ran)
+		})
+	}})
+	in := content(0, 0, 19200)
+	submit(t, s, in[:9600*6])
+	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
+	k.advanceUnwatched(300 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The next now is the kernel drain's deadline: the first drain's
+	// context ends there, after the writer last looked at it.
+	k.inspect(func(k *fakeKernel) {
+		k.onNow = func() {
+			cancel()
+			<-fired
+		}
+	})
+	wantReason(t, s.Drain(ctx), ReasonXrun)
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	submit(t, s, in[9600*6:])
+	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer again")
+	done := make(chan error, 1)
+	go func() { done <- s.Drain(context.Background()) }()
+	await(t, k.when(func(k *fakeKernel) bool { return k.state == stateDraining && starved(k) }), "the kernel to drain the second buffer")
+	close(release)
+	await(t, ran, "the first drain's cancel to run")
+	k.free()
+	if err := receive(t, done, "the second drain to end"); err != nil {
+		t.Fatalf("the second Drain: %v", err)
+	}
+	sameFrames(t, "what the DAC heard", heard(k), in)
+}
+
+// TestSinkAPausedDrainsCancelIsNotLost pins a Drain's cancel that comes as
+// the writer goes from looking at the drain to waiting, here the wait of a
+// paused drain, which lasts until the release (#1303's review: the cancel
+// ended the context of the wait before, and the wait took a fresh one).
+// The Drain ends at once with the cancel, and the sink stops.
+func TestSinkAPausedDrainsCancelIsNotLost(t *testing.T) {
+	k := newModel(t)
+	s := openTestSink(t, k, sinkConfig())
+	submit(t, s, content(0, 0, 30000))
+	await(t, k.when(starved), "the writer to fill the hardware buffer")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Drain(ctx) }()
+	waitState(t, s, SinkDraining)
+	// The paused writer reads the clock once it has looked at the drain's
+	// context and before it takes its wait's: the cancel comes there, and
+	// its callback, which pokes the writer last, runs to its end first.
+	k.atNow(func() bool { return s.state == SinkPaused }, func() {
+		select {
+		case <-s.kick:
+		default:
+		}
+		cancel()
+		<-s.kick
+	})
+	if err := s.Pause(); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	wantReason(t, receive(t, done, "the paused drain to end at its cancel"), ReasonCancelled)
+	if p := waitState(t, s, SinkStopped); p.Played > p.Written {
+		t.Errorf("after the cancel: %+v", p)
 	}
 	k.checkClosedEach(t)
 }

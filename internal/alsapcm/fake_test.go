@@ -209,6 +209,21 @@ func (k *fakeKernel) now() time.Time {
 	return clock
 }
 
+// atNow has f called once, outside the lock, by the first now for which
+// ready holds; ready runs on the goroutine that reads the clock, which for
+// a sink is its writer, so it may look at what the writer keeps.
+func (k *fakeKernel) atNow(ready func() bool, f func()) {
+	var hook func()
+	hook = func() {
+		if !ready() {
+			k.inspect(func(k *fakeKernel) { k.onNow = hook })
+			return
+		}
+		f()
+	}
+	k.inspect(func(k *fakeKernel) { k.onNow = hook })
+}
+
 func (k *fakeKernel) open(path string) (int, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -323,12 +338,14 @@ func (k *fakeKernel) modelPoll(ctx context.Context, events int16, timeout time.D
 				select {
 				case <-more:
 				case <-ctx.Done():
-					k.mu.Lock()
-					k.leaveWait(ctx)
-					return 0, ctx.Err()
 				}
 				k.mu.Lock()
 				k.leaveWait(ctx)
+				// The real poll looks at its wake-up first (linuxSys.poll): a
+				// cancel that comes with a grant ends the wait.
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
 				continue
 			}
 			step = min(step, k.budget)
