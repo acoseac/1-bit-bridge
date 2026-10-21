@@ -31,9 +31,10 @@
 //	procremove N                card N out of proc/asound
 //	unplug DIR                  DIR removed with every card, bus/usb/devices link and proc card under it
 //
-// Links are made after the directories and files of the same manifest, so
-// on Windows a link to a directory is a directory link. A test on a
-// system that cannot make symlinks is skipped.
+// Links are made after the directories and files of the same manifest. A
+// test is skipped on Windows, where no file name can hold the colon sysfs
+// names do (an interface's 1-1:1.0, a PCI device's 0000:01:00.0), and on
+// any system that cannot make a symlink.
 package sysfstest
 
 import (
@@ -41,6 +42,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,10 +97,14 @@ func Apply(t testing.TB, root, text string) {
 	}
 }
 
-// symlinksOrSkip skips a test on a system that cannot make a symlink
-// (Windows without the privilege to).
+// symlinksOrSkip skips a test where a tree cannot be laid out: on Windows,
+// whose file names cannot hold a colon, and on a system that cannot make a
+// symlink.
 func symlinksOrSkip(t testing.TB) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("sysfstest: sysfs names hold a colon (1-1:1.0, 0000:01:00.0), which no Windows file name can")
+	}
 	dir := t.TempDir()
 	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
 		t.Skipf("sysfstest: this system cannot make a symlink: %v", err)

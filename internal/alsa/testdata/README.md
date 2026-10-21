@@ -72,8 +72,9 @@ and each status file holds only the first lines a real one opens with.
 ## Sysfs manifests (`sysfs/`), all synthetic
 
 A sysfs tree is symlinks all the way down, and a checkout of a committed
-symlink is not the same file everywhere, so these are not trees: each is a
-manifest that `internal/alsa/sysfstest` lays out under `t.TempDir()`, with
+symlink is not the same file everywhere (nor can a Windows file name hold
+the colon in `1-1:1.0`, so these tests skip there), so these are not trees:
+each is a manifest that `internal/alsa/sysfstest` lays out under `t.TempDir()`, with
 a `sys/` tree for `SysfsReader` and a `proc/` tree for `Reader` beside it
 (the directives are in that package's doc). Every one is made up from the
 layouts it names; none was captured, and every serial in them is made up.

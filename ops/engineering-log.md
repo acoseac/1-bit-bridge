@@ -50346,7 +50346,10 @@ the reader walks components through an `os.Root`, refusing an absolute link
 and a `..` past the root, counting links (40 is a loop) and steps. Fake trees
 are laid out at test time from manifests: a committed symlink checks out as a
 text file on Windows, and the alsa testdata README already records that for
-`symlinked-pcm`. The manifests are synthetic and say so; the GO bar's place in
+`symlinked-pcm`. Those tests skip on Windows all the same: a sysfs name holds
+a colon (`1-1:1.0`, `0000:01:00.0`), which no Windows file name can (found
+reading the manifests, before any Windows run). The reader still builds there, and
+the tests that need no tree run. The manifests are synthetic and say so; the GO bar's place in
 `pi5-go-bar` comes from the captured long name, and every serial is made up.
 
 **Resolve's choices.** Any transient card (in one tree only, read as two
