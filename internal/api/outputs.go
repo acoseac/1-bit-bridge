@@ -60,12 +60,17 @@ type OutputPlayer struct {
 
 // OutputMPD is the daemon beside the bridge. Addresses are the LAN
 // addresses that greeted, never loopback, and never null.
+// LoopbackBaseURL is the base URL of the bridge's loopback track route,
+// http://127.0.0.1:<port>, which only this MPD can reach: the app hands
+// it <base>/dlna/file/<trackID> for a bridge track its database lacks.
+// Additive, and absent while the route is not serving.
 type OutputMPD struct {
 	Port             int      `json:"port"`
 	Addresses        []string `json:"addresses"`
 	Version          string   `json:"version"`
 	State            string   `json:"state"`
 	ReachableFromLAN bool     `json:"reachableFromLAN"`
+	LoopbackBaseURL  string   `json:"loopbackBaseURL,omitempty"`
 }
 
 // OutputDAC is one sound card. IsMPDsOutput is true or null, never
@@ -130,6 +135,14 @@ type LocalOutputsConfig struct {
 	Cards      func() (alsa.Snapshot, error)
 	Getenv     func(string) string
 	BuildLimit time.Duration
+
+	// LoopbackBaseURL is the base URL of the loopback track route while it
+	// serves, "" otherwise; mpd.loopbackBaseURL carries it. Nil is "".
+	LoopbackBaseURL func() string
+	// OnActive runs each time Active answers true: the loopback track
+	// route starts the first time output.mpd resolves on. It must be
+	// cheap and idempotent. Nil does nothing.
+	OnActive func()
 }
 
 type localOutputs struct {
@@ -147,6 +160,8 @@ type localOutputs struct {
 	cards      func() (alsa.Snapshot, error)
 	getenv     func(string) string
 	buildLimit time.Duration
+	loopback   func() string
+	onActive   func()
 
 	mu           sync.Mutex
 	client       outputSession
@@ -221,6 +236,8 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		cards:      cfg.Cards,
 		getenv:     cfg.Getenv,
 		buildLimit: cfg.BuildLimit,
+		loopback:   cfg.LoopbackBaseURL,
+		onActive:   cfg.OnActive,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -271,19 +288,23 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 // config says on: the readers refuse the host the way bridge output dac
 // does. auto is on only when a configuration was read or a daemon
 // greeted, and that answer is cached so health does not dial every time.
+// The same answer starts the loopback track route: OnActive runs each
+// time it is true.
 func (o *localOutputs) Active(ctx context.Context) bool {
 	if o == nil || o.goos != "linux" {
 		return false
 	}
+	on := false
 	switch o.output().Mode() {
 	case "on":
-		return true
+		on = true
 	case "auto":
-		found, _, _ := o.probe(ctx)
-		return found
-	default:
-		return false
+		on, _, _ = o.probe(ctx)
 	}
+	if on && o.onActive != nil {
+		o.onActive()
+	}
+	return on
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
@@ -544,6 +565,9 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 		Version:          version,
 		State:            state,
 		ReachableFromLAN: len(addrs) > 0,
+	}
+	if o.loopback != nil {
+		mpdInfo.LoopbackBaseURL = o.loopback()
 	}
 	dacs := o.dacs(rep)
 	base := OutputInfo{Kind: "mpd", Player: player, MPD: mpdInfo, PathRules: rules}
@@ -945,6 +969,13 @@ func (s *Server) WithLocalOutputs(cfg LocalOutputsConfig) *Server {
 	}
 	s.localOutputs = newLocalOutputs(cfg)
 	return s
+}
+
+// LocalOutputsActive is the gate /v1/health's localOutputs flag reads:
+// output.mpd resolves on and the host is Linux. False when the route is
+// not wired. Like every call of that gate, a true answer runs OnActive.
+func (s *Server) LocalOutputsActive(ctx context.Context) bool {
+	return s.localOutputs.Active(ctx)
 }
 
 func (s *Server) outputs(w http.ResponseWriter, r *http.Request) {
