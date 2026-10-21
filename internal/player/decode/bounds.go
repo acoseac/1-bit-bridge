@@ -21,6 +21,24 @@ const (
 	maxMP4BoxDepth = 8
 	// maxMoovBytes is the largest moov/moof payload we will load to find stsd.
 	maxMoovBytes = 4 << 20
+
+	// maxM4ABoxes bounds the box headers one ALAC open reads: the top level,
+	// moov, and the containers of the tracks below it.
+	maxM4ABoxes = 4096
+	// maxM4AChildren bounds one container's boxes, the top level's included.
+	maxM4AChildren = 256
+	// maxM4ASmallBox bounds mvhd, mdhd, hdlr, dref and elst, which are read
+	// whole. Each is tens of bytes; hdlr carries a name.
+	maxM4ASmallBox = 4096
+	// maxSTSDBytes bounds the sample description read whole. An ALAC one is
+	// 80 bytes.
+	maxSTSDBytes = 64 << 10
+	// maxALACPackets bounds an ALAC track's packets, and so its seek index:
+	// twelve bytes a packet, 12 MiB at the cap. 2^20 packets of 4096 frames
+	// are 6.2 hours at 192 kHz.
+	maxALACPackets = 1 << 20
+	// m4aTableRead is how many table entries one read takes.
+	m4aTableRead = 4096
 )
 
 func acceptRate(rate int) error {

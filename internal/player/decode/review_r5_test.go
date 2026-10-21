@@ -9,16 +9,15 @@ import (
 )
 
 // Round-5 CodeRabbit: moov scans capped at 4 MiB must not discard codecs
-// already found when a later box crosses the cut.
+// already found when a later box crosses the cut. The ALAC cases ask the
+// sniffer directly: since PR 1c these stubs open the ALAC demuxer, which
+// refuses them for the tables they lack (TestALACLargeBoxesAreSkipped
+// decodes a real file with a cover past the cut).
 
 func TestReviewR5MoovCapKeepsALACBeforeCover(t *testing.T) {
-	_, err := decode.Open(bytes.NewReader(moovPastCapWithCodec(t, stsdALAC())))
-	r, ok := decode.AsRefusal(err)
-	if !ok {
-		t.Fatalf("want refusal, got %v", err)
-	}
-	if r.Reason != decode.ReasonNotYetSupported {
-		t.Fatalf("got %q (%v), want not_yet_supported (ALAC before large covr)", r.Reason, err)
+	alac, err := decode.SniffsALAC(bytes.NewReader(moovPastCapWithCodec(t, stsdALAC())))
+	if err != nil || !alac {
+		t.Fatalf("sniffed ALAC=%v err=%v, want ALAC (ALAC before large covr)", alac, err)
 	}
 }
 
@@ -34,13 +33,9 @@ func TestReviewR5MoovCapKeepsAACBeforeCover(t *testing.T) {
 }
 
 func TestReviewR5MoovCapALACWhenSTBLCrossesCut(t *testing.T) {
-	_, err := decode.Open(bytes.NewReader(moovSTBLCrossesCut(t, stsdALAC())))
-	r, ok := decode.AsRefusal(err)
-	if !ok {
-		t.Fatalf("want refusal, got %v", err)
-	}
-	if r.Reason != decode.ReasonNotYetSupported {
-		t.Fatalf("got %q (%v), want not_yet_supported (stsd before stbl cut)", r.Reason, err)
+	alac, err := decode.SniffsALAC(bytes.NewReader(moovSTBLCrossesCut(t, stsdALAC())))
+	if err != nil || !alac {
+		t.Fatalf("sniffed ALAC=%v err=%v, want ALAC (stsd before stbl cut)", alac, err)
 	}
 }
 

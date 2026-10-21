@@ -9,6 +9,7 @@ require (
 	github.com/hashicorp/mdns v1.0.7
 	github.com/mewkiz/flac v1.0.14
 	github.com/miekg/dns v1.1.73
+	github.com/mycophonic/saprobe-alac v1.0.0-rc2.0.20261020094436-1b6eb8378954
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/quic-go v0.63.0
@@ -20,7 +21,7 @@ require (
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
-	golang.org/x/text v0.42.0
+	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0
 	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v3 v3.0.1

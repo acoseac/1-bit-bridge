@@ -17,7 +17,7 @@ const (
 	ReasonUnsupportedComp     Reason = "unsupported_compression"
 	ReasonTruncated           Reason = "truncated_or_corrupt"
 	ReasonUnsupportedLayout   Reason = "unsupported_layout"
-	ReasonNotYetSupported     Reason = "not_yet_supported" // ALAC in a later PR
+	ReasonNotYetSupported     Reason = "not_yet_supported" // 32-bit FLAC (sample-size code 111)
 )
 
 // Refusal is a typed refusal the console and OpenHome layer can show.
