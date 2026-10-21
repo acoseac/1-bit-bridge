@@ -27,7 +27,7 @@ import (
 // shares, each element's card, and the loopback route's base URL.
 func TestChecklistInputReadsTheOutputsBody(t *testing.T) {
 	yes := true
-	mpdObj := &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.0.94"}, Version: "0.24.0", State: "play",
+	mpdObj := &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "play",
 		ReachableFromLAN: true, LoopbackBaseURL: "http://127.0.0.1:7791"}
 	rules := []api.OutputPathRule{{Root: "INTERNAL", State: "mismatch", Checked: 20, Found: 3}}
 	resp := api.OutputsResponse{Outputs: []api.OutputInfo{
@@ -40,7 +40,7 @@ func TestChecklistInputReadsTheOutputsBody(t *testing.T) {
 	}}
 	in := checklistInput(resp)
 	if in.Player.Software != "volumio" || in.Player.Version != "4.119" || in.Player.MPDVersion != "0.24.0" ||
-		in.Player.Port != 6600 || len(in.Player.Addresses) != 1 || in.Player.Addresses[0] != "192.168.0.94" {
+		in.Player.Port != 6600 || len(in.Player.Addresses) != 1 || in.Player.Addresses[0] != "192.168.1.42" {
 		t.Fatalf("player %+v", in.Player)
 	}
 	if in.Loopback.BaseURL != "http://127.0.0.1:7791" {

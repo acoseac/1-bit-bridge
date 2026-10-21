@@ -14,7 +14,7 @@ var ifi = DAC{
 // healthy is a Volumio box where everything works.
 func healthy() Input {
 	return Input{
-		Player:   Player{Software: "volumio", Version: "4.119", MPDVersion: "0.24.0", Port: 6600, Addresses: []string{"192.168.0.94"}},
+		Player:   Player{Software: "volumio", Version: "4.119", MPDVersion: "0.24.0", Port: 6600, Addresses: []string{"192.168.1.42"}},
 		DACs:     []DAC{ifi},
 		Roots:    []RootRule{{Root: "INTERNAL", State: "proven", Checked: 20, Found: 20}},
 		Loopback: Loopback{BaseURL: "http://127.0.0.1:7791"},
@@ -126,7 +126,7 @@ func TestAHealthyBoxIsGreenAndNamesItsProtocol(t *testing.T) {
 		}
 	}
 	p := line(t, lines, "player")
-	for _, want := range []string{"Volumio 4.119", "MPD 0.24.0", "port 6600", "192.168.0.94"} {
+	for _, want := range []string{"Volumio 4.119", "MPD 0.24.0", "port 6600", "192.168.1.42"} {
 		if !strings.Contains(p.Summary, want) {
 			t.Errorf("player summary %q lacks %q", p.Summary, want)
 		}

@@ -48,7 +48,7 @@ func TestOutputChecklistIsInactiveOffAPlayer(t *testing.T) {
 func TestOutputChecklistPassesTheLinesThrough(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	lines := []OutputCheckLine{
-		{Key: "player", Title: "Player", Status: "ok", Summary: "Volumio 4.119 · MPD 0.24.0 on port 6600, reachable at 192.168.0.94"},
+		{Key: "player", Title: "Player", Status: "ok", Summary: "Volumio 4.119 · MPD 0.24.0 on port 6600, reachable at 192.168.1.42"},
 		{Key: "dac", Title: "DAC", Status: "warn", Summary: "iFi found, but MPD's output does not name it", Fix: "Point MPD's audio_output at the DAC."},
 		{Key: "music", Title: "Music", Status: "ok", Summary: "Ready: can play music from another bridge or NAS"},
 		{Key: "phone", Title: "Phone", Status: "warn", Summary: "No phone paired yet", Fix: "Scan the pairing QR."},
