@@ -1,9 +1,13 @@
 // Package alsapcm plays PCM through one physical ALSA playback endpoint by
 // talking to the Linux kernel directly: the ioctls of
 // include/uapi/sound/asound.h, with no alsa-lib, no cgo and no C toolchain
-// at run time. It is the first layer of the bridge player's backend (B470
-// PR 2a): open, negotiate, write and stop. The streaming sink, its xrun
-// recovery, DSD and DoP are later layers.
+// at run time. Device is the first layer of the bridge player's backend
+// (B470 PR 2a): open, negotiate, write and stop. Sink is the second (PR 2b):
+// a stream of frames through a preallocated lookahead, the position the
+// kernel establishes, pause and resume by the kernel's PAUSE or by zeros
+// with the device released after a long pause, xruns reported and
+// recovered only when asked, drop and drain, and the gapless decision
+// between tracks. DSD and DoP are later layers.
 //
 // What it will do, and what it refuses:
 //
@@ -24,6 +28,10 @@
 //     silence.
 //   - A write waits for room with poll, and a cancelled context ends the
 //     wait at once; xrun, suspend and disconnect come back typed.
+//   - A Sink never conceals: an xrun stops it and is counted as a gap
+//     until the caller asks for Recover; silence never counts as content;
+//     a frame is never written twice or skipped, a release and a reopen
+//     included; and the device is closed once per open.
 //   - No buffer is ever shared with the kernel past a call: nothing is
 //     mmapped, and each ioctl's argument is kept alive across the call
 //     (ioctlOn).
