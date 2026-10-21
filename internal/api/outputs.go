@@ -971,6 +971,61 @@ func (s *Server) WithLocalOutputs(cfg LocalOutputsConfig) *Server {
 	return s
 }
 
+// LocalOutputs is GET /v1/outputs' builder on its own, for a caller with
+// no server: `bridge doctor` asks it once for the checklist and closes it.
+// The gate and the body are the route's, from the same code.
+type LocalOutputs struct{ o *localOutputs }
+
+// NewLocalOutputs builds the outputs body the way WithLocalOutputs does,
+// from cfg alone: a nil Output, Roots or Advertised is the empty one, as
+// for a server, and nothing is read from a server's config.
+func NewLocalOutputs(cfg LocalOutputsConfig) *LocalOutputs {
+	return &LocalOutputs{o: newLocalOutputs(cfg)}
+}
+
+// Active is the localOutputs gate.
+func (l *LocalOutputs) Active(ctx context.Context) bool { return l.o.Active(ctx) }
+
+// Response builds the body GET /v1/outputs would serve.
+func (l *LocalOutputs) Response(ctx context.Context) (OutputsResponse, error) {
+	return l.o.Response(ctx)
+}
+
+// Close ends the MPD session now, rather than after the idle minute, and
+// disarms the idle close. A one-shot caller closes as soon as it has its
+// body: the connection stays lazy, and MPD's max_connections is shared.
+func (l *LocalOutputs) Close() { l.o.close() }
+
+func (o *localOutputs) close() {
+	o.mu.Lock()
+	c := o.client
+	o.client = nil
+	o.sessEndpoint = ""
+	o.sessPassword = ""
+	stop := o.stopIdle
+	o.stopIdle = nil
+	o.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if c != nil {
+		_ = c.Close()
+	}
+}
+
+// errNoLocalOutputs is a server with no outputs builder wired.
+var errNoLocalOutputs = errors.New("api: local outputs are not wired")
+
+// LocalOutputsResponse is the body GET /v1/outputs serves, built by the
+// route's own builder, with its caches and its lazy session: the console's
+// checklist reads the box from here, the way the app does.
+func (s *Server) LocalOutputsResponse(ctx context.Context) (OutputsResponse, error) {
+	if s.localOutputs == nil {
+		return OutputsResponse{}, errNoLocalOutputs
+	}
+	return s.localOutputs.Response(ctx)
+}
+
 // LocalOutputsActive is the gate /v1/health's localOutputs flag reads:
 // output.mpd resolves on and the host is Linux. False when the route is
 // not wired. Like every call of that gate, a true answer runs OnActive.
