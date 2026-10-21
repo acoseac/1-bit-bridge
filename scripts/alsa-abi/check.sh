@@ -36,7 +36,23 @@ if [ -n "${ALSA_UAPI_HEADER:-}" ]; then
 	echo "asound.h: $ALSA_UAPI_HEADER (ALSA_UAPI_HEADER), compared as the header of $tag"
 else
 	url="https://raw.githubusercontent.com/torvalds/linux/$tag/include/uapi/sound/asound.h"
-	curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$header" "$url"
+	# GitHub's raw host rate-limits unauthenticated requests, and a shared CI
+	# runner can find its limit spent: four 429s in 13 seconds failed the
+	# job on 2026-10-21. curl retries a 429 as transient, honouring the
+	# server's Retry-After, and otherwise waits 1 s and doubles the wait;
+	# eight retries within at most 5 minutes outlast such a window and stay
+	# well inside the job's 15. A 404 or another failure is not retried.
+	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --retry 8 --retry-max-time 300 -o "$header")
+	if [ -n "${GITHUB_TOKEN:-}" ]; then
+		# In CI the workflow's token authenticates the request, which the
+		# raw host gives a higher limit. It reaches curl as a config line on
+		# stdin, so no command line carries it, and it leaves the
+		# environment before anything else here runs.
+		printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" | "${fetch[@]}" --config - "$url"
+		unset GITHUB_TOKEN
+	else
+		"${fetch[@]}" "$url"
+	fi
 	echo "asound.h: $url"
 fi
 # The blob id is the file's identity in the kernel's own git history:

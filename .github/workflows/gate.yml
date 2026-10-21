@@ -362,6 +362,11 @@ jobs:
           cc --version | head -1
           dpkg-query -W -f='${Package} ${Version}\n' linux-libc-dev libc6-dev || true
       - name: compare the Go definitions with the pinned asound.h
+        # The job's read-only token authenticates the header's download,
+        # which raises GitHub's rate limit on its raw host; check.sh passes
+        # it to curl off the command line and drops it once it has the file.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/alsa-abi/check.sh
 
   # Executes the suite on the two platforms `build-all` only ever
