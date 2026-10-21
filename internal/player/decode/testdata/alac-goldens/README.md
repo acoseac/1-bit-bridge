@@ -29,9 +29,9 @@ full-scale noise, smooth triangle waves, correlated stereo, silence with one
 impulse per channel, values next to the extrema with noise in the low byte,
 and a one-step square beside a ramp. Left and right differ in every kind but
 the silence. `afconvert` codes the packet that holds most of the noise as an
-escape (uncompressed) packet and the others compressed, so each fixture
-decodes both kinds; `TestALACGoldensDecodeBothPacketKinds` reads the packet
-headers to keep it so.
+escape (uncompressed) packet and most of the others compressed, so each
+fixture decodes both kinds; `TestALACGoldensDecodeBothPacketKinds` reads the
+packet headers to keep it so.
 
 | File | What it pins |
 |---|---|
