@@ -87,9 +87,11 @@ func TestAfterRunReturnsEveryCommandIsClosed(t *testing.T) {
 	// Each waits under the watchdog: a command that blocked after Run would
 	// otherwise hang the test rather than fail it.
 	for name, f := range map[string]func() error{
-		"play":   func() error { return h.eng.Play(context.Background()) },
-		"stop":   func() error { return h.eng.Stop(context.Background()) },
-		"output": func() error { return h.eng.ReportOutput(context.Background(), OutputReport{Generation: 9, Available: true}) },
+		"play": func() error { return h.eng.Play(context.Background()) },
+		"stop": func() error { return h.eng.Stop(context.Background()) },
+		"output": func() error {
+			return h.eng.ReportOutput(context.Background(), OutputReport{Generation: 9, Available: true})
+		},
 		"insert": func() error {
 			_, err := h.eng.InsertAfter(context.Background(), 0, ref("b"), nil)
 			return err
