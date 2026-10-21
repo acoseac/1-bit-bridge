@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
 - [2026-10-21 — B470 PR 2b round 2: the writer's watch, five sink windows, the position test's Linux race, and pcm-test's stop, time and keys](#2026-10-21--b470-pr-2b-round-2-the-writers-watch-five-sink-windows-the-position-tests-linux-race-and-pcm-tests-stop-time-and-keys)
 - [2026-10-21 — B470 PR 2b: the streaming PCM sink, its position, pause and release, reported xruns, gapless joins, and the harness's sink mode](#2026-10-21--b470-pr-2b-the-streaming-pcm-sink-its-position-pause-and-release-reported-xruns-gapless-joins-and-the-harnesss-sink-mode)
 - [2026-10-21 — B470 PR 2a: the pure-Go ALSA PCM backend's first layer, its pinned UAPI and ABI check, and the hardware harness](#2026-10-21--b470-pr-2a-the-pure-go-alsa-pcm-backends-first-layer-its-pinned-uapi-and-abi-check-and-the-hardware-harness)
@@ -49628,3 +49629,150 @@ and 4 after each sink change, and the harness tests three times under
   change transport (`--keys`) should print "stopped (q)" and "closed",
   exit 0, with nothing playing after; the same run without q should report
   the played time rising across the change with no jump back.
+
+## 2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor
+
+Round 2 was reviewed by Codex (no new findings; every round-1 finding
+fixed), Argon (none) and the Claude API (two, Low). With CodeRabbit's
+request and #1303's windows-latest failure, four items: all real, all in
+the harness (`cmd/bridge/output_pcmtest_sink.go`,
+`cmd/bridge/output_pcmtest_keys_unix.go`), all fixed. The sink's own code
+is unchanged.
+
+### The windows-latest failure
+
+`TestOutputPCMTestSinkPausesAndResumesOnTimers` exited 1. The owner's
+excerpt of the log showed a tick line in round 1's format ("1 s: played
+0.500 s (24000 frames) …"), so the leg ran round 1's head. It also showed
+the kernel-file comparison finding `asound\cards` missing, which is
+informational: the comparison says "not read" and agrees.
+
+- Not a timer: the test sends its ticks with fixed times, the fake sink
+  has no clock, and nothing in the run reads the wall clock. Not Linux's
+  either: the test drives a fake sink, portable to every OS.
+- Reproduced on macOS without `-race`, as the Windows leg runs it: one
+  failure in the first 3,000 runs, then none in 14,000 more at GOMAXPROCS
+  1, 2, 4 and the host's, or in 6,000 under `-race` at 1, 2, 4 and 8. The
+  failure: exit 1, stderr "drain: bad_state: paused: resume or drop it",
+  the stdout running on through the pause and "resumed at 1.000 s" to
+  "stopped after 1.000 s played" and "closed". The owner's excerpt ended
+  at the first tick line; no path of the run exits 1 without printing more
+  than that, and the test reaches its result only once the run has taken
+  all four ticks, so the excerpt was not the whole output.
+- The cause is a window in the harness's `drain`: a paused sink refuses a
+  Drain (`bad_state`), and the producer then asked the sink's state to
+  decide whether to wait for a resume; a resume between the refusal and
+  that read found the sink playing, so the refusal went back as the run's
+  failure. The real sink refuses a paused Drain the same way
+  (`startDrain`), so a resume by timer or key could end a hardware run
+  like that too. Why it struck the Windows leg and not the `-race` legs is
+  not measured: it is one interleaving, which any OS can produce.
+
+### What changed
+
+- f0a701ac, 0e241433. **The producer's drain asks again when a resume
+  overtakes a paused sink's refusal.** A `bad_state` refusal is read with
+  the sink's state first and the `Changed` channel, taken before the
+  Drain, second: the channel still open says the state read is the one
+  the refusal answered, so a paused sink is waited for and any other
+  refusal returned; the channel closed says the state changed, and the
+  Drain is asked again. The fake sink's hooks became one (`hook`, called
+  at "write", "drain", "position" and "refused"), and its Drain no longer
+  defers its unlock inside its loop.
+- 6548fe9a. **A file at a rate the ALSA backend does not open is refused
+  before the device opens** (CodeRabbit). The decoders take 1 Hz to
+  768 kHz (`acceptRate`) and the backend opens `alsapcm.MinRateHz` to
+  `MaxRateHz`, 8 kHz to 1.536 MHz, so a file below 8 kHz passed
+  `pcmTestOpenFiles` and was refused by its sink's open: at once for the
+  first file, and after the first had played for a second file of another
+  transport. The harness's fake `openSink` now refuses such a rate as the
+  backend's open does.
+- 5082d05e. **The run's time cannot wrap** (the Claude API, finding 1).
+  `pcmTestDuration` multiplied the frames by a second's nanoseconds before
+  dividing by the rate, which passes int64 at 9.22e9 frames: 3 h 20 min
+  into a sink at 768 kHz, 6 h 40 min at 384 kHz, and gapless joins add to
+  one sink's `Played`. The whole seconds and the remainder are counted
+  apart.
+- 13f724c2. **The key reader takes its descriptor through `SyscallConn`**
+  (the Claude API, finding 2). `(*os.File).Fd` puts a file Go made
+  non-blocking back into blocking mode, on the open file description every
+  holder shares. The descriptor is taken once, through `Control`, and the
+  reader keeps the file, as before.
+
+### Red first
+
+| Item | Test | Red against the code before the fix |
+|---|---|---|
+| windows-latest | `TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal` | exit 1, "drain: bad_state: paused: resume or drop it", three runs of three (its first version; its second, both cases, under control C1, which is round 2's logic) |
+| CodeRabbit | `TestOutputPCMTestSinkRefusesWhatItCannotPlay`, two new cases | a lone 4000 Hz WAV was opened, and refused there ("rate 4000 Hz is outside 8000..1536000") once the fake's open had the backend's gate; after a 44.1 kHz WAV, the first file played and "track 2: the sink for its transport did not open (exit 1)" |
+| the Claude API 1 | `TestPCMTestDurationCannotOverflow`, `TestOutputPCMTestSinkCountsALongRunsTime` | 9.3e9 frames at 768 kHz were -3h18m29.823s for 3h21m49.375s; the run printed "played -11909.823 s" and never paused for `--pause-at 12000` |
+| the Claude API 2 | `TestPCMTestKeysLeaveTheFilesModeAlone` | the pipe's read end was left blocking, three runs of three |
+
+The drain test holds the producer at its first look at the sink after the
+refusal, and the resume comes while it waits there. Its first version had
+the pause come after the producer took `Changed`, so the pause itself
+closed the channel the producer looks at, and a look at the channel before
+the state read passed (C2). The second version adds the case where the
+pause comes first (the producer held at its first write), where only the
+resume closes it.
+
+### Negative controls
+
+Each run against the committed fix, then restored and the tree checked
+clean.
+
+| | Mutation | What failed |
+|---|---|---|
+| C1 | the drain's look at `Changed` removed (round 2's logic) | the drain test, both cases: exit 1, the refusal |
+| C2 | the look at `Changed` before the state read | the first version of the drain test: nothing; the second: both cases |
+| R1 | the rate check's floor at 1 Hz | the refusal test's two new cases |
+| D1 | `pcmTestDuration` back to frames × 1e9 / rate | `TestPCMTestDurationCannotOverflow`, `TestOutputPCMTestSinkCountsALongRunsTime` |
+| D2 | the remainder dropped | six tests: those two, and every one whose time has a fraction of a second (the joins, the tone's tracks, the time across rates, and the drain test, which waited out its watchdog for a pause at 0.5 s) |
+| K1 | `f.Fd()` called again | `TestPCMTestKeysLeaveTheFilesModeAlone` |
+
+After the fix, the timer test and the drain test ran 12,000 times each at
+GOMAXPROCS 1, 4 and 16, and 400 times each under `-race` at 1 and 4,
+without a failure.
+
+### Decisions
+
+- The drain asks again rather than waiting on `Changed` for every
+  refusal: a refusal for another reason (a second Drain, the kernel's last
+  buffer) is returned as before. The order of the two reads is what makes
+  the look mean something (C2).
+- Not gated to Linux: the window is the harness's on every OS, the
+  hardware's included.
+- The rate check is the backend's range, as `--rate`'s is, and is the
+  condition the backend's own open applies; its top half no decoded file
+  reaches today, since the decoders stop at 768 kHz. No other transport
+  check was added: the channels and the valid bits are the decoders'
+  (round 2's rejection stands), and whether the hardware takes a rate is
+  its open's to say.
+- `pcmTestDuration` keeps `time.Duration`: its int64 nanoseconds hold 292
+  years, and the whole seconds overflow only past that.
+- `os.Stdin` comes from `NewFile`, which never marks a file as one Go made
+  non-blocking, so `Fd` never changed the shell's standard input in Go
+  1.27.2: the finding's production case did not occur. A pipe Go opened is
+  marked, the test's own pipe was switched to blocking, and the reader's
+  comment claimed it changed nothing about its file, which was false for
+  such a file. `unix.IsNonblock`, which the finding named, is not in
+  x/sys v0.49.0; the test reads `F_GETFL` through `SyscallConn`, since
+  `Fd` would change what it reads.
+- The fake sink's Drain deferred its unlock inside its loop, so a gate
+  that fired while the state was not draining would have deadlocked the
+  fake on its own lock; no test reached it, and the unlocks are now
+  explicit.
+
+### Not in this change
+
+- The Linux and Windows legs have not run round 3: this session had no
+  Linux or Windows. Everything was compiled and vetted for linux/amd64,
+  linux/arm64 and windows/amd64, and `cmd/bridge`'s tests compile for
+  windows.
+- The same shape, a state read before an action, remains in `resume`'s
+  report: a sink released between its read and the Resume reopens, and the
+  run says "resumed at" without the reopen's line and its parameters. The
+  run plays correctly; only the report is short.
+- The hardware's own rates (the card's stream file) are not read before
+  the open: a rate the backend opens and the DAC does not is the open's
+  `parameters_not_supported`, at the first open or at a reopen.
