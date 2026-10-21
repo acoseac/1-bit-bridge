@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -126,17 +127,19 @@ func mustChecklist(t *testing.T, src outputChecklistSource) []outputcheck.Line {
 }
 
 // TestProbeLoopbackRouteKnowsItsOwnRoute: the doctor asks the configured
-// port. This bridge's route answers there with its typed refusal; nothing
+// port. This bridge's route answers there with its typed refusal, not_found
+// while it serves and not_serving while output.mpd does not resolve on in
+// the bridge that runs it, and the doctor knows it by either; nothing
 // listening is a route that is not serving; anything else on the port is
 // named as holding it.
 func TestProbeLoopbackRouteKnowsItsOwnRoute(t *testing.T) {
-	srv := dlna.NewLoopbackServer(dlna.LoopbackConfig{Library: emptyTrackLookup{}, Roots: func() []string { return nil }})
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	srv := startProbedRoute(t, true)
 	if base, err := probeLoopbackRoute(context.Background(), portOf(t, srv.BaseURL())); err != nil || base != srv.BaseURL() {
 		t.Fatalf("own route: base %q err %v, want %q", base, err, srv.BaseURL())
+	}
+	off := startProbedRoute(t, false)
+	if base, err := probeLoopbackRoute(context.Background(), portOf(t, off.BaseURL())); base != "" || !errors.Is(err, errLoopbackNotServing) {
+		t.Fatalf("own route, output off: base %q err %v, want no base and errLoopbackNotServing", base, err)
 	}
 
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -161,6 +164,67 @@ func TestProbeLoopbackRouteKnowsItsOwnRoute(t *testing.T) {
 type emptyTrackLookup struct{}
 
 func (emptyTrackLookup) GetTrackInfo(string) (dlna.TrackInfo, bool) { return dlna.TrackInfo{}, false }
+
+// startProbedRoute starts a loopback route on a port the kernel picks,
+// serving or not as on says, and stops it when the test ends.
+func startProbedRoute(t *testing.T, on bool) *dlna.LoopbackServer {
+	t.Helper()
+	srv := dlna.NewLoopbackServer(dlna.LoopbackConfig{
+		Library: emptyTrackLookup{},
+		Roots:   func() []string { return nil },
+		Enabled: func() bool { return on },
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	return srv
+}
+
+// TestBridgeDoctorSaysTheLoopbackRouteIsNotServing: when the running
+// bridge's route answers on its port with not_serving, the doctor knows the
+// route as this bridge's, never as something else holding the port, and
+// the Music line says the route is up and refusing, with the fix for that.
+func TestBridgeDoctorSaysTheLoopbackRouteIsNotServing(t *testing.T) {
+	route := startProbedRoute(t, false)
+	port := portOf(t, route.BaseURL())
+	dir := t.TempDir()
+	music := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(music, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		LibraryRoots:  []string{music},
+		DataDir:       filepath.Join(dir, "data"),
+		ListenAddress: "127.0.0.1:0",
+		Output:        config.OutputConfig{MPD: "on", LoopbackPort: &port},
+	}
+	var line doctor.Check
+	for _, c := range doctorOutputChecklist(cfg, linuxBoxSeam(music))(context.Background()) {
+		if c.Name == "music" {
+			line = c
+		}
+	}
+	if line.Status != doctor.Fail || !strings.Contains(line.Summary, "answers but is not serving") ||
+		!strings.Contains(line.Hint, "Restart the bridge") {
+		t.Fatalf("music line %+v, want a fail saying the route answers but is not serving", line)
+	}
+}
+
+// linuxBoxSeam stands the doctor's outputs builder on a Linux box with
+// Volumio, whose MPD does not answer, whose music directory is music, and
+// which has no cards and no LAN greeting.
+func linuxBoxSeam(music string) func(*api.LocalOutputsConfig) {
+	return func(c *api.LocalOutputsConfig) {
+		c.GOOS = "linux"
+		c.Inspect = func(context.Context, mpd.Options) mpd.Report {
+			return mpd.Report{Software: mpd.Software{Name: "Volumio", Version: "4.119"}, MusicDirectory: music}
+		}
+		c.Cards = func() (alsa.Snapshot, error) { return alsa.Snapshot{}, nil }
+		c.Greet = func(context.Context, string) bool { return false }
+		c.Getenv = func(string) string { return "" }
+	}
+}
 
 func portOf(t *testing.T, base string) int {
 	t.Helper()

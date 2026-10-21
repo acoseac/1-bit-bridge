@@ -40,7 +40,8 @@ type outputChecklistSource struct {
 	Active func(context.Context) bool
 	// Outputs is the body GET /v1/outputs serves.
 	Outputs func(context.Context) (api.OutputsResponse, error)
-	// LoopbackErr is why the loopback track route is not serving, or nil.
+	// LoopbackErr is why the loopback track route is not serving, or nil:
+	// errLoopbackNotServing when it answers and refuses tracks.
 	LoopbackErr func() error
 	// Phones is the number of paired devices.
 	Phones func() int
@@ -59,7 +60,10 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 		}
 	}
 	if src.LoopbackErr != nil {
-		if err := src.LoopbackErr(); err != nil {
+		switch err := src.LoopbackErr(); {
+		case errors.Is(err, errLoopbackNotServing):
+			in.Loopback.NotServing = true
+		case err != nil:
 			in.Loopback.Err = err.Error()
 		}
 	}
@@ -209,10 +213,18 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 // loopbackProbeLimit bounds the doctor's question to the loopback route.
 const loopbackProbeLimit = 2 * time.Second
 
+// errLoopbackNotServing is the loopback route answering on its port with
+// not_serving: the running bridge has the route up, and output.mpd does
+// not resolve on there now (off in the config it loaded, or auto with no
+// MPD found at the gate's last look).
+var errLoopbackNotServing = errors.New("the running bridge's loopback route answers, but is not serving tracks: output.mpd does not resolve on there")
+
 // probeLoopbackRoute asks 127.0.0.1:port whether this bridge's loopback
 // route serves there: the route answers a request for no track with its
-// typed 404, which nothing else on the port would. A dial that fails is
-// ("", nil), nothing serving there: the bridge is not running, or its
+// typed 404, which nothing else on the port would: not_found while it
+// serves, and not_serving while output.mpd does not resolve on in the
+// bridge that runs it, which is errLoopbackNotServing. A dial that fails
+// is ("", nil), nothing serving there: the bridge is not running, or its
 // route did not start. Any failed dial, not one errno: a refusal is
 // ECONNREFUSED on unix and WSAECONNREFUSED on Windows. A port that
 // answers otherwise is an error: something else holds it.
@@ -241,8 +253,13 @@ func probeLoopbackRoute(ctx context.Context, port int) (string, error) {
 		Error string `json:"error"`
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode == http.StatusNotFound && json.Unmarshal(body, &refusal) == nil && refusal.Error == "not_found" {
-		return base, nil
+	if resp.StatusCode == http.StatusNotFound && json.Unmarshal(body, &refusal) == nil {
+		switch refusal.Error {
+		case "not_found":
+			return base, nil
+		case "not_serving":
+			return "", errLoopbackNotServing
+		}
 	}
 	return "", fmt.Errorf("port %d answers, but not as this bridge's loopback route", port)
 }

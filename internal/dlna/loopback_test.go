@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -54,13 +55,26 @@ func newLoopbackFixture(t *testing.T) *loopbackFixture {
 	mustWrite(t, filepath.Join(f.root, "Artist", "Album", "01.flac"), f.track)
 	mustWrite(t, filepath.Join(f.outside, "secret.flac"), f.secret)
 	f.add("inside", filepath.Join(f.root, "Artist", "Album", "01.flac"), ".flac")
-	f.h = LoopbackFileHandler(f.lib, func() []string { return []string{f.root} })
+	f.h = LoopbackFileHandler(f.lib, f.roots, serving)
 	return f
 }
 
 func (f *loopbackFixture) add(id, abs, ext string) {
 	f.lib[id] = TrackInfo{TrackID: id, AbsolutePath: abs, FileExtension: ext}
 }
+
+// roots is the fixture's one library root.
+func (f *loopbackFixture) roots() []string { return []string{f.root} }
+
+// hooked is the fixture's handler with a hook in each race window: before
+// the open, after it, and before the identity check.
+func (f *loopbackFixture) hooked(beforeOpen, afterOpen, beforeConfirm func()) *loopbackHandler {
+	return &loopbackHandler{lib: f.lib, roots: f.roots, enabled: serving,
+		beforeOpen: beforeOpen, afterOpen: afterOpen, beforeConfirm: beforeConfirm}
+}
+
+// serving is the route's enabled answer while output.mpd resolves on.
+func serving() bool { return true }
 
 func randomBytes(t *testing.T, n int) []byte {
 	t.Helper()
@@ -166,6 +180,82 @@ func TestLoopbackRouteRefusesARemoteThatIsNotLoopback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoopbackRouteServesOnlyWhileOutputIsOn: the route asks on every
+// request whether output.mpd resolves on now, so a route that started
+// while it did refuses once it does not, with a typed not_serving for
+// every path and method and no byte of a track, and serves again once
+// output.mpd is back on. The listener stays up throughout. Who asked is
+// judged first, and a route given nothing to ask serves nothing.
+func TestLoopbackRouteServesOnlyWhileOutputIsOn(t *testing.T) {
+	f := newLoopbackFixture(t)
+	var on atomic.Bool
+	on.Store(true)
+	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: f.roots, Enabled: on.Load, Port: 0})
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	track := srv.BaseURL() + "/dlna/file/inside"
+	requireServed(t, track, f.track)
+
+	on.Store(false)
+	status, body := serverGet(t, track)
+	if status != http.StatusNotFound || refusalCode(body) != "not_serving" || strings.Contains(string(body), string(f.track[:256])) {
+		t.Fatalf("output off: status %d, %q", status, short(string(body)))
+	}
+	h := LoopbackFileHandler(f.lib, f.roots, on.Load)
+	for _, req := range [][2]string{
+		{http.MethodGet, "/dlna/file/inside"},
+		{http.MethodHead, "/dlna/file/inside"},
+		{http.MethodGet, "/dlna/file/"},
+		{http.MethodPost, "/dlna/file/inside"},
+	} {
+		rec := loopbackGet(h, req[0], req[1], "127.0.0.1:1", nil)
+		assertRefusal(t, rec, http.StatusNotFound, "not_serving", f.track[:256])
+	}
+	rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "192.168.1.20:5000", nil)
+	assertRefusal(t, rec, http.StatusForbidden, "loopback_only")
+
+	on.Store(true)
+	requireServed(t, track, f.track)
+
+	rec = loopbackGet(LoopbackFileHandler(f.lib, f.roots, nil), http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
+	assertRefusal(t, rec, http.StatusNotFound, "not_serving", f.track[:256])
+}
+
+// serverGet fetches url from a real listener: the status and the body.
+func serverGet(t *testing.T, url string) (int, []byte) {
+	t.Helper()
+	resp, err := loopbackClient().Get(url)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return resp.StatusCode, body
+}
+
+// requireServed requires url to answer 200 with want, byte for byte.
+func requireServed(t *testing.T, url string, want []byte) {
+	t.Helper()
+	status, body := serverGet(t, url)
+	if status != http.StatusOK || string(body) != string(want) {
+		t.Fatalf("%s: status %d, %d bytes of %d (%q)", url, status, len(body), len(want), short(string(body)))
+	}
+}
+
+// refusalCode is a refusal body's error code, "" when it is not one.
+func refusalCode(body []byte) string {
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	return refusal.Error
 }
 
 // TestLoopbackRouteServesTheFileUnaltered: the bytes are the file's, whole
@@ -310,7 +400,7 @@ func TestLoopbackRouteConfinesToTheLibraryRoots(t *testing.T) {
 				TrackID: "via-link", FileExtension: ".flac",
 				AbsolutePath: filepath.Join(linkedRoot, "Artist", "Album", "01.flac"),
 			}}
-			h := LoopbackFileHandler(lib, func() []string { return []string{linkedRoot} })
+			h := LoopbackFileHandler(lib, func() []string { return []string{linkedRoot} }, serving)
 			rec := loopbackGet(h, http.MethodGet, "/dlna/file/via-link", "127.0.0.1:1", nil)
 			if rec.Code != http.StatusOK || string(rec.Body.Bytes()) != string(f.track) {
 				t.Fatalf("status %d (%q)", rec.Code, short(rec.Body.String()))
@@ -319,7 +409,7 @@ func TestLoopbackRouteConfinesToTheLibraryRoots(t *testing.T) {
 	}
 
 	t.Run("no roots serve nothing", func(t *testing.T) {
-		h := LoopbackFileHandler(f.lib, func() []string { return nil })
+		h := LoopbackFileHandler(f.lib, func() []string { return nil }, serving)
 		rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
 		assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.track[:256])
 	})
@@ -337,19 +427,15 @@ func TestLoopbackRouteRefusesALinkSwappedAfterTheCheck(t *testing.T) {
 	mustSymlink(t, filepath.Join(f.root, "Artist", "Album", "01.flac"), link)
 	f.add("swap", link, ".flac")
 	swapped := false
-	h := &loopbackHandler{
-		lib:   f.lib,
-		roots: func() []string { return []string{f.root} },
-		beforeOpen: func() {
-			if err := os.Remove(link); err != nil {
-				t.Errorf("remove the link: %v", err)
-			}
-			if err := os.Symlink(filepath.Join(f.outside, "secret.flac"), link); err != nil {
-				t.Errorf("swap the link: %v", err)
-			}
-			swapped = true
-		},
-	}
+	h := f.hooked(func() {
+		if err := os.Remove(link); err != nil {
+			t.Errorf("remove the link: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(f.outside, "secret.flac"), link); err != nil {
+			t.Errorf("swap the link: %v", err)
+		}
+		swapped = true
+	}, nil, nil)
 	rec := loopbackGet(h, http.MethodGet, "/dlna/file/swap", "127.0.0.1:1", nil)
 	if !swapped {
 		t.Fatal("the request never reached the open")
@@ -373,19 +459,15 @@ func TestLoopbackRouteRefusesADirectorySwappedAfterTheCheck(t *testing.T) {
 	mustMkdir(t, decoy)
 	mustWrite(t, filepath.Join(decoy, "01.flac"), f.secret)
 	swapped := false
-	h := &loopbackHandler{
-		lib:   f.lib,
-		roots: func() []string { return []string{f.root} },
-		beforeOpen: func() {
-			if err := os.Rename(album, album+".real"); err != nil {
-				t.Errorf("move the album aside: %v", err)
-			}
-			if err := os.Symlink(decoy, album); err != nil {
-				t.Errorf("link the album out: %v", err)
-			}
-			swapped = true
-		},
-	}
+	h := f.hooked(func() {
+		if err := os.Rename(album, album+".real"); err != nil {
+			t.Errorf("move the album aside: %v", err)
+		}
+		if err := os.Symlink(decoy, album); err != nil {
+			t.Errorf("link the album out: %v", err)
+		}
+		swapped = true
+	}, nil, nil)
 	rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
 	if !swapped {
 		t.Fatal("the request never reached the open")
@@ -407,28 +489,23 @@ func TestLoopbackRouteRefusesADirectorySwappedBackAfterTheOpen(t *testing.T) {
 	mustMkdir(t, decoy)
 	mustWrite(t, filepath.Join(decoy, "01.flac"), f.secret)
 	steps := 0
-	h := &loopbackHandler{
-		lib:   f.lib,
-		roots: func() []string { return []string{f.root} },
-		beforeOpen: func() {
-			if err := os.Rename(album, album+".real"); err != nil {
-				t.Errorf("move the album aside: %v", err)
-			}
-			if err := os.Symlink(decoy, album); err != nil {
-				t.Errorf("link the album out: %v", err)
-			}
-			steps++
-		},
-		afterOpen: func() {
-			if err := os.Remove(album); err != nil {
-				t.Errorf("remove the link: %v", err)
-			}
-			if err := os.Rename(album+".real", album); err != nil {
-				t.Errorf("put the album back: %v", err)
-			}
-			steps++
-		},
-	}
+	h := f.hooked(func() {
+		if err := os.Rename(album, album+".real"); err != nil {
+			t.Errorf("move the album aside: %v", err)
+		}
+		if err := os.Symlink(decoy, album); err != nil {
+			t.Errorf("link the album out: %v", err)
+		}
+		steps++
+	}, func() {
+		if err := os.Remove(album); err != nil {
+			t.Errorf("remove the link: %v", err)
+		}
+		if err := os.Rename(album+".real", album); err != nil {
+			t.Errorf("put the album back: %v", err)
+		}
+		steps++
+	}, nil)
 	rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
 	if steps != 2 {
 		t.Fatalf("the request took %d of the two swaps", steps)
@@ -474,13 +551,7 @@ func TestLoopbackRouteRefusesASwapInEveryWindow(t *testing.T) {
 				}
 			}
 			steps := 0
-			h := &loopbackHandler{
-				lib:           f.lib,
-				roots:         func() []string { return []string{f.root} },
-				beforeOpen:    func() { linkOut(); steps++ },
-				afterOpen:     func() { putBack(); steps++ },
-				beforeConfirm: func() { linkOut(); steps++ },
-			}
+			h := f.hooked(func() { linkOut(); steps++ }, func() { putBack(); steps++ }, func() { linkOut(); steps++ })
 			rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
 			if steps != 3 {
 				t.Fatalf("the request took %d of the three swaps", steps)
@@ -564,7 +635,7 @@ func TestLoopbackRouteRefusesWhatIsNotAFile(t *testing.T) {
 // through it is served.
 func TestLoopbackServerBindsOnlyLoopback(t *testing.T) {
 	f := newLoopbackFixture(t)
-	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: func() []string { return []string{f.root} }, Port: 0})
+	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: f.roots, Enabled: serving, Port: 0})
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -618,7 +689,7 @@ func TestLoopbackServerStopsWithTheServer(t *testing.T) {
 	file.Close()
 	f.add("big", big, ".dsf")
 
-	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: func() []string { return []string{f.root} }, Port: 0})
+	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: f.roots, Enabled: serving, Port: 0})
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}

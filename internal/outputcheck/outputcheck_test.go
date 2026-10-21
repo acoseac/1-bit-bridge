@@ -74,6 +74,10 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
 			in.Loopback = Loopback{}
 		},
+		"unproven, route not serving": func(in *Input) {
+			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
+			in.Loopback = Loopback{NotServing: true}
+		},
 		"no phone": func(in *Input) { in.Phones = 0 },
 	}
 	for name, mutate := range cases {
@@ -180,6 +184,10 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
 			in.Loopback = Loopback{}
 		}, "music", Fail, []string{"Start the bridge"}},
+		{"unproven, route not serving", func(in *Input) {
+			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
+			in.Loopback = Loopback{NotServing: true}
+		}, "music", Fail, []string{"Restart the bridge", "output.mpd"}},
 		{"no phone", func(in *Input) { in.Phones = 0 }, "phone", Warn, []string{"pairing QR"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,6 +203,19 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTheMusicLineSaysTheRouteAnswersButIsNotServing: a route that is up
+// and refuses tracks is not a route that did not start: the line says the
+// route answers, and does not send the reader to free a port.
+func TestTheMusicLineSaysTheRouteAnswersButIsNotServing(t *testing.T) {
+	in := healthy()
+	in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
+	in.Loopback = Loopback{NotServing: true}
+	m := line(t, Lines(in), "music")
+	if !strings.Contains(m.Summary, "answers but is not serving") || strings.Contains(m.Fix, "port") {
+		t.Fatalf("music line %+v", m)
 	}
 }
 

@@ -48,6 +48,8 @@ type TrackLookup interface {
 // JSON refusal (`{"error": code, "message": …}`):
 //
 //	403 loopback_only       the request did not come from a loopback address
+//	404 not_serving         output.mpd does not resolve on now: enabled
+//	                        answered false
 //	405 method_not_allowed  not GET or HEAD
 //	404 not_found           no index row with that id, a path that is not
 //	                        exactly the file route and one id, a rendition,
@@ -57,14 +59,19 @@ type TrackLookup interface {
 //	                        configured library root
 //	500 internal            the file could not be opened for another reason
 //
-// roots is read on every request: the live library roots.
-func LoopbackFileHandler(lib TrackLookup, roots func() []string) http.Handler {
-	return &loopbackHandler{lib: lib, roots: roots}
+// roots is read on every request: the live library roots. enabled is asked
+// on every request too, before anything is looked up, because output.mpd
+// can stop resolving on while the listener runs. It must answer at once,
+// without I/O: serve passes the localOutputs gate's last answer, which
+// never dials MPD. A nil enabled serves nothing.
+func LoopbackFileHandler(lib TrackLookup, roots func() []string, enabled func() bool) http.Handler {
+	return &loopbackHandler{lib: lib, roots: roots, enabled: enabled}
 }
 
 type loopbackHandler struct {
-	lib   TrackLookup
-	roots func() []string
+	lib     TrackLookup
+	roots   func() []string
+	enabled func() bool
 	// beforeOpen, when set, runs between the containment check and the
 	// open, afterOpen between the open and the second resolution, and
 	// beforeConfirm between that resolution and the identity check.
@@ -75,23 +82,47 @@ type loopbackHandler struct {
 }
 
 func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	trackID, ok := h.admit(w, r)
+	if !ok {
+		return
+	}
+	h.serveTrack(w, r, trackID)
+}
+
+// admit answers every refusal that needs no file: who asked, whether the
+// route is serving now, the method and the id. It returns the track id of
+// a request that may go on.
+func (h *loopbackHandler) admit(w http.ResponseWriter, r *http.Request) (string, bool) {
 	// The listener binds loopback addresses only. This is the defence for a
 	// listener that is ever bound otherwise: the handler itself refuses.
 	if !remoteIsLoopback(r.RemoteAddr) {
 		refuseLoopback(w, http.StatusForbidden, "loopback_only",
 			"this route answers only on this host's loopback")
-		return
+		return "", false
+	}
+	// Asked on every request, never only when the listener starts: the
+	// listener stays up while output.mpd turns off.
+	if h.enabled == nil || !h.enabled() {
+		refuseLoopback(w, http.StatusNotFound, "not_serving",
+			"this bridge is not serving its tracks to a player on this host now")
+		return "", false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		refuseLoopback(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or HEAD only")
-		return
+		return "", false
 	}
 	trackID, ok := loopbackTrackID(r.URL.Path)
 	if !ok {
 		refuseLoopback(w, http.StatusNotFound, "not_found", "no library track has that id")
-		return
+		return "", false
 	}
+	return trackID, true
+}
+
+// serveTrack serves the file trackID names when it is a file inside a
+// library root, and refuses it otherwise.
+func (h *loopbackHandler) serveTrack(w http.ResponseWriter, r *http.Request, trackID string) {
 	info, ok := h.lib.GetTrackInfo(trackID)
 	if !ok || info.AbsolutePath == "" {
 		// An empty path is a track the bridge proxies from an upstream
@@ -113,9 +144,7 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuseOutside(w)
 		return
 	}
-	if h.beforeOpen != nil {
-		h.beforeOpen()
-	}
+	runHook(h.beforeOpen)
 	// Opened the way every route that serves a file opens it: what is not
 	// a file is refused, and a named pipe without waiting for a writer.
 	f, stat, err := fsutil.OpenAsFile(info.AbsolutePath)
@@ -130,9 +159,7 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// first resolution down the same link, so only a fresh resolution sees
 	// where the open went. That resolution must still be inside, and name
 	// the file that opened.
-	if h.afterOpen != nil {
-		h.afterOpen()
-	}
+	runHook(h.afterOpen)
 	again, err := fsutil.ResolveLinks(info.AbsolutePath)
 	if err != nil {
 		refuseOutside(w)
@@ -143,14 +170,19 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuseOutside(w)
 		return
 	}
-	if h.beforeConfirm != nil {
-		h.beforeConfirm()
-	}
+	runHook(h.beforeConfirm)
 	if !sameFileInRoot(stat, root, again) {
 		refuseOutside(w)
 		return
 	}
 	serveOpenedFile(w, r, f, stat, info.AbsolutePath, info.FileExtension, trackID)
+}
+
+// runHook runs a test's hook in a race window. Production sets none.
+func runHook(hook func()) {
+	if hook != nil {
+		hook()
+	}
 }
 
 // sameFileInRoot reports whether opened is the file at path, walked from
@@ -236,6 +268,9 @@ func refuseLoopback(w http.ResponseWriter, status int, code, message string) {
 type LoopbackConfig struct {
 	Library TrackLookup
 	Roots   func() []string
+	// Enabled is asked on every request (LoopbackFileHandler's enabled):
+	// the route serves while it answers true. Nil serves nothing.
+	Enabled func() bool
 	Port    int
 	Logger  *slog.Logger
 }
@@ -289,7 +324,7 @@ func (s *LoopbackServer) Start() error {
 	// bounded, a response is not, because MPD streams for as long as the
 	// track plays.
 	srv := &http.Server{
-		Handler:           LoopbackFileHandler(s.cfg.Library, s.cfg.Roots),
+		Handler:           LoopbackFileHandler(s.cfg.Library, s.cfg.Roots, s.cfg.Enabled),
 		ReadHeaderTimeout: dlnaReadHeaderTimeout,
 		ReadTimeout:       dlnaReadTimeout,
 		IdleTimeout:       dlnaIdleTimeout,

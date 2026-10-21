@@ -12,9 +12,12 @@ import (
 // outputLoopback is the loopback track route's lifecycle in serve (backlog
 // B473, decision 2): this bridge's own tracks over plain HTTP on 127.0.0.1
 // and ::1, for the MPD beside it to fetch when its database misses a
-// track. It starts the first time the localOutputs gate answers true, at
-// boot or later through api.LocalOutputsConfig.OnActive, so it runs while
-// output.mpd resolves on and never otherwise, and it stops with the server.
+// track. The listener starts the first time the localOutputs gate answers
+// true, at boot or later through api.LocalOutputsConfig.OnActive, and
+// stops with the server. In between, every request asks whether
+// output.mpd still resolves on (outputLoopbackWiring.Enabled), and one
+// that comes while it does not is refused with not_serving, so the route
+// serves while output.mpd resolves on and never otherwise.
 //
 // One attempt to bind: a port that is taken is reported once, and the
 // checklist's Music line says what to do, rather than a bind and a warning
@@ -35,9 +38,13 @@ type outputLoopbackWiring struct {
 	// Library is the index the DLNA listener reads: a track id to its row.
 	Library dlna.TrackLookup
 	// Roots are the live library roots (the resolver's).
-	Roots  func() []string
-	Port   int
-	Logger *slog.Logger
+	Roots func() []string
+	// Enabled is asked on every request: whether output.mpd resolves on
+	// now, as the localOutputs gate last answered it
+	// (api.Server.LocalOutputsActiveNow), which never dials MPD.
+	Enabled func() bool
+	Port    int
+	Logger  *slog.Logger
 }
 
 func newOutputLoopback(w outputLoopbackWiring) *outputLoopback {
@@ -47,7 +54,9 @@ func newOutputLoopback(w outputLoopbackWiring) *outputLoopback {
 	}
 	log = log.With(slog.String("component", "output"))
 	return &outputLoopback{
-		srv:  dlna.NewLoopbackServer(dlna.LoopbackConfig{Library: w.Library, Roots: w.Roots, Port: w.Port, Logger: log}),
+		srv: dlna.NewLoopbackServer(dlna.LoopbackConfig{
+			Library: w.Library, Roots: w.Roots, Enabled: w.Enabled, Port: w.Port, Logger: log,
+		}),
 		log:  log,
 		port: w.Port,
 	}

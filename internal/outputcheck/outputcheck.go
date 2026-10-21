@@ -78,11 +78,14 @@ type RootRule struct {
 	Found   int
 }
 
-// Loopback is the loopback track route: its base URL while it serves, and
-// why it does not when it tried to start and could not.
+// Loopback is the loopback track route: its base URL while it serves; why
+// it does not when it tried to start and could not; and NotServing when
+// it answers on its port and refuses tracks, because output.mpd does not
+// resolve on in the bridge that runs it.
 type Loopback struct {
-	BaseURL string
-	Err     string
+	BaseURL    string
+	Err        string
+	NotServing bool
 }
 
 // Lines judges in. It returns Player, DAC, Music and Phone, in that order.
@@ -241,10 +244,17 @@ func musicLine(roots []RootRule, lb Loopback) Line {
 		return l
 	}
 	l.Status = Fail
-	l.Summary += ", and the bridge's loopback HTTP route is not serving"
-	if lb.Err != "" {
+	switch {
+	case lb.NotServing:
+		// The route is up and refuses tracks: output.mpd does not resolve
+		// on in the bridge that runs it, whatever this reading found.
+		l.Summary += ", and the running bridge's loopback HTTP route answers but is not serving tracks"
+		l.Fix = "Restart the bridge, so it reads output.mpd and looks for MPD again."
+	case lb.Err != "":
+		l.Summary += ", and the bridge's loopback HTTP route is not serving"
 		l.Fix = "Free the route's port or set output.loopbackPort, then restart the bridge."
-	} else {
+	default:
+		l.Summary += ", and the bridge's loopback HTTP route is not serving"
 		l.Fix = "Start the bridge, so MPD can fetch those tracks over its loopback HTTP route."
 	}
 	return l

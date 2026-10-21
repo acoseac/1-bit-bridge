@@ -3885,12 +3885,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// decision 2), through the index adapter the DLNA listener reads, so
 	// a track id is the DLNA one. It starts the first time the
 	// localOutputs gate answers true: here at boot, or later through
-	// OnActive, when auto finds an MPD that was not there at boot. It is
-	// stopped before the store it reads closes (the store's close is
+	// OnActive, when auto finds an MPD that was not there at boot. Every
+	// request then asks the gate's answer as it stands (Enabled), which
+	// never dials MPD, so the route stops serving when output.mpd stops
+	// resolving on: at once for off, at the gate's next probe for auto. It
+	// is stopped before the store it reads closes (the store's close is
 	// deferred above, so it runs after this one).
 	outLoop := newOutputLoopback(outputLoopbackWiring{
 		Library: newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, logger),
 		Roots:   apiSrv.Resolver().Roots,
+		Enabled: apiSrv.LocalOutputsActiveNow,
 		Port:    cfg.Output.EffectiveLoopbackPort(),
 		Logger:  logger,
 	})

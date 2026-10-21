@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"net/http"
@@ -169,6 +172,44 @@ func TestServeServesItsTracksOnLoopbackWhileOutputIsOn(t *testing.T) {
 	if conn, err := net.Dial("tcp", host); err == nil {
 		conn.Close()
 		t.Fatalf("%s still accepts after serve stopped", host)
+	}
+}
+
+// TestServeAsksTheGateOnEveryLoopbackRequest: serve hands the loopback
+// route the localOutputs gate's answer as it stands
+// (api.Server.LocalOutputsActiveNow), so every request asks whether
+// output.mpd still resolves on and none dials MPD. A route that asked
+// nothing would serve nothing, and one that asked a constant would serve
+// after output.mpd turned off; the boot test sees only the first.
+func TestServeAsksTheGateOnEveryLoopbackRequest(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := topLevelFuncNamed(f, "runServe")
+	if serve == nil {
+		t.Fatal("main.go has no runServe")
+	}
+	wired := 0
+	ast.Inspect(serve.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || !isIdent(lit.Type, "outputLoopbackWiring") {
+			return true
+		}
+		forEachKeyedElement(lit, func(key *ast.Ident, value ast.Expr) {
+			if key.Name != "Enabled" {
+				return
+			}
+			wired++
+			if !isSelector(value, "apiSrv", "LocalOutputsActiveNow") {
+				t.Errorf("the loopback route's Enabled at %s is not apiSrv.LocalOutputsActiveNow", fset.Position(value.Pos()))
+			}
+		})
+		return true
+	})
+	if wired != 1 {
+		t.Fatalf("runServe sets the loopback route's Enabled %d times, want once", wired)
 	}
 }
 

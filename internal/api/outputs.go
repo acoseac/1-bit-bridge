@@ -307,6 +307,27 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 	return on
 }
 
+// activeNow is the gate's answer without asking MPD anything: false off
+// Linux and for off, true for on, and for auto the verdict of the most
+// recent probe the gate stored, whatever its age and whatever
+// configuration it probed (false before the first). It never probes,
+// dials or greets, and never runs OnActive, so the loopback track route
+// asks it on every request.
+func (o *localOutputs) activeNow() bool {
+	if o == nil || o.goos != "linux" {
+		return false
+	}
+	switch o.output().Mode() {
+	case "on":
+		return true
+	case "auto":
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		return o.probed.found
+	}
+	return false
+}
+
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
 	cfg := config.OutputConfig{}
 	if o.output != nil {
@@ -1031,6 +1052,14 @@ func (s *Server) LocalOutputsResponse(ctx context.Context) (OutputsResponse, err
 // not wired. Like every call of that gate, a true answer runs OnActive.
 func (s *Server) LocalOutputsActive(ctx context.Context) bool {
 	return s.localOutputs.Active(ctx)
+}
+
+// LocalOutputsActiveNow is that gate's answer as it stands, without a
+// probe: on, off, or auto's last verdict (activeNow). The loopback track
+// route asks it on every request, which therefore never dials MPD. False
+// when the route is not wired.
+func (s *Server) LocalOutputsActiveNow() bool {
+	return s.localOutputs.activeNow()
 }
 
 func (s *Server) outputs(w http.ResponseWriter, r *http.Request) {
