@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,10 +44,18 @@ type fakeSink struct {
 	failAt    int64 // with failErr: Write stops at this frame and the sink ends
 	failErr   error
 	resumeErr []error // Resume's answers, in turn, before one that resumes
-	// Hooks, set before the run has the sink: enterDrain is called as each
-	// Drain begins, and refused once a Drain has refused a paused sink, just
-	// before it returns the refusal, so a test can hold the producer there.
-	enterDrain, refused func()
+	// hook, set before the run has the sink, is called where a test may hold
+	// the caller: "write", "drain" and "position" as each Write, Drain and
+	// Position begins, and "refused" once a Drain has refused a paused sink,
+	// just before it returns.
+	hook func(at string)
+}
+
+// at calls the fake's hook, if a test set one.
+func (f *fakeSink) at(point string) {
+	if f.hook != nil {
+		f.hook(point)
+	}
 }
 
 // newFakeSink is a sink opened for cfg, playing, with its drain gate shut.
@@ -83,6 +92,7 @@ func (f *fakeSink) Transport() alsapcm.Transport          { return f.cfg.Transpo
 func (f *fakeSink) Next(t alsapcm.Transport) alsapcm.Join { return f.cfg.Transport.Join(t) }
 
 func (f *fakeSink) Write(ctx context.Context, b []byte) (int, error) {
+	f.at("write")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fb := f.params.FrameBytes()
@@ -159,17 +169,13 @@ func (f *fakeSink) Recover() error {
 }
 
 func (f *fakeSink) Drain(ctx context.Context) error {
-	if f.enterDrain != nil {
-		f.enterDrain()
-	}
+	f.at("drain")
 	f.call("drain")
 	f.mu.Lock()
 	switch f.state {
 	case alsapcm.SinkPaused, alsapcm.SinkReleased:
 		f.mu.Unlock()
-		if f.refused != nil {
-			f.refused()
-		}
+		f.at("refused")
 		return &alsapcm.Error{Reason: alsapcm.ReasonBadState, Op: "drain", Detail: "paused: resume or drop it"}
 	case alsapcm.SinkStopped:
 		f.mu.Unlock()
@@ -235,6 +241,7 @@ func (f *fakeSink) Close() error {
 }
 
 func (f *fakeSink) Position() alsapcm.Position {
+	f.at("position")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return alsapcm.Position{State: f.state, Stream: 3, Played: f.played, Written: f.frames(), Submitted: f.frames(),
@@ -656,55 +663,80 @@ func TestOutputPCMTestSinkPausesAndResumesOnTimers(t *testing.T) {
 }
 
 // TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal pins the drain a
-// pause refused when the resume comes before the producer looks at the
-// refusal (#1303's Windows leg: TestOutputPCMTestSinkPausesAndResumesOnTimers
+// pause refused when the resume comes before the producer has read the
+// sink's state (#1303's Windows leg: TestOutputPCMTestSinkPausesAndResumesOnTimers
 // exited 1, "drain: bad_state: paused: resume or drop it", the producer
 // having found the sink playing again and taken the refusal for a failure).
-// The producer is held where it has the refusal and the resume comes: the
-// drain is asked again and plays out, exit 0.
+// The producer is held as it reads the state after the refusal, and the
+// resume comes. The pause came after the producer took Changed for its
+// drain, or before it, when the resume alone closes the channel the producer
+// looks at, which a look at the channel before the state read would miss.
+// Either way the drain is asked again and plays out, exit 0.
 func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
-	h := newSinkHarness(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	refused, goOn := make(chan struct{}), make(chan struct{})
-	h.prepare = func(_ int, f *fakeSink) {
-		close(f.gate)
-		var first, firstRefusal sync.Once
-		f.enterDrain = func() { first.Do(func() { close(entered); <-release }) }
-		f.refused = func() { firstRefusal.Do(func() { close(refused); <-goOn }) }
-	}
-	done := h.run(context.Background(), "--sink", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16",
-		"--seconds", "1", "--pause-at", "0.5", "--resume-after", "1", "--proc-root", t.TempDir())
-	f := waitSink(t, h, done)
-	// Every frame is written and the producer is about to ask for the drain:
-	// the pause comes first.
-	awaitRun(t, entered, "the producer to ask for the drain")
-	playing := f.Changed()
-	f.setPlayed(24000)
-	t0 := time.Unix(1_000, 0)
-	h.ticks <- t0
-	awaitRun(t, playing, "the pause at half a second")
-	// The paused sink refuses the drain, and the resume comes before the
-	// producer looks at why.
-	paused := f.Changed()
-	close(release)
-	awaitRun(t, refused, "the paused sink to refuse the drain")
-	h.ticks <- t0.Add(time.Second)
-	awaitRun(t, paused, "the resume a second after the pause")
-	close(goOn)
-	r := h.wait(t, done)
-	drains := 0
-	for _, c := range drainCalls(f) {
-		if c == "drain" {
-			drains++
+	for _, c := range []struct {
+		name string
+		// hold is where the producer waits for the pause: as its drain
+		// begins, after it took Changed, or at its first write, before.
+		hold string
+	}{
+		{"the pause after the producer took Changed", "drain"},
+		{"the pause before the producer took Changed", "write"},
+	} {
+		h := newSinkHarness(t)
+		held, release := make(chan struct{}), make(chan struct{})
+		looking, goOn := make(chan struct{}), make(chan struct{})
+		h.prepare = func(_ int, f *fakeSink) {
+			close(f.gate)
+			var pausing, refused atomic.Bool
+			pausing.Store(true)
+			f.hook = func(at string) {
+				switch {
+				case at == c.hold && pausing.CompareAndSwap(true, false):
+					close(held)
+					<-release
+				case at == "refused":
+					refused.Store(true)
+				// The first look after the refusal is the producer's: the
+				// run looks at the sink only on the ticks the test sends.
+				case at == "position" && refused.CompareAndSwap(true, false):
+					close(looking)
+					<-goOn
+				}
+			}
 		}
-	}
-	if r.code != 0 || drains != 2 || f.closes != 1 {
-		t.Errorf("exit %d, %d drains asked, closed %d times; want 0, the refused drain asked again, closed once\nstdout:\n%s\nstderr:\n%s",
-			r.code, drains, f.closes, r.stdout, r.stderr)
-	}
-	for _, say := range []string{"paused by the kernel's PAUSE, at 0.500 s", "resumed at 0.500 s", "drained: 1.000 s played; gaps 0", "closed\n"} {
-		if !strings.Contains(r.stdout, say) {
-			t.Errorf("stdout does not say %q:\n%s", say, r.stdout)
+		done := h.run(context.Background(), "--sink", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16",
+			"--seconds", "1", "--pause-at", "0.5", "--resume-after", "1", "--proc-root", t.TempDir())
+		f := waitSink(t, h, done)
+		awaitRun(t, held, c.name+": the producer to wait for the pause")
+		playing := f.Changed()
+		f.setPlayed(24000)
+		t0 := time.Unix(1_000, 0)
+		h.ticks <- t0
+		awaitRun(t, playing, c.name+": the pause at half a second")
+		// The paused sink refuses the drain, and the resume comes as the
+		// producer reads the state.
+		paused := f.Changed()
+		close(release)
+		awaitRun(t, looking, c.name+": the producer to look at the paused sink's refusal")
+		h.ticks <- t0.Add(time.Second)
+		awaitRun(t, paused, c.name+": the resume a second after the pause")
+		close(goOn)
+		r := h.wait(t, done)
+		drains := 0
+		for _, call := range drainCalls(f) {
+			if call == "drain" {
+				drains++
+			}
+		}
+		if r.code != 0 || drains != 2 || f.closes != 1 {
+			t.Errorf("%s: exit %d, %d drains asked, closed %d times; want 0, the refused drain asked again, closed once\nstdout:\n%s\nstderr:\n%s",
+				c.name, r.code, drains, f.closes, r.stdout, r.stderr)
+			continue
+		}
+		for _, say := range []string{"paused by the kernel's PAUSE, at 0.500 s", "resumed at 0.500 s", "drained: 1.000 s played; gaps 0", "closed\n"} {
+			if !strings.Contains(r.stdout, say) {
+				t.Errorf("%s: stdout does not say %q:\n%s", c.name, say, r.stdout)
+			}
 		}
 	}
 }
