@@ -132,6 +132,12 @@ func TestSinkPausesWithZeros(t *testing.T) {
 			if err := s.Resume(); err != nil {
 				t.Fatal(err)
 			}
+			// The buffer is full of zeros: the first 100 ms after the
+			// resume play zeros, and the content after them waits.
+			k.play(t, 100*time.Millisecond)
+			if p := s.Position(); p.Played != x || p.Written <= x {
+				t.Errorf("100 ms into the resume, zeros still queued ahead of the content: %+v; want %d played, more written", p, x)
+			}
 			k.free()
 			drain(t, s)
 			silence := s.Stats().Silence
