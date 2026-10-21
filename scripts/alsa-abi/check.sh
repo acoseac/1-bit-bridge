@@ -19,6 +19,20 @@
 # not vendored, and nothing here is part of the bridge.
 set -euo pipefail
 
+work=$(unset GITHUB_TOKEN; mktemp -d)
+trap 'rm -rf "$work"' EXIT
+# In CI the workflow's token authenticates the header's download (below),
+# which the raw host gives a higher rate limit. awk, the one program here
+# that sees it, writes it from the environment straight into a curl config
+# file in $work, which only this user can read, and it leaves the
+# environment at once, on failure too: nothing else this script runs
+# inherits it, no command line carries it, and no shell expansion shows it
+# in a trace (bash -x).
+auth="$work/curl-auth"
+(umask 077 && awk 'BEGIN { t = ENVIRON["GITHUB_TOKEN"]; if (t != "") printf "header = \"Authorization: Bearer %s\"\n", t }' >"$auth") ||
+	{ unset GITHUB_TOKEN; echo "check.sh: could not write the download's curl config" >&2; exit 1; }
+unset GITHUB_TOKEN
+
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 tag=$(sed -n 's/^const uapiKernel = "\(v[0-9][0-9.]*\)"$/\1/p' "$repo/internal/alsapcm/uapi.go")
 if [ -z "$tag" ]; then
@@ -26,8 +40,6 @@ if [ -z "$tag" ]; then
 	exit 1
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/include/sound"
 header="$work/include/sound/asound.h"
 
@@ -36,7 +48,20 @@ if [ -n "${ALSA_UAPI_HEADER:-}" ]; then
 	echo "asound.h: $ALSA_UAPI_HEADER (ALSA_UAPI_HEADER), compared as the header of $tag"
 else
 	url="https://raw.githubusercontent.com/torvalds/linux/$tag/include/uapi/sound/asound.h"
-	curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$header" "$url"
+	# GitHub's raw host rate-limits unauthenticated requests, and a shared CI
+	# runner can find its limit spent: four 429s in 13 seconds failed the
+	# job on 2026-10-21. curl retries a 429 as transient, honouring the
+	# server's Retry-After, and otherwise waits 1 s and doubles the wait, and
+	# it retries an attempt that stalls past its own bound (15 s to connect,
+	# 60 s in all). No retry starts after 5 minutes, so the download gives up
+	# within 6, well inside the job's 15. A 404 or another failure is not
+	# retried.
+	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 15 --max-time 60 --retry 8 --retry-max-time 300 -o "$header")
+	if [ -s "$auth" ]; then
+		"${fetch[@]}" --config "$auth" "$url"
+	else
+		"${fetch[@]}" "$url"
+	fi
 	echo "asound.h: $url"
 fi
 # The blob id is the file's identity in the kernel's own git history:
