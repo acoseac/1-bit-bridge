@@ -303,6 +303,14 @@ type Deps struct {
 	// manifest and walks no library folder.
 	NameCollisions func(ctx context.Context) (NameCollisions, error)
 
+	// OutputChecklist is the checklist of a bridge that is a player
+	// (internal/outputcheck): Player, DAC, Music and Phone, the lines the
+	// console's checklist panel shows, in the same words. Run appends them
+	// after its own checks. It returns nothing when the bridge is not a
+	// player (output.mpd resolves off, or the host is not Linux), and a
+	// nil func skips it.
+	OutputChecklist func(ctx context.Context) []Check
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -420,9 +428,12 @@ func Run(ctx context.Context, d Deps) Report {
 		checkVariantsIndex,
 		checkNameCollisions,
 	}
-	out := make([]Check, 0, len(checks))
+	out := make([]Check, 0, len(checks)+4)
 	for _, fn := range checks {
 		out = append(out, fn(ctx, d))
+	}
+	if d.OutputChecklist != nil {
+		out = append(out, d.OutputChecklist(ctx)...)
 	}
 	return Report{Checks: out}
 }

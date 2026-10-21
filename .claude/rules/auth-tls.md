@@ -71,7 +71,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   tenant console behind the host's proxy arrives from 127.0.0.1 under the
   tenant's name, and its session cookie is what a rebinding page cannot
   carry). The DLNA listener takes the same rule on its own addresses (under
-  **DLNA, UPnP and discovery**). A console POST through a tunnel on ANOTHER
+  **DLNA, UPnP and discovery**), and the loopback track route a stricter
+  one: `127.0.0.1`, `[::1]` or `localhost` only, and no forwarded request
+  (`output.md`). A console POST through a tunnel on ANOTHER
   local port is still refused by the Origin check, which compares the
   admin port (backlog B193) — **don't widen `originMatchesLoopbackMode` to
   admit it**; the refusal is a typed JSON `cross_origin` body whose message

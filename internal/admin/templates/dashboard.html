@@ -14,6 +14,23 @@
     </div>
   </div>
 
+  {{/* The player checklist (backlog B473): Player, DAC, Music and Phone,
+       the four lines `bridge doctor` prints for a bridge that is a player,
+       in the same words (GET /api/output/checklist; app.js
+       loadPlayerChecklist). Hidden unless this bridge is one: output.mpd
+       resolves on, on Linux. Loaded with the page and on Check again,
+       never polled. The Phone line carries the pairing QR, through the
+       dialog below. */}}
+  <div class="panel" id="player-checklist-panel" hidden>
+    <div class="panel-head">
+      <h2>This box as a player</h2>
+      <button type="button" id="player-checklist-refresh" class="btn">Check again</button>
+    </div>
+    <p class="hint">What 1-bit needs to play here over MPD: the player, the DAC, the music, and a paired phone. Each line is green, or says what to do.</p>
+    <p class="hint" id="player-checklist-status" aria-live="polite"></p>
+    <ul class="doctor-list" id="player-checklist"></ul>
+  </div>
+
   <div class="panel">
     <div class="panel-head">
       <h2>Scanner</h2>
@@ -218,4 +235,6 @@
   */}}
 
 </section>
+
+{{template "pair-dialog" .}}
 {{end}}

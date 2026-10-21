@@ -60,12 +60,17 @@ type OutputPlayer struct {
 
 // OutputMPD is the daemon beside the bridge. Addresses are the LAN
 // addresses that greeted, never loopback, and never null.
+// LoopbackBaseURL is the base URL of the bridge's loopback track route,
+// http://127.0.0.1:<port>, which only this MPD can reach: the app hands
+// it <base>/dlna/file/<trackID> for a bridge track its database lacks.
+// Additive, and absent while the route is not serving.
 type OutputMPD struct {
 	Port             int      `json:"port"`
 	Addresses        []string `json:"addresses"`
 	Version          string   `json:"version"`
 	State            string   `json:"state"`
 	ReachableFromLAN bool     `json:"reachableFromLAN"`
+	LoopbackBaseURL  string   `json:"loopbackBaseURL,omitempty"`
 }
 
 // OutputDAC is one sound card. IsMPDsOutput is true or null, never
@@ -130,6 +135,14 @@ type LocalOutputsConfig struct {
 	Cards      func() (alsa.Snapshot, error)
 	Getenv     func(string) string
 	BuildLimit time.Duration
+
+	// LoopbackBaseURL is the base URL of the loopback track route while it
+	// serves, "" otherwise; mpd.loopbackBaseURL carries it. Nil is "".
+	LoopbackBaseURL func() string
+	// OnActive runs each time Active answers true: the loopback track
+	// route starts the first time output.mpd resolves on. It must be
+	// cheap and idempotent. Nil does nothing.
+	OnActive func()
 }
 
 type localOutputs struct {
@@ -147,6 +160,8 @@ type localOutputs struct {
 	cards      func() (alsa.Snapshot, error)
 	getenv     func(string) string
 	buildLimit time.Duration
+	loopback   func() string
+	onActive   func()
 
 	mu           sync.Mutex
 	client       outputSession
@@ -157,6 +172,16 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	// answered is auto's newest verdict that a caller of Active recorded,
+	// whichever way the gate reached it: a probe it stored, a probe past its
+	// own deadline it did not store, the cache, or another caller's probe
+	// it waited on. activeNow returns it, so the loopback route follows
+	// exactly what the gate says. Every verdict is numbered as it is
+	// produced under mu (verdictSeq), answeredSeq is the number of the one
+	// answered holds, and a caller records only a newer one.
+	answered     bool
+	answeredSeq  uint64
+	verdictSeq   uint64
 	probeFlights map[string]*probeFlight
 	paths        outputPathCache
 	// joined, when set, runs after a caller has found a build in flight
@@ -166,6 +191,10 @@ type localOutputs struct {
 	// probeWait, when set, runs after a caller has found a probe in
 	// flight and before it waits. Production leaves it nil.
 	probeWait func()
+	// beforeRecord, when set, runs after a caller of Active has its
+	// verdict and before it records it, with that caller's context.
+	// Production leaves it nil. Tests park one caller there.
+	beforeRecord func(context.Context)
 }
 
 type outputFlight struct {
@@ -197,12 +226,15 @@ type outputProbe struct {
 }
 
 // probeFlight is one inspection shared by every caller that asks for
-// the same configuration while it is running.
+// the same configuration while it is running. seq numbers its verdict,
+// set under mu before done closes, so every waiter carries the number the
+// probe was given.
 type probeFlight struct {
 	done  chan struct{}
 	found bool
 	rep   mpd.Report
 	opt   mpd.Options
+	seq   uint64
 }
 
 func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
@@ -221,6 +253,8 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		cards:      cfg.Cards,
 		getenv:     cfg.Getenv,
 		buildLimit: cfg.BuildLimit,
+		loopback:   cfg.LoopbackBaseURL,
+		onActive:   cfg.OnActive,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -271,32 +305,90 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 // config says on: the readers refuse the host the way bridge output dac
 // does. auto is on only when a configuration was read or a daemon
 // greeted, and that answer is cached so health does not dial every time.
+// The same answer starts the loopback track route: OnActive runs each
+// time it is true. auto's answer is also recorded, and the route asks it
+// on every request (activeNow) until the gate answers again.
 func (o *localOutputs) Active(ctx context.Context) bool {
 	if o == nil || o.goos != "linux" {
 		return false
 	}
-	switch o.output().Mode() {
+	on := false
+	switch o.outputConfig().Mode() {
+	case "on":
+		on = true
+	case "auto":
+		on = o.answerAuto(ctx)
+	}
+	if on && o.onActive != nil {
+		o.onActive()
+	}
+	return on
+}
+
+// answerAuto is auto's answer: the probe's verdict, recorded under mu as
+// the gate's answer for activeNow when it is newer than the one recorded,
+// and the gate's newest recorded verdict is what the caller gets. The
+// verdict was numbered when it was produced, and this caller took it out
+// of mu to get here, so another caller may have recorded a newer one
+// meanwhile: the older one is not recorded over it. A caller that stopped
+// waiting on another caller's probe has no verdict of its own (0): it
+// records nothing, so a request that ends while a probe runs cannot turn
+// the loopback route off.
+func (o *localOutputs) answerAuto(ctx context.Context) bool {
+	found, _, _, seq := o.probeVerdict(ctx)
+	if o.beforeRecord != nil {
+		o.beforeRecord(ctx)
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if seq > o.answeredSeq {
+		o.answered, o.answeredSeq = found, seq
+	}
+	return o.answered
+}
+
+// activeNow is the gate's answer as it stands, without asking MPD
+// anything: false off Linux and for off, true for on, and for auto the
+// newest verdict a caller of Active recorded (answered), whatever its age
+// and whatever configuration it was for, false before the first. It never
+// probes, dials or greets, and never runs OnActive, so the loopback track
+// route asks it on every request. It waits only on mu, which probe, like
+// every holder of mu, releases before any I/O, so that read never waits
+// on MPD.
+func (o *localOutputs) activeNow() bool {
+	if o == nil || o.goos != "linux" {
+		return false
+	}
+	switch o.outputConfig().Mode() {
 	case "on":
 		return true
 	case "auto":
-		found, _, _ := o.probe(ctx)
-		return found
-	default:
-		return false
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		return o.answered
 	}
+	return false
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
+	found, rep, opt, _ := o.probeVerdict(ctx)
+	return found, rep, opt
+}
+
+// probeVerdict is probe, and the number of its verdict. Every answer is a
+// verdict, numbered under mu as it is produced: a cache read when it is
+// read, a probe when it completes (stored or past its own deadline),
+// whichever caller ran it. The false of a caller that stopped waiting on
+// another caller's probe is none, and carries 0.
+func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64) {
+	cfg := o.outputConfig()
 	key := probeKey(cfg)
 	o.mu.Lock()
 	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
 		p := o.probed
+		seq := o.nextVerdictLocked()
 		o.mu.Unlock()
-		return p.found, p.rep, p.opt
+		return p.found, p.rep, p.opt, seq
 	}
 	if f := o.probeFlights[key]; f != nil {
 		o.mu.Unlock()
@@ -305,9 +397,9 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 		}
 		select {
 		case <-f.done:
-			return f.found, f.rep, f.opt
+			return f.found, f.rep, f.opt, f.seq
 		case <-ctx.Done():
-			return false, mpd.Report{}, mpd.Options{}
+			return false, mpd.Report{}, mpd.Options{}, 0
 		}
 	}
 	f := &probeFlight{done: make(chan struct{})}
@@ -339,10 +431,25 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	}
 	delete(o.probeFlights, key)
-	f.found, f.rep, f.opt = found, rep, opt
+	f.found, f.rep, f.opt, f.seq = found, rep, opt, o.nextVerdictLocked()
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt
+	return found, rep, opt, f.seq
+}
+
+// nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.
+func (o *localOutputs) nextVerdictLocked() uint64 {
+	o.verdictSeq++
+	return o.verdictSeq
+}
+
+// outputConfig is the output section as the config holds it now, and the
+// empty one when no reader is wired: every reader of it reads it this way.
+func (o *localOutputs) outputConfig() config.OutputConfig {
+	if o.output == nil {
+		return config.OutputConfig{}
+	}
+	return o.output()
 }
 
 func probeKey(cfg config.OutputConfig) string {
@@ -478,7 +585,7 @@ func sessionBroken(err error) bool {
 }
 
 func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
-	cfg := o.output()
+	cfg := o.outputConfig()
 	_, rep, opt := o.probe(ctx)
 	endpoint := rep.MPD.Endpoint
 	if endpoint == "" {
@@ -544,6 +651,9 @@ func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
 		Version:          version,
 		State:            state,
 		ReachableFromLAN: len(addrs) > 0,
+	}
+	if o.loopback != nil {
+		mpdInfo.LoopbackBaseURL = o.loopback()
 	}
 	dacs := o.dacs(rep)
 	base := OutputInfo{Kind: "mpd", Player: player, MPD: mpdInfo, PathRules: rules}
@@ -656,10 +766,7 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 }
 
 func (o *localOutputs) pathRuleKey(musicDir string, roots []string) string {
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
+	cfg := o.outputConfig()
 	return strings.Join([]string{musicDir, cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password, strings.Join(roots, "\n")}, "\n")
 }
 
@@ -945,6 +1052,76 @@ func (s *Server) WithLocalOutputs(cfg LocalOutputsConfig) *Server {
 	}
 	s.localOutputs = newLocalOutputs(cfg)
 	return s
+}
+
+// LocalOutputs is GET /v1/outputs' builder on its own, for a caller with
+// no server: `bridge doctor` asks it once for the checklist and closes it.
+// The gate and the body are the route's, from the same code.
+type LocalOutputs struct{ o *localOutputs }
+
+// NewLocalOutputs builds the outputs body the way WithLocalOutputs does,
+// from cfg alone: a nil Output, Roots or Advertised is the empty one, as
+// for a server, and nothing is read from a server's config.
+func NewLocalOutputs(cfg LocalOutputsConfig) *LocalOutputs {
+	return &LocalOutputs{o: newLocalOutputs(cfg)}
+}
+
+// Active is the localOutputs gate.
+func (l *LocalOutputs) Active(ctx context.Context) bool { return l.o.Active(ctx) }
+
+// Response builds the body GET /v1/outputs would serve.
+func (l *LocalOutputs) Response(ctx context.Context) (OutputsResponse, error) {
+	return l.o.Response(ctx)
+}
+
+// Close ends the MPD session now, rather than after the idle minute, and
+// disarms the idle close. A one-shot caller closes as soon as it has its
+// body: the connection stays lazy, and MPD's max_connections is shared.
+func (l *LocalOutputs) Close() { l.o.close() }
+
+func (o *localOutputs) close() {
+	o.mu.Lock()
+	c := o.client
+	o.client = nil
+	o.sessEndpoint = ""
+	o.sessPassword = ""
+	stop := o.stopIdle
+	o.stopIdle = nil
+	o.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if c != nil {
+		_ = c.Close()
+	}
+}
+
+// errNoLocalOutputs is a server with no outputs builder wired.
+var errNoLocalOutputs = errors.New("api: local outputs are not wired")
+
+// LocalOutputsResponse is the body GET /v1/outputs serves, built by the
+// route's own builder, with its caches and its lazy session: the console's
+// checklist reads the box from here, the way the app does.
+func (s *Server) LocalOutputsResponse(ctx context.Context) (OutputsResponse, error) {
+	if s.localOutputs == nil {
+		return OutputsResponse{}, errNoLocalOutputs
+	}
+	return s.localOutputs.Response(ctx)
+}
+
+// LocalOutputsActive is the gate /v1/health's localOutputs flag reads:
+// output.mpd resolves on and the host is Linux. False when the route is
+// not wired. Like every call of that gate, a true answer runs OnActive.
+func (s *Server) LocalOutputsActive(ctx context.Context) bool {
+	return s.localOutputs.Active(ctx)
+}
+
+// LocalOutputsActiveNow is that gate's answer as it stands, without a
+// probe: on, off, or the answer auto last gave (activeNow). The loopback
+// track route asks it on every request, which therefore never dials MPD.
+// False when the route is not wired.
+func (s *Server) LocalOutputsActiveNow() bool {
+	return s.localOutputs.activeNow()
 }
 
 func (s *Server) outputs(w http.ResponseWriter, r *http.Request) {

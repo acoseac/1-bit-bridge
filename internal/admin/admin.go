@@ -482,6 +482,14 @@ type Deps struct {
 	// than erroring).
 	DoctorRun func(ctx context.Context) *DoctorReport
 
+	// OutputChecklist is the player checklist: Player, DAC, Music and
+	// Phone, wired by cmd/bridge from the source `bridge doctor` prints
+	// (internal/outputcheck) over the serving process's own GET
+	// /v1/outputs builder, so the console and the doctor say the same
+	// thing in the same words. ok is false when the bridge is not a
+	// player, and the dashboard's panel stays hidden; nil hides it too.
+	OutputChecklist func(ctx context.Context) ([]OutputCheckLine, bool)
+
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's
 	// lifecycle snapshot (running / last sweep timestamps + counts /
 	// next due). Ephemeral "since process start" state recorded by
@@ -1807,6 +1815,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
 	mux.HandleFunc("POST /api/database/compact", s.apiDatabaseCompact)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
+	mux.HandleFunc("GET /api/output/checklist", s.apiOutputChecklist)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are
 	// downloads rather than JSON a cross-origin page could read back.

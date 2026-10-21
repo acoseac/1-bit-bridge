@@ -1,7 +1,9 @@
 package dlna
 
 import (
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -232,7 +234,15 @@ func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo,
 		return
 	}
 	defer f.Close()
+	serveOpenedFile(w, r, f, stat, servePath, ext, trackID)
+}
 
+// serveOpenedFile is the serving half of the file route: the response
+// headers and http.ServeContent over a file already opened (and judged)
+// by the caller. The DLNA listener's route and the loopback route
+// (LoopbackFileHandler) share it, so MPD gets the same headers from
+// either, and the bytes are the file's own: no transcoding, ever.
+func serveOpenedFile(w http.ResponseWriter, r *http.Request, f *os.File, stat fs.FileInfo, servePath, ext, trackID string) {
 	ua := r.Header.Get("User-Agent")
 	if ext == "" {
 		// Defensive — derive from path if the adapter didn't pre-fill.
