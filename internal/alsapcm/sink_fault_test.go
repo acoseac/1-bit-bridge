@@ -212,10 +212,13 @@ func TestSinkEndsOnADisconnectOrASuspendAndClosesOnce(t *testing.T) {
 }
 
 // TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait pins the
-// producer's wait: with the DAC playing nothing the store fills, the
-// producer waits for room, and a cancel of its context ends the wait at
-// once with the frames taken counted; the sink plays on, and those frames
-// play.
+// producer's wait: the store full and nothing to make room, since the sink
+// was paused before it wrote a frame and so writes none, the producer
+// waits, and a cancel of its context is all that can end the wait, at once,
+// with the frames taken counted; the sink plays on once resumed, and those
+// frames play. (The writer's own pokes would wake a producer a moment after
+// the cancel and hide a wait that ignores its context; the pause leaves
+// none.)
 func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) {
 	k := newModel(t)
 	waits := make(chan struct{}, 1)
@@ -227,6 +230,9 @@ func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) 
 		default:
 		}
 	})
+	if err := s.Pause(); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	in := content(0, 0, 40000)
@@ -240,7 +246,6 @@ func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) 
 		done <- result{n, err}
 	}()
 	await(t, waits, "the producer to wait for room")
-	await(t, k.when(starved), "the writer to wait on the DAC")
 	cancel()
 	r := receive(t, done, "the producer's Write to end at the cancel")
 	wantReason(t, r.err, ReasonCancelled)
@@ -251,8 +256,11 @@ func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) 
 	if r.n != 14400 {
 		t.Errorf("Write took %d frames, want the 14400 the store holds", r.n)
 	}
-	if p := s.Position(); p.State != SinkPlaying || p.Submitted != 14400 {
-		t.Errorf("after the producer's cancel: %+v, want playing with 14400 submitted", p)
+	if p := s.Position(); p.State != SinkPaused || p.Submitted != 14400 || p.Written != 0 {
+		t.Errorf("after the producer's cancel: %+v, want still paused with 14400 submitted and none written", p)
+	}
+	if err := s.Resume(); err != nil {
+		t.Fatal(err)
 	}
 	k.free()
 	drain(t, s)
