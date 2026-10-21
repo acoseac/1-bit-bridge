@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
@@ -43,6 +44,29 @@ func TestOutputOnlyBridgeStarts(t *testing.T) {
 // test host need not have, so they are not about the config and a fail
 // there is not this test's.
 func TestDoctorPassesWithNoRoots(t *testing.T) {
+	d := buildDoctorDeps(writeOutputOnlyConfig(t))
+	if d.ConfigFile == nil || d.ConfigFile.LoadErr != nil {
+		t.Fatalf("config did not load: %+v", d.ConfigFile)
+	}
+	if len(d.LibraryRoots) != 0 {
+		t.Fatalf("roots = %v", d.LibraryRoots)
+	}
+	report := doctor.Run(context.Background(), d)
+	for _, name := range []string{"config-file", "library-roots"} {
+		if c, ok := reportCheck(report, name); ok && c.Status != doctor.OK {
+			t.Errorf("%s = %s (%s)", c.Name, c.Status, c.Summary)
+		}
+	}
+	requireNoFailBut(t, report, "player", "dac")
+	if c, ok := reportCheck(report, "music"); ok && (c.Status != doctor.OK || c.Summary != "Ready: can play music from another bridge or NAS") {
+		t.Errorf("music %s %q, want ok and Ready", c.Status, c.Summary)
+	}
+}
+
+// writeOutputOnlyConfig writes a config with output.mpd on and no library
+// root, and returns its path.
+func writeOutputOnlyConfig(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	data := filepath.Join(dir, "data")
 	if err := os.MkdirAll(data, 0o755); err != nil {
@@ -53,28 +77,26 @@ func TestDoctorPassesWithNoRoots(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d := buildDoctorDeps(path)
-	if d.ConfigFile == nil || d.ConfigFile.LoadErr != nil {
-		t.Fatalf("config did not load: %+v", d.ConfigFile)
-	}
-	if len(d.LibraryRoots) != 0 {
-		t.Fatalf("roots = %v", d.LibraryRoots)
-	}
-	report := doctor.Run(context.Background(), d)
+	return path
+}
+
+// reportCheck is the report's check called name, and whether there is one.
+func reportCheck(report doctor.Report, name string) (doctor.Check, bool) {
 	for _, c := range report.Checks {
-		if c.Name != "config-file" && c.Name != "library-roots" {
-			continue
-		}
-		if c.Status != doctor.OK {
-			t.Errorf("%s = %s (%s)", c.Name, c.Status, c.Summary)
+		if c.Name == name {
+			return c, true
 		}
 	}
+	return doctor.Check{}, false
+}
+
+// requireNoFailBut requires no check in the report to fail but the ones
+// named in except.
+func requireNoFailBut(t *testing.T, report doctor.Report, except ...string) {
+	t.Helper()
 	for _, c := range report.Checks {
-		if c.Status == doctor.Fail && c.Name != "player" && c.Name != "dac" {
+		if c.Status == doctor.Fail && !slices.Contains(except, c.Name) {
 			t.Errorf("fail %s: %s", c.Name, c.Summary)
-		}
-		if c.Name == "music" && (c.Status != doctor.OK || c.Summary != "Ready: can play music from another bridge or NAS") {
-			t.Errorf("music %s %q, want ok and Ready", c.Status, c.Summary)
 		}
 	}
 }

@@ -90,23 +90,30 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 			in := healthy()
 			mutate(&in)
 			for _, l := range Lines(in) {
-				if l.Summary == "" {
-					t.Errorf("%s: no summary", l.Key)
-				}
-				switch l.Status {
-				case OK:
-					if l.Fix != "" {
-						t.Errorf("%s is green and carries a fix: %q", l.Key, l.Fix)
-					}
-				case Warn, Fail:
-					if !oneSentence(l.Fix) {
-						t.Errorf("%s (%s): fix %q is not one sentence", l.Key, l.Status, l.Fix)
-					}
-				default:
-					t.Errorf("%s: status %q", l.Key, l.Status)
-				}
+				requireGreenOrOneFix(t, l)
 			}
 		})
+	}
+}
+
+// requireGreenOrOneFix requires a line to have a summary, and to be green
+// with no fix or to carry exactly one sentence of fix.
+func requireGreenOrOneFix(t *testing.T, l Line) {
+	t.Helper()
+	if l.Summary == "" {
+		t.Errorf("%s: no summary", l.Key)
+	}
+	switch l.Status {
+	case OK:
+		if l.Fix != "" {
+			t.Errorf("%s is green and carries a fix: %q", l.Key, l.Fix)
+		}
+	case Warn, Fail:
+		if !oneSentence(l.Fix) {
+			t.Errorf("%s (%s): fix %q is not one sentence", l.Key, l.Status, l.Fix)
+		}
+	default:
+		t.Errorf("%s: status %q", l.Key, l.Status)
 	}
 }
 

@@ -236,7 +236,7 @@ function initStats() {
   // The player checklist: hidden unless this bridge is a player, and its
   // Phone line opens the pairing dialog the Devices page uses.
   const openPair = initPairModal();
-  loadPlayerChecklist(openPair);
+  void loadPlayerChecklist(openPair);
   const checkAgain = document.getElementById("player-checklist-refresh");
   if (checkAgain) {
     checkAgain.addEventListener("click", async () => {

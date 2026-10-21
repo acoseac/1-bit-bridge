@@ -303,13 +303,8 @@ func TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken(t *testing.T) {
 	cfg := &config.Config{DataDir: data, ListenAddress: "127.0.0.1:0", Output: config.OutputConfig{MPD: "on", LoopbackPort: &none}}
 	phone := func() doctor.Check {
 		t.Helper()
-		for _, c := range doctorOutputChecklist(cfg, linuxBoxSeam(data))(context.Background()) {
-			if c.Name == "phone" {
-				return c
-			}
-		}
-		t.Fatal("no phone line")
-		return doctor.Check{}
+		checks := doctorOutputChecklist(cfg, linuxBoxSeam(data))(context.Background())
+		return findCheck(t, doctor.Report{Checks: checks}, "phone")
 	}
 	if p := phone(); p.Status != doctor.Warn || !strings.Contains(p.Summary, "1 device token is issued, but no phone uses it") {
 		t.Fatalf("a token never used: %+v", p)
@@ -407,12 +402,8 @@ func TestBridgeDoctorSaysTheLoopbackRouteIsNotServing(t *testing.T) {
 		ListenAddress: "127.0.0.1:0",
 		Output:        config.OutputConfig{MPD: "on", LoopbackPort: &port},
 	}
-	var line doctor.Check
-	for _, c := range doctorOutputChecklist(cfg, linuxBoxSeam(music))(context.Background()) {
-		if c.Name == "music" {
-			line = c
-		}
-	}
+	checks := doctorOutputChecklist(cfg, linuxBoxSeam(music))(context.Background())
+	line := findCheck(t, doctor.Report{Checks: checks}, "music")
 	if line.Status != doctor.Fail || !strings.Contains(line.Summary, "answers but is not serving") ||
 		!strings.Contains(line.Hint, "Restart the bridge") {
 		t.Fatalf("music line %+v, want a fail saying the route answers but is not serving", line)
@@ -450,35 +441,7 @@ func portOf(t *testing.T, base string) int {
 // Phone in the checklist's words. Linux, the MPD report and the cards are
 // stood in for; the rest is the doctor's own reading.
 func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
-	dir := t.TempDir()
-	music := filepath.Join(dir, "Music")
-	data := filepath.Join(dir, "data")
-	for _, d := range []string{music, data} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	tokens, err := auth.OpenStore(filepath.Join(data, tokensFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _, err := tokens.Mint("iPhone")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A phone has used the token, and the serving bridge wrote that down.
-	if _, ok := tokens.Validate(raw); !ok {
-		t.Fatal("the token does not validate")
-	}
-	if err := tokens.FlushLastUsed(); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "bridge.yaml")
-	body := "libraryRoots:\n  - " + music + "\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\ndataDir: " + data +
-		"\noutput:\n  mpd: on\n  loopbackPort: 0\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path, music := writePlayerConfig(t)
 	d := buildDoctorDeps(path)
 	if d.ConfigFile == nil || d.ConfigFile.LoadErr != nil {
 		t.Fatalf("config did not load: %+v", d.ConfigFile)
@@ -486,24 +449,8 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 	if d.OutputChecklist == nil {
 		t.Fatal("bridge doctor does not ask for the player checklist")
 	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.OutputChecklist = doctorOutputChecklist(cfg, func(c *api.LocalOutputsConfig) {
-		c.GOOS = "linux"
-		c.Inspect = func(context.Context, mpd.Options) mpd.Report {
-			return mpd.Report{Software: mpd.Software{Name: "Volumio", Version: "4.119"}, MusicDirectory: music}
-		}
-		c.Cards = func() (alsa.Snapshot, error) { return alsa.Snapshot{}, nil }
-		c.Greet = func(context.Context, string) bool { return false }
-		c.Getenv = func(string) string { return "" }
-	})
+	d.OutputChecklist = doctorOutputChecklist(mustLoadConfig(t, path), linuxBoxSeam(music))
 	report := doctor.Run(context.Background(), d)
-	got := map[string]doctor.Check{}
-	for _, c := range report.Checks {
-		got[c.Name] = c
-	}
 	for _, want := range []struct {
 		name    string
 		status  doctor.Status
@@ -514,44 +461,95 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 		{"music", doctor.Fail, "MPD was not asked about Music"},
 		{"phone", doctor.OK, "1 device paired"},
 	} {
-		c, ok := got[want.name]
-		if !ok {
-			t.Fatalf("no %s line in %+v", want.name, report.Checks)
-		}
-		if c.Status != want.status || !strings.Contains(c.Summary, want.summary) {
-			t.Errorf("%s: %s %q, want %s containing %q", want.name, c.Status, c.Summary, want.status, want.summary)
-		}
-		if c.Status != doctor.OK && c.Hint == "" {
-			t.Errorf("%s is %s and gives no fix", want.name, c.Status)
-		}
+		requireDoctorLine(t, report, want.name, want.status, want.summary)
 	}
+}
 
-	// A bridge that is no player prints no checklist.
-	off := doctorOutputChecklist(cfg, func(c *api.LocalOutputsConfig) { c.GOOS = "darwin" })
+// TestBridgeDoctorPrintsNoChecklistOffAPlayer: a bridge that is no player,
+// here one off Linux, prints no checklist.
+func TestBridgeDoctorPrintsNoChecklistOffAPlayer(t *testing.T) {
+	path, _ := writePlayerConfig(t)
+	off := doctorOutputChecklist(mustLoadConfig(t, path), func(c *api.LocalOutputsConfig) { c.GOOS = "darwin" })
 	if lines := off(context.Background()); len(lines) != 0 {
 		t.Fatalf("a bridge off Linux printed %d checklist lines", len(lines))
 	}
+}
 
-	// A player box with no library (the music lives on another bridge or a
-	// NAS) is ready, not failing.
-	noRoots := *cfg
-	noRoots.LibraryRoots = nil
-	ready := doctorOutputChecklist(&noRoots, func(c *api.LocalOutputsConfig) {
-		c.GOOS = "linux"
-		c.Inspect = func(context.Context, mpd.Options) mpd.Report {
-			return mpd.Report{Software: mpd.Software{Name: "Volumio"}}
-		}
-		c.Cards = func() (alsa.Snapshot, error) { return alsa.Snapshot{}, nil }
-		c.Greet = func(context.Context, string) bool { return false }
-		c.Getenv = func(string) string { return "" }
-	})(context.Background())
-	var musicLine doctor.Check
-	for _, c := range ready {
-		if c.Name == "music" {
-			musicLine = c
+// TestBridgeDoctorCallsAPlayerWithNoLibraryReady: a player box with no
+// library (the music lives on another bridge or a NAS) is ready, not
+// failing.
+func TestBridgeDoctorCallsAPlayerWithNoLibraryReady(t *testing.T) {
+	path, _ := writePlayerConfig(t)
+	cfg := mustLoadConfig(t, path)
+	cfg.LibraryRoots = nil
+	checks := doctorOutputChecklist(cfg, linuxBoxSeam(""))(context.Background())
+	music := findCheck(t, doctor.Report{Checks: checks}, "music")
+	if music.Status != doctor.OK || music.Summary != "Ready: can play music from another bridge or NAS" || music.Hint != "" {
+		t.Fatalf("music line of a player with no library: %+v", music)
+	}
+}
+
+// writePlayerConfig writes a player's config, output.mpd on with one
+// library root and no loopback probe, beside a token file whose one token
+// a phone has used, and returns the config's path and the root.
+func writePlayerConfig(t *testing.T) (path, music string) {
+	t.Helper()
+	dir := t.TempDir()
+	music = filepath.Join(dir, "Music")
+	data := filepath.Join(dir, "data")
+	for _, d := range []string{music, data} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if musicLine.Status != doctor.OK || musicLine.Summary != "Ready: can play music from another bridge or NAS" || musicLine.Hint != "" {
-		t.Fatalf("music line of a player with no library: %+v", musicLine)
+	pairPhone(t, data)
+	path = filepath.Join(dir, "bridge.yaml")
+	body := "libraryRoots:\n  - " + music + "\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\ndataDir: " + data +
+		"\noutput:\n  mpd: on\n  loopbackPort: 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, music
+}
+
+// pairPhone mints a device token in data's token file, and has a phone use
+// it with the serving bridge writing that down, as a paired phone does.
+func pairPhone(t *testing.T, data string) {
+	t.Helper()
+	tokens, err := auth.OpenStore(filepath.Join(data, tokensFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := tokens.Mint("iPhone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tokens.Validate(raw); !ok {
+		t.Fatal("the token does not validate")
+	}
+	if err := tokens.FlushLastUsed(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustLoadConfig(t *testing.T, path string) *config.Config {
+	t.Helper()
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// requireDoctorLine requires the report's check called name to have
+// status, a summary containing summary, and a fix unless it is green.
+func requireDoctorLine(t *testing.T, report doctor.Report, name string, status doctor.Status, summary string) {
+	t.Helper()
+	c := findCheck(t, report, name)
+	if c.Status != status || !strings.Contains(c.Summary, summary) {
+		t.Errorf("%s: %s %q, want %s containing %q", name, c.Status, c.Summary, status, summary)
+	}
+	if c.Status != doctor.OK && c.Hint == "" {
+		t.Errorf("%s is %s and gives no fix", name, c.Status)
 	}
 }

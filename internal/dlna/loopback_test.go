@@ -343,15 +343,27 @@ func TestLoopbackRouteServesTheFileUnaltered(t *testing.T) {
 	}
 	// The serving half is the DLNA file route's: MPD gets the same type it
 	// gets from the LAN listener.
-	dlna := FileHandler(newTestLib(f.lib["inside"]), nil, nil, nil)
-	ref := httptest.NewRecorder()
-	refReq := httptest.NewRequest(http.MethodGet, "/dlna/file/inside", nil)
-	refReq.Header.Set("User-Agent", mpd["User-Agent"])
-	dlna(ref, refReq)
-	if got, want := rec.Header().Get("Content-Type"), ref.Header().Get("Content-Type"); got != want || got == "" {
+	if got, want := rec.Header().Get("Content-Type"), dlnaRouteContentType(f.lib["inside"], mpd["User-Agent"]); got != want || got == "" {
 		t.Fatalf("content type %q, the DLNA route sends %q", got, want)
 	}
+	requireRangesServed(t, f)
+	requireHeadSendsNoBody(t, f)
+}
 
+// dlnaRouteContentType is the type the DLNA listener's file route sends
+// for ti to a client that names itself userAgent.
+func dlnaRouteContentType(ti TrackInfo, userAgent string) string {
+	ref := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/"+ti.TrackID, nil)
+	req.Header.Set("User-Agent", userAgent)
+	FileHandler(newTestLib(ti), nil, nil, nil)(ref, req)
+	return ref.Header().Get("Content-Type")
+}
+
+// requireRangesServed requires each range of the fixture's track to be
+// answered 206 with exactly those bytes and a Content-Range.
+func requireRangesServed(t *testing.T, f *loopbackFixture) {
+	t.Helper()
 	for _, tc := range []struct {
 		rng  string
 		want []byte
@@ -362,17 +374,19 @@ func TestLoopbackRouteServesTheFileUnaltered(t *testing.T) {
 		{"bytes=65000-", f.track[65000:]},
 	} {
 		rec := loopbackGet(f.h, http.MethodGet, "/dlna/file/inside", "[::1]:1", map[string]string{"Range": tc.rng})
-		if rec.Code != http.StatusPartialContent {
-			t.Fatalf("%s: status %d", tc.rng, rec.Code)
+		if rec.Code != http.StatusPartialContent || rec.Header().Get("Content-Range") == "" {
+			t.Fatalf("%s: status %d, content range %q", tc.rng, rec.Code, rec.Header().Get("Content-Range"))
 		}
 		if string(rec.Body.Bytes()) != string(tc.want) {
 			t.Fatalf("%s: wrong bytes", tc.rng)
 		}
-		if rec.Header().Get("Content-Range") == "" {
-			t.Fatalf("%s: no content range", tc.rng)
-		}
 	}
+}
 
+// requireHeadSendsNoBody requires HEAD of the fixture's track to answer
+// 200 with its length and no byte of it.
+func requireHeadSendsNoBody(t *testing.T, f *loopbackFixture) {
+	t.Helper()
 	head := loopbackGet(f.h, http.MethodHead, "/dlna/file/inside", "127.0.0.1:1", nil)
 	if head.Code != http.StatusOK || head.Body.Len() != 0 {
 		t.Fatalf("HEAD status %d body %d bytes", head.Code, head.Body.Len())

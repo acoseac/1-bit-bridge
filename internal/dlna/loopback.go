@@ -140,7 +140,7 @@ func (h *loopbackHandler) admit(w http.ResponseWriter, r *http.Request) (string,
 	}
 	trackID, ok := loopbackTrackID(r.URL.Path)
 	if !ok {
-		refuseLoopback(w, http.StatusNotFound, "not_found", "no library track has that id")
+		refuseNoTrack(w)
 		return "", false
 	}
 	return trackID, true
@@ -153,7 +153,7 @@ func (h *loopbackHandler) serveTrack(w http.ResponseWriter, r *http.Request, tra
 	if !ok || info.AbsolutePath == "" {
 		// An empty path is a track the bridge proxies from an upstream
 		// server: not a file in a library root.
-		refuseLoopback(w, http.StatusNotFound, "not_found", "no library track has that id")
+		refuseNoTrack(w)
 		return
 	}
 	var roots []string
@@ -293,6 +293,14 @@ func forwarded(h http.Header) bool {
 	return false
 }
 
+// msgNoTrack is the message of every not_found refusal.
+const msgNoTrack = "no library track has that id"
+
+// refuseNoTrack answers a request that names no track the route serves.
+func refuseNoTrack(w http.ResponseWriter) {
+	refuseLoopback(w, http.StatusNotFound, "not_found", msgNoTrack)
+}
+
 func refuseOutside(w http.ResponseWriter) {
 	refuseLoopback(w, http.StatusForbidden, "outside_library",
 		"the track's file is not inside a library root")
@@ -305,7 +313,7 @@ func refuseOpen(w http.ResponseWriter, err error) {
 		refuseLoopback(w, http.StatusNotFound, "not_a_file",
 			"the track's path is a "+fsutil.NotAFileKind(err)+", not a file")
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
-		refuseLoopback(w, http.StatusNotFound, "not_found", "no library track has that id")
+		refuseNoTrack(w)
 	default:
 		refuseLoopback(w, http.StatusInternalServerError, "internal", "the bridge couldn't open this file")
 	}
