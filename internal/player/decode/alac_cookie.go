@@ -58,7 +58,9 @@ func (c alacConfig) maxPacketBytes() uint32 {
 // one ALAC AudioSampleEntry, version 0, with data reference 1, two channels
 // and one alac box of 36 bytes, and returns the validated cookie. The entry's
 // samplesize and samplerate are not compared with the cookie: afconvert
-// writes 16 and 44100 there whatever the stream.
+// writes 16 and 44100 there whatever the stream, and a channel count of 2
+// even for mono, so the cookie's count is the one that refuses a stream
+// that is not stereo. FFmpeg writes the stream's own values.
 func parseALACSampleDescription(p []byte) (alacConfig, error) {
 	if len(p) < 8 {
 		return alacConfig{}, refuse(ReasonTruncated, "M4A stsd box of %d bytes", len(p))
