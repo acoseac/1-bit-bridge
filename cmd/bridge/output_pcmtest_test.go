@@ -303,6 +303,24 @@ func TestOutputPCMTestReportsAnXrunAndCloses(t *testing.T) {
 	}
 }
 
+// TestOutputPCMTestAnUnderrunBeforeTheDrainFails pins that the harness
+// claims no xrun-free run before the drain has said so: an underrun after
+// the last write is an xrun the drain reports, the run exits 1, and "xruns
+// 0" is never printed (the Claude API review and Codex on #1301).
+func TestOutputPCMTestAnUnderrunBeforeTheDrainFails(t *testing.T) {
+	dev := &fakePCMDevice{params: pcmTestParams48k(),
+		drainErr: &alsapcm.Error{Reason: alsapcm.ReasonXrun, Op: "drain", Endpoint: alsapcm.Endpoint{Card: 5}, Detail: "the buffer ran empty"}}
+	var opens int
+	stdout, stderr, code := runPCMTest(context.Background(), pcmTestEnvWith(dev, nil, &opens),
+		"--card", "5", "--device", "0", "--rate", "48000", "--bits", "24", "--seconds", "1", "--proc-root", pcmTestProcTree(t, pcmTestKernelHW48k))
+	if code != 1 || strings.Contains(stdout, "xruns 0") || strings.Contains(stdout, "drained") || !strings.Contains(stdout, "xruns 1") {
+		t.Errorf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if dev.drains != 1 || dev.closes != 1 {
+		t.Errorf("drains %d, closes %d", dev.drains, dev.closes)
+	}
+}
+
 // TestOutputPCMTestNamesTheHolderOfABusyDevice pins the busy refusal: the
 // typed error, then the thread and process holding the substream, read
 // passively from /proc (here the GO bar capture, where MPD's output thread

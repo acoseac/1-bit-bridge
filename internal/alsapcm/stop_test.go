@@ -106,6 +106,11 @@ func TestDrainTypesWhatEndsIt(t *testing.T) {
 		"ENODEV":      {func(k *fakeKernel) { k.fail = map[uint32]error{ioctlStatus: errnoENODEV} }, ReasonDisconnected},
 		"POLLHUP":     {func(k *fakeKernel) { k.states, k.polls = []int32{stateDraining}, []fakePoll{{revents: pollHup}} }, ReasonDisconnected},
 		"DRAIN fails": {func(k *fakeKernel) { k.fail = map[uint32]error{ioctlDrain: errnoENODEV} }, ReasonDisconnected},
+		// Linux answers every PCM ioctl, STATUS included, with EBADFD once
+		// the runtime is DISCONNECTED (one PCM removed, not the whole card).
+		"EBADFD": {func(k *fakeKernel) {
+			k.fail = map[uint32]error{ioctlDrain: errnoEBADFD, ioctlStatus: errnoEBADFD}
+		}, ReasonDisconnected},
 	} {
 		k := newFake(t)
 		d := mustOpen(t, k, cfg48k)
@@ -116,6 +121,25 @@ func TestDrainTypesWhatEndsIt(t *testing.T) {
 		_ = d.Close()
 		k.checkClosedOnce(t)
 	}
+}
+
+// TestDrainAfterAnUnderrunIsAnXrun pins that a stream which underran after
+// its last write reports the xrun: DRAIN moves an XRUN stream to SETUP and
+// answers EAGAIN, so a drain that asked the state only after it read that
+// SETUP as a clean end, and a gap in the sound passed as a clean run (the
+// Claude API review and Codex on #1301). A stopped stream is not drained.
+func TestDrainAfterAnUnderrunIsAnXrun(t *testing.T) {
+	k := newFake(t)
+	d := mustOpen(t, k, cfg48k)
+	k.state = stateXrun
+	if err := d.Drain(context.Background(), time.Second); ReasonOf(err) != ReasonXrun {
+		t.Errorf("Drain after an underrun: %v, want %s", err, ReasonXrun)
+	}
+	if n := k.callsOf(ioctlDrain); n != 0 {
+		t.Errorf("DRAIN issued %d times on a stream that had stopped", n)
+	}
+	_ = d.Close()
+	k.checkClosedOnce(t)
 }
 
 // TestCloseClosesOnEveryPath pins that the node is closed exactly once
