@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
 - [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
 - [2026-10-21 — B470 PR 2b round 2: the writer's watch, five sink windows, the position test's Linux race, and pcm-test's stop, time and keys](#2026-10-21--b470-pr-2b-round-2-the-writers-watch-five-sink-windows-the-position-tests-linux-race-and-pcm-tests-stop-time-and-keys)
 - [2026-10-21 — B470 PR 2b: the streaming PCM sink, its position, pause and release, reported xruns, gapless joins, and the harness's sink mode](#2026-10-21--b470-pr-2b-the-streaming-pcm-sink-its-position-pause-and-release-reported-xruns-gapless-joins-and-the-harnesss-sink-mode)
@@ -49776,3 +49777,64 @@ without a failure.
 - The hardware's own rates (the card's stream file) are not read before
   the open: a rate the backend opens and the DAC does not is the open's
   `parameters_not_supported`, at the first open or at a reopen.
+
+## 2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar
+
+**Review of round 3 (the Claude API none, Argon none, Codex one).** The new
+drain-retry test could take the wrong path: after `Pause` closes `playing`,
+the run still reads `Position` for its "paused …" line
+(`pcmTestSayPaused` → `player.played()`), and a producer that refused first
+let that read take the hold meant for the producer. A park reproduced it:
+"pause before Changed" hung until the 60 s timeout, and "pause after Changed"
+panicked (`close of closed channel` at the hook). The test now releases the
+producer only once the run has printed its "paused …" line, the last thing
+the run does on that tick, and every tick send is under the one-minute
+watchdog (83701951, test only). With the same park the fixed test fails at
+its watchdog instead of hanging. 24,000 runs at GOMAXPROCS 1, 4 and 16 and
+800 under `-race` passed; the old test never hung without the park.
+
+**The hardware gate passed** on the Volumio Pi (aarch64, kernel 6.12), the
+arm64 build of 687cac23, the iFi GO bar at card 5, with the owner listening
+on headphones; the owner heard everything clean and saw the GO bar's light
+follow every rate. Round 4 changed a test only, so the result holds for it.
+1. The tone at 44.1 kHz/16, 96 kHz/24 (S24_3LE), 192 kHz/24 and
+   384 kHz/32: committed exactly, the kernel's `hw_params` agreeing, a store
+   2 s ahead, "played" up a second each second with about 210 ms queued,
+   "drained: 20.000 s played; gaps 0", closed, exit 0. The 44.1/16 and
+   192/24 test-tone FLACs (-20 dBFS) with `--file`: the same, 10.000 s each.
+2. Pause by PAUSE: paused at 6.015 s, "played" frozen PAUSED, resumed from
+   6.015 s, 30.000 s drained, gaps 0, no silence. Pause by zeros: the
+   queued 0.2 s played (6.005 to 6.200 s), RUNNING while paused, a seamless
+   resume, exactly 220,500 frames of silence (5.0 s). By key over a pipe
+   (p, p, q): paused, resumed, "stopped (q) after 7.964 s played: dropped",
+   closed, exit 0.
+3. Release and reopen, both ways: "closed, released" about 30 s after the
+   pause, `/proc/asound/card5/pcm0p/sub0/status` "closed", then "resumed:
+   opened card 5 device 0 again, writing again first what the DAC had not
+   played, from 6.016 s" (by zeros, 6.200 s), committed exactly again,
+   60.000 s drained, gaps 0, "releases 1, reopens 1"; by zeros, 1,323,000
+   frames of silence (30.0 s) before the release.
+4. Gapless: the two-track tone joined "gaplessly at 10.001 s (frame 441037
+   of its sink)"; two sample-exact 10 s slices of a 24/192 live recording
+   (their concatenation byte-identical to the continuous 20 s, by MD5)
+   joined "gaplessly at 10.000 s (frame 1920000 of its sink)", inaudibly; a
+   44.1/16 then 192/24 pair "needs another transport … an honest gap" and
+   committed exactly again; q just after that change: "stopped (q) after
+   11.390 s played", the times of both rates summed, closed once, exit 0.
+5. Contention: with Volumio playing, the open is "busy … (EBUSY)", "held by
+   sub 0: thread 7403 "output:alsa", process 7307 "mpd"", exit 1, MPD
+   playing on. With Volumio started after the release: the resume refused
+   as busy, the holder named, "stopped: the resume was refused after
+   6.015 s played: dropped", closed, exit 1, MPD playing on.
+6. A USB unplug while playing: "the device went away after 16.540 s played:
+   the sink closed it", "write: disconnected … (ENODEV)", closed, exit 1, no
+   hang; while paused by PAUSE: "pause: disconnected … (ENODEV)", closed,
+   exit 1 within a second. The GO bar came back as card 5 each time.
+7. SIGINT at 384 kHz/32 after about 10 s: "stopped by signal after 9.940 s
+   played: dropped", closed, exit 0, and a run straight after opened at
+   once and drained clean; during a `--file` run and while paused: the
+   same.
+
+Not exercised: an xrun, which cannot be made to order on the box. Noted:
+`--pause-at` acts on the harness's one-second tick, so a pause lands up to
+a second after the time asked (5 s gave 6.015 s); the sink is not involved.
