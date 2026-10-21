@@ -25,6 +25,8 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-21 — B470 PR 2b: the streaming PCM sink, its position, pause and release, reported xruns, gapless joins, and the harness's sink mode](#2026-10-21--b470-pr-2b-the-streaming-pcm-sink-its-position-pause-and-release-reported-xruns-gapless-joins-and-the-harnesss-sink-mode)
+- [2026-10-21 — B470 PR 2a: the pure-Go ALSA PCM backend's first layer, its pinned UAPI and ABI check, and the hardware harness](#2026-10-21--b470-pr-2a-the-pure-go-alsa-pcm-backends-first-layer-its-pinned-uapi-and-abi-check-and-the-hardware-harness)
 - [2026-10-21 — B470 PR 1c: ALAC in M4A through a bounded demuxer, cookie and packet checks, and saprobe-alac's packet decoder](#2026-10-21--b470-pr-1c-alac-in-m4a-through-a-bounded-demuxer-cookie-and-packet-checks-and-saprobe-alacs-packet-decoder)
 - [2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules](#2026-10-20--b470-pr-1b-round-3-the-dff-walks-bounds-the-goldens-layout-checks-and-two-overstated-rules)
 - [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
@@ -49182,3 +49184,274 @@ to prevent: Volumio stores its output as a card number, the cards were
 renumbered (the Hugo 2 became card 2, the GO bar card 5), and Volumio played
 to the Hugo 2 while its settings named the iFi until the output was chosen
 again.
+
+## 2026-10-21 — B470 PR 2b: the streaming PCM sink, its position, pause and release, reported xruns, gapless joins, and the harness's sink mode
+
+### What shipped
+
+- `alsapcm.Sink` (`sink.go`, `sink_ring.go`, `sink_writer.go`): a stream of
+  PCM frames through one endpoint, above `Device`. `OpenSink(ctx,
+  SinkConfig)` opens the endpoint for a `Transport` (kind, rate, channels,
+  ALSA format, valid bits packed); `Write` copies a producer's frames into a
+  store preallocated at open; one writer goroutine owns the device and
+  moves the frames into it a period at a time with `Device.Write`,
+  measuring after each write; `Pause`, `Resume`, `Recover`, `Drain`,
+  `Drop` and `Close` are commands to it, safe from any goroutine;
+  `Position`, `Stats` and `Changed` read it. `Transport.Join` and
+  `Sink.Next` answer the gapless question.
+- `Device.Pause` (the kernel's PAUSE), `Device.Prepare`, and `Device.wait`
+  (a poll for no event, for a stream nothing writes); `Params.CanPause`;
+  ENOSYS, typed `parameters_not_supported`.
+- SNDRV_PCM_IOCTL_PAUSE in the pinned UAPI, `probe.c`, the ABI facts and
+  `TestIoctlNumbersEncodeTheirStructures`, through a new seam call,
+  `sys.ioctlValue`, because the kernel takes PAUSE's int as the argument
+  itself.
+- The fake kernel's playback model (`fake_test.go`).
+- `bridge output pcm-test --sink`, `--file`, `--tracks`, `--pause`,
+  `--pause-at`, `--resume-after`, `--release-after`, `--keys`, `--recover`
+  and `--ack-full-level` (`cmd/bridge/output_pcmtest_sink.go`).
+- Rules text for `.claude/rules/output.md`, which this session could not
+  edit, went to the owner beside the branch (`/tmp/b470-2b-rules.md`): a
+  new section after PR 2a's and three OLD → NEW sentences in PR 2a's.
+
+### The numbers
+
+- The store is `DefaultLookahead`, two seconds, ahead of the hardware
+  buffer, plus the hardware buffer's frames kept behind the write point for
+  a replay after a release, capped at `MaxRingBytes`, 32 MiB; the lookahead
+  is 100 ms to 30 s. With the default 200 ms buffer: 44.1 kHz S16_LE
+  97,020 frames, 388,080 bytes; 96 kHz S24_3LE 211,200 frames, 1,267,200
+  bytes; 192 kHz S24_3LE 2,534,400 bytes; 384 kHz S32_LE 844,800 frames,
+  6,758,400 bytes; the backend's top rate, 1,536 kHz S32_LE, 27,033,600
+  bytes, under the cap, which binds only on a longer lookahead.
+- The writer writes at most a period (about 50 ms at the default geometry)
+  per call and issues one STATUS after each.
+- A pause releases the device after `ReleaseAfter`, 30 s by default (1 s
+  to 10 min). The last eight xruns are kept in detail (`maxGaps`); the
+  run's record of content and silence holds 64 segments
+  (`maxSegments`); a drain may run two seconds past the buffer's own time
+  (`drainSlack`).
+
+### Decisions
+
+- **One goroutine owns the Device.** PR 2a's Device is not safe for
+  concurrent use, and a decoder fills ahead while the DAC plays, so the
+  sink is a producer, a store and a writer. A command reaches the writer by
+  cancelling the context of whatever wait it is in (a `Device.Write`
+  waiting for room, the paused wait, the drain), and a wait the writer
+  starts with a command pending runs with a context already done, so no
+  command waits behind a period of audio. Rejected: a mutex handed between
+  the writer and the caller, which leaves fairness to the scheduler and
+  still needs the wait cut short.
+- **The position is measured, never extrapolated.** Played is what the
+  last STATUS establishes: the delay while running or draining (the
+  driver's own included), all of the run before the stream starts, the
+  pointers while paused. STATUS reports a delay of 0 in PREPARED and in
+  PAUSED; written minus that would claim every queued frame played, before
+  the stream started and through a pause. A run's record of content and
+  silence (segments since the last PREPARE, folded once played) keeps the
+  zeros of a pause out of it. The position is held never to go back at two
+  layers, the run's played count and the position itself, and never to
+  pass Written. A display that wants a smoother clock interpolates in the
+  engine, at or under this.
+- **A pause prefers the kernel's PAUSE.** It stops the stream at once and
+  keeps its buffer, so the position is exact and nothing is lost; USB
+  audio offers it. Without it (or with `PauseZeros`), the writer keeps the
+  stream running on zeros, so the DAC stays clocked and a resume does not
+  relock; the sound stops after what is queued, at most the hardware
+  buffer, since only REWIND could take back queued frames, and it is
+  outside the pinned UAPI and refused by drivers that set NO_REWINDS. A
+  stream that has not started is paused by writing nothing: PAUSE needs a
+  running stream, and zeros would start it.
+- **The release keeps the frames it cannot play.** After `ReleaseAfter` the
+  device is closed (B470 §3 releases hardware-paused handles too), the
+  position kept, and the content frames the DAC had not played are taken
+  back from Written; the store keeps the last hardware buffer's frames
+  written for exactly this, and Resume reopens the same endpoint with the
+  same parameters and writes them first, so nothing is skipped or played
+  twice across the release. A release that would have to skip ends the
+  sink instead. In PAUSED, frames the driver had handed the hardware
+  before the pause (USB's packets in flight) count as played: they play
+  out during the pause.
+- **An xrun is reported, never recovered behind the caller's back.** The
+  kernel stops a stream once its pointer reaches the last frame written,
+  so the frames written count as played and the gap sits at the end of
+  them; `Recover` alone prepares the stream, and every xrun stays counted.
+  What a driver sent the DAC between the underrun and the stop (stale
+  samples, for a driver that prepares packets from the ring without
+  looking at appl_ptr) is not knowable here, and the sink claims nothing
+  about it.
+- **A drain stays pausable until the kernel's own drain.** The first
+  version refused every command but Drop while it drained, which would
+  have made the last two seconds of a queue unpausable. Drain is now a
+  command the writer keeps until the drain ends; only `Device.Drain`, the
+  last buffer, refuses all but a Drop, since an interrupted Device.Drain
+  drops the stream and cuts off the end (control D1 shows it).
+- **Gapless is the transport, and the sink only answers.** The transport
+  includes the valid bits, as B470 §3 lists valid-bit interpretation; 24
+  bits in S32_LE and 32 bits in S32_LE carry the same container but are not
+  the same stream. The engine (PR 4b) decides, and keeps track boundaries
+  as content frames against `Position.Played`; the sink adds nothing
+  between two writes.
+- **PAUSE's argument is a value.** `snd_pcm_common_ioctl` takes
+  `(unsigned long)arg` for PAUSE, and alsa-lib passes `enable` itself, so a
+  pointer to an int would be read as a non-zero address, a pause, in both
+  directions. `ioctlValue` keeps the integer out of an `unsafe.Pointer`.
+  This is recalled, not read from the source on this machine; the
+  `alsa-abi` job checks the number, and the hardware gate's pause and
+  resume check the meaning.
+- **The harness plays files at their own level.** The bridge never
+  attenuates a sample, so `--file` needs `--ack-full-level`; the tone stays
+  at most -30 dBFS. `--tracks` splits the tone 37 frames past an even
+  share, never a whole repeat, so a lost, repeated or inserted frame at the
+  join is a click in a pure sine.
+
+### Red first
+
+- The Device additions, against stub bodies: all 5 of their tests failed
+  (`TestPauseUsesTheKernelsPAUSE`, `TestPauseIsRefusedByHardwareThatCannot`,
+  `TestPauseTypesAStreamItCannotPause`, `TestPrepareStartsTheStreamAgain`,
+  `TestWaitPollsForNoEvent`), and the 38 PR 2a tests passed on the
+  extended fake.
+- The sink, against an API with stub bodies: 22 of its 23 tests failed;
+  `TestSinkStateNames`, which checks names the stub already had, passed.
+- The pausable drain, against the committed blocking drain:
+  `TestSinkCommandsFollowTheState`, rewritten to pause and resume a drain,
+  failed ("the sink is draining: only a drop stops it").
+- The harness's tests were written with its code; their evidence is the
+  controls H1–H6.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against its package
+with a 2–3 s watchdog, then restored from HEAD and the tree checked clean.
+
+| Control | Mutation | Red |
+|---|---|---|
+| S1 | an interrupted write counted as the whole chunk | 11 tests, every one that interrupts a write (pause, xrun, cancel); not the load tests, since `Device.Write` continues partial writes itself |
+| S1b | the store's copy does not wrap | `TestSinkGivesTheKernelEveryFrameOnceInOrder`, `TestSinkJoinsCompatibleTracksBackToBack` |
+| S2 | the kernel's PAUSE never used | `TestSinkPausesWithTheKernelsPause`, the PAUSE release case, `TestSinkResumeAfterAReleaseTypesWhatRefusesIt`, `TestSinkCommandsFollowTheState`, `TestSinkPositionIsWrittenMinusWhatTheKernelHolds` |
+| S3 | zeros recorded as content | first run: only the zeros release case; the clamp to Written hid it from `TestSinkPausesWithZeros`, which now checks the position while zeros queued ahead of the resumed content play (370f08a1); then both of its cases too |
+| S4 | the release takes back nothing | the PAUSE and not-started release cases, `TestSinkResumeAfterAReleaseTypesWhatRefusesIt` |
+| S4b | the release after twice the time | all three release cases |
+| S5 | an xrun recovered by the sink itself | `TestSinkReportsAnXrunAndRecoversOnlyWhenAsked`, `TestSinkCountsEveryGapAndKeepsTheLastFew` |
+| S6 | a disconnect or a suspend settled as an xrun | all five cases of `TestSinkEndsOnADisconnectOrASuspendAndClosesOnce` |
+| S7 | the producer's wait ignores its context | first run: nothing, a stale wake-up token woke the producer after the cancel; after 3860fc02 (the token taken before the wait), one run in three; after a86671fb (the test waits where nothing else can wake the producer), `TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait`, five runs of five |
+| S7b | the writer's waits do not end with the sink's life | `TestSinkCancelUnderLoadDropsAndClosesOnce` |
+| G1 | Join ignores the valid bits | `TestTransportJoinNamesWhatDiffers`, `TestOutputPCMTestSinkReopensForAnotherTransport` |
+| P1 | STATUS's delay of 0 believed before the start | `TestSinkPositionIsWrittenMinusWhatTheKernelHolds`, `TestSinkPausesAStreamThatHasNotStartedByWritingNothing`, two release cases, `TestSinkResumeAfterAReleaseTypesWhatRefusesIt` |
+| P2 | the position's own never-back clamp removed | nothing: the run's played count is monotonic too, and covers it |
+| P2b | both never-back layers removed | `TestSinkPositionIsWrittenMinusWhatTheKernelHolds` ("resumed: played 4736, want 4800"), `TestSinkPositionIgnoresAReadingItCannotUse` |
+| D1 | a Pause let through during the kernel's drain | `TestSinkLastBufferDrainsUninterrupted`: the drain was dropped, the end lost |
+| U1 | PAUSE's number off by one | `TestIoctlNumbersEncodeTheirStructures` |
+| U2 | `probe.c` without PAUSE | `TestProbeAndGoNameTheSameFacts`, naming the fact |
+| U3 | PAUSE's value inverted | 8 tests, every one that pauses by PAUSE |
+| C1 | the end does not close the device | 12 tests |
+| H1 | `--file` without `--ack-full-level` | first run: the package hung to its timeout on the fake's shut drain gate; after b35327cb (a watchdog on every run, the gate open in the refusal test), `TestOutputPCMTestSinkRefusesWhatItCannotPlay` at once |
+| H2 | the tone's second track on an even share | `TestOutputPCMTestSinkTwoToneTracksAreOneSeamlessTone` |
+| H3 | a recovered gap exits 0 | `TestOutputPCMTestSinkReportsAnXrunAndRecoversOnlyWhenAsked` |
+| H4 | a recovery without `--recover` | the same test |
+| H5 | a busy resume not naming the holder | `TestOutputPCMTestSinkNamesTheHolderWhenAResumeIsBusy` |
+| H6 | every next track joined, whatever its transport | the package panicked: the 48 kHz/24-bit track cut at the first sink's 16-bit frames |
+
+S3, S7 and H1 found weak tests, each fixed in its own commit before the
+control was run again; S7 also found a stale wake-up the producer acted on
+(harmless, now taken before the wait). P2 is recorded as a defence in depth
+no single mutation reaches.
+
+The tests never sleep: the fake kernel's clock moves only in a poll that
+waits, by simulated time a test grants, so 30 s of pause runs in
+milliseconds. The one real-time timer is a watchdog. The sink's tests ran
+120 times under `-race` across GOMAXPROCS 1, 2 and 8 without a failure,
+and the package and the harness tests 30 more each after the last change.
+
+### The hardware gate
+
+On the Pi as a user in the `audio` group, with `dist/bridge-linux-arm64`
+from `make build-all`; N is the card `bridge output dac` lists. Pause
+Volumio first, except for the contention runs. Turn the volume down before
+any `--file` run: files play bit-exact, at their own level.
+
+1. The PCM matrix through the sink, the tone, 20 s each:
+   `bridge output pcm-test --sink --card N --device 0 --rate 44100 --bits 16 --seconds 20`,
+   then `--rate 96000 --bits 24`, `--rate 192000 --bits 24`,
+   `--rate 384000 --bits 32` (an S32-only DAC: add `--format S32_LE` to
+   the 24-bit runs). Pass: "committed exactly" names the rate and format,
+   the kernel's hw_params line "agrees", a "sink:" line with the store,
+   each second's line with "played" up about a second and "queued" near
+   the buffer, "RUNNING, playing"; "drained: 20.000 s (… frames) played;
+   gaps 0", "closed", exit 0; the tone clean; the DAC showing the rate.
+   Then a FLAC or WAV at each rate on hand:
+   `bridge output pcm-test --file /path/track.flac --ack-full-level --card N --device 0`.
+   Pass: the same, with the file's length played.
+2. Pause and resume both ways:
+   `bridge output pcm-test --sink --card N --device 0 --rate 44100 --bits 16 --seconds 30 --pause pause --pause-at 5 --resume-after 5`,
+   and the same with `--pause zeros`. Pass, PAUSE: "pause: PAUSE alone
+   (the hardware offers PAUSE)", "paused by the kernel's PAUSE, at 5.x s",
+   the tone stopping at once, "played" frozen with "PAUSED, paused",
+   "resumed at 5.x s", the tone going on with nothing lost, gaps 0, exit 0
+   (a DAC without PAUSE is refused at the open: run zeros only, and say
+   so). Pass, zeros: "paused by zeros, after what was queued plays", the
+   tone stopping within the buffer (about 0.2 s), "played" frozen while the
+   stream stays "RUNNING, paused", a seamless resume, gaps 0, exit 0, and
+   silence frames counted in the last line. By key:
+   `--sink --card N --device 0 --rate 96000 --bits 24 --seconds 120 --keys`,
+   p Enter, p Enter, q Enter: paused, resumed, "stopped (q) … dropped",
+   "closed", exit 0.
+3. The release and the reopen, both ways:
+   `bridge output pcm-test --sink --card N --device 0 --rate 44100 --bits 16 --seconds 60 --pause pause --pause-at 5 --resume-after 40`,
+   and with `--pause zeros`. Pass: at about 35 s the line reads "closed,
+   released" and `cat /proc/asound/cardN/pcm0p/sub0/status` says
+   `closed`; at about 45 s "resumed: opened card N device 0 again, writing
+   again first what the DAC had not played, from 5.x s" and the committed
+   parameters again; the tone going on (the DAC's relock is expected,
+   nothing skipped); "releases 1, reopens 1", gaps 0, exit 0.
+4. Gapless:
+   `bridge output pcm-test --sink --tracks 2 --card N --device 0 --rate 44100 --bits 16 --seconds 20`.
+   Pass: "track 2 joins track 1 gaplessly at 10.001 s (441037 frames)",
+   "track 2 reached the DAC" near 10 s, no click there on headphones, gaps
+   0, exit 0. Then two consecutive tracks of a gapless album in one
+   format: `--file track1.flac --file track2.flac --ack-full-level`; pass:
+   the join named at track 1's length and inaudible. Two files of
+   different formats: "needs another transport (…): drain, reopen and
+   refill, an honest gap" and a second "committed exactly".
+5. Contention with MPD: with Volumio playing, run (1): exit 1, "busy",
+   MPD's `output:alsa` thread and `mpd` process named, MPD playing on. Then
+   `bridge output pcm-test --sink --card N --device 0 --rate 44100 --bits 16 --seconds 120 --pause-at 5 --resume-after 60`
+   and start Volumio playing once the line reads "released" (after 35 s):
+   at 65 s "resume: … busy", the holder named, "stopped: the resume was
+   refused … dropped", "closed", exit 1, MPD playing on.
+6. A USB unplug mid-stream:
+   `bridge output pcm-test --sink --card N --device 0 --rate 96000 --bits 24 --seconds 120`,
+   unplug after about 10 s. Pass: "the device went away after X s played:
+   the sink closed it", "disconnected" on stderr, "closed", exit 1, no
+   hang. Again while paused by PAUSE (`--pause pause --pause-at 5
+   --resume-after 100`, unplug at about 10 s): the same.
+7. A cancel under load:
+   `bridge output pcm-test --sink --card N --device 0 --rate 384000 --bits 32 --seconds 600`,
+   Ctrl-C after about 10 s. Pass: the sound stopping at once, "stopped by
+   signal after X s played: dropped", "closed", exit 0, and a second run
+   opening at once, not busy. Again during a `--file` run, and while
+   paused.
+
+An xrun cannot be made to order on the box; when one happens the run
+prints "xrun 1:" with where the stream stopped and what was held, and
+exits 1, and `--recover` plays on and still exits 1, the gap counted.
+
+### Not in this change
+
+- The engine and queue (PR 4b), OpenHome (5a), DSD and DoP (2c, 2d),
+  seek (7a), tails and relock policies (7b), stable bindings and hotplug
+  (4a).
+- Interpolating the position between measurements for a display.
+- An immediate pause by zeros, which would need REWIND.
+- Kernel silence fill on an underrun (`silence_size` = boundary): PR 2a's
+  rule keeps the kernel from filling silence, so a driver that prepares
+  packets from the ring without looking at appl_ptr may send the DAC stale
+  samples between the underrun and the stop. The sink reports the xrun
+  either way; whether to fill silence there is the owner's call, and was
+  not written to the backlog, which is not on this machine.
+- The `alsa-abi` job and the Linux-only tests (`TestErrnoValuesAreLinuxs`,
+  which now holds ENOSYS too, among them) had not run when this was
+  written: the session had no Linux. Everything was compiled and vetted
+  for linux/amd64 and linux/arm64, and the PAUSE number is new to the job.
