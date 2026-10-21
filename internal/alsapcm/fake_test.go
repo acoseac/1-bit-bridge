@@ -522,13 +522,22 @@ var watchdog = flag.Duration("watchdog", time.Minute, "how long a test waits for
 // under test run.
 func await(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
+	receive(t, ch, what)
+}
+
+// receive waits for a value on ch, under await's watchdog.
+func receive[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
 	timer := time.NewTimer(*watchdog)
 	defer timer.Stop()
 	select {
-	case <-ch:
+	case v := <-ch:
+		return v
 	case <-timer.C:
 		t.Fatalf("waited %v for %s", *watchdog, what)
 	}
+	var zero T
+	return zero
 }
 
 func (k *fakeKernel) ioctl(fd int, req uint32, arg unsafe.Pointer) error {

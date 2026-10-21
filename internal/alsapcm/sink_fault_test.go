@@ -242,7 +242,7 @@ func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) 
 	await(t, waits, "the producer to wait for room")
 	await(t, k.when(starved), "the writer to wait on the DAC")
 	cancel()
-	r := <-done
+	r := receive(t, done, "the producer's Write to end at the cancel")
 	wantReason(t, r.err, ReasonCancelled)
 	if !errors.Is(r.err, context.Canceled) {
 		t.Errorf("%v does not wrap context.Canceled", r.err)
@@ -284,7 +284,7 @@ func TestSinkCancelUnderLoadDropsAndClosesOnce(t *testing.T) {
 	await(t, waits, "the producer to wait for room")
 	await(t, k.when(starved), "the writer to wait on the DAC")
 	end()
-	wantReason(t, <-done, ReasonCancelled)
+	wantReason(t, receive(t, done, "the producer's Write to end with the sink"), ReasonCancelled)
 	p := waitState(t, s, SinkEnded)
 	wantReason(t, p.Err, ReasonCancelled)
 	if !errors.Is(p.Err, context.Canceled) {
@@ -383,7 +383,7 @@ func TestSinkDrainEndsEarlyOnACancelOrADrop(t *testing.T) {
 				await(t, k.when(func(k *fakeKernel) bool { return k.state == stateDraining && starved(k) }), "the kernel to drain")
 			}
 			c.stop(t, s, cancel)
-			wantReason(t, <-done, ReasonCancelled)
+			wantReason(t, receive(t, done, "the drain to end early"), ReasonCancelled)
 			if p := waitState(t, s, SinkStopped); p.Played > p.Written {
 				t.Errorf("after the drain ended early: %+v", p)
 			}

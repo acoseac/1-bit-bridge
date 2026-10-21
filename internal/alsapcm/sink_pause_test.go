@@ -325,7 +325,7 @@ func TestSinkCommandsFollowTheState(t *testing.T) {
 		t.Errorf("a resumed drain is %s, want draining", p.State)
 	}
 	k.free()
-	if err := <-done; err != nil {
+	if err := receive(t, done, "the drain to end"); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	sameFrames(t, "what the DAC heard", heard(k), in)
@@ -351,7 +351,7 @@ func TestSinkLastBufferDrainsUninterrupted(t *testing.T) {
 	wantReason(t, s.Pause(), ReasonBadState)
 	wantReason(t, s.Resume(), ReasonBadState)
 	k.free()
-	if err := <-done; err != nil {
+	if err := receive(t, done, "the drain to end"); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	sameFrames(t, "what the DAC heard", heard(k), in)
