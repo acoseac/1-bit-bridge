@@ -120,9 +120,18 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	// The file that opened is the file judged above. A link swapped in
-	// between the two reads as another file and is refused.
-	if now, err := os.Stat(resolved); err != nil || !os.SameFile(stat, now) {
+	// The file that opened is a file inside the roots. The path is resolved
+	// again after the open: a directory on it replaced by a link out of the
+	// roots after the first check sends the open and any later stat of the
+	// first resolution down the same link, so only a fresh resolution sees
+	// where the open went. That resolution must still be inside, and name
+	// the file that opened.
+	again, err := fsutil.ResolveLinks(info.AbsolutePath)
+	if err != nil || fsutil.IsUnderAny(again, roots) == "" {
+		refuseOutside(w)
+		return
+	}
+	if now, err := os.Stat(again); err != nil || !os.SameFile(stat, now) {
 		refuseOutside(w)
 		return
 	}
