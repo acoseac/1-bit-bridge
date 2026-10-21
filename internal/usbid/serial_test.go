@@ -178,9 +178,9 @@ func TestSerialLabel(t *testing.T) {
 		"ABCDEFGHIJK":          "serial set",
 		"1234":                 "serial set",
 		"ABCDEFGHIJ\x1b[2J":    "serial set",
-		"ABCDEFGHIJKLMN​": "serial set",
+		"ABCDEFGHIJKLMN\u200b": "serial set",
 		"シリアル番号は一二三四五六七八": "…五六七八",
-		"":                     "no serial",
+		"": "no serial",
 	} {
 		if got := New(raw).Label(); got != want {
 			t.Errorf("Label(%q) = %q, want %q", raw, got, want)

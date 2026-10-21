@@ -72,32 +72,32 @@ func TestPortRoundTripsItsCanonicalForm(t *testing.T) {
 func TestParsePortRefusesWhatTheGrammarDoesNot(t *testing.T) {
 	for _, in := range []string{
 		"",
-		"usb2-1:1.0",                     // no anchor
-		"1-1.3:1.0",                      // a bus-relative sysfs name
-		"1-1.3",                          // a bus number and a chain
-		"pci-0000:01:00.0",               // no usb segment
-		"pci-0000:01:00.0/usb2-1.3",      // no interface
-		"pci-0000:01:00.0/usb2-1.3:1",    // no interface
-		"pci-0000:01:00.0/usb4-1:1.0",    // no generation 4
-		"pci-0000:01:00.0/usb-1:1.0",     // no generation
-		"pci-0000:01:00.0/usb2-0:1.0",    // port 0
-		"pci-0000:01:00.0/usb2-01:1.0",   // a leading zero
-		"pci-0000:01:00.0/usb2-256:1.0",  // past 255
-		"pci-0000:01:00.0/usb2-1:0.0",    // configuration 0
-		"pci-0000:01:00.0/usb2-1:1.256",  // interface past 255
-		"pci-0000:01:00.0/usb2-1:1.01",   // a leading zero
-		"pci-0000:01:00.0/usb2-1..2:1.0", // an empty port
+		"usb2-1:1.0",                                // no anchor
+		"1-1.3:1.0",                                 // a bus-relative sysfs name
+		"1-1.3",                                     // a bus number and a chain
+		"pci-0000:01:00.0",                          // no usb segment
+		"pci-0000:01:00.0/usb2-1.3",                 // no interface
+		"pci-0000:01:00.0/usb2-1.3:1",               // no interface
+		"pci-0000:01:00.0/usb4-1:1.0",               // no generation 4
+		"pci-0000:01:00.0/usb-1:1.0",                // no generation
+		"pci-0000:01:00.0/usb2-0:1.0",               // port 0
+		"pci-0000:01:00.0/usb2-01:1.0",              // a leading zero
+		"pci-0000:01:00.0/usb2-256:1.0",             // past 255
+		"pci-0000:01:00.0/usb2-1:0.0",               // configuration 0
+		"pci-0000:01:00.0/usb2-1:1.256",             // interface past 255
+		"pci-0000:01:00.0/usb2-1:1.01",              // a leading zero
+		"pci-0000:01:00.0/usb2-1..2:1.0",            // an empty port
 		"pci-0000:01:00.0/usb2-1.2.3.4.5.6.7.8:1.0", // past seven ports
-		"pci-0000:01:00.8/usb2-1:1.0",                // function 8
-		"pci-0000:1:00.0/usb2-1:1.0",                 // a one-digit bus
-		"pci-0000:01:00.0:x/usb2-1:1.0",              // trailing junk
-		"pci-0000:01:00.0/usb2-1:1.0/",               // trailing slash
-		"/pci-0000:01:00.0/usb2-1:1.0",               // leading slash
-		"PCI-0000:01:00.0/usb2-1:1.0",                // case
-		"pci-0000:01:0A.0/usb2-1:1.0",                // upper-case hex
-		"platform-/usb2-1:1.0",                       // an empty name
-		"platform-soc:usb/usb2-1:1.0",                // a colon in a name
-		"platform-a b/usb2-1:1.0",                    // a space in a name
+		"pci-0000:01:00.8/usb2-1:1.0",               // function 8
+		"pci-0000:1:00.0/usb2-1:1.0",                // a one-digit bus
+		"pci-0000:01:00.0:x/usb2-1:1.0",             // trailing junk
+		"pci-0000:01:00.0/usb2-1:1.0/",              // trailing slash
+		"/pci-0000:01:00.0/usb2-1:1.0",              // leading slash
+		"PCI-0000:01:00.0/usb2-1:1.0",               // case
+		"pci-0000:01:0A.0/usb2-1:1.0",               // upper-case hex
+		"platform-/usb2-1:1.0",                      // an empty name
+		"platform-soc:usb/usb2-1:1.0",               // a colon in a name
+		"platform-a b/usb2-1:1.0",                   // a space in a name
 		"platform-" + strings.Repeat("a", 65) + "/usb2-1:1.0",
 		"devnum-5/usb2-1:1.0",
 		"platform-a/platform-b/platform-c/platform-d/platform-e/usb2-1:1.0", // five anchors
