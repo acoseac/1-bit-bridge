@@ -48566,7 +48566,10 @@ One gathering in `cmd/bridge` (`outputChecklist`) feeds both surfaces.
 (`api.NewLocalOutputs`, closed at once, so the doctor holds no MPD
 connection), probes the loopback port (the route's typed 404 is how it
 knows the route from anything else holding the port), and counts
-`tokens.json`. The console reads the serving process's own builder
+`tokens.json`. The probe runs once, only when a line needs it, and any
+dial that fails reads as nothing serving: a refusal is ECONNREFUSED on
+unix and WSAECONNREFUSED on Windows, and the first draft named only the
+first (found on review; Windows was not run here). The console reads the serving process's own builder
 (`Server.LocalOutputsResponse`, its caches and its lazy session) for
 `GET /api/output/checklist` and for its Diagnostics doctor, because
 `/api/doctor` runs on every settings render and a builder of its own
@@ -48665,7 +48668,8 @@ the named tests, restored from HEAD and checked clean.
 | the Player line without "MPD" | `TestAHealthyBoxIsGreenAndNamesItsProtocol` |
 | `bridge doctor` not wired | `TestBridgeDoctorPrintsThePlayerChecklist` |
 | the console DTO drops the fix | `TestTheConsoleAndTheDoctorShowOneChecklist` |
-| the probe accepts any answer | `TestProbeLoopbackRouteKnowsItsOwnRoute` |
+| the probe accepts any answer | `TestProbeLoopbackRouteKnowsItsOwnRoute` (another server) |
+| a failed dial read as an error | `TestProbeLoopbackRouteKnowsItsOwnRoute` (nothing listening) |
 | the dashboard without the dialog / without its data | `TestTheDashboardCarriesThePlayerChecklistAndThePairingQR` |
 | the QR on a green Phone line | `TestThePlayerChecklistScriptIsWired` |
 | `output.mpd` unset read as off | `TestLocalOutputsActiveStartsTheLoopbackRoute/linux_unset_with_an_MPD` and B2b's `TestOutputModeRejectsAnythingElse` |
