@@ -109,6 +109,12 @@ func TestSerialNeverPrintsItsValue(t *testing.T) {
 	if !strings.Contains(text.String(), "serial=[redacted]") || !strings.Contains(js.String(), `"serial":"[redacted]"`) {
 		t.Errorf("the handlers did not print the redaction:\n%s\n%s", text.String(), js.String())
 	}
+	// slog resolves a LogValuer itself, so a handler that formats a value
+	// its own way, not through fmt or encoding/json, still gets the
+	// redaction.
+	if v := slog.AnyValue(s); v.Kind() != slog.KindLogValuer || v.Resolve().String() != "[redacted]" {
+		t.Errorf("slog sees the serial as %s %q, want a LogValuer that resolves to the redaction", v.Kind(), v.Resolve().String())
+	}
 }
 
 // TestSerialJSONSaysOnlyWhetherOneIsSet: a present serial encodes as the
