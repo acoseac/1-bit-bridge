@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-21 — B470 PR 1c: ALAC in M4A through a bounded demuxer, cookie and packet checks, and saprobe-alac's packet decoder](#2026-10-21--b470-pr-1c-alac-in-m4a-through-a-bounded-demuxer-cookie-and-packet-checks-and-saprobe-alacs-packet-decoder)
 - [2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules](#2026-10-20--b470-pr-1b-round-3-the-dff-walks-bounds-the-goldens-layout-checks-and-two-overstated-rules)
 - [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
 - [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
@@ -47926,6 +47927,219 @@ them: clean advisory with no TIT2 on an `[E]` stem is explicit (WAV, AIFF,
 DFF, DSF, and `EXPLICIT=0`); a clean advisory with no marker anywhere is
 clean; a TIT2 carrying `[E]` beside a clean advisory is explicit; a WAV with
 no ID3 whose LIST/INFO title is clean is clean.
+
+## 2026-10-21 — B470 PR 1c: ALAC in M4A through a bounded demuxer, cookie and packet checks, and saprobe-alac's packet decoder
+
+### The decision this builds, and the trigger it found
+
+The owner chose option B on 2026-10-20: keep ALAC in 0.2.2 with the
+package's own bounded M4A demuxer and configuration checks around
+saprobe-alac's packet decoder, pinned at 1b6eb83, with a `recover` as the
+last resort. Codex's evaluation of that revision had found every
+well-formed file decoded bit-exact (Apple and FFmpeg encodes, 16 and 24
+bits, 44.1 to 192 kHz) and the library's container path unfit: panics on
+malformed configurations, allocations driven by table counts, edit lists
+ignored. The brief's trigger for option C, porting Apple's reference
+decoder, is a crash inside the library's packet decoding that validation
+cannot prevent. The decision is the owner's.
+
+**The trigger condition is met.** Reading `DynDecomp`
+(`internal/alac/golomb.go`) before writing any code: the loop checks
+`bitPos < maxPos` only at the top of each sample, a sample's code can carry
+`bitPos` past the packet's end, and when the running mean then falls under
+the zero-run threshold `dynGet` loads four bytes at `bitPos >> 3` with no
+check. `BitBuffer`'s four-byte padding does not cover it. Apple's
+`ag_dec.c` has the same unchecked `dyn_get`. Confirmed with a ten-byte
+stereo packet under Apple's own configuration (frame length 4096, pb 40,
+mb 10, kb 14): `index out of range [3] with length 2` at golomb.go:85,
+reached from :118 and :246. The packet is a channel pair, compressed, no
+shift, whose first residual is an escape that ends exactly at the packet's
+end. Nothing in the cookie or the element header tells it from a good
+packet, so no validation prevents it. The `recover` contains it: the
+packet is a `truncated_or_corrupt` refusal and the decoder recovers on the
+next packet (`TestALACLibraryPanicIsARefusal`, `alacPanicPacket`). Nothing
+here ports Apple's decoder or works around the library beyond the
+`recover`. One mitigation was considered and not built: appending eight or
+more zero bytes to every packet would keep the overrun inside the buffer,
+and a valid packet decodes the same, but a corrupt packet that overruns
+by less than the padding would then decode the zeros instead of failing.
+The same packet panics under a 24-bit configuration. The defect and four
+others, each with a minimal input, are in `ops/upstream/saprobe-alac.md`
+(not reported upstream).
+
+### What shipped
+
+`decode.Open` opens ALAC in M4A where it refused it as `not_yet_supported`.
+The library is `github.com/mycophonic/saprobe-alac`
+`v1.0.0-rc2.0.20261020094436-1b6eb8378954` (Apache-2.0), resolved offline
+from the module cache; `go get` was not permitted on the host, so the
+require line was added by hand and `go vet -mod=mod ./...` filled go.sum.
+Minimum version selection raised `golang.org/x/text` from v0.42.0 to
+v0.43.0, which saprobe-alac's go.mod lists; it was in the cache.
+
+- **The demuxer** (`m4a.go`, `alac.go`) reads boxes by seeking: ftyp
+  first, one moov before or after mdat, every mdat, the one `soun` track's
+  mdhd, hdlr, dinf/dref, stbl and edts/elst. Box headers are compared as
+  uint64s with their parent by subtraction; a top-level mdat may run past
+  the end of a cut file, and any other box past its parent or the file is
+  refused. Each table count is checked against its box (`fits`) before
+  anything is allocated for the table; the packet count is capped at 2^20;
+  a constant-size stsz's count must fit the mdat bytes the file holds.
+  stts and stsc must place exactly stsz's packets, every stts duration is
+  1 to the frame length, every packet 1 byte to the cookie's max frame
+  bytes and inside one mdat, mdhd's timescale the cookie's rate, its
+  duration stts's frames. The index is every packet's offset and size
+  plus the stts runs.
+- **The cookie** is validated before the library is constructed (the
+  ranges are in the rules). pb, mb and maxRun are not limited: Apple writes
+  40/10/14 and maxRun 255, FFmpeg (Lavf58 in the private corpus) maxRun 0,
+  and FFmpeg writes pb, mb and kb as 0 at compression level 0.
+- **Each packet's element header** is read before the library decodes it,
+  and the decoded length checked after.
+- **Edit lists**: one edit, presented from its media time for the frames
+  its duration covers whole, never past the media's end. Measured with
+  afconvert's own decode of rewritten goldens at a movie timescale of 1000
+  and 44.1 kHz: durations of 251, 255 and 257 ms (11069.1, 11245.5 and
+  11333.7 frames) presented 11069, 11245 and 11333 frames from the media
+  time 123, so afconvert floors; an edit running past the media's end
+  presented the media to its end; and an edit with a media time of 0
+  presented the whole media whatever its duration (1 ms or 257 ms), which
+  this decoder does not copy: it applies the duration.
+- **The sniffer** (PR 1a) treats a file that ends inside moov the way it
+  treats its 4 MiB cut, so the codec found before the end decides: a cut
+  AAC file was `unsupported_layout: MP4 box "trak" size 480 exceeds buffer`
+  and is `lossy_refused`; a cut ALAC file was `unsupported_layout: MP4 box
+  "udta" ... exceeds buffer` and reaches the demuxer, which says the moov
+  runs past the end of the file.
+- PR 1a's sniff tests whose stub ALAC files now reach the demuxer ask the
+  sniffer through `SniffsALAC` (`export_test.go`); `TestReviewSniffMP4`,
+  which detected a misread "alac" by the old `not_yet_supported` reason,
+  asks it too, since that reason no longer means ALAC.
+
+### Goldens
+
+`scripts/player-alac-goldens/generate.py` writes an integer pattern (left
+and right differ in every kind but silence; signed extrema; low-bit-only
+activity; full-scale noise; the kind changing every 1499 frames, so inside
+packets), encodes it with afconvert at 16-bit/44.1 kHz, 24-bit/96 kHz,
+24-bit/192 kHz (a one-frame last packet) and 32-bit/44.1 kHz, and decodes
+each back with afconvert, writing none that is not the pattern. Rewritten
+variants keep afconvert's audio bytes: moov after mdat with co64, and an
+edit (media time 123, 251 ms at a movie timescale of 1000, 11069 frames),
+which the generator also checks against afconvert's decode of it.
+Refusals: a real 20-bit ALAC (`afconvert -d alac/2`), mono, and AAC. Two
+FFmpeg (Lavf63.1.102) encodes from Codex's evaluation are copied with
+their file hash and the hash of the PCM they encode, since FFmpeg, flac
+and sox are not installed on the host. The fixtures are 498,858 bytes
+(507,810 with the manifest and README); 0ff9f4cc's message said 516 KB,
+which is `du`'s count of disk blocks.
+
+afconvert stamps the encode's time into mvhd, tkhd and mdhd; the generator
+zeroes them, and a rerun into a scratch directory is byte-identical.
+afconvert writes 16 bits, 44100 Hz and 2 channels in every sample entry it
+made here (mono and 24-bit/96 kHz included), so only the cookie describes
+the stream. Every golden holds both an escape and a compressed packet
+(afconvert shifts one byte out of 24-bit samples and two out of 32-bit).
+
+### Red first
+
+The tests written first, in `alac_golden_test.go` and
+`alac_hostile_test.go`, ran before `openALAC` existed and failed: the
+goldens' pattern, seek and EOF tests (all six decoded goldens), the FFmpeg
+fixtures, `TestALACAbsurdTablesRefused` (60 of the 61 cases it had then),
+the edit-list tests, the truncation, packet-header, panic, cancel, I/O-error,
+buffer-shape, large-box and ID3 tests, each with `not_yet_supported`. The
+cases that passed were ones PR 1a's sniffer already refused for the same
+reason: an `mp4a` entry, and box sizes below their header or past what is
+addressable. `TestSniffKeepsTheCodecWhenTheFileEndsInsideMoov` and the cut
+moov in `TestALACTruncatedMidPacket` failed with the sniffer's
+`unsupported_layout` before its change (control 9 below). The tests that
+reach the demuxer past the sniffer (`alac_demuxer_test.go`), the fuzz
+targets and the corpus test came with the implementation; the controls
+below are their evidence.
+
+### Negative controls
+
+Each was run against the committed code and reverted.
+
+| Mutation | What failed |
+|---|---|
+| Edit list ignored | the edited golden's pattern, seek and EOF tests, `TestALACEditListVersion1`, `TestALACEditPastTheEndClipsAtTheMedia`, the FFmpeg `edit123` fixture, three `TestALACEditListsRefused` cases, the corpus `variant-edit123` |
+| Edit duration rounded up | the edited golden's three tests, `TestALACEditListVersion1`, "no whole frame" |
+| Seek drops no frames before the target | every golden's exact-seek test and every corpus file's seek suffixes |
+| Element-header check skipped | all seven header cases; the END-first packet then read 24576 samples and no error |
+| `recover` removed | the injected panic crashed the test binary; so did the real one, at golomb.go:85 |
+| Frame-length range dropped | four frame-length cases; a 4,194,304-frame cookie then constructed the library |
+| Cookie channel check dropped | three channel cases, the 9-channel cookie constructed the library, and the mono golden opened: its sample entry says 2 channels (30f65c43 corrects the comment that relied on it) |
+| Constant-size stsz count not checked against mdat | the demuxer allocated 4,201,256 bytes before refusing; the refusal no longer named mdat |
+| Sniffer's cut-file boundary reverted | the two sniff-at-the-cut tests |
+| `fits` dropped | three count cases; the stts reader then took the next box's type, `stsc`, as a duration of 1,937,011,555 frames |
+| Packet size not checked against max frame bytes | "max frame bytes below a packet" |
+| mdhd duration not checked against stts | the mdhd case and the corpus `variant-stts2048`, which then opened |
+| Left and right swapped | every test that compares audio |
+| 24-bit sign extension dropped | the three 24-bit pattern goldens; the FFmpeg hash tests stayed green, since packing back to three bytes drops the error |
+| Context check after the packet read dropped | after 2aa52ef2: the cancel test, which got 5192 frames for 1096 |
+| `mdatHolding` answers any mdat | "stco offset outside mdat" |
+| A child box past its parent not refused | `TestALACDemuxerAlone`, the box then misread as a cut file |
+
+Three controls first reddened nothing, and each led to a change. The
+duplicate count check inside `table()` could not fire, since each reader
+had checked first: the readers now call `fits` and `table()` checks
+nothing (0e98cc95), and two cases whose counts fit the packets but not the
+box isolate it (50830e26). Without the context check after a packet read,
+the cancelled read decoded that packet and returned `Canceled` a packet
+later, gapless, so the test now pins that a cancel during a packet's read
+returns none of it (2aa52ef2). A first `mdatHolding` mutation left the
+zero box's end of 0 for the extent check to refuse; the clean one is in
+the table.
+
+### The private corpus and Codex's encodes
+
+`TestALACReferenceCorpus` (skipped without the files) compared the owner's
+six files under `~/medialibtest-formats/alac` and Codex's nine FFmpeg
+encodes and variants with FFmpeg's decodes recorded in Codex's
+`qualification.json`: every stereo file matched FFmpeg byte for byte,
+whole and from each of eleven seek frames (0, 1, 17, 4095, 4096, 4097, a
+third, a half, inside the last packet, the last frame and the end),
+`variant-co64` and `variant-edit123` (28686 frames) included. The mono and
+six-channel encodes were refused for their channels, the AAC control as
+lossy, and `variant-stts2048` as corrupt: its mdhd duration 28809
+disagrees with its stts's 14473 frames. Five of the owner's files were
+muxed by Lavf58 (moov after mdat, an edit at a movie timescale of 1000
+rounded up past the media's end, maxRun 0); the sixth has moov first, no
+edit, a 140 KB udta and 254 chunks.
+
+### Fuzzing
+
+`FuzzALACOpen` fuzzes the whole path, seeded with every golden, the FFmpeg
+encodes and the panic file; `FuzzALACCookie` the cookie validation, seeded
+with every golden's cookie. Runs with `-parallel 4 -fuzzminimizetime 1s`
+under the build lock, each continuing from the cached corpus:
+
+| Target | Mode | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|---|
+| `FuzzALACOpen` | strict | 5m00s | 7,893,533 | 536 (547) | pass |
+| `FuzzALACOpen` | default | 5m01s | 13,536,946 | 57 (605) | pass |
+| `FuzzALACOpen` | default | 5m32s | 15,784,502 | 20 (625) | pass |
+| `FuzzALACOpen` | strict, replaying the corpus | 1m02s | 2,847,179 | 1 (625) | pass |
+| `FuzzALACCookie` | | 10m00s | 70,580,265 | 7 (14) | pass |
+
+No run found a crasher, so no regression input was added. The strict runs
+are the ones that fail on a recovered library panic, and neither found
+one: the defect above was found by reading `DynDecomp`, and random
+mutation of the goldens did not reach its shape (an escape ending on the
+packet's last bit, then a zero run) in these runs. The default runs
+include the panic file as a seed, so they fuzz the recovery too.
+
+### Licence
+
+saprobe-alac is Apache-2.0 with no NOTICE file. The stack lines in
+`CLAUDE.md` and `AGENTS.md`, the only places the repo lists its
+dependencies, now name it and its licence. The release tarballs carry only
+the bridge's LICENSE and README: Apache-2.0 §4(a) asks a binary
+distribution to give recipients the licence, and the BSD and MIT
+dependencies' terms ask for their notices, none of which ship today. That
+is a follow-up beyond this PR.
 
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 

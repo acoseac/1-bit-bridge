@@ -35,7 +35,7 @@ headers to keep it so.
 
 | File | What it pins |
 |---|---|
-| `afconvert_16bit_44100.m4a` | 16-bit; `moov` before `mdat` behind a `free` box, one chunk, no edit list; a 137-frame final packet |
+| `afconvert_16bit_44100.m4a` | 16-bit; `ftyp`, `moov`, a `free` box, then `mdat`; one chunk, no edit list; a 137-frame final packet |
 | `afconvert_24bit_96000.m4a` | 24-bit at 96 kHz; the sample entry's 16-bit, 44.1 kHz fields are `afconvert`'s constants, not the stream's |
 | `afconvert_24bit_192000.m4a` | 24-bit at 192 kHz; a final packet of one frame |
 | `afconvert_32bit_44100.m4a` | 32-bit; a final packet one frame short of a whole one |
