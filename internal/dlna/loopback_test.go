@@ -252,6 +252,9 @@ func TestLoopbackRouteConfinesToTheLibraryRoots(t *testing.T) {
 		// A directory in the root that links out of it.
 		mustSymlink(t, f.outside, filepath.Join(f.root, "jump"))
 		f.add("dir-link-out", filepath.Join(f.root, "jump", "secret.flac"), ".flac")
+		// The link itself, which names a directory outside: judged before
+		// it is opened, so it is outside_library, never not_a_file.
+		f.add("link-to-dir-out", filepath.Join(f.root, "jump"), ".flac")
 		// A relative link out.
 		mustSymlink(t, filepath.Join("..", "..", "..", "outside", "secret.flac"),
 			filepath.Join(f.root, "Artist", "Album", "03.flac"))
@@ -261,7 +264,7 @@ func TestLoopbackRouteConfinesToTheLibraryRoots(t *testing.T) {
 		f.add("link-in", filepath.Join(f.root, "alias.flac"), ".flac")
 	}
 
-	for _, id := range []string{"outside", "dotdot", "link-out", "dir-link-out", "relative-link-out"} {
+	for _, id := range []string{"outside", "dotdot", "link-out", "dir-link-out", "link-to-dir-out", "relative-link-out"} {
 		if _, ok := f.lib[id]; !ok {
 			continue
 		}
