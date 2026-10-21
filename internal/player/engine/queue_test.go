@@ -201,6 +201,13 @@ func TestACommandWaitsForAReservationThatHasNotLanded(t *testing.T) {
 	h.files.mu.Lock()
 	h.files.holdReserve = g
 	h.files.mu.Unlock()
+	t.Cleanup(func() {
+		select {
+		case <-g:
+		default:
+			g.open()
+		}
+	})
 	admission := func(what string) {
 		t.Helper()
 		select {
