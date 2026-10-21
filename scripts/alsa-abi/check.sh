@@ -47,8 +47,10 @@ echo "compiler: $(cc --version | head -1), for $(uname -m)"
 
 # The header in the kernel's source tree still carries the annotations
 # `make headers_install` strips: __user (a user-space pointer) and __force
-# (a sparse cast). Both mean nothing to a C compiler.
-cc -std=gnu11 -Wall -Werror -D__user= -D__force= -DUAPI_KERNEL="\"$tag\"" \
+# (a sparse cast), which mean nothing to a C compiler, and __packed, which it
+# rewrites as __attribute__((packed)) (without that, the compiler reads
+# `} __packed;` as a declaration and the UMP structures fail to compile).
+cc -std=gnu11 -Wall -Werror -D__user= -D__force= '-D__packed=__attribute__((packed))' -DUAPI_KERNEL="\"$tag\"" \
 	-I "$work/include" -o "$work/probe" "$repo/scripts/alsa-abi/probe.c"
 "$work/probe" >"$work/probe.txt"
 echo "the probe printed $(wc -l <"$work/probe.txt") facts:"
