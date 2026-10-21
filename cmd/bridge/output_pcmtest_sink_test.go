@@ -589,6 +589,58 @@ func TestOutputPCMTestSinkCountsTheRunsTimeAcrossRates(t *testing.T) {
 	}
 }
 
+// TestPCMTestDurationCannotOverflow pins frames' time past the 9.22e9
+// frames whose nanoseconds pass int64 (#1303's review: frames × 1e9 was
+// taken before the division, and wrapped negative 3 h 20 min into a sink at
+// 768 kHz, 6 h 40 min at 384 kHz): whole seconds and the remainder are
+// counted apart, exact to the nanosecond below, at any rate.
+func TestPCMTestDurationCannotOverflow(t *testing.T) {
+	for _, c := range []struct {
+		frames int64
+		rate   int
+		want   time.Duration
+	}{
+		{24000, 48000, 500 * time.Millisecond},
+		{1, 44100, 22675}, // 22675.7 ns
+		{9_300_000_000, 768000, 12109*time.Second + 375*time.Millisecond},
+		{9_300_000_000, 384000, 24218*time.Second + 750*time.Millisecond},
+		{9_300_000_000, 44100, 210884*time.Second + 353741496},                        // the remainder 15600 frames, 353741496.6 ns
+		{1_000_000_000_000_000, alsapcm.MaxRateHz, 651041666*time.Second + 666666666}, // 20 years at the backend's top rate
+		{48000, 0, 0},
+	} {
+		if got := pcmTestDuration(c.frames, c.rate); got != c.want {
+			t.Errorf("%d frames at %d Hz: %v (%d ns), want %v (%d ns)", c.frames, c.rate, got, int64(got), c.want, int64(c.want))
+		}
+	}
+}
+
+// TestOutputPCMTestSinkCountsALongRunsTime pins the run's time once a sink
+// has played past 9.22e9 frames (#1303's review: the time wrapped negative
+// there, so the ticks said so and --pause-at never fired): 9.3e9 frames at
+// 768 kHz are 12109.375 s on the tick, the pause --pause-at 12000 asks for
+// comes, and the stop names the time.
+func TestOutputPCMTestSinkCountsALongRunsTime(t *testing.T) {
+	h := newSinkHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := h.run(ctx, "--sink", "--card", "5", "--device", "0", "--rate", "768000", "--bits", "24", "--seconds", "1",
+		"--pause-at", "12000", "--proc-root", t.TempDir())
+	f := waitSink(t, h, done)
+	f.setPlayed(9_300_000_000)
+	h.ticks <- time.Unix(1_000, 0)
+	// The tick is taken and acted on before the run's next look at ctx.
+	cancel()
+	r := h.wait(t, done)
+	for _, say := range []string{"1 s: played 12109.375 s", "paused by the kernel's PAUSE, at 12109.375 s", "stopped by signal after 12109.375 s played: dropped"} {
+		if !strings.Contains(r.stdout, say) {
+			t.Errorf("stdout does not say %q:\n%s", say, r.stdout)
+		}
+	}
+	if r.code != 0 {
+		t.Errorf("exit %d\nstderr:\n%s", r.code, r.stderr)
+	}
+}
+
 // TestOutputPCMTestSinkKeysReaderEndsWithTheRun pins the --keys reader's
 // life (#1303's review: it outlived the run, blocked on standard input):
 // once the run has returned, its reader has stopped, and a line written

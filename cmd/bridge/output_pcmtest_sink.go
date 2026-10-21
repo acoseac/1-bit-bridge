@@ -779,12 +779,16 @@ func pcmTestFrames(frames int64, rate int) string {
 	return fmt.Sprintf("%.3f s (%d frames)", float64(frames)/float64(rate), frames)
 }
 
-// pcmTestDuration is frames' time at rate.
+// pcmTestDuration is frames' time at rate, rounded down to the nanosecond.
+// The whole seconds and the remainder are counted apart: frames times a
+// second's nanoseconds passes int64 at 9.22e9 frames, 3 h 20 min into a sink
+// at 768 kHz.
 func pcmTestDuration(frames int64, rate int) time.Duration {
 	if rate <= 0 {
 		return 0
 	}
-	return time.Duration(frames) * time.Second / time.Duration(rate)
+	r := int64(rate)
+	return time.Duration(frames/r)*time.Second + time.Duration(frames%r)*time.Second/time.Duration(r)
 }
 
 // pcmTestRunTime is the run's content time, which may span sinks of
