@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestInsertAfterZeroIsTheHead pins an insert after 0 at the head and one
@@ -179,6 +180,80 @@ func TestTheReservationIsDurableBeforeAnIDIsHandedOut(t *testing.T) {
 		if _, tokens := h.files.durable(); h.snap().Token() > tokens {
 			t.Fatalf("token %d published with the reservation at %d", h.snap().Token(), tokens)
 		}
+	}
+}
+
+// TestACommandWaitsForAReservationThatHasNotLanded pins the other half: when
+// a block runs out before the next one's write has landed, the command that
+// needs it waits for the write, and takes nothing past what is durable.
+// Whether a command has waited is read without sleeping: the owner notes a
+// command it applied in the step that applied it, and admits a second
+// command only once that step is over.
+func TestACommandWaitsForAReservationThatHasNotLanded(t *testing.T) {
+	h := newHarness(t)
+	admitted := make(chan op, 8)
+	h.tweak = func(c *Config) {
+		c.seams.admitted = func(cmd *command) { admitted <- cmd.op }
+	}
+	h.boot()
+	ids, tokens := h.files.durable()
+	g := newGate()
+	h.files.mu.Lock()
+	h.files.holdReserve = g
+	h.files.mu.Unlock()
+	admission := func(what string) {
+		t.Helper()
+		select {
+		case <-admitted:
+		case <-time.After(*watchdog):
+			t.Fatalf("waited %v for %s to be admitted", *watchdog, what)
+		}
+	}
+	applied := func(since int, op string) bool {
+		h.appliedMu.Lock()
+		defer h.appliedMu.Unlock()
+		return slices.Contains(h.appliedOps[since:], op)
+	}
+	var last uint32
+	for n := 0; ; n++ {
+		if n > 2*idBlock {
+			t.Fatal("no block ran out")
+		}
+		var got uint32
+		edit, run := "insert", func() error {
+			id, err := h.eng.InsertAfter(bg, 0, ref("t"), nil)
+			got = id
+			return err
+		}
+		if h.snap().Len() == MaxEntries-1 {
+			edit, run = "delete all", func() error { return h.eng.DeleteAll(bg) }
+		}
+		mark := h.appliedMark()
+		done := async(run)
+		admission("the edit")
+		h.outGen++
+		probe := async(func() error { return h.eng.ReportOutput(bg, OutputReport{Generation: h.outGen, Available: true}) })
+		admission("the probe")
+		if applied(mark, edit) {
+			h.must("edit", h.result("the edit", done))
+			last = max(last, got)
+			if last > ids || h.snap().Token() > tokens {
+				t.Fatalf("an edit took ID %d and token %d with %d and %d durable", last, h.snap().Token(), ids, tokens)
+			}
+			h.must("probe", h.result("probe", probe))
+			continue
+		}
+		if n < 100 {
+			t.Fatalf("edit %d waited with most of the block left", n)
+		}
+		g.open()
+		h.must("the edit that waited", h.result("the edit", done))
+		h.must("probe", h.result("probe", probe))
+		nowIDs, nowTokens := h.files.durable()
+		if got > nowIDs || h.snap().Token() > nowTokens || (nowIDs == ids && nowTokens == tokens) {
+			t.Fatalf("the edit that waited took ID %d and token %d with %d and %d durable", got, h.snap().Token(), nowIDs, nowTokens)
+		}
+		return
 	}
 }
 

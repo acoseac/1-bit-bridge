@@ -86,6 +86,7 @@ type fakeFiles struct {
 	reserves        []reserveRecord
 	reserveAttempts int
 	failReserve     error
+	holdReserve     gate
 	renameErr       error
 	readErr         map[string]error
 	changed         chan struct{}
@@ -133,6 +134,15 @@ func (f *fakeFiles) writeQueue(path string, data []byte) error {
 }
 
 func (f *fakeFiles) writeReserve(path string, data []byte) error {
+	f.mu.Lock()
+	hold := f.holdReserve
+	f.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-f.cleanup:
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	defer f.signal()
