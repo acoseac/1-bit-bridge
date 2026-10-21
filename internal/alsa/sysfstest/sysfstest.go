@@ -136,7 +136,9 @@ func (b *builder) write(p string, data []byte) error {
 	return os.WriteFile(b.abs(p), data, 0o644)
 }
 
-func (b *builder) link(at, target string) { b.links = append(b.links, pendingLink{at: at, target: target}) }
+func (b *builder) link(at, target string) {
+	b.links = append(b.links, pendingLink{at: at, target: target})
+}
 
 func (b *builder) makeLink(l pendingLink) error {
 	if err := b.mkdir(path.Dir(l.at)); err != nil {

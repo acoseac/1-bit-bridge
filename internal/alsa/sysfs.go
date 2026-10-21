@@ -74,7 +74,7 @@ const (
 // Identity is what sysfs says about one card.
 type Identity struct {
 	// Card is the N of sysfs's class/sound/cardN.
-	Card int `json:"card"`
+	Card int          `json:"card"`
 	Kind IdentityKind `json:"kind"`
 	// Bus is the subsystem of the card's device: "usb", "platform", "pci",
 	// or "" when it could not be read.
