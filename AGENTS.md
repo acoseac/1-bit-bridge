@@ -49,8 +49,9 @@ request instead of walking an SMB tree.
 - Module: `github.com/acoseac/1-bit-bridge`, binary: `bridge` (from `./cmd/bridge`).
 - Pure-Go, CGO-free stack (`modernc.org/sqlite`, `mewkiz/flac`, `dhowden/tag`,
   `hashicorp/mdns`, `quic-go`, `tailscale.com/tsnet`, and
-  `mycophonic/saprobe-alac`, Apache-2.0, for the player's ALAC packets) — one
-  static binary, no runtime deps.
+  `mycophonic/saprobe-alac`, Apache-2.0, for the player's ALAC packets, built
+  from the patched copy in `third_party/saprobe-alac`) — one static binary, no
+  runtime deps.
 - Target platforms: macOS / Linux / Windows × amd64 / arm64. Tested primarily
   on macOS. Current release line: v0.1.9; wire protocol: **v1** (additive only).
 - **Bit-exact by mission: no server-side transcoding, ever.** `/v1/download`

@@ -48227,6 +48227,126 @@ the cached corpus:
 
 No run found a crasher.
 
+### Round 3: a patched saprobe-alac in third_party, and 16-bit packets with a shift refused
+
+Codex reviewed #1300 and found two wrong decodes in saprobe-alac that no
+check of the bridge's could see, both confirmed against 1b6eb83
+(`ops/upstream/saprobe-alac.md`, 6 and 7). A compressed 16-bit pair that
+declares a shift lost its shifted bytes: the library read them, and its
+16-bit output never used them. A last residual that ran past the packet
+decoded from the four zero bytes of padding: `DynDecomp` checked its cursor
+only before each sample. The second is also why 1b6eb83 panicked on
+`alacPanicPacket`, past the padding. The owner decided on 2026-10-21 that
+the bridge carries a patched copy of the library.
+
+**The copy.** `third_party/saprobe-alac` (0bd37344) holds what the build
+needs at 1b6eb83: the root package, `internal/alac` and `internal/mp4` (the
+root imports both), `go.mod`, `go.sum` and `LICENSE`, and the two tests of
+them that run offline. A plain `cp` from the module cache needs approval on
+this host, so the `.go` files and `LICENSE` came from `go mod vendor -o`
+into a scratch directory, after `go mod verify` had checked the cache
+against go.sum. The rest was transcribed, and the transcribed `go.mod`
+hashes to go.sum's recorded `h1:UOUpQ…`. `go.mod` replaces the module with
+the directory, in B401's style, and go.sum loses the module's two lines,
+which a directory replacement does not use. `go mod tidy -diff` cannot run
+offline here (it needs test-only modules of tailscale's and others' that
+the cache lacks), so that go.sum change rests on that rule, not on a tidy
+run; goreleaser's before-hook runs `go mod tidy` at release.
+
+The Dockerfile copies the copy's `go.mod` before `go mod download`. With
+go.mod and go.sum alone in a scratch directory the download stopped with
+"reading third_party/saprobe-alac/go.mod: no such file or directory", and
+with the copy's go.mod beside them it passed. The tree sweeps in
+`cmd/bridge` (keepers, cited test names, docblock subjects, embed patterns,
+the default logger) read the copy, since they skip `vendor` but not
+`third_party`, and pass. `make test` does not run the copy's tests, which
+are a module of their own: `go -C third_party/saprobe-alac test ./...`
+does, and passes.
+
+**The patch** (ac6c7118). `DynDecomp` checks every code against the packet's
+own length:
+- an escape's value before `getStreamBits` reads it, which also bounds a
+  32-bit pair's 33-bit read, whose fifth byte lay past the padding;
+- a normal code's length before it is taken;
+- a zero run's count before `dynGet` reads it and after.
+A code that would end past the packet returns `ErrBitstreamOverrun`. The
+checks subtract from the bits left rather than add to the cursor. That is
+31 lines added and 4 removed in `internal/alac/golomb.go`, with a 106-line
+`tests/bitstream_overrun_test.go` in upstream's style. The test file holds
+the packets and a code that ends exactly at the packet's end, which still
+decodes to (0, -4). `ops/upstream/saprobe-alac.patch` is `git diff`'s
+output for the two files against 1b6eb83. Its index lines check
+(`42704e54..5cfc369b`, and `37a89c73` for the new file): 42704e54 is the
+copy's `golomb.go` at 0bd37344, and a diff against the copy at ac6c7118,
+with its header notice removed, printed 5cfc369b and the same hunks. `git
+apply` needs approval on this host, so no apply was run. The patched file's
+header says it was changed (Apache-2.0 §4(b)); that note is the only
+difference between the copy and 1b6eb83 with the patch. The copy's
+`README.md` lists both changes. `WriteStereo16` is not touched.
+
+**Finding 1 in the bridge.** `checkALACPacket` refuses a compressed 16-bit
+pair with a shift as `truncated_or_corrupt`, before the library sees it.
+Apple's and FFmpeg's encoders shift only above 16 bits, and no golden,
+FFmpeg encode or corpus file has such a packet: every one still decodes.
+
+**Red first**, on 0bd37344 (the copy unmodified, no 16-bit check):
+- `TestALACCodesPastThePacketAreRefused`. Codex's escape packet, a stop bit
+  past the end and a zero run past the end (both built with Codex's
+  header) read (0, 0), (0, 4) and 16 frames of (0, 0) with no error.
+- `TestALACShiftedBytesIn16BitPacketRefused`: Codex's 16-bit packet read
+  (0, 0), where its shifted bytes make it (0x12, 0x34).
+- `TestSaprobeALACRefusesCodesPastThePacket`. The library panicked on
+  `alacPanicPacket` at 16, 24 and 32 bits (`index out of range [3] with
+  length 2`, `[3] with length 1`, `[6] with length 6`), and decoded the
+  three past-the-end packets with no error.
+- `TestALACPanicPacketIsRefusedWithoutTheRecover` and
+  `TestALACLibraryErrorIsARefusal` got the recover's message.
+- The 16-bit case of `TestALACCorruptPacketHeadersRefused` got the
+  library's overrun, not the bridge's refusal.
+- `FuzzALACOpen`'s overrun oracle failed three of its new seeds.
+
+**Renamed**, since the patched library no longer panics on the packet:
+`…RealLibraryPanicIsCounted` is `TestALACPanicPacketIsRefusedWithoutTheRecover`,
+which asserts no panic and the library's own overrun, and
+`…LibraryPanicIsARefusal` is `TestALACLibraryErrorIsARefusal`. The round-1
+text above names the second elided. The recover is still the last resort,
+and `TestALACInjectedPanicIsARefusal` still pins it with an injected panic.
+
+**The oracle.** `FuzzALACOpen` opens each file a second time with
+`overrunOracle` in the library's place. The oracle decodes every packet the
+library decodes twice more, with eight bytes of 0xFF and then of 0x55
+appended. A decode that reads nothing past the packet gives the same samples
+each time, so a difference fails the target in either mode. Strict mode now
+includes `alacPanicPacket`'s seed, which no longer panics.
+
+**Negative controls**, on ac6c7118, each reverted:
+
+| Mutation | What failed |
+|---|---|
+| `golomb.go` back to 1b6eb83; the copy, its new tests and the 16-bit check kept | exactly the patch's cases: the three past-the-end packets, the six library-level cases, the two renamed tests and fuzz seeds 13 to 15. The 16-bit cases stayed green. In the copy's own tests, the zero-run packet got no error and `alacPanicPacket` panicked at golomb.go:85, 118 and 246 |
+| The 16-bit check dropped | `TestALACShiftedBytesIn16BitPacketRefused` (the packet read (0, 0)) and the 16-bit case of `TestALACCorruptPacketHeadersRefused` (the library's overrun instead); nothing else |
+
+**Re-runs** on ac6c7118: the ALAC goldens, the FFmpeg fixtures and
+`TestALACReferenceCorpus` (the owner's six files and Codex's twelve) decode
+bit-exact, whole and from every seek frame. Fuzzing with `-parallel 4
+-fuzzminimizetime 1s` under the build lock, from the cached corpus and the
+new seeds:
+
+| Target | Mode | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|---|
+| `FuzzALACOpen` | strict, with the oracle | 10m32s | 22,038,662 | 171 (813) | pass |
+| `FuzzALACCookie` | | 5m30s | 38,970,655 | 1 (16) | pass |
+
+Neither run found a crasher, a library panic or a packet decoded from past
+its end.
+
+**Not done here.** The rules text for `.claude/rules/output.md` is in the
+round's report, quoted from the round-1 text because the PR branch is not
+in this clone. SonarCloud and CodeQL will read the copy, and the repository
+has no Sonar configuration to leave `third_party` out. The release tarballs
+still carry the bridge's LICENSE alone (the Licence section above), now
+with modified Apache-2.0 code in the binary.
+
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 
 ### Trigger

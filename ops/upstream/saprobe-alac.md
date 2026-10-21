@@ -146,3 +146,69 @@ The repository says the decoder is a port of Apple's ALAC reference
 (Apache-2.0, Copyright 2011 Apple Inc.), but the ported Go files carry only
 Mycophonic's header. Apache-2.0 §4(c) asks that a derivative keep the
 original's copyright notices (Codex's evaluation).
+
+## 6. A 16-bit pair's shifted bytes are dropped, without an error
+
+From Codex's review of the bridge's PR #1300 (2026-10-21), and run here.
+`decodeCPE` reads a compressed packet's shifted bytes into `shiftBuffer` at
+any depth, and `WriteStereo16` never reads that buffer (nor does
+`WriteStereo20`), so a compressed 16-bit pair that declares a shift decodes
+to its residuals alone:
+
+```go
+cfg.BitDepth = 16
+dec, _ := alac.NewPacketDecoder(cfg)
+dec.DecodePacket([]byte{0x20, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x68, 0x70})
+// one frame, (0, 0), err == nil
+```
+
+The packet is a partial channel pair of one frame with one shifted byte a
+sample: zero residuals, and shifted bytes 0x12 and 0x34, which make the
+frame (0x12, 0x34) when they are kept. No encoder writes such a packet
+(Apple's and FFmpeg's shift only above 16 bits, and the bridge's afconvert
+goldens, FFmpeg encodes and corpus have no 16-bit packet with a shift). The
+bridge refuses a compressed 16-bit pair with a shift before the library
+sees it, and leaves `WriteStereo16` alone.
+
+## 7. A last code that runs past the packet decodes from the padding
+
+From the same review, and run here. `DynDecomp` checks `bitPos < maxPos`
+only at the top of each sample, so a sample's code can end past the packet,
+in the four zero bytes of padding, and they decide its value. When a zero
+run follows, reading its count is the panic of 1. When the code is the last
+the packet holds, nothing reads after it and the packet decodes with no
+error. Three cases under the configuration of 1, each a partial channel pair
+whose V's last code runs past the end:
+
+| Packet | Frames | V's last code | 1b6eb83, with no error |
+|---|---|---|---|
+| `20 00 10 00 00 00 02 00 00 00 00 00 00 ff 80` (Codex's) | 1 | a nine-bit escape whose 17 value bits need 10 more than the packet has | (0, 0) |
+| `20 00 10 00 00 00 02 00 00 00 00 00 00 ff` | 1 | eight ones that end the packet, so its stop bit is the padding's | (0, 4) |
+| `20 00 10 00 00 00 20 00 00 00 00 00 00 82` | 16 | after a zero and U's run of 15 (`1 0 000`), V's zero and a run whose code `1 0 000` has three bits past the end | 16 frames of (0, 0) |
+
+Only the second channel's last code can do this: the first channel's
+`DynDecomp` advances the bit buffer past the packet, and the second's then
+refuses at its start.
+
+## The bridge's patch
+
+The bridge builds this module from a copy of 1b6eb83 with one change
+(`third_party/saprobe-alac`, which a `replace` in its `go.mod` names), and
+carries it until a release has the fix. `ops/upstream/saprobe-alac.patch` is
+that change as a plain diff against 1b6eb83, for upstream. `DynDecomp` checks
+every code against the packet's own length: an escape's value before
+`getStreamBits` reads it, which also bounds the 33-bit read of 3; a normal
+code's length before it is taken; and a zero run's count before and after
+`dynGet`. A code that would end past the packet returns
+`ErrBitstreamOverrun`. That fixes 1 and 7: their packets, and the 32-bit
+packet of 3, return `ErrDecode` wrapping the overrun, and none panics. The
+patch adds `tests/bitstream_overrun_test.go` in the module's style with
+those packets, and with a code that ends exactly at the packet's end, which
+still decodes. With it the bridge's goldens and corpus decode bit-exact as
+before.
+
+The patch leaves 6 alone, which the bridge refuses before the library, and
+the 33-bit value itself: `getStreamBits` cannot return 33 bits (its
+`32 - numBits` wraps), so a compressed 32-bit pair with no shifted byte is
+still not decodable, and the bridge refuses that before the library too.
