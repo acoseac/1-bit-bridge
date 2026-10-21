@@ -64,11 +64,14 @@ type TrackLookup interface {
 //	                        configured library root
 //	500 internal            the file could not be opened for another reason
 //
-// roots is read on every request: the live library roots. enabled is asked
-// on every request too, before anything is looked up, because output.mpd
-// can stop resolving on while the listener runs. It must answer at once,
-// without I/O: serve passes the localOutputs gate's last answer, which
-// never dials MPD. A nil enabled serves nothing.
+// roots is read on every request: the live library roots. A configured
+// root's own path and its ancestors are trusted as the owner's (a root that
+// is a link is followed wherever it points), and the route defends
+// everything below a root. enabled is asked on every request too, before
+// anything is looked up, because output.mpd can stop resolving on while
+// the listener runs. It must answer at once, without I/O: serve passes the
+// localOutputs gate's last answer, which never dials MPD. A nil enabled
+// serves nothing.
 func LoopbackFileHandler(lib TrackLookup, roots func() []string, enabled func() bool) http.Handler {
 	return &loopbackHandler{lib: lib, roots: roots, enabled: enabled}
 }
