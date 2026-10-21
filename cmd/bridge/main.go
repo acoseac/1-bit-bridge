@@ -3888,7 +3888,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// OnActive, when auto finds an MPD that was not there at boot. Every
 	// request then asks the gate's answer as it stands (Enabled), which
 	// never dials MPD, so the route stops serving when output.mpd stops
-	// resolving on: at once for off, at the gate's next probe for auto. It
+	// resolving on: at once for off, at the gate's next answer for auto. It
 	// is stopped before the store it reads closes (the store's close is
 	// deferred above, so it runs after this one).
 	outLoop := newOutputLoopback(outputLoopbackWiring{

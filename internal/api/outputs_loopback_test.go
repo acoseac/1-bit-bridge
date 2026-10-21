@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,8 +114,8 @@ func (t oneTrack) GetTrackInfo(id string) (dlna.TrackInfo, bool) {
 // TestTheLoopbackRouteAsksTheGateWithoutDialling: the loopback route asks
 // on every request whether output.mpd resolves on, and gets the gate's
 // answer as it stands: off refuses at once, on serves, and auto follows
-// the verdict of the gate's most recent probe, so a verdict that turns
-// false refuses. The route is the real handler, wired as serve wires it.
+// the gate's most recent answer, so an answer that turns false refuses.
+// The route is the real handler, wired as serve wires it.
 // No request inspects, dials or greets MPD: every inspection here is the
 // gate's own, asked the way /v1/health asks it.
 func TestTheLoopbackRouteAsksTheGateWithoutDialling(t *testing.T) {
@@ -172,6 +173,147 @@ func TestTheLoopbackRouteAsksTheGateWithoutDialling(t *testing.T) {
 	fetch("auto after a probe found none", http.StatusNotFound, "not_serving")
 	if n := asked.Load(); n != 2 {
 		t.Fatalf("MPD was asked %d times, want the gate's two probes", n)
+	}
+}
+
+// TestTheRouteFollowsAnExpiredProbeThatFoundMPD: a probe that read MPD's
+// configuration and then passed its own deadline is not stored, yet the
+// gate answers true and starts the loopback route, so the route serves:
+// activeNow is the gate's answer, not the stored probe's.
+func TestTheRouteFollowsAnExpiredProbeThatFoundMPD(t *testing.T) {
+	var started atomic.Int32
+	cfg := quietOutputs("linux", "auto")
+	cfg.Inspect = func(ctx context.Context, _ mpd.Options) mpd.Report {
+		<-ctx.Done() // the probe's own deadline passes
+		return mpd.Report{ConfPath: "/etc/mpd.conf"}
+	}
+	cfg.OnActive = func() { started.Add(1) }
+	o := newLocalOutputs(cfg)
+	if !o.Active(context.Background()) || started.Load() != 1 {
+		t.Fatalf("an expired probe that found MPD: the gate said off, or started nothing (%d)", started.Load())
+	}
+	if !o.activeNow() {
+		t.Fatal("the gate answered true and started the route, and the route refuses")
+	}
+}
+
+// TestTheRouteStopsOnAnExpiredMissAfterATrue: after the gate answered true
+// from a probe it stored, a probe that found nothing and passed its own
+// deadline is not stored, yet the gate (and /v1/health with it) answers
+// false, so the route refuses too.
+func TestTheRouteStopsOnAnExpiredMissAfterATrue(t *testing.T) {
+	clock := &manualClock{}
+	var gone atomic.Bool
+	cfg := quietOutputs("linux", "auto")
+	cfg.Now, cfg.AfterFunc = clock.Now, clock.AfterFunc
+	cfg.Inspect = func(ctx context.Context, _ mpd.Options) mpd.Report {
+		if gone.Load() {
+			<-ctx.Done()
+			return mpd.Report{}
+		}
+		return mpd.Report{ConfPath: "/etc/mpd.conf"}
+	}
+	o := newLocalOutputs(cfg)
+	if !o.Active(context.Background()) || !o.activeNow() {
+		t.Fatal("a stored probe that found MPD: the gate or the route said off")
+	}
+	gone.Store(true)
+	clock.Advance(outputProbeHit + time.Second)
+	if o.Active(context.Background()) {
+		t.Fatal("an expired miss: the gate said on")
+	}
+	if o.activeNow() {
+		t.Fatal("the gate answered false, and the route still serves")
+	}
+}
+
+// TestActiveNowIsTheGatesLastAnswer: whichever way the gate reached its
+// answer (a probe it stored, a probe past its deadline it did not store, a
+// fresh cache hit, a new configuration), activeNow is the answer Active
+// last returned.
+func TestActiveNowIsTheGatesLastAnswer(t *testing.T) {
+	const here, elsewhere = "127.0.0.1:6600", "127.0.0.1:6601"
+	clock := &manualClock{}
+	var endpoint atomic.Value
+	cfg := quietOutputs("linux", "auto")
+	cfg.Now, cfg.AfterFunc = clock.Now, clock.AfterFunc
+	cfg.Output = func() config.OutputConfig {
+		return config.OutputConfig{MPD: "auto", Endpoint: endpoint.Load().(string)}
+	}
+	cfg.Inspect = func(ctx context.Context, opt mpd.Options) mpd.Report {
+		if opt.Endpoint == here {
+			return mpd.Report{ConfPath: "/etc/mpd.conf"}
+		}
+		<-ctx.Done() // nothing there, found only after the probe's deadline
+		return mpd.Report{}
+	}
+	o := newLocalOutputs(cfg)
+	for _, step := range []struct {
+		name, endpoint string
+		advance        time.Duration
+		want           bool
+	}{
+		{"a stored probe that found MPD", here, 0, true},
+		{"a fresh cache hit", here, time.Second, true},
+		{"a new configuration, past its probe's deadline, found none", elsewhere, 0, false},
+		{"the first configuration again, a fresh cache hit", here, 0, true},
+		{"the second again, past its deadline again", elsewhere, 0, false},
+	} {
+		endpoint.Store(step.endpoint)
+		clock.Advance(step.advance)
+		if got := o.Active(context.Background()); got != step.want {
+			t.Fatalf("%s: Active %v, want %v", step.name, got, step.want)
+		}
+		if got := o.activeNow(); got != step.want {
+			t.Fatalf("%s: activeNow %v, and the gate answered %v", step.name, got, step.want)
+		}
+	}
+}
+
+// TestACallerThatStopsWaitingGetsTheGatesLastAnswer: a caller whose request
+// ends while it waits on another caller's probe has no verdict of its own.
+// The gate answers it with its last answer and records nothing, so a
+// cancelled /v1/health cannot turn the route off; the probe's own answer
+// is recorded when it lands.
+func TestACallerThatStopsWaitingGetsTheGatesLastAnswer(t *testing.T) {
+	clock := &manualClock{}
+	var second atomic.Bool
+	inspecting, release := make(chan struct{}), make(chan struct{})
+	cfg := quietOutputs("linux", "auto")
+	cfg.Now, cfg.AfterFunc = clock.Now, clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		if !second.Load() {
+			return mpd.Report{ConfPath: "/etc/mpd.conf"}
+		}
+		close(inspecting)
+		<-release
+		return mpd.Report{} // MPD has gone
+	}
+	o := newLocalOutputs(cfg)
+	if !o.Active(context.Background()) {
+		t.Fatal("a probe that found MPD: the gate said off")
+	}
+	second.Store(true)
+	clock.Advance(outputProbeHit + time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	o.probeWait = cancel // the waiter's request ends as it starts to wait
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	owner := make(chan bool, 1)
+	go func() { owner <- o.Active(context.Background()) }()
+	<-inspecting
+	if !o.Active(ctx) {
+		t.Fatal("a caller that stopped waiting was answered off; the gate's last answer was on")
+	}
+	if !o.activeNow() {
+		t.Fatal("a caller that stopped waiting turned the route off")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if <-owner {
+		t.Fatal("the probe found no MPD, and the gate said on")
+	}
+	if o.activeNow() {
+		t.Fatal("the gate answered false, and the route still serves")
 	}
 }
 

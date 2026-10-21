@@ -172,6 +172,12 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	// answered is auto's answer as Active last returned it, whichever way
+	// the gate reached it: a probe it stored, a probe past its own deadline
+	// it did not store, the cache, or another caller's probe it waited on.
+	// activeNow returns it, so the loopback route follows exactly what the
+	// gate last said.
+	answered     bool
 	probeFlights map[string]*probeFlight
 	paths        outputPathCache
 	// joined, when set, runs after a caller has found a build in flight
@@ -289,7 +295,8 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 // does. auto is on only when a configuration was read or a daemon
 // greeted, and that answer is cached so health does not dial every time.
 // The same answer starts the loopback track route: OnActive runs each
-// time it is true.
+// time it is true. auto's answer is also recorded, and the route asks it
+// on every request (activeNow) until the gate answers again.
 func (o *localOutputs) Active(ctx context.Context) bool {
 	if o == nil || o.goos != "linux" {
 		return false
@@ -299,7 +306,7 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 	case "on":
 		on = true
 	case "auto":
-		on, _, _ = o.probe(ctx)
+		on = o.answerAuto(ctx)
 	}
 	if on && o.onActive != nil {
 		o.onActive()
@@ -307,12 +314,28 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 	return on
 }
 
-// activeNow is the gate's answer without asking MPD anything: false off
-// Linux and for off, true for on, and for auto the verdict of the most
-// recent probe the gate stored, whatever its age and whatever
-// configuration it probed (false before the first). It never probes,
+// answerAuto is auto's answer: the probe's verdict, recorded under mu as
+// the gate's answer for activeNow every time there is one. A caller that
+// stopped waiting on another caller's probe has no verdict of its own: it
+// gets the answer the gate last recorded and records nothing, so a request
+// that ends while a probe runs cannot turn the loopback route off.
+func (o *localOutputs) answerAuto(ctx context.Context) bool {
+	found, _, _, verdict := o.probeVerdict(ctx)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if verdict {
+		o.answered = found
+	}
+	return o.answered
+}
+
+// activeNow is the gate's answer as it stands, without asking MPD
+// anything: false off Linux and for off, true for on, and for auto the
+// answer Active last returned (answered), whatever its age and whatever
+// configuration it was for, false before the first. It never probes,
 // dials or greets, and never runs OnActive, so the loopback track route
-// asks it on every request.
+// asks it on every request. It waits only on mu, which probe, like every
+// holder of mu, releases before any I/O, so that read never waits on MPD.
 func (o *localOutputs) activeNow() bool {
 	if o == nil || o.goos != "linux" {
 		return false
@@ -323,12 +346,21 @@ func (o *localOutputs) activeNow() bool {
 	case "auto":
 		o.mu.Lock()
 		defer o.mu.Unlock()
-		return o.probed.found
+		return o.answered
 	}
 	return false
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
+	found, rep, opt, _ := o.probeVerdict(ctx)
+	return found, rep, opt
+}
+
+// probeVerdict is probe, and whether its answer is a verdict. Every answer
+// is, from the cache, a probe this caller ran (stored or past its own
+// deadline) or one another caller ran, except the false of a caller that
+// stopped waiting on another caller's probe.
+func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, bool) {
 	cfg := config.OutputConfig{}
 	if o.output != nil {
 		cfg = o.output()
@@ -338,7 +370,7 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
 		p := o.probed
 		o.mu.Unlock()
-		return p.found, p.rep, p.opt
+		return p.found, p.rep, p.opt, true
 	}
 	if f := o.probeFlights[key]; f != nil {
 		o.mu.Unlock()
@@ -347,9 +379,9 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 		}
 		select {
 		case <-f.done:
-			return f.found, f.rep, f.opt
+			return f.found, f.rep, f.opt, true
 		case <-ctx.Done():
-			return false, mpd.Report{}, mpd.Options{}
+			return false, mpd.Report{}, mpd.Options{}, false
 		}
 	}
 	f := &probeFlight{done: make(chan struct{})}
@@ -384,7 +416,7 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	f.found, f.rep, f.opt = found, rep, opt
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt
+	return found, rep, opt, true
 }
 
 func probeKey(cfg config.OutputConfig) string {
@@ -1055,9 +1087,9 @@ func (s *Server) LocalOutputsActive(ctx context.Context) bool {
 }
 
 // LocalOutputsActiveNow is that gate's answer as it stands, without a
-// probe: on, off, or auto's last verdict (activeNow). The loopback track
-// route asks it on every request, which therefore never dials MPD. False
-// when the route is not wired.
+// probe: on, off, or the answer auto last gave (activeNow). The loopback
+// track route asks it on every request, which therefore never dials MPD.
+// False when the route is not wired.
 func (s *Server) LocalOutputsActiveNow() bool {
 	return s.localOutputs.activeNow()
 }
