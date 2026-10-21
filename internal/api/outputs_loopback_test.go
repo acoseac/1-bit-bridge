@@ -56,7 +56,10 @@ func TestOutputsCarryTheLoopbackBaseURL(t *testing.T) {
 
 // TestLocalOutputsActiveStartsTheLoopbackRoute: the gate that answers
 // localOutputs is the gate that starts the loopback route. OnActive runs
-// whenever output.mpd resolves on, and never when it does not.
+// whenever output.mpd resolves on, and never when it does not. On by
+// default: a config that does not set output.mpd at all is on when
+// detection finds an MPD on this box. An explicit setting wins: off with
+// an MPD there stays off, on with none stays on.
 func TestLocalOutputsActiveStartsTheLoopbackRoute(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -66,6 +69,8 @@ func TestLocalOutputsActiveStartsTheLoopbackRoute(t *testing.T) {
 		want  bool
 	}{
 		{"linux on", "linux", "on", false, true},
+		{"linux unset with an MPD", "linux", "", true, true},
+		{"linux unset without one", "linux", "", false, false},
 		{"linux auto with an MPD", "linux", "auto", true, true},
 		{"linux auto without one", "linux", "auto", false, false},
 		{"linux off with an MPD", "linux", "off", true, false},
