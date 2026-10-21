@@ -267,11 +267,13 @@ func (p PlayerConfig) Problem() error {
 	default:
 		return fmt.Errorf(at+"mixer.type: %s is not a mixer type (none or hardware), and this release takes none alone: there is no software volume", token(p.Mixer.Type))
 	}
-	return p.Device.problem()
+	return p.Device.Problem()
 }
 
-// problem is Problem's part for the device block.
-func (d PlayerDevice) problem() error {
+// Problem is PlayerConfig.Problem's part for the device block: why the
+// binding cannot be resolved as written, or nil. A block that names
+// nothing is no binding (Configured is false), not a refusal.
+func (d PlayerDevice) Problem() error {
 	const at = "output.player.device."
 	if d.empty() {
 		return nil

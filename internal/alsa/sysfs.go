@@ -81,6 +81,9 @@ type Identity struct {
 	Bus string `json:"bus"`
 	// USB is the unit's identity, for a USB card.
 	USB *USBIdentity `json:"usb"`
+	// Vanished says a file the card's reading needed was not there: a card
+	// the kernel is adding or removing, whose reading is not an answer.
+	Vanished bool `json:"vanished"`
 	// Problems are what could not be read, by file, never quoting a
 	// serial.
 	Problems []string `json:"problems"`
@@ -259,6 +262,17 @@ var (
 	errNotAFile       = errors.New("not a regular file")
 )
 
+// fileError is a file that could not be read, printed without the path a
+// *fs.PathError repeats, and still errors.Is what it wraps.
+type fileError struct {
+	file string
+	err  error
+}
+
+func (e fileError) Error() string { return e.file + ": " + errText(e.err) }
+
+func (e fileError) Unwrap() error { return e.err }
+
 // sysfsTree is one reading's open root.
 type sysfsTree struct {
 	root *os.Root
@@ -380,30 +394,33 @@ func (t *sysfsTree) subsystem(dir string) string {
 func (t *sysfsTree) card(n int) Identity {
 	id := Identity{Card: n, Kind: IdentityUnreadable, Problems: []string{}}
 	name := "card" + strconv.Itoa(n)
-	fail := func(format string, args ...any) Identity {
+	fail := func(err error, format string, args ...any) Identity {
+		if errors.Is(err, fs.ErrNotExist) {
+			id.Vanished = true
+		}
 		id.Problems = append(id.Problems, fmt.Sprintf(format, args...))
 		return id
 	}
 	cardDir, err := t.resolve("class/sound/" + name)
 	if err != nil {
-		return fail("class/sound/%s: %s", name, errText(err))
+		return fail(err, "class/sound/%s: %s", name, errText(err))
 	}
 	devDir, err := t.resolve(cardDir + "/device")
 	if err != nil {
-		return fail("%s/device: %s", name, errText(err))
+		return fail(err, "%s/device: %s", name, errText(err))
 	}
 	id.Bus = t.subsystem(devDir)
 	switch id.Bus {
 	case "usb":
 	case "":
-		return fail("%s/device: no subsystem says what bus the card is on", name)
+		return fail(nil, "%s/device: no subsystem says what bus the card is on", name)
 	default:
 		id.Kind = IdentityUnsupported
 		return id
 	}
 	usb, err := t.usbIdentity(devDir)
 	if err != nil {
-		return fail("%s: %s", name, errText(err))
+		return fail(err, "%s: %s", name, err)
 	}
 	id.Kind, id.USB = IdentityUSB, usb
 	return id
@@ -427,7 +444,7 @@ func (t *sysfsTree) usbIdentity(iface string) (*USBIdentity, error) {
 	}{{"idVendor", &u.ID.Vendor}, {"idProduct", &u.ID.Product}} {
 		b, err := t.attr(unit, f.name)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %s", f.name, errText(err))
+			return nil, fileError{f.name, err}
 		}
 		v, err := usbid.ParseHex16(strings.TrimSpace(string(b)))
 		if err != nil {
@@ -439,7 +456,7 @@ func (t *sysfsTree) usbIdentity(iface string) (*USBIdentity, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		return nil, fmt.Errorf("serial: %s", errText(err))
+		return nil, fileError{"serial", err}
 	default:
 		u.Serial = usbid.New(string(b))
 	}
