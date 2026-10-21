@@ -85,6 +85,9 @@ func TestDrainCancelledDrops(t *testing.T) {
 	if k.callsOf(ioctlDrop) != 1 {
 		t.Errorf("DROP issued %d times, want once", k.callsOf(ioctlDrop))
 	}
+	if len(k.pollWaits) != 1 {
+		t.Errorf("waited %d times, want the one wait the cancel ended", len(k.pollWaits))
+	}
 	_ = d.Close()
 	k.checkClosedOnce(t)
 }

@@ -208,7 +208,9 @@ func TestWritePollErrorIsWhatTheKernelSaysItIs(t *testing.T) {
 // TestWriteCancelDuringAPollReturnsAndTheDeviceStillDrops pins that a
 // cancel while a write waits for room ends the wait at once, reports the
 // frames already taken, and leaves a device that drops and closes. The
-// fake's poll says when it is waiting, so nothing here sleeps.
+// write returns from that wait: it neither waits again nor offers the
+// kernel another frame after the cancel. The fake's poll says when it is
+// waiting, so nothing here sleeps.
 func TestWriteCancelDuringAPollReturnsAndTheDeviceStillDrops(t *testing.T) {
 	k := newFake(t)
 	k.writes = []fakeWrite{{take: 100}, {err: errnoEAGAIN}}
@@ -234,6 +236,10 @@ func TestWriteCancelDuringAPollReturnsAndTheDeviceStillDrops(t *testing.T) {
 	}
 	if r.n != 100 {
 		t.Errorf("reported %d frames, want the 100 taken before the wait", r.n)
+	}
+	if len(k.pollWaits) != 1 || k.callsOf(ioctlWriteIFrames) != 2 {
+		t.Errorf("%d waits and %d writes, want the one wait the cancel ended and the two writes before it",
+			len(k.pollWaits), k.callsOf(ioctlWriteIFrames))
 	}
 	if err := d.Drop(); err != nil {
 		t.Fatalf("Drop after a cancelled write: %v", err)
