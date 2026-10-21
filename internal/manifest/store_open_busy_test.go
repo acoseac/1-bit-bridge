@@ -211,6 +211,35 @@ func TestOpenStoreGivesUpOnABusyPingPastItsBudget(t *testing.T) {
 	requireClosed(t, pings.dbs)
 }
 
+// TestOpenStoreTriesAgainAfterABusyAnswerSlowerThanItsBudget: the budget
+// runs from the first busy answer, not from the first try. A plain busy
+// answer at the open comes only once busy_timeout's own 5 s have run out
+// (openStoreDB), so a budget counted from the first try would be spent
+// before it could try again. Here the first ping takes twice the budget
+// before it answers busy, and the open still tries again and opens.
+func TestOpenStoreTriesAgainAfterABusyAnswerSlowerThanItsBudget(t *testing.T) {
+	e := makeDriverErrors(t)
+	const budget = 200 * time.Millisecond
+	shortenBusyPauses(t, budget)
+	path := filepath.Join(t.TempDir(), "bridge.db")
+	pings := scriptPings(t, path, func(n int) error {
+		if n == 1 {
+			time.Sleep(2 * budget)
+			return e.busy
+		}
+		return nil
+	})
+
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore after a busy answer that took %s: %v", 2*budget, err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if pings.calls != 2 {
+		t.Errorf("pinged %d times, want 2", pings.calls)
+	}
+}
+
 // TestOpenStoreFailsAtOnceOnAPingErrorThatIsNotBusy: a ping that fails
 // with any other error, SQLite's or not, fails the open on its first try:
 // nothing is tried again and nothing is logged about a busy database. The
