@@ -48934,7 +48934,8 @@ long-term line. The layout is the one a
 The machine this was written on had no copy of the header, could not fetch
 one, and could not run a C compiler. The definitions were written from the
 header's known layout, and the `alsa-abi` job is their first comparison with
-the real file; it has not run, because the branch was not pushed. The facts
+the real file; it had not run when this was written, because the branch was
+not pushed (it passed on the PR: "Review and the hardware gate" below). The facts
 most at risk are `pcmVersion`, written as 2.0.18 (the protocol the 6.11
 rework of the stream synchronisation id is remembered to have set), and the
 member names the probe refers to; the job names each fact that differs.
@@ -49118,9 +49119,10 @@ which proves negotiation and lifecycle only.
 
 - The `alsa-abi` job and the Linux-only tests (`TestLinuxPollEndsAtOnceWhenCancelled`,
   `TestLinuxOpenRefusesANodeThatIsNotALSA`, `TestErrnoValuesAreLinuxs`,
-  `TestPollBitsAreLinuxs`, `TestAloopNegotiatesAndCloses`) have not run: the
-  session had no Linux. They were compiled and vetted for linux/amd64 and
-  linux/arm64.
+  `TestPollBitsAreLinuxs`, `TestAloopNegotiatesAndCloses`) had not run when
+  this was written: the session had no Linux. They were compiled and vetted
+  for linux/amd64 and linux/arm64, and ran on the PR's Linux runners ("Review
+  and the hardware gate" below).
 - Recording the header's blob id from the first green run as an enforced
   pin, and committing that run's probe outputs as testdata so a reorder of
   two same-size fields fails on every OS and not only in the job (captured
@@ -49145,7 +49147,7 @@ SonarCloud S6506).
 
 **Review (Codex, the Claude API review; Argon none), two real defects:**
 an underrun after the last write passed as a clean run (DRAIN moves an XRUN
-stream to SETUP, `Drain` asked the state only afterwards, and the harness
+stream to SETUP, `Drain` asked the state only afterward, and the harness
 printed a literal "xruns 0" before draining), and EBADFD from a removed PCM,
 which STATUS also answers, was a kernel error rather than a disconnect.
 Red first (`TestDrainAfterAnUnderrunIsAnXrun`, an EBADFD case in
