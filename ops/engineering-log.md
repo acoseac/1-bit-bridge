@@ -48897,3 +48897,288 @@ are unchanged. `codeql.yml`'s comment now names the group instead of telling
 a maintainer to close singles by hand; the three SHAs must still be equal.
 The rule is under **Build, CI, and test discipline** in
 `.claude/rules/build-ci-tests.md`.
+
+## 2026-10-21 — B470 PR 2a: the pure-Go ALSA PCM backend's first layer, its pinned UAPI and ABI check, and the hardware harness
+
+### What shipped
+
+- `internal/alsapcm`: the bridge player's ALSA backend without alsa-lib, cgo
+  or a C toolchain at run time. `Open` takes an `Endpoint` (card and device
+  numbers) and opens `/dev/snd/pcmC<card>D<device>p` non-blocking; checks the
+  kernel's PCM protocol and INFO's card, device and direction; refines the
+  exact request (RW_INTERLEAVED, the format, STD, two channels, the rate),
+  aims the buffer near 200 ms, commits with HW_PARAMS and reads the commit
+  back; sets the software parameters; prepares. `Write` is `WRITEI_FRAMES`
+  with poll, `Drop`, `Drain` with a deadline, `Close` once. The kernel is a
+  seam of four calls (open, ioctl, poll, close): `linuxSys` on
+  `linux && (amd64 || arm64)`, a fake kernel in the tests on every OS, and
+  `Open` refuses with `ReasonUnsupported` anywhere else.
+- `scripts/alsa-abi` (`probe.c`, `check.sh`, a README) and the `alsa-abi`
+  job in `gate.yml`, in the gate fan-in.
+- `bridge output pcm-test`, the hardware harness, not listed in `bridge
+  output`'s usage.
+- Rules text for `.claude/rules/output.md`, which this session could not
+  edit, went to the owner beside the branch: a new section, the
+  `internal/alsapcm/**` and `scripts/alsa-abi/**` globs, and the title line.
+
+### The UAPI pin, and what this session could not see
+
+`uapi.go` follows `include/uapi/sound/asound.h` at the tag `v6.12`, a
+long-term line. The layout is the one a
+64-bit little-endian process sees, the same on linux/amd64 and linux/arm64:
+`snd_pcm_hw_params` 608 bytes, `snd_pcm_sw_params` 136, `snd_pcm_info` 288,
+`snd_pcm_status` 152, `snd_xferi` 24, which the request numbers encode
+(HW_PARAMS `0xc2604111`, SW_PARAMS `0xc0884113`, INFO `0x81204101`, STATUS
+`0x80984120`, WRITEI_FRAMES `0x40184150`).
+
+The machine this was written on had no copy of the header, could not fetch
+one, and could not run a C compiler. The definitions were written from the
+header's known layout, and the `alsa-abi` job is their first comparison with
+the real file; it had not run when this was written, because the branch was
+not pushed (it passed on the PR: "Review and the hardware gate" below). The facts
+most at risk are `pcmVersion`, written as 2.0.18 (the protocol the 6.11
+rework of the stream synchronisation id is remembered to have set), and the
+member names the probe refers to; the job names each fact that differs.
+Where the header changed in 6.11 (`snd_pcm_info`'s sync id became `pad1`,
+and `snd_pcm_hw_params`' reserved bytes became `sync[16]` and
+`reserved[48]`), the Go structures keep one opaque field and the probe names
+neither layout's members, so the comparison holds for both.
+
+**Why a probe, run natively.** Three ways were open: `static_assert`s
+compiled for each target, Go generated from the header with a freshness
+check, or a probe run on each architecture. A run probe is the compiler's
+own answer, with no second hand-written copy of the offsets, and it is the
+only one that reads where the compiler put `snd_interval`'s one-bit fields.
+Run natively on both architectures (GitHub's arm64 runner is free for public
+repositories), the comparison is between the real Go compiler's layout and
+the real C compiler's on each. golang.org/x/sys pins its Linux definitions
+the same way, by tag: `unix/linux/Dockerfile` clones the kernel at `v7.2` in
+v0.49.0, beside a cross compiler for each architecture and qemu.
+
+**Why the header is fetched, not vendored.** No verbatim copy could be made
+here, and fetching keeps a GPL-2.0+ WITH Linux-syscall-note file out of the
+repository and out of every archive. `check.sh` prints the file's git blob id
+and sha256; the tag is what pins it until a first green run records the id.
+
+### Decisions
+
+- **The protocol floor is 2.0.15.** ALSA promises compatibility within a
+  major.minor (`SNDRV_PROTOCOL_INCOMPATIBLE`), so 2.0 is required. On a
+  64-bit process every structure here has had the size its request encodes
+  since long before 2.0.15, so the micro floor is a qualification bound:
+  2.0.15 came with Linux 5.6 (2020), every kernel the owner's hardware runs
+  is newer, and the oldest maintained line, 5.10, carries it. That history
+  is as recalled here: the `alsa-abi` job checks the pinned header's own
+  version, not which kernel brought which. Rejected: the pinned header's
+  own version, which would refuse 5.6 to 6.11, Debian 12's 6.1 among them;
+  and 2.0.0, which states no bound at all.
+- **The device logic is portable; the kernel seam is Linux's.** The brief
+  asked for a Linux-only package with a stub elsewhere. `Open` is exactly
+  that: off linux/amd64 and linux/arm64 it refuses with
+  `ReasonUnsupported`. Everything above the four calls builds everywhere,
+  so the fake-kernel tests run on all three CI OSes, as `internal/alsa`'s
+  reader does with its captured trees; the errno and poll values are
+  written out for that, and `TestErrnoValuesAreLinuxs` and
+  `TestPollBitsAreLinuxs` hold them to x/sys on Linux.
+- **POLLERR alone is not a disconnect.** The brief's list put POLLERR beside
+  ENODEV. The kernel's `snd_pcm_poll` raises it in every state but running,
+  prepared, paused and draining, so an xrun and a suspend raise it too; read
+  as a disconnect, every xrun after a wait would be reported as an unplug.
+  The write asks STATUS: XRUN is an xrun, SUSPENDED a suspend, DISCONNECTED
+  (or ENODEV from STATUS) a disconnect, a playing state is retried, and a
+  POLLERR the state explains away twice with no frame between is an error.
+  POLLHUP and POLLNVAL (the kernel's disconnect poll returns
+  POLLERR|POLLNVAL once a card's files are shut) are a disconnect at once.
+- **Busy is EBUSY from the non-blocking open**, which never waits.
+  `pcm-test` names the holder from `/proc/asound` through `internal/alsa`,
+  which stays a reader.
+- **Exact means a closed, single, committed interval.** The kernel's runtime
+  takes an interval's minimum (`params_rate` and its siblings), so a
+  committed value is read only when the interval is closed and its ends are
+  equal, and `rate_num` must be the rate times `rate_den`.
+- **The geometry is aimed, never required.** Buffer first (exactly
+  `framesIn(rate, 200 ms)` clamped to the refined range, then the largest at
+  most that), then a quarter of it as the period (exactly, then the smallest
+  at least that); a range the hardware refuses too is left to HW_PARAMS'
+  own choice.
+- **Software parameters**: the stream starts when the buffer is full, stops
+  (an xrun) when it is empty, never fills silence, and wakes a writer a
+  period at a time; `proto` is the pinned header's version, timestamps off.
+- **A wait for room is bounded** by `stallTimeout`, ten buffers and at least
+  a second, after which the stream is `stalled`, never waited on forever.
+- **A cancel wakes the real poll through an eventfd** made for the call and
+  written by `context.AfterFunc`; a callback that has started is waited for
+  before the eventfd closes. Polling in slices to notice a cancel was
+  rejected: it trades latency for wakeups and still is not "at once".
+- **Drain on the non-blocking node** is DRAIN (EAGAIN) and then STATUS at
+  least once a period, waiting in between on a poll that asks for no event,
+  so only an error condition wakes it early: the drain's end raises POLLERR
+  (the stream is SETUP again), and a playback stream still draining raises
+  none, so the wait cannot spin.
+- **Go memory and the kernel.** `ioctlOn` passes a pointer and keeps its
+  target alive across the call; `xferi.buf` is an `unsafe.Pointer`, not a
+  uintptr, so the samples stay alive and move with a stack; nothing is
+  mmapped, so no Go memory is kernel-visible after a call. PAUSE and
+  STATUS_EXT are not used.
+- **The harness checks the kernel's own account** (`/proc/asound/cardN/
+  pcmDp/subS/hw_params`) against the read-back before it plays, and refuses
+  to play on a difference: that would mean the definitions are wrong. Its
+  tone is a 1 kHz sine at `--level` dBFS, -30 at most, with the amplitude
+  rounded down, generated over `rate/gcd(rate, 1000)` frames so whole
+  repeats join without a seam, and packed by `format.Pack`. That table is
+  as long as the rate when the rate shares no factor with 1000, so
+  `--rate` is checked against the backend's own bounds
+  (`alsapcm.MinRateHz`, `MaxRateHz`) before the tone is built: found on
+  review, after the harness's first commit, where a rate such as
+  2147483647 would have asked for 16 GiB of samples before `Open` refused
+  it. The fix came red first (7999 and 1536001 reached the open), and that
+  run is its control.
+
+### Red first
+
+Against the API with stub bodies, 29 of the package's tests failed, every
+fake-kernel test of the open, the parameters, the writes and the stop; the
+five definition and helper tests passed and the probe comparison skipped. The
+harness's tests were written with its code; their evidence is the controls
+H1–H7 below.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against the package (or the
+harness) suite, then restored from HEAD with the tree checked clean. All
+went red exactly where predicted, except where noted.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | protocol floor not checked | `TestOpenRefusesAProtocolBelowTheFloor`, `TestCloseClosesOnEveryPath/old_protocol` |
+| C2 | EBUSY not typed busy | `TestOpenNamesABusyEndpoint`, `TestOpenTypesWhatTheOpenRefused` |
+| C3 | INFO's card not compared | `TestOpenChecksTheNodeIsTheEndpointAskedFor`, `TestCloseClosesOnEveryPath/another_endpoint` |
+| C4 | read-back rate checks removed | `TestOpenRefusesAReadBackThatIsNotWhatWasAsked` (rate, rate fraction, no rate fraction), `TestCloseClosesOnEveryPath/read-back_mismatch` |
+| C5 | stop threshold never reached | `TestOpenCommitsExactlyWhatWasAsked` |
+| C6 | buffer range fallback removed | `TestOpenTakesTheGeometryRefineNarrowsTo/sizes_in_steps_of_1000_frames` |
+| C7 | EINTR not retried | `TestWriteRetriesAnInterruptedCall` |
+| C8 | a partial write restarts at the first frame | `TestWriteContinuesAPartialWriteWhereItStopped`, `TestWriteRetriesAnInterruptedCall` |
+| C9 | POLLERR read as a disconnect | `TestWritePollErrorIsWhatTheKernelSaysItIs` |
+| C10 | a cancelled wait retried on a live context | first run: nothing; after e4de410b, `TestWriteCancelDuringAPollReturnsAndTheDeviceStillDrops` |
+| C11 | drain deadline half again as long | `TestDrainDropsAtItsDeadline` |
+| C12 | Close not idempotent | `TestCloseIsOnceAndThenNothingReachesTheKernel` |
+| C13 | a refused open keeps the node | every open-refusal case of `TestOpenRefusesAProtocolBelowTheFloor`, `TestOpenChecksTheNodeIsTheEndpointAskedFor`, `TestOpenRefusesWhatTheHardwareDoesNotTake`, `TestOpenRefusesAReadBackThatIsNotWhatWasAsked` and `TestCloseClosesOnEveryPath`; no case after a successful open |
+| C14 | `hwParams.tail` four bytes shorter | first run: nothing, Go padded the struct back to 608 bytes, so the layout had not changed; eight bytes shorter: `TestIoctlNumbersEncodeTheirStructures` |
+| C15 | probe drops `rate_den` | `TestProbeAndGoNameTheSameFacts` |
+| C16 | comparison ignores a differing value | `TestCompareFactsReportsEachKindOfDifference` |
+| H1 | Ctrl-C does not drop | `TestOutputPCMTestCtrlCDropsAndCloses` |
+| H2 | the -30 dBFS cap lifted | first run: `TestOutputPCMTestTakesAnEndpointOnlyByNumber` through a panic that hid the other results; after 075f5520, that test alone |
+| H3 | the tone at -15 dBFS | `TestOutputPCMTestPlaysTheToneAndReports`, `TestOutputPCMTestToneIsQuietAndSeamless` |
+| H4 | passive mode prints other cards' files | `TestOutputPCMTestPassiveOpensNothing` |
+| H5 | busy holder not named | `TestOutputPCMTestNamesTheHolderOfABusyDevice` |
+| H6 | cross-check ignores the rate | `TestOutputPCMTestStopsWhenTheKernelDisagrees` |
+| H7 | pcm-test listed in `bridge output`'s usage | `TestOutputPCMTestIsHidden` (alone among the 35 output tests) |
+
+C10 found a weak test: the write loop checks its context before each call,
+so a cancelled wait retried on a live context still returned "cancelled",
+one wait later; in the fake that wait returned at once, on a DAC it lasts
+until the buffer has room. The test now asserts one wait and no write after
+the cancel, and `TestDrainCancelledDrops` one wait. H2's first run reddened
+the right test by a divide-by-zero in a zero fake device; the usage cases'
+opener now refuses.
+
+`TestUAPIMatchesTheKernelHeader` was also run end to end through its flag
+with a probe file written from the Go side (195 facts): it passed, and a copy
+with one offset moved, one fact dropped and one added failed naming all
+three.
+
+### The hardware gate
+
+On the box, as a user in the `audio` group, with `bridge` from `make
+build-all` (`dist/bridge-linux-arm64` on the Pi 5). N is the card number
+`bridge output dac` lists.
+
+1. Passive capture: `bridge output pcm-test --passive --card N`. Pass: the
+   card's `/proc/asound` files and its reading, exit 0, and the substream
+   left as it was.
+2. Open and write, per DAC and format, for example
+   `bridge output pcm-test --card N --device 0 --rate 44100 --bits 16`,
+   `--rate 96000 --bits 24`, `--rate 192000 --bits 24 --format S32_LE` (the
+   Hugo 2 is S32 only), `--rate 384000 --bits 32`. Pass: "committed exactly"
+   names the rate and format asked for, the kernel's hw_params line says
+   "agrees", the tone is quiet and clean on headphones, the DAC shows the
+   rate, "drained; xruns 0", "closed", exit 0 (the xrun count comes from the drain:
+   an underrun after the last write is an xrun and exit 1, #1301 review).
+3. Cancel mid-write: `--seconds 60`, Ctrl-C after a few seconds. Pass: the
+   sound stops at once, "stopped by signal after N frames: dropped",
+   "closed", exit 0, and a second run opens at once, not busy.
+4. Busy: play something in the player (Volumio, moOde, MPD) and run (2).
+   Pass: exit 1, "busy", MPD's thread and process named, and MPD plays on.
+5. A rate the DAC lacks, for example `--rate 22050`: exit 1,
+   `parameters_not_supported`, naming what it offers.
+
+Optionally, `sudo modprobe snd-aloop` and (2) against the Loopback card,
+which proves negotiation and lifecycle only.
+
+### Not in this change
+
+- The `alsa-abi` job and the Linux-only tests (`TestLinuxPollEndsAtOnceWhenCancelled`,
+  `TestLinuxOpenRefusesANodeThatIsNotALSA`, `TestErrnoValuesAreLinuxs`,
+  `TestPollBitsAreLinuxs`, `TestAloopNegotiatesAndCloses`) had not run when
+  this was written: the session had no Linux. They were compiled and vetted
+  for linux/amd64 and linux/arm64, and ran on the PR's Linux runners ("Review
+  and the hardware gate" below).
+- Recording the header's blob id from the first green run as an enforced
+  pin, and committing that run's probe outputs as testdata so a reorder of
+  two same-size fields fails on every OS and not only in the job (captured
+  bytes, not a second hand-written copy).
+- A substream chosen by number (`PREFER_SUBDEVICE` on the control node):
+  the kernel picks a free one, and INFO says which.
+- The streaming sink and its recovery (2b), DSD and DoP (2c, 2d), stable
+  bindings and hotplug (4a), and everything after.
+
+### Review and the hardware gate (2026-10-21)
+
+**The first `alsa-abi` run never compared anything:** the source-tree
+`asound.h` writes `} __packed;`, which `make headers_install` rewrites and
+a plain compile reads as a declaration, so the probe failed to build on both
+runners. `check.sh` now passes `-D__packed=__attribute__((packed))`, as it
+already strips `__user` and `__force`. The next run passed on amd64 and
+arm64: every one of the Go definitions, written without the header at hand,
+matches Linux v6.12. Codex compared them field by field with the real header
+too, and so did the Claude API review. `SNDRV_PCM_FORMAT_LAST` joined the
+facts. `curl` in `check.sh` takes HTTPS only (`--proto '=https'`;
+SonarCloud S6506).
+
+**Review (Codex, the Claude API review; Argon none), two real defects:**
+an underrun after the last write passed as a clean run (DRAIN moves an XRUN
+stream to SETUP, `Drain` asked the state only afterward, and the harness
+printed a literal "xruns 0" before draining), and EBADFD from a removed PCM,
+which STATUS also answers, was a kernel error rather than a disconnect.
+Red first (`TestDrainAfterAnUnderrunIsAnXrun`, an EBADFD case in
+`TestDrainTypesWhatEndsIt`, `TestOutputPCMTestAnUnderrunBeforeTheDrainFails`),
+then fixed: `Drain` reads the state first, and the harness prints
+"drained; xruns 0" only after a clean drain. The second look found the
+window that check leaves (an underrun between it and DRAIN, which DRAIN
+erases too): a stream seen RUNNING that reaches SETUP without being seen
+DRAINING is now an xrun (`TestDrainSeesAnUnderrunBetweenItsCheckAndDRAIN`,
+red first). Rechecked on the GO bar: 48/24 and 384/32 still drain clean.
+
+**The hardware gate passed** on the Volumio Pi (aarch64 kernel 6.12, the
+arm64 static build), the iFi GO bar at card 5, with the owner listening on
+headphones:
+- passive capture: the GO bar's three PCM formats (S32_LE, S24_3LE, S16_LE)
+  at 44.1 to 384 kHz and its DSD altset, nothing opened;
+- 44.1 kHz/16, 96 kHz/24 and 384 kHz/32: committed exactly, the kernel's
+  `hw_params` agreeing, a buffer of about 210 ms, drained, no xrun, closed,
+  exit 0, twice; the owner heard every tone clean and saw the GO bar's light
+  follow each rate;
+- a cancel after 4 s: stopped at 4.10 s, dropped, closed, the device free
+  at once, and the sound stopped at once;
+- 22,050 Hz: `parameters_not_supported`, listing what the GO bar offers
+  (the first run listed format numbers 64 to 255, bits of the mask past
+  the last format the kernel defines; `formatsOf` now stops at
+  `SNDRV_PCM_FORMAT_LAST`, red first in `TestFormatsOfNamesOnlyRealFormats`);
+- busy, with Volumio playing to the GO bar: exit 1, naming MPD's
+  `output:alsa` thread and the `mpd` process, MPD playing on untouched.
+
+On the way the Pi showed the failure the design's persisted identity exists
+to prevent: Volumio stores its output as a card number, the cards were
+renumbered (the Hugo 2 became card 2, the GO bar card 5), and Volumio played
+to the Hugo 2 while its settings named the iFi until the output was chosen
+again.

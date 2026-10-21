@@ -30,6 +30,10 @@ func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return outputDACCmd(ctx, args[1:], stdout, stderr)
 	case "player":
 		return outputPlayerCmd(ctx, args[1:], stdout, stderr)
+	case "pcm-test":
+		// Not in outputUsage: the B470 hardware harness, run by hand on a
+		// box with a DAC (output_pcmtest.go). It has its own -h.
+		return outputPCMTestCmd(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		outputUsage(stdout)
 		return 0
