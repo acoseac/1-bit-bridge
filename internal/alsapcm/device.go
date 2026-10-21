@@ -745,10 +745,11 @@ func (d *Device) Prepare() error {
 	return nil
 }
 
-// wait waits on a stream nothing is writing, a paused or a filling one,
-// for an error condition the kernel raises (a suspend, a device gone), for
-// at most timeout, or until ctx ends. It polls for no event: a paused or
-// prepared stream raises none, so the wait cannot spin.
+// wait waits on a stream nothing is writing, a paused, a filling or a
+// running one, for an error condition the kernel raises (an underrun, a
+// suspend, a device gone), for at most timeout, or until ctx ends. It
+// polls for no event: room in the buffer, which the kernel reports with
+// POLLOUT, does not end it, so the wait cannot spin.
 func (d *Device) wait(ctx context.Context, timeout time.Duration) (int16, error) {
 	if d.closed {
 		return 0, d.closedError("wait")

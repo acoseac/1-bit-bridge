@@ -234,8 +234,9 @@ type Gap struct {
 	// Lookahead is the content frames the sink held, not yet written, when
 	// it stopped. None was lost: they play after Recover.
 	Lookahead int64
-	// Op is what found it: "write", "status", "pause", "resume" or
-	// "drain".
+	// Op is what found it: "write", "wait" (the writer's wait on the
+	// stream while it has nothing to write), "status", "pause", "resume"
+	// or "drain".
 	Op string
 	// Noticed is when the sink saw it, and Recovered when Recover
 	// prepared the stream again (zero until then).
@@ -287,7 +288,7 @@ type Sink struct {
 	runPlayed   int64 // the frames of the run the kernel has played, as last established
 	zeros       []byte
 	deadline    time.Time // when the pause releases the device
-	unexplained int       // POLLERRs in a row a paused stream's state explained away
+	unexplained int       // POLLERRs in a row that woke a wait on the stream and its state explained away
 	drainCmd    *sinkCmd  // the Drain waiting for its end
 	drainStop   func() bool
 
@@ -313,6 +314,7 @@ type Sink struct {
 	cmds     []*sinkCmd
 	wake     context.Context
 	wakeStop context.CancelFunc
+	watching bool // the writer waits on the stream with nothing to write: frames submitted cancel its wait
 	changed  chan struct{}
 	// finishing is a Drain under way: the producer is done. finalDrain is
 	// its last part, the kernel playing out the buffer, which a command
@@ -522,6 +524,9 @@ func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 		s.ring.put(at, frames[done*fb:(done+n)*fb])
 		s.mu.Lock()
 		s.ring.sub += n
+		if s.watching && s.wakeStop != nil {
+			s.wakeStop()
+		}
 		s.mu.Unlock()
 		poke(s.kick)
 		done += n

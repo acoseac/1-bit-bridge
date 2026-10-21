@@ -13,14 +13,16 @@ import (
 // still held, refuses frames, and never prepares the stream by itself.
 // Recover prepares it and plays on from the next frame: the DAC hears every
 // frame once, the gap in time and not in the music, and the gap stays
-// counted.
+// counted. The late frames arrive before the kernel's wake-up reaches the
+// writer's wait, so a write finds the xrun (the wait finding it is
+// TestSinkWatchesTheStreamWhileTheProducerIsLate).
 func TestSinkReportsAnXrunAndRecoversOnlyWhenAsked(t *testing.T) {
 	k := newModel(t)
 	s := openTestSink(t, k, sinkConfig())
 	in := content(0, 0, 20000)
 	submit(t, s, in[:9600*6])
 	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer and wait for frames")
-	k.advanceNow(300 * time.Millisecond)
+	k.advanceUnwatched(300 * time.Millisecond)
 	submit(t, s, in[9600*6:])
 	p := waitState(t, s, SinkXrun)
 	wantReason(t, p.Err, ReasonXrun)
@@ -61,6 +63,49 @@ func TestSinkReportsAnXrunAndRecoversOnlyWhenAsked(t *testing.T) {
 	k.checkClosedEach(t)
 }
 
+// TestSinkWatchesTheStreamWhileTheProducerIsLate pins the writer's wait
+// when it has nothing to write: the producer has submitted one buffer,
+// which started the stream, and is late with the next frames. The writer
+// waits on the stream, not only for frames: the position moves while the
+// DAC plays what the buffer holds, and an underrun, a device gone or a
+// suspend is found by the wait itself, with no write to find it (#1303's
+// review: a starved producer stopped the device's monitoring).
+func TestSinkWatchesTheStreamWhileTheProducerIsLate(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		stop  func(*fakeKernel)
+		state SinkState
+		want  Reason
+	}{
+		{"an underrun", func(k *fakeKernel) { k.advanceNow(300 * time.Millisecond) }, SinkXrun, ReasonXrun},
+		{"a device gone", (*fakeKernel).unplug, SinkEnded, ReasonDisconnected},
+		{"a suspend", (*fakeKernel).suspend, SinkEnded, ReasonSuspended},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := newModel(t)
+			s := openTestSink(t, k, sinkConfig())
+			submit(t, s, content(0, 0, 9600))
+			await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer and wait on the stream")
+			k.play(t, 100*time.Millisecond)
+			var consumed uint64
+			k.inspect(func(k *fakeKernel) { consumed = k.consumed })
+			if p := s.Position(); p.State != SinkPlaying || consumed != 4800 || p.Played != 4800 || !p.Measured.Equal(k.now()) {
+				t.Errorf("100 ms into a late producer: %+v with the DAC at frame %d; want 4800 played, measured now", p, consumed)
+			}
+			c.stop(k)
+			p := waitState(t, s, c.state)
+			wantReason(t, p.Err, c.want)
+			if c.state != SinkXrun {
+				k.checkClosedEach(t)
+				return
+			}
+			if gaps := s.Stats().Gaps; p.Played != 9600 || p.Gaps != 1 || len(gaps) != 1 || gaps[0].Op != "wait" || gaps[0].At != 9600 || gaps[0].Lookahead != 0 {
+				t.Errorf("at the xrun: %+v, gaps %+v; want all 9600 played, one gap at frame 9600 found by the wait, nothing held", p, gaps)
+			}
+		})
+	}
+}
+
 // TestSinkCountsEveryGapAndKeepsTheLastFew pins the bound on the
 // diagnostics: every xrun is counted, and the details of the last eight
 // are kept, oldest first.
@@ -70,8 +115,9 @@ func TestSinkCountsEveryGapAndKeepsTheLastFew(t *testing.T) {
 	total := 0
 	for i := range 10 {
 		// Each round gives the kernel one buffer, lets it run dry, and
-		// offers one more frame, which finds the xrun and is the first the
-		// next round writes.
+		// offers one more frame before the wake-up reaches the writer's
+		// wait: the frame finds the xrun and is the first the next round
+		// writes.
 		n := 9599
 		if i == 0 {
 			n = 9600
@@ -79,7 +125,7 @@ func TestSinkCountsEveryGapAndKeepsTheLastFew(t *testing.T) {
 		submit(t, s, content(0, total, n))
 		total += n
 		await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
-		k.advanceNow(300 * time.Millisecond)
+		k.advanceUnwatched(300 * time.Millisecond)
 		submit(t, s, content(0, total, 1))
 		total++
 		waitState(t, s, SinkXrun)
@@ -105,15 +151,17 @@ func TestSinkCountsEveryGapAndKeepsTheLastFew(t *testing.T) {
 }
 
 // TestSinkDrainReportsAnUnderrunBeforeIt pins an underrun after the last
-// write: the drain finds the stream stopped, reports the xrun and counts
-// the gap rather than calling it a clean end, and Close still closes once.
+// write that the Drain reaches before the kernel's wake-up reaches the
+// writer's wait: the drain finds the stream stopped, reports the xrun and
+// counts the gap rather than calling it a clean end, and Close still
+// closes once.
 func TestSinkDrainReportsAnUnderrunBeforeIt(t *testing.T) {
 	k := newModel(t)
 	s := openTestSink(t, k, sinkConfig())
 	in := content(0, 0, 9600)
 	submit(t, s, in)
 	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
-	k.advanceNow(300 * time.Millisecond)
+	k.advanceUnwatched(300 * time.Millisecond)
 	wantReason(t, s.Drain(context.Background()), ReasonXrun)
 	p := s.Position()
 	if p.State != SinkXrun || p.Gaps != 1 || p.Played != 9600 {

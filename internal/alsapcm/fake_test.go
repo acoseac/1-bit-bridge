@@ -106,18 +106,18 @@ type fakeKernel struct {
 
 	// The playback model.
 	model     bool
-	unlimited bool          // the clock moves freely: no grant is needed
-	budget    time.Duration // simulated time granted and not yet used
-	more      chan struct{} // closed and replaced by each grant and each wake-up
-	starving  int           // polls waiting: for a grant, or, without model, for their context
-	onNow     func()        // called once, outside the lock, by the next now
-	appl      uint64        // frames written since PREPARE (appl_ptr)
-	consumed  uint64        // frames consumed since PREPARE (hw_ptr)
-	frac      uint64        // what a part frame of play has used: nanoseconds times the rate
-	extra     int64         // the driver's own delay past the buffer (runtime->delay)
-	runBytes  []byte        // the bytes written since PREPARE
-	heard     []byte        // the bytes the DAC consumed, across every open
-	total     uint64        // frames written across every open
+	unlimited bool              // the clock moves freely: no grant is needed
+	budget    time.Duration     // simulated time granted and not yet used
+	more      chan struct{}     // closed and replaced by each grant and each wake-up
+	waiters   []context.Context // the contexts of the polls waiting: for a grant, or, without model, for their context
+	onNow     func()            // called once, outside the lock, by the next now
+	appl      uint64            // frames written since PREPARE (appl_ptr)
+	consumed  uint64            // frames consumed since PREPARE (hw_ptr)
+	frac      uint64            // what a part frame of play has used: nanoseconds times the rate
+	extra     int64             // the driver's own delay past the buffer (runtime->delay)
+	runBytes  []byte            // the bytes written since PREPARE
+	heard     []byte            // the bytes the DAC consumed, across every open
+	total     uint64            // frames written across every open
 	at        []fakeAt
 	gone      bool // the device went away: ENODEV to every call, POLLERR to a poll
 	conds     []fakeCond
@@ -255,12 +255,12 @@ func (k *fakeKernel) poll(ctx context.Context, fd int, events int16, timeout tim
 	if len(k.polls) == 0 && events&pollOut == 0 {
 		// A wait for an error condition alone: nothing here raises one, so
 		// it lasts until its context ends.
-		k.starving++
+		k.enterWait(ctx)
 		k.check()
 		k.mu.Unlock()
 		<-ctx.Done()
 		k.mu.Lock()
-		k.starving--
+		k.leaveWait(ctx)
 		k.mu.Unlock()
 		return 0, ctx.Err()
 	}
@@ -317,18 +317,18 @@ func (k *fakeKernel) modelPoll(ctx context.Context, events int16, timeout time.D
 				// Wait for a grant, or for the node to have something to
 				// report (a device gone): either way, look again.
 				more := k.more
-				k.starving++
+				k.enterWait(ctx)
 				k.check()
 				k.mu.Unlock()
 				select {
 				case <-more:
 				case <-ctx.Done():
 					k.mu.Lock()
-					k.starving--
+					k.leaveWait(ctx)
 					return 0, ctx.Err()
 				}
 				k.mu.Lock()
-				k.starving--
+				k.leaveWait(ctx)
 				continue
 			}
 			step = min(step, k.budget)
@@ -471,6 +471,18 @@ func (k *fakeKernel) grant(d time.Duration) {
 	k.check()
 }
 
+// revoke takes back the simulated time granted and not yet used: a grant
+// sized for one wait, such as one that ends past a release's deadline, that
+// a later wait must not play on. A writer with nothing to write plays the
+// time it is given, as a DAC plays on, and a leftover grant would run a
+// resumed stream dry before the test's Drain reached it.
+func (k *fakeKernel) revoke() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.budget = 0
+	k.check()
+}
+
 // free lets the clock move as far as every poll needs from now on.
 func (k *fakeKernel) free() {
 	k.mu.Lock()
@@ -481,9 +493,33 @@ func (k *fakeKernel) free() {
 	k.check()
 }
 
+// enterWait records, with k.mu held, a poll that starts to wait with ctx;
+// leaveWait records that it has stopped.
+func (k *fakeKernel) enterWait(ctx context.Context) { k.waiters = append(k.waiters, ctx) }
+
+func (k *fakeKernel) leaveWait(ctx context.Context) {
+	if i := slices.Index(k.waiters, ctx); i >= 0 {
+		k.waiters = slices.Delete(k.waiters, i, i+1)
+	}
+}
+
 // starved reports whether a poll is waiting for time with none granted:
-// the writer has used every grant and waits on the DAC.
-func starved(k *fakeKernel) bool { return k.budget == 0 && k.starving > 0 }
+// the writer has used every grant and waits on the DAC. A poll whose
+// context has ended is on its way out, not waiting: the producer's frames
+// end the writer's wait without waiting for it to leave, so a test that
+// submits and then looks for the writer's next wait must not find the one
+// the frames just ended.
+func starved(k *fakeKernel) bool {
+	if k.budget != 0 {
+		return false
+	}
+	for _, ctx := range k.waiters {
+		if ctx.Err() == nil {
+			return true
+		}
+	}
+	return false
+}
 
 // play lets the DAC play d of simulated time and returns once the writer
 // has used all of it and waits on the DAC for more.
@@ -507,7 +543,8 @@ func (k *fakeKernel) advanceNow(d time.Duration) {
 }
 
 // advanceUnwatched is advanceNow with no poll woken: the moment before the
-// kernel's wake-up reaches a waiting writer, which a command may beat.
+// kernel's wake-up reaches a waiting writer, which a command or the
+// producer's frames may beat.
 func (k *fakeKernel) advanceUnwatched(d time.Duration) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -550,14 +587,6 @@ func (k *fakeKernel) inspect(f func(k *fakeKernel)) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	f(k)
-}
-
-// lastCall is the request of the last ioctl, with k.mu held.
-func (k *fakeKernel) lastCall() uint32 {
-	if len(k.calls) == 0 {
-		return 0
-	}
-	return k.calls[len(k.calls)-1]
 }
 
 // watchdog is how long await waits before it calls the wait a hang.

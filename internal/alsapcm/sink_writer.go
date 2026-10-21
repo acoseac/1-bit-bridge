@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // How a pause pauses, as SinkStats.PausedBy names it.
@@ -100,8 +101,8 @@ func (s *Sink) waitContext() context.Context {
 }
 
 // feed writes the next frames of the lookahead, at most a period, and
-// measures. With nothing to write it waits for frames or a command, or,
-// draining, has the kernel play out the buffer.
+// measures. With nothing to write it waits on the stream for frames or a
+// command (watch), or, draining, has the kernel play out the buffer.
 func (s *Sink) feed() {
 	ctx := s.waitContext()
 	s.mu.Lock()
@@ -111,7 +112,7 @@ func (s *Sink) feed() {
 		if s.state == SinkDraining {
 			s.finishDrain()
 		} else {
-			s.idle()
+			s.watch()
 		}
 		return
 	}
@@ -128,7 +129,36 @@ func (s *Sink) feed() {
 	}
 }
 
-// idle waits for frames or a command, or the end of the sink's life.
+// watch waits, with the stream open and nothing to write, for frames, a
+// command or the end of the sink's life. A stream that runs plays on
+// meanwhile, and the kernel can stop it with no write to find out: an
+// underrun, a suspend, a device gone each raise an error condition, which
+// the wait watches for (Device.wait, settle). It measures each period, so
+// the position moves while the producer is late. A Write that submits
+// frames while the writer watches ends the wait.
+func (s *Sink) watch() {
+	ctx := s.waitContext()
+	s.mu.Lock()
+	if s.ring.pending() > 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.watching = true
+	s.mu.Unlock()
+	rev, err := s.dev.wait(ctx, max(s.params.PeriodTime(), time.Millisecond))
+	s.mu.Lock()
+	s.watching = false
+	s.mu.Unlock()
+	s.settle(ctx, rev, err, "wait")
+	if err == nil && rev == 0 {
+		if _, err := s.measure(); err != nil {
+			s.fault(err, "status")
+		}
+	}
+}
+
+// idle waits for a command, or the end of the sink's life, where there is
+// no stream to watch: stopped at an xrun, or released.
 func (s *Sink) idle() {
 	select {
 	case <-s.kick:
@@ -152,6 +182,7 @@ func (s *Sink) wrote(n int64, silence bool) bool {
 		s.end(err, err)
 		return false
 	}
+	s.unexplained = 0
 	c := s.dev.Counters()
 	s.mu.Lock()
 	s.live = c
@@ -409,27 +440,37 @@ func (s *Sink) hold() {
 		return
 	}
 	rev, err := s.dev.wait(ctx, left)
+	s.settle(ctx, rev, err, "pause")
+}
+
+// settle settles how a wait on the stream ended (watch, hold), op naming
+// the wait: a cancel ends the sink when its life is over, and is otherwise
+// a command or frames for the writer; a timeout is nothing; an error
+// condition is a device gone, or a state explain types. One the state
+// explains away twice in a row is a kernel that keeps waking the wait for
+// nothing, and ends the sink.
+func (s *Sink) settle(ctx context.Context, rev int16, err error, op string) {
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
 			kerr := s.dev.kernelError("poll", err)
 			s.end(kerr, kerr)
 		} else if s.life.Err() != nil {
-			cerr := &Error{Reason: ReasonCancelled, Op: "pause", Endpoint: s.cfg.Endpoint, Err: s.life.Err()}
+			cerr := &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.cfg.Endpoint, Err: s.life.Err()}
 			s.end(cerr, cerr)
 		}
 	case rev == 0:
 		s.unexplained = 0
 	case rev&(pollHup|pollNval) != 0:
-		derr := &Error{Reason: ReasonDisconnected, Op: "pause", Endpoint: s.cfg.Endpoint, Detail: "the device went away", Err: pollEvents(rev)}
+		derr := &Error{Reason: ReasonDisconnected, Op: op, Endpoint: s.cfg.Endpoint, Detail: "the device went away", Err: pollEvents(rev)}
 		s.end(derr, derr)
 	case rev&pollErr != 0:
-		if err := s.dev.explain("pause"); err != nil {
-			s.fault(err, "pause")
+		if err := s.dev.explain(op); err != nil {
+			s.fault(err, op)
 			return
 		}
 		if s.unexplained++; s.unexplained > 1 {
-			kerr := &Error{Reason: ReasonKernel, Op: "pause", Endpoint: s.cfg.Endpoint,
+			kerr := &Error{Reason: ReasonKernel, Op: op, Endpoint: s.cfg.Endpoint,
 				Detail: "poll keeps reporting an error the stream's state does not explain"}
 			s.end(kerr, kerr)
 		}

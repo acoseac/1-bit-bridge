@@ -196,6 +196,7 @@ func TestSinkReleasesAPauseAfterThirtySeconds(t *testing.T) {
 			}
 			k.grant(time.Second)
 			p := waitState(t, s, SinkReleased)
+			k.revoke()
 			k.inspect(func(k *fakeKernel) {
 				if k.isOpen || k.closes != 1 || k.opens != 1 {
 					t.Errorf("released: open %v after %d opens and %d closes; want closed once", k.isOpen, k.opens, k.closes)
@@ -257,6 +258,7 @@ func TestSinkResumeAfterAReleaseTypesWhatRefusesIt(t *testing.T) {
 	}
 	k.grant(2 * time.Second)
 	released := waitState(t, s, SinkReleased)
+	k.revoke()
 	for _, c := range []struct {
 		err  error
 		want Reason

@@ -142,10 +142,13 @@ func waitState(t *testing.T, s *Sink, want SinkState) Position {
 }
 
 // filledAndIdle is a condition on the fake: the writer has written appl
-// frames since PREPARE and then measured, its last call before it waits
-// for more frames.
+// frames since PREPARE, measured, and waits on the stream for more. The
+// wait comes after the writer has used its measurement; a condition on the
+// STATUS call itself holds inside the call, before the sink has applied
+// the reading, so a test that read the position then could read the one
+// before (#1303's Linux race).
 func filledAndIdle(appl uint64) func(*fakeKernel) bool {
-	return func(k *fakeKernel) bool { return k.appl == appl && k.lastCall() == ioctlStatus }
+	return func(k *fakeKernel) bool { return k.appl == appl && starved(k) }
 }
 
 // drain drains s and fails the test when the drain does not end cleanly.
@@ -362,13 +365,14 @@ func TestSinkPositionIsWrittenMinusWhatTheKernelHolds(t *testing.T) {
 // TestSinkPositionIgnoresAReadingItCannotUse pins the clamps on the
 // kernel's account, with STATUS scripted: a delay larger than what was
 // written does not move the position back, and a negative one does not
-// move it forward.
+// move it forward. Each look at the position waits for the writer's wait
+// on the stream, which follows its use of the last reading (filledAndIdle).
 func TestSinkPositionIgnoresAReadingItCannotUse(t *testing.T) {
 	k := newFake(t)
 	k.delay = 5000
 	s := openTestSink(t, k, sinkConfig())
 	submit(t, s, content(0, 0, 20000))
-	await(t, k.when(func(k *fakeKernel) bool { return len(k.played) == 20000*6 && k.lastCall() == ioctlStatus }), "20000 frames written and measured")
+	await(t, k.when(func(k *fakeKernel) bool { return len(k.played) == 20000*6 && starved(k) }), "20000 frames written and measured")
 	if p := s.Position(); p.Played != 15000 || p.Written != 20000 {
 		t.Fatalf("position %+v, want 15000 played of 20000", p)
 	}
@@ -376,7 +380,7 @@ func TestSinkPositionIgnoresAReadingItCannotUse(t *testing.T) {
 		var written int
 		k.inspect(func(k *fakeKernel) { k.delay, written = delay, len(k.played) })
 		submit(t, s, content(0, 0, 2400))
-		await(t, k.when(func(k *fakeKernel) bool { return len(k.played) == written+2400*6 && k.lastCall() == ioctlStatus }), "2400 more written and measured")
+		await(t, k.when(func(k *fakeKernel) bool { return len(k.played) == written+2400*6 && starved(k) }), "2400 more written and measured")
 		if p := s.Position(); p.Played != 15000 {
 			t.Errorf("a delay of %d: played %d, want 15000 kept", delay, p.Played)
 		}
