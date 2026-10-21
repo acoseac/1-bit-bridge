@@ -12,7 +12,7 @@ require (
 	github.com/mycophonic/saprobe-alac v1.0.0-rc2.0.20261020094436-1b6eb8378954
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
-	github.com/quic-go/quic-go v0.63.0
+	github.com/quic-go/quic-go v0.64.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.57.0
 	golang.org/x/image v0.46.0
