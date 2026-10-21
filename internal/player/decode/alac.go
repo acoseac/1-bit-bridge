@@ -33,8 +33,9 @@ func newALACLibrary(cfg alac.PacketConfig) (alacPackets, error) {
 	return d, nil
 }
 
-// alacRun is one stts run: count packets of delta frames each, the first of
-// them packet firstPacket, starting at media frame firstFrame.
+// alacRun is one stts run, the entries of one duration side by side merged:
+// count packets of delta frames each, the first of them packet firstPacket,
+// starting at media frame firstFrame.
 type alacRun struct {
 	firstPacket int
 	firstFrame  int64
@@ -449,10 +450,12 @@ func (d *alacDecoder) index(w *m4aWalk, tr alacTrackBoxes, mdats []m4aBox) error
 	return d.placePackets(w, tr, n, mdats)
 }
 
-// readSTTS reads the stts runs: every run at least one packet, every packet
+// readSTTS reads the stts runs: every entry at least one packet, every packet
 // 1 to frameLength frames (the decoder's buffers hold one frame), and the
-// runs covering exactly the n packets stsz sizes. It returns the media's
-// frames, at most n*frameLength.
+// entries covering exactly the n packets stsz sizes. Entries of one duration
+// side by side are one run, and more than maxALACRuns runs are refused, so
+// a table of an entry a packet costs one run. It returns the media's frames,
+// at most n*frameLength.
 func (d *alacDecoder) readSTTS(w *m4aWalk, tr alacTrackBoxes, n uint64) (int64, error) {
 	h, err := w.fullBox(tr.stts, 8)
 	if err != nil {
@@ -468,7 +471,7 @@ func (d *alacDecoder) readSTTS(w *m4aWalk, tr alacTrackBoxes, n uint64) (int64, 
 	if count > n {
 		return 0, refuse(ReasonTruncated, "M4A stts lists %d runs for %d packets", count, n)
 	}
-	d.runs = make([]alacRun, 0, count)
+	d.runs = make([]alacRun, 0, min(count, maxALACRuns))
 	var packets uint64
 	var frames int64
 	err = w.table(tr.stts, 8, count, 8, func(_ int, e []byte) error {
@@ -482,7 +485,14 @@ func (d *alacDecoder) readSTTS(w *m4aWalk, tr alacTrackBoxes, n uint64) (int64, 
 		if c > n-packets {
 			return refuse(ReasonTruncated, "M4A stts covers more than stsz's %d packets", n)
 		}
-		d.runs = append(d.runs, alacRun{firstPacket: int(packets), firstFrame: frames, count: int(c), delta: int(delta)})
+		switch last := len(d.runs) - 1; {
+		case last >= 0 && d.runs[last].delta == int(delta):
+			d.runs[last].count += int(c)
+		case len(d.runs) == maxALACRuns:
+			return refuse(ReasonUnsupportedLayout, "M4A stts has more than %d runs of packets of one duration", maxALACRuns)
+		default:
+			d.runs = append(d.runs, alacRun{firstPacket: int(packets), firstFrame: frames, count: int(c), delta: int(delta)})
+		}
 		packets += c
 		frames += int64(c) * int64(delta)
 		return nil
@@ -496,10 +506,11 @@ func (d *alacDecoder) readSTTS(w *m4aWalk, tr alacTrackBoxes, n uint64) (int64, 
 	return frames, nil
 }
 
-// placePackets reads stsc and the chunk offsets and gives every packet its
-// offset: chunk by chunk, each packet after the one before it, every packet
-// at least one byte, no larger than the cookie and the format allow, and
-// inside one mdat's payload.
+// placePackets reads the chunk offsets and, in step with them, stsc, and
+// gives every packet its offset: chunk by chunk, each packet after the one
+// before it, every packet at least one byte, no larger than the cookie and
+// the format allow, and inside one mdat's payload. stsc must place exactly
+// the n packets stsz sizes.
 func (d *alacDecoder) placePackets(w *m4aWalk, tr alacTrackBoxes, n uint64, mdats []m4aBox) error {
 	width := 4
 	if tr.chunks.typ == "co64" {
@@ -519,14 +530,21 @@ func (d *alacDecoder) placePackets(w *m4aWalk, tr alacTrackBoxes, n uint64, mdat
 	if chunks > n {
 		return refuse(ReasonTruncated, "M4A %s lists %d chunks for %d packets", tr.chunks.typ, chunks, n)
 	}
-	perChunk, err := d.readSTSC(w, tr, chunks, n)
+	stsc, err := readSTSC(w, tr, chunks)
 	if err != nil {
 		return err
 	}
 	maxPacket := d.cfg.maxPacketBytes()
 	d.offsets = make([]int64, n)
-	p := 0
+	var p uint64
 	err = w.table(tr.chunks, 8, chunks, width, func(c int, e []byte) error {
+		per, err := stsc.packets(uint64(c) + 1)
+		if err != nil {
+			return err
+		}
+		if uint64(per) > n-p {
+			return refuse(ReasonTruncated, "M4A stsc places more than stsz's %d packets", n)
+		}
 		var at uint64
 		if width == 8 {
 			at = binary.BigEndian.Uint64(e)
@@ -538,7 +556,7 @@ func (d *alacDecoder) placePackets(w *m4aWalk, tr alacTrackBoxes, n uint64, mdat
 			return refuse(ReasonTruncated, "M4A chunk %d at byte %d is outside mdat", c, at)
 		}
 		off := int64(at)
-		for k, per := uint32(0), perChunk(c); k < per; k++ {
+		for k := uint32(0); k < per; k++ {
 			size := d.sizes[p]
 			switch {
 			case size == 0:
@@ -557,7 +575,13 @@ func (d *alacDecoder) placePackets(w *m4aWalk, tr alacTrackBoxes, n uint64, mdat
 		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if p != n {
+		return refuse(ReasonTruncated, "M4A stsc places %d packets; stsz has %d", p, n)
+	}
+	return nil
 }
 
 // mdatBytesHeld counts the mdat payload bytes the file holds: an mdat that
@@ -582,10 +606,22 @@ func mdatHolding(mdats []m4aBox, at uint64) (m4aBox, bool) {
 	return m4aBox{}, false
 }
 
-// readSTSC reads the sample-to-chunk runs: the first at chunk 1, each after
-// the last, every run's chunks one or more packets of sample description 1,
-// and together exactly the n packets. It returns the packets of each chunk.
-func (d *alacDecoder) readSTSC(w *m4aWalk, tr alacTrackBoxes, chunks, n uint64) (func(c int) uint32, error) {
+// stscRuns reads the sample-to-chunk runs in step with the chunk offsets,
+// so they are never held: the first starts at chunk 1, each after the one
+// before it and at most at the last chunk, and each gives its chunks one or
+// more packets of sample description 1.
+type stscRuns struct {
+	cur     *tableCursor
+	chunks  uint64
+	read    int    // runs read
+	per     uint32 // the packets of each chunk of the run reached last
+	next    uint64 // the chunk the next run starts at, 0 after the last
+	nextPer uint32
+}
+
+// readSTSC checks stsc's count against its box and the chunks and reads its
+// first run.
+func readSTSC(w *m4aWalk, tr alacTrackBoxes, chunks uint64) (*stscRuns, error) {
 	h, err := w.fullBox(tr.stsc, 8)
 	if err != nil {
 		return nil, err
@@ -600,48 +636,48 @@ func (d *alacDecoder) readSTSC(w *m4aWalk, tr alacTrackBoxes, chunks, n uint64) 
 	if count > chunks {
 		return nil, refuse(ReasonTruncated, "M4A stsc lists %d runs for %d chunks", count, chunks)
 	}
-	type run struct {
-		first uint64 // 1-based chunk
-		per   uint32
-	}
-	runs := make([]run, 0, count)
-	err = w.table(tr.stsc, 8, count, 12, func(i int, e []byte) error {
-		first, per, desc := uint64(binary.BigEndian.Uint32(e[0:4])), binary.BigEndian.Uint32(e[4:8]), binary.BigEndian.Uint32(e[8:12])
-		switch {
-		case i == 0 && first != 1:
-			return refuse(ReasonTruncated, "M4A stsc's first run starts at chunk %d", first)
-		case i > 0 && (first <= runs[i-1].first || first > chunks):
-			return refuse(ReasonTruncated, "M4A stsc run %d starts at chunk %d, out of order", i, first)
-		case per == 0:
-			return refuse(ReasonTruncated, "M4A stsc gives chunks of 0 packets")
-		case desc != 1:
-			return refuse(ReasonUnsupportedLayout, "M4A stsc names sample description %d; one description is read", desc)
-		}
-		runs = append(runs, run{first, per})
-		return nil
-	})
-	if err != nil {
+	s := &stscRuns{cur: w.cursor(tr.stsc, 8, count, 12), chunks: chunks}
+	if err := s.advance(0); err != nil {
 		return nil, err
 	}
-	var placed uint64
-	for i, r := range runs {
-		last := chunks
-		if i+1 < len(runs) {
-			last = runs[i+1].first - 1
+	return s, nil
+}
+
+// packets returns the packets of chunk c, counted from 1. The caller asks
+// for the chunks in order.
+func (s *stscRuns) packets(c uint64) (uint32, error) {
+	if c == s.next {
+		s.per = s.nextPer
+		if err := s.advance(c); err != nil {
+			return 0, err
 		}
-		hi, lo := bits.Mul64(last-r.first+1, uint64(r.per))
-		if hi != 0 || lo > n-placed {
-			return nil, refuse(ReasonTruncated, "M4A stsc places more than stsz's %d packets", n)
-		}
-		placed += lo
 	}
-	if placed != n {
-		return nil, refuse(ReasonTruncated, "M4A stsc places %d packets; stsz has %d", placed, n)
+	return s.per, nil
+}
+
+// advance reads the run after the one that starts at chunk at (0 before the
+// first run) into next and nextPer.
+func (s *stscRuns) advance(at uint64) error {
+	e, err := s.cur.next()
+	if e == nil || err != nil {
+		s.next = 0
+		return err
 	}
-	return func(c int) uint32 {
-		k := sort.Search(len(runs), func(i int) bool { return runs[i].first > uint64(c)+1 })
-		return runs[k-1].per
-	}, nil
+	i := s.read
+	s.read++
+	first, per, desc := uint64(binary.BigEndian.Uint32(e[0:4])), binary.BigEndian.Uint32(e[4:8]), binary.BigEndian.Uint32(e[8:12])
+	switch {
+	case i == 0 && first != 1:
+		return refuse(ReasonTruncated, "M4A stsc's first run starts at chunk %d", first)
+	case i > 0 && (first <= at || first > s.chunks):
+		return refuse(ReasonTruncated, "M4A stsc run %d starts at chunk %d, out of order", i, first)
+	case per == 0:
+		return refuse(ReasonTruncated, "M4A stsc gives chunks of 0 packets")
+	case desc != 1:
+		return refuse(ReasonUnsupportedLayout, "M4A stsc names sample description %d; one description is read", desc)
+	}
+	s.next, s.nextPer = first, per
+	return nil
 }
 
 // window applies the edit list, if there is one, to the media's frames

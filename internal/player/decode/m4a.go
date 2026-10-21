@@ -182,21 +182,54 @@ func fits(b m4aBox, headerLen int64, count uint64, width int) error {
 // bytes, to fn a bounded read at a time. The caller has checked the count
 // with fits.
 func (w *m4aWalk) table(b m4aBox, headerLen int64, count uint64, width int, fn func(i int, e []byte) error) error {
-	buf := make([]byte, width*int(min(count, m4aTableRead)))
-	off := b.start + headerLen
-	for done := uint64(0); done < count; {
-		n := min(count-done, m4aTableRead)
-		chunk := buf[:width*int(n)]
-		if err := w.readAt(off, chunk, "box "+b.typ); err != nil {
+	c := w.cursor(b, headerLen, count, width)
+	for i := 0; ; i++ {
+		e, err := c.next()
+		if e == nil || err != nil {
 			return err
 		}
-		for k := 0; k < int(n); k++ {
-			if err := fn(int(done)+k, chunk[width*k:width*(k+1)]); err != nil {
-				return err
-			}
+		if err := fn(i, e); err != nil {
+			return err
 		}
-		done += n
-		off += int64(len(chunk))
 	}
-	return nil
+}
+
+// tableCursor reads a table's entries in order, m4aTableRead at a time, so
+// two tables can be read in step and neither is held whole.
+type tableCursor struct {
+	w     *m4aWalk
+	what  string
+	off   int64  // where the next read starts
+	left  uint64 // entries not yet read from the file
+	width int
+	buf   []byte // the entries of the last read
+	pos   int    // the next entry's offset in buf
+}
+
+// cursor reads count entries of width bytes after b's header of headerLen
+// bytes. The caller has checked the count with fits.
+func (w *m4aWalk) cursor(b m4aBox, headerLen int64, count uint64, width int) *tableCursor {
+	return &tableCursor{
+		w: w, what: "box " + b.typ, off: b.start + headerLen, left: count, width: width,
+		buf: make([]byte, 0, width*int(min(count, m4aTableRead))),
+	}
+}
+
+// next returns the next entry, valid until the next call, or nil after the
+// last.
+func (c *tableCursor) next() ([]byte, error) {
+	if c.pos == len(c.buf) {
+		if c.left == 0 {
+			return nil, nil
+		}
+		n := min(c.left, m4aTableRead)
+		buf := c.buf[:c.width*int(n)]
+		if err := c.w.readAt(c.off, buf, c.what); err != nil {
+			return nil, err
+		}
+		c.buf, c.off, c.left, c.pos = buf, c.off+int64(len(buf)), c.left-n, 0
+	}
+	e := c.buf[c.pos : c.pos+c.width]
+	c.pos += c.width
+	return e, nil
 }

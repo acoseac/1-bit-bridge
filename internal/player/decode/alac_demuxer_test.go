@@ -95,7 +95,8 @@ func TestALACDemuxerAlone(t *testing.T) {
 }
 
 // The demuxer refuses an over-cap stsz from its header, and the absurd
-// counts, without allocating anything near their declared sizes.
+// counts, without allocating anything near their declared sizes; and a file
+// at the packet cap opens holding no more than its seek index.
 func TestALACDemuxerAllocatesLittle(t *testing.T) {
 	g := loadALACGoldens(t)
 	_, base := g.fixture(t, alac16)
@@ -125,6 +126,146 @@ func TestALACDemuxerAllocatesLittle(t *testing.T) {
 		}
 		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 256<<10 {
 			t.Fatalf("%s: the demuxer allocated %d bytes before refusing", name, alloc)
+		}
+	}
+
+	// The seek index is twelve bytes a packet and 32 a stts run, runs of one
+	// duration merged, and stsc is read in step with the chunk offsets, never
+	// held. At the cap's 2^20 one-byte packets, stts listing a run a packet
+	// and stsc a run a chunk opened holding 44 MiB and 28 MiB (#1300's second
+	// round), and durations that alternate past the run cap are refused.
+	const n = 1 << 20
+	ones, alternate, stscEach := make([][2]uint32, n), make([][2]uint32, n), make([][3]uint32, n)
+	for p := range ones {
+		ones[p] = [2]uint32{1, 1}
+		alternate[p] = [2]uint32{1, 1 + uint32(p%2)}
+		stscEach[p] = [3]uint32{uint32(p + 1), 1, 1}
+	}
+	oneChunk := [][3]uint32{{1, n, 1}}
+	for _, c := range []struct {
+		name   string
+		raw    []byte
+		reason decode.Reason // empty when the file opens
+	}{
+		{"stts a run a packet", alacOneBytePackets(t, base, n, ones, oneChunk, 1), ""},
+		{"stsc a run a chunk", alacOneBytePackets(t, base, n, [][2]uint32{{n, 1}}, stscEach, n), ""},
+		{"stts durations that alternate", alacOneBytePackets(t, base, n, alternate, oneChunk, 1), decode.ReasonUnsupportedLayout},
+	} {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := openALACErr(c.raw)
+		runtime.ReadMemStats(&after)
+		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 12*n+1<<20 {
+			t.Errorf("%s: the demuxer allocated %d bytes, past twelve a packet and 1 MiB", c.name, alloc)
+		}
+		if c.reason == "" && err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		} else if c.reason != "" {
+			refusedWith(t, err, c.reason, "stts")
+		}
+	}
+}
+
+// alacOneBytePackets rewrites the 16-bit golden, laid out moov last, as n
+// one-byte packets filling an mdat of n bytes: stsz a constant size of 1,
+// stts and stsc the entries given, one offset for each of the chunks, at the
+// packets stsc puts before it, and mdhd's duration stts's frames. An open
+// reads none of the packets.
+func alacOneBytePackets(t testing.TB, base []byte, n uint32, stts [][2]uint32, stsc [][3]uint32, chunks uint32) []byte {
+	t.Helper()
+	nodes := m4aMoovLast(t, base)
+	nodes[1].payload = make([]byte, n)
+	stbl := m4aSTBL(t, nodes)
+	box(t, stbl, "stsz").payload = table(0, 1, n)
+	tts := make([]byte, 8+8*len(stts))
+	put32At(tts, 4, uint32(len(stts)))
+	var frames uint32
+	for i, e := range stts {
+		put32At(tts, 8+8*i, e[0])
+		put32At(tts, 12+8*i, e[1])
+		frames += e[0] * e[1]
+	}
+	box(t, stbl, "stts").payload = tts
+	sc := make([]byte, 8+12*len(stsc))
+	put32At(sc, 4, uint32(len(stsc)))
+	for i, e := range stsc {
+		put32At(sc, 8+12*i, e[0])
+		put32At(sc, 12+12*i, e[1])
+		put32At(sc, 16+12*i, e[2])
+	}
+	box(t, stbl, "stsc").payload = sc
+	co := make([]byte, 8+4*int(chunks))
+	put32At(co, 4, chunks)
+	at, r := uint32(len(nodes[0].encode())+8), 0 // mdat's payload
+	for c := uint32(1); c <= chunks; c++ {
+		for r+1 < len(stsc) && stsc[r+1][0] <= c {
+			r++
+		}
+		put32At(co, 4+4*int(c), at)
+		at += stsc[r][1]
+	}
+	box(t, stbl, "stco").payload = co
+	put32At(m4aPath(t, nodes, "moov", "trak", "mdia", "mdhd").payload, 16, frames)
+	return encodeM4A(nodes)
+}
+
+// stts entries of one duration side by side are one run: every golden, its
+// stts rewritten as an entry a packet, decodes whole and from each seek frame
+// as the pattern. Runs of differing durations are capped at 1024, where every
+// golden, corpus file and FFmpeg encode has one or two: 1024 open, and 1025
+// are refused.
+func TestALACSTTSRunsMergeAndCap(t *testing.T) {
+	g := loadALACGoldens(t)
+	ctx := context.Background()
+	for _, f := range g.decoded() {
+		f := f
+		t.Run(f.File, func(t *testing.T) {
+			nodes := m4aMoovLast(t, readALACGolden(t, f.File))
+			stts := box(t, m4aSTBL(t, nodes), "stts")
+			each := []uint32{0, 0}
+			for i, k := 0, int(binary.BigEndian.Uint32(stts.payload[4:])); i < k; i++ {
+				count, delta := binary.BigEndian.Uint32(stts.payload[8+8*i:]), binary.BigEndian.Uint32(stts.payload[12+8*i:])
+				for ; count > 0; count-- {
+					each = append(each, 1, delta)
+				}
+			}
+			each[1] = uint32(len(each)/2 - 1)
+			stts.payload = table(each...)
+			raw := encodeM4A(nodes)
+			want := f.want(t)
+			for _, frame := range append([]int64{0}, f.SeekFrames...) {
+				d, err := openPCM(bytes.NewReader(raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d.Format().Frames != f.Frames {
+					t.Fatalf("%d frames, want %d", d.Format().Frames, f.Frames)
+				}
+				if err := d.Seek(ctx, frame); err != nil {
+					t.Fatalf("seek %d: %v", frame, err)
+				}
+				requireSameSamples(t, readAllFrames(t, d, 2*777), want[2*frame:])
+				d.Close()
+			}
+		})
+	}
+
+	_, base := g.fixture(t, alac16)
+	const n = 4096
+	for _, c := range []struct {
+		runs   int
+		reason decode.Reason
+	}{{1024, ""}, {1025, decode.ReasonUnsupportedLayout}} {
+		stts := make([][2]uint32, n)
+		for p := range stts {
+			stts[p] = [2]uint32{1, 1 + uint32(min(p, c.runs-1)%2)}
+		}
+		err := openALACErr(alacOneBytePackets(t, base, n, stts, [][3]uint32{{1, n, 1}}, 1))
+		if c.reason == "" && err != nil {
+			t.Errorf("%d runs: %v", c.runs, err)
+		} else if c.reason != "" {
+			refusedWith(t, err, c.reason, "1024 runs")
 		}
 	}
 }

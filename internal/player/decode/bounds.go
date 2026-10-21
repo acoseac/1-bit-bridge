@@ -33,10 +33,18 @@ const (
 	// maxSTSDBytes bounds the sample description read whole. An ALAC one is
 	// 80 bytes.
 	maxSTSDBytes = 64 << 10
-	// maxALACPackets bounds an ALAC track's packets, and so its seek index:
-	// twelve bytes a packet, 12 MiB at the cap. 2^20 packets of 4096 frames
-	// are 6.2 hours at 192 kHz.
+	// maxALACPackets and maxALACRuns bound an ALAC track's seek index: twelve
+	// bytes a packet (its offset and size) and 32 a stts run, 12 MiB and
+	// 32 KiB at the caps. Nothing else an open allocates grows with a table:
+	// stsc is read in step with the chunk offsets and never held, and each
+	// table is read m4aTableRead entries at a time (48 KiB for stsc's, the
+	// widest). 2^20 packets of 4096 frames are 6.2 hours at 192 kHz.
 	maxALACPackets = 1 << 20
+	// maxALACRuns bounds stts's runs once entries of one duration side by
+	// side are merged. ALAC packets hold the frame length but the last, so
+	// the goldens, the private corpus and Codex's FFmpeg encodes have one run
+	// or two each.
+	maxALACRuns = 1024
 	// m4aTableRead is how many table entries one read takes.
 	m4aTableRead = 4096
 )
