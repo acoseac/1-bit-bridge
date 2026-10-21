@@ -19,16 +19,18 @@
 # not vendored, and nothing here is part of the bridge.
 set -euo pipefail
 
-work=$(mktemp -d)
+work=$(env -u GITHUB_TOKEN mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # In CI the workflow's token authenticates the header's download (below),
-# which the raw host gives a higher rate limit. awk writes it from the
-# environment straight into a curl config file in $work, which only this
-# user can read, and it leaves the environment at once: nothing this script
-# runs inherits it, no command line carries it, and no shell expansion shows
-# it in a trace (bash -x).
+# which the raw host gives a higher rate limit. awk, the one program here
+# that sees it, writes it from the environment straight into a curl config
+# file in $work, which only this user can read, and it leaves the
+# environment at once, on failure too: nothing else this script runs
+# inherits it, no command line carries it, and no shell expansion shows it
+# in a trace (bash -x).
 auth="$work/curl-auth"
-(umask 077 && awk 'BEGIN { t = ENVIRON["GITHUB_TOKEN"]; if (t != "") printf "header = \"Authorization: Bearer %s\"\n", t }' >"$auth")
+(umask 077 && awk 'BEGIN { t = ENVIRON["GITHUB_TOKEN"]; if (t != "") printf "header = \"Authorization: Bearer %s\"\n", t }' >"$auth") ||
+	{ unset GITHUB_TOKEN; echo "check.sh: could not write the download's curl config" >&2; exit 1; }
 unset GITHUB_TOKEN
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
