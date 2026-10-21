@@ -343,6 +343,11 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 				return u, u != ""
 			}
 			d.LibraryRoots = cfg.LibraryRoots
+			// A player box's checklist, from a one-shot outputs builder it
+			// closes at once (output_checklist.go). The console's doctor
+			// replaces it with the serving process's own
+			// (adminDoctorRunner).
+			d.OutputChecklist = doctorOutputChecklist(cfg, nil)
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
 			d.UpscaleTargetBits = cfg.Upscale.EffectiveTargetBits()
@@ -818,10 +823,18 @@ func printWarnings(w io.Writer, r doctor.Report) {
 // port checks be answered from knowledge instead of deduced from a bind
 // probe — which is not merely faster: in-process the probe can only
 // fail, because the port really is in use, by us.
-func adminDoctorRunner(cfgPath string, ownedPorts []int) func(context.Context) *admin.DoctorReport {
+//
+// checklist is the player checklist from the serving process's source
+// (checklistDoctorChecks), the lines the dashboard shows; nil adds none.
+func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
 		d := buildDoctorDeps(cfgPath)
 		d.OwnedPorts = ownedPorts
+		// The player checklist from the serving process's own source, the
+		// one the dashboard's panel shows, rather than the one-shot outputs
+		// builder `bridge doctor` uses: /api/doctor runs on every settings
+		// render, and a builder of its own would dial MPD each time.
+		d.OutputChecklist = checklist
 		rep := doctor.Run(ctx, d)
 		out := &admin.DoctorReport{
 			Checks: make([]admin.DoctorCheck, 0, len(rep.Checks)),

@@ -37,7 +37,11 @@ func TestOutputOnlyBridgeStarts(t *testing.T) {
 
 // TestDoctorPassesWithNoRoots is the same install graded by bridge doctor.
 // An empty library is not a failure once output.mpd is on; auto still is,
-// because the config does not load.
+// because the config does not load. On Linux the report carries the player
+// checklist too, whose Music line reads Ready for a box with no library;
+// its Player and DAC lines grade this host's MPD and sound cards, which a
+// test host need not have, so they are not about the config and a fail
+// there is not this test's.
 func TestDoctorPassesWithNoRoots(t *testing.T) {
 	dir := t.TempDir()
 	data := filepath.Join(dir, "data")
@@ -65,11 +69,12 @@ func TestDoctorPassesWithNoRoots(t *testing.T) {
 			t.Errorf("%s = %s (%s)", c.Name, c.Status, c.Summary)
 		}
 	}
-	if report.FailCount() != 0 {
-		for _, c := range report.Checks {
-			if c.Status == doctor.Fail {
-				t.Errorf("fail %s: %s", c.Name, c.Summary)
-			}
+	for _, c := range report.Checks {
+		if c.Status == doctor.Fail && c.Name != "player" && c.Name != "dac" {
+			t.Errorf("fail %s: %s", c.Name, c.Summary)
+		}
+		if c.Name == "music" && (c.Status != doctor.OK || c.Summary != "Ready: can play music from another bridge or NAS") {
+			t.Errorf("music %s %q, want ok and Ready", c.Status, c.Summary)
 		}
 	}
 }

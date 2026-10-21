@@ -5184,6 +5184,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		uploadMgr.RunSweeper(scanCtx, uploadSweepInterval)
 	}()
 
+	// The player checklist (Player, DAC, Music, Phone) for the dashboard's
+	// panel and the console's doctor: one source, over this process's own
+	// GET /v1/outputs builder, with its caches and its lazy MPD session,
+	// so the console reads the box the way the app does.
+	checklistSrc := outputChecklistSource{
+		Active:      apiSrv.LocalOutputsActive,
+		Outputs:     apiSrv.LocalOutputsResponse,
+		LoopbackErr: outLoop.StartErr,
+		Phones:      func() int { return len(store.List()) },
+	}
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
 		CfgPath:      absCfgPath,
@@ -5269,7 +5279,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg)),
+		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc)),
+		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,
