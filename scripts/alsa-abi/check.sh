@@ -36,7 +36,7 @@ if [ -n "${ALSA_UAPI_HEADER:-}" ]; then
 	echo "asound.h: $ALSA_UAPI_HEADER (ALSA_UAPI_HEADER), compared as the header of $tag"
 else
 	url="https://raw.githubusercontent.com/torvalds/linux/$tag/include/uapi/sound/asound.h"
-	curl -fsSL --retry 3 -o "$header" "$url"
+	curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$header" "$url"
 	echo "asound.h: $url"
 fi
 # The blob id is the file's identity in the kernel's own git history:

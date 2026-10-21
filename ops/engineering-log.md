@@ -49129,3 +49129,50 @@ which proves negotiation and lifecycle only.
   the kernel picks a free one, and INFO says which.
 - The streaming sink and its recovery (2b), DSD and DoP (2c, 2d), stable
   bindings and hotplug (4a), and everything after.
+
+### Review and the hardware gate (2026-10-21)
+
+**The first `alsa-abi` run never compared anything:** the source-tree
+`asound.h` writes `} __packed;`, which `make headers_install` rewrites and
+a plain compile reads as a declaration, so the probe failed to build on both
+runners. `check.sh` now passes `-D__packed=__attribute__((packed))`, as it
+already strips `__user` and `__force`. The next run passed on amd64 and
+arm64: every one of the Go definitions, written without the header at hand,
+matches Linux v6.12. Codex compared them field by field with the real header
+too, and so did the Claude API review. `SNDRV_PCM_FORMAT_LAST` joined the
+facts. `curl` in `check.sh` takes HTTPS only (`--proto '=https'`;
+SonarCloud S6506).
+
+**Review (Codex, the Claude API review; Argon none), two real defects:**
+an underrun after the last write passed as a clean run (DRAIN moves an XRUN
+stream to SETUP, `Drain` asked the state only afterwards, and the harness
+printed a literal "xruns 0" before draining), and EBADFD from a removed PCM,
+which STATUS also answers, was a kernel error rather than a disconnect.
+Red first (`TestDrainAfterAnUnderrunIsAnXrun`, an EBADFD case in
+`TestDrainTypesWhatEndsIt`, `TestOutputPCMTestAnUnderrunBeforeTheDrainFails`),
+then fixed: `Drain` reads the state first, and the harness prints
+"drained; xruns 0" only after a clean drain.
+
+**The hardware gate passed** on the Volumio Pi (aarch64 kernel 6.12, the
+arm64 static build), the iFi GO bar at card 5, with the owner listening on
+headphones:
+- passive capture: the GO bar's three PCM formats (S32_LE, S24_3LE, S16_LE)
+  at 44.1 to 384 kHz and its DSD altset, nothing opened;
+- 44.1 kHz/16, 96 kHz/24 and 384 kHz/32: committed exactly, the kernel's
+  `hw_params` agreeing, a buffer of about 210 ms, drained, no xrun, closed,
+  exit 0, twice; the owner heard every tone clean and saw the GO bar's light
+  follow each rate;
+- a cancel after 4 s: stopped at 4.10 s, dropped, closed, the device free
+  at once, and the sound stopped at once;
+- 22,050 Hz: `parameters_not_supported`, listing what the GO bar offers
+  (the first run listed format numbers 64 to 255, bits of the mask past
+  the last format the kernel defines; `formatsOf` now stops at
+  `SNDRV_PCM_FORMAT_LAST`, red first in `TestFormatsOfNamesOnlyRealFormats`);
+- busy, with Volumio playing to the GO bar: exit 1, naming MPD's
+  `output:alsa` thread and the `mpd` process, MPD playing on untouched.
+
+On the way the Pi showed the failure the design's persisted identity exists
+to prevent: Volumio stores its output as a card number, the cards were
+renumbered (the Hugo 2 became card 2, the GO bar card 5), and Volumio played
+to the Hugo 2 while its settings named the iFi until the output was chosen
+again.
