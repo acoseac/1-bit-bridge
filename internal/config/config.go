@@ -100,13 +100,20 @@ type Config struct {
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
+
+	// playerGOOS is the host Validate judges output.player for, "" for
+	// runtime.GOOS (playerPlatform): the seam a test of the Linux-only
+	// refusal sets.
+	playerGOOS string
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
 // auto (the default, including an empty value), on, or off. Endpoint,
 // Conf and Password are the optional overrides bridge output player
 // takes. Password is not a JSON field: a settings response must not
-// carry it.
+// carry it. Player is the bridge as a player itself (B470), apart from
+// MPD: Mode stays MPD's alone, and PlayerEnabled is the player's own
+// predicate.
 type OutputConfig struct {
 	MPD      string `yaml:"mpd,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
@@ -118,6 +125,8 @@ type OutputConfig struct {
 	// port the kernel picks, for tests: MPD keeps the route's URLs in its
 	// queue, so a real bridge wants the same port after a restart.
 	LoopbackPort *int `yaml:"loopbackPort,omitempty"`
+	// Player is output.player (PlayerConfig).
+	Player PlayerConfig `yaml:"player,omitempty"`
 }
 
 // DefaultLoopbackPort is the loopback track route's port when
@@ -3215,6 +3224,14 @@ func (c *Config) Validate() error {
 	}
 	if p := c.Output.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
 		return fmt.Errorf("output.loopbackPort: %d is not a port (0 to 65535)", *p)
+	}
+	// output.player is never a reason to refuse the config: a block that
+	// does not read or is refused turns the player off, and MPD, the
+	// library and the server load as they would without it. The reason is
+	// logged, and names no serial. Nothing here reads hardware, sysfs or
+	// the interfaces: whether a LAN is up yet is the player's runtime state.
+	if on, why := c.PlayerEnabled(c.playerPlatform()); !on && why != nil {
+		validateLogger.Warn(playerOffMessage, "reason", why.Error())
 	}
 
 	// Retention: a NON-ZERO playback-history window below the longest
