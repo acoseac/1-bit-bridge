@@ -310,20 +310,25 @@ func (r pcmTestRun) play(ctx context.Context, env outputPCMTestEnv, stdout, stde
 		}
 	}
 	c := dev.Counters()
-	fmt.Fprintf(stdout, "done: %d frames in %d writes (%d partial), %d waits for room, %d interrupted; xruns 0\n",
+	fmt.Fprintf(stdout, "done: %d frames in %d writes (%d partial), %d waits for room, %d interrupted\n",
 		written, c.Writes, c.Partial, c.Waits, c.Interrupted)
 	if st, err := dev.Status(); err == nil {
 		fmt.Fprintf(stdout, "delay before drain: %d frames (%s), %s\n", st.Delay, pcmTestMillis(st.Delay, r.rate), st.State)
 	}
+	// No xrun is claimed before the drain has said so: an underrun after
+	// the last write is the drain's to report (#1301 review).
 	if err := dev.Drain(ctx, p.BufferTime()+2*time.Second); err != nil {
-		if alsapcm.ReasonOf(err) == alsapcm.ReasonCancelled {
+		switch alsapcm.ReasonOf(err) {
+		case alsapcm.ReasonCancelled:
 			fmt.Fprintln(stdout, "stopped by signal while draining: dropped")
 			return pcmTestClose(dev, 0, stdout, stderr)
+		case alsapcm.ReasonXrun:
+			fmt.Fprintln(stdout, "xruns 1: the stream underran before the drain")
 		}
 		fmt.Fprintf(stderr, "output pcm-test: %v\n", err)
 		return pcmTestClose(dev, 1, stdout, stderr)
 	}
-	fmt.Fprintln(stdout, "drained")
+	fmt.Fprintln(stdout, "drained; xruns 0")
 	return pcmTestClose(dev, 0, stdout, stderr)
 }
 

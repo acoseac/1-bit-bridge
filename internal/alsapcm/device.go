@@ -729,6 +729,15 @@ func (d *Device) Drain(ctx context.Context, timeout time.Duration) error {
 		return d.closedError("drain")
 	}
 	deadline := d.now().Add(timeout)
+	// A stream that already stopped has nothing to play out. DRAIN moves an
+	// XRUN stream to SETUP and answers EAGAIN, so asking the state only
+	// after DRAIN would read an underrun after the last write as a clean
+	// end (the Claude API review and Codex on #1301).
+	if st, err := d.status(); err != nil {
+		return d.streamError("drain", err)
+	} else if st.state == stateXrun || st.state == stateSuspended || st.state == stateDisconnected {
+		return d.stateError("drain", st.state)
+	}
 	for {
 		err := d.ioctlNone(ioctlDrain)
 		if err == nil {
@@ -848,6 +857,12 @@ func (d *Device) streamError(op string, err error) error {
 	case e == errnoEBADFD:
 		st, serr := d.status()
 		if serr != nil {
+			// Linux answers every PCM ioctl, STATUS included, with EBADFD
+			// once the runtime is DISCONNECTED: one PCM removed (a codec
+			// unbound), where a whole card's removal gives ENODEV.
+			if se, _ := errnoOf(serr); se == errnoEBADFD {
+				return &Error{Reason: ReasonDisconnected, Op: op, Endpoint: d.params.Endpoint, Detail: "the device went away", Err: err}
+			}
 			return d.kernelError(op, serr)
 		}
 		return d.stateError(op, st.state)

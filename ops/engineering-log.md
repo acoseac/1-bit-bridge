@@ -48680,7 +48680,8 @@ build-all` (`dist/bridge-linux-arm64` on the Pi 5). N is the card number
    Hugo 2 is S32 only), `--rate 384000 --bits 32`. Pass: "committed exactly"
    names the rate and format asked for, the kernel's hw_params line says
    "agrees", the tone is quiet and clean on headphones, the DAC shows the
-   rate, "xruns 0", "drained", "closed", exit 0.
+   rate, "drained; xruns 0", "closed", exit 0 (the xrun count comes from the drain:
+   an underrun after the last write is an xrun and exit 1, #1301 review).
 3. Cancel mid-write: `--seconds 60`, Ctrl-C after a few seconds. Pass: the
    sound stops at once, "stopped by signal after N frames: dropped",
    "closed", exit 0, and a second run opens at once, not busy.

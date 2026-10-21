@@ -234,9 +234,9 @@ func TestOutputPCMTestPlaysTheToneAndReports(t *testing.T) {
 		"playing 2 s (96000 frames)",
 		"  1 s: 48000 frames written, delay 9600 frames (200.0 ms), RUNNING",
 		"  2 s: 96000 frames written",
-		"done: 96000 frames in 3 writes (2 partial), 1 waits for room, 0 interrupted; xruns 0",
+		"done: 96000 frames in 3 writes (2 partial), 1 waits for room, 0 interrupted\n",
 		"delay before drain: 9600 frames (200.0 ms), RUNNING",
-		"drained\nclosed\n",
+		"drained; xruns 0\nclosed\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not say %q:\n%s", want, stdout)
