@@ -776,9 +776,13 @@ func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 		held, release := make(chan struct{}), make(chan struct{})
 		looking, goOn := make(chan struct{}), make(chan struct{})
 		reported, report := make(chan struct{}), new(sync.Once)
+		resumedSaid, resumeReport := make(chan struct{}), new(sync.Once)
 		h.said = func(s string) {
-			if strings.HasPrefix(s, "paused ") {
+			switch {
+			case strings.HasPrefix(s, "paused "):
 				report.Do(func() { close(reported) })
+			case strings.HasPrefix(s, "resumed at "):
+				resumeReport.Do(func() { close(resumedSaid) })
 			}
 		}
 		h.prepare = func(_ int, f *fakeSink) {
@@ -818,6 +822,12 @@ func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 		awaitRun(t, looking, c.name+": the producer to look at the paused sink's refusal")
 		h.tick(t, t0.Add(time.Second))
 		awaitRun(t, paused, c.name+": the resume a second after the pause")
+		// The resume reads the position for its report after the state
+		// change, so the producer goes on only once the run has said it
+		// resumed: let go at the state change, it could finish its drain
+		// first and the report say 1.000 s (Codex on #1303's round 4). The
+		// producer's own look holds no lock while it waits here.
+		awaitRun(t, resumedSaid, c.name+": the run to say it resumed at half a second")
 		close(goOn)
 		r := h.wait(t, done)
 		drains := 0
