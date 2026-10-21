@@ -112,6 +112,26 @@ type OutputConfig struct {
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Conf     string `yaml:"conf,omitempty"`
 	Password string `yaml:"password,omitempty" json:"-"`
+	// LoopbackPort is the port of the loopback track route, which serves
+	// the bridge's own tracks on 127.0.0.1 and ::1 to the MPD beside it
+	// while output.mpd resolves on. Nil is DefaultLoopbackPort. 0 is a
+	// port the kernel picks, for tests: MPD keeps the route's URLs in its
+	// queue, so a real bridge wants the same port after a restart.
+	LoopbackPort *int `yaml:"loopbackPort,omitempty"`
+}
+
+// DefaultLoopbackPort is the loopback track route's port when
+// output.loopbackPort is not set: the next after the API (7788), the
+// console (7789) and the DLNA listener (7790).
+const DefaultLoopbackPort = 7791
+
+// EffectiveLoopbackPort is output.loopbackPort, or DefaultLoopbackPort
+// when it is not set.
+func (o OutputConfig) EffectiveLoopbackPort() int {
+	if o.LoopbackPort == nil {
+		return DefaultLoopbackPort
+	}
+	return *o.LoopbackPort
 }
 
 // Mode is auto, on or off. An empty value is auto. Anything else is
@@ -3192,6 +3212,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Output.Mode() == "" {
 		return fmt.Errorf("output.mpd: %q is not auto, on or off", c.Output.MPD)
+	}
+	if p := c.Output.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
+		return fmt.Errorf("output.loopbackPort: %d is not a port (0 to 65535)", *p)
 	}
 
 	// Retention: a NON-ZERO playback-history window below the longest

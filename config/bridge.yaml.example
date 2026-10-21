@@ -40,11 +40,18 @@ libraryName: "My Music Library"
 #
 # endpoint, conf and password are optional overrides of what
 # `bridge output player` finds on its own. The password is not logged.
+#
+# loopbackPort: while output.mpd resolves on, the bridge serves its own
+#   tracks over plain HTTP to the MPD on this box, on 127.0.0.1 and ::1
+#   only (no other address, no SSDP, no auth), so MPD can fetch a track
+#   its database does not have. Default 7791. Keep it fixed: MPD keeps
+#   these URLs in its queue across a bridge restart.
 # output:
 #   mpd: auto
 #   # endpoint: "127.0.0.1:6600"
 #   # conf: "/etc/mpd.conf"
 #   # password: ""
+#   # loopbackPort: 7791
 
 # deployment.mode: "loopback" (default) | "public"
 #

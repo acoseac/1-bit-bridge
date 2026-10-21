@@ -164,6 +164,10 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.SmartPlaylists.Enabled
 		out.SmartPlaylists.Enabled = &v
 	}
+	if cfg.Output.LoopbackPort != nil {
+		v := *cfg.Output.LoopbackPort
+		out.Output.LoopbackPort = &v
+	}
 	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
 	// slice both need deep copies so mutations on the clone don't leak back.
 	if cfg.UPnPUpstream.Servers != nil {
