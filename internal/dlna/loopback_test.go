@@ -436,6 +436,60 @@ func TestLoopbackRouteRefusesADirectorySwappedBackAfterTheOpen(t *testing.T) {
 	assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.secret)
 }
 
+// TestLoopbackRouteRefusesASwapInEveryWindow: the link out is in place for
+// the open, gone for the second resolution, and back for the identity
+// check. The check walks the path inside the root it matched, where a link
+// that is absolute or that climbs out does not resolve, so the file that
+// opened is never confirmed by a path that leaves the root.
+func TestLoopbackRouteRefusesASwapInEveryWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("swaps a directory for a symlink in place")
+	}
+	for _, kind := range []string{"absolute", "relative"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newLoopbackFixture(t)
+			album := filepath.Join(f.root, "Artist", "Album")
+			decoy := filepath.Join(f.outside, "Album")
+			mustMkdir(t, decoy)
+			mustWrite(t, filepath.Join(decoy, "01.flac"), f.secret)
+			target := decoy
+			if kind == "relative" {
+				// From Music/Artist: up to the parent of Music, then outside.
+				target = filepath.Join("..", "..", "outside", "Album")
+			}
+			linkOut := func() {
+				if err := os.Rename(album, album+".real"); err != nil {
+					t.Errorf("move the album aside: %v", err)
+				}
+				if err := os.Symlink(target, album); err != nil {
+					t.Errorf("link the album out: %v", err)
+				}
+			}
+			putBack := func() {
+				if err := os.Remove(album); err != nil {
+					t.Errorf("remove the link: %v", err)
+				}
+				if err := os.Rename(album+".real", album); err != nil {
+					t.Errorf("put the album back: %v", err)
+				}
+			}
+			steps := 0
+			h := &loopbackHandler{
+				lib:           f.lib,
+				roots:         func() []string { return []string{f.root} },
+				beforeOpen:    func() { linkOut(); steps++ },
+				afterOpen:     func() { putBack(); steps++ },
+				beforeConfirm: func() { linkOut(); steps++ },
+			}
+			rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
+			if steps != 3 {
+				t.Fatalf("the request took %d of the three swaps", steps)
+			}
+			assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.secret)
+		})
+	}
+}
+
 // TestLoopbackRouteListsNothing: the file route is the only route, and it
 // serves one file by id. No directory, no description, no control.
 func TestLoopbackRouteListsNothing(t *testing.T) {

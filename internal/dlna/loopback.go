@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,10 +66,12 @@ type loopbackHandler struct {
 	lib   TrackLookup
 	roots func() []string
 	// beforeOpen, when set, runs between the containment check and the
-	// open, and afterOpen between the open and the second resolution.
-	// Production leaves both nil. A test swaps a link in each window.
-	beforeOpen func()
-	afterOpen  func()
+	// open, afterOpen between the open and the second resolution, and
+	// beforeConfirm between that resolution and the identity check.
+	// Production leaves all three nil. A test swaps a link in each window.
+	beforeOpen    func()
+	afterOpen     func()
+	beforeConfirm func()
 }
 
 func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -131,15 +134,46 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.afterOpen()
 	}
 	again, err := fsutil.ResolveLinks(info.AbsolutePath)
-	if err != nil || fsutil.IsUnderAny(again, roots) == "" {
+	if err != nil {
 		refuseOutside(w)
 		return
 	}
-	if now, err := os.Stat(again); err != nil || !os.SameFile(stat, now) {
+	root := fsutil.IsUnderAny(again, roots)
+	if root == "" {
+		refuseOutside(w)
+		return
+	}
+	if h.beforeConfirm != nil {
+		h.beforeConfirm()
+	}
+	if !sameFileInRoot(stat, root, again) {
 		refuseOutside(w)
 		return
 	}
 	serveOpenedFile(w, r, f, stat, info.AbsolutePath, info.FileExtension, trackID)
+}
+
+// sameFileInRoot reports whether opened is the file at path, walked from
+// root with os.Root, which follows a link only while it stays inside root
+// and never an absolute one. path is a resolution under root, so a
+// component swapped for a link out after that resolution does not walk
+// out of the root, and the file that opened is confirmed only by a path
+// that stays inside. A path that does not begin with root, byte for byte,
+// is not confirmed: on a volume that folds case, a link whose target
+// spells the root another way is refused rather than guessed at.
+func sameFileInRoot(opened fs.FileInfo, root, path string) bool {
+	sep := string(filepath.Separator)
+	rel, ok := strings.CutPrefix(path, strings.TrimSuffix(root, sep)+sep)
+	if !ok || rel == "" {
+		return false
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return false
+	}
+	defer r.Close()
+	now, err := r.Stat(rel)
+	return err == nil && os.SameFile(opened, now)
 }
 
 // loopbackTrackID is the id in FilePathPrefix + id. The id is one path
