@@ -49234,17 +49234,19 @@ the MPD connection still lazy (decision 4). The rules are in
 - **Typed refusals**: `{"error","message"}` with `loopback_only`,
   `method_not_allowed`, `not_found` (no row, a path below the id, a
   rendition, a routed track, a file gone), `not_a_file`,
-  `outside_library` and `internal`. They are the route's, not `/v1`'s, so
-  PROTOCOL.md's error table, whose guards read `internal/api`, does not
-  list them; the `/v1/outputs` section names them.
+  `outside_library` and `internal`; round two added `loopback_host_only`,
+  `forwarded_request` and `not_serving` (below). They are the route's, not
+  `/v1`'s, so PROTOCOL.md's error table, whose guards read `internal/api`,
+  does not list them; the `/v1/outputs` section names them.
 - **Lifecycle**: serve starts the route the first time the localOutputs
   gate answers true (asked once at boot, and `OnActive` from every later
   true answer, for an MPD that appears after boot), binds once (a taken
   port is one Warn, kept for the checklist), and stops it before the store
-  closes. `Stop` closes a stream still running when its context ends:
-  `http.Server.Shutdown` returns at the context and leaves an active
-  connection open, which the red run showed (a 64 MiB stream ran to its
-  end after a cancelled Shutdown).
+  closes; since round two every request in between asks whether
+  `output.mpd` still resolves on (below). `Stop` closes a stream still
+  running when its context ends: `http.Server.Shutdown` returns at the
+  context and leaves an active connection open, which the red run showed
+  (a 64 MiB stream ran to its end after a cancelled Shutdown).
 - **On the wire**: `/v1/outputs`'s `mpd` object gains `loopbackBaseURL`
   (`http://127.0.0.1:<port>`), present only while the route serves, so a
   client treats it as optional. Additive, `ProtocolVersion` stays 1, and
@@ -49267,7 +49269,8 @@ a warn (`hw:CARD=<id>`). The Music line reads the path rules: no library root is
 green, "Ready: can play music from another bridge or NAS"; every root
 proven is green; otherwise the first root that is not proven names its
 fix, as a warn while the loopback route serves (it still plays, over
-HTTP) and a fail when it does not. The Phone line counts paired devices.
+HTTP) and a fail when it does not. The Phone line counts paired devices,
+which round two narrowed to the tokens a phone can use (below).
 
 One gathering in `cmd/bridge` (`outputChecklist`) feeds both surfaces.
 `bridge doctor` asks a one-shot outputs builder over the config
@@ -49393,3 +49396,118 @@ the named tests, restored from HEAD and checked clean.
 - B3 (the live reading and verdict), the iOS side (I1–I4), the bridge's
   own player (B470), and anything the DLNA server serves are untouched;
   the DLNA route's serving half was extracted, not changed.
+
+### Round two: the PR #1302 review
+
+Six findings, each fixed in its own commit with its test red first and one
+negative control (finding 6 has two, one per kind of split).
+
+- **The route kept serving after `output.mpd` stopped resolving on**
+  (Medium). The listener's start was the only gate, so a route that
+  started while the gate answered true served until the bridge stopped.
+  Every request now asks `LoopbackConfig.Enabled`, which serve wires to
+  `api.Server.LocalOutputsActiveNow`: `off` refuses at once, `on` serves,
+  and `auto` follows the verdict of the gate's most recent probe, whatever
+  its age or the configuration it probed (`localOutputs.activeNow`, a read
+  of the probe cache under its lock). It never probes, dials, greets or
+  runs `OnActive`, so a request never reaches MPD; the listener stays up
+  and a request is refused with `404 not_serving`, and a nil `Enabled`
+  serves nothing. The doctor's probe knows the route by `not_serving` as
+  well as `not_found` (`errLoopbackNotServing`), and the Music line then
+  says the running bridge's route answers but is not serving, with a
+  restart as the fix, where it would have named the port as taken.
+- **DNS rebinding** (Medium). A page a browser loads from a name its
+  author controls can re-point that name at 127.0.0.1; its requests then
+  pass the remote-address check, under the page's name as the Host. The
+  route answers only a Host of `127.0.0.1`, `[::1]` or `localhost`, with
+  any port or none (`loopback_host_only`; an empty Host is refused too,
+  since MPD's curl always sends one), and refuses a request carrying
+  `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP`, even
+  empty (`forwarded_request`). Both come before the route says whether it
+  serves, so a rebinding page does not learn that either. The residual: a
+  proxy on the host that strips all four and forwards to the port is the
+  owner's own configuration, which nothing in the request tells from MPD.
+- **The checklist judged an empty input when the outputs body could not
+  be read** (Low). The Player line said MPD was not answering, the DAC
+  line that there was no DAC, and a box with roots read "Ready". The
+  error now goes into the input (`Input.Unread`): the Player line fails
+  and says what failed, the DAC line says it was not checked, the Music
+  line judges the configured roots, each `unchecked`
+  (`outputChecklistSource.Roots`: the resolver's live roots in serve,
+  `cfg.LibraryRoots` in the doctor, by the basename a path rule gives a
+  root), with the route's base URL and start error read from the route,
+  so a taken port still fails with its fix; no roots is still Ready, and
+  the Phone line is judged as usual.
+- **The Phone line counted tokens no phone can use** (Medium). Every token
+  in the store counted, so a token minted and never used, one past its
+  expiry, or one rotated and not used since turned the line green.
+  `usablePhones` is the one count, over serve's `store.List()` and the
+  doctor's `tokens.json`: a token counts when it has not expired and its
+  `LastUsedAt` is later than its `RotatedAt`. The demo's static token is
+  not in `List` and counts none. With tokens issued and none in use the
+  line says so ("1 device token is issued, but no phone uses it: …"). In
+  the doctor `LastUsedAt` lands lazily (`lastUsedFlushInterval`, and at
+  shutdown), so a phone that first connected in the last half minute may
+  not count there yet; the console reads the serving store and counts it.
+- **A root's own path**: documented, not rebuilt. A configured root's own
+  path and its ancestors are trusted as the owner's (a root that is a
+  link is followed wherever it points); the route defends everything below
+  a root.
+- **SonarCloud**: the not-found message is one constant
+  (`msgNoTrack`, go:S1192); the dashboard's first `loadPlayerChecklist`
+  is `void` (javascript:S9383); four tests over the cognitive-complexity
+  limit (go:S3776) are split by the concerns they had, no assertion
+  dropped, the doctor test's off-Linux and no-library cases becoming
+  `TestBridgeDoctorPrintsNoChecklistOffAPlayer` and
+  `TestBridgeDoctorCallsAPlayerWithNoLibraryReady`. The two plain-HTTP
+  URLs (go:S5332) are the route's purpose and stay. With no Sonar on the
+  host, a standard-library script following gocognit's rules measured the
+  result: it scores the four flagged tests at 26, 22, 19 and 16 on
+  48a02cd0 at the lines Sonar named (and scores some functions Sonar did
+  not flag above 15, so it errs high); after the split they are 10 and
+  under, and every function round two added or touched is 15 or under.
+
+**Red first.** On 48a02cd0 the new tests do not build: they use the new
+API (`LoopbackFileHandler`'s third argument, `LoopbackConfig.Enabled`,
+`activeNow`, `errLoopbackNotServing`, `Loopback.NotServing`,
+`Input.Unread`, the source's `Roots`, `LoopbackBaseURL` and `Tokens`).
+Each was then run against the API with the behaviour absent:
+`TestLoopbackRouteServesOnlyWhileOutputIsOn` (`output off: status 200`,
+the track's bytes), `TestTheLoopbackRouteAsksTheGateWithoutDialling`
+(`off: status 200 error "", want 404 "not_serving"`),
+`TestProbeLoopbackRouteKnowsItsOwnRoute` (`own route, output off: base
+"http://127.0.0.1:49220" err <nil>`),
+`TestBridgeDoctorSaysTheLoopbackRouteIsNotServing` (a warn: "it plays
+through the bridge's loopback HTTP route"),
+`TestServeAsksTheGateOnEveryLoopbackRequest` (`Enabled 0 times`),
+`TestTheMusicLineSaysTheRouteAnswersButIsNotServing`;
+`TestLoopbackRouteAnswersOnlyALoopbackHost` and
+`TestLoopbackRouteRefusesAForwardedRequest` (`status 200, want 403`, the
+track served to `Host: evil.example:7791` from 127.0.0.1);
+`TestABoxThatCouldNotBeReadSaysWhatFailed` and
+`TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead` ("MPD is
+not answering on port 6600", "No DAC found on this box", "Ready" with a
+root configured), `TestServeChecklistReadsTheLiveRootsAndTheRoute`,
+`TestTheDoctorChecklistReadsTheConfiguredRoots`;
+`TestUsablePhonesCountsOnlyTokensAPhoneCanUse` (expired, never used,
+rotated: `counts 1, want 0`), `TestThePhoneLineSaysWhenNoTokenIsInUse`,
+`TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken` (a token never used
+read `ok 1 device paired`). `TestTheDemoTokenIsNoPhone` passed against the
+stub too: it pins a property `List` already had.
+`TestBridgeDoctorPrintsThePlayerChecklist`'s token is now used and
+flushed, since a bare mint is no phone.
+
+| Mutation | Red |
+|---|---|
+| the per-request `Enabled` check removed | `TestLoopbackRouteServesOnlyWhileOutputIsOn`, `TestTheLoopbackRouteAsksTheGateWithoutDialling`, `TestProbeLoopbackRouteKnowsItsOwnRoute`, `TestBridgeDoctorSaysTheLoopbackRouteIsNotServing` |
+| the Host and forwarding checks removed (whole `internal/dlna`) | `TestLoopbackRouteAnswersOnlyALoopbackHost`, `TestLoopbackRouteRefusesAForwardedRequest` |
+| an unread body judged as the empty input | `TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead` |
+| `usablePhones` counts every token | `TestUsablePhonesCountsOnlyTokensAPhoneCanUse`, `TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken` |
+| the route ignores `Range` (whole `internal/dlna`) | `TestLoopbackRouteServesTheFileUnaltered` |
+| the Player line's fail without a fix | `TestEveryLineIsGreenOrSaysItsFixInOneSentence/mpd_down`, `TestEachStateSaysWhatToDo/mpd_down`, `TestBridgeDoctorPrintsThePlayerChecklist` |
+
+The root-trust sentence is documentation and has no control.
+`TestDoctorPassesWithNoRoots`'s Music assertion runs only where the
+checklist runs, so on the macOS host here its split was checked by the
+test passing and the helpers being straight extractions; CI's Linux leg
+runs it whole.
