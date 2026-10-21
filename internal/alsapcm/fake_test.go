@@ -68,11 +68,20 @@ type fakeCond struct {
 // clock moves only in a poll that waits, by the time the wait needs (until
 // a period is free, until the buffer runs dry, until a timeout), and only
 // as far as the simulated time the test has granted (grant, play): a poll
-// that needs more waits for the test's next grant, or for its context. So a
-// test decides how much audio plays between two of its steps, and nothing
-// depends on how fast the machine runs. heard is what the DAC consumed, in
-// order, across every open; STATUS reports the pointers and the delay as
-// the kernel does, a delay of 0 unless the stream runs or drains.
+// that needs more waits for the test's next grant, for its context, or for
+// the node to have something to report. So a test decides how much audio
+// plays between two of its steps, and nothing depends on how fast the
+// machine runs. free lets the waits that need time to finish, for room and
+// for a drain's end, take it without a grant; a wait for an error condition
+// alone (a paused stream, a writer waiting for frames) still makes no time
+// pass by itself, since nothing would make it pass faster in a real system.
+// heard is what the DAC consumed, in order, across every open; STATUS
+// reports the pointers and the delay as the kernel does, a delay of 0 unless
+// the stream runs or drains.
+//
+// Without model, a poll for no event that nothing has scripted waits until
+// its context ends: nothing in this fake raises an error condition on its
+// own.
 type fakeKernel struct {
 	t *testing.T
 
@@ -99,8 +108,9 @@ type fakeKernel struct {
 	model     bool
 	unlimited bool          // the clock moves freely: no grant is needed
 	budget    time.Duration // simulated time granted and not yet used
-	more      chan struct{} // closed and replaced by each grant
-	starving  int           // polls waiting for a grant
+	more      chan struct{} // closed and replaced by each grant and each wake-up
+	starving  int           // polls waiting: for a grant, or, without model, for their context
+	onNow     func()        // called once, outside the lock, by the next now
 	appl      uint64        // frames written since PREPARE (appl_ptr)
 	consumed  uint64        // frames consumed since PREPARE (hw_ptr)
 	frac      uint64        // what a part frame of play has used: nanoseconds times the rate
@@ -184,11 +194,19 @@ func mustOpen(t *testing.T, k *fakeKernel, cfg Config) *Device {
 	return d
 }
 
-// now is the fake clock, which only a poll that waits moves.
+// now is the fake clock, which only a poll that waits moves. A test that
+// sets onNow has it called once, by the next now, outside the lock: the
+// sink reads its clock between deciding to wait and starting the wait.
 func (k *fakeKernel) now() time.Time {
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.clock
+	hook := k.onNow
+	k.onNow = nil
+	clock := k.clock
+	k.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return clock
 }
 
 func (k *fakeKernel) open(path string) (int, error) {
@@ -233,6 +251,18 @@ func (k *fakeKernel) poll(ctx context.Context, fd int, events int16, timeout tim
 		k.check()
 		k.mu.Unlock()
 		return rev, err
+	}
+	if len(k.polls) == 0 && events&pollOut == 0 {
+		// A wait for an error condition alone: nothing here raises one, so
+		// it lasts until its context ends.
+		k.starving++
+		k.check()
+		k.mu.Unlock()
+		<-ctx.Done()
+		k.mu.Lock()
+		k.starving--
+		k.mu.Unlock()
+		return 0, ctx.Err()
 	}
 	step := fakePoll{revents: pollOut}
 	if len(k.polls) > 0 {
@@ -279,7 +309,10 @@ func (k *fakeKernel) modelPoll(ctx context.Context, events int16, timeout time.D
 		if need, ok := k.untilEvent(events); ok && need < step {
 			step = need
 		}
-		if !k.unlimited {
+		// free gives time to a wait that needs it to finish, for room or
+		// for a drain's end; a wait for an error condition alone waits for
+		// a grant, as when time is not free.
+		if !k.unlimited || (events&pollOut == 0 && k.state != stateDraining) {
 			if k.budget == 0 {
 				// Wait for a grant, or for the node to have something to
 				// report (a device gone): either way, look again.
@@ -461,8 +494,21 @@ func (k *fakeKernel) play(t *testing.T, d time.Duration) {
 }
 
 // advanceNow moves the fake clock by d with the DAC playing, outside any
-// poll: the time a writer that waits for frames, not on the DAC, lets pass.
+// poll: time that passes while no poll asks for it, as when a producer is
+// late. A poll that waits looks at the node again afterwards, as the kernel
+// wakes its sleepers when a stream's state changes.
 func (k *fakeKernel) advanceNow(d time.Duration) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.advance(d)
+	close(k.more)
+	k.more = make(chan struct{})
+	k.check()
+}
+
+// advanceUnwatched is advanceNow with no poll woken: the moment before the
+// kernel's wake-up reaches a waiting writer, which a command may beat.
+func (k *fakeKernel) advanceUnwatched(d time.Duration) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.advance(d)
