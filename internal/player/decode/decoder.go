@@ -83,7 +83,7 @@ func Open(rs io.ReadSeeker) (Source, error) {
 	case sniffAIFF:
 		return openAIFF(view)
 	case sniffALAC:
-		return nil, refuse(ReasonNotYetSupported, "ALAC is not enabled in this release")
+		return openALAC(view)
 	case sniffDSF:
 		return openDSF(view)
 	case sniffDFF:

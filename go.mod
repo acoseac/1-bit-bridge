@@ -9,6 +9,7 @@ require (
 	github.com/hashicorp/mdns v1.0.7
 	github.com/mewkiz/flac v1.0.14
 	github.com/miekg/dns v1.1.73
+	github.com/mycophonic/saprobe-alac v1.0.0-rc2.0.20261020094436-1b6eb8378954
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/quic-go v0.63.0
@@ -20,7 +21,7 @@ require (
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
-	golang.org/x/text v0.42.0
+	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0
 	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -88,3 +89,11 @@ require (
 // Drop this replace when a released fsnotify carries the fix: bump the require
 // above and delete this line in the same change.
 replace github.com/fsnotify/fsnotify => github.com/acoseac/fsnotify v1.10.2-0.20261020172534-bda6368c20de
+
+// Patched saprobe-alac 1b6eb83 for its entropy decoder's reads past a packet's
+// end (backlog B470; ops/upstream/saprobe-alac.md is the upstream report, and
+// ops/upstream/saprobe-alac.patch the change third_party/saprobe-alac carries).
+// Drop this replace when a released saprobe-alac carries the fix: bump the
+// require above and delete this line and third_party/saprobe-alac in the same
+// change.
+replace github.com/mycophonic/saprobe-alac => ./third_party/saprobe-alac

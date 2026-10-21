@@ -70,8 +70,12 @@ RUN apk add --no-cache git
 WORKDIR /src
 
 # Cache the module layer separately so a code-only change doesn't
-# re-download deps.
+# re-download deps. go.mod replaces saprobe-alac with the patched copy in
+# third_party/saprobe-alac (B470), and go mod download reads that copy's
+# go.mod to build the module graph: without it the download stops with
+# "reading third_party/saprobe-alac/go.mod: no such file or directory".
 COPY go.mod go.sum ./
+COPY third_party/saprobe-alac/go.mod third_party/saprobe-alac/
 RUN go mod download
 
 COPY . .

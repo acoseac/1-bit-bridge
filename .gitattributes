@@ -10,3 +10,6 @@ internal/mpd/testdata/** text eol=lf
 internal/player/decode/testdata/dsd-goldens/*.bin binary
 internal/player/decode/testdata/dsd-goldens/*.dsf binary
 internal/player/decode/testdata/dsd-goldens/*.dff binary
+# The ALAC goldens are compared sample for sample after decoding; keep git
+# from ever treating one as text.
+internal/player/decode/testdata/alac-goldens/*.m4a binary

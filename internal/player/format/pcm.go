@@ -13,7 +13,8 @@ const (
 	ContainerAIFF Container = "aiff"
 	ContainerDSF  Container = "dsf"
 	ContainerDFF  Container = "dff"
-	// Later: ContainerALAC.
+	// ContainerALAC is ALAC packets in an MP4 (M4A) container.
+	ContainerALAC Container = "alac"
 )
 
 // Kind is the playback transport representation.

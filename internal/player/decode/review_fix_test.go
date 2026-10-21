@@ -353,7 +353,9 @@ func TestReviewSniffMP4(t *testing.T) {
 	if !ok {
 		t.Fatalf("want refusal, got %v", err)
 	}
-	if r.Reason == decode.ReasonNotYetSupported {
+	// Since PR 1c an ALAC verdict opens the ALAC demuxer, whose refusal
+	// would not name the sniffer's mistake: ask the sniffer.
+	if alac, _ := decode.SniffsALAC(bytes.NewReader(b)); alac {
 		t.Fatalf("metadata text alac misclassified as ALAC: %v", err)
 	}
 	if r.Reason == decode.ReasonLossy {
