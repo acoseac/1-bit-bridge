@@ -136,21 +136,32 @@ func TestMaintenanceRefusesMutationsAndServesReads(t *testing.T) {
 }
 
 // TestMaintenanceDiscardsEarlierSessionsEvents pins the session check
-// inside a hold.
+// inside a hold: the session it released reports while its release is
+// still under way, and after, and nothing it reports takes effect.
 func TestMaintenanceDiscardsEarlierSessionsEvents(t *testing.T) {
 	h := startHarness(t)
 	ids, s := h.playing(0, "a", "b")
 	next := s.prepared(s.first.ID, 1)
-	_, err := h.eng.EnterMaintenance(bg, h.snap().Generation(), "the test")
-	h.must("enter", err)
-	mark := h.appliedMark()
-	s.submitted(next.ID)
-	s.audible(next.ID)
-	s.fault(Fault{Reason: ReasonXrun})
-	h.waitApplied("handled fault", mark)
-	sn := h.snap()
-	if sn.Selected() != ids[0] || len(sn.Faults()) != 0 || sn.State() != Maintenance {
-		t.Fatalf("an earlier session's events took effect in maintenance: %s at %d, faults %v", sn.State(), sn.Selected(), sn.Faults())
+	g := holdReleases(h)
+	enter := async(func() error {
+		_, err := h.eng.EnterMaintenance(bg, h.snap().Generation(), "the test")
+		return err
+	})
+	h.waitSnap("maintenance", func(sn *Snapshot) bool { return sn.State() == Maintenance })
+	for round := 0; round < 2; round++ {
+		mark := h.appliedMark()
+		s.submitted(next.ID)
+		s.audible(next.ID)
+		s.fault(Fault{Reason: ReasonXrun})
+		h.waitApplied("handled fault", mark)
+		sn := h.snap()
+		if sn.Selected() != ids[0] || len(sn.Faults()) != 0 || sn.State() != Maintenance {
+			t.Fatalf("round %d: an earlier session's events took effect in maintenance: %s at %d, faults %v", round, sn.State(), sn.Selected(), sn.Faults())
+		}
+		if round == 0 {
+			g.open()
+			h.must("enter", h.result("enter", enter))
+		}
 	}
 }
 
