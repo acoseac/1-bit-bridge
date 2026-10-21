@@ -27,24 +27,38 @@ libraryName: "My Music Library"
 
 # output.mpd: "auto" (default) | "on" | "off"
 #
-# auto: report this box as an audio output when it has an MPD (a
-#   configuration was read, or a daemon greeted). A loopback bridge
-#   still requires a library root. A public bridge may start with
-#   none; Validate warns.
-# on: report it on Linux. macOS and Windows answer GET /v1/outputs
-#   with 404 local_outputs_not_supported, so an output-only bridge
-#   there is not a working output. A bridge with no libraryRoots is
-#   valid in this mode: on Linux it serves the player and the DAC,
+# On, this bridge is a player as well as a library: GET /v1/outputs
+# reports the box's MPD and DAC, the bridge serves its tracks to that MPD
+# on loopback (loopbackPort below), and `bridge doctor` and the console's
+# dashboard show the Player / DAC / Music / Phone checklist. The MPD
+# connection is opened by the first /v1/outputs call and closed about a
+# minute after the last.
+#
+# auto (the default, and what an unset value means): on when this box has
+#   an MPD (Volumio or moOde is installed, a configuration was read, or a
+#   daemon greeted). A loopback bridge still requires a library root. A
+#   public bridge may start with none; Validate warns.
+# on: on on Linux whatever detection finds. macOS and Windows answer GET
+#   /v1/outputs with 404 local_outputs_not_supported, so an output-only
+#   bridge there is not a working output. A bridge with no libraryRoots
+#   is valid in this mode: on Linux it serves the player and the DAC,
 #   and no tracks.
-# off: do not report it.
+# off: the opt-out: not a player, whatever detection finds.
 #
 # endpoint, conf and password are optional overrides of what
 # `bridge output player` finds on its own. The password is not logged.
+#
+# loopbackPort: while output.mpd resolves on, the bridge serves its own
+#   tracks over plain HTTP to the MPD on this box, on 127.0.0.1 and ::1
+#   only (no other address, no SSDP, no auth), so MPD can fetch a track
+#   its database does not have. Default 7791. Keep it fixed: MPD keeps
+#   these URLs in its queue across a bridge restart.
 # output:
 #   mpd: auto
 #   # endpoint: "127.0.0.1:6600"
 #   # conf: "/etc/mpd.conf"
 #   # password: ""
+#   # loopbackPort: 7791
 
 # deployment.mode: "loopback" (default) | "public"
 #

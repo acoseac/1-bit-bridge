@@ -22,7 +22,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
-| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the player PCM format/decode layer (`internal/player/format`, `internal/player/decode`), and the player's ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`) | `output.md` |
+| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), the player PCM format/decode layer (`internal/player/format`, `internal/player/decode`), and the player's ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`) | `output.md` |
 | Auth, pairing, sessions and login tickets, TLS and the pin, what logs and error bodies may say | `auth-tls.md` |
 | The admin console, the web player, uploads and the trash | `admin-console.md` |
 | Test discipline, CI, SonarCloud and Docker (loads with every test file) | `build-ci-tests.md` |
@@ -56,6 +56,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/packaging` | launchd plist + systemd unit templates + install/uninstall helpers, used by `bridge init` |
 | `internal/alsa` | Reads the box's ALSA state from a `/proc` tree: the cards, a USB card's id and stream altsets, what an open playback substream was opened with, and the thread and process holding it (`bridge output dac`) |
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader: the box's player (Volumio, moOde or MPD) and how MPD is set (`bridge output player`). Sends only an allowlist; a password is never printed |
+| `internal/outputcheck` | The player checklist (Player / DAC / Music / Phone): four lines, each green or with a one-sentence fix, that `bridge doctor` and the console's dashboard print from one source |
 | `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
 | `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF), DSF and DFF demuxers into canonical native DSD (B470 PR 1b), ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder (B470 PR 1c), and typed refusals |
 | `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470 PR 2a): asound.h definitions pinned to a kernel tag and checked by the `alsa-abi` CI job (`scripts/alsa-abi`), an endpoint opened by card and device number, exact rate/channels/format, cancellable non-blocking writes, bounded drain. Linux amd64/arm64; `bridge output pcm-test` is its hardware harness |

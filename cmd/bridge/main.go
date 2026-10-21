@@ -2613,6 +2613,17 @@ type serveOpts struct {
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
+	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
+	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
+	// loopback track route answer to and which is true on Linux only.
+	// Empty (this host) in production; a boot test on another host stands
+	// in for Linux. Per invocation for tailscaleCLI's reason.
+	localOutputsGOOS string
+	// outputLoopbackBoot is called once serve has decided at boot whether
+	// the loopback track route serves, with its base URL, or "" when it
+	// does not. Nil in production. A boot test waits on it instead of
+	// polling. Per invocation for tailscaleCLI's reason.
+	outputLoopbackBoot func(baseURL string)
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -3868,11 +3879,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	apiSrv.WithPlaylistFileStore(manifestStore)
 	// The box as an output. The flag and the route read output.mpd at
 	// request time, and the track list is the filesystem index only.
+	//
+	// The loopback track route serves this bridge's own tracks over plain
+	// HTTP on 127.0.0.1 and ::1 to the MPD beside it (backlog B473,
+	// decision 2), through the index adapter the DLNA listener reads, so
+	// a track id is the DLNA one. It starts the first time the
+	// localOutputs gate answers true: here at boot, or later through
+	// OnActive, when auto finds an MPD that was not there at boot. Every
+	// request then asks the gate's answer as it stands (Enabled), which
+	// never dials MPD, so the route stops serving when output.mpd stops
+	// resolving on: at once for off, at the gate's next answer for auto. It
+	// is stopped before the store it reads closes (the store's close is
+	// deferred above, so it runs after this one).
+	outLoop := newOutputLoopback(outputLoopbackWiring{
+		Library: newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, logger),
+		Roots:   apiSrv.Resolver().Roots,
+		Enabled: apiSrv.LocalOutputsActiveNow,
+		Port:    cfg.Output.EffectiveLoopbackPort(),
+		Logger:  logger,
+	})
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		outLoop.Stop(stopCtx)
+	}()
 	apiSrv.WithLocalOutputs(api.LocalOutputsConfig{
+		GOOS: opts.localOutputsGOOS,
 		Tracks: func(ctx context.Context) ([]string, error) {
 			return manifestStore.TrackPathsLocal(ctx)
 		},
+		LoopbackBaseURL: outLoop.BaseURL,
+		OnActive:        outLoop.ensureStarted,
 	})
+	// The boot decision: asking the gate starts the route when it is on.
+	apiSrv.LocalOutputsActive(ctx)
+	if opts.outputLoopbackBoot != nil {
+		opts.outputLoopbackBoot(outLoop.BaseURL())
+	}
 	// The endpoint list publishes an IPv6 address of the interface walk
 	// only while the certificate this process serves names it (backlog
 	// B457), and only for a pair this bridge minted: `bridge cert rotate`
@@ -5145,6 +5188,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		uploadMgr.RunSweeper(scanCtx, uploadSweepInterval)
 	}()
 
+	// The player checklist (Player, DAC, Music, Phone) for the dashboard's
+	// panel and the console's doctor: one source, over this process's own
+	// GET /v1/outputs builder, with its caches and its lazy MPD session,
+	// so the console reads the box the way the app does.
+	checklistSrc := outputChecklistSource{
+		Active:          apiSrv.LocalOutputsActive,
+		Outputs:         apiSrv.LocalOutputsResponse,
+		Roots:           apiSrv.Resolver().Roots,
+		LoopbackBaseURL: outLoop.BaseURL,
+		LoopbackErr:     outLoop.StartErr,
+		Tokens:          store.List,
+	}
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
 		CfgPath:      absCfgPath,
@@ -5230,7 +5285,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg)),
+		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc)),
+		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,

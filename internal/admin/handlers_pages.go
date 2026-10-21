@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -356,6 +357,9 @@ func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 		// track_analysis columns, no json_extract.
 		"KeyCoverage": s.keyCoverage(r.Context()),
 	}
+	// The player checklist's Phone line opens the pairing dialog, the
+	// Devices page's own (layout.html's "pair-dialog").
+	pairDialogData(s.deps.CfgHolder.Load(), data)
 	s.renderPage(w, r, "stats", data)
 }
 
@@ -422,6 +426,18 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, r, "library", data)
 }
 
+// pairDialogData adds what the shared pairing dialog reads (layout.html's
+// "pair-dialog"): the dial URL it pre-fills, and the reason when there is
+// none to offer. The Devices page and the dashboard both render the
+// dialog, so they fill it the same way.
+func pairDialogData(cfg *config.Config, data map[string]any) {
+	dial := defaultBridgeURL(cfg)
+	data["DefaultURL"] = dial
+	if dial == "" {
+		data["PairingHint"] = advertise.PairingNeedsEndpoint
+	}
+}
+
 func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	tokens := s.deps.Auth.List()
@@ -443,14 +459,8 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 			ClientVersion: t.LastClientVersion,
 		})
 	}
-	dial := defaultBridgeURL(cfg)
-	data := map[string]any{
-		"Tokens":     rows,
-		"DefaultURL": dial,
-	}
-	if dial == "" {
-		data["PairingHint"] = advertise.PairingNeedsEndpoint
-	}
+	data := map[string]any{"Tokens": rows}
+	pairDialogData(cfg, data)
 	// Console sign-ins, for the "Sign out all other sessions" panel the
 	// template renders in public mode, the one mode with sessions.
 	if s.deps.AdminAuth != nil {
