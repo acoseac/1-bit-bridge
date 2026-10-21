@@ -125,9 +125,12 @@ func playerLine(p Player) Line {
 func dacLine(dacs []DAC) Line {
 	l := Line{Key: "dac", Title: "DAC"}
 	if len(dacs) == 0 {
+		// No card MPD's output resolves to, and no USB card to offer. The
+		// box may hold an I2S HAT behind a device name this reader does not
+		// resolve, so the line does not say USB alone.
 		l.Status = Fail
-		l.Summary = "No USB DAC found on this box"
-		l.Fix = "Plug the DAC in by USB and switch it on, then check `bridge output dac`."
+		l.Summary = "No DAC found on this box"
+		l.Fix = "Plug the DAC in by USB and switch it on, or point MPD's audio_output at its card; `bridge output dac` lists the cards."
 		return l
 	}
 	for _, d := range dacs {

@@ -167,7 +167,7 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 	}{
 		{"mpd down", func(in *Input) { in.Player.MPDVersion, in.Player.Addresses = "", nil }, "player", Fail, []string{"Start MPD"}},
 		{"mpd on this box only", func(in *Input) { in.Player.Addresses = nil }, "player", Warn, []string{"bind_to_address", "mpd.conf"}},
-		{"no dac", func(in *Input) { in.DACs = nil }, "dac", Fail, []string{"USB", "bridge output dac"}},
+		{"no dac", func(in *Input) { in.DACs = nil }, "dac", Fail, []string{"USB", "audio_output", "bridge output dac"}},
 		{"dac not mpd's", func(in *Input) { in.DACs[0].IsMPDsOutput = false }, "dac", Warn, []string{"audio_output", "hw:CARD=Audio"}},
 		{"unproven", func(in *Input) { in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"} }, "music", Warn, []string{"INTERNAL", "music directory"}},
 		{"mismatch", func(in *Input) { in.Roots[0] = RootRule{Root: "INTERNAL", State: "mismatch", Checked: 20, Found: 3} }, "music", Warn, []string{"Update MPD's database"}},
@@ -195,6 +195,18 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNoDACIsNotOnlyAUSBQuestion: a box whose card MPD's output does not
+// resolve to may hold an I2S HAT, not a USB DAC, so the line says no DAC,
+// and its fix covers pointing MPD at a card as well as plugging one in.
+func TestNoDACIsNotOnlyAUSBQuestion(t *testing.T) {
+	in := healthy()
+	in.DACs = nil
+	d := line(t, Lines(in), "dac")
+	if d.Summary != "No DAC found on this box" {
+		t.Fatalf("summary %q", d.Summary)
 	}
 }
 

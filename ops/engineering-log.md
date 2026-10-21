@@ -48554,8 +48554,10 @@ LAN addresses where the phone reaches it (the owner asked that protocols
 be shown); MPD down is a fail ("Start MPD on this box…"), MPD on loopback
 only is a warn (`bind_to_address "any"`). The DAC line names the card,
 its USB id and what it can receive (PCM rate, native DSD by its DSD
-name); no card is a fail, a card MPD's output does not name is a warn
-(`hw:CARD=<id>`). The Music line reads the path rules: no library root is
+name); no card is a fail, worded "No DAC found" rather than "no USB DAC",
+since a box with an I2S HAT behind a device name this reader does not
+resolve reaches the same branch, and a card MPD's output does not name is
+a warn (`hw:CARD=<id>`). The Music line reads the path rules: no library root is
 green, "Ready: can play music from another bridge or NAS"; every root
 proven is green; otherwise the first root that is not proven names its
 fix, as a warn while the loopback route serves (it still plays, over

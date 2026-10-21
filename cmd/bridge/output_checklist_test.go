@@ -230,7 +230,7 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 		summary string
 	}{
 		{"player", doctor.Fail, "Volumio is installed, but MPD is not answering on port 6600"},
-		{"dac", doctor.Fail, "No USB DAC found on this box"},
+		{"dac", doctor.Fail, "No DAC found on this box"},
 		{"music", doctor.Fail, "MPD was not asked about Music"},
 		{"phone", doctor.OK, "1 device paired"},
 	} {
