@@ -1195,6 +1195,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   which hashicorp/mdns binds on macOS and on Linux (measured).
 
 - **A folder's children sort by `RelativePath`, with `AbsolutePath` only
+- **The file route's serving half is shared with the loopback track route** (B473 B2c): `serveOpenedFile` (the headers, the adaptive writer, `http.ServeContent`) serves `/dlna/file/` on this listener and the same path on the loopback listener the MPD beside the bridge fetches from, so MPD gets the same type and bytes from either; it was extracted from `serveFromFilesystem` unchanged. The loopback route is not a second DLNA listener: no SSDP, no CDS, no artwork, no renditions, no routed tracks, a stricter containment check and typed JSON refusals. Its rules are in `output.md`. **Don't add a serving step to one route that the other does not get, and don't mount another DLNA route on the loopback listener.**
   as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`
   (`dlna_wiring.go` leaves it so the proxy fast-path takes over), so a sort
   keyed on it alone left a routed folder's children — and the "first keyed
