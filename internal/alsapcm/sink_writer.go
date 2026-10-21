@@ -32,11 +32,17 @@ func (s *Sink) loop() {
 			return
 		}
 		if c != nil {
-			c.reply <- s.do(c)
+			if reply, err := s.do(c); reply {
+				c.reply <- err
+			}
+			continue
+		}
+		if s.drainCmd != nil && s.drainCmd.ctx.Err() != nil {
+			s.abandonDrain()
 			continue
 		}
 		switch s.state {
-		case SinkPlaying:
+		case SinkPlaying, SinkDraining:
 			s.feed()
 		case SinkPaused:
 			s.hold()
@@ -62,19 +68,20 @@ func (s *Sink) next() (*sinkCmd, bool) {
 	return c, false
 }
 
-// do carries out one command.
-func (s *Sink) do(c *sinkCmd) error {
+// do carries out one command, and reports whether it is answered now: a
+// Drain is answered when the drain ends.
+func (s *Sink) do(c *sinkCmd) (bool, error) {
 	switch c.op {
 	case opPause:
-		return s.pause()
+		return true, s.pause()
 	case opResume:
-		return s.resume()
+		return true, s.resume()
 	case opRecover:
-		return s.recover()
+		return true, s.recover()
 	case opDrain:
-		return s.drain(c.ctx)
+		return s.startDrain(c)
 	}
-	return s.drop()
+	return true, s.drop()
 }
 
 // waitContext is the context a wait on the device runs with: it ends with
@@ -93,14 +100,19 @@ func (s *Sink) waitContext() context.Context {
 }
 
 // feed writes the next frames of the lookahead, at most a period, and
-// measures; with nothing to write it waits for frames or a command.
+// measures. With nothing to write it waits for frames or a command, or,
+// draining, has the kernel play out the buffer.
 func (s *Sink) feed() {
 	ctx := s.waitContext()
 	s.mu.Lock()
 	chunk := s.ring.span(s.ring.wr, min(s.ring.pending(), int64(s.params.PeriodFrames)))
 	s.mu.Unlock()
 	if len(chunk) == 0 {
-		s.idle()
+		if s.state == SinkDraining {
+			s.finishDrain()
+		} else {
+			s.idle()
+		}
 		return
 	}
 	n, err := s.dev.Write(ctx, chunk)
@@ -121,7 +133,8 @@ func (s *Sink) idle() {
 	select {
 	case <-s.kick:
 	case <-s.life.Done():
-		s.end(&Error{Reason: ReasonCancelled, Op: "sink", Endpoint: s.cfg.Endpoint, Detail: "the sink's context ended", Err: s.life.Err()})
+		err := &Error{Reason: ReasonCancelled, Op: "sink", Endpoint: s.cfg.Endpoint, Detail: "the sink's context ended", Err: s.life.Err()}
+		s.end(err, err)
 	}
 }
 
@@ -134,8 +147,9 @@ func (s *Sink) wrote(n int64, silence bool) bool {
 		return true
 	}
 	if !s.run.add(n, silence) {
-		s.end(&Error{Reason: ReasonBadState, Op: "write", Endpoint: s.cfg.Endpoint,
-			Detail: "the record of content and silence written is full: the position could not be kept"})
+		err := &Error{Reason: ReasonBadState, Op: "write", Endpoint: s.cfg.Endpoint,
+			Detail: "the record of content and silence written is full: the position could not be kept"}
+		s.end(err, err)
 		return false
 	}
 	c := s.dev.Counters()
@@ -160,12 +174,12 @@ func (s *Sink) fault(err error, op string) {
 	switch ReasonOf(err) {
 	case ReasonCancelled:
 		if s.life.Err() != nil {
-			s.end(err)
+			s.end(err, err)
 		}
 	case ReasonXrun:
 		s.xrun(err, op)
 	default:
-		s.end(err)
+		s.end(err, err)
 	}
 }
 
@@ -221,7 +235,8 @@ func (s *Sink) establish(p int64, stream State, queued int64) {
 // pointer reaches the last frame written, so every frame written was
 // consumed: the content played is all of it, the gap is at its end, and
 // the frames still held play after Recover. What the DAC was sent between
-// the underrun and the stop is the driver's to say, not the sink's.
+// the underrun and the stop is the driver's to say, not the sink's. A
+// Drain under way ends with the xrun.
 func (s *Sink) xrun(err error, op string) {
 	s.runPlayed = s.run.written
 	s.run.fold(s.run.written)
@@ -232,6 +247,7 @@ func (s *Sink) xrun(err error, op string) {
 	s.ngaps++
 	s.setStateLocked(SinkXrun, err)
 	s.mu.Unlock()
+	s.answerDrain(err)
 }
 
 // setStateLocked moves the sink to st, with s.mu held, and tells whoever
@@ -244,8 +260,9 @@ func (s *Sink) setStateLocked(st SinkState, err error) {
 }
 
 // end closes the device and ends the sink: stopped when err is nil, ended
-// with err otherwise. Commands still waiting are answered with the end.
-func (s *Sink) end(err error) {
+// with err otherwise. A Drain under way is answered with drainErr, and the
+// commands still waiting with the end.
+func (s *Sink) end(err, drainErr error) {
 	s.closeDevice()
 	st := SinkStopped
 	if err != nil {
@@ -259,6 +276,7 @@ func (s *Sink) end(err error) {
 		s.wakeStop()
 	}
 	s.mu.Unlock()
+	s.answerDrain(drainErr)
 	for _, c := range cmds {
 		c.reply <- s.doneError(c.op)
 	}
@@ -305,8 +323,8 @@ func (s *Sink) badState(op string) error {
 		detail = "the sink stopped at an xrun: recover or drop it"
 	case SinkPaused, SinkReleased:
 		detail = "the sink is " + s.state.String() + ": resume or drop it"
-	case SinkPlaying:
-		detail = "the sink is playing: nothing stopped it"
+	case SinkPlaying, SinkDraining:
+		detail = "the sink is " + s.state.String() + ": nothing stopped it"
 	}
 	return &Error{Reason: ReasonBadState, Op: op, Endpoint: s.cfg.Endpoint, Detail: detail}
 }
@@ -315,7 +333,8 @@ func (s *Sink) badState(op string) error {
 // that runs with the kernel's PAUSE when the mode allows and the hardware
 // offers it, and otherwise with zeros, which the writer then writes after
 // what is queued. A pause by zeros needs two free segments in the run's
-// record, its silence and the content after it.
+// record, its silence and the content after it. A drain under way waits
+// for the resume.
 func (s *Sink) pause() error {
 	switch s.state {
 	case SinkPaused, SinkReleased:
@@ -393,22 +412,26 @@ func (s *Sink) hold() {
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
-			s.end(s.dev.kernelError("poll", err))
+			kerr := s.dev.kernelError("poll", err)
+			s.end(kerr, kerr)
 		} else if s.life.Err() != nil {
-			s.end(&Error{Reason: ReasonCancelled, Op: "pause", Endpoint: s.cfg.Endpoint, Err: s.life.Err()})
+			cerr := &Error{Reason: ReasonCancelled, Op: "pause", Endpoint: s.cfg.Endpoint, Err: s.life.Err()}
+			s.end(cerr, cerr)
 		}
 	case rev == 0:
 		s.unexplained = 0
 	case rev&(pollHup|pollNval) != 0:
-		s.end(&Error{Reason: ReasonDisconnected, Op: "pause", Endpoint: s.cfg.Endpoint, Detail: "the device went away", Err: pollEvents(rev)})
+		derr := &Error{Reason: ReasonDisconnected, Op: "pause", Endpoint: s.cfg.Endpoint, Detail: "the device went away", Err: pollEvents(rev)}
+		s.end(derr, derr)
 	case rev&pollErr != 0:
 		if err := s.dev.explain("pause"); err != nil {
 			s.fault(err, "pause")
 			return
 		}
 		if s.unexplained++; s.unexplained > 1 {
-			s.end(&Error{Reason: ReasonKernel, Op: "pause", Endpoint: s.cfg.Endpoint,
-				Detail: "poll keeps reporting an error the stream's state does not explain"})
+			kerr := &Error{Reason: ReasonKernel, Op: "pause", Endpoint: s.cfg.Endpoint,
+				Detail: "poll keeps reporting an error the stream's state does not explain"}
+			s.end(kerr, kerr)
 		}
 	}
 }
@@ -428,8 +451,9 @@ func (s *Sink) release() {
 	kept := s.ring.wr - s.ring.base
 	s.mu.Unlock()
 	if unplayed > kept {
-		s.end(&Error{Reason: ReasonBadState, Op: "release", Endpoint: s.cfg.Endpoint, Detail: fmt.Sprintf(
-			"the %d frames the DAC had not played are not all held (%d are): a release would skip them", unplayed, kept)})
+		err := &Error{Reason: ReasonBadState, Op: "release", Endpoint: s.cfg.Endpoint, Detail: fmt.Sprintf(
+			"the %d frames the DAC had not played are not all held (%d are): a release would skip them", unplayed, kept)}
+		s.end(err, err)
 		return
 	}
 	s.closeDevice()
@@ -441,11 +465,19 @@ func (s *Sink) release() {
 	s.mu.Unlock()
 }
 
+// playing is the state a sink plays on in: draining when a Drain waits.
+func (s *Sink) playing() SinkState {
+	if s.drainCmd != nil {
+		return SinkDraining
+	}
+	return SinkPlaying
+}
+
 // resume plays on: PAUSE released, zeros no longer written, or, for a
 // released sink, the device opened again.
 func (s *Sink) resume() error {
 	switch s.state {
-	case SinkPlaying:
+	case SinkPlaying, SinkDraining:
 		return nil
 	case SinkReleased:
 		return s.reopen()
@@ -463,7 +495,7 @@ func (s *Sink) resume() error {
 		}
 	}
 	s.mu.Lock()
-	s.setStateLocked(SinkPlaying, nil)
+	s.setStateLocked(s.playing(), nil)
 	s.mu.Unlock()
 	return nil
 }
@@ -500,7 +532,7 @@ func (s *Sink) reopen() error {
 	s.ring.keep = int64(p.BufferFrames)
 	s.pos.Stream, s.pos.Queued = State(statePrepared), 0
 	s.reopens++
-	s.setStateLocked(SinkPlaying, nil)
+	s.setStateLocked(s.playing(), nil)
 	s.mu.Unlock()
 	return nil
 }
@@ -526,41 +558,68 @@ func (s *Sink) recover() error {
 	return nil
 }
 
-// drain writes what the store holds, has the kernel play out the buffer
-// (Device.Drain, bounded by the buffer's time and drainSlack), and closes
-// the device: the sink is stopped. Paused, released or stopped by an
-// xrun, a sink has nothing it may play out until it is resumed or
-// recovered.
-func (s *Sink) drain(ctx context.Context) error {
+// startDrain takes a Drain: the producer is done, and the writer goes on
+// writing what the store holds, pauses included, until it is empty and
+// finishDrain has the kernel play out the buffer. It is answered then, or
+// when the drain ends some other way. The drain's context ending wakes the
+// writer, which drops the stream (abandonDrain).
+func (s *Sink) startDrain(c *sinkCmd) (bool, error) {
 	if s.state != SinkPlaying {
-		return s.badState("drain")
+		return true, s.badState("drain")
 	}
+	s.drainCmd = c
+	s.drainStop = context.AfterFunc(c.ctx, func() {
+		s.mu.Lock()
+		if s.wakeStop != nil {
+			s.wakeStop()
+		}
+		s.mu.Unlock()
+		poke(s.kick)
+	})
 	s.mu.Lock()
+	s.finishing = true
 	s.setStateLocked(SinkDraining, nil)
 	s.mu.Unlock()
+	return false, nil
+}
+
+// answerDrain answers the Drain under way, if there is one, with err.
+func (s *Sink) answerDrain(err error) {
+	if s.drainCmd == nil {
+		return
+	}
+	s.drainStop()
+	s.drainCmd.reply <- err
+	s.drainCmd, s.drainStop = nil, nil
+	s.mu.Lock()
+	s.finishing = false
+	s.mu.Unlock()
+}
+
+// finishDrain has the kernel play out the buffer once the store is empty,
+// with Device.Drain's bound, closes the device, and answers the Drain: the
+// sink is stopped. A command that came first is taken first; once the
+// kernel drains, the sender lets nothing but a Drop through, since an
+// interrupted Device.Drain drops the stream and cuts off its end.
+func (s *Sink) finishDrain() {
+	s.mu.Lock()
+	if len(s.cmds) > 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.finalDrain = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.finalDrain = false
+		s.mu.Unlock()
+	}()
 	dctx, cancel := context.WithCancel(s.waitContext())
 	defer cancel()
-	defer context.AfterFunc(ctx, cancel)()
-	for {
-		s.mu.Lock()
-		chunk := s.ring.span(s.ring.wr, min(s.ring.pending(), int64(s.params.PeriodFrames)))
-		s.mu.Unlock()
-		if len(chunk) == 0 {
-			break
-		}
-		n, err := s.dev.Write(dctx, chunk)
-		if !s.wrote(int64(n), false) {
-			return s.err
-		}
-		if err == nil {
-			_, err = s.measure()
-		}
-		if err != nil {
-			return s.drainFailed(ctx, err)
-		}
-	}
+	defer context.AfterFunc(s.drainCmd.ctx, cancel)()
 	if err := s.dev.Drain(dctx, s.params.BufferTime()+drainSlack); err != nil {
-		return s.drainFailed(ctx, err)
+		s.drainFailed(err)
+		return
 	}
 	s.runPlayed = s.run.written
 	s.run.fold(s.run.written)
@@ -568,41 +627,47 @@ func (s *Sink) drain(ctx context.Context) error {
 	s.mu.Lock()
 	s.pos.Played, s.pos.Queued, s.pos.Stream, s.pos.Measured = s.ring.wr, 0, State(stateSetup), at
 	s.mu.Unlock()
-	s.end(nil)
-	return nil
+	s.end(nil, nil)
 }
 
-// drainFailed settles a drain that did not reach its end: an xrun stops the
-// sink as anywhere else; a cancel ends the sink when its life is over, and
-// stops it when the drain's own context ended; a Drop from another
-// goroutine woke it, and the Drop, taken next, stops the sink; anything
-// else ends the sink.
-func (s *Sink) drainFailed(ctx context.Context, err error) error {
+// drainFailed settles a kernel drain that did not reach its end: an xrun
+// stops the sink as anywhere else, and the Drain says so; a cancel ends
+// the sink when its life is over, and stops it when the Drain's own
+// context ended; a Drop woke it, and the Drop, taken next, stops the sink
+// and answers the Drain; anything else ends the sink.
+func (s *Sink) drainFailed(err error) {
 	switch ReasonOf(err) {
 	case ReasonXrun:
 		s.xrun(err, "drain")
-		return err
 	case ReasonCancelled:
 		switch {
 		case s.life.Err() != nil:
-			s.end(err)
-		case ctx.Err() != nil:
-			s.end(nil)
-		default:
-			return &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.cfg.Endpoint, Detail: "dropped while draining"}
+			s.end(err, err)
+		case s.drainCmd.ctx.Err() != nil:
+			s.end(nil, err)
 		}
-		return err
+	default:
+		s.end(err, err)
 	}
-	s.end(err)
-	return err
+}
+
+// abandonDrain stops a sink whose Drain's context ended before the drain
+// did: the stream is dropped, and the Drain is answered with the cancel.
+func (s *Sink) abandonDrain() {
+	err := &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.cfg.Endpoint, Detail: "the drain's context ended: dropped", Err: s.drainCmd.ctx.Err()}
+	if s.dev != nil && s.state != SinkXrun {
+		_, _ = s.measure()
+	}
+	s.end(nil, err)
 }
 
 // drop stops the stream at once and closes the device: the sink is
-// stopped. Where a stream is open, the position is measured first.
+// stopped, and a Drain under way says it was dropped. Where a stream is
+// open, the position is measured first.
 func (s *Sink) drop() error {
 	if s.dev != nil && (s.state == SinkPlaying || s.state == SinkPaused || s.state == SinkDraining) {
 		_, _ = s.measure()
 	}
-	s.end(nil)
+	s.end(nil, &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.cfg.Endpoint, Detail: "dropped while draining"})
 	return nil
 }

@@ -163,7 +163,9 @@ const (
 	// SinkXrun has stopped at an underrun: Recover prepares the stream and
 	// goes on, counting the gap; Drop and Close end it.
 	SinkXrun
-	// SinkDraining is playing out what was submitted.
+	// SinkDraining is playing out what was submitted: the producer is
+	// done. A pause still pauses it until the kernel plays out the last
+	// hardware buffer, which only a drop interrupts.
 	SinkDraining
 	// SinkStopped was dropped or drained: the device is released and the
 	// sink is done.
@@ -286,6 +288,8 @@ type Sink struct {
 	zeros       []byte
 	deadline    time.Time // when the pause releases the device
 	unexplained int       // POLLERRs in a row a paused stream's state explained away
+	drainCmd    *sinkCmd  // the Drain waiting for its end
+	drainStop   func() bool
 
 	wmu sync.Mutex // one producer at a time
 
@@ -310,6 +314,11 @@ type Sink struct {
 	wake     context.Context
 	wakeStop context.CancelFunc
 	changed  chan struct{}
+	// finishing is a Drain under way: the producer is done. finalDrain is
+	// its last part, the kernel playing out the buffer, which a command
+	// other than a Drop must not interrupt: an interrupted Device.Drain
+	// drops the stream and cuts off the end.
+	finishing, finalDrain bool
 
 	kick   chan struct{} // frames or a command for the writer
 	room   chan struct{} // room, or a new state, for the producer
@@ -515,15 +524,15 @@ func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 
 // acceptLocked is why the sink takes no frames now, or nil.
 func (s *Sink) acceptLocked() error {
-	switch s.state {
-	case SinkPlaying, SinkPaused, SinkReleased:
-		return nil
-	case SinkDraining:
-		return &Error{Reason: ReasonBadState, Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink is draining and takes no more frames"}
-	case SinkStopped:
+	switch {
+	case s.state == SinkStopped:
 		return s.stoppedError("sink write")
+	case s.state == SinkXrun || s.state == SinkEnded:
+		return &Error{Reason: ReasonOf(s.err), Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink has stopped: " + s.state.String(), Err: s.err}
+	case s.finishing:
+		return &Error{Reason: ReasonBadState, Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink is draining and takes no more frames"}
 	}
-	return &Error{Reason: ReasonOf(s.err), Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink has stopped: " + s.state.String(), Err: s.err}
+	return nil
 }
 
 // stoppedError is an operation on a sink that was dropped or drained.
@@ -549,11 +558,16 @@ func (s *Sink) Resume() error { return s.command(opResume, nil) }
 // Stats; nothing is written twice and nothing skipped.
 func (s *Sink) Recover() error { return s.command(opRecover, nil) }
 
-// Drain plays out everything submitted, the lookahead and then the
-// hardware buffer, with Device.Drain's bound, and releases the device. ctx
-// ends it early: the stream is dropped (ReasonCancelled), as it is by a
-// Drop from another goroutine. An xrun stops it as anywhere else, and the
-// sink waits for Recover, Drop or Close.
+// Drain says the producer is done, and waits until everything submitted
+// has played: the lookahead is written out, the kernel plays out the
+// hardware buffer (Device.Drain, bounded by the buffer's time and
+// drainSlack), and the device is released. Until that last part Pause and
+// Resume work as ever, and a paused drain waits for the resume (a release
+// and a reopen on the way); during it, only a Drop interrupts. ctx ends the
+// wait early: the stream is dropped (ReasonCancelled), as it is by a Drop.
+// An xrun ends the Drain with the xrun's error, and the sink waits for
+// Recover, Drop or Close. A paused, released or stopped sink has nothing
+// it may play out until it is resumed or recovered, and refuses.
 func (s *Sink) Drain(ctx context.Context) error { return s.command(opDrain, ctx) }
 
 // Drop stops at once: the stream is dropped and the device released, and
@@ -571,30 +585,31 @@ func (s *Sink) Close() error {
 
 // command hands op to the writer and waits for its answer. What the state
 // refuses outright is refused here: everything once the sink is done (a
-// Drop of it does nothing), and all but a Drop while it drains, whose
-// writes and waits a command would otherwise interrupt.
+// Drop of it does nothing), a second Drain, and all but a Drop while the
+// kernel plays out the last buffer, whose wait a command would cut short.
 func (s *Sink) command(op sinkOp, ctx context.Context) error {
 	name := sinkOpNames[op]
 	s.mu.Lock()
-	switch s.state {
-	case SinkStopped:
+	switch {
+	case s.state == SinkStopped:
 		s.mu.Unlock()
 		if op == opDrop {
 			return nil
 		}
 		return s.stoppedError(name)
-	case SinkEnded:
+	case s.state == SinkEnded:
 		err := s.err
 		s.mu.Unlock()
 		if op == opDrop {
 			return nil
 		}
 		return &Error{Reason: ReasonOf(err), Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink has ended", Err: err}
-	case SinkDraining:
-		if op != opDrop {
-			s.mu.Unlock()
-			return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink is draining: only a drop stops it"}
-		}
+	case s.finalDrain && op != opDrop:
+		s.mu.Unlock()
+		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink is playing out its last frames: only a drop stops it"}
+	case s.finishing && op == opDrain:
+		s.mu.Unlock()
+		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink is draining already"}
 	}
 	c := &sinkCmd{op: op, ctx: ctx, reply: make(chan error, 1)}
 	s.cmds = append(s.cmds, c)

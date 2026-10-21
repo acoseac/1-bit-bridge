@@ -275,8 +275,9 @@ func TestSinkResumeAfterAReleaseTypesWhatRefusesIt(t *testing.T) {
 // TestSinkCommandsFollowTheState pins what each command does in each state
 // it can meet: a second Pause and a Resume of a sink that plays change
 // nothing; Recover with no xrun and Drain while paused are refused, typed,
-// and change nothing; and while it drains, Pause, Resume, Recover and
-// Write are refused and the drain goes on.
+// and change nothing; and while it drains the lookahead, a pause pauses
+// the drain and a resume plays it on, while frames, a second Drain and
+// Recover are refused, and the drain plays every frame.
 func TestSinkCommandsFollowTheState(t *testing.T) {
 	k := newModel(t)
 	s := openTestSink(t, k, sinkConfig())
@@ -303,15 +304,59 @@ func TestSinkCommandsFollowTheState(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Drain(context.Background()) }()
 	waitState(t, s, SinkDraining)
-	wantReason(t, s.Pause(), ReasonBadState)
-	wantReason(t, s.Resume(), ReasonBadState)
-	wantReason(t, s.Recover(), ReasonBadState)
 	if _, err := s.Write(context.Background(), content(0, 0, 1)); ReasonOf(err) != ReasonBadState {
 		t.Errorf("a Write while draining: %v, want %s", err, ReasonBadState)
+	}
+	wantReason(t, s.Drain(context.Background()), ReasonBadState)
+	wantReason(t, s.Recover(), ReasonBadState)
+	if err := s.Pause(); err != nil {
+		t.Fatalf("a Pause of a drain that writes its lookahead: %v", err)
+	}
+	if p := s.Position(); p.State != SinkPaused {
+		t.Errorf("a paused drain is %s, want paused", p.State)
+	}
+	if _, err := s.Write(context.Background(), content(0, 0, 1)); ReasonOf(err) != ReasonBadState {
+		t.Errorf("a Write to a paused drain: %v, want %s", err, ReasonBadState)
+	}
+	if err := s.Resume(); err != nil {
+		t.Fatalf("Resume of a paused drain: %v", err)
+	}
+	if p := s.Position(); p.State != SinkDraining {
+		t.Errorf("a resumed drain is %s, want draining", p.State)
 	}
 	k.free()
 	if err := <-done; err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	sameFrames(t, "what the DAC heard", heard(k), in)
+	if len(k.pauses) != 4 {
+		t.Errorf("PAUSE given %v, want two pauses and two releases", k.pauses)
+	}
+}
+
+// TestSinkLastBufferDrainsUninterrupted pins the last part of a drain: once
+// the store is empty and the kernel plays out the buffer, a Pause or a
+// Resume is refused, typed, rather than cut short a Device.Drain, which
+// would drop the stream and cut off the end; the drain then plays every
+// frame.
+func TestSinkLastBufferDrainsUninterrupted(t *testing.T) {
+	k := newModel(t)
+	s := openTestSink(t, k, sinkConfig())
+	in := content(0, 0, 9600)
+	submit(t, s, in)
+	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
+	done := make(chan error, 1)
+	go func() { done <- s.Drain(context.Background()) }()
+	await(t, k.when(func(k *fakeKernel) bool { return k.state == stateDraining && starved(k) }), "the kernel to drain the last buffer")
+	wantReason(t, s.Pause(), ReasonBadState)
+	wantReason(t, s.Resume(), ReasonBadState)
+	k.free()
+	if err := <-done; err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	sameFrames(t, "what the DAC heard", heard(k), in)
+	if len(k.pauses) != 0 {
+		t.Errorf("PAUSE given %v during the kernel's drain", k.pauses)
+	}
+	k.checkClosedEach(t)
 }
