@@ -48,7 +48,9 @@ request instead of walking an SMB tree.
 
 - Module: `github.com/acoseac/1-bit-bridge`, binary: `bridge` (from `./cmd/bridge`).
 - Pure-Go, CGO-free stack (`modernc.org/sqlite`, `mewkiz/flac`, `dhowden/tag`,
-  `hashicorp/mdns`, `quic-go`, `tailscale.com/tsnet`) — one static binary, no
+  `hashicorp/mdns`, `quic-go`, `tailscale.com/tsnet`, and
+  `mycophonic/saprobe-alac`, Apache-2.0, for the player's ALAC packets, built
+  from the patched copy in `third_party/saprobe-alac`) — one static binary, no
   runtime deps.
 - Target platforms: macOS / Linux / Windows × amd64 / arm64. Tested primarily
   on macOS. Current release line: v0.1.9; wire protocol: **v1** (additive only).
@@ -133,7 +135,7 @@ automation is unaffected.
 | `internal/alsa` | The box's ALSA state read from a `/proc` tree (cards, USB ids, stream altsets, what an open substream receives and the thread and process holding it), for `bridge output dac` |
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader (`internal/mpd/conf`): the box's player and how MPD is set, for `bridge output player` |
 | `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
-| `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF) and typed refusals |
+| `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF, and ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder), DSF and DFF demuxers into canonical native DSD, and typed refusals |
 | `internal/supervision` | Answers "if this process exits, will something relaunch us?" |
 | `internal/pairing` | In-memory state machine for the admin-approval pairing flow |
 | `internal/analyze` | Offline audio analysis: sox(1) PCM decode → peak waveform sidecars; worker pool (opt-in via `analysis.enabled`) |

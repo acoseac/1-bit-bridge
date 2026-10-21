@@ -118,7 +118,6 @@ func TestReviewR3ID3PrefixedFullSniff(t *testing.T) {
 		{"dsf", []byte("DSD \x00\x00\x00\x00"), decode.ReasonTruncated},
 		{"dff", []byte("FRM8\x00\x00\x00\x00"), decode.ReasonTruncated},
 		{"rf64", []byte("RF64\x00\x00\x00\x00WAVE"), decode.ReasonUnsupportedLayout},
-		{"alac", id3ALACPayload(t), decode.ReasonNotYetSupported},
 	} {
 		b := append(append([]byte{}, tag...), c.payload...)
 		_, err := decode.Open(bytes.NewReader(b))
@@ -130,6 +129,13 @@ func TestReviewR3ID3PrefixedFullSniff(t *testing.T) {
 		if r.Reason != c.reason {
 			t.Errorf("%s: got reason %q want %q (%v)", c.name, r.Reason, c.reason, err)
 		}
+	}
+	// The ALAC stub is asked of the sniffer: since PR 1c it opens the ALAC
+	// demuxer, which refuses it for the tables it lacks
+	// (TestALACAfterID3Prefix decodes a real file behind an ID3 tag).
+	b := append(append([]byte{}, tag...), id3ALACPayload(t)...)
+	if alac, err := decode.SniffsALAC(bytes.NewReader(b)); err != nil || !alac {
+		t.Errorf("alac: sniffed ALAC=%v err=%v, want ALAC", alac, err)
 	}
 }
 
@@ -151,10 +157,8 @@ func TestReviewR3MP4MetaFullBoxAndDepth(t *testing.T) {
 		),
 	)
 	b := append(mp4Box("ftyp", []byte("M4A \x00\x00\x00\x00")), moov...)
-	_, err := decode.Open(bytes.NewReader(b))
-	r, ok := decode.AsRefusal(err)
-	if !ok || r.Reason != decode.ReasonNotYetSupported {
-		t.Fatalf("meta FullBox alac: want not_yet_supported, got %v", err)
+	if alac, err := decode.SniffsALAC(bytes.NewReader(b)); err != nil || !alac {
+		t.Fatalf("meta FullBox alac: sniffed ALAC=%v err=%v, want ALAC", alac, err)
 	}
 
 	// Deep nesting of unknown 8-byte boxes must not overflow the stack.
@@ -166,8 +170,7 @@ func TestReviewR3MP4MetaFullBoxAndDepth(t *testing.T) {
 		}
 	}
 	b = append(mp4Box("ftyp", []byte("isom\x00\x00\x00\x00")), mp4Box("moov", deep)...)
-	_, err = decode.Open(bytes.NewReader(b))
-	if err == nil {
+	if _, err := decode.Open(bytes.NewReader(b)); err == nil {
 		t.Fatal("expected refusal on deep empty moov")
 	}
 }

@@ -203,6 +203,11 @@ func scanMP4Codecs(rs io.ReadSeeker) (alac, aac bool, err error) {
 			buf := make([]byte, scan)
 			n, _ := io.ReadFull(rs, buf)
 			buf = buf[:n]
+			// A file that ends inside moov is cut there the way the cap
+			// cuts a large one: the box that crosses the end is a boundary,
+			// so the codec found before it decides the refusal, and the ALAC
+			// demuxer reports the file as cut short.
+			truncated = truncated || uint64(n) < scan
 			boxCount := 0
 			a, c, werr := codecsInBoxes(buf, 0, &boxCount, truncated)
 			if werr != nil {
