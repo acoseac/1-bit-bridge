@@ -1,0 +1,37 @@
+// Package alsapcm plays PCM through one physical ALSA playback endpoint by
+// talking to the Linux kernel directly: the ioctls of
+// include/uapi/sound/asound.h, with no alsa-lib, no cgo and no C toolchain
+// at run time. It is the first layer of the bridge player's backend (B470
+// PR 2a): open, negotiate, write and stop. The streaming sink, its xrun
+// recovery, DSD and DoP are later layers.
+//
+// What it will do, and what it refuses:
+//
+//   - It opens only /dev/snd/pcmC<card>D<device>p, from the card and device
+//     numbers in an Endpoint. There is no way to pass a name: no "default",
+//     "hw:…", "plughw:…", dmix, softvol, alias or path, and no ALSA
+//     configuration file is read. The node is opened non-blocking, and one
+//     another process holds (MPD playing) is a typed busy refusal: the
+//     kernel's exclusive open decides who plays, and nothing here stops MPD
+//     or touches its configuration.
+//   - The kernel's PCM protocol is checked at open (pcmVersionFloor).
+//   - Rate, the two channels and the sample format are asked for exactly
+//     and read back after HW_PARAMS; anything else the kernel committed is
+//     a typed refusal, never a substitute. The buffer geometry is aimed near
+//     200 ms and reported as granted.
+//   - An underrun stops the stream (the stop threshold is the buffer size),
+//     so it surfaces as an xrun, and the kernel is never asked to fill
+//     silence.
+//   - A write waits for room with poll, and a cancelled context ends the
+//     wait at once; xrun, suspend and disconnect come back typed.
+//   - No buffer is ever shared with the kernel past a call: nothing is
+//     mmapped, and each ioctl's argument is kept alive across the call
+//     (ioctlOn).
+//
+// The kernel interface is the sys seam: the real one (linuxSys) is built
+// on linux/amd64 and linux/arm64 only, the two layouts the definitions in
+// uapi.go are checked against (scripts/alsa-abi, the alsa-abi job in
+// .github/workflows/gate.yml). Everything above the seam builds and is
+// tested on every OS through a fake kernel; Open itself refuses with
+// ReasonUnsupported anywhere else.
+package alsapcm

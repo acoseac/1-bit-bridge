@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-21 — B470 PR 1c: ALAC in M4A through a bounded demuxer, cookie and packet checks, and saprobe-alac's packet decoder](#2026-10-21--b470-pr-1c-alac-in-m4a-through-a-bounded-demuxer-cookie-and-packet-checks-and-saprobe-alacs-packet-decoder)
 - [2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules](#2026-10-20--b470-pr-1b-round-3-the-dff-walks-bounds-the-goldens-layout-checks-and-two-overstated-rules)
 - [2026-10-20 — B470 PR 1b round 2: the DSD byte count, DFF FVER, and the DFF goldens' padding](#2026-10-20--b470-pr-1b-round-2-the-dsd-byte-count-dff-fver-and-the-dff-goldens-padding)
 - [2026-10-20 — B470 PR 1b: DSF and DFF demuxers into canonical native DSD](#2026-10-20--b470-pr-1b-dsf-and-dff-demuxers-into-canonical-native-dsd)
@@ -47927,6 +47928,426 @@ DFF, DSF, and `EXPLICIT=0`); a clean advisory with no marker anywhere is
 clean; a TIT2 carrying `[E]` beside a clean advisory is explicit; a WAV with
 no ID3 whose LIST/INFO title is clean is clean.
 
+## 2026-10-21 — B470 PR 1c: ALAC in M4A through a bounded demuxer, cookie and packet checks, and saprobe-alac's packet decoder
+
+### The decision this builds, and the trigger it found
+
+The owner chose option B on 2026-10-20: keep ALAC in 0.2.2 with the
+package's own bounded M4A demuxer and configuration checks around
+saprobe-alac's packet decoder, pinned at 1b6eb83, with a `recover` as the
+last resort. Codex's evaluation of that revision had found every
+well-formed file decoded bit-exact (Apple and FFmpeg encodes, 16 and 24
+bits, 44.1 to 192 kHz) and the library's container path unfit: panics on
+malformed configurations, allocations driven by table counts, edit lists
+ignored. The brief's trigger for option C, porting Apple's reference
+decoder, is a crash inside the library's packet decoding that validation
+cannot prevent. The decision is the owner's.
+
+**The trigger condition is met.** Reading `DynDecomp`
+(`internal/alac/golomb.go`) before writing any code: the loop checks
+`bitPos < maxPos` only at the top of each sample, a sample's code can carry
+`bitPos` past the packet's end, and when the running mean then falls under
+the zero-run threshold `dynGet` loads four bytes at `bitPos >> 3` with no
+check. `BitBuffer`'s four-byte padding does not cover it. Apple's
+`ag_dec.c` has the same unchecked `dyn_get`. Confirmed with a ten-byte
+stereo packet under Apple's own configuration (frame length 4096, pb 40,
+mb 10, kb 14): `index out of range [3] with length 2` at golomb.go:85,
+reached from :118 and :246. The packet is a channel pair, compressed, no
+shift, whose first residual is an escape that ends exactly at the packet's
+end. Nothing in the cookie or the element header tells it from a good
+packet, so no validation prevents it. The `recover` contains it: the
+packet is a `truncated_or_corrupt` refusal and the decoder recovers on the
+next packet (`…LibraryPanicIsARefusal`, `alacPanicPacket`; round 3 below
+renamed the test `TestALACLibraryErrorIsARefusal` when the patched library
+stopped panicking on the packet, and the old name is elided here so that it
+is no citation of a test that no longer exists). Nothing
+here ports Apple's decoder or works around the library beyond the
+`recover`. One mitigation was considered and not built: appending eight or
+more zero bytes to every packet would keep the overrun inside the buffer,
+and a valid packet decodes the same, but a corrupt packet that overruns
+by less than the padding would then decode the zeros instead of failing.
+The same packet panics under a 24-bit configuration. The defect and the
+library's others, from this work and Codex's evaluation, are in
+`ops/upstream/saprobe-alac.md`, with the minimal input and output of each
+one run here (not reported upstream).
+
+### What shipped
+
+`decode.Open` opens ALAC in M4A where it refused it as `not_yet_supported`.
+The library is `github.com/mycophonic/saprobe-alac`
+`v1.0.0-rc2.0.20261020094436-1b6eb8378954` (Apache-2.0), resolved offline
+from the module cache; `go get` was not permitted on the host, so the
+require line was added by hand and `go vet -mod=mod ./...` filled go.sum.
+Minimum version selection raised `golang.org/x/text` from v0.42.0 to
+v0.43.0, which saprobe-alac's go.mod lists; it was in the cache.
+
+- **The demuxer** (`m4a.go`, `alac.go`) reads boxes by seeking: ftyp
+  first, one moov before or after mdat, every mdat, the one `soun` track's
+  mdhd, hdlr, dinf/dref, stbl and edts/elst. Box headers are compared as
+  uint64s with their parent by subtraction; a top-level mdat may run past
+  the end of a cut file, and any other box past its parent or the file is
+  refused. Each table count is checked against its box (`fits`) before
+  anything is allocated for the table; the packet count is capped at 2^20;
+  a constant-size stsz's count must fit the mdat bytes the file holds.
+  stts and stsc must place exactly stsz's packets, every stts duration is
+  between 1 and the frame length, every packet 1 byte to the cookie's max frame
+  bytes and inside one mdat, mdhd's timescale the cookie's rate, its
+  duration stts's frames. The index is every packet's offset and size
+  plus the stts runs.
+- **The cookie** is validated before the library is constructed (the
+  ranges are in the rules). pb, mb and maxRun are not limited: Apple writes
+  40/10/14 and maxRun 255, FFmpeg (Lavf58 in the private corpus) maxRun 0,
+  and FFmpeg writes pb, mb and kb as 0 at compression level 0.
+- **Each packet's element header** is read before the library decodes it,
+  and the decoded length checked after.
+- **Edit lists**: one edit, presented from its media time for the frames
+  its duration covers whole, never past the media's end. Measured with
+  afconvert's own decode of rewritten goldens at a movie timescale of 1000
+  and 44.1 kHz: durations of 251, 255 and 257 ms (11069.1, 11245.5 and
+  11333.7 frames) presented 11069, 11245 and 11333 frames from the media
+  time 123, so afconvert floors; an edit running past the media's end
+  presented the media to its end; and an edit with a media time of 0
+  presented the whole media whatever its duration (1 ms or 257 ms), which
+  this decoder does not copy: it applies the duration.
+- **The sniffer** (PR 1a) treats a file that ends inside moov the way it
+  treats its 4 MiB cut, so the codec found before the end decides: a cut
+  AAC file was `unsupported_layout: MP4 box "trak" size 480 exceeds buffer`
+  and is `lossy_refused`; a cut ALAC file was `unsupported_layout: MP4 box
+  "udta" ... exceeds buffer` and reaches the demuxer, which says the moov
+  runs past the end of the file.
+- PR 1a's sniff tests whose stub ALAC files now reach the demuxer ask the
+  sniffer through `SniffsALAC` (`export_test.go`); `TestReviewSniffMP4`,
+  which detected a misread "alac" by the old `not_yet_supported` reason,
+  asks it too, since that reason no longer means ALAC.
+
+### Goldens
+
+`scripts/player-alac-goldens/generate.py` writes an integer pattern (left
+and right differ in every kind but silence; signed extrema; low-bit-only
+activity; full-scale noise; the kind changing every 1499 frames, so inside
+packets), encodes it with afconvert at 16-bit/44.1 kHz, 24-bit/96 kHz,
+24-bit/192 kHz (a one-frame last packet) and 32-bit/44.1 kHz, and decodes
+each back with afconvert, writing none that is not the pattern. Rewritten
+variants keep afconvert's audio bytes: moov after mdat with co64, and an
+edit (media time 123, 251 ms at a movie timescale of 1000, 11069 frames),
+which the generator also checks against afconvert's decode of it.
+Refusals: a real 20-bit ALAC (`afconvert -d alac/2`), mono, and AAC. Two
+FFmpeg (Lavf63.1.102) encodes from Codex's evaluation are copied with
+their file hash and the hash of the PCM they encode, since FFmpeg, flac
+and sox are not installed on the host. The fixtures are 498,858 bytes
+(507,810 with the manifest and README); 0ff9f4cc's message said 516 KB,
+which is `du`'s count of disk blocks.
+
+afconvert stamps the encode's time into mvhd, tkhd and mdhd; the generator
+zeroes them, and a rerun into a scratch directory is byte-identical.
+afconvert writes 16 bits, 44100 Hz and 2 channels in every sample entry it
+made here (mono and 24-bit/96 kHz included), so only the cookie describes
+the stream. Every golden holds both an escape and a compressed packet
+(afconvert shifts one byte out of 24-bit samples and two out of 32-bit).
+
+### Red first
+
+The tests written first, in `alac_golden_test.go` and
+`alac_hostile_test.go`, ran before `openALAC` existed and failed: the
+goldens' pattern, seek and EOF tests (all six decoded goldens), the FFmpeg
+fixtures, `TestALACAbsurdTablesRefused` (60 of the 61 cases it had then),
+the edit-list tests, the truncation, packet-header, panic, cancel, I/O-error,
+buffer-shape, large-box and ID3 tests, each with `not_yet_supported`. The
+cases that passed were ones PR 1a's sniffer already refused for the same
+reason: an `mp4a` entry, and box sizes below their header or past what is
+addressable. `TestSniffKeepsTheCodecWhenTheFileEndsInsideMoov` and the cut
+moov in `TestALACTruncatedMidPacket` failed with the sniffer's
+`unsupported_layout` before its change (control 9 below). The tests that
+reach the demuxer past the sniffer (`alac_demuxer_test.go`), the fuzz
+targets and the corpus test came with the implementation; the controls
+below are their evidence.
+
+### Negative controls
+
+Each was run against the committed code and reverted.
+
+| Mutation | What failed |
+|---|---|
+| Edit list ignored | the edited golden's pattern, seek and EOF tests, `TestALACEditListVersion1`, `TestALACEditPastTheEndClipsAtTheMedia`, the FFmpeg `edit123` fixture, three `TestALACEditListsRefused` cases, the corpus `variant-edit123` |
+| Edit duration rounded up | the edited golden's three tests, `TestALACEditListVersion1`, "no whole frame" |
+| Seek drops no frames before the target | every golden's exact-seek test and every corpus file's seek suffixes |
+| Element-header check skipped | all seven header cases; the END-first packet then read 24576 samples and no error |
+| `recover` removed | the injected panic crashed the test binary; so did the real one, at golomb.go:85 |
+| Frame-length range dropped | four frame-length cases; a 4,194,304-frame cookie then constructed the library |
+| Cookie channel check dropped | three channel cases, the 9-channel cookie constructed the library, and the mono golden opened: its sample entry says 2 channels (30f65c43 corrects the comment that relied on it) |
+| Constant-size stsz count not checked against mdat | the demuxer allocated 4,201,256 bytes before refusing; the refusal no longer named mdat |
+| Sniffer's cut-file boundary reverted | the two sniff-at-the-cut tests |
+| `fits` dropped | three count cases; the stts reader then took the next box's type, `stsc`, as a duration of 1,937,011,555 frames |
+| Packet size not checked against max frame bytes | "max frame bytes below a packet" |
+| mdhd duration not checked against stts | the mdhd case and the corpus `variant-stts2048`, which then opened |
+| Left and right swapped | every test that compares audio |
+| 24-bit sign extension dropped | the three 24-bit pattern goldens; the FFmpeg hash tests stayed green, since packing back to three bytes drops the error |
+| Context check after the packet read dropped | after 2aa52ef2: the cancel test, which got 5192 frames for 1096 |
+| `mdatHolding` answers any mdat | "stco offset outside mdat" |
+| A child box past its parent not refused | `TestALACDemuxerAlone`, the box then misread as a cut file |
+
+Three controls first reddened nothing, and each led to a change. The
+duplicate count check inside `table()` could not fire, since each reader
+had checked first: the readers now call `fits` and `table()` checks
+nothing (0e98cc95), and two cases whose counts fit the packets but not the
+box isolate it (50830e26). Without the context check after a packet read,
+the cancelled read decoded that packet and returned `Canceled` a packet
+later, gapless, so the test now pins that a cancel during a packet's read
+returns none of it (2aa52ef2). A first `mdatHolding` mutation left the
+zero box's end of 0 for the extent check to refuse; the clean one is in
+the table.
+
+### The private corpus and Codex's encodes
+
+`TestALACReferenceCorpus` (skipped without the files) compared the owner's
+six files under `~/medialibtest-formats/alac` and Codex's nine FFmpeg
+encodes and variants with FFmpeg's decodes recorded in Codex's
+`qualification.json`: every stereo file matched FFmpeg byte for byte,
+whole and from each of eleven seek frames (0, 1, 17, 4095, 4096, 4097, a
+third, a half, inside the last packet, the last frame and the end),
+`variant-co64` and `variant-edit123` (28686 frames) included. The mono and
+six-channel encodes were refused for their channels, the AAC control as
+lossy, and `variant-stts2048` as corrupt: its mdhd duration 28809
+disagrees with its stts's 14473 frames. Five of the owner's files were
+muxed by Lavf58 (moov after mdat, an edit at a movie timescale of 1000
+rounded up past the media's end, maxRun 0); the sixth has moov first, no
+edit, a 140 KB udta and 254 chunks.
+
+### Fuzzing
+
+`FuzzALACOpen` fuzzes the whole path, seeded with every golden, the FFmpeg
+encodes and the panic file; `FuzzALACCookie` the cookie validation, seeded
+with every golden's cookie. Runs with `-parallel 4 -fuzzminimizetime 1s`
+under the build lock, each continuing from the cached corpus:
+
+| Target | Mode | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|---|
+| `FuzzALACOpen` | strict | 5m00s | 7,893,533 | 536 (547) | pass |
+| `FuzzALACOpen` | default | 5m01s | 13,536,946 | 57 (605) | pass |
+| `FuzzALACOpen` | default | 5m32s | 15,784,502 | 20 (625) | pass |
+| `FuzzALACOpen` | strict, replaying the corpus | 1m02s | 2,847,179 | 1 (625) | pass |
+| `FuzzALACCookie` | | 10m00s | 70,580,265 | 7 (14) | pass |
+
+No run found a crasher, so no regression input was added. The strict runs
+are the ones that fail on a recovered library panic, and neither found
+one: the defect above was found by reading `DynDecomp`, and random
+mutation of the goldens did not reach its shape (an escape ending on the
+packet's last bit, then a zero run) in these runs. The default runs
+include the panic file as a seed, so they fuzz the recovery too.
+
+### License
+
+saprobe-alac is Apache-2.0 with no NOTICE file. The stack lines in
+`CLAUDE.md` and `AGENTS.md`, the places the repo's docs list its
+dependencies (`go.mod` aside), now name it and its license. The release tarballs carry only
+the bridge's LICENSE and README: Apache-2.0 §4(a) asks a binary
+distribution to give recipients the license, and the BSD and MIT
+dependencies' terms ask for their notices, none of which ship today. That
+is a follow-up beyond this PR.
+
+**The owner's decision (2026-10-21).** Option B stands: the library stays
+behind the demuxer, the cookie and packet checks, and the `recover`; the
+channel-pair check covers the silent stereo case, and no check of ours can
+prevent the panic (round 3 below: after Codex found two silent decodes, the
+owner chose to carry a patched copy, which refuses that packet itself). The library's maintainers were
+told first, privately, through the repository's vulnerability reporting,
+before this branch made the ten-byte input public. Porting Apple's
+reference decoder stays the fallback if upstream does not fix the panic.
+
+### Round 2: the seek index held to the bound it states
+
+The review of #1300 found one defect, Low: `bounds.go` said the seek index
+was twelve bytes a packet, 12 MiB at the 2^20 packet cap, and it was more.
+`readSTTS` allocated a 32-byte run for every stts entry, up to 2^20 of them
+(32 MiB), and `readSTSC` held every stsc entry, 16 bytes each and up to
+2^20, before the chunk offsets were read. The review's file of about 9 MiB
+passed open holding about 44 MiB.
+
+**Red first.** `TestALACDemuxerAllocatesLittle` gained three files of 2^20
+one-byte packets, built from the 16-bit golden by `alacOneBytePackets`
+(stsz a constant size of 1, an mdat of 1 MiB, mdhd's duration stts's
+frames), and holds each open to twelve bytes a packet and 1 MiB: the
+review's file (stts an entry a packet, one stsc entry, one chunk; 9,438,000
+bytes), stsc an entry a chunk over 2^20 chunk offsets with one stts entry
+(17,826,600 bytes), and stts entries alternating 1 and 2 frames. At
+8ed60333 they opened with 46,275,480, 29,533,064 and 46,275,480 bytes
+allocated.
+
+**What the files hold.** Before choosing, a box dump of every golden, the
+owner's six files and Codex's twelve: each has one stts entry or two, since
+the writers run-length encode stts and an ALAC packet holds the frame
+length but the last. stsc has one entry in afconvert's files and Codex's
+FFmpeg encodes, and two in the owner's 96 kHz file (254 chunks), but 14, 9,
+3, 2 and 9 in the five Lavf58 files, over 17, 16, 3, 2 and 9 chunks of
+about 1 MB (14 to 96 seconds of audio). An stsc entry starts wherever a
+chunk's packet count changes, and FFmpeg's chunks hold whole packets of
+varying size, so 37 of those 47 chunks start one: stsc grows with a file's
+length. A cap low enough to matter could refuse a long file (at that chunk
+size a 6-hour file at 192 kHz is some 15,000 chunks), and a cap that keeps
+one still holds its entries, which the bound would then count. So the two
+tables are treated differently:
+
+- **stts**: entries of one duration side by side merge into one run, and
+  more than `maxALACRuns`, 1024, runs are `unsupported_layout`. The runs
+  are kept for seeking, so they need the cap. The merge loses nothing (a
+  run is packets of one duration), and a writer that lists an entry a
+  packet still opens, at the cost of one run.
+- **stsc**: read through a table cursor in step with the chunk offsets and
+  never held, so it needs no cap. Round 1's checks are made as each entry
+  is reached: the first run at chunk 1, each after the one before and at
+  most at the last chunk, one or more packets a chunk of description 1, and
+  exactly stsz's packets placed. `table()` is the same cursor.
+
+The index is twelve bytes a packet and 32 a run, 12 MiB and 32 KiB at the
+caps, and `bounds.go` now says so; a table is read 4096 entries at a time,
+48 KiB for stsc's, the widest. The three files now open with 12,751,936
+and 12,751,904 bytes allocated, and the third is refused after 4,266,800.
+`TestALACSTTSRunsMergeAndCap` decodes every decoded golden with its stts
+rewritten as an entry a packet, whole and from each of its seek frames, and
+opens 1024 runs and refuses 1025. The caps sentence in the ALAC section of
+`.claude/rules/output.md` changes with this.
+
+**Negative controls**, on 09635028, each reverted:
+
+| Mutation | What failed |
+|---|---|
+| `alac.go`, `m4a.go` and `bounds.go` as at 8ed60333 | the three new cases and the alternating file's refusal in `TestALACDemuxerAllocatesLittle`, and the 1025-run refusal; nothing else in the package |
+| The stts merge and cap undone, stsc's cursor kept | the two stts cases (46,273,536 bytes each), the alternating refusal and the 1025-run refusal |
+| stsc held again (8ed60333's `readSTSC`), the merge kept | the stsc case alone (29,529,016 bytes) |
+| The merge drops the merged entry's packets | the six split goldens ("ALAC packet 1 holds 4096 frames; stts gives it 137" and the like); the frame count stayed right, since a run's first frame counts every entry before it |
+
+**Re-runs** on 09635028: the ALAC goldens, the FFmpeg fixtures and
+`TestALACReferenceCorpus` (the owner's six files and Codex's twelve) pass.
+Fuzzing with `-parallel 4 -fuzzminimizetime 1s` under the build lock, from
+the cached corpus:
+
+| Target | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|
+| `FuzzALACOpen` | 2m32s | 6,799,667 | 12 (638) | pass |
+| `FuzzALACCookie` | 2m30s | 17,752,532 | 1 (15) | pass |
+
+No run found a crasher.
+
+### Round 3: a patched saprobe-alac in third_party, and 16-bit packets with a shift refused
+
+Codex reviewed #1300 and found two wrong decodes in saprobe-alac that no
+check of the bridge's could see, both confirmed against 1b6eb83
+(`ops/upstream/saprobe-alac.md`, 6 and 7). A compressed 16-bit pair that
+declares a shift lost its shifted bytes: the library read them, and its
+16-bit output never used them. A last residual that ran past the packet
+decoded from the four zero bytes of padding: `DynDecomp` checked its cursor
+only before each sample. The second is also why 1b6eb83 panicked on
+`alacPanicPacket`, past the padding. The owner decided on 2026-10-21 that
+the bridge carries a patched copy of the library.
+
+**The copy.** `third_party/saprobe-alac` (0bd37344) holds what the build
+needs at 1b6eb83: the root package, `internal/alac` and `internal/mp4` (the
+root imports both), `go.mod`, `go.sum` and `LICENSE`, and the two tests of
+them that run offline. A plain `cp` from the module cache needs approval on
+this host, so the `.go` files and `LICENSE` came from `go mod vendor -o`
+into a scratch directory, after `go mod verify` had checked the cache
+against go.sum. The rest was transcribed, and the transcribed `go.mod`
+hashes to go.sum's recorded `h1:UOUpQ…`. `go.mod` replaces the module with
+the directory, in B401's style, and go.sum loses the module's two lines,
+which a directory replacement does not use. `go mod tidy -diff` cannot run
+offline here (it needs test-only modules of tailscale's and others' that
+the cache lacks), so that go.sum change rests on that rule, not on a tidy
+run; goreleaser's before-hook runs `go mod tidy` at release.
+
+The Dockerfile copies the copy's `go.mod` before `go mod download`. With
+go.mod and go.sum alone in a scratch directory the download stopped with
+"reading third_party/saprobe-alac/go.mod: no such file or directory", and
+with the copy's go.mod beside them it passed. The tree sweeps in
+`cmd/bridge` (keepers, cited test names, docblock subjects, embed patterns,
+the default logger) read the copy, since they skip `vendor` but not
+`third_party`, and pass. `make test` does not run the copy's tests, which
+are a module of their own: `go -C third_party/saprobe-alac test ./...`
+does, and passes.
+
+**The patch** (ac6c7118). `DynDecomp` checks every code against the packet's
+own length:
+- an escape's value before `getStreamBits` reads it, which also bounds a
+  32-bit pair's 33-bit read, whose fifth byte lay past the padding;
+- a normal code's length before it is taken;
+- a zero run's count before `dynGet` reads it and after.
+A code that would end past the packet returns `ErrBitstreamOverrun`. The
+checks subtract from the bits left rather than add to the cursor. That is
+31 lines added and 4 removed in `internal/alac/golomb.go`, with a 106-line
+`tests/bitstream_overrun_test.go` in upstream's style. The test file holds
+the packets and a code that ends exactly at the packet's end, which still
+decodes to (0, -4). `ops/upstream/saprobe-alac.patch` is `git diff`'s
+output for the two files against 1b6eb83. Its index lines check
+(`42704e54..5cfc369b`, and `37a89c73` for the new file): 42704e54 is the
+copy's `golomb.go` at 0bd37344, and a diff against the copy at ac6c7118,
+with its header notice removed, printed 5cfc369b and the same hunks. `git
+apply` needs approval on this host, so no apply was run. The patched file's
+header says it was changed (Apache-2.0 §4(b)); that note is the only
+difference between the copy and 1b6eb83 with the patch. The copy's
+`README.md` lists both changes. `WriteStereo16` is not touched.
+
+**Finding 1 in the bridge.** `checkALACPacket` refuses a compressed 16-bit
+pair with a shift as `truncated_or_corrupt`, before the library sees it.
+Apple's and FFmpeg's encoders shift only above 16 bits, and no golden,
+FFmpeg encode or corpus file has such a packet: every one still decodes.
+
+**Red first**, on 0bd37344 (the copy unmodified, no 16-bit check):
+- `TestALACCodesPastThePacketAreRefused`. Codex's escape packet, a stop bit
+  past the end and a zero run past the end (both built with Codex's
+  header) read (0, 0), (0, 4) and 16 frames of (0, 0) with no error.
+- `TestALACShiftedBytesIn16BitPacketRefused`: Codex's 16-bit packet read
+  (0, 0), where its shifted bytes make it (0x12, 0x34).
+- `TestSaprobeALACRefusesCodesPastThePacket`. The library panicked on
+  `alacPanicPacket` at 16, 24 and 32 bits (`index out of range [3] with
+  length 2`, `[3] with length 1`, `[6] with length 6`), and decoded the
+  three past-the-end packets with no error.
+- `TestALACPanicPacketIsRefusedWithoutTheRecover` and
+  `TestALACLibraryErrorIsARefusal` got the recover's message.
+- The 16-bit case of `TestALACCorruptPacketHeadersRefused` got the
+  library's overrun, not the bridge's refusal.
+- `FuzzALACOpen`'s overrun oracle failed three of its new seeds.
+
+**Renamed**, since the patched library no longer panics on the packet:
+`…RealLibraryPanicIsCounted` is `TestALACPanicPacketIsRefusedWithoutTheRecover`,
+which asserts no panic and the library's own overrun, and
+`…LibraryPanicIsARefusal` is `TestALACLibraryErrorIsARefusal`. The round-1
+text above names the second elided. The recover is still the last resort,
+and `TestALACInjectedPanicIsARefusal` still pins it with an injected panic.
+
+**The oracle.** `FuzzALACOpen` opens each file a second time with
+`overrunOracle` in the library's place. The oracle decodes every packet the
+library decodes twice more, with eight bytes of 0xFF and then of 0x55
+appended. A decode that reads nothing past the packet gives the same samples
+each time, so a difference fails the target in either mode. Strict mode now
+includes `alacPanicPacket`'s seed, which no longer panics.
+
+**Negative controls**, on ac6c7118, each reverted:
+
+| Mutation | What failed |
+|---|---|
+| `golomb.go` back to 1b6eb83; the copy, its new tests and the 16-bit check kept | exactly the patch's cases: the three past-the-end packets, the six library-level cases, the two renamed tests and fuzz seeds 13 to 15. The 16-bit cases stayed green. In the copy's own tests, the zero-run packet got no error and `alacPanicPacket` panicked at golomb.go:85, 118 and 246 |
+| The 16-bit check dropped | `TestALACShiftedBytesIn16BitPacketRefused` (the packet read (0, 0)) and the 16-bit case of `TestALACCorruptPacketHeadersRefused` (the library's overrun instead); nothing else |
+
+**Re-runs** on ac6c7118: the ALAC goldens, the FFmpeg fixtures and
+`TestALACReferenceCorpus` (the owner's six files and Codex's twelve) decode
+bit-exact, whole and from every seek frame. Fuzzing with `-parallel 4
+-fuzzminimizetime 1s` under the build lock, from the cached corpus and the
+new seeds:
+
+| Target | Mode | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|---|
+| `FuzzALACOpen` | strict, with the oracle | 10m32s | 22,038,662 | 171 (813) | pass |
+| `FuzzALACCookie` | | 5m30s | 38,970,655 | 1 (16) | pass |
+
+Neither run found a crasher, a library panic or a packet decoded from past
+its end.
+
+**Not done here.** The rules text for `.claude/rules/output.md` is in the
+round's report, quoted from the round-1 text because the PR branch is not
+in this clone. SonarCloud and CodeQL will read the copy, and the repository
+has no Sonar configuration to leave `third_party` out. The release tarballs
+still carry the bridge's LICENSE alone (the License section above), now
+with modified Apache-2.0 code in the binary.
+
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 
 ### Trigger
@@ -48476,6 +48897,291 @@ are unchanged. `codeql.yml`'s comment now names the group instead of telling
 a maintainer to close singles by hand; the three SHAs must still be equal.
 The rule is under **Build, CI, and test discipline** in
 `.claude/rules/build-ci-tests.md`.
+
+## 2026-10-21 — B470 PR 2a: the pure-Go ALSA PCM backend's first layer, its pinned UAPI and ABI check, and the hardware harness
+
+### What shipped
+
+- `internal/alsapcm`: the bridge player's ALSA backend without alsa-lib, cgo
+  or a C toolchain at run time. `Open` takes an `Endpoint` (card and device
+  numbers) and opens `/dev/snd/pcmC<card>D<device>p` non-blocking; checks the
+  kernel's PCM protocol and INFO's card, device and direction; refines the
+  exact request (RW_INTERLEAVED, the format, STD, two channels, the rate),
+  aims the buffer near 200 ms, commits with HW_PARAMS and reads the commit
+  back; sets the software parameters; prepares. `Write` is `WRITEI_FRAMES`
+  with poll, `Drop`, `Drain` with a deadline, `Close` once. The kernel is a
+  seam of four calls (open, ioctl, poll, close): `linuxSys` on
+  `linux && (amd64 || arm64)`, a fake kernel in the tests on every OS, and
+  `Open` refuses with `ReasonUnsupported` anywhere else.
+- `scripts/alsa-abi` (`probe.c`, `check.sh`, a README) and the `alsa-abi`
+  job in `gate.yml`, in the gate fan-in.
+- `bridge output pcm-test`, the hardware harness, not listed in `bridge
+  output`'s usage.
+- Rules text for `.claude/rules/output.md`, which this session could not
+  edit, went to the owner beside the branch: a new section, the
+  `internal/alsapcm/**` and `scripts/alsa-abi/**` globs, and the title line.
+
+### The UAPI pin, and what this session could not see
+
+`uapi.go` follows `include/uapi/sound/asound.h` at the tag `v6.12`, a
+long-term line. The layout is the one a
+64-bit little-endian process sees, the same on linux/amd64 and linux/arm64:
+`snd_pcm_hw_params` 608 bytes, `snd_pcm_sw_params` 136, `snd_pcm_info` 288,
+`snd_pcm_status` 152, `snd_xferi` 24, which the request numbers encode
+(HW_PARAMS `0xc2604111`, SW_PARAMS `0xc0884113`, INFO `0x81204101`, STATUS
+`0x80984120`, WRITEI_FRAMES `0x40184150`).
+
+The machine this was written on had no copy of the header, could not fetch
+one, and could not run a C compiler. The definitions were written from the
+header's known layout, and the `alsa-abi` job is their first comparison with
+the real file; it had not run when this was written, because the branch was
+not pushed (it passed on the PR: "Review and the hardware gate" below). The facts
+most at risk are `pcmVersion`, written as 2.0.18 (the protocol the 6.11
+rework of the stream synchronisation id is remembered to have set), and the
+member names the probe refers to; the job names each fact that differs.
+Where the header changed in 6.11 (`snd_pcm_info`'s sync id became `pad1`,
+and `snd_pcm_hw_params`' reserved bytes became `sync[16]` and
+`reserved[48]`), the Go structures keep one opaque field and the probe names
+neither layout's members, so the comparison holds for both.
+
+**Why a probe, run natively.** Three ways were open: `static_assert`s
+compiled for each target, Go generated from the header with a freshness
+check, or a probe run on each architecture. A run probe is the compiler's
+own answer, with no second hand-written copy of the offsets, and it is the
+only one that reads where the compiler put `snd_interval`'s one-bit fields.
+Run natively on both architectures (GitHub's arm64 runner is free for public
+repositories), the comparison is between the real Go compiler's layout and
+the real C compiler's on each. golang.org/x/sys pins its Linux definitions
+the same way, by tag: `unix/linux/Dockerfile` clones the kernel at `v7.2` in
+v0.49.0, beside a cross compiler for each architecture and qemu.
+
+**Why the header is fetched, not vendored.** No verbatim copy could be made
+here, and fetching keeps a GPL-2.0+ WITH Linux-syscall-note file out of the
+repository and out of every archive. `check.sh` prints the file's git blob id
+and sha256; the tag is what pins it until a first green run records the id.
+
+### Decisions
+
+- **The protocol floor is 2.0.15.** ALSA promises compatibility within a
+  major.minor (`SNDRV_PROTOCOL_INCOMPATIBLE`), so 2.0 is required. On a
+  64-bit process every structure here has had the size its request encodes
+  since long before 2.0.15, so the micro floor is a qualification bound:
+  2.0.15 came with Linux 5.6 (2020), every kernel the owner's hardware runs
+  is newer, and the oldest maintained line, 5.10, carries it. That history
+  is as recalled here: the `alsa-abi` job checks the pinned header's own
+  version, not which kernel brought which. Rejected: the pinned header's
+  own version, which would refuse 5.6 to 6.11, Debian 12's 6.1 among them;
+  and 2.0.0, which states no bound at all.
+- **The device logic is portable; the kernel seam is Linux's.** The brief
+  asked for a Linux-only package with a stub elsewhere. `Open` is exactly
+  that: off linux/amd64 and linux/arm64 it refuses with
+  `ReasonUnsupported`. Everything above the four calls builds everywhere,
+  so the fake-kernel tests run on all three CI OSes, as `internal/alsa`'s
+  reader does with its captured trees; the errno and poll values are
+  written out for that, and `TestErrnoValuesAreLinuxs` and
+  `TestPollBitsAreLinuxs` hold them to x/sys on Linux.
+- **POLLERR alone is not a disconnect.** The brief's list put POLLERR beside
+  ENODEV. The kernel's `snd_pcm_poll` raises it in every state but running,
+  prepared, paused and draining, so an xrun and a suspend raise it too; read
+  as a disconnect, every xrun after a wait would be reported as an unplug.
+  The write asks STATUS: XRUN is an xrun, SUSPENDED a suspend, DISCONNECTED
+  (or ENODEV from STATUS) a disconnect, a playing state is retried, and a
+  POLLERR the state explains away twice with no frame between is an error.
+  POLLHUP and POLLNVAL (the kernel's disconnect poll returns
+  POLLERR|POLLNVAL once a card's files are shut) are a disconnect at once.
+- **Busy is EBUSY from the non-blocking open**, which never waits.
+  `pcm-test` names the holder from `/proc/asound` through `internal/alsa`,
+  which stays a reader.
+- **Exact means a closed, single, committed interval.** The kernel's runtime
+  takes an interval's minimum (`params_rate` and its siblings), so a
+  committed value is read only when the interval is closed and its ends are
+  equal, and `rate_num` must be the rate times `rate_den`.
+- **The geometry is aimed, never required.** Buffer first (exactly
+  `framesIn(rate, 200 ms)` clamped to the refined range, then the largest at
+  most that), then a quarter of it as the period (exactly, then the smallest
+  at least that); a range the hardware refuses too is left to HW_PARAMS'
+  own choice.
+- **Software parameters**: the stream starts when the buffer is full, stops
+  (an xrun) when it is empty, never fills silence, and wakes a writer a
+  period at a time; `proto` is the pinned header's version, timestamps off.
+- **A wait for room is bounded** by `stallTimeout`, ten buffers and at least
+  a second, after which the stream is `stalled`, never waited on forever.
+- **A cancel wakes the real poll through an eventfd** made for the call and
+  written by `context.AfterFunc`; a callback that has started is waited for
+  before the eventfd closes. Polling in slices to notice a cancel was
+  rejected: it trades latency for wakeups and still is not "at once".
+- **Drain on the non-blocking node** is DRAIN (EAGAIN) and then STATUS at
+  least once a period, waiting in between on a poll that asks for no event,
+  so only an error condition wakes it early: the drain's end raises POLLERR
+  (the stream is SETUP again), and a playback stream still draining raises
+  none, so the wait cannot spin.
+- **Go memory and the kernel.** `ioctlOn` passes a pointer and keeps its
+  target alive across the call; `xferi.buf` is an `unsafe.Pointer`, not a
+  uintptr, so the samples stay alive and move with a stack; nothing is
+  mmapped, so no Go memory is kernel-visible after a call. PAUSE and
+  STATUS_EXT are not used.
+- **The harness checks the kernel's own account** (`/proc/asound/cardN/
+  pcmDp/subS/hw_params`) against the read-back before it plays, and refuses
+  to play on a difference: that would mean the definitions are wrong. Its
+  tone is a 1 kHz sine at `--level` dBFS, -30 at most, with the amplitude
+  rounded down, generated over `rate/gcd(rate, 1000)` frames so whole
+  repeats join without a seam, and packed by `format.Pack`. That table is
+  as long as the rate when the rate shares no factor with 1000, so
+  `--rate` is checked against the backend's own bounds
+  (`alsapcm.MinRateHz`, `MaxRateHz`) before the tone is built: found on
+  review, after the harness's first commit, where a rate such as
+  2147483647 would have asked for 16 GiB of samples before `Open` refused
+  it. The fix came red first (7999 and 1536001 reached the open), and that
+  run is its control.
+
+### Red first
+
+Against the API with stub bodies, 29 of the package's tests failed, every
+fake-kernel test of the open, the parameters, the writes and the stop; the
+five definition and helper tests passed and the probe comparison skipped. The
+harness's tests were written with its code; their evidence is the controls
+H1–H7 below.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against the package (or the
+harness) suite, then restored from HEAD with the tree checked clean. All
+went red exactly where predicted, except where noted.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | protocol floor not checked | `TestOpenRefusesAProtocolBelowTheFloor`, `TestCloseClosesOnEveryPath/old_protocol` |
+| C2 | EBUSY not typed busy | `TestOpenNamesABusyEndpoint`, `TestOpenTypesWhatTheOpenRefused` |
+| C3 | INFO's card not compared | `TestOpenChecksTheNodeIsTheEndpointAskedFor`, `TestCloseClosesOnEveryPath/another_endpoint` |
+| C4 | read-back rate checks removed | `TestOpenRefusesAReadBackThatIsNotWhatWasAsked` (rate, rate fraction, no rate fraction), `TestCloseClosesOnEveryPath/read-back_mismatch` |
+| C5 | stop threshold never reached | `TestOpenCommitsExactlyWhatWasAsked` |
+| C6 | buffer range fallback removed | `TestOpenTakesTheGeometryRefineNarrowsTo/sizes_in_steps_of_1000_frames` |
+| C7 | EINTR not retried | `TestWriteRetriesAnInterruptedCall` |
+| C8 | a partial write restarts at the first frame | `TestWriteContinuesAPartialWriteWhereItStopped`, `TestWriteRetriesAnInterruptedCall` |
+| C9 | POLLERR read as a disconnect | `TestWritePollErrorIsWhatTheKernelSaysItIs` |
+| C10 | a cancelled wait retried on a live context | first run: nothing; after e4de410b, `TestWriteCancelDuringAPollReturnsAndTheDeviceStillDrops` |
+| C11 | drain deadline half again as long | `TestDrainDropsAtItsDeadline` |
+| C12 | Close not idempotent | `TestCloseIsOnceAndThenNothingReachesTheKernel` |
+| C13 | a refused open keeps the node | every open-refusal case of `TestOpenRefusesAProtocolBelowTheFloor`, `TestOpenChecksTheNodeIsTheEndpointAskedFor`, `TestOpenRefusesWhatTheHardwareDoesNotTake`, `TestOpenRefusesAReadBackThatIsNotWhatWasAsked` and `TestCloseClosesOnEveryPath`; no case after a successful open |
+| C14 | `hwParams.tail` four bytes shorter | first run: nothing, Go padded the struct back to 608 bytes, so the layout had not changed; eight bytes shorter: `TestIoctlNumbersEncodeTheirStructures` |
+| C15 | probe drops `rate_den` | `TestProbeAndGoNameTheSameFacts` |
+| C16 | comparison ignores a differing value | `TestCompareFactsReportsEachKindOfDifference` |
+| H1 | Ctrl-C does not drop | `TestOutputPCMTestCtrlCDropsAndCloses` |
+| H2 | the -30 dBFS cap lifted | first run: `TestOutputPCMTestTakesAnEndpointOnlyByNumber` through a panic that hid the other results; after 075f5520, that test alone |
+| H3 | the tone at -15 dBFS | `TestOutputPCMTestPlaysTheToneAndReports`, `TestOutputPCMTestToneIsQuietAndSeamless` |
+| H4 | passive mode prints other cards' files | `TestOutputPCMTestPassiveOpensNothing` |
+| H5 | busy holder not named | `TestOutputPCMTestNamesTheHolderOfABusyDevice` |
+| H6 | cross-check ignores the rate | `TestOutputPCMTestStopsWhenTheKernelDisagrees` |
+| H7 | pcm-test listed in `bridge output`'s usage | `TestOutputPCMTestIsHidden` (alone among the 35 output tests) |
+
+C10 found a weak test: the write loop checks its context before each call,
+so a cancelled wait retried on a live context still returned "cancelled",
+one wait later; in the fake that wait returned at once, on a DAC it lasts
+until the buffer has room. The test now asserts one wait and no write after
+the cancel, and `TestDrainCancelledDrops` one wait. H2's first run reddened
+the right test by a divide-by-zero in a zero fake device; the usage cases'
+opener now refuses.
+
+`TestUAPIMatchesTheKernelHeader` was also run end to end through its flag
+with a probe file written from the Go side (195 facts): it passed, and a copy
+with one offset moved, one fact dropped and one added failed naming all
+three.
+
+### The hardware gate
+
+On the box, as a user in the `audio` group, with `bridge` from `make
+build-all` (`dist/bridge-linux-arm64` on the Pi 5). N is the card number
+`bridge output dac` lists.
+
+1. Passive capture: `bridge output pcm-test --passive --card N`. Pass: the
+   card's `/proc/asound` files and its reading, exit 0, and the substream
+   left as it was.
+2. Open and write, per DAC and format, for example
+   `bridge output pcm-test --card N --device 0 --rate 44100 --bits 16`,
+   `--rate 96000 --bits 24`, `--rate 192000 --bits 24 --format S32_LE` (the
+   Hugo 2 is S32 only), `--rate 384000 --bits 32`. Pass: "committed exactly"
+   names the rate and format asked for, the kernel's hw_params line says
+   "agrees", the tone is quiet and clean on headphones, the DAC shows the
+   rate, "drained; xruns 0", "closed", exit 0 (the xrun count comes from the drain:
+   an underrun after the last write is an xrun and exit 1, #1301 review).
+3. Cancel mid-write: `--seconds 60`, Ctrl-C after a few seconds. Pass: the
+   sound stops at once, "stopped by signal after N frames: dropped",
+   "closed", exit 0, and a second run opens at once, not busy.
+4. Busy: play something in the player (Volumio, moOde, MPD) and run (2).
+   Pass: exit 1, "busy", MPD's thread and process named, and MPD plays on.
+5. A rate the DAC lacks, for example `--rate 22050`: exit 1,
+   `parameters_not_supported`, naming what it offers.
+
+Optionally, `sudo modprobe snd-aloop` and (2) against the Loopback card,
+which proves negotiation and lifecycle only.
+
+### Not in this change
+
+- The `alsa-abi` job and the Linux-only tests (`TestLinuxPollEndsAtOnceWhenCancelled`,
+  `TestLinuxOpenRefusesANodeThatIsNotALSA`, `TestErrnoValuesAreLinuxs`,
+  `TestPollBitsAreLinuxs`, `TestAloopNegotiatesAndCloses`) had not run when
+  this was written: the session had no Linux. They were compiled and vetted
+  for linux/amd64 and linux/arm64, and ran on the PR's Linux runners ("Review
+  and the hardware gate" below).
+- Recording the header's blob id from the first green run as an enforced
+  pin, and committing that run's probe outputs as testdata so a reorder of
+  two same-size fields fails on every OS and not only in the job (captured
+  bytes, not a second hand-written copy).
+- A substream chosen by number (`PREFER_SUBDEVICE` on the control node):
+  the kernel picks a free one, and INFO says which.
+- The streaming sink and its recovery (2b), DSD and DoP (2c, 2d), stable
+  bindings and hotplug (4a), and everything after.
+
+### Review and the hardware gate (2026-10-21)
+
+**The first `alsa-abi` run never compared anything:** the source-tree
+`asound.h` writes `} __packed;`, which `make headers_install` rewrites and
+a plain compile reads as a declaration, so the probe failed to build on both
+runners. `check.sh` now passes `-D__packed=__attribute__((packed))`, as it
+already strips `__user` and `__force`. The next run passed on amd64 and
+arm64: every one of the Go definitions, written without the header at hand,
+matches Linux v6.12. Codex compared them field by field with the real header
+too, and so did the Claude API review. `SNDRV_PCM_FORMAT_LAST` joined the
+facts. `curl` in `check.sh` takes HTTPS only (`--proto '=https'`;
+SonarCloud S6506).
+
+**Review (Codex, the Claude API review; Argon none), two real defects:**
+an underrun after the last write passed as a clean run (DRAIN moves an XRUN
+stream to SETUP, `Drain` asked the state only afterward, and the harness
+printed a literal "xruns 0" before draining), and EBADFD from a removed PCM,
+which STATUS also answers, was a kernel error rather than a disconnect.
+Red first (`TestDrainAfterAnUnderrunIsAnXrun`, an EBADFD case in
+`TestDrainTypesWhatEndsIt`, `TestOutputPCMTestAnUnderrunBeforeTheDrainFails`),
+then fixed: `Drain` reads the state first, and the harness prints
+"drained; xruns 0" only after a clean drain. The second look found the
+window that check leaves (an underrun between it and DRAIN, which DRAIN
+erases too): a stream seen RUNNING that reaches SETUP without being seen
+DRAINING is now an xrun (`TestDrainSeesAnUnderrunBetweenItsCheckAndDRAIN`,
+red first). Rechecked on the GO bar: 48/24 and 384/32 still drain clean.
+
+**The hardware gate passed** on the Volumio Pi (aarch64 kernel 6.12, the
+arm64 static build), the iFi GO bar at card 5, with the owner listening on
+headphones:
+- passive capture: the GO bar's three PCM formats (S32_LE, S24_3LE, S16_LE)
+  at 44.1 to 384 kHz and its DSD altset, nothing opened;
+- 44.1 kHz/16, 96 kHz/24 and 384 kHz/32: committed exactly, the kernel's
+  `hw_params` agreeing, a buffer of about 210 ms, drained, no xrun, closed,
+  exit 0, twice; the owner heard every tone clean and saw the GO bar's light
+  follow each rate;
+- a cancel after 4 s: stopped at 4.10 s, dropped, closed, the device free
+  at once, and the sound stopped at once;
+- 22,050 Hz: `parameters_not_supported`, listing what the GO bar offers
+  (the first run listed format numbers 64 to 255, bits of the mask past
+  the last format the kernel defines; `formatsOf` now stops at
+  `SNDRV_PCM_FORMAT_LAST`, red first in `TestFormatsOfNamesOnlyRealFormats`);
+- busy, with Volumio playing to the GO bar: exit 1, naming MPD's
+  `output:alsa` thread and the `mpd` process, MPD playing on untouched.
+
+On the way the Pi showed the failure the design's persisted identity exists
+to prevent: Volumio stores its output as a card number, the cards were
+renumbered (the Hugo 2 became card 2, the GO bar card 5), and Volumio played
+to the Hugo 2 while its settings named the iFi until the output was chosen
+again.
 
 ## 2026-10-21 — the loopback track route, the player checklist, and output.mpd on by default (B473 B2c)
 
