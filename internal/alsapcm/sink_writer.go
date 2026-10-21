@@ -273,6 +273,7 @@ func (s *Sink) establish(p int64, stream State, queued int64) {
 // the underrun and the stop is the driver's to say, not the sink's. A
 // Drain under way ends with the xrun.
 func (s *Sink) xrun(err error, op string) {
+	s.xrunPaused = s.state == SinkPaused
 	s.runPlayed = s.run.written
 	s.run.fold(s.run.written)
 	at := s.now()
@@ -350,12 +351,14 @@ func addCounters(a, b Counters) Counters {
 	return Counters{Writes: a.Writes + b.Writes, Partial: a.Partial + b.Partial, Waits: a.Waits + b.Waits, Interrupted: a.Interrupted + b.Interrupted}
 }
 
-// badState refuses op in the sink's state.
+// badState refuses op in the sink's state. A sink an xrun stopped refuses
+// with the xrun, as Write does, so a caller that recovers on an xrun
+// recovers whichever call found it.
 func (s *Sink) badState(op string) error {
 	detail := "the sink is " + s.state.String()
 	switch s.state {
 	case SinkXrun:
-		detail = "the sink stopped at an xrun: recover or drop it"
+		return &Error{Reason: ReasonOf(s.err), Op: op, Endpoint: s.cfg.Endpoint, Detail: "the sink stopped at an xrun: recover or drop it", Err: s.err}
 	case SinkPaused, SinkReleased:
 		detail = "the sink is " + s.state.String() + ": resume or drop it"
 	case SinkPlaying, SinkDraining:
@@ -583,7 +586,10 @@ func (s *Sink) reopen() error {
 }
 
 // recover prepares a stream an xrun stopped, and plays on from the next
-// content frame: a new run starts where the content played ends.
+// content frame: a new run starts where the content played ends. A sink
+// the xrun stopped while paused (by zeros that came too late) stays paused
+// on the prepared stream, writing nothing until Resume, and its release
+// stays due when the pause began.
 func (s *Sink) recover() error {
 	if s.state != SinkXrun {
 		return s.badState("recover")
@@ -598,7 +604,12 @@ func (s *Sink) recover() error {
 	s.run = run{base: s.ring.wr}
 	s.gaps[(s.ngaps-1)%maxGaps].Recovered = at
 	s.pos.Stream, s.pos.Queued = State(statePrepared), 0
-	s.setStateLocked(SinkPlaying, nil)
+	if s.xrunPaused {
+		s.pausedBy = pausedIdle
+		s.setStateLocked(SinkPaused, nil)
+	} else {
+		s.setStateLocked(SinkPlaying, nil)
+	}
 	s.mu.Unlock()
 	return nil
 }

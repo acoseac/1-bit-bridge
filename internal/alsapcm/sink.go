@@ -291,6 +291,7 @@ type Sink struct {
 	zeros       []byte
 	deadline    time.Time // when the pause releases the device
 	unexplained int       // POLLERRs in a row that woke a wait on the stream and its state explained away
+	xrunPaused  bool      // the last xrun stopped a paused sink: Recover keeps the pause
 	drainStop   func() bool
 
 	wmu sync.Mutex // one producer at a time
@@ -589,7 +590,10 @@ func (s *Sink) Resume() error { return s.command(opResume, nil) }
 
 // Recover prepares a stream an xrun stopped and goes on from the next
 // content frame. The gap stays counted in Position.Gaps and recorded in
-// Stats; nothing is written twice and nothing skipped.
+// Stats; nothing is written twice and nothing skipped. A sink the xrun
+// stopped while paused stays paused, writing nothing until Resume, and
+// releases the device when the pause would have. Until Recover, Pause,
+// Resume and Drain answer with the xrun's error, as Write does.
 func (s *Sink) Recover() error { return s.command(opRecover, nil) }
 
 // Drain says the producer is done, and waits until everything submitted
@@ -600,8 +604,9 @@ func (s *Sink) Recover() error { return s.command(opRecover, nil) }
 // and a reopen on the way); during it, only a Drop interrupts. ctx ends the
 // wait early: the stream is dropped (ReasonCancelled), as it is by a Drop.
 // An xrun ends the Drain with the xrun's error, and the sink waits for
-// Recover, Drop or Close. A paused, released or stopped sink has nothing
-// it may play out until it is resumed or recovered, and refuses.
+// Recover, Drop or Close; a sink an xrun had stopped already answers with
+// it too. A paused, released or stopped sink has nothing it may play out
+// until it is resumed, and refuses.
 func (s *Sink) Drain(ctx context.Context) error { return s.command(opDrain, ctx) }
 
 // Drop stops at once: the stream is dropped and the device released, and

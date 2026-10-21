@@ -107,6 +107,93 @@ func TestSinkWatchesTheStreamWhileTheProducerIsLate(t *testing.T) {
 	}
 }
 
+// TestSinkAnswersCommandsAtAnXrunWithTheXrun pins what a sink an xrun
+// stopped says to Pause, Resume and Drain: the xrun, as Write says it, so a
+// caller that recovers on an xrun recovers whichever call found it
+// (#1303's review: pcm-test's --recover gave up on an xrun the writer's
+// wait had found before the Drain). None of them changes anything: Recover
+// plays on, and the drain plays every frame.
+func TestSinkAnswersCommandsAtAnXrunWithTheXrun(t *testing.T) {
+	k := newModel(t)
+	s := openTestSink(t, k, sinkConfig())
+	in := content(0, 0, 9600)
+	submit(t, s, in)
+	await(t, k.when(filledAndIdle(9600)), "the writer to fill the hardware buffer")
+	k.advanceNow(300 * time.Millisecond)
+	waitState(t, s, SinkXrun)
+	for _, c := range []struct {
+		name string
+		op   func() error
+	}{
+		{"Pause", s.Pause}, {"Resume", s.Resume},
+		{"Drain", func() error { return s.Drain(context.Background()) }},
+	} {
+		if err := c.op(); ReasonOf(err) != ReasonXrun {
+			t.Errorf("%s of a sink an xrun stopped: %v, want %s", c.name, err, ReasonXrun)
+		}
+	}
+	if p := s.Position(); p.State != SinkXrun || p.Gaps != 1 || len(k.pauses) != 0 {
+		t.Errorf("after the commands: %+v, PAUSE given %v; want still stopped at the one xrun", p, k.pauses)
+	}
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	k.free()
+	drain(t, s)
+	sameFrames(t, "what the DAC heard", heard(k), in)
+}
+
+// TestSinkRecoverKeepsAPause pins Recover of a sink an xrun stopped while
+// it was paused (#1303's review: Recover played on). A pause by zeros
+// whose zeros come too late underruns; Recover prepares the stream and
+// keeps the pause, writing nothing until Resume, with the release still
+// due when the pause began; Resume after the release plays on from the
+// first content frame the DAC had not played.
+func TestSinkRecoverKeepsAPause(t *testing.T) {
+	k := newModel(t)
+	cfg := sinkConfig()
+	cfg.Pause = PauseZeros
+	s := openTestSink(t, k, cfg)
+	in := content(0, 0, 30000)
+	submit(t, s, in)
+	await(t, k.when(starved), "the writer to fill the hardware buffer")
+	k.play(t, 100*time.Millisecond)
+	if err := s.Pause(); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	x := s.Position().Written
+	k.play(t, 300*time.Millisecond)
+	k.advanceNow(300 * time.Millisecond)
+	waitState(t, s, SinkXrun)
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if p := s.Position(); p.State != SinkPaused {
+		t.Fatalf("after Recover: %+v, want still paused", p)
+	}
+	writes := k.callsOf(ioctlWriteIFrames)
+	k.play(t, DefaultReleaseAfter-time.Second)
+	p := s.Position()
+	if p.State != SinkPaused || p.Written != x || p.Played != x || k.callsOf(ioctlWriteIFrames) != writes {
+		t.Errorf("recovered while paused: %+v and %d writes since; want still paused at frame %d, nothing written", p, k.callsOf(ioctlWriteIFrames)-writes, x)
+	}
+	// The pause began 600 ms before the Recover (300 ms of zeros, then 300 ms
+	// late), so 29 s on its release is 400 ms away; one counted from the
+	// Recover would be a second away.
+	k.grant(500 * time.Millisecond)
+	waitState(t, s, SinkReleased)
+	k.revoke()
+	if err := s.Resume(); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	k.free()
+	drain(t, s)
+	// The xrun played every frame written: the content to x and every zero.
+	if n := aroundSilence(t, "what the DAC heard", heard(k), in[:x*6], in[x*6:]); n != s.Stats().Silence {
+		t.Errorf("heard %d frames of silence, want the %d written", n, s.Stats().Silence)
+	}
+}
+
 // TestSinkCountsEveryGapAndKeepsTheLastFew pins the bound on the
 // diagnostics: every xrun is counted, and the details of the last eight
 // are kept, oldest first.
