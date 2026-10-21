@@ -48476,3 +48476,208 @@ are unchanged. `codeql.yml`'s comment now names the group instead of telling
 a maintainer to close singles by hand; the three SHAs must still be equal.
 The rule is under **Build, CI, and test discipline** in
 `.claude/rules/build-ci-tests.md`.
+
+## 2026-10-21 — the loopback track route, the player checklist, and output.mpd on by default (B473 B2c)
+
+### The question
+
+The last bridge step of option A before the iOS side. Three parts:
+decision 2's HTTP fallback (while `output.mpd` is configured, the bridge
+serves its plain-HTTP track route on loopback only, so the co-located MPD
+can fetch a bridge track its `find` misses, without the optional DLNA
+server); the setup checklist, Player / DAC / Music / Phone, in the console
+and in `bridge doctor` from one source; and `output.mpd` on by default
+where detection finds an MPD on the same box, with an explicit opt-out,
+the MPD connection still lazy (decision 4). The rules are in
+`.claude/rules/output.md`.
+
+### The loopback track route
+
+- **It is the DLNA listener's file route, not a new one.** The app
+  already composes `/dlna/file/{trackID}` for a bridge row (the id is the
+  first 16 hex digits of SHA-256 of a NUL and the manifest path, which
+  the app computes the way the bridge does), and MPD's type comes from the
+  DLNA renderer profile for MPD's user agent. So the route is that path,
+  through the same index adapter (`newManifestLibraryAdapter`), and the
+  same serving half, `serveOpenedFile`, extracted unchanged from
+  `serveFromFilesystem`: the headers and `http.ServeContent`, so the bytes
+  are the file's and a range is answered `206`. What it does not serve is
+  what the DLNA listener adds: SSDP, the ContentDirectory, artwork, the
+  silences, renditions, and tracks proxied from an upstream server.
+- **Bound to 127.0.0.1 and ::1 only**, on `output.loopbackPort` (7791 by
+  default: MPD keeps the URLs in its queue across a bridge restart, so the
+  port is fixed; 0 is a kernel pick for tests). ::1 is optional, since a
+  host can run without IPv6, and the base URL names 127.0.0.1. The handler
+  refuses a remote address that is not loopback whatever the listener is
+  bound to (`loopback_only`), so a listener misbound later is still closed.
+- **Confined to the configured roots, links resolved.** The existing
+  confinement (`fs.Resolver` for the index row, `fsutil.OpenAsFile` for the
+  open) serves a symlink the operator planted that points out of a root;
+  `/v1/download` and the DLNA route serve it too, by design (the resolver's
+  doc: trusted content). This route answers anyone on the host with no
+  token, so a symlink out is refused here. The check reuses the canonical
+  containment helpers, `fsutil.ResolveLinks` and `fsutil.IsUnderAny`,
+  before the open (so nothing outside the roots is opened, not even to
+  learn that it is not a file), resolves the path again after the open and
+  requires that resolution inside a root too, and then confirms the file
+  that opened by walking the path below the matched root with `os.Root`,
+  which follows a link only while it stays inside and never an absolute
+  one (`sameFileInRoot`). A path that does not begin with the root byte
+  for byte is refused, so on a volume that folds case a link whose target
+  spells the root another way is refused rather than guessed at.
+- **Typed refusals**: `{"error","message"}` with `loopback_only`,
+  `method_not_allowed`, `not_found` (no row, a path below the id, a
+  rendition, a routed track, a file gone), `not_a_file`,
+  `outside_library` and `internal`. They are the route's, not `/v1`'s, so
+  PROTOCOL.md's error table, whose guards read `internal/api`, does not
+  list them; the `/v1/outputs` section names them.
+- **Lifecycle**: serve starts the route the first time the localOutputs
+  gate answers true (asked once at boot, and `OnActive` from every later
+  true answer, for an MPD that appears after boot), binds once (a taken
+  port is one Warn, kept for the checklist), and stops it before the store
+  closes. `Stop` closes a stream still running when its context ends:
+  `http.Server.Shutdown` returns at the context and leaves an active
+  connection open, which the red run showed (a 64 MiB stream ran to its
+  end after a cancelled Shutdown).
+- **On the wire**: `/v1/outputs`'s `mpd` object gains `loopbackBaseURL`
+  (`http://127.0.0.1:<port>`), present only while the route serves, so a
+  client treats it as optional. Additive, `ProtocolVersion` stays 1, and
+  PROTOCOL.md says how the app composes a track URL from it and what the
+  route refuses.
+
+### The checklist
+
+`internal/outputcheck` judges an input and reads nothing: four lines,
+Player, DAC, Music and Phone, each green with no fix or not green with
+exactly one sentence of fix. The Player line names MPD, its port and the
+LAN addresses where the phone reaches it (the owner asked that protocols
+be shown); MPD down is a fail ("Start MPD on this box…"), MPD on loopback
+only is a warn (`bind_to_address "any"`). The DAC line names the card,
+its USB id and what it can receive (PCM rate, native DSD by its DSD
+name); no card is a fail, a card MPD's output does not name is a warn
+(`hw:CARD=<id>`). The Music line reads the path rules: no library root is
+green, "Ready: can play music from another bridge or NAS"; every root
+proven is green; otherwise the first root that is not proven names its
+fix, as a warn while the loopback route serves (it still plays, over
+HTTP) and a fail when it does not. The Phone line counts paired devices.
+
+One gathering in `cmd/bridge` (`outputChecklist`) feeds both surfaces.
+`bridge doctor` asks a one-shot outputs builder over the config
+(`api.NewLocalOutputs`, closed at once, so the doctor holds no MPD
+connection), probes the loopback port (the route's typed 404 is how it
+knows the route from anything else holding the port), and counts
+`tokens.json`. The console reads the serving process's own builder
+(`Server.LocalOutputsResponse`, its caches and its lazy session) for
+`GET /api/output/checklist` and for its Diagnostics doctor, because
+`/api/doctor` runs on every settings render and a builder of its own
+would dial MPD each time. The dashboard shows the lines in a panel hidden
+unless the bridge is a player; the Phone line, when not green, opens the
+pairing dialog, which moved from `devices.html` to one template in
+`layout.html` with one opener in app.js (`initPairModal`), so the QR is
+the Devices page's own token and flow.
+
+### output.mpd on by default
+
+Already true at runtime since B2b: an unset value is `auto`, which is on
+where Volumio or moOde is installed, a configuration was read, or a daemon
+greeted; `off` is the opt-out and `on` wins over detection. What changed is
+what that gate now starts (the loopback route and the checklist), the
+example config's words, and two pins: the unset value with and without an
+MPD, and that asking the gate dials no MPD session (the first body opens
+it). `bridge init`'s documented overwrite still resets features, this one
+included.
+
+### What review of the route found while writing the rules
+
+The first identity check compared the opened file with `os.Stat` of the
+path resolved before the open. A directory on the path replaced by a link
+out after the check sends the open and that stat down the same link, so
+one swap served a file outside every root
+(`TestLoopbackRouteRefusesADirectorySwappedAfterTheCheck`, red on
+857d9b24's code). Resolving again after the open closed that, and a second
+park point showed the identity check refusing a directory swapped back in
+before the second resolution
+(`TestLoopbackRouteRefusesADirectorySwappedBackAfterTheOpen`). A swap in
+every window (out for the open, back for the second resolution, out again
+for the confirmation) still confirmed through `os.Stat`
+(`TestLoopbackRouteRefusesASwapInEveryWindow`, red for an absolute and a
+relative link), which is why the confirmation walks with `os.Root`. Each
+window is reproduced by parking the request in it (`beforeOpen`,
+`afterOpen`, `beforeConfirm`, fields of the handler), never by stress.
+
+### Red first
+
+- The route: the stub was the existing DLNA `FileHandler` mounted as-is
+  on a wildcard listener. Red: all eleven non-loopback remotes served
+  (`status 200, want 403`); the outside file served through every index
+  escape (`body "SECRET-OUTSIDE-THE-LIBRARY"`); `/dlna/file/inside/extra`
+  and the other multi-segment paths served the track; a rendition served
+  (`body "RENDITION"`); plain-text refusals; `listens on [::]:65094, which
+  is not loopback`; `the stream ran to its end after Stop (67108864 bytes)`.
+- The identity check, the second resolution and the `os.Root`
+  confirmation: each test was run against the code without that step, as
+  above.
+- `output.loopbackPort`: `default port 0 (const 0), want 7791`;
+  `TestConfigCloneIsDeep` then caught the shared pointer.
+- `mpd.loopbackBaseURL` and `OnActive`: `loopbackBaseURL "", want
+  "http://127.0.0.1:7791"`; `OnActive ran 0 times`.
+- Serve: `loopback route base "", want http://127.0.0.1:<port>`, from a
+  boot test that waits on a per-invocation hook and serve's exit channel,
+  never a poll.
+- The checklist: four bare lines failed five of the six tests. The
+  one-shot builder: `Close left the session open (closed 0)`. The doctor
+  hook: `the checklist was asked 0 times`. The admin endpoint: `asked 0`.
+  The console's doctor ignoring the serving source: `the console's doctor
+  carries []`. The dashboard (run against HEAD's five console files):
+  `the dashboard lacks <div class="panel" id="player-checklist-panel"
+  hidden>`, `/stats renders no pairing dialog`, `no function
+  initPairModal in the source`.
+- The gathering code in `cmd/bridge/output_checklist.go` was drafted
+  before its tests; its red was taken against stubbed bodies before any
+  commit (`player {Software: … Port:0 …}`, `own route: base "" err
+  <nil>`, `bridge doctor does not ask for the player checklist`).
+
+### Negative controls
+
+Each one anchor of production code on the committed change, run against
+the named tests, restored from HEAD and checked clean.
+
+| Mutation | Red |
+|---|---|
+| `remoteIsLoopback` always true | the eight parseable non-loopback remotes of `TestLoopbackRouteRefusesARemoteThatIsNotLoopback` (the three that do not parse are the parse branch's) |
+| containment check before the open removed | `TestLoopbackRouteConfinesToTheLibraryRoots/index_link-to-dir-out` (`status 404, want 403 … not_a_file`): the second check covers files, this one keeps an outside path from being opened at all |
+| containment of the second resolution removed (on 55441980) | `TestLoopbackRouteRefusesALinkSwappedAfterTheCheck`, `TestLoopbackRouteRefusesADirectorySwappedAfterTheCheck` |
+| `os.Stat` of the second resolution instead of `os.Root` | both `TestLoopbackRouteRefusesASwapInEveryWindow` subtests |
+| the id parser takes the first segment | the four multi-segment URL subtests and `TestLoopbackRouteServesNoVariantAndNoRoutedTrack` |
+| refusals as `http.Error` | all seven refusal tests; the three serving tests stay green |
+| bind `0.0.0.0` | `TestLoopbackServerBindsOnlyLoopback` |
+| `Stop` without `Close` | `TestLoopbackServerStopsWithTheServer` |
+| the routed-track guard removed | `TestLoopbackRouteServesNoVariantAndNoRoutedTrack` (`status 403, want 404`) |
+| `output.loopbackPort` range check removed | `TestOutputLoopbackPort` |
+| the base URL never set on `mpd` | `TestOutputsCarryTheLoopbackBaseURL/serving` |
+| `OnActive` never run / always run | the two resolves-on cases / the two Linux resolves-off cases of `TestLocalOutputsActiveStartsTheLoopbackRoute` |
+| the gate opens a session | `TestTheGateNeverOpensTheMPDSession` (both modes) and B2b's `TestSessionFollowsTheEndpoint`, which counts dials |
+| `Close` keeps the session / leaves the idle timer | `TestAOneShotBuilderClosesItsSession`, at its own assertion each |
+| serve's boot decision removed / the route started regardless | `TestServeServesItsTracksOnLoopbackWhileOutputIsOn` / `TestServeStartsNoLoopbackRouteWhileOutputIsOff` |
+| serve never stops the route | `TestServeServesItsTracksOnLoopbackWhileOutputIsOn` (`still accepts after serve stopped`) |
+| no roots read as a failure | `TestABoxWithNoLibraryIsReady` |
+| a green Phone line with a fix | the eleven cases of `TestEveryLineIsGreenOrSaysItsFixInOneSentence` where Phone is green |
+| the Player line without "MPD" | `TestAHealthyBoxIsGreenAndNamesItsProtocol` |
+| `bridge doctor` not wired | `TestBridgeDoctorPrintsThePlayerChecklist` |
+| the console DTO drops the fix | `TestTheConsoleAndTheDoctorShowOneChecklist` |
+| the probe accepts any answer | `TestProbeLoopbackRouteKnowsItsOwnRoute` |
+| the dashboard without the dialog / without its data | `TestTheDashboardCarriesThePlayerChecklistAndThePairingQR` |
+| the QR on a green Phone line | `TestThePlayerChecklistScriptIsWired` |
+| `output.mpd` unset read as off | `TestLocalOutputsActiveStartsTheLoopbackRoute/linux_unset_with_an_MPD` and B2b's `TestOutputModeRejectsAnythingElse` |
+
+### Not in this change
+
+- The console's JS is pinned structurally and through the rendered pages;
+  it was not executed here (no node on the host this was written on).
+  The node-run console tests skip without node, as before.
+- `TestDoctorPassesWithNoRoots` (B2b) now leaves the checklist's Player
+  and DAC lines out of its no-fail rule: on Linux they grade the test
+  host's MPD and sound cards, which are not the config.
+- B3 (the live reading and verdict), the iOS side (I1–I4), the bridge's
+  own player (B470), and anything the DLNA server serves are untouched;
+  the DLNA route's serving half was extracted, not changed.
