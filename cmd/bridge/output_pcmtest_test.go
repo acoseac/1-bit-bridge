@@ -169,8 +169,12 @@ func TestOutputPCMTestTakesAnEndpointOnlyByNumber(t *testing.T) {
 		{with("--level", "-91"), "--level is -90 to -30 dBFS"},
 		{[]string{"--passive", "--card", "5", "--rate", "48000"}, "--passive opens nothing and plays nothing, and takes no --rate"},
 	} {
+		// The opener refuses, so a request wrongly let through ends at
+		// the open, counted, rather than playing on a device with no
+		// parameters.
 		var opens int
-		_, stderr, code := runPCMTest(context.Background(), pcmTestEnvWith(&fakePCMDevice{}, nil, &opens), c.args...)
+		refused := &alsapcm.Error{Reason: alsapcm.ReasonKernel, Op: "open", Detail: "a usage error reached the open"}
+		_, stderr, code := runPCMTest(context.Background(), pcmTestEnvWith(nil, refused, &opens), c.args...)
 		if code != 2 || !strings.Contains(stderr, c.says) {
 			t.Errorf("%q: exit %d, stderr %q; want 2 and %q", c.args, code, stderr, c.says)
 		}
