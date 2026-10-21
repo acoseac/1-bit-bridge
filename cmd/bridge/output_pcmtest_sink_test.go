@@ -285,6 +285,17 @@ type sinkHarness struct {
 	prepare  func(i int, f *fakeSink)
 	openWait func(i int)
 	openErr  error
+	// said, when set, is given each write the run makes to standard output,
+	// as it makes it: a line, or the block of lines one report prints.
+	said func(string)
+}
+
+// saidTo is a writer that hands each write to a sinkHarness's said.
+type saidTo func(string)
+
+func (w saidTo) Write(p []byte) (int, error) {
+	w(string(p))
+	return len(p), nil
 }
 
 // newSinkHarness is a harness on Linux whose sinks are fakes.
@@ -346,10 +357,28 @@ func (h *sinkHarness) sink(i int) *fakeSink {
 func (h *sinkHarness) run(ctx context.Context, args ...string) <-chan pcmTestResult {
 	done := make(chan pcmTestResult, 1)
 	go func() {
-		so, se, code := runPCMTest(ctx, h.env, args...)
-		done <- pcmTestResult{so, se, code}
+		var so, se bytes.Buffer
+		var stdout io.Writer = &so
+		if h.said != nil {
+			stdout = io.MultiWriter(&so, saidTo(h.said))
+		}
+		code := runOutputPCMTest(ctx, args, h.env, stdout, &se)
+		done <- pcmTestResult{so.String(), se.String(), code}
 	}()
 	return done
+}
+
+// tick sends the run a tick at when, under the watchdog, so a run that no
+// longer takes ticks fails the test in a minute rather than hanging it.
+func (h *sinkHarness) tick(t *testing.T, when time.Time) {
+	t.Helper()
+	watchdog := time.NewTimer(time.Minute)
+	defer watchdog.Stop()
+	select {
+	case h.ticks <- when:
+	case <-watchdog.C:
+		t.Fatalf("waited a minute for the run to take the tick at %v", when)
+	}
 }
 
 // pcmTestResult is what a run printed and how it exited.
@@ -574,8 +603,8 @@ func TestOutputPCMTestSinkCountsTheRunsTimeAcrossRates(t *testing.T) {
 	}
 	second.setPlayed(24000)
 	t0 := time.Unix(1_000, 0)
-	h.ticks <- t0
-	h.ticks <- t0.Add(time.Second)
+	h.tick(t, t0)
+	h.tick(t, t0.Add(time.Second))
 	close(second.gate)
 	r := h.wait(t, done)
 	calls := drainCalls(second)
@@ -627,7 +656,7 @@ func TestOutputPCMTestSinkCountsALongRunsTime(t *testing.T) {
 		"--pause-at", "12000", "--proc-root", t.TempDir())
 	f := waitSink(t, h, done)
 	f.setPlayed(9_300_000_000)
-	h.ticks <- time.Unix(1_000, 0)
+	h.tick(t, time.Unix(1_000, 0))
 	// The tick is taken and acted on before the run's next look at ctx.
 	cancel()
 	r := h.wait(t, done)
@@ -702,14 +731,14 @@ func TestOutputPCMTestSinkPausesAndResumesOnTimers(t *testing.T) {
 	t0 := time.Unix(1_000, 0)
 	f := waitSink(t, h, done)
 	f.setPlayed(24000)
-	h.ticks <- t0
+	h.tick(t, t0)
 	f.setPlayed(48000)
-	h.ticks <- t0.Add(time.Second)
+	h.tick(t, t0.Add(time.Second))
 	if got := nextCall(t, f, "drain"); got != "pause" {
 		t.Fatalf("after the content reached 1 s: %q, want a pause", got)
 	}
-	h.ticks <- t0.Add(2 * time.Second)
-	h.ticks <- t0.Add(3 * time.Second)
+	h.tick(t, t0.Add(2*time.Second))
+	h.tick(t, t0.Add(3*time.Second))
 	if got := nextCall(t, f, "drain"); got != "resume" {
 		t.Fatalf("2 s after the pause: %q, want a resume", got)
 	}
@@ -729,7 +758,10 @@ func TestOutputPCMTestSinkPausesAndResumesOnTimers(t *testing.T) {
 // resume comes. The pause came after the producer took Changed for its
 // drain, or before it, when the resume alone closes the channel the producer
 // looks at, which a look at the channel before the state read would miss.
-// Either way the drain is asked again and plays out, exit 0.
+// Either way the drain is asked again and plays out, exit 0. The producer is
+// let go only once the run has said it paused (Codex on #1303: the run still
+// read Position for that report after the pause's state change, and when the
+// producer refused first that read took the hold meant for the producer).
 func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -743,6 +775,12 @@ func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 		h := newSinkHarness(t)
 		held, release := make(chan struct{}), make(chan struct{})
 		looking, goOn := make(chan struct{}), make(chan struct{})
+		reported, report := make(chan struct{}), new(sync.Once)
+		h.said = func(s string) {
+			if strings.HasPrefix(s, "paused ") {
+				report.Do(func() { close(reported) })
+			}
+		}
 		h.prepare = func(_ int, f *fakeSink) {
 			close(f.gate)
 			var pausing, refused atomic.Bool
@@ -754,8 +792,11 @@ func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 					<-release
 				case at == "refused":
 					refused.Store(true)
-				// The first look after the refusal is the producer's: the
-				// run looks at the sink only on the ticks the test sends.
+				// The first look after the refusal is the producer's: it
+				// refuses only once the run has said it paused, the last
+				// thing the run does on that tick, after its own look, and
+				// the run looks at the sink again only on the next tick,
+				// which the test sends once the producer is held here.
 				case at == "position" && refused.CompareAndSwap(true, false):
 					close(looking)
 					<-goOn
@@ -766,17 +807,16 @@ func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
 			"--seconds", "1", "--pause-at", "0.5", "--resume-after", "1", "--proc-root", t.TempDir())
 		f := waitSink(t, h, done)
 		awaitRun(t, held, c.name+": the producer to wait for the pause")
-		playing := f.Changed()
 		f.setPlayed(24000)
 		t0 := time.Unix(1_000, 0)
-		h.ticks <- t0
-		awaitRun(t, playing, c.name+": the pause at half a second")
+		h.tick(t, t0)
+		awaitRun(t, reported, c.name+": the run to say it paused at half a second")
 		// The paused sink refuses the drain, and the resume comes as the
 		// producer reads the state.
 		paused := f.Changed()
 		close(release)
 		awaitRun(t, looking, c.name+": the producer to look at the paused sink's refusal")
-		h.ticks <- t0.Add(time.Second)
+		h.tick(t, t0.Add(time.Second))
 		awaitRun(t, paused, c.name+": the resume a second after the pause")
 		close(goOn)
 		r := h.wait(t, done)
@@ -963,8 +1003,8 @@ func TestOutputPCMTestSinkNamesTheHolderWhenAResumeIsBusy(t *testing.T) {
 	t0 := time.Unix(1_000, 0)
 	f := waitSink(t, h, done)
 	f.setPlayed(44100)
-	h.ticks <- t0
-	h.ticks <- t0.Add(40 * time.Second)
+	h.tick(t, t0)
+	h.tick(t, t0.Add(40*time.Second))
 	r := h.wait(t, done)
 	for _, want := range []string{"busy", `held by sub 0: thread 6584 "output:alsa", process 6551 "mpd"`, "does not stop MPD"} {
 		if !strings.Contains(r.stderr, want) {
