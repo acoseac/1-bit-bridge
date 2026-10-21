@@ -80,8 +80,8 @@ func TestTheSettingsResponseCarriesNoSerial(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, out := range []string{string(b), fmt.Sprintf("%+v", resp), fmt.Sprintf("%#v", resp)} {
-		for i := 0; i+8 <= len(serial); i++ {
-			if strings.Contains(out, serial[i:i+8]) {
+		for i := 0; i+6 <= len(serial); i++ {
+			if strings.Contains(out, serial[i:i+6]) {
 				t.Fatalf("the settings response carries the serial: %s", out)
 			}
 		}

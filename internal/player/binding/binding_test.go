@@ -447,8 +447,8 @@ func TestWhatResolveReturnsLogsNoSerial(t *testing.T) {
 		l.Warn("cards", slog.Any("cards", inv.Cards), slog.Any("usb", c.USB))
 	}
 	for _, s := range []string{goBarSerial, "SWAPPED-IN-UNIT-0001"} {
-		for i := 0; i+8 <= len(s); i++ {
-			if strings.Contains(buf.String(), s[i:i+8]) {
+		for i := 0; i+6 <= len(s); i++ {
+			if strings.Contains(buf.String(), s[i:i+6]) {
 				t.Fatalf("a log line carries a serial:\n%s", buf.String())
 			}
 		}

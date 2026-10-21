@@ -26,10 +26,10 @@ const dacSerial = "GOBAR-7Q2X-91KZ-4471"
 // dacUSB1 is the Pi 5 tree's first USB 2 bus.
 const dacUSB1 = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1"
 
-// dacLeaks reports whether out carries the serial, or eight bytes of it.
+// dacLeaks reports whether out carries the serial, or six bytes of it.
 func dacLeaks(out, serial string) bool {
-	for i := 0; i+8 <= len(serial); i++ {
-		if strings.Contains(out, serial[i:i+8]) {
+	for i := 0; i+6 <= len(serial); i++ {
+		if strings.Contains(out, serial[i:i+6]) {
 			return true
 		}
 	}

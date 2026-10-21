@@ -24,11 +24,11 @@ import (
 // to find in anything that leaked it.
 const playerSerial = "GOBAR-7Q2X-91KZ-4471"
 
-// playerLeaks reports whether out carries the serial, or eight bytes of it
+// playerLeaks reports whether out carries the serial, or six bytes of it
 // in a row.
 func playerLeaks(out string) bool {
-	for i := 0; i+8 <= len(playerSerial); i++ {
-		if strings.Contains(out, playerSerial[i:i+8]) {
+	for i := 0; i+6 <= len(playerSerial); i++ {
+		if strings.Contains(out, playerSerial[i:i+6]) {
 			return true
 		}
 	}

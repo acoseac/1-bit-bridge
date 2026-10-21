@@ -16,15 +16,37 @@ import (
 // easy to find in an output that leaked it.
 const testSerial = "GOBAR-7Q2X-91KZ-4471"
 
-// leaks reports whether out carries the serial or any eight bytes of it
-// in a row: a cut-down copy is a leak too.
+// leaks reports whether out carries the serial or any six bytes of it in a
+// row: a cut-down copy is a leak too (yaml.v3 quotes seven bytes of a value
+// it cannot decode). The label's four never reach six.
 func leaks(out string) bool {
-	for i := 0; i+8 <= len(testSerial); i++ {
-		if strings.Contains(out, testSerial[i:i+8]) {
+	for i := 0; i+6 <= len(testSerial); i++ {
+		if strings.Contains(out, testSerial[i:i+6]) {
 			return true
 		}
 	}
 	return false
+}
+
+// TestSerialPrintsTheRedactionForEveryVerb: Format prints the redaction
+// itself whatever the verb, width or flag, on the value and on a pointer,
+// so %x, %q or %d print what %v prints and never a rendering of the
+// fields; %#v prints it typed.
+func TestSerialPrintsTheRedactionForEveryVerb(t *testing.T) {
+	s := New(testSerial)
+	for _, v := range []any{s, &s} {
+		for _, verb := range []string{"%v", "%+v", "%s", "%q", "%x", "%X", "%d", "%o", "%c", "%U", "%t", "%e", "%20s", "%-20v", "%08d", "% x"} {
+			if got := fmt.Sprintf(verb, v); got != "[redacted]" {
+				t.Errorf("%s of %T = %q, want [redacted]", verb, v, got)
+			}
+		}
+		if got := fmt.Sprintf("%#v", v); got != "usbid.Serial([redacted])" {
+			t.Errorf("%%#v of %T = %q", v, got)
+		}
+	}
+	if got := fmt.Sprintf("%v %x %#v", Serial{}, Serial{}, Serial{}); got != "[none] [none] usbid.Serial([none])" {
+		t.Errorf("an absent serial prints %q", got)
+	}
 }
 
 // withExported and withUnexported hold a serial the way a DTO or an
