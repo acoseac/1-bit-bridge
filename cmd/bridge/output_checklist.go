@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -155,8 +155,14 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // Production passes nil.
 func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
 	return func(ctx context.Context) []doctor.Check {
-		port := cfg.Output.EffectiveLoopbackPort()
-		base, probeErr := probeLoopbackRoute(ctx, port)
+		// The route is asked once, and only when a line needs it: a
+		// bridge that is no player dials nothing.
+		var probed sync.Once
+		var base string
+		var probeErr error
+		probe := func() {
+			probed.Do(func() { base, probeErr = probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort()) })
+		}
 		dbPath := manifest.DefaultDBPath(cfg.DataDir)
 		lcfg := api.LocalOutputsConfig{
 			Identity: api.OutputIdentity(cfg.DataDir),
@@ -180,7 +186,7 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 				listen, _ := configuredPort(cfg.ListenAddress)
 				return advertise.URLs(advertise.Params{Port: listen, CustomEndpoints: cfg.CustomEndpoints})
 			},
-			LoopbackBaseURL: func() string { return base },
+			LoopbackBaseURL: func() string { probe(); return base },
 		}
 		if seam != nil {
 			seam(&lcfg)
@@ -190,7 +196,7 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 		lines, ok := outputChecklist(ctx, outputChecklistSource{
 			Active:      lo.Active,
 			Outputs:     lo.Response,
-			LoopbackErr: func() error { return probeErr },
+			LoopbackErr: func() error { probe(); return probeErr },
 			Phones:      func() int { return countPairedDevices(cfg.DataDir) },
 		})
 		if !ok {
@@ -205,9 +211,11 @@ const loopbackProbeLimit = 2 * time.Second
 
 // probeLoopbackRoute asks 127.0.0.1:port whether this bridge's loopback
 // route serves there: the route answers a request for no track with its
-// typed 404, which nothing else on the port would. Nothing listening is
-// ("", nil): the bridge is not running, or its route did not start. A
-// port that answers otherwise is an error: something else holds it.
+// typed 404, which nothing else on the port would. A dial that fails is
+// ("", nil), nothing serving there: the bridge is not running, or its
+// route did not start. Any failed dial, not one errno: a refusal is
+// ECONNREFUSED on unix and WSAECONNREFUSED on Windows. A port that
+// answers otherwise is an error: something else holds it.
 func probeLoopbackRoute(ctx context.Context, port int) (string, error) {
 	if port <= 0 {
 		return "", nil
@@ -222,7 +230,8 @@ func probeLoopbackRoute(ctx context.Context, port int) (string, error) {
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil}}
 	resp, err := client.Do(req)
 	if err != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) {
+		var op *net.OpError
+		if errors.As(err, &op) && op.Op == "dial" {
 			return "", nil
 		}
 		return "", fmt.Errorf("port %d did not answer as the loopback route: %w", port, err)
