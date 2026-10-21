@@ -137,6 +137,10 @@ func (p Params) InfoFlags() []string {
 	return out
 }
 
+// CanPause reports whether the setup offers the kernel's PAUSE: the
+// committed parameters carry SNDRV_PCM_INFO_PAUSE.
+func (p Params) CanPause() bool { return p.Info&infoPause != 0 }
+
 // framesTime is n frames at rate as a duration.
 func framesTime(n, rate int) time.Duration {
 	if rate <= 0 {
@@ -703,6 +707,54 @@ func (d *Device) Delay() (int64, error) {
 		return 0, d.streamError("delay", err)
 	}
 	return n, nil
+}
+
+// Pause pauses a running stream (on) or releases a paused one (off) with
+// the kernel's PAUSE. A paused stream keeps its buffer and its pointers:
+// what was queued plays on from where it stopped once it is released.
+// Hardware without PAUSE (Params.CanPause) refuses it
+// (ReasonNotSupported); a stream in another state is typed by its state.
+func (d *Device) Pause(on bool) error {
+	if d.closed {
+		return d.closedError("pause")
+	}
+	var v uintptr
+	if on {
+		v = 1
+	}
+	if err := d.sys.ioctlValue(d.fd, ioctlPause, v); err != nil {
+		if e, _ := errnoOf(err); e == errnoENOSYS {
+			return &Error{Reason: ReasonNotSupported, Op: "pause", Endpoint: d.params.Endpoint,
+				Detail: "the hardware does not pause", Err: err}
+		}
+		return d.streamError("pause", err)
+	}
+	return nil
+}
+
+// Prepare prepares the stream again (PREPARE), after an xrun or a drop:
+// the kernel's pointers start again from zero, and the next writes fill
+// the buffer until the stream starts.
+func (d *Device) Prepare() error {
+	if d.closed {
+		return d.closedError("prepare")
+	}
+	if err := d.ioctlNone(ioctlPrepare); err != nil {
+		return d.streamError("prepare", err)
+	}
+	return nil
+}
+
+// wait waits on a stream nothing is writing, a paused, a filling or a
+// running one, for an error condition the kernel raises (an underrun, a
+// suspend, a device gone), for at most timeout, or until ctx ends. It
+// polls for no event: room in the buffer, which the kernel reports with
+// POLLOUT, does not end it, so the wait cannot spin.
+func (d *Device) wait(ctx context.Context, timeout time.Duration) (int16, error) {
+	if d.closed {
+		return 0, d.closedError("wait")
+	}
+	return d.sys.poll(ctx, d.fd, 0, timeout)
 }
 
 // Drop stops the stream at once and discards what the buffer holds

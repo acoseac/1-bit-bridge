@@ -21,6 +21,11 @@ type sys interface {
 	// which the caller keeps alive across the call (ioctlOn); the kernel
 	// keeps nothing of it after it returns.
 	ioctl(fd int, req uint32, arg unsafe.Pointer) error
+	// ioctlValue issues a request whose argument is a value the kernel reads
+	// as the argument itself, never through a pointer: PAUSE's 1 or 0. It
+	// keeps that value out of an unsafe.Pointer, which must only ever hold
+	// an address.
+	ioctlValue(fd int, req uint32, arg uintptr) error
 	// poll waits until fd has one of events, or an error condition, which
 	// it reports whether asked or not (revents); until timeout passes
 	// (revents 0, no error); or until ctx is done (ctx.Err()), which ends

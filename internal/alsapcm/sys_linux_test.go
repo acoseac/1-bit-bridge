@@ -28,6 +28,7 @@ func TestErrnoValuesAreLinuxs(t *testing.T) {
 		{errnoEACCES, unix.EACCES}, {errnoEBUSY, unix.EBUSY}, {errnoENODEV, unix.ENODEV},
 		{errnoEINVAL, unix.EINVAL}, {errnoENOTTY, unix.ENOTTY}, {errnoEPIPE, unix.EPIPE},
 		{errnoELOOP, unix.ELOOP}, {errnoEBADFD, unix.EBADFD}, {errnoESTRPIPE, unix.ESTRPIPE},
+		{errnoENOSYS, unix.ENOSYS},
 	} {
 		if uintptr(c.ours) != uintptr(c.unix) {
 			t.Errorf("%v is %d here and %d in the kernel", c.ours, uintptr(c.ours), uintptr(c.unix))

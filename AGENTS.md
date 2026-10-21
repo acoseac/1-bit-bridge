@@ -136,6 +136,7 @@ automation is unaffected.
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader (`internal/mpd/conf`): the box's player and how MPD is set, for `bridge output player` |
 | `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
 | `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF, and ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder), DSF and DFF demuxers into canonical native DSD, and typed refusals |
+| `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470): an endpoint opened by card and device number with exact parameters and cancellable writes, its UAPI pinned and checked by the `alsa-abi` CI job (PR 2a), and the streaming `Sink` above it: lookahead, the position the kernel establishes, pause and its release, reported xruns, drop and drain, gapless joins (PR 2b). `bridge output pcm-test` is its hardware harness |
 | `internal/supervision` | Answers "if this process exits, will something relaunch us?" |
 | `internal/pairing` | In-memory state machine for the admin-approval pairing flow |
 | `internal/analyze` | Offline audio analysis: sox(1) PCM decode → peak waveform sidecars; worker pool (opt-in via `analysis.enabled`) |

@@ -131,6 +131,12 @@ const (
 	ioctlDrop         uint32 = 0x00004143 // _IO('A', 0x43)
 	ioctlDrain        uint32 = 0x00004144 // _IO('A', 0x44)
 	ioctlWriteIFrames uint32 = 0x40184150 // _IOW('A', 0x50, struct snd_xferi)
+	// ioctlPause encodes an int, but the kernel takes that int as the
+	// argument itself, (unsigned long)arg, and never reads it through a
+	// pointer (snd_pcm_common_ioctl; alsa-lib passes it the same way), so it
+	// goes through sys.ioctlValue: 1 pauses a running stream, 0 releases a
+	// paused one.
+	ioctlPause uint32 = 0x40044145 // _IOW('A', 0x45, int)
 )
 
 // mask is struct snd_mask: one bit per value, SNDRV_MASK_MAX bits.

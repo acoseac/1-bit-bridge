@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,11 +39,15 @@ type pcmTestDevice interface {
 }
 
 // outputPCMTestEnv is what `bridge output pcm-test` takes from the host,
-// so a test can stand in for each: the OS it refuses off Linux and the
-// opener of an endpoint.
+// so a test can stand in for each: the OS it refuses off Linux, the opener
+// of an endpoint and of a sink, standard input (read only with --keys),
+// and the ticks the sink mode reports and runs its timers on.
 type outputPCMTestEnv struct {
-	goos string
-	open func(alsapcm.Endpoint, alsapcm.Config) (pcmTestDevice, error)
+	goos     string
+	open     func(alsapcm.Endpoint, alsapcm.Config) (pcmTestDevice, error)
+	openSink func(context.Context, alsapcm.SinkConfig) (pcmTestSink, error)
+	stdin    io.Reader
+	ticks    func(time.Duration) (<-chan time.Time, func())
 }
 
 // outputPCMTestCmd implements `bridge output pcm-test` on this host.
@@ -56,6 +61,18 @@ func outputPCMTestCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 			}
 			return d, nil
 		},
+		openSink: func(ctx context.Context, cfg alsapcm.SinkConfig) (pcmTestSink, error) {
+			s, err := alsapcm.OpenSink(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		},
+		stdin: os.Stdin,
+		ticks: func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTicker(d)
+			return t.C, t.Stop
+		},
 	}, stdout, stderr)
 }
 
@@ -63,20 +80,40 @@ func outputPCMTestCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 // the subcommand: it is the B470 hardware harness, run by hand.
 func outputPCMTestUsage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprint(w, `bridge output pcm-test --card N --device N --rate HZ --bits 16|24|32 [--format F] [--seconds S] [--level DBFS]
+bridge output pcm-test --sink --card N --device N --rate HZ --bits B [--tracks N] [sink flags]
+bridge output pcm-test --file PATH [--file PATH] --ack-full-level --card N --device N [--format F] [sink flags]
 bridge output pcm-test --passive --card N [--device N] [--proc-root DIR]
 
-The bridge player's ALSA backend, by hand (B470 PR 2a's hardware gate). It
-opens /dev/snd/pcmC<card>D<device>p, the card and device given by number,
-never by a name: no default, hw:, plughw:, dmix, softvol, alias or path, and
-no .asoundrc. It asks for the rate, two channels and the format exactly and
-prints what the kernel committed; anything else is refused, never played. It
-then plays a quiet 1 kHz sine, at most -30 dBFS, on both channels, and reports
-the delay, the writes and any xrun, then drains and closes. Ctrl-C stops it at
-once: the stream is dropped and the device closed.
+The bridge player's ALSA backend, by hand (B470 PR 2a's and PR 2b's hardware
+gates). It opens /dev/snd/pcmC<card>D<device>p, the card and device given by
+number, never by a name: no default, hw:, plughw:, dmix, softvol, alias or
+path, and no .asoundrc. It asks for the rate, two channels and the format
+exactly and prints what the kernel committed; anything else is refused, never
+played. It then plays a quiet 1 kHz sine, at most -30 dBFS, on both channels,
+and reports the delay, the writes and any xrun, then drains and closes. Ctrl-C
+stops it at once: the stream is dropped and the device closed.
+
+--sink plays the tone through the streaming sink instead (B470 PR 2b): two
+seconds decoded ahead, the position the kernel establishes, pause and resume,
+the release of a paused device, and xruns reported. --tracks 2 splits the
+tone into two tracks joined back to back mid-cycle: a gapless join is no
+click. --file decodes a file (FLAC, WAV, AIFF or ALAC) and plays it through
+the sink bit-exact, at the level it was mastered at, which the bridge never
+lowers: turn the volume down first and pass --ack-full-level. Two --file
+flags play back to back, with nothing between when their transport matches,
+and with a drain and a reopen, an honest gap, when it does not.
+
+Sink flags: --pause-at S pauses once S seconds have played, --resume-after S
+resumes S seconds later; --keys reads p (pause or resume) and q (stop) from
+standard input, one a line. --pause auto|pause|zeros chooses the kernel's
+PAUSE or zeros (auto: PAUSE when the hardware offers it). A pause releases
+the device after --release-after seconds (30), and the resume opens it again.
+An xrun stops the run unless --recover asks to play on, the gap counted; a
+run with a gap exits 1.
 
 A device another process holds (MPD playing) is refused as busy, naming the
-holder. The bridge never stops MPD or touches its configuration: stop the
-player first.
+holder, and so is a resume after a release. The bridge never stops MPD or
+touches its configuration: stop the player first.
 
 --passive opens nothing: it prints the card's /proc/asound files (stream,
 hw_params, sw_params, status) as the kernel wrote them.
@@ -91,9 +128,11 @@ Flags:
 
 // runOutputPCMTest is `bridge output pcm-test`.
 //
-// Exit codes: 0 the tone played and drained, or Ctrl-C stopped it and the
-// device was dropped and closed, or --passive printed the card; 1 the
-// endpoint was refused or the stream failed; 2 usage error.
+// Exit codes: 0 the tone or the files played and drained, with no gap, or
+// Ctrl-C (or q) stopped them and the device was dropped and closed, or
+// --passive printed the card; 1 the endpoint or a file was refused, a
+// resume was refused, the stream failed, or a recovered xrun left a gap; 2
+// usage error.
 func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("output pcm-test", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -106,6 +145,17 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 	level := fs.Float64("level", pcmTestLoudest, "the tone's peak in `dBFS`, -90 to -30")
 	passive := fs.Bool("passive", false, "open nothing: print the card's /proc/asound files")
 	procRoot := fs.String("proc-root", "", "the /proc tree --passive and a busy device's holder are read from (default /proc)")
+	sinkFlag := fs.Bool("sink", false, "play the tone through the streaming sink (B470 PR 2b)")
+	var sf pcmTestSinkFlags
+	fs.Var(&sf.files, "file", "a `file` to decode and play through the sink, bit-exact; give it twice to play two back to back")
+	fs.BoolVar(&sf.ackFullLevel, "ack-full-level", false, "with --file: the volume is down; files play at their own level, never lowered")
+	fs.IntVar(&sf.tracks, "tracks", 1, "with --sink: the tone in this many tracks joined back to back, 1 to 8")
+	fs.StringVar(&sf.pause, "pause", "auto", "how the sink pauses: auto, pause (the kernel's PAUSE) or zeros")
+	fs.Float64Var(&sf.pauseAt, "pause-at", 0, "pause once this many `seconds` have played")
+	fs.Float64Var(&sf.resumeAfter, "resume-after", 0, "resume this many `seconds` after the pause")
+	fs.Float64Var(&sf.releaseAfter, "release-after", 30, "release a paused device after this many `seconds`, 1 to 600")
+	fs.BoolVar(&sf.keys, "keys", false, "read p (pause or resume) and q (stop) from standard input, one a line")
+	fs.BoolVar(&sf.recover, "recover", false, "after an xrun, prepare the stream and play on, counting the gap")
 	fs.Usage = func() { outputPCMTestUsage(stderr, fs) }
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -125,7 +175,8 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 	}
 	root := *procRoot
 	if *passive {
-		for _, name := range []string{"rate", "bits", "format", "seconds", "level"} {
+		for _, name := range []string{"rate", "bits", "format", "seconds", "level", "sink", "file", "ack-full-level", "tracks",
+			"pause", "pause-at", "resume-after", "release-after", "keys", "recover"} {
 			if set[name] {
 				fmt.Fprintf(stderr, "output pcm-test: --passive opens nothing and plays nothing, and takes no --%s\n", name)
 				return 2
@@ -145,6 +196,17 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 		}
 		return printPCMTestPassive(alsa.Reader{ProcRoot: root}, *card, dev, stdout, stderr)
 	}
+	sink, problem := pcmTestSinkModeFrom(*sinkFlag, sf, set)
+	if problem != "" {
+		fmt.Fprintln(stderr, "output pcm-test: "+problem)
+		return 2
+	}
+	if root == "" {
+		root = alsa.DefaultProcRoot
+	}
+	if len(sf.files) > 0 {
+		return runPCMTestFiles(ctx, env, sf, *card, *device, *alsaFormat, root, stdout, stderr)
+	}
 	run, code := pcmTestRunFrom(*device, *rate, *bits, *alsaFormat, *seconds, *level)
 	if code != 0 {
 		fmt.Fprintln(stderr, "output pcm-test: "+run.problem)
@@ -154,11 +216,11 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 		fmt.Fprintf(stderr, "output pcm-test: ALSA is Linux only, and this is %s\n", env.goos)
 		return 1
 	}
-	if root == "" {
-		root = alsa.DefaultProcRoot
-	}
 	run.endpoint = alsapcm.Endpoint{Card: *card, Device: *device}
 	run.procRoot = root
+	if sink {
+		return run.playThroughSink(ctx, env, sf, stdout, stderr)
+	}
 	return run.play(ctx, env, stdout, stderr)
 }
 

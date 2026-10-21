@@ -123,6 +123,7 @@ const (
 	errnoEINVAL   errno = 22
 	errnoENOTTY   errno = 25
 	errnoEPIPE    errno = 32
+	errnoENOSYS   errno = 38
 	errnoELOOP    errno = 40
 	errnoEBADFD   errno = 77
 	errnoESTRPIPE errno = 86
@@ -142,6 +143,7 @@ var errnoNames = map[errno]string{
 	errnoEINVAL:   "EINVAL",
 	errnoENOTTY:   "ENOTTY",
 	errnoEPIPE:    "EPIPE",
+	errnoENOSYS:   "ENOSYS",
 	errnoELOOP:    "ELOOP",
 	errnoEBADFD:   "EBADFD",
 	errnoESTRPIPE: "ESTRPIPE",
