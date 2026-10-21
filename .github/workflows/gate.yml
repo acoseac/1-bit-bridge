@@ -363,8 +363,9 @@ jobs:
           dpkg-query -W -f='${Package} ${Version}\n' linux-libc-dev libc6-dev || true
       - name: compare the Go definitions with the pinned asound.h
         # The job's read-only token authenticates the header's download,
-        # which raises GitHub's rate limit on its raw host; check.sh passes
-        # it to curl off the command line and drops it once it has the file.
+        # which raises GitHub's rate limit on its raw host. check.sh writes
+        # it into a private curl config and drops it from the environment
+        # before it runs anything else.
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/alsa-abi/check.sh

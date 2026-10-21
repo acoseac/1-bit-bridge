@@ -19,6 +19,18 @@
 # not vendored, and nothing here is part of the bridge.
 set -euo pipefail
 
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+# In CI the workflow's token authenticates the header's download (below),
+# which the raw host gives a higher rate limit. awk writes it from the
+# environment straight into a curl config file in $work, which only this
+# user can read, and it leaves the environment at once: nothing this script
+# runs inherits it, no command line carries it, and no shell expansion shows
+# it in a trace (bash -x).
+auth="$work/curl-auth"
+(umask 077 && awk 'BEGIN { t = ENVIRON["GITHUB_TOKEN"]; if (t != "") printf "header = \"Authorization: Bearer %s\"\n", t }' >"$auth")
+unset GITHUB_TOKEN
+
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 tag=$(sed -n 's/^const uapiKernel = "\(v[0-9][0-9.]*\)"$/\1/p' "$repo/internal/alsapcm/uapi.go")
 if [ -z "$tag" ]; then
@@ -26,8 +38,6 @@ if [ -z "$tag" ]; then
 	exit 1
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/include/sound"
 header="$work/include/sound/asound.h"
 
@@ -39,17 +49,14 @@ else
 	# GitHub's raw host rate-limits unauthenticated requests, and a shared CI
 	# runner can find its limit spent: four 429s in 13 seconds failed the
 	# job on 2026-10-21. curl retries a 429 as transient, honouring the
-	# server's Retry-After, and otherwise waits 1 s and doubles the wait;
-	# eight retries within at most 5 minutes outlast such a window and stay
-	# well inside the job's 15. A 404 or another failure is not retried.
-	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --retry 8 --retry-max-time 300 -o "$header")
-	if [ -n "${GITHUB_TOKEN:-}" ]; then
-		# In CI the workflow's token authenticates the request, which the
-		# raw host gives a higher limit. It reaches curl as a config line on
-		# stdin, so no command line carries it, and it leaves the
-		# environment before anything else here runs.
-		printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" | "${fetch[@]}" --config - "$url"
-		unset GITHUB_TOKEN
+	# server's Retry-After, and otherwise waits 1 s and doubles the wait, and
+	# it retries an attempt that stalls past its own bound (15 s to connect,
+	# 60 s in all). No retry starts after 5 minutes, so the download gives up
+	# within 6, well inside the job's 15. A 404 or another failure is not
+	# retried.
+	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 15 --max-time 60 --retry 8 --retry-max-time 300 -o "$header")
+	if [ -s "$auth" ]; then
+		"${fetch[@]}" --config "$auth" "$url"
 	else
 		"${fetch[@]}" "$url"
 	fi
