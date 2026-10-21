@@ -47990,7 +47990,7 @@ v0.43.0, which saprobe-alac's go.mod lists; it was in the cache.
   anything is allocated for the table; the packet count is capped at 2^20;
   a constant-size stsz's count must fit the mdat bytes the file holds.
   stts and stsc must place exactly stsz's packets, every stts duration is
-  1 to the frame length, every packet 1 byte to the cookie's max frame
+  between 1 and the frame length, every packet 1 byte to the cookie's max frame
   bytes and inside one mdat, mdhd's timescale the cookie's rate, its
   duration stts's frames. The index is every packet's offset and size
   plus the stts runs.
@@ -48135,13 +48135,13 @@ mutation of the goldens did not reach its shape (an escape ending on the
 packet's last bit, then a zero run) in these runs. The default runs
 include the panic file as a seed, so they fuzz the recovery too.
 
-### Licence
+### License
 
 saprobe-alac is Apache-2.0 with no NOTICE file. The stack lines in
-`CLAUDE.md` and `AGENTS.md`, the only places the repo lists its
-dependencies, now name it and its licence. The release tarballs carry only
+`CLAUDE.md` and `AGENTS.md`, the places the repo's docs list its
+dependencies (`go.mod` aside), now name it and its license. The release tarballs carry only
 the bridge's LICENSE and README: Apache-2.0 §4(a) asks a binary
-distribution to give recipients the licence, and the BSD and MIT
+distribution to give recipients the license, and the BSD and MIT
 dependencies' terms ask for their notices, none of which ship today. That
 is a follow-up beyond this PR.
 
@@ -48345,7 +48345,7 @@ its end.
 round's report, quoted from the round-1 text because the PR branch is not
 in this clone. SonarCloud and CodeQL will read the copy, and the repository
 has no Sonar configuration to leave `third_party` out. The release tarballs
-still carry the bridge's LICENSE alone (the Licence section above), now
+still carry the bridge's LICENSE alone (the License section above), now
 with modified Apache-2.0 code in the binary.
 
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules

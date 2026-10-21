@@ -341,8 +341,16 @@ def main() -> None:
     args = ap.parse_args()
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
+    # Without --codex the FFmpeg fixtures can't be rebuilt, so the previous
+    # manifest's entries and their files are carried over unchanged; only
+    # what this generator writes is deleted and written again.
+    carried = []
+    previous = out / "manifest.json"
+    if not args.codex and previous.exists():
+        carried = json.loads(previous.read_text()).get("ffmpeg_fixtures", [])
+    keep = {"README.md"} | {f["file"] for f in carried}
     for old in out.iterdir():
-        if old.is_file() and old.name != "README.md":
+        if old.is_file() and old.name not in keep:
             old.unlink()
 
     fixtures = []
@@ -427,7 +435,7 @@ def main() -> None:
         for fname, reason, notes in refusals:
             fixtures.append({"file": fname, "encoder": "afconvert", "notes": notes, "refusal": reason})
 
-    codex = []
+    codex = carried
     if args.codex:
         q = json.loads((args.codex / "results" / "qualification.json").read_text())
         refs = {r["file"]: r for r in q}

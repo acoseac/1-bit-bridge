@@ -14,8 +14,9 @@ saprobe-alac is Mycophonic's Go port of Apple's ALAC reference decoder
 
 Only what the bridge's build needs, and the tests of it that run offline:
 the root package, `internal/alac` and `internal/mp4` (the root package
-imports both), `go.mod`, `go.sum`, `LICENSE`, `tests/packet_bounds_test.go`
-and `internal/alac/matrix_bench_test.go`. The rest of the upstream
+imports both), `go.mod`, `go.sum`, `LICENSE`, `tests/packet_bounds_test.go`,
+`internal/alac/matrix_bench_test.go`, and `tests/bitstream_overrun_test.go`
+(ours: the patch's regression tests, written for upstream). The rest of the upstream
 repository (its CI, documentation, examples, and the tests that need
 CoreAudio, alacconvert or its test framework) is not carried.
 `go -C third_party/saprobe-alac test ./...` runs the tests here; the
