@@ -54,7 +54,7 @@ func TestAllUnplayableStops(t *testing.T) {
 	h.insert("u1", "u2")
 	unplayable(h, "u1", "u2")
 	h.available()
-	h.refused("play", h.eng.Play(bg), ReasonAllUnplayable)
+	h.refused("play", h.result("play", async(func() error { return h.eng.Play(bg) })), ReasonAllUnplayable)
 	sn := h.snap()
 	if sn.State() != Stopped || sn.LastStop().Reason != ReasonAllUnplayable || h.be.starts() != 2 {
 		t.Fatalf("%s, last stop %+v, %d sessions", sn.State(), sn.LastStop(), h.be.starts())
@@ -68,7 +68,8 @@ func TestRepeatWithAllUnplayableStopsAfterOneLap(t *testing.T) {
 	unplayable(h, "u1", "u2", "u3")
 	h.must("repeat", h.eng.SetRepeat(bg, true))
 	h.available()
-	h.refused("play", h.eng.Play(bg), ReasonAllUnplayable)
+	// A spin never answers: the watchdog turns it into a failure.
+	h.refused("play", h.result("play", async(func() error { return h.eng.Play(bg) })), ReasonAllUnplayable)
 	if n := h.be.starts(); n != 3 {
 		t.Fatalf("%d sessions for three unplayable entries with repeat on, want one lap of 3", n)
 	}
