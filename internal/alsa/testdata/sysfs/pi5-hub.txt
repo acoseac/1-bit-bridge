@@ -1,0 +1,16 @@
+# A Raspberry Pi 5 with a DAC behind a USB hub: the hub (class 09, a made-up
+# 05e3:0610) in xhci-hcd.0's root port 2, the DAC (made-up 1234:0b02, a
+# made-up serial) in the hub's port 4, so its chain is 2.4 and the hub is
+# in it. Synthetic, on pi5-go-bar's layout.
+
+platform sys/devices/platform/axi
+platform sys/devices/platform/axi/1000120000.pcie
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0
+roothub sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1 speed=480
+roothub sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb2 speed=5000
+
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2 vendor=05e3 product=0610 class=09
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2/1-2.4 vendor=1234 product=0b02 serial=HUBDAC-00000000777
+usbcard 3 sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2/1-2.4/1-2.4:1.0
+proccard 3 DAC "Synthetic DAC behind a hub" usb=1234:0b02 pcm=0.0

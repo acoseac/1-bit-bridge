@@ -167,6 +167,11 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 	}
 	snap := Snapshot{ProcRoot: procRoot, AsoundRoot: asoundRoot, Cards: []CardReading{}}
 	path := filepath.Join(asoundRoot, "cards")
+	for _, root := range []string{procRoot, asoundRoot} {
+		if err := checkHostRead(root, DefaultProcRoot); err != nil {
+			return snap, fmt.Errorf("read %s: %w", path, err)
+		}
+	}
 	b, err := readUnderRoot(asoundRoot, path, maxFileBytes)
 	if err != nil {
 		// The path once: a *fs.PathError would name it again. What it
