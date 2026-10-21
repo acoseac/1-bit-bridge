@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +118,120 @@ func TestTheConsoleAndTheDoctorShowOneChecklist(t *testing.T) {
 		if c.Name != console[i].Key || string(c.Status) != console[i].Status || c.Summary != console[i].Summary || c.Hint != console[i].Fix {
 			t.Errorf("bridge doctor line %d %+v, console %+v", i, c, console[i])
 		}
+	}
+}
+
+// TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead: when the
+// outputs body cannot be read, the checklist carries the error, judges the
+// configured roots, by the name a path rule gives a root, as unchecked,
+// and reads the route's base URL and start error from the route itself,
+// so the Music line still says whether those tracks play over it.
+func TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead(t *testing.T) {
+	unread := outputChecklistSource{
+		Active: func(context.Context) bool { return true },
+		Outputs: func(context.Context) (api.OutputsResponse, error) {
+			return api.OutputsResponse{}, context.DeadlineExceeded
+		},
+		Roots:       func() []string { return []string{filepath.Join("srv", "Music")} },
+		LoopbackErr: func() error { return nil },
+		Phones:      func() int { return 1 },
+	}
+	for _, tc := range []struct {
+		name          string
+		edit          func(*outputChecklistSource)
+		status        string
+		summary, hint string
+	}{
+		{"port taken", func(s *outputChecklistSource) {
+			s.LoopbackErr = func() error { return errors.New("listen tcp4 127.0.0.1:7791: bind: address already in use") }
+		}, "fail", "MPD was not asked about Music", "output.loopbackPort"},
+		{"route serving", func(s *outputChecklistSource) {
+			s.LoopbackBaseURL = func() string { return "http://127.0.0.1:7791" }
+		}, "warn", "plays through the bridge's loopback HTTP route", "Player line"},
+		{"no roots", func(s *outputChecklistSource) {
+			s.Roots = func() []string { return nil }
+		}, "ok", "Ready: can play music from another bridge or NAS", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := unread
+			tc.edit(&src)
+			lines := mustChecklist(t, src)
+			if p := lines[0]; p.Status != outputcheck.Fail || !strings.Contains(p.Summary, context.DeadlineExceeded.Error()) {
+				t.Errorf("player %+v", p)
+			}
+			if d := lines[1]; !strings.Contains(d.Summary, "Not checked") {
+				t.Errorf("dac %+v", d)
+			}
+			m := lines[2]
+			if string(m.Status) != tc.status || !strings.Contains(m.Summary, tc.summary) || !strings.Contains(m.Fix, tc.hint) {
+				t.Errorf("music %+v, want %s with %q and %q", m, tc.status, tc.summary, tc.hint)
+			}
+		})
+	}
+}
+
+// TestServeChecklistReadsTheLiveRootsAndTheRoute: serve's checklist source
+// reads the resolver's live roots and the route's own state, so a box
+// whose outputs body cannot be read is still judged on the roots the
+// bridge serves now and on the route that runs.
+func TestServeChecklistReadsTheLiveRootsAndTheRoute(t *testing.T) {
+	got := serveChecklistSourceFields(t)
+	for field, want := range map[string]string{
+		"Active":          "apiSrv.LocalOutputsActive",
+		"Outputs":         "apiSrv.LocalOutputsResponse",
+		"Roots":           "apiSrv.Resolver().Roots",
+		"LoopbackBaseURL": "outLoop.BaseURL",
+		"LoopbackErr":     "outLoop.StartErr",
+	} {
+		if got[field] != want {
+			t.Errorf("serve's checklist source sets %s to %q, want %q", field, got[field], want)
+		}
+	}
+}
+
+// serveChecklistSourceFields is each keyed field of the one
+// outputChecklistSource literal in runServe, as source text.
+func serveChecklistSourceFields(t *testing.T) map[string]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := topLevelFuncNamed(f, "runServe")
+	if serve == nil {
+		t.Fatal("main.go has no runServe")
+	}
+	fields := map[string]string{}
+	literals := 0
+	ast.Inspect(serve.Body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.CompositeLit); ok && isIdent(lit.Type, "outputChecklistSource") {
+			literals++
+			forEachKeyedElement(lit, func(key *ast.Ident, value ast.Expr) { fields[key.Name] = types.ExprString(value) })
+		}
+		return true
+	})
+	if literals != 1 {
+		t.Fatalf("runServe builds %d checklist sources, want one", literals)
+	}
+	return fields
+}
+
+// TestTheDoctorChecklistReadsTheConfiguredRoots: `bridge doctor` gathers
+// the configured roots and the route as its port answers, so a box whose
+// outputs body cannot be read is judged on them, as serve's is.
+func TestTheDoctorChecklistReadsTheConfiguredRoots(t *testing.T) {
+	roots := []string{filepath.Join(t.TempDir(), "Music"), filepath.Join(t.TempDir(), "More")}
+	cfg := &config.Config{LibraryRoots: roots, DataDir: t.TempDir()}
+	lo := api.NewLocalOutputs(api.LocalOutputsConfig{})
+	t.Cleanup(lo.Close)
+	route := &loopbackAnswer{ask: func() (string, error) { return "http://127.0.0.1:7791", nil }}
+	src := doctorChecklistSource(cfg, lo, route)
+	if src.Roots == nil || strings.Join(src.Roots(), "|") != strings.Join(roots, "|") {
+		t.Fatalf("the doctor's roots are not the configured ones")
+	}
+	if src.LoopbackBaseURL == nil || src.LoopbackBaseURL() != "http://127.0.0.1:7791" {
+		t.Fatal("the doctor does not read the route's base URL from its port")
 	}
 }
 

@@ -39,6 +39,11 @@ type Line struct {
 
 // Input is what the checklist judges.
 type Input struct {
+	// Unread is why the box could not be read (the GET /v1/outputs body),
+	// empty when it was. Nothing that body carries was judged then: the
+	// Player line says what failed, the DAC line that it was not checked,
+	// and the Music line judges Roots, each one unchecked.
+	Unread   string
 	Player   Player
 	DACs     []DAC
 	Roots    []RootRule
@@ -90,7 +95,26 @@ type Loopback struct {
 
 // Lines judges in. It returns Player, DAC, Music and Phone, in that order.
 func Lines(in Input) []Line {
+	if in.Unread != "" {
+		return []Line{unreadPlayerLine(in.Unread), uncheckedDACLine(), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones)}
+	}
 	return []Line{playerLine(in.Player), dacLine(in.DACs), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones)}
+}
+
+// unreadPlayerLine is the Player line of a box the bridge could not read:
+// it says what failed, and never that MPD is down.
+func unreadPlayerLine(why string) Line {
+	return Line{Key: "player", Title: "Player", Status: Fail,
+		Summary: "The bridge could not read this box's player and cards (" + why + ")",
+		Fix:     "Check again; if it fails again, `bridge output player` on this box shows what the bridge reads there."}
+}
+
+// uncheckedDACLine is the DAC line of a box the bridge could not read: the
+// cards were not looked at, which says nothing about whether there is one.
+func uncheckedDACLine() Line {
+	return Line{Key: "dac", Title: "DAC", Status: Warn,
+		Summary: "Not checked, because the bridge could not read this box",
+		Fix:     "Check again once the Player line reads the box."}
 }
 
 func playerLine(p Player) Line {

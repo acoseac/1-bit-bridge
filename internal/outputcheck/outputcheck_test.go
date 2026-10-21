@@ -79,6 +79,9 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 			in.Loopback = Loopback{NotServing: true}
 		},
 		"no phone": func(in *Input) { in.Phones = 0 },
+		"unread": func(in *Input) {
+			*in = Input{Unread: "context canceled", Roots: []RootRule{{Root: "INTERNAL", State: "unchecked"}}, Phones: 1}
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -203,6 +206,41 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestABoxThatCouldNotBeReadSaysWhatFailed: when the outputs body could not
+// be read, nothing it carries was judged. The Player line fails and says
+// what failed, never that MPD is down; the DAC line says it was not
+// checked, never that there is no DAC; the Music line judges the
+// configured roots as unchecked, so a taken port still fails with its fix,
+// and a box with no root is still ready; the Phone line is as usual.
+func TestABoxThatCouldNotBeReadSaysWhatFailed(t *testing.T) {
+	in := Input{
+		Unread:   "context deadline exceeded",
+		Roots:    []RootRule{{Root: "Music", State: "unchecked"}},
+		Loopback: Loopback{Err: "listen tcp4 127.0.0.1:7791: bind: address already in use"},
+		Phones:   1,
+	}
+	lines := Lines(in)
+	p := line(t, lines, "player")
+	if p.Status != Fail || !strings.Contains(p.Summary, "context deadline exceeded") || strings.Contains(p.Summary, "not answering") {
+		t.Errorf("player %+v", p)
+	}
+	d := line(t, lines, "dac")
+	if d.Status != Warn || !strings.Contains(d.Summary, "Not checked") || strings.Contains(d.Summary, "No DAC") {
+		t.Errorf("dac %+v", d)
+	}
+	m := line(t, lines, "music")
+	if m.Status != Fail || !strings.Contains(m.Summary, "MPD was not asked about Music") || !strings.Contains(m.Fix, "output.loopbackPort") {
+		t.Errorf("music %+v", m)
+	}
+	if ph := line(t, lines, "phone"); ph.Status != OK {
+		t.Errorf("phone %+v", ph)
+	}
+	in.Roots = nil
+	if m := line(t, Lines(in), "music"); m.Status != OK || m.Summary != "Ready: can play music from another bridge or NAS" {
+		t.Errorf("music with no roots %+v", m)
 	}
 }
 

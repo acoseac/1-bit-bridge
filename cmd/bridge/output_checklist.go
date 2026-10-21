@@ -40,6 +40,14 @@ type outputChecklistSource struct {
 	Active func(context.Context) bool
 	// Outputs is the body GET /v1/outputs serves.
 	Outputs func(context.Context) (api.OutputsResponse, error)
+	// Roots are the configured library roots: the resolver's live roots in
+	// serve, cfg.LibraryRoots in the doctor. When the body cannot be read,
+	// the Music line judges them, each one unchecked.
+	Roots func() []string
+	// LoopbackBaseURL is the loopback track route's base URL while it
+	// serves, "" otherwise: what the body carries, read here when the body
+	// cannot be.
+	LoopbackBaseURL func() string
 	// LoopbackErr is why the loopback track route is not serving, or nil:
 	// errLoopbackNotServing when it answers and refuses tracks.
 	LoopbackErr func() error
@@ -54,10 +62,10 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 		return nil, false
 	}
 	var in outputcheck.Input
-	if src.Outputs != nil {
-		if resp, err := src.Outputs(ctx); err == nil {
-			in = checklistInput(resp)
-		}
+	if resp, err := readOutputs(ctx, src); err != nil {
+		in = unreadInput(err, src)
+	} else {
+		in = checklistInput(resp)
 	}
 	if src.LoopbackErr != nil {
 		switch err := src.LoopbackErr(); {
@@ -71,6 +79,35 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 		in.Phones = src.Phones()
 	}
 	return outputcheck.Lines(in), true
+}
+
+// errOutputsNotWired is a checklist source with no outputs body to read.
+var errOutputsNotWired = errors.New("the outputs are not wired")
+
+func readOutputs(ctx context.Context, src outputChecklistSource) (api.OutputsResponse, error) {
+	if src.Outputs == nil {
+		return api.OutputsResponse{}, errOutputsNotWired
+	}
+	return src.Outputs(ctx)
+}
+
+// unreadInput is the input when the outputs body could not be read: the
+// error, and what does not come from that body. The configured roots are
+// judged unchecked, each by the name its path rule would carry, so the
+// Music line still says whether those tracks play over the loopback route,
+// whose base URL comes from the route, since the body that carries it is
+// what failed.
+func unreadInput(err error, src outputChecklistSource) outputcheck.Input {
+	in := outputcheck.Input{Unread: err.Error()}
+	if src.Roots != nil {
+		for _, root := range src.Roots() {
+			in.Roots = append(in.Roots, outputcheck.RootRule{Root: filepath.Base(root), State: "unchecked"})
+		}
+	}
+	if src.LoopbackBaseURL != nil {
+		in.Loopback.BaseURL = src.LoopbackBaseURL()
+	}
+	return in
 }
 
 // checklistInput reads the outputs body: the player, MPD and path rules
@@ -159,14 +196,9 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // Production passes nil.
 func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
 	return func(ctx context.Context) []doctor.Check {
-		// The route is asked once, and only when a line needs it: a
-		// bridge that is no player dials nothing.
-		var probed sync.Once
-		var base string
-		var probeErr error
-		probe := func() {
-			probed.Do(func() { base, probeErr = probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort()) })
-		}
+		route := &loopbackAnswer{ask: func() (string, error) {
+			return probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort())
+		}}
 		dbPath := manifest.DefaultDBPath(cfg.DataDir)
 		lcfg := api.LocalOutputsConfig{
 			Identity: api.OutputIdentity(cfg.DataDir),
@@ -190,25 +222,54 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 				listen, _ := configuredPort(cfg.ListenAddress)
 				return advertise.URLs(advertise.Params{Port: listen, CustomEndpoints: cfg.CustomEndpoints})
 			},
-			LoopbackBaseURL: func() string { probe(); return base },
+			LoopbackBaseURL: route.BaseURL,
 		}
 		if seam != nil {
 			seam(&lcfg)
 		}
 		lo := api.NewLocalOutputs(lcfg)
 		defer lo.Close()
-		lines, ok := outputChecklist(ctx, outputChecklistSource{
-			Active:      lo.Active,
-			Outputs:     lo.Response,
-			LoopbackErr: func() error { probe(); return probeErr },
-			Phones:      func() int { return countPairedDevices(cfg.DataDir) },
-		})
+		lines, ok := outputChecklist(ctx, doctorChecklistSource(cfg, lo, route))
 		if !ok {
 			return nil
 		}
 		return doctorChecks(lines)
 	}
 }
+
+// doctorChecklistSource is what `bridge doctor` gathers the checklist
+// from: the one-shot outputs builder, the configured roots, the running
+// bridge's loopback route as its port answers, and the token file.
+func doctorChecklistSource(cfg *config.Config, lo *api.LocalOutputs, route *loopbackAnswer) outputChecklistSource {
+	return outputChecklistSource{
+		Active:          lo.Active,
+		Outputs:         lo.Response,
+		Roots:           func() []string { return append([]string(nil), cfg.LibraryRoots...) },
+		LoopbackBaseURL: route.BaseURL,
+		LoopbackErr:     route.Err,
+		Phones:          func() int { return countPairedDevices(cfg.DataDir) },
+	}
+}
+
+// loopbackAnswer is the running bridge's loopback route as the doctor
+// reads it: asked once, and only when a line needs it, so a bridge that is
+// no player dials nothing.
+type loopbackAnswer struct {
+	ask  func() (string, error)
+	once sync.Once
+	base string
+	err  error
+}
+
+func (a *loopbackAnswer) read() { a.once.Do(func() { a.base, a.err = a.ask() }) }
+
+// BaseURL is the route's base URL while it serves, "" otherwise.
+func (a *loopbackAnswer) BaseURL() string { a.read(); return a.base }
+
+// Err is why the route is not serving: errLoopbackNotServing when it
+// answers and refuses tracks, another error when something else holds its
+// port, nil when it serves or nothing answers.
+func (a *loopbackAnswer) Err() error { a.read(); return a.err }
 
 // loopbackProbeLimit bounds the doctor's question to the loopback route.
 const loopbackProbeLimit = 2 * time.Second

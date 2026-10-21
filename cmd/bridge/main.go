@@ -5193,10 +5193,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// GET /v1/outputs builder, with its caches and its lazy MPD session,
 	// so the console reads the box the way the app does.
 	checklistSrc := outputChecklistSource{
-		Active:      apiSrv.LocalOutputsActive,
-		Outputs:     apiSrv.LocalOutputsResponse,
-		LoopbackErr: outLoop.StartErr,
-		Phones:      func() int { return len(store.List()) },
+		Active:          apiSrv.LocalOutputsActive,
+		Outputs:         apiSrv.LocalOutputsResponse,
+		Roots:           apiSrv.Resolver().Roots,
+		LoopbackBaseURL: outLoop.BaseURL,
+		LoopbackErr:     outLoop.StartErr,
+		Phones:          func() int { return len(store.List()) },
 	}
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
