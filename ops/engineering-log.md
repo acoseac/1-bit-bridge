@@ -49562,3 +49562,44 @@ recovered into the failure). The expired probes wait out the real
 | `activeNow` reads the stored probe again | `TestTheRouteFollowsAnExpiredProbeThatFoundMPD`, `TestTheRouteStopsOnAnExpiredMissAfterATrue`, `TestActiveNowIsTheGatesLastAnswer` |
 | a stopped waiter's false recorded | `TestACallerThatStopsWaitingGetsTheGatesLastAnswer` |
 | `outputConfig` unguarded | `TestActiveNowReadsTheConfigLikeTheProbe`, and B2b's `TestPathRulesUseTheStoredRootPrefix`, whose `localOutputs` has no reader and whose path-rule key had the guard the helper now holds; its panic stops the package, so the run was repeated with it skipped, and only the first was red |
+
+### Round four: the review of round three
+
+Codex and Argon found nothing; the Claude API found a lost update, which
+the owner verified. `probeVerdict` produced a verdict under `o.mu` and
+released it, and `answerAuto` took `o.mu` again to record it, so nothing
+ordered the records by when each verdict was produced: a caller whose
+cache hit said true, held between that read and its record while the
+cache expired (or the configuration changed) and another caller's probe
+found MPD gone and recorded false, then recorded its older true, and the
+route served while the gate's newest verdict said off, until some later
+`Active` call. A waiter woken by a flight's `done` could do the same.
+
+Every verdict is now numbered under `o.mu` as it is produced
+(`nextVerdictLocked`): a cache hit at its read, a probe at its
+completion, the number saved into the flight before `done` closes so each
+waiter carries it. `answerAuto` records a verdict only when its number is
+newer than `answeredSeq`, and answers with the newest recorded verdict,
+so the caller that carried the older one out of the lock is answered off
+too. A waiter whose context ended carries 0 and still records nothing.
+Producing and recording in one critical section was the other way
+offered; it was not taken because a flight's verdict is recorded by its
+waiters after `done`, and a build's probe (`probe`, which records
+nothing) can be the flight they wait on, so the waiter's record would
+still be a second critical section.
+
+**Red first.** On 1d081f72 the tests do not build: they park a caller
+with the new `beforeRecord` seam (it runs between a caller's verdict and
+its record, with that caller's context, and the test parks only the one
+caller whose context it marked; no sleep). With the seam alone added,
+under `-race`: `TestAnOlderCacheVerdictNeverOverwritesANewerOne` (a cache
+hit parked while the cache expires and a probe records MPD gone) and
+`TestAWaiterNeverRecordsAnOlderVerdict` (a flight's waiter parked while
+the configuration changes and a probe of the new one records no MPD) both
+failed with "an older verdict overwrote a newer one: the route serves
+while the gate says off". After the fix, twenty repetitions of the gate's
+tests passed under `-race`.
+
+| Mutation | Red (whole `internal/api`, under `-race`) |
+|---|---|
+| any verdict recorded, whatever its number (`seq > 0`) | `TestAnOlderCacheVerdictNeverOverwritesANewerOne`, `TestAWaiterNeverRecordsAnOlderVerdict` |
