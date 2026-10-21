@@ -167,13 +167,21 @@ func (w *m4aWalk) fullBox(b m4aBox, need int64) ([]byte, error) {
 	return h, nil
 }
 
-// table checks that count entries of width bytes fit in b after its header
-// of headerLen bytes, then hands them to fn a bounded read at a time. The
-// count is compared with what the box holds before anything is allocated.
-func (w *m4aWalk) table(b m4aBox, headerLen int64, count uint64, width int, fn func(i int, e []byte) error) error {
+// fits refuses count entries of width bytes that b does not hold after its
+// header of headerLen bytes. Each table reader asks it of its count before
+// it allocates anything for the table, so an allocation is bounded by the
+// bytes the box really holds, inside moov, inside the file.
+func fits(b m4aBox, headerLen int64, count uint64, width int) error {
 	if room := uint64(b.size() - headerLen); count > room/uint64(width) {
 		return refuse(ReasonTruncated, "M4A %s box of %d bytes holds fewer than its %d entries", b.typ, b.size(), count)
 	}
+	return nil
+}
+
+// table hands count entries of width bytes, after b's header of headerLen
+// bytes, to fn a bounded read at a time. The caller has checked the count
+// with fits.
+func (w *m4aWalk) table(b m4aBox, headerLen int64, count uint64, width int, fn func(i int, e []byte) error) error {
 	buf := make([]byte, width*int(min(count, m4aTableRead)))
 	off := b.start + headerLen
 	for done := uint64(0); done < count; {

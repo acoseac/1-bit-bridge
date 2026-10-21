@@ -414,8 +414,8 @@ func (d *alacDecoder) index(w *m4aWalk, tr alacTrackBoxes, mdats []m4aBox) error
 	if constSize == 0 {
 		// The count must fit the box before the cap is asked, so a count
 		// the box cannot hold is truncation whatever its size.
-		if room := uint64(tr.stsz.size() - 12); n > room/4 {
-			return refuse(ReasonTruncated, "M4A stsz box of %d bytes holds fewer than its %d entries", tr.stsz.size(), n)
+		if err := fits(tr.stsz, 12, n, 4); err != nil {
+			return err
 		}
 	}
 	if n > maxALACPackets {
@@ -462,8 +462,8 @@ func (d *alacDecoder) readSTTS(w *m4aWalk, tr alacTrackBoxes, n uint64) (int64, 
 	if count == 0 {
 		return 0, refuse(ReasonTruncated, "M4A stts has no entries")
 	}
-	if room := uint64(tr.stts.size() - 8); count > room/8 {
-		return 0, refuse(ReasonTruncated, "M4A stts box of %d bytes holds fewer than its %d entries", tr.stts.size(), count)
+	if err := fits(tr.stts, 8, count, 8); err != nil {
+		return 0, err
 	}
 	if count > n {
 		return 0, refuse(ReasonTruncated, "M4A stts lists %d runs for %d packets", count, n)
@@ -513,8 +513,8 @@ func (d *alacDecoder) placePackets(w *m4aWalk, tr alacTrackBoxes, n uint64, mdat
 	if chunks == 0 {
 		return refuse(ReasonTruncated, "M4A %s lists no chunks", tr.chunks.typ)
 	}
-	if room := uint64(tr.chunks.size() - 8); chunks > room/uint64(width) {
-		return refuse(ReasonTruncated, "M4A %s box of %d bytes holds fewer than its %d entries", tr.chunks.typ, tr.chunks.size(), chunks)
+	if err := fits(tr.chunks, 8, chunks, width); err != nil {
+		return err
 	}
 	if chunks > n {
 		return refuse(ReasonTruncated, "M4A %s lists %d chunks for %d packets", tr.chunks.typ, chunks, n)
@@ -594,8 +594,8 @@ func (d *alacDecoder) readSTSC(w *m4aWalk, tr alacTrackBoxes, chunks, n uint64) 
 	if count == 0 {
 		return nil, refuse(ReasonTruncated, "M4A stsc has no entries")
 	}
-	if room := uint64(tr.stsc.size() - 8); count > room/12 {
-		return nil, refuse(ReasonTruncated, "M4A stsc box of %d bytes holds fewer than its %d entries", tr.stsc.size(), count)
+	if err := fits(tr.stsc, 8, count, 12); err != nil {
+		return nil, err
 	}
 	if count > chunks {
 		return nil, refuse(ReasonTruncated, "M4A stsc lists %d runs for %d chunks", count, chunks)
