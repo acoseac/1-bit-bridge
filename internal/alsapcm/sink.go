@@ -502,6 +502,13 @@ func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 		free, at := s.ring.free(), s.ring.sub
 		s.mu.Unlock()
 		if free == 0 {
+			// A token already waiting may be stale: take it and look again
+			// before waiting, so a wait is one with nothing pending.
+			select {
+			case <-s.room:
+				continue
+			default:
+			}
 			if s.producerWaits != nil {
 				s.producerWaits()
 			}
