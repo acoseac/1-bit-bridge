@@ -5,6 +5,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,18 +26,16 @@ func sinkConfig() SinkConfig {
 // test ends.
 func openTestSink(t *testing.T, k *fakeKernel, cfg SinkConfig) *Sink {
 	t.Helper()
-	return openTestSinkWith(t, context.Background(), k, cfg, nil)
+	return openTestSinkWith(t, context.Background(), k, cfg, sinkSeams{})
 }
 
-// openTestSinkWith is openTestSink with a life context and a hook called
-// each time the producer waits for room.
-func openTestSinkWith(t *testing.T, life context.Context, k *fakeKernel, cfg SinkConfig, producerWaits func()) *Sink {
+// openTestSinkWith is openTestSink with a life context and the producer's
+// hooks: hooks.open and hooks.now are k's.
+func openTestSinkWith(t *testing.T, life context.Context, k *fakeKernel, cfg SinkConfig, hooks sinkSeams) *Sink {
 	t.Helper()
-	s, err := openSink(life, cfg, sinkSeams{
-		open:          func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) },
-		now:           k.now,
-		producerWaits: producerWaits,
-	})
+	hooks.open = func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) }
+	hooks.now = k.now
+	s, err := openSink(life, cfg, hooks)
 	if err != nil {
 		t.Fatalf("openSink: %v", err)
 	}
@@ -217,6 +216,48 @@ func TestSinkWriteAllocatesNothing(t *testing.T) {
 	}); allocs != 0 {
 		t.Errorf("a Write allocated %v times", allocs)
 	}
+}
+
+// TestSinkTakesNoFramesADrainHasFinished pins the producer's Write against
+// a Drain that ends while it copies (#1303's review: the frames were
+// accepted before the copy and published after it). Frames the producer
+// has copied into the store but not yet published when the drain finishes
+// are refused, not counted, and the Write says the sink has stopped; the
+// drain played exactly what was published before it.
+func TestSinkTakesNoFramesADrainHasFinished(t *testing.T) {
+	k := newModel(t)
+	k.free()
+	var park atomic.Bool
+	parked, release := make(chan struct{}), make(chan struct{})
+	s := openTestSinkWith(t, context.Background(), k, sinkConfig(), sinkSeams{producerPublishes: func() {
+		if park.CompareAndSwap(true, false) {
+			close(parked)
+			<-release
+		}
+	}})
+	in := content(0, 0, 9600)
+	submit(t, s, in)
+	park.Store(true)
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := s.Write(context.Background(), content(0, 9600, 2400))
+		done <- result{n, err}
+	}()
+	await(t, parked, "the producer to copy its frames and stop before it publishes them")
+	drain(t, s)
+	close(release)
+	r := receive(t, done, "the producer's Write to end")
+	if r.n != 0 || ReasonOf(r.err) != ReasonClosed {
+		t.Errorf("a Write whose frames were copied as the drain finished: %d, %v; want none taken, the sink stopped", r.n, r.err)
+	}
+	if p := s.Position(); p.State != SinkStopped || p.Submitted != 9600 || p.Played != 9600 {
+		t.Errorf("after the drain: %+v; want stopped, the 9600 frames published before it submitted and played", p)
+	}
+	sameFrames(t, "what the DAC heard", heard(k), in)
 }
 
 // TestSinkStoreIsTwoSecondsAheadAndCapped pins the store's size: two

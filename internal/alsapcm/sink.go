@@ -275,12 +275,13 @@ type SinkStats struct {
 // is for one producer at a time. A sink is done once dropped, drained or
 // ended, and Close must be called to stop its goroutine.
 type Sink struct {
-	cfg           SinkConfig
-	devCfg        Config
-	life          context.Context
-	open          func(Endpoint, Config) (*Device, error)
-	now           func() time.Time
-	producerWaits func()
+	cfg               SinkConfig
+	devCfg            Config
+	life              context.Context
+	open              func(Endpoint, Config) (*Device, error)
+	now               func() time.Time
+	producerWaits     func()
+	producerPublishes func()
 
 	// The writer's own: nothing else reads or writes them.
 	dev         *Device
@@ -348,12 +349,14 @@ type sinkCmd struct {
 }
 
 // sinkSeams is what openSink takes from its caller: the opener of a
-// device, the clock, and for the tests a hook called each time the
-// producer starts to wait for room.
+// device, the clock, and for the tests two hooks: one called each time
+// the producer starts to wait for room, and one each time it has copied
+// frames into the store and is about to publish them.
 type sinkSeams struct {
-	open          func(Endpoint, Config) (*Device, error)
-	now           func() time.Time
-	producerWaits func()
+	open              func(Endpoint, Config) (*Device, error)
+	now               func() time.Time
+	producerWaits     func()
+	producerPublishes func()
 }
 
 // OpenSink opens cfg.Endpoint for cfg.Transport and starts the sink's
@@ -428,7 +431,7 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	}
 	s := &Sink{
 		cfg: cfg, devCfg: devCfg, life: ctx,
-		open: seams.open, now: seams.now, producerWaits: seams.producerWaits,
+		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes,
 		dev:     dev,
 		zeros:   make([]byte, p.PeriodFrames*fb),
 		ring:    newRing(frames, fb, keep),
@@ -481,8 +484,10 @@ func (s *Sink) Changed() <-chan struct{} {
 // while the store is full, at most until ctx ends (ReasonCancelled, the
 // frames taken so far counted). It refuses frames once the sink has
 // stopped at an xrun (the xrun's error, until Recover), is draining, or is
-// done. The frames are copied: Write keeps nothing of the caller's slice
-// and allocates nothing.
+// done, and frames it was copying when one of those came are not taken:
+// a frame counts once it is published, which the sink's state is asked
+// again for. The frames are copied: Write keeps nothing of the caller's
+// slice and allocates nothing.
 func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
@@ -522,7 +527,17 @@ func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 		}
 		n := min(free, total-done)
 		s.ring.put(at, frames[done*fb:(done+n)*fb])
+		if s.producerPublishes != nil {
+			s.producerPublishes()
+		}
+		// The sink is asked again under the lock that publishes the frames:
+		// a Drain, an xrun or an end that came while they were copied takes
+		// none of them.
 		s.mu.Lock()
+		if err := s.acceptLocked(); err != nil {
+			s.mu.Unlock()
+			return int(done), err
+		}
 		s.ring.sub += n
 		if s.watching && s.wakeStop != nil {
 			s.wakeStop()

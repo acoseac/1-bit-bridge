@@ -272,12 +272,12 @@ func TestSinkWriteWaitsWhileTheStoreIsFullAndItsCancelEndsTheWait(t *testing.T) 
 	waits := make(chan struct{}, 1)
 	cfg := sinkConfig()
 	cfg.Lookahead = 100 * time.Millisecond
-	s := openTestSinkWith(t, context.Background(), k, cfg, func() {
+	s := openTestSinkWith(t, context.Background(), k, cfg, sinkSeams{producerWaits: func() {
 		select {
 		case waits <- struct{}{}:
 		default:
 		}
-	})
+	}})
 	if err := s.Pause(); err != nil {
 		t.Fatal(err)
 	}
@@ -326,12 +326,12 @@ func TestSinkCancelUnderLoadDropsAndClosesOnce(t *testing.T) {
 	waits := make(chan struct{}, 1)
 	cfg := sinkConfig()
 	cfg.Lookahead = 100 * time.Millisecond
-	s := openTestSinkWith(t, life, k, cfg, func() {
+	s := openTestSinkWith(t, life, k, cfg, sinkSeams{producerWaits: func() {
 		select {
 		case waits <- struct{}{}:
 		default:
 		}
-	})
+	}})
 	done := make(chan error, 1)
 	go func() {
 		_, err := s.Write(context.Background(), content(0, 0, 40000))
