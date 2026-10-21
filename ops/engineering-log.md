@@ -48142,6 +48142,14 @@ distribution to give recipients the licence, and the BSD and MIT
 dependencies' terms ask for their notices, none of which ship today. That
 is a follow-up beyond this PR.
 
+**The owner's decision (2026-10-21).** Option B stands: the library stays
+behind the demuxer, the cookie and packet checks, and the `recover`; the
+channel-pair check covers the silent stereo case, and no other check is
+added for the panic, which none can prevent. The library's maintainers were
+told first, privately, through the repository's vulnerability reporting,
+before this branch made the ten-byte input public. Porting Apple's
+reference decoder stays the fallback if upstream does not fix the panic.
+
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 
 ### Trigger

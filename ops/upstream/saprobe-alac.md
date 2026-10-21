@@ -15,8 +15,9 @@ accepted through the high-level `Decoder` (part of 2). The zero-run
 overrun (1), the single-channel case of 2, the short frame length and the
 32-bit pair under 3 were found here.
 
-**Status: not reported upstream.** The owner decides when; no one contacts
-upstream before then.
+**Status: reported privately on 2026-10-21**, through the repository's
+vulnerability reporting (the panics, the unchecked configurations and the
+silent stereo case; not yet the container path or the notices).
 
 Each input quoted below with its output was run here against the pinned
 revision on Go 1.27.2, darwin/arm64, and the output is what it printed; the
