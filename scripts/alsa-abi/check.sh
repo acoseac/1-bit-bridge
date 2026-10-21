@@ -19,7 +19,7 @@
 # not vendored, and nothing here is part of the bridge.
 set -euo pipefail
 
-work=$(env -u GITHUB_TOKEN mktemp -d)
+work=$(unset GITHUB_TOKEN; mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # In CI the workflow's token authenticates the header's download (below),
 # which the raw host gives a higher rate limit. awk, the one program here
