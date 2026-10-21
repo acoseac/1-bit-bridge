@@ -61,10 +61,10 @@ const maxBufferTime = 2 * time.Second
 // Channels is the one channel count the player opens: stereo.
 const Channels = 2
 
-// minRateHz and maxRateHz bound Config.RateHz to what a PCM DAC plays.
+// MinRateHz and MaxRateHz bound Config.RateHz to what a PCM DAC plays.
 const (
-	minRateHz = 8000
-	maxRateHz = 1536000
+	MinRateHz = 8000
+	MaxRateHz = 1536000
 )
 
 // periodsTarget is how many periods Open aims to split the buffer into:
@@ -234,8 +234,8 @@ func (cfg Config) resolve(ep Endpoint) (request, error) {
 	if !ok {
 		return bad(fmt.Sprintf("format %q is not one this backend packs (S16_LE, S24_3LE, S24_LE, S32_LE)", cfg.Format))
 	}
-	if cfg.RateHz < minRateHz || cfg.RateHz > maxRateHz {
-		return bad(fmt.Sprintf("rate %d Hz is outside %d..%d", cfg.RateHz, minRateHz, maxRateHz))
+	if cfg.RateHz < MinRateHz || cfg.RateHz > MaxRateHz {
+		return bad(fmt.Sprintf("rate %d Hz is outside %d..%d", cfg.RateHz, MinRateHz, MaxRateHz))
 	}
 	buffer := cfg.BufferTime
 	if buffer == 0 {

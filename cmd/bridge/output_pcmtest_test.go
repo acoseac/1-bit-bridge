@@ -160,6 +160,8 @@ func TestOutputPCMTestTakesAnEndpointOnlyByNumber(t *testing.T) {
 		{[]string{"--device", "0", "--rate", "48000", "--bits", "24"}, "--card is required"},
 		{[]string{"--card", "5", "--rate", "48000", "--bits", "24"}, "--device is required"},
 		{[]string{"--card", "5", "--device", "0", "--bits", "24"}, "--rate is required"},
+		{with("--rate", "7999"), "--rate is 8000 to 1536000 Hz, not 7999"},
+		{with("--rate", "1536001"), "--rate is 8000 to 1536000 Hz, not 1536001"},
 		{with("--bits", "20"), "--bits is 16, 24 or 32"},
 		{with("--format", "S16_LE"), "--format S16_LE does not carry 24-bit samples"},
 		{with("--format", "FLOAT_LE"), "--format FLOAT_LE does not carry 24-bit samples"},

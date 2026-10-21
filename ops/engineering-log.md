@@ -48603,7 +48603,14 @@ and sha256; the tag is what pins it until a first green run records the id.
   to play on a difference: that would mean the definitions are wrong. Its
   tone is a 1 kHz sine at `--level` dBFS, -30 at most, with the amplitude
   rounded down, generated over `rate/gcd(rate, 1000)` frames so whole
-  repeats join without a seam, and packed by `format.Pack`.
+  repeats join without a seam, and packed by `format.Pack`. That table is
+  as long as the rate when the rate shares no factor with 1000, so
+  `--rate` is checked against the backend's own bounds
+  (`alsapcm.MinRateHz`, `MaxRateHz`) before the tone is built: found on
+  review, after the harness's first commit, where a rate such as
+  2147483647 would have asked for 16 GiB of samples before `Open` refused
+  it. The fix came red first (7999 and 1536001 reached the open), and that
+  run is its control.
 
 ### Red first
 

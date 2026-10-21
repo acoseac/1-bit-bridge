@@ -186,6 +186,12 @@ func pcmTestRunFrom(device, rate, bits int, alsaFormat string, seconds int, leve
 	if rate <= 0 {
 		return bad("--rate is required: the frame rate in Hz, exactly as the DAC is to run")
 	}
+	// Checked here, before the tone is built: its table is the frames one
+	// 1 kHz cycle takes to repeat exactly, which for a rate sharing no
+	// factor with 1000 is the rate itself.
+	if rate < alsapcm.MinRateHz || rate > alsapcm.MaxRateHz {
+		return bad("--rate is %d to %d Hz, not %d", alsapcm.MinRateHz, alsapcm.MaxRateHz, rate)
+	}
 	f := format.ALSAFormat(alsaFormat)
 	switch {
 	case bits != 16 && bits != 24 && bits != 32:
