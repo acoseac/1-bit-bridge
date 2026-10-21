@@ -172,12 +172,16 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
-	// answered is auto's answer as Active last returned it, whichever way
-	// the gate reached it: a probe it stored, a probe past its own deadline
-	// it did not store, the cache, or another caller's probe it waited on.
-	// activeNow returns it, so the loopback route follows exactly what the
-	// gate last said.
+	// answered is auto's newest verdict that a caller of Active recorded,
+	// whichever way the gate reached it: a probe it stored, a probe past its
+	// own deadline it did not store, the cache, or another caller's probe
+	// it waited on. activeNow returns it, so the loopback route follows
+	// exactly what the gate says. Every verdict is numbered as it is
+	// produced under mu (verdictSeq), answeredSeq is the number of the one
+	// answered holds, and a caller records only a newer one.
 	answered     bool
+	answeredSeq  uint64
+	verdictSeq   uint64
 	probeFlights map[string]*probeFlight
 	paths        outputPathCache
 	// joined, when set, runs after a caller has found a build in flight
@@ -187,6 +191,10 @@ type localOutputs struct {
 	// probeWait, when set, runs after a caller has found a probe in
 	// flight and before it waits. Production leaves it nil.
 	probeWait func()
+	// beforeRecord, when set, runs after a caller of Active has its
+	// verdict and before it records it, with that caller's context.
+	// Production leaves it nil. Tests park one caller there.
+	beforeRecord func(context.Context)
 }
 
 type outputFlight struct {
@@ -218,12 +226,15 @@ type outputProbe struct {
 }
 
 // probeFlight is one inspection shared by every caller that asks for
-// the same configuration while it is running.
+// the same configuration while it is running. seq numbers its verdict,
+// set under mu before done closes, so every waiter carries the number the
+// probe was given.
 type probeFlight struct {
 	done  chan struct{}
 	found bool
 	rep   mpd.Report
 	opt   mpd.Options
+	seq   uint64
 }
 
 func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
@@ -315,27 +326,35 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 }
 
 // answerAuto is auto's answer: the probe's verdict, recorded under mu as
-// the gate's answer for activeNow every time there is one. A caller that
-// stopped waiting on another caller's probe has no verdict of its own: it
-// gets the answer the gate last recorded and records nothing, so a request
-// that ends while a probe runs cannot turn the loopback route off.
+// the gate's answer for activeNow when it is newer than the one recorded,
+// and the gate's newest recorded verdict is what the caller gets. The
+// verdict was numbered when it was produced, and this caller took it out
+// of mu to get here, so another caller may have recorded a newer one
+// meanwhile: the older one is not recorded over it. A caller that stopped
+// waiting on another caller's probe has no verdict of its own (0): it
+// records nothing, so a request that ends while a probe runs cannot turn
+// the loopback route off.
 func (o *localOutputs) answerAuto(ctx context.Context) bool {
-	found, _, _, verdict := o.probeVerdict(ctx)
+	found, _, _, seq := o.probeVerdict(ctx)
+	if o.beforeRecord != nil {
+		o.beforeRecord(ctx)
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if verdict {
-		o.answered = found
+	if seq > o.answeredSeq {
+		o.answered, o.answeredSeq = found, seq
 	}
 	return o.answered
 }
 
 // activeNow is the gate's answer as it stands, without asking MPD
 // anything: false off Linux and for off, true for on, and for auto the
-// answer Active last returned (answered), whatever its age and whatever
-// configuration it was for, false before the first. It never probes,
-// dials or greets, and never runs OnActive, so the loopback track route
-// asks it on every request. It waits only on mu, which probe, like every
-// holder of mu, releases before any I/O, so that read never waits on MPD.
+// newest verdict a caller of Active recorded (answered), whatever its age
+// and whatever configuration it was for, false before the first. It never
+// probes, dials or greets, and never runs OnActive, so the loopback track
+// route asks it on every request. It waits only on mu, which probe, like
+// every holder of mu, releases before any I/O, so that read never waits
+// on MPD.
 func (o *localOutputs) activeNow() bool {
 	if o == nil || o.goos != "linux" {
 		return false
@@ -356,18 +375,20 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 	return found, rep, opt
 }
 
-// probeVerdict is probe, and whether its answer is a verdict. Every answer
-// is, from the cache, a probe this caller ran (stored or past its own
-// deadline) or one another caller ran, except the false of a caller that
-// stopped waiting on another caller's probe.
-func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, bool) {
+// probeVerdict is probe, and the number of its verdict. Every answer is a
+// verdict, numbered under mu as it is produced: a cache read when it is
+// read, a probe when it completes (stored or past its own deadline),
+// whichever caller ran it. The false of a caller that stopped waiting on
+// another caller's probe is none, and carries 0.
+func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64) {
 	cfg := o.outputConfig()
 	key := probeKey(cfg)
 	o.mu.Lock()
 	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
 		p := o.probed
+		seq := o.nextVerdictLocked()
 		o.mu.Unlock()
-		return p.found, p.rep, p.opt, true
+		return p.found, p.rep, p.opt, seq
 	}
 	if f := o.probeFlights[key]; f != nil {
 		o.mu.Unlock()
@@ -376,9 +397,9 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		}
 		select {
 		case <-f.done:
-			return f.found, f.rep, f.opt, true
+			return f.found, f.rep, f.opt, f.seq
 		case <-ctx.Done():
-			return false, mpd.Report{}, mpd.Options{}, false
+			return false, mpd.Report{}, mpd.Options{}, 0
 		}
 	}
 	f := &probeFlight{done: make(chan struct{})}
@@ -410,10 +431,16 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	}
 	delete(o.probeFlights, key)
-	f.found, f.rep, f.opt = found, rep, opt
+	f.found, f.rep, f.opt, f.seq = found, rep, opt, o.nextVerdictLocked()
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt, true
+	return found, rep, opt, f.seq
+}
+
+// nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.
+func (o *localOutputs) nextVerdictLocked() uint64 {
+	o.verdictSeq++
+	return o.verdictSeq
 }
 
 // outputConfig is the output section as the config holds it now, and the

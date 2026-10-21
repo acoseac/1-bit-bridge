@@ -317,6 +317,126 @@ func TestACallerThatStopsWaitingGetsTheGatesLastAnswer(t *testing.T) {
 	}
 }
 
+// TestAnOlderCacheVerdictNeverOverwritesANewerOne: a caller whose cache hit
+// said MPD is there is parked between that read and its record. The cache
+// expires, and another caller's probe finds MPD gone and records it. When
+// the parked caller goes on, its older verdict does not overwrite the newer
+// one: the route stays off with the gate, and that caller is answered with
+// the newer verdict too.
+func TestAnOlderCacheVerdictNeverOverwritesANewerOne(t *testing.T) {
+	clock := &manualClock{}
+	var gone atomic.Bool
+	cfg := quietOutputs("linux", "auto")
+	cfg.Now, cfg.AfterFunc = clock.Now, clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		if gone.Load() {
+			return mpd.Report{}
+		}
+		return mpd.Report{ConfPath: "/etc/mpd.conf"}
+	}
+	o := newLocalOutputs(cfg)
+	if !o.Active(context.Background()) {
+		t.Fatal("a probe that found MPD: the gate said off")
+	}
+	park := parkAtRecord(t, o)
+	parked := make(chan bool, 1)
+	go func() { parked <- o.Active(park.ctx) }()
+	<-park.parked // its cache hit said true, and it has not recorded it
+	gone.Store(true)
+	clock.Advance(outputProbeHit + time.Second)
+	if o.Active(context.Background()) || o.activeNow() {
+		t.Fatal("a probe found MPD gone: the gate or the route said on")
+	}
+	park.release()
+	answer := <-parked
+	if o.activeNow() {
+		t.Fatal("an older verdict overwrote a newer one: the route serves while the gate says off")
+	}
+	if answer {
+		t.Fatal("the parked caller was answered on after the gate's newer verdict said off")
+	}
+}
+
+// TestAWaiterNeverRecordsAnOlderVerdict: a caller woken by another caller's
+// probe is parked between that verdict and its record. The configuration
+// changes, and a probe of the new one finds no MPD and records it. When the
+// parked waiter goes on, the flight's older verdict does not overwrite the
+// newer one.
+func TestAWaiterNeverRecordsAnOlderVerdict(t *testing.T) {
+	const here, elsewhere = "127.0.0.1:6600", "127.0.0.1:6601"
+	var endpoint atomic.Value
+	endpoint.Store(here)
+	inspecting, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	cfg := quietOutputs("linux", "auto")
+	cfg.Output = func() config.OutputConfig {
+		return config.OutputConfig{MPD: "auto", Endpoint: endpoint.Load().(string)}
+	}
+	cfg.Inspect = func(_ context.Context, opt mpd.Options) mpd.Report {
+		if opt.Endpoint != here {
+			return mpd.Report{} // no MPD at the new configuration's endpoint
+		}
+		close(inspecting)
+		<-release
+		return mpd.Report{ConfPath: "/etc/mpd.conf"}
+	}
+	o := newLocalOutputs(cfg)
+	park := parkAtRecord(t, o)
+	waiting := make(chan struct{})
+	o.probeWait = func() { close(waiting) }
+	prober, waiter := make(chan bool, 1), make(chan bool, 1)
+	go func() { prober <- o.Active(context.Background()) }()
+	<-inspecting
+	go func() { waiter <- o.Active(park.ctx) }()
+	<-waiting
+	releaseOnce.Do(func() { close(release) }) // the probe finds MPD
+	if !<-prober {
+		t.Fatal("the probe found MPD, and its caller was answered off")
+	}
+	<-park.parked // woken with the flight's true, and not recorded yet
+	endpoint.Store(elsewhere)
+	if o.Active(context.Background()) || o.activeNow() {
+		t.Fatal("a new configuration with no MPD: the gate or the route said on")
+	}
+	park.release()
+	answer := <-waiter
+	if o.activeNow() {
+		t.Fatal("a waiter's older verdict overwrote a newer one: the route serves while the gate says off")
+	}
+	if answer {
+		t.Fatal("the parked waiter was answered on after the gate's newer verdict said off")
+	}
+}
+
+// parkedRecord parks, between its verdict and its record, the one caller
+// of Active whose context is ctx.
+type parkedRecord struct {
+	ctx            context.Context
+	parked, resume chan struct{}
+	once           sync.Once
+}
+
+type parkMark struct{}
+
+// parkAtRecord arms o's beforeRecord seam to park the caller of Active that
+// passes the returned record's ctx, and releases it when the test ends.
+func parkAtRecord(t *testing.T, o *localOutputs) *parkedRecord {
+	t.Helper()
+	p := &parkedRecord{parked: make(chan struct{}), resume: make(chan struct{})}
+	p.ctx = context.WithValue(context.Background(), parkMark{}, p)
+	o.beforeRecord = func(ctx context.Context) {
+		if ctx.Value(parkMark{}) == p {
+			close(p.parked)
+			<-p.resume
+		}
+	}
+	t.Cleanup(p.release)
+	return p
+}
+
+func (p *parkedRecord) release() { p.once.Do(func() { close(p.resume) }) }
+
 // TestActiveNowReadsTheConfigLikeTheProbe: with no output reader wired,
 // activeNow reads the empty config, as probe does, and answers off (auto,
 // no answer yet) instead of panicking on a request.
