@@ -144,6 +144,11 @@ func TestALACAbsurdTablesRefused(t *testing.T) {
 		{"stco count 0", stcoSet(4, 0), decode.ReasonTruncated, "stco"},
 		{"stco offset outside mdat", stcoSet(8, 1), decode.ReasonTruncated, "mdat"},
 		{"stco offset past the file", stcoSet(8, huge), decode.ReasonTruncated, "mdat"},
+		// Counts the packets could hold but the box does not: only the
+		// count-against-box check refuses these, where a huge count is
+		// refused by the count-against-packets checks first.
+		{"stco count past its box", stcoSet(4, 2), decode.ReasonTruncated, "entries"},
+		{"stts count past its box", sttsSet(4, 3), decode.ReasonTruncated, "entries"},
 		{"stsc count 2^32-1", stscSet(4, huge), decode.ReasonTruncated, "stsc"},
 		{"stsc first chunk 2", stscSet(8, 2), decode.ReasonTruncated, "stsc"},
 		{"stsc samples per chunk 0", stscSet(12, 0), decode.ReasonTruncated, "stsc"},
