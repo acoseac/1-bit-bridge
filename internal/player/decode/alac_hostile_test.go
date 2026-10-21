@@ -165,8 +165,8 @@ func TestALACAbsurdTablesRefused(t *testing.T) {
 		{"stsd two entries", stsdSet(stsdEntryCount, 2), decode.ReasonUnsupportedLayout, "entries"},
 		{"stsd 2^32-1 entries", stsdSet(stsdEntryCount, huge), decode.ReasonUnsupportedLayout, "entries"},
 		// The sniffer sees no ALAC entry in these four, so Open refuses
-		// them before the demuxer runs; TestALACSampleDescriptionRefusals
-		// and TestALACDemuxerAlone hold the demuxer's own refusals.
+		// them before the demuxer runs; TestALACDemuxerAlone holds the
+		// demuxer's own refusals of them.
 		{"stsd entry size huge", stsdSet(stsdEntrySize, huge), decode.ReasonUnknownContainer, ""},
 		{"stsd entry size 0", stsdSet(stsdEntrySize, 0), decode.ReasonUnknownContainer, ""},
 		{"stsd mp4a", stsdTag(stsdEntryType, "mp4a"), decode.ReasonLossy, "AAC"},
