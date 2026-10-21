@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -53,12 +54,27 @@ func TestDoctorPassesWithNoRoots(t *testing.T) {
 	}
 	report := doctor.Run(context.Background(), d)
 	for _, name := range []string{"config-file", "library-roots"} {
-		if c, ok := reportCheck(report, name); ok && c.Status != doctor.OK {
+		c, ok := reportCheck(report, name)
+		if !ok {
+			t.Errorf("the report has no %s check", name)
+			continue
+		}
+		if c.Status != doctor.OK {
 			t.Errorf("%s = %s (%s)", c.Name, c.Status, c.Summary)
 		}
 	}
 	requireNoFailBut(t, report, "player", "dac")
-	if c, ok := reportCheck(report, "music"); ok && (c.Status != doctor.OK || c.Summary != "Ready: can play music from another bridge or NAS") {
+	// The checklist is Linux's alone (the localOutputs gate), so elsewhere
+	// a Music line is the defect, and on Linux a missing one is.
+	c, ok := reportCheck(report, "music")
+	switch {
+	case runtime.GOOS != "linux":
+		if ok {
+			t.Errorf("music %s %q on %s, which has no player checklist", c.Status, c.Summary, runtime.GOOS)
+		}
+	case !ok:
+		t.Error("the report has no music check")
+	case c.Status != doctor.OK || c.Summary != "Ready: can play music from another bridge or NAS":
 		t.Errorf("music %s %q, want ok and Ready", c.Status, c.Summary)
 	}
 }
