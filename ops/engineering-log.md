@@ -47963,9 +47963,10 @@ here ports Apple's decoder or works around the library beyond the
 more zero bytes to every packet would keep the overrun inside the buffer,
 and a valid packet decodes the same, but a corrupt packet that overruns
 by less than the padding would then decode the zeros instead of failing.
-The same packet panics under a 24-bit configuration. The defect and four
-others, each with a minimal input, are in `ops/upstream/saprobe-alac.md`
-(not reported upstream).
+The same packet panics under a 24-bit configuration. The defect and the
+library's others, from this work and Codex's evaluation, are in
+`ops/upstream/saprobe-alac.md`, with the minimal input and output of each
+one run here (not reported upstream).
 
 ### What shipped
 
