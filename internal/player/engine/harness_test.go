@@ -181,6 +181,27 @@ func (f *fakeFiles) rename(from, to string) error {
 	return os.Rename(from, to)
 }
 
+// releaseHolds lets every held write go, so a test that fails while one is
+// held does not hold its engine's shutdown.
+func (f *fakeFiles) releaseHolds() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gates := []gate{f.holdReserve}
+	for _, g := range f.holdQueue {
+		gates = append(gates, g)
+	}
+	for _, g := range gates {
+		if g == nil {
+			continue
+		}
+		select {
+		case <-g:
+		default:
+			g.open()
+		}
+	}
+}
+
 // writes is the number of queue writes that landed.
 func (f *fakeFiles) writes() int {
 	f.mu.Lock()
@@ -326,6 +347,7 @@ func (h *harness) run() {
 		}
 	}()
 	h.t.Cleanup(func() { h.shutdownEngine(e, cancel, ran) })
+	h.t.Cleanup(h.files.releaseHolds)
 }
 
 // shutdown cancels Run and fires the clock's timers until it returns.
