@@ -48150,6 +48150,80 @@ told first, privately, through the repository's vulnerability reporting,
 before this branch made the ten-byte input public. Porting Apple's
 reference decoder stays the fallback if upstream does not fix the panic.
 
+### Round 2: the seek index held to the bound it states
+
+The review of #1300 found one defect, Low: `bounds.go` said the seek index
+was twelve bytes a packet, 12 MiB at the 2^20 packet cap, and it was more.
+`readSTTS` allocated a 32-byte run for every stts entry, up to 2^20 of them
+(32 MiB), and `readSTSC` held every stsc entry, 16 bytes each and up to
+2^20, before the chunk offsets were read. The review's file of about 9 MiB
+passed open holding about 44 MiB.
+
+**Red first.** `TestALACDemuxerAllocatesLittle` gained three files of 2^20
+one-byte packets, built from the 16-bit golden by `alacOneBytePackets`
+(stsz a constant size of 1, an mdat of 1 MiB, mdhd's duration stts's
+frames), and holds each open to twelve bytes a packet and 1 MiB: the
+review's file (stts an entry a packet, one stsc entry, one chunk; 9,438,000
+bytes), stsc an entry a chunk over 2^20 chunk offsets with one stts entry
+(17,826,600 bytes), and stts entries alternating 1 and 2 frames. At
+8ed60333 they opened with 46,275,480, 29,533,064 and 46,275,480 bytes
+allocated.
+
+**What the files hold.** Before choosing, a box dump of every golden, the
+owner's six files and Codex's twelve: each has one stts entry or two, since
+the writers run-length encode stts and an ALAC packet holds the frame
+length but the last. stsc has one entry in afconvert's files and Codex's
+FFmpeg encodes, and two in the owner's 96 kHz file (254 chunks), but 14, 9,
+3, 2 and 9 in the five Lavf58 files, over 17, 16, 3, 2 and 9 chunks of
+about 1 MB (14 to 96 seconds of audio). An stsc entry starts wherever a
+chunk's packet count changes, and FFmpeg's chunks hold whole packets of
+varying size, so 37 of those 47 chunks start one: stsc grows with a file's
+length. A cap low enough to matter could refuse a long file (at that chunk
+size a 6-hour file at 192 kHz is some 15,000 chunks), and a cap that keeps
+one still holds its entries, which the bound would then count. So the two
+tables are treated differently:
+
+- **stts**: entries of one duration side by side merge into one run, and
+  more than `maxALACRuns`, 1024, runs are `unsupported_layout`. The runs
+  are kept for seeking, so they need the cap. The merge loses nothing (a
+  run is packets of one duration), and a writer that lists an entry a
+  packet still opens, at the cost of one run.
+- **stsc**: read through a table cursor in step with the chunk offsets and
+  never held, so it needs no cap. Round 1's checks are made as each entry
+  is reached: the first run at chunk 1, each after the one before and at
+  most at the last chunk, one or more packets a chunk of description 1, and
+  exactly stsz's packets placed. `table()` is the same cursor.
+
+The index is twelve bytes a packet and 32 a run, 12 MiB and 32 KiB at the
+caps, and `bounds.go` now says so; a table is read 4096 entries at a time,
+48 KiB for stsc's, the widest. The three files now open with 12,751,936
+and 12,751,904 bytes allocated, and the third is refused after 4,266,800.
+`TestALACSTTSRunsMergeAndCap` decodes every decoded golden with its stts
+rewritten as an entry a packet, whole and from each of its seek frames, and
+opens 1024 runs and refuses 1025. The caps sentence in the ALAC section of
+`.claude/rules/output.md` changes with this.
+
+**Negative controls**, on 09635028, each reverted:
+
+| Mutation | What failed |
+|---|---|
+| `alac.go`, `m4a.go` and `bounds.go` as at 8ed60333 | the three new cases and the alternating file's refusal in `TestALACDemuxerAllocatesLittle`, and the 1025-run refusal; nothing else in the package |
+| The stts merge and cap undone, stsc's cursor kept | the two stts cases (46,273,536 bytes each), the alternating refusal and the 1025-run refusal |
+| stsc held again (8ed60333's `readSTSC`), the merge kept | the stsc case alone (29,529,016 bytes) |
+| The merge drops the merged entry's packets | the six split goldens ("ALAC packet 1 holds 4096 frames; stts gives it 137" and the like); the frame count stayed right, since a run's first frame counts every entry before it |
+
+**Re-runs** on 09635028: the ALAC goldens, the FFmpeg fixtures and
+`TestALACReferenceCorpus` (the owner's six files and Codex's twelve) pass.
+Fuzzing with `-parallel 4 -fuzzminimizetime 1s` under the build lock, from
+the cached corpus:
+
+| Target | Time | Execs | New entries (corpus) | Result |
+|---|---|---|---|---|
+| `FuzzALACOpen` | 2m32s | 6,799,667 | 12 (638) | pass |
+| `FuzzALACCookie` | 2m30s | 17,752,532 | 1 (15) | pass |
+
+No run found a crasher.
+
 ## 2026-10-20 — B470 PR 1b round 3: the DFF walk's bounds, the goldens' layout checks, and two overstated rules
 
 ### Trigger
