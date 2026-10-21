@@ -142,6 +142,23 @@ func TestDrainAfterAnUnderrunIsAnXrun(t *testing.T) {
 	k.checkClosedOnce(t)
 }
 
+// TestDrainSeesAnUnderrunBetweenItsCheckAndDRAIN pins the window the state
+// check before DRAIN leaves: the check reads RUNNING, the stream underruns
+// before DRAIN, and DRAIN moves the XRUN stream to SETUP. A running stream
+// with frames left is seen DRAINING first when its drain is clean, so SETUP
+// straight after DRAIN, from a stream that was RUNNING, is the underrun
+// (Codex and the Claude API review of the #1301 fixes).
+func TestDrainSeesAnUnderrunBetweenItsCheckAndDRAIN(t *testing.T) {
+	k := newFake(t)
+	d := mustOpen(t, k, cfg48k)
+	k.states = []int32{stateRunning, stateSetup}
+	if err := d.Drain(context.Background(), time.Second); ReasonOf(err) != ReasonXrun {
+		t.Errorf("Drain: %v, want %s", err, ReasonXrun)
+	}
+	_ = d.Close()
+	k.checkClosedOnce(t)
+}
+
 // TestCloseClosesOnEveryPath pins that the node is closed exactly once
 // whichever way its use ends: each refusal after the open, and each way a
 // stream ends before Close. The hardware parameters are freed before the
