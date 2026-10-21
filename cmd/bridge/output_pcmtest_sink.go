@@ -624,8 +624,10 @@ func (r pcmTestSinkRun) sayXrun(sink pcmTestSink, err error, player *pcmTestPlay
 }
 
 // drain drains the sink. A paused sink is waited for until it plays again,
-// since a pause holds what was submitted; an xrun is recovered and the
-// drain tried again when --recover allows it.
+// since a pause holds what was submitted; a refusal whose state has changed
+// since is asked again, since a resume can come between the refusal and the
+// look at the state; an xrun is recovered and the drain tried again when
+// --recover allows it.
 func (r pcmTestSinkRun) drain(ctx context.Context, sink pcmTestSink, player *pcmTestPlayer, out *pcmTestOut) error {
 	for {
 		changed := sink.Changed()
@@ -633,7 +635,18 @@ func (r pcmTestSinkRun) drain(ctx context.Context, sink pcmTestSink, player *pcm
 		switch {
 		case err == nil:
 			return nil
-		case alsapcm.ReasonOf(err) == alsapcm.ReasonBadState && pcmTestIsPaused(sink):
+		case alsapcm.ReasonOf(err) == alsapcm.ReasonBadState:
+			// The state is read before changed is looked at, so a changed
+			// still open says the state read is the one the refusal answered.
+			paused := pcmTestIsPaused(sink)
+			select {
+			case <-changed:
+				continue
+			default:
+			}
+			if !paused {
+				return err
+			}
 			select {
 			case <-changed:
 			case <-ctx.Done():

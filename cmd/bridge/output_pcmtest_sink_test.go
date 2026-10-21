@@ -43,6 +43,10 @@ type fakeSink struct {
 	failAt    int64 // with failErr: Write stops at this frame and the sink ends
 	failErr   error
 	resumeErr []error // Resume's answers, in turn, before one that resumes
+	// Hooks, set before the run has the sink: enterDrain is called as each
+	// Drain begins, and refused once a Drain has refused a paused sink, just
+	// before it returns the refusal, so a test can hold the producer there.
+	enterDrain, refused func()
 }
 
 // newFakeSink is a sink opened for cfg, playing, with its drain gate shut.
@@ -155,11 +159,17 @@ func (f *fakeSink) Recover() error {
 }
 
 func (f *fakeSink) Drain(ctx context.Context) error {
+	if f.enterDrain != nil {
+		f.enterDrain()
+	}
 	f.call("drain")
 	f.mu.Lock()
 	switch f.state {
 	case alsapcm.SinkPaused, alsapcm.SinkReleased:
 		f.mu.Unlock()
+		if f.refused != nil {
+			f.refused()
+		}
 		return &alsapcm.Error{Reason: alsapcm.ReasonBadState, Op: "drain", Detail: "paused: resume or drop it"}
 	case alsapcm.SinkStopped:
 		f.mu.Unlock()
@@ -179,12 +189,13 @@ func (f *fakeSink) Drain(ctx context.Context) error {
 			select {
 			case <-f.gate:
 				f.mu.Lock()
-				defer f.mu.Unlock()
 				if f.state == alsapcm.SinkDraining {
 					f.played = f.frames()
 					f.setState(alsapcm.SinkStopped, nil)
+					f.mu.Unlock()
 					return nil
 				}
+				f.mu.Unlock()
 				continue
 			case <-f.dropped:
 				return &alsapcm.Error{Reason: alsapcm.ReasonCancelled, Op: "drain", Detail: "dropped while draining"}
@@ -641,6 +652,60 @@ func TestOutputPCMTestSinkPausesAndResumesOnTimers(t *testing.T) {
 	r := h.wait(t, done)
 	if r.code != 0 || !strings.Contains(r.stdout, "paused by the kernel's PAUSE, at 1.000 s") || !strings.Contains(r.stdout, "resumed at") || !strings.Contains(r.stdout, "drained") {
 		t.Errorf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+}
+
+// TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal pins the drain a
+// pause refused when the resume comes before the producer looks at the
+// refusal (#1303's Windows leg: TestOutputPCMTestSinkPausesAndResumesOnTimers
+// exited 1, "drain: bad_state: paused: resume or drop it", the producer
+// having found the sink playing again and taken the refusal for a failure).
+// The producer is held where it has the refusal and the resume comes: the
+// drain is asked again and plays out, exit 0.
+func TestOutputPCMTestSinkDrainsWhenAResumeOvertakesItsRefusal(t *testing.T) {
+	h := newSinkHarness(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	refused, goOn := make(chan struct{}), make(chan struct{})
+	h.prepare = func(_ int, f *fakeSink) {
+		close(f.gate)
+		var first, firstRefusal sync.Once
+		f.enterDrain = func() { first.Do(func() { close(entered); <-release }) }
+		f.refused = func() { firstRefusal.Do(func() { close(refused); <-goOn }) }
+	}
+	done := h.run(context.Background(), "--sink", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16",
+		"--seconds", "1", "--pause-at", "0.5", "--resume-after", "1", "--proc-root", t.TempDir())
+	f := waitSink(t, h, done)
+	// Every frame is written and the producer is about to ask for the drain:
+	// the pause comes first.
+	awaitRun(t, entered, "the producer to ask for the drain")
+	playing := f.Changed()
+	f.setPlayed(24000)
+	t0 := time.Unix(1_000, 0)
+	h.ticks <- t0
+	awaitRun(t, playing, "the pause at half a second")
+	// The paused sink refuses the drain, and the resume comes before the
+	// producer looks at why.
+	paused := f.Changed()
+	close(release)
+	awaitRun(t, refused, "the paused sink to refuse the drain")
+	h.ticks <- t0.Add(time.Second)
+	awaitRun(t, paused, "the resume a second after the pause")
+	close(goOn)
+	r := h.wait(t, done)
+	drains := 0
+	for _, c := range drainCalls(f) {
+		if c == "drain" {
+			drains++
+		}
+	}
+	if r.code != 0 || drains != 2 || f.closes != 1 {
+		t.Errorf("exit %d, %d drains asked, closed %d times; want 0, the refused drain asked again, closed once\nstdout:\n%s\nstderr:\n%s",
+			r.code, drains, f.closes, r.stdout, r.stderr)
+	}
+	for _, say := range []string{"paused by the kernel's PAUSE, at 0.500 s", "resumed at 0.500 s", "drained: 1.000 s played; gaps 0", "closed\n"} {
+		if !strings.Contains(r.stdout, say) {
+			t.Errorf("stdout does not say %q:\n%s", say, r.stdout)
+		}
 	}
 }
 
