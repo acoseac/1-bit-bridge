@@ -78,8 +78,10 @@ type seams struct {
 	applied      func(op string)
 	handled      func(what string)
 	// replying sees each reply as it is sent, with the snapshot published
-	// then.
-	replying func(op string, r reply, s *Snapshot)
+	// then; writerWaits, the queue file writer about to wait, with the
+	// newest revision it has seen.
+	replying    func(op string, r reply, s *Snapshot)
+	writerWaits func(seen uint64)
 }
 
 // Engine owns the player's state: one goroutine, the owner, runs every

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -125,6 +126,70 @@ func TestABurstWritesABoundedNumberOfTimes(t *testing.T) {
 	f := readQueueFile(t, data)
 	if !slices.Equal(idsOfFile(f), sn.IDs()) || f.Selected != sn.Selected() || f.Tokens.Current != sn.Token() {
 		t.Fatalf("the file after the flush is not the state: %d entries, selected %d, token %d", len(f.Entries), f.Selected, f.Tokens.Current)
+	}
+}
+
+// TestTheWriterCoalescesAndBoundsTheDirtyAge pins the writer's timing on
+// the clock: a change is written once writeCoalesce has passed with no
+// other, and under changes that keep coming, writeMaxAge after the first.
+// The writer's own report that it is waiting, with the newest revision it
+// decided on, says it has seen a change without a sleep.
+func TestTheWriterCoalescesAndBoundsTheDirtyAge(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	var seen uint64
+	idle := make(chan struct{}, 1)
+	h.tweak = func(c *Config) {
+		c.seams.writerWaits = func(rev uint64) {
+			mu.Lock()
+			seen = max(seen, rev)
+			mu.Unlock()
+			poke(idle)
+		}
+	}
+	h.boot()
+	waitIdle := func() {
+		t.Helper()
+		rev := h.snap().Persist().Revision
+		timer := time.NewTimer(*watchdog)
+		defer timer.Stop()
+		for {
+			mu.Lock()
+			s := seen
+			mu.Unlock()
+			if s >= rev {
+				return
+			}
+			select {
+			case <-idle:
+			case <-timer.C:
+				t.Fatalf("waited %v for the writer to see revision %d", *watchdog, rev)
+			}
+		}
+	}
+	h.insert("a")
+	waitIdle()
+	if n := h.files.attempts(); n != 0 {
+		t.Fatalf("a change was written at once, %d times, not after %v", n, writeCoalesce)
+	}
+	h.clk.Advance(writeCoalesce)
+	h.files.waitFor(t, "the coalesced write", func() bool { return h.files.queueAttempts == 1 })
+
+	start := h.clk.Now()
+	for {
+		h.insert("t")
+		waitIdle()
+		elapsed := h.clk.Now().Sub(start)
+		if n := h.files.attempts(); n > 1 {
+			if elapsed < writeMaxAge {
+				t.Fatalf("changes every 100 ms were written after %v, before the maximum age %v", elapsed, writeMaxAge)
+			}
+			break
+		}
+		if elapsed > writeMaxAge {
+			t.Fatalf("changes every 100 ms were not written %v after the first", elapsed)
+		}
+		h.clk.Advance(100 * time.Millisecond)
 	}
 }
 

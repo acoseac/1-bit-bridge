@@ -301,7 +301,8 @@ func (w *writer) run() {
 			return
 		default:
 		}
-		if p, due := w.due(); p != nil {
+		p, due := w.due()
+		if p != nil {
 			if !due.After(w.e.clk.Now()) {
 				w.write(p)
 				continue
@@ -311,11 +312,25 @@ func (w *writer) run() {
 			}
 			t = w.e.clk.At(due, func() { poke(w.kick) })
 		}
+		if w.e.sm.writerWaits != nil {
+			seen := w.writtenRev()
+			if p != nil {
+				seen = p.rev
+			}
+			w.e.sm.writerWaits(seen)
+		}
 		select {
 		case <-w.kick:
 		case <-w.stop:
 		}
 	}
+}
+
+// writtenRev is the newest revision written.
+func (w *writer) writtenRev() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.written
 }
 
 // write writes p and tells the owner how it went: a failure keeps the
