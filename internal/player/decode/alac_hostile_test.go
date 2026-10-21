@@ -617,6 +617,11 @@ func TestALACCancelThenRetryNoGap(t *testing.T) {
 	if !errors.Is(err1, context.Canceled) {
 		t.Fatalf("read under cancel: n=%d err=%v, want Canceled", n1, err1)
 	}
+	// The cancel fires during packet 1's read: the call returns the 1096
+	// frames left of packet 0 and decodes nothing of packet 1.
+	if n1 != 2*(4096-3000) {
+		t.Fatalf("read under cancel returned %d frames, want the %d already decoded", n1/2, 4096-3000)
+	}
 	r.armed = false
 	got := append(append(first[:n:n], dst[:n1]...), readAllFrames(t, d, 4096)...)
 	requireSameSamples(t, got, f.want(t))
