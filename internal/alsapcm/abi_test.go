@@ -138,6 +138,7 @@ func abiFacts() map[string]string {
 		"SNDRV_PCM_FORMAT_S24_LE":           formatS24LE,
 		"SNDRV_PCM_FORMAT_S32_LE":           formatS32LE,
 		"SNDRV_PCM_FORMAT_S24_3LE":          formatS243LE,
+		"SNDRV_PCM_FORMAT_LAST":             formatLast,
 		"SNDRV_PCM_ACCESS_RW_INTERLEAVED":   accessRWInterleaved,
 		"SNDRV_PCM_SUBFORMAT_STD":           subformatStd,
 		"SNDRV_PCM_STREAM_PLAYBACK":         streamPlayback,

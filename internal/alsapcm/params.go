@@ -166,6 +166,12 @@ func formatName(code uint32) string {
 func formatsOf(m mask) string {
 	var known, other []string
 	for _, v := range m.values() {
+		// A refine leaves the bits past the last format the kernel defines
+		// as the request set them; they are not formats (the GO bar's
+		// refusal listed 64 to 255).
+		if v > formatLast {
+			break
+		}
 		name := formatName(v)
 		if strings.HasPrefix(name, "format ") {
 			other = append(other, strconv.FormatUint(uint64(v), 10))
