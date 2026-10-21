@@ -51,8 +51,27 @@ type outputChecklistSource struct {
 	// LoopbackErr is why the loopback track route is not serving, or nil:
 	// errLoopbackNotServing when it answers and refuses tracks.
 	LoopbackErr func() error
-	// Phones is the number of paired devices.
-	Phones func() int
+	// Tokens are the bridge's device tokens: the auth store's list in
+	// serve, tokens.json in the doctor. The Phone line counts the ones a
+	// phone can use (usablePhones).
+	Tokens func() []auth.Token
+}
+
+// usablePhones is the number of device tokens a phone can use now: not
+// expired (Validate refuses one past its ExpiresAt), and used by a phone
+// since it was issued or last rotated, since a rotation replaces the secret
+// the phone held. LastUsedAt is zero for a token never used, which is
+// after nothing. The demo's static token is no phone either: List does not
+// return it. Serve and the doctor both count with this.
+func usablePhones(tokens []auth.Token, now time.Time) int {
+	n := 0
+	for _, tok := range tokens {
+		expired := tok.ExpiresAt != nil && !tok.ExpiresAt.IsZero() && now.After(*tok.ExpiresAt)
+		if !expired && tok.LastUsedAt.After(tok.RotatedAt) {
+			n++
+		}
+	}
+	return n
 }
 
 // outputChecklist returns the four lines, or false when the bridge is no
@@ -75,8 +94,9 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 			in.Loopback.Err = err.Error()
 		}
 	}
-	if src.Phones != nil {
-		in.Phones = src.Phones()
+	if src.Tokens != nil {
+		tokens := src.Tokens()
+		in.Phones, in.Tokens = usablePhones(tokens, time.Now()), len(tokens)
 	}
 	return outputcheck.Lines(in), true
 }
@@ -247,7 +267,7 @@ func doctorChecklistSource(cfg *config.Config, lo *api.LocalOutputs, route *loop
 		Roots:           func() []string { return append([]string(nil), cfg.LibraryRoots...) },
 		LoopbackBaseURL: route.BaseURL,
 		LoopbackErr:     route.Err,
-		Phones:          func() int { return countPairedDevices(cfg.DataDir) },
+		Tokens:          func() []auth.Token { return tokenFile(cfg.DataDir) },
 	}
 }
 
@@ -325,12 +345,16 @@ func probeLoopbackRoute(ctx context.Context, port int) (string, error) {
 	return "", fmt.Errorf("port %d answers, but not as this bridge's loopback route", port)
 }
 
-// countPairedDevices is the number of tokens in the data dir's token file,
-// read and not written. A file that cannot be read counts none.
-func countPairedDevices(dataDir string) int {
+// tokenFile is the device tokens in the data dir's token file, read and
+// not written; a file that cannot be read holds none. LastUsedAt lands in
+// that file lazily: the serving bridge writes a phone's use at most once
+// per auth's lastUsedFlushInterval (30 s) and at its shutdown, so a phone
+// that first connected in the last half minute may not count here yet,
+// while the console, which reads the serving bridge's own store, counts it.
+func tokenFile(dataDir string) []auth.Token {
 	store, err := auth.OpenStore(filepath.Join(dataDir, tokensFileName))
 	if err != nil {
-		return 0
+		return nil
 	}
-	return len(store.List())
+	return store.List()
 }

@@ -19,6 +19,7 @@ func healthy() Input {
 		Roots:    []RootRule{{Root: "INTERNAL", State: "proven", Checked: 20, Found: 20}},
 		Loopback: Loopback{BaseURL: "http://127.0.0.1:7791"},
 		Phones:   1,
+		Tokens:   1,
 	}
 }
 
@@ -78,7 +79,8 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
 			in.Loopback = Loopback{NotServing: true}
 		},
-		"no phone": func(in *Input) { in.Phones = 0 },
+		"no phone":            func(in *Input) { in.Phones, in.Tokens = 0, 0 },
+		"tokens, none in use": func(in *Input) { in.Phones, in.Tokens = 0, 2 },
 		"unread": func(in *Input) {
 			*in = Input{Unread: "context canceled", Roots: []RootRule{{Root: "INTERNAL", State: "unchecked"}}, Phones: 1}
 		},
@@ -191,7 +193,7 @@ func TestEachStateSaysWhatToDo(t *testing.T) {
 			in.Roots[0] = RootRule{Root: "INTERNAL", State: "unproven"}
 			in.Loopback = Loopback{NotServing: true}
 		}, "music", Fail, []string{"Restart the bridge", "output.mpd"}},
-		{"no phone", func(in *Input) { in.Phones = 0 }, "phone", Warn, []string{"pairing QR"}},
+		{"no phone", func(in *Input) { in.Phones, in.Tokens = 0, 0 }, "phone", Warn, []string{"pairing QR"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := healthy()
@@ -241,6 +243,30 @@ func TestABoxThatCouldNotBeReadSaysWhatFailed(t *testing.T) {
 	in.Roots = nil
 	if m := line(t, Lines(in), "music"); m.Status != OK || m.Summary != "Ready: can play music from another bridge or NAS" {
 		t.Errorf("music with no roots %+v", m)
+	}
+}
+
+// TestThePhoneLineSaysWhenNoTokenIsInUse: a device token no phone can use
+// (expired, never used, or not used since it was rotated) is no paired
+// phone. With tokens issued and none in use, the line says that and what
+// to do, rather than that no phone was ever paired, and never goes green.
+func TestThePhoneLineSaysWhenNoTokenIsInUse(t *testing.T) {
+	for _, tc := range []struct {
+		phones, tokens int
+		status         Status
+		summary, fix   string
+	}{
+		{0, 0, Warn, "No phone paired yet", "pairing QR"},
+		{0, 1, Warn, "1 device token is issued, but no phone uses it", "pairing QR"},
+		{0, 3, Warn, "3 device tokens are issued, but no phone uses one", "pairing QR"},
+		{1, 3, OK, "1 device paired", ""},
+	} {
+		in := healthy()
+		in.Phones, in.Tokens = tc.phones, tc.tokens
+		p := line(t, Lines(in), "phone")
+		if p.Status != tc.status || !strings.Contains(p.Summary, tc.summary) || !strings.Contains(p.Fix, tc.fix) {
+			t.Errorf("%d of %d tokens in use: %+v", tc.phones, tc.tokens, p)
+		}
 	}
 }
 

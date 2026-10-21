@@ -50,6 +50,8 @@ type Input struct {
 	Loopback Loopback
 	// Phones is the number of paired devices.
 	Phones int
+	// Tokens is the number of device tokens the bridge holds.
+	Tokens int
 }
 
 // Player is the player software and the MPD it drives. MPDVersion is
@@ -96,9 +98,9 @@ type Loopback struct {
 // Lines judges in. It returns Player, DAC, Music and Phone, in that order.
 func Lines(in Input) []Line {
 	if in.Unread != "" {
-		return []Line{unreadPlayerLine(in.Unread), uncheckedDACLine(), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones)}
+		return []Line{unreadPlayerLine(in.Unread), uncheckedDACLine(), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 	}
-	return []Line{playerLine(in.Player), dacLine(in.DACs), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones)}
+	return []Line{playerLine(in.Player), dacLine(in.DACs), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 }
 
 // unreadPlayerLine is the Player line of a box the bridge could not read:
@@ -284,20 +286,33 @@ func musicLine(roots []RootRule, lb Loopback) Line {
 	return l
 }
 
-func phoneLine(n int) Line {
+// phoneLine judges the phones that can use their token (phones) among the
+// device tokens the bridge holds (tokens).
+func phoneLine(phones, tokens int) Line {
 	l := Line{Key: "phone", Title: "Phone"}
-	if n == 0 {
+	switch {
+	case phones > 0:
+		l.Status = OK
+		devices := "device"
+		if phones != 1 {
+			devices = "devices"
+		}
+		l.Summary = fmt.Sprintf("%d %s paired; 1-bit casts to this box over MPD", phones, devices)
+	case tokens > 0:
+		// Tokens no phone can use: expired, never used, or not used since
+		// a rotation replaced the secret the phone held.
+		l.Status = Warn
+		if tokens == 1 {
+			l.Summary = "1 device token is issued, but no phone uses it: it has expired, or has not been used since it was issued or rotated"
+		} else {
+			l.Summary = fmt.Sprintf("%d device tokens are issued, but no phone uses one: each has expired, or has not been used since it was issued or rotated", tokens)
+		}
+		l.Fix = "Open 1-bit on your phone so it connects, or scan this bridge's pairing QR again (console, Devices)."
+	default:
 		l.Status = Warn
 		l.Summary = "No phone paired yet"
 		l.Fix = "Open 1-bit on your phone and scan this bridge's pairing QR (console, Devices)."
-		return l
 	}
-	l.Status = OK
-	devices := "device"
-	if n != 1 {
-		devices = "devices"
-	}
-	l.Summary = fmt.Sprintf("%d %s paired; 1-bit casts to this box over MPD", n, devices)
 	return l
 }
 

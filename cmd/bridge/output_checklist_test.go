@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -15,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
@@ -80,7 +83,7 @@ func TestTheConsoleAndTheDoctorShowOneChecklist(t *testing.T) {
 			}}}, nil
 		},
 		LoopbackErr: func() error { return nil },
-		Phones:      func() int { return 0 },
+		Tokens:      func() []auth.Token { return nil },
 	}
 	ctx := context.Background()
 	console, ok := consoleOutputChecklist(src)(ctx)
@@ -134,7 +137,7 @@ func TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead(t *testing.T
 		},
 		Roots:       func() []string { return []string{filepath.Join("srv", "Music")} },
 		LoopbackErr: func() error { return nil },
-		Phones:      func() int { return 1 },
+		Tokens:      func() []auth.Token { return []auth.Token{{LastUsedAt: time.Now()}} },
 	}
 	for _, tc := range []struct {
 		name          string
@@ -182,6 +185,7 @@ func TestServeChecklistReadsTheLiveRootsAndTheRoute(t *testing.T) {
 		"Roots":           "apiSrv.Resolver().Roots",
 		"LoopbackBaseURL": "outLoop.BaseURL",
 		"LoopbackErr":     "outLoop.StartErr",
+		"Tokens":          "store.List",
 	} {
 		if got[field] != want {
 			t.Errorf("serve's checklist source sets %s to %q, want %q", field, got[field], want)
@@ -232,6 +236,92 @@ func TestTheDoctorChecklistReadsTheConfiguredRoots(t *testing.T) {
 	}
 	if src.LoopbackBaseURL == nil || src.LoopbackBaseURL() != "http://127.0.0.1:7791" {
 		t.Fatal("the doctor does not read the route's base URL from its port")
+	}
+}
+
+// TestUsablePhonesCountsOnlyTokensAPhoneCanUse: a token counts as a phone
+// only when it has not expired and a phone has used it since it was issued
+// or last rotated, so the Phone line is never green over a token no phone
+// can use. Serve and the doctor count with this one function.
+func TestUsablePhonesCountsOnlyTokensAPhoneCanUse(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	twoDaysAgo, yesterday, hourAgo, tomorrow := now.Add(-48*time.Hour), now.Add(-24*time.Hour), now.Add(-time.Hour), now.Add(24*time.Hour)
+	for _, tc := range []struct {
+		name string
+		tok  auth.Token
+		want int
+	}{
+		{"expired", auth.Token{LastUsedAt: twoDaysAgo, ExpiresAt: &yesterday}, 0},
+		{"never used", auth.Token{}, 0},
+		{"rotated and not used since", auth.Token{LastUsedAt: yesterday, RotatedAt: hourAgo}, 0},
+		{"used", auth.Token{LastUsedAt: hourAgo}, 1},
+		{"used since its rotation, expiring later", auth.Token{LastUsedAt: hourAgo, RotatedAt: yesterday, ExpiresAt: &tomorrow}, 1},
+	} {
+		if got := usablePhones([]auth.Token{tc.tok}, now); got != tc.want {
+			t.Errorf("%s: counts %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestTheDemoTokenIsNoPhone: the demo's static token lives in memory, never
+// in the token file, and List does not return it, so however often it is
+// used a demo bridge counts no phone for it.
+func TestTheDemoTokenIsNoPhone(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), tokensFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("the-demo-token"))
+	if err := store.SetStaticToken(hex.EncodeToString(sum[:]), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Validate("the-demo-token"); !ok {
+		t.Fatal("the demo token does not validate")
+	}
+	if n := usablePhones(store.List(), time.Now()); n != 0 {
+		t.Fatalf("the demo token counts as %d phones", n)
+	}
+}
+
+// TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken: `bridge doctor` reads
+// tokens.json, where a token minted and never used is no phone; once a
+// phone has used it and the serving bridge has written that down, it is.
+func TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := auth.OpenStore(filepath.Join(data, tokensFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := tokens.Mint("iPhone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	none := 0
+	cfg := &config.Config{DataDir: data, ListenAddress: "127.0.0.1:0", Output: config.OutputConfig{MPD: "on", LoopbackPort: &none}}
+	phone := func() doctor.Check {
+		t.Helper()
+		for _, c := range doctorOutputChecklist(cfg, linuxBoxSeam(data))(context.Background()) {
+			if c.Name == "phone" {
+				return c
+			}
+		}
+		t.Fatal("no phone line")
+		return doctor.Check{}
+	}
+	if p := phone(); p.Status != doctor.Warn || !strings.Contains(p.Summary, "1 device token is issued, but no phone uses it") {
+		t.Fatalf("a token never used: %+v", p)
+	}
+	if _, ok := tokens.Validate(raw); !ok {
+		t.Fatal("the token does not validate")
+	}
+	if err := tokens.FlushLastUsed(); err != nil {
+		t.Fatal(err)
+	}
+	if p := phone(); p.Status != doctor.OK || !strings.Contains(p.Summary, "1 device paired") {
+		t.Fatalf("a token a phone used: %+v", p)
 	}
 }
 
@@ -372,7 +462,15 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := tokens.Mint("iPhone"); err != nil {
+	raw, _, err := tokens.Mint("iPhone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A phone has used the token, and the serving bridge wrote that down.
+	if _, ok := tokens.Validate(raw); !ok {
+		t.Fatal("the token does not validate")
+	}
+	if err := tokens.FlushLastUsed(); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "bridge.yaml")

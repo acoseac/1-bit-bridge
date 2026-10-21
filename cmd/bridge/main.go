@@ -5198,7 +5198,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Roots:           apiSrv.Resolver().Roots,
 		LoopbackBaseURL: outLoop.BaseURL,
 		LoopbackErr:     outLoop.StartErr,
-		Phones:          func() int { return len(store.List()) },
+		Tokens:          store.List,
 	}
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
