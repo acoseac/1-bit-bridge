@@ -73,6 +73,13 @@ func (linuxSys) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 	return nil
 }
 
+func (linuxSys) ioctlValue(fd int, req uint32, arg uintptr) error {
+	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(req), arg); e != 0 {
+		return errno(e)
+	}
+	return nil
+}
+
 // poll waits on fd and on an eventfd of its own, which a cancel of ctx
 // writes to, so a cancelled context ends the wait at once rather than at
 // the timeout. The eventfd lives for this one call; a cancel that fires

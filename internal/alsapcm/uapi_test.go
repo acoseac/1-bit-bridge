@@ -44,6 +44,9 @@ func TestIoctlNumbersEncodeTheirStructures(t *testing.T) {
 		{"START", ioctlStart, ioc(iocNone, 0x42, 0)},
 		{"DROP", ioctlDrop, ioc(iocNone, 0x43, 0)},
 		{"DRAIN", ioctlDrain, ioc(iocNone, 0x44, 0)},
+		// PAUSE's number encodes an int although the int is passed as the
+		// argument itself (ioctlValue).
+		{"PAUSE", ioctlPause, ioc(iocWrite, 0x45, unsafe.Sizeof(int32(0)))},
 		{"WRITEI_FRAMES", ioctlWriteIFrames, ioc(iocWrite, 0x50, unsafe.Sizeof(xferi{}))},
 	} {
 		if c.got != c.want {

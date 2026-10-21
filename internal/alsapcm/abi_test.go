@@ -193,6 +193,7 @@ func abiFacts() map[string]string {
 		"SNDRV_PCM_IOCTL_START":         ioctlStart,
 		"SNDRV_PCM_IOCTL_DROP":          ioctlDrop,
 		"SNDRV_PCM_IOCTL_DRAIN":         ioctlDrain,
+		"SNDRV_PCM_IOCTL_PAUSE":         ioctlPause,
 		"SNDRV_PCM_IOCTL_WRITEI_FRAMES": ioctlWriteIFrames,
 	} {
 		num("ioctl "+name, uint64(v))
