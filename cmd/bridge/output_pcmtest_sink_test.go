@@ -320,6 +320,21 @@ type pcmTestResult struct {
 	code           int
 }
 
+// wait waits for a run's result. The minute is a watchdog that turns a run
+// that never ends into a failure; nothing waits on it to let the run go on.
+func (h *sinkHarness) wait(t *testing.T, done <-chan pcmTestResult) pcmTestResult {
+	t.Helper()
+	watchdog := time.NewTimer(time.Minute)
+	defer watchdog.Stop()
+	select {
+	case r := <-done:
+		return r
+	case <-watchdog.C:
+		t.Fatal("the run did not end within a minute")
+	}
+	return pcmTestResult{}
+}
+
 // openGate lets the drain of every sink opened from now on end at once.
 func openGate(_ int, f *fakeSink) { close(f.gate) }
 
@@ -378,7 +393,7 @@ func TestOutputPCMTestSinkPlaysAFileBitExact(t *testing.T) {
 		h.prepare = openGate
 		path := filepath.Join(t.TempDir(), "a.wav")
 		data := writePCMWAV(t, path, c.rate, c.bits, 30011, 0)
-		r := <-h.run(context.Background(), fileArgs(t, path)...)
+		r := h.wait(t, h.run(context.Background(), fileArgs(t, path)...))
 		if r.code != 0 {
 			t.Fatalf("%d/%d: exit %d\nstdout:\n%s\nstderr:\n%s", c.rate, c.bits, r.code, r.stdout, r.stderr)
 		}
@@ -410,7 +425,7 @@ func TestOutputPCMTestSinkJoinsTwoFilesOfOneTransport(t *testing.T) {
 	dir := t.TempDir()
 	a := writePCMWAV(t, filepath.Join(dir, "a.wav"), 44100, 16, 22050, 0)
 	b := writePCMWAV(t, filepath.Join(dir, "b.wav"), 44100, 16, 10007, 0x5a)
-	r := <-h.run(context.Background(), fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav"))...)
+	r := h.wait(t, h.run(context.Background(), fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav"))...))
 	if r.code != 0 {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -434,7 +449,7 @@ func TestOutputPCMTestSinkReopensForAnotherTransport(t *testing.T) {
 	dir := t.TempDir()
 	a := writePCMWAV(t, filepath.Join(dir, "a.wav"), 44100, 16, 4410, 0)
 	b := writePCMWAV(t, filepath.Join(dir, "b.wav"), 48000, 24, 4800, 1)
-	r := <-h.run(context.Background(), fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav"))...)
+	r := h.wait(t, h.run(context.Background(), fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav"))...))
 	if r.code != 0 {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -456,8 +471,8 @@ func TestOutputPCMTestSinkReopensForAnotherTransport(t *testing.T) {
 func TestOutputPCMTestSinkTwoToneTracksAreOneSeamlessTone(t *testing.T) {
 	h := newSinkHarness(t)
 	h.prepare = openGate
-	r := <-h.run(context.Background(), "--sink", "--tracks", "2", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "24",
-		"--seconds", "1", "--proc-root", t.TempDir())
+	r := h.wait(t, h.run(context.Background(), "--sink", "--tracks", "2", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "24",
+		"--seconds", "1", "--proc-root", t.TempDir()))
 	if r.code != 0 {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -501,7 +516,7 @@ func TestOutputPCMTestSinkPausesAndResumesOnTimers(t *testing.T) {
 		t.Fatalf("2 s after the pause: %q, want a resume", got)
 	}
 	close(f.gate)
-	r := <-done
+	r := h.wait(t, done)
 	if r.code != 0 || !strings.Contains(r.stdout, "paused by the kernel's PAUSE, at 1.000 s") || !strings.Contains(r.stdout, "resumed at") || !strings.Contains(r.stdout, "drained") {
 		t.Errorf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -548,7 +563,7 @@ func TestOutputPCMTestSinkPausesAndResumesOnKeys(t *testing.T) {
 	if _, err := io.WriteString(h.stdin, "q\n"); err != nil {
 		t.Fatal(err)
 	}
-	r := <-done
+	r := h.wait(t, done)
 	if r.code != 0 || !strings.Contains(r.stdout, "stopped (q) after") || !strings.Contains(r.stdout, "closed") || f.closes != 1 {
 		t.Errorf("exit %d, closes %d\nstdout:\n%s\nstderr:\n%s", r.code, f.closes, r.stdout, r.stderr)
 	}
@@ -569,7 +584,7 @@ func TestOutputPCMTestSinkReportsAnXrunAndRecoversOnlyWhenAsked(t *testing.T) {
 		if recovered {
 			args = append(args, "--recover")
 		}
-		r := <-h.run(context.Background(), args...)
+		r := h.wait(t, h.run(context.Background(), args...))
 		f := h.sink(0)
 		calls := drainCalls(f)
 		if r.code != 1 || !strings.Contains(r.stdout, "xrun 1:") || !strings.Contains(r.stdout, "stopped at content frame 30000") {
@@ -611,7 +626,7 @@ func TestOutputPCMTestSinkEndsOnADisconnect(t *testing.T) {
 	h.prepare = func(_ int, f *fakeSink) {
 		f.failAt, f.failErr = 20000, &alsapcm.Error{Reason: alsapcm.ReasonDisconnected, Op: "write", Endpoint: alsapcm.Endpoint{Card: 5}, Detail: "the device went away"}
 	}
-	r := <-h.run(context.Background(), "--sink", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16", "--seconds", "2", "--proc-root", t.TempDir())
+	r := h.wait(t, h.run(context.Background(), "--sink", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16", "--seconds", "2", "--proc-root", t.TempDir()))
 	if r.code != 1 || !strings.Contains(r.stdout, "the device went away after") || !strings.Contains(r.stderr, "disconnected") || h.sink(0).closes != 1 {
 		t.Errorf("exit %d, closes %d\nstdout:\n%s\nstderr:\n%s", r.code, h.sink(0).closes, r.stdout, r.stderr)
 	}
@@ -629,7 +644,7 @@ func TestOutputPCMTestSinkCtrlCDropsAndCloses(t *testing.T) {
 		t.Fatalf("first call %q, want the drain the run waits in", got)
 	}
 	cancel()
-	r := <-done
+	r := h.wait(t, done)
 	if r.code != 0 || !strings.Contains(r.stdout, "stopped by signal after") || !strings.Contains(r.stdout, "dropped\nclosed\n") || f.closes != 1 {
 		t.Errorf("exit %d, closes %d\nstdout:\n%s\nstderr:\n%s", r.code, f.closes, r.stdout, r.stderr)
 	}
@@ -653,7 +668,7 @@ func TestOutputPCMTestSinkNamesTheHolderWhenAResumeIsBusy(t *testing.T) {
 	f.setPlayed(44100)
 	h.ticks <- t0
 	h.ticks <- t0.Add(40 * time.Second)
-	r := <-done
+	r := h.wait(t, done)
 	for _, want := range []string{"busy", `held by sub 0: thread 6584 "output:alsa", process 6551 "mpd"`, "does not stop MPD"} {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("stderr does not say %q:\n%s", want, r.stderr)
@@ -703,7 +718,10 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 		{[]string{"--card", "5", "--device", "0", "--file", wav, "--ack-full-level", "--format", "S32_LE"}, 1, "--format S32_LE does not carry"},
 	} {
 		h := newSinkHarness(t)
-		r := <-h.run(context.Background(), c.args...)
+		// A run wrongly let through drains at once and fails the checks
+		// below, rather than waiting on a drain nobody ends.
+		h.prepare = openGate
+		r := h.wait(t, h.run(context.Background(), c.args...))
 		if r.code != c.code || !strings.Contains(r.stderr, c.says) {
 			t.Errorf("%q: exit %d, stderr %q; want %d and %q", c.args, r.code, r.stderr, c.code, c.says)
 		}
@@ -713,7 +731,7 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 	}
 	h := newSinkHarness(t)
 	h.env.goos = "darwin"
-	if r := <-h.run(context.Background(), "--card", "5", "--device", "0", "--file", wav, "--ack-full-level"); r.code != 1 || !strings.Contains(r.stderr, "Linux only") || len(h.opened) != 0 {
+	if r := h.wait(t, h.run(context.Background(), "--card", "5", "--device", "0", "--file", wav, "--ack-full-level")); r.code != 1 || !strings.Contains(r.stderr, "Linux only") || len(h.opened) != 0 {
 		t.Errorf("off Linux: exit %d, %q, %d opens", r.code, r.stderr, len(h.opened))
 	}
 }
