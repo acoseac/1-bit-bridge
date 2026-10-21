@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +35,46 @@ func TestACommandCancelledBeforeAdmissionDoesNotRun(t *testing.T) {
 	h.refused("an insert whose context ended as the owner took it", err, ReasonCancelled)
 	if sn := h.snap(); sn.Len() != 0 {
 		t.Fatalf("a command that was not admitted ran: %v", sn.IDs())
+	}
+}
+
+// TestAReplyComesAfterItsSnapshot pins read-your-writes: when a command's
+// reply is sent, the snapshot published already holds what the command
+// did, so a caller that reads as soon as its command returns reads its own
+// change.
+func TestAReplyComesAfterItsSnapshot(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	var stale []string
+	var selections []uint32
+	h.tweak = func(c *Config) {
+		c.seams.replying = func(op string, r reply, s *Snapshot) {
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case op == "insert" && r.err == nil:
+				if _, ok := s.Read(r.id); !ok {
+					stale = append(stale, fmt.Sprintf("insert of %d", r.id))
+				}
+			case op == "set repeat" && !s.Repeat():
+				stale = append(stale, "repeat on")
+			case op == "next":
+				selections = append(selections, s.Selected())
+			}
+		}
+	}
+	h.boot()
+	ids := h.insert("a", "b", "c")
+	h.must("repeat", h.eng.SetRepeat(bg, true))
+	h.must("next", h.eng.Next(bg))
+	h.must("next", h.eng.Next(bg))
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []uint32{ids[1], ids[2]}; !slices.Equal(selections, want) {
+		stale = append(stale, fmt.Sprintf("next selected %v as it answered, want %v", selections, want))
+	}
+	if len(stale) > 0 {
+		t.Fatalf("replies sent before their snapshot: %v", stale)
 	}
 }
 

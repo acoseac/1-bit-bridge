@@ -77,6 +77,9 @@ type seams struct {
 	admitted     func(c *command)
 	applied      func(op string)
 	handled      func(what string)
+	// replying sees each reply as it is sent, with the snapshot published
+	// then.
+	replying func(op string, r reply, s *Snapshot)
 }
 
 // Engine owns the player's state: one goroutine, the owner, runs every
@@ -458,6 +461,9 @@ type answered struct {
 // one, and then tells the tests' seams what the step applied and handled.
 func (e *Engine) sendReplies() {
 	for _, a := range e.o.outbox {
+		if e.sm.replying != nil {
+			e.sm.replying(a.c.op.String(), a.r, e.snap.Load())
+		}
 		a.c.reply <- a.r
 	}
 	clear(e.o.outbox)
