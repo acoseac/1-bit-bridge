@@ -302,7 +302,7 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 		return false
 	}
 	on := false
-	switch o.output().Mode() {
+	switch o.outputConfig().Mode() {
 	case "on":
 		on = true
 	case "auto":
@@ -340,7 +340,7 @@ func (o *localOutputs) activeNow() bool {
 	if o == nil || o.goos != "linux" {
 		return false
 	}
-	switch o.output().Mode() {
+	switch o.outputConfig().Mode() {
 	case "on":
 		return true
 	case "auto":
@@ -361,10 +361,7 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 // deadline) or one another caller ran, except the false of a caller that
 // stopped waiting on another caller's probe.
 func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, bool) {
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
+	cfg := o.outputConfig()
 	key := probeKey(cfg)
 	o.mu.Lock()
 	if o.probed.key == key && !o.probed.until.IsZero() && o.now().Before(o.probed.until) {
@@ -417,6 +414,15 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 	close(f.done)
 	o.mu.Unlock()
 	return found, rep, opt, true
+}
+
+// outputConfig is the output section as the config holds it now, and the
+// empty one when no reader is wired: every reader of it reads it this way.
+func (o *localOutputs) outputConfig() config.OutputConfig {
+	if o.output == nil {
+		return config.OutputConfig{}
+	}
+	return o.output()
 }
 
 func probeKey(cfg config.OutputConfig) string {
@@ -552,7 +558,7 @@ func sessionBroken(err error) bool {
 }
 
 func (o *localOutputs) build(ctx context.Context) (OutputsResponse, error) {
-	cfg := o.output()
+	cfg := o.outputConfig()
 	_, rep, opt := o.probe(ctx)
 	endpoint := rep.MPD.Endpoint
 	if endpoint == "" {
@@ -733,10 +739,7 @@ func (o *localOutputs) pathRules(ctx context.Context, musicDir string, lookup mp
 }
 
 func (o *localOutputs) pathRuleKey(musicDir string, roots []string) string {
-	cfg := config.OutputConfig{}
-	if o.output != nil {
-		cfg = o.output()
-	}
+	cfg := o.outputConfig()
 	return strings.Join([]string{musicDir, cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password, strings.Join(roots, "\n")}, "\n")
 }
 

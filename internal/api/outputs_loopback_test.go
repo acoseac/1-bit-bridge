@@ -317,6 +317,20 @@ func TestACallerThatStopsWaitingGetsTheGatesLastAnswer(t *testing.T) {
 	}
 }
 
+// TestActiveNowReadsTheConfigLikeTheProbe: with no output reader wired,
+// activeNow reads the empty config, as probe does, and answers off (auto,
+// no answer yet) instead of panicking on a request.
+func TestActiveNowReadsTheConfigLikeTheProbe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("activeNow panicked with no output reader: %v", r)
+		}
+	}()
+	if (&localOutputs{goos: "linux"}).activeNow() {
+		t.Fatal("no output reader: activeNow said on")
+	}
+}
+
 // requireLoopbackAnswer asks route for track t1 ten times, requires the
 // same answer each time, and requires that no request asked MPD anything:
 // asked counts every Inspect, Dial and Greet.
