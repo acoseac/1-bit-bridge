@@ -49151,7 +49151,11 @@ which STATUS also answers, was a kernel error rather than a disconnect.
 Red first (`TestDrainAfterAnUnderrunIsAnXrun`, an EBADFD case in
 `TestDrainTypesWhatEndsIt`, `TestOutputPCMTestAnUnderrunBeforeTheDrainFails`),
 then fixed: `Drain` reads the state first, and the harness prints
-"drained; xruns 0" only after a clean drain.
+"drained; xruns 0" only after a clean drain. The second look found the
+window that check leaves (an underrun between it and DRAIN, which DRAIN
+erases too): a stream seen RUNNING that reaches SETUP without being seen
+DRAINING is now an xrun (`TestDrainSeesAnUnderrunBetweenItsCheckAndDRAIN`,
+red first). Rechecked on the GO bar: 48/24 and 384/32 still drain clean.
 
 **The hardware gate passed** on the Volumio Pi (aarch64 kernel 6.12, the
 arm64 static build), the iFi GO bar at card 5, with the owner listening on

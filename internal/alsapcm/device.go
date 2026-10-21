@@ -733,11 +733,19 @@ func (d *Device) Drain(ctx context.Context, timeout time.Duration) error {
 	// XRUN stream to SETUP and answers EAGAIN, so asking the state only
 	// after DRAIN would read an underrun after the last write as a clean
 	// end (the Claude API review and Codex on #1301).
-	if st, err := d.status(); err != nil {
+	pre, err := d.status()
+	if err != nil {
 		return d.streamError("drain", err)
-	} else if st.state == stateXrun || st.state == stateSuspended || st.state == stateDisconnected {
-		return d.stateError("drain", st.state)
 	}
+	if pre.state == stateXrun || pre.state == stateSuspended || pre.state == stateDisconnected {
+		return d.stateError("drain", pre.state)
+	}
+	// The check leaves a window: an underrun between it and DRAIN is erased
+	// by DRAIN too. A running stream with frames left is seen DRAINING first
+	// when its drain is clean, so SETUP straight after DRAIN from a stream
+	// the check saw RUNNING is that underrun. It errs only when the buffer
+	// was all but empty at the check, an underrun in the making anyway.
+	wasRunning, sawDraining := pre.state == stateRunning, false
 	for {
 		err := d.ioctlNone(ioctlDrain)
 		if err == nil {
@@ -756,8 +764,14 @@ func (d *Device) Drain(ctx context.Context, timeout time.Duration) error {
 		}
 		switch st.state {
 		case stateSetup:
+			if wasRunning && !sawDraining {
+				return &Error{Reason: ReasonXrun, Op: "drain", Endpoint: d.params.Endpoint,
+					Detail: "the stream stopped before it drained: an underrun between the last write and the drain"}
+			}
 			return nil
-		case stateDraining, stateRunning:
+		case stateDraining:
+			sawDraining = true
+		case stateRunning:
 		default:
 			return d.stateError("drain", st.state)
 		}
