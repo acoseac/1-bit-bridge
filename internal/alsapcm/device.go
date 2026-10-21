@@ -150,6 +150,14 @@ func ProtocolString(v uint32) string {
 	return fmt.Sprintf("%d.%d.%d", v>>16, v>>8&0xff, v&0xff)
 }
 
+// ProtocolFloor is the oldest kernel PCM protocol Open accepts
+// (pcmVersionFloor).
+func ProtocolFloor() uint32 { return pcmVersionFloor }
+
+// PinnedKernel is the kernel release whose asound.h the backend's
+// definitions follow (uapiKernel).
+func PinnedKernel() string { return uapiKernel }
+
 // State is a stream state as the kernel names it.
 type State int32
 
