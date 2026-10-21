@@ -15,17 +15,24 @@ import (
 
 // FuzzALACOpen fuzzes the whole path: the sniffer, the M4A demuxer, the
 // cookie and packet checks, and saprobe-alac's packet decoder. It is seeded
-// with every ALAC golden, the FFmpeg encodes, the refusal fixtures and the
-// file whose first packet the library panics on. For anything that opens as
-// ALAC: the format is a shape the player accepts; a read never returns more
-// than asked, more than Frames, or a sample outside the valid bits; a clean
-// EOF comes exactly at Frames, and any other end is a refusal; seeks to the
-// start, the middle and the end succeed and one past the end is refused.
+// with every ALAC golden, the FFmpeg encodes, the refusal fixtures, the file
+// whose first packet 1b6eb83 panicked on, and the one-packet files of
+// alac_overrun_test.go. For anything that opens as ALAC: the format is a
+// shape the player accepts; a read never returns more than asked, more than
+// Frames, or a sample outside the valid bits; a clean EOF comes exactly at
+// Frames, and any other end is a refusal; seeks to the start, the middle and
+// the end succeed and one past the end is refused.
+//
+// The demuxer then opens the file again with overrunOracle in the library's
+// place, which decodes every packet the library decodes twice more with
+// bytes appended to it. A decode that reads nothing past the packet's end
+// gives the same samples each time, so a difference is a packet decoded from
+// past its end, and it fails the target.
 //
 // A packet the library panicked on is a refusal like any malformed packet.
 // With BRIDGE_ALAC_FUZZ_STRICT set it fails the target instead: that is the
 // mode that looks for library panics no check prevents
-// (ops/upstream/saprobe-alac.md), and it leaves out the seed known to panic.
+// (ops/upstream/saprobe-alac.md).
 func FuzzALACOpen(f *testing.F) {
 	strict := os.Getenv("BRIDGE_ALAC_FUZZ_STRICT") != ""
 	g := loadALACGoldens(f)
@@ -35,9 +42,18 @@ func FuzzALACOpen(f *testing.F) {
 	for _, fx := range g.FFmpegFixtures {
 		f.Add(readALACGolden(f, fx.File))
 	}
-	if !strict {
-		_, raw := g.fixture(f, alac16)
-		f.Add(m4aReplacePacket(f, raw, 0, alacPanicPacket))
+	_, base := g.fixture(f, alac16)
+	f.Add(m4aReplacePacket(f, base, 0, alacPanicPacket))
+	for _, s := range []struct {
+		pkt    []byte
+		frames uint32
+	}{
+		{alacShifted16Packet, 1},
+		{alacEscapePastEndPacket, 1},
+		{alacStopBitPastEndPacket, 1},
+		{alacRunPastEndPacket, 16},
+	} {
+		f.Add(alacSinglePacket(f, base, s.pkt, s.frames))
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		s, err := decode.Open(bytes.NewReader(raw))
@@ -107,7 +123,58 @@ func FuzzALACOpen(f *testing.F) {
 		if err := d.Seek(ctx, fm.Frames+1); !decode.IsRefusal(err) {
 			t.Fatalf("seek past the end: %v, want a refusal", err)
 		}
+		caught := 0
+		od, err := decode.OpenALACWith(bytes.NewReader(raw), overrunOracleFactory(&caught))
+		if err != nil {
+			return // a prefix Open reads past, which the demuxer alone does not
+		}
+		defer od.Close()
+		for i := int64(0); i <= fm.Frames; i++ {
+			if n, err := od.ReadFrames(ctx, buf); err != nil || n == 0 {
+				break
+			}
+		}
+		if caught > 0 {
+			t.Fatalf("saprobe-alac decoded %d packets from past their end", caught)
+		}
 	})
+}
+
+// overrunOracle stands in for saprobe-alac and decodes every packet the
+// library decodes twice more, with eight bytes of 0xFF and then of 0x55
+// appended to it. The library pads a packet with zero bytes, and takes the
+// appended ones as part of the packet: a decode that reads nothing past the
+// packet's end decodes the same samples each time, and one whose last code
+// ran into the padding reads those bits differently, or fails.
+type overrunOracle struct {
+	lib    *alac.PacketDecoder
+	caught *int
+}
+
+func (o *overrunOracle) DecodePacket(p []byte) ([]byte, error) {
+	out, err := o.lib.DecodePacket(p)
+	if err != nil {
+		return nil, err
+	}
+	out = bytes.Clone(out)
+	for _, fill := range []byte{0xFF, 0x55} {
+		again, err := o.lib.DecodePacket(append(bytes.Clone(p), bytes.Repeat([]byte{fill}, 8)...))
+		if err != nil || !bytes.Equal(again, out) {
+			*o.caught++
+			break
+		}
+	}
+	return out, nil
+}
+
+func overrunOracleFactory(caught *int) func(alac.PacketConfig) (decode.ALACPackets, error) {
+	return func(cfg alac.PacketConfig) (decode.ALACPackets, error) {
+		lib, err := alac.NewPacketDecoder(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &overrunOracle{lib: lib, caught: caught}, nil
+	}
 }
 
 // FuzzALACCookie fuzzes the cookie validation alone. Any bytes it accepts

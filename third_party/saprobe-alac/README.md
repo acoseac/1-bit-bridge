@@ -24,4 +24,19 @@ own.
 
 ## Modifications
 
-None: every file here is upstream's at that revision.
+Every file here is upstream's at that revision except these two, and
+`ops/upstream/saprobe-alac.patch` in the bridge repository is the change as
+a diff against it, for upstream (`ops/upstream/saprobe-alac.md` is the
+report):
+
+- `internal/alac/golomb.go`, modified: `DynDecomp` checks every code against
+  the packet's own length, not the four bytes of padding the bit buffer
+  adds after it. It checks an escape's value before reading it, a normal
+  code's length before taking it, and a zero run's count before and after
+  `dynGet`. A code that would end past the packet returns
+  `ErrBitstreamOverrun`, where revision 1b6eb83 decoded it from the padding
+  with no error, or panicked reading past the padding too. The file's
+  header says that it was changed; that note is the only difference
+  between this copy and 1b6eb83 with the patch applied.
+- `tests/bitstream_overrun_test.go`, added: the packets the change refuses,
+  and a code that ends exactly at the packet's end, which still decodes.

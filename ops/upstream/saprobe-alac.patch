@@ -1,0 +1,187 @@
+diff --git a/internal/alac/golomb.go b/internal/alac/golomb.go
+index 42704e54..5cfc369b 100644
+--- a/internal/alac/golomb.go
++++ b/internal/alac/golomb.go
+@@ -148,6 +148,8 @@ func dynGet(input []byte, bitPos, golombM, golombK uint32) (result, newBitPos ui
+ 
+ // DynDecomp performs adaptive Golomb-Rice entropy decoding of a sample block.
+ // Writes decoded prediction residuals into predCoefs.
++// Every code must end within the packet: one that would end in the padding
++// returns ErrBitstreamOverrun.
+ //
+ //nolint:gocognit // dyn_decomp with dyn_get_32bit inlined: the entropy decoder's hot loop, ~7% of decode time
+ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSamples, maxSize int) error {
+@@ -197,11 +199,17 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
+ 			residual = uint32(lead(int32(^streamLong)))
+ 
+ 			if residual >= maxPrefix32 {
++				// The escape's value must lie in the packet: past it, getStreamBits
++				// reads the padding, and a 33-bit value's fifth byte past the padding.
++				if maxPos-bitPos < maxPrefix32+uint32(maxSize) { // #nosec G115 -- maxSize is chanBits, at most 33
++					return ErrBitstreamOverrun
++				}
++
+ 				// #nosec G115 -- maxSize is chanBits, at most 33 (decodeCPE)
+ 				residual = getStreamBits(input, bitPos+maxPrefix32, uint32(maxSize))
+ 				bitPos += maxPrefix32 + uint32(maxSize) // #nosec G115 -- maxSize is chanBits, at most 33
+ 			} else {
+-				bitPos += residual + 1
++				used := residual + 1 // the prefix and its stop bit
+ 
+ 				if k != 1 {
+ 					streamLong <<= residual + 1
+@@ -209,12 +217,19 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
+ 
+ 					if v >= 2 {
+ 						residual = residual*m + v - 1
+-						bitPos += uint32(k) // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
++						used += uint32(k) // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
+ 					} else {
+ 						residual *= m
+-						bitPos += uint32(k) - 1 // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
++						used += uint32(k) - 1 // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
+ 					}
+ 				}
++
++				// A code that ends past the packet was decoded from the padding.
++				if used > maxPos-bitPos {
++					return ErrBitstreamOverrun
++				}
++
++				bitPos += used
+ 			}
+ 		}
+ 
+@@ -243,7 +258,19 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
+ 
+ 			mz := ((uint32(1) << uint32(k32)) - 1) & wbLocal
+ 
+-			residual, bitPos = dynGet(input, bitPos, mz, uint32(k32))
++			// The run's count must be read from the packet and end in it.
++			if bitPos >= maxPos {
++				return ErrBitstreamOverrun
++			}
++
++			var runEnd uint32
++
++			residual, runEnd = dynGet(input, bitPos, mz, uint32(k32))
++			if runEnd-bitPos > maxPos-bitPos {
++				return ErrBitstreamOverrun
++			}
++
++			bitPos = runEnd
+ 
+ 			if count+int(residual) > numSamples {
+ 				return ErrSampleOverrun
+diff --git a/tests/bitstream_overrun_test.go b/tests/bitstream_overrun_test.go
+new file mode 100644
+index 00000000..37a89c73
+--- /dev/null
++++ b/tests/bitstream_overrun_test.go
+@@ -0,0 +1,106 @@
++/*
++   Copyright Mycophonic.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++*/
++
++package tests_test
++
++import (
++	"bytes"
++	"testing"
++
++	alac "github.com/mycophonic/saprobe-alac"
++)
++
++// Packets whose last code runs past the end of the packet. The bit buffer
++// pads a packet with four zero bytes so that a code can be read near the end;
++// each of these either panicked, reading past the padding as well, or was
++// decoded from the padding without an error. Each must come back as ErrDecode.
++
++// compressedPair writes a compressed channel pair of numSamples frames, with
++// mixBits, mixRes and both predictors' header bytes zero (no coefficients),
++// and then the entropy-coded bits given as '0' and '1'.
++func compressedPair(numSamples uint64, bits string) []byte {
++	var w bitWriter
++
++	w.elementHeader(1, true, 0, 0)
++	w.write(numSamples, 32)
++	w.write(0, 6*8)
++
++	for _, b := range bits {
++		w.write(uint64(b-'0'), 1)
++	}
++
++	return w.buf
++}
++
++// U's first residual is an escape whose value lies in the padding, and the
++// zero run after it read four bytes from past the padding: a panic.
++func TestDecodePacket_EscapeThenZeroRunPastEnd(t *testing.T) {
++	t.Parallel()
++
++	packet := []byte{0x20, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0xFF}
++
++	decodeMustFail(t, boundsConfig(16, 2), packet)
++	decodeMustFail(t, boundsConfig(24, 2), packet)
++}
++
++// The same packet as a 32-bit pair with no shifted byte: the escape's value is
++// 33 bits, and getStreamBits read its fifth byte from past the padding.
++func TestDecodePacket_EscapeOf33BitsPastEnd(t *testing.T) {
++	t.Parallel()
++
++	decodeMustFail(t, boundsConfig(32, 2), []byte{0x20, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0xFF})
++}
++
++// V's escape needs 17 value bits where the packet has 7.
++func TestDecodePacket_EscapeValuePastEnd(t *testing.T) {
++	t.Parallel()
++
++	decodeMustFail(t, boundsConfig(16, 2), compressedPair(1, "0"+"111111111"+"0000000"))
++}
++
++// V's code is eight ones that end the packet: its stop bit is the padding's.
++func TestDecodePacket_StopBitPastEnd(t *testing.T) {
++	t.Parallel()
++
++	decodeMustFail(t, boundsConfig(16, 2), compressedPair(1, "0"+"11111111"))
++}
++
++// V's zero run (1 0 000, a run of 15) has three of its five bits past the end.
++func TestDecodePacket_ZeroRunPastEnd(t *testing.T) {
++	t.Parallel()
++
++	decodeMustFail(t, boundsConfig(16, 2), compressedPair(16, "0"+"10000"+"0"+"10"))
++}
++
++// A last code that ends exactly at the end of the packet decodes: V's seven
++// ones and a stop bit are a residual of 7, the sample -4.
++func TestDecodePacket_CodeEndingAtTheEnd(t *testing.T) {
++	t.Parallel()
++
++	dec, err := alac.NewPacketDecoder(boundsConfig(16, 2))
++	if err != nil {
++		t.Fatalf("NewPacketDecoder: %v", err)
++	}
++
++	pcm, err := dec.DecodePacket(compressedPair(1, "0"+"11111110"))
++	if err != nil {
++		t.Fatalf("DecodePacket: %v", err)
++	}
++
++	if want := []byte{0x00, 0x00, 0xfc, 0xff}; !bytes.Equal(pcm, want) {
++		t.Fatalf("decoded % x, want % x", pcm, want)
++	}
++}

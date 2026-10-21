@@ -12,6 +12,10 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+   Modified by the 1-bit bridge on 2026-10-21 (backlog B470): DynDecomp
+   checks every code against the packet's own length. The README.md at the
+   root of this copy lists every change to revision 1b6eb83.
 */
 
 package alac
@@ -148,6 +152,8 @@ func dynGet(input []byte, bitPos, golombM, golombK uint32) (result, newBitPos ui
 
 // DynDecomp performs adaptive Golomb-Rice entropy decoding of a sample block.
 // Writes decoded prediction residuals into predCoefs.
+// Every code must end within the packet: one that would end in the padding
+// returns ErrBitstreamOverrun.
 //
 //nolint:gocognit // dyn_decomp with dyn_get_32bit inlined: the entropy decoder's hot loop, ~7% of decode time
 func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSamples, maxSize int) error {
@@ -197,11 +203,17 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
 			residual = uint32(lead(int32(^streamLong)))
 
 			if residual >= maxPrefix32 {
+				// The escape's value must lie in the packet: past it, getStreamBits
+				// reads the padding, and a 33-bit value's fifth byte past the padding.
+				if maxPos-bitPos < maxPrefix32+uint32(maxSize) { // #nosec G115 -- maxSize is chanBits, at most 33
+					return ErrBitstreamOverrun
+				}
+
 				// #nosec G115 -- maxSize is chanBits, at most 33 (decodeCPE)
 				residual = getStreamBits(input, bitPos+maxPrefix32, uint32(maxSize))
 				bitPos += maxPrefix32 + uint32(maxSize) // #nosec G115 -- maxSize is chanBits, at most 33
 			} else {
-				bitPos += residual + 1
+				used := residual + 1 // the prefix and its stop bit
 
 				if k != 1 {
 					streamLong <<= residual + 1
@@ -209,12 +221,19 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
 
 					if v >= 2 {
 						residual = residual*m + v - 1
-						bitPos += uint32(k) // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
+						used += uint32(k) // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
 					} else {
 						residual *= m
-						bitPos += uint32(k) - 1 // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
+						used += uint32(k) - 1 // #nosec G115 -- 0 to KB (8-bit cookie field) by the min above
 					}
 				}
+
+				// A code that ends past the packet was decoded from the padding.
+				if used > maxPos-bitPos {
+					return ErrBitstreamOverrun
+				}
+
+				bitPos += used
 			}
 		}
 
@@ -243,7 +262,19 @@ func DynDecomp(params *AGParams, bitBuf *BitBuffer, predCoefs []int32, numSample
 
 			mz := ((uint32(1) << uint32(k32)) - 1) & wbLocal
 
-			residual, bitPos = dynGet(input, bitPos, mz, uint32(k32))
+			// The run's count must be read from the packet and end in it.
+			if bitPos >= maxPos {
+				return ErrBitstreamOverrun
+			}
+
+			var runEnd uint32
+
+			residual, runEnd = dynGet(input, bitPos, mz, uint32(k32))
+			if runEnd-bitPos > maxPos-bitPos {
+				return ErrBitstreamOverrun
+			}
+
+			bitPos = runEnd
 
 			if count+int(residual) > numSamples {
 				return ErrSampleOverrun

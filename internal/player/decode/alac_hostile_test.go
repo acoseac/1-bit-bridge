@@ -492,9 +492,11 @@ func TestALACTruncatedMidPacket(t *testing.T) {
 // refused before the library decodes them: an END or a single-channel
 // element first (the library returns a silent frame for the first), a
 // partial count that is not stts's, set unused bits, a shift of three
-// bytes, and a compressed 32-bit pair with no shifted byte, whose 33-bit
-// samples the entropy decoder reads past the packet's padding. The packets
-// before it decode; the refusal comes with them or on the next call.
+// bytes, a compressed 32-bit pair with no shifted byte, whose 33-bit samples
+// the entropy decoder reads past the packet's padding, and a compressed
+// 16-bit pair that shifts a byte, which the library's 16-bit output drops.
+// The packets before it decode; the refusal comes with them or on the next
+// call.
 func TestALACCorruptPacketHeadersRefused(t *testing.T) {
 	g := loadALACGoldens(t)
 	f16, raw16 := g.fixture(t, alac16)
@@ -530,6 +532,7 @@ func TestALACCorruptPacketHeadersRefused(t *testing.T) {
 		{"a partial count of 0", raw16, f16, 1, partialOf(0), "frames"},
 		{"a two-byte packet", raw16, f16, 1, []byte{0x20, 0}, "header"},
 		{"a compressed 32-bit pair with no shifted byte", raw32, f32, 1, element(1, 0, 0, 0, 0), "33"},
+		{"a compressed 16-bit pair that shifts a byte", raw16, f16, 1, element(1, 0, 0, 1, 0), "16-bit"},
 	}
 	for _, c := range cases {
 		c := c
@@ -553,18 +556,19 @@ func TestALACCorruptPacketHeadersRefused(t *testing.T) {
 	}
 }
 
-// saprobe-alac 1b6eb83 panics on this ten-byte stereo packet under Apple's
+// saprobe-alac 1b6eb83 panicked on this ten-byte stereo packet under Apple's
 // own cookie values (frame length 4096, pb 40, mb 10, kb 14): its last nine
-// bits are ones, so the first residual is an escape whose value is read from
-// the padding, and the zero run that follows reads four bytes from past the
+// bits are ones, so the first residual is an escape whose value was read from
+// the padding, and the zero run that follows read four bytes from past the
 // padded buffer (golomb.go: dynGet's read32bit; ops/upstream/saprobe-alac.md).
 // No check of the cookie or the header can tell it apart from a good packet.
+// The patched copy in third_party/saprobe-alac refuses it at the escape.
 var alacPanicPacket = []byte{0x20, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0xFF}
 
-// A packet the library panics on is a truncated_or_corrupt refusal, never a
-// success and never a short packet; the decoder then decodes the next packet
-// with a fresh library decoder.
-func TestALACLibraryPanicIsARefusal(t *testing.T) {
+// A packet the library refuses with an error is a truncated_or_corrupt
+// refusal, never a success and never a short packet, and the same refusal
+// again on a retry; after a seek past it the next packets decode.
+func TestALACLibraryErrorIsARefusal(t *testing.T) {
 	g := loadALACGoldens(t)
 	f, raw := g.fixture(t, alac16)
 	d, err := openPCM(bytes.NewReader(m4aReplacePacket(t, raw, 0, alacPanicPacket)))
@@ -576,9 +580,9 @@ func TestALACLibraryPanicIsARefusal(t *testing.T) {
 	buf := make([]int32, 2*4096)
 	n, err := d.ReadFrames(ctx, buf)
 	if n != 0 {
-		t.Fatalf("read %d samples of the panicking packet", n)
+		t.Fatalf("read %d samples of the refused packet", n)
 	}
-	refusedWith(t, err, decode.ReasonTruncated, "packet 0")
+	refusedWith(t, err, decode.ReasonTruncated, "packet 0 does not decode")
 	// The same packet again: the same refusal, not a different failure.
 	if n, err := d.ReadFrames(ctx, buf); n != 0 || !decode.IsRefusal(err) {
 		t.Fatalf("second read: n=%d err=%v", n, err)

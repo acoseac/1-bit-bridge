@@ -47957,7 +47957,10 @@ shift, whose first residual is an escape that ends exactly at the packet's
 end. Nothing in the cookie or the element header tells it from a good
 packet, so no validation prevents it. The `recover` contains it: the
 packet is a `truncated_or_corrupt` refusal and the decoder recovers on the
-next packet (`TestALACLibraryPanicIsARefusal`, `alacPanicPacket`). Nothing
+next packet (`…LibraryPanicIsARefusal`, `alacPanicPacket`; round 3 below
+renamed the test `TestALACLibraryErrorIsARefusal` when the patched library
+stopped panicking on the packet, and the old name is elided here so that it
+is no citation of a test that no longer exists). Nothing
 here ports Apple's decoder or works around the library beyond the
 `recover`. One mitigation was considered and not built: appending eight or
 more zero bytes to every packet would keep the overrun inside the buffer,

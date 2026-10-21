@@ -373,9 +373,11 @@ func TestALACInjectedPanicIsARefusal(t *testing.T) {
 	}
 }
 
-// The real library's panic on alacPanicPacket is counted as a panic, so the
-// fuzz targets can tell it from any other refusal.
-func TestALACRealLibraryPanicIsCounted(t *testing.T) {
+// saprobe-alac 1b6eb83 panicked on alacPanicPacket and the recover made the
+// panic a refusal. The patched copy refuses the packet with its own overrun
+// error, so the refusal names it and the recover is not taken: no panic is
+// counted.
+func TestALACPanicPacketIsRefusedWithoutTheRecover(t *testing.T) {
 	g := loadALACGoldens(t)
 	_, raw := g.fixture(t, alac16)
 	d, err := openPCM(bytes.NewReader(m4aReplacePacket(t, raw, 0, alacPanicPacket)))
@@ -383,11 +385,10 @@ func TestALACRealLibraryPanicIsCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if _, err := d.ReadFrames(context.Background(), make([]int32, 2*16)); !decode.IsRefusal(err) {
-		t.Fatalf("got %v, want a refusal", err)
-	}
-	if p := decode.ALACLibraryPanics(d); p != 1 {
-		t.Fatalf("%d panics counted, want 1", p)
+	_, err = d.ReadFrames(context.Background(), make([]int32, 2*16))
+	refusedWith(t, err, decode.ReasonTruncated, "bitstream overrun")
+	if p := decode.ALACLibraryPanics(d); p != 0 {
+		t.Fatalf("%d panics counted, want none: the recover is the last resort", p)
 	}
 }
 

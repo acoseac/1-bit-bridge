@@ -208,7 +208,11 @@ func parseALACCookie(b []byte) (alacConfig, error) {
 // stts gives it: the cookie's frame length, or the count a partial packet
 // carries. A compressed pair of 32-bit samples with no shifted byte would
 // make the entropy decoder read 33-bit residuals, past the 32 its bit reads
-// hold; and a compressed packet needs a kb of at least 1.
+// hold. A compressed 16-bit pair shifts no byte out: the library reads the
+// shifted bytes and its 16-bit output drops them, returning the residuals
+// alone and no error (Codex's review of #1300), and Apple's and FFmpeg's
+// encoders shift only above 16 bits. A compressed packet needs a kb of at
+// least 1.
 func checkALACPacket(p int, pkt []byte, frames int, c alacConfig) error {
 	if len(pkt) < 3 {
 		return refuse(ReasonTruncated, "ALAC packet %d of %d bytes holds no element header", p, len(pkt))
@@ -239,6 +243,9 @@ func checkALACPacket(p int, pkt []byte, frames int, c alacConfig) error {
 	if escape == 0 {
 		if bits := uint64(c.bitDepth) + 1 - 8*shift; bits > 32 {
 			return refuse(ReasonTruncated, "ALAC packet %d is a compressed %d-bit pair with no shifted byte: its residuals would be %d bits", p, c.bitDepth, bits)
+		}
+		if c.bitDepth == 16 && shift != 0 {
+			return refuse(ReasonTruncated, "ALAC packet %d is a compressed 16-bit pair with a shift (%d): the 16-bit output drops shifted bytes", p, shift)
 		}
 		if c.kb == 0 {
 			return refuse(ReasonTruncated, "ALAC packet %d is compressed and the cookie's kb is 0", p)
