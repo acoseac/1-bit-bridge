@@ -294,19 +294,20 @@ func (o *pcmTestOut) printf(format string, args ...any) {
 
 // pcmTestPlayer is what the producer and the main loop share: the sink now
 // playing, which a track of another transport replaces, and the content
-// the sinks before it played.
+// time the sinks before it played, each counted at its own rate.
 type pcmTestPlayer struct {
 	mu     sync.Mutex
 	sink   pcmTestSink
-	before int64 // content frames the sinks closed before this one played
+	before time.Duration // content time the sinks closed before this one played
 	starts []pcmTestStart
 	gaps   int
 }
 
-// pcmTestStart is where a gapless track starts in the run's content, to
+// pcmTestStart is where a gapless track starts in its sink's content, to
 // say when it reaches the DAC.
 type pcmTestStart struct {
 	track int
+	sink  pcmTestSink
 	frame int64
 	told  bool
 }
@@ -317,12 +318,27 @@ func (p *pcmTestPlayer) current() pcmTestSink {
 	return p.sink
 }
 
-// played is the content the run has played, over every sink.
-func (p *pcmTestPlayer) played() (int64, alsapcm.Position) {
+// played is the content time the run has played, over every sink, and the
+// position of the sink now playing.
+func (p *pcmTestPlayer) played() (time.Duration, alsapcm.Position) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	pos := p.sink.Position()
-	return p.before + pos.Played, pos
+	return p.before + pcmTestDuration(pos.Played, pos.RateHz), pos
+}
+
+// swap makes next the sink the run plays and returns the one it replaces,
+// which has drained: its content counts in the run's time at its own rate,
+// and every gapless start in it has reached the DAC.
+func (p *pcmTestPlayer) swap(next pcmTestSink, out *pcmTestOut) pcmTestSink {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.sink
+	pos := old.Position()
+	p.before += pcmTestDuration(pos.Played, pos.RateHz)
+	p.tellStartsLocked(old, pos.Played, out)
+	p.sink = next
+	return old
 }
 
 // play is a sink run: open the sink for the first track's transport, check
@@ -357,13 +373,16 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 	}
 	out.printf("playing; %s\n", hint)
 
+	// The producer runs on the run's own context, which a stop ends first.
+	runCtx, endRun := context.WithCancel(ctx)
+	defer endRun()
 	produced := make(chan error, 1)
-	go func() { produced <- r.produce(ctx, env, player, out, stderr) }()
-	done := make(chan struct{})
-	defer close(done)
+	go func() { produced <- r.produce(runCtx, env, player, out, stderr) }()
 	var keys <-chan string
 	if r.keys {
-		keys = pcmTestKeys(env.stdin, done)
+		var stopKeys func()
+		keys, stopKeys = pcmTestKeys(env.stdin)
+		defer stopKeys()
 	}
 	ticks, stop := env.ticks(pcmTestTick)
 	defer stop()
@@ -371,16 +390,21 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 	var pausedAt time.Time
 	second := 0
 	paused, resumed := false, false
-	// stopNow drops the sink, waits for the producer, which the drop ends,
-	// unless it has ended already, and closes the sink.
+	// stopNow ends the run's context and drops the sink playing, so the
+	// sound stops at once and the producer opens and writes nothing more;
+	// waits for the producer, unless it has ended already; and then drops
+	// and closes the sink it left playing, which is a sink it opened for
+	// another transport when the stop came as it changed.
 	stopNow := func(code int, say string, producerDone bool) int {
-		s := player.current()
-		_ = s.Drop()
+		endRun()
+		_ = player.current().Drop()
 		if !producerDone {
 			<-produced
 		}
+		s := player.current()
+		_ = s.Drop()
 		played, _ := player.played()
-		out.printf("%s after %s played: dropped\n", say, pcmTestFrames(played, s.Transport().RateHz))
+		out.printf("%s after %s played: dropped\n", say, pcmTestRunTime(played))
 		return pcmTestCloseSink(s, code, out, stderr)
 	}
 	for {
@@ -401,11 +425,11 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 			switch k {
 			case "p":
 				if s := player.current(); pcmTestIsPaused(s) {
-					r.resume(s, out, stderr)
+					r.resume(player, out, stderr)
 				} else if err := s.Pause(); err != nil {
 					fmt.Fprintf(stderr, "output pcm-test: pause: %v\n", err)
 				} else {
-					pcmTestSayPaused(s, out)
+					pcmTestSayPaused(player, out)
 				}
 			case "q":
 				return stopNow(0, "stopped (q)", false)
@@ -414,25 +438,25 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 			second++
 			s := player.current()
 			played, pos := player.played()
-			rate := s.Transport().RateHz
+			rate := pos.RateHz
 			stream := pos.Stream.String()
 			if pos.State == alsapcm.SinkReleased || pos.State == alsapcm.SinkStopped || pos.State == alsapcm.SinkEnded {
 				stream = "closed"
 			}
 			out.printf("  %d s: played %s, queued %d frames (%s), %s, %s\n", second,
-				pcmTestFrames(played, rate), pos.Queued, pcmTestMillis(pos.Queued, rate), stream, pos.State)
-			player.tellStarts(played, rate, out)
+				pcmTestRunTime(played), pos.Queued, pcmTestMillis(pos.Queued, rate), stream, pos.State)
+			player.tellStarts(out)
 			switch {
-			case r.pauseAt > 0 && !paused && played >= int64(r.pauseAt.Seconds()*float64(rate)):
+			case r.pauseAt > 0 && !paused && played >= r.pauseAt:
 				paused, pausedAt = true, now
 				if err := s.Pause(); err != nil {
 					fmt.Fprintf(stderr, "output pcm-test: pause: %v\n", err)
 					continue
 				}
-				pcmTestSayPaused(s, out)
+				pcmTestSayPaused(player, out)
 			case r.resumeAfter > 0 && paused && !resumed && now.Sub(pausedAt) >= r.resumeAfter:
 				resumed = true
-				if !r.resume(s, out, stderr) && !r.keys {
+				if !r.resume(player, out, stderr) && !r.keys {
 					return stopNow(1, "stopped: the resume was refused", false)
 				}
 			}
@@ -442,10 +466,14 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 
 // open opens a sink for t, prints what the kernel committed, and checks it
 // against the kernel's own hw_params file. It returns nil and the exit code
-// when the sink cannot play.
+// when the sink cannot play; an open the run's stop cut short is no
+// failure to report.
 func (r pcmTestSinkRun) open(ctx context.Context, env outputPCMTestEnv, t alsapcm.Transport, out *pcmTestOut, stderr io.Writer) (pcmTestSink, int) {
 	sink, err := env.openSink(ctx, alsapcm.SinkConfig{Endpoint: r.endpoint, Transport: t, Pause: r.pause, ReleaseAfter: r.releaseAfter})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 1
+		}
 		fmt.Fprintf(stderr, "output pcm-test: %v\n", err)
 		if alsapcm.ReasonOf(err) == alsapcm.ReasonBusy {
 			pcmTestNameHolder(alsa.Reader{ProcRoot: r.procRoot}, r.endpoint, stderr)
@@ -469,39 +497,43 @@ func (r pcmTestSinkRun) open(ctx context.Context, env outputPCMTestEnv, t alsapc
 }
 
 // produce feeds every track to the sink, joining one of the same transport
-// to the one before with nothing between, and draining, closing and
-// opening a sink for one of another transport, an honest gap; then it
-// drains the last sink.
+// to the one before with nothing between, and draining the sink and opening
+// one for a track of another transport, an honest gap; then it drains the
+// last sink. A sink it replaces it closes once the next one plays, so each
+// sink has one closer: the producer for one it replaced, the run for the
+// last. ctx ends with the run, a q or Ctrl-C included, so nothing is opened
+// or written after a stop.
 func (r pcmTestSinkRun) produce(ctx context.Context, env outputPCMTestEnv, player *pcmTestPlayer, out *pcmTestOut, stderr io.Writer) error {
-	var submitted int64 // content frames handed to the sinks, over the run
+	var at time.Duration // the run's content time handed to the sinks so far
+	var sinkFrames int64 // the content frames handed to the sink now playing
 	for i, t := range r.tracks {
 		sink := player.current()
 		if i > 0 {
 			if j := sink.Next(t.transport); j.Gapless {
-				out.printf("track %d joins track %d gaplessly at %s: the same transport, nothing between\n",
-					i+1, i, pcmTestFrames(submitted, t.transport.RateHz))
+				out.printf("track %d joins track %d gaplessly at %s (frame %d of its sink): the same transport, nothing between\n",
+					i+1, i, pcmTestRunTime(at), sinkFrames)
 				player.mu.Lock()
-				player.starts = append(player.starts, pcmTestStart{track: i + 1, frame: submitted})
+				player.starts = append(player.starts, pcmTestStart{track: i + 1, sink: sink, frame: sinkFrames})
 				player.mu.Unlock()
 			} else {
 				out.printf("track %d needs another transport (%s): drain, reopen and refill, an honest gap\n", i+1, strings.Join(j.Differs, ", "))
 				if err := r.drain(ctx, sink, player, out); err != nil {
 					return err
 				}
-				played := sink.Position().Played
-				_ = sink.Close()
 				next, code := r.open(ctx, env, t.transport, out, stderr)
 				if next == nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					return fmt.Errorf("track %d: the sink for its transport did not open (exit %d)", i+1, code)
 				}
-				player.mu.Lock()
-				player.sink, player.before = next, player.before+played
-				player.mu.Unlock()
-				sink = next
+				_ = player.swap(next, out).Close()
+				sink, sinkFrames = next, 0
 			}
 		}
 		n, err := r.feed(ctx, t, sink, player, out)
-		submitted += n
+		at += pcmTestDuration(n, t.transport.RateHz)
+		sinkFrames += n
 		if err != nil {
 			return err
 		}
@@ -618,9 +650,11 @@ func (r pcmTestSinkRun) drain(ctx context.Context, sink pcmTestSink, player *pcm
 	}
 }
 
-// resume resumes the sink and reports it, and reports a refusal, naming
-// whoever holds a busy device. It returns whether the sink plays again.
-func (r pcmTestSinkRun) resume(s pcmTestSink, out *pcmTestOut, stderr io.Writer) bool {
+// resume resumes the sink playing and reports it, and reports a refusal,
+// naming whoever holds a busy device. It returns whether the sink plays
+// again.
+func (r pcmTestSinkRun) resume(player *pcmTestPlayer, out *pcmTestOut, stderr io.Writer) bool {
+	s := player.current()
 	released := s.Position().State == alsapcm.SinkReleased
 	if err := s.Resume(); err != nil {
 		fmt.Fprintf(stderr, "output pcm-test: resume: %v\n", err)
@@ -629,24 +663,25 @@ func (r pcmTestSinkRun) resume(s pcmTestSink, out *pcmTestOut, stderr io.Writer)
 		}
 		return false
 	}
-	pos := s.Position()
+	played, _ := player.played()
 	if released {
 		out.printf("resumed: opened %s again, writing again first what the DAC had not played, from %s\n",
-			r.endpoint, pcmTestFrames(pos.Played, s.Transport().RateHz))
+			r.endpoint, pcmTestRunTime(played))
 		var report strings.Builder
 		printPCMTestParams(&report, s.Params())
 		out.printf("%s", report.String())
 		return true
 	}
-	out.printf("resumed at %s\n", pcmTestFrames(pos.Played, s.Transport().RateHz))
+	out.printf("resumed at %s\n", pcmTestRunTime(played))
 	return true
 }
 
-// pcmTestSayPaused reports a pause: how, and where.
-func pcmTestSayPaused(s pcmTestSink, out *pcmTestOut) {
-	pos, st := s.Position(), s.Stats()
-	how := map[string]string{"pause": "by the kernel's PAUSE", "zeros": "by zeros, after what was queued plays", "idle": "before the stream started: nothing more written"}[st.PausedBy]
-	out.printf("paused %s, at %s\n", how, pcmTestFrames(pos.Played, s.Transport().RateHz))
+// pcmTestSayPaused reports a pause of the sink playing: how, and where in
+// the run.
+func pcmTestSayPaused(player *pcmTestPlayer, out *pcmTestOut) {
+	played, _ := player.played()
+	how := map[string]string{"pause": "by the kernel's PAUSE", "zeros": "by zeros, after what was queued plays", "idle": "before the stream started: nothing more written"}[player.current().Stats().PausedBy]
+	out.printf("paused %s, at %s\n", how, pcmTestRunTime(played))
 }
 
 // pcmTestIsPaused reports whether the sink waits on a pause.
@@ -660,16 +695,15 @@ func pcmTestIsPaused(s pcmTestSink) bool {
 func (r pcmTestSinkRun) finish(err error, player *pcmTestPlayer, out *pcmTestOut, stderr io.Writer) int {
 	s := player.current()
 	played, _ := player.played()
-	rate := s.Transport().RateHz
 	if err != nil {
 		switch alsapcm.ReasonOf(err) {
 		case alsapcm.ReasonXrun:
 			r.sayXrun(s, err, player, out)
 			out.printf("  stopped at the xrun; --recover plays on after one, counting the gap\n")
 		case alsapcm.ReasonDisconnected:
-			out.printf("the device went away after %s played: the sink closed it\n", pcmTestFrames(played, rate))
+			out.printf("the device went away after %s played: the sink closed it\n", pcmTestRunTime(played))
 		default:
-			out.printf("stopped after %s played\n", pcmTestFrames(played, rate))
+			out.printf("stopped after %s played\n", pcmTestRunTime(played))
 		}
 		fmt.Fprintf(stderr, "output pcm-test: %v\n", err)
 		return pcmTestCloseSink(s, 1, out, stderr)
@@ -678,7 +712,7 @@ func (r pcmTestSinkRun) finish(err error, player *pcmTestPlayer, out *pcmTestOut
 	player.mu.Lock()
 	gaps := player.gaps
 	player.mu.Unlock()
-	out.printf("drained: %s played; gaps %d\n", pcmTestFrames(played, rate), gaps)
+	out.printf("drained: %s played; gaps %d\n", pcmTestRunTime(played), gaps)
 	out.printf("  the last sink: pauses %d, releases %d, reopens %d; %d writes (%d partial), %d waits for room, %d interrupted; %d frames of silence\n",
 		st.Pauses, st.Releases, st.Reopens, st.Counters.Writes, st.Counters.Partial, st.Counters.Waits, st.Counters.Interrupted, st.Silence)
 	code := 0
@@ -689,14 +723,21 @@ func (r pcmTestSinkRun) finish(err error, player *pcmTestPlayer, out *pcmTestOut
 	return pcmTestCloseSink(s, code, out, stderr)
 }
 
-// tellStarts says when a gapless track's first frame reaches the DAC.
-func (p *pcmTestPlayer) tellStarts(played int64, rate int, out *pcmTestOut) {
+// tellStarts says when a gapless track's first frame reaches the DAC: when
+// the sink now playing, the one it starts in, has played it.
+func (p *pcmTestPlayer) tellStarts(out *pcmTestOut) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.tellStartsLocked(p.sink, p.sink.Position().Played, out)
+}
+
+// tellStartsLocked tells the starts in sink that played reaches, with p.mu
+// held.
+func (p *pcmTestPlayer) tellStartsLocked(sink pcmTestSink, played int64, out *pcmTestOut) {
 	for i := range p.starts {
-		if s := &p.starts[i]; !s.told && played >= s.frame {
+		if s := &p.starts[i]; !s.told && s.sink == sink && played >= s.frame {
 			s.told = true
-			out.printf("  track %d reached the DAC: its first frame, content frame %d, has played\n", s.track, s.frame)
+			out.printf("  track %d reached the DAC: its first frame, frame %d of its sink, has played\n", s.track, s.frame)
 		}
 	}
 }
@@ -720,11 +761,41 @@ func pcmTestFrames(frames int64, rate int) string {
 	return fmt.Sprintf("%.3f s (%d frames)", float64(frames)/float64(rate), frames)
 }
 
+// pcmTestDuration is frames' time at rate.
+func pcmTestDuration(frames int64, rate int) time.Duration {
+	if rate <= 0 {
+		return 0
+	}
+	return time.Duration(frames) * time.Second / time.Duration(rate)
+}
+
+// pcmTestRunTime is the run's content time, which may span sinks of
+// different rates, so it has no one frame count.
+func pcmTestRunTime(d time.Duration) string { return fmt.Sprintf("%.3f s", d.Seconds()) }
+
+// errPCMTestKeysStopped ends the key reader's read when the run ends.
+var errPCMTestKeysStopped = errors.New("the run has ended")
+
 // pcmTestKeys reads commands from in, one a line, trimmed and lowercased,
-// until in ends or done is closed.
-func pcmTestKeys(in io.Reader, done <-chan struct{}) <-chan string {
+// until in ends or stop is called. stop ends the reader and waits for it,
+// so the reader never outlives the run, cutting short a read under way:
+// standard input, a file, is read through poll with a wake-up
+// (pcmTestStoppableFile), and a pipe's read end is closed. A reader of
+// another kind cannot be cut short, and stop leaves it to its read.
+func pcmTestKeys(in io.Reader) (<-chan string, func()) {
+	interrupt, release, joinable := func() {}, func() {}, false
+	switch r := in.(type) {
+	case *os.File:
+		if pr, intr, rel, ok := pcmTestStoppableFile(r); ok {
+			in, interrupt, release, joinable = pr, intr, rel, true
+		}
+	case interface{ CloseWithError(error) error }:
+		interrupt, joinable = func() { _ = r.CloseWithError(errPCMTestKeysStopped) }, true
+	}
 	keys := make(chan string)
+	done, exited := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(exited)
 		defer close(keys)
 		sc := bufio.NewScanner(in)
 		for sc.Scan() {
@@ -735,5 +806,13 @@ func pcmTestKeys(in io.Reader, done <-chan struct{}) <-chan string {
 			}
 		}
 	}()
-	return keys
+	stop := func() {
+		close(done)
+		interrupt()
+		if joinable {
+			<-exited
+			release()
+		}
+	}
+	return keys, stop
 }

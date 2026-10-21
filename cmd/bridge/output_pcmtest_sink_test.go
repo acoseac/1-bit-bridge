@@ -83,6 +83,8 @@ func (f *fakeSink) Write(ctx context.Context, b []byte) (int, error) {
 	defer f.mu.Unlock()
 	fb := f.params.FrameBytes()
 	switch {
+	case ctx.Err() != nil:
+		return 0, &alsapcm.Error{Reason: alsapcm.ReasonCancelled, Op: "sink write", Err: ctx.Err()}
 	case f.state == alsapcm.SinkXrun || f.state == alsapcm.SinkEnded:
 		return 0, f.err
 	case f.state == alsapcm.SinkStopped:
@@ -259,9 +261,11 @@ type sinkHarness struct {
 	mu     sync.Mutex
 	sinks  []*fakeSink
 	opened []alsapcm.SinkConfig
-	// prepare scripts each sink as it opens.
-	prepare func(i int, f *fakeSink)
-	openErr error
+	// prepare scripts each sink as it opens; openWait, when set, is called
+	// first, outside the lock, to hold the i-th open.
+	prepare  func(i int, f *fakeSink)
+	openWait func(i int)
+	openErr  error
 }
 
 // newSinkHarness is a harness on Linux whose sinks are fakes.
@@ -276,8 +280,18 @@ func newSinkHarness(t *testing.T) *sinkHarness {
 			return nil, &alsapcm.Error{Reason: alsapcm.ReasonKernel}
 		},
 		openSink: func(ctx context.Context, cfg alsapcm.SinkConfig) (pcmTestSink, error) {
+			if h.openWait != nil {
+				h.mu.Lock()
+				i := len(h.opened)
+				h.mu.Unlock()
+				h.openWait(i)
+			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
+			// As alsapcm.OpenSink does, a context already over opens nothing.
+			if err := ctx.Err(); err != nil {
+				return nil, &alsapcm.Error{Reason: alsapcm.ReasonCancelled, Op: "open", Endpoint: cfg.Endpoint, Err: err}
+			}
 			h.opened = append(h.opened, cfg)
 			if h.openErr != nil {
 				return nil, h.openErr
@@ -343,7 +357,13 @@ func openGate(_ int, f *fakeSink) { close(f.gate) }
 // returns the data: the bytes S16_LE or S24_3LE carry for those samples.
 func writePCMWAV(t *testing.T, path string, rate, bits, frames int, seed byte) []byte {
 	t.Helper()
-	block := 2 * bits / 8
+	return writeWAV(t, path, rate, bits, 2, frames, seed)
+}
+
+// writeWAV is writePCMWAV with any number of channels.
+func writeWAV(t *testing.T, path string, rate, bits, channels, frames int, seed byte) []byte {
+	t.Helper()
+	block := channels * bits / 8
 	data := make([]byte, frames*block)
 	for i := range data {
 		data[i] = byte(i*13+i/7) ^ seed
@@ -356,7 +376,7 @@ func writePCMWAV(t *testing.T, path string, rate, bits, frames int, seed byte) [
 	b.WriteString("WAVEfmt ")
 	le32(16)
 	le16(1)
-	le16(2)
+	le16(channels)
 	le32(rate)
 	le32(rate * block)
 	le16(block)
@@ -435,7 +455,7 @@ func TestOutputPCMTestSinkJoinsTwoFilesOfOneTransport(t *testing.T) {
 	if f := h.sink(0); !bytes.Equal(f.written, append(slices.Clone(a), b...)) {
 		t.Errorf("the sink got %d bytes that are not the two files' %d, back to back", len(f.written), len(a)+len(b))
 	}
-	if !strings.Contains(r.stdout, "track 2 joins track 1 gaplessly at 0.500 s (22050 frames): the same transport, nothing between") {
+	if !strings.Contains(r.stdout, "track 2 joins track 1 gaplessly at 0.500 s (frame 22050 of its sink): the same transport, nothing between") {
 		t.Errorf("stdout does not name the join:\n%s", r.stdout)
 	}
 }
@@ -465,6 +485,108 @@ func TestOutputPCMTestSinkReopensForAnotherTransport(t *testing.T) {
 	}
 }
 
+// TestOutputPCMTestSinkQDuringATransportChangeStopsTheRun pins q while the
+// run changes transport (#1303's review: q dropped the sink it found, the
+// producer went on to open the next file's sink and play it to the end,
+// and the run closed the first sink twice). The q comes while the second
+// file's sink opens: no sink plays on, nothing is opened after the q, the
+// first sink is closed once, and the stop is no failure.
+func TestOutputPCMTestSinkQDuringATransportChangeStopsTheRun(t *testing.T) {
+	h := newSinkHarness(t)
+	h.prepare = openGate
+	opening, release := make(chan struct{}), make(chan struct{})
+	h.openWait = func(i int) {
+		if i == 1 {
+			close(opening)
+			<-release
+		}
+	}
+	dir := t.TempDir()
+	writePCMWAV(t, filepath.Join(dir, "a.wav"), 44100, 16, 4410, 0)
+	writePCMWAV(t, filepath.Join(dir, "b.wav"), 48000, 24, 4800, 1)
+	done := h.run(context.Background(), append(fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav")), "--keys")...)
+	first := waitSink(t, h, done)
+	awaitRun(t, opening, "the run to open the second file's sink")
+	if _, err := io.WriteString(h.stdin, "q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := nextCall(t, first, "drain"); got != "drop" {
+		t.Fatalf("after q: %q, want the sink the run found dropped", got)
+	}
+	close(release)
+	r := h.wait(t, done)
+	if r.code != 0 || !strings.Contains(r.stdout, "stopped (q) after") || strings.Contains(r.stderr, "cancel") {
+		t.Errorf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+	h.mu.Lock()
+	opened := len(h.opened)
+	h.mu.Unlock()
+	if first.closes != 1 || opened != 1 {
+		t.Errorf("the first sink closed %d times, %d sinks opened; want it closed once and none opened after q", first.closes, opened)
+	}
+}
+
+// TestOutputPCMTestSinkCountsTheRunsTimeAcrossRates pins the run's content
+// time across sinks of different rates (#1303's review: their frames were
+// summed and read at the last sink's rate). A second of 44.1 kHz drains,
+// then half a second of a 48 kHz file plays: the run says 1.5 s played,
+// pauses there for --pause-at 1.5, and drains at 2 s.
+func TestOutputPCMTestSinkCountsTheRunsTimeAcrossRates(t *testing.T) {
+	h := newSinkHarness(t)
+	h.prepare = func(i int, f *fakeSink) {
+		if i == 0 {
+			close(f.gate)
+		}
+	}
+	dir := t.TempDir()
+	writePCMWAV(t, filepath.Join(dir, "a.wav"), 44100, 16, 44100, 0)
+	writePCMWAV(t, filepath.Join(dir, "b.wav"), 48000, 16, 48000, 1)
+	done := h.run(context.Background(), append(fileArgs(t, filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav")), "--pause-at", "1.5", "--resume-after", "1")...)
+	waitSink(t, h, done)
+	second := waitSink(t, h, done)
+	// The second sink's drain is the producer's last call: the run plays it.
+	if got := nextCall(t, second, ""); got != "drain" {
+		t.Fatalf("the second sink's first call: %q, want its drain", got)
+	}
+	second.setPlayed(24000)
+	t0 := time.Unix(1_000, 0)
+	h.ticks <- t0
+	h.ticks <- t0.Add(time.Second)
+	close(second.gate)
+	r := h.wait(t, done)
+	calls := drainCalls(second)
+	for _, say := range []string{"1 s: played 1.500 s", "paused by the kernel's PAUSE, at 1.500 s", "drained: 2.000 s played"} {
+		if !strings.Contains(r.stdout, say) {
+			t.Errorf("stdout does not say %q:\n%s", say, r.stdout)
+		}
+	}
+	if r.code != 0 || !slices.Contains(calls, "pause") {
+		t.Errorf("exit %d, the second sink's calls %v; want 0 and a pause", r.code, calls)
+	}
+}
+
+// TestOutputPCMTestSinkKeysReaderEndsWithTheRun pins the --keys reader's
+// life (#1303's review: it outlived the run, blocked on standard input):
+// once the run has returned, its reader has stopped, and a line written
+// after it is read by nobody.
+func TestOutputPCMTestSinkKeysReaderEndsWithTheRun(t *testing.T) {
+	h := newSinkHarness(t)
+	done := h.run(context.Background(), "--sink", "--keys", "--card", "5", "--device", "0", "--rate", "48000", "--bits", "16",
+		"--seconds", "3", "--proc-root", t.TempDir())
+	waitSink(t, h, done)
+	if _, err := io.WriteString(h.stdin, "q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.wait(t, done); r.code != 0 {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+	// A reader still alive takes this line; one that stopped with the run
+	// has closed its end of the pipe.
+	if _, err := io.WriteString(h.stdin, "p\n"); err == nil {
+		t.Error("a line written after the run was read: the run's key reader outlived it")
+	}
+}
+
 // TestOutputPCMTestSinkTwoToneTracksAreOneSeamlessTone pins --tracks: the
 // tone split mid-cycle into two tracks of one transport reaches the sink
 // as the one continuous tone, and the join is named.
@@ -486,7 +608,7 @@ func TestOutputPCMTestSinkTwoToneTracksAreOneSeamlessTone(t *testing.T) {
 	if 24037%tone.frames == 0 {
 		t.Fatal("the second track starts on a whole repeat of the tone, where a lost frame would not show")
 	}
-	for _, say := range []string{"track 2 joins track 1 gaplessly at 0.501 s (24037 frames)", "tone: 1000 Hz sine on both channels, peak -30.0 dBFS", "drained"} {
+	for _, say := range []string{"track 2 joins track 1 gaplessly at 0.501 s (frame 24037 of its sink)", "tone: 1000 Hz sine on both channels, peak -30.0 dBFS", "drained"} {
 		if !strings.Contains(r.stdout, say) {
 			t.Errorf("stdout does not say %q:\n%s", say, r.stdout)
 		}
@@ -534,15 +656,35 @@ func waitSink(t *testing.T, h *sinkHarness, done <-chan pcmTestResult) *fakeSink
 	return nil
 }
 
-// nextCall returns the next call to the fake other than skip.
+// nextCall returns the next call to the fake other than skip, under the
+// run's watchdog.
 func nextCall(t *testing.T, f *fakeSink, skip string) string {
 	t.Helper()
-	for c := range f.calls {
-		if c != skip {
-			return c
+	watchdog := time.NewTimer(time.Minute)
+	defer watchdog.Stop()
+	for {
+		select {
+		case c := <-f.calls:
+			if c != skip {
+				return c
+			}
+		case <-watchdog.C:
+			t.Fatalf("waited a minute for a call other than %q", skip)
+			return ""
 		}
 	}
-	return ""
+}
+
+// awaitRun waits for ch, under the run's watchdog.
+func awaitRun(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	watchdog := time.NewTimer(time.Minute)
+	defer watchdog.Stop()
+	select {
+	case <-ch:
+	case <-watchdog.C:
+		t.Fatalf("waited a minute for %s", what)
+	}
 }
 
 // TestOutputPCMTestSinkPausesAndResumesOnKeys pins --keys: p pauses, p
@@ -681,11 +823,16 @@ func TestOutputPCMTestSinkNamesTheHolderWhenAResumeIsBusy(t *testing.T) {
 
 // TestOutputPCMTestSinkRefusesWhatItCannotPlay pins the sink mode's
 // refusals: flags that do not make a run (exit 2) and files the player
-// does not play (exit 1), each before any sink is opened.
+// does not play (exit 1), each before any sink is opened. A file of other
+// than two channels is the decoder's to refuse, before the run sees its
+// transport (#1303's review asked for a channel check in pcmTestOpenFiles,
+// which no decoded file could reach).
 func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 	dir := t.TempDir()
 	wav := filepath.Join(dir, "a.wav")
 	writePCMWAV(t, wav, 44100, 16, 100, 0)
+	mono := filepath.Join(dir, "mono.wav")
+	writeWAV(t, mono, 44100, 16, 1, 100, 0)
 	mp3 := filepath.Join(dir, "a.mp3")
 	if err := os.WriteFile(mp3, append([]byte("ID3\x04\x00\x00\x00\x00\x00\x00"), bytes.Repeat([]byte{0xff, 0xfb, 0x90, 0x00}, 64)...), 0o644); err != nil {
 		t.Fatal(err)
@@ -713,6 +860,7 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 		{append(slices.Clone(tone), "--sink", "--level", "-20"), 2, "never louder than -30 dBFS"},
 		{[]string{"--passive", "--card", "5", "--sink"}, 2, "--passive opens nothing and plays nothing, and takes no --sink"},
 		{[]string{"--card", "5", "--device", "0", "--file", dsf, "--ack-full-level"}, 1, "native DSD"},
+		{[]string{"--card", "5", "--device", "0", "--file", mono, "--ack-full-level"}, 1, "want stereo (2 channels), got 1"},
 		{[]string{"--card", "5", "--device", "0", "--file", mp3, "--ack-full-level"}, 1, "refused"},
 		{[]string{"--card", "5", "--device", "0", "--file", filepath.Join(dir, "missing.flac"), "--ack-full-level"}, 1, "missing.flac"},
 		{[]string{"--card", "5", "--device", "0", "--file", wav, "--ack-full-level", "--format", "S32_LE"}, 1, "--format S32_LE does not carry"},
