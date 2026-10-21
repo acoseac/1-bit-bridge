@@ -64,6 +64,10 @@ func LoopbackFileHandler(lib TrackLookup, roots func() []string) http.Handler {
 type loopbackHandler struct {
 	lib   TrackLookup
 	roots func() []string
+	// beforeOpen, when set, runs between the containment check and the
+	// open. Production leaves it nil. A test swaps a link there, which is
+	// the window the identity check closes.
+	beforeOpen func()
 }
 
 func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +108,9 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if fsutil.IsUnderAny(resolved, roots) == "" {
 		refuseOutside(w)
 		return
+	}
+	if h.beforeOpen != nil {
+		h.beforeOpen()
 	}
 	// Opened the way every route that serves a file opens it: what is not
 	// a file is refused, and a named pipe without waiting for a writer.

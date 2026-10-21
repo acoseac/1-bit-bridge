@@ -322,6 +322,38 @@ func TestLoopbackRouteConfinesToTheLibraryRoots(t *testing.T) {
 	})
 }
 
+// TestLoopbackRouteRefusesALinkSwappedAfterTheCheck: a link that points
+// inside a root when the route judges it, and out of the roots when the
+// route opens it, is refused. The request is parked between the two.
+func TestLoopbackRouteRefusesALinkSwappedAfterTheCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("swaps a symlink in place")
+	}
+	f := newLoopbackFixture(t)
+	link := filepath.Join(f.root, "Artist", "Album", "swap.flac")
+	mustSymlink(t, filepath.Join(f.root, "Artist", "Album", "01.flac"), link)
+	f.add("swap", link, ".flac")
+	swapped := false
+	h := &loopbackHandler{
+		lib:   f.lib,
+		roots: func() []string { return []string{f.root} },
+		beforeOpen: func() {
+			if err := os.Remove(link); err != nil {
+				t.Errorf("remove the link: %v", err)
+			}
+			if err := os.Symlink(filepath.Join(f.outside, "secret.flac"), link); err != nil {
+				t.Errorf("swap the link: %v", err)
+			}
+			swapped = true
+		},
+	}
+	rec := loopbackGet(h, http.MethodGet, "/dlna/file/swap", "127.0.0.1:1", nil)
+	if !swapped {
+		t.Fatal("the request never reached the open")
+	}
+	assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.secret)
+}
+
 // TestLoopbackRouteListsNothing: the file route is the only route, and it
 // serves one file by id. No directory, no description, no control.
 func TestLoopbackRouteListsNothing(t *testing.T) {
