@@ -415,8 +415,12 @@ func (r pcmTestSinkRun) play(ctx context.Context, env outputPCMTestEnv, stdout, 
 			s := player.current()
 			played, pos := player.played()
 			rate := s.Transport().RateHz
+			stream := pos.Stream.String()
+			if pos.State == alsapcm.SinkReleased || pos.State == alsapcm.SinkStopped || pos.State == alsapcm.SinkEnded {
+				stream = "closed"
+			}
 			out.printf("  %d s: played %s, queued %d frames (%s), %s, %s\n", second,
-				pcmTestFrames(played, rate), pos.Queued, pcmTestMillis(pos.Queued, rate), pos.Stream, pos.State)
+				pcmTestFrames(played, rate), pos.Queued, pcmTestMillis(pos.Queued, rate), stream, pos.State)
 			player.tellStarts(played, rate, out)
 			switch {
 			case r.pauseAt > 0 && !paused && played >= int64(r.pauseAt.Seconds()*float64(rate)):
