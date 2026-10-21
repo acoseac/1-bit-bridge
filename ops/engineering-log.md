@@ -49511,3 +49511,54 @@ The root-trust sentence is documentation and has no control.
 checklist runs, so on the macOS host here its split was checked by the
 test passing and the helpers being straight extractions; CI's Linux leg
 runs it whole.
+
+### Round three: the review of round two
+
+Two findings, from Codex and the Claude API, both verified by the owner.
+
+- **The route's answer and the gate's could disagree** (Codex, Medium).
+  `activeNow` read the stored probe, and `probe` stores nothing when its
+  own deadline expires, while `Active` still answers with what that probe
+  found. A boot probe that read MPD's configuration and then expired made
+  `Active` answer true and start the route, which then refused every
+  request until a later probe landed in time; an expired miss after a
+  stored true made `Active` and `/v1/health` say false while the route
+  kept serving. `Active` now records auto's answer under `o.mu` every
+  time it has a verdict (`answerAuto`): from a probe it stored, a probe
+  past its deadline it did not store, the cache, or another caller's
+  probe it waited on. `activeNow` returns that answer, false before the
+  first, and still never probes, dials or runs `OnActive`. **One case
+  was decided here**: a caller that stops waiting on another caller's
+  probe got `false` from `probe`, which is no verdict, and recording it
+  would let one `/v1/health` request that ends during a probe turn the
+  route off until the gate's next answer, even after a probe that found
+  MPD (a select over a probe that finished and a context that ended at
+  once can take either). That caller is answered with the gate's last
+  answer and records nothing (`probeVerdict` tells it apart), so every
+  answer the gate gives still agrees with the route. Every holder of
+  `o.mu` releases it before any I/O (the probe, the session's dial and
+  close, the build), so the per-request read never waits on MPD, which
+  the Claude API asked and `activeNow`'s comment now says.
+- **A nil output reader** (the Claude API, Low). `activeNow` called
+  `o.output()` unguarded while `probe` guarded it. One helper,
+  `outputConfig`, reads the section (the empty one with no reader), and
+  `Active`, `activeNow`, the probe, the build and the path-rule key all
+  read through it.
+
+**Red first**, on 3328d1c3's code (df150080 changed only the rules):
+`TestTheRouteFollowsAnExpiredProbeThatFoundMPD` ("the gate answered true
+and started the route, and the route refuses"),
+`TestTheRouteStopsOnAnExpiredMissAfterATrue` ("the gate answered false,
+and the route still serves"), `TestActiveNowIsTheGatesLastAnswer` (at the
+key change to a probe past its deadline: "activeNow true, and the gate
+answered false"), `TestACallerThatStopsWaitingGetsTheGatesLastAnswer` ("a
+caller that stopped waiting was answered off; the gate's last answer was
+on") and `TestActiveNowReadsTheConfigLikeTheProbe` (a nil-pointer panic,
+recovered into the failure). The expired probes wait out the real
+`outputProbeLimit` (750 ms), as `TestProbeDeadlineIsNotCached` does.
+
+| Mutation | Red (whole `internal/api`, under `-race`) |
+|---|---|
+| `activeNow` reads the stored probe again | `TestTheRouteFollowsAnExpiredProbeThatFoundMPD`, `TestTheRouteStopsOnAnExpiredMissAfterATrue`, `TestActiveNowIsTheGatesLastAnswer` |
+| a stopped waiter's false recorded | `TestACallerThatStopsWaitingGetsTheGatesLastAnswer` |
+| `outputConfig` unguarded | `TestActiveNowReadsTheConfigLikeTheProbe`, and B2b's `TestPathRulesUseTheStoredRootPrefix`, whose `localOutputs` has no reader and whose path-rule key had the guard the helper now holds; its panic stops the package, so the run was repeated with it skipped, and only the first was red |
