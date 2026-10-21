@@ -48,6 +48,11 @@ type TrackLookup interface {
 // JSON refusal (`{"error": code, "message": …}`):
 //
 //	403 loopback_only       the request did not come from a loopback address
+//	403 loopback_host_only  the Host is not 127.0.0.1, [::1] or localhost
+//	                        (any port or none): a name a page re-pointed at
+//	                        this host (DNS rebinding), or no Host at all
+//	403 forwarded_request   the request carries Forwarded, X-Forwarded-For,
+//	                        X-Forwarded-Host or X-Real-IP: a proxy sent it
 //	404 not_serving         output.mpd does not resolve on now: enabled
 //	                        answered false
 //	405 method_not_allowed  not GET or HEAD
@@ -98,6 +103,24 @@ func (h *loopbackHandler) admit(w http.ResponseWriter, r *http.Request) (string,
 	if !remoteIsLoopback(r.RemoteAddr) {
 		refuseLoopback(w, http.StatusForbidden, "loopback_only",
 			"this route answers only on this host's loopback")
+		return "", false
+	}
+	// A page a browser loads from a name its author controls can re-point
+	// that name at 127.0.0.1 (DNS rebinding): its requests then come from
+	// loopback with the page's name as the Host. MPD's name 127.0.0.1, the
+	// base URL the bridge hands it.
+	if !loopbackHost(r.Host) {
+		refuseLoopback(w, http.StatusForbidden, "loopback_host_only",
+			"this route answers only a Host of 127.0.0.1, [::1] or localhost")
+		return "", false
+	}
+	// A request a proxy forwarded came from beyond this host, whatever its
+	// remote address says. A proxy on this host that strips all four
+	// headers and forwards to the port is the owner's own configuration,
+	// which nothing in the request tells from MPD.
+	if forwarded(r.Header) {
+		refuseLoopback(w, http.StatusForbidden, "forwarded_request",
+			"this route does not answer a request a proxy forwarded")
 		return "", false
 	}
 	// Asked on every request, never only when the listener starts: the
@@ -228,6 +251,43 @@ func remoteIsLoopback(remote string) bool {
 		return false
 	}
 	return ap.Addr().Unmap().IsLoopback()
+}
+
+// loopbackHost reports whether a request's Host is one a client on this
+// host sends: 127.0.0.1, [::1] or localhost (in any case), with any port
+// or none. Another name, another address and an empty Host are not.
+func loopbackHost(host string) bool {
+	name, _, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port.
+		name = host
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			name = host[1 : len(host)-1]
+		}
+	}
+	switch {
+	case name == "::1":
+		// Only bracketed: a bare ::1 is no Host a client writes.
+		return strings.HasPrefix(host, "[")
+	case name == "127.0.0.1":
+		return true
+	default:
+		return strings.EqualFold(name, "localhost")
+	}
+}
+
+// forwardingHeaders are the headers a proxy adds to a request it forwards.
+var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"}
+
+// forwarded reports whether a request carries a forwarding header, even an
+// empty one.
+func forwarded(h http.Header) bool {
+	for _, name := range forwardingHeaders {
+		if len(h.Values(name)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func refuseOutside(w http.ResponseWriter) {

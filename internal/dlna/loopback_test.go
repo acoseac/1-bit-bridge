@@ -110,11 +110,16 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
-// loopbackGet sends one request through the handler from remote.
+// loopbackGet sends one request through the handler from remote. The Host
+// is 127.0.0.1:7791 unless hdr names another.
 func loopbackGet(h http.Handler, method, path, remote string, hdr map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, "http://127.0.0.1:7791"+path, nil)
 	req.RemoteAddr = remote
 	for k, v := range hdr {
+		if k == "Host" {
+			req.Host = v
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
@@ -225,10 +230,69 @@ func TestLoopbackRouteServesOnlyWhileOutputIsOn(t *testing.T) {
 	assertRefusal(t, rec, http.StatusNotFound, "not_serving", f.track[:256])
 }
 
-// serverGet fetches url from a real listener: the status and the body.
-func serverGet(t *testing.T, url string) (int, []byte) {
+// TestLoopbackRouteAnswersOnlyALoopbackHost: a page a browser loads from a
+// name its author controls can re-point that name at 127.0.0.1 (DNS
+// rebinding), and the browser then asks the route from loopback with the
+// page's name as the Host. The route answers only a Host of 127.0.0.1,
+// [::1] or localhost, with any port or none, and says nothing else first,
+// not even whether it is serving.
+func TestLoopbackRouteAnswersOnlyALoopbackHost(t *testing.T) {
+	f := newLoopbackFixture(t)
+	off := LoopbackFileHandler(f.lib, f.roots, func() bool { return false })
+	for _, host := range []string{
+		"evil.example:7791", "evil.example", "127.0.0.1.nip.io:7791", "localhost.evil.example:7791",
+		"192.168.1.42:7791", "127.0.0.2:7791", "[::ffff:127.0.0.1]:7791", "::1", "",
+	} {
+		hdr := map[string]string{"Host": host}
+		assertRefusal(t, loopbackGet(f.h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:50000", hdr),
+			http.StatusForbidden, "loopback_host_only", f.track[:256])
+		assertRefusal(t, loopbackGet(off, http.MethodGet, "/dlna/file/inside", "127.0.0.1:50000", hdr),
+			http.StatusForbidden, "loopback_host_only")
+	}
+	for _, host := range []string{"127.0.0.1:7791", "localhost:7791", "[::1]:7791", "127.0.0.1", "localhost", "[::1]", "LocalHost:7791"} {
+		rec := loopbackGet(f.h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:50000", map[string]string{"Host": host})
+		if rec.Code != http.StatusOK || string(rec.Body.Bytes()) != string(f.track) {
+			t.Errorf("Host %q: status %d (%q)", host, rec.Code, short(rec.Body.String()))
+		}
+	}
+}
+
+// TestLoopbackRouteRefusesAForwardedRequest: a request a proxy forwarded
+// came from beyond this host, whatever its remote address says. One that
+// carries Forwarded, X-Forwarded-For, X-Forwarded-Host or X-Real-IP, even
+// empty, is refused, through a real listener as through the handler.
+func TestLoopbackRouteRefusesAForwardedRequest(t *testing.T) {
+	f := newLoopbackFixture(t)
+	srv := NewLoopbackServer(LoopbackConfig{Library: f.lib, Roots: f.roots, Enabled: serving, Port: 0})
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"} {
+		for _, value := range []string{"for=192.168.1.20", "192.168.1.20", ""} {
+			rec := loopbackGet(f.h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:50000", map[string]string{name: value})
+			assertRefusal(t, rec, http.StatusForbidden, "forwarded_request", f.track[:256])
+		}
+		status, body := serverGet(t, srv.BaseURL()+"/dlna/file/inside", name, "192.168.1.20")
+		if status != http.StatusForbidden || refusalCode(body) != "forwarded_request" {
+			t.Errorf("%s through the listener: status %d, %q", name, status, short(string(body)))
+		}
+	}
+	requireServed(t, srv.BaseURL()+"/dlna/file/inside", f.track)
+}
+
+// serverGet fetches url from a real listener, with each name and value
+// pair in header set on the request: the status and the body.
+func serverGet(t *testing.T, url string, header ...string) (int, []byte) {
 	t.Helper()
-	resp, err := loopbackClient().Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+1 < len(header); i += 2 {
+		req.Header.Set(header[i], header[i+1])
+	}
+	resp, err := loopbackClient().Do(req)
 	if err != nil {
 		t.Fatalf("get %s: %v", url, err)
 	}
