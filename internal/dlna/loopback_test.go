@@ -390,6 +390,49 @@ func TestLoopbackRouteRefusesADirectorySwappedAfterTheCheck(t *testing.T) {
 	assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.secret)
 }
 
+// TestLoopbackRouteRefusesADirectorySwappedBackAfterTheOpen: the link out
+// is in place for the open and gone again for the second resolution, which
+// then reads as inside. The file that opened is not the file that path
+// names now, and it is refused.
+func TestLoopbackRouteRefusesADirectorySwappedBackAfterTheOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("swaps a directory for a symlink in place")
+	}
+	f := newLoopbackFixture(t)
+	album := filepath.Join(f.root, "Artist", "Album")
+	decoy := filepath.Join(f.outside, "Album")
+	mustMkdir(t, decoy)
+	mustWrite(t, filepath.Join(decoy, "01.flac"), f.secret)
+	steps := 0
+	h := &loopbackHandler{
+		lib:   f.lib,
+		roots: func() []string { return []string{f.root} },
+		beforeOpen: func() {
+			if err := os.Rename(album, album+".real"); err != nil {
+				t.Errorf("move the album aside: %v", err)
+			}
+			if err := os.Symlink(decoy, album); err != nil {
+				t.Errorf("link the album out: %v", err)
+			}
+			steps++
+		},
+		afterOpen: func() {
+			if err := os.Remove(album); err != nil {
+				t.Errorf("remove the link: %v", err)
+			}
+			if err := os.Rename(album+".real", album); err != nil {
+				t.Errorf("put the album back: %v", err)
+			}
+			steps++
+		},
+	}
+	rec := loopbackGet(h, http.MethodGet, "/dlna/file/inside", "127.0.0.1:1", nil)
+	if steps != 2 {
+		t.Fatalf("the request took %d of the two swaps", steps)
+	}
+	assertRefusal(t, rec, http.StatusForbidden, "outside_library", f.secret)
+}
+
 // TestLoopbackRouteListsNothing: the file route is the only route, and it
 // serves one file by id. No directory, no description, no control.
 func TestLoopbackRouteListsNothing(t *testing.T) {

@@ -65,9 +65,10 @@ type loopbackHandler struct {
 	lib   TrackLookup
 	roots func() []string
 	// beforeOpen, when set, runs between the containment check and the
-	// open. Production leaves it nil. A test swaps a link there, which is
-	// the window the identity check closes.
+	// open, and afterOpen between the open and the second resolution.
+	// Production leaves both nil. A test swaps a link in each window.
 	beforeOpen func()
+	afterOpen  func()
 }
 
 func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +127,9 @@ func (h *loopbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// first resolution down the same link, so only a fresh resolution sees
 	// where the open went. That resolution must still be inside, and name
 	// the file that opened.
+	if h.afterOpen != nil {
+		h.afterOpen()
+	}
 	again, err := fsutil.ResolveLinks(info.AbsolutePath)
 	if err != nil || fsutil.IsUnderAny(again, roots) == "" {
 		refuseOutside(w)
