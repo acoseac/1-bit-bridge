@@ -29,6 +29,16 @@ func OpenALACWith(rs io.ReadSeeker, newPackets func(alac.PacketConfig) (ALACPack
 	return openALACWith(rs, newPackets)
 }
 
+// ParseALACCookie validates an ALACSpecificConfig and returns the library
+// configuration built from it.
+func ParseALACCookie(b []byte) (alac.PacketConfig, error) {
+	c, err := parseALACCookie(b)
+	if err != nil {
+		return alac.PacketConfig{}, err
+	}
+	return c.library(), nil
+}
+
 // ALACLibraryPanics returns how many packets d's packet decoder panicked on,
 // or -1 when d is not an ALAC decoder.
 func ALACLibraryPanics(d Decoder) int {
