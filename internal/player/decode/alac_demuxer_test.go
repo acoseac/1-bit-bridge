@@ -57,6 +57,22 @@ func TestALACDemuxerAlone(t *testing.T) {
 	}
 
 	raw := encodeM4A(m4aMoovLast(t, base))
+	// The box headers inside moov, which the sniffer refuses first in Open.
+	at := bytes.Index(raw, []byte("stsz")) - 4
+	for _, c := range []struct {
+		name   string
+		raw    []byte
+		reason decode.Reason
+		msg    string
+	}{
+		{"a box past its parent", putBE32(raw, at, 1<<20), decode.ReasonUnsupportedLayout, "past its parent"},
+		{"a box of size 0 inside a container", putBE32(raw, at, 0), decode.ReasonUnsupportedLayout, "size 0"},
+		{"a box below its header", putBE32(raw, at, 7), decode.ReasonUnsupportedLayout, "smaller than its header"},
+		{"an extended size of 2^63", putBE64(putBE32(raw, at, 1), at+8, 1<<63), decode.ReasonUnsupportedLayout, "addressable"},
+		{"an extended size below its header", putBE64(putBE32(raw, at, 1), at+8, 15), decode.ReasonUnsupportedLayout, "smaller than its header"},
+	} {
+		refusedWith(t, openALACErr(c.raw), c.reason, c.msg)
+	}
 	// A top-level box other than mdat that runs past the file's end is a
 	// file cut short; a size of 0 runs to the end; an extended size the
 	// file cannot address is refused before it is added to anything.
