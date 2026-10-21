@@ -9,14 +9,18 @@ B470 PR 1c). The bridge calls only `NewPacketDecoder` and
 `PacketDecoder.DecodePacket`, behind its own M4A demuxer and its own checks
 of the magic cookie and of each packet's element header, with a `recover`
 as the last resort (`internal/player/decode/alac.go`). Codex's B470 ALAC
-evaluation (2026-10-20, outside this repo) found the configuration panics
-and the container-path defects listed under 3 and 4; 1 and 2 are new.
+evaluation (2026-10-20, outside this repo) found the container path's
+defects (4), most of the configurations under 3, and an END-first packet
+accepted through the high-level `Decoder` (part of 2). The zero-run
+overrun (1), the single-channel case of 2, the short frame length and the
+32-bit pair under 3 were found here.
 
 **Status: not reported upstream.** The owner decides when; no one contacts
 upstream before then.
 
-Every input below was run against the pinned revision on Go 1.27.2,
-darwin/arm64, and the output quoted is what it printed.
+Each input quoted below with its output was run here against the pinned
+revision on Go 1.27.2, darwin/arm64, and the output is what it printed; the
+rest is Codex's record or the code.
 
 ## 1. The entropy decoder reads past its padded buffer and panics
 
