@@ -233,6 +233,22 @@ function initStats() {
   // analysis, and on every other page.
   initCamelotWheel();
 
+  // The player checklist: hidden unless this bridge is a player, and its
+  // Phone line opens the pairing dialog the Devices page uses.
+  const openPair = initPairModal();
+  loadPlayerChecklist(openPair);
+  const checkAgain = document.getElementById("player-checklist-refresh");
+  if (checkAgain) {
+    checkAgain.addEventListener("click", async () => {
+      setDisabled(checkAgain, true);
+      try {
+        await loadPlayerChecklist(openPair);
+      } finally {
+        setDisabled(checkAgain, false);
+      }
+    });
+  }
+
   const scanBtn = document.getElementById("scan-now");
   if (scanBtn) {
     scanBtn.addEventListener("click", async () => {
@@ -2839,33 +2855,21 @@ function initConsoleSessions() {
   });
 }
 
-function initDevices() {
-  initConsoleSessions();
+// initPairModal wires the pairing dialog (layout.html's "pair-dialog")
+// on a page that renders it, and returns the function that opens it at
+// its first step; null on a page without it. The Devices page's "Pair
+// manually" button and the dashboard checklist's Phone line both call
+// it, so the QR is the same token, from the same POST /api/tokens, on
+// either page. Closing after a pairing reloads the page, so a new device
+// shows in the Devices list and turns the Phone line green.
+function initPairModal() {
   const modal = document.getElementById("pair-modal");
-  const openBtn = document.getElementById("pair-open");
   const form = document.getElementById("pair-form");
   const stepForm = document.getElementById("pair-step-form");
   const stepResult = document.getElementById("pair-step-result");
+  if (!modal || !form || !stepForm || !stepResult) return null;
 
-  // Pending pairing requests are hydrated by the SSE stream wired at
-  // the bottom of this file. The initial snapshot lands within ms of
-  // EventSource connect; thereafter, frames arrive on state change
-  // and on the per-second SecondsUntilExpiry countdown while requests
-  // are pending. handlePairingAction still calls renderPendingPairing
-  // for instant post-tap visual feedback.
-
-  if (openBtn) {
-    openBtn.addEventListener("click", () => {
-      stepForm.hidden = false;
-      stepResult.hidden = true;
-      form.reset();
-      // reset defaults from input attributes after reset()
-      const urlInput = form.querySelector("input[name=url]");
-      if (urlInput) urlInput.value = urlInput.defaultValue;
-      modal.showModal();
-    });
-  }
-  modal?.querySelectorAll("[data-close]").forEach((b) =>
+  modal.querySelectorAll("[data-close]").forEach((b) =>
     b.addEventListener("click", () => {
       modal.close();
       // A brand-new pairing might need to appear in the list.
@@ -2873,7 +2877,7 @@ function initDevices() {
     })
   );
 
-  form?.addEventListener("submit", async (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = form.name.value.trim();
     const url = form.url.value.trim();
@@ -2892,7 +2896,7 @@ function initDevices() {
     }
   });
 
-  document.querySelectorAll("[data-copy]").forEach((btn) => {
+  modal.querySelectorAll("[data-copy]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.copy;
       const el = document.getElementById(id);
@@ -2912,6 +2916,34 @@ function initDevices() {
       }
     });
   });
+
+  return () => {
+    stepForm.hidden = false;
+    stepResult.hidden = true;
+    form.reset();
+    // reset defaults from input attributes after reset()
+    const urlInput = form.querySelector("input[name=url]");
+    if (urlInput) urlInput.value = urlInput.defaultValue;
+    modal.showModal();
+  };
+}
+
+function initDevices() {
+  initConsoleSessions();
+  const modal = document.getElementById("pair-modal");
+  const openBtn = document.getElementById("pair-open");
+  const stepForm = document.getElementById("pair-step-form");
+  const stepResult = document.getElementById("pair-step-result");
+
+  // Pending pairing requests are hydrated by the SSE stream wired at
+  // the bottom of this file. The initial snapshot lands within ms of
+  // EventSource connect; thereafter, frames arrive on state change
+  // and on the per-second SecondsUntilExpiry countdown while requests
+  // are pending. handlePairingAction still calls renderPendingPairing
+  // for instant post-tap visual feedback.
+
+  const openPair = initPairModal();
+  if (openBtn && openPair) openBtn.addEventListener("click", openPair);
 
   document.querySelectorAll(".revoke-token").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -7061,6 +7093,79 @@ function renderDoctorReport(report) {
     ul.appendChild(li);
   }
   results.appendChild(ul);
+}
+
+// ---- The player checklist on the dashboard (backlog B473) ----
+
+// loadPlayerChecklist fetches Player, DAC, Music and Phone, the lines
+// `bridge doctor` prints for a bridge that is a player, and paints them.
+// The panel stays hidden unless the bridge is one. Loaded with the page
+// and on "Check again", never polled: a build can ask MPD to find tracks.
+async function loadPlayerChecklist(openPair) {
+  const panel = document.getElementById("player-checklist-panel");
+  const list = document.getElementById("player-checklist");
+  const status = document.getElementById("player-checklist-status");
+  if (!panel || !list) return;
+  try {
+    const d = await API.get("/api/output/checklist");
+    if (!d || !d.active) {
+      panel.hidden = true;
+      return;
+    }
+    renderPlayerChecklist(list, d.lines || [], openPair);
+    if (status) status.textContent = "";
+    panel.hidden = false;
+  } catch (err) {
+    // Said only on a panel already showing: a failed first load of a
+    // bridge that may not be a player at all says nothing.
+    if (status && !panel.hidden) status.textContent = `Couldn't check: ${err.message}`;
+  }
+}
+
+// renderPlayerChecklist paints the lines in their own order (Player, DAC,
+// Music, Phone), each green or with its fix under it, in the doctor
+// panel's layout. Built with createElement/textContent: summaries carry
+// names a sound card and a player report. A Phone line that is not green
+// carries the pairing QR, through the pairing dialog.
+function renderPlayerChecklist(list, lines, openPair) {
+  list.replaceChildren();
+  for (const l of lines) {
+    const li = document.createElement("li");
+    li.className = "doctor-check";
+    li.dataset.status = l.status || "ok";
+
+    const badge = document.createElement("span");
+    badge.className = "doctor-badge";
+    badge.textContent = l.status || "ok";
+    li.appendChild(badge);
+
+    const name = document.createElement("span");
+    name.className = "doctor-name";
+    name.textContent = l.title || l.key || "";
+    li.appendChild(name);
+
+    const summary = document.createElement("span");
+    summary.className = "doctor-summary";
+    summary.textContent = l.summary || "";
+    li.appendChild(summary);
+
+    const qr = l.key === "phone" && l.status !== "ok" && typeof openPair === "function";
+    if (l.fix || qr) {
+      const hint = document.createElement("div");
+      hint.className = "doctor-hint";
+      hint.textContent = l.fix || "";
+      if (qr) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn";
+        btn.textContent = "Show pairing QR";
+        btn.addEventListener("click", openPair);
+        hint.append(" ", btn);
+      }
+      li.appendChild(hint);
+    }
+    list.appendChild(li);
+  }
 }
 
 async function loadDiagnostics() {
