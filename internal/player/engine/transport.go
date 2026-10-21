@@ -1,0 +1,1029 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+)
+
+// errCallDeadline is the cause a backend call's context ends with at its
+// deadline.
+var errCallDeadline = errors.New("player: the call's deadline passed")
+
+// sessPhase is where a session is.
+type sessPhase int
+
+const (
+	// sessStarting has Start under way.
+	sessStarting sessPhase = iota
+	// sessLive has had Start return nil: it plays, or is paused.
+	sessLive
+	// sessReleasing has had its release asked for and not acknowledged.
+	sessReleasing
+	// sessUnconfirmed passed its release deadline unacknowledged.
+	sessUnconfirmed
+)
+
+// stage is how far an occurrence has got.
+type stage int
+
+const (
+	stageRequested stage = iota // named in a Start or a Prepare
+	stagePrepared               // its decoder open
+	stageSubmitted              // its first frames in the sink
+	stageAudible                // heard
+)
+
+// occ is one hand-off of an entry.
+type occ struct {
+	id    OccurrenceID
+	entry uint32
+	ref   Reference
+	stage stage
+	// unwanted is why it must not be heard: an edit removed it, or made it
+	// no longer next, and the cut came too late.
+	unwanted string
+}
+
+func (oc *occ) public() Occurrence { return Occurrence{ID: oc.id, Entry: oc.entry, Ref: oc.ref} }
+
+// session is one playback session as the owner tracks it.
+type session struct {
+	id    SessionID
+	phase sessPhase
+	// chain is what was handed off, in play order: chain[0] is the audible
+	// occurrence, or the first while nothing is.
+	chain []*occ
+	// endSent is the backend told nothing follows the last occurrence;
+	// noMore, that the backend took no further successor, so what follows
+	// plays in a session of its own once this one has finished.
+	endSent, noMore bool
+	// succCall is the Prepare or Cut under way, one at a time;
+	// transportCall the Pause or Resume.
+	succCall, transportCall *call
+	paused, devReleased     bool
+	pauseTimer              timer
+	pauseSeq                uint64
+	releaseCall             *call
+	releaseTimer            timer
+}
+
+// index is where occurrence id is in the chain, or -1.
+func (s *session) index(id OccurrenceID) int {
+	for i, oc := range s.chain {
+		if oc.id == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// stopPause stops the pause's release deadline.
+func (s *session) stopPause() {
+	if s.pauseTimer != nil {
+		s.pauseTimer.Stop()
+		s.pauseTimer = nil
+	}
+}
+
+// stopTimers stops every timer the session armed.
+func (s *session) stopTimers() {
+	s.stopPause()
+	if s.releaseTimer != nil {
+		s.releaseTimer.Stop()
+	}
+}
+
+// move is where a transport command takes the selection.
+type move int
+
+const (
+	moveKeep move = iota
+	moveNext
+	movePrevious
+	moveTo // the command's ID, or the ID at its index
+)
+
+// act is what a transport command does to the transport.
+type act int
+
+const (
+	actNothing act = iota
+	actStart       // start a session at the selection, the first entry when none
+	actResume      // resume the paused session
+	actPause       // pause the session
+	actRelease     // release the session; the rule's then follows
+	actIntent      // set the pending intent while releasing
+	actStop        // stop a transport that holds no session
+)
+
+// rule is what one transport command does in one state.
+type rule struct {
+	move move
+	act  act
+	then Intent
+	// output is a rule that starts a session, or will: refused while the
+	// output is unknown or unavailable.
+	output bool
+}
+
+// policy is the package documentation's table, in one place: what op does
+// in state st, where live is a session held (false for paused at the start
+// of the selection, with none) and atEnd a Next whose selection is the last
+// entry with repeat off. Navigation keeps the transport's state: Next and
+// Previous play on while playing, stay paused while paused (the paused
+// content dropped, as a deletion drops it) and only select while stopped,
+// so a stopped bridge never starts sound on a Next; PlayID and PlayIndex
+// play in every state, as their OpenHome actions (SeekId, SeekIndex) are
+// used to; a Next past the end follows the end of the queue's rule. Release
+// 5a may adjust it once named controllers have been tested.
+func policy(op op, st State, live, atEnd bool) rule {
+	held := st == Playing || (st == Paused && live)
+	switch op {
+	case opPlay:
+		switch {
+		case st == Stopped, st == Paused && !live:
+			return rule{act: actStart, output: true}
+		case st == Paused:
+			return rule{act: actResume, output: true}
+		case st == Releasing:
+			return rule{act: actIntent, then: IntentPlay, output: true}
+		}
+	case opPause:
+		if st == Playing {
+			return rule{act: actPause}
+		}
+	case opStop:
+		switch {
+		case held:
+			return rule{act: actRelease, then: IntentStop}
+		case st == Paused:
+			return rule{act: actStop}
+		case st == Releasing:
+			return rule{act: actIntent, then: IntentStop}
+		}
+	case opNext:
+		if atEnd {
+			switch {
+			case held:
+				return rule{act: actRelease, then: IntentStop}
+			case st == Paused:
+				return rule{act: actStop}
+			case st == Releasing:
+				return rule{act: actIntent, then: IntentStop}
+			}
+			return rule{}
+		}
+		switch {
+		case st == Playing:
+			return rule{move: moveNext, act: actRelease, then: IntentPlay, output: true}
+		case st == Paused && live:
+			return rule{move: moveNext, act: actRelease, then: IntentPause}
+		}
+		return rule{move: moveNext}
+	case opPrevious:
+		switch {
+		case st == Playing:
+			return rule{move: movePrevious, act: actRelease, then: IntentPlay, output: true}
+		case st == Paused && live:
+			return rule{move: movePrevious, act: actRelease, then: IntentPause}
+		}
+		return rule{move: movePrevious}
+	case opPlayID, opPlayIndex:
+		switch {
+		case st == Stopped, st == Paused && !live:
+			return rule{move: moveTo, act: actStart, output: true}
+		case held:
+			return rule{move: moveTo, act: actRelease, then: IntentPlay, output: true}
+		case st == Releasing:
+			return rule{move: moveTo, act: actIntent, then: IntentPlay, output: true}
+		}
+	}
+	return rule{}
+}
+
+// transport runs a transport command by its rule.
+func (e *Engine) transport(c *command) {
+	o := &e.o
+	name := c.op.String()
+	switch c.op {
+	case opPlay, opPlayID, opPlayIndex, opNext, opPrevious:
+		if u := o.unconfirmed; u != nil {
+			e.answer(c, reply{err: refuse(name, ReasonReleaseUnconfirmed,
+				fmt.Sprintf("session %d's release is not confirmed: nothing opens the device until it is", u.Session))})
+			return
+		}
+	}
+	var target uint32
+	switch c.op {
+	case opPlayID:
+		if !o.q.has(c.id) {
+			e.answer(c, reply{err: refuse(name, ReasonIDNotFound, fmt.Sprintf("no entry %d", c.id))})
+			return
+		}
+		target = c.id
+	case opPlayIndex:
+		if c.index < 0 || c.index >= o.q.len() {
+			e.answer(c, reply{err: refuse(name, ReasonIndexNotFound, fmt.Sprintf("no index %d in %d entries", c.index, o.q.len()))})
+			return
+		}
+		target = o.q.entries[c.index].id
+	}
+	live := o.sess != nil && (o.sess.phase == sessStarting || o.sess.phase == sessLive)
+	atEnd := c.op == opNext && o.selected != 0 && o.q.after(o.selected, o.repeat) == 0
+	r := policy(c.op, o.state, live, atEnd)
+	if r.output {
+		if why := e.outputRefusal(name); why != nil {
+			e.answer(c, reply{err: why})
+			return
+		}
+	}
+	sel := o.selected
+	switch r.move {
+	case moveNext:
+		sel = o.q.after(o.selected, o.repeat)
+	case movePrevious:
+		sel = o.q.before(o.selected)
+	case moveTo:
+		sel = target
+	}
+	if r.act == actStart || (r.act == actIntent && r.then == IntentPlay) {
+		if sel == 0 {
+			sel = o.q.first()
+		}
+		if sel == 0 {
+			e.answer(c, reply{err: refuse(name, ReasonEmptyQueue, "the queue is empty")})
+			return
+		}
+	}
+	e.selectEntry(sel)
+	switch r.act {
+	case actNothing:
+		e.answer(c, reply{})
+	case actStart:
+		e.startSession(sel)
+		e.wait(c, true)
+	case actResume:
+		e.resume(c)
+	case actPause:
+		e.pause(c)
+	case actRelease:
+		stop := StopInfo{Reason: ReasonStopped, Detail: name}
+		if atEnd {
+			stop = StopInfo{Reason: ReasonEndOfQueue, Detail: "next past the last entry"}
+		}
+		e.releaseSession(o.sess, r.then, stop)
+		e.wait(c, r.then == IntentPlay)
+	case actIntent:
+		e.setIntent(r.then)
+		e.wait(c, r.then == IntentPlay)
+	case actStop:
+		o.state = Stopped
+		stop := StopInfo{Reason: ReasonStopped, Detail: name}
+		if atEnd {
+			stop = StopInfo{Reason: ReasonEndOfQueue, Detail: "next past the last entry"}
+		}
+		e.stopped(stop)
+		e.answer(c, reply{})
+	}
+}
+
+// outputRefusal is why nothing may start while the output is as it is, or
+// nil.
+func (e *Engine) outputRefusal(op string) error {
+	switch out := e.o.output; {
+	case !out.Known:
+		return refuse(op, ReasonOutputUnknown, "the output has not been reported yet")
+	case !out.Available:
+		return refuse(op, ReasonOutputUnavailable, out.Reason)
+	}
+	return nil
+}
+
+// selectEntry moves the selection.
+func (e *Engine) selectEntry(id uint32) {
+	if e.o.selected != id {
+		e.o.selected = id
+		e.saved()
+	}
+}
+
+// setIntent replaces the pending intent: the latest command's wins.
+func (e *Engine) setIntent(then Intent) {
+	o := &e.o
+	if then == IntentPlay {
+		o.settleErr = nil
+	}
+	if o.then != then {
+		o.then = then
+		e.visible()
+	}
+}
+
+// stopped records why playback stopped.
+func (e *Engine) stopped(why StopInfo) {
+	why.Entry, why.At = e.o.selected, e.clk.Now()
+	e.o.lastStop = why
+	e.visible()
+}
+
+// newOcc is a new hand-off of entry id.
+func (e *Engine) newOcc(id uint32) *occ {
+	o := &e.o
+	o.nextOcc++
+	en, _ := o.q.get(id)
+	return &occ{id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref}
+}
+
+// startSession starts a session at entry target. The owner starts one only
+// with no other session unacknowledged.
+func (e *Engine) startSession(target uint32) {
+	o := &e.o
+	o.nextSess++
+	s := &session{id: SessionID(o.nextSess), phase: sessStarting}
+	first := e.newOcc(target)
+	s.chain = []*occ{first}
+	o.sess = s
+	o.sessions[s.id] = s
+	o.state, o.starting, o.then = Playing, true, IntentStop
+	o.audible, o.join, o.settleErr = Audible{}, nil, nil
+	e.selectEntry(target)
+	e.visible()
+	req := StartRequest{
+		Session: s.id,
+		First:   first.public(),
+		Options: SessionOptions{PauseRelease: e.cfg.PauseRelease, DSD: e.cfg.DSD},
+		Events:  e.evts,
+	}
+	e.call(callStart, s, StartTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Start(ctx, req)} })
+}
+
+// releaseSession asks s to release; then is what follows the
+// acknowledgement, and why, when playback stops, is recorded.
+func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
+	o := &e.o
+	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
+		e.setIntent(then)
+		return
+	}
+	s.phase = sessReleasing
+	s.stopPause()
+	if tc := s.transportCall; tc != nil && tc.waiter != nil {
+		e.answer(tc.waiter, reply{})
+		tc.waiter = nil
+	}
+	s.transportCall = nil
+	o.then = then
+	if then == IntentPlay {
+		o.settleErr = nil
+	} else if why.Reason != "" {
+		e.stopped(why)
+	}
+	if o.maint == nil {
+		o.state = Releasing
+	}
+	o.starting, o.audible, o.join = false, Audible{}, nil
+	e.visible()
+	s.releaseCall = e.call(callRelease, s, 0, func(ctx context.Context) callResult { return callResult{err: e.be.Release(ctx, s.id)} })
+	s.releaseTimer = e.clk.AfterFunc(ReleaseTimeout, func() { e.post(msgReleaseDeadline{s: s}) })
+}
+
+// releaseDeadline is s's release past ReleaseTimeout: unconfirmed, the
+// pending intent dropped, and nothing opens the device until the
+// acknowledgement comes.
+func (e *Engine) releaseDeadline(s *session) {
+	o := &e.o
+	if s.phase != sessReleasing {
+		return
+	}
+	s.phase = sessUnconfirmed
+	if rc := s.releaseCall; rc != nil {
+		rc.cancel(errCallDeadline)
+	}
+	if o.sess == s {
+		o.sess = nil
+	}
+	o.unconfirmed = &ReleaseInfo{Session: s.id, Since: e.clk.Now()}
+	e.log.Warn("player: a session's release was not confirmed by its deadline; nothing opens the device until it is", "session", uint64(s.id), "deadline", ReleaseTimeout)
+	if o.then == IntentPlay {
+		o.settleErr = refuse("play", ReasonReleaseUnconfirmed, fmt.Sprintf("session %d's release is not confirmed", s.id))
+	}
+	o.then = IntentStop
+	if o.maint == nil {
+		o.state = Stopped
+	} else if m := o.maint; m.waiter != nil {
+		e.answer(m.waiter, reply{hold: Hold{Lease: m.lease, Expires: m.expires, ReleaseConfirmed: false}})
+		m.waiter = nil
+	}
+	e.visible()
+}
+
+// acked is s's release acknowledged: by Release returning nil, or by
+// Events.Released.
+func (e *Engine) acked(s *session) {
+	o := &e.o
+	switch s.phase {
+	case sessReleasing:
+		s.stopTimers()
+		delete(o.sessions, s.id)
+		if o.sess == s {
+			o.sess = nil
+		}
+		if u := o.unconfirmed; u != nil && u.Session == s.id {
+			o.unconfirmed = nil
+		}
+		if m := o.maint; m != nil {
+			m.confirmed = o.unconfirmed == nil
+			if m.waiter != nil {
+				e.answer(m.waiter, reply{hold: Hold{Lease: m.lease, Expires: m.expires, ReleaseConfirmed: m.confirmed}})
+				m.waiter = nil
+			}
+		}
+		e.afterRelease()
+	case sessUnconfirmed:
+		s.stopTimers()
+		delete(o.sessions, s.id)
+		if u := o.unconfirmed; u != nil && u.Session == s.id {
+			o.unconfirmed = nil
+			e.log.Info("player: the unconfirmed release was acknowledged late", "session", uint64(s.id))
+			e.visible()
+		}
+		if m := o.maint; m != nil && o.unconfirmed == nil {
+			m.confirmed = true
+			e.touched()
+		}
+	}
+}
+
+// afterRelease applies the pending intent once the release is
+// acknowledged.
+func (e *Engine) afterRelease() {
+	o := &e.o
+	then := o.then
+	o.then = IntentStop
+	e.visible()
+	switch {
+	case o.maint != nil:
+	case o.closing:
+		o.state = Stopped
+	case then == IntentPlay:
+		if why := e.outputRefusal("play"); why != nil {
+			o.settleErr, o.state = why, Stopped
+			return
+		}
+		target := o.selected
+		if target == 0 {
+			target = o.q.first()
+		}
+		if target == 0 {
+			o.settleErr, o.state = refuse("play", ReasonEmptyQueue, "the queue is empty"), Stopped
+			return
+		}
+		e.startSession(target)
+	case then == IntentPause:
+		o.state = Paused
+	default:
+		o.state = Stopped
+	}
+}
+
+// pause asks the session to pause; c is answered with the backend's
+// answer.
+func (e *Engine) pause(c *command) {
+	s := e.o.sess
+	tc := e.call(callPause, s, CallTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Pause(ctx, s.id)} })
+	tc.waiter = c
+	s.transportCall = tc
+}
+
+// resume asks the paused session to play on; c is answered with the
+// backend's answer.
+func (e *Engine) resume(c *command) {
+	s := e.o.sess
+	tc := e.call(callResume, s, CallTimeout, func(ctx context.Context) callResult {
+		how, err := e.be.Resume(ctx, s.id)
+		return callResult{err: err, resume: how}
+	})
+	tc.waiter = c
+	s.transportCall = tc
+}
+
+// current is session id when it is the one playing or starting.
+func (e *Engine) current(id SessionID) *session {
+	s := e.o.sess
+	if s == nil || s.id != id || (s.phase != sessStarting && s.phase != sessLive) {
+		return nil
+	}
+	return s
+}
+
+// following is the entry that follows id in play order, passing over the
+// entries refused in this pass, or 0.
+func (e *Engine) following(id uint32) uint32 {
+	o := &e.o
+	cur := id
+	for i := 0; i < o.q.len(); i++ {
+		next := o.q.after(cur, o.repeat)
+		if next == 0 {
+			return 0
+		}
+		if !o.pass[next] {
+			return next
+		}
+		cur = next
+	}
+	return 0
+}
+
+// reconcile holds the session's hand-offs to what the queue now says
+// follows the audible occurrence. An occurrence not yet submitted that is no
+// longer the one that follows is replaced by a new Prepare; a submitted one
+// is cut at its boundary, and when the cut comes too late it is marked so
+// that playback stops at once if it is heard. One Prepare or Cut is under
+// way at a time, and the tail's successor is named once its frames are in
+// the sink.
+func (e *Engine) reconcile(s *session) {
+	o := &e.o
+	if s == nil || s != o.sess || s.phase != sessLive || s.succCall != nil || o.closing {
+		return
+	}
+	for i := 1; i < len(s.chain); i++ {
+		prev, cur := s.chain[i-1], s.chain[i]
+		want := e.following(prev.entry)
+		if cur.entry == want {
+			cur.unwanted = ""
+			continue
+		}
+		if cur.unwanted != "" {
+			return
+		}
+		if cur.stage < stageSubmitted {
+			s.chain = s.chain[:i]
+			e.prepare(s, prev, want)
+			return
+		}
+		why := fmt.Sprintf("entry %d is no longer next", cur.entry)
+		if !o.q.has(cur.entry) {
+			why = fmt.Sprintf("entry %d was deleted", cur.entry)
+		}
+		e.cut(s, cur, why)
+		return
+	}
+	last := s.chain[len(s.chain)-1]
+	if last.stage < stageSubmitted || s.noMore {
+		return
+	}
+	switch want := e.following(last.entry); {
+	case want == 0 && !s.endSent:
+		e.prepare(s, last, 0)
+	case want != 0:
+		e.prepare(s, last, want)
+	}
+}
+
+// prepare names entry (0: nothing) as what follows after.
+func (e *Engine) prepare(s *session, after *occ, entry uint32) {
+	var next *occ
+	var pub *Occurrence
+	if entry != 0 {
+		next = e.newOcc(entry)
+		s.chain = append(s.chain, next)
+		p := next.public()
+		pub = &p
+		s.endSent = false
+	} else {
+		s.endSent = true
+	}
+	if e.o.join != nil {
+		e.o.join = nil
+		e.touched()
+	}
+	pc := e.call(callPrepare, s, CallTimeout, func(ctx context.Context) callResult {
+		return callResult{err: e.be.Prepare(ctx, s.id, after.id, pub)}
+	})
+	pc.after, pc.next = after, next
+	s.succCall = pc
+}
+
+// cut asks the backend to end the content before from at its boundary and
+// to discard from and what follows it.
+func (e *Engine) cut(s *session, from *occ, why string) {
+	cc := e.call(callCut, s, CallTimeout, func(ctx context.Context) callResult {
+		ok, err := e.be.Cut(ctx, s.id, from.id)
+		return callResult{err: err, cut: ok && err == nil}
+	})
+	cc.from, cc.why = from, why
+	s.succCall = cc
+}
+
+// skip records entry as refused before any of its content played.
+func (e *Engine) skip(entry uint32, u Unplayable) {
+	o := &e.o
+	if o.pass == nil {
+		o.pass = map[uint32]bool{}
+	}
+	o.pass[entry] = true
+	e.setSkips(func(m map[uint32]Skip) { m[entry] = Skip{Reason: u.Reason, Detail: u.Detail, At: e.clk.Now()} })
+}
+
+// allFailed reports a pass in which every entry was refused.
+func (e *Engine) allFailed() bool {
+	o := &e.o
+	for _, en := range o.q.entries {
+		if !o.pass[en.id] {
+			return false
+		}
+	}
+	return o.q.len() > 0
+}
+
+// callKind is a backend call's kind.
+type callKind int
+
+const (
+	callStart callKind = iota
+	callPrepare
+	callCut
+	callPause
+	callResume
+	callRelease
+	callDiscard
+)
+
+var callNames = [...]string{"start", "prepare", "cut", "pause", "resume", "release", "discard"}
+
+func (k callKind) String() string { return callNames[k] }
+
+// call is one backend call under way.
+type call struct {
+	id      uint64
+	kind    callKind
+	sess    *session
+	cancel  context.CancelCauseFunc
+	timer   timer
+	expired bool
+	waiter  *command
+	// after and next are a Prepare's; from and why a Cut's.
+	after, next, from *occ
+	why               string
+}
+
+// callResult is what a backend call returned.
+type callResult struct {
+	err    error
+	cut    bool
+	resume ResumeResult
+}
+
+// call runs fn on a goroutine of its own under a context derived from the
+// engine's life, ended at timeout (none for 0), and hands the owner what it
+// returns.
+func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(ctx context.Context) callResult) *call {
+	o := &e.o
+	o.nextCall++
+	c := &call{id: o.nextCall, kind: kind, sess: s}
+	ctx, cancel := context.WithCancelCause(e.life)
+	c.cancel = cancel
+	if timeout > 0 {
+		c.timer = e.clk.AfterFunc(timeout, func() { e.post(msgCallExpired{c: c}) })
+	}
+	o.calls[c.id] = c
+	e.spawn(func() { e.post(msgCallDone{c: c, r: fn(ctx)}) })
+	return c
+}
+
+// callDone applies what a call returned; a call past its deadline was
+// already treated as failed, and what it returns late is not taken.
+func (e *Engine) callDone(c *call, r callResult) {
+	o := &e.o
+	delete(o.calls, c.id)
+	if c.timer != nil {
+		c.timer.Stop()
+	}
+	c.cancel(nil)
+	if c.expired {
+		return
+	}
+	s := c.sess
+	switch c.kind {
+	case callStart:
+		e.startDone(s, r)
+	case callPrepare:
+		if s.succCall == c {
+			s.succCall = nil
+		}
+		if e.current(s.id) != s {
+			return
+		}
+		if r.err != nil {
+			if c.next != nil {
+				if i := s.index(c.next.id); i >= 0 {
+					s.chain = s.chain[:i]
+				}
+			}
+			s.noMore = true
+			if !errors.Is(r.err, ErrSessionEnding) {
+				e.log.Info("player: the backend took no successor; what follows plays in a session of its own", "session", uint64(s.id), "err", r.err)
+			}
+			return
+		}
+		e.reconcile(s)
+	case callCut:
+		if s.succCall == c {
+			s.succCall = nil
+		}
+		if e.current(s.id) != s {
+			return
+		}
+		if i := s.index(c.from.id); i >= 0 {
+			if r.cut {
+				s.chain = s.chain[:i]
+				s.endSent = false
+			} else {
+				for _, oc := range s.chain[i:] {
+					oc.unwanted = c.why
+				}
+			}
+		}
+		e.reconcile(s)
+	case callPause:
+		e.pauseDone(c, r)
+	case callResume:
+		e.resumeDone(c, r)
+	case callRelease:
+		if r.err == nil {
+			e.acked(s)
+		}
+	}
+}
+
+// startDone applies Start's answer: the session plays; or its first entry
+// was refused and is skipped; or it failed, and playback stops with why.
+func (e *Engine) startDone(s *session, r callResult) {
+	o := &e.o
+	if s.phase != sessStarting || o.sess != s {
+		return
+	}
+	if r.err == nil {
+		s.phase = sessLive
+		if s.chain[0].stage < stageSubmitted {
+			s.chain[0].stage = stageSubmitted
+		}
+		// A start is the end of a pass: what was refused before it is
+		// offered again, once, by the entries that follow it.
+		o.pass = nil
+		e.touched()
+		e.reconcile(s)
+		return
+	}
+	var u *Unplayable
+	if errors.As(r.err, &u) {
+		e.skipAtStart(s, *u)
+		return
+	}
+	o.settleErr = &Error{Reason: ReasonBackend, Op: "start", Detail: "the backend could not start the session", Err: r.err}
+	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonBackend, Detail: r.err.Error()})
+}
+
+// skipAtStart skips a session's first entry, refused before any of its
+// content played: the selection moves to the entry that follows and a new
+// session starts there, until every entry of the pass has been refused.
+func (e *Engine) skipAtStart(s *session, u Unplayable) {
+	o := &e.o
+	entry := s.chain[0].entry
+	e.skip(entry, u)
+	if e.allFailed() {
+		o.settleErr = refuse("play", ReasonAllUnplayable, "every entry was refused before any of its content played")
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonAllUnplayable, Detail: "every entry was refused before any of its content played"})
+		return
+	}
+	next := e.following(entry)
+	if next == 0 {
+		o.settleErr = &Error{Reason: ReasonUnplayable, Op: "play", Detail: fmt.Sprintf("entry %d: %s", entry, u.Reason)}
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonUnplayable, Detail: fmt.Sprintf("entry %d, the last, was refused: %s", entry, u.Reason)})
+		return
+	}
+	e.selectEntry(next)
+	e.releaseSession(s, IntentPlay, StopInfo{})
+}
+
+// pauseDone applies Pause's answer.
+func (e *Engine) pauseDone(c *call, r callResult) {
+	o := &e.o
+	s := c.sess
+	if s.transportCall == c {
+		s.transportCall = nil
+	}
+	w := c.waiter
+	if e.current(s.id) != s || s.phase != sessLive {
+		if w != nil {
+			e.answer(w, reply{})
+		}
+		return
+	}
+	if r.err != nil {
+		if w != nil {
+			e.answer(w, reply{err: &Error{Reason: ReasonBackend, Op: "pause", Detail: "the backend could not pause", Err: r.err}})
+		}
+		return
+	}
+	s.paused = true
+	o.state = Paused
+	e.visible()
+	s.pauseSeq++
+	seq := s.pauseSeq
+	s.pauseTimer = e.clk.AfterFunc(e.cfg.PauseRelease+ReleaseTimeout, func() { e.post(msgPauseOverdue{s: s, seq: seq}) })
+	if w != nil {
+		e.answer(w, reply{})
+	}
+}
+
+// resumeDone applies Resume's answer; a refusal leaves the session paused
+// with the reason.
+func (e *Engine) resumeDone(c *call, r callResult) {
+	o := &e.o
+	s := c.sess
+	if s.transportCall == c {
+		s.transportCall = nil
+	}
+	w := c.waiter
+	if e.current(s.id) != s || s.phase != sessLive {
+		if w != nil {
+			e.answer(w, reply{})
+		}
+		return
+	}
+	if r.err != nil {
+		o.resumeErr = r.err.Error()
+		e.touched()
+		if w != nil {
+			e.answer(w, reply{err: &Error{Reason: ReasonBackend, Op: "play", Detail: "the backend could not resume", Err: r.err}})
+		}
+		return
+	}
+	s.paused, s.devReleased = false, false
+	s.stopPause()
+	o.state, o.resumed, o.resumeErr = Playing, r.resume, ""
+	e.visible()
+	if w != nil {
+		e.answer(w, reply{})
+	}
+}
+
+// callExpired is a call that did not answer by its deadline: its context
+// ends, its waiter is answered, and its session, when it is the current
+// one, is released.
+func (e *Engine) callExpired(c *call) {
+	o := &e.o
+	if _, ok := o.calls[c.id]; !ok {
+		return
+	}
+	c.expired = true
+	c.cancel(errCallDeadline)
+	why := fmt.Sprintf("%s did not answer within its deadline", c.kind)
+	if w := c.waiter; w != nil {
+		e.answer(w, reply{err: refuse(w.op.String(), ReasonTimeout, why)})
+		c.waiter = nil
+	}
+	s := c.sess
+	if s == nil {
+		return
+	}
+	if s.transportCall == c {
+		s.transportCall = nil
+	}
+	if s.succCall == c {
+		s.succCall = nil
+	}
+	if e.current(s.id) == s {
+		o.settleErr = refuse("play", ReasonTimeout, why)
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonTimeout, Detail: why})
+	}
+}
+
+// onAudible is the played content crossing an occurrence's first frame:
+// the selection moves to its entry. An occurrence an edit removed, or made
+// no longer next, stops playback at once.
+func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
+	o := &e.o
+	s := e.current(id)
+	if s == nil {
+		return
+	}
+	i := s.index(oid)
+	if i < 0 {
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: fmt.Sprintf("occurrence %d, which the engine did not hand off, became audible", oid)})
+		return
+	}
+	oc := s.chain[i]
+	if oc.unwanted != "" {
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: oc.unwanted + ", and it became audible"})
+		return
+	}
+	s.chain = s.chain[i:]
+	oc.stage = stageAudible
+	o.audible = Audible{Occurrence: oc.id, Entry: oc.entry}
+	o.pos = Position{Occurrence: oc.id}
+	o.starting = false
+	if _, ok := o.skips[oc.entry]; ok {
+		e.setSkips(func(m map[uint32]Skip) { delete(m, oc.entry) })
+	}
+	e.selectEntry(oc.entry)
+	e.touched()
+	e.reconcile(s)
+}
+
+// onFinished is everything handed off played out: playback stops on the
+// last entry, or, when the backend took no successor the queue now has,
+// that successor plays in a session of its own.
+func (e *Engine) onFinished(id SessionID) {
+	s := e.current(id)
+	if s == nil {
+		return
+	}
+	if next := e.following(e.o.selected); s.noMore && next != 0 {
+		e.selectEntry(next)
+		e.releaseSession(s, IntentPlay, StopInfo{})
+		return
+	}
+	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonEndOfQueue, Detail: "the last entry played out"})
+}
+
+// onFault is a failure after content played: recorded, playback stopped,
+// never restarted.
+func (e *Engine) onFault(id SessionID, f Fault) {
+	o := &e.o
+	s := e.current(id)
+	if s == nil {
+		return
+	}
+	f.Entry = o.selected
+	if i := s.index(f.Occurrence); i >= 0 {
+		f.Entry = s.chain[i].entry
+	}
+	if f.At.IsZero() {
+		f.At = e.clk.Now()
+	}
+	faults := append(slices.Clone(o.faults), f)
+	if len(faults) > MaxFaults {
+		faults = faults[len(faults)-MaxFaults:]
+	}
+	o.faults = faults
+	o.settleErr = refuse("play", ReasonFault, string(f.Reason))
+	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonFault, Detail: string(f.Reason) + ": " + f.Detail})
+}
+
+// onRefused is a successor refused before any of its content played: it
+// is skipped, and what follows it is named instead.
+func (e *Engine) onRefused(id SessionID, oid OccurrenceID, u Unplayable) {
+	s := e.current(id)
+	if s == nil {
+		return
+	}
+	i := s.index(oid)
+	if i <= 0 {
+		return
+	}
+	e.skip(s.chain[i].entry, u)
+	s.chain = s.chain[:i]
+	s.endSent = false
+	e.reconcile(s)
+}
+
+// onDeviceReleased is a paused session's own release of the device.
+func (e *Engine) onDeviceReleased(id SessionID) {
+	o := &e.o
+	s := e.current(id)
+	if s == nil || !s.paused {
+		return
+	}
+	s.devReleased = true
+	s.stopPause()
+	if u := o.unconfirmed; u != nil && u.Session == s.id && u.Paused {
+		o.unconfirmed = nil
+		e.log.Info("player: the paused session's release of the device was reported late", "session", uint64(s.id))
+		e.visible()
+		return
+	}
+	e.touched()
+}
+
+// pauseOverdue is a pause whose release of the device was not reported by
+// PauseRelease plus ReleaseTimeout: unconfirmed, under the same rule as a
+// release.
+func (e *Engine) pauseOverdue(s *session, seq uint64) {
+	o := &e.o
+	if e.current(s.id) != s || !s.paused || s.devReleased || seq != s.pauseSeq || o.unconfirmed != nil {
+		return
+	}
+	o.unconfirmed = &ReleaseInfo{Session: s.id, Since: e.clk.Now(), Paused: true}
+	e.log.Warn("player: a paused session's release of the device was not reported by its deadline; nothing opens the device until it is", "session", uint64(s.id))
+	e.visible()
+}
+
+// discard asks the backend to drop what it prepared outside a session.
+func (e *Engine) discard() {
+	e.call(callDiscard, nil, CallTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Discard(ctx)} })
+}

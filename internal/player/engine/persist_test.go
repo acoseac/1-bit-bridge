@@ -1,0 +1,464 @@
+package engine
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+// testQueueFile is the queue file's format as the tests read it, apart
+// from the engine's own reader.
+type testQueueFile struct {
+	Version  int    `json:"version"`
+	Revision uint64 `json:"revision"`
+	IDs      struct {
+		Next     uint64 `json:"next"`
+		Reserved uint64 `json:"reserved"`
+	} `json:"ids"`
+	Tokens struct {
+		Current  uint32 `json:"current"`
+		Reserved uint64 `json:"reserved"`
+	} `json:"tokens"`
+	Repeat   bool   `json:"repeat"`
+	Shuffle  bool   `json:"shuffle"`
+	Selected uint32 `json:"selected"`
+	Entries  []struct {
+		ID   uint32 `json:"id"`
+		Ref  string `json:"ref"`
+		Meta []byte `json:"meta"`
+	} `json:"entries"`
+}
+
+// readQueueFile reads queue file bytes.
+func readQueueFile(t *testing.T, data []byte) testQueueFile {
+	t.Helper()
+	var f testQueueFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("the queue file does not parse: %v", err)
+	}
+	return f
+}
+
+// idsOfFile is a queue file's IDs in order.
+func idsOfFile(f testQueueFile) []uint32 {
+	var out []uint32
+	for _, e := range f.Entries {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// TestAMaximumSizeQueueRoundTrips pins the file's cap against the real
+// encoding of a full queue: 1,000 entries carrying 16 MiB of metadata,
+// sized so base64 rounds up on each, and references every byte of which
+// JSON escapes, saved and loaded back exactly.
+func TestAMaximumSizeQueueRoundTrips(t *testing.T) {
+	h := startHarness(t)
+	worst := strings.Repeat(`"\<&`, MaxReferenceBytes/4)
+	last := uint32(0)
+	for i := 0; i < MaxEntries; i++ {
+		n := 16777
+		if i < 72 {
+			n = 16780
+		}
+		meta := make([]byte, n)
+		for j := range meta {
+			meta[j] = byte(i*31 + j)
+		}
+		id, err := h.eng.InsertAfter(bg, last, ref(worst), meta)
+		h.must("insert", err)
+		last = id
+	}
+	h.must("repeat", h.eng.SetRepeat(bg, true))
+	before := h.snap()
+	if total := before.q.meta; total != MaxTotalMetadataBytes {
+		t.Fatalf("the queue holds %d bytes of metadata, want %d", total, MaxTotalMetadataBytes)
+	}
+	h.restart()
+	info, err := os.Stat(h.queuePath())
+	h.must("stat the queue file", err)
+	if info.Size() > maxQueueFileBytes {
+		t.Fatalf("a full queue's file is %d bytes, over the cap %d", info.Size(), maxQueueFileBytes)
+	}
+	after := h.snap()
+	if !slices.Equal(after.IDs(), before.IDs()) || after.Selected() != before.Selected() || !after.Repeat() {
+		t.Fatalf("the reloaded queue differs: %d entries, selected %d, repeat %v", after.Len(), after.Selected(), after.Repeat())
+	}
+	for _, id := range before.IDs() {
+		want, _ := before.Read(id)
+		got, _ := after.Read(id)
+		if got.Ref != want.Ref || !bytes.Equal(got.Meta, want.Meta) {
+			t.Fatalf("entry %d reloaded differently", id)
+		}
+	}
+	if after.Token() <= before.Token() {
+		t.Fatalf("the token did not advance across the restart: %d then %d", before.Token(), after.Token())
+	}
+}
+
+// TestABurstWritesABoundedNumberOfTimes pins the coalescing: 500 inserts
+// over five seconds write at most once per maximum dirty age and once
+// after, and the file after the flush is the state.
+func TestABurstWritesABoundedNumberOfTimes(t *testing.T) {
+	h := startHarness(t)
+	for i := 0; i < 500; i++ {
+		h.insert("t")
+		h.clk.Advance(10 * time.Millisecond)
+	}
+	h.clk.Advance(writeCoalesce)
+	h.waitSnap("written", func(sn *Snapshot) bool { p := sn.Persist(); return p.Written == p.Revision })
+	if n, bound := h.files.writes(), int(5*time.Second/writeMaxAge)+2; n > bound {
+		t.Fatalf("500 inserts over 5 s wrote %d times, more than %d", n, bound)
+	}
+	h.shutdown()
+	sn := h.snap()
+	data, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	f := readQueueFile(t, data)
+	if !slices.Equal(idsOfFile(f), sn.IDs()) || f.Selected != sn.Selected() || f.Tokens.Current != sn.Token() {
+		t.Fatalf("the file after the flush is not the state: %d entries, selected %d, token %d", len(f.Entries), f.Selected, f.Tokens.Current)
+	}
+}
+
+// TestAnOlderWriteNeverLandsAfterANewerOne pins the one writer: a write
+// held and released late lands, and then the newer state lands after it,
+// never the other way round.
+func TestAnOlderWriteNeverLandsAfterANewerOne(t *testing.T) {
+	h := startHarness(t)
+	hold := newGate()
+	h.files.mu.Lock()
+	h.files.holdQueue[1] = hold
+	h.files.mu.Unlock()
+	h.insert("a")
+	h.clk.Advance(writeCoalesce)
+	h.files.waitFor(t, "the first write", func() bool { return h.files.queueAttempts == 1 })
+	h.insert("b", "c")
+	h.clk.Advance(writeMaxAge)
+	hold.open()
+	sn := h.waitSnap("written", func(sn *Snapshot) bool { p := sn.Persist(); return p.Written == p.Revision })
+	h.files.mu.Lock()
+	writes := slices.Clone(h.files.queueWrites)
+	h.files.mu.Unlock()
+	var revs []uint64
+	for _, w := range writes {
+		revs = append(revs, readQueueFile(t, w).Revision)
+	}
+	if !slices.IsSorted(revs) || len(slices.Compact(slices.Clone(revs))) != len(revs) {
+		t.Fatalf("writes landed in the order %v", revs)
+	}
+	data, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	if f := readQueueFile(t, data); f.Revision != sn.Persist().Revision || len(f.Entries) != 3 {
+		t.Fatalf("the file holds revision %d with %d entries, want the newest, %d with 3", f.Revision, len(f.Entries), sn.Persist().Revision)
+	}
+}
+
+// TestAFailingWriteStaysDirtyAndRetries pins a write that fails: the state
+// stays dirty, one log line, retries with backoff, and the newest state
+// lands once the disk takes it.
+func TestAFailingWriteStaysDirtyAndRetries(t *testing.T) {
+	h := startHarness(t)
+	full := errors.New("no space left on device")
+	h.files.mu.Lock()
+	h.files.failQueue = func(n int) error {
+		if n <= 3 {
+			return full
+		}
+		return nil
+	}
+	h.files.mu.Unlock()
+	h.insert("a")
+	h.clk.Advance(writeCoalesce)
+	sn := h.waitSnap("the first failure", func(sn *Snapshot) bool { return sn.Persist().Failures == 1 })
+	if p := sn.Persist(); p.Written >= p.Revision || !strings.Contains(p.Err, "no space") {
+		t.Fatalf("after a failed write %+v, want dirty with the error", p)
+	}
+	h.insert("b")
+	backoff := writeRetryMin
+	for k := 2; k <= 4; k++ {
+		h.clk.Advance(backoff)
+		backoff *= 2
+		h.files.waitFor(t, "the retry", func() bool { return h.files.queueAttempts >= k })
+		if k < 4 {
+			h.waitSnap("the failure", func(sn *Snapshot) bool { return sn.Persist().Failures == k })
+		}
+	}
+	sn = h.waitSnap("written", func(sn *Snapshot) bool { p := sn.Persist(); return p.Written == p.Revision && p.Err == "" })
+	if n := h.logs.count("queue file write failed"); n != 1 {
+		t.Fatalf("%d log lines for three failed writes, want 1: %v", n, h.logs.all())
+	}
+	data, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	if f := readQueueFile(t, data); len(f.Entries) != 2 {
+		t.Fatalf("the file holds %d entries, want the newest state's 2", len(f.Entries))
+	}
+}
+
+// TestAMutationDuringTheShutdownFlushIsRefused pins the order of shutdown:
+// mutations are refused from its first moment, so nothing lands after the
+// flush.
+func TestAMutationDuringTheShutdownFlushIsRefused(t *testing.T) {
+	h := startHarness(t)
+	h.insert("a")
+	hold := newGate()
+	h.files.mu.Lock()
+	h.files.holdQueue[h.files.queueAttempts+1] = hold
+	h.files.mu.Unlock()
+	h.cancel()
+	h.files.waitFor(t, "the flush", func() bool { return h.files.queueAttempts >= 1 })
+	_, err := h.eng.InsertAfter(bg, 0, ref("b"), nil)
+	h.refused("an insert during the flush", err, ReasonClosed)
+	hold.open()
+	h.drive(h.ran)
+	h.down = true
+	data, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	if f := readQueueFile(t, data); len(f.Entries) != 1 || f.Entries[0].Ref != "a" {
+		t.Fatalf("the flushed file holds %+v", f.Entries)
+	}
+}
+
+// savedQueue runs an engine that saves the queue a, b with b selected, and
+// returns the harness, stopped, and the file's JSON as a map to corrupt.
+func savedQueue(t *testing.T) (*harness, map[string]any) {
+	t.Helper()
+	h := startHarness(t)
+	ids := h.insert("a", "b")
+	h.must("delete a", h.eng.Delete(bg, ids[0]))
+	h.insert("c")
+	h.shutdown()
+	h.joinAfter(h.eng)
+	data, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	var m map[string]any
+	h.must("parse", json.Unmarshal(data, &m))
+	return h, m
+}
+
+// writeJSON writes m as the queue file.
+func writeJSON(t *testing.T, h *harness, m map[string]any) []byte {
+	t.Helper()
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.queuePath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// entriesOfFile is the file map's entries.
+func entriesOfFile(m map[string]any) []any { return m["entries"].([]any) }
+
+// metaEntries is n entries with IDs from 1, each with size bytes of
+// metadata.
+func metaEntries(n, size int) []any {
+	out := make([]any, n)
+	meta := base64.StdEncoding.EncodeToString(make([]byte, size))
+	for i := range out {
+		out[i] = map[string]any{"id": i + 1, "ref": "r", "meta": meta}
+	}
+	return out
+}
+
+// TestEachKindOfBadFileIsMovedAside pins every way a queue file can be bad:
+// the engine starts empty, logs the reason once, renames the file aside
+// with a timestamp and never deletes it, and goes on to write a new one.
+func TestEachKindOfBadFileIsMovedAside(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bad  func(t *testing.T, h *harness, m map[string]any) []byte
+	}{
+		{"unreadable", func(t *testing.T, h *harness, m map[string]any) []byte {
+			h.files.readErr["queue.json"] = fs.ErrPermission
+			data, _ := os.ReadFile(h.queuePath())
+			return data
+		}},
+		{"oversized", func(t *testing.T, h *harness, m map[string]any) []byte {
+			data := append([]byte(`{"version":1}`), bytes.Repeat([]byte(" "), maxQueueFileBytes)...)
+			h.must("write", os.WriteFile(h.queuePath(), data, 0o600))
+			return data
+		}},
+		{"not JSON", func(t *testing.T, h *harness, m map[string]any) []byte {
+			h.must("write", os.WriteFile(h.queuePath(), []byte("{"), 0o600))
+			return []byte("{")
+		}},
+		{"another version", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["version"] = 2
+			return writeJSON(t, h, m)
+		}},
+		{"a zero ID", func(t *testing.T, h *harness, m map[string]any) []byte {
+			entriesOfFile(m)[0].(map[string]any)["id"] = 0
+			return writeJSON(t, h, m)
+		}},
+		{"a duplicate ID", func(t *testing.T, h *harness, m map[string]any) []byte {
+			es := entriesOfFile(m)
+			es[1].(map[string]any)["id"] = es[0].(map[string]any)["id"]
+			return writeJSON(t, h, m)
+		}},
+		{"an ID past its reservation", func(t *testing.T, h *harness, m map[string]any) []byte {
+			reserved := m["ids"].(map[string]any)["reserved"].(float64)
+			entriesOfFile(m)[0].(map[string]any)["id"] = reserved + 1
+			return writeJSON(t, h, m)
+		}},
+		{"a selection not in the queue", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["selected"] = 4242
+			return writeJSON(t, h, m)
+		}},
+		{"a bad reference", func(t *testing.T, h *harness, m map[string]any) []byte {
+			entriesOfFile(m)[0].(map[string]any)["ref"] = "bad\u0001"
+			return writeJSON(t, h, m)
+		}},
+		{"more entries than the queue holds", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["entries"] = metaEntries(MaxEntries+1, 0)
+			m["selected"] = 1
+			return writeJSON(t, h, m)
+		}},
+		{"an entry's metadata past its bound", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["entries"] = metaEntries(1, MaxMetadataBytes+1)
+			m["selected"] = 1
+			return writeJSON(t, h, m)
+		}},
+		{"metadata past the queue's bound", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["entries"] = metaEntries(MaxTotalMetadataBytes/MaxMetadataBytes+1, MaxMetadataBytes)
+			m["selected"] = 1
+			return writeJSON(t, h, m)
+		}},
+		{"shuffle on", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["shuffle"] = true
+			return writeJSON(t, h, m)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, m := savedQueue(t)
+			if ids := m["ids"].(map[string]any); ids["reserved"].(float64) < MaxEntries+1 {
+				t.Fatalf("the saved reservation %v is too small for the test", ids["reserved"])
+			}
+			original := tc.bad(t, h, m)
+			lines := len(h.logs.all())
+			h.boot()
+			if n := h.snap().Len(); n != 0 {
+				t.Fatalf("a bad file loaded %d entries", n)
+			}
+			aside, _ := filepath.Glob(h.queuePath() + ".bad-*")
+			if len(aside) != 1 {
+				t.Fatalf("moved aside: %v, want one file", aside)
+			}
+			got, err := os.ReadFile(aside[0])
+			h.must("read the file moved aside", err)
+			if !bytes.Equal(got, original) {
+				t.Fatal("the file moved aside is not the original")
+			}
+			if _, err := os.Lstat(h.queuePath()); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the bad file is still at the queue's path: %v", err)
+			}
+			moved := 0
+			for _, l := range h.logs.all()[lines:] {
+				if strings.Contains(l, "moved aside") {
+					moved++
+				}
+			}
+			if moved != 1 {
+				t.Fatalf("%d log lines say the file was moved aside, want 1: %v", moved, h.logs.all()[lines:])
+			}
+			delete(h.files.readErr, "queue.json")
+			h.insert("fresh")
+			h.restart()
+			if ids := h.snap().IDs(); len(ids) != 1 {
+				t.Fatalf("after a bad file the engine saved %v", ids)
+			}
+		})
+	}
+}
+
+// TestAFailedMoveAsideKeepsTheOriginal pins a bad file the engine cannot
+// rename: it stays where it is, byte for byte, the engine starts empty and
+// writes no queue file over it, the log says so, and edits wait until the
+// operator moves it.
+func TestAFailedMoveAsideKeepsTheOriginal(t *testing.T) {
+	h, _ := savedQueue(t)
+	h.must("write", os.WriteFile(h.queuePath(), []byte("{"), 0o600))
+	h.files.renameErr = errors.New("read-only file system")
+	h.boot()
+	if h.snap().Len() != 0 {
+		t.Fatal("the bad file loaded")
+	}
+	if ed := h.snap().Edits(); ed.Refused != ReasonFileStuck {
+		t.Fatalf("edits %+v, want refused %s", ed, ReasonFileStuck)
+	}
+	_, err := h.eng.InsertAfter(bg, 0, ref("a"), nil)
+	h.refused("an insert while the bad file stays", err, ReasonFileStuck)
+	h.must("repeat", h.eng.SetRepeat(bg, true))
+	h.clk.Advance(writeMaxAge)
+	if n := h.logs.count("could not be moved aside"); n != 1 {
+		t.Fatalf("%d log lines say so, want 1: %v", n, h.logs.all())
+	}
+	h.restart()
+	if got, _ := os.ReadFile(h.queuePath()); string(got) != "{" {
+		t.Fatalf("the original was overwritten with %q", got)
+	}
+	h.files.mu.Lock()
+	h.files.renameErr = nil
+	h.files.mu.Unlock()
+	h.must("the operator moves it aside", os.Rename(h.queuePath(), h.queuePath()+".mine"))
+	if _, err := h.eng.InsertAfter(bg, 0, ref("a"), nil); err != nil {
+		t.Fatalf("an insert once the file is moved: %v", err)
+	}
+	h.restart()
+	if n := h.snap().Len(); n != 1 {
+		t.Fatalf("the engine saved %d entries once the file was moved", n)
+	}
+}
+
+// TestLoadStartsPastTheReservationAndTheLargestID pins where a run's IDs
+// begin: one block past the larger of the reservation file's and the
+// queue file's largest ID.
+func TestLoadStartsPastTheReservationAndTheLargestID(t *testing.T) {
+	t.Run("the reservation is larger", func(t *testing.T) {
+		h := newHarness(t)
+		writeReserveFile(t, h, 30000, 500)
+		h.boot()
+		if id := h.insert("a")[0]; id != 30000+idBlock+1 {
+			t.Fatalf("the first ID is %d, want %d", id, 30000+idBlock+1)
+		}
+	})
+	t.Run("the largest ID is larger", func(t *testing.T) {
+		h, m := savedQueue(t)
+		ids := m["ids"].(map[string]any)
+		ids["next"], ids["reserved"] = 20001, 20000
+		entriesOfFile(m)[0].(map[string]any)["id"] = 20000
+		m["selected"] = 20000
+		writeJSON(t, h, m)
+		writeReserveFile(t, h, 10000, 500)
+		h.boot()
+		if id := h.insert("a")[0]; id != 20000+idBlock+1 {
+			t.Fatalf("the first ID is %d, want %d", id, 20000+idBlock+1)
+		}
+	})
+}
+
+// TestAStartIsStopped pins the state after a restart: stopped, with the
+// queue, the modes and the selection as saved, and the token advanced.
+func TestAStartIsStopped(t *testing.T) {
+	h := startHarness(t)
+	h.must("repeat", h.eng.SetRepeat(bg, true))
+	ids, _ := h.playing(1, "a", "b", "c")
+	token := h.snap().Token()
+	h.restart()
+	sn := h.snap()
+	if sn.State() != Stopped || !slices.Equal(sn.IDs(), ids) || sn.Selected() != ids[1] || !sn.Repeat() || sn.Token() <= token {
+		t.Fatalf("after a restart %s, IDs %v, selected %d, repeat %v, token %d (was %d)", sn.State(), sn.IDs(), sn.Selected(), sn.Repeat(), sn.Token(), token)
+	}
+	if h.be.starts() != 0 {
+		t.Fatal("a restart started a session")
+	}
+}
