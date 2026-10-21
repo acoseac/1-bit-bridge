@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
 - [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
 - [2026-10-21 — B470 PR 2b round 2: the writer's watch, five sink windows, the position test's Linux race, and pcm-test's stop, time and keys](#2026-10-21--b470-pr-2b-round-2-the-writers-watch-five-sink-windows-the-position-tests-linux-race-and-pcm-tests-stop-time-and-keys)
@@ -50259,3 +50260,170 @@ follow every rate. Round 4 changed a test only, so the result holds for it.
 Not exercised: an xrun, which cannot be made to order on the box. Noted:
 `--pause-at` acts on the harness's one-second tick, so a pause lands up to
 a second after the time asked (5 s gave 6.015 s); the sink is not involved.
+
+## 2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind
+
+**What landed.** `output.player` (`internal/config/player.go`), the player's
+UUID (`player_uuid.go`), `internal/usbid` (the serial guard, the ids, the
+port grammar), the sysfs identity reader (`internal/alsa/sysfs.go`) and the
+fake trees its tests read (`internal/alsa/sysfstest`, manifests in
+`internal/alsa/testdata/sysfs`), binding resolution and the check after
+open (`internal/player/binding`), the LAN state (`internal/player/lan`),
+`Device.Node`, `SinkConfig.Admit` and `GuardNodeOpens` in `internal/alsapcm`,
+and `bridge output dac inspect` and `bind` (`cmd/bridge/output_dac_bind.go`).
+The engine (PR 4b) and the hotplug watcher (PR 4a2) use these and are not
+here: this PR resolves on demand.
+
+**The player block never fails the load, by design and against the obvious
+shape.** Validate is the config's one refusal point, and the brief's "refuses
+an enabled player in public mode" read first as an error from it. It is not:
+"an invalid player block disables the player with a logged reason; it never
+stops MPD, the library or the server" decides it, so `PlayerEnabled` is the
+refusal and Validate logs it (`output.player: the player is off`, the reason
+as an attribute) and returns nil. The YAML half needed the same treatment:
+`Load` decodes with `KnownFields(true)`, so a typo'd key or a wrong type
+inside the block failed the whole config before Validate ran, and yaml.v3's
+own type errors quote up to seven bytes of the value (`cannot unmarshal !!str
+\`GOBAR-7...\``), which is a serial in the wrong field. So the block is read by
+hand (`playerReader`): `UnmarshalYAML` never errors, each value is decoded by
+yaml.v3 (a bool or an int reads as it does elsewhere in the config), every
+message is this package's own (field, line, never a value unless it is a
+short plain token), and a block that does not read is kept as the node the
+file held, which `MarshalYAML` returns, so `Save` writes the operator's text
+back instead of dropping it. A block that reads and is refused (`dsdMode:
+auto`, a serial under a port binding) keeps its typed fields and round-trips
+too. The log line is written on every Validate (each Load, each settings
+PATCH); for a block the operator asked for and cannot have, that repetition
+is the point.
+
+**A serial is one type everywhere.** `usbid.Serial` holds the value behind a
+pointer: fmt calls `Format` only on a value it can interface with, so a Serial
+in an unexported field is printed by reflection, and with a plain string
+inside that print is the serial (control C05 below shows it). With the
+pointer it is an address. Because of the pointer a missing `Format` leaked
+nothing and the first test, which only asked for no leak, stayed green with
+`Format` gone; `TestSerialPrintsTheRedactionForEveryVerb` now requires every
+verb, width and flag to print the redaction itself, which only `Format` does
+(`%x` of a Stringer is the hex of its string). `LogValue` is redundant with
+`Format` for slog's own handlers and is kept for any handler that resolves a
+LogValuer without fmt; the test asks slog for the kind. There is no
+`MarshalText`, on purpose: yaml.v3, encoding/xml and many log encoders would
+take it. `MarshalYAML` is the way out, for the config file, written 0600 by
+`Save` (CreateTemp's mode). The env derivation walks struct fields with yaml
+tags, and the Serial struct has none, so no variable sets a serial
+(`TestThePlayerIsEnvSettableButItsSerialIsNot`).
+
+**"A reflection walk over every exported DTO type" is a walk over the
+source.** Go cannot list a package's types at run time, and a hand-kept
+registry of the console's 205 struct types and /v1's 43 would fail every
+future PR that adds one. `TestNoDTOHoldsASerialAsText` (in `internal/admin`,
+beside the omitempty guard) parses `internal/admin`, `internal/api`,
+`internal/config` and `cmd/bridge`, takes every declared type as a root,
+follows each field's type into this module's packages, and fails on a field
+named for a serial that holds text (a string, `[]string`, `[]byte`, a pointer
+to one) unless it is a `…Label`. Numeric serials (an Ogg stream's) are not
+USB serials. The reflection half is on values: the settings response built
+from a config bound by serial (`TestTheSettingsResponseCarriesNoSerial`), the
+config's JSON and printed forms, and the binding's slog lines
+(`TestWhatResolveReturnsLogsNoSerial`).
+
+**The port path is ours, anchored as udev anchors.** The controller segments
+follow udev's path_id walk (the nearest PCI device, the nearest platform
+device above a PCI run, each run named by its innermost member), so a Pi 4's
+socket 3 is `platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3:1.0` and a Pi
+5's GO bar `platform-xhci-hcd.0/usb2-1:1.0` (its captured long name says
+`usb-xhci-hcd.0-1`). It is not byte for byte udev's ID_PATH: segments are
+joined with `/` (sysfs names never hold one, so the string splits without
+ambiguity), and the root hub's generation (`usb1`, `usb2`, `usb3`, from its
+`speed`) stands where udev writes `usb-0`, because an xHCI controller has a
+USB 2 and a USB 3 root hub whose port numbers both start at 1. A controller
+under ACPI, virtio or a platform name with a colon has no port path; its
+cards still bind by serial or model.
+
+**The sysfs walk resolves every link itself.** `filepath.EvalSymlinks` follows
+an absolute link out of a fake tree before a containment check sees it, so
+the reader walks components through an `os.Root`, refusing an absolute link
+and a `..` past the root, counting links (40 is a loop) and steps. Fake trees
+are laid out at test time from manifests: a committed symlink checks out as a
+text file on Windows, and the alsa testdata README already records that for
+`symlinked-pcm`. The manifests are synthetic and say so; the GO bar's place in
+`pi5-go-bar` comes from the captured long name, and every serial is made up.
+
+**Resolve's choices.** Any transient card (in one tree only, read as two
+units, or vanished mid-read) makes the whole answer `identity_transient`,
+because a card the kernel is adding may be a second unit of the bound model:
+answering `available` beside it could pick the first of two. A USB card whose
+identity cannot be read makes a serial or model match ambiguous for the same
+reason; a port binding is not affected, since one port is one card. A port
+binding names a port and an interface, not a model: it carries no ids (each
+binding only its own fields), another model in the port is the player's DAC,
+and the bound unit in another port is not (`device_missing`). A hub in the
+bound port is a topology change, `binding_invalid` like a controller that is
+gone: what is behind the hub is not "this port". A malformed binding resolves
+to `binding_invalid` with the config's own reason.
+
+**The check after open is two halves, and the sink's reopen needed the
+second.** `Device.Node` asks INFO again on the open descriptor; `Checker.Check`
+reads that card's identity from sysfs and compares it with what Resolve read.
+The brief asked for the API between opening the PCM and sending samples; a
+sink also opens the device again after a released pause, thirty seconds or
+more later, inside its writer, where no caller can stand between the open and
+the first frame. So `SinkConfig.Admit` runs the check at the open and at every
+reopen, closing a refused device as `ReasonWrongDevice` and leaving the sink
+released. `--verify-card N` runs `Check` with card N in the node's place, so
+the owner can see a refusal before PR 4b exists.
+
+**bind refuses a running bridge.** A serve holds the config in memory, and its
+next settings save writes that copy over the file, which would drop a binding
+written beside it. bind therefore takes the data dir's lock
+(`holdDataDirForMutation`), as restore and clear-missing do, then the admin
+probe on a fixed port. It also refuses a block that did not read, since `Save`
+would write the old node back in place of the new binding.
+
+**LAN eligibility is the player's own definition.** DLNA's
+`IsLANEligibleInterface` admits a private address on any up interface,
+tunnels included, and an IPv6 ULA alone; the player needs IPv4 SSDP and
+"private space alone is insufficient" (design §9), so `internal/player/lan`
+also requires a carrier (`FlagRunning`), multicast, and not point-to-point,
+and refuses an interface with a Tailscale or CGNAT address outright. Docker's
+`docker0` counts while a container runs on it; PR 5a decides which addresses
+its listener serves.
+
+**Red first.** Each package's tests were written first and failed to build
+(`undefined: Serial`, `undefined: Inventory`, `cfg.Output.Player undefined`,
+`undefined: outputBindEnv`, `d.Node undefined`, `undefined: SysfsSnapshot`,
+`undefined: Interface`), then passed. One assertion was wrong on the first
+green run (`(made now)` against the line `(made now, kept in player-uuid)`).
+
+**Controls: 48, each on a committed tree, each restored from git, all red.**
+Two mutations first failed to build (a duplicate `case "auto"`, an import left
+unused) and were rewritten; the tree was clean after every run. The ambiguity
+tests fail when Resolve returns the first match (C01) or `For` skips its own
+resolve (C48); the swap test when the check skips the identity compare (C02);
+`TestSerialPrintsTheRedactionForEveryVerb` when `Format` goes (C03); the
+NUL-padded serial tests when serials are compared untrimmed (C04); the
+unexported-field print when the guard holds a plain string (C05); and one test
+each when the guard loses `MarshalJSON` (C06) or `LogValue` (C07),
+`MarshalYAML` writes the redaction (C08), the label shows a short serial
+(C09), Validate refuses over the block (C10), a reason quotes yaml's error
+(C11), the player runs off Linux (C12) or on a public bridge (C13), a binding
+takes another kind's field (C14-C16), an id takes `0X` (C17),
+`pauseReleaseSeconds` takes 0 (C18), `dsdMode` takes auto (C19), a scalar
+mixer reads (C20), a resampling key is merely unknown (C21), an unanchored
+port parses (C22), a link climbs out of the root (C23), the link counter goes
+(C24), the 4 KiB cap goes (C25), an absolute link is followed (C26), the
+directory cap goes (C27), a /proc-only card is unreadable rather than
+transient (C28), Resolve passes over a transient card (C29), an unreadable
+card is ruled out (C30), the hub check goes (C31), the gone-controller check
+goes (C32), a port binding follows a unit (C33), the endpoint check goes
+(C34), a sink opens or reopens without Admit (C35, C36), Node returns what
+Open recorded (C37), Open is not guarded (C38), the sysfs reader skips the
+host watch (C39), a DTO holds a serial as text (C40), Validate reads the
+host's sysfs (C41), an unreadable player-uuid is replaced (C42), bind writes
+beside a serve (C43) or over an unread block (C44) or prints the serial (C45),
+and the LAN takes a tunnel (C46) or an interface with no carrier (C47).
+
+**Hardware: none in this PR.** The owner's gate on the Pi (GO bar, Hugo 2,
+Altair) follows it; ambiguity needs two units of one model, which the fake
+trees give (`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`,
+`TestASerialTwoUnitsShareIsAmbiguous`).
