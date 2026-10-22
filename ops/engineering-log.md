@@ -50639,3 +50639,127 @@ and shutdown with the device busy in a kernel call, bounded.
   within an entry and shuffle (7a); the admin page (6a); DSD playback.
 - The rules text is not in `.claude/rules/output.md` yet: the owner applies
   it from beside the branch.
+
+### Round 2
+
+The Claude API and Codex reviewed round 1 (#1309): ten findings, all
+real, one of them (10) a policy the coordinator decided. One more of
+finding 9's class turned up while testing finding 8. Each was fixed
+red-first, with a negative control on the committed tree (restored from
+git each time), more than one where a fix has layers. Round 1's rules
+text had been applied from beside the branch (6379b262) before this
+round; this round's went beside it again (`/tmp/b470-4b1-rules-r2.md`).
+
+What changed:
+
+- 983fe411, 74f8d6ca. **An edit marks the occurrences it unwants in its
+  own step** (1): an occurrence was marked unwanted only once its Cut
+  answered false, and nothing was issued while a call was under way, so an
+  Audible for a deleted successor that beat the call's answer selected an
+  entry outside the queue (the next start moved the whole queue file
+  aside), and a Cut that then answered true emptied the chain and panicked
+  the owner (`index out of range [-1]` in `reconcile`). `reconcile` marks
+  and clears per pair before it looks at the call; a false Cut sets `late`;
+  `onAudible` stops on an unwanted occurrence crossed on the way and never
+  selects an entry outside the queue; no Cut or Prepare answer empties the
+  chain. A dangling selection at load is cleared and logged, not a bad file.
+- 3574cbb7. **An acknowledged session is finished** (2): a release deadline
+  queued behind its acknowledgement made the finished session unconfirmed
+  for good, and set Stopped under a newer playing session. `sessAcked`, and
+  `releaseDeadline` ignores a session no longer registered.
+- dbf79495. **A reservation is made only once its directory entry is
+  fsynced** (3): `atomicwrite.WriteBytesDurable` fails on the directory
+  fsync `WriteBytes` tolerates (every other caller unchanged;
+  `SetSyncParentDirForTest` for other packages' tests), and the engine's
+  reservation writes through it.
+- d37e12c9. **A start publishes its token only under a durable reservation**
+  (4): 0, none, until an edit's reservation lands.
+- 418efabd, 69410d40. **A bad file with no name to move to stays** (5): a
+  name is taken on ErrNotExist only, the next tried only when Lstat says
+  the name exists; any other error, or 100 names taken, leaves the file
+  stuck.
+- 1d109d5e. **Caller slices are copied before the owner sees them** (6):
+  `do` clones the conditions, `InsertAfter` the metadata.
+- 37b062ad. **A call's context carries its deadline, and a late answer is
+  late whatever the order** (7): `callCtx` reports the deadline (the
+  engine's clock) and its timer ends the context; answers are stamped as
+  they return and `callDone` expires one at or past it first. A Release
+  keeps its own rule, its late acknowledgement taken.
+- 54d7006d, 0d22046d. **A Play that does not happen says why** (9, and its
+  sibling): a pending play an intent replaces, a starting session released
+  to stop, and a Play whose Resume is under way when its session is
+  released answer `ReasonSuperseded`, or the reason already recorded.
+- b3a93deb, 8416723b, a3f486f5. **Commands wait only behind their own
+  lane** (8): inserts, deletes and DeleteAll wait for a reservation write,
+  at most `reserveTimeout` (5 s), then are refused, as is every edit that
+  needs one until it lands; Play and Pause wait for a transport call, the
+  other transport commands behind them; Stop, output reports, maintenance
+  and the modes never wait. A Stop, or a report that stops playback,
+  answers the parked transport commands as it runs (a Pause nil, the rest
+  superseded or the report's reason), and EnterMaintenance refuses every
+  parked command.
+- 228792a1. **Next and Previous select and play in every state** (10), as
+  ohPipeline's SourcePlaylist does; refused while the output is unknown or
+  unavailable and on an empty queue, like PlayID.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestAnEntryHeardWhileItsCallIsUnderWayStops` (8 cases) | "b was heard with its call under way: selected 4098 (b is 4098), playing" |
+| 1 | `TestACutAnsweredAfterItsEntryWasHeardStops`, `TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain` | owner panic, `index out of range [-1]` |
+| 1 | `TestADanglingSelectionIsClearedAtLoad` | the queue moved aside, loaded empty |
+| 2 | `TestADeadlineQueuedBehindItsAcknowledgementChangesNothing` | unconfirmed session 1; after a Next, Stopped under the new session |
+| 3 | `TestAReservationIsMadeOnlyWithItsDirectoryEntry` | ID 16385 taken without a durable entry; token 16385 published again after the rollback |
+| 4 | `TestAStartWithoutItsReservationPublishesNoToken` | tokens [16385 16385] and [12289 12289] |
+| 5 | `TestABadFileWithNoNameToMoveToStays` | New did not return (5 s watchdog), both cases |
+| 6 | `TestACancelledInsertKeepsNoneOfTheCallersSlices` | DATA RACE; the caller's reused buffer stored; the insert ran at a generation never sent |
+| 7 | `TestALateAnswerIsRefusedWhateverTheOrder` | no deadline on the context; the late Start, Pause and Resume answered nil |
+| 9 | `TestAPlayReplacedBeforePlaybackSaysSo` (6 cases) | nil, with the transport stopped |
+| 8 | `TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt`, `TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite`, `TestAStopDuringASlowOpenIsTakenAtOnce`, `TestAnOutputReportOvertakesTheTransportCommandsWaiting` | the report, the enter and the Stop waited past the watchdog |
+| 10 | `TestTheStateCommandTable` (8 cells), `TestTheTableEdges` | the old cells; Next of an empty queue and with no output answered nil |
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | no mark while a call is under way | the two Prepare cases (no longer next); the Cut cases mark before the Cut |
+| 1 | the mark ignored in `onAudible` | every no-longer-next case and the crossing test; the deleted ones stay green behind the queue check, red once it goes too |
+| 1 | only the reported occurrence checked | `TestAnUnwantedOccurrenceCrossedUnreportedStops` |
+| 1 | a Cut of the heard occurrence truncates | `TestACutAnsweredAfterItsEntryWasHeardStops` (no stop) |
+| 1 | a Prepare's refusal truncates at 0 | green: `reconcile`'s empty-chain guard covers; red (panic) with both gone |
+| 1 | a dangling selection refused | `TestADanglingSelectionIsClearedAtLoad` |
+| 2 | `sessAcked` and the registration check | red with both gone; each alone green, the other covering |
+| 3 | `WriteBytes` for the reservation; the strict barrier tolerated; the fallback unsynced | the engine test; and atomicwrite's strict tests |
+| 4 | the token taken without `needs` | both cases |
+| 5 | Lstat errors counted as taken; no name bound | the failing-Lstat case (once the test counted its asks: the bound alone also ends it); the taken-names case |
+| 6 | the metadata, or the conditions, not copied | each case |
+| 7 | lateness unchecked; no deadline on the context | all three cases |
+| 9 | `setIntent`, `releaseSession` of a starting session, a resuming Play: not superseded | the matching cases |
+| 8 | one queue stopping at its first blocked command; laneless commands parked; Stop or the report not superseding; maintenance not refusing; no bound; no refusal while overdue | each its test (parking laneless commands alone is green: `drainParked` runs them in the same step) |
+| 10 | Next and Previous only select while stopped | the stopped cells and both edges |
+
+Two controls found weak tests, each fixed before the control ran again:
+the bound on aside names also stopped the failing Lstat (5), and no test
+parked two lanes at once (8). The first red run hung below the watchdog:
+the test called the fake's `count` inside `waitFor`'s condition, which
+holds the fake's mutex (`countLocked` now).
+
+Not taken: a refusal of the pass reset's cut. Any queue change resets the
+pass, so an entry skipped as unplayable is offered again and a submitted
+successor past it is cut; if the cut is late, the successor's audible
+report stops playback (`removed_entry_audible`) on an edit that had
+nothing to do with it. Round 1 behaves so; round 2's mark only adds the
+Audible that beats the Cut's answer. Reported for the next round.
+
+A stress run at GOMAXPROCS 1, 2 and 4 found a flake round 1 already had:
+`TestAPausesReleaseThatNeverComesIsUnconfirmed` moved the clock past the
+deadline of a Prepare whose answer could still be on its way, and the
+answer that lost expired and released the paused session (5 failures in
+300 runs on round 1's code, 2 on round 2's). It, and the new late-answer
+test, wait for the owner to take that answer first (be003a08): 0 in 300.
+Every other test that moves the clock does so with no live session, or
+one already releasing.
+
+The suite: 94 tests, about 13 s a run under `-race`; ten runs in a row
+green, and twice each at GOMAXPROCS 1, 2 and 4.
