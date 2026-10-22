@@ -1,6 +1,7 @@
 package backup_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
@@ -169,13 +171,49 @@ func TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone(t *testing
 	}
 }
 
+// moveOnLiveDatabase changes the live database at dbPath after a snapshot, as
+// a running install does, and lays a -wal and a -shm beside it, as an
+// install that stopped without a checkpoint leaves them. It returns the bytes
+// of the three, which a restore that writes nothing leaves as they are: a
+// restore of bridge.db removes the -wal and the -shm before it renames the
+// snapshot's copy over the database.
+func moveOnLiveDatabase(t *testing.T, dbPath string) map[string][]byte {
+	t.Helper()
+	db, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE after_snapshot (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{
+		dbPath + "-wal": []byte("the live write-ahead log"),
+		dbPath + "-shm": []byte("the live shared memory"),
+	}
+	for p, b := range files {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files[dbPath] = readBytes(t, dbPath)
+	return files
+}
+
 // TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile: a
 // snapshot's player-uuid is read by the rule the player reads its own with
 // (config.ReadPlayerUUIDFile), and one that does not hold one UUID fails the
 // restore before any file is written: the box's identity is not replaced
 // with it, none is made from it, and nothing the snapshot lists before it is
-// restored either, so the install is never half restored. The refusal names
-// the snapshot's file and says how to restore the rest.
+// restored either, so the install is never half restored. The database is
+// the first file a restore writes, and its -wal and -shm go before it, so a
+// check made after it would leave a new database beside the old install:
+// the live database, which moved on after the snapshot, and its -wal and
+// -shm must be as they were (Codex on B505's round 1: the test restored no
+// database). The refusal names the snapshot's file and says how to restore
+// the rest.
 func TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"empty", ""},
@@ -214,7 +252,9 @@ func TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile(t *testin
 					t.Fatal(err)
 				}
 			}
+			database := moveOnLiveDatabase(t, src.ManifestDB)
 			err = backup.Restore(snap, backup.Targets{
+				ManifestDB: src.ManifestDB,
 				TokensJSON: src.TokensJSON,
 				ServerCert: src.ServerCert,
 				ServerKey:  src.ServerKey,
@@ -231,6 +271,13 @@ func TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile(t *testin
 			for p, want := range after {
 				if got := readBytes(t, p); string(got) != string(want) {
 					t.Errorf("restore replaced %s before refusing the player-uuid: %q", filepath.Base(p), got)
+				}
+			}
+			for p, want := range database {
+				if !pathExists(t, p) {
+					t.Errorf("restore removed %s before refusing the player-uuid", filepath.Base(p))
+				} else if got := readBytes(t, p); string(got) != string(want) {
+					t.Errorf("restore replaced %s before refusing the player-uuid", filepath.Base(p))
 				}
 			}
 			none := filepath.Join(t.TempDir(), config.PlayerUUIDFile)

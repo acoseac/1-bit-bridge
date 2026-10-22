@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // runBackup runs bridge backup on cfgPath and returns the snapshot it wrote.
@@ -81,10 +84,11 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 
 // TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo: a snapshot
 // whose player-uuid does not hold one UUID is refused before the restore
-// writes anything, and the refusal names the file and the way through.
-// Removing the file from the snapshot is that way: the restore then keeps
-// the box's identity, as for a snapshot taken before the file was part of
-// the bundle.
+// writes anything, the database included, which the restore writes first
+// (Codex on B505's round 1: the test watched the config and the identity
+// alone), and the refusal names the file and the way through. Removing the
+// file from the snapshot is that way: the restore then keeps the box's
+// identity, as for a snapshot taken before the file was part of the bundle.
 func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T) {
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
 	if _, _, err := config.EnsurePlayerUUID(dataDir); err != nil {
@@ -104,12 +108,26 @@ func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T)
 		t.Fatal(err)
 	}
 	// The install moves on after the snapshot, so a restore that wrote the
-	// config shows.
+	// config or the database shows.
 	edit := []byte("# written after the snapshot\n")
 	if err := os.WriteFile(cfgPath, append(readFileT(t, cfgPath), edit...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfgBefore := readFileT(t, cfgPath)
+	const afterSnapshot = "Artist/Album/After the snapshot.flac"
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{
+		Path: afterSnapshot, Size: 1, ModTime: time.Unix(0, 0).UTC(), Title: "After",
+	}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
 	if code == 0 || strings.Contains(stdout, "Restore complete") {
@@ -120,6 +138,9 @@ func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T)
 	}
 	if got := readFileT(t, cfgPath); string(got) != string(cfgBefore) {
 		t.Fatalf("the refused restore wrote bridge.yaml:\n%s", got)
+	}
+	if !trackExists(t, filepath.Dir(dataDir), afterSnapshot) {
+		t.Fatal("the refused restore replaced the database with the snapshot's")
 	}
 	if got, err := config.ReadPlayerUUID(dataDir); err != nil || got != boxID {
 		t.Fatalf("the refused restore changed the player's identity: %q, %v", got, err)
