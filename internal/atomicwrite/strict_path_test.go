@@ -127,6 +127,25 @@ func TestWriteBytesDurable_RefusesALinkBelowTheRoot(t *testing.T) {
 	}
 }
 
+// TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites pins the check
+// the write makes again once it has created the directories it needs, before
+// it syncs anything: another writer that puts a symbolic link where a
+// directory was missing, between the write's first check and its creation of
+// that directory (the beforeMkdirAll seam), has the write refused
+// (ErrNotUnderRoot) with nothing fsynced and no file written where the link
+// leads, though the directory the write wanted now exists, through the link.
+func TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites(t *testing.T) {
+	root := realTempDir(t)
+	real := filepath.Join(root, "real")
+	mkdirs(t, real)
+	prev := beforeMkdirAll
+	t.Cleanup(func() { beforeMkdirAll = prev })
+	beforeMkdirAll = func(string) { symlink(t, real, filepath.Join(root, "a")) }
+	synced := stubSyncDir(t, nil)
+	err := WriteBytesDurable(root, filepath.Join(root, "a", "ids"), []byte("reserved"), ".durable-*.tmp")
+	refusedPlainly(t, "WriteBytesDurable with a link put where a directory was missing", err, synced, filepath.Join(real, "ids"))
+}
+
 // TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot pins the layouts that stay
 // allowed: a root that is itself a link (some installs make the data
 // directory one), and a link above the root (macOS's /var). The root is
