@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -180,6 +181,7 @@ func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
 		"a conf.d entry a directory":     {files: map[string]string{"etc/asound.conf": plain}, dir: "etc/alsa/conf.d/20-b.conf", unread: true},
 		"a file past the read's bounds":  {files: map[string]string{"etc/asound.conf": plain + strings.Repeat("#\n", maxFileBytes)}, unread: true},
 		"more files than the read takes": {files: tooMany, unread: true},
+		"conf.d a file, not a directory": {files: map[string]string{"etc/asound.conf": plain, "etc/alsa/conf.d": plain}, unread: true},
 		"a top-level @hooks":             {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
 		"a value the parser refuses":     {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0 }\n"}},
 	} {
@@ -194,6 +196,38 @@ func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
 		if c.Unread() != tc.unread || c.ok != tc.ok {
 			t.Errorf("%s: unread %v ok %v, want unread %v ok %v", name, c.Unread(), c.ok, tc.unread, tc.ok)
 		}
+	}
+}
+
+// TestAConfigurationDirectoryThatCannotBeListedIsUnread: the loader lists
+// conf.d itself, so a conf.d that is there and cannot be listed, or whose
+// entries cannot be stat'ed, leaves the configuration unread, where a listing
+// that swallowed the error took asound.conf alone for the whole
+// configuration. Unix permissions make both; a superuser, and Windows, are
+// not refused this way.
+func TestAConfigurationDirectoryThatCannotBeListedIsUnread(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs permissions that refuse this user")
+	}
+	for name, mode := range map[string]os.FileMode{
+		"conf.d that cannot be listed":           0o300,
+		"conf.d whose entries cannot be stat'ed": 0o444,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTree(t, root, map[string]string{
+				"etc/alsa/conf.d/10-a.conf": "pcm.other { type hw\n    card 0 }\n",
+				"etc/asound.conf":           "pcm.hwcard { type hw\n    card \"Audio\" }\n",
+			})
+			confd := filepath.Join(root, "etc", "alsa", "conf.d")
+			if err := os.Chmod(confd, mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(confd, 0o755) })
+			if c := LoadPCMConfig(root); !c.Unread() || c.ok {
+				t.Errorf("unread %v ok %v, want unread", c.Unread(), c.ok)
+			}
+		})
 	}
 }
 

@@ -1,10 +1,11 @@
 package alsa
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -37,7 +38,8 @@ func LoadPCMConfig(root string) PCMConfig {
 
 // Unread reports whether the read of the configuration stopped at a file
 // that is there and could not be read (an open or read error, what opened
-// as no regular file, a file past the read's bounds), rather than at a file
+// as no regular file, a file past the read's bounds, a conf.d it could not
+// list), rather than at a file
 // it read that holds what the parser does not model. Either way no
 // definition is used; but what an unread file says is not known, and it
 // can read the next time, while a file the parser does not model resolves
@@ -316,9 +318,10 @@ func walkChain(c PCMConfig, name string, cards []Card, seen map[string]bool, hop
 // loadPCMDefs reads conf.d and then asound.conf. The second result, ok, is
 // false when any file that is present cannot be read, or parses as
 // something this reader does not fully model, and the third, unread, is
-// true when the read stopped at the first of those. A missing file is
-// neither: the other files still count. A false ok means no definition may
-// be used.
+// true when the read stopped at the first of those; a conf.d that is there
+// and cannot be listed is a file that cannot be read. A missing file, or a
+// missing conf.d, is neither: the other files still count. A false ok
+// means no definition may be used.
 func loadPCMDefs(root string) (map[string]pcmDef, bool, bool) {
 	defs := map[string]pcmDef{}
 	var files int
@@ -356,10 +359,20 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool, bool) {
 			defs[name] = def
 		}
 	}
-	matches, _ := filepath.Glob(filepath.Join(root, "etc", "alsa", "conf.d", "*.conf"))
-	sort.Strings(matches)
-	for _, path := range matches {
-		add(path)
+	// conf.d is listed here, not by filepath.Glob, which takes a directory
+	// it cannot stat, open or list for one with nothing in it: a conf.d
+	// that is there and cannot be listed is a configuration not read.
+	confd := filepath.Join(root, "etc", "alsa", "conf.d")
+	switch entries, err := os.ReadDir(confd); {
+	case err == nil:
+		// ReadDir sorts by name.
+		for _, e := range entries {
+			if ok, _ := filepath.Match("*.conf", e.Name()); ok {
+				add(filepath.Join(confd, e.Name()))
+			}
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		bad, unread = true, true
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
 	if bad {
