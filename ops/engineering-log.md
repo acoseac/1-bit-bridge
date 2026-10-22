@@ -51790,3 +51790,142 @@ wait behind a release share the session after it, whichever set the intent
 last, so a Next and then a PlayID, both sent while releasing, answer nil
 once the PlayID's entry is heard; shutdown's ReasonClosed, as in rounds 5
 and 6.
+
+### Round 8
+
+Codex and the Claude API reviewed round 7 (#1309); Argon was unavailable.
+Round 7's two rules notes were applied from beside the branch (8338c2f1 for
+`player.md`, dabd28d9 for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r8.md` for `player.md` and
+`/tmp/b470-4b1-rules-r8-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. All four findings were verified against the code and
+were real; none was rejected. Each was fixed red first, with negative
+controls on the committed tree, restored from git each time.
+
+What changed:
+
+- 53520045, f18c1814. **A Next, Previous, PlayID or PlayIndex sent while a
+  skip releases supersedes the play command the skip carried** (the Claude
+  API, Medium). A Play whose first entry was refused at its start was carried
+  on to the session after the skip's release with its session reset to 0,
+  among the commands that share that session, and a PlayID sent during that
+  release took the pending-intent path, where nothing superseded it: once the
+  PlayID's entry was heard, the Play answered nil, though the playback its
+  own session had moved on to never happened. Sent a step earlier, while the
+  first session started, the same PlayID superseded it (`replaced`), so the
+  answer hung on the PlayID's timing against the engine's own skip. `carry`
+  now marks the waiters it hands on (`waiter.carried`, cleared when the next
+  session starts), and one of the four commands on the pending-intent path
+  supersedes the carried ones, naming itself (`replacedCarry`, through
+  `supersedeWaiters`, which `replaced` shares). A Play sent then moves no
+  target and shares the session after the release with the carried Play, as
+  the commands that set the intent themselves do
+  (`TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt`).
+- c1cbbe49, 38f2497f. **A file path that ends in a separator, `.` or `..` is
+  refused, never cleaned into another file** (Codex 3, P2). `filepath.Abs`
+  cleaned `ReservePath` `data/ids/` and `data/ids/.` to `data/ids`, the
+  strict writer wrote the reservation there, and the engine read the path as
+  given, which a regular file answers ENOTDIR: measured through a restart,
+  every insert was then refused with `file_not_moved_aside`, the move aside
+  under that name failing too. A queue path so spelled made the queue writer
+  put a directory in the file's place, with the same end; a queue path
+  ending in `..` too, its reservation path `x/...ids` being a plain file's.
+  `atomicwrite.NamesDirectory` is the one definition (a last element that is
+  none, `.` or `..`); `WriteBytesDurable` and `ProbeDurable` refuse such a
+  path before cleaning it, an `*fs.PathError` wrapping `EISDIR`, a root
+  keeping its trailing separator, and New refuses such a queue or
+  reservation path, naming it, with nothing written.
+- dd202712, 57d5cf77, 3c1459be, 00a54fd0. **The strict writer tells a mount
+  by the ID the kernel gives it, on every write and at the destination too,
+  and takes a fallback's bytes only from a plain file** (Codex 1 and 2, P2).
+  Round 7's probe matched the mount table by spelling, so on a filesystem
+  that folds case `root/Player` reached a bind mount the table names
+  `root/player`, and passed; it looked for a bind mount at New alone; and it
+  never looked at the destination, so a file mounted at the reservation
+  path passed, the rename over it failed with EBUSY, and with matching bytes
+  the fallback fsynced the mounted file and the root and answered nil, the
+  mount source's entry never synced. On Linux `plain` now reads the mount ID
+  of each directory, and of the destination when it is there, with statx
+  (`STATX_MNT_ID`, Linux 5.8; `mountIDOf`), a link at the end not followed,
+  and refuses one not on the root's mount, whatever the spelling, on every
+  write and in the probe; `x/sys/unix` was already a direct dependency. Where
+  the kernel gives no IDs (older than 5.8, or a statx a seccomp policy
+  refuses) the probe falls back to round 7's mount table, the destination
+  included, and a kernel that gives the root's ID and not a directory's is
+  refused, `ErrMountsUnknown`; elsewhere than Linux the device alone. The
+  fallback after a failed rename takes matching bytes only from a regular
+  file on its directory's own device and mount, asked as it takes them
+  (`onItsDirectorysMount`): a file mounted there once the checks have
+  passed, or a symbolic link, leaves the rename's error. Kept rather than
+  removed: the mount table, as the fallback for kernels without IDs, which
+  keeps `TestParseMountInfo` and `TestPlatformMountTableReadsTheKernels`,
+  which the rules cite, meaningful; the fallback stays spelling-bound, an
+  owner item below.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| the Claude API | `TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded`, the skip case | the carried Play answered nil |
+| Codex 3 | `TestWriteBytesDurable_RefusesAPathThatNamesADirectory` | `ids/`, `ids/.` and `sub/ids/` written at the cleaned path, nil; the probe nil |
+| Codex 3 | `TestNewRefusesAFilePathThatNamesADirectory`, four cases | New took each path; at the restart every insert was refused, `file_not_moved_aside` |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling` | the probe passed `root/Player/ids` with the table naming `root/player`; the write wrote through the mount |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountByItsMountID` | the write and the probe nil for a directory on a mount of its own by ID |
+| Codex 2 | `TestWriteBytesDurable_RefusesAMountedDestination` | the probe nil; the write nil over the mounted file |
+| Codex 2 | `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`, two cases | nil, after syncing the file mounted once the checks passed (or a link's target) and the root |
+
+The atomicwrite red runs had `mountIDOf`, `platformMountID` and their
+platform files declared beside round 7's logic, which used none of them.
+`TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt` is a guard and
+passes before and after; so does `TestPlatformMountIDReadsTheKernels` on
+this Mac, where the platform gives no IDs. The queue `..` case (38f2497f),
+the table-destination case (57d5cf77), the no-table-read case (3c1459be)
+and the root-ID-alone case (00a54fd0) were added when a control showed no
+test reached a piece of the fix; their controls are below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| carry | `replacedCarry` not called | the skip case nil |
+| carry | `replacedCarry` on every intent to play, a Play's included | the guard: the carried Play superseded by a plain Play |
+| carry | `carry` not marking the waiter | the skip case nil |
+| carry | the start not clearing the mark | green: no waiter is undecided with a session started for it at a later release to play but through `carry`, which marks it again; the clear keeps the mark's meaning, "carried until the next session starts", and no test can reach it |
+| path | the writer's `NamesDirectory` refusal disabled | the writer's test; the engine's stays green, New refusing first |
+| path | New's check disabled | the engine's four first cases: the reservation paths refused by the writer with the wrong message ("cannot be read"), the queue paths taken and stuck at the restart |
+| path | `NamesDirectory` without `.` | the `.` cases in both packages |
+| path | `NamesDirectory` without `..` | the queue `..` case (the writer's stays green: `hasDotDot`) |
+| mounts | mount IDs ignored | three tests: by ID, by another spelling, the mounted destination |
+| mounts | the destination's check removed | the mounted-destination test |
+| mounts | the fallback asking nothing of the destination | both fallback cases |
+| mounts | the fallback without the mount-ID comparison | the mounted-after case |
+| mounts | the fallback without the regular-file check | the link case |
+| mounts | the probe reading the table with IDs to go by | first green, every case refusing before the table; 3c1459be added a passing case, then red |
+| mounts | the table fallback without the destination | the table-destination case (57d5cf77) |
+| mounts | a root ID alone taken as no mount | the root-ID-alone case (00a54fd0) |
+
+The suite: 107 tests in the engine and 44 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (149.3 s and 74.1 s, no skips:
+the alternate-spelling test ran, this Mac's volume folding case); `make fmt
+vet test` (72 packages ok, cmd/bridge 470 s, `go fmt` changing nothing),
+`make build-all` (six targets, stamped f18c1814 with no `-dirty`: the
+committed tree) and `make docs-check` clean, in one run through the build
+lock; `go vet` of both packages for windows/amd64, linux/amd64 and
+linux/arm64 clean. The Linux statx reader and
+`TestPlatformMountIDReadsTheKernels` run on CI's Linux legs alone, as round
+7's table reader did: this Mac has no Linux. Both notes checked against
+HEAD, each OLD found once: `player.md` 75,104 to 76,167 bytes and
+`config-lifecycle.md` 49,188 to 50,603, of 100,000 each; with both applied
+to the worktree's rules files, `check-doc-budgets` ok, the files restored
+from git after; every test name they cite is defined.
+
+Not changed, for the owner: where the kernel gives no mount IDs (Linux
+older than 5.8, or statx refused by a seccomp policy) the probe falls back
+to the mount table, read at New and matched by its spelling, so Codex's
+spelling case stands there, and the writer then checks devices alone on
+each write; off Linux a mount that shows no device of its own is not seen;
+a link or a mount another writer puts in place after the write's second
+check, or during its syncs, is not seen either; the commands that set the
+pending intent share the session after the release, a carried one now
+superseded by a command that moves the target; shutdown's ReasonClosed, as
+in rounds 5 to 7.
