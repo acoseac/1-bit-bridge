@@ -152,9 +152,11 @@ func TestAnOverflowWithNoWindowReadsAtOnce(t *testing.T) {
 	h.source().overflow()
 	h.reconciles(2)
 	h.state(binding.StateDeviceMissing, -1, 2)
-	if st := h.svc.Status(); !st.Next.Equal(h.clock.Now().Add(periodic)) {
-		t.Errorf("next reading %v after the overflow's", st.Next.Sub(h.clock.Now()))
-	}
+	// The watcher counts a reading as it ends and sets its next deadline
+	// only after, so the deadline is waited for, never read beside the
+	// count (round 3: read at once, it was the overflow's own, one run in
+	// a hundred under -race -cpu 1,2,8).
+	h.waitNext(h.clock.Now().Add(periodic))
 }
 
 // TestThePeriodicReadingCatchesAChangeNoEventAnnounced: with no event at
