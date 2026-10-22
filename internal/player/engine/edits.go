@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"slices"
 )
 
 // insert is InsertAfter.
@@ -16,8 +15,8 @@ func (e *Engine) insert(c *command) {
 		e.answer(c, reply{err: refuse(name, ReasonBadReference, "the zero Reference names nothing")})
 	case c.id != 0 && !o.q.has(c.id):
 		e.answer(c, reply{err: refuse(name, ReasonIDNotFound, fmt.Sprintf("no entry %d to insert after", c.id))})
-	case len(c.meta) > MaxMetadataBytes:
-		e.answer(c, reply{err: refuse(name, ReasonMetadataTooLarge, fmt.Sprintf("%d bytes of metadata, more than %d", len(c.meta), MaxMetadataBytes))})
+	case c.metaLen > MaxMetadataBytes:
+		e.answer(c, reply{err: refuse(name, ReasonMetadataTooLarge, fmt.Sprintf("%d bytes of metadata, more than %d", c.metaLen, MaxMetadataBytes))})
 	case o.q.len() >= MaxEntries:
 		e.answer(c, reply{err: refuse(name, ReasonFull, fmt.Sprintf("the queue holds %d entries", MaxEntries))})
 	case o.q.meta+len(c.meta) > MaxTotalMetadataBytes:
@@ -29,7 +28,7 @@ func (e *Engine) insert(c *command) {
 		id := o.res.ids.take()
 		o.token = o.res.tokens.take()
 		empty := o.q.len() == 0
-		o.q = o.q.insertAfter(c.id, entry{id: id, ref: c.ref, meta: slices.Clone(c.meta)})
+		o.q = o.q.insertAfter(c.id, entry{id: id, ref: c.ref, meta: c.meta})
 		o.pass = nil
 		e.saved()
 		if empty {

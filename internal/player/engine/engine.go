@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -289,9 +290,15 @@ func (e *Engine) PlayIndex(ctx context.Context, index int, conds ...Cond) error 
 }
 
 // InsertAfter inserts an entry after afterID, at the head when afterID is
-// 0, and returns its ID. meta is copied.
+// 0, and returns its ID. meta is copied before the owner sees it, so the
+// caller may reuse it as soon as InsertAfter returns, whatever it returned;
+// metadata past MaxMetadataBytes is refused without a copy.
 func (e *Engine) InsertAfter(ctx context.Context, afterID uint32, ref Reference, meta []byte, conds ...Cond) (uint32, error) {
-	r := e.do(&command{op: opInsert, ctx: ctx, conds: conds, id: afterID, ref: ref, meta: meta})
+	c := &command{op: opInsert, ctx: ctx, conds: conds, id: afterID, ref: ref, metaLen: len(meta)}
+	if len(meta) <= MaxMetadataBytes {
+		c.meta = slices.Clone(meta)
+	}
+	r := e.do(c)
 	return r.id, r.err
 }
 
@@ -374,18 +381,21 @@ func (o op) String() string { return opNames[o] }
 
 // command is one call of a method, and where its reply goes.
 type command struct {
-	op     op
-	ctx    context.Context
-	conds  []Cond
-	id     uint32
-	index  int
-	ref    Reference
-	meta   []byte
-	on     bool
-	report OutputReport
-	lease  Lease
-	reason string
-	want   Generation
+	op    op
+	ctx   context.Context
+	conds []Cond
+	id    uint32
+	index int
+	ref   Reference
+	// meta is the owner's copy of an insert's metadata, and metaLen the
+	// caller's length, which a refusal past MaxMetadataBytes names.
+	meta    []byte
+	metaLen int
+	on      bool
+	report  OutputReport
+	lease   Lease
+	reason  string
+	want    Generation
 
 	reply   chan reply
 	replied bool
@@ -403,8 +413,12 @@ type reply struct {
 // do hands c to the owner and waits for its reply. A context that has
 // ended, or ends before the owner takes c, means c does not run; one that
 // ends after means c runs and its reply is dropped. After shutdown every
-// command is answered ReasonClosed at once.
+// command is answered ReasonClosed at once. c holds nothing of the
+// caller's once it is sent: do copies the conditions here, and InsertAfter
+// the metadata, so a caller that returns early may reuse its slices while
+// the owner still runs the command.
 func (e *Engine) do(c *command) reply {
+	c.conds = slices.Clone(c.conds)
 	name := c.op.String()
 	if err := c.ctx.Err(); err != nil {
 		return reply{err: notAdmitted(name, err)}

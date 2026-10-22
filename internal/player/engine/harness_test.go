@@ -84,6 +84,7 @@ type fakeFiles struct {
 	failQueue       func(attempt int) error
 	holdQueue       map[int]gate
 	reserves        []reserveRecord
+	reserveCalls    int // writes begun, counted before a hold
 	reserveAttempts int
 	failReserve     error
 	holdReserve     gate
@@ -135,7 +136,9 @@ func (f *fakeFiles) writeQueue(path string, data []byte) error {
 
 func (f *fakeFiles) writeReserve(path string, data []byte) error {
 	f.mu.Lock()
+	f.reserveCalls++
 	hold := f.holdReserve
+	f.signal()
 	f.mu.Unlock()
 	if hold != nil {
 		select {

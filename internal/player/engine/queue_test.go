@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"slices"
@@ -261,6 +263,71 @@ func TestACommandWaitsForAReservationThatHasNotLanded(t *testing.T) {
 			t.Fatalf("the edit that waited took ID %d and token %d with %d and %d durable", got, h.snap().Token(), nowIDs, nowTokens)
 		}
 		return
+	}
+}
+
+// TestACancelledInsertKeepsNoneOfTheCallersSlices pins the copy: an insert
+// takes its metadata and its conditions as copies before the owner can see
+// them, so a caller whose context ended while its insert was parked, and
+// who reuses its buffers then, changes nothing the owner later reads. The
+// second write is made while the owner runs the insert: under -race, a race
+// if the owner read the caller's slice.
+func TestACancelledInsertKeepsNoneOfTheCallersSlices(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		meta  bool
+		conds bool
+	}{
+		{"metadata", true, false},
+		{"conditions", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			h.insert("a")
+			h.restartWith(func() { h.files.failReserve = errors.New("read-only file system") })
+			g := newGate()
+			h.files.mu.Lock()
+			h.files.failReserve, h.files.holdReserve = nil, g
+			calls := h.files.reserveCalls
+			h.files.mu.Unlock()
+
+			meta := []byte("the caller's metadata")
+			original := slices.Clone(meta)
+			var conds []Cond
+			if tc.conds {
+				conds = []Cond{IfGeneration(h.snap().Generation())}
+			}
+			ctx, cancel := context.WithCancel(bg)
+			mark := h.appliedMark()
+			done := async(func() error {
+				_, err := h.eng.InsertAfter(ctx, 0, ref("x"), meta, conds...)
+				return err
+			})
+			h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
+			cancel()
+			h.refused("the insert whose caller left", h.result("insert", done), ReasonCancelled)
+			reuse := func(b byte) {
+				if tc.meta {
+					for i := range meta {
+						meta[i] = b
+					}
+				}
+				if tc.conds {
+					conds[0] = IfGeneration(Generation{})
+				}
+			}
+			reuse('X')
+			g.open()
+			reuse('Y')
+			h.waitApplied("insert", mark)
+			sn := h.snap()
+			if sn.Len() != 2 {
+				t.Fatalf("the parked insert did not run at the generation it was sent with: %v", sn.IDs())
+			}
+			if e, _ := sn.Read(sn.IDs()[0]); !bytes.Equal(e.Meta, original) {
+				t.Fatalf("the entry holds %q, the caller's reused buffer, not %q", e.Meta, original)
+			}
+		})
 	}
 }
 
