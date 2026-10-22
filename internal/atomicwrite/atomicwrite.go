@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -128,6 +129,13 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // answers nil is not one a caller can tell from a barrier that ran.
 // commitDirEntry then has nothing to run, and WriteBytesDurable refuses.
 var syncParentDir = platformBarrier()
+
+// syncFile is the file fsync each write runs on what it stages, and the
+// strict writer on a destination another writer filled with the same bytes.
+// A test seam, process-global like syncParentDir, with the same contract:
+// in-package tests override it with a `t.Cleanup` restore and never call
+// `t.Parallel()`.
+var syncFile = (*os.File).Sync
 
 // platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
 // where it is a no-op.
@@ -307,6 +315,27 @@ func durableDirEntry(path string) error {
 	return nil
 }
 
+// sameAndSynced reports whether path holds exactly data and, when it does,
+// fsyncs it through the open it read the bytes from: bytes another writer
+// renamed into place are visible once its rename lands, and durable only
+// once they are fsynced. A destination it cannot open or read is not the
+// same, and the caller's own error stands.
+func sameAndSynced(path string, data []byte) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, nil
+	}
+	defer func() { _ = f.Close() }()
+	existing, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
+	if err != nil || !bytes.Equal(existing, data) {
+		return false, nil
+	}
+	if err := syncFile(f); err != nil {
+		return true, fmt.Errorf("the destination holds the same bytes, but they are not durable: %w", err)
+	}
+	return true, nil
+}
+
 // barrier runs the parent-directory barrier for path: ErrNoDirectoryBarrier
 // on a platform with none, never a barrier that ran.
 func barrier(path string) error {
@@ -396,7 +425,8 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // whose entry is not durable can roll back at a crash. A failure may leave
 // the new bytes in place, so the caller counts the write as not made, never
 // as undone. A rename that fails while the destination already holds the
-// same bytes is taken as WriteBytes takes it, once the directory is synced.
+// same bytes is taken as WriteBytes takes it, once the destination itself
+// and then its directory are synced.
 //
 // The directories it creates for path are made durable too, each in its
 // parent, the deepest first, before the file is written: a durable entry in
@@ -445,7 +475,7 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -469,12 +499,20 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 		// No parent-dir barrier on this branch for WriteBytes:
 		// we didn't publish the directory entry, the concurrent
 		// winner did — and its own rename already ran the
-		// barrier for it. WriteBytesDurable runs it again, since
-		// the winner's may have been tolerated.
-		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
-			if durable {
+		// barrier for it. WriteBytesDurable makes the winner's
+		// write durable itself (sameAndSynced), since matching
+		// bytes prove it visible, not durable, and the winner's
+		// barrier may have been tolerated.
+		if durable {
+			switch same, syncErr := sameAndSynced(path, data); {
+			case syncErr != nil:
+				return syncErr
+			case same:
 				return durableDirEntry(path)
 			}
+			return err
+		}
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
 			return nil
 		}
 		return err

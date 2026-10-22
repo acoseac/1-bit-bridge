@@ -280,8 +280,11 @@ func TestWriteBytesDurable_SyncsParentDirectoryOnce(t *testing.T) {
 // TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier pins the fallback a
 // failed rename takes when the destination already holds the same bytes:
 // WriteBytes accepts it as the winner's write, while the strict writer
-// accepts it only once the directory entry is durable, since the winner's
-// barrier may have been tolerated.
+// accepts it only once it has fsynced the destination, through the open it
+// read the bytes from, and then the directory entry naming it: matching
+// bytes prove the winner's write visible, not durable, and the winner's own
+// barrier may have been tolerated. Other bytes are the rename's failure,
+// and nothing is synced for them.
 func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "reserved.json")
 	want := []byte("same bytes")
@@ -291,14 +294,44 @@ func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
 	prev := SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
 	t.Cleanup(func() { SetRenameFuncForTest(prev) })
 
-	syncErr := errors.New("fsync: input/output error")
-	stubSyncParentDir(t, syncErr)
-	if err := WriteBytesDurable(dst, want, ".durable-*.tmp"); !errors.Is(err, syncErr) {
-		t.Fatalf("WriteBytesDurable over the winner's bytes with a failing barrier = %v, want the barrier's failure", err)
+	// syncs is every file and directory sync after the staged file's, in
+	// order; fileErr fails the destination's, dirErr the barrier.
+	var syncs []string
+	var fileErr, dirErr error
+	prevFile, prevDir := syncFile, syncParentDir
+	t.Cleanup(func() { syncFile, syncParentDir = prevFile, prevDir })
+	syncFile = func(f *os.File) error {
+		if f.Name() != dst {
+			return f.Sync() // the staged file
+		}
+		syncs = append(syncs, "file "+f.Name())
+		return fileErr
 	}
-	seen := stubSyncParentDir(t, nil)
-	if err := WriteBytesDurable(dst, want, ".durable-*.tmp"); err != nil || len(*seen) != 1 {
-		t.Fatalf("WriteBytesDurable over the winner's bytes = %v with %d barriers, want nil after one", err, len(*seen))
+	syncParentDir = func(path string) error {
+		syncs = append(syncs, "dir "+path)
+		return dirErr
+	}
+	syncErr := errors.New("fsync: input/output error")
+	for _, tc := range []struct {
+		name            string
+		data            []byte
+		fileErr, dirErr error
+		want            error
+		syncs           []string
+	}{
+		{"the destination, then its entry", want, nil, nil, nil, []string{"file " + dst, "dir " + dst}},
+		{"a destination that cannot be synced", want, syncErr, nil, syncErr, []string{"file " + dst}},
+		{"an entry that cannot be synced", want, nil, syncErr, syncErr, []string{"file " + dst, "dir " + dst}},
+		{"other bytes", []byte("other bytes"), nil, nil, os.ErrPermission, nil},
+	} {
+		syncs, fileErr, dirErr = nil, tc.fileErr, tc.dirErr
+		err := WriteBytesDurable(dst, tc.data, ".durable-*.tmp")
+		if (tc.want == nil && err != nil) || (tc.want != nil && !errors.Is(err, tc.want)) {
+			t.Errorf("%s: WriteBytesDurable over the winner's bytes = %v, want %v", tc.name, err, tc.want)
+		}
+		if !slices.Equal(syncs, tc.syncs) {
+			t.Errorf("%s: synced %v, want %v", tc.name, syncs, tc.syncs)
+		}
 	}
 }
 
