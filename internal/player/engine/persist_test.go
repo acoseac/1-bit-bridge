@@ -503,6 +503,71 @@ func TestAFailedMoveAsideKeepsTheOriginal(t *testing.T) {
 	}
 }
 
+// TestABadFileWithNoNameToMoveToStays pins the name a bad file is moved to:
+// a name is taken only when Lstat says nothing is there. An Lstat that fails
+// any other way (a parent without search permission, ENOTDIR, an I/O
+// error), or a run of names every one of which is taken, leaves the bad file
+// where it is, logged, with inserts refused: New returns, and no name is
+// probed for ever.
+func TestABadFileWithNoNameToMoveToStays(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lstat func(t *testing.T, h *harness) func(string) (fs.FileInfo, error)
+	}{
+		{"an Lstat that keeps failing", func(*testing.T, *harness) func(string) (fs.FileInfo, error) {
+			return func(path string) (fs.FileInfo, error) {
+				return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
+			}
+		}},
+		{"every name taken", func(t *testing.T, h *harness) func(string) (fs.FileInfo, error) {
+			taken, err := os.Lstat(h.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return func(path string) (fs.FileInfo, error) {
+				if strings.Contains(path, ".bad-") {
+					return taken, nil
+				}
+				return os.Lstat(path)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := savedQueue(t)
+			h.must("write", os.WriteFile(h.queuePath(), []byte("{"), 0o600))
+			lstat := tc.lstat(t, h)
+			h.tweak = func(c *Config) { c.seams.lstat = lstat }
+			h.be = newFakeBackend(t)
+			built := make(chan *Engine, 1)
+			go func() {
+				e, err := New(h.config())
+				if err != nil {
+					t.Errorf("New: %v", err)
+				}
+				built <- e
+			}()
+			var e *Engine
+			select {
+			case e = <-built:
+			case <-time.After(*watchdog):
+				t.Fatalf("New did not return within %v: a name for the bad file is probed for ever", *watchdog)
+			}
+			if got, _ := os.ReadFile(h.queuePath()); string(got) != "{" {
+				t.Fatalf("the bad file is now %q", got)
+			}
+			if aside, _ := filepath.Glob(h.queuePath() + ".bad-*"); len(aside) != 0 {
+				t.Fatalf("moved aside to %v", aside)
+			}
+			if ed := e.Snapshot().Edits(); ed.Refused != ReasonFileStuck {
+				t.Fatalf("edits %+v, want refused %s", ed, ReasonFileStuck)
+			}
+			if n := h.logs.count("could not be moved aside"); n != 1 {
+				t.Fatalf("%d log lines say so, want 1: %v", n, h.logs.all())
+			}
+		})
+	}
+}
+
 // TestLoadStartsPastTheReservationAndTheLargestID pins where a run's IDs
 // begin: one block past the larger of the reservation file's and the
 // queue file's largest ID.

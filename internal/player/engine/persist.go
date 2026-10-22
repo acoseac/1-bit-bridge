@@ -32,6 +32,9 @@ const (
 	// write.
 	writeRetryMin = time.Second
 	writeRetryMax = 30 * time.Second
+	// maxAsideNames bounds the names moveAside tries for one bad file: the
+	// timestamp has nanoseconds, so a second name is already rare.
+	maxAsideNames = 100
 )
 
 // queueFile is the queue file: the entries, the reservations and the
@@ -206,14 +209,27 @@ func (e *Engine) readBounded(path string, limit int64) ([]byte, error) {
 }
 
 // moveAside renames a bad file to its name with ".bad-" and a timestamp
-// after it, never deleting it, and logs why. It reports false when the
-// rename failed: the file then stays where it is.
+// after it, never deleting it, and logs why. A name is taken only when
+// Lstat says nothing is there, and the next is tried only when it says
+// something is: any other answer (a parent without search permission,
+// ENOTDIR, an I/O error), or maxAsideNames names all taken, is a move that
+// cannot be made. It reports false when the move was not made: the file
+// then stays where it is.
 func (e *Engine) moveAside(what, path, why string) bool {
 	stamp := e.clk.Now().UTC().Format("20060102T150405.000000000Z")
 	to := path + ".bad-" + stamp
 	for i := 1; ; i++ {
-		if _, err := e.sm.lstat(to); errors.Is(err, fs.ErrNotExist) {
+		_, err := e.sm.lstat(to)
+		if errors.Is(err, fs.ErrNotExist) {
 			break
+		}
+		if err == nil && i > maxAsideNames {
+			err = fmt.Errorf("%d names beside it are taken", maxAsideNames)
+		}
+		if err != nil {
+			e.log.Error("player: the "+what+" is bad and could not be moved aside: no name beside it is free; it is not overwritten until it is moved, and inserts are refused until then",
+				"path", path, "reason", why, "err", err)
+			return false
 		}
 		to = fmt.Sprintf("%s.bad-%s-%d", path, stamp, i)
 	}
