@@ -50768,3 +50768,42 @@ swaps the sysfs, ALSA and /proc roots through the readers' `beforeOpen`
 on all three before, each blocked until the watchdog. Control: `rootPath`
 returning `dir` itself on unix blocked those three and round 3's three
 FIFO-at-a-root cases; restored from git, the tree clean.
+
+**Round 5 (CI's Linux leg, and the bots on #1307).** `test -race (rest)`
+failed on Linux alone: `TestDoctorPassesWithNoRoots` ran bridge doctor's
+one-shot outputs builder, which left `api.LocalOutputsConfig.Cards` nil,
+and a nil `Cards` reads `alsa.Reader{}`, the host's `/proc`; the
+host-read watch in cmd/bridge's TestMain refused and reported it. The
+localOutputs gate opens that path on Linux alone (and for `auto` only
+where MPD is found, so every doctor test would have read a Pi's `/proc`),
+which is why no macOS run, round 2's whole-suite one included, saw it.
+`hostTrees` (`output_host.go`) now names the host's `/proc` and `/sys` in
+cmd/bridge: both builders, serve's and the doctor's, take
+`hostTrees.cards`, the output commands fall back to it on Linux, and
+TestMain points it at two empty directories before any test runs. Red
+first was possible on macOS after all: the doctor's existing seam stands
+the builder on Linux while leaving the cards as the doctor builds them,
+and the watch, which runs on any OS, recorded `/proc` on the stack CI
+showed (`TestTheDoctorsOutputsBuilderReadsNoHostTree`). Read from the
+code, the tests that reached a reader with the host's roots on Linux were
+that one (`output.mpd: on`), and every doctor test on a box where `auto`
+finds MPD; no cmd/bridge test asks a real serve for the outputs body, the
+console's checklist or its doctor, and the output commands' tests force
+their OS and pass their trees, so the watch already caught them anywhere.
+`TestTheSuiteReadsEmptyTreesForTheHosts` asserts the seam is set, and
+`TestOnlyHostTreesNamesTheHostsTrees` sweeps cmd/bridge's code for the
+host's roots named elsewhere, a reader built without its root, and an
+outputs builder without its cards. Controls: the doctor's builder without
+its cards (red: the pin, the sweep, TestMain's report), serve's without
+them (the sweep), TestMain leaving `hostTrees` alone (both pins), and a
+command naming `alsa.DefaultSysfsRoot` (the sweep). The bots:
+`player-uuid` now reads past white space after the UUID, a CR LF
+included, and refuses anything else (Gemini; red on CR LF, mixed white
+space and trailing spaces; controls: one LF only, and white space on both
+ends); the usage and `bridge output`'s help say `dac bind` also writes
+the UUID file (CodeRabbit); `internal/alsa`'s `quote` stays (Gemini
+proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
+(`maxQuoted`) the package's doc promises every problem, and both values
+can be 4 KiB of attribute text; the garbled bold sentence in the
+check-after-open bullet, moved verbatim to `player.md`, is in the round's
+rules note.
