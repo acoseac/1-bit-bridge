@@ -52926,3 +52926,206 @@ and the windows test binaries build.
   returns. A command that panics there now drops the session, and the
   flight is still left open, so every later call to `GET /v1/outputs`
   waits out its own context. Found writing Codex P2 11's fix; not changed.
+
+### Round 4 (2026-10-22): DoP as MPD's ALSA output decides it, the outputs flight, an ALSA file that could not be read, the routing plug and alsa-lib's dmix, the volume at both reads
+
+Round 3's reviews (Codex, two P2s; the Claude API, a High, a Medium and
+two Lows) and its flag, decided by the owner. The scope is unchanged and
+binding: the bridge claims only what the kernel shows, `format_preserved`
+or `format_preserved_dop`, always with `bitExactness: not_verifiable` for
+an MPD output; settings that change samples are warnings labelled with
+where they were read; MPD-reported format changes withhold. The rules are
+in the round's note, eighteen OLD/NEW sections of `output.md` against
+7dca9400 (`/tmp/b473-b3-rules-r4.md`); `wire.md` and CLAUDE.md need none.
+
+**The owner's decisions, and what each changed**
+
+1. **A wider PCM container stays `format_preserved`** (16 bits in
+   `S24_3LE`): the plan's decision (d), "at least the file's bit depth".
+   PROTOCOL.md, the signalpath docs and the note now say "a signed integer
+   container of at least the file's bit depth" in those words.
+   `TestAWiderContainerHasTheFormatPreserved` pins it at the route; it was
+   green at HEAD (round 3 already preserved it), and its control is D1.
+2. **DoP is read from what MPD will send** (the Claude API's High). MPD
+   0.24's `AlsaOutput::Open` takes `dop = a.dop` from `BestMatch` (the
+   first entry of `allowed_formats` whose mask matches the stream,
+   `AudioFormat::MatchMask`, else the first entry) whenever its
+   `allowed_formats` is not empty, and reads the `dop` setting only when it
+   is. So `sendsDoP` (signalpath) reads the live `allowed_formats` while it
+   names a format: the first entry that matches the stream (its DSD rate in
+   MPD's bytes, dsd64 352800, and its channels, `*` any) sends DoP by its
+   `=dop`; an entry without it, no entry that matches (MPD then applies
+   the first entry: a PCM one is its conversion, which carries no `=dop`,
+   and a DSD one for another rate asks a DSD-to-DSD conversion MPD does not
+   make, so the output does not open), and a value the bridge does not read
+   send none, `dsd_converted_to_pcm`; while it names none, `dop` decides,
+   live first, else the file's, as before. `parseAllowedFormats` is MPD's
+   reading (`Alsa::AllowedFormat`, `ParseAudioFormat` with a mask): entries
+   split on single spaces, `=dop` only on a DSD entry, the 64-byte entry
+   buffer, dsdN from dsd32 to dsd4096 even, `_3` only after 24, channels to
+   MAX_CHANNELS 8, a rate below 1 << 30, and a whole value refused for one
+   entry MPD refuses. The owner's rows are
+   `TestReadingDoPHasTheFormatDoPTakes`'s: `dop=1` with
+   `allowed_formats=176400:24:2` and the card at `S24_3LE`/176400 is
+   `withheld [dsd_converted_to_pcm]`, and `dop=0` with the stream's `=dop`
+   entry is `format_preserved_dop`, each with the live override's
+   `mpd_format_override` beside it. On the owner's decision on round 3's
+   flag, a live override that turns DSD into PCM withholds the DoP claim
+   and is never a warning beside it; what only `mpd.conf` says (the
+   output's `format`, `audio_output_format`, the file's `allowed_formats`)
+   stays a warning, which beside `format_preserved_dop` says the frames may
+   not be DoP (PROTOCOL.md's `mpd_format_override`). `mpd.config.output.dop`
+   is still the setting, and PROTOCOL.md now says MPD does not read it while
+   `allowedFormats` names a format.
+3. **A panic inside the outputs build closes its flight** (the Claude API's
+   Medium, round 3's last residual). `Response` completes its flight in a
+   function deferred after the build context's cancel (so it runs first and
+   reads the build's own deadline) and recovers: the panic is logged with
+   `logOutputPanic` (step `the outputs body`, the stack, never the value,
+   the message now `local outputs: a step panicked` for both routes), the
+   result is `errOutputsBuildPanicked`, never cached, and the handler's 500.
+   `TestAPanicInTheOutputsBodyClosesItsFlight` sets `scriptedMPD.panics`
+   for `find`: the first `GET /v1/outputs` fails, and the second answers
+   within its deadline with a build of its own (it hung against round 3's
+   code until its 5 s context ended).
+4. **An ordinary ALSA configuration read failure is `unknown /
+   alsa_config_unread`, never a 404** (Codex P2 1). `PCMConfig.Unread` says
+   the loader's read stopped at a file that is there and could not be read
+   (an open or read error, what opened as no regular file, past the read's
+   bounds, more files or bytes than it takes), and `readALSAConfig` takes
+   such a configuration for one it did not have. The test goes past the
+   panic-only case: `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown`'s
+   `unreadable` case turns the asound.conf the listing read into a
+   directory, through the real loader. See the deviation below on the rest
+   of what `ok=false` covers.
+5. **A `plug` with a sample-changing setting warns** (Codex P2 2). A plug
+   whose block has a `ttable` (dotted or a block) or a `route_policy` stays
+   opaque, so it has no chain, and `SampleStage` names it a route stage
+   (`pcmDef.routes`), `alsa_route` from `alsa_conf`: its transfer table can
+   swap or attenuate channels at the same format, rate and channels.
+   `routingPlug` in `TestTheFirstStageThatChangesSamplesIsNamed` is now
+   `route`, with `policyPlug` and `tablePlug` beside it, and
+   `TestAPlugThatRoutesHasNoChain` checks the stage of its four forms (the
+   float entry still makes the file unread, which names none).
+6. **Software volume on both sides of the `/proc` read** (the Claude API
+   Low 3). `readingFacts` reads `volume` from both statuses
+   (`MPD.VolumeBefore`, `MPD.Volume`) and the warning takes either below
+   100; `sameSettings` still does not compare it, so a volume change does
+   not settle a reading. Route rows 60 then 100, and 100 then 60.
+7. **A `dmix:` device string is a dmix stage** (the Claude API Low 4).
+   `deviceStringStage` maps the prefix for the starting device (in
+   `SampleStage`, before the configuration's own check, since a device
+   string names its plugin without the files) and for a slave (in
+   `sampleStage`). Rows for `dmix:2,0`, a plug and an empty whose slave is
+   a `dmix:` string, and the route's `dmix:CARD=Audio,DEV=0` and a plug
+   over it.
+
+**Deviations from the brief, with why**
+
+- **Decision 4 is carried for a file that could not be read, not for every
+  `ok=false`.** The loader's `ok` is false for two causes: a file it could
+  not read, and a file it read that its parser does not model. Measured
+  with a scratch test (deleted), the second is the steady state of common,
+  readable configurations: a softvol with `max_dB 0.0` (the lexer stops at
+  the `.`; a negative `min_dB` at the `-`), and a pipewire-alsa
+  `pcm_type.pipewire { libs.native = /usr/lib/... ; }` (an unquoted path),
+  each `ok=false` with no definition used. Propagating that into `had`
+  would answer every reading on such a box `unknown / alsa_config_unread`
+  with `dac` null, a USB DAC played by `hw:` included, on every read,
+  where today the listing and the reading both resolve no PCM name and
+  agree on the USB candidates. A file that could not be read is the
+  ordinary read failure the decision and Codex name ("propagate loader read
+  errors"): what it says is not known, and it can read the next time, which
+  is the 404 Codex found. `TestAConfigurationNotReadWholeResolvesAsTheListingDoes`
+  pins the other half (a top-level `@hooks`: the listing names card 5 as a
+  candidate and its reading is whole and judged); control R2, the decision
+  read literally, turns it red. A truncated file read mid-write that no
+  longer parses still resolves no name, as a truncated file that parses
+  always did (a residual under either reading). Flipping to the literal
+  reading is one line in `readALSAConfig` and an accessor.
+- **The owner's row `allowed_formats=dsd64:=dop` is written as MPD writes
+  it, `dsd64:*=dop`.** MPD's `ParseChannelCount` refuses an empty channel
+  count, and MPD prints a mask's channels as `*`, so `dsd64:=dop` is no
+  value MPD runs with or reports; `TestAllowedFormatsAreReadAsMPDReadsThem`
+  lists it among the refused, and a refused value sends no DoP.
+- **The name `dmix` the files do not define is a dmix stage too**, beside
+  the `dmix:` prefix the decision names: it is the same alsa-lib PCM with
+  its default arguments, and `slave.pcm "dmix"` is the common form of a
+  plug over dmix. A name is looked up in the files first, so a `pcm.dmix`
+  they define is theirs, and a configuration not read whole names none for
+  it.
+- **Only the live `allowed_formats` decides DoP.** The file's, where MPD
+  reports none, is what the bridge found, which MPD may not run with: it
+  stays a `mpd_conf` warning, and `dop` decides there, as it did in round
+  3 for every output.
+
+**Red first**
+
+- signalpath, against compile-only stubs (`VolumeBefore`, the parser
+  returning nothing): the six new `TestEveryWithheldReason` rows
+  `format_preserved_dop` (round 3's answer) where `[dsd_converted_to_pcm]`
+  is wanted, the seven `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`
+  rows `withheld [dsd_converted_to_pcm]`, the volume row before the `/proc`
+  read with no warning, and the parser table. The rows for the file's
+  `allowed_formats` and an empty live one were green: pins.
+- alsa, against stubs (`Unread` false, `routes` unused): every routing and
+  dmix row `""`, and the unreadable rows `unread false`.
+- The route, against the tree with signalpath and alsa fixed and the
+  route's code not: the volume row 60 then 100 with no warning, the
+  `unreadable` case "an output that is there: found false", and the flight
+  test "context deadline exceeded" on its second call (5.04 s); with round
+  3's `signalpath.go` and `asoundconf.go` put back for one run, the owner's
+  two DoP rows (`format_preserved_dop` with the warning, and
+  `[dsd_converted_to_pcm]`) and the routing plug and both dmix rows with no
+  warning. Green at HEAD, as pins: the wider container and the
+  configuration read but not modeled.
+
+**Negative controls.** Thirty-seven, each one anchor asserted to occur
+once, run against the named tests with the change committed, one package
+at a time, the file then written back byte for byte and checked against
+HEAD with the tree clean (`/tmp/b473-r4-controls/run.py`). All went red,
+each on the row it predicts (read from the failure lines, not the test
+name alone); none failed to build. F1 showed why the flight test decodes
+its second answer: with the recover removed the deferred completion still
+ran during the panic and cached the panicked build's empty body, which a
+200 alone would have passed (c8bf9a19 added the check, and A12's bound its
+row).
+
+| Control | Rule | Red |
+|---|---|---|
+| S1 | DoP is not the `dop` setting alone while `allowed_formats` names a format | `TestEveryWithheldReason`, `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S2 | the first entry that matches decides, not any entry with `=dop` | `TestEveryWithheldReason` |
+| S3, S4 | an entry matches the stream's DSD rate, and its channels | `TestEveryWithheldReason` |
+| S5 | a DSD stream's rate is MPD's, in bytes | `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S6, S7 | a value this does not read, and no entry that matches, send no DoP | `TestEveryWithheldReason`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S8 | only the live `allowed_formats` decides | `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith` |
+| S9 to S14 | MPD's parse: a channel count, `=dop` only on DSD, the 64-byte entry, dsdN's bounds, `_3` only after 24, the rate's bound | `TestAllowedFormatsAreReadAsMPDReadsThem` |
+| S15, S16 | the volume before the `/proc` read counts, and the one after | `TestASettingThatChangesTheSamplesIsAWarning`, `TestTheVerdictReadsMPDsOwnSettings` |
+| D1 | a container of at least the file's bit depth | `TestWhatDoesNotChangeTheSamplesIsNotAReason`, `TestAWiderContainerHasTheFormatPreserved` |
+| A1 to A5 | a transfer table or a route policy is recognised (a ttable block, a dotted entry, a policy), and a routing plug is a route stage | `TestAPlugThatRoutesHasNoChain`, `TestTheFirstStageThatChangesSamplesIsNamed`, `TestTheVerdictReadsMPDsOwnSettings` |
+| A6, A7 | a `dmix:` slave, and a `dmix:` starting device, are dmix stages | `TestTheFirstStageThatChangesSamplesIsNamed`, `TestTheVerdictReadsMPDsOwnSettings` |
+| A8, A9 | the name `dmix` the files do not define, exactly | `TestTheFirstStageThatChangesSamplesIsNamed` |
+| A10 | a device string names its stage without the files | `TestTheFirstStageThatChangesSamplesIsNamed` |
+| A11, A12 | a file that cannot be read, and more than the read takes, are unread | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown` |
+| A13 | a file the parser does not model is not unread | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, `TestAConfigurationNotReadWholeResolvesAsTheListingDoes` |
+| R1 | an unread configuration is not had | `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown` |
+| R2 | decision 4 read literally (every `ok=false` not had) | `TestAConfigurationNotReadWholeResolvesAsTheListingDoes`, `TestAFileOfTheConfigurationThatCannotBeReadIsUnread` |
+| R3 | the volume before the `/proc` read reaches the verdict | `TestTheVerdictReadsMPDsOwnSettings` |
+| R4 | the live `allowed_formats` reaches the verdict as live | `TestReadingDoPHasTheFormatDoPTakes`, `TestTheVerdictReadsMPDsOwnSettings` |
+| F1 to F3 | a build that panics is recovered, not cached, and logged | `TestAPanicInTheOutputsBodyClosesItsFlight` |
+
+**Residuals, named, not fixed here**
+
+- **The ALSA parser refuses a float, a negative number and an unquoted
+  path**, which alsa-lib reads as values: one such file (a softvol's
+  `max_dB 0.0` or `min_dB -5.0`, a `ttable.0.0 0.5` gain, pipewire-alsa's
+  library path) leaves the whole configuration resolving no PCM name and
+  naming no stage, so its `alsa_*` warnings are lost with it. Proposed to
+  the owner for the backlog.
+- MPD matches `allowed_formats` against the format its output receives,
+  which `audio_output_format` and the output's `format` can change from the
+  decoder's; the bridge matches status `audio:`, the decoder's, and those
+  two settings are `mpd_conf` warnings.
+- Round 3's Codex 2 and Codex 10, narrowed, stand; and the two the owner
+  files (MPD's `/proc/<pid>/cmdline` for the file it started with, and an
+  include relative to a linked `mpd.conf`).
