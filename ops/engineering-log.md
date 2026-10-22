@@ -53141,3 +53141,143 @@ test binaries build.
 - Round 3's Codex 2 and Codex 10, narrowed, stand; and the two the owner
   files (MPD's `/proc/<pid>/cmdline` for the file it started with, and an
   include relative to a linked `mpd.conf`).
+
+### Round 5 (2026-10-23): DoP only for settings the bridge watched the stream open with, a conf.d that cannot be listed, alsa-lib's plug over dmix
+
+The owner accepted round 4's four deviations (D4 for a file that could not
+be read only, `dsd64:*=dop` as MPD writes it, the bare name `dmix`, only
+the live `allowed_formats` deciding DoP). Round 4's reviews: Codex, two
+Mediums; the Claude API, one Low and nothing else to report. Each premise
+was checked against the code, and the first against MPD 0.24's source. That
+check was from the source as I know it: this host denies network access, so
+the files Codex cites were not fetched. The rules are in the round's note,
+`/tmp/b473-b3-rules-r5.md`: nine sections of `output.md` and one of
+`wire.md`, each heading naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, reported settings need not describe the open stream:
+   correct.** `AudioOutputControl::SetAttribute` (MPD's
+   `src/output/Control.cxx`) passes an `outputset` to
+   `AlsaOutput::SetAttribute`. That stores `allowed_formats` or `dop` under
+   `attributes_mutex` and opens nothing again. `AlsaOutput::Open` reads both
+   under that mutex, the only place they are read. At round 4's head,
+   `sendsDoP` (`internal/signalpath/signalpath.go:729`) read the reported
+   attributes alone, and `sameSettings` compares only the two reads of one
+   reading. So a DSD64 stream MPD opened as PCM of DoP's shape, followed by
+   `outputset allowed_formats "dsd64:*=dop"`, read `format_preserved_dop`.
+   `TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP` reproduces it.
+2. **Codex Medium, an unreadable configuration directory reads as clean:
+   correct.** Go 1.27.2's `filepath.glob`
+   (`$GOROOT/src/path/filepath/match.go:322-335`) returns no error when the
+   directory cannot be stat'ed, is not a directory, cannot be opened, or
+   its `Readdirnames` fails (`names, _ :=`). The loader
+   (`internal/alsa/asoundconf.go:359` at 59d735ac) then read asound.conf
+   alone and returned `ok`, not unread.
+3. **The Claude API Low, `plug:dmix` gets no `alsa_dmix` warning:
+   correct.** `deviceStringStage` (`asoundconf.go:249-253` at 59d735ac) cut
+   at the first `:` and named `dmix` alone. It is reached from
+   `SampleStage` (:212-213) and from `sampleStage`'s first branch
+   (:221-222), so `plug:dmix`, `plug:'dmix:CARD=Audio,DEV=0'` and a slave
+   of either form named nothing.
+
+**The evidence chosen for (1), and why it holds**
+
+The bridge has watched the stream open. A reading at most `openWatch`
+(10 s) before found the output's PCM device with no stream open, or with
+another stream on it. It also found MPD reporting the same `dop` and
+`allowed_formats` for the output whose thread holds the stream now. A
+reading that found this same stream, itself marked, under the same
+settings carries the mark (`watchOpens`, `watchedOpen`). It holds because
+MPD sets `hw_params` only in `AlsaOutput::Open`, the call that reads the
+settings, and a substream exists only between open and close. So a stream
+key (subdevice, `hw_params`, owner thread and process) that differs from
+the one the reading before found puts an open after that reading's `/proc`
+read. The settings that open read are then the ones both readings report,
+unless they changed and changed back within the window. That is the class
+of change the bracket of one reading already accepts, here bounded at
+10 s. The kept state carries no verdict. A reading that cannot tell keeps
+nothing: the cards, the ALSA configuration or the stream not read whole,
+MPD not read, or its outputs differing across the read. A reading whose
+own code panics forgets everything (`forgetOpens`).
+
+The other two candidates in the brief do not hold:
+- **The substream's `trigger_time`** (and `hw_ptr`, which a prepare
+  zeroes) moves on every restart. A seek or a manual change of song in the
+  same format goes through MPD's `Cancel`, which drops the stream so that
+  the next write prepares and starts it again. An xrun goes through
+  `Recover`, which prepares it again. Neither reopens the output, so a
+  `trigger_time` after the bridge last saw the settings can belong to a
+  stream opened before an `outputset`. The captures show it is the box's
+  monotonic clock (3512.6 s on the Pi), which a reading could compare only
+  through the uptime.
+- **MPD 0.24's `audio:`** is the decoder's format: `PlayerControl`'s
+  `audio_format`, set from `DecoderControl::in_audio_format`, and the
+  protocol's own "the format emitted by the decoder plugin". It reads
+  `dsd64:2` whether the output sends DoP, sends native DSD or converts to
+  PCM, and MPD's protocol reports no output's format.
+
+What a client sees: the first reading of a stream already playing is
+`dop_unconfirmed`. A client that reads the output while playback starts,
+or across a change of format, sees the open and gets the DoP verdict.
+`dsd_converted_to_pcm` is unchanged: a report of conversion withholds
+whether or not the settings were watched. The other direction, a stream
+opened as DoP whose settings changed to PCM since, also withholds, and the
+safe direction needed no evidence.
+
+**Fixes**
+
+- (1) c40eaa0c. `signalpath.Output.DoPSettingsAtOpen`, the new reason
+  `dop_unconfirmed`, `watchOpens` at the end of `takeReading`, and
+  PROTOCOL.md's DoP condition and its note on what a reading keeps.
+- (2) f1af84e7. The loader lists conf.d with `os.ReadDir`. Every error but
+  absence is `Unread`, and a conf.d that is a regular file is ENOTDIR on
+  every OS (`dir_windows.go:147-148` on Windows).
+- (3) 727272c6. `deviceStringStage` judges plug's one argument, SLAVE, as a
+  slave (`plugSlave`, `argValue`). The argument may be positional or
+  `SLAVE=`, quoted or bare, or a `{ SLAVE … }` compound. A device string
+  goes back through `deviceStringStage`, and a name is walked in the files,
+  so only beside a configuration read whole; `plug:soft` names the
+  softvol. What alsa-lib would not open as a plug names nothing: a bare
+  value with a comma or an =, another argument's name. PROTOCOL.md's stage
+  bullet says so.
+
+**Red first**
+
+- (1) signalpath, against compile-only stubs (the field and the code): the
+  three new rows read `format_preserved_dop` (`dop_container_too_narrow`
+  alone for the 16-bit one), and the dop-off row was green as a pin. The
+  route, against the tree with signalpath fixed and the route not wired:
+  every row needing a watched open read `dop_unconfirmed`. Then against
+  round 4's `signalpath.go`, with only the code name added as a stub: the
+  transition row read `format_preserved_dop` with the live override's
+  warning, as did the first reading of a playing stream and the readings
+  11 s apart.
+- (2) conf.d as a file and conf.d that cannot be listed read `unread false
+  ok true`. A conf.d whose entries cannot be stat'ed was green before the
+  fix, a pin: `readCapped` already failed on the entry itself.
+- (3) Every `plug:` row read `""`, and the route's `device "plug:dmix"`
+  carried no warning.
+
+**Negative controls**, one per fix, run with the fix committed and the
+file restored from git (`git checkout --`) and the tree clean after each
+(`/tmp/b473-r4-controls/run_r5.py`). C1 first failed to build (the
+mutation left `was` and `is` unused) and was rerun with them kept in use.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | `watchedOpen` ignores a change of the settings since the reading before (`was != is` made `(was != is && false)`) | `TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP`: the reading after the `outputset` read `format_preserved_dop` |
+| C2 | the conf.d listing's error dropped (`bad, unread = true, true` removed from its case) | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread` (conf.d a file), `TestAConfigurationDirectoryThatCannotBeListedIsUnread` (cannot be listed) |
+| C3 | the `plug` case never taken | `TestTheFirstStageThatChangesSamplesIsNamed` (every `plug:` row), `TestTheVerdictReadsMPDsOwnSettings/alsa-lib's_plug_over_dmix,_plug:dmix` |
+
+**Residuals, named, not fixed here**
+
+- A change of `dop` or `allowed_formats` and a change back between two
+  readings at most 10 s apart, across a reopen with the same `hw_params`,
+  passes as watched.
+- An `outputset` in the instant between MPD's `Open` reading its settings
+  and opening the PCM, while a reading's `/proc` read finds the device
+  closed, passes as watched.
+- `dop_unconfirmed` stays for the life of a stream the bridge did not see
+  open (a client that starts reading mid-track gets the DoP verdict at the
+  next open).
