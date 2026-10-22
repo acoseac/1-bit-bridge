@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -198,6 +199,49 @@ func TestNoLoadRefusalOrWarningCarriesAValue(t *testing.T) {
 				if carriesPartOf(l, c.secret) {
 					t.Errorf("a line Load logged carries the value: %s", l)
 				}
+			}
+		})
+	}
+}
+
+// TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine: two keys that
+// name one field, spelt differently so yaml.v3's same-text check passes them
+// (a !!binary key, an alias key), are refused as "field X already set", and
+// once ValueFreeYAMLError has dropped the key's text the line is all the
+// refusal says of where it is. The Claude API, on B505's round 3, read
+// v3.0.1 as printing ni.Line+1 there, as yaml.v2 did with its zero-based
+// lines; v3.0.1's decoder.mappingStruct prints ni.Line, 1-based like every
+// node's, and measured, the message names the second key's own line. The
+// guard holds yaml.v3's own message to that line too, so a yaml.v3 that
+// moved it fails here before a refusal points past its key (round 4).
+func TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		line       int
+		field, in  string
+	}{
+		{"a !!binary key beside a plain one", "libraryRoots: [/m]\nlibraryName: Kitchen\nscanIntervalSec: 600\n" +
+			"dataDir: /tmp/data\noutput:\n  mpd: \"off\"\n  !!binary bXBk: \"on\"\n", 7, "mpd", "config.OutputConfig"},
+		{"an alias key beside a plain one", "libraryRoots: [/m]\nlibraryName: &k mpd\nscanIntervalSec: 600\n" +
+			"dataDir: /tmp/data\noutput:\n  mpd: \"off\"\n  *k : \"on\"\n", 7, "mpd", "config.OutputConfig"},
+		{"the output block written twice, once as !!binary", "libraryRoots: [/m]\noutput:\n  mpd: \"off\"\n" +
+			"!!binary b3V0cHV0:\n  mpd: \"on\"\n", 4, "output", "config.Config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := yaml.NewDecoder(strings.NewReader(tc.body))
+			dec.KnownFields(true)
+			raw := fmt.Sprintf("line %d: field %s already set in type %s", tc.line, tc.field, tc.in)
+			if err := dec.Decode(&Config{}); err == nil || !strings.Contains(err.Error(), raw) {
+				t.Fatalf("yaml.v3's own error is %v, want %q: has its line moved?", err, raw)
+			}
+			file := filepath.Join(t.TempDir(), "bridge.yaml")
+			if err := os.WriteFile(file, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(file)
+			said := fmt.Sprintf("line %d: that key names a field already set in type %s", tc.line, tc.in)
+			if err == nil || !strings.Contains(err.Error(), said) {
+				t.Errorf("Load = %v, want %q", err, said)
 			}
 		})
 	}
