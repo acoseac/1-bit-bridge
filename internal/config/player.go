@@ -23,8 +23,8 @@ const (
 	// BindingUniqueModel names a model that has one unit on the box: two
 	// units of it are ambiguous, never the first.
 	BindingUniqueModel = "uniqueModel"
-	// BindingPort names a port, not a unit: whatever sound card sits on that
-	// interface of that port.
+	// BindingPort names a port, not a unit: whatever unit is in that port,
+	// and the sound card it carries (usbid.Port).
 	BindingPort = "port"
 )
 
@@ -111,7 +111,10 @@ type PlayerDevice struct {
 	// Serial is the unit's serial, for a serial binding: password-class,
 	// written to the config file and printed nowhere.
 	Serial usbid.Serial `yaml:"serial,omitempty"`
-	// Port is the anchored port path, for a port binding (usbid.Port).
+	// Port is the anchored port, for a port binding: the controller and the
+	// port chain, and a card's configuration and interface after them only
+	// as a preference among the cards of a unit that carries more than one
+	// (usbid.Port).
 	Port string `yaml:"port,omitempty"`
 	// PCMDevice and Subdevice are the playback endpoint on the card: the
 	// D of pcmC<card>D<D>p and its substream, 0 to 255.

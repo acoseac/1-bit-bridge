@@ -31,7 +31,8 @@ func TestParseHex16TakesTheThreeSpellings(t *testing.T) {
 }
 
 // TestPortRoundTripsItsCanonicalForm: each topology the grammar names
-// parses into its parts and prints back byte for byte.
+// parses into its parts and prints back byte for byte, a card's port path
+// (the configuration and interface after the port) and a port alone.
 func TestPortRoundTripsItsCanonicalForm(t *testing.T) {
 	for _, tc := range []struct {
 		in        string
@@ -48,6 +49,9 @@ func TestPortRoundTripsItsCanonicalForm(t *testing.T) {
 		{"pci-10000:e1:00.3/usb3-10:2.255", "pci-10000:e1:00.3", 3, []int{10}, 2, 255, "10"},
 		{"platform-ci_hdrc.0/usb1-1.2.3.4.5.6.7:255.0", "platform-ci_hdrc.0", 1, []int{1, 2, 3, 4, 5, 6, 7}, 255, 0, "1.2.3.4.5.6.7"},
 		{"platform-a/pci-0000:00:00.0/platform-b.usb/pci-0000:01:00.0/usb2-255:1.3", "platform-a/pci-0000:00:00.0/platform-b.usb/pci-0000:01:00.0", 2, []int{255}, 1, 3, "255"},
+		{"platform-xhci-hcd.1/usb2-2", "platform-xhci-hcd.1", 2, []int{2}, 0, 0, "2"},
+		{"platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3", "platform-fd500000.pcie/pci-0000:01:00.0", 2, []int{1, 3}, 0, 0, "1.3"},
+		{"pci-10000:e1:00.3/usb3-10.255.1.2.3.4.5", "pci-10000:e1:00.3", 3, []int{10, 255, 1, 2, 3, 4, 5}, 0, 0, "10.255.1.2.3.4.5"},
 	} {
 		p, err := ParsePort(tc.in)
 		if err != nil {
@@ -55,7 +59,7 @@ func TestPortRoundTripsItsCanonicalForm(t *testing.T) {
 			continue
 		}
 		if p.String() != tc.in || p.Anchor() != tc.anchor || p.Gen != tc.gen || p.ChainString() != tc.chainText ||
-			p.Config != tc.config || p.Interface != tc.iface || len(p.Chain) != len(tc.chain) {
+			p.Config != tc.config || p.Interface != tc.iface || len(p.Chain) != len(tc.chain) || p.HasInterface() != (tc.config != 0) {
 			t.Errorf("ParsePort(%q) = %+v (%q, anchor %q)", tc.in, p, p.String(), p.Anchor())
 		}
 		for i := range tc.chain {
@@ -66,18 +70,74 @@ func TestPortRoundTripsItsCanonicalForm(t *testing.T) {
 	}
 }
 
+// TestAPortIsThePlaceWithoutTheInterface: a port binding names the
+// controller anchor and the port chain. A card's port path, and a binding
+// an older bind wrote with the configuration and interface after the port,
+// reads as that port (Place), its configuration and interface kept apart
+// as a preference; the port alone has none, and its place is itself.
+func TestAPortIsThePlaceWithoutTheInterface(t *testing.T) {
+	for in, place := range map[string]string{
+		"platform-xhci-hcd.1/usb2-2:1.0":                         "platform-xhci-hcd.1/usb2-2",
+		"platform-xhci-hcd.1/usb2-2:1.1":                         "platform-xhci-hcd.1/usb2-2",
+		"platform-xhci-hcd.1/usb2-2":                             "platform-xhci-hcd.1/usb2-2",
+		"platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3:2.4":   "platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3",
+		"platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3":       "platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3",
+		"platform-ci_hdrc.0/usb1-1.2.3.4.5.6.7:255.255":          "platform-ci_hdrc.0/usb1-1.2.3.4.5.6.7",
+		"platform-a/pci-0000:00:00.0/usb3-9:1.0":                 "platform-a/pci-0000:00:00.0/usb3-9",
+		"platform-a/pci-0000:00:00.0/platform-b.usb/usb1-17:3.2": "platform-a/pci-0000:00:00.0/platform-b.usb/usb1-17",
+	} {
+		p, err := ParsePort(in)
+		if err != nil {
+			t.Errorf("ParsePort(%q): %v", in, err)
+			continue
+		}
+		pl := p.Place()
+		if pl.String() != place || pl.HasInterface() || pl.Config != 0 || pl.Interface != 0 || pl.Anchor() != p.Anchor() ||
+			pl.Gen != p.Gen || pl.ChainString() != p.ChainString() {
+			t.Errorf("ParsePort(%q).Place() = %+v (%q), want %q", in, pl, pl.String(), place)
+		}
+		if p.String() != in {
+			t.Errorf("Place changed the port it was taken from: %q is now %q", in, p.String())
+		}
+		back, err := ParsePort(place)
+		if err != nil || back.String() != place || back.HasInterface() {
+			t.Errorf("the place %q does not read back as itself: %+v, %v", place, back, err)
+		}
+	}
+	p, _ := ParsePort("platform-xhci-hcd.1/usb2-2:1.1")
+	if !p.HasInterface() || p.Config != 1 || p.Interface != 1 {
+		t.Errorf("the older form's configuration and interface: %+v", p)
+	}
+	if (Port{}).String() != "" || (Port{}).HasInterface() {
+		t.Errorf("the zero Port prints %q", Port{}.String())
+	}
+}
+
 // TestParsePortRefusesWhatTheGrammarDoesNot: a bus number, a device
 // number or an unanchored bus-port suffix never parses, nor anything the
-// grammar's ranges, digits or characters leave out.
+// grammar's ranges, digits or characters leave out, nor a configuration
+// and interface that are not both there after the port.
 func TestParsePortRefusesWhatTheGrammarDoesNot(t *testing.T) {
 	for _, in := range []string{
 		"",
 		"usb2-1:1.0",                                // no anchor
+		"usb2-1",                                    // no anchor
 		"1-1.3:1.0",                                 // a bus-relative sysfs name
 		"1-1.3",                                     // a bus number and a chain
 		"pci-0000:01:00.0",                          // no usb segment
-		"pci-0000:01:00.0/usb2-1.3",                 // no interface
+		"pci-0000:01:00.0/usb2",                     // no chain
+		"pci-0000:01:00.0/usb2-",                    // no chain
+		"pci-0000:01:00.0/usb2-:1.0",                // no chain
 		"pci-0000:01:00.0/usb2-1.3:1",               // no interface
+		"pci-0000:01:00.0/usb2-1.3:",                // nothing after the colon
+		"pci-0000:01:00.0/usb2-1.3:.0",              // no configuration
+		"pci-0000:01:00.0/usb2-1.3:1.",              // no interface
+		"pci-0000:01:00.0/usb2-1.3:1.0.0",           // a third number
+		"pci-0000:01:00.0/usb2-1.3:1:0",             // a colon for the dot
+		"pci-0000:01:00.0/usb2-1.3::1.0",            // two colons
+		"pci-0000:01:00.0/usb2-1.3:1.0:1.0",         // two suffixes
+		"pci-0000:01:00.0/usb2-1.3.",                // a trailing dot
+		"pci-0000:01:00.0/usb2-1.3.:1.0",            // a trailing dot
 		"pci-0000:01:00.0/usb4-1:1.0",               // no generation 4
 		"pci-0000:01:00.0/usb-1:1.0",                // no generation
 		"pci-0000:01:00.0/usb2-0:1.0",               // port 0
@@ -105,6 +165,17 @@ func TestParsePortRefusesWhatTheGrammarDoesNot(t *testing.T) {
 		"platform-a/usb2-1:1.0\n",
 		"platform-a/usb2-1:1.0 ",
 		"platform-a/usb2-１:1.0",
+		// The port alone, out of the same ranges.
+		"pci-0000:01:00.0/usb4-1",
+		"pci-0000:01:00.0/usb2-0",
+		"pci-0000:01:00.0/usb2-01",
+		"pci-0000:01:00.0/usb2-256",
+		"pci-0000:01:00.0/usb2-1..2",
+		"pci-0000:01:00.0/usb2-1.2.3.4.5.6.7.8",
+		"platform-a/usb2-1/",
+		"platform-a/usb2-1\n",
+		"platform-a/usb2-1 ",
+		"platform-soc:usb/usb2-1",
 	} {
 		if p, err := ParsePort(in); err == nil {
 			t.Errorf("ParsePort(%q) = %+v, want a refusal", in, p)

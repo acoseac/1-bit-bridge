@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
+- [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
@@ -50808,6 +50809,364 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it
+
+**What the gate showed.** On the owner's Raspberry Pi 5 with three DACs
+(the GO bar, a Hugo 2, an Altair), the GO bar was bound with
+`--binding port`, which 4a's bind wrote as
+`platform-xhci-hcd.1/usb2-2:1.0`: the controller anchor, the port chain,
+and the card's configuration and interface (the GO bar's audio interface
+is 0). With the Hugo 2 in that physical port, inspect read
+`card 3: Hugo2, port: platform-xhci-hcd.1/usb2-2:1.1, interface 1` (the
+Hugo 2's audio interface is 1), and the binding
+`resolves: device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`.
+A port binding meant "this port and this interface", and the interface
+belongs to the model: snd-usb-audio makes one card per USB device, on its
+audio control interface, which the GO bar has at 0 and the Hugo 2 at 1,
+after an interface of another class. 4a's entry said a port binding names
+"a port and an interface, not a model"; the interface was the model's.
+Everything else in the gate passed: the serial binding, renumbering,
+unplug and replug, `--verify-card`, and the bound unit moved to another
+port.
+
+**Two forms.** `usbid.Port`'s grammar (its doc) now takes an optional
+`:CONFIG.INTERFACE`. Without it the string is a port,
+`anchor/usbG-CHAIN`, what a port binding names and bind writes; with it,
+one card's port path, what sysfs gives a card (`alsa.USBIdentity.Port`,
+unchanged, and so is `sysfs.go`) and what 4a's bind wrote. `ParsePort`
+reads both, `Place` is the port alone, `HasInterface` says whether there
+is a suffix (the grammar's configurations start at 1, so 0 is none), and
+`String` prints the suffix only when there is one, and nothing for the
+zero Port, which a serial binding's resolution carries. Resolve matches a
+port binding by place: every USB card whose port path's place is the
+bound port is a card of the unit in it, and that unit gives the card, so
+its interface, and the bound pcmDevice and subdevice are looked up on
+that card (`endpoint_missing` when it lacks them). A binding with the
+suffix, from 4a's bind, loads and resolves as its port: the suffix is only
+a preference.
+
+**A unit with more than one card.** Two cards on one unit (a composite
+device) take two drivers, since snd-usb-audio makes one card per device.
+As the brief asked, the card on the configuration and interface the
+binding records is the one chosen, and with none recorded, or no card on
+it, the unit is `device_ambiguous`, never its first card. A serial or
+uniqueModel binding cannot tell such a unit's cards apart either (both are
+the unit, so both match: ambiguous), so a bind that always wrote the port
+alone would leave a composite unit with no binding at all. bind therefore
+writes the card's port path, suffix included, for a unit with more than
+one card, and the port alone for every other, and says which it wrote. The
+brief said bind writes the new form; this is the one exception, the case
+the preference exists for. Configuration and interface are recorded and
+matched together, since an interface number means something only in its
+configuration.
+
+**An unreadable card beside a port binding.** 4a exempted a port binding
+from the rule that a card whose identity cannot be read is never ruled
+out, because one port was one card. Under the new meaning a port is one
+unit, which may carry several cards, and the unreadable card may be
+another of them. So a port binding's one match beside an unreadable card
+is now `device_ambiguous`, as a serial or model match is, unless the match
+is on the interface the binding records, which no other card of that unit
+can be. `TestAnUnreadableCardIsNeverRuledOut` kept its assertion for the
+older form (available, on the recorded interface) and gained one for the
+port alone (ambiguous, and bind refused). A box with no unreadable card
+sees no change.
+
+**The check after open.** `Checker.Check`, which `SinkConfig.Admit` runs at
+every open and reopen, compared the opened card with the resolution's
+identity by `SameUnit`, so a unit swapped into the bound port between the
+resolve and the open was refused, though the binding names the port. Under
+a port binding it now asks `SamePort` (SameUnit's counterpart: the same
+place, whatever the unit and the interface) and then whether the card is
+the one the binding chooses there now: a card on the recorded interface
+is, and any other only while its unit carries no other card, which it
+reads sysfs again for. `Resolution` carries the binding's kind and its
+parsed port for it. Serial and uniqueModel bindings are checked as before.
+`--verify-card` runs the same check, and its pass says "at the bound
+port"; bind's line names the port it wrote. The check judges the cards it
+can read; an unreadable or a transient card is Resolve's to fail closed
+on, as under the other bindings.
+
+**What did not change.** A hub in the bound port and a controller that is
+gone are `binding_invalid` in either form, an empty port `device_missing`,
+and a card that is not USB `identity_unsupported` at bind. B470 PR 4a2's
+item that refuses a port whose device class cannot be read is that
+branch's: the lines of Resolve's no-match branch it changes are as main
+has them here, and so is the last line of the hub test, which that branch
+adds a test after.
+
+**Red first.** With the tests written and the code at e095d14b, eight
+binding tests failed (the grammar refused the port alone; bind wrote
+`platform-xhci-hcd.1/usb2-2:1.0`), two config tests, and the CLI test on
+bind's line. A scratch test of the gate itself, the binding 4a's bind
+wrote with the Hugo 2's card on interface 1 in that port, failed
+`device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`, as the Pi
+did, and inspect printed the gate's lines. The usbid tests did not build
+(`Place`, `HasInterface`); with a stub of HEAD's meaning they failed on
+every port alone and every place. `TestTheEndpointMustBeThere`'s port case
+was added after the fix; control 20 shows it red.
+
+**Controls: twenty-one, each on a committed tree, each restored from git,
+all red.** Resolve matching a port binding by the stored string (1: nine
+binding tests and the CLI's); the grammar requiring the suffix (2: the
+usbid, config, binding and CLI tests); bind writing the card's port path
+for every unit (3) and the port alone for a unit with two cards (4: bind
+refused, ambiguous); a unit with two cards resolving to its first (5); the
+recorded interface never choosing (6); a port binding exempt from an
+unreadable card again (7), and no exemption for the recorded interface
+(8); the hub never found (9), missed for the port alone (10a) and, by
+comparing the stored string, for the older form (10b); the
+gone-controller check removed (11); the check after open by `SameUnit`
+under a port binding (12), `SamePort` always true (13), the check not
+reading the unit's other cards (14), and the recorded interface not
+settling it (15); Resolve not recording the binding's kind (16); `Place`
+keeping the interface (17); a port alone printing `:0.0` (18); bind's old
+line (19); and no endpoint check under a port binding (20). Control 13
+stayed green on its first run: with `SamePort` always true a card at
+another port was still refused, by the second sysfs read, which also
+asked whether the opened card was among the cards at the bound port.
+`SamePort` was redundant there, so `checkPort` now asks each question once
+(abcebb43): `SamePort` says where the opened card is, naming it, and the
+read only whether its unit carries another card. Run again, the control
+was red.
+
+**Hardware: the gate's step 6c, again, not run here.** On the Pi with this
+build, the service stopped (bind refuses a data dir a serve holds):
+`bridge output dac bind <the GO bar's card> --binding port` writes
+`port: platform-xhci-hcd.1/usb2-2` and says so; with the Hugo 2 in that
+port, `bridge output dac inspect --verify-card <its card>` resolves
+`available` at that port and passes; the GO bar in another port is
+refused by `--verify-card <its card>`, which names the bound port; the
+binding the gate wrote, `platform-xhci-hcd.1/usb2-2:1.0`, resolves the
+same; and the port left empty is `device_missing`.
+
+**Round 2 (Codex P2 and the Claude API Low, one finding; Argon found
+none).** `checkPort`'s re-read counted only readable USB cards at the bound
+port. Suppose a composite unit is swapped into the port between the
+resolve and the open, its first card takes the opened card's number, and
+its second card's reading is not a readable USB identity (registered on
+the unit itself rather than on an interface, or vanished as it was read).
+Then the opened card stood alone at the port and the check passed, where
+Resolve on the same tree answers `device_ambiguous` or
+`identity_transient`. Under a serial or uniqueModel binding `SameUnit` pins
+the opened card to the unit Resolve analysed; under a port binding the
+check admits a unit Resolve never saw, so Resolve's fail-closed reading
+did not cover it. The check now refuses such a card, as Resolve does,
+unless the opened card is on the interface the binding records. A card
+that is not USB, or a readable one at another port, is ruled out: refusing
+every reading that is not a readable USB identity would refuse on every Pi,
+whose HDMI cards are not USB (control R2-4). The same hole had a second
+way in: a re-read that could not list the cards saw none and passed. Under
+a port binding the check now reads sysfs once, for the opened card and the
+cards beside it, so a reading that fails does not hold the opened card and
+refuses, with no branch of its own. Red first, the final test against
+round 1's `binding.go`: the unreadable and vanished cases, each with no
+interface recorded and with another one, passed the check (four failures).
+The two cases in which the opened card is not in the reading (the port
+left empty, and a `class/sound` that cannot be listed) were refused on
+round 1 too, with its older message, because round 1's own lookup of
+card 5 failed as well (on macOS a lookup through a directory without read
+permission fails); they pin the one reading, and R2-7 shows them red.
+Controls on 0b8ca51e, all red, each restored from git: unreadable and
+vanished cards ignored (R2-1), vanished ones alone ignored (R2-2),
+unreadable ones alone ignored (R2-3), a card that is not USB refusing
+(R2-4: the first check, on HDMI card 0, and the CLI test), a readable card
+at another port counted (R2-5), the recorded interface not settling it
+(R2-6), a reading without the opened card passing (R2-7: the empty port and
+the unlistable `class/sound`), `SamePort` always true (R2-8), a unit's
+readable second card not counted (R2-9), and no port dispatch in `Check`
+(R2-10: the check test and the CLI test).
+
+**Round 3 (Codex P2 twice, and the Claude API Low with one of them; Argon
+found none). Both findings had one root: the check after open read sysfs
+alone and never asked whether its reading was whole.** A sibling card
+whose `class/sound` link was gone while `/proc/asound` still listed it (the
+kernel's removal order) was invisible, so the check admitted card 5 under
+a port binding where Resolve answers `identity_transient`; round 2's
+vanished case had kept the class link, and missed it. `SysfsReader.Read`
+caps `class/sound` at 1,024 entries and said so only in `Problems`, so a
+listing that kept the opened card and cut its sibling admitted it too. And
+an unlistable reading refused only because `Read` then returns no cards;
+round 2's test for it changed `class/sound`'s permissions, under which the
+direct lookup of card 5 also failed on macOS, so it would have passed
+round 1's shape, a separate `Card()` lookup beside a loop that never asked
+whether the listing was whole. `alsa.SysfsSnapshot` now says whether its
+card listing is whole (`CardsComplete`), and the check refuses a reading
+that is not present, one cut short, and a `/proc/asound` that cannot be
+read, each with a reason of its own and whatever interface the binding
+records. It then reads `/proc/asound`'s cards and reconciles the two trees
+with the function `Observe` now shares (`inventory`), so a card listed by
+one tree alone refuses as an unreadable or vanished one does, unless the
+opened card is on the recorded interface. `Checker` gained `Proc`, and its
+`Sysfs` is an interface `alsa.SysfsReader` satisfies (`SysfsReading`), the
+seam the failed-listing test stands a reading in through while card 5's
+own lookup still reads; `--verify-card` passes the check both trees. Red
+first, with the new `Checker` fields in place and round 2's check: the
+sibling listed by `/proc/asound` alone (twice), a `/proc/asound` that
+cannot be read, and the cut listing, whether `/proc/asound` listed the cut
+card or not (six), were admitted; the cases round 2 already refused (an
+unreadable or vanished sibling, the failed listing, card 5 gone or listed
+by `/proc/asound` alone) failed on their reasons only. Controls on
+6cd98ba0, all red, each restored from git: cards that `/proc/asound` lists
+and sysfs does not dropped before the reconciliation (R3-1: the sibling
+admitted twice, Codex's case), no refusal of a cut listing (R3-2: with
+`/proc/asound` no longer listing the cut card, all three bindings
+admitted), no reason of its own for a listing that failed (R3-3: refused as
+cut short), round 1's shape (R3-4: a separate `Card()` lookup admitted the
+failed listing with and without the recorded interface, and every round 2
+and 3 case besides), `--verify-card` without the `/proc` reader (R3-5: the
+CLI test failed, and the suite's TestMain reported the host's `/proc`
+read), no early exit (R3-6), `CardsComplete` always true (R3-7) and never
+(R3-8), and a card that is not USB refusing (R3-9). R3-3's first edit
+matched `inventory`'s `!sys.Present` too and was not applied; the run was
+of the unchanged tree, and the control was made again on `checkPort`'s
+line alone.
+
+**Round 4 (Codex P2 twice, the Claude API Low with the second; Argon
+found none). Both findings: Resolve and the check after open still
+answered differently on one reading, so round 4 added a table that runs
+each shape of reading through both.** `checkPort` filed a card the kernel
+is adding or removing (vanished as it was read, or listed by one tree
+alone) with the unreadable cards, whose refusal the interface preference
+skips, so card 5 on the recorded interface was admitted beside it, where
+Resolve answers `identity_transient` before it looks at the binding;
+round 3's test required that admission for its vanished and /proc-only
+cases, and now requires the refusal. Such a card now refuses before the
+preference, wherever it is; the preference stays for an unreadable card,
+which Resolve's own preference (`byInterface`) covers. And `inventory`,
+shared since round 3, dropped `SysfsSnapshot.CardsComplete`: on a listing
+cut at the cap Resolve answered available (status, and bind accepted)
+while the check refused every open "cut short … resolve again", and
+resolving again answered available again, so a port-bound player never
+played; and a cut sibling that /proc/asound did not list was invisible to
+Resolve, which answered available where that sibling made the binding
+ambiguous. `Inventory` now carries `CardsComplete`, and Resolve answers
+`identity_incomplete`, a new state, before it looks at any card,
+`identity_transient` included, since a card cut from sysfs's listing that
+/proc/asound lists reads as one tree's alone, which it is not. bind
+(`For`) refuses such a reading before it looks for its card, which the
+listing may lack: it said "there is no card 5", or "being added or
+removed: try again". Nothing outside `internal/player/binding` changed:
+`--verify-card` runs the check only on a resolution that is available,
+so on a cut listing it now says the binding does not resolve
+(`identity_incomplete`).
+
+**The table.** `TestTheCheckAfterOpenAgreesWithResolveOnEachReading`
+lays out nineteen shapes on the Pi 5 tree: the GO bar beside the HDMI
+cards, a virtual card, a card at another port, another model in the port,
+the GO bar in another port, the port empty; a second card of the GO bar's
+unit read whole, cut from the listing while /proc/asound lists it and
+before it does, listed by one tree alone each way, vanished, and
+unreadable; a card at another port that sysfs alone lists; card 5 itself
+listed by one tree alone each way, and vanished; a listing cut with no
+card missing, and one that cannot be read. Each runs through Resolve and
+through the check of card 5, made from the resolution of the GO bar
+alone, under a serial, a uniqueModel and a port binding with and without
+the GO bar's interface, and the check must admit card 5 exactly when
+Resolve answers available on it. Under a port binding they agree on every
+shape: the check chooses again there, since a unit Resolve never saw may
+be in the port. Under a serial or uniqueModel binding the check chooses
+nothing: it pins the unit Resolve chose by `SameUnit` on the opened
+card's own sysfs identity, and the table names the shapes where that
+answers otherwise, for three reasons. A second card or unit, a card
+Resolve cannot identify, or a listing it cannot read whole is why Resolve
+chooses none, and none makes card 5 another unit (ten shapes); the GO bar
+moved to another port as card 5 is refused, the safe way to differ, since
+`SameUnit` compares the port the open was made from; and card 5 that
+sysfs lists and /proc/asound does not is admitted, since a USB card's
+identity is sysfs's and the kernel holds its node. A named difference
+that stops differing fails the table too.
+
+**Red first, and the controls.** With the new state, the field and
+`inventory`'s carry in place and round 3's Resolve and check, the table
+failed on seven shapes. Finding 1 on four: the second card listed by one
+tree alone each way or vanished, and the card at another port that sysfs
+alone lists, where Resolve answered `identity_transient` and the check
+admitted card 5 under the port with its interface. Finding 2 on three:
+the listing cut with no card missing and the second card cut before
+/proc/asound lists it, under both port forms Resolve available and the
+check refusing "cut short", under the unit forms the named difference
+not holding; and on the third, the second card cut while /proc/asound
+lists it, Resolve answered `identity_transient` where the table says
+`identity_incomplete`. `TestTheCheckAfterOpenFollowsAPortBinding`
+failed on its vanished and /proc-only cases, and
+`TestACutListingResolvesToNoCardAndBindsNone` on its first resolution.
+Controls on 90781dac, all red, each restored from git: a transient card
+filed with the unreadable ones again (R4-1: the four transient shapes
+under the port with its interface, and the port-binding test), transient
+cards ignored (R4-2: the same shapes under both port forms), the
+preference dropped for an unreadable card (R4-3: the unreadable shape
+under the port with its interface, and the port-binding test), Resolve
+without `identity_incomplete` (R4-4: the three cut shapes, two on
+agreement and one on its state, and the cut-listing test), `inventory`
+calling every listing whole (R4-5: the same, and the carry on the four
+shapes not whole), `identity_transient` answered first (R4-6: the cut
+sibling /proc/asound lists, and the cut-listing test with card 5 cut),
+bind without its check (R4-7: "card 5 is in /proc/asound and not in
+sysfs: being added or removed: try again" for each kind), the check
+without round 3's cut refusal (R4-8: the two cut shapes under both port
+forms, and the port-binding test), and every binding checked as a port
+(R4-9: eleven shapes under the unit forms, ten named differences agreeing
+and another model in the port admitted, and both check tests).
+
+**Round 5 (Codex P2; the Claude API found nothing, and Argon was queued).
+The check after open skipped Resolve's controller gate.** Resolve passes a
+port binding through that gate before it looks at any card: the bound
+anchor must be among the controllers the USB listing (`bus/usb/devices`)
+names, or the answer is `binding_invalid`. `checkPort` never read that
+listing, and a card's own port path is read from its device's ancestors,
+not from the listing, so on a reading whose USB listing could not be
+listed, was cut at the cap, or lost the bound controller's root hub
+entries, card 5 still read as at the bound port and the check admitted it
+under either port form. The check now refuses unless the reconciled
+inventory names the bound controller, and its reason carries the
+reading's problems, which say why the listing lacks it. The review asked
+for a sweep of every piece of the inventory Resolve consults against the
+check: whether the card listing is whole, each card's state in both
+trees, the cards' port paths and interfaces (both take the place with
+`placeOf`, and the interface preference compares the whole path), the
+controllers, the hub status, and the bound playback stream. The stream
+was a second gap: Resolve requires it on the card it chooses
+(`endpoint_missing`), and the check took the endpoint from the node
+alone, so another model swapped into the port without the bound stream,
+or card 5 read without it, was admitted. Under a port binding the check
+now requires it on the opened card in /proc/asound. The hub status needs
+nothing: Resolve reads it only when no card is at the bound port, to
+answer `binding_invalid` rather than `device_missing`, and the check
+refuses there too, since the opened card must be at the bound port.
+
+**The rows.** The table gained seven: the USB listing unreadable (a file
+in place of `bus/usb/devices`), the bound controller's two root hub
+entries unreadable in it, and the listing cut before them (an edit, as
+the card listing's cut is); card 5's port path unreadable (its root hub's
+speed unreadable, the controller still listed through its other root
+hub); a hub in the bound port with the GO bar behind it; card 5 without
+the bound stream, and another model in the port without it. Under the
+port forms each agrees. Under the unit forms two differences are named:
+the unreadable port path and the hub refuse a card Resolve would choose
+now, since `SameUnit` compares the port path the open was made from; and
+card 5 without the stream is admitted where Resolve answers
+`endpoint_missing`, since the unit check reads no /proc/asound and takes
+the stream from the kernel's INFO on the open descriptor. The carry
+assertion now compares the inventory's `CardsComplete` with the
+reading's, because the USB cut keeps the card listing whole.
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream` pins the two new
+refusals' reasons. Resolve itself is unchanged: on a USB listing it
+cannot read whole it still answers `binding_invalid`, and on a card whose
+port path cannot be read `device_missing`, both failing closed; telling
+those readings apart would need the reader to say whether its USB listing
+is whole, as `CardsComplete` says of the card listing.
+
+**Red first, and the controls.** On 517de480 with the new rows, the three
+USB-listing rows failed under both port forms (Resolve `binding_invalid`,
+the check admitting card 5), the two stream rows under both port forms
+(Resolve `endpoint_missing`, the check admitting), and the focused test
+four times; the port-path and hub rows passed, as the sweep expected.
+Controls on d9ce5a00, each restored from git: the controller gate dropped
+(R5-1: the three USB-listing rows under both port forms, and the focused
+test's controller case) and the stream check dropped (R5-2: the two
+stream rows under both port forms, and its stream case), both red.
 
 ## 2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation
 

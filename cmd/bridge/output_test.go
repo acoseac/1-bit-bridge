@@ -383,8 +383,11 @@ func TestOutputCommandUsage(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "  dac ") {
 		t.Errorf("output help: exit %d, %q", code, stdout)
 	}
-	if !strings.Contains(stdout, "With the\n           player enabled, the first bind also writes the player's UUID\n           file, <dataDir>/player-uuid.") {
+	if !strings.Contains(stdout, "With the player enabled, the first bind also writes the\n           player's UUID file, <dataDir>/player-uuid.") {
 		t.Errorf("output help does not say dac bind writes the player's UUID file:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Write that card's unit, or with port the port it is in, into the\n           config as the player's binding") {
+		t.Errorf("output help does not say a port binding names the port:\n%s", stdout)
 	}
 	var b bytes.Buffer
 	usage(&b)
