@@ -50426,8 +50426,8 @@ refusal and Validate logs it (`output.player: the player is off`, the reason
 as an attribute) and returns nil. The YAML half needed the same treatment:
 `Load` decodes with `KnownFields(true)`, so a typo'd key or a wrong type
 inside the block failed the whole config before Validate ran, and yaml.v3's
-own type errors quote up to seven bytes of the value (`cannot unmarshal !!str
-\`GOBAR-7...\``), which is a serial in the wrong field. So the block is read by
+own type errors quote up to seven bytes of the value
+(`` cannot unmarshal !!str `GOBAR-7...` ``), which is a serial in the wrong field. So the block is read by
 hand (`playerReader`): `UnmarshalYAML` never errors, each value is decoded by
 yaml.v3 (a bool or an int reads as it does elsewhere in the config), every
 message is this package's own (field, line, never a value unless it is a

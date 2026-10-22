@@ -94,7 +94,8 @@ func TestAFIFOInTheSysfsTreeIsRefusedPromptly(t *testing.T) {
 		}},
 		{"speed", goBarHub + "/speed", func(snap SysfsSnapshot) bool { return strings.Contains(problems(snap), "speed") }},
 		{"bDeviceClass", goBarDevice + "/bDeviceClass", func(snap SysfsSnapshot) bool {
-			return cardKind(snap, 5) == IdentityUSB && len(snap.Devices) == 1 && !snap.Devices[0].Hub
+			return cardKind(snap, 5) == IdentityUSB && len(snap.Devices) == 1 && !snap.Devices[0].Hub &&
+				snap.Devices[0].HubUnknown && strings.Contains(problems(snap), "bDeviceClass")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

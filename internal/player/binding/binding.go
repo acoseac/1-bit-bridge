@@ -47,9 +47,10 @@ const (
 	StateEndpointMissing State = "endpoint_missing"
 	// StateBindingInvalid is a binding that cannot be resolved as it
 	// stands: a port binding whose controller is gone or whose port a hub
-	// has taken (a topology change: rebind), or one the config refuses.
-	// It fails closed, which an empty port (StateDeviceMissing) does not
-	// need to.
+	// has taken (a topology change: rebind), or whose port holds a device
+	// whose class cannot be read, so may be a hub, or one the config
+	// refuses. It fails closed, which an empty port (StateDeviceMissing)
+	// does not need to.
 	StateBindingInvalid State = "binding_invalid"
 	// StateIdentityUnsupported is a box whose cards' identities cannot be
 	// read at all: no sysfs.
@@ -293,9 +294,12 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 			r.Matches[0], what, joinInts(unreadable))
 	case len(r.Matches) == 0:
 		if dev.Binding == config.BindingPort {
-			if hub, ok := inv.deviceAt(dev.Port); ok && hub.Hub {
+			if d, ok := inv.deviceAt(dev.Port); ok && d.Hub {
 				return fail(StateBindingInvalid, "a hub is in the bound port %s now: a port binding names that port, not what is behind a hub, so rebind (bridge output dac bind)",
-					hub.Port())
+					d.Port())
+			} else if ok && d.HubUnknown {
+				return fail(StateBindingInvalid, "the device in the bound port %s has a class that could not be read, so it may be a hub: a port binding names that port, not what is behind a hub, and resolves again once the class reads",
+					d.Port())
 			}
 		}
 		more := ""

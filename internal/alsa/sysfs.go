@@ -117,6 +117,11 @@ type USBDevice struct {
 	Chain  string `json:"chain"`
 	// Hub is a device whose class is 09.
 	Hub bool `json:"hub"`
+	// HubUnknown is a device whose class could not be read, so whether it
+	// is a hub is not known (Hub is false): a port binding whose port it
+	// holds is refused, never read as an empty port. The snapshot's
+	// problems say why.
+	HubUnknown bool `json:"hubUnknown"`
 }
 
 // Port is the device's place as a port path without the configuration
@@ -320,6 +325,13 @@ func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
 	}
 	defer f.Close()
 	return readAllCapped(f, int64(t.lim.file))
+}
+
+// gone reports whether dir, a directory resolve returned, is no longer in
+// the tree: a device the kernel removed after it was listed.
+func (t *sysfsTree) gone(dir string) bool {
+	_, err := t.root.Lstat(filepath.FromSlash(dir))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // subsystem is the name of the subsystem dir's subsystem link points at
@@ -613,9 +625,20 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 			snap.addProblem("bus/usb/devices/%s: %s", name, errText(err))
 			continue
 		}
-		class, _ := t.attr(dir, "bDeviceClass")
-		snap.Devices = append(snap.Devices, USBDevice{Anchor: r.anchor, Gen: r.gen, Chain: m[2],
-			Hub: strings.TrimSpace(string(class)) == "09"})
+		d := USBDevice{Anchor: r.anchor, Gen: r.gen, Chain: m[2]}
+		class, err := t.attr(dir, "bDeviceClass")
+		switch {
+		case err == nil:
+			d.Hub = strings.TrimSpace(string(class)) == "09"
+		case errors.Is(err, fs.ErrNotExist) && t.gone(dir):
+			// The device went between the listing and its class: it is
+			// being removed, and is not in a port any more.
+			continue
+		default:
+			d.HubUnknown = true
+			snap.addProblem("bus/usb/devices/%s/bDeviceClass: %s; whether it is a hub is not known", name, errText(err))
+		}
+		snap.Devices = append(snap.Devices, d)
 	}
 	sort.Slice(snap.Devices, func(i, j int) bool { return snap.Devices[i].Port() < snap.Devices[j].Port() })
 }

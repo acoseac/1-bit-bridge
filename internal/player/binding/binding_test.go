@@ -266,6 +266,32 @@ func TestAHubOrAGoneControllerInvalidatesAPortBinding(t *testing.T) {
 	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2:1.0"), inv), StateDeviceMissing, -1)
 }
 
+// TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort: a device in the
+// bound port whose class (bDeviceClass) cannot be read may be a hub, so a
+// port binding with no card at the port is refused (binding_invalid), as a
+// hub there is, never read as an empty port (device_missing). The reading
+// says the class could not be read, and a serial binding still follows the
+// unit behind it.
+func TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\nusbdev "+goBar+" vendor=05e3 product=0610 class=09\n"+
+		"remove "+goBar+"/bDeviceClass\ndir "+goBar+"/bDeviceClass\n"+plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial))
+	inv := observe(t, root)
+	d, ok := inv.deviceAt(goBarPort)
+	if !ok || d.Hub || !d.HubUnknown {
+		t.Fatalf("the device in the bound port: %+v, %v; want its hub status unknown", d, ok)
+	}
+	if !strings.Contains(strings.Join(inv.Problems, "; "), "bDeviceClass") {
+		t.Errorf("the reading's problems do not name the class: %q", inv.Problems)
+	}
+	r := Resolve(byPort(goBarPort), inv)
+	want(t, r, StateBindingInvalid, -1)
+	if !strings.Contains(r.Reason, "class") {
+		t.Errorf("reason %s", r.Reason)
+	}
+	want(t, Resolve(bySerial(goBarSerial), inv), StateAvailable, 5)
+}
+
 // TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard: the check passes
 // the node Resolve named, and refuses, naming why, the same card number
 // once another DAC has taken it (a swap between the resolve and the open),
