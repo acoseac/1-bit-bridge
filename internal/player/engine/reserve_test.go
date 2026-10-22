@@ -485,6 +485,9 @@ func TestNewRefusesAFilePathThatNamesADirectory(t *testing.T) {
 		{"a reservation path ending in \".\"", "queue.json", "ids" + sep + ".", "reservation"},
 		{"a queue path with a trailing separator", "queue.json" + sep, "", "queue"},
 		{"a queue path ending in \".\"", "queue.json" + sep + ".", "", "queue"},
+		// Its reservation path, x/...ids, is a plain file's: only the queue
+		// path's own check can refuse it.
+		{"a queue path ending in \"..\"", "x" + sep + "..", "", "queue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
