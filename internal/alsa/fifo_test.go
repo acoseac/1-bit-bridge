@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build unix
 
 package alsa
 
@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 )
@@ -17,7 +18,9 @@ import (
 // A FIFO opened for reading blocks until a writer comes, so a fake tree
 // that holds one where the readers open a file or a directory would hold
 // the reader for good. These tests plant one at each kind of path the two
-// readers open; only a POSIX system makes a FIFO.
+// readers open; only a POSIX system makes a FIFO. They build on every one
+// the unix tag stands for, so they take Mkfifo from x/sys: syscall has none
+// on aix, solaris or illumos.
 
 // fifoWatchdog is how long a read of a tree with a FIFO in it may take
 // before the test calls it blocked. A read that does not open the FIFO
@@ -30,7 +33,7 @@ func plantFIFO(root, rel string) (string, error) {
 	if err := os.RemoveAll(p); err != nil {
 		return p, err
 	}
-	return p, syscall.Mkfifo(p, 0o600)
+	return p, unix.Mkfifo(p, 0o600)
 }
 
 // readsPromptly runs read and fails the test when it has not returned
@@ -49,7 +52,7 @@ func readsPromptly(t *testing.T, fifos []string, read func()) {
 	case <-time.After(fifoWatchdog):
 	}
 	for _, p := range fifos {
-		if f, err := os.OpenFile(p, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+		if f, err := os.OpenFile(p, os.O_WRONLY|unix.O_NONBLOCK, 0); err == nil {
 			_ = f.Close()
 		}
 	}
