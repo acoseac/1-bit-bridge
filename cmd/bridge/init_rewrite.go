@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +63,17 @@ import (
 //     name. A script that re-runs init --yes --force and expects :7788
 //     keeps the old port instead. printKept lists an address only when a
 //     first install of this posture would have written another.
+//   - output, the whole block, in either posture (backlog B505). It says
+//     what is beside the bridge on this box, the MPD and the player's DAC,
+//     and init asks for none of it. The player's binding names a unit by a
+//     serial that bridge output dac bind reads from the unit and never
+//     prints, so only the unit can give it back; MPD's password is typed
+//     from MPD's own configuration; MPD keeps the loopback route's URLs in
+//     its queue, so a port the rewrite reset broke every queued track; and
+//     output.mpd: off is the operator's opt-out, which the default, auto,
+//     would turn back on. A setting that does not read, or that the
+//     config's own check refuses, is not kept, and the run says which and
+//     why (priorOutput, warnOutputNotKept).
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features and cadences. The ports are kept under
@@ -471,13 +483,149 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	if adminKept {
 		add("adminAddress", cfg.AdminAddress)
 	}
+	// A first install writes no output block, so one in cfg was kept.
+	for _, l := range keptOutputLines(cfg.Output) {
+		add(l[0], l[1])
+	}
 	if len(lines) == 0 {
 		return
+	}
+	// Sixteen columns, or the longest key's (output.loopbackPort is 19).
+	width := 16
+	for _, l := range lines {
+		width = max(width, len(l[0]))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, keptFromHeading)
 	for _, l := range lines {
-		fmt.Fprintf(w, "  %-16s %s\n", l[0], l[1])
+		fmt.Fprintf(w, "  %-*s %s\n", width, l[0], l[1])
 	}
 	fmt.Fprintln(w, "every other setting is this run's or the default.")
+}
+
+// priorOutput reads the output block of the config a rewrite replaces (raw,
+// the bytes the run read): what the rewrite keeps of it, and a line for each
+// setting it cannot keep. The block is kept as the file holds it (the list
+// at the top of this file), a setting at a time. One that does not read, or
+// that the config's own check refuses (config.OutputConfig.Problem), is one
+// the config did not load with either, often why init runs again: it is left
+// out and named, by its key and line and the check's own words, never by a
+// value that does not read. A player block never fails: one this release
+// cannot read is kept as the file holds it, as Load keeps it, and the player
+// stays off. A key output does not take is dropped, as a rewrite drops every
+// key a config does not have.
+//
+// Read on its own, never as a field of priorInstallFile: a type error in the
+// block fails that struct's whole decode, and refuseRewrite would then refuse
+// the rewrite over a block it can do without.
+func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
+	var file struct {
+		Output yaml.Node `yaml:"output"`
+	}
+	if err := yaml.Unmarshal(raw, &file); err != nil {
+		return config.OutputConfig{}, nil
+	}
+	n := &file.Output
+	for hops := 0; n.Kind == yaml.AliasNode && n.Alias != nil && hops < 16; hops++ {
+		n = n.Alias
+	}
+	switch {
+	case n.Kind == 0, n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null":
+		return config.OutputConfig{}, nil
+	case n.Kind != yaml.MappingNode:
+		return config.OutputConfig{}, []string{fmt.Sprintf("output (line %d): it is not a block of output settings", n.Line)}
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		var one config.OutputConfig
+		if err := (&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{k, v}}).Decode(&one); err != nil {
+			notKept = append(notKept, fmt.Sprintf("%s (line %d): it does not read as that setting", outputKeyName(k), k.Line))
+			continue
+		}
+		if err := one.Problem(); err != nil {
+			notKept = append(notKept, err.Error())
+			continue
+		}
+		// The setting the pair holds, into what is kept.
+		from, into := reflect.ValueOf(one), reflect.ValueOf(&kept).Elem()
+		for f := 0; f < from.NumField(); f++ {
+			if from.Type().Field(f).IsExported() && !from.Field(f).IsZero() {
+				into.Field(f).Set(from.Field(f))
+			}
+		}
+	}
+	return kept, notKept
+}
+
+// outputKeyName names a key of the output block: output.<key> for one of
+// config.OutputConfig's own, and "a key of output" for any other, which is
+// never quoted.
+func outputKeyName(k *yaml.Node) string {
+	t := reflect.TypeOf(config.OutputConfig{})
+	for f := 0; f < t.NumField(); f++ {
+		if name, _, _ := strings.Cut(t.Field(f).Tag.Get("yaml"), ","); name != "" && name == k.Value {
+			return "output." + name
+		}
+	}
+	return "a key of output"
+}
+
+// keptOutputLines lists, for printKept, the output settings a rewrite kept:
+// each key, with its value where it is no secret. MPD's password and the
+// player's serial are never shown, nor anything the player's binding names
+// but its kind.
+func keptOutputLines(o config.OutputConfig) [][2]string {
+	var lines [][2]string
+	if o.MPD != "" {
+		lines = append(lines, [2]string{"output.mpd", o.Mode()})
+	}
+	if o.Endpoint != "" {
+		lines = append(lines, [2]string{"output.endpoint", o.Endpoint})
+	}
+	if o.Conf != "" {
+		lines = append(lines, [2]string{"output.conf", o.Conf})
+	}
+	if o.Password != "" {
+		lines = append(lines, [2]string{"output.password", "set (not shown)"})
+	}
+	if o.LoopbackPort != nil {
+		lines = append(lines, [2]string{"output.loopbackPort", strconv.Itoa(*o.LoopbackPort)})
+	}
+	if !o.Player.IsZero() {
+		lines = append(lines, [2]string{"output.player", keptPlayerSummary(o.Player)})
+	}
+	return lines
+}
+
+// keptPlayerSummary says what a kept player block asks for: whether the
+// player is enabled, and the binding's kind when it is one this release
+// knows.
+func keptPlayerSummary(p config.PlayerConfig) string {
+	if p.Unread() != nil {
+		return "kept as written (it does not read, so the player is off)"
+	}
+	s := "not enabled"
+	if p.Enabled {
+		s = "enabled"
+	}
+	switch b := p.Device.Binding; {
+	case b == config.BindingSerial || b == config.BindingUniqueModel || b == config.BindingPort:
+		return s + ", bound by " + b
+	case p.Device.Configured():
+		return s + ", with a binding this release refuses"
+	}
+	return s + ", no DAC bound"
+}
+
+// warnOutputNotKept names, once the rewrite is saved, the output settings it
+// could not keep (priorOutput), so none is dropped without a word.
+func warnOutputNotKept(w io.Writer, notKept []string) {
+	if len(notKept) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "warning: output settings in the config this run replaced do not read, so the rewrite did not keep them:")
+	for _, s := range notKept {
+		fmt.Fprintf(w, "  %s\n", s)
+	}
+	fmt.Fprintln(w, "the config did not load with them either. Set them again in bridge.yaml if you want them.")
 }

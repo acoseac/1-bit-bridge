@@ -286,7 +286,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgDirFlag := fs.String("dir", "", "config directory (default per-OS standard)")
 	nonInteractive := fs.Bool("yes", false, "accept all defaults without prompting")
 	fs.BoolVar(nonInteractive, "y", *nonInteractive, "alias for --yes")
-	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir and TLS pair are kept")
+	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir, TLS pair and output block are kept")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: the existing config's, or the hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
@@ -736,6 +736,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// The TLS pair the install serves, and a loopback install's custom
 	// endpoints. The data dir and the roots are in cfg already.
 	endpointsKept := keepFromPrior(cfg, prior)
+	// And the output block, in either posture, but for a setting the config
+	// did not load with either (priorOutput).
+	var outputNotKept []string
+	if prior != nil {
+		cfg.Output, outputNotKept = priorOutput(asRead.raw)
+	}
 	if err := cfg.NormalizeAndValidate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
@@ -869,6 +875,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if endpointsKept {
 		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
 	}
+	warnOutputNotKept(stderr, outputNotKept)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding

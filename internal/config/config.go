@@ -158,6 +158,20 @@ func (o OutputConfig) Mode() string {
 	}
 }
 
+// Problem is the refusal Validate makes of the output block, or nil: an
+// output.mpd that is not auto, on or off, or an output.loopbackPort that is
+// not a port. The player block is never one (PlayerEnabled turns the
+// player off instead). bridge init's rewrite keeps no setting it refuses.
+func (o OutputConfig) Problem() error {
+	if o.Mode() == "" {
+		return fmt.Errorf("output.mpd: %q is not auto, on or off", o.MPD)
+	}
+	if p := o.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
+		return fmt.Errorf("output.loopbackPort: %d is not a port (0 to 65535)", *p)
+	}
+	return nil
+}
+
 // MetricsConfig controls who may scrape /metrics without a session.
 //
 // In loopback mode (the default) the console's own boundary admits this
@@ -3219,11 +3233,8 @@ func (c *Config) Validate() error {
 	if _, err := c.Deployment.EffectiveMode(); err != nil {
 		return err
 	}
-	if c.Output.Mode() == "" {
-		return fmt.Errorf("output.mpd: %q is not auto, on or off", c.Output.MPD)
-	}
-	if p := c.Output.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
-		return fmt.Errorf("output.loopbackPort: %d is not a port (0 to 65535)", *p)
+	if err := c.Output.Problem(); err != nil {
+		return err
 	}
 	// output.player is never a reason to refuse the config: a block that
 	// does not read or is refused turns the player off, and MPD, the
