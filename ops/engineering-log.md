@@ -51608,3 +51608,185 @@ Not changed, for the owner: 4b2 must pass the data directory that holds
 written; a link reached only through another link is on neither walk, so its
 entry is the caller's, like the root's; shutdown's ReasonClosed and a
 resuming Play's own answer, as in round 5.
+
+### Round 7
+
+Codex, the Claude API and Argon reviewed round 6 (#1309). A new session
+took the round, round 6's worker having retired. Round 6's two rules notes
+were applied from beside the branch (8054995b for `player.md`, a15bd337 for
+`config-lifecycle.md`); this round's went beside it again,
+`/tmp/b470-4b1-rules-r7.md` for `player.md` and
+`/tmp/b470-4b1-rules-r7-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. Each finding was verified against the code, then
+fixed red first, with negative controls on the committed tree, restored
+from git each time.
+
+What changed:
+
+- 814320ea, 6e2335ad. **The strict writer refuses a path that does not lie
+  plainly below its root, and walks up from the file once** (A; Codex 3 P1,
+  the Claude API 2 Low, Argon P2: one family of holes in round 6's two
+  walks). A `..` element was cleaned lexically by `filepath.Abs`, so
+  `root/link/../ids`, with `link` a link to `root/real/sub`, was written and
+  fsynced as `root/ids` while a reader opens `root/real/ids`: a restart read
+  no reservation and handed its IDs and tokens out again, with no crash at
+  all. A link reached through another link (`root/a/l1` to `root/b/l2` to
+  `root/c/d`) left `root/b`, which holds `l2`'s entry, on neither walk; a
+  link out and back (`root/l` to `/out/m`, whose `y` leads to `root/c`)
+  passed the containment check, made only of the final directory, and had
+  the writer fsync `/out/m`, outside the root; and a bind mount below the
+  root kept its source's entries off both walks. Each answered nil. The
+  owner's choice, the Claude API's second option: simplify rather than walk
+  links. `checkPath` refuses a `..` element in the root or the path and a
+  path not below the root as written, and resolves the root once: every path
+  the write opens, creates and fsyncs is spelled from where it resolved, so
+  a link at or above the root, a data directory that is a link included,
+  stays the caller's. `plain` refuses, by `Lstat` from the root down, a
+  symbolic link strictly below the root, wherever it leads, and a directory
+  on another filesystem (its `st_dev` not the root's), before anything is
+  created and again once the missing directories are, for a link another
+  writer puts in place meanwhile (6e2335ad pins that second check, which no
+  test reached). `ProbeDurable` also refuses, on Linux, a mount point the
+  kernel lists strictly below the root: a bind mount of the root's own
+  filesystem shows the root's device, so only `/proc/self/mountinfo` names
+  it. The probe reads it once, at New, as the brief set it, and only when a
+  directory lies between the file and the root, and a table it cannot read
+  is `ErrMountsUnknown`, which New names as the mount table, never as a
+  directory. Then one walk from the file's directory up to the root reaches
+  every entry. Elsewhere no table is read: macOS and the BSDs refuse a mount
+  of another filesystem by its device, and do not see one that shows none of
+  its own (FreeBSD's nullfs); the player runs on Linux alone. Windows
+  refuses before it looks at a path (no barrier), and its `FileInfo`
+  carries no device, so a test that sets a barrier there compares none
+  (`devicesKnown`). **What it costs the real layouts: nothing.**
+  `config.ResolvePath` cleans every configured path, so a `..` never reaches
+  the writer from a config, and 4b2 builds the engine's paths with
+  `filepath.Join`; the data directory defaults to `<configDir>/data`, and
+  the Docker image's is `/data/data`, below the `/data` volume, a mount
+  point above the root, which is allowed, as is `BRIDGE_DATA_DIR=/data`, the
+  mount point as the root; a data directory that is a link is taken
+  (`TestADataDirectoryThatIsALinkIsTaken`, through the real writer and a
+  restart). Not taken: walking links and closing each hole by a rule of its
+  own, round 6's shape, which needed a rule per link shape and still missed
+  two. `TestWriteBytesDurable_RetriesThroughASymlinkedAlias` keeps its name,
+  which the rules cite, and now pins the retry through the alias refused.
+- 94995786, 22a0930f. **A play command is decided by the session started
+  for it, and a command that replaces that session before it is heard
+  supersedes it** (B; Codex P2). Round 6's disposition of its finding 3 did
+  not hold. Session 1's Start held, its Play replaced by a PlayID, session 2
+  started for the PlayID: the Play stayed waiting with no outcome, since a
+  release to play supersedes nothing, and session 2 decided it, its Audible
+  before its Start returned, or its Start's success at the settle, so the
+  Play answered nil although its own session was never heard. Round 6's
+  pin made session 2 fail and accepted any error from the Play, which masked
+  this. Each play waiter now records the session started for it
+  (`waiter.sess`, set in `startSession`; 0 while it waits behind a release
+  or a pending intent); `playBegan(s)` decides only `s`'s waiters; the
+  settle answers one nil only while its session plays; and a Next, Previous,
+  PlayID or PlayIndex that releases a session to play its own target
+  answers that session's undecided waiters `ReasonSuperseded`, naming itself
+  (`replaced`). The same class, found by the pattern: a Play whose Resume
+  was under way when such a command came was answered nil at the release,
+  and now answers `ReasonSuperseded` too (`releaseSession` answers what
+  `replaced` recorded, whatever the intent). The engine's own move past an
+  entry refused at its start carries the waiters on to the next session
+  (`carry`); 22a0930f removed the carry 94995786 had also put in
+  `onFinished`'s release to play on, which needs its session live, by when
+  the settle has answered every waiter: no control could see it. The
+  commands that waited behind a release or set the pending intent share the
+  session that follows, the latest intent's, as the brief set it
+  (`TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget`: three Nexts,
+  all nil). Round 6's pin with the second session refused now requires the
+  Play's `ReasonSuperseded`.
+- 9187d288. **New names the directory the probe refused** (C; Argon P3).
+  When the barrier failed on a directory above the reservation file's, the
+  refusal blamed the reservation file's own directory, which had synced;
+  so it did for a directory above it that could not be read, or was a file.
+  `notDurable` now names the directory the probe's `*fs.PathError` names,
+  and the reservation file's directory only when the error names none. The
+  strict barrier's failure is an `*fs.PathError` naming the directory it
+  fsynced, as `(*os.File).Sync`'s is, whatever barrier a test sets
+  (`syncDirAt`), and `ErrBarrierFailed`'s doc says so.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| B | `TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded`, three cases | the Play answered nil: the PlayID's session heard before its Start returned (Codex's sequence), and started and not yet heard (the settle); a resuming Play a Next replaced, nil |
+| C | `TestNewNamesTheDirectoryTheProbeRefused`, four cases | the reservation file's own directory named for a barrier that failed above it, for a directory above it that could not be read, and for one that is a file; the fourth, an error that names none, red at the wording alone |
+| C | `TestBarrierFailuresAreMarked` | no `*fs.PathError` naming the directory, all three, the barrier answering a bare error |
+| A | `TestWriteBytesDurable_RefusesADotDotElement` | `root/link/../ids` written and fsynced as `root/ids`, nil; the same with no link, and with a `..` in the root; the probe nil |
+| A | `TestWriteBytesDurable_RefusesALinkBelowTheRoot` | nil for a link to a directory below the root, with a directory to make below it too, a link to a link (`root/c/d/ids` written) and a link out and back (`root/l`, that is `/out/m`, fsynced) |
+| A | `TestWriteBytesDurable_RetriesThroughASymlinkedAlias`, as rewritten | the retry through the alias answered nil |
+| A | `TestWriteBytesDurable_RefusesAMountBelowTheRoot` | the write tried to make a directory in `/dev` (EPERM), and the probe fsynced `/dev` and `/` and answered nil |
+| A | `TestProbeDurable_RefusesAMountPointTheKernelLists` | a listed mount point probed nil, and so did a table that could not be read |
+| A | `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot` | the same directories fsynced, spelled through the alias, not from where the root resolves |
+| A | `TestNewRequiresADataDirectoryTheReservationLiesBelow`, three new cases, and `TestNewNamesTheDirectoryTheProbeRefused`'s mount-table case | New built an engine and wrote the reservation for a `..` and for a link inside the data directory, and built one for a link and back; the mount table named as "the directory /proc/self/mountinfo" that could not be read |
+
+Finding A's red runs had round 6's path logic with the mount-table seam,
+its platform files and `ErrMountsUnknown` declared beside it, and the
+engine's had round 6's writer and `notDurable` with that declaration. C's
+test was reworked after its first red run, to build its paths on the data
+directory as its links resolve, and run red again against the files before
+the fix. `TestADataDirectoryThatIsALinkIsTaken` passes before and after,
+as a guard; `TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites`
+pins a check that came with the fix, and its control is below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| B | `replaced` not called | four: round 6's pin (the backend's error), both PlayID cases at the detail ("playback did not begin", the settle's backstop), the resuming Play nil |
+| B | `playBegan` decides every play waiter, `replaced` kept | green: `replaced` has decided a replaced session's waiters before any other session can be heard, so this check is the second line, and no test can reach it alone |
+| B | the same, and `replaced` not called | Codex's sequence red at nil |
+| B | the settle's session check removed, and `replaced` not called | both PlayID cases nil |
+| B | no carry past an entry refused at its start | three tests, each a skip at a start: "playback did not begin" |
+| B | the start assigns no waiting command its session | 56 tests |
+| B | the session started before the command waits, the old order | 55 tests |
+| B | `replaced`'s half for a resuming Play removed | the resume case nil |
+| B | `releaseSession` ignoring a recorded reason on a release to play, the old answer | the resume case nil |
+| C | `notDurable` taking no directory from the `*fs.PathError` | the three cases above the reservation file's directory |
+| C | `syncDirAt` passing a bare error through | `TestBarrierFailuresAreMarked`, all three, and the engine's case through the real probe |
+| A | the `..` refusal disabled | the `..` test, and the engine's two `..` cases: New started on Codex's link and back |
+| A | the link refusal disabled, `Lstat` kept | four tests in `internal/atomicwrite`; the engine's two link cases, refused as ENOTDIR, the wrong kind |
+| A | `Lstat` made `Stat`, links followed | the same four; the engine built and wrote through both links |
+| A | the device comparison disabled | the `/dev` test: a directory tried in `/dev`, the probe fsyncing `/dev` and `/` |
+| A | the probe reading no mount table | the listed mount point and the unread table, nil |
+| A | a table that cannot be read taken for an empty one | the unread table, nil |
+| A | the root not resolved | the link-at-the-root test, fsynced through the alias; the engine's tests stay green, as they should |
+| A | no check after `MkdirAll` | the link-put-in-place test: nil, fsynced, the file written where the link leads |
+| A | the table read with nothing between the file and the root | one read where none is wanted |
+| A | the chain dropping the root | nine tests |
+| A | the engine's `ErrMountsUnknown` case dropped | the mount table named as a directory that cannot be read |
+| A | the table's mount points not unescaped | `TestParseMountInfo` |
+
+One control was replaced before it ran: removing `noMountsBelow`'s early
+return would have indexed an empty slice in its error, a panic rather than
+the assertion, so the control read the table first and then returned.
+
+The suite: 105 tests in the engine and 38 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (134.3 s and 57.8 s, no skips:
+the `/dev` test ran, this Mac mounting another filesystem there); `make fmt
+vet test` (72 packages ok, cmd/bridge 466 s, `go fmt` changing nothing),
+`make build-all` (six targets) and `make docs-check` clean, in one run
+through the build lock; `go vet` of both packages for windows/amd64,
+linux/amd64 and linux/arm64 clean. The Linux reader of the mount table and
+`TestPlatformMountTableReadsTheKernels` run on CI's Linux legs alone: this
+Mac has no Linux to run them on, and the parser runs everywhere, on
+captured tables. Both notes checked against HEAD, each OLD found once:
+`player.md` 73,803 to 75,104 bytes and `config-lifecycle.md` 47,042 to
+49,188, of 100,000 each; with both applied to the worktree's rules files,
+`check-doc-budgets` ok, the files restored from git after; every test name
+they cite is defined.
+
+Not changed, for the owner: the probe reads the mount table once, at New,
+as the brief set it, so a bind mount made below the data directory while
+the bridge runs is not seen by the writer, which checks links and devices
+on every write; a link another writer puts in place after the write's second
+check, or during its syncs, is not seen either: a check by path narrows that
+window and cannot close it, and the data directory is the bridge's own; off
+Linux a mount that shows no device of its own is not seen; the commands that
+wait behind a release share the session after it, whichever set the intent
+last, so a Next and then a PlayID, both sent while releasing, answer nil
+once the PlayID's entry is heard; shutdown's ReasonClosed, as in rounds 5
+and 6.
