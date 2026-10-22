@@ -4261,7 +4261,11 @@ func (c *Config) Save(path string) error {
 // the staged file is removed, and that error is returned as it is. A writer
 // that cannot hold off every other writer (library add and remove and init
 // take no lock) asks whether the file still holds what it read, so a save
-// made since is not written over (bridge output dac bind).
+// made before that question is not written over (bridge output dac bind).
+// That narrows the window to the instant between the question and the
+// rename, and does not close it: no rename can be made conditional on the
+// file it replaces, so a save that lands in that instant is still written
+// over. A lock that every config writer takes is the fix.
 func (c *Config) SaveIf(path string, unchanged func() error) error {
 	return c.save(path, unchanged)
 }

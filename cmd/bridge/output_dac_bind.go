@@ -527,9 +527,11 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	// before it stopped, that committed in between would otherwise be
 	// written over with the older copy. The path is the one resolved
 	// above, so this reads that file again. read is the bytes this read
-	// parses, or older ones: the save replaces the file only while it still
-	// holds them, since library add and remove and init save it without the
-	// lock.
+	// parses, or older ones: library add and remove and init save the file
+	// without the lock, so the save asks just before its rename whether the
+	// file still holds them (SaveIf). That narrows the window to the instant
+	// before the rename and does not close it; a lock that every config
+	// writer takes would.
 	read, err := os.ReadFile(cfgPath)
 	if err == nil {
 		cfg, _, err = loadCLIConfig(cfgPath)
