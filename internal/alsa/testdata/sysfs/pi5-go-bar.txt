@@ -1,0 +1,32 @@
+# A Raspberry Pi 5 with the iFi GO bar, as the captured trees have it: card 5
+# (id Audio, 20b1:3009), whose long name says "at usb-xhci-hcd.0-1, high
+# speed" (dsd256-native/proc/asound/cards): RP1's first xHCI controller,
+# xhci-hcd.0, root port 1 of its USB 2 bus. Synthetic: the sysfs directories
+# follow the Pi 5's layout (the controllers are platform devices under axi
+# and the PCIe node, and udev names them platform-xhci-hcd.N), the HDMI
+# cards' devices are named for the shape only, and the serial is made up.
+
+# The two HDMI cards: platform devices, not USB.
+platform sys/devices/platform/axi
+platform sys/devices/platform/axi/107c701400.hdmi
+platform sys/devices/platform/axi/107c706400.hdmi
+card 0 sys/devices/platform/axi/107c701400.hdmi
+card 1 sys/devices/platform/axi/107c706400.hdmi
+proccard 0 vc4hdmi0 vc4-hdmi-0 driver=vc4-hdmi pcm=0.0
+proccard 1 vc4hdmi1 vc4-hdmi-1 driver=vc4-hdmi pcm=0.0
+
+# RP1's two xHCI controllers, each with a USB 2 and a USB 3 root hub.
+platform sys/devices/platform/axi/1000120000.pcie
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0
+roothub sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1 speed=480
+roothub sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb2 speed=5000
+platform sys/devices/platform/axi/1000120000.pcie/1f00300000.usb
+platform sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1
+roothub sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3 speed=480
+roothub sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4 speed=5000
+
+# The GO bar on xhci-hcd.0's port 1, its audio control interface 0 card 5.
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1 vendor=20b1 product=3009 serial=GOBAR-7Q2X-91KZ-4471
+usbcard 5 sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1/1-1:1.0
+proccard 5 Audio "iFi (by AMR) HD USB Audio" usb=20b1:3009 pcm=0.0

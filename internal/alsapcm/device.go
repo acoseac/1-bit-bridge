@@ -523,6 +523,33 @@ func (d *Device) setSW() error {
 // Params returns what the kernel committed.
 func (d *Device) Params() Params { return d.params }
 
+// NodeInfo is what the kernel says an open node is: its card, device and
+// substream, whether it plays, and the device's own id and name.
+type NodeInfo struct {
+	Card, Device, Subdevice int
+	Playback                bool
+	ID, Name                string
+}
+
+// Node asks the kernel, now, what d's open node is: SNDRV_PCM_IOCTL_INFO on
+// its descriptor, never the endpoint d was opened by or what Open recorded.
+// The player's check after open (internal/player/binding) reads the card
+// from it and compares that card's identity with the binding's before any
+// frame is written.
+func (d *Device) Node() (NodeInfo, error) {
+	if d.closed {
+		return NodeInfo{}, d.closedError("info")
+	}
+	var info pcmInfo
+	if err := ioctlOn(d, ioctlInfo, &info); err != nil {
+		return NodeInfo{}, d.kernelError("info", err)
+	}
+	return NodeInfo{
+		Card: int(info.card), Device: int(info.device), Subdevice: int(info.subdevice),
+		Playback: info.stream == streamPlayback, ID: cString(info.id[:]), Name: cString(info.name[:]),
+	}, nil
+}
+
 // Counters returns what Write has asked of the kernel so far.
 func (d *Device) Counters() Counters { return d.counters }
 

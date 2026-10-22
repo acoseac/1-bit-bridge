@@ -24,6 +24,9 @@ const alsaMajor = 116
 // the stream starts once the buffer is full (Params.StartThreshold). Every
 // refusal is an *Error, and a refused open leaves nothing open.
 func Open(ep Endpoint, cfg Config) (*Device, error) {
+	if err := guarded(ep); err != nil {
+		return nil, err
+	}
 	return open(linuxSys{}, time.Now, ep, cfg)
 }
 

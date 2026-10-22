@@ -1,0 +1,21 @@
+# Two models whose sound card sits on different interfaces, on a Raspberry
+# Pi 5 (pi5-go-bar's layout): model A (made-up 1234:0c01) has its audio
+# control interface at 0, card 2 on 1-1:1.0; model B (made-up 1234:0c02) has
+# a HID interface at 0 and a DFU interface at 1 before it, so its card is on
+# interface 2, 1-2:1.2, card 3, and it has no serial. Synthetic.
+
+platform sys/devices/platform/axi
+platform sys/devices/platform/axi/1000120000.pcie
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb
+platform sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0
+roothub sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1 speed=480
+
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1 vendor=1234 product=0c01 serial=MODELA-000000000001
+usbcard 2 sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1/1-1:1.0
+proccard 2 ModelA "Synthetic model A" usb=1234:0c01 pcm=0.0
+
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2 vendor=1234 product=0c02
+subsys sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2/1-2:1.0 usb
+subsys sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2/1-2:1.1 usb
+usbcard 3 sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-2/1-2:1.2
+proccard 3 ModelB "Synthetic model B" usb=1234:0c02 pcm=0.0

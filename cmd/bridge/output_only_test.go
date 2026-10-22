@@ -41,9 +41,10 @@ func TestOutputOnlyBridgeStarts(t *testing.T) {
 // An empty library is not a failure once output.mpd is on; auto still is,
 // because the config does not load. On Linux the report carries the player
 // checklist too, whose Music line reads Ready for a box with no library;
-// its Player and DAC lines grade this host's MPD and sound cards, which a
-// test host need not have, so they are not about the config and a fail
-// there is not this test's.
+// its Player line grades this host's MPD, which a test host need not have,
+// and its DAC line the empty tree this suite reads for the host's /proc
+// (hostTrees), so they are not about the config and a fail there is not
+// this test's.
 func TestDoctorPassesWithNoRoots(t *testing.T) {
 	d := buildDoctorDeps(writeOutputOnlyConfig(t))
 	if d.ConfigFile == nil || d.ConfigFile.LoadErr != nil {

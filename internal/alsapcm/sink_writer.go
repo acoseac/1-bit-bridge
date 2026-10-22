@@ -567,6 +567,10 @@ func (s *Sink) reopen() error {
 		return &Error{Reason: ReasonBadConfig, Op: "resume", Endpoint: s.cfg.Endpoint, Detail: fmt.Sprintf(
 			"the device came back with a buffer of %d frames, which the store of %d cannot hold with a period more", p.BufferFrames, s.ring.frames)}
 	}
+	if err := admit(s.cfg, dev, "resume"); err != nil {
+		_ = dev.Close()
+		return err
+	}
 	if need := p.PeriodFrames * p.FrameBytes(); need > cap(s.zeros) {
 		s.zeros = make([]byte, need)
 	} else {

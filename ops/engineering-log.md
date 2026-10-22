@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
+- [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
 - [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
@@ -50403,6 +50404,410 @@ Controls on 9ed70ceb, each restored from git:
   10 ms at the cap, 1,001 pings and 4m9.06s of fake time.
 - The last pause not cut to what is left, a positive control: green. The
   open stops 60 ms past the budget, inside the pause the bound allows.
+
+## 2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind
+
+**What landed.** `output.player` (`internal/config/player.go`), the player's
+UUID (`player_uuid.go`), `internal/usbid` (the serial guard, the ids, the
+port grammar), the sysfs identity reader (`internal/alsa/sysfs.go`) and the
+fake trees its tests read (`internal/alsa/sysfstest`, manifests in
+`internal/alsa/testdata/sysfs`), binding resolution and the check after
+open (`internal/player/binding`), the LAN state (`internal/player/lan`),
+`Device.Node`, `SinkConfig.Admit` and `GuardNodeOpens` in `internal/alsapcm`,
+and `bridge output dac inspect` and `bind` (`cmd/bridge/output_dac_bind.go`).
+The engine (PR 4b) and the hotplug watcher (PR 4a2) use these and are not
+here: this PR resolves on demand.
+
+**The player block never fails the load, by design and against the obvious
+shape.** Validate is the config's one refusal point, and the brief's "refuses
+an enabled player in public mode" read first as an error from it. It is not:
+"an invalid player block disables the player with a logged reason; it never
+stops MPD, the library or the server" decides it, so `PlayerEnabled` is the
+refusal and Validate logs it (`output.player: the player is off`, the reason
+as an attribute) and returns nil. The YAML half needed the same treatment:
+`Load` decodes with `KnownFields(true)`, so a typo'd key or a wrong type
+inside the block failed the whole config before Validate ran, and yaml.v3's
+own type errors quote up to seven bytes of the value (`cannot unmarshal !!str
+\`GOBAR-7...\``), which is a serial in the wrong field. So the block is read by
+hand (`playerReader`): `UnmarshalYAML` never errors, each value is decoded by
+yaml.v3 (a bool or an int reads as it does elsewhere in the config), every
+message is this package's own (field, line, never a value unless it is a
+short plain token), and a block that does not read is kept as the node the
+file held, which `MarshalYAML` returns, so `Save` writes the operator's text
+back instead of dropping it. A block that reads and is refused (`dsdMode:
+auto`, a serial under a port binding) keeps its typed fields and round-trips
+too. The log line is written on every Validate (each Load, each settings
+PATCH); for a block the operator asked for and cannot have, that repetition
+is the point.
+
+**A serial is one type everywhere.** `usbid.Serial` holds the value behind a
+pointer: fmt calls `Format` only on a value it can interface with, so a Serial
+in an unexported field is printed by reflection, and with a plain string
+inside that print is the serial (control C05 below shows it). With the
+pointer it is an address. Because of the pointer a missing `Format` leaked
+nothing and the first test, which only asked for no leak, stayed green with
+`Format` gone; `TestSerialPrintsTheRedactionForEveryVerb` now requires every
+verb, width and flag to print the redaction itself, which only `Format` does
+(`%x` of a Stringer is the hex of its string). `LogValue` is redundant with
+`Format` for slog's own handlers and is kept for any handler that resolves a
+LogValuer without fmt; the test asks slog for the kind. There is no
+`MarshalText`, on purpose: yaml.v3, encoding/xml and many log encoders would
+take it. `MarshalYAML` is the way out, for the config file, written 0600 by
+`Save` (CreateTemp's mode). The env derivation walks struct fields with yaml
+tags, and the Serial struct has none, so no variable sets a serial
+(`TestThePlayerIsEnvSettableButItsSerialIsNot`).
+
+**"A reflection walk over every exported DTO type" is a walk over the
+source.** Go cannot list a package's types at run time, and a hand-kept
+registry of the console's 205 struct types and /v1's 43 would fail every
+future PR that adds one. `TestNoDTOHoldsASerialAsText` (in `internal/admin`,
+beside the omitempty guard) parses `internal/admin`, `internal/api`,
+`internal/config` and `cmd/bridge`, takes every declared type as a root,
+follows each field's type into this module's packages, and fails on a field
+named for a serial that holds text (a string, `[]string`, `[]byte`, a pointer
+to one) unless it is a `…Label`. Numeric serials (an Ogg stream's) are not
+USB serials. The reflection half is on values: the settings response built
+from a config bound by serial (`TestTheSettingsResponseCarriesNoSerial`), the
+config's JSON and printed forms, and the binding's slog lines
+(`TestWhatResolveReturnsLogsNoSerial`).
+
+**The port path is ours, anchored as udev anchors.** The controller segments
+follow udev's path_id walk (the nearest PCI device, the nearest platform
+device above a PCI run, each run named by its innermost member), so a Pi 4's
+socket 3 is `platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3:1.0` and a Pi
+5's GO bar `platform-xhci-hcd.0/usb2-1:1.0` (its captured long name says
+`usb-xhci-hcd.0-1`). It is not byte for byte udev's ID_PATH: segments are
+joined with `/` (sysfs names never hold one, so the string splits without
+ambiguity), and the root hub's generation (`usb1`, `usb2`, `usb3`, from its
+`speed`) stands where udev writes `usb-0`, because an xHCI controller has a
+USB 2 and a USB 3 root hub whose port numbers both start at 1. A controller
+under ACPI, virtio or a platform name with a colon has no port path; its
+cards still bind by serial or model.
+
+**The sysfs walk resolves every link itself.** `filepath.EvalSymlinks` follows
+an absolute link out of a fake tree before a containment check sees it, so
+the reader walks components through an `os.Root`, refusing an absolute link
+and a `..` past the root, counting links (40 is a loop) and steps. Fake trees
+are laid out at test time from manifests: a committed symlink checks out as a
+text file on Windows, and the alsa testdata README already records that for
+`symlinked-pcm`. Those tests skip on Windows all the same: a sysfs name holds
+a colon (`1-1:1.0`, `0000:01:00.0`), which no Windows file name can (found
+reading the manifests, before any Windows run). The reader still builds there, and
+the tests that need no tree run. The manifests are synthetic and say so; the GO bar's place in
+`pi5-go-bar` comes from the captured long name, and every serial is made up.
+
+**Resolve's choices.** Any transient card (in one tree only, read as two
+units, or vanished mid-read) makes the whole answer `identity_transient`,
+because a card the kernel is adding may be a second unit of the bound model:
+answering `available` beside it could pick the first of two. A USB card whose
+identity cannot be read makes a serial or model match ambiguous for the same
+reason; a port binding is not affected, since one port is one card. A port
+binding names a port and an interface, not a model: it carries no ids (each
+binding only its own fields), another model in the port is the player's DAC,
+and the bound unit in another port is not (`device_missing`). A hub in the
+bound port is a topology change, `binding_invalid` like a controller that is
+gone: what is behind the hub is not "this port". A malformed binding resolves
+to `binding_invalid` with the config's own reason.
+
+**The check after open is two halves, and the sink's reopen needed the
+second.** `Device.Node` asks INFO again on the open descriptor; `Checker.Check`
+reads that card's identity from sysfs and compares it with what Resolve read.
+The brief asked for the API between opening the PCM and sending samples; a
+sink also opens the device again after a released pause, thirty seconds or
+more later, inside its writer, where no caller can stand between the open and
+the first frame. So `SinkConfig.Admit` runs the check at the open and at every
+reopen, closing a refused device as `ReasonWrongDevice` and leaving the sink
+released. `--verify-card N` runs `Check` with card N in the node's place, so
+the owner can see a refusal before PR 4b exists.
+
+**bind refuses a running bridge.** A serve holds the config in memory, and its
+next settings save writes that copy over the file, which would drop a binding
+written beside it. bind therefore takes the data dir's lock
+(`holdDataDirForMutation`), as restore and clear-missing do, then the admin
+probe on a fixed port. It also refuses a block that did not read, since `Save`
+would write the old node back in place of the new binding.
+
+**LAN eligibility is the player's own definition.** DLNA's
+`IsLANEligibleInterface` admits a private address on any up interface,
+tunnels included, and an IPv6 ULA alone; the player needs IPv4 SSDP and
+"private space alone is insufficient" (design §9), so `internal/player/lan`
+also requires a carrier (`FlagRunning`), multicast, and not point-to-point,
+and refuses an interface with a Tailscale or CGNAT address outright. Docker's
+`docker0` counts while a container runs on it; PR 5a decides which addresses
+its listener serves.
+
+**Red first.** Each package's tests were written first and failed to build
+(`undefined: Serial`, `undefined: Inventory`, `cfg.Output.Player undefined`,
+`undefined: outputBindEnv`, `d.Node undefined`, `undefined: SysfsSnapshot`,
+`undefined: Interface`), then passed. One assertion was wrong on the first
+green run (`(made now)` against the line `(made now, kept in player-uuid)`).
+
+**Controls: 48, each on a committed tree, each restored from git, all red.**
+Two mutations first failed to build (a duplicate `case "auto"`, an import left
+unused) and were rewritten; the tree was clean after every run. The ambiguity
+tests fail when Resolve returns the first match (C01) or `For` skips its own
+resolve (C48); the swap test when the check skips the identity compare (C02);
+`TestSerialPrintsTheRedactionForEveryVerb` when `Format` goes (C03); the
+NUL-padded serial tests when serials are compared untrimmed (C04); the
+unexported-field print when the guard holds a plain string (C05); and one test
+each when the guard loses `MarshalJSON` (C06) or `LogValue` (C07),
+`MarshalYAML` writes the redaction (C08), the label shows a short serial
+(C09), Validate refuses over the block (C10), a reason quotes yaml's error
+(C11), the player runs off Linux (C12) or on a public bridge (C13), a binding
+takes another kind's field (C14-C16), an id takes `0X` (C17),
+`pauseReleaseSeconds` takes 0 (C18), `dsdMode` takes auto (C19), a scalar
+mixer reads (C20), a resampling key is merely unknown (C21), an unanchored
+port parses (C22), a link climbs out of the root (C23), the link counter goes
+(C24), the 4 KiB cap goes (C25), an absolute link is followed (C26), the
+directory cap goes (C27), a /proc-only card is unreadable rather than
+transient (C28), Resolve passes over a transient card (C29), an unreadable
+card is ruled out (C30), the hub check goes (C31), the gone-controller check
+goes (C32), a port binding follows a unit (C33), the endpoint check goes
+(C34), a sink opens or reopens without Admit (C35, C36), Node returns what
+Open recorded (C37), Open is not guarded (C38), the sysfs reader skips the
+host watch (C39), a DTO holds a serial as text (C40), Validate reads the
+host's sysfs (C41), an unreadable player-uuid is replaced (C42), bind writes
+beside a serve (C43) or over an unread block (C44) or prints the serial (C45),
+and the LAN takes a tunnel (C46) or an interface with no carrier (C47).
+
+**Hardware: none in this PR.** The owner's gate on the Pi (GO bar, Hugo 2,
+Altair) follows it; ambiguity needs two units of one model, which the fake
+trees give (`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`,
+`TestASerialTwoUnitsShareIsAmbiguous`).
+
+**Round 2 (the Claude API and Codex): six findings, all real, none
+rejected.** Each was reproduced red first, fixed, and negative-controlled
+on the committed tree.
+
+1. *A serial in the wrong field was quoted.* `tokenShape` took any short
+plain word, and the PR's own test serial is one: `device.binding:
+"GOBAR-7Q2X-91KZ-4471" is not serial, uniqueModel or port` reached
+Validate's log, `PlayerEnabled`, `Status`, Resolve's reason and inspect.
+The same pattern had two more sites the review did not name: the numeric
+refusals echoed the number (a serial of digits in `pauseReleaseSeconds`,
+`pcmDevice` or `subdevice` came back whole), and inspect's binding line
+and JSON printed `binding`, the ids, the port and the endpoint as written,
+which `TestOutputDACInspectNeverQuotesASerialInTheWrongField` found after
+the reasons were fixed. A refusal now quotes a value only inside the case
+of the words its field knows, says "that value" or "that key" (listing
+the section's settings) of anything else, and drops the number; the
+reader names a key in a path only once it is known or refused by name;
+inspect shows a field only when it holds a value that field takes, an
+endpoint out of range as null. `TestASerialInTheWrongFieldIsNeverQuoted`
+was red on all ten cases. Four expectations in `TestEveryPlayerRefusal`
+and two in `TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse`
+asserted the quoting, and were changed with it.
+
+2. *A USB card without a usbid blocked every binding.* Only snd-usb-audio
+registers `/proc/asound/cardN/usbid`, so a hiFace's card (snd-usb-hiface;
+caiaq, ua101, 6fire and line6 likewise) was transient on every reading.
+Its sysfs identity now stands, and a usbid cross-checks it only where
+there is one. A `USB-Audio` card with no usbid stays transient:
+snd-usb-audio lists a card in `/proc/asound/cards` before it writes the
+card's proc files, and its usbid reads empty once it starts disconnecting
+the card (the reader's comment on `USBID` already said so). A card with
+no parent device sits under `devices/virtual/sound` with no device link;
+`Vanished` marked it transient for good, and it is now
+`identity_unsupported`, bus `virtual`. A missing device link anywhere
+else stays `Vanished`: `device_remove_class_symlinks` removes it first,
+and `device_add_class_symlinks` makes it before the class link that lists
+the card. Red: `TestAUSBCardWithNoUsbidIsReadFromSysfs`,
+`TestAVirtualCardIsUnsupportedNotTransient`,
+`TestSysfsTellsAVirtualCardFromOneBeingRemoved`.
+
+3. *A FIFO hung the readers.* The sysfs reader opened `class/sound` and
+`bus/usb/devices` with a plain open, an attribute after an `Lstat` (a
+swap in between blocked), and `os.OpenRoot` opens its own path plainly
+too. The /proc reader's `readCapped`, which also reads the ALSA
+configuration files, had the same open; its listings were safe, because
+`os.ReadDir` opens directory-only. Every open now asks not to block, a
+directory is opened directory-only, and the opened descriptor's type
+decides (`openRegular`, `openDirectory`, flags for Linux and macOS in
+`open_posix.go`; Windows has no FIFO and keeps the type check). The root
+is opened directory-only before `os.OpenRoot`, which leaves one window: a
+swap of the root's own path between the two, the operator's path or
+`/sys`. Red: the root, `class/sound`, `bus/usb/devices`, the swapped
+attribute (`SysfsReader.beforeOpen` parks it), and `/proc`'s cards,
+usbid and status, each a five-second watchdog that opens the FIFO for
+writing so the blocked reader goes.
+
+4. *bind saved a stale config.* It loaded, locked, and saved what it had
+loaded. It now reads the config again under the lock, through
+`loadCLIConfig` with the path it resolved (`config.Load` there was
+refused by `TestNoSubcommandTailBypassesLoadCLIConfig` on the first full
+run), refuses a data dir that moved and a block that no longer reads, and
+saves that copy. `outputBindEnv.beforeLock` lands the other writer in the
+window; `TestOutputDACBindSavesTheConfigItReadUnderTheLock` was red on all
+three cases.
+
+5. *A kept block's alias broke the next load.* With `libraryName: &room
+Kitchen` and `player.room: *room` beside an unknown setting, a save wrote
+`*room` without `&room` (yaml.v3 encodes an alias by name), and the next
+load failed on an unknown anchor, which stops the bridge. `keepable`
+copies what an alias outside the block names into the kept block and
+leaves an alias to an anchor inside it; the copies are bounded at 1024
+nodes and 32 aliases deep, and a block past them is not kept, its reason
+saying a save drops it. Without the bounds an alias to the block's own
+parent overflowed the goroutine stack at load (control 5b), worse than the
+defect. Red: the libraryName alias, an alias as a key, aliases in a
+value, the parent alias and a 1100-alias bomb; an anchor inside the block
+round-tripped before and after.
+
+6. *cmd/bridge's TestMain had only the PCM guard.* `WatchHostReads` now
+refuses and reports there too, with each read's stack. A whole
+cmd/bridge run under it reported no read, so no test needed a fake root.
+
+**Controls, round 2: nineteen, each with the result it should have.** The binding
+refusal quoting its value (1a), the unknown key quoted (1b), the endpoint
+number echoed (1c), inspect's raw binding view (1d); every driver's
+missing usbid transient (2a), USB-Audio's not (2b), the virtual branch
+gone (2c), every missing device link virtual (2d); the sysfs listing's
+plain open (3a), no type check after the open (3b), no `O_NONBLOCK` (3c,
+which hangs), no directory-only look at the root (3d); no reload under the
+lock (4a, run again after the `loadCLIConfig` change), no data-dir check
+(4b), no second unread check (4c); the raw node kept (5a), the bounds gone
+(5b); a probe test reading `/proc` failed the binary with the watch (6a)
+and passed without it (6b). Each was restored from git; the tree was clean
+after every run.
+
+**Round 3 (Codex and the Claude API on round 2): three findings, all real,
+none rejected.** Each was reproduced red first, fixed, and
+negative-controlled on the committed tree.
+
+1. *The /proc reader's confinement was a check, then a second open by
+name.* `readUnderRoot` checked a path with `EvalSymlinks` and opened the
+pathname again (`readCapped`), and `readDirUnder` listed it again with
+`os.ReadDir`: a file, or a directory above it, replaced by a link between
+the two redirected the open out of the tree, and `--raw` printed what it
+found there (Codex, P1). The reader now opens its ALSA root and its /proc
+root once per reading as a `tree` (`internal/alsa/tree.go`: an `os.Root`
+and the resolver the sysfs reader had, which both readers now share), and
+every read, listing and stat goes through the root's descriptor after
+`resolve`. A link that leaves a tree that holds still is refused by name
+(absolute, or climbing past the root: `errLinkAbsolute`,
+`errLinkLeavesRoot`, both `errors.Is` `errOutsideRoot`); one swapped in
+after the resolve is refused by `os.Root` at the open itself ("path
+escapes from parent"). The non-blocking open and the type check on the
+opened descriptor stay, and `openTree` takes round 2's directory-only look
+at each root. Two behaviours moved with it. An absolute link is refused
+even when it names a path inside the root, as `os.Root` refuses every
+absolute link (the kernel's own links in /proc/asound are relative). And
+the listing's stat goes through the tree too, so a stream or pcm name
+whose link leaves the tree is kept, for its read or listing to report the
+refusal, where the old `os.Stat` looked at the target outside.
+`TestReaderRefusesALinkSwappedInAfterItsCheck` swaps, through
+`Reader.beforeOpen`, a stream file, a substream's directory, a listed pcm
+directory, an owner's status and the cards file, each for an absolute and
+for a climbing link: red on all ten before (the files read from outside,
+and a `sub7` only the outside directory holds listed as a substream).
+`TestSysfsRefusesALinkSwappedInAfterItsCheck` pins the sysfs reader's
+attribute and unit directory, which were confined already (green before),
+and `TestAFIFOInTheProcTreeIsRefusedPromptly` gained the two roots the
+/proc reader now opens as trees. `TestReaderRefusesAFileThatLeavesTheRoot`
+asked for the message "path leaves the root", and now asks for "an
+absolute link is refused".
+
+2. *bind could still write over a config another command saved.* Round 2
+made bind read the config again under the data dir's lock, but library
+add and remove and init save it without that lock, so a save between
+bind's read and its own was written over (Codex, P2). bind now keeps the
+bytes its read parsed (read just before it, so a write in between is
+refused too) and saves through `Config.SaveIf`, which asks, once the new
+file is staged and just before the rename, whether the file still holds
+them: a change, the same-size change with its modification time put back,
+and the file removed are each refused with "run bind again", and the file
+is left as the other writer left it. Bytes, not the size and the time, as
+`tokens.json`'s writers compare (`config-lifecycle.md`); what remains is
+the rename itself. One lock that every config writer takes (library add
+and remove, init, bind, restore) is the wider fix, and it is not this
+PR's. `TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead` lands each
+writer through `outputBindEnv.beforeSave`: red on all three before (exit
+0, both updates written over, the removed file made again).
+`TestSaveIfAsksJustBeforeTheRename` pins `SaveIf` itself.
+
+3. *The FIFO guard was built for Linux and macOS alone.* `open_other.go`'s
+`!linux && !darwin` took in FreeBSD, OpenBSD, NetBSD, DragonFly, illumos,
+Solaris and AIX, whose flags were then 0, so a build there waited on a
+FIFO in a tree it read (the Claude API, Low). `open_posix.go` and
+`fifo_test.go` are built for `unix`, and `open_other.go` for `!unix`.
+syscall defines `O_NONBLOCK` and `O_DIRECTORY` on every unix port Go
+1.27.2 builds, so the production file keeps syscall; the test takes
+`Mkfifo` from x/sys, a dependency already, because syscall has none on
+aix, solaris or illumos. `TestOpenFlagsAreBuiltForEveryUnix` asks
+`go/build` which of the three files each GOOS builds: red before for aix,
+dragonfly, freebsd, hurd, illumos, netbsd, openbsd and solaris.
+`go vet ./internal/alsa/...` is clean for freebsd, openbsd, netbsd,
+dragonfly, illumos, solaris and aix, beside linux, darwin, windows, plan9
+and wasip1.
+
+**Controls, round 3: ten, each red, each restored from git; the tree was
+clean after every run.** `tree.readFile` opening the host path again (1a:
+the eight file cases of the swap test), `tree.readDir` listing it (1b: the
+two listing cases), the sysfs `attr` opening it (1c: both sysfs swap
+cases, which then read the outside attribute), the listing dropping a
+link out of the tree (1d) and `outsideRoot` no longer `errors.Is`
+`errOutsideRoot` (1e: `TestReaderRefusesAFileThatLeavesTheRoot` both
+times), and `openTree` without its directory-only look (1f: the sysfs
+root and both /proc roots blocked until the watchdog); bind's comparison
+never refusing (2a: all three cases), comparing sizes alone (2b: the
+same-size case alone), and `SaveIf` asking after the rename (2c:
+`TestSaveIfAsksJustBeforeTheRename` and all three bind cases); and the
+old tags (3a: sixteen assertions, over the eight GOOSes).
+
+**Round 4 (the Claude API and Codex on round 3): two items.** `SaveIf`
+narrows the window to the instant before its rename and does not close
+it, since no rename can be made conditional on the file it replaces; its
+doc comment and bind's comment said otherwise, and now say that, naming a
+lock every config writer takes (backlog) as the fix. And `openTree`'s
+directory-only look, closed before `os.OpenRoot` reopened the path
+plainly, left a root swapped for a FIFO in between to block the reader
+(Codex, P2): the root is now opened once, through `dir/.` on unix
+(`rootPath`), whose resolution fails with ENOTDIR before it opens
+anything but a directory. `TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly`
+swaps the sysfs, ALSA and /proc roots through the readers' `beforeOpen`
+(now also called with "." and "asound" just before a root's open): red
+on all three before, each blocked until the watchdog. Control: `rootPath`
+returning `dir` itself on unix blocked those three and round 3's three
+FIFO-at-a-root cases; restored from git, the tree clean.
+
+**Round 5 (CI's Linux leg, and the bots on #1307).** `test -race (rest)`
+failed on Linux alone: `TestDoctorPassesWithNoRoots` ran bridge doctor's
+one-shot outputs builder, which left `api.LocalOutputsConfig.Cards` nil,
+and a nil `Cards` reads `alsa.Reader{}`, the host's `/proc`; the
+host-read watch in cmd/bridge's TestMain refused and reported it. The
+localOutputs gate opens that path on Linux alone (and for `auto` only
+where MPD is found, so every doctor test would have read a Pi's `/proc`),
+which is why no macOS run, round 2's whole-suite one included, saw it.
+`hostTrees` (`output_host.go`) now names the host's `/proc` and `/sys` in
+cmd/bridge: both builders, serve's and the doctor's, take
+`hostTrees.cards`, the output commands fall back to it on Linux, and
+TestMain points it at two empty directories before any test runs. Red
+first was possible on macOS after all: the doctor's existing seam stands
+the builder on Linux while leaving the cards as the doctor builds them,
+and the watch, which runs on any OS, recorded `/proc` on the stack CI
+showed (`TestTheDoctorsOutputsBuilderReadsNoHostTree`). Read from the
+code, the tests that reached a reader with the host's roots on Linux were
+that one (`output.mpd: on`), and every doctor test on a box where `auto`
+finds MPD; no cmd/bridge test asks a real serve for the outputs body, the
+console's checklist or its doctor, and the output commands' tests force
+their OS and pass their trees, so the watch already caught them anywhere.
+`TestTheSuiteReadsEmptyTreesForTheHosts` asserts the seam is set, and
+`TestOnlyHostTreesNamesTheHostsTrees` sweeps cmd/bridge's code for the
+host's roots named elsewhere, a reader built without its root, and an
+outputs builder without its cards. Controls: the doctor's builder without
+its cards (red: the pin, the sweep, TestMain's report), serve's without
+them (the sweep), TestMain leaving `hostTrees` alone (both pins), and a
+command naming `alsa.DefaultSysfsRoot` (the sweep). The bots:
+`player-uuid` now reads past white space after the UUID, a CR LF
+included, and refuses anything else (Gemini; red on CR LF, mixed white
+space and trailing spaces; controls: one LF only, and white space on both
+ends); the usage and `bridge output`'s help say `dac bind` also writes
+the UUID file (CodeRabbit); `internal/alsa`'s `quote` stays (Gemini
+proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
+(`maxQuoted`) the package's doc promises every problem, and both values
+can be 4 KiB of attribute text; the garbled bold sentence in the
+check-after-open bullet, moved verbatim to `player.md`, is in the round's
+rules note.
 
 ## 2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown
 

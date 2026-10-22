@@ -1,0 +1,26 @@
+# A Raspberry Pi 4: its USB ports hang from the VIA VL805, a PCIe xHCI
+# controller (0000:01:00.0) behind the BCM2711's PCIe root port, and its
+# USB 2 lanes pass through the VL805's own hub (2109:3431) at root port 1,
+# so a DAC in a USB 2 socket is 1-1.N. udev names the controller
+# platform-fd500000.pcie-pci-0000:01:00.0. Synthetic: the layout follows
+# the Pi 4's, and the DAC is a made-up model (1234:0a01) with a made-up
+# serial, in socket 3, card 1.
+
+platform sys/devices/platform/scb
+platform sys/devices/platform/scb/fd500000.pcie
+dir sys/devices/platform/scb/fd500000.pcie/pci0000:00
+pci sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0
+pci sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0
+roothub sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1 speed=480
+roothub sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb2 speed=5000
+usbdev sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1 vendor=2109 product=3431 class=09
+
+# HDMI: a platform device, not USB.
+platform sys/devices/platform/soc
+platform sys/devices/platform/soc/fef00700.hdmi
+card 0 sys/devices/platform/soc/fef00700.hdmi
+proccard 0 vc4hdmi0 vc4-hdmi-0 driver=vc4-hdmi pcm=0.0
+
+usbdev sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.3 vendor=1234 product=0a01 serial=PI4DAC-000000000042
+usbcard 1 sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.3/1-1.3:1.0
+proccard 1 DAC "Synthetic USB DAC" usb=1234:0a01 pcm=0.0

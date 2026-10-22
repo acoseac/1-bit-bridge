@@ -2,6 +2,7 @@ package alsa
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -499,14 +501,19 @@ func TestReaderFollowsSymlinkedPCMAndSubdirectories(t *testing.T) {
 	}
 	// The id symlink resolves inside the root. A read through it is the
 	// card's own stream, not a refusal.
-	throughID := filepath.Join(root, "asound", "Audio", "stream0")
-	if err := staysInRoot(filepath.Join(root, "asound"), throughID); err != nil {
-		t.Errorf("Audio -> card0 leaves the root: %v", err)
+	asound, err := openTree(filepath.Join(root, "asound"), maxLinks, maxHops, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer asound.close()
+	if b, err := asound.readFile("Audio/stream0", maxFileBytes, nil); err != nil || !bytes.Equal(b, readFixture(t, "symlinked-pcm", "asound/card0/stream0.body")) {
+		t.Errorf("Audio/stream0 through Audio -> card0: %v", err)
 	}
 }
 
 // TestReaderRefusesAFileThatLeavesTheRoot: a stream symlink to a file
-// outside the tree is not read, and --raw does not receive its bytes.
+// outside the tree is not read, and --raw does not receive its bytes. The
+// link is absolute, which a tree refuses whatever it names.
 func TestReaderRefusesAFileThatLeavesTheRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs a privilege this test does not have")
@@ -563,8 +570,143 @@ func TestReaderRefusesAFileThatLeavesTheRoot(t *testing.T) {
 			t.Errorf("a problem quotes the outside file: %s", p)
 		}
 	}
-	if !strings.Contains(strings.Join(c.Problems, "\n"), "path leaves the root") {
+	if !strings.Contains(strings.Join(c.Problems, "\n"), "card0/stream0: an absolute link is refused") {
 		t.Errorf("problems = %q; want the read refused", c.Problems)
+	}
+}
+
+// swapCase is one path a reading opens, swapped for a link out of the tree
+// once the reader has looked at it and before it opens or lists it.
+type swapCase struct {
+	name string
+	// at is the path the swap waits for, as a raw dump names it, and swap
+	// the path in the tree replaced by the link: at itself, or a directory
+	// above it.
+	at, swap string
+	// outside is what the link's target holds: a file's text under "", a
+	// directory's files under their paths in it.
+	outside map[string]string
+	// problem opens the problem card 5 reports for the refusal, "" where
+	// none is reported (an owner that cannot be named is unknown).
+	problem string
+}
+
+// swapAfterCheck lays the dsd256 capture out, and returns a Reader of it
+// that swaps tc.swap for a link to a copy of tc.outside the first time the
+// reader comes to tc.at, and a func that fails the test when it never came.
+// The link is absolute, or relative and climbing out of the tree when
+// relative is set; both leave the root.
+func swapAfterCheck(t *testing.T, tc swapCase, relative bool) (Reader, func()) {
+	t.Helper()
+	root := copyTree(t, "dsd256-native")
+	target := filepath.Join(t.TempDir(), "outside")
+	if text, ok := tc.outside[""]; ok {
+		if err := os.WriteFile(target, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		writeTree(t, target, tc.outside)
+	}
+	at := filepath.Join(root, filepath.FromSlash(tc.swap))
+	link := target
+	if relative {
+		rel, err := filepath.Rel(filepath.Dir(at), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		link = rel
+	}
+	var once sync.Once
+	var swapped bool
+	var swapErr error
+	r := Reader{ProcRoot: root, beforeOpen: func(path string) {
+		if path != tc.at {
+			return
+		}
+		once.Do(func() {
+			swapped = true
+			if swapErr = os.Rename(at, at+".before"); swapErr == nil {
+				swapErr = os.Symlink(link, at)
+			}
+		})
+	}}
+	return r, func() {
+		t.Helper()
+		if swapErr != nil {
+			t.Fatal(swapErr)
+		}
+		if !swapped {
+			t.Fatalf("the reading never came to %s", tc.at)
+		}
+	}
+}
+
+// TestReaderRefusesALinkSwappedInAfterItsCheck: what the reader opens and
+// lists is what its root holds at the open, never a path it looked at
+// before. A file, a directory above a file, a directory it lists, an
+// owner's status and the cards file, each swapped for a link out of the
+// tree after the look and before the open, are refused: neither the
+// reading nor --raw holds anything of the outside, and nothing the outside
+// directory lists becomes part of the reading.
+func TestReaderRefusesALinkSwappedInAfterItsCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege this test does not have")
+	}
+	const secret = "OUTSIDE-ROOT-SECRET"
+	for _, tc := range []swapCase{
+		{name: "a file", at: "asound/card5/stream0", swap: "asound/card5/stream0",
+			outside: map[string]string{"": secret + " : USB Audio\n\nPlayback:\n  Status: Stop\n"}, problem: "card5/stream0: "},
+		{name: "a directory above a file", at: "asound/card5/pcm0p/sub0/hw_params", swap: "asound/card5/pcm0p/sub0",
+			outside: map[string]string{"hw_params": secret + "\n", "status": secret + "\n", "sw_params": secret + "\n", "info": secret + "\n"},
+			problem: "card5/pcm0p/sub0/hw_params: "},
+		{name: "a directory it lists", at: "asound/card5/pcm0p", swap: "asound/card5/pcm0p",
+			outside: map[string]string{"sub7/hw_params": secret + "\n", "sub7/status": secret + "\n"}, problem: "card5/pcm0p: "},
+		{name: "an owner's status", at: "6584/status", swap: "6584/status",
+			outside: map[string]string{"": "Name:\t" + secret + "\nTgid:\t6551\n"}},
+		{name: "the cards file", at: "asound/cards", swap: "asound/cards",
+			outside: map[string]string{"": " 7 [Secret         ]: USB-Audio - " + secret + "\n                      " + secret + " at usb-1\n"}},
+	} {
+		for _, relative := range []bool{false, true} {
+			name := tc.name
+			if relative {
+				name += ", a relative link"
+			}
+			t.Run(name, func(t *testing.T) {
+				r, swapped := swapAfterCheck(t, tc, relative)
+				snap, err := r.Read()
+				swapped()
+				if (err != nil) != (tc.at == "asound/cards") {
+					t.Fatalf("the reading's error is %v", err)
+				}
+				if b, _ := json.Marshal(snap); bytes.Contains(b, []byte(secret)) {
+					i := bytes.Index(b, []byte(secret))
+					t.Errorf("the reading holds the outside: …%s…", b[max(0, i-80):min(len(b), i+len(secret)+20)])
+				}
+				for _, c := range snap.Cards {
+					for _, d := range c.Devices {
+						for _, s := range d.Substreams {
+							if s.Subdevice == 7 {
+								t.Errorf("card %d device %d has substream 7, which only the outside directory lists", c.Index, d.Device)
+							}
+						}
+					}
+					if probs := strings.Join(c.Problems, "\n"); c.Index == 5 && tc.problem != "" && !strings.Contains(probs, tc.problem) {
+						t.Errorf("card 5's problems do not report the refusal at %s:\n%s", tc.at, probs)
+					}
+				}
+				r, swapped = swapAfterCheck(t, tc, relative)
+				files, _ := r.Raw()
+				swapped()
+				for _, f := range files {
+					if bytes.Contains(f.Data, []byte(secret)) {
+						t.Errorf("raw %s holds the outside", f.Path)
+					}
+					if f.Path == tc.at && f.Err == nil {
+						t.Errorf("raw %s was read", f.Path)
+					}
+				}
+			})
+		}
 	}
 }
 

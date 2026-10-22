@@ -69,6 +69,30 @@ and each status file holds only the first lines a real one opens with.
 
 `fuzz/` holds inputs the fuzz targets found; `go test` runs them as seeds.
 
+## Sysfs manifests (`sysfs/`), all synthetic
+
+A sysfs tree is symlinks all the way down, and a checkout of a committed
+symlink is not the same file everywhere (nor can a Windows file name hold
+the colon in `1-1:1.0`, so these tests skip there), so these are not trees:
+each is a manifest that `internal/alsa/sysfstest` lays out under `t.TempDir()`, with
+a `sys/` tree for `SysfsReader` and a `proc/` tree for `Reader` beside it
+(the directives are in that package's doc). Every one is made up from the
+layouts it names; none was captured, and every serial in them is made up.
+
+- `pi5-go-bar`: the captured box's card 5, the iFi GO bar (`20b1:3009`),
+  where its long name puts it (`at usb-xhci-hcd.0-1`): RP1's `xhci-hcd.0`,
+  root port 1 of its USB 2 bus, interface 0; the two HDMI cards are
+  platform devices.
+- `pi4-vl805`: a Raspberry Pi 4's VL805 on PCIe (`0000:01:00.0` under
+  `fd500000.pcie`), its own hub (`2109:3431`) at root port 1, and a DAC in
+  socket 3 (chain `1.3`).
+- `pi5-hub`: a DAC behind a hub on `xhci-hcd.0`'s port 2 (chain `2.4`).
+- `pi5-interfaces`: two models whose cards sit on interfaces 0 and 2, the
+  second with no serial.
+
+A capture of a real box's sysfs would need `bridge output dac --raw`'s
+sysfs half, which would print serials; there is none, on purpose.
+
 ## Adding a case
 
 On the box, `bridge output dac --raw > capture.txt` prints every file a

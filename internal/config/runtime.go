@@ -168,6 +168,7 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.Output.LoopbackPort
 		out.Output.LoopbackPort = &v
 	}
+	out.Output.Player = cfg.Output.Player.clone()
 	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
 	// slice both need deep copies so mutations on the clone don't leak back.
 	if cfg.UPnPUpstream.Servers != nil {
