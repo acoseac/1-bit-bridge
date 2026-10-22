@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
+	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
 
 // outputBindEnv is what `bridge output dac inspect` and `bridge output dac
@@ -125,15 +126,55 @@ type dacLANInterface struct {
 	Addrs []string `json:"addrs"`
 }
 
-// dacBindingView is output.player.device with the serial as its label.
+// dacBindingView is output.player.device with the serial as its label, and
+// every other field as written only when it holds a value that field
+// takes: anything else is "that value" (an endpoint number, null), as in
+// the config's refusal, since a serial pasted into the wrong field must not
+// be printed.
 type dacBindingView struct {
 	Binding     string `json:"binding"`
 	VendorID    string `json:"vendorId"`
 	ProductID   string `json:"productId"`
 	SerialLabel string `json:"serial"`
 	Port        string `json:"port"`
-	PCMDevice   int    `json:"pcmDevice"`
-	Subdevice   int    `json:"subdevice"`
+	PCMDevice   *int   `json:"pcmDevice"`
+	Subdevice   *int   `json:"subdevice"`
+}
+
+// dacBindingOf is d's view.
+func dacBindingOf(d config.PlayerDevice) *dacBindingView {
+	const refused = "that value"
+	v := &dacBindingView{Binding: refused, SerialLabel: d.Serial.Label(), VendorID: d.VendorID, ProductID: d.ProductID, Port: d.Port}
+	switch d.Binding {
+	case config.BindingSerial, config.BindingUniqueModel, config.BindingPort:
+		v.Binding = d.Binding
+	}
+	for _, id := range []*string{&v.VendorID, &v.ProductID} {
+		if n, err := usbid.ParseHex16(*id); err == nil {
+			*id = usbid.Hex16(n)
+		} else if *id != "" {
+			*id = refused
+		}
+	}
+	if _, err := usbid.ParsePort(v.Port); err != nil && v.Port != "" {
+		v.Port = refused
+	}
+	endpoint := func(n int) *int {
+		if n < 0 || n > 255 {
+			return nil
+		}
+		return &n
+	}
+	v.PCMDevice, v.Subdevice = endpoint(d.PCMDevice), endpoint(d.Subdevice)
+	return v
+}
+
+// endpoint words the view's endpoint for a person.
+func (v dacBindingView) endpoint() string {
+	if v.PCMDevice == nil || v.Subdevice == nil {
+		return "an endpoint out of range"
+	}
+	return binding.Endpoint{Device: *v.PCMDevice, Subdevice: *v.Subdevice}.String()
 }
 
 // dacResolutionView is how the binding resolves.
@@ -244,8 +285,7 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dac
 		}
 		d := p.Device
 		if d.Configured() {
-			rep.Binding = &dacBindingView{Binding: d.Binding, VendorID: d.VendorID, ProductID: d.ProductID, SerialLabel: d.Serial.Label(),
-				Port: d.Port, PCMDevice: d.PCMDevice, Subdevice: d.Subdevice}
+			rep.Binding = dacBindingOf(d)
 		}
 		if err := p.Unread(); err != nil {
 			rep.Resolution.State, rep.Resolution.Reason = string(binding.StateBindingInvalid), err.Error()
@@ -339,7 +379,7 @@ func renderDACInspect(w io.Writer, rep dacInspectReport) {
 		fmt.Fprintf(w, "LAN: %s: %s\n", rep.LAN.State, rep.LAN.Reason)
 	}
 	if b := rep.Binding; b != nil {
-		ep := binding.Endpoint{Device: b.PCMDevice, Subdevice: b.Subdevice}
+		ep := b.endpoint()
 		switch b.Binding {
 		case config.BindingSerial:
 			fmt.Fprintf(w, "binding: serial %s:%s (%s), %s\n", b.VendorID, b.ProductID, b.SerialLabel, ep)

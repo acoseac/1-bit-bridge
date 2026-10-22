@@ -458,7 +458,7 @@ func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, e
 		}
 		dev.Port = u.Port
 	default:
-		return config.PlayerDevice{}, fmt.Errorf("binding %q is not serial, uniqueModel or port", kind)
+		return config.PlayerDevice{}, errors.New("that binding kind is not serial, uniqueModel or port")
 	}
 	r := Resolve(dev, inv)
 	switch {

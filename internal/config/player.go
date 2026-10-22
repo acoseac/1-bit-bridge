@@ -3,9 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"runtime"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -244,14 +243,19 @@ func (p PlayerConfig) Unread() error {
 // refused, and a value the design names for a later PR is said to be not in
 // this release. It reads the block and nothing else (no hardware, no sysfs,
 // no interface, no file); whether this host can run a player at all is
-// PlayerEnabled's. A refusal never quotes the serial.
+// PlayerEnabled's.
+//
+// A refusal quotes a value only when it is one of the words its field
+// knows, and says "that value" of anything else, a number included: a
+// serial pasted into the wrong field, letters or digits, must not reach the
+// log line Validate writes on every load and save.
 func (p PlayerConfig) Problem() error {
 	if p.unread != "" {
 		return errors.New(p.unread)
 	}
 	const at = "output.player."
 	if n := p.PauseReleaseSeconds; n != nil && (*n < 1 || *n > maxPauseReleaseSeconds) {
-		return fmt.Errorf(at+"pauseReleaseSeconds: must be from 1 to %d (an hour), and %d is not", maxPauseReleaseSeconds, *n)
+		return fmt.Errorf(at+"pauseReleaseSeconds: must be from 1 to %d (an hour)", maxPauseReleaseSeconds)
 	}
 	switch {
 	case !utf8.ValidString(p.Room):
@@ -264,9 +268,9 @@ func (p PlayerConfig) Problem() error {
 	switch p.DSDMode {
 	case "", "off":
 	case "auto", "native", "dop":
-		return fmt.Errorf(at+"dsdMode: %s is not in this release: only off is, and a DSD track is refused (native DSD and DoP are later work)", token(p.DSDMode))
+		return fmt.Errorf(at+"dsdMode: %q is not in this release: only off is, and a DSD track is refused (native DSD and DoP are later work)", p.DSDMode)
 	default:
-		return fmt.Errorf(at+"dsdMode: %s is not a DSD mode (auto, native, dop or off), and this release takes off alone: the player never converts DSD to PCM", token(p.DSDMode))
+		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off), and this release takes off alone: the player never converts DSD to PCM")
 	}
 	if p.AllowsDoP() {
 		return errors.New(at + "allowDoP: true is not in this release: only false is (DoP is later work)")
@@ -276,7 +280,7 @@ func (p PlayerConfig) Problem() error {
 	case "hardware":
 		return errors.New(at + `mixer.type: "hardware" is not in this release: only none is, and the output is fixed (hardware volume is later work)`)
 	default:
-		return fmt.Errorf(at+"mixer.type: %s is not a mixer type (none or hardware), and this release takes none alone: there is no software volume", token(p.Mixer.Type))
+		return errors.New(at + "mixer.type: that value is not a mixer type (none or hardware), and this release takes none alone: there is no software volume")
 	}
 	return p.Device.Problem()
 }
@@ -290,7 +294,7 @@ func (d PlayerDevice) Problem() error {
 		return nil
 	}
 	if d.Transport != "" && d.Transport != "usb" {
-		return fmt.Errorf(at+"transport: %s is not in this release: only usb is", token(d.Transport))
+		return errors.New(at + "transport: that value is not in this release: only usb is")
 	}
 	needIDs := func(kind string) error {
 		for _, f := range []struct{ name, value string }{{"vendorId", d.VendorID}, {"productId", d.ProductID}} {
@@ -340,14 +344,14 @@ func (d PlayerDevice) Problem() error {
 			return fmt.Errorf(at+"port: %w", err)
 		}
 	default:
-		return fmt.Errorf(at+"binding: %s is not serial, uniqueModel or port", token(d.Binding))
+		return errors.New(at + "binding: that value is not serial, uniqueModel or port")
 	}
 	for _, f := range []struct {
 		name string
 		v    int
 	}{{"pcmDevice", d.PCMDevice}, {"subdevice", d.Subdevice}} {
 		if f.v < 0 || f.v > maxPlayerEndpoint {
-			return fmt.Errorf(at+"%s: must be from 0 to %d, and %d is not", f.name, maxPlayerEndpoint, f.v)
+			return fmt.Errorf(at+"%s: must be from 0 to %d", f.name, maxPlayerEndpoint)
 		}
 	}
 	return nil
@@ -395,25 +399,31 @@ func (c *Config) playerPlatform() string {
 	return runtime.GOOS
 }
 
-// tokenShape is a value short and plain enough to quote in a refusal; any
-// other value is described, not quoted, since a serial pasted into the
-// wrong field must not reach a log.
-var tokenShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,23}$`)
-
-// token quotes v when it is tokenShape, and describes it otherwise.
-func token(v string) string {
-	if tokenShape.MatchString(v) {
-		return strconv.Quote(v)
-	}
-	return "that value"
-}
-
 // playerSection is one mapping the player block's reader walks: what its
-// keys are settings of, for the unknown-key refusal, and the keys it
-// refuses by name with why.
+// keys are settings of, the keys it takes, and the keys it refuses by name
+// with why. A refusal names a key only when it is one of those: any other
+// is "that key", since a serial written as a key must not reach a log.
 type playerSection struct {
 	path, noun string
-	never      map[string]string
+	// keys are the settings the section takes, in the order the refusal
+	// of any other key lists them.
+	keys  []string
+	never map[string]string
+}
+
+// The keys each section takes.
+var (
+	playerKeys = []string{"enabled", "room", "pauseReleaseSeconds", "device", "dsdMode", "allowDoP", "mixer"}
+	deviceKeys = []string{"transport", "binding", "vendorId", "productId", "serial", "port", "pcmDevice", "subdevice"}
+	mixerKeys  = []string{"type", "control"}
+)
+
+// orList is keys joined as a person lists them: "a, b or c".
+func orList(keys []string) string {
+	if len(keys) < 2 {
+		return strings.Join(keys, "")
+	}
+	return strings.Join(keys[:len(keys)-1], ", ") + " or " + keys[len(keys)-1]
 }
 
 // neverSettings are the keys every part of the block refuses by name, with
@@ -481,9 +491,11 @@ func deref(n *yaml.Node) *yaml.Node {
 func isNull(n *yaml.Node) bool { return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null" }
 
 // fields walks the mapping n, handing each key and value to set, and
-// refuses what is not a mapping, a key written twice, a merge key, a key
-// that is not a plain word, a key the player refuses by name (neverKeys),
-// and a key set does not take. A null is a mapping with nothing in it.
+// refuses what is not a mapping, a merge key, a key that is not a plain
+// word, a key the player refuses by name (never), a key the section does
+// not take (keys, or one set refuses), and a key written twice. A null is a
+// mapping with nothing in it. A key is named in a refusal only once it is
+// one of the section's or one refused by name.
 func (r *playerReader) fields(n *yaml.Node, s playerSection, set func(key string, v *yaml.Node) bool) {
 	n = deref(n)
 	if isNull(n) {
@@ -492,6 +504,9 @@ func (r *playerReader) fields(n *yaml.Node, s playerSection, set func(key string
 	if n.Kind != yaml.MappingNode {
 		r.fail(n, s.path, "is a mapping of %s settings, and this is not one", s.noun)
 		return
+	}
+	unknown := func(k *yaml.Node) {
+		r.fail(k, s.path, "that key is not a %s setting (%s)", s.noun, orList(s.keys))
 	}
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(n.Content); i += 2 {
@@ -505,21 +520,21 @@ func (r *playerReader) fields(n *yaml.Node, s playerSection, set func(key string
 			r.fail(k, s.path, "a YAML merge key (<<) is not read here: write the settings out")
 			return
 		}
-		at := s.path + "." + key
-		if !tokenShape.MatchString(key) {
-			at = s.path
+		if why, ok := s.never[strings.ToLower(key)]; ok {
+			r.fail(k, s.path+"."+key, "%s", why)
+			return
+		}
+		if !slices.Contains(s.keys, key) {
+			unknown(k)
+			return
 		}
 		if seen[key] {
-			r.fail(k, at, "set twice")
+			r.fail(k, s.path+"."+key, "set twice")
 			return
 		}
 		seen[key] = true
-		if why, ok := s.never[strings.ToLower(key)]; ok {
-			r.fail(k, at, "%s", why)
-			return
-		}
 		if !set(key, v) {
-			r.fail(k, s.path, "%s is not a %s setting", token(key), s.noun)
+			unknown(k)
 			return
 		}
 		if r.problem != "" {
@@ -585,7 +600,7 @@ func (r *playerReader) hex(n *yaml.Node, path string, into *string) {
 func (r *playerReader) player(n *yaml.Node) PlayerConfig {
 	var p PlayerConfig
 	const at = "output.player"
-	r.fields(n, playerSection{at, "player", neverSettings}, func(key string, v *yaml.Node) bool {
+	r.fields(n, playerSection{path: at, noun: "player", keys: playerKeys, never: neverSettings}, func(key string, v *yaml.Node) bool {
 		switch key {
 		case "enabled":
 			r.boolean(v, at+".enabled", &p.Enabled)
@@ -613,7 +628,7 @@ func (r *playerReader) player(n *yaml.Node) PlayerConfig {
 func (r *playerReader) device(n *yaml.Node) PlayerDevice {
 	var d PlayerDevice
 	const at = "output.player.device"
-	r.fields(n, playerSection{at, "device", neverDeviceSettings}, func(key string, v *yaml.Node) bool {
+	r.fields(n, playerSection{path: at, noun: "device", keys: deviceKeys, never: neverDeviceSettings}, func(key string, v *yaml.Node) bool {
 		switch key {
 		case "transport":
 			r.text(v, at+".transport", &d.Transport)
@@ -651,7 +666,7 @@ func (r *playerReader) mixer(n *yaml.Node) PlayerMixer {
 		r.fail(nn, at, "mixer is an object, not a word: write mixer: {type: none}")
 		return m
 	}
-	r.fields(n, playerSection{at, "mixer", neverSettings}, func(key string, v *yaml.Node) bool {
+	r.fields(n, playerSection{path: at, noun: "mixer", keys: mixerKeys, never: neverSettings}, func(key string, v *yaml.Node) bool {
 		switch key {
 		case "type":
 			r.text(v, at+".type", &m.Type)

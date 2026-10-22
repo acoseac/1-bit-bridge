@@ -165,6 +165,63 @@ func TestOutputDACInspectShowsEachCardAndHowTheBindingResolves(t *testing.T) {
 	}
 }
 
+// TestOutputDACInspectNeverQuotesASerialInTheWrongField: a serial pasted
+// into the binding, the transport, dsdMode, mixer.type, an id or the port,
+// written as a key, or, all digits, into an endpoint number, reaches
+// inspect as the field's refusal, in the player's reason and the
+// resolution's, and is printed nowhere, as text or as JSON, whether the
+// player is enabled or not: the binding's own line shows such a field as
+// "that value".
+func TestOutputDACInspectNeverQuotesASerialInTheWrongField(t *testing.T) {
+	root := dacTree(t)
+	const model = "      vendorId: 20b1\n      productId: \"3009\"\n"
+	const digits = "202311050044"
+	for _, tc := range []struct {
+		name, block, says string
+		// whenOff: the refusal shows with the player off too, as the
+		// resolution's reason (a binding that is refused, or a block
+		// that does not read); a refusal of the player's own fields is
+		// its reason only when it is enabled.
+		whenOff bool
+	}{
+		{"binding", "    device:\n      binding: " + dacSerial + "\n" + model, "device.binding: that value", true},
+		{"transport", "    device:\n      transport: " + dacSerial + "\n      binding: uniqueModel\n" + model, "device.transport: that value", true},
+		{"dsdMode", "    dsdMode: " + dacSerial + "\n    device:\n      binding: uniqueModel\n" + model, "dsdMode: that value", false},
+		{"mixer type", "    mixer:\n      type: " + dacSerial + "\n    device:\n      binding: uniqueModel\n" + model, "mixer.type: that value", false},
+		{"vendorId", "    device:\n      binding: uniqueModel\n      vendorId: " + dacSerial + "\n      productId: \"3009\"\n",
+			"binding: uniqueModel that value:3009", true},
+		{"productId", "    device:\n      binding: uniqueModel\n      vendorId: 20b1\n      productId: " + dacSerial + "\n",
+			"binding: uniqueModel 20b1:that value", true},
+		{"port", "    device:\n      binding: port\n      port: " + dacSerial + "\n", "binding: port that value", true},
+		{"pcmDevice", "    device:\n      binding: uniqueModel\n" + model + "      pcmDevice: " + digits + "\n",
+			"binding: uniqueModel 20b1:3009, an endpoint out of range", true},
+		{"a key", "    " + dacSerial + ": true\n", "that key is not a player setting", true},
+		{"a device key", "    device:\n      " + dacSerial + ": 1\n", "that key is not a device setting", true},
+	} {
+		for _, enabled := range []string{"", "    enabled: true\n"} {
+			cfgPath := dacConfig(t, "  player:\n"+enabled+tc.block)
+			for _, format := range [][]string{nil, {"--json"}} {
+				args := append(append([]string{"inspect", "--config", cfgPath}, treeFlags(root)...), format...)
+				out, errOut, code := runDAC(t, dacEnv(), args...)
+				name := tc.name + " " + strings.TrimSpace(enabled) + " " + strings.Join(format, "")
+				if code != 0 {
+					t.Fatalf("%s: exit %d, stderr %q", name, code, errOut)
+				}
+				if dacLeaks(out+errOut, dacSerial) || dacLeaks(out+errOut, digits) {
+					t.Errorf("%s: inspect quotes the serial:\n%s%s", name, out, errOut)
+				}
+				// The binding's own line is the text form's.
+				if format != nil && strings.HasPrefix(tc.says, "binding: ") {
+					continue
+				}
+				if (enabled != "" || tc.whenOff) && !strings.Contains(out, tc.says) {
+					t.Errorf("%s: inspect does not say %q:\n%s", name, tc.says, out)
+				}
+			}
+		}
+	}
+}
+
 // TestOutputDACInspectWorksWithoutAConfigOrABinding: with no config the
 // cards are still read, and a config with no binding says how to make one.
 func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {

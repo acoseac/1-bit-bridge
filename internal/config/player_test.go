@@ -24,11 +24,19 @@ import (
 // to find in anything that leaked it.
 const playerSerial = "GOBAR-7Q2X-91KZ-4471"
 
+// numericSerial is a unit serial of digits alone, which a whole-number
+// field decodes as a number.
+const numericSerial = "202311050044"
+
 // playerLeaks reports whether out carries the serial, or six bytes of it
 // in a row.
-func playerLeaks(out string) bool {
-	for i := 0; i+6 <= len(playerSerial); i++ {
-		if strings.Contains(out, playerSerial[i:i+6]) {
+func playerLeaks(out string) bool { return leaksSerial(out, playerSerial) }
+
+// leaksSerial reports whether out carries serial, or six bytes of it in a
+// row.
+func leaksSerial(out, serial string) bool {
+	for i := 0; i+6 <= len(serial); i++ {
+		if strings.Contains(out, serial[i:i+6]) {
 			return true
 		}
 	}
@@ -189,8 +197,9 @@ func TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse(t *testing.T) {
 	for _, tc := range []struct {
 		name, block, reason string
 	}{
-		{"unknown key", "    enabled: true\n    pauseReleaseSecond: 30\n", `"pauseReleaseSecond" is not a player setting`},
-		{"unknown key holding the serial", "    enabled: true\n    serail: " + playerSerial + "\n", `"serail" is not a player setting`},
+		{"unknown key", "    enabled: true\n    pauseReleaseSecond: 30\n",
+			"that key is not a player setting (enabled, room, pauseReleaseSeconds, device, dsdMode, allowDoP or mixer)"},
+		{"unknown key holding the serial", "    enabled: true\n    serail: " + playerSerial + "\n", "that key is not a player setting"},
 		{"a wrong type", "    enabled: maybe\n", "output.player.enabled (line"},
 		{"the serial where a number goes", "    enabled: true\n    device:\n      pcmDevice: " + playerSerial + "\n", "output.player.device.pcmDevice (line"},
 		{"a scalar mixer", "    enabled: true\n    mixer: none\n", "mixer is an object"},
@@ -243,6 +252,69 @@ func TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse(t *testing.T) {
 	}
 }
 
+// TestASerialInTheWrongFieldIsNeverQuoted: a serial pasted into a field
+// that takes a fixed word (binding, transport, dsdMode, mixer.type),
+// written as a key, or, all digits, into a whole-number field, is refused
+// as "that value" or "that key", never quoted: not in PlayerEnabled's
+// reason, not in Problem, and not in Validate's log line, on the load and
+// on the load after a save. A word a refusal quotes is one the field
+// knows.
+func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
+	const model = "      vendorId: 20b1\n      productId: \"3009\"\n"
+	for _, tc := range []struct {
+		name, block, reason string
+	}{
+		{"binding", "    device:\n      binding: " + playerSerial + "\n" + model,
+			"output.player.device.binding: that value is not serial, uniqueModel or port"},
+		{"transport", "    device:\n      transport: " + playerSerial + "\n      binding: uniqueModel\n" + model,
+			"output.player.device.transport: that value is not in this release: only usb is"},
+		{"dsdMode", "    dsdMode: " + playerSerial + "\n", "output.player.dsdMode: that value is not a DSD mode"},
+		{"mixer type", "    mixer:\n      type: " + playerSerial + "\n", "output.player.mixer.type: that value is not a mixer type"},
+		{"a player key", "    " + playerSerial + ": true\n", "that key is not a player setting"},
+		{"a device key", "    device:\n      " + playerSerial + ": 1\n", "that key is not a device setting"},
+		{"a mixer key", "    mixer:\n      " + playerSerial + ": none\n", "that key is not a mixer setting"},
+		{"pauseReleaseSeconds", "    pauseReleaseSeconds: " + numericSerial + "\n", "output.player.pauseReleaseSeconds: must be from 1 to 3600"},
+		{"pcmDevice", "    device:\n      binding: uniqueModel\n" + model + "      pcmDevice: " + numericSerial + "\n",
+			"output.player.device.pcmDevice: must be from 0 to 255"},
+		{"subdevice", "    device:\n      binding: uniqueModel\n" + model + "      subdevice: " + numericSerial + "\n",
+			"output.player.device.subdevice: must be from 0 to 255"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaks := func(out string) bool { return playerLeaks(out) || leaksSerial(out, numericSerial) }
+			rec := loggingtest.Record(t)
+			path := writePlayerConfig(t, "  player:\n    enabled: true\n"+tc.block)
+			for _, pass := range []string{"load", "load after a save"} {
+				cfg, err := Load(path)
+				if err != nil {
+					t.Fatalf("%s: %v", pass, err)
+				}
+				on, why := cfg.PlayerEnabled("linux")
+				if on || why == nil || !strings.Contains(why.Error(), tc.reason) {
+					t.Fatalf("%s: PlayerEnabled = %v, %v; want off, naming %q", pass, on, why, tc.reason)
+				}
+				if leaks(why.Error()) {
+					t.Errorf("%s: the reason quotes the serial: %v", pass, why)
+				}
+				if err := cfg.Output.Player.Problem(); err == nil || leaks(err.Error()) {
+					t.Errorf("%s: Problem = %v", pass, err)
+				}
+				logged := rec.Failures(playerOffMessage)
+				if len(logged) == 0 || !strings.Contains(logged[len(logged)-1], tc.reason) {
+					t.Errorf("%s: Validate logged %q, want the reason %q", pass, logged, tc.reason)
+				}
+				for _, l := range rec.All() {
+					if leaks(l) {
+						t.Errorf("%s: a log line quotes the serial: %s", pass, l)
+					}
+				}
+				if err := cfg.Save(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // fullPlayer is fullPlayerBlock in memory: every field set to a value
 // this release takes.
 func fullPlayer() PlayerConfig {
@@ -274,18 +346,18 @@ func TestEveryPlayerRefusal(t *testing.T) {
 		{"dsd auto", func(p *PlayerConfig) { p.DSDMode = "auto" }, `dsdMode: "auto" is not in this release`},
 		{"dsd native", func(p *PlayerConfig) { p.DSDMode = "native" }, `dsdMode: "native" is not in this release`},
 		{"dsd dop", func(p *PlayerConfig) { p.DSDMode = "dop" }, `dsdMode: "dop" is not in this release`},
-		{"dsd to pcm", func(p *PlayerConfig) { p.DSDMode = "pcm" }, `dsdMode: "pcm" is not a DSD mode`},
+		{"dsd to pcm", func(p *PlayerConfig) { p.DSDMode = "pcm" }, `dsdMode: that value is not a DSD mode`},
 		{"dsd off", func(p *PlayerConfig) { p.DSDMode = "off" }, ""},
 		{"dop on", func(p *PlayerConfig) { p.AllowDoP = boolp(true) }, "allowDoP: true is not in this release"},
 		{"hardware mixer", func(p *PlayerConfig) { p.Mixer.Type = "hardware" }, `mixer.type: "hardware" is not in this release`},
-		{"software mixer", func(p *PlayerConfig) { p.Mixer.Type = "software" }, `mixer.type: "software" is not a mixer type`},
+		{"software mixer", func(p *PlayerConfig) { p.Mixer.Type = "software" }, `mixer.type: that value is not a mixer type`},
 		{"room too long", func(p *PlayerConfig) { p.Room = strings.Repeat("r", 65) }, "room"},
 		{"room with a control", func(p *PlayerConfig) { p.Room = "a\x1bb" }, "room"},
 		{"room not utf8", func(p *PlayerConfig) { p.Room = "caf\xe9" }, "room"},
 		{"no transport", func(p *PlayerConfig) { p.Device.Transport = "" }, ""},
-		{"another transport", func(p *PlayerConfig) { p.Device.Transport = "i2s" }, `device.transport: "i2s" is not in this release`},
+		{"another transport", func(p *PlayerConfig) { p.Device.Transport = "i2s" }, `device.transport: that value is not in this release`},
 		{"no binding with a unit", func(p *PlayerConfig) { p.Device.Binding = "" }, "device.binding"},
-		{"a card binding", func(p *PlayerConfig) { p.Device.Binding = "card" }, `device.binding: "card" is not serial, uniqueModel or port`},
+		{"a card binding", func(p *PlayerConfig) { p.Device.Binding = "card" }, `device.binding: that value is not serial, uniqueModel or port`},
 		{"serial with no serial", func(p *PlayerConfig) { p.Device.Serial = usbid.Serial{} }, "device.serial"},
 		{"serial with no vendor", func(p *PlayerConfig) { p.Device.VendorID = "" }, "device.vendorId"},
 		{"serial with no product", func(p *PlayerConfig) { p.Device.ProductID = "" }, "device.productId"},
