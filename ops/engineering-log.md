@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — saprobe-alac v1.0.0-rc3 carries the over-read fix: the bridge drops its patched copy](#2026-10-23--saprobe-alac-v100-rc3-carries-the-over-read-fix-the-bridge-drops-its-patched-copy)
 - [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
 - [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
@@ -53965,3 +53966,39 @@ linux/arm, windows and freebsd, and the Linux test binary built, clean.
 Not changed, for the owner: the stacks named above; a link or a mount
 another writer puts in place after the write's second check, or during its
 syncs, is not seen; shutdown's ReasonClosed, as in rounds 5 to 11.
+
+## 2026-10-23 — saprobe-alac v1.0.0-rc3 carries the over-read fix: the bridge drops its patched copy
+
+Upstream fixed the bridge's report: GHSA-g66f-c97f-q276 ("DecodePacket
+panics on a short crafted packet", medium, acoseac credited as reporter) was
+published on 2026-10-22 and v1.0.0-rc3 tagged (9c424f2e, PR #64). In
+3087cde0 `DynDecomp` checks every code against the packet (an escape's
+value before reading it, a normal code's length before taking it, the
+zero-run count before and after `dynGet`) and returns
+`ErrBitstreamOverrun`, the bit buffer's padding grows to 16 bytes, the
+predictor's warm-up stops at the frame, and `NewPacketDecoder` refuses a
+cookie of 0 or more than 8 channels, a frame length of 0 or over 65536 and
+a sample rate of 0; 2478d2f2 bounds the container's tables by the file.
+That is the condition the player rule set for dropping the patched copy,
+so `go.mod` requires rc3, and the `replace`, `third_party/saprobe-alac`, the
+Dockerfile's copy of its `go.mod` and the Makefile's test of it go in the
+same change. rc3's own requirements are the copy's (agar v0.1.6,
+primordium v0.15.1 and the same indirect set), so nothing else moved.
+
+rc3 is 107 commits past the pin (1b6eb83), most of them lint, dependency
+and refactor work; three cases that came back as silence or decoded
+without error are errors now (a packet that ends before every declared
+channel, a channel pair on the last channel, shifted bytes declared by a
+16 or 20-bit element). The ALAC goldens (independently specified
+patterns that afconvert encodes) decode bit-exact on rc3 as before; a real
+file that hit one of those cases would now be refused rather than played
+with a silent channel.
+
+Checks: `go test -race ./internal/player/decode/...` passes on rc3. The
+negative control: the old copy with the bridge's patch reversed
+(`ops/upstream/saprobe-alac.patch`, which gives 1b6eb83), named by a
+temporary `replace`, fails `TestALACPanicPacketIsRefusedWithoutTheRecover`,
+`TestALACLibraryErrorIsARefusal`, `TestALACCodesPastThePacketAreRefused`,
+`TestSaprobeALACRefusesCodesPastThePacket` and `FuzzALACOpen`'s seed; on
+rc3 all five pass. `make test`, `make build-all` and `make docs-check`
+results are in the PR.
