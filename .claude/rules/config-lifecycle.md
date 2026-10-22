@@ -344,25 +344,49 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   token reservation, with the data directory as `root`: the "No ID and no
   token is handed out twice" bullet in `player.md`). It keeps nothing
   between writes: each syncs every entry from the file's directory up to
-  `root`, along the path as written and as its links resolve, whoever made
-  those directories, so one an earlier write or an earlier run could not
-  sync is synced by the next, across a restart too. Round 5 kept a
-  process-local set of such directories, which a SIGKILL or a clean exit
-  dropped while the directory sat in the kernel's cache, and round 4
-  removed them, which raced every other writer. `root` is the caller's to
-  vouch for: it must exist (the writer never creates it), and its own entry
-  is never synced. It refuses, before anything is created, a platform with
-  no directory barrier (`ErrNoDirectoryBarrier`), a root that does not
-  exist, and a path not below `root` as written and as its links resolve
-  (`ErrNotUnderRoot`). Each directory is opened once and that descriptor
-  fsynced (`syncDirAt`), so only an fsync's own failure is
-  `ErrBarrierFailed`: an open that fails (EACCES, EMFILE) is returned as it
-  is. `ProbeDurable(root, path)` runs the same barriers, without writing, on
-  every directory a write would fsync that exists now. **Don't count a
-  write durable without every entry up to its root, don't keep in memory
-  which entries are durable, don't delete anything to recover durability,
-  don't sync above the root, and don't advise moving to another filesystem
-  for an error not marked `ErrBarrierFailed`.**
+  `root`, whoever made those directories, so one an earlier write or an
+  earlier run could not sync is synced by the next, across a restart too.
+  Round 5 kept a process-local set of such directories, which a SIGKILL or
+  a clean exit dropped while the directory sat in the kernel's cache, and
+  round 4 removed them, which raced every other writer. **The path must lie
+  plainly below `root`, so that one walk from the file's directory up to
+  `root` reaches every entry** (round 7): a `..` element in `root` or the
+  path is refused, since `filepath.Abs` cleans it lexically while a reader
+  resolves the link before it (round 6 wrote and fsynced `root/ids` for
+  `root/link/../ids`, which a reader opens below where the link points, so
+  a restart read no reservation, with no crash at all); so is a symbolic
+  link strictly below `root`, whether it leads out or stays inside, found
+  by `Lstat` from `root` down, and a directory there on another filesystem,
+  its `st_dev` not `root`'s, before anything is created and again once the
+  missing directories are, for a link another writer puts in place
+  meanwhile. Round 6 walked the path as written and as it resolved
+  instead, and missed a link reached through another link and synced
+  outside `root` for a link out and back (Codex, the Claude API and Argon
+  on round 6). `root` is the caller's to vouch for: it must exist (the
+  writer never creates it), its own entry is never synced, and a link at
+  or above it, a data directory that is a link included, is the caller's
+  too: `root` is resolved once, and every path the write opens, creates and
+  fsyncs, and every name its errors give, is spelled from where it
+  resolved. It refuses, before anything is created, a platform with no
+  directory barrier (`ErrNoDirectoryBarrier`), a root that does not exist,
+  and a path not plainly below `root` (`ErrNotUnderRoot`). Each directory
+  is opened once and that descriptor fsynced (`syncDirAt`), so only an
+  fsync's own failure is `ErrBarrierFailed`, an `*fs.PathError` naming the
+  directory that would not sync: an open that fails (EACCES, EMFILE) is
+  returned as it is. `ProbeDurable(root, path)` runs the same checks and
+  barriers, without writing, on every directory a write would fsync that
+  exists now, and on Linux also refuses a mount point the kernel lists
+  strictly below `root` (`/proc/self/mountinfo`, read only when a directory
+  lies between the file and `root`; `ErrMountsUnknown` when it cannot be
+  read): a bind mount of `root`'s own filesystem shows `root`'s device, and
+  its source's entries are off the walk. Elsewhere it reads no table (a
+  mount of another filesystem is still refused by its device), and a bind
+  mount made after the probe is not looked for. **Don't count a write
+  durable without every entry up to its root, don't keep in memory which
+  entries are durable, don't delete anything to recover durability, don't
+  sync above the root, don't walk a link or a mount below the root, don't
+  clean a `..` away, and don't advise moving to another filesystem for an
+  error not marked `ErrBarrierFailed`.**
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
   `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
@@ -370,8 +394,15 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestWriteBytesDurable_NeverSyncsAboveTheRoot`,
   `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`,
   `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier`,
-  `TestBarrierFailuresAreMarked`, `TestProbeDurable_SyncsTheDirectoryItOpened`
-  and `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
+  `TestWriteBytesDurable_RefusesADotDotElement`,
+  `TestWriteBytesDurable_RefusesALinkBelowTheRoot`,
+  `TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites`,
+  `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot`,
+  `TestWriteBytesDurable_RefusesAMountBelowTheRoot`,
+  `TestProbeDurable_RefusesAMountPointTheKernelLists`, `TestParseMountInfo`,
+  `TestPlatformMountTableReadsTheKernels`, `TestBarrierFailuresAreMarked`,
+  `TestProbeDurable_SyncsTheDirectoryItOpened` and
+  `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.
