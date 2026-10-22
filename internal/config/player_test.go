@@ -281,6 +281,7 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leaks := func(out string) bool { return playerLeaks(out) || leaksSerial(out, numericSerial) }
+			forgetPlayerOffReason(t)
 			rec := loggingtest.Record(t)
 			path := writePlayerConfig(t, "  player:\n    enabled: true\n"+tc.block)
 			for _, pass := range []string{"load", "load after a save"} {
@@ -539,10 +540,27 @@ func TestThePlayerIsLinuxOnlyAndNeverPublic(t *testing.T) {
 	}
 }
 
+// forgetPlayerOffReason clears the reason Validate last logged the player
+// off for, now and when the test ends. logPlayerOff keeps that reason for
+// the process, so a test that asserts the line would otherwise pass or fail
+// by what ran before it (the same subtest run twice, under -count=2, logged
+// nothing the second time). Every test that asserts the line calls it.
+func forgetPlayerOffReason(t testing.TB) {
+	t.Helper()
+	forget := func() {
+		playerOffLogged.mu.Lock()
+		defer playerOffLogged.mu.Unlock()
+		playerOffLogged.reason = ""
+	}
+	forget()
+	t.Cleanup(forget)
+}
+
 // TestValidateTurnsThePlayerOffWithALoggedReason: Validate never fails a
 // config over its player block; it logs why the player is off, through
 // the GOOS it is given, and the line carries no serial.
 func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
+	forgetPlayerOffReason(t)
 	rec := loggingtest.Record(t)
 	cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
 		Output: OutputConfig{Player: fullPlayer()}}
@@ -584,13 +602,7 @@ func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
 // runs, or is simply off) and came back, which is a change too. Saves made at
 // once write a changed reason once.
 func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
-	// A config whose player is simply off has no reason: whatever another
-	// test left as the reason last logged is gone, here and after this test.
-	quiet := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"}}
-	if err := quiet.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = quiet.Validate() })
+	forgetPlayerOffReason(t)
 	rec := loggingtest.Record(t)
 	loadAndSave := func(t *testing.T, path string) {
 		t.Helper()
