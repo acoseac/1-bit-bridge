@@ -1,6 +1,8 @@
 package alsa
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +15,127 @@ import (
 // maxPCMHops is how many slave.pcm follows a name may take. One more
 // leaves the device unresolved.
 const maxPCMHops = 8
+
+// maxPasswdBytes bounds the read of etc/passwd.
+const maxPasswdBytes = 1 << 20
+
+// userConfigFiles are the files alsa-lib's alsa.conf loads from a user's
+// home after the system's (its load hook: ~/.asoundrc, then
+// $XDG_CONFIG_HOME/alsa/asoundrc, whose default is ~/.config).
+var userConfigFiles = []string{".asoundrc", ".config/alsa/asoundrc"}
+
+// UserConfig reports whether the ALSA configuration alsa-lib loads from
+// uid's home is there: alsa-lib reads it after the system's files, so a
+// definition in it replaces one the bridge read under etc. The home is
+// uid's in root's etc/passwd, which is where alsa-lib looks when the
+// process has no HOME. known is false when the bridge cannot tell: no
+// passwd, no entry for uid, a home that is not absolute, or a home it
+// cannot look in. A HOME or XDG_CONFIG_HOME the process was started with
+// is in its environment, which only its own user can read.
+func UserConfig(root string, uid int) (present, known bool) {
+	b, err := readCapped(filepath.Join(root, "etc", "passwd"), maxPasswdBytes)
+	if err != nil {
+		return false, false
+	}
+	home := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Split(line, ":")
+		if len(f) == 7 && f[2] == strconv.Itoa(uid) {
+			home = f[5]
+			break
+		}
+	}
+	if !strings.HasPrefix(home, "/") {
+		return false, false
+	}
+	for _, rel := range userConfigFiles {
+		_, err := os.Lstat(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(home, "/")), filepath.FromSlash(rel)))
+		switch {
+		case err == nil:
+			return true, true
+		case !errors.Is(err, fs.ErrNotExist):
+			return false, false
+		}
+	}
+	return false, true
+}
+
+// PCMConfig is the ALSA configuration a resolution reads, loaded once: the
+// PCM definitions of etc/alsa/conf.d/*.conf and etc/asound.conf under a
+// config root, and the plugin types a pcm_type stanza there hands to
+// another library. Resolving from it reads nothing, so a caller that bounds
+// the load bounds every resolution made from it.
+type PCMConfig struct {
+	defs map[string]pcmDef
+	// ok is false when a file that is present could not be used whole: no
+	// definition is then used, and no stage is known.
+	ok bool
+	// types are the plugin types a pcm_type stanza redefines; "*" is a
+	// stanza whose types this parser cannot tell.
+	types map[string]bool
+}
+
+// LoadPCMConfig reads the ALSA configuration under root once.
+func LoadPCMConfig(root string) PCMConfig {
+	defs, types, ok := loadPCMDefs(root)
+	return PCMConfig{defs: defs, ok: ok, types: types}
+}
+
+// ResolveOutputDevice is the package's ResolveOutputDevice from c: the card
+// a device names, whatever redefines its stages.
+func (c PCMConfig) ResolveOutputDevice(device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
+	if idx, pcm, found := ResolveALSADevice(device, cards); found {
+		return idx, pcm, true
+	}
+	device = strings.TrimSpace(device)
+	if device == "" || strings.Contains(device, ":") || !c.ok {
+		return 0, 0, false
+	}
+	return walkPCM(c, device, cards, map[string]bool{}, 0)
+}
+
+// ResolveOutputChain is the package's ResolveOutputChain from c. A
+// configuration not read whole may redefine any stage, hw:N's too, so it
+// knows no chain.
+func (c PCMConfig) ResolveOutputChain(device string, cards []Card) (Chain, bool) {
+	device = strings.TrimSpace(device)
+	if !c.ok || device == "" {
+		return Chain{}, false
+	}
+	chain, ok, known := walkChain(c, device, cards, map[string]bool{}, 0)
+	if !ok || !known {
+		return Chain{}, false
+	}
+	return chain, true
+}
+
+// trustsType reports whether a stage of plugin type typ is the plugin the
+// bridge knows: no pcm_type stanza hands it to another library.
+func (c PCMConfig) trustsType(typ string) bool {
+	return !c.types["*"] && !c.types[typ]
+}
+
+// deviceStringStages is the stages a device string names directly, as c
+// defines them: hw is the card itself and plughw a plug over it, while no
+// definition of that PCM (pcm.hw, pcm.!plughw) replaces alsa-lib's and no
+// pcm_type stanza redefines a type it is made of. front and plug are
+// resolved to a card by ResolveALSADevice, and their stages are not known.
+func (c PCMConfig) deviceStringStages(device string) ([]string, bool) {
+	plugin, _, _ := strings.Cut(strings.TrimSpace(device), ":")
+	stages, known := deviceStringStages(device)
+	if !known {
+		return nil, false
+	}
+	if _, defined := c.defs[plugin]; defined {
+		return nil, false
+	}
+	for _, s := range stages {
+		if !c.trustsType(s) {
+			return nil, false
+		}
+	}
+	return stages, true
+}
 
 // maxAsoundFiles and maxAsoundBytes bound the configuration read for
 // one resolution. One file is also bounded by maxFileBytes.
@@ -61,11 +184,7 @@ func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevic
 	if device == "" || strings.Contains(device, ":") {
 		return 0, 0, false
 	}
-	defs, ok := loadPCMDefs(root)
-	if !ok {
-		return 0, 0, false
-	}
-	return walkPCM(defs, device, cards, map[string]bool{}, 0)
+	return LoadPCMConfig(root).ResolveOutputDevice(device, cards)
 }
 
 // Chain is how an MPD alsa device reaches a card: the plugin type of each
@@ -85,28 +204,11 @@ type Chain struct {
 // PCM device, and not for a front or plug device string, at the start or
 // as a slave: what those name is defined in alsa-lib's own configuration
 // files (the card's front PCM, plug's slave argument), which this does not
-// read, so their stages are not known.
+// read, so their stages are not known. A hw or plughw device string's
+// stages are known only from a configuration read whole that redefines
+// neither its PCM nor a plugin type it is made of (PCMConfig).
 func ResolveOutputChain(root, device string, cards []Card) (Chain, bool) {
-	if idx, pcm, found := ResolveALSADevice(device, cards); found {
-		stages, known := deviceStringStages(device)
-		if !known {
-			return Chain{}, false
-		}
-		return Chain{Card: idx, Device: pcm, Stages: stages}, true
-	}
-	device = strings.TrimSpace(device)
-	if device == "" || strings.Contains(device, ":") {
-		return Chain{}, false
-	}
-	defs, ok := loadPCMDefs(root)
-	if !ok {
-		return Chain{}, false
-	}
-	chain, ok, known := walkChain(defs, device, cards, map[string]bool{}, 0)
-	if !ok || !known {
-		return Chain{}, false
-	}
-	return chain, true
+	return LoadPCMConfig(root).ResolveOutputChain(device, cards)
 }
 
 // deviceStringStages is the stages a device string names directly: hw is
@@ -134,27 +236,28 @@ type pcmDef struct {
 	opaque      bool
 }
 
-func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
-	chain, ok, _ := walkChain(defs, name, cards, seen, hops)
+func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
+	chain, ok, _ := walkChain(c, name, cards, seen, hops)
 	return chain.Card, chain.Device, ok
 }
 
 // walkChain follows name to a card. ok is whether it reached one, and
 // known whether every stage on the way is one whose type it knows: a slave
-// that is a front or plug device string reaches a card without that.
-func walkChain(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (chain Chain, ok, known bool) {
+// that is a front or plug device string reaches a card without that, and
+// so does a stage whose PCM or type the configuration redefines.
+func walkChain(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (chain Chain, ok, known bool) {
 	if strings.Contains(name, ":") {
 		idx, pcm, found := ResolveALSADevice(name, cards)
 		if !found {
 			return Chain{}, false, false
 		}
-		stages, known := deviceStringStages(name)
+		stages, known := c.deviceStringStages(name)
 		return Chain{Card: idx, Device: pcm, Stages: stages}, true, known
 	}
 	if hops > maxPCMHops || seen[name] {
 		return Chain{}, false, false
 	}
-	def, found := defs[name]
+	def, found := c.defs[name]
 	if !found || def.opaque {
 		return Chain{}, false, false
 	}
@@ -169,7 +272,7 @@ func walkChain(defs map[string]pcmDef, name string, cards []Card, seen map[strin
 			if !cardIndexExists(cards, def.cardIndex) {
 				return Chain{}, false, false
 			}
-			return Chain{Card: def.cardIndex, Device: pcm, Stages: []string{"hw"}}, true, true
+			return Chain{Card: def.cardIndex, Device: pcm, Stages: []string{"hw"}}, true, c.trustsType("hw")
 		}
 		if def.card == "" {
 			return Chain{}, false, false
@@ -178,28 +281,30 @@ func walkChain(defs map[string]pcmDef, name string, cards []Card, seen map[strin
 		if !unique {
 			return Chain{}, false, false
 		}
-		return Chain{Card: idx, Device: pcm, Stages: []string{"hw"}}, true, true
+		return Chain{Card: idx, Device: pcm, Stages: []string{"hw"}}, true, c.trustsType("hw")
 	case "empty", "plug":
 		if def.slave == "" {
 			return Chain{}, false, false
 		}
-		inner, ok, known := walkChain(defs, def.slave, cards, seen, hops+1)
+		inner, ok, known := walkChain(c, def.slave, cards, seen, hops+1)
 		if !ok {
 			return Chain{}, false, false
 		}
 		inner.Stages = append([]string{def.typ}, inner.Stages...)
-		return inner, true, known
+		return inner, true, known && c.trustsType(def.typ)
 	default:
 		return Chain{}, false, false
 	}
 }
 
-// loadPCMDefs reads conf.d and then asound.conf. ok is false when any
+// loadPCMDefs reads conf.d and then asound.conf: the PCM definitions, and
+// the plugin types a pcm_type stanza redefines. ok is false when any
 // file that is present cannot be read, or parses as something this
 // reader does not fully model. A missing file is not that: the other
 // files still count. A false ok means no definition may be used.
-func loadPCMDefs(root string) (map[string]pcmDef, bool) {
+func loadPCMDefs(root string) (map[string]pcmDef, map[string]bool, bool) {
 	defs := map[string]pcmDef{}
+	types := map[string]bool{}
 	var files int
 	var total int
 	bad := false
@@ -221,7 +326,7 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 		}
 		files++
 		total += len(b)
-		parsed, ok := parsePCMFile(string(b))
+		parsed, redefined, ok := parsePCMFile(string(b))
 		if !ok {
 			bad = true
 			return
@@ -234,6 +339,9 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 			}
 			defs[name] = def
 		}
+		for typ := range redefined {
+			types[typ] = true
+		}
 	}
 	matches, _ := filepath.Glob(filepath.Join(root, "etc", "alsa", "conf.d", "*.conf"))
 	sort.Strings(matches)
@@ -242,9 +350,9 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
 	if bad {
-		return nil, false
+		return nil, nil, false
 	}
-	return defs, true
+	return defs, types, true
 }
 
 const (
@@ -274,28 +382,33 @@ type pcmParser struct {
 	i   int
 }
 
-func parsePCMFile(src string) (map[string]pcmDef, bool) {
+// parsePCMFile reads one file's PCM definitions, and the plugin types its
+// pcm_type stanzas redefine: pcm_type.NAME (or pcm_type.!NAME) is NAME, and
+// a pcm_type stanza of any other form is "*", since which types it names is
+// not read here.
+func parsePCMFile(src string) (map[string]pcmDef, map[string]bool, bool) {
 	toks, ok := lexPCM(src)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	p := pcmParser{tok: toks}
 	defs := map[string]pcmDef{}
+	types := map[string]bool{}
 	for {
 		p.skipSep()
 		if p.peek().kind == tokEOF {
-			return defs, true
+			return defs, types, true
 		}
 		if atDirective(p.peek()) {
-			return nil, false
+			return nil, nil, false
 		}
 		if p.peek().kind == tokIdent && p.peek().val == "pcm" {
 			if !p.isPCM() {
-				return nil, false
+				return nil, nil, false
 			}
 			name, def, ok := p.parsePCMDef()
 			if !ok {
-				return nil, false
+				return nil, nil, false
 			}
 			if prev, exists := defs[name]; exists {
 				prev.opaque = true
@@ -305,10 +418,31 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 			defs[name] = def
 			continue
 		}
+		if p.peek().kind == tokIdent && p.peek().val == "pcm_type" {
+			types[p.pcmTypeName()] = true
+		}
 		if !p.skipStanza() {
-			return nil, false
+			return nil, nil, false
 		}
 	}
+}
+
+// pcmTypeName is the type a pcm_type stanza at the parser's position
+// redefines, without consuming it: NAME for pcm_type.NAME or
+// pcm_type.!NAME, "*" for any other form.
+func (p *pcmParser) pcmTypeName() string {
+	j := p.i + 1
+	if j >= len(p.tok) || p.tok[j].kind != tokDot {
+		return "*"
+	}
+	j++
+	if j < len(p.tok) && p.tok[j].kind == tokBang {
+		j++
+	}
+	if j < len(p.tok) && (p.tok[j].kind == tokIdent || p.tok[j].kind == tokString) {
+		return p.tok[j].val
+	}
+	return "*"
 }
 
 func (p *pcmParser) isPCM() bool {
