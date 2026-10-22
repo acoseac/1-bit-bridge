@@ -150,6 +150,56 @@ func TestServeRunsThePlayersWatcherWhileThePlayerIsOn(t *testing.T) {
 	}
 }
 
+// heldSource is an event source that hears nothing and whose reader does
+// not end until release closes: a source stuck as a read in the kernel
+// would be, so the watcher's service waits on it, at most its stop's
+// deadline.
+type heldSource struct{ release chan struct{} }
+
+func (heldSource) Events() <-chan hotplug.Uevent { return nil }
+func (heldSource) Notes() <-chan struct{}        { return nil }
+func (heldSource) TakeLost() bool                { return false }
+func (s heldSource) Done() <-chan struct{}       { return s.release }
+func (heldSource) Status() hotplug.SourceStatus {
+	return hotplug.SourceStatus{Mode: hotplug.ModePolling, Reason: "held"}
+}
+
+// TestThePlayersWatcherStopJoinsItsService: serve's stop of the watcher
+// returns only once the service's Run has returned, here once the service
+// gave up on a source that would not end (its stop deadline), never while
+// it still runs.
+func TestThePlayersWatcherStopJoinsItsService(t *testing.T) {
+	cfg := &config.Config{Output: config.OutputConfig{Player: config.PlayerConfig{Enabled: true}}}
+	held := heldSource{release: make(chan struct{})}
+	defer close(held.release)
+	booted := make(chan struct {
+		svc  *hotplug.Service
+		done <-chan struct{}
+	}, 1)
+	stop := startPlayerHotplug(context.Background(), playerHotplugWiring{
+		GOOS:       "linux",
+		Holder:     config.NewRuntimeConfig(cfg),
+		OpenSource: func(context.Context) hotplug.Source { return held },
+		Boot: func(svc *hotplug.Service, _ *config.RuntimeConfig, done <-chan struct{}) {
+			booted <- struct {
+				svc  *hotplug.Service
+				done <-chan struct{}
+			}{svc, done}
+		},
+	})
+	b := <-booted
+	waitHotplug(t, b.svc, "the watch running", func(st hotplug.Status) bool { return st.Running })
+	stop()
+	select {
+	case <-b.done:
+	default:
+		t.Fatal("the stop returned with the service still running")
+	}
+	if st := b.svc.Status(); st.Running || st.Stopping {
+		t.Errorf("after the stop: %+v", st)
+	}
+}
+
 // TestServeStartsNoPlayerWatcherOffLinux: off Linux, where the player
 // never runs, serve starts no watcher, the player enabled or not.
 func TestServeStartsNoPlayerWatcherOffLinux(t *testing.T) {

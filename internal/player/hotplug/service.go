@@ -234,7 +234,11 @@ func (s *Service) stop(w *watch) {
 		case <-src:
 			src = nil
 		case <-timer.C():
-			s.log.Warn("player hotplug: the watcher did not stop within its deadline and is abandoned: a read of /sys or /proc is stuck in the kernel, as a USB device's lock held by a disconnect makes it",
+			why := "its event source did not end"
+			if owner != nil {
+				why = "a read of /sys or /proc is stuck in the kernel, as a USB device's lock held by a disconnect makes it"
+			}
+			s.log.Warn("player hotplug: the watcher did not stop within its deadline and is abandoned: "+why,
 				"waited", s.cfg.Timing.StopWait, "watcherStopped", owner == nil, "eventsStopped", src == nil)
 			owner, src = nil, nil
 		}
