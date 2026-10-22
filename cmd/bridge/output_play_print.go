@@ -193,7 +193,8 @@ func (r *playRun) diff(s *engine.Snapshot) {
 	}
 	if st := s.LastStop(); st != seen.stop {
 		seen.stop = st
-		r.out.line("engine: playback stopped: %s (%s), on entry %d", st.Reason, st.Detail, st.Entry)
+		p := s.Position()
+		r.out.line("engine: playback stopped: %s (%s), on entry %d, the position at %.3f s (%d frames)", st.Reason, st.Detail, st.Entry, p.Seconds(), p.Frames)
 	}
 	if u, ok := s.ReleaseUnconfirmed(); ok != seen.unconfirmed {
 		seen.unconfirmed = ok

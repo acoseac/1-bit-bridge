@@ -369,7 +369,7 @@ func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 	}
 	// The engine records the stop as the release begins, and the run prints
 	// the two from two goroutines: either may come first.
-	for _, want := range []string{"closed card 5 device 0 subdevice 0", "session 1: released", "engine: playback stopped: end_of_queue"} {
+	for _, want := range []string{"closed card 5 device 0 subdevice 0", "session 1: released", "engine: playback stopped: end_of_queue", "the position at "} {
 		if !strings.Contains(out[at:], want) {
 			t.Errorf("the output does not say %q after the end:\n%s", want, out)
 		}
