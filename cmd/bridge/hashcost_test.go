@@ -1,14 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"sync"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 )
 
@@ -24,10 +27,13 @@ import (
 // it, and TestNoProductionCodeLowersTheHashCost sweeps every non-test file to
 // make sure nothing outside a suite calls this.
 //
-// No test here opens /dev/snd: the pcm-test harness's tests drive a fake
-// device, and the DAC binding commands open nothing. The guard refuses any
-// open that reaches alsapcm.Open and fails the binary on it, so a test that
-// would play on the box it runs on (the owner's Pi has a DAC) fails instead.
+// No test here opens /dev/snd or reads the box's own /proc or /sys: the
+// pcm-test harness's tests drive a fake device, and the output and DAC
+// binding commands read trees the tests lay out. The guard refuses any
+// open that reaches alsapcm.Open, and the watch any read of the host's
+// trees through the alsa readers, and the binary fails on either, so a test
+// that would play on, or read, the box it runs on (the owner's Pi has a
+// DAC) fails instead.
 func TestMain(m *testing.M) {
 	// The fingerprint stand-in re-execs this binary as fpcalc. It must
 	// return before the suite starts, or the child runs every test.
@@ -35,22 +41,50 @@ func TestMain(m *testing.M) {
 		os.Exit(runFpcalcStandIn())
 	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
-	stop := alsapcm.GuardNodeOpens(recordNodeOpen)
+	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
+	stopReads := alsa.WatchHostReads(recordHostRead)
 	code := m.Run()
-	stop()
+	stopReads()
+	stopOpens()
 	if opened := nodeOpens(); len(opened) > 0 {
 		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, which no test may: %q\n", opened)
+		code = 1
+	}
+	if read := hostReads(); len(read) > 0 {
+		fmt.Fprintf(os.Stderr, "the suite read the host's own trees, which no test may (%d reads); each read's root and where it was asked:\n", len(read))
+		for _, r := range read {
+			fmt.Fprintln(os.Stderr, r)
+		}
 		code = 1
 	}
 	os.Exit(code)
 }
 
 // openedNodes are the nodes the guard refused, for TestMain and the tests
-// that assert a command opened none.
+// that assert a command opened none; readRoots are the host trees the
+// watch refused, each with the stack that asked for it, since a read names
+// no test.
 var (
 	openedNodesMu sync.Mutex
 	openedNodes   []string
+	readRootsMu   sync.Mutex
+	readRoots     []string
 )
+
+// recordHostRead is the watch's report: it refuses the read.
+func recordHostRead(root string) error {
+	readRootsMu.Lock()
+	defer readRootsMu.Unlock()
+	readRoots = append(readRoots, root+"\n"+string(debug.Stack()))
+	return errors.New("this test binary reads no host tree: " + root)
+}
+
+// hostReads returns the host trees the watch refused so far.
+func hostReads() []string {
+	readRootsMu.Lock()
+	defer readRootsMu.Unlock()
+	return append([]string(nil), readRoots...)
+}
 
 // recordNodeOpen is the guard's report.
 func recordNodeOpen(path string) {
