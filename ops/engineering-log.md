@@ -50371,3 +50371,34 @@ the driver's open (extended codes on, `busy_timeout` first, `select 1`),
 conversion and `winLock`'s answer. With main's `go.mod` and `go.sum` the
 four busy tests and the concurrency test passed three runs each under
 `-race`, and `GOOS=windows go vet` was clean.
+
+**Review** (Codex, Low; the Claude API found none). The give-up test
+asserted only that the open tried for at least its budget, so nothing
+bounded the retry: on bbb367b7, with the deadline at
+`10 * openStoreBusyBudget`, all four busy tests passed, the give-up test in
+3.02 s against 0.31 s. A wall-clock upper bound would flake under load, so
+`openStoreDB` now runs its pauses and its budget on a clock seam,
+`openStoreNow` and `openStoreSleep` (`time.Now` and `time.Sleep`, set
+through `setOpenStoreClock` behind a mutex as the ping seam is, and read
+once as an open starts; there is no Store yet to put a seam on). The
+give-up test runs the open on a fake clock that moves only by the pauses it
+sleeps, at production's schedule, and requires it to stop no earlier than
+the budget and no later than one pause (`openStoreBusyPauseMax`) past it,
+counted from the first busy answer, after the 25 pings that schedule gives:
+the first try, then one after each pause of 10, 20, 40, 80 and 160 ms,
+eighteen of 250 ms, and the 190 ms left of the 5 s. It checks first that the
+schedule is that one, and past a thousand pings its script answers an error
+that is not busy, so an open with no limit fails the test instead of
+hanging it.
+
+Controls on 9ed70ceb, each restored from git:
+- The deadline at ten budgets: exactly the give-up test failed, "still
+  trying 50s after the first busy answer, past its 5s budget and one 250ms
+  pause" and "pinged 205 times, want 25".
+- The pauses tripling instead of doubling: only the count failed, 24 pings;
+  the open still stopped at 5 s.
+- A second's sleep before giving up: only the upper bound failed, 6 s.
+- A deadline taken again at every busy answer, so none: the test failed in
+  10 ms at the cap, 1,001 pings and 4m9.06s of fake time.
+- The last pause not cut to what is left, a positive control: green. The
+  open stops 60 ms past the budget, inside the pause the bound allows.
