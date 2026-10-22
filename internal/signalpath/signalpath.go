@@ -8,8 +8,9 @@
 //
 // The verdict claims only what the kernel shows: the format the DAC
 // receives, against the file's. It is format_preserved (PCM at the file's
-// rate and channels in a format that holds every bit of its depth, or native
-// DSD at the file's rate), format_preserved_dop (PCM at the rate and in the
+// rate and channels in a signed integer container of at least the file's
+// bit depth, or native DSD at the file's rate), format_preserved_dop (PCM at
+// the rate and in the
 // format DoP of the file's DSD rate takes, which is consistent with DoP and
 // never a claim that the DAC locked onto it or decoded it), or withheld,
 // with a code for every condition that does not hold. It never says
@@ -153,7 +154,9 @@ const (
 	// DepthReduced: the card's PCM format carries fewer bits than the file.
 	DepthReduced = "depth_reduced"
 	// DSDConvertedToPCM: a DSD file reaches the card as PCM, and the output
-	// does not send DoP.
+	// does not send DoP as MPD reports it: the first entry of its
+	// allowed_formats that matches the stream has no =dop, or, with none
+	// named, dop is off.
 	DSDConvertedToPCM = "dsd_converted_to_pcm"
 	// DoPContainerTooNarrow: DoP in a PCM format of fewer than 24 bits.
 	DoPContainerTooNarrow = "dop_container_too_narrow"
@@ -336,8 +339,11 @@ type MPD struct {
 	// MixRampDelay is status mixrampdelay as MPD prints it; "" when
 	// absent, which is off, as is "nan".
 	MixRampDelay string
-	// Volume is status volume as MPD prints it; "" when absent.
-	Volume string
+	// Volume is status volume as MPD prints it at the status read after
+	// the /proc read, and VolumeBefore at the one before it; "" when absent.
+	// The card held samples attenuated at either one.
+	Volume       string
+	VolumeBefore string
 	// ConfRead is whether mpd.conf was read at this reading.
 	// VolumeNormalization and AudioOutputFormat are its top-level settings,
 	// as written: what the file says, which is not shown to be what MPD runs
@@ -368,8 +374,9 @@ type Output struct {
 	// one (AllowedFormatsLive), else its block's.
 	AllowedFormats     string
 	AllowedFormatsLive bool
-	// DoP is whether the output sends DSD as DoP: the live dop attribute,
-	// else its block's dop setting.
+	// DoP is the output's dop setting: the live dop attribute, else its
+	// block's. MPD sends DSD as DoP by it only while the allowed_formats it
+	// runs with is empty (sendsDoP).
 	DoP bool
 	// SampleStage is the plugin type of the first stage that changes the
 	// samples (softvol, rate, dmix, route, ladspa) on the way from its
@@ -478,7 +485,10 @@ func Judge(f Facts) Verdict {
 			case !oneOutput:
 				// Which output, and so whether it sends DoP, is not known;
 				// mpd_output_ambiguous already says so.
-			case !f.MPD.Output.DoP:
+			case !sendsDoP(f.MPD.Output, audio):
+				// MPD's own report says the PCM at the card is its
+				// conversion of the DSD, which the kernel cannot tell from
+				// DoP when it has DoP's shape.
 				add(DSDConvertedToPCM)
 			default:
 				// DoP: 16 one-bit samples a channel in each PCM frame, in
@@ -514,9 +524,10 @@ func Judge(f Facts) Verdict {
 			if f.PCM.Channels != audio.Channels {
 				add(ChannelsMismatch)
 			}
-			// The format must hold the file's bits; a wider one carries
-			// them in a wider word. When the file's bits are not known, the
-			// stream's stand in.
+			// The container is at least the file's bit depth (the plan's
+			// decision (d)): a wider one carries the file's bits in a wider
+			// word, so a 16-bit file in S24_3LE is preserved. When the
+			// file's bits are not known, the stream's stand in.
 			floor := audio.Bits
 			if f.Source.Known && !f.Source.DSD && f.Source.Bits > 0 {
 				floor = f.Source.Bits
@@ -542,9 +553,10 @@ func Judge(f Facts) Verdict {
 // and then WarningSources order: what MPD reports (replay gain, crossfade,
 // MixRamp, the output's live allowed_formats), what mpd.conf says
 // (normalization, the format overrides, the holder's software volume while
-// MPD reports a volume below 100, its filters), and the first sample stage
-// the holder's device goes through as the ALSA files define it. A setting
-// that does not read as on is no warning, and what was not read is none.
+// MPD reports a volume below 100 at either status read, its filters), and
+// the first sample stage the holder's device goes through as the ALSA files
+// define it. A setting that does not read as on is no warning, and what was
+// not read is none.
 func warnings(f Facts) []Warning {
 	out := []Warning{}
 	add := func(code, source string) {
@@ -580,7 +592,7 @@ func warnings(f Facts) []Warning {
 			add(MPDFormatOverride, source)
 		}
 		if o.Configured {
-			if o.MixerType == "software" && volumeBelowFull(m.Volume) {
+			if o.MixerType == "software" && (volumeBelowFull(m.VolumeBefore) || volumeBelowFull(m.Volume)) {
 				add(MPDSoftwareVolume, FromMPDConf)
 			}
 			if strings.TrimSpace(o.Format) != "" {
@@ -703,6 +715,174 @@ func ParseAudio(s string) (Audio, bool) {
 		return Audio{Rate: rate, Bits: bits, Channels: ch}, true
 	}
 	return Audio{}, false
+}
+
+// sendsDoP reports whether the output sends the DSD stream a as DoP, as
+// MPD 0.24's ALSA output decides it (src/output/plugins/AlsaOutputPlugin.cxx,
+// AlsaOutput::Open): while the allowed_formats it runs with names a format,
+// the first entry that matches the stream (BestMatch) decides by its "=dop"
+// suffix, and dop is not read; with none named, dop decides. Only the
+// allowed_formats MPD reports is read: the file's is what the bridge found,
+// which MPD may not run with, and is a warning. One this does not read, or
+// none of whose entries matches the stream, sends no DoP: MPD would apply
+// its first entry, which is then not the stream's format.
+func sendsDoP(o Output, a Audio) bool {
+	if o.AllowedFormatsLive {
+		list, ok := parseAllowedFormats(o.AllowedFormats)
+		switch {
+		case !ok:
+			return false
+		case len(list) > 0:
+			for _, e := range list {
+				if e.matches(a) {
+					return e.dop
+				}
+			}
+			return false
+		}
+	}
+	return o.DoP
+}
+
+// allowedFormat is one entry of an ALSA output's allowed_formats, as MPD
+// 0.24 reads it: a rate (Hz for PCM; bytes a second for DSD, so dsd64 is
+// 352800), a sample format ("8", "16", "24", "32", "f" or "dsd") and
+// channels, each 0 or "" where the entry has "*", which matches anything;
+// and whether it sends DSD as DoP ("=dop").
+type allowedFormat struct {
+	rate     int
+	format   string
+	channels int
+	dop      bool
+}
+
+// MPD's bounds on an audio format (src/pcm/AudioFormat.hxx): channels up
+// to MAX_CHANNELS, a rate below 1 << 30 (audio_valid_sample_rate), and the
+// dsdN shortcut from dsd32 to dsd4096, even (src/pcm/AudioParser.cxx).
+const (
+	mpdMaxChannels = 8
+	mpdMaxRate     = 1 << 30
+	mpdMinDSD      = 32
+	mpdMaxDSD      = 4096
+)
+
+// parseAllowedFormats reads an allowed_formats value as MPD 0.24 does
+// (src/lib/alsa/AllowedFormat.cxx, ParseList): entries split on single
+// spaces, an empty one skipped, each an audio format mask with an optional
+// "=dop", which only a DSD entry may carry. ok is false when any entry
+// does not read, as MPD refuses the whole value then. A number is digits:
+// a sign or a space strtoul would skip, which MPD never writes, is not read.
+func parseAllowedFormats(s string) ([]allowedFormat, bool) {
+	out := []allowedFormat{}
+	for _, item := range strings.Split(s, " ") {
+		if item == "" {
+			continue
+		}
+		e, ok := parseAllowedFormat(item)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, e)
+	}
+	return out, true
+}
+
+// parseAllowedFormat is one entry: Alsa::AllowedFormat's constructor, and
+// ParseAudioFormat with a mask.
+func parseAllowedFormat(s string) (allowedFormat, bool) {
+	var e allowedFormat
+	s, e.dop = strings.CutSuffix(s, "=dop")
+	// MPD copies the entry into a 64-byte buffer, its terminator included.
+	if len(s) >= 64 {
+		return allowedFormat{}, false
+	}
+	if rest, ok := strings.CutPrefix(s, "dsd"); ok {
+		// dsdN: N × 44100 one-bit samples a second, a rate in bytes of
+		// N × 44100 / 8. Anything else that starts dsd is no rate.
+		n, channels, found := strings.Cut(rest, ":")
+		v, ok := digits(n)
+		if !found || !ok || v < mpdMinDSD || v > mpdMaxDSD || v%2 != 0 {
+			return allowedFormat{}, false
+		}
+		e.rate, e.format = v*44100/8, "dsd"
+		if e.channels, ok = maskChannels(channels); !ok {
+			return allowedFormat{}, false
+		}
+		return e, true
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return allowedFormat{}, false
+	}
+	if parts[0] != "*" {
+		v, ok := digits(parts[0])
+		if !ok || v <= 0 || v >= mpdMaxRate {
+			return allowedFormat{}, false
+		}
+		e.rate = v
+	}
+	switch f := parts[1]; f {
+	case "*":
+	case "f", "dsd":
+		e.format = f
+	default:
+		// Sample bits: 8, 16, 24 (which "_3" may follow, the packed 24 MPD
+		// still reads as its 24) or 32.
+		bits := strings.TrimSuffix(f, "_3")
+		v, ok := digits(bits)
+		switch {
+		case !ok:
+			return allowedFormat{}, false
+		case v == 24:
+			e.format = "24"
+		case bits != f || (v != 8 && v != 16 && v != 32):
+			return allowedFormat{}, false
+		default:
+			e.format = strconv.Itoa(v)
+		}
+	}
+	ch, ok := maskChannels(parts[2])
+	if !ok || (e.dop && e.format != "dsd") {
+		return allowedFormat{}, false
+	}
+	e.channels = ch
+	return e, true
+}
+
+// maskChannels is a channel count in a mask: "*" (0, any) or 1 to
+// MAX_CHANNELS.
+func maskChannels(s string) (int, bool) {
+	if s == "*" {
+		return 0, true
+	}
+	v, ok := digits(s)
+	if !ok || v < 1 || v > mpdMaxChannels {
+		return 0, false
+	}
+	return v, true
+}
+
+// digits parses a decimal of digits alone.
+func digits(s string) (int, bool) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(s)
+	return v, err == nil
+}
+
+// matches is MPD's AudioFormat::MatchMask: the stream a against the entry,
+// where a 0 or "" matches anything. A DSD stream's rate is MPD's, in bytes.
+func (e allowedFormat) matches(a Audio) bool {
+	rate, format := a.Rate, strconv.Itoa(a.Bits)
+	switch {
+	case a.DSD:
+		rate, format = a.Rate/8, "dsd"
+	case a.Float:
+		format = "f"
+	}
+	return (e.rate == 0 || e.rate == rate) && (e.format == "" || e.format == format) &&
+		(e.channels == 0 || e.channels == a.Channels)
 }
 
 // atoiCapped parses a decimal that fits in 32 bits.

@@ -51,6 +51,11 @@ func dsd64AsDoP() Facts {
 	return f
 }
 
+// liveFormats sets the holder's allowed_formats as MPD reports it live.
+func liveFormats(formats string) func(*Facts) {
+	return func(f *Facts) { f.MPD.Output.AllowedFormats, f.MPD.Output.AllowedFormatsLive = formats, true }
+}
+
 // wantVerdict holds v to value with exactly reasons and warnings, and to
 // bit-exactness not verifiable, which every verdict carries.
 func wantVerdict(t *testing.T, name string, v Verdict, value string, reasons []string, warnings ...Warning) {
@@ -180,6 +185,17 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"DoP unsigned", dop, func(f *Facts) { f.PCM.Format = "U24_3LE" }, []string{FormatMismatch}},
 		{"DoP on one channel", dop, func(f *Facts) { f.PCM.Channels = 1 }, []string{ChannelsMismatch}},
 		{"DoP from one of two outputs named alike", dop, func(f *Facts) { f.MPD.Holders = 2 }, []string{MPDOutputAmbiguous}},
+
+		// With an allowed_formats MPD runs with, MPD 0.24's ALSA output takes
+		// DoP from the first entry that matches the stream, by its "=dop",
+		// and not from dop: with no such entry, the PCM at the card is MPD's
+		// conversion of the DSD, of DoP's shape or not.
+		{"dop on, and an allowed_formats that names the stream PCM", dop, liveFormats("176400:24:2"), []string{DSDConvertedToPCM}},
+		{"dop on, and the stream's entry without =dop", dop, liveFormats("dsd64:*"), []string{DSDConvertedToPCM}},
+		{"dop on, and the first entry that matches without =dop", dop, liveFormats("dsd64:2 dsd64:*=dop"), []string{DSDConvertedToPCM}},
+		{"dop on, and =dop only for another DSD rate", dop, liveFormats("dsd128:*=dop"), []string{DSDConvertedToPCM}},
+		{"dop on, and =dop only for another channel count", dop, liveFormats("dsd64:1=dop"), []string{DSDConvertedToPCM}},
+		{"dop on, and an allowed_formats this does not read", dop, liveFormats("dsd64=dop"), []string{DSDConvertedToPCM}},
 	}
 	for _, tc := range cases {
 		f := tc.base()
@@ -233,6 +249,10 @@ func TestWhatDoesNotChangeTheSamplesIsNotAReason(t *testing.T) {
 		"an output mpd.conf does not define": func(f *Facts) { f.MPD.Output = Output{Plugin: "alsa"} },
 		"mpd.conf unread":                    func(f *Facts) { f.MPD.ConfRead, f.MPD.Output.Configured = false, false },
 		"a stage type that changes nothing":  func(f *Facts) { f.MPD.Output.SampleStage = "plug" },
+		"software volume at 100 at both status reads": func(f *Facts) {
+			f.MPD.Output.MixerType, f.MPD.VolumeBefore, f.MPD.Volume = "software", "100", "100"
+		},
+		"the DAC's mixer below 100 before the /proc read": func(f *Facts) { f.MPD.VolumeBefore = "40" },
 	}
 	for name, apply := range cases {
 		f := pcmOnTheGoBar()
@@ -263,6 +283,14 @@ func TestASettingThatChangesTheSamplesIsAWarning(t *testing.T) {
 		{"mixramp", func(f *Facts) { f.MPD.MixRampDelay = "2.5" }, []Warning{fromMPD(MPDMixRamp)}},
 		{"software volume below 100", func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "software", "62" }, []Warning{fromConf(MPDSoftwareVolume)}},
 		{"software volume at 0", func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "software", "0" }, []Warning{fromConf(MPDSoftwareVolume)}},
+		// The volume is read at both status reads: the card held samples
+		// attenuated at either one.
+		{"software volume below 100 before the /proc read", func(f *Facts) {
+			f.MPD.Output.MixerType, f.MPD.VolumeBefore, f.MPD.Volume = "software", "60", "100"
+		}, []Warning{fromConf(MPDSoftwareVolume)}},
+		{"software volume below 100 after it", func(f *Facts) {
+			f.MPD.Output.MixerType, f.MPD.VolumeBefore, f.MPD.Volume = "software", "100", "60"
+		}, []Warning{fromConf(MPDSoftwareVolume)}},
 		{"normalization yes", func(f *Facts) { f.MPD.VolumeNormalization = "yes" }, []Warning{fromConf(MPDNormalization)}},
 		{"normalization TRUE", func(f *Facts) { f.MPD.VolumeNormalization = "TRUE" }, []Warning{fromConf(MPDNormalization)}},
 		{"audio_output_format", func(f *Facts) { f.MPD.AudioOutputFormat = "48000:24:2" }, []Warning{fromConf(MPDFormatOverride)}},
@@ -341,6 +369,91 @@ func TestAStreamThatIsNotMPDsIsJudgedNoFurther(t *testing.T) {
 	f.MPD.Holders = 1
 	wantVerdict(t, "MPD's own stream", Judge(f), FormatPreserved, nil,
 		Warning{Code: MPDReplayGain, Source: FromMPD}, Warning{Code: MPDSoftwareVolume, Source: FromMPDConf})
+}
+
+// TestDoPIsReadFromTheAllowedFormatsMPDRunsWith: with an allowed_formats MPD
+// reports, MPD 0.24's ALSA output sends DoP when the first entry that
+// matches the stream carries "=dop", whatever dop says, so the PCM at the
+// card is DoP's shape from a DoP stream; with an empty one, dop decides. The
+// file's allowed_formats, with none live, is what the bridge found, which
+// MPD may not run with: a warning, and dop decides.
+func TestDoPIsReadFromTheAllowedFormatsMPDRunsWith(t *testing.T) {
+	live := Warning{Code: MPDFormatOverride, Source: FromMPD}
+	for name, formats := range map[string]string{
+		"the stream's entry with =dop":             "dsd64:*=dop",
+		"MPD's own example list":                   "96000:16:* 192000:24:* dsd64:*=dop *:dsd:*",
+		"the entry by its rate in bytes":           "352800:dsd:2=dop",
+		"every DSD rate":                           "*:dsd:*=dop",
+		"an entry for PCM before the stream's":     "176400:24:2 dsd64:*=dop",
+		"spaces around and between the entries":    "  176400:24:2  dsd64:2=dop ",
+		"the stream's entry, a leading zero in it": "dsd064:*=dop",
+	} {
+		f := dsd64AsDoP()
+		f.MPD.Output.DoP = false
+		liveFormats(formats)(&f)
+		wantVerdict(t, name, Judge(f), FormatPreservedDoP, nil, live)
+	}
+	f := dsd64AsDoP()
+	f.MPD.Output.AllowedFormats = "176400:24:2"
+	wantVerdict(t, "the file's allowed_formats, with none live", Judge(f), FormatPreservedDoP, nil,
+		Warning{Code: MPDFormatOverride, Source: FromMPDConf})
+	f = dsd64AsDoP()
+	liveFormats("")(&f)
+	wantVerdict(t, "an empty live allowed_formats", Judge(f), FormatPreservedDoP, nil)
+	f.MPD.Output.DoP = false
+	wantVerdict(t, "an empty live allowed_formats and dop off", Judge(f), Withheld, []string{DSDConvertedToPCM})
+}
+
+// TestAllowedFormatsAreReadAsMPDReadsThem holds parseAllowedFormats to MPD
+// 0.24's reading of the value (src/lib/alsa/AllowedFormat.cxx, and
+// ParseAudioFormat with a mask): entries split on single spaces, each a
+// rate (Hz, bytes a second for DSD, dsdN for N × 44100 one-bit samples),
+// a sample format and channels, "*" for any, and "=dop" only on a DSD
+// entry. A value with one entry MPD refuses is refused whole, as MPD
+// refuses it: dsd64:=dop has no channel count (MPD writes dsd64:*=dop).
+func TestAllowedFormatsAreReadAsMPDReadsThem(t *testing.T) {
+	type af = allowedFormat
+	for in, want := range map[string][]af{
+		"":                 {},
+		"   ":              {},
+		"dsd64:*=dop":      {{rate: 352800, format: "dsd", dop: true}},
+		"dsd512:2":         {{rate: 2822400, format: "dsd", channels: 2}},
+		"dsd32:2":          {{rate: 176400, format: "dsd", channels: 2}},
+		"dsd4096:*":        {{rate: 22579200, format: "dsd"}},
+		"352800:dsd:2=dop": {{rate: 352800, format: "dsd", channels: 2, dop: true}},
+		"*:*:*":            {{}},
+		"44100:16:2":       {{rate: 44100, format: "16", channels: 2}},
+		"96000:24_3:2":     {{rate: 96000, format: "24", channels: 2}},
+		"96000:024_3:2":    {{rate: 96000, format: "24", channels: 2}},
+		"044100:016:02":    {{rate: 44100, format: "16", channels: 2}},
+		"192000:32:8":      {{rate: 192000, format: "32", channels: 8}},
+		"48000:8:1":        {{rate: 48000, format: "8", channels: 1}},
+		"44100:f:*":        {{rate: 44100, format: "f"}},
+		"96000:16:* 192000:24:* dsd64:*=dop *:dsd:*": {
+			{rate: 96000, format: "16"}, {rate: 192000, format: "24"},
+			{rate: 352800, format: "dsd", dop: true}, {format: "dsd"},
+		},
+	} {
+		got, ok := parseAllowedFormats(in)
+		if !ok || !slices.Equal(got, want) {
+			t.Errorf("%q = %+v, %v; want %+v", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{
+		"dsd64:=dop", "dsd64=dop", "dsd64:", "dsd64", "dsd63:2", "dsd30:2", "dsd4098:2", "dsd:2",
+		"44100:16:2=dop", "*:*:*=dop", "44100:*:*=dop", "44100:16:2=DOP",
+		"0:16:2", "1073741824:16:2", "44100:20:2", "44100:16:0", "44100:16:9", "44100:16", "44100:16:2:2",
+		"44100:16:2\t", "44100::2", ":16:2", "44100:float:2", "f:16:2", "44100:16:2 dsd64:=dop",
+		"44100:16_3:2", "44100:dsdx:2", "**:16:2", "44100:16:**", "DSD64:2",
+		strings.Repeat("0", 54) + "44100:16:2",
+	} {
+		if got, ok := parseAllowedFormats(in); ok {
+			t.Errorf("%q read as %+v, which MPD refuses", in, got)
+		}
+	}
+	if got, ok := parseAllowedFormats(strings.Repeat("0", 53) + "44100:16:2"); !ok || len(got) != 1 || got[0].rate != 44100 {
+		t.Errorf("an entry of 63 bytes: %+v, %v", got, ok)
+	}
 }
 
 // TestEveryStageTheALSAReaderNamesIsAWarning: alsa.SampleStage names a
