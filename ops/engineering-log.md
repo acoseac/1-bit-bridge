@@ -51084,3 +51084,143 @@ the rewrite keeps the rest and names what it left out.
 form of the cli-serve.md line on the player's identity in a snapshot is not
 in ops/History-rules-cli-serve.md, so that line points at nothing. Round 2's
 note carries it again, beside its own edits.
+
+**Round 3 (Codex and the Claude API on round 2; Argon unavailable): five
+findings, four defects (Codex's third and the Claude API's Medium are one),
+all real, none rejected.** The owner's bar: for an output block Load
+accepts, the rewrite keeps exactly what Load decoded, taken from yaml.v3's
+own decoding of the block and never from a resolver of its own; a block
+Load refuses keeps a setting only where the rewrite can name it with
+certainty, and otherwise leaves it out and says so; and no error, refusal,
+warning or log line of the config path carries any part of a value,
+yaml.v3's own type errors included, whatever their length.
+
+1. *An encoded key changed MPD's password (Codex, P2).* yaml.v3 decodes the
+key of `{!!binary cGFzc3dvcmQ=: "", <<: {password: old-pw}}` to `password`,
+so Load has an empty password, set before the merge; `resolveOutput`
+compared the key's base64 text, and kept the merged `old-pw`.
+
+2. *The resolver's bound dropped a valid config's settings (Codex, P2).*
+`maxMergedBlocks` (64) counted the output block and every merged one, so a
+merge sequence of 63 empty blocks and then `{password: saved-pw}`, which
+loads, lost the password, with a warning that the merge "names more blocks
+than a rewrite follows (64)".
+
+3. *Values reached stderr through yaml.v3's own errors and the rest of
+Validate (Codex, P2; the Claude API, Medium).* Read in the module cache,
+v3.0.1: `decoder.terror` quotes a value of ten bytes or fewer whole and the
+first seven of a longer one, and writes a value tagged !!map or !!seq whole
+and unquoted beside the tag; `resolve` prints whole a value its explicit tag
+does not fit (`!!int <password>`); `parser.alias` names the anchor an alias
+names when there is none (`password: *<password>`, unquoted); and a key not
+taken, or written twice, is named (a password written alone in a flow block
+is a key). The parser's own problems are constants, "exceeded max depth of
+%d" and an event's name aside (scannerc.go, parserc.go). Load printed all of
+them, and so did init's refusal of a config that does not decode. Beyond
+the output block round 2 fixed, Validate's refusals printed what they
+refused: `got %d` on 25 bounds and `%d is below` or `above` on the three
+retention ones, the quoted mode, address, quiet-hours window
+and directory, the effective durations of the two TTL checks,
+`net.SplitHostPort`'s error (which repeats the address), a library root's
+path and an upstream server's name. An unparseable BRIDGE_* variable was
+logged with its value and strconv's error. Fix 0895d238:
+`config.ValueFreeYAMLError` rebuilds yaml.v3's messages from the line, the
+Go type, a standard tag and the decoder's own words, keeps the parser's
+messages, and replaces an error that is not yaml.v3's own; Load and init's
+read of the prior config print it. Every Validate refusal names the setting
+and what it takes (a library root and a server by their index,
+`splitHostPortWhy` keeping net's reason alone), and the env warning names
+the variable.
+
+4. *The resolver's "written twice" disagreed with the decoder in merged
+blocks (the Claude API, Low).* Load takes `{conf: &k mpd, <<: {mpd: "on",
+*k: "off"}}` with mpd `on`: inside a merged block a second key naming a
+setting is skipped as merged, not refused. The resolver dropped mpd and
+warned. Two shapes Load refuses it resolved without a word: a merged block
+writing a key twice (`{mpd: "off", <<: {mpd: "on", mpd: "auto"}}`, kept
+`off`), and a merge key beside a quoted "<<" (kept the merged block).
+
+Fix for 1, 2 and 4, cbff00a7: no resolver. `priorOutput` decodes the file
+with yaml.v3's decoder set as Load sets it (`KnownFields`) into a struct
+whose output field is `outputAsLoaded`, an Unmarshaler of yaml.v3's older
+form, whose callback decodes with the decoder at hand into
+`config.OutputConfig` and returns that value's errors alone, a refusal the
+decoder panics with included (`callObsoleteUnmarshaler` recovers it); a
+`nodeOf` takes the node the decoder hands it. A block that decodes is kept
+exactly, less what `OutputConfig.WithoutRefused` refuses (`Problem` is now
+its first), each named by the line of the block's own key or as merged. A
+block that does not decode keeps only settings whose keys are text with no
+tag, each written once, beside no merge key, alias or tag
+(`outputRecovered`), each decoded on its own; any other, nothing, and a
+line that says so. Two more things the bar asks for: a key output does not
+take, which round 2 dropped without a word (it decoded to nothing), is
+named by its line, and a block the file writes twice, once as `!!binary
+b3V0cHV0`, which round 2 dropped silently (its `yaml.Unmarshal` failed and
+it returned nothing), keeps nothing and says so (`outputKeyLines`).
+
+**Red first.** 3, on 8ea8af5c's production code with 0895d238's tests:
+`TestNoLoadRefusalOrWarningCarriesAValue` 115 subtests (a word and a serial
+of digits on every setting `envBindings` knows, and on those Validate checks
+only beside another, with that one set);
+`TestNoEnvironmentOverrideWarningCarriesAValue` 75;
+`TestOutputRefusalsCarryNoValue` its 11 new Load cases, each checked to
+carry the value in yaml.v3's own error first;
+`TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt` 3 of 3 (the
+password printed whole for an explicit tag and an alias, its first seven
+bytes on demo.enabled); and `TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad`,
+`TestLoadRejectsUnknownKeys`, `TestTailscaleEffectiveMode`,
+`TestValidateRejectsBadTailscaleMode` and `TestDuplicatesEffectiveFilter`,
+which asserted the quoted value or key and now assert its absence. The
+sweep's first version named each subtest after its value, which t.TempDir
+puts in the path Load names, and checked Load's refusal with that path in
+it, whose random digits can share four bytes with a serial of digits: it
+names the kind of value now and strips the path. 1, 2 and 4, on 0895d238
+(round 2's resolver) with cbff00a7's tests:
+`TestPriorOutputResolvesMergeKeysAsLoadDoes` 4 of its 5 new shapes (the
+!!binary key saved `password: old-pw`; 63 and 200 empty blocks lost
+`saved-pw`; the alias key dropped `mpd: "on"`); the tagged values pass on
+both, a guard. `TestInitRewriteResolvesMergesBesideASettingItCannotKeep` 10
+of its 13 cases (two of the three that pass on both are round 2's, and the
+third, a refused value whose key is an alias, guards the line
+`settingKeyLine` finds), and
+`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` 2 (a merged
+refusal's wording, and the key output does not take).
+
+**Controls**, each on the committed fix and restored from git. 0895d238:
+the sanitizer out of Load, red in 81 subtests of the two Load tests; the
+value back in the integer env warning, red in 35; `got %d` back on
+scanIntervalSec, red in exactly `scanIntervalSec=digits`; the sanitizer out
+of init's read, red 3 of 3. cbff00a7: the decoded block never kept, red in
+20 of the differential's 21 shapes, 11 of the 12 load shapes and five more;
+`plainKey` taking any scalar, red in the six merge and tag cases; the
+written-twice check off, red in exactly that case; `KnownFields` off, red in
+exactly the unknown key's.
+
+**Decisions.** Keys go as values do: a misspelt key is named by its line,
+not its text (`line 8: that key is not a field of type config.Config`),
+since a scalar written alone in a flow block is a key and the player
+block's reasons already say "that key" so that a serial written as one
+never reaches a log; `bridge doctor`'s config-file line changes with it.
+init's address flags still name what they were given, the operator's own
+typing on that command line. Left as they were: a URL's scheme and host
+(`urlFieldForLog`, B54), and the repaired `libraryName` and the autocert
+host Normalize logs, both published. Round 2 mirrored the decoder by hand
+rather than decode the block into a map, which fails whole on a key written
+twice; round 3 decodes it with the decoder, into the config's own type,
+through the callback that keeps the block's errors its own, and what Load
+refuses keeps only what is certain, so the case that cost round 2 the map
+decode is now the rule.
+
+**Stress runs and gate.** `internal/config` under `-race -count=10
+-shuffle=on` (18 s; a passing run prints no seed), and cmd/bridge's
+`TestInit`, `TestPriorInstall` and `TestPriorOutput` tests under `-race
+-count=10 -shuffle=1792684400` (98 s), both passed; then `make fmt vet test
+build-all docs-check` at cbff00a7 with this entry uncommitted, clean (`go
+fmt` rewrote nothing), all through the build lock.
+
+**Rules.** Round 3's note, OLD/NEW against 8ea8af5c: cli-serve.md's line
+and its long form for the decoder in place of the resolver, config-lifecycle.md's
+round-2 bullet widened to the whole config path, and the tally of claims
+found wrong in CLAUDE.md and History-Workflow.md, nineteen to twenty-one
+(round 2's "resolves as the decoder does" and "an output refusal names the
+setting, never its value").
