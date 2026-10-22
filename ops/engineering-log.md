@@ -51167,5 +51167,5 @@ watchdog).
 The gate, through the build lock: `make fmt vet test` green on f9de73a4
 (17.7 minutes, after 19 minutes waiting for a slot), `make build-all`
 and `make docs-check` clean, and the hotplug package, its test fix included, passed
-`-race -count=20 -cpu 1,2,8`. The rules text is a note, OLD/NEW against
-481d3144's `player.md`.
+`-race -count=20 -cpu 1,2,8`. The round-3 rules text is applied to
+`.claude/rules/player.md` in this change (7cdb5af0).
