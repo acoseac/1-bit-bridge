@@ -51331,3 +51331,65 @@ the warning's entries and round 3's bullet narrowed to what the code
 guarantees, and the tally of claims found wrong, twenty-one to
 twenty-three (round 3's "a block yaml.v3 does not decode is one Load
 refuses" and "carries any part of a value or a key").
+
+**Round 5 (the Claude API on round 4; Codex found nothing): two Lows, both
+real, then the merge with main.**
+
+1. *The narrowed rule's bold lines forbade what the code does (the Claude
+API, Low).* The bullet's bold title and its bold Don't named "a value a
+setting refused" with no word of the configured paths the same bullet
+leaves out, so a reader of the summary alone would take `LibraryRootError`,
+which prints a missing root's path, for a violation, and might strip the
+path the orchestrator decided operators need. Rules text only: round 5's
+note puts "a path the operator configured excepted" into both.
+
+2. *The reading of a block on its own was no longer pinned (the Claude API,
+Low).* Since round 4 every file whose whole decode succeeds keeps Load's
+own block, and every fixture of the rewrite's tests decodes whole (a
+Validate refusal is no decode refusal), so the reading left for a file the
+decoder refuses elsewhere, `outputAsLoaded` before the certainty recovery,
+had no test. Measured on 5b807e14: that reading removed (a block that
+decodes on its own sent to the certainty recovery), every test passed; the
+fallback keeping a block refused only for its aliases, every test passed.
+(Keeping any block that fails on its own is caught: eleven of the refused
+-block cases fail.) 4f569b1d adds
+`TestPriorOutputOfAFileTheDecoderRefusesElsewhere`: a misspelt top-level
+key (`libraryRoot: /x`) beside a merged block the decoder takes alone,
+kept as Load decodes it once the typo is put right, with no line; and
+beside Codex's alias-heavy block (now `aliasHeavyBlock`, shared with
+`wholeConfigShapes`), which Load refuses for its aliases with little else
+in the file, of which nothing is kept, its line saying why. Controls on
+4f569b1d: each mutation red in exactly its case. 3cae962e also gives the
+B505 entry the index line round 1 left out.
+
+**The merge with main-62556b9b (#1311, #1312) is not in this branch.** The
+branch main-62556b9b was already in the repository's refs, so no fetch was
+needed, but `git fetch`, `git merge` and `git cat-file` all ask for an
+approval this headless session cannot give, and the merge was not made any
+other way. It was computed and tested instead. Main changed 70 files since
+the base, e095d14b, and eight of them are files this branch changed too. A
+three-way merge of those eight (`difflib`, from `git show` of the three
+versions) merges six cleanly and leaves three conflicts, resolved as their
+authors would:
+- `.claude/rules/player.md`, one: main rewrote the five binding bullets
+  (the port binding, the sysfs reader, Resolve, the check after open,
+  inspect and bind), and the branch the player-UUID bullet after them,
+  which main left as it was, so the two touch. Main's five, then the
+  branch's UUID bullet.
+- `ops/engineering-log.md`, the index: main's two lines, then B505's.
+- `ops/engineering-log.md`, the end: B505's entry, then main's two
+  entries, the hardware gate and 4a2, since the index lists newest first
+  and the body runs in date order.
+
+Each merged file was checked to add and remove exactly the lines each
+side's own diff does. The merged tree, built in the worktree uncommitted
+(main's other 62 files as main has them) and restored after, passed
+`internal/config` under `-race -count=10 -shuffle=1792710001` (19.5 s),
+cmd/bridge's `TestInit`, `TestPriorInstall` and `TestPriorOutput` tests
+under `-race -count=10 -shuffle=1792710002` (103 s), and `make fmt vet test
+build-all docs-check` (`go fmt` rewrote nothing; main's `internal/alsa`,
+`internal/player/binding` and `internal/player/hotplug` passed beside this
+branch; docs-check ok). Nothing main adds calls what this branch changed
+(the value-free messages, `UnknownManagedControls`), and none of its tests
+asserts a load error's text. The prepared resolutions and a script that
+makes the merge with them are left for a session that may merge.
