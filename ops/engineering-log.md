@@ -53234,3 +53234,145 @@ Not changed, for the owner: the stacks named above, by the orchestrator's
 scope; a link or a mount another writer puts in place after the write's
 second check, or during its syncs, is not seen; shutdown's ReasonClosed, as
 in rounds 5 to 10.
+
+### Round 12
+
+The last round: after it the PR merges unless a review finds a High. Codex
+and the Claude API reviewed round 11 (#1309); Argon was unavailable. Round
+11's two rules notes were applied from beside the branch (bd139896 for
+`player.md`, 51f2dc03 for `config-lifecycle.md`); 19b384ad merged
+main-62556b9b (#1311, #1312: the hotplug watcher's section now sits before
+this PR's in `player.md`), and 5581c719 moved two of 4a's long forms to
+`ops/History-rules-player.md`, which brought `player.md` from 103.5% of its
+budget to 96.0%. This round's notes went beside the branch,
+`/tmp/b470-4b1-rules-r12.md` for `player.md` (to 96.4%) and
+`/tmp/b470-4b1-rules-r12-config.md`, each OLD copied from 5581c719, every
+block fenced. Round 11's Linux tests ran on a Linux host (kernel 7.0, ext4,
+an unprivileged user): both suites passed under `-race -count=3`, and
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs` skipped
+there (no overlay mount for an unprivileged user).
+
+**The orchestrator's decisions on round 11's reviews**, all taken here:
+
+1. **A bind of an overlay subtree is refused** (Codex High 1, the Claude API
+   Medium 1). On an overlay whose mount's root field (mountinfo's fourth) is
+   not `/`, a bind of a directory inside it (an operator's systemd
+   `ProtectSystem=strict` with `ReadWritePaths`, a chroot, a container's bind
+   of an overlay host's directory), the directories a copy-up of a
+   lower-only data directory creates above it are out of that mount's
+   reach, so the walk round 11 added stopped at the bind's root and synced
+   none of them. Such a root is now refused as storage that cannot be told
+   (`ErrMediumUnknown`), naming the directory, the bind's root and the fix:
+   a data directory on a filesystem that is not an overlay, or on the
+   overlay's own mount. Syncing through another mount of the same
+   superblock, and syncfs, whose errors overlayfs reports only on recent
+   kernels, were rejected: neither is a barrier the writer can check. The
+   refusal applies wherever the overlay would otherwise be taken, so a bind
+   whose upper layer is tmpfs is refused for its storage first
+   (`ErrVolatile`): the overlay's own mount would not mend that. Our own
+   unit (`internal/packaging/systemd.service.tmpl`) adds no sandboxing, and
+   an overlay root's own mount with an upper layer on disk, Volumio's shape,
+   is still taken (a table case of each shape, and a namespace scenario of
+   the bind).
+2. **Totals that move and come back no longer refuse at random** (Codex
+   Medium 2, the Claude API Low 3). An XFS allocation freed again gave the
+   overlay A, the upper path B and the overlay A, which round 11 refused as
+   another filesystem. The overlay, the upper path and the overlay again
+   are read for up to three rounds (`upperAsReached`): the path is taken as
+   soon as it matches an overlay read beside it, an overlay seen to move is
+   no tmpfs or ramfs (round 11's rule), and only three rounds that each held
+   still while the path differed are refused. The test that encoded A, B, A
+   as a refusal now has A, B, A followed by a quiescent agreement taken, and
+   three held-still rounds refused.
+3. **An empty mount source is legitimate** (the Claude API Low 2): the
+   kernel writes it empty for a filesystem mounted with none, and round 11
+   refused the whole line. The source alone may be empty; every other field
+   must still be there.
+4. **The copy-up default is unit-tested** (the Claude API Low 4):
+   `copyUpsFrom(root, id, statfs, idOf)` carries it, platform-neutral as
+   `mediumFrom` is, and `platformCopyUps` is one line of wiring, so a
+   default answering none no longer passes where the namespace tests skip.
+5. **Cheap follow-ups:** the rule that the mount table is read only for an
+   overlay's upper layer now names what it is read for (an overlay's upper
+   layer and root field, a FUSE mount's type and source; Codex's
+   follow-up); fuse-overlayfs is told by its source too, for a build that
+   sets no subtype; a directory above the root that the service cannot open
+   for its sync is named, with what it was opened for and the fix (read
+   access for the service, or a data directory on a filesystem that is not
+   an overlay); and `append(p.chain(n), above...)` could not write into the
+   chain's backing array (`chain` makes a fresh slice of exactly its length,
+   so the append reallocated), and is gone: the directories above are
+   passed apart and synced by `syncAbove`.
+6. **Named, not chased:** an overlay nested in another's upper directory,
+   whose copy-ups above the outer upper directory are not synced, joins
+   zram, a loop image in tmpfs and an NFS export written async among the
+   stacks the operator must avoid.
+
+All of it is cc424012 (whose message misspells Volumio; commits are not
+amended here).
+
+Red first, against round 11's code, with `copyUpsFrom` declared beside it
+and answering none:
+
+| Decision | Test | Red |
+|---|---|---|
+| 1 | `TestMediumRefusesWhatDoesNotOutliveAReboot`, the bind of a directory inside an overlay over a disk | taken |
+| 2 | `TestMediumTakesTotalsThatMoveWithWhatIsWritten`, A, B, A then agreement | refused as another filesystem |
+| 3 | `TestOverlayLayerIsTheLineOfTheRootsMountID`, and the table's overlay and FUSE mounted with no source | the line "does not read as one", both refused |
+| 4 | `TestCopyUpsFromWalkOnlyOnAnOverlay` | no walk on an overlay; statfs's and the walk's errors lost |
+| 5 | the table's fuse-overlayfs with no subtype | taken |
+| 5 | `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`, the directory above that cannot be opened | the write and the probe gave the open's bare error |
+
+The bind over tmpfs (refused for its storage first) and the Volumio shape
+pass on round 11's code too: they pin the order and the shape that must
+keep working, and controls E2 and E3 hold them.
+
+Negative controls, each a mutation of cc424012, with the red set each
+predicted, all red and each hitting it:
+
+| | Mutation | Predicted red |
+|---|---|---|
+| E1 | the bind check dropped | the bind over a disk |
+| E2 | a bind refused before its storage is read | the bind over a disk (message), the bind over tmpfs (wants ErrVolatile) |
+| E3 | an overlay's own mount taken for a bind | Volumio's shape, an overlay over a disk, one with no source (and the read-only overlay) |
+| E4 | one round of totals only | A, B, A then agreement |
+| E5 | an empty source refused (round 11) | the line test, the overlay and the FUSE with no source |
+| E6 | fuse-overlayfs not told by its source | fuse-overlayfs with no subtype |
+| E7 | `copyUpsFrom` walking off an overlay | the copy-ups test |
+| E8 | `copyUpsFrom` answering none | the copy-ups test |
+| E9 | `copyUpsFrom` swallowing statfs's error | the copy-ups test |
+| E10 | an unopenable ancestor's bare error (round 11) | the overlay sync test |
+| E11 | the probe without the directories above | the overlay sync test |
+
+Linux-only, for the Linux host: `TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree`
+(new: a bind of a lower-only directory of an overlay, mounted in a
+namespace of the test's own; its control: drop the bind check, and it goes
+red), `TestWriteBytesDurable_SyncsWhatACopyUpCreated` (its control: make
+`platformCopyUps` answer none), and round 11's list. **Tests that skip
+without root**, or without an unprivileged user and mount namespace that
+may mount an overlay: `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated` and
+`TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree` (the last two also
+where the temporary directory is on an overlay or on storage the writer
+refuses), through their child, `TestOverlayNamespaceHelper`, which does
+nothing alone. Two skip as root instead, which reads every directory:
+`TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` and
+`TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure`. The rest
+skip on their host's shape, not its privilege: a filesystem that folds case
+(`TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`), `/dev` on a
+mount of its own (`TestWriteBytesDurable_RefusesAMountBelowTheRoot`), a
+tmpfs at `/dev/shm`
+(`TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck`), and
+symbolic links or a directory barrier on Windows.
+
+The suite: 108 tests in the engine and 56 in `internal/atomicwrite` on this Mac
+(65 on Linux); ten runs in a row of each green under `-race` (152.2 s and
+99.8 s, no skips); `make fmt vet test` (73 packages ok, cmd/bridge 470 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped cc424012 with no
+`-dirty`: the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of `internal/atomicwrite` for darwin, linux/amd64, linux/arm64,
+linux/arm, windows and freebsd, and the Linux test binary built, clean.
+
+Not changed, for the owner: the stacks named above; a link or a mount
+another writer puts in place after the write's second check, or during its
+syncs, is not seen; shutdown's ReasonClosed, as in rounds 5 to 11.
