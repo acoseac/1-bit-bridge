@@ -288,6 +288,8 @@ type readingRig struct {
 	uri      string
 	tracks   map[string]OutputTrack
 	loop     map[string][2]string
+	askedMu  sync.Mutex
+	asked    []string
 	mpd      *scriptedMPD
 	dials    atomic.Int32
 	reads    atomic.Int32
@@ -364,6 +366,9 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 			return out, nil
 		},
 		Track: func(_ context.Context, path string) (OutputTrack, bool, error) {
+			r.askedMu.Lock()
+			r.asked = append(r.asked, path)
+			r.askedMu.Unlock()
 			tr, ok := r.tracks[path]
 			return tr, ok, nil
 		},
@@ -374,6 +379,13 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 		LoopbackBaseURL: func() string { return "http://127.0.0.1:7791" },
 	}
 	return r
+}
+
+// askedPaths are the manifest paths the reading looked a row up at.
+func (r *readingRig) askedPaths() []string {
+	r.askedMu.Lock()
+	defer r.askedMu.Unlock()
+	return append([]string(nil), r.asked...)
 }
 
 func (r *readingRig) writeConf(text string) {
@@ -807,6 +819,12 @@ func TestReadingNamesTheBridgesOwnRow(t *testing.T) {
 			wantVerdict(t, got, raw, signalpath.Withheld, signalpath.SourceUnknown)
 			if got.Song == nil || got.Song.Row != nil || got.Song.URI != uri {
 				t.Fatalf("song %+v", got.Song)
+			}
+			// The bridge never asks its index for a path outside its roots.
+			for _, p := range rig.askedPaths() {
+				if strings.Contains(p, "..") || filepath.IsAbs(p) {
+					t.Fatalf("looked a row up at %q", p)
+				}
 			}
 		})
 	}
