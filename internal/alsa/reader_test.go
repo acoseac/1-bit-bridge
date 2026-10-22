@@ -501,7 +501,7 @@ func TestReaderFollowsSymlinkedPCMAndSubdirectories(t *testing.T) {
 	}
 	// The id symlink resolves inside the root. A read through it is the
 	// card's own stream, not a refusal.
-	asound, err := openTree(filepath.Join(root, "asound"), maxLinks, maxHops, nil)
+	asound, err := openTree(filepath.Join(root, "asound"), maxLinks, maxHops)
 	if err != nil {
 		t.Fatal(err)
 	}

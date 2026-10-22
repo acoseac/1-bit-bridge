@@ -206,23 +206,28 @@ func TestAFIFOInTheProcTreeIsRefusedPromptly(t *testing.T) {
 // TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly: each root is
 // opened once, as its path stands at that open, so nothing a look at the
 // root before it saw can be swapped out from under it. A root replaced by a
-// FIFO the instant before its open (the sysfs root, the ALSA root, the
-// /proc root) is refused at once, never waited on: the sysfs reading has no
-// tree, the /proc reading no cards file, and a /proc root it cannot open
-// leaves every owner unknown.
+// FIFO at its open itself (the sysfs root, the ALSA root, the /proc root)
+// is refused at once, never waited on: the sysfs reading has no tree, the
+// /proc reading no cards file, and a /proc root it cannot open leaves every
+// owner unknown.
+//
+// The swap is made by osOpenRoot's stand-in when it is handed this root's
+// name, so it lands after anything openTree does before that open: a
+// directory-only look ahead of a plain open of the root (round 3's shape)
+// passes the look and blocks at the open, where a swap made before
+// openTree began would have been refused by the look.
 func TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// at is the root as the reader's beforeOpen names it, and root the
-		// directory the swap replaces with a FIFO.
-		at, root string
+		// root is the directory the swap replaces with a FIFO.
+		root string
 		// asound, when set, is where the ALSA tree is moved and read from,
 		// so the /proc root can be swapped on its own.
 		asound string
 	}{
-		{name: "the sysfs root", at: ".", root: "sys"},
-		{name: "the ALSA root", at: "asound", root: "proc/asound"},
-		{name: "the /proc root", at: ".", root: "proc", asound: "asound"},
+		{name: "the sysfs root", root: "sys"},
+		{name: "the ALSA root", root: "proc/asound"},
+		{name: "the /proc root", root: "proc", asound: "asound"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
@@ -230,25 +235,27 @@ func TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly(t *testing.T) {
 			var once sync.Once
 			var swapped bool
 			var swapErr error
-			swap := func(path string) {
-				if path != tc.at {
-					return
+			// The stand-in swaps when handed this root, by its name or by
+			// rootPath's (dir/.), and then opens what it was handed.
+			standInForOpenRoot(t, func(name string) (*os.Root, error) {
+				if filepath.Clean(name) == dir {
+					once.Do(func() {
+						swapped = true
+						if swapErr = os.Rename(dir, dir+".before"); swapErr == nil {
+							swapErr = unix.Mkfifo(dir, 0o600)
+						}
+					})
 				}
-				once.Do(func() {
-					swapped = true
-					if swapErr = os.Rename(dir, dir+".before"); swapErr == nil {
-						swapErr = unix.Mkfifo(dir, 0o600)
-					}
-				})
-			}
+				return os.OpenRoot(name)
+			})
 			if tc.root == "sys" {
 				var snap SysfsSnapshot
-				readsPromptly(t, []string{dir}, func() { snap = SysfsReader{Root: dir, beforeOpen: swap}.Read() })
+				readsPromptly(t, []string{dir}, func() { snap = SysfsReader{Root: dir}.Read() })
 				if snap.Present || len(snap.Cards) != 0 || len(snap.Problems) != 1 {
 					t.Errorf("the sysfs root swapped for a FIFO read as %+v", snap)
 				}
 			} else {
-				r := Reader{ProcRoot: filepath.Join(tree, "proc"), beforeOpen: swap}
+				r := Reader{ProcRoot: filepath.Join(tree, "proc")}
 				if tc.asound != "" {
 					r.AsoundRoot = filepath.Join(tree, tc.asound)
 					if err := os.Rename(filepath.Join(tree, "proc", "asound"), r.AsoundRoot); err != nil {
@@ -270,4 +277,16 @@ func TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// standInForOpenRoot makes open the tree's root open (osOpenRoot) for the
+// rest of t. No test in this package runs in parallel, and the stand-in is
+// put back by a cleanup, which runs once t's function has returned: every
+// reading readsPromptly ran has finished by then, even a failed one, since
+// it waits for its reading before it fails the test.
+func standInForOpenRoot(t *testing.T, open func(name string) (*os.Root, error)) {
+	t.Helper()
+	before := osOpenRoot
+	osOpenRoot = open
+	t.Cleanup(func() { osOpenRoot = before })
 }
