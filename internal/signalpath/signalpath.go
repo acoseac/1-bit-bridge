@@ -64,6 +64,10 @@ const (
 	ProcUnreadable = "proc_unreadable"
 	// ProcTimeout: the /proc read ran past its deadline.
 	ProcTimeout = "proc_timeout"
+	// ALSAConfigUnread: the ALSA configuration, which says which card an
+	// output's PCM names, was not had: its read ran past its deadline, one
+	// from an earlier reading still ran, or it failed.
+	ALSAConfigUnread = "alsa_config_unread"
 	// NoCard: this output names no sound card, so nothing says what a DAC
 	// receives.
 	NoCard = "no_card"
@@ -159,7 +163,7 @@ const (
 // reading's codes first, then what stops a stream being judged, then the
 // file, MPD's stream, the output and the formats.
 var codeOrder = []string{
-	MPDUnreachable, MPDTimeout, MPDRefused, ProcUnreadable, ProcTimeout, NoCard, ReadingFailed,
+	MPDUnreachable, MPDTimeout, MPDRefused, ProcUnreadable, ProcTimeout, ALSAConfigUnread, NoCard, ReadingFailed,
 	StateChanged, SongChanged, Seeked, SongStarting, SettingsChanged,
 	NotPlaying, PCMAmbiguous, PCMClosed, PCMNotRunning, OwnerUnknown, OwnerNotMPD, OwnerNotOutput, HWParamsUnknown,
 	SourceUnknown, SourceChanged, SourceLossy, SourceCodecUnknown, SourceMismatch,

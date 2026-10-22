@@ -237,6 +237,10 @@ type readingSnap struct {
 
 	cards    alsa.Snapshot
 	procCode string
+	// alsaCode is alsa_config_unread when the ALSA configuration was not
+	// had: the cards a PCM name resolves to are not known, so neither are
+	// the output ids, and every well-formed id is answered unknown.
+	alsaCode string
 	// picks are the cards GET /v1/outputs lists from these cards, and
 	// chains every alsa output of mpd.conf's with the chain its device
 	// takes and the first stage on the way that changes samples: both are
@@ -426,9 +430,15 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	// With no card there is nothing to resolve a device to, and the ALSA
 	// configuration is not read.
 	if s.procCode == "" && len(s.cards.Cards) > 0 {
-		pcm := o.readALSAConfig(ctx, alsa.ConfigRoot(s.cards.ProcRoot))
-		s.picks = dacsFrom(s.cards, s.rep, pcm.ResolveOutputDevice)
-		s.chains = outputChains(s, pcm)
+		// A configuration not had is not resolved from: the cards a PCM
+		// name reaches would fall back to every USB card, and an output
+		// GET /v1/outputs lists through that name would read as none.
+		if pcm, had := o.readALSAConfig(ctx, alsa.ConfigRoot(s.cards.ProcRoot)); had {
+			s.picks = dacsFrom(s.cards, s.rep, pcm.ResolveOutputDevice)
+			s.chains = outputChains(s, pcm)
+		} else {
+			s.alsaCode = signalpath.ALSAConfigUnread
+		}
 	}
 	if s.mpdCode == "" {
 		s.row = o.lookUpSong(ctx, s)
@@ -554,16 +564,16 @@ func (o *localOutputs) readConf(ctx context.Context, root, path string) (conf.Fi
 }
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
-// (boundedStep). One that is not had in time is none: no device a PCM name
-// resolves, no chain, no stage named.
-func (o *localOutputs) readALSAConfig(ctx context.Context, root string) alsa.PCMConfig {
+// (boundedStep). had is false for one not had in time, or whose read
+// failed: nothing is resolved from it.
+func (o *localOutputs) readALSAConfig(ctx context.Context, root string) (pcm alsa.PCMConfig, had bool) {
 	c, late, failed := boundedStep(o, &o.reading.alsa, ctx, o.limits.alsa, "the ALSA configuration read", func() alsa.PCMConfig {
 		return o.alsaConfig(root)
 	})
 	if late || failed {
-		return alsa.PCMConfig{}
+		return alsa.PCMConfig{}, false
 	}
-	return c
+	return c, true
 }
 
 // confRoot is the root mpd.conf is read under: the probe's, except that a
@@ -790,11 +800,12 @@ type readingElement struct {
 
 // readingElement finds the output id names, from this reading's cards the
 // way GET /v1/outputs lists them, so the ids agree. When the cards could
-// not be read, the MPD endpoint the ids are made from is not known, or the
-// reading failed, an id they could have named cannot be told from one they
-// could not: it is answered, unknown, rather than refused.
+// not be read, the ALSA configuration that says which card a PCM name
+// reaches was not had, the MPD endpoint the ids are made from is not known,
+// or the reading failed, an id they could have named cannot be told from
+// one they could not: it is answered, unknown, rather than refused.
 func (o *localOutputs) readingElement(s *readingSnap, id string) (readingElement, bool) {
-	if s.procCode != "" || s.failed || s.unidentified {
+	if s.procCode != "" || s.alsaCode != "" || s.failed || s.unidentified {
 		return readingElement{}, true
 	}
 	if len(s.picks) == 0 {
@@ -832,6 +843,8 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 		switch {
 		case s.procCode != "":
 			reasons = append(reasons, s.procCode)
+		case s.alsaCode != "":
+			reasons = append(reasons, s.alsaCode)
 		case elem.pick == nil && !s.unidentified:
 			reasons = append(reasons, signalpath.NoCard)
 		}

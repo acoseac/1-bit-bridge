@@ -325,9 +325,9 @@ func TestAConfigReadPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 }
 
 // TestAnALSAConfigurationReadPastItsDeadline: the ALSA configuration is
-// read once a reading, under its own deadline: one that hangs leaves no
-// chain and no stage named, the output still named by its card, and is not
-// doubled.
+// read once a reading, under its own deadline: one that hangs ends the
+// reading in time, an honest unknown (alsa_config_unread) that still
+// reports MPD, and is not doubled.
 func TestAnALSAConfigurationReadPastItsDeadline(t *testing.T) {
 	_, srv, _, id := stepRig(t)
 	stuck := make(chan struct{})
@@ -343,8 +343,8 @@ func TestAnALSAConfigurationReadPastItsDeadline(t *testing.T) {
 	if took < 50*time.Millisecond || took > time.Second {
 		t.Fatalf("the reading took %s with a 50ms deadline on the ALSA configuration", took)
 	}
-	if got.State != "whole" || got.DAC == nil || got.DAC.Card != 5 || got.Verdict.Value != signalpath.FormatPreserved {
-		t.Fatalf("state %s dac %+v verdict %+v", got.State, got.DAC, got.Verdict)
+	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ALSAConfigUnread}) || got.DAC != nil || got.MPD == nil {
+		t.Fatalf("state %s %v dac %+v mpd %+v", got.State, got.StateReasons, got.DAC, got.MPD)
 	}
 	srv.localOutputs.mu.Lock()
 	srv.localOutputs.reading.snap = nil
@@ -352,6 +352,65 @@ func TestAnALSAConfigurationReadPastItsDeadline(t *testing.T) {
 	readingWithin(t, srv, id, 5*time.Second)
 	if n := reads.Load(); n != 1 {
 		t.Fatalf("the ALSA configuration was read %d times while one read hung", n)
+	}
+}
+
+// TestAnALSAConfigurationNotHadLeavesEveryIdUnknown: which card an output
+// id names can come from the ALSA configuration alone: Volumio's volumio
+// PCM pointed at a card that is not USB (an I2S HAT, here the HDMI card) is
+// listed by resolving that name. A reading whose ALSA configuration read ran
+// past its deadline, or failed, cannot tell that id from one that names no
+// output, so it answers every well-formed id unknown with
+// alsa_config_unread, never a 404 for an output that is there.
+func TestAnALSAConfigurationNotHadLeavesEveryIdUnknown(t *testing.T) {
+	for name, read := range map[string]func(stuck <-chan struct{}) func(string) alsa.PCMConfig{
+		"late": func(stuck <-chan struct{}) func(string) alsa.PCMConfig {
+			return func(root string) alsa.PCMConfig { <-stuck; return alsa.LoadPCMConfig(root) }
+		},
+		"failed": func(<-chan struct{}) func(string) alsa.PCMConfig {
+			return func(string) alsa.PCMConfig { panic("an ALSA configuration read that panics") }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := piCaptures[0]
+			rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+			etc := filepath.Join(filepath.Dir(rig.procRoot), "etc", "asound.conf")
+			b, err := os.ReadFile(etc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hat := strings.Replace(string(b), `card "Audio"`, `card "vc4hdmi0"`, 1)
+			if hat == string(b) {
+				t.Fatal("the copied asound.conf names no card \"Audio\"")
+			}
+			if err := os.WriteFile(etc, []byte(hat), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			clock := &manualClock{now: time.Now()}
+			rig.cfg.Now, rig.cfg.AfterFunc = clock.Now, clock.AfterFunc
+			srv, hs, token := newReadingServer(t, rig.cfg)
+			resp := outputsGet(t, hs, token, "/v1/outputs")
+			body, raw := decodeOutputs(t, resp)
+			if len(body.Outputs) != 1 || body.Outputs[0].DAC == nil || body.Outputs[0].DAC.Card != 0 {
+				t.Fatalf("the outputs route does not list the card the PCM name resolves to: %s", raw)
+			}
+			id := body.Outputs[0].ID
+			stuck := make(chan struct{})
+			t.Cleanup(func() { close(stuck) })
+			srv.localOutputs.alsaConfig = read(stuck)
+			srv.localOutputs.limits.alsa = 50 * time.Millisecond
+			got, found, err := srv.localOutputs.Reading(context.Background(), id)
+			if err != nil || !found {
+				t.Fatalf("an output that is there: found %v err %v", found, err)
+			}
+			if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ALSAConfigUnread}) || got.DAC != nil || got.MPD == nil {
+				t.Fatalf("state %s %v dac %+v mpd %+v", got.State, got.StateReasons, got.DAC, got.MPD)
+			}
+			wantVerdict(t, got, nil, signalpath.Withheld, signalpath.ALSAConfigUnread)
+			if _, found, _ := srv.localOutputs.Reading(context.Background(), "abc"); found {
+				t.Fatal("a malformed id was answered")
+			}
+		})
 	}
 }
 
