@@ -549,19 +549,25 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 // beside it are one reading. A sysfs reading that cannot list the cards, or
 // whose listing was cut short (alsa.SysfsSnapshot.CardsComplete), and a
 // /proc/asound that cannot be read are no answer, and refuse with a reason
-// of their own. The opened card must be a USB card both trees agree on, at
-// the bound port (SamePort), and the card the binding chooses there now,
-// which on a unit swapped into the port between the resolve and the open it
-// may be. A card the kernel is adding or removing, any card inventory calls
-// transient (vanished as it was read, listed by one tree alone, read as two
-// units, or a USB-Audio card with no usbid), refuses wherever it is and
-// whatever the binding records, as Resolve concludes nothing from such a
-// reading. Then a card on the configuration and interface the binding
-// records is the card whatever else the unit carries. Any other is only
-// while the unit carries no other card, and, as Resolve rules out no card
-// it cannot identify, a card unreadable in sysfs may be another card of
-// that unit and refuses too; a card that is not USB, or a readable one at
-// another port, does not.
+// of their own. So does a USB listing that does not name the controller the
+// binding names, where Resolve answers binding_invalid, whatever the opened
+// card's own port path says: that path is read from the card's device's
+// ancestors, not from the listing. The opened card must be a USB card both
+// trees agree on, at the bound port (SamePort), and the card the binding
+// chooses there now, which on a unit swapped into the port between the
+// resolve and the open it may be. A card the kernel is adding or removing,
+// any card inventory calls transient (vanished as it was read, listed by one
+// tree alone, read as two units, or a USB-Audio card with no usbid), refuses
+// wherever it is and whatever the binding records, as Resolve concludes
+// nothing from such a reading. Then a card on the configuration and
+// interface the binding records is the card whatever else the unit carries.
+// Any other is only while the unit carries no other card, and, as Resolve
+// rules out no card it cannot identify, a card unreadable in sysfs may be
+// another card of that unit and refuses too; a card that is not USB, or a
+// readable one at another port, does not. Last, the card must have the
+// bound playback stream in /proc/asound, where Resolve answers
+// endpoint_missing. Resolve reads a hub in the bound port only when no card
+// is at it, where the check refuses too, so the check reads none.
 func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 	w := c.Want
 	place := w.Port.Place().String()
@@ -585,6 +591,14 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		unreadable []Card
 	)
 	inv := inventory(snap, sys)
+	if anchor := w.Port.Anchor(); !contains(inv.Controllers, anchor) {
+		why := ""
+		if len(sys.Problems) > 0 {
+			why = " (" + strings.Join(sys.Problems, "; ") + ")"
+		}
+		return wrongDevice("the controller the port binding names, %s, is not among the USB controllers sysfs lists now%s, so no card is chosen at the bound port %s: resolve again",
+			anchor, why, place)
+	}
 	for i, card := range inv.Cards {
 		switch {
 		case card.Index == n.Card:
@@ -625,6 +639,9 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 			return wrongDevice("card %d cannot be identified now (%s), and may be another card of the unit at the bound port %s: resolve again",
 				unreadable[0].Index, unreadable[0].Why, place)
 		}
+	}
+	if !opened.has(w.Endpoint) {
+		return wrongDevice("card %d has no playback stream at %s in /proc/asound now, so no card is chosen at the bound port %s: resolve again", n.Card, w.Endpoint, place)
 	}
 	if n.Card != w.Card {
 		return wrongDevice("card %d is at the bound port, and the binding resolved to card %d: resolve again", n.Card, w.Card)

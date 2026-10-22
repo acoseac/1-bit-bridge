@@ -54,6 +54,10 @@ const (
 	goBarSerial = "GOBAR-7Q2X-91KZ-4471"
 	goBarPlace  = "platform-xhci-hcd.0/usb2-1"
 	goBarPort   = goBarPlace + ":1.0"
+	// usb2 is the USB 3 root hub of the GO bar's controller, xhci-hcd.0,
+	// whose anchor, goBarAnchor, a port binding names before its port.
+	usb2        = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb2"
+	goBarAnchor = "platform-xhci-hcd.0"
 	// usb3 is the USB 2 root hub of the tree's second controller,
 	// xhci-hcd.1, and gatePort its port 2, where the hardware gate bound
 	// the GO bar by port.
@@ -639,6 +643,31 @@ func cutAtTheCap(drop ...int) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 	}
 }
 
+// cutDevicesAtTheCap is a sysfs reading whose USB device listing
+// (bus/usb/devices) was cut short at the reader's entry cap before the root
+// hubs of the controller anchor names, as Read returns one: that controller
+// and the devices on it left out, and the problem it adds. The card listing
+// stays whole.
+func cutDevicesAtTheCap(anchor string) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
+	return func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
+		var controllers []string
+		for _, a := range s.Controllers {
+			if a != anchor {
+				controllers = append(controllers, a)
+			}
+		}
+		var devices []alsa.USBDevice
+		for _, d := range s.Devices {
+			if d.Anchor != anchor {
+				devices = append(devices, d)
+			}
+		}
+		s.Controllers, s.Devices = controllers, devices
+		s.Problems = append(s.Problems, "bus/usb/devices lists more than 1024 entries; the rest are not read")
+		return s
+	}
+}
+
 // TestTheCheckAfterOpenAgreesWithResolveOnEachReading runs each shape a
 // reading can take through Resolve and through the check after open, under
 // each form of binding: by serial, by uniqueModel, by the port alone, and
@@ -650,7 +679,11 @@ func cutAtTheCap(drop ...int) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 // that holds for every shape: the check chooses the card again there, since
 // a unit Resolve never saw may be in the port by then. Under a serial or
 // uniqueModel binding the check chooses nothing, and where it answers
-// otherwise than Resolve the table says so and why.
+// otherwise than Resolve the table says so and why. The rows take each piece
+// of the reading Resolve consults in turn: whether the card listing is
+// whole, each card's state in the two trees, the USB controllers and devices
+// (the controller a port binding names, a hub in the bound port), the cards'
+// port paths and interfaces, and the bound playback stream.
 func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 	forms := []struct {
 		name string
@@ -677,17 +710,20 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 			"and the card's port and interface; a card beside it that Resolve cannot identify, a second card or unit " +
 			"Resolve would have to choose among, and a listing Resolve cannot read whole are why Resolve chooses none, " +
 			"and none of them makes card 5 another unit"
-		unitMoved = "SameUnit compares the opened card with the identity the open was made from, its port included, so " +
-			"the bound unit moved to another port between the resolve and the open is refused, to be resolved again: " +
-			"here the check refuses a card Resolve would choose now, the safe way to differ"
+		unitMoved = "SameUnit compares the opened card with the identity the open was made from, its port path included, " +
+			"so the bound unit at another port path now (moved, or behind a hub) or at one sysfs can no longer read is " +
+			"refused, to be resolved again: here the check refuses a card Resolve would choose now, the safe way to differ"
 		unitInSysfs = "under a serial or uniqueModel binding the check reads the opened card's identity from sysfs, " +
 			"which is where a USB card's identity comes from (/proc/asound's usbid only cross-checks it), and requires " +
 			"the unit Resolve chose: a card /proc/asound does not list yet or any more is that unit being added or " +
 			"removed, and a removed card's next write is a disconnect, which ends the sink"
+		unitStream = "under a serial or uniqueModel binding the check reads no /proc/asound: the stream is the one the " +
+			"kernel says it opened (INFO on the open descriptor, which it answers only for a stream the card has) and " +
+			"the unit is SameUnit's, so a reading that lists card 5 without that stream makes it no other unit"
 	)
 	byUnit := func(why string) [4]string { return [4]string{why, why, "", ""} }
 	every := func(s State) [4]State { return [4]State{s, s, s, s} }
-	available, ambiguous, missing := StateAvailable, StateDeviceAmbiguous, StateDeviceMissing
+	available, ambiguous, missing, invalid := StateAvailable, StateDeviceAmbiguous, StateDeviceMissing, StateBindingInvalid
 	// second is card 6 on the GO bar's interface 2: a second card of its
 	// unit, which another driver made, so /proc/asound has no usbid for it.
 	second := "usbcard 6 " + goBar + "/1-1:1.2\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n"
@@ -740,6 +776,33 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 		{name: "card 5 vanished as it was read", resolves: every(StateIdentityTransient),
 			steps: []string{"remove " + goBar + "/1-1:1.0/sound/card5/device\n"}},
 		{name: "a listing that cannot be read", resolves: every(StateIdentityUnsupported), differs: byUnit(unitChosen), edit: unlisted},
+		// The USB listing, bus/usb/devices, gives Resolve the controllers a
+		// port binding's controller must be among, and the devices it tells a
+		// hub in the bound port by. A card's own port path is read from its
+		// device's ancestors and not from the listing, so it still reads when
+		// the listing does not.
+		{name: "a USB device listing that cannot be read", resolves: [4]State{available, available, invalid, invalid},
+			steps: []string{"remove sys/bus/usb/devices\nfile sys/bus/usb/devices not a directory\n"}},
+		{name: "the root hubs of the GO bar's controller unreadable in the USB listing", resolves: [4]State{available, available, invalid, invalid},
+			steps: []string{"link sys/bus/usb/devices/usb1 !gone\nlink sys/bus/usb/devices/usb2 !gone\n"}},
+		{name: "the USB listing cut short before the GO bar's controller", resolves: [4]State{available, available, invalid, invalid},
+			edit: cutDevicesAtTheCap(goBarAnchor)},
+		// Card 5's port path cannot be read when its root hub's speed cannot,
+		// while its controller is still listed through its other root hub.
+		{name: "card 5's port path unreadable", resolves: [4]State{available, available, missing, missing}, differs: byUnit(unitMoved),
+			steps: []string{"remove " + usb1 + "/speed\n"}},
+		// Resolve reads a hub in the bound port only when no card is at it, to
+		// answer binding_invalid rather than device_missing, and the check
+		// refuses there too, since the opened card must be at the bound port.
+		{name: "a hub in the bound port with the GO bar behind it as card 5", resolves: [4]State{available, available, invalid, invalid},
+			differs: byUnit(unitMoved), steps: []string{"unplug " + goBar + "\nusbdev " + goBar + " vendor=05e3 product=0610 class=09\n" +
+				plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial)}},
+		{name: "card 5 without the bound playback stream", resolves: every(StateEndpointMissing), differs: byUnit(unitStream),
+			steps: []string{"remove proc/asound/card5/pcm0p\n"}},
+		{name: "another model in the port as card 5 without the bound playback stream",
+			resolves: [4]State{missing, missing, StateEndpointMissing, StateEndpointMissing}, steps: []string{"unplug " + goBar + "\n" +
+				"usbdev " + goBar + " vendor=1234 product=0c12 serial=HUGO2-UNIT-0000000042\nusbcard 5 " + goBar + "/1-1:1.1\n" +
+				"proccard 5 DAC5 \"Synthetic DAC\" usb=1234:0c12 pcm=1.0\n"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			root := pi5(t)
@@ -757,9 +820,10 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 			}
 			// Observe's reading of the two trees, through the sysfs reading the
 			// check takes.
-			inv := inventory(snap, sys.Read())
-			if inv.CardsComplete != (row.edit == nil) {
-				t.Errorf("the inventory says its card listing is whole: %v", inv.CardsComplete)
+			reading := sys.Read()
+			inv := inventory(snap, reading)
+			if inv.CardsComplete != reading.CardsComplete {
+				t.Errorf("the inventory says its card listing is whole (%v), and the reading says %v", inv.CardsComplete, reading.CardsComplete)
 			}
 			for i, f := range forms {
 				r := Resolve(f.dev, inv)
@@ -824,6 +888,51 @@ func TestACutListingResolvesToNoCardAndBindsNone(t *testing.T) {
 			if _, err := For(inv, 5, kind, Endpoint{}); err == nil || !strings.Contains(err.Error(), "identity_incomplete") ||
 				!strings.Contains(err.Error(), "cut short") {
 				t.Errorf("cards %v cut, bind by %s: %v", drop, kind, err)
+			}
+		}
+	}
+}
+
+// TestTheCheckAfterOpenNeedsTheBoundControllerAndStream: under a port
+// binding the check after open asks what Resolve asks of the reading before
+// it chooses a card, and refuses with a reason of its own where Resolve
+// answers binding_invalid or endpoint_missing. A USB listing that does not
+// name the bound controller is no port to choose a card at, whatever the
+// opened card's own port path says, and the refusal names the controller
+// and why the listing lacks it; a card /proc/asound lists without the bound
+// playback stream is no card the binding chooses.
+func TestTheCheckAfterOpenNeedsTheBoundControllerAndStream(t *testing.T) {
+	base := observe(t, pi5(t))
+	node := alsapcm.NodeInfo{Card: 5, Playback: true}
+	for _, port := range []string{goBarPlace, goBarPort} {
+		made := Resolve(byPort(port), base)
+		want(t, made, StateAvailable, 5)
+		for _, tc := range []struct {
+			name, step string
+			resolves   State
+			says       []string
+		}{
+			{"a USB listing that cannot be read", "remove sys/bus/usb/devices\nfile sys/bus/usb/devices not a directory\n",
+				StateBindingInvalid, []string{"the controller the port binding names, " + goBarAnchor + ", is not among the USB controllers",
+					"bus/usb/devices: not a directory", "bound port " + goBarPlace}},
+			{"card 5 without the bound playback stream", "remove proc/asound/card5/pcm0p\n",
+				StateEndpointMissing, []string{"card 5 has no playback stream at device 0 subdevice 0", "bound port " + goBarPlace}},
+		} {
+			root := pi5(t)
+			sysfstest.Apply(t, root, tc.step)
+			if r := Resolve(byPort(port), observe(t, root)); r.State != tc.resolves {
+				t.Fatalf("%s, %s: Resolve answers %s (%s), want %s", port, tc.name, r.State, r.Reason, tc.resolves)
+			}
+			err := Checker{Proc: alsa.Reader{ProcRoot: filepath.Join(root, "proc")}, Sysfs: alsa.SysfsReader{Root: filepath.Join(root, "sys")},
+				Want: made}.Check(node)
+			if !errors.Is(err, ErrWrongDevice) {
+				t.Errorf("%s, %s: %v", port, tc.name, err)
+				continue
+			}
+			for _, s := range tc.says {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("%s, %s: the refusal does not say %q: %v", port, tc.name, s, err)
+				}
 			}
 		}
 	}
