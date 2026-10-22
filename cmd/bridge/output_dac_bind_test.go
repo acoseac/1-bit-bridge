@@ -379,7 +379,7 @@ func TestOutputDACBindSavesTheConfigItReadUnderTheLock(t *testing.T) {
 			return strings.Replace(text, "room: Study", "room: Kitchen", 1) + "libraryName: Restored\n"
 		}, ""},
 		{"a data dir moved", func(t *testing.T, text string) string {
-			return regexpDataDir.ReplaceAllString(text, "dataDir: '"+filepath.Join(t.TempDir(), "moved")+"'")
+			return regexpDataDir.ReplaceAllLiteralString(text, "dataDir: '"+filepath.Join(t.TempDir(), "moved")+"'")
 		}, "data dir"},
 		{"a block that no longer reads", func(t *testing.T, text string) string {
 			return strings.Replace(text, "room: Study", "room: Study\n    resample: soxr", 1)
