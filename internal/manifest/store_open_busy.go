@@ -53,13 +53,43 @@ func pingStore(path string, db *sql.DB) error {
 	return db.Ping()
 }
 
+// openStoreNow and openStoreSleep are the clock openStoreDB reads and
+// sleeps on between its busy tries: time.Now and time.Sleep, unless a test
+// has set another through setOpenStoreClock.
+var (
+	openStoreClockMu sync.Mutex
+	openStoreNow     = time.Now
+	openStoreSleep   = time.Sleep
+)
+
+func setOpenStoreClock(now func() time.Time, sleep func(time.Duration)) func() {
+	openStoreClockMu.Lock()
+	prevNow, prevSleep := openStoreNow, openStoreSleep
+	openStoreNow, openStoreSleep = now, sleep
+	openStoreClockMu.Unlock()
+	return func() {
+		openStoreClockMu.Lock()
+		openStoreNow, openStoreSleep = prevNow, prevSleep
+		openStoreClockMu.Unlock()
+	}
+}
+
+// openStoreClock returns the clock openStoreDB runs its busy tries on. An
+// open reads it once, as it starts.
+func openStoreClock() (now func() time.Time, sleep func(time.Duration)) {
+	openStoreClockMu.Lock()
+	defer openStoreClockMu.Unlock()
+	return openStoreNow, openStoreSleep
+}
+
 // openStoreDB opens the database at path through uri and pings it, which
 // opens the first connection and runs the DSN's pragmas. While SQLite
 // answers that with SQLITE_BUSY (isSQLiteBusy), it closes that *sql.DB and
 // tries again, pausing openStoreBusyPause, then twice as long each time up
 // to openStoreBusyPauseMax, until openStoreBusyBudget has passed since the
-// first busy answer, and then fails with the last one. Any other error
-// fails at once. The first busy answer is logged at Info.
+// first busy answer, and then fails with the last one. The pauses and the
+// budget run on openStoreClock's clock. Any other error fails at once. The
+// first busy answer is logged at Info.
 //
 // OpenStore holds the ladder lock through the open, the ping and the
 // migration, so two openers never overlap there, but one opener's Close,
@@ -80,6 +110,7 @@ func pingStore(path string, db *sql.DB) error {
 // opens the store while `bridge serve` closes or reopens it. The
 // migration's statements are not tried again: nothing has failed there.
 func openStoreDB(path, uri string) (*sql.DB, error) {
+	now, sleep := openStoreClock()
 	var giveUp time.Time
 	pause, said := openStoreBusyPause, false
 	for {
@@ -98,10 +129,11 @@ func openStoreDB(path, uri string) (*sql.DB, error) {
 		if !isSQLiteBusy(err) {
 			return nil, storeOpenErr(path, "ping sqlite", err)
 		}
+		at := now()
 		if giveUp.IsZero() {
-			giveUp = time.Now().Add(openStoreBusyBudget)
+			giveUp = at.Add(openStoreBusyBudget)
 		}
-		left := time.Until(giveUp)
+		left := giveUp.Sub(at)
 		if left <= 0 {
 			return nil, storeOpenErr(path, "ping sqlite", err)
 		}
@@ -110,7 +142,7 @@ func openStoreDB(path, uri string) (*sql.DB, error) {
 			logger.Info("the database was busy as the store opened; trying again",
 				"db", filepath.Base(path), "budget", openStoreBusyBudget, "err", err)
 		}
-		time.Sleep(min(pause, left))
+		sleep(min(pause, left))
 		pause = min(2*pause, openStoreBusyPauseMax)
 	}
 }

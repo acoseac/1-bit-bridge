@@ -145,6 +145,27 @@ func requireClosed(t *testing.T, dbs []*sql.DB) {
 	}
 }
 
+// fakeOpenStoreClock is a clock for OpenStore's busy tries that moves only
+// when the open sleeps on it, by the pause it sleeps, and at once.
+type fakeOpenStoreClock struct {
+	at time.Time
+}
+
+// now returns the clock's time.
+func (c *fakeOpenStoreClock) now() time.Time { return c.at }
+
+// sleep moves the clock on by d.
+func (c *fakeOpenStoreClock) sleep(d time.Duration) { c.at = c.at.Add(d) }
+
+// useFakeOpenStoreClock runs OpenStore's busy tries on a fakeOpenStoreClock
+// until the test ends.
+func useFakeOpenStoreClock(t *testing.T) *fakeOpenStoreClock {
+	t.Helper()
+	c := &fakeOpenStoreClock{at: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	t.Cleanup(setOpenStoreClock(c.now, c.sleep))
+	return c
+}
+
 // TestOpenStoreTriesABusyPingAgain: a ping SQLite answers busy, by the
 // plain code or an extended one, is tried again on a new *sql.DB, and the
 // failed one is closed. The store opens on the *sql.DB whose ping
@@ -184,29 +205,53 @@ func TestOpenStoreTriesABusyPingAgain(t *testing.T) {
 
 // TestOpenStoreGivesUpOnABusyPingPastItsBudget: a ping that stays busy
 // fails the open with that busy error once openStoreBusyBudget has passed
-// since the first one, and every try's *sql.DB is closed.
+// since the first busy answer, and no later than one pause past it, after
+// the tries the pause schedule gives; every try's *sql.DB is closed. The
+// open runs on a fake clock that moves only by the pauses it sleeps, so
+// the bounds are the schedule's and not the host's. Production's schedule
+// pauses 10, 20, 40, 80 and 160 ms, then 250 ms eighteen times, then the
+// 190 ms left of its 5 s: 24 pauses, so 25 pings.
 func TestOpenStoreGivesUpOnABusyPingPastItsBudget(t *testing.T) {
+	if openStoreBusyBudget != 5*time.Second || openStoreBusyPause != 10*time.Millisecond || openStoreBusyPauseMax != 250*time.Millisecond {
+		t.Fatalf("the schedule is %s of pauses from %s doubling to %s; this test counts the tries of 5s from 10ms to 250ms",
+			openStoreBusyBudget, openStoreBusyPause, openStoreBusyPauseMax)
+	}
+	const wantPings = 25
+	// Past this many pings the script answers an error that is not busy, so
+	// an open with no limit fails the test instead of hanging it.
+	const pingCap = 1000
 	e := makeDriverErrors(t)
-	const budget = 300 * time.Millisecond
-	shortenBusyPauses(t, budget)
+	clock := useFakeOpenStoreClock(t)
 	path := filepath.Join(t.TempDir(), "bridge.db")
-	pings := scriptPings(t, path, func(int) error { return e.busy })
+	var firstBusy time.Time
+	pings := scriptPings(t, path, func(n int) error {
+		if n == 1 {
+			firstBusy = clock.now()
+		}
+		if n > pingCap {
+			return errors.New("the open was still trying past the test's cap")
+		}
+		return e.busy
+	})
 
-	start := time.Now()
 	s, err := OpenStore(path)
-	elapsed := time.Since(start)
 	if err == nil {
 		_ = s.Close()
 		t.Fatal("OpenStore opened while every ping was busy")
 	}
+	tried := clock.now().Sub(firstBusy)
+	if tried < openStoreBusyBudget {
+		t.Errorf("gave up %s after the first busy answer, inside its %s budget", tried, openStoreBusyBudget)
+	}
+	if limit := openStoreBusyBudget + openStoreBusyPauseMax; tried > limit {
+		t.Errorf("still trying %s after the first busy answer, past its %s budget and one %s pause",
+			tried, openStoreBusyBudget, openStoreBusyPauseMax)
+	}
+	if pings.calls != wantPings {
+		t.Errorf("pinged %d times, want %d: the first try and one after each pause the schedule gives", pings.calls, wantPings)
+	}
 	if !errors.Is(err, e.busy) {
-		t.Fatalf("err = %v, want the busy error", err)
-	}
-	if pings.calls < 2 {
-		t.Fatalf("pinged %d times: the busy ping was not tried again", pings.calls)
-	}
-	if elapsed < budget {
-		t.Errorf("gave up after %s, inside its %s budget", elapsed, budget)
+		t.Errorf("err = %v, want the busy error", err)
 	}
 	requireClosed(t, pings.dbs)
 }
