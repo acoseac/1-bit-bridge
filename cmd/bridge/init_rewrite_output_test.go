@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,8 +299,14 @@ func TestInitRewriteKeepsWhatTheOutputBlockLoadedWith(t *testing.T) {
 // the resolver followed, which dropped a setting a valid config holds
 // (Codex); and a setting a merged block writes twice, once through an alias,
 // which the decoder takes the first of and the resolver dropped (the Claude
-// API); and values with a tag.
+// API); and values with a tag. And each beside a whole config
+// (wholeConfigShapes, round 4): round 3 decoded the output block on its own,
+// and yaml.v3 counts aliases across the document, so a block whose merges
+// expand aliases tenfold a level beside 1,000 library roots, which Load
+// takes, failed that decode as "excessive aliasing" and lost its password
+// (Codex).
 func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
+	var shapes []outputShape
 	for _, block := range []string{
 		`{!!binary cGFzc3dvcmQ=: "", <<: {password: old-pw}}`,
 		`{<<: [` + strings.Repeat(`{}, `, 63) + `{password: saved-pw}]}`,
@@ -323,10 +330,16 @@ func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
 		`{<<: {player: ` + mergeTestPlayer + `}, mpd: "off"}`,
 		`{endpoint: &e "127.0.0.1:6601", <<: {endpoint: other}, conf: *e}`,
 	} {
-		t.Run(block, func(t *testing.T) {
+		shapes = append(shapes, outputShape{name: block, block: block})
+	}
+	for _, s := range append(shapes, wholeConfigShapes()...) {
+		t.Run(s.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "bridge.yaml")
-			body := "libraryRoots:\n  - " + dir + "\ndataDir: " + filepath.Join(dir, "data") + "\noutput: " + block + "\n"
+			body := "libraryRoots:\n  - " + dir + "\n" + s.roots + "dataDir: " + filepath.Join(dir, "data") + "\n" + s.others
+			if s.block != "" {
+				body += "output: " + s.block + "\n"
+			}
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -334,12 +347,61 @@ func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the fixture's config does not load: %v", err)
 			}
+			if s.roots+s.others != "" {
+				if held, err := yaml.Marshal(loaded.Output); err != nil || string(held) == "{}\n" {
+					t.Fatalf("the fixture's output block loads as nothing (%v), so it pins nothing", err)
+				}
+			}
 			kept, notKept := priorOutput([]byte(body))
 			if len(notKept) != 0 {
 				t.Errorf("priorOutput did not keep %q", notKept)
 			}
 			sameOutput(t, kept, loaded.Output)
 		})
+	}
+}
+
+// outputShape is an output block for TestPriorOutputResolvesMergeKeysAsLoadDoes
+// and what else its config holds: roots are list entries after the fixture's
+// own library root, others top-level keys before the block, and block the
+// output block, none when it is empty.
+type outputShape struct{ name, roots, others, block string }
+
+// wholeConfigShapes are output blocks beside a config with much else in it,
+// for TestPriorOutputResolvesMergeKeysAsLoadDoes: what the decoder decodes
+// outside the block changes what it counts, so a block read on its own can
+// be refused where Load takes it.
+func wholeConfigShapes() []outputShape {
+	var roots strings.Builder
+	for i := 1; i < 1000; i++ {
+		fmt.Fprintf(&roots, "  - /music/r%d\n", i)
+	}
+	tenfold := func(anchor string) string {
+		return strings.TrimSuffix(strings.Repeat("*"+anchor+", ", 10), ", ")
+	}
+	var endpoints, servers strings.Builder
+	endpoints.WriteString("customEndpoints:\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&endpoints, "  - https://e%d.example:7788\n", i)
+	}
+	servers.WriteString("upnpUpstream:\n  servers:\n")
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&servers, "    - {name: s%d, udn: \"uuid:%d\"}\n", i, i)
+	}
+	return []outputShape{
+		{"1,000 roots beside merges whose aliases expand tenfold a level (Codex)", roots.String(), "",
+			"{password: saved-pw, <<: [&a {}, &b {<<: [" + tenfold("a") + "]}, &c {<<: [" + tenfold("b") + "]}, " +
+				"&d {<<: [" + tenfold("c") + "]}, &e {<<: [" + tenfold("d") + "]}]}"},
+		{"1,000 roots beside a player and merged MPD settings", roots.String(), "",
+			"{<<: [{mpd: \"off\", conf: /etc/mpd-a.conf}, {password: listed-pw}], player: " + mergeTestPlayer + "}"},
+		{"a whole config whose anchors the block aliases",
+			"", "libraryName: &n Kitchen\nscanIntervalSec: &port 7799\n" + endpoints.String() + servers.String() +
+				"update: {checkIntervalHours: 12}\nbackup: {intervalHours: 24}\nanalysis: {workers: 2}\n",
+			"{conf: *n, loopbackPort: *port, <<: {mpd: \"off\"}, password: kept-pw}"},
+		{"a whole config whose top-level merge names the block",
+			"", "libraryName: Study\n" + endpoints.String() +
+				"<<: {output: {mpd: \"off\", password: top-pw, player: " + mergeOtherPlayer + "}, scanIntervalSec: 900}\n",
+			""},
 	}
 }
 

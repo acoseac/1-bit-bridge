@@ -509,24 +509,28 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 // the bytes the run read): what the rewrite keeps of it, and a line for each
 // setting, or for the block, it does not keep.
 //
-// A block yaml.v3 decodes is kept exactly as Load decoded it: decoded by
-// yaml.v3's own decoder, set as Load sets it (KnownFields), into
-// config.OutputConfig, the type Load decodes it into (outputAsLoaded). So no
-// merge key, alias, tag or encoded key is read one way here and another by
-// Load (B505's round 3: round 2 resolved the merge keys with a resolver of
-// its own, which read a key written as !!binary as its encoded text,
-// followed 64 merged blocks and no more, and dropped a setting a merged block
-// wrote twice through an alias, all of which the decoder reads otherwise).
-// Of such a block, the settings config.OutputConfig.WithoutRefused refuses
-// are the ones Load refuses it for: each is left out, and the rest kept as
-// decoded.
+// A file Load's decoder takes whole gives up Load's own block: raw decoded
+// as Load decodes it, the same decoder set the same way (KnownFields) into
+// config.Config, before Load's defaults, its BRIDGE_* overrides, its paths
+// and its checks (outputAsLoadDecodes). So no merge key, alias, tag or
+// encoded key is read one way here and another by Load, and neither is
+// anything the decoder counts across the document (B505's round 4: round 3
+// decoded the block on its own, and yaml.v3 counts aliases document-wide, so
+// a block whose merges expand aliases tenfold a level beside 1,000 library
+// roots, which Load takes, was refused as "excessive aliasing" and lost its
+// password; round 2's resolver of its own disagreed with the decoder on
+// encoded keys, on a merge past 64 blocks and on an alias key). Of that
+// block, the settings config.OutputConfig.WithoutRefused refuses are the
+// ones Load refuses it for: each is left out, and the rest kept as decoded.
 //
-// A block yaml.v3 does not decode is one Load refuses, and the rewrite keeps
-// of it only what it can name with certainty (outputRecovered): settings
-// whose keys are plain text, each written once, beside no merge key, alias
-// or tag among the keys, each decoded on its own; or nothing, and a line
-// that says so. So is a block the file writes twice, which Load refuses
-// whatever each holds.
+// A file the decoder refuses, anywhere, is one Load refuses, and of its
+// block the rewrite keeps only what is certain: the block as the decoder
+// decodes it on its own, when it does (outputAsLoaded; what the decoder
+// counts outside the block can only make it refuse more, never read a value
+// otherwise); else, of a block whose keys are plain text, each written once,
+// beside no merge key, alias or tag among the keys, each setting decoded on
+// its own (outputRecovered); else nothing, and a line that says so. So is a
+// block the file writes twice, which Load refuses whatever each holds.
 //
 // Each line names the setting and the line of its key, or the block and its
 // line, never a value. A player block never fails: one this release cannot
@@ -535,6 +539,14 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 // the block fails that struct's whole decode, and refuseRewrite would then
 // refuse the rewrite over a block it can do without.
 func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
+	if block, ok := outputAsLoadDecodes(raw); ok {
+		kept, refused := block.WithoutRefused()
+		node := outputNode(raw)
+		for _, p := range refused {
+			notKept = append(notKept, outputRefusal(p, node))
+		}
+		return kept, notKept
+	}
 	keyLines := outputKeyLines(raw)
 	if len(keyLines) > 1 {
 		return config.OutputConfig{}, []string{fmt.Sprintf("output (lines %s): it is written twice, which Load refuses, so none of it is kept",
@@ -569,11 +581,39 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 	return outputRecovered(o.node, at)
 }
 
-// outputAsLoaded is the output block as Load's decoder decodes it: the node
-// the decoder hands it, through an alias, and config.OutputConfig decoded
-// from that node by the same decoder, with the error of that decode alone,
-// nil for a block Load takes. found is false for a file with no block, or a
-// null one, which Load decodes as none.
+// outputAsLoadDecodes is the output block of raw as config.Load decodes it,
+// when Load's decoder takes the whole file: the same decoder, set as Load
+// sets it (KnownFields), into config.Config, the type Load decodes into,
+// taken before anything Load does after the decode. ok is false when the
+// decoder refuses any of the file. An empty file decodes as no block.
+func outputAsLoadDecodes(raw []byte) (block config.OutputConfig, ok bool) {
+	var cfg config.Config
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		return config.OutputConfig{}, false
+	}
+	return cfg.Output, true
+}
+
+// outputNode is the node the decoder hands the file's output field, through
+// a top-level merge or an alias as it reads them, and nil for no block or a
+// null one: where the lines of a block's own keys are, for the warnings. It
+// decodes no value, so it counts no alias the block expands.
+func outputNode(raw []byte) *yaml.Node {
+	var file struct {
+		Output nodeOf `yaml:"output"`
+	}
+	_ = yaml.Unmarshal(raw, &file)
+	return file.Output.node
+}
+
+// outputAsLoaded is the output block as Load's decoder decodes it on its
+// own: the node the decoder hands it, through an alias, and
+// config.OutputConfig decoded from that node by the same decoder, with the
+// error of that decode alone, nil for a block the decoder takes. found is
+// false for a file with no block, or a null one, which Load decodes as none.
+// It is what priorOutput reads of a file the decoder refuses elsewhere.
 type outputAsLoaded struct {
 	found bool
 	node  *yaml.Node
@@ -700,7 +740,7 @@ func outputRefusal(p *config.OutputProblem, block *yaml.Node) string {
 // its own at most names a setting, and its value is the one decoded: a key
 // of the block wins over a merged one.
 func settingKeyLine(block *yaml.Node, name string) int {
-	if block.Kind != yaml.MappingNode {
+	if block == nil || block.Kind != yaml.MappingNode {
 		return 0
 	}
 	for i := 0; i+1 < len(block.Content); i += 2 {
