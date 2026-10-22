@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
@@ -50807,3 +50808,134 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it
+
+**What the gate showed.** On the owner's Raspberry Pi 5 with three DACs
+(the GO bar, a Hugo 2, an Altair), the GO bar was bound with
+`--binding port`, which 4a's bind wrote as
+`platform-xhci-hcd.1/usb2-2:1.0`: the controller anchor, the port chain,
+and the card's configuration and interface (the GO bar's audio interface
+is 0). With the Hugo 2 in that physical port, inspect read
+`card 3: Hugo2, port: platform-xhci-hcd.1/usb2-2:1.1, interface 1` (the
+Hugo 2's audio interface is 1), and the binding
+`resolves: device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`.
+A port binding meant "this port and this interface", and the interface
+belongs to the model: snd-usb-audio makes one card per USB device, on its
+audio control interface, which the GO bar has at 0 and the Hugo 2 at 1,
+after an interface of another class. 4a's entry said a port binding names
+"a port and an interface, not a model"; the interface was the model's.
+Everything else in the gate passed: the serial binding, renumbering,
+unplug and replug, `--verify-card`, and the bound unit moved to another
+port.
+
+**Two forms.** `usbid.Port`'s grammar (its doc) now takes an optional
+`:CONFIG.INTERFACE`. Without it the string is a port,
+`anchor/usbG-CHAIN`, what a port binding names and bind writes; with it,
+one card's port path, what sysfs gives a card (`alsa.USBIdentity.Port`,
+unchanged, and so is `sysfs.go`) and what 4a's bind wrote. `ParsePort`
+reads both, `Place` is the port alone, `HasInterface` says whether there
+is a suffix (the grammar's configurations start at 1, so 0 is none), and
+`String` prints the suffix only when there is one, and nothing for the
+zero Port, which a serial binding's resolution carries. Resolve matches a
+port binding by place: every USB card whose port path's place is the
+bound port is a card of the unit in it, and that unit gives the card, so
+its interface, and the bound pcmDevice and subdevice are looked up on
+that card (`endpoint_missing` when it lacks them). A binding with the
+suffix, from 4a's bind, loads and resolves as its port: the suffix is only
+a preference.
+
+**A unit with more than one card.** Two cards on one unit (a composite
+device) take two drivers, since snd-usb-audio makes one card per device.
+As the brief asked, the card on the configuration and interface the
+binding records is the one chosen, and with none recorded, or no card on
+it, the unit is `device_ambiguous`, never its first card. A serial or
+uniqueModel binding cannot tell such a unit's cards apart either (both are
+the unit, so both match: ambiguous), so a bind that always wrote the port
+alone would leave a composite unit with no binding at all. bind therefore
+writes the card's port path, suffix included, for a unit with more than
+one card, and the port alone for every other, and says which it wrote. The
+brief said bind writes the new form; this is the one exception, the case
+the preference exists for. Configuration and interface are recorded and
+matched together, since an interface number means something only in its
+configuration.
+
+**An unreadable card beside a port binding.** 4a exempted a port binding
+from the rule that a card whose identity cannot be read is never ruled
+out, because one port was one card. Under the new meaning a port is one
+unit, which may carry several cards, and the unreadable card may be
+another of them. So a port binding's one match beside an unreadable card
+is now `device_ambiguous`, as a serial or model match is, unless the match
+is on the interface the binding records, which no other card of that unit
+can be. `TestAnUnreadableCardIsNeverRuledOut` kept its assertion for the
+older form (available, on the recorded interface) and gained one for the
+port alone (ambiguous, and bind refused). A box with no unreadable card
+sees no change.
+
+**The check after open.** `Checker.Check`, which `SinkConfig.Admit` runs at
+every open and reopen, compared the opened card with the resolution's
+identity by `SameUnit`, so a unit swapped into the bound port between the
+resolve and the open was refused, though the binding names the port. Under
+a port binding it now asks `SamePort` (SameUnit's counterpart: the same
+place, whatever the unit and the interface) and then whether the card is
+the one the binding chooses there now: a card on the recorded interface
+is, and any other only while its unit carries no other card, which it
+reads sysfs again for. `Resolution` carries the binding's kind and its
+parsed port for it. Serial and uniqueModel bindings are checked as before.
+`--verify-card` runs the same check, and its pass says "at the bound
+port"; bind's line names the port it wrote. The check judges the cards it
+can read; an unreadable or a transient card is Resolve's to fail closed
+on, as under the other bindings.
+
+**What did not change.** A hub in the bound port and a controller that is
+gone are `binding_invalid` in either form, an empty port `device_missing`,
+and a card that is not USB `identity_unsupported` at bind. B470 PR 4a2's
+item that refuses a port whose device class cannot be read is that
+branch's: the lines of Resolve's no-match branch it changes are as main
+has them here, and so is the last line of the hub test, which that branch
+adds a test after.
+
+**Red first.** With the tests written and the code at e095d14b, eight
+binding tests failed (the grammar refused the port alone; bind wrote
+`platform-xhci-hcd.1/usb2-2:1.0`), two config tests, and the CLI test on
+bind's line. A scratch test of the gate itself, the binding 4a's bind
+wrote with the Hugo 2's card on interface 1 in that port, failed
+`device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`, as the Pi
+did, and inspect printed the gate's lines. The usbid tests did not build
+(`Place`, `HasInterface`); with a stub of HEAD's meaning they failed on
+every port alone and every place. `TestTheEndpointMustBeThere`'s port case
+was added after the fix; control 20 shows it red.
+
+**Controls: twenty-one, each on a committed tree, each restored from git,
+all red.** Resolve matching a port binding by the stored string (1: nine
+binding tests and the CLI's); the grammar requiring the suffix (2: the
+usbid, config, binding and CLI tests); bind writing the card's port path
+for every unit (3) and the port alone for a unit with two cards (4: bind
+refused, ambiguous); a unit with two cards resolving to its first (5); the
+recorded interface never choosing (6); a port binding exempt from an
+unreadable card again (7), and no exemption for the recorded interface
+(8); the hub never found (9), missed for the port alone (10a) and, by
+comparing the stored string, for the older form (10b); the
+gone-controller check removed (11); the check after open by `SameUnit`
+under a port binding (12), `SamePort` always true (13), the check not
+reading the unit's other cards (14), and the recorded interface not
+settling it (15); Resolve not recording the binding's kind (16); `Place`
+keeping the interface (17); a port alone printing `:0.0` (18); bind's old
+line (19); and no endpoint check under a port binding (20). Control 13
+stayed green on its first run: with `SamePort` always true a card at
+another port was still refused, by the second sysfs read, which also
+asked whether the opened card was among the cards at the bound port.
+`SamePort` was redundant there, so `checkPort` now asks each question once
+(abcebb43): `SamePort` says where the opened card is, naming it, and the
+read only whether its unit carries another card. Run again, the control
+was red.
+
+**Hardware: the gate's step 6c, again, not run here.** On the Pi with this
+build, the service stopped (bind refuses a data dir a serve holds):
+`bridge output dac bind <the GO bar's card> --binding port` writes
+`port: platform-xhci-hcd.1/usb2-2` and says so; with the Hugo 2 in that
+port, `bridge output dac inspect --verify-card <its card>` resolves
+`available` at that port and passes; the GO bar in another port is
+refused by `--verify-card <its card>`, which names the bound port; the
+binding the gate wrote, `platform-xhci-hcd.1/usb2-2:1.0`, resolves the
+same; and the port left empty is `device_missing`.
