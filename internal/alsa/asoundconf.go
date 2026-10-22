@@ -313,16 +313,17 @@ func walkChain(c PCMConfig, name string, cards []Card, seen map[string]bool, hop
 	}
 }
 
-// loadPCMDefs reads conf.d and then asound.conf. ok is false when any
-// file that is present cannot be read, or parses as something this
-// reader does not fully model, and unread is true when it is the first of
-// those the read stopped at. A missing file is neither: the other files
-// still count. A false ok means no definition may be used.
-func loadPCMDefs(root string) (defs map[string]pcmDef, ok, unread bool) {
-	defs = map[string]pcmDef{}
+// loadPCMDefs reads conf.d and then asound.conf. The second result, ok, is
+// false when any file that is present cannot be read, or parses as
+// something this reader does not fully model, and the third, unread, is
+// true when the read stopped at the first of those. A missing file is
+// neither: the other files still count. A false ok means no definition may
+// be used.
+func loadPCMDefs(root string) (map[string]pcmDef, bool, bool) {
+	defs := map[string]pcmDef{}
 	var files int
 	var total int
-	bad := false
+	bad, unread := false, false
 	add := func(path string) {
 		if bad {
 			return
