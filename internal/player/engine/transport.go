@@ -344,8 +344,8 @@ func (e *Engine) setIntent(then Intent, by string) {
 func (e *Engine) playFailed(err error) {
 	o := &e.o
 	for i := range o.waiters {
-		if w := &o.waiters[i]; w.play && w.err == nil && !w.played {
-			w.err = err
+		if w := &o.waiters[i]; w.play && !w.decided {
+			w.decided, w.err = true, err
 		}
 	}
 	if s := o.sess; s != nil {
@@ -367,13 +367,14 @@ func (e *Engine) superseded(by string) {
 // that their playback began: the session started for them was heard, which
 // is the only session they wait for while one is current. Each answers nil
 // from then on, whatever stops playback after (playFailed passes it over);
-// one already given a reason keeps it. A Play whose Resume is under way is
-// not one of them: an Audible while a session is paused can be content a
-// pause by zeros was still playing out, so the Resume's own answer stands.
+// one already given a reason keeps it, since deciding again changes nothing
+// recorded. A Play whose Resume is under way is not one of them: an Audible
+// while a session is paused can be content a pause by zeros was still
+// playing out, so the Resume's own answer stands.
 func (e *Engine) playBegan() {
 	for i := range e.o.waiters {
-		if w := &e.o.waiters[i]; w.play && w.err == nil {
-			w.played = true
+		if w := &e.o.waiters[i]; w.play {
+			w.decided = true
 		}
 	}
 }

@@ -63,16 +63,16 @@ type owner struct {
 // waiter is a command answered when the transport settles: no start and no
 // release under way. play is a command that asked for playback, and its
 // answer is the first outcome recorded for that playback, whatever later
-// commands do: err is why it did not happen (playFailed), and played that it
-// began, the session started for it heard (playBegan), after which it
-// answers nil whatever stops playback. So a later Play that plays never
-// answers for an earlier one, and a stop after the playback began is never
-// its answer.
+// commands do: decided is set by that outcome, and err is it, nil once the
+// playback began, the session started for it heard (playBegan), and
+// otherwise why it did not happen (playFailed). So a later Play that plays
+// never answers for an earlier one, and nothing that stops a playback after
+// it began is the answer of the command that asked for it.
 type waiter struct {
-	c      *command
-	play   bool
-	err    error
-	played bool
+	c       *command
+	play    bool
+	decided bool
+	err     error
 }
 
 // shutdownPhase is how far shutdown has got.
@@ -547,9 +547,9 @@ func (e *Engine) settleWaiters() {
 	}
 	for _, w := range o.waiters {
 		var err error
-		if w.play && !w.played {
+		if w.play {
 			err = w.err
-			if err == nil && o.state != Playing {
+			if !w.decided && o.state != Playing {
 				// Every path that ends without the playback records why
 				// (playFailed); this keeps the answer from being nil if one
 				// is ever missed.
