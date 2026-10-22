@@ -815,6 +815,9 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 			appendAsound(t, r, "pcm.shared {\n    type plug\n    slave.pcm \"dmix:CARD=Audio,DEV=0\"\n}\n")
 			r.writeConf(withDevice(volumioConf(t, r.music), "shared"))
 		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSADmix, signalpath.FromALSAConf)}},
+		{"alsa-lib's plug over dmix, plug:dmix", func(t *testing.T, r *readingRig) {
+			r.writeConf(withDevice(volumioConf(t, r.music), "plug:dmix"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSADmix, signalpath.FromALSAConf)}},
 		// The card held by the thread of an output MPD reports switched off
 		// is not that output's stream.
 		{"the output switched off live", func(t *testing.T, r *readingRig) {

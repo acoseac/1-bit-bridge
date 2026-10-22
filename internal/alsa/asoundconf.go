@@ -202,8 +202,10 @@ func SampleStageTypes() []string { return append([]string(nil), sampleStageTypes
 // a route policy is the route plugin inside it, a route stage, though it
 // has no chain. alsa-lib's own dmix is a dmix stage: a dmix: device string,
 // which names its plugin without the files, and the name dmix where the
-// files define none. The walk does not go through such a stage, so what
-// lies past it is not read, and any other device string names none. It is
+// files define none. alsa-lib's plug as a device string (plug:SLAVE) is a
+// plug stage over its slave, which is judged as a slave is. The walk does
+// not go through a stage that changes samples, so what lies past it is not
+// read, and any other device string names none. It is
 // what the files say, not what alsa-lib loaded for the process that opened
 // the card: information, not proof.
 func (c PCMConfig) SampleStage(device string) string {
@@ -212,7 +214,7 @@ func (c PCMConfig) SampleStage(device string) string {
 	case device == "":
 		return ""
 	case strings.Contains(device, ":"):
-		return deviceStringStage(device)
+		return deviceStringStage(c, device, map[string]bool{}, 0)
 	case !c.ok:
 		return ""
 	}
@@ -221,7 +223,7 @@ func (c PCMConfig) SampleStage(device string) string {
 
 func sampleStage(c PCMConfig, name string, seen map[string]bool, hops int) string {
 	if strings.Contains(name, ":") {
-		return deviceStringStage(name)
+		return deviceStringStage(c, name, seen, hops)
 	}
 	if hops > maxPCMHops || seen[name] {
 		return ""
@@ -247,12 +249,71 @@ func sampleStage(c PCMConfig, name string, seen map[string]bool, hops int) strin
 
 // deviceStringStage is the sample stage a device string names by its
 // plugin: alsa-lib's dmix (dmix:CARD=…,DEV=…), which mixes every stream
-// into a format and rate of its own; none for any other.
-func deviceStringStage(device string) string {
-	if plugin, _, _ := strings.Cut(device, ":"); plugin == "dmix" {
+// into a format and rate of its own; for alsa-lib's plug (plug:SLAVE), its
+// slave, judged as a slave is: a device string here, and a name walked in
+// the files, which needs them read whole; none for any other plugin.
+func deviceStringStage(c PCMConfig, device string, seen map[string]bool, hops int) string {
+	plugin, arg, _ := strings.Cut(device, ":")
+	switch plugin {
+	case "dmix":
 		return "dmix"
+	case "plug":
+		slave, ok := plugSlave(arg)
+		switch {
+		case !ok || hops > maxPCMHops:
+			return ""
+		case strings.Contains(slave, ":"):
+			return deviceStringStage(c, slave, seen, hops+1)
+		case !c.ok:
+			return ""
+		}
+		return sampleStage(c, slave, seen, hops+1)
 	}
 	return ""
+}
+
+// plugSlave is the slave a plug: device string names. alsa-lib's plug PCM
+// takes one argument, SLAVE: given by position or as SLAVE=, its value
+// quoted in '…' or "…" or bare, or in the compound { SLAVE value }, with an
+// = between them or none, as alsa's configuration has it. ok is false for
+// what alsa-lib would not open as a plug: a bare value with a comma (a
+// second argument) or an = (an argument of another name), another
+// argument's name, or nothing.
+func plugSlave(arg string) (string, bool) {
+	arg = strings.TrimSpace(arg)
+	if inner, ok := strings.CutPrefix(arg, "{"); ok {
+		inner, ok = strings.CutSuffix(inner, "}")
+		if !ok {
+			return "", false
+		}
+		rest, ok := strings.CutPrefix(strings.TrimSpace(inner), "SLAVE")
+		value := strings.TrimLeft(rest, " \t")
+		if !ok || (value == rest && !strings.HasPrefix(rest, "=")) {
+			return "", false
+		}
+		return argValue(strings.TrimPrefix(value, "="))
+	}
+	if name, value, found := strings.Cut(arg, "="); found && name == "SLAVE" {
+		arg = value
+	}
+	return argValue(arg)
+}
+
+// argValue is one argument's value: quoted in '…' or "…", the quote closing
+// it at its end, or bare, with no comma, =, quote, brace or space in it.
+func argValue(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') {
+		inner := s[1:]
+		if strings.IndexByte(inner, s[0]) != len(inner)-1 || len(inner) == 1 {
+			return "", false
+		}
+		return inner[:len(inner)-1], true
+	}
+	if s == "" || strings.ContainsAny(s, ",=\"'{} \t") {
+		return "", false
+	}
+	return s, true
 }
 
 func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {

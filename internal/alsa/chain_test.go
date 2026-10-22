@@ -283,6 +283,8 @@ pcm.emptyOverDmixString { type empty
     slave { pcm "dmix:CARD=Audio,DEV=0" } }
 pcm.plugOverDmix { type plug
     slave.pcm "dmix" }
+pcm.emptyOverPlugDmix { type empty
+    slave.pcm "plug:dmix" }
 pcm.twice { type softvol
     type plug
     slave.pcm "hwcard" }
@@ -304,6 +306,14 @@ pcm.dup { type plug
 		"routingPlug": "route", "policyPlug": "route", "tablePlug": "route",
 		"dmix:2,0": "dmix", " dmix:CARD=Audio,DEV=0 ": "dmix", "dmix": "dmix",
 		"plugOverDmixString": "dmix", "emptyOverDmixString": "dmix", "plugOverDmix": "dmix",
+		// alsa-lib's plug: its one argument, SLAVE, judged as a slave.
+		"plug:dmix": "dmix", "plug:'dmix:CARD=Audio,DEV=0'": "dmix", `plug:"dmix"`: "dmix",
+		"plug:SLAVE=dmix": "dmix", `plug:SLAVE="dmix:2,0"`: "dmix",
+		"plug:{ SLAVE dmix }": "dmix", `plug:{SLAVE = "dmix:CARD=Audio"}`: "dmix",
+		"plug:soft": "softvol", "plug:'plug:dmix'": "dmix", "emptyOverPlugDmix": "dmix",
+		// What alsa-lib would not open as a plug: a bare value with a comma
+		// or an =, another argument's name.
+		"plug:hw:2,0": "", "plug:dmix:CARD=Audio": "", "plug:OTHER=dmix": "", "plug:": "",
 		"passthrough": "", "hwcard": "", "hw:2,0": "", "plughw:2,0": "", "front:2": "", "dmixer": "",
 		"twice": "", "a": "", "dup": "", "nothing": "", "": "",
 	} {
@@ -334,6 +344,14 @@ pcm.dup { type plug
 	if got := LoadPCMConfig(hooked).SampleStage("dmix"); got != "" {
 		t.Errorf("the name dmix in a configuration not read whole: %q", got)
 	}
+	// plug's slave is judged the same way: a dmix: string counts, a name
+	// needs the files read whole.
+	if got := LoadPCMConfig(hooked).SampleStage("plug:'dmix:2,0'"); got != "dmix" {
+		t.Errorf("plug over a dmix: string beside a configuration not read whole: %q", got)
+	}
+	if got := LoadPCMConfig(hooked).SampleStage("plug:dmix"); got != "" {
+		t.Errorf("plug over the name dmix in a configuration not read whole: %q", got)
+	}
 	// The files' own dmix is what they define.
 	redefined := t.TempDir()
 	writeTree(t, redefined, map[string]string{
@@ -341,6 +359,9 @@ pcm.dup { type plug
 	})
 	if got := LoadPCMConfig(redefined).SampleStage("dmix"); got != "" {
 		t.Errorf("a dmix the files define as a plug to hw: %q", got)
+	}
+	if got := LoadPCMConfig(redefined).SampleStage("plug:dmix"); got != "" {
+		t.Errorf("plug over a dmix the files define as a plug to hw: %q", got)
 	}
 	if got := LoadPCMConfig(filepath.Join("testdata", "volumio-asound-chain")).SampleStage("volumio"); got != "" {
 		t.Errorf("Volumio's chain: %q", got)
