@@ -58,7 +58,11 @@ type Config struct {
 	// does not, or is not a directory), and the reservation file must lie
 	// plainly below it: no ".." element, and no symbolic link or mount point
 	// between them (atomicwrite.ErrNotUnderRoot). A data directory that is a
-	// link, or lies below one, is taken: the writer resolves it once.
+	// link, or lies below one, is taken: the writer resolves it once. It must
+	// be on storage that keeps what is written to it through a reboot: New
+	// refuses tmpfs, ramfs, and an overlay whose upper layer is one
+	// (atomicwrite.ErrVolatile), and storage of which that cannot be told
+	// (atomicwrite.ErrMediumUnknown).
 	//
 	// Nothing makes DataDir's own entry durable: bridge init creates it, and
 	// serve creates it where it is missing (lockServeDataDir), and neither
@@ -66,7 +70,11 @@ type Config struct {
 	// DataDir holds the player's identity (player-uuid,
 	// config.EnsurePlayerUUID): a crash that takes DataDir takes that
 	// identity with it, and the player that comes back is a new device to
-	// every controller, which has seen none of its IDs or tokens.
+	// every controller, which has seen none of its IDs or tokens. One case is
+	// not covered: a DataDir in an overlay's lower layer alone, its identity
+	// with it, is copied up by the first write, and the entry the copy-up
+	// creates above DataDir is not synced, so a crash could take the copy and
+	// keep the identity below it.
 	DataDir string
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it, passed to every session; 0 is DefaultPauseRelease, and
