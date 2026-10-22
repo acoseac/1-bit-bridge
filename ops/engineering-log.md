@@ -52060,3 +52060,186 @@ platform but Linux, macOS and Windows, where the player does not run; a
 link or a mount another writer puts in place after the write's second
 check, or during its syncs, is not seen; shutdown's ReasonClosed, as in
 rounds 5 to 8.
+
+### Round 10
+
+Codex and the Claude API reviewed round 9 (#1309); Argon was unavailable.
+Round 9's two rules notes were applied from beside the branch (b463dbbf for
+`player.md`, 214f9b4b for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r10.md` for `player.md` and
+`/tmp/b470-4b1-rules-r10-config.md` for the strict-writer bullet in
+`config-lifecycle.md`, every block fenced. Round 9's Linux tests ran on a
+Linux host (kernel 7.0, ext4): both suites passed under `-race -count=3`,
+the mount-identity tests included, and
+`TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling` skipped there
+(no filesystem that folds case). All five findings were verified against
+the code and were real; none was rejected. Each was fixed red first, with
+negative controls on the committed tree, restored from git each time.
+
+**The decision on the Claude API's High is the orchestrator's: fail
+closed.** A data directory on storage that does not outlive a reboot
+(tmpfs, ramfs, an overlay whose upper layer is tmpfs, as Raspberry Pi OS's
+"Overlay File System" sets up) is refused at New, with an error the
+operator can act on: it names the data directory, says the player's IDs
+and tokens would repeat after a reboot, and says to put the data directory
+on persistent storage. The overlay's upper layer is decided by the mount
+the writer already identifies, never by spelling, and the writer reports
+durable only once every directory entry it created, or a copy-up created,
+is durable through the root, which closes Codex's copy-up window too.
+
+What changed:
+
+- 971fd479. **Once a strict write lands, by its rename or by the fallback a
+  failed rename takes for the same bytes, every directory from the file's up
+  to the root is synced again** (Codex, P2). The writer synced the entries
+  above the file's directory before it staged the file, and the file's
+  directory alone after the rename. On an overlay, staging the file in a
+  directory found in the lower layer alone copies that directory up,
+  creating its entry, and those of the directories above it up to the root,
+  after those syncs, and overlayfs documents that a copy-up fsyncs none of
+  the parents it creates, so a crash could take a copied-up entry and the
+  reservation below it while the player's identity stayed. `durableChain`
+  now syncs the whole chain, the deepest first and the root included, after
+  the rename and after the fallback; the syncs before the staging stay, so a
+  directory that cannot be synced still fails the write before anything is
+  written. Seven tests that listed the syncs in order were moved to the new
+  order: `TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable`,
+  `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
+  `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
+  `TestWriteBytesDurable_RetriesThroughASymlinkedAlias`,
+  `TestWriteBytesDurable_NeverSyncsAboveTheRoot`,
+  `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot` and
+  `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`.
+- 2ccaf8a2, 9cff0e8d. **A root on storage that does not keep what is
+  written to it through a reboot is refused, and New says so** (the Claude
+  API, High). Round 9 took any root its mounts allowed, so on the Raspberry
+  Pi OS option, an overlay whose upper layer is a tmpfs, every barrier
+  answered, the reservation landed in RAM, and a reboot took it and kept a
+  `player-uuid` written before the overlay was enabled: the player handed
+  out its IDs and tokens again with no crash at all. Round 8 had refused the
+  same setup by accident, at the second write, through the device
+  comparison round 9 removed. The writer and the probe now ask a medium
+  check after the mount checks (`strictPath.medium`, through the `mediumOf`
+  seam): on Linux tmpfs and ramfs by statfs's `f_type` (`ErrVolatile`), an
+  overlay mounted volatile (`volatile` or `fsync=volatile`), and an overlay
+  whose upper layer is any of those. The upper layer is the one the mount
+  table (`/proc/self/mountinfo`) names on the line of the root's own mount
+  ID, the one the writer already holds (`overlayLayer`), never a line picked
+  by its mount point's spelling; and since a path in the table is the
+  mounter's, the path must reach here the filesystem the overlay reports (a
+  statfs of an overlay gives its upper layer's totals: block size, blocks,
+  inodes). Where it reaches nothing or another filesystem, where the table
+  cannot be read or names the upper layer by a relative path, and past eight
+  overlays one over another (followed by each inner overlay's mount ID), the
+  writer fails closed (`ErrMediumUnknown`). A read-only overlay is taken: a
+  write there fails by itself. macOS takes every root (no tmpfs, no
+  overlayfs; a RAM disk is a volume statfs does not tell from a disk), and
+  Windows refuses before it asks. The engine's `notDurable` names the data
+  directory, says the player's IDs and tokens would repeat after a reboot,
+  and says to put the data directory on persistent storage, for both
+  sentinels; `Config.DataDir` and the package doc say the data directory must
+  be on such storage. `unescapeMountInfo` moved from the tests into the
+  package, which reads the table again, for this alone. The package's
+  `TestMain` takes every root for persistent storage, with a line on
+  stderr, where the system's temporary directory is itself tmpfs (Debian 13
+  and Fedora mount `/tmp` so), and the engine's tests that drive the real
+  writer take the medium as they take the barrier
+  (`atomicwrite.SetMediumForTest`).
+- 05bd32ed. **An fdinfo listing that cannot be read is the read's error,
+  unless it does not exist** (the Claude API, Low 4). `fdinfoMountID` turned
+  every failure to read `/proc/self/fdinfo/N` into no mount identity, so a
+  process one descriptor short of its limit, whose `O_PATH` open took the
+  last, read the listing with EMFILE and New told the operator the platform
+  gives no mount identity. The read is now `fdinfoMountIDFrom`, platform
+  neutral: no `/proc` (ErrNotExist) is no identity, anything else the
+  read's `*fs.PathError`.
+- 93bc0235. **`platformMountID` asks its two readers through seams**
+  (`statxMountIDOf`, `fdinfoMountIDOf`; the Claude API, Low 3), so
+  `TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` can stand for a kernel
+  whose statx gives no mount ID on one whose statx gives it, and hold the
+  wiring to the kernel's mount table: round 9 tested each reader and the
+  order, and a `platformMountID` that asked statx alone passed on every
+  kernel from 5.8 up.
+- 8fad98f3. **The fallback for the same bytes is held to mount identity
+  under faked devices too** (the Claude API, Low 2): round 8's device
+  comparison put back into `onItsDirectorysMount` passed the whole suite
+  (measured, before the case), and on an overlay with xino off it fails the
+  reservation write whenever another writer's rename wins.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| Codex | `TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands` | the rename case synced `a`, the root, the rename, then `a/b` alone; the fallback `a/b` alone after its five attempts |
+| the Claude API, High | `TestWriteBytesDurable_RefusesARootThatDoesNotOutliveAReboot` | the write and the probe answered nil with the medium refused, the medium never asked; the write created `sub/new` and both synced |
+| the Claude API, High | `TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot` | New built an engine over tmpfs, and over storage that cannot be told |
+| the Claude API, High | `TestMediumRefusesWhatDoesNotOutliveAReboot`, `TestOverlayLayerIsTheLineOfTheRootsMountID` | every refusal nil, every overlay's upper layer empty, against the API with no behaviour |
+| the Claude API, Low 2 | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`, the fallback case | with round 8's device comparison in the fallback, the suite green before the case and the case red after (`resource busy`) |
+| the Claude API, Low 4 | `TestFdinfoMountIDSaysWhatFailedToRead` | EMFILE and EIO gave no identity and no error, against the read extracted with round 9's mapping |
+
+The High's red runs were round 9's writer with the new API declared beside
+it, with no behaviour: sentinels, seams, and stub bodies the writer did not
+call. Low 3's red is Linux's alone (below).
+
+Negative controls, each a mutation of the committed fix, all red:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| chain | the chain after the write cut to the file's directory | both cases of the chain test |
+| chain | the fallback's chain cut to the file's directory | the chain test's fallback case |
+| medium | the write without the medium check | the root test's write |
+| medium | the probe without the medium check | the root test's probe, and New's refusal test |
+| medium | tmpfs taken | tmpfs, the Raspberry Pi OS overlay, and the overlay over an overlay over tmpfs |
+| medium | the upper layer's path not held to the overlay's filesystem | the case whose upper layer names another filesystem here |
+| medium | the table's line not picked by the mount ID | the line test, and the overlay over a disk, the unlisted overlay and the nested one |
+| medium | volatile ignored | the line test's two volatile mounts, and the volatile overlay |
+| medium | an inner overlay not followed by its own mount ID | the overlay over an overlay over tmpfs (cannot be told, past the bound) |
+| medium | a relative upper layer taken as it reads here | the relative case |
+| medium | the medium asked of another mount ID | the root test (asked with 8, want 7) |
+| engine | New without its ErrVolatile refusal | New's refusal test: "cannot be read" |
+| engine | New without its ErrMediumUnknown refusal | the same test's second case |
+| fdinfo | every read error taken for no identity (round 9) | the fdinfo error test, EMFILE and EIO |
+| fallback | round 8's device comparison in `onItsDirectorysMount` | the device test's fallback case |
+
+Linux-only, for the Linux host, which this Mac cannot run:
+`TestPlatformMountTableReadsTheKernels`, the Linux half of
+`TestPlatformMountIDReadsTheKernels`,
+`TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` (its control: make
+`platformMountID` call `statxMountID` and `fdinfoMountID` directly, and the
+test goes red, fdinfo never asked), `TestMediumMagicsAreLinuxs`,
+`TestPlatformMediumReadsTheKernels` (`/dev/shm` refused as tmpfs, the
+temporary directory refused or taken by its `f_type`), and two that mount
+in a user and mount namespace of their own, through a child of the test
+binary (`TestOverlayNamespaceHelper`, which does nothing alone):
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`, the
+Raspberry Pi OS option against the real kernel, and
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated`, Codex's copy-up against
+the real kernel, both skipping where an unprivileged process gets no such
+namespace or no overlay in one (Linux 5.11), and the second also where the
+temporary directory is not on storage that outlives a reboot.
+
+The suite: 108 tests in the engine and 52 in `internal/atomicwrite` on this
+Mac (59 on Linux); ten runs in a row of each green under `-race` (150.2 s
+and 99.5 s, no skips); `make fmt vet test` (72 packages ok, cmd/bridge 466 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 9cff0e8d with no `-dirty`:
+the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of both packages for darwin, linux and windows on amd64 and arm64,
+and of `internal/atomicwrite` for linux/arm and freebsd/amd64, clean. Both
+notes checked against HEAD, each OLD found once: `player.md` 76,597 to
+77,788 bytes and `config-lifecycle.md` 52,089 to 54,964, of 100,000 each;
+with both applied to the worktree's rules files, `check-doc-budgets` ok and
+`TestEveryCitedTestNameExists` green, the files restored from git after.
+
+Not changed, for the owner: a root in an overlay's lower layer alone is
+copied up by the first write, and the entries that copy-up creates above
+the root are synced by nothing, as the root's own entry never is; with the
+data directory there and `player-uuid` with it, a crash could take the copy
+and keep the identity below it (on an ext4, xfs or btrfs upper layer a
+later fsync commits them; on one that needs each parent synced, not). A
+container whose data directory is in its own root overlay rather than a
+volume is refused as storage that cannot be told when the overlay's upper
+layer, a host path, is not visible inside it (the image's `/data` is a
+volume). Storage that is RAM under a disk filesystem (an ext4 zram device,
+a macOS RAM disk) is not told from a disk. A link or a mount another writer
+puts in place after the write's second check, or during its syncs, is not
+seen; shutdown's ReasonClosed, as in rounds 5 to 9.
