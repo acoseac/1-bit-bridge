@@ -146,3 +146,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **…and the TRACKED `.md` docs, with three exemptions and one hard constraint.** → History-rules-build-ci-tests.md
 - **…and every name `go test` runs, which is more than `Test` and an uppercase letter.** → History-rules-build-ci-tests.md
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through an invalid fallback:** **Never replace it with a real default.** → History-rules-build-ci-tests.md
+- **gofmt rewrites two single quotes in a Go doc comment as a closing double
+  quotation mark (`”`), inside backticks too**: SQL's empty string in a
+  docblock (`''`) is mangled on the first `make fmt`. Write it as words, or
+  put the SQL in an indented code block (a tab after `//`), which gofmt
+  keeps verbatim. Only the doc comment of a top-level declaration is
+  rewritten: a struct field's comment, a comment inside a function body and
+  SQL inside a string literal are left alone (each measured with go1.27.2's
+  gofmt, 2026-10-23).

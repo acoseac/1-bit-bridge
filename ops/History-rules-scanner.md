@@ -2042,6 +2042,101 @@
   SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
   stays 1.
 
+- **A PCM track's sample kind (`Track.SampleFormat`) is what its header
+  states, and nothing else** (2026-10-23, backlog B513). `"integer"` or
+  `"float"`, set by the reads that see the header: `parseWAVFmtChunk`
+  (`wavSampleFormat`: `WAVE_FORMAT_PCM` integer, `WAVE_FORMAT_IEEE_FLOAT`
+  float, `WAVE_FORMAT_EXTENSIBLE` by its subformat GUID compared whole, 16
+  bytes, against `KSDATAFORMAT_SUBTYPE_PCM` and
+  `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`, anything else none),
+  `parseAIFFCOMMChunk` (`aifcEncoding.sampleFormat`: a plain AIFF and `NONE`,
+  `twos`, `sowt`, `raw `, `in24`, `42ni`, `in32`, `23ni` integer; `fl32`,
+  `FL32`, `fl64`, `FL64` float; compressed and unknown types none),
+  `extractFLACFormatFromReader` (FLAC and Ogg FLAC, integer-only) and
+  `extractMP4WithContext` (an `alac` sample entry, integer-only). Every other
+  format, a header that could not be read, and a UPnP-routed row carry none.
+  The codec walk names a WAV by the GUID's first two bytes (`wavEncodingOf`,
+  TagLib's reading); the kind is the stricter reading, so the Ambisonic
+  B-format subformat (first two bytes PCM's) is "WAV" with a depth and no
+  kind. **Don't read an extensible WAV's kind from the GUID's first two bytes,
+  don't default an unknown to integer** (absent is unknown on the wire),
+  **don't change `codec` or `bitsPerSample` with it** (a float WAV is "WAV" at
+  32 or 64 bits, clients match the codec by equality), **and never put a kind
+  on an isDSD row**: three guards, the write (`sampleFormatColumn`), the
+  splice (`spliceSampleFormat`) and the open-time fill (`COALESCE(is_dsd, 0) =
+  0`). (`TestSampleFormatIsWhatTheHeaderStates`, 56 shapes, the captured
+  ffmpeg and afconvert headers among them; `TestAIFCEncodingOf`;
+  `TestADSDRowNeverCarriesASampleFormat`, whose three halves each went red
+  with its guard removed.)
+
+- **…and it lives in `tracks.sample_format` (v59), spliced by the readers and
+  never in `tags_json`** (2026-10-23, backlog B513). The `firstIndexedAt`
+  shape: `GetTrack` and `scanListedTrack` splice the column,
+  `marshalForStorage` zeroes the field, both upserts bind
+  `sampleFormatColumn(t)` and the conflict arm assigns it unconditionally (the
+  row runs because the file changed), and the version-stale stamp leg records
+  the kind its re-read found (`writeSampleFormatTx`), advancing `indexed_at`
+  through `bumpIndexedAtByPathSQL` only when a client would see the change
+  (NULL and `''` both read as absent). A refused file keeps its kind, as it
+  keeps its lyrics. NULL is a row nothing has decided; `''` is decided, no
+  kind. **Don't move it into `tags_json`**: the version-stale diff
+  (`markStampIfUnchanged`) compares `tags_json`, so every row gaining a kind
+  would take the full upsert and re-queue its enrichment (the control that
+  left it there turned the stamp test red on exactly that), and a backfill
+  writing `tags_json` without advancing `indexed_at` breaks `rowVersion` (an
+  enricher stamp read before it writes the old blob back). **Don't leave it
+  out of a track write or the stamp leg**: the three production upsert
+  callers (the scan writer, `settleHeldReconciles`, the UPnP ingest) write
+  fresh extractions or routed rows, and a new caller that writes back a Track
+  read without the splice would clear the kind.
+  (`TestSampleFormatRidesItsColumnAndNeverTagsJSON`,
+  `TestTheVersionStaleStampRecordsTheKindItReads`.)
+
+- **…and the rows extracted before it get it without a rescan: every open
+  decides what a codec decides, and the header pass reads each WAV and AIFF
+  row's format chunk** (2026-10-23, backlog B513). `backfillSampleFormatByCodec`
+  runs at the end of every `migrate` (`sampleFormatFillSQL`, 2,000 rows a
+  statement): a FLAC or ALAC row read from a file and not DSD is `'integer'`,
+  every other row it reaches `''`; it reads no file and assigns no
+  `indexed_at`, and a client receives these values through the one-time full
+  sync the `sampleFormat` health key starts (wire.md). `Store.BackfillSampleFormats`
+  reads the undecided WAV and AIFF rows read from a file, 200 a page in path
+  order: the API's resolver, the row's size and mtime against the file's
+  before and after the read, `openAudioFile`, and `readHeaderSampleFormat`,
+  which walks the chunks with the walkers' own `fmt `/`COMM` size bounds
+  (`wavFmtChunkMin`… package consts both share) and seeks over the rest; it
+  writes a page in one transaction under `Store.mu`, each row only while it
+  is still undecided and still has that stat (`sampleFormatDecideSQL`), and a
+  row that gains a kind advances `indexed_at`. Measured: the fill over 50,000
+  rows 248 ms, once; 2,000 WAV headers 113 ms on an SSD; a pass with nothing
+  to read 35 µs (the record, 2026-10-23). **Don't let the open-time fill move
+  `indexed_at`** (it decides most of a library; a delta of the whole library
+  is what the key's full sync replaces), **don't stamp a routed row by its
+  codec** (its codec is its upstream's file name and no header is read),
+  **don't read past the format chunk** (a header pass that read the chunks it
+  passed read 2 MiB for a header), **don't record a kind from a file whose
+  size and mtime are not the row's** (the scan that re-reads it writes the
+  kind), **and don't let the header read and the walkers disagree on which
+  chunk names the file** (`TestTheHeaderReadAgreesWithTheExtractor` runs all
+  45 WAV and AIFF shapes through both).
+  (`TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor`,
+  `TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows`,
+  `TestTheHeaderReadStopsAtTheFormatChunk`,
+  `TestTheSampleFormatQueriesUseThePartialIndex`.)
+
+- **B513 changed extraction without an `ExtractorVersion` bump, and that is the
+  bounded exception, not a precedent for a `tags_json` field** (2026-10-23).
+  The bump rule exists so the skip gate re-extracts rows whose stored answer
+  is stale, at the cost of re-opening every file once. The sample kind lives
+  in a column the version-stale diff does not compare, and its own backfill
+  (the bullet above) reaches every row extracted before it, reading only the
+  WAV and AIFF headers, so the bump would have bought nothing but that cost,
+  which the owner's brief ruled out. A later change to what the kind reads IS
+  a bump: the stamp leg then records the new answer for every unchanged file.
+  `ExtractorVersion`'s docblock says the same at the const. **Don't skip a
+  bump for a field the version-stale diff compares**: such a field has no
+  backfill but the bump.
+
 - **A repeated Vorbis comment for GENRE, ALBUM, COMPOSER, CONDUCTOR or
   WORK is joined with `"; "`** (ExtractorVersion 24, backlog B328).
   dhowden's map keeps the last value, so a FLAC the app reads as

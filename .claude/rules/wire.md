@@ -55,6 +55,29 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `Some(false)`. Same trap with `omitempty time.Time`: Go does NOT drop a zero
   time, so it ships `"0001-01-01T00:00:00Z"` and the client parses a real,
   very-old date — use `*time.Time`.
+- **`sampleFormat` is `"integer"`, `"float"` or absent, and absent is unknown,
+  never integer** (2026-10-23, backlog B513; PROTOCOL.md "Sample kind").
+  A string with `omitempty`, so an unknown row carries no key, never `null`
+  or `""`; a client tolerates a value it does not know. `codec` and
+  `bitsPerSample` do not change with it. A variant carries its own,
+  derived from its `format` in `scanTrackVariants` (`variantSampleFormat`:
+  every rendition the bridge writes is FLAC, so `"integer"`), never stored.
+  **The health key `sampleFormat` waits for the rows the open-time fill
+  decides, never for a WAV or AIFF header**: `SampleFormatReady` counts the
+  undecided rows the fill decides, the fill moves no `indexed_at`, and a
+  client's one-time paginated full sync on seeing the key is what delivers
+  those values; a WAV or AIFF row gains its kind later and advances
+  `indexed_at`, so a delta carries it, and counting it would hold the key
+  back forever over one unreadable file. The answer is cached with
+  `firstIndexedAt`'s through one helper (`healthCountsCache.stickyReady`):
+  sticky once ready, a miss rechecked on the TTL, a timeout not stored.
+  **Don't emit the key on an unknown row, don't count WAV or AIFF rows in
+  the readiness, and don't advertise the key without asking it.**
+  (`TestTheManifestCarriesSampleFormatOnlyWhereAHeaderStatesIt`, streamed and
+  paged, `TestAVariantCarriesTheKindItsFormatIs`,
+  `TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind`,
+  `TestHealthOmitsSampleFormatUntilTheFillIsDone`,
+  `TestTheTwoReadinessKeysKeepTheirOwnAnswers`.)
 - **An optional time on a wire DTO is a `*time.Time`, and a guard enforces it.**
   This rule was stated here, fixed correctly in three structs, and violated in
   TEN fields across five files — including the `/v1/health` DTO iOS decodes.

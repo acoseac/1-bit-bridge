@@ -1709,6 +1709,24 @@ mentions across the four `ops/audit-*.md` files.
   already written under **Build, CI, and test discipline** and was still tripped
   by a session that had read it — the platform leg is what closes that gap.
 
+- **Serve runs the sample-format header pass at once and after every
+  successful scan, on a `postScanNudges` channel and `scanCtx`, joined through
+  `bgWriters`** (2026-10-23, backlog B513). `runSampleFormatBackfill` calls
+  `manifestStore.BackfillSampleFormats` with `apiSrv.Resolver().ResolveChecked`
+  (hot on a root change), once at once and once per nudge, until `scanCtx`
+  ends; `logSampleFormatPass` writes one Info line of counts when a pass read
+  a header, nothing when it read none (every pass once the backfill is done),
+  and a Warn through `ctxerr.WithoutCancellation` for a failure that is not
+  the shutdown; `serveOpts.sampleFormatPassed` lets a boot test wait on a pass.
+  **Don't give it a `SetPostScanHook` of its own** (the hook REPLACES, and the
+  sweepers would lose theirs), **don't drop the pass at once** (a startup scan
+  that ends before runServe registers the hook sends no nudge, and the rows
+  would wait for the next scan, six hours by default), **and don't log a
+  path** (counts only; the privacy page's rule). (`TestServeGivesARowIndexedBeforeSampleFormatItsKind`
+  boots the real serve over a store rewound to before the column,
+  `TestTheSampleFormatPassRunsAtBootAndAfterEveryScan`,
+  `TestServeHandsTheSampleFormatPassThePostScanNudge`.)
+
 - **`bridge init`'s preflight grades the install that is THERE, and
   `ensureDoctorClean` prints warns.** init is re-run far more often than it is
   run (service reinstall, config rewrite, data dir moved to a new host) and it

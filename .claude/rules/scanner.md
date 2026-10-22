@@ -17,6 +17,7 @@ paths:
   - "internal/manifest/reconcile*.go"
   - "internal/manifest/deletion_journal*.go"
   - "internal/manifest/first_indexed*.go"
+  - "internal/manifest/sample_format*.go"
   - "internal/manifest/name_collisions*.go"
   - "internal/manifest/eligibility*.go"
   - "internal/manifest/folder_art_state*.go"
@@ -158,6 +159,10 @@ lost my library."
 - **Two raw keys that normalise to one `stringOf` alias are the first non-empty value in ascending raw-key order** (2026-10-14, backlog B182) → History-rules-scanner.md
 - **dhowden's Vorbis reader answers year 1 for a DATE it cannot parse, so a Vorbis 1 is re-read like a 0** (ExtractorVersion 22, backlog B222, B234) → History-rules-scanner.md
 - **Explicit content reaches the wire as `explicit`** (ExtractorVersion 23) → History-rules-scanner.md
+- **A PCM track's sample kind (`Track.SampleFormat`) is what its header states, and nothing else** (2026-10-23, backlog B513) **Don't read an extensible WAV's kind from the GUID's first two bytes, don't default an unknown to integer, don't change `codec` or `bitsPerSample` with it, and never put a kind on an isDSD row** → History-rules-scanner.md
+- **…and it lives in `tracks.sample_format` (v59), spliced by the readers and never in `tags_json`** (2026-10-23, backlog B513) **Don't move it into `tags_json`, and don't leave it out of a track write or the stamp leg** → History-rules-scanner.md
+- **…and the rows extracted before it get it without a rescan: every open decides what a codec decides, and the header pass reads each WAV and AIFF row's format chunk** (2026-10-23, backlog B513) **Don't let the open-time fill move `indexed_at`, don't stamp a routed row by its codec, don't read past the format chunk, don't record a kind from a file whose size and mtime are not the row's, and don't let the header read and the walkers disagree on which chunk names the file** → History-rules-scanner.md
+- **B513 changed extraction without an `ExtractorVersion` bump, and that is the bounded exception, not a precedent for a `tags_json` field** (2026-10-23) **Don't skip a bump for a field the version-stale diff compares** → History-rules-scanner.md
 - **A repeated Vorbis comment for GENRE, ALBUM, COMPOSER, CONDUCTOR or WORK is joined with `"; "`** (ExtractorVersion 24, backlog B328) → History-rules-scanner.md
 - **`normaliseRawTagKey` canonicalizes a LEADING `0xA9` before `ToLower`.** → History-rules-scanner.md
 - **dhowden/tag does not read `gnre`, and keeps the data-atom locale on every MP4 freeform value** (ExtractorVersion 15, from a report that Rock / Pop listed only DSD) → History-rules-scanner.md
