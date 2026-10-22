@@ -92,6 +92,48 @@ func TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt(t *testing.T) {
 	}
 }
 
+// TestAWaitingCommandWaitsOnlyForItsOwnLane pins the parked commands'
+// lanes: an insert parked on a hung reservation write, ahead of a Play
+// parked on a Pause under way, does not hold the Play once the Pause has
+// answered, and still waits itself.
+func TestAWaitingCommandWaitsOnlyForItsOwnLane(t *testing.T) {
+	h := startHarness(t)
+	ids := h.insert("a", "b")
+	reservation, calls := h.hangReservations()
+	h.available()
+	h.must("play a", h.eng.PlayID(bg, ids[0]))
+	s := h.be.nth(1)
+	s.audible(s.first.ID)
+	h.waitSnap("a audible", func(sn *Snapshot) bool { _, ok := sn.Audible(); return ok })
+
+	mark := h.appliedMark()
+	insert := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); return err })
+	h.waitApplied("admitted insert", mark)
+	h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
+	held := newGate()
+	h.be.script(func() {
+		h.be.onPause = func(ctx context.Context, _ *fakeSession) error { return held.wait(ctx, h.be, false) }
+	})
+	pause := async(func() error { return h.eng.Pause(bg) })
+	h.be.waitFor("the pause", func() bool { return h.be.countLocked("pause") == 1 })
+	mark = h.appliedMark()
+	play := async(func() error { return h.eng.Play(bg) })
+	h.waitApplied("admitted play", mark)
+	held.open()
+	h.must("pause", h.result("pause", pause))
+	h.must("the play that waited for the pause", h.result("play", play))
+	if sn := h.snap(); sn.State() != Playing {
+		t.Fatalf("after the pause and the play: %s", sn.State())
+	}
+	select {
+	case err := <-insert:
+		t.Fatalf("the insert answered %v while its reservation write hangs", err)
+	default:
+	}
+	reservation.open()
+	h.must("the insert once its write landed", h.result("insert", insert))
+}
+
 // TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite pins the
 // maintenance commands' admission: they never wait behind a parked edit,
 // and the parked edit is refused with ReasonMaintenance as the hold begins.
