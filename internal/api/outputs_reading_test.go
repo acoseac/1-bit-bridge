@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -740,6 +741,28 @@ func TestTheReadingReadsMPDConfAgain(t *testing.T) {
 	wantVerdict(t, second, raw2, signalpath.Withheld, signalpath.MPDSoftwareVolume)
 	if second.MPD.Config.Output == nil || second.MPD.Config.Output.MixerType != "software" {
 		t.Fatalf("config %+v", second.MPD.Config)
+	}
+}
+
+// TestMPDConfIsReadUnderItsOwnVolume: the probe's root is /, which on
+// Windows is the working directory's drive, and a test's temp directory
+// sits on another one there (GitHub's runner: D: and C:). A path that
+// names a volume is read under that volume's root; a Linux path names
+// none and keeps the probe's.
+func TestMPDConfIsReadUnderItsOwnVolume(t *testing.T) {
+	if got := confRoot("/", "/etc/mpd.conf"); got != "/" {
+		t.Fatalf("a Linux path: %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		return
+	}
+	for path, want := range map[string]string{
+		`C:\Users\runner\AppData\Local\Temp\mpd.conf`: `C:\`,
+		`\\server\share\mpd\mpd.conf`:                 `\\server\share\`,
+	} {
+		if got := confRoot("/", path); got != want {
+			t.Errorf("%s: %q, want %q", path, got, want)
+		}
 	}
 }
 

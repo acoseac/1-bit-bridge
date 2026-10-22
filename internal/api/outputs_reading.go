@@ -336,7 +336,7 @@ func (o *localOutputs) takeReading(ctx context.Context) *readingSnap {
 		s.endpoint = opt.Endpoint
 	}
 	if rep.ConfPath != "" {
-		if f, err := conf.ReadFile(opt.Root, rep.ConfPath, rep.ConfPath); err == nil {
+		if f, err := conf.ReadFile(confRoot(opt.Root, rep.ConfPath), rep.ConfPath, rep.ConfPath); err == nil {
 			s.conf, s.confRead = f, true
 		}
 	}
@@ -412,6 +412,17 @@ func outputChains(s *readingSnap) []outputChain {
 		out = append(out, oc)
 	}
 	return out
+}
+
+// confRoot is the root mpd.conf is read under: the probe's, except that a
+// path naming a volume is read under that volume's root, which is what /
+// is there. A Linux path names none; a Windows test's temp directory does,
+// on another drive than the working directory that / would mean.
+func confRoot(root, path string) string {
+	if v := filepath.VolumeName(path); v != "" {
+		return v + string(filepath.Separator)
+	}
+	return root
 }
 
 func statusCommand(c outputSession, ctx context.Context) (mpd.Reply, error) { return c.Status(ctx) }
