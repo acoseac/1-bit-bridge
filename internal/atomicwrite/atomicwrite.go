@@ -362,10 +362,10 @@ func missing(dir string) []string {
 // is there, and answers nil for a regular file, where no write can ever be
 // made. A regular file is an error wrapping syscall.ENOTDIR, and any other
 // error Stat gives is returned as it is. The directory is then opened here,
-// before the barrier opens it, so one this process cannot read (searchable
-// and not readable) is the open's error, as it is: only the barrier's own
-// failure is marked ErrBarrierFailed, a directory the filesystem would not
-// sync.
+// before the barrier opens it: one this process cannot read (searchable,
+// not readable) is the open's error, unmarked, and only the barrier's own
+// failure, a directory the filesystem would not sync, is marked
+// ErrBarrierFailed.
 func ProbeDurable(path string) error {
 	if syncParentDir == nil {
 		return ErrNoDirectoryBarrier
