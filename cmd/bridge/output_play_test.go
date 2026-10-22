@@ -259,8 +259,8 @@ func TestOutputPlayIsHidden(t *testing.T) {
 
 // TestOutputPlayRefusesWhatItCannotPlay pins the refusals before anything
 // starts: no file, a pause release out of the engine's bounds (usage, 2);
-// off Linux, a config the player cannot run, no binding, a file that is not
-// there (1); and none of them builds a backend.
+// off Linux, before any config is read, a config the player cannot run, no
+// binding, a file that is not there (1); and none of them builds a backend.
 func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -268,13 +268,16 @@ func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 		goos   string
 		args   []string
 		files  []string
-		code   int
-		says   string
+		// noConfig names a config file that is not there.
+		noConfig bool
+		code     int
+		says     string
 	}{
 		{name: "no file", player: goBarPlayer, goos: "linux", files: []string{}, code: 2, says: "at least one FILE"},
 		{name: "a pause release of 0", player: goBarPlayer, goos: "linux", args: []string{"--pause-release", "0"}, code: 2, says: "1 to 600"},
 		{name: "a pause release past the engine's", player: goBarPlayer, goos: "linux", args: []string{"--pause-release", "601"}, code: 2, says: "1 to 600"},
 		{name: "off Linux", player: goBarPlayer, goos: "darwin", code: 1, says: "Linux only"},
+		{name: "off Linux, before any config is read", player: goBarPlayer, goos: "darwin", noConfig: true, code: 1, says: "Linux only"},
 		{name: "a block the player cannot run", player: "    enabled: true\n    dsdMode: native\n", goos: "linux", code: 1, says: "cannot run"},
 		{name: "no binding", player: "    enabled: true\n", goos: "linux", code: 1, says: "bridge output dac bind"},
 		{name: "a file that is not there", player: goBarPlayer, goos: "linux", files: []string{"/nonexistent/x.flac"}, code: 1, says: "x.flac"},
@@ -283,6 +286,9 @@ func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 			c := newPlayCase(t, tc.player)
 			if tc.files != nil {
 				c.files = tc.files
+			}
+			if tc.noConfig {
+				c.configPath = filepath.Join(t.TempDir(), "absent.yaml")
 			}
 			built := false
 			env := c.env(tc.goos)
