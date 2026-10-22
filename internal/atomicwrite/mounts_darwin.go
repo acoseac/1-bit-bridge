@@ -7,6 +7,12 @@ import (
 	"syscall"
 )
 
+// platformMedium takes every root on macOS: it has neither tmpfs nor
+// overlayfs, and a RAM disk is a volume like any other, which statfs does not
+// tell from a disk. The player, the strict writer's one caller, runs on Linux
+// alone.
+func platformMedium(string, uint64) error { return nil }
+
 // mountIDsExpected is whether this platform gives a mount's identity, so that
 // the strict writer refuses (ErrMountsUnknown) where it gets none.
 const mountIDsExpected = true

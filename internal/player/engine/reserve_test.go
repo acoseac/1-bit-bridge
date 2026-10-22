@@ -152,6 +152,7 @@ func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 		return nil
 	})
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h := newHarness(t)
 	h.tweak = func(c *Config) { c.seams.writeReserve = nil }
 	h.boot()
@@ -218,6 +219,7 @@ func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
 		return nil
 	})
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h := newHarness(t)
 	h.tweak = func(c *Config) { c.seams.writeReserve, c.seams.probe = nil, nil }
 	h.boot()
@@ -267,6 +269,7 @@ func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
 func TestNewRefusesAReservationDirectoryThatIsAFile(t *testing.T) {
 	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h := newHarness(t)
 	file := filepath.Join(h.dir, "existing-file")
 	h.must("write the file", os.WriteFile(file, []byte("x"), 0o600))
@@ -342,6 +345,7 @@ func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
 		return nil
 	})
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h.be = newFakeBackend(t)
 	for _, tc := range []struct {
 		name  string
@@ -375,6 +379,60 @@ func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
 		}
 		if !strings.HasPrefix(tc.begins, "player: the directory "+own) && strings.Contains(err.Error(), own+" ") {
 			t.Errorf("%s: New = %q, which blames the reservation file's own directory %s", tc.name, err, own)
+		}
+	}
+}
+
+// onStorageThatOutlivesAReboot is the medium check for a test that drives
+// the real writer over a barrier of its own: the medium, like the barrier, is
+// the test's, since the test's temporary directory may itself be on tmpfs,
+// which the writer refuses (TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot
+// is that refusal's).
+func onStorageThatOutlivesAReboot(string) error { return nil }
+
+// TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot pins New's refusal of
+// a data directory on storage that does not keep what is written to it
+// through a reboot, the orchestrator's decision on the Claude API's round 9
+// finding (fail closed): tmpfs, ramfs, or an overlay whose upper layer is one,
+// as Raspberry Pi OS's "Overlay File System" sets up, where every barrier
+// answers and a reboot takes the reservation and keeps player-uuid, so the
+// player would hand out its IDs and tokens again with no crash at all. The
+// refusal names the data directory, says the IDs and tokens would repeat after
+// a reboot, and says to put the data directory on persistent storage; so does
+// the refusal of storage that cannot be told to outlive one. Through the real
+// probe, whose barrier and medium are the test's.
+func TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot(t *testing.T) {
+	h := newHarness(t)
+	data, err := filepath.EvalSymlinks(h.dir)
+	h.must("resolve the data directory", err)
+	// Registered before the engine is built, so it is restored after every
+	// engine goroutine that could read it has ended.
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	h.be = newFakeBackend(t)
+	for _, tc := range []struct {
+		name   string
+		medium error
+		is     error
+		begins string
+	}{
+		{"tmpfs", fmt.Errorf("%w: %s is on tmpfs", atomicwrite.ErrVolatile, data), atomicwrite.ErrVolatile,
+			"player: the data directory " + data + " is on storage that does not outlive a reboot"},
+		{"storage that cannot be told", fmt.Errorf("%w: %s is on an overlay whose upper layer cannot be read here", atomicwrite.ErrMediumUnknown, data), atomicwrite.ErrMediumUnknown,
+			"player: whether the data directory " + data + " outlives a reboot cannot be told"},
+	} {
+		restore := atomicwrite.SetMediumForTest(func(string) error { return tc.medium })
+		cfg := h.config()
+		cfg.DataDir, cfg.ReservePath = data, filepath.Join(data, "reserve.json")
+		cfg.seams.probe = nil
+		_, err := New(cfg)
+		restore()
+		switch {
+		case err == nil:
+			t.Errorf("%s: New built an engine", tc.name)
+		case !errors.Is(err, tc.is) || !strings.HasPrefix(err.Error(), tc.begins):
+			t.Errorf("%s: New = %q, want it to begin %q", tc.name, err, tc.begins)
+		case !strings.Contains(err.Error(), "the player's IDs and tokens would repeat after a reboot") || !strings.Contains(err.Error(), "put the data directory on persistent storage"):
+			t.Errorf("%s: New = %q, want it to say the player's IDs and tokens would repeat after a reboot, and to put the data directory on persistent storage", tc.name, err)
 		}
 	}
 }
@@ -413,6 +471,7 @@ func TestABadReservationFileIsMovedAside(t *testing.T) {
 func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h := newHarness(t)
 	h.be = newFakeBackend(t)
 	data := filepath.Join(h.dir, "data")
@@ -477,6 +536,7 @@ func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 func TestNewRefusesAFilePathThatNamesADirectory(t *testing.T) {
 	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	sep := string(filepath.Separator)
 	for _, tc := range []struct {
 		name               string
@@ -539,6 +599,7 @@ func TestNewRefusesAFilePathThatNamesADirectory(t *testing.T) {
 func TestADataDirectoryThatIsALinkIsTaken(t *testing.T) {
 	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
 	t.Cleanup(restore)
+	t.Cleanup(atomicwrite.SetMediumForTest(onStorageThatOutlivesAReboot))
 	h := newHarness(t)
 	real := filepath.Join(h.dir, "real")
 	link := filepath.Join(h.dir, "link")

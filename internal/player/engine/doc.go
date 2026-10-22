@@ -162,7 +162,16 @@
 // directory the probe cannot read (a Stat or an open refused, EACCES or EIO)
 // is refused as unreadable, with the probe's error and no advice to move:
 // that advice is for a directory fsync that ran and failed
-// (atomicwrite.ErrBarrierFailed). The next block is reserved in the
+// (atomicwrite.ErrBarrierFailed). A data directory on storage that does not
+// keep what is written to it through a reboot is refused too
+// (atomicwrite.ErrVolatile: tmpfs, ramfs, an overlay whose upper layer is
+// one, as Raspberry Pi OS's "Overlay File System" sets up): every barrier
+// answers there, and a reboot takes the reservation and keeps the identity,
+// so the IDs and tokens would repeat with no crash at all. The refusal names
+// the data directory, says so, and says to put it on persistent storage, and
+// so does the refusal of storage that cannot be told to outlive a reboot
+// (atomicwrite.ErrMediumUnknown): the orchestrator's decision on round 9's
+// review, to fail closed. The next block is reserved in the
 // background, so a command waits on a write only when that write has not
 // landed by the time the current block runs out, and at most
 // reserveTimeout: past it the waiting edits are refused with

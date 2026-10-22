@@ -273,9 +273,15 @@ func New(cfg Config) (*Engine, error) {
 // Stat or an open refused: EACCES, EIO) is said to be unreadable, with the
 // probe's error, since another filesystem would not mend it; a reservation
 // file that does not lie plainly below the data directory is said to be so;
-// and mounts the platform gives no identity for (atomicwrite.ErrMountsUnknown:
+// mounts the platform gives no identity for (atomicwrite.ErrMountsUnknown:
 // on Linux, no mount ID from statx or /proc/self/fdinfo) are named as that,
-// never as a directory.
+// never as a directory; and a data directory on storage that does not
+// outlive a reboot (atomicwrite.ErrVolatile: tmpfs, ramfs, an overlay whose
+// upper layer is one, as Raspberry Pi OS's "Overlay File System" sets up), or
+// on storage of which that cannot be told (atomicwrite.ErrMediumUnknown), is
+// named, with the IDs and tokens that would repeat after a reboot and the
+// remedy, persistent storage: the orchestrator's decision on round 9's
+// review, to fail closed.
 func notDurable(path, dataDir string, err error) error {
 	dir := filepath.Dir(path)
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) {
@@ -286,6 +292,10 @@ func notDurable(path, dataDir string, err error) error {
 		return fmt.Errorf("player: the reservation file %s is not below the data directory %s as the strict writer takes it, with no \"..\" element and no symbolic link or mount point between them or at the file, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
 	case errors.Is(err, atomicwrite.ErrMountsUnknown):
 		return fmt.Errorf("player: the platform gives no mount identity for the data directory %s or an entry below it, so no mount point between it and the reservation file %s can be ruled out: %w", dataDir, path, err)
+	case errors.Is(err, atomicwrite.ErrVolatile):
+		return fmt.Errorf("player: the data directory %s is on storage that does not outlive a reboot, so the player's IDs and tokens would repeat after a reboot: put the data directory on persistent storage: %w", dataDir, err)
+	case errors.Is(err, atomicwrite.ErrMediumUnknown):
+		return fmt.Errorf("player: whether the data directory %s outlives a reboot cannot be told, and on storage that does not, the player's IDs and tokens would repeat after a reboot: put the data directory on persistent storage: %w", dataDir, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", filepath.Dir(path), err)
 	case errors.Is(err, syscall.ENOTDIR):

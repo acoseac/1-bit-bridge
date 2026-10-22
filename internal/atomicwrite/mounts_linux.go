@@ -11,6 +11,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// platformMedium is the medium check on Linux (mediumFrom): statfs's f_type
+// of the root, and for an overlay the upper layer the kernel's mount table
+// (/proc/self/mountinfo) names on the line of the root's own mount ID.
+func platformMedium(root string, mountID uint64) error {
+	return mediumFrom(root, mountID, linuxStatfs, readMountInfo, mountIDOf)
+}
+
+// linuxStatfs is what the medium check reads of the filesystem path is on.
+func linuxStatfs(path string) (fsStat, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return fsStat{}, &fs.PathError{Op: "statfs", Path: path, Err: err}
+	}
+	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files)}, nil
+}
+
+// readMountInfo is the kernel's mount table for this process's mount
+// namespace.
+func readMountInfo() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") }
+
 // mountIDsExpected is whether this platform gives a mount's identity, so that
 // the strict writer refuses (ErrMountsUnknown) where it gets none.
 const mountIDsExpected = true

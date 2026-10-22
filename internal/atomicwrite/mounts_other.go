@@ -8,5 +8,9 @@ package atomicwrite
 // The player, its one caller, runs on Linux alone.
 const mountIDsExpected = true
 
+// platformMedium takes every root: the strict writer refuses on this
+// platform before it asks, for want of a mount identity (ErrMountsUnknown).
+func platformMedium(string, uint64) error { return nil }
+
 // platformMountID is no ID: the strict writer reads none on this platform.
 func platformMountID(string) (uint64, bool, error) { return 0, false, nil }

@@ -114,6 +114,23 @@ var ErrNotUnderRoot = errors.New("atomicwrite: the path is not plainly below the
 // bind mount shows no device of its own.
 var ErrMountsUnknown = errors.New("atomicwrite: the mounts between the file and the root cannot be told apart")
 
+// ErrVolatile is WriteBytesDurable's and ProbeDurable's refusal of a root on
+// storage that does not keep what is written to it through a reboot: on
+// Linux tmpfs, ramfs, an overlay mounted volatile, and an overlay whose upper
+// layer is any of those, as Raspberry Pi OS's "Overlay File System" option
+// sets one up over its root, told by statfs and, for an overlay, by the upper
+// layer the mount table names on the line of the root's own mount ID
+// (strictPath.medium). Every barrier answers there, and a reboot takes what
+// was written. Nothing is created, written or synced.
+var ErrVolatile = errors.New("atomicwrite: the root is on storage that does not keep what is written to it through a reboot")
+
+// ErrMediumUnknown is their refusal of a root on storage of which that cannot
+// be told: an overlay whose upper layer the mount table, unreadable, does not
+// name, or names by a path that reaches here nothing, or another filesystem
+// than the one the overlay writes to. They say so rather than take it for
+// storage that outlives a reboot.
+var ErrMediumUnknown = errors.New("atomicwrite: whether the root's storage keeps what is written to it through a reboot cannot be told")
+
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
 // without waiting out the full retry backoff budget. Production
@@ -230,6 +247,13 @@ var beforeMkdirAll func(dir string)
 // same contract: in-package tests override it with a `t.Cleanup` restore and
 // never call `t.Parallel()`.
 var mountIDOf = platformMountID
+
+// mediumOf is the medium check (strictPath.medium), asked of the root and the
+// ID of the mount it lies on: platformMedium. A test seam, process-global like
+// syncParentDir, with the same contract: in-package tests override it with a
+// `t.Cleanup` restore and never call `t.Parallel()`, and tests in other
+// packages go through SetMediumForTest.
+var mediumOf = platformMedium
 
 // lstat is the Lstat the strict writer sees each entry through: a test seam,
 // so that a test can report a device (st_dev) as some filesystems report it,
@@ -648,8 +672,10 @@ func onItsDirectorysMount(path string) (bool, error) {
 //
 // It refuses what every write would: a mount between the file and root, or at
 // the file, told by the identity the platform gives each entry, never by its
-// device (ErrNotUnderRoot), and a root, or an entry below it, whose mount the
-// platform gives no identity for (ErrMountsUnknown), so that its caller learns
+// device (ErrNotUnderRoot), a root, or an entry below it, whose mount the
+// platform gives no identity for (ErrMountsUnknown), and a root on storage
+// that does not keep what is written to it through a reboot (ErrVolatile), or
+// of which that cannot be told (ErrMediumUnknown), so that its caller learns
 // as it starts what the write after the first would refuse.
 //
 // What it probes must be a directory: a barrier opens and fsyncs whatever is
@@ -671,6 +697,9 @@ func ProbeDurable(root, path string) error {
 	}
 	n, err := p.plain()
 	if err != nil {
+		return err
+	}
+	if err := p.medium(); err != nil {
 		return err
 	}
 	for _, d := range p.chain(n) {
@@ -839,6 +868,12 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // directories are, before any is synced, for one another writer put in place
 // meanwhile.
 //
+// root must be on storage that keeps what is written to it through a reboot
+// (ErrVolatile): a write on tmpfs, ramfs, or an overlay whose upper layer is
+// one, has every barrier answer and is gone after the reboot, and where the
+// storage cannot be told the writer says so (ErrMediumUnknown), failing
+// closed (strictPath.medium).
+//
 // root is the caller's guarantee: it must exist (the writer never creates
 // it), and its own entry, and those above it, must be durable already, or
 // need not be, which only the caller can say (the player's engine passes
@@ -859,6 +894,9 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 		return err
 	}
 	if _, err := p.plain(); err != nil {
+		return err
+	}
+	if err := p.medium(); err != nil {
 		return err
 	}
 	if beforeMkdirAll != nil {

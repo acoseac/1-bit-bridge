@@ -13,10 +13,11 @@ import (
 // with fewer fields, an ID that does not read as a number, or a mount point
 // that is not an absolute path is an error. Where one mount is mounted over
 // another at the same point, the later line is the one a path there reaches,
-// and wins. The writer reads no table: it tells a mount by the identity the
-// platform gives the entry a path reaches, never by a spelling (Codex on
-// rounds 7 and 8). The table is the tests' oracle for the IDs the kernel
-// gives (TestPlatformMountTableReadsTheKernels).
+// and wins. The writer tells a mount by the identity the platform gives the
+// entry a path reaches, never by a spelling (Codex on rounds 7 and 8), and
+// reads the table only for an overlay's upper layer, on the line of the
+// root's own mount ID (overlayLayer). The table is the tests' oracle for the
+// IDs the kernel gives (TestPlatformMountTableReadsTheKernels).
 func parseMountInfo(data []byte) (map[string]uint64, error) {
 	ids := map[string]uint64{}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -34,28 +35,6 @@ func parseMountInfo(data []byte) (map[string]uint64, error) {
 		ids[unescapeMountInfo(fields[4])] = id
 	}
 	return ids, nil
-}
-
-// unescapeMountInfo undoes mountinfo's escaping of a path: the kernel
-// writes a space, tab, newline and backslash as a backslash and three octal
-// digits (proc(5), seq_path's "\t\n\\ "). internal/doctor's
-// unescapeMountinfo is its twin, for the cgroup mounts.
-func unescapeMountInfo(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+3 < len(s) {
-			if n, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
-				b.WriteByte(byte(n))
-				i += 3
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
 }
 
 // TestParseMountInfo pins the oracle's reading of a mount table: the mount
