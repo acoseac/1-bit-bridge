@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 		os.Exit(runFpcalcStandIn())
 	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
-	trees, err := emptyHostTrees()
+	trees, treesDir, err := emptyHostTrees()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "the empty trees the suite reads for the host's:", err)
 		os.Exit(1)
@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	stopReads()
 	stopOpens()
-	_ = os.RemoveAll(filepath.Dir(trees.proc))
+	_ = os.RemoveAll(treesDir)
 	if opened := nodeOpens(); len(opened) > 0 {
 		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, which no test may: %q\n", opened)
 		code = 1
@@ -71,20 +71,21 @@ func TestMain(m *testing.M) {
 }
 
 // emptyHostTrees makes the two empty directories the suite reads in place
-// of the host's /proc and /sys, in a directory of their own.
-func emptyHostTrees() (outputTrees, error) {
-	dir, err := os.MkdirTemp("", "bridge-host-trees-")
+// of the host's /proc and /sys, in a directory of their own, dir, which
+// TestMain removes by the name MkdirTemp gave it.
+func emptyHostTrees() (trees outputTrees, dir string, err error) {
+	dir, err = os.MkdirTemp("", "bridge-host-trees-")
 	if err != nil {
-		return outputTrees{}, err
+		return outputTrees{}, "", err
 	}
-	trees := outputTrees{proc: filepath.Join(dir, "proc"), sysfs: filepath.Join(dir, "sys")}
+	trees = outputTrees{proc: filepath.Join(dir, "proc"), sysfs: filepath.Join(dir, "sys")}
 	for _, d := range []string{trees.proc, trees.sysfs} {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			_ = os.RemoveAll(dir)
-			return outputTrees{}, err
+			return outputTrees{}, "", err
 		}
 	}
-	return trees, nil
+	return trees, dir, nil
 }
 
 // openedNodes are the nodes the guard refused, for TestMain and the tests
