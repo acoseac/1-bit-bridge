@@ -12,15 +12,22 @@ import (
 // (GET /v1/outputs/{id}/reading, B473 B3): its format from the track, and
 // the size and modification time from the columns the scanner's skip gate
 // compares (GetTrackStat), which say whether the file on disk is still the
-// one the row describes.
+// one the row describes. All of it is one statement (GetTrackWithStat), so
+// one version of the row.
 func outputTrackLookup(store *manifest.Store) func(context.Context, string) (api.OutputTrack, bool, error) {
+	return outputTrackLookupWith(store, nil)
+}
+
+// outputTrackLookupWith is outputTrackLookup with afterRead, when it is
+// set, run once the row is read: where a scan's commit would fall between
+// two reads of it.
+func outputTrackLookupWith(store *manifest.Store, afterRead func()) func(context.Context, string) (api.OutputTrack, bool, error) {
 	return func(ctx context.Context, path string) (api.OutputTrack, bool, error) {
-		t, err := store.GetTrack(ctx, path)
-		if err != nil || t == nil {
-			return api.OutputTrack{}, false, err
+		t, size, mtimeNS, err := store.GetTrackWithStat(ctx, path)
+		if afterRead != nil {
+			afterRead()
 		}
-		st, err := store.GetTrackStat(ctx, path)
-		if err != nil || st == nil {
+		if err != nil || t == nil {
 			return api.OutputTrack{}, false, err
 		}
 		return api.OutputTrack{
@@ -29,8 +36,8 @@ func outputTrackLookup(store *manifest.Store) func(context.Context, string) (api
 			BitsPerSample: t.BitsPerSample,
 			Channels:      t.Channels,
 			IsDSD:         t.IsDSD,
-			Size:          st.Size,
-			MTimeNS:       st.MTimeNS,
+			Size:          size,
+			MTimeNS:       mtimeNS,
 		}, true, nil
 	}
 }

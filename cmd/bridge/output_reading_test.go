@@ -220,6 +220,46 @@ func TestOutputTrackLookupReadsTheRowAndItsStat(t *testing.T) {
 	}
 }
 
+// TestOutputTrackLookupReadsOneVersionOfTheRow: the format and the size
+// and time the lookup returns are one version of the row. A scan that
+// commits a new version while the lookup runs (an ALAC file replaced by an
+// AAC one at the same path) must not pair the old codec with the new
+// file's size and time, which the file on disk then matches: a lossy file
+// judged as the lossless row it replaced.
+func TestOutputTrackLookupReadsOneVersionOfTheRow(t *testing.T) {
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rate, bits := 44100.0, 16
+	first := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	then := first.Add(time.Hour)
+	ctx := context.Background()
+	if err := store.UpsertTrack(ctx, &manifest.Track{Path: "Album/a.m4a", Size: 1000, ModTime: first, Codec: "ALAC", SampleRate: &rate, BitsPerSample: &bits}); err != nil {
+		t.Fatal(err)
+	}
+	var rescanned bool
+	lookup := outputTrackLookupWith(store, func() {
+		if rescanned {
+			return
+		}
+		rescanned = true
+		if err := store.UpsertTrack(ctx, &manifest.Track{Path: "Album/a.m4a", Size: 2000, ModTime: then, Codec: "AAC", SampleRate: &rate}); err != nil {
+			t.Error(err)
+		}
+	})
+	got, ok, err := lookup(ctx, "Album/a.m4a")
+	if err != nil || !ok || !rescanned {
+		t.Fatalf("ok %v err %v rescanned %v", ok, err, rescanned)
+	}
+	alac := got.Codec == "ALAC" && got.Size == 1000 && got.MTimeNS == first.UnixNano()
+	aac := got.Codec == "AAC" && got.Size == 2000 && got.MTimeNS == then.UnixNano()
+	if !alac && !aac {
+		t.Fatalf("a row of two versions: %s at size %d and mtime %d", got.Codec, got.Size, got.MTimeNS)
+	}
+}
+
 // TestLoopbackTrackLookupIsTheRoutesIndex: the id resolves through the
 // index the loopback route reads; a routed track, which the route does not
 // serve, is none.
