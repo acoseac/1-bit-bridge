@@ -388,6 +388,12 @@ func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 {
 		t.Errorf("the refused write left %v (%v), want the destination alone", entries, err)
 	}
+	// Where the kernel gives no mount IDs, the probe's mount table names the
+	// mounted file, and the probe refuses it there too.
+	*synced = nil
+	stubMountIDs(t, noMountIDs)
+	stubMountTable(t, []string{dst}, nil)
+	refusedPlainly(t, "ProbeDurable of a destination the mount table names", ProbeDurable(root, dst), synced)
 }
 
 // TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile pins the fallback
