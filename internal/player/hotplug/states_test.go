@@ -265,6 +265,86 @@ func TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn(t *testing.T) {
 	}
 }
 
+// TestAReadingThatOutlastsAHeldAnswersBoundIsPublished: a reading that
+// starts before a held answer's bound and ends after it is judged when it
+// ends: published, as it stands and at the time it read the box, neither
+// held again nor set aside for a removal queued behind it, and no other
+// reading starts at once (its next follow-up runs from its end). Until
+// round 3 the bound was judged at the reading's start, so that reading was
+// held or set aside, and the bound, already past, started another
+// reading, which may block as the first did (Codex on round 2). The other
+// deadline tests keep the clock still while a reading runs.
+func TestAReadingThatOutlastsAHeldAnswersBoundIsPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// queued puts a removal reaching card 1 behind the reading, which
+		// would set it aside short of the bound.
+		queued bool
+	}{
+		{"the hold", false},
+		{"a removal queued behind it", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			// The GO bar's sysfs half goes; /proc/asound still lists card 5.
+			h.apply("remove sys/class/sound/card5\nremove sys/bus/usb/devices/1-1\nremove sys/bus/usb/devices/1-1:1.0\nremove " + goBar + "\n")
+			storm := Uevent{Action: "change", DevPath: devpath(usb1) + "/1-4", Subsystem: "usb"}
+			t0 := h.clock.Now()
+			at := func(d time.Duration) { h.advance(t0.Add(d).Sub(h.clock.Now())) }
+			reads := uint64(1)
+			read := func(d time.Duration) {
+				at(d)
+				reads++
+				h.reconciles(reads)
+			}
+			// The window's reading at 0.3 s holds the answer; two events renew
+			// the follow-ups before they run out, so the follow-up at 3.3 s is
+			// held still, 0.5 s short of the bound.
+			h.send(storm)
+			read(quiet)
+			deadline := t0.Add(quiet).Add(maxDelay + DefaultFollowUps*followUp)
+			read(800 * time.Millisecond)
+			read(1300 * time.Millisecond)
+			at(1500 * time.Millisecond)
+			h.send(storm)
+			read(1800 * time.Millisecond)
+			read(2300 * time.Millisecond)
+			at(2500 * time.Millisecond)
+			h.send(storm)
+			read(2800 * time.Millisecond)
+			if st := h.svc.Status(); st.Stats.Publishes != 1 {
+				t.Fatalf("published before the bound: %+v", st.Stats)
+			}
+			// That follow-up parks, and the clock passes the bound while it reads.
+			p := h.parkNextReading()
+			started := t0.Add(3300 * time.Millisecond)
+			at(3300 * time.Millisecond)
+			p.wait(t)
+			if tc.queued {
+				h.queue(Uevent{Action: "remove", DevPath: "/devices/platform/axi/107c706400.hdmi/sound/card1", Subsystem: "sound"})
+			}
+			ended := deadline.Add(100 * time.Millisecond)
+			at(ended.Sub(t0))
+			p.release()
+			reads++
+			h.reconciles(reads)
+			s := h.state(binding.StateIdentityTransient, -1, 2)
+			if !s.Observed().Equal(started) {
+				t.Errorf("published from the reading at %v; want the one that outlasted the bound, at %v", s.Observed().Sub(t0), started.Sub(t0))
+			}
+			st := h.waitStatus("the watcher waiting again", func(s Status) bool {
+				return s.Stats.Reconciles >= reads && s.Next.After(h.clock.Now())
+			})
+			if st.Stats.Reconciles != reads || st.Stats.SetAside != 0 {
+				t.Errorf("another reading started, or this one was set aside: %+v", st.Stats)
+			}
+			if !tc.queued && !st.Next.Equal(ended.Add(followUp)) {
+				t.Errorf("the next follow-up is due at %v; want %v after the reading ended, at %v", st.Next.Sub(t0), followUp, ended.Add(followUp).Sub(t0))
+			}
+		})
+	}
+}
+
 // TestAnUnplugBesideAnUnrelatedTransientCardIsMissingAtOnce: the bound DAC
 // unplugged while another model's card is still in /proc alone is
 // device_missing in the first reading, not after the follow-ups: that card

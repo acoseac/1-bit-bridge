@@ -171,6 +171,28 @@ func TestThePeriodicReadingCatchesAChangeNoEventAnnounced(t *testing.T) {
 	h.state(binding.StateDeviceMissing, -1, 2)
 }
 
+// TestThePeriodicReadingIsDueAPeriodAfterTheLastReadingEnds: the periodic
+// reading comes a period after the last reading ended. Until round 3 the
+// period ran from the reading's start, so one that took longer than a
+// period, as a read stuck on a USB device's lock does, left the next due at
+// once, another reading that may block as it did.
+func TestThePeriodicReadingIsDueAPeriodAfterTheLastReadingEnds(t *testing.T) {
+	h := newHarness(t)
+	p := h.parkNextReading()
+	h.advance(periodic)
+	p.wait(t)
+	h.advance(periodic + time.Second)
+	ended := h.clock.Now()
+	p.release()
+	st := h.waitStatus("the reading taken and the watcher waiting", func(s Status) bool {
+		return s.Stats.Reconciles >= 2 && s.Next.After(h.clock.Now())
+	})
+	if st.Stats.Reconciles != 2 || !st.Next.Equal(ended.Add(periodic)) {
+		t.Errorf("after a reading that took %v: %+v, the next due %v after it ended; want no other reading yet and the next %v after",
+			periodic+time.Second, st.Stats, st.Next.Sub(ended), periodic)
+	}
+}
+
 // TestAnUnchangedInventoryLeavesTheGenerationAlone: events that change
 // nothing the snapshot holds (another device's, a keyboard's) are read,
 // and nothing is published.

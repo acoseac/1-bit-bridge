@@ -275,8 +275,20 @@ func (w *watch) onTimer(ctx context.Context) {
 // held back while a transient card may be the bound unit, until the
 // follow-ups run out or Timing.holdMax has passed since the first reading
 // that held it, which events renewing the follow-ups do not move.
+//
+// now is when the reading began, which stays its time (the snapshot's
+// Observed, the hold's start); what is due after it (the next follow-up,
+// a retry, the periodic reading) runs from when it ended, and a held
+// answer's bound is judged then (B470 PR 4a2 round 3: judged at its start,
+// a reading that outlasted the bound was held again, or set aside, and the
+// bound, past by then, started another reading at once, which may block as
+// the first did; so did a follow-up, a retry or a periodic reading due from
+// the start of one that took longer than its interval).
 func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	defer w.svc.update(func() { w.svc.stats.Reconciles++ })
+	// Every reading moves the periodic one on, the ones that return early
+	// included, so none leaves it due again at once; a reading that worked
+	// moves it again, from when it ended.
 	w.nextPeriodic = now.Add(w.timing.Periodic)
 	w.followAt = time.Time{}
 	w.lostLogged = false
@@ -297,7 +309,7 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 		err = fmt.Errorf("the reading was partial: %s", strings.Join(inv.Problems, "; "))
 	}
 	if err != nil {
-		w.fail(now, err)
+		w.fail(now, w.clock.Now(), err)
 		return
 	}
 	w.recovered()
@@ -311,7 +323,10 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	// re-enumerated at the next generation too). Once in a row, and never
 	// at a held answer's bound, so events that keep coming hold nothing
 	// back: the reading after is published with the removals in it.
-	if w.takeQueued() && !w.setAside && !w.holdDue(now) {
+	queued := w.takeQueued()
+	done := w.clock.Now()
+	w.nextPeriodic = done.Add(w.timing.Periodic)
+	if queued && !w.setAside && !w.holdDue(done) {
 		w.setAside = true
 		w.svc.update(func() { w.svc.stats.SetAside++ })
 		return
@@ -331,12 +346,12 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	}
 	if len(transient) > 0 && w.followLeft > 0 {
 		w.followLeft--
-		w.followAt = now.Add(w.timing.FollowUpEvery)
+		w.followAt = done.Add(w.timing.FollowUpEvery)
 		if !settled {
 			if w.heldSince.IsZero() {
 				w.heldSince = now
 			}
-			if now.Before(w.heldSince.Add(w.timing.holdMax())) {
+			if !w.holdDue(done) {
 				return
 			}
 		}
@@ -352,13 +367,14 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	w.dirs = append(w.dirs, w.svc.feed.lastDirs()...)
 }
 
-// fail is a reading that failed: counted, the run of failures logged once,
-// the last snapshot marked stale, and the next attempt due after a backoff
-// that doubles with each failure in a row.
-func (w *watch) fail(now time.Time, err error) {
+// fail is a reading that failed, begun at now and ended at done: counted,
+// the run of failures logged once, the last snapshot marked stale, and the
+// next attempt due a backoff after it ended, doubling with each failure in
+// a row.
+func (w *watch) fail(now, done time.Time, err error) {
 	w.failures++
 	backoff := w.timing.backoff(w.failures)
-	w.retryAt = now.Add(backoff)
+	w.retryAt = done.Add(backoff)
 	w.pending = &trigger{why: "retry", renew: true, at: w.retryAt}
 	var streak Failure
 	first := false

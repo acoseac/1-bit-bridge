@@ -267,6 +267,46 @@ func TestAReadErrorKeepsTheLastSnapshotStale(t *testing.T) {
 	}
 }
 
+// TestARetryIsDueItsBackoffAfterAFailedReadingEnds: a failed reading that
+// took a while is retried its backoff after it ended, not after it began.
+// Until round 3 the backoff ran from its start, so a reading that blocked
+// for longer than the backoff, as a read stuck on a USB device's lock does,
+// was followed at once by another, which may block as it did.
+func TestARetryIsDueItsBackoffAfterAFailedReadingEnds(t *testing.T) {
+	h := newHarness(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.setObserve(func(ctx context.Context, read func(context.Context) (binding.Inventory, error)) (binding.Inventory, error) {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return read(ctx)
+		}
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return binding.Inventory{}, errors.New("read /proc/asound/cards: input/output error")
+	})
+	h.advance(periodic)
+	select {
+	case <-entered:
+	case <-time.After(watchdog):
+		t.Fatal("the periodic reading never began")
+	}
+	h.advance(5 * DefaultBackoffMin)
+	ended := h.clock.Now()
+	close(release)
+	st := h.waitStatus("the failed reading taken and the watcher waiting", func(s Status) bool {
+		return s.Stats.Reconciles >= 2 && s.Next.After(h.clock.Now())
+	})
+	if st.Stats.Reconciles != 2 || st.Stats.Failures != 1 || !st.Next.Equal(ended.Add(DefaultBackoffMin)) {
+		t.Errorf("after a failed reading that took %v: %+v, the retry due %v after it ended; want no other reading yet and the retry %v after",
+			5*DefaultBackoffMin, st.Stats, st.Next.Sub(ended), DefaultBackoffMin)
+	}
+}
+
 // TestAPartialReadingIsAFailure: a sysfs reading a cap cut, or one whose
 // root could not be opened, says it is partial, and the watcher takes it
 // for a failed reading: never for a box whose cards went.
