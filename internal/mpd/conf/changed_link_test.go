@@ -11,6 +11,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TestChangedIsNotSetBackWithTheModificationTime: anyone who can write the
+// file can set its modification time back (touch -d, cp -p), and the
+// inode's change time moves with every such change and never back, so
+// Changed is the later of the two.
+func TestChangedIsNotSetBackWithTheModificationTime(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "mpd.conf"), "music_directory \"/m\"\n")
+	before := time.Now().Add(-time.Second)
+	earlier := before.Add(-24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "mpd.conf"), earlier, earlier); err != nil {
+		t.Fatal(err)
+	}
+	f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Changed(); got.Before(before) {
+		t.Fatalf("changed %s: the modification time set back to %s was taken for the change", got, earlier)
+	}
+}
+
 // TestChangedCountsTheLinkAFileIsNamedBy: a link that names mpd.conf or an
 // include is part of what the read depends on, since re-pointing it hands
 // the read another file whose own times are old. Its own change counts.
