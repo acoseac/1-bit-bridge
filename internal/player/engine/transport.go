@@ -24,6 +24,9 @@ const (
 	sessReleasing
 	// sessUnconfirmed passed its release deadline unacknowledged.
 	sessUnconfirmed
+	// sessAcked has had its release acknowledged: finished, so a deadline
+	// or an acknowledgement still on its way to the owner changes nothing.
+	sessAcked
 )
 
 // stage is how far an occurrence has got.
@@ -398,10 +401,12 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 
 // releaseDeadline is s's release past ReleaseTimeout: unconfirmed, the
 // pending intent dropped, and nothing opens the device until the
-// acknowledgement comes.
+// acknowledgement comes. A deadline that reaches the owner after the
+// acknowledgement, its timer having fired first, finds s finished and does
+// nothing.
 func (e *Engine) releaseDeadline(s *session) {
 	o := &e.o
-	if s.phase != sessReleasing {
+	if s.phase != sessReleasing || o.sessions[s.id] != s {
 		return
 	}
 	s.phase = sessUnconfirmed
@@ -427,11 +432,12 @@ func (e *Engine) releaseDeadline(s *session) {
 }
 
 // acked is s's release acknowledged: by Release returning nil, or by
-// Events.Released.
+// Events.Released. s is finished from then on (sessAcked).
 func (e *Engine) acked(s *session) {
 	o := &e.o
 	switch s.phase {
 	case sessReleasing:
+		s.phase = sessAcked
 		s.stopTimers()
 		delete(o.sessions, s.id)
 		if o.sess == s {
@@ -449,6 +455,7 @@ func (e *Engine) acked(s *session) {
 		}
 		e.afterRelease()
 	case sessUnconfirmed:
+		s.phase = sessAcked
 		s.stopTimers()
 		delete(o.sessions, s.id)
 		if u := o.unconfirmed; u != nil && u.Session == s.id {

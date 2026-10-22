@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestNoOpenOverlapsAnUnacknowledgedRelease pins the first term of the
@@ -136,6 +137,94 @@ func TestALateEventFromAnOldSessionIsDiscarded(t *testing.T) {
 	})
 	if sn.Selected() != ids[2] || sn.State() != Playing || len(sn.Faults()) != 0 || sn.Position().Frames != 600 {
 		t.Fatalf("an old session's events took effect: %s at %d, faults %v, position %+v", sn.State(), sn.Selected(), sn.Faults(), sn.Position())
+	}
+}
+
+// TestADeadlineQueuedBehindItsAcknowledgementChangesNothing pins an
+// acknowledged release as finished: a release deadline whose timer fired
+// while the owner was busy, and so reached it behind the acknowledgement
+// (stopping a timer cannot take back a message it has sent), marks no
+// release unconfirmed and leaves the transport alone: a Stop's stopped
+// transport plays again, and a Next's new session plays on.
+func TestADeadlineQueuedBehindItsAcknowledgementChangesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		run   func(h *harness) error
+		state State
+	}{
+		{"stop", func(h *harness) error { return h.eng.Stop(bg) }, Stopped},
+		{"next", func(h *harness) error { return h.eng.Next(bg) }, Playing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			hold := make(chan chan struct{}, 1)
+			holding := make(chan struct{}, 1)
+			h.tweak = func(c *Config) {
+				c.seams.admitted = func(cmd *command) {
+					if cmd.op != opOutput {
+						return
+					}
+					select {
+					case g := <-hold:
+						holding <- struct{}{}
+						<-g
+					default:
+					}
+				}
+			}
+			h.boot()
+			ids, s := h.playing(0, "a", "b")
+			never := newGate()
+			h.be.script(func() {
+				h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
+					if fs.id != s.id {
+						<-fs.startDone
+						fs.ack()
+						return nil
+					}
+					_ = never.wait(ctx, h.be, false)
+					return context.Canceled
+				}
+			})
+			done := async(func() error { return tc.run(h) })
+			h.be.waitFor("the release", func() bool { return s.releaseAsked })
+			// The owner is held in a report's admission while the
+			// acknowledgement and then the deadline queue up behind it.
+			owner := make(chan struct{})
+			hold <- owner
+			h.outGen++
+			report := async(func() error {
+				return h.eng.ReportOutput(bg, OutputReport{Generation: h.outGen, Available: true})
+			})
+			select {
+			case <-holding:
+			case <-time.After(*watchdog):
+				t.Fatalf("waited %v for the owner to take the report", *watchdog)
+			}
+			mark := h.appliedMark()
+			s.ack()
+			s.ev.Released(s.id)
+			h.clk.Advance(ReleaseTimeout)
+			close(owner)
+			h.must("report", h.result("report", report))
+			h.must(tc.name, h.result(tc.name, done))
+			h.waitApplied("handled release deadline", mark)
+			sn := h.snap()
+			if info, ok := sn.ReleaseUnconfirmed(); ok || sn.State() != tc.state {
+				t.Fatalf("a deadline behind its acknowledgement: %s, want %s; unconfirmed %+v %v", sn.State(), tc.state, info, ok)
+			}
+			if tc.state == Playing {
+				if s2 := h.be.nth(2); s2.first.Entry != ids[1] || sn.Selected() != ids[1] {
+					t.Fatalf("the next session started %d, selected %d", s2.first.Entry, sn.Selected())
+				}
+			} else {
+				h.must("play after the acknowledged release", h.eng.Play(bg))
+				if h.be.starts() != 2 {
+					t.Fatalf("%d sessions, want the second started", h.be.starts())
+				}
+			}
+			never.open()
+		})
 	}
 }
 
