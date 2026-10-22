@@ -113,8 +113,9 @@ func describe(s Snapshot) string {
 
 // TestEachStateChangeIsLoggedOnceWithoutASerial: every change of the
 // binding's state is one INFO line naming the binding by its label, the
-// card and the unit by 4a's description; nothing the watcher logs carries
-// a serial.
+// card and the unit by 4a's description, and every other generation (a
+// second DAC plugged in) one INFO line listing the cards by their models;
+// nothing the watcher logs carries a serial.
 func TestEachStateChangeIsLoggedOnceWithoutASerial(t *testing.T) {
 	h := newHarness(t)
 	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
@@ -133,6 +134,10 @@ func TestEachStateChangeIsLoggedOnceWithoutASerial(t *testing.T) {
 	}
 	if !strings.Contains(logs, "serial 20b1:3009 (…4471)") || !strings.Contains(logs, "level=INFO") {
 		t.Errorf("the binding's label is not in the lines:\n%s", logs)
+	}
+	if n := countLines(logs, `level=INFO msg="player hotplug: the inventory changed" generation=4`); n != 1 ||
+		!strings.Contains(logs, "5 usb 20b1:3009, 6 usb 20b1:3009") {
+		t.Errorf("the second DAC's generation is not one INFO line listing the cards:\n%s", logs)
 	}
 	for _, serial := range []string{goBarSerial, "OTHER-UNIT-SERIAL-0099"} {
 		for i := 0; i+6 <= len(serial); i++ {

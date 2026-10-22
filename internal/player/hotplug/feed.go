@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -330,10 +332,12 @@ func cardDirs(cards []Card) []string {
 	return out
 }
 
-// logChange writes one line for a new generation: INFO when the binding's
-// state changed or its unit did (another unit, the same one re-enumerated),
-// DEBUG for the rest of the inventory. It names the binding by its label and
-// the unit by 4a's description, never by a serial.
+// logChange writes one INFO line for a new generation: "player DAC: …" when
+// the binding's state changed or its unit did (another unit, the same one
+// re-enumerated), "player hotplug: the inventory changed" for the rest,
+// another DAC that came or went, so an operator sees each generation. It
+// names the binding by its label, the unit by 4a's description and the
+// cards by their models, never by a serial.
 func logChange(log *slog.Logger, prev, next *snapshot) {
 	r := next.resolution
 	attrs := []any{"generation", next.generation, "binding", bindingLabel(next.device)}
@@ -357,8 +361,22 @@ func logChange(log *slog.Logger, prev, next *snapshot) {
 	case c.ReEnumerated:
 		log.Info("player DAC: the bound unit re-enumerated", attrs...)
 	default:
-		log.Debug("player hotplug: the inventory changed", attrs...)
+		log.Info("player hotplug: the inventory changed", append(attrs, "state", string(r.State), "cards", cardsLabel(next.cards))...)
 	}
+}
+
+// cardsLabel lists cards for a log line: each index, its state, and a USB
+// card's model ("5 usb 20b1:3009"), never a serial.
+func cardsLabel(cards []Card) string {
+	parts := make([]string, 0, len(cards))
+	for _, c := range cards {
+		p := strconv.Itoa(c.Index) + " " + string(c.State)
+		if c.USB != nil {
+			p += " " + c.USB.ID.String()
+		}
+		parts = append(parts, p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // bindingLabel names a binding for a person: its kind and model, its
