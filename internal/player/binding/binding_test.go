@@ -543,21 +543,28 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 
 	// A sysfs reading that cannot list the cards, while card 5's own lookup
 	// still reads: refused on the listing itself, which a lookup of the
-	// opened card apart from the listing would never see.
+	// opened card apart from the listing would never see, even where card 5
+	// is on the recorded interface and no other card would matter. So is a
+	// /proc/asound that cannot be read.
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(goBar, 5, "1234:0c20", ""))
 	failed := readingAs{SysfsReader: sys, edit: func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 		return alsa.SysfsSnapshot{Root: s.Root, Problems: []string{"class/sound: permission denied"}}
 	}}
-	if id, ok := failed.Card(5); !ok || id.USB == nil {
+	if id, ok := failed.Card(5); !ok || id.USB == nil || id.USB.Port != goBarPort {
 		t.Fatalf("premise: card 5's own lookup does not read: %+v, %v", id, ok)
 	}
-	if err := (Checker{Proc: proc, Sysfs: failed, Want: place}).Check(node); !errors.Is(err, ErrWrongDevice) ||
-		!strings.Contains(err.Error(), "sysfs could not be read") || !strings.Contains(err.Error(), "permission denied") {
-		t.Errorf("a sysfs that cannot list its cards: %v", err)
-	}
-	// A /proc/asound that cannot be read.
-	if err := (Checker{Proc: alsa.Reader{ProcRoot: t.TempDir()}, Sysfs: sys, Want: place}).Check(node); !errors.Is(err, ErrWrongDevice) ||
-		!strings.Contains(err.Error(), "/proc/asound's cards could not be read") {
-		t.Errorf("a /proc/asound that cannot be read: %v", err)
+	for name, r := range map[string]Resolution{"no interface recorded": place, "the interface recorded": older} {
+		if err := check(r); err != nil {
+			t.Fatalf("%s, premise: the whole reading passes: %v", name, err)
+		}
+		if err := (Checker{Proc: proc, Sysfs: failed, Want: r}).Check(node); !errors.Is(err, ErrWrongDevice) ||
+			!strings.Contains(err.Error(), "sysfs could not be read") || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s, a sysfs that cannot list its cards: %v", name, err)
+		}
+		if err := (Checker{Proc: alsa.Reader{ProcRoot: t.TempDir()}, Sysfs: sys, Want: r}).Check(node); !errors.Is(err, ErrWrongDevice) ||
+			!strings.Contains(err.Error(), "/proc/asound's cards could not be read") {
+			t.Errorf("%s, a /proc/asound that cannot be read: %v", name, err)
+		}
 	}
 
 	// A listing cut at the cap that keeps card 5 and cuts its sibling, card
