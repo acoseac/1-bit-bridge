@@ -355,7 +355,11 @@ func dacVerify(sysfs alsa.SysfsReader, r binding.Resolution, n int, bound bool) 
 		return v
 	}
 	v.Passes = true
-	v.Says = fmt.Sprintf("passes: card %d is the bound unit, %s", n, binding.Describe(r.Identity))
+	is := "the bound unit"
+	if r.Binding == config.BindingPort {
+		is = "at the bound port"
+	}
+	v.Says = fmt.Sprintf("passes: card %d is %s, %s", n, is, binding.Describe(r.Identity))
 	return v
 }
 
@@ -585,7 +589,15 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		return 1
 	}
 	r := binding.Resolve(dev, inv)
-	fmt.Fprintf(stdout, "bound card %d by %s: %s, %s\n", card, *kind, binding.Describe(r.Identity), r.Endpoint)
+	if dev.Binding == config.BindingPort {
+		fmt.Fprintf(stdout, "bound card %d by port %s, whatever unit is in it: now %s, %s\n", card, dev.Port, binding.Describe(r.Identity), r.Endpoint)
+		if r.Port.HasInterface() {
+			fmt.Fprintf(stdout, "the unit in that port carries more than one card, so the binding records this card's configuration and interface, %d.%d, which choose it among them\n",
+				r.Port.Config, r.Port.Interface)
+		}
+	} else {
+		fmt.Fprintf(stdout, "bound card %d by %s: %s, %s\n", card, *kind, binding.Describe(r.Identity), r.Endpoint)
+	}
 	if dev.Serial.Present() {
 		fmt.Fprintf(stdout, "wrote output.player.device to %s (0600); the serial is in that file and nowhere else\n", cfgPath)
 	} else {

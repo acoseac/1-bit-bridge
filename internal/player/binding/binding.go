@@ -224,20 +224,35 @@ type Resolution struct {
 	// StateEndpointMissing, and -1 otherwise.
 	Card int
 	// Identity is that card's identity as Resolve read it: what the check
-	// after open compares the opened node's card with.
+	// after open compares the opened node's card with, as one unit or,
+	// under a port binding, as one port.
 	Identity alsa.USBIdentity
 	// Endpoint is the bound playback endpoint.
 	Endpoint Endpoint
 	// Matches are the cards an ambiguous binding names.
 	Matches []int
+	// Binding is the binding's kind (config.BindingSerial,
+	// BindingUniqueModel or BindingPort), and Port a port binding's port as
+	// it reads (usbid.Port: the place, and the configuration and interface
+	// it records, if any): what the check after open judges by.
+	Binding string
+	Port    usbid.Port
 }
 
 // Resolve resolves dev on inv: the card it names now, or the state that
 // says why there is none. It decides nothing it cannot read: a transient
 // card makes the whole answer identity_transient, and a card whose identity
-// cannot be read is never ruled out as a second unit.
+// cannot be read is never ruled out as a second unit, or as a second card
+// of the unit in a bound port.
+//
+// A port binding names a port and not a unit (usbid.Port): its card is the
+// one the unit in that port carries, whatever model it is and whichever
+// interface the card sits on. A unit can carry more than one card (a
+// composite device): then the configuration and interface the binding
+// records choose the card on them, and with none recorded, or none on
+// them, the answer is device_ambiguous, never the first.
 func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
-	r := Resolution{Card: -1, Endpoint: Endpoint{Device: dev.PCMDevice, Subdevice: dev.Subdevice}}
+	r := Resolution{Card: -1, Endpoint: Endpoint{Device: dev.PCMDevice, Subdevice: dev.Subdevice}, Binding: dev.Binding}
 	fail := func(s State, format string, args ...any) Resolution {
 		r.State, r.Reason = s, fmt.Sprintf(format, args...)
 		return r
@@ -269,12 +284,13 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 			match = func(u *alsa.USBIdentity) bool { return u.ID == id && u.Serial.Equal(dev.Serial) }
 		}
 	case config.BindingPort:
-		p, _ := usbid.ParsePort(dev.Port)
-		if !contains(inv.Controllers, p.Anchor()) {
-			return fail(StateBindingInvalid, "the controller the port binding names, %s, is not on the box: a topology change, so rebind (bridge output dac bind)", p.Anchor())
+		r.Port, _ = usbid.ParsePort(dev.Port)
+		if !contains(inv.Controllers, r.Port.Anchor()) {
+			return fail(StateBindingInvalid, "the controller the port binding names, %s, is not on the box: a topology change, so rebind (bridge output dac bind)", r.Port.Anchor())
 		}
-		what = "at " + dev.Port
-		match = func(u *alsa.USBIdentity) bool { return u.Port == dev.Port }
+		place := r.Port.Place().String()
+		what = "at " + place
+		match = func(u *alsa.USBIdentity) bool { return placeOf(u.Port) == place }
 	}
 	var unreadable []int
 	for _, c := range inv.Cards {
@@ -285,7 +301,25 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 			r.Matches = append(r.Matches, c.Index)
 		}
 	}
+	// The cards at a port are one unit's, and the card on the configuration
+	// and interface the binding records is the one card there it can name,
+	// whatever else the unit carries or an unreadable card may be.
+	byInterface := false
+	if dev.Binding == config.BindingPort {
+		if n, ok := inv.onInterface(r.Matches, r.Port); ok {
+			r.Matches, byInterface = []int{n}, true
+		}
+	}
 	switch {
+	case len(r.Matches) > 1 && dev.Binding == config.BindingPort:
+		why := "the binding records no interface"
+		if r.Port.HasInterface() {
+			why = fmt.Sprintf("neither is on the interface the binding records (configuration %d, interface %d)", r.Port.Config, r.Port.Interface)
+		}
+		return fail(StateDeviceAmbiguous, "cards %s are each %s, cards of the one unit in that port, and %s: neither is chosen", joinInts(r.Matches), what, why)
+	case len(r.Matches) == 1 && len(unreadable) > 0 && dev.Binding == config.BindingPort && !byInterface:
+		return fail(StateDeviceAmbiguous, "card %d is %s, and the identity of card %s could not be read, so it may be another card of the unit in that port: neither is chosen",
+			r.Matches[0], what, joinInts(unreadable))
 	case len(r.Matches) > 1:
 		return fail(StateDeviceAmbiguous, "cards %s are each %s: neither is chosen", joinInts(r.Matches), what)
 	case len(r.Matches) == 1 && len(unreadable) > 0 && dev.Binding != config.BindingPort:
@@ -320,19 +354,57 @@ func (r Resolution) found(c Card, what string) Resolution {
 	return r
 }
 
-// deviceAt is the USB device at a port path's anchor, generation and chain.
+// deviceAt is the USB device at a port path's place: its anchor,
+// generation and chain.
 func (inv Inventory) deviceAt(port string) (alsa.USBDevice, bool) {
-	p, err := usbid.ParsePort(port)
-	if err != nil {
+	place := placeOf(port)
+	if place == "" {
 		return alsa.USBDevice{}, false
 	}
-	place := p.Anchor() + "/usb" + strconv.Itoa(p.Gen) + "-" + p.ChainString()
 	for _, d := range inv.Devices {
 		if d.Port() == place {
 			return d, true
 		}
 	}
 	return alsa.USBDevice{}, false
+}
+
+// placeOf is the port of a port path, the place a port binding names
+// (usbid.Port.Place), or "" for a path that does not read: the empty path
+// of a card whose port this box cannot anchor among them.
+func placeOf(port string) string {
+	p, err := usbid.ParsePort(port)
+	if err != nil {
+		return ""
+	}
+	return p.Place().String()
+}
+
+// cardsAt is the USB cards at place, a port binding's port: the cards of
+// the unit in it.
+func (inv Inventory) cardsAt(place string) []int {
+	var at []int
+	for _, c := range inv.Cards {
+		if c.State == CardUSB && placeOf(c.USB.Port) == place {
+			at = append(at, c.Index)
+		}
+	}
+	return at
+}
+
+// onInterface is the card among cards that sits on the configuration and
+// interface p records, when p records them: the card a port binding's
+// preference names on a unit that carries more than one.
+func (inv Inventory) onInterface(cards []int, p usbid.Port) (int, bool) {
+	if !p.HasInterface() {
+		return 0, false
+	}
+	for _, n := range cards {
+		if c, ok := inv.Card(n); ok && c.USB != nil && c.USB.Port == p.String() {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 func contains(list []string, s string) bool {
@@ -386,37 +458,81 @@ type Checker struct {
 
 // Check takes what the kernel says the opened node is (alsapcm.Device.Node,
 // INFO on the open descriptor), reads that card's identity from sysfs
-// again, and requires it to be the identity Resolve read, on the bound
-// endpoint, playing. Anything else wraps ErrWrongDevice and says why: a
-// renumber or a swap between the resolve and the open, the card gone, or
-// another stream. It never quotes a serial.
+// again, and requires it to be what the binding resolved to, on the bound
+// endpoint, playing: the unit Resolve read under a serial or uniqueModel
+// binding, and under a port binding the card the binding chooses at the
+// bound port now, whatever unit is in it (checkPort). Anything else wraps
+// ErrWrongDevice and says why: a renumber or a swap between the resolve and
+// the open, the card gone, or another stream. It never quotes a serial.
 func (c Checker) Check(n alsapcm.NodeInfo) error {
-	refuse := func(format string, args ...any) error {
-		return fmt.Errorf("%w: %s", ErrWrongDevice, fmt.Sprintf(format, args...))
-	}
 	w := c.Want
 	if w.State != StateAvailable {
-		return refuse("the binding resolved to no card (%s)", w.State)
+		return wrongDevice("the binding resolved to no card (%s)", w.State)
 	}
 	if !n.Playback {
-		return refuse("the node of card %d device %d is not a playback stream", n.Card, n.Device)
+		return wrongDevice("the node of card %d device %d is not a playback stream", n.Card, n.Device)
 	}
 	if got := (Endpoint{Device: n.Device, Subdevice: n.Subdevice}); got != w.Endpoint {
-		return refuse("the kernel opened %s of card %d, and the binding names %s", got, n.Card, w.Endpoint)
+		return wrongDevice("the kernel opened %s of card %d, and the binding names %s", got, n.Card, w.Endpoint)
 	}
 	id, ok := c.Sysfs.Card(n.Card)
 	switch {
 	case !ok:
-		return refuse("card %d is not in sysfs now: it went away (unplugged or renumbered) between the resolve and the open", n.Card)
+		return wrongDevice("card %d is not in sysfs now: it went away (unplugged or renumbered) between the resolve and the open", n.Card)
 	case id.Kind != alsa.IdentityUSB || id.USB == nil:
-		return refuse("card %d is not a USB unit whose identity can be read now", n.Card)
+		return wrongDevice("card %d is not a USB unit whose identity can be read now", n.Card)
+	case w.Binding == config.BindingPort:
+		return c.checkPort(n, *id.USB)
 	case !SameUnit(*id.USB, w.Identity):
-		return refuse("card %d is %s, not the bound unit %s: renumbered or swapped between the resolve and the open",
+		return wrongDevice("card %d is %s, not the bound unit %s: renumbered or swapped between the resolve and the open",
 			n.Card, Describe(*id.USB), Describe(w.Identity))
 	case n.Card != w.Card:
-		return refuse("card %d is the bound unit, and the binding resolved to card %d: resolve again", n.Card, w.Card)
+		return wrongDevice("card %d is the bound unit, and the binding resolved to card %d: resolve again", n.Card, w.Card)
 	}
 	return nil
+}
+
+// checkPort is Check under a port binding, which names a port and not a
+// unit: the opened card must be at the bound port, and be the card the
+// binding chooses there now, which on a unit swapped into the port between
+// the resolve and the open it may be. A card on the configuration and
+// interface the binding records is that card whatever else the unit
+// carries; any other card is only while it is the one card the unit
+// carries, which sysfs is read again for. Like Check under the other
+// bindings, it judges by the cards it can read: an unreadable or a
+// transient card is Resolve's to fail closed on.
+func (c Checker) checkPort(n alsapcm.NodeInfo, u alsa.USBIdentity) error {
+	w := c.Want
+	place := w.Port.Place().String()
+	if !SamePort(u, w.Identity) {
+		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(u), place)
+	}
+	if !w.Port.HasInterface() || u.Port != w.Port.String() {
+		var at []int
+		for _, id := range c.Sysfs.Read().Cards {
+			if id.Kind == alsa.IdentityUSB && id.USB != nil && placeOf(id.USB.Port) == place {
+				at = append(at, id.Card)
+			}
+		}
+		switch {
+		case len(at) > 1 && w.Port.HasInterface():
+			return wrongDevice("the unit at the bound port %s carries cards %s, and card %d is not on the interface the binding records (configuration %d, interface %d): resolve again",
+				place, joinInts(at), n.Card, w.Port.Config, w.Port.Interface)
+		case len(at) > 1:
+			return wrongDevice("the unit at the bound port %s carries cards %s, and the binding records no interface to choose one: resolve again", place, joinInts(at))
+		case len(at) == 0 || at[0] != n.Card:
+			return wrongDevice("card %d is not at the bound port %s now: resolve again", n.Card, place)
+		}
+	}
+	if n.Card != w.Card {
+		return wrongDevice("card %d is at the bound port, and the binding resolved to card %d: resolve again", n.Card, w.Card)
+	}
+	return nil
+}
+
+// wrongDevice is a refusal of the check after open, saying why.
+func wrongDevice(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrWrongDevice, fmt.Sprintf(format, args...))
 }
 
 // SameUnit reports whether a and b are one unit in one place: the same ids,
@@ -424,6 +540,16 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 func SameUnit(a, b alsa.USBIdentity) bool {
 	sameSerial := a.Serial.Equal(b.Serial) || (!a.Serial.Present() && !b.Serial.Present())
 	return a.ID == b.ID && sameSerial && a.Port == b.Port && a.Interface == b.Interface
+}
+
+// SamePort reports whether a and b are cards at one port: the same
+// controller anchor, generation and port chain, whatever units they are and
+// whichever interfaces they sit on. It is SameUnit's counterpart under a
+// port binding, which names a port and not a unit. A card whose port this
+// box's topology cannot anchor is at no port.
+func SamePort(a, b alsa.USBIdentity) bool {
+	place := placeOf(a.Port)
+	return place != "" && place == placeOf(b.Port)
 }
 
 // Describe names a unit for a person: its ids, its serial's label and its
@@ -438,9 +564,12 @@ func Describe(u alsa.USBIdentity) string {
 
 // For builds the binding of kind for card n's unit, on endpoint ep, as
 // bridge output dac bind writes it: each kind with its own fields only, the
-// serial straight from sysfs. It refuses a card that cannot be bound (not
-// there, transient, not USB, unreadable, no such endpoint) and a binding
-// that would not resolve to that card now, an ambiguous one above all.
+// serial straight from sysfs, and a port binding's port alone, or, when the
+// unit in that port carries more than one card, the card's port path, whose
+// configuration and interface choose it among them. It refuses a card that
+// cannot be bound (not there, transient, not USB, unreadable, no such
+// endpoint) and a binding that would not resolve to that card now, an
+// ambiguous one above all.
 func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, error) {
 	c, ok := inv.Card(n)
 	if !ok {
@@ -468,7 +597,10 @@ func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, e
 		if u.Port == "" {
 			return config.PlayerDevice{}, fmt.Errorf("card %d has no anchored port (%s): bind by serial or uniqueModel", n, u.PortProblem)
 		}
-		dev.Port = u.Port
+		dev.Port = placeOf(u.Port)
+		if len(inv.cardsAt(dev.Port)) > 1 {
+			dev.Port = u.Port
+		}
 	default:
 		return config.PlayerDevice{}, errors.New("that binding kind is not serial, uniqueModel or port")
 	}
@@ -476,7 +608,7 @@ func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, e
 	switch {
 	case r.State == StateAvailable && r.Card == n:
 		return dev, nil
-	case r.State == StateDeviceAmbiguous:
+	case r.State == StateDeviceAmbiguous && kind != config.BindingPort:
 		return config.PlayerDevice{}, fmt.Errorf("binding card %d by %s would be %s now: %s; bind by port, or by serial where the units have their own", n, kind, r.State, r.Reason)
 	default:
 		return config.PlayerDevice{}, fmt.Errorf("binding card %d by %s would be %s now: %s", n, kind, r.State, r.Reason)

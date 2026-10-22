@@ -104,6 +104,34 @@ func TestThePlayerIsOffByDefault(t *testing.T) {
 	}
 }
 
+// TestAPortBindingLoadsInEitherForm: a port binding loads as bind writes it,
+// the port alone, and as B470 PR 4a's bind wrote it, the bound card's
+// configuration and interface after the port; each is no refusal, the
+// player runs on it, and a save keeps its text.
+func TestAPortBindingLoadsInEitherForm(t *testing.T) {
+	for _, port := range []string{"platform-xhci-hcd.1/usb2-2", "platform-xhci-hcd.1/usb2-2:1.0"} {
+		path := writePlayerConfig(t, "  player:\n    enabled: true\n    device:\n      binding: port\n      port: "+port+"\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", port, err)
+		}
+		d := cfg.Output.Player.Device
+		if d.Binding != BindingPort || d.Port != port || d.Problem() != nil {
+			t.Errorf("%s: loaded %+v, problem %v", port, d, d.Problem())
+		}
+		if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
+			t.Errorf("%s: PlayerEnabled = %v, %v", port, on, why)
+		}
+		if err := cfg.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		again, err := Load(path)
+		if err != nil || again.Output.Player.Device.Port != port || again.Output.Player.Device.Problem() != nil {
+			t.Errorf("%s: after a save: %+v, %v", port, again.Output.Player.Device, err)
+		}
+	}
+}
+
 // TestThePlayerBlockLoadsAndRoundTrips: every field reads, the ids come
 // back canonical, the serial is kept, and a Save writes the file 0600 with
 // the serial whole, which loads back the same.
@@ -485,6 +513,13 @@ func TestEveryPlayerRefusal(t *testing.T) {
 		}, "a port binding names a port, not a model"},
 		{"port with no port", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort} }, "device.port"},
 		{"port unanchored", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort, Port: "1-1.3:1.0"} }, "device.port"},
+		{"the port alone", func(p *PlayerConfig) {
+			p.Device = PlayerDevice{Transport: "usb", Binding: BindingPort, Port: "platform-xhci-hcd.0/usb2-1"}
+		}, ""},
+		{"port unanchored alone", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort, Port: "1-1.3"} }, "device.port"},
+		{"port with half an interface", func(p *PlayerConfig) {
+			p.Device = PlayerDevice{Binding: BindingPort, Port: "platform-xhci-hcd.0/usb2-1:1"}
+		}, "device.port"},
 		{"vendor upper", func(p *PlayerConfig) { p.Device.VendorID = "20B1" }, ""},
 		{"vendor 0x", func(p *PlayerConfig) { p.Device.VendorID = "0x20b1" }, ""},
 		{"vendor three digits", func(p *PlayerConfig) { p.Device.VendorID = "2b1" }, "device.vendorId"},

@@ -45,12 +45,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// The Pi 5 tree's places (pi5-go-bar).
+// The Pi 5 tree's places (pi5-go-bar). goBarPlace is the GO bar's port,
+// which a port binding names, and goBarPort its card's port path, the form
+// B470 PR 4a's bind wrote.
 const (
 	usb1        = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1"
 	goBar       = usb1 + "/1-1"
 	goBarSerial = "GOBAR-7Q2X-91KZ-4471"
-	goBarPort   = "platform-xhci-hcd.0/usb2-1:1.0"
+	goBarPlace  = "platform-xhci-hcd.0/usb2-1"
+	goBarPort   = goBarPlace + ":1.0"
+	// usb3 is the USB 2 root hub of the tree's second controller,
+	// xhci-hcd.1, and gatePort its port 2, where the hardware gate bound
+	// the GO bar by port.
+	usb3     = "sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3"
+	gatePort = usb3 + "/3-2"
 )
 
 // pi5 lays out pi5-go-bar: the GO bar is card 5 on root port 1.
@@ -61,15 +69,32 @@ func pi5(t *testing.T) string {
 
 // plug is the manifest of a unit at dir (a USB device directory under
 // usb1) whose interface 0 is sound card n.
-func plug(dir string, n int, vidpid, serial string) string {
+func plug(dir string, n int, vidpid, serial string) string { return plugOn(dir, 0, n, vidpid, serial) }
+
+// plugOn is plug with the card on interface iface, as a model whose audio
+// control interface comes after a HID or DFU one has it (the Hugo 2's is
+// interface 1).
+func plugOn(dir string, iface, n int, vidpid, serial string) string {
 	vid, pid, _ := strings.Cut(vidpid, ":")
 	s := ""
 	if serial != "" {
 		s = " serial=" + serial
 	}
 	base := filepath.Base(dir)
-	return fmt.Sprintf("usbdev %s vendor=%s product=%s%s\nusbcard %d %s/%s:1.0\nproccard %d DAC%d \"Synthetic DAC\" usb=%s pcm=0.0\n",
-		dir, vid, pid, s, n, dir, base, n, n, vidpid)
+	return fmt.Sprintf("usbdev %s vendor=%s product=%s%s\nusbcard %d %s/%s:1.%d\nproccard %d DAC%d \"Synthetic DAC\" usb=%s pcm=0.0\n",
+		dir, vid, pid, s, n, dir, base, iface, n, n, vidpid)
+}
+
+// composite is the manifest of a unit at dir that carries two sound cards,
+// as a unit two drivers each make a card of: card n on interface 0, which
+// snd-usb-audio made, and card m on interface 2, which another driver made
+// and which therefore has no usbid. Synthetic.
+func composite(dir string, n, m int, vidpid string) string {
+	vid, pid, _ := strings.Cut(vidpid, ":")
+	base := filepath.Base(dir)
+	return fmt.Sprintf("usbdev %s vendor=%s product=%s\n", dir, vid, pid) +
+		fmt.Sprintf("usbcard %d %s/%s:1.0\nproccard %d DAC%d \"Synthetic composite DAC\" usb=%s pcm=0.0\n", n, dir, base, n, n, vidpid) +
+		fmt.Sprintf("usbcard %d %s/%s:1.2\nproccard %d Other%d \"Synthetic composite DAC, second card\" driver=snd-synthetic pcm=0.0\n", m, dir, base, m, m)
 }
 
 // observe reads root's two trees.
@@ -180,13 +205,14 @@ func TestTwoSerialLessUnitsOfOneModelAreAmbiguous(t *testing.T) {
 		t.Errorf("matches %v", r.Matches)
 	}
 	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-3:1.0"), inv), StateAvailable, 7)
+	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-3"), inv), StateAvailable, 7)
 	if _, err := For(inv, 6, config.BindingSerial, Endpoint{}); err == nil || !strings.Contains(err.Error(), "no serial") {
 		t.Errorf("bind by serial of a unit with none: %v", err)
 	}
 	if _, err := For(inv, 6, config.BindingUniqueModel, Endpoint{}); err == nil || !strings.Contains(err.Error(), "device_ambiguous") {
 		t.Errorf("bind by model with two units: %v", err)
 	}
-	if dev, err := For(inv, 6, config.BindingPort, Endpoint{}); err != nil || dev.Port != "platform-xhci-hcd.0/usb2-2:1.0" {
+	if dev, err := For(inv, 6, config.BindingPort, Endpoint{}); err != nil || dev.Port != "platform-xhci-hcd.0/usb2-2" {
 		t.Errorf("bind by port: %+v, %v", dev, err)
 	}
 }
@@ -222,48 +248,152 @@ func TestIdsMatchInEverySpellingTheConfigTakes(t *testing.T) {
 }
 
 // TestAPortBindingFollowsThePortNotTheUnit: another model in the bound
-// port is the player's DAC, and the bound unit in another port is not.
+// port is the player's DAC, and the bound unit in another port is not, in
+// the port binding bind writes and in the form B470 PR 4a's bind wrote.
 func TestAPortBindingFollowsThePortNotTheUnit(t *testing.T) {
-	root := pi5(t)
-	dev := byPort(goBarPort)
-	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(goBar, 5, "1234:0f03", ""))
-	r := Resolve(dev, observe(t, root))
-	want(t, r, StateAvailable, 5)
-	if r.Identity.ID.String() != "1234:0f03" {
-		t.Errorf("the port's DAC is %s", r.Identity.ID)
+	for _, port := range []string{goBarPlace, goBarPort} {
+		root := pi5(t)
+		dev := byPort(port)
+		sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(goBar, 5, "1234:0f03", ""))
+		r := Resolve(dev, observe(t, root))
+		want(t, r, StateAvailable, 5)
+		if r.Identity.ID.String() != "1234:0f03" {
+			t.Errorf("%s: the port's DAC is %s", port, r.Identity.ID)
+		}
+		sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(usb1+"/1-2", 5, "20b1:3009", goBarSerial))
+		r = Resolve(dev, observe(t, root))
+		want(t, r, StateDeviceMissing, -1)
+		if !strings.Contains(r.Reason, "no card is at "+goBarPlace) {
+			t.Errorf("%s: the reason does not name the port: %s", port, r.Reason)
+		}
 	}
-	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(usb1+"/1-2", 5, "20b1:3009", goBarSerial))
-	r = Resolve(dev, observe(t, root))
-	want(t, r, StateDeviceMissing, -1)
-	if !strings.Contains(r.Reason, goBarPort) {
-		t.Errorf("the reason does not name the port: %s", r.Reason)
+}
+
+// TestAPortBindingResolvesWhateverModelIsInThePort is B470 PR 4a's hardware
+// gate on a Pi 5: the GO bar, its card on interface 0, bound by port in
+// xhci-hcd.1's port 2, then a Hugo 2 (made-up ids here), whose card is on
+// interface 1, in that port, where the binding 4a's bind wrote,
+// platform-xhci-hcd.1/usb2-2:1.0, was device_missing. A port binding names
+// the controller and the port chain alone, so bind writes
+// platform-xhci-hcd.1/usb2-2, and both forms resolve to whichever model is
+// in the port, on its own interface, and to device_missing once the port is
+// empty, the GO bar in another port included.
+func TestAPortBindingResolvesWhateverModelIsInThePort(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(gatePort, 5, "20b1:3009", goBarSerial))
+	inv := observe(t, root)
+	dev, err := For(inv, 5, config.BindingPort, Endpoint{})
+	if err != nil || dev.Port != "platform-xhci-hcd.1/usb2-2" || dev.Problem() != nil {
+		t.Fatalf("bind by port wrote %q, %v; want the port alone", dev.Port, err)
+	}
+	older := byPort("platform-xhci-hcd.1/usb2-2:1.0")
+	for _, d := range []config.PlayerDevice{dev, older} {
+		want(t, Resolve(d, inv), StateAvailable, 5)
+	}
+
+	sysfstest.Apply(t, root, "unplug "+gatePort+"\n"+plugOn(gatePort, 1, 3, "1234:0c12", "HUGO2-UNIT-0000000042"))
+	inv = observe(t, root)
+	for _, d := range []config.PlayerDevice{dev, older} {
+		r := Resolve(d, inv)
+		want(t, r, StateAvailable, 3)
+		if r.Identity.ID.String() != "1234:0c12" || r.Identity.Interface != 1 || r.Identity.Port != "platform-xhci-hcd.1/usb2-2:1.1" {
+			t.Errorf("%s: the port's DAC is %+v", d.Port, r.Identity)
+		}
+		if !strings.Contains(r.Reason, "card 3 is at platform-xhci-hcd.1/usb2-2, device 0 subdevice 0") {
+			t.Errorf("%s: reason %s", d.Port, r.Reason)
+		}
+	}
+
+	sysfstest.Apply(t, root, "unplug "+gatePort+"\n"+plugOn(gatePort, 2, 4, "1234:0c13", "")+plug(usb3+"/3-1", 5, "20b1:3009", goBarSerial))
+	inv = observe(t, root)
+	for _, d := range []config.PlayerDevice{dev, older} {
+		want(t, Resolve(d, inv), StateAvailable, 4)
+	}
+
+	sysfstest.Apply(t, root, "unplug "+gatePort+"\n")
+	inv = observe(t, root)
+	for _, d := range []config.PlayerDevice{dev, older} {
+		r := Resolve(d, inv)
+		want(t, r, StateDeviceMissing, -1)
+		if !strings.Contains(r.Reason, "no card is at platform-xhci-hcd.1/usb2-2") {
+			t.Errorf("%s: reason %s", d.Port, r.Reason)
+		}
+	}
+}
+
+// TestAUnitWithTwoCardsInThePortFollowsTheRecordedInterface: a unit that
+// carries two sound cards in the bound port (a composite device: card 5 on
+// interface 0, card 6 on interface 2) is ambiguous to a binding that
+// records no interface, never its first card; a binding that records one
+// resolves to the card on it, and to neither when neither card is on it.
+// bind records the card's configuration and interface for such a unit, and
+// a unit with one card in the port is that card whatever either records.
+func TestAUnitWithTwoCardsInThePortFollowsTheRecordedInterface(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+composite(goBar, 5, 6, "1234:0c20"))
+	inv := observe(t, root)
+	for _, n := range []int{5, 6} {
+		if c, ok := inv.Card(n); !ok || c.State != CardUSB {
+			t.Fatalf("card %d: %+v, %v", n, c, ok)
+		}
+	}
+	r := Resolve(byPort(goBarPlace), inv)
+	want(t, r, StateDeviceAmbiguous, -1)
+	if !slices.Equal(r.Matches, []int{5, 6}) || !strings.Contains(r.Reason, "records no interface") {
+		t.Errorf("no interface recorded: matches %v, reason %s", r.Matches, r.Reason)
+	}
+	want(t, Resolve(byPort(goBarPlace+":1.0"), inv), StateAvailable, 5)
+	want(t, Resolve(byPort(goBarPlace+":1.2"), inv), StateAvailable, 6)
+	for _, port := range []string{goBarPlace + ":1.1", goBarPlace + ":2.0", goBarPlace + ":2.2"} {
+		r := Resolve(byPort(port), inv)
+		want(t, r, StateDeviceAmbiguous, -1)
+		if !slices.Equal(r.Matches, []int{5, 6}) || !strings.Contains(r.Reason, "neither is on the interface the binding records") {
+			t.Errorf("%s: matches %v, reason %s", port, r.Matches, r.Reason)
+		}
+	}
+	for n, port := range map[int]string{5: goBarPlace + ":1.0", 6: goBarPlace + ":1.2"} {
+		dev, err := For(inv, n, config.BindingPort, Endpoint{})
+		if err != nil || dev.Port != port {
+			t.Errorf("bind card %d by port: %q, %v; want %q", n, dev.Port, err, port)
+		}
+	}
+
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plugOn(goBar, 1, 7, "1234:0c21", ""))
+	inv = observe(t, root)
+	for _, port := range []string{goBarPlace, goBarPlace + ":1.0", goBarPlace + ":1.2"} {
+		want(t, Resolve(byPort(port), inv), StateAvailable, 7)
 	}
 }
 
 // TestAHubOrAGoneControllerInvalidatesAPortBinding: a hub in the bound
 // port, or a controller the binding names that is not there, fails closed
-// as binding_invalid, which an empty port is not; a serial binding follows
-// the unit through the hub.
+// as binding_invalid, which an empty port is not, in either form; a serial
+// binding follows the unit through the hub.
 func TestAHubOrAGoneControllerInvalidatesAPortBinding(t *testing.T) {
 	root := pi5(t)
 	sysfstest.Apply(t, root, "unplug "+goBar+"\nusbdev "+goBar+" vendor=05e3 product=0610 class=09\n"+plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial))
 	inv := observe(t, root)
-	r := Resolve(byPort(goBarPort), inv)
-	want(t, r, StateBindingInvalid, -1)
-	if !strings.Contains(r.Reason, "hub") {
-		t.Errorf("reason %s", r.Reason)
+	for _, port := range []string{goBarPort, goBarPlace} {
+		r := Resolve(byPort(port), inv)
+		want(t, r, StateBindingInvalid, -1)
+		if !strings.Contains(r.Reason, "hub") {
+			t.Errorf("%s: reason %s", port, r.Reason)
+		}
 	}
 	want(t, Resolve(bySerial(goBarSerial), inv), StateAvailable, 5)
 	if got := Resolve(bySerial(goBarSerial), inv).Identity.Port; got != "platform-xhci-hcd.0/usb2-1.3:1.0" {
 		t.Errorf("through the hub the port is %s", got)
 	}
 
-	r = Resolve(byPort("platform-xhci-hcd.7/usb2-1:1.0"), inv)
-	want(t, r, StateBindingInvalid, -1)
-	if !strings.Contains(r.Reason, "platform-xhci-hcd.7") || !strings.Contains(r.Reason, "rebind") {
-		t.Errorf("reason %s", r.Reason)
+	for _, port := range []string{"platform-xhci-hcd.7/usb2-1:1.0", "platform-xhci-hcd.7/usb2-1"} {
+		r := Resolve(byPort(port), inv)
+		want(t, r, StateBindingInvalid, -1)
+		if !strings.Contains(r.Reason, "platform-xhci-hcd.7") || !strings.Contains(r.Reason, "rebind") {
+			t.Errorf("%s: reason %s", port, r.Reason)
+		}
 	}
 	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2:1.0"), inv), StateDeviceMissing, -1)
+	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2"), inv), StateDeviceMissing, -1)
 }
 
 // TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard: the check passes
@@ -303,6 +433,61 @@ func TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard(t *testing.T) {
 	}
 	if err := (Checker{Sysfs: c.Sysfs, Want: Resolution{State: StateDeviceMissing, Card: -1}}).Check(node); !errors.Is(err, ErrWrongDevice) {
 		t.Errorf("a check against no resolution: %v", err)
+	}
+}
+
+// TestTheCheckAfterOpenFollowsAPortBinding: under a port binding the check
+// after open asks for the bound port and not the bound unit. Another model
+// swapped into the port between the resolve and the open passes, its card
+// on its own interface, in either form of the binding, where a serial
+// binding's check refuses it; a card at another port is refused. On a unit
+// that carries two cards the opened card must be the one the binding
+// chooses there now: the card on the interface it records, and with none
+// recorded, or another, neither.
+func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
+	root := pi5(t)
+	sys := alsa.SysfsReader{Root: filepath.Join(root, "sys")}
+	inv := observe(t, root)
+	node := alsapcm.NodeInfo{Card: 5, Playback: true}
+	place, older, other, serial := Resolve(byPort(goBarPlace), inv), Resolve(byPort(goBarPort), inv),
+		Resolve(byPort(goBarPlace+":1.2"), inv), Resolve(bySerial(goBarSerial), inv)
+	for _, r := range []Resolution{place, older, other, serial} {
+		want(t, r, StateAvailable, 5)
+		if err := (Checker{Sysfs: sys, Want: r}).Check(node); err != nil {
+			t.Fatalf("the bound node: %v", err)
+		}
+	}
+	check := func(r Resolution) error { return Checker{Sysfs: sys, Want: r}.Check(node) }
+
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plugOn(goBar, 1, 5, "1234:0c12", "HUGO2-UNIT-0000000042"))
+	for _, r := range []Resolution{place, older, other} {
+		if err := check(r); err != nil {
+			t.Errorf("another model at the bound port: %v", err)
+		}
+	}
+	if err := check(serial); !errors.Is(err, ErrWrongDevice) {
+		t.Errorf("a serial binding took another model: %v", err)
+	}
+
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(usb1+"/1-2", 5, "20b1:3009", goBarSerial))
+	for _, r := range []Resolution{place, older, other} {
+		err := check(r)
+		if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "not at the bound port "+goBarPlace) {
+			t.Errorf("a card at another port: %v", err)
+		} else if strings.Contains(err.Error(), goBarSerial[4:]) {
+			t.Errorf("the refusal carries a serial: %v", err)
+		}
+	}
+
+	sysfstest.Apply(t, root, "unplug "+usb1+"/1-2\n"+composite(goBar, 5, 6, "1234:0c20"))
+	if err := check(older); err != nil {
+		t.Errorf("the card on the recorded interface of a unit with two: %v", err)
+	}
+	for name, r := range map[string]Resolution{"no interface recorded": place, "another interface recorded": other} {
+		err := check(r)
+		if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "cards 5 and 6") {
+			t.Errorf("%s, a unit with two cards: %v", name, err)
+		}
 	}
 }
 
@@ -402,7 +587,10 @@ func TestAVirtualCardIsUnsupportedNotTransient(t *testing.T) {
 
 // TestAnUnreadableCardIsNeverRuledOut: a USB card whose identity cannot be
 // read may be a second unit of the bound one, so a match beside it is
-// ambiguous, never the first.
+// ambiguous, never the first. It may also be a second card of the unit in
+// a bound port, so a port binding's match is ambiguous beside it too, and
+// bind refuses that binding, unless the match is on the interface the
+// binding records, which no other card of that unit can be.
 func TestAnUnreadableCardIsNeverRuledOut(t *testing.T) {
 	root := pi5(t)
 	sysfstest.Apply(t, root, plug(usb1+"/1-2", 6, "20b1:3009", "")+"file "+usb1+"/1-2/idVendor \""+strings.Repeat("2", 5000)+"\"\n")
@@ -416,19 +604,32 @@ func TestAnUnreadableCardIsNeverRuledOut(t *testing.T) {
 		t.Errorf("reason %s", r.Reason)
 	}
 	want(t, Resolve(byPort(goBarPort), inv), StateAvailable, 5)
+	r = Resolve(byPort(goBarPlace), inv)
+	want(t, r, StateDeviceAmbiguous, -1)
+	if !strings.Contains(r.Reason, "card 6") || !strings.Contains(r.Reason, "another card of the unit") {
+		t.Errorf("the port alone: reason %s", r.Reason)
+	}
+	_, err := For(inv, 5, config.BindingPort, Endpoint{})
+	if err == nil || !strings.Contains(err.Error(), "device_ambiguous") || strings.Contains(err.Error(), "bind by port") {
+		t.Errorf("bind by port beside an unreadable card: %v", err)
+	}
 }
 
 // TestTheEndpointMustBeThere: the unit present with no playback stream at
-// the bound device and substream is endpoint_missing, on its card.
+// the bound device and substream is endpoint_missing, on its card, and so
+// is the unit in a bound port.
 func TestTheEndpointMustBeThere(t *testing.T) {
 	inv := observe(t, pi5(t))
-	dev := bySerial(goBarSerial)
-	dev.PCMDevice = 1
-	want(t, Resolve(dev, inv), StateEndpointMissing, 5)
-	dev.PCMDevice, dev.Subdevice = 0, 1
-	want(t, Resolve(dev, inv), StateEndpointMissing, 5)
-	if _, err := For(inv, 5, config.BindingSerial, Endpoint{Device: 1}); err == nil || !strings.Contains(err.Error(), "endpoint_missing") {
-		t.Errorf("bind to an endpoint the card lacks: %v", err)
+	for _, dev := range []config.PlayerDevice{bySerial(goBarSerial), byPort(goBarPlace)} {
+		dev.PCMDevice = 1
+		want(t, Resolve(dev, inv), StateEndpointMissing, 5)
+		dev.PCMDevice, dev.Subdevice = 0, 1
+		want(t, Resolve(dev, inv), StateEndpointMissing, 5)
+	}
+	for _, kind := range []string{config.BindingSerial, config.BindingPort} {
+		if _, err := For(inv, 5, kind, Endpoint{Device: 1}); err == nil || !strings.Contains(err.Error(), "endpoint_missing") {
+			t.Errorf("bind by %s to an endpoint the card lacks: %v", kind, err)
+		}
 	}
 }
 
@@ -460,8 +661,8 @@ func TestWhatCannotBeBound(t *testing.T) {
 }
 
 // TestForWritesOnlyTheBindingsOwnFields: each binding For builds carries
-// its own fields, the serial whole, and resolves to the card it was built
-// from.
+// its own fields, the serial whole, a port binding the port alone, and
+// resolves to the card it was built from.
 func TestForWritesOnlyTheBindingsOwnFields(t *testing.T) {
 	inv := observe(t, pi5(t))
 	s, err := For(inv, 5, config.BindingSerial, Endpoint{})
@@ -473,7 +674,7 @@ func TestForWritesOnlyTheBindingsOwnFields(t *testing.T) {
 		t.Errorf("uniqueModel: %+v, %v", m, err)
 	}
 	p, err := For(inv, 5, config.BindingPort, Endpoint{})
-	if err != nil || p.Serial.Present() || p.VendorID != "" || p.Port != goBarPort {
+	if err != nil || p.Serial.Present() || p.VendorID != "" || p.Port != goBarPlace {
 		t.Errorf("port: %+v, %v", p, err)
 	}
 	for _, dev := range []config.PlayerDevice{s, m, p} {
