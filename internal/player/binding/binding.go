@@ -3,8 +3,8 @@
 // before a sample is sent, that the node opened is that card (B470 PR 4a).
 // It reads the box's /proc/asound and sysfs through the alsa readers and
 // nothing else: it opens no PCM, plays nothing, and latches nothing, so a
-// caller resolves again whenever it needs an answer (the hotplug watcher of
-// PR 4a2 will).
+// caller resolves again whenever it needs an answer, as the hotplug watcher
+// (internal/player/hotplug, PR 4a2) does on every reading, through Settled.
 //
 // A card index and an ALSA id are observations, never the binding: a
 // serial binding names a unit (its vendor and product ids and its serial),
