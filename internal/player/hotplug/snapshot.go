@@ -119,8 +119,9 @@ func (s Snapshot) Cards() []Card {
 }
 
 // Resolution is how the binding resolved (binding.Settled), as a copy:
-// its state, the card and the unit's identity, the endpoint, and the cards
-// an ambiguous binding names.
+// its state, the card and the unit's identity, the endpoint, the cards an
+// ambiguous binding names, and the binding's kind and, for a port binding,
+// its port.
 func (s Snapshot) Resolution() binding.Resolution {
 	if s.d == nil {
 		return binding.Resolution{Card: -1}
@@ -183,10 +184,15 @@ func copyCard(c binding.Card) binding.Card {
 	return c
 }
 
-// copyResolution is r with its matches copied: an alsa.USBIdentity is a
-// value, its serial immutable.
+// copyResolution is r with its matches copied, and a port binding's port
+// (usbid.Port, whose anchor segments and port chain are slices): an
+// alsa.USBIdentity is a value, its serial immutable. Round 4: the
+// port-binding fix added the port, and a copy that cloned the matches alone
+// handed every consumer the snapshot's own slices.
 func copyResolution(r binding.Resolution) binding.Resolution {
 	r.Matches = slices.Clone(r.Matches)
+	r.Port.Segments = slices.Clone(r.Port.Segments)
+	r.Port.Chain = slices.Clone(r.Port.Chain)
 	return r
 }
 

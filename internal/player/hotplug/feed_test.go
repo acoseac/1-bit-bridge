@@ -90,6 +90,30 @@ func TestASnapshotIsTheSameForEveryConsumer(t *testing.T) {
 	}
 }
 
+// TestEachConsumerGetsItsOwnCopyOfTheBoundPort: under a port binding a
+// snapshot's resolution carries the port the binding names, a usbid.Port
+// whose anchor segments and port chain are slices, and what one consumer
+// does to its copy changes nothing the snapshot holds for the next. Round
+// 4: the port-binding fix added the field, and the accessor, which cloned
+// the matches alone, handed every consumer the snapshot's own slices.
+func TestEachConsumerGetsItsOwnCopyOfTheBoundPort(t *testing.T) {
+	h := newHarness(t, func(o *options) { o.device = byPort(goBarPort) })
+	s := h.state(binding.StateAvailable, 5, 1)
+	before := s.Resolution().Port.String()
+	if before != goBarPort {
+		t.Fatalf("premise: the snapshot's resolution names the port %q", before)
+	}
+	mine := s.Resolution()
+	mine.Port.Segments[0] = "pci-0000:00:00.0"
+	mine.Port.Chain[0] = 9
+	if after := s.Resolution().Port.String(); after != before {
+		t.Errorf("one consumer's copy of the port reached the snapshot: %q, was %q", after, before)
+	}
+	if latest, _ := h.svc.Feed().Latest(); latest.Resolution().Port.String() != before {
+		t.Errorf("the feed's newest snapshot names %q, was %q", latest.Resolution().Port.String(), before)
+	}
+}
+
 // describe renders what a snapshot holds, to compare.
 func describe(s Snapshot) string {
 	var b strings.Builder
