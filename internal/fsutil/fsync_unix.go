@@ -20,8 +20,8 @@ const SyncsParentDir = true
 // directory handle commits the entry update so a power-loss between
 // the file fsync and the entry flush can't resurrect the file at its
 // old path (or lose it). A missing parent is an error (the open
-// fails), as is a directory that cannot be opened for reading; a
-// caller that has just renamed into the directory meets neither.
+// fails), and so is a directory this process may write into but not
+// open for reading.
 //
 // Exported so `internal/atomicwrite` can run the same barrier after
 // its tmp-file rename without duplicating the per-platform split.
