@@ -9,6 +9,7 @@ paths:
   - "scripts/player-pcm-goldens/**"
   - "scripts/player-dsd-goldens/**"
   - "scripts/player-alac-goldens/**"
+  - "third_party/saprobe-alac/**"
 ---
 # The bridge's player (B470: PCM format and decode, DSD and ALAC containers, the ALSA PCM backend, the streaming PCM sink)
 
