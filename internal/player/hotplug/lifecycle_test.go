@@ -286,3 +286,30 @@ func TestAPartialReadingIsAFailure(t *testing.T) {
 		t.Errorf("status %+v", st)
 	}
 }
+
+// TestACardWhoseDevicesCannotBeListedIsAFailure: a /proc reading that could
+// not list the bound card's PCM directory does not know the card's
+// endpoints, so the watcher takes it for a failed reading, through the
+// readers and not a hand-set mark: the last snapshot stands, marked stale
+// and saying which directory, never the endpoint_missing the card would
+// read as (until round 2 the inventory's completeness was sysfs's alone).
+// Once the directory lists again the snapshot is fresh at its generation.
+func TestACardWhoseDevicesCannotBeListedIsAFailure(t *testing.T) {
+	h := newHarness(t)
+	h.apply("remove proc/asound/card5/pcm0p\nlink proc/asound/card5/pcm0p !../../../outside\n")
+	h.send(Uevent{Action: "change", DevPath: devpath(goBar) + "/1-1:1.0/sound/card5", Subsystem: "sound"})
+	h.advance(quiet)
+	h.reconciles(2)
+	h.published(2)
+	s := h.state(binding.StateAvailable, 5, 1)
+	if f, stale := s.Stale(); !stale || !strings.Contains(f.Err, "partial") || !strings.Contains(f.Err, "card5/pcm0p") {
+		t.Fatalf("after the unlistable directory: stale %v, %+v", stale, f)
+	}
+	h.apply("remove proc/asound/card5/pcm0p\nproccard 5 Audio \"iFi (by AMR) HD USB Audio\" usb=20b1:3009 pcm=0.0\n")
+	h.advance(DefaultBackoffMin)
+	h.reconciles(3)
+	s = h.state(binding.StateAvailable, 5, 1)
+	if _, stale := s.Stale(); stale {
+		t.Error("the snapshot is still stale once the directory lists")
+	}
+}

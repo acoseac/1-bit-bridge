@@ -55,6 +55,15 @@ type CardReading struct {
 	// Problems are what the card's files could not say, each opening with
 	// the file's path under the ALSA root ("card5/stream0: line 9: …").
 	Problems []string `json:"problems"`
+	// Partial says the card's devices could not all be enumerated: its
+	// directory or a pcmNp directory could not be listed, or the type of an
+	// entry a listing named could not be read, for a reason other than its
+	// absence (a card or a device going, which is the box as it is). What
+	// it lacks is not absent from the card, so a consumer that compares
+	// readings (the hotplug watcher, through binding.Inventory.Partial)
+	// does not take it for a change; Problems say which. Not encoded: the
+	// --json shape is pinned, and Problems say it there (B470 PR 4a2 round 2).
+	Partial bool `json:"-"`
 }
 
 // Device is one PCM device of a card: hw:<card>,<device>.
@@ -286,17 +295,33 @@ func (t walk) card(c Card) CardReading {
 	note := func(rel string, probs []string) {
 		cr.Problems = append(cr.Problems, prefixed(dirName+"/"+rel, probs)...)
 	}
+	// unlisted records a listing, or an entry's type, that could not be
+	// read: the card's devices are not all known (Partial). One that is
+	// not there is the card or the device going, and is absent, as a
+	// missing file is.
+	unlisted := func(rel string, err error) {
+		if !errors.Is(err, fs.ErrNotExist) {
+			cr.Partial = true
+		}
+		cr.Problems = append(cr.Problems, rel+": "+errText(err))
+	}
 	// is reports whether what rel names under the card, its links followed
 	// inside the tree, is what want asks. DirEntry.IsDir reports a link
 	// itself, so a tree that links pcmNp or subM would otherwise have no
 	// playback device. A link that leaves the tree is kept, so the read or
-	// the listing it was kept for reports the refusal.
+	// the listing it was kept for reports the refusal; an entry gone since
+	// the listing is not there; any other failure is unlisted.
 	is := func(rel string, want func(fs.FileInfo) bool) bool {
 		info, err := t.asound.stat(dirName + "/" + rel)
-		if err != nil {
-			return errors.Is(err, errOutsideRoot)
+		switch {
+		case err == nil:
+			return want(info)
+		case errors.Is(err, errOutsideRoot):
+			return true
+		case !errors.Is(err, fs.ErrNotExist):
+			unlisted(dirName+"/"+rel, err)
 		}
-		return want(info)
+		return false
 	}
 	regular := func(fi fs.FileInfo) bool { return fi.Mode().IsRegular() }
 	directory := func(fi fs.FileInfo) bool { return fi.IsDir() }
@@ -315,7 +340,7 @@ func (t walk) card(c Card) CardReading {
 	entries, err := t.asound.readDir(dirName, t.hook("asound/"+dirName))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			cr.Problems = append(cr.Problems, dirName+": "+errText(err))
+			unlisted(dirName, err)
 		}
 		return cr
 	}
@@ -354,7 +379,7 @@ func (t walk) card(c Card) CardReading {
 		}
 		subs, err := t.asound.readDir(dirName+"/"+pcmRel, t.hook("asound/"+dirName+"/"+pcmRel))
 		if err != nil {
-			cr.Problems = append(cr.Problems, dirName+"/"+pcmRel+": "+errText(err))
+			unlisted(dirName+"/"+pcmRel, err)
 		}
 		subNums := map[int]bool{}
 		for _, e := range subs {

@@ -136,10 +136,12 @@ type Inventory struct {
 	Devices     []alsa.USBDevice
 	// Problems are what the trees could not say beyond one card.
 	Problems []string
-	// Partial says sysfs was not read whole (alsa.SysfsSnapshot.Partial):
-	// what the reading lacks is not absent from the box. Resolve answers
-	// from what was read; the hotplug watcher publishes no answer from a
-	// partial reading.
+	// Partial says the reading is not whole: sysfs was not read whole
+	// (alsa.SysfsSnapshot.Partial), or a card's /proc/asound devices could
+	// not all be enumerated (alsa.CardReading.Partial), whose problems are
+	// then in Problems too. What the reading lacks is not absent from the
+	// box. Resolve answers from what was read; the hotplug watcher
+	// publishes no answer from a partial reading.
 	Partial bool
 }
 
@@ -189,8 +191,9 @@ func (o Observer) ObserveContext(ctx context.Context) (Inventory, error) {
 	if err := ctx.Err(); err != nil {
 		return Inventory{}, err
 	}
+	procPartial, unlisted := partialCards(snap)
 	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, Controllers: sys.Controllers, Devices: sys.Devices,
-		Problems: append(append([]string{}, snap.Problems...), sys.Problems...), Partial: sys.Partial}
+		Problems: append(append(append([]string{}, snap.Problems...), sys.Problems...), unlisted...), Partial: sys.Partial || procPartial}
 	ids := map[int]alsa.Identity{}
 	for _, id := range sys.Cards {
 		ids[id.Card] = id
@@ -237,6 +240,21 @@ func (o Observer) ObserveContext(ctx context.Context) (Inventory, error) {
 	}
 	sort.Slice(inv.Cards, func(i, j int) bool { return inv.Cards[i].Index < inv.Cards[j].Index })
 	return inv, nil
+}
+
+// partialCards reports whether a /proc reading has a card whose devices
+// could not all be enumerated (alsa.CardReading.Partial), and those cards'
+// problems: such a reading is as partial as a sysfs listing a cap cut, and
+// a card it read as having no endpoint may have one (B470 PR 4a2 round 2).
+func partialCards(snap alsa.Snapshot) (bool, []string) {
+	partial, problems := false, []string{}
+	for _, cr := range snap.Cards {
+		if cr.Partial {
+			partial = true
+			problems = append(problems, cr.Problems...)
+		}
+	}
+	return partial, problems
 }
 
 // orUnknown is s, or "unknown-bus" when it is empty.

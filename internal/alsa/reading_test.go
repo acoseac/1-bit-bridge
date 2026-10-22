@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,6 +71,65 @@ func TestSysfsSaysWhenItsReadingIsNotWhole(t *testing.T) {
 	snap := SysfsReader{Root: filepath.Join(root, "sys")}.Read()
 	if !snap.Partial || !strings.Contains(strings.Join(snap.Problems, "; "), "usb1/speed") {
 		t.Errorf("a root hub whose speed cannot be read: partial %v, problems %q", snap.Partial, snap.Problems)
+	}
+}
+
+// TestAProcCardSaysWhenItsDevicesCannotAllBeListed: a card whose directory
+// or a pcmNp directory cannot be listed, or whose pcmNp or subM entry's
+// type cannot be read, is Partial, and its problems say which: its devices
+// are not all known. One that is not there, gone between the listing that
+// named it and its own, is the card or the device going, never Partial
+// (a pcmNp the card's listing named is still a problem, as before). The
+// other cards read whole (B470 PR 4a2 round 2).
+func TestAProcCardSaysWhenItsDevicesCannotAllBeListed(t *testing.T) {
+	const card5 = "proc/asound/card5"
+	for _, tc := range []struct {
+		name string
+		// step changes the Pi 5's tree; gone is a path the reader is about
+		// to list, removed just before it does.
+		step, gone string
+		partial    bool
+		problem    string
+	}{
+		{"a card directory whose link loops", "remove " + card5 + "\nlink " + card5 + " !card5\n", "", true, "card5: too many links"},
+		{"a pcmNp directory whose link leaves the tree", "remove " + card5 + "/pcm0p\nlink " + card5 + "/pcm0p !../../../outside\n", "", true, "card5/pcm0p: a link leaves the root"},
+		{"a pcmNp entry whose link loops", "remove " + card5 + "/pcm0p\nlink " + card5 + "/pcm0p !pcm0p\n", "", true, "card5/pcm0p: too many links"},
+		{"a subM entry whose link loops", "remove " + card5 + "/pcm0p/sub0\nlink " + card5 + "/pcm0p/sub0 !sub0\n", "", true, "card5/pcm0p/sub0: too many links"},
+		{"a pcmNp directory gone before its listing", "", "asound/card5/pcm0p", false, "card5/pcm0p: "},
+		{"a card directory gone before its listing", "", "asound/card5", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			sysfstest.Apply(t, root, tc.step)
+			snap, err := Reader{ProcRoot: filepath.Join(root, "proc"), beforeOpen: func(path string) {
+				if path == tc.gone {
+					if err := os.RemoveAll(filepath.Join(root, "proc", filepath.FromSlash(path))); err != nil {
+						t.Error(err)
+					}
+				}
+			}}.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snap.Cards) != 3 {
+				t.Fatalf("cards %+v", snap.Cards)
+			}
+			for _, c := range snap.Cards {
+				if c.Index != 5 {
+					if c.Partial || len(c.Problems) != 0 || len(c.Devices) != 1 {
+						t.Errorf("card %d did not read whole: partial %v, problems %q, %d devices", c.Index, c.Partial, c.Problems, len(c.Devices))
+					}
+					continue
+				}
+				problems := strings.Join(c.Problems, "; ")
+				if c.Partial != tc.partial || !strings.Contains(problems, tc.problem) || (tc.problem == "") != (problems == "") {
+					t.Errorf("card 5: partial %v, problems %q; want partial %v, a problem naming %q", c.Partial, c.Problems, tc.partial, tc.problem)
+				}
+				if len(c.Devices) != 0 && (len(c.Devices) != 1 || len(c.Devices[0].Substreams) != 0) {
+					t.Errorf("card 5 has endpoints it could not list: %+v", c.Devices)
+				}
+			}
+		})
 	}
 }
 
