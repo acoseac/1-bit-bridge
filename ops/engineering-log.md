@@ -51628,3 +51628,16 @@ it there. The fixtures are unchanged:
 - Given a directory, it exits with its usage and writes nothing.
 Control: the previous script, given a directory, wrote 15 files into it.
 SonarCloud's own verdict comes with the next CI run.
+
+The gate, through the build lock: `make fmt vet test` green on 2c2f7e1a
+(18.5 minutes, after 10.5 minutes waiting for a slot), and `make
+build-all` and `make docs-check` clean. `internal/player/...` and
+`internal/alsa` passed `-race -count=10` under `-timeout 60m`, decode
+taking 1106 s. The first such run, under `go test`'s default 10 minutes,
+stopped in decode at 600 s with a goroutine dump and no assertion: the
+timeout `build-ci-tests.md` describes, not a failure. The hotplug suite's
+Linux-only tests are run on a Linux host: `TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly` and
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`, unchanged since round 1, and
+`TestCaptureKernelUevents`, run by hand on the Pi. The round-4 rules text
+is a note, OLD/NEW against 9e6eea1c's `player.md`.
