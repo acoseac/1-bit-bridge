@@ -138,6 +138,12 @@ var syncParentDir = platformBarrier()
 // `t.Parallel()`.
 var syncFile = (*os.File).Sync
 
+// beforeMkdirAll is a test seam, nil in production: a strict write calls it
+// once it has looked for the directories it must create and before it
+// creates them, so a test can act there as another writer would. In-package
+// tests set it with a `t.Cleanup` restore and never call `t.Parallel()`.
+var beforeMkdirAll func(dir string)
+
 // platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
 // where it is a no-op.
 func platformBarrier() func(path string) error {
@@ -397,35 +403,75 @@ func barrier(path string) error {
 	return syncParentDir(path)
 }
 
+// unconfirmed is the directories a strict write found missing whose entry
+// in their parent has not been made durable since: their barrier failed, or
+// never ran because the write stopped first. Every strict write runs the
+// barrier of each member on its path before it reports success, and a
+// member leaves the set only once its barrier has succeeded.
+//
+// Nothing is removed to make a later write sync an entry again. A removal
+// raced every other writer in those directories: one that made the same
+// directory in the meantime lost it, a regular file one put at the path was
+// deleted, and a directory one filled could not be removed and was then
+// taken by the next strict write for one that was always there.
+//
+// The set is the process's, and that is enough across a crash: a directory
+// still present after one has a durable entry, and one that is gone is
+// created again, its barrier with it. A process that exits with a member
+// unconfirmed leaves the next to take that directory as found, as it takes
+// every directory that was there already (the caller's). Barriering every
+// directory up to the root on every write would not depend on the set, and
+// was not taken: it syncs directories outside the caller's tree, which the
+// process may not be able to open (a parent searchable and not readable) or
+// whose filesystem cannot sync a directory, and so refuses writes that are
+// durable.
+//
+// Strict writes find, create and confirm their directories one at a time,
+// under mu, so a member joins before its directory is created and leaves
+// only by a barrier that ran after it was. The barriers' I/O is under the
+// lock: strict writes are rare, and the player's, the one caller, are one at
+// a time already.
+var unconfirmed = struct {
+	mu   sync.Mutex
+	dirs map[string]bool
+}{dirs: map[string]bool{}}
+
 // mkdirAllDurable is fsutil.MkdirAll for the strict writer: each directory
 // it creates is made durable in its parent, the deepest first, before
 // anything is written into it, so a crash cannot take a durable file's
 // directory with it. A directory that was there already is the caller's,
-// and is not synced.
-//
-// When the creation or a barrier fails, the directories this call created
-// are removed again, the deepest first: left in place, the next write would
-// find them and take them for directories that were there already, and
-// never sync their entries. Every directory a strict write leaves behind is
-// one it found or one it made durable.
-func mkdirAllDurable(dir string) (err error) {
-	created := missing(dir)
-	defer func() {
-		if err != nil {
-			for _, d := range created {
-				_ = os.Remove(d)
-			}
-		}
-	}()
+// and is not synced, unless a strict write of this process found it missing
+// and has not confirmed its entry since (unconfirmed): that barrier runs
+// again, here, on every write below it until it succeeds.
+func mkdirAllDurable(dir string) error {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	unconfirmed.mu.Lock()
+	defer unconfirmed.mu.Unlock()
+	for _, d := range missing(dir) {
+		unconfirmed.dirs[d] = true
+	}
+	if beforeMkdirAll != nil {
+		beforeMkdirAll(dir)
+	}
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	for _, d := range created {
-		if err := barrier(d); err != nil {
-			return fmt.Errorf("the directory %s was created, but its entry is not durable: %w", d, err)
+	for d := dir; ; {
+		if unconfirmed.dirs[d] {
+			if err := barrier(d); err != nil {
+				return fmt.Errorf("the directory %s was created, but its entry is not durable: %w", d, err)
+			}
+			delete(unconfirmed.dirs, d)
 		}
+		up := filepath.Dir(d)
+		if up == d {
+			return nil
+		}
+		d = up
 	}
-	return nil
 }
 
 // WriteBytes writes `data` to `path` via tmp-file + rename so a
@@ -485,8 +531,9 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // The directories it creates for path are made durable too, each in its
 // parent, the deepest first, before the file is written: a durable entry in
 // a directory whose own entry is not durable is lost with it. When that
-// fails, the directories it created are removed again, so the next write
-// creates them and runs their barriers rather than taking them as found.
+// fails, nothing is removed: the process keeps each such directory, and
+// every later strict write below it runs its barrier again before it
+// reports success, until one succeeds (unconfirmed).
 //
 // On a platform with no directory barrier (Windows) it refuses with
 // ErrNoDirectoryBarrier before it writes anything: no write there could be

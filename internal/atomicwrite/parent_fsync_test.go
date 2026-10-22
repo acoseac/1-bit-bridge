@@ -130,47 +130,113 @@ func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 }
 
 // TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated pins a
-// directory whose barrier failed: the write that created it fails, and the
-// next write syncs its entry before it counts the file durable, rather than
-// finding the directory there and taking it for one that was always durable.
-// The failed write removes the directory it created, so the next creates it
-// again.
+// directory whose barrier failed: the write that created it fails and
+// leaves it where it is, and every later write below it runs that barrier
+// again before it counts the file durable, rather than finding the
+// directory there and taking it for one that was always durable, until the
+// barrier succeeds; from then on the directory is one that was there. While
+// the first barrier fails another writer puts a file in the directory, so
+// no removal could have made the next write create it again.
 func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "a")
 	dst := filepath.Join(dir, "reserved.json")
+	theirs := filepath.Join(dir, "theirs")
 	syncErr := errors.New("fsync: input/output error")
-	// seen is the paths the barrier is asked for; the one for a's entry in
-	// the root fails once.
+	// seen is the paths the barrier is asked for. The one for a's entry in
+	// the root fails twice, and the first time another writer puts a file
+	// in a before it answers.
 	var seen []string
-	failed := false
+	fails := 0
 	prev := syncParentDir
 	t.Cleanup(func() { syncParentDir = prev })
 	syncParentDir = func(path string) error {
 		seen = append(seen, path)
-		if path == dir && !failed {
-			failed = true
-			return syncErr
+		if path != dir || fails == 2 {
+			return nil
 		}
-		return nil
+		if fails++; fails == 1 {
+			if err := os.WriteFile(theirs, []byte("theirs"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return syncErr
 	}
-	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
-		t.Fatalf("the write whose directory's barrier failed = %v, want the barrier's failure", err)
+	for write := 1; write <= 2; write++ {
+		seen = nil
+		if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
+			t.Fatalf("write %d = %v with the barrier for a's entry failing, want its failure; it ran the barrier for %v", write, err, seen)
+		}
 	}
-	_, statErr := os.Lstat(dir)
+	if got, err := os.ReadFile(theirs); err != nil || string(got) != "theirs" {
+		t.Fatalf("the other writer's file in a: %q, %v", got, err)
+	}
 	seen = nil
 	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
-		t.Fatalf("the next write: %v", err)
+		t.Fatalf("the write once a's barrier answers: %v", err)
 	}
 	if !slices.Contains(seen, dir) {
-		t.Fatalf("the next write ran the barrier for %v: never for a's entry in the root, whose barrier had failed", seen)
+		t.Fatalf("the write after the failures ran the barrier for %v: never for a's entry in the root, whose barrier had failed", seen)
 	}
-	if !errors.Is(statErr, fs.ErrNotExist) {
-		t.Fatalf("the failed write left the directory it created (%v)", statErr)
+	seen = nil
+	if err := WriteBytesDurable(dst, []byte("again"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("the write after a's barrier succeeded: %v", err)
 	}
-	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
+	if !slices.Equal(seen, []string{dst}) {
+		t.Fatalf("the write after a's barrier succeeded ran the barrier for %v, want the file's entry alone", seen)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "again" {
 		t.Fatalf("destination %q, %v", got, err)
 	}
+}
+
+// TestWriteBytesDurable_RemovesNothingAnotherWriterMade pins a strict write
+// that fails while another writer works in the directories it creates: it
+// removes nothing. Through the beforeMkdirAll seam the other writer acts
+// between the strict write's look for what is missing and its creation: a
+// directory it makes there survives the strict write's failed barrier, and
+// it goes on writing into it; a regular file it makes at the path is never
+// touched, though the strict write then fails.
+func TestWriteBytesDurable_RemovesNothingAnotherWriterMade(t *testing.T) {
+	inTheWindow := func(t *testing.T, act func()) {
+		prev := beforeMkdirAll
+		t.Cleanup(func() { beforeMkdirAll = prev })
+		beforeMkdirAll = func(string) { act() }
+	}
+	t.Run("a directory", func(t *testing.T) {
+		syncErr := errors.New("fsync: input/output error")
+		stubSyncParentDir(t, syncErr)
+		dir := filepath.Join(t.TempDir(), "a")
+		inTheWindow(t, func() {
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err := WriteBytesDurable(filepath.Join(dir, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
+			t.Fatalf("WriteBytesDurable with the barrier failing = %v, want its failure", err)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("the directory the other writer made is gone after the strict write failed (%v)", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "theirs"), []byte("theirs"), 0o600); err != nil {
+			t.Fatalf("the other writer's write into its directory: %v", err)
+		}
+	})
+	t.Run("a file at the path", func(t *testing.T) {
+		stubSyncParentDir(t, nil)
+		path := filepath.Join(t.TempDir(), "a")
+		inTheWindow(t, func() {
+			if err := os.WriteFile(path, []byte("theirs"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err := WriteBytesDurable(filepath.Join(path, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); err == nil {
+			t.Fatal("WriteBytesDurable below a regular file answered nil")
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "theirs" {
+			t.Fatalf("the other writer's file at the path: %q, %v, want it untouched", got, err)
+		}
+	})
 }
 
 // TestProbeDurable pins the probe a caller runs before it counts on
