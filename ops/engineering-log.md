@@ -50939,3 +50939,40 @@ port, `bridge output dac inspect --verify-card <its card>` resolves
 refused by `--verify-card <its card>`, which names the bound port; the
 binding the gate wrote, `platform-xhci-hcd.1/usb2-2:1.0`, resolves the
 same; and the port left empty is `device_missing`.
+
+**Round 2 (Codex P2 and the Claude API Low, one finding; Argon found
+none).** `checkPort`'s re-read counted only readable USB cards at the bound
+port. Suppose a composite unit is swapped into the port between the
+resolve and the open, its first card takes the opened card's number, and
+its second card's reading is not a readable USB identity (registered on
+the unit itself rather than on an interface, or vanished as it was read).
+Then the opened card stood alone at the port and the check passed, where
+Resolve on the same tree answers `device_ambiguous` or
+`identity_transient`. Under a serial or uniqueModel binding `SameUnit` pins
+the opened card to the unit Resolve analysed; under a port binding the
+check admits a unit Resolve never saw, so Resolve's fail-closed reading
+did not cover it. The check now refuses such a card, as Resolve does,
+unless the opened card is on the interface the binding records. A card
+that is not USB, or a readable one at another port, is ruled out: refusing
+every reading that is not a readable USB identity would refuse on every Pi,
+whose HDMI cards are not USB (control R2-4). The same hole had a second
+way in: a re-read that could not list the cards saw none and passed. Under
+a port binding the check now reads sysfs once, for the opened card and the
+cards beside it, so a reading that fails does not hold the opened card and
+refuses, with no branch of its own. Red first, the final test against
+round 1's `binding.go`: the unreadable and vanished cases, each with no
+interface recorded and with another one, passed the check (four failures).
+The two cases in which the opened card is not in the reading (the port
+left empty, and a `class/sound` that cannot be listed) were refused on
+round 1 too, with its older message, because round 1's own lookup of
+card 5 failed as well (on macOS a lookup through a directory without read
+permission fails); they pin the one reading, and R2-7 shows them red.
+Controls on 0b8ca51e, all red, each restored from git: unreadable and
+vanished cards ignored (R2-1), vanished ones alone ignored (R2-2),
+unreadable ones alone ignored (R2-3), a card that is not USB refusing
+(R2-4: the first check, on HDMI card 0, and the CLI test), a readable card
+at another port counted (R2-5), the recorded interface not settling it
+(R2-6), a reading without the opened card passing (R2-7: the empty port and
+the unlistable `class/sound`), `SamePort` always true (R2-8), a unit's
+readable second card not counted (R2-9), and no port dispatch in `Check`
+(R2-10: the check test and the CLI test).
