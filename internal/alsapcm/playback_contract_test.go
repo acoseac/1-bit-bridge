@@ -362,6 +362,35 @@ func TestPlaybackRefusesBeforeAnyContentPlays(t *testing.T) {
 	}
 }
 
+// TestPlaybackRefusesDSDInEveryMode pins DSD's refusal whatever the
+// session's DSD mode: this release plays PCM only, so under off, the one
+// mode the config takes, and under the modes a later release may take, DSD
+// content is refused as not in this release, before the device is touched.
+func TestPlaybackRefusesDSDInEveryMode(t *testing.T) {
+	dsf, err := os.ReadFile(filepath.Join("..", "player", "decode", "testdata", "dsd-goldens", "lsb_dsd64_whole_blocks.dsf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, mode := range []string{"off", "native", "dop", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			d := newDirect(t, nil)
+			d.files.add("dsd", dsf)
+			s := engine.SessionID(i + 1)
+			err := d.be.Start(bg, engine.StartRequest{Session: s, First: occurrence(engine.OccurrenceID(s)*100+1, 1, "dsd"),
+				Options: engine.SessionOptions{PauseRelease: time.Second, DSD: mode}, Events: &recEvents{r: d.rec, next: nopEvents{}}})
+			var u *engine.Unplayable
+			if !errors.As(err, &u) || u.Reason != playback.ReasonDSD {
+				t.Fatalf("Start of DSD under mode %s: %v; want an *engine.Unplayable, %s", mode, err, playback.ReasonDSD)
+			}
+			if v := d.k.View(); v.Opens != 0 {
+				t.Errorf("DSD under mode %s opened the device %d times", mode, v.Opens)
+			}
+			d.release(s)
+			d.files.allClosed(t)
+		})
+	}
+}
+
 // TestPlaybackSkipsASuccessorRefusedBeforeAnyOfItPlayed pins the refusals as
 // successors, through the engine: each is reported Refused with its reason,
 // never Submitted, the engine skips it with that reason, and what follows
