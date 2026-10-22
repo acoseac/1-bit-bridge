@@ -151,9 +151,11 @@ func serveFakeMPD(t *testing.T, song *atomic.Value) string {
 		},
 		"currentsong":        func() string { return "file: " + song.Load().(string) + "\nId: 7\nOK\n" },
 		"replay_gain_status": func() string { return "replay_gain_mode: off\nOK\n" },
-		"outputs":            func() string { return "outputid: 0\noutputname: alsa\nplugin: alsa\noutputenabled: 1\nattribute: dop=0\nOK\n" },
-		"find":               func() string { return "OK\n" },
-		"config":             func() string { return "ACK [4@0] {config} Command only permitted to local clients\n" },
+		"outputs": func() string {
+			return "outputid: 0\noutputname: alsa\nplugin: alsa\noutputenabled: 1\nattribute: dop=0\nOK\n"
+		},
+		"find":   func() string { return "OK\n" },
+		"config": func() string { return "ACK [4@0] {config} Command only permitted to local clients\n" },
 	}
 	go func() {
 		for {
