@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -261,6 +262,79 @@ func TestTheSourceStopsAtOnceAndClosesItsSocket(t *testing.T) {
 	}
 	if st := src.Status(); st.Mode != ModePolling || st.Reason == "" || sock.closes() != 1 {
 		t.Errorf("after the socket failed: %+v, closed %d", st, sock.closes())
+	}
+}
+
+// endlessSocket is a socket the kernel never stops filling: every recv
+// answers msg (the kernel's) or err, never EAGAIN, until the test lets it
+// run dry. reading is closed at the first recv: the source is draining.
+type endlessSocket struct {
+	msg     []byte
+	err     error
+	reading chan struct{}
+	once    sync.Once
+	dry     atomic.Bool
+	closed  atomic.Int32
+}
+
+func (s *endlessSocket) wait(ctx context.Context) error { return ctx.Err() }
+
+func (s *endlessSocket) recv(buf []byte) (received, error) {
+	s.once.Do(func() { close(s.reading) })
+	switch {
+	case s.dry.Load():
+		return received{}, errEAGAIN
+	case s.err != nil:
+		return received{}, s.err
+	}
+	return received{n: copy(buf, s.msg), cred: root}, nil
+}
+
+func (s *endlessSocket) close() error {
+	s.closed.Add(1)
+	return nil
+}
+
+// TestTheSourceStopsWhileTheKernelKeepsSending: a socket that is refilled
+// as fast as it is read never answers EAGAIN, so a source that looked at
+// its context only once a drain ran dry read on past its stop, keeping its
+// goroutine and its socket past serve's stop deadline (round 2). It stops
+// at once, whether the socket answers messages, EINTR or ENOBUFS without
+// end, and closes the socket once.
+func TestTheSourceStopsWhileTheKernelKeepsSending(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  []byte
+		err  error
+	}{
+		{"messages", uevent("change", "/devices/platform/x/usb1/1-1", "usb", "1"), nil},
+		{"EINTR", nil, errEINTR},
+		{"ENOBUFS", nil, errENOBUFS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sock := &endlessSocket{msg: tc.msg, err: tc.err, reading: make(chan struct{})}
+			// A source that did not stop sees its stop once the socket runs
+			// dry, so a failed run leaves nothing spinning.
+			defer sock.dry.Store(true)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			src := newKernelSource(ctx, sock, true)
+			select {
+			case <-sock.reading:
+			case <-time.After(watchdog):
+				t.Fatal("the source never read")
+			}
+			cancel()
+			select {
+			case <-src.Done():
+			case <-time.After(watchdog):
+				t.Fatalf("the source read on past its stop while the kernel kept sending: %+v", src.Status().Counts)
+			}
+			if n := sock.closed.Load(); n != 1 {
+				t.Errorf("the socket was closed %d times", n)
+			}
+		})
 	}
 }
 

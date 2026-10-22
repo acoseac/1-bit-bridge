@@ -219,7 +219,11 @@ func (s *kernelSource) count(c func(*Counts)) {
 }
 
 // run reads until ctx ends or the socket fails: it waits for the socket,
-// then reads every message there is, and again.
+// then reads every message there is, and again. The drain looks at ctx
+// before every recv, a retry's included: a socket refilled as fast as it is
+// read never answers EAGAIN, so a drain that looked only once it ran dry
+// read on past its stop, keeping this goroutine and the socket past serve's
+// stop deadline (B470 PR 4a2 round 2).
 func (s *kernelSource) run(ctx context.Context, sock socket, passcred bool) {
 	defer close(s.done)
 	defer func() { _ = sock.close() }()
@@ -232,6 +236,9 @@ func (s *kernelSource) run(ctx context.Context, sock socket, passcred bool) {
 			return
 		}
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			m, err := sock.recv(buf)
 			switch {
 			case err == nil:
