@@ -172,6 +172,11 @@ func startKernelSource(ctx context.Context, sock socket, passcred bool, raw func
 	return s
 }
 
+// PollingSource is a source that hears nothing, for reason: the watcher
+// reads on its periodic tick alone. Serve's boot tests run the watcher on
+// one, so no test opens the kernel's socket.
+func PollingSource(reason string) Source { return newPollingSource(ModePolling, reason) }
+
 // newPollingSource is a source that hears nothing, in mode, for reason.
 func newPollingSource(mode Mode, reason string) *kernelSource {
 	s := &kernelSource{notes: make(chan struct{}, 1), done: make(chan struct{}), status: SourceStatus{Mode: mode, Reason: reason}}

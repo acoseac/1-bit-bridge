@@ -59,6 +59,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
+	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
@@ -2627,6 +2628,18 @@ type serveOpts struct {
 	// does not. Nil in production. A boot test waits on it instead of
 	// polling. Per invocation for tailscaleCLI's reason.
 	outputLoopbackBoot func(baseURL string)
+	// playerGOOS stands in for runtime.GOOS where serve decides whether
+	// the player's hotplug watcher runs, which is Linux alone. Empty (this
+	// host) in production; a boot test on another host stands in for
+	// Linux. Per invocation for tailscaleCLI's reason.
+	playerGOOS string
+	// hotplugSource opens the hotplug watcher's event source; nil is the
+	// kernel's netlink socket. A boot test passes one that hears nothing.
+	hotplugSource func(context.Context) hotplug.Source
+	// hotplugBoot is told serve's decision about the hotplug watcher (see
+	// playerHotplugWiring.Boot). Nil in production; a boot test waits on
+	// it instead of polling.
+	hotplugBoot func(*hotplug.Service, *config.RuntimeConfig, <-chan struct{})
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -4046,6 +4059,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// live holder (see SetDupePolicy above) so settings PATCHes reach
 	// the next stamping pass.
 	lateCfgHolder.Store(cfgHolder)
+
+	// The player's hotplug watcher (B470 PR 4a2), on Linux: it watches
+	// for DACs while the live config enables the player and does nothing
+	// while it does not, reading output.player from the holder on every
+	// reading and waking on its changes. No path changes output.player
+	// while serve runs today (bind refuses a data dir a serve holds); the
+	// console's DAC page will (PR 6a). Its stop, the teardown's, cancels
+	// and joins it; it writes nothing a later close waits for.
+	stopPlayerHotplug := startPlayerHotplug(ctx, playerHotplugWiring{
+		GOOS:       opts.playerGOOS,
+		Holder:     cfgHolder,
+		OpenSource: opts.hotplugSource,
+		Boot:       opts.hotplugBoot,
+	})
+	defer stopPlayerHotplug()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA

@@ -591,6 +591,9 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	} else {
 		fmt.Fprintf(stdout, "wrote output.player.device to %s (0600)\n", cfgPath)
 	}
+	// bind wrote the file with no serve on the data dir, and a serve reads
+	// output.player when it starts: nothing reloads the file.
+	fmt.Fprintln(stdout, "the binding applies when bridge serve next starts")
 	if !cfg.Output.Player.Enabled {
 		fmt.Fprintln(stdout, "output.player.enabled is not true: the binding waits for the player to be turned on")
 		return 0

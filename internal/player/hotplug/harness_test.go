@@ -334,13 +334,13 @@ func (h *harness) waitStats(what string, cond func(Stats) bool) Stats {
 }
 
 // waitStatus waits until the service's status satisfies cond, on the
-// service's own progress signal: never a sleep or a poll.
+// service's own Updates: never a sleep or a poll.
 func (h *harness) waitStatus(what string, cond func(Status) bool) Status {
 	h.t.Helper()
 	deadline := time.NewTimer(watchdog)
 	defer deadline.Stop()
 	for {
-		ch := h.svc.progress()
+		ch := h.svc.Updates()
 		st := h.svc.Status()
 		if cond(st) {
 			return st

@@ -147,9 +147,10 @@ func (s *Service) Status() Status {
 	return st
 }
 
-// progress is closed at the service's next change of status: a test waits
-// on it, never on a sleep.
-func (s *Service) progress() <-chan struct{} {
+// Updates returns a channel closed at the service's next change of Status:
+// a reader takes the channel, reads Status, and waits on it, never on a
+// sleep or a poll (the tests, and serve's).
+func (s *Service) Updates() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.progCh
