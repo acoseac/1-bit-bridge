@@ -77,11 +77,15 @@ type owner struct {
 // other command waiting so. Only sess's Audible decides it, and the settle
 // answers it nil only while sess is the session playing. The engine's own
 // move past an entry refused at its start hands it on to the session that
-// follows (carry).
+// follows (carry), and carried marks it until that session starts: a Next,
+// Previous, PlayID or PlayIndex sent meanwhile replaces the playback the
+// engine was moving on to, and supersedes it (replaced), where the commands
+// that set the pending intent themselves share the session after the release.
 type waiter struct {
 	c       *command
 	play    bool
 	sess    SessionID
+	carried bool
 	decided bool
 	err     error
 }

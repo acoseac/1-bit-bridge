@@ -93,9 +93,11 @@
 // refused at its start, it is the session that follows. Only that session's
 // Audible decides the command, and a Next, Previous, PlayID or PlayIndex
 // that replaces it before it is heard answers the command ReasonSuperseded,
-// and a Play whose Resume is under way the same. Pause and a resume answer
-// with the backend's answer; Stop and EnterMaintenance once the release is
-// confirmed or its deadline passed.
+// and a Play whose Resume is under way the same; so it does for a command
+// carried past an entry refused at its start when one of the four comes
+// while the release before the next session is under way. Pause and a
+// resume answer with the backend's answer; Stop and EnterMaintenance once
+// the release is confirmed or its deadline passed.
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;

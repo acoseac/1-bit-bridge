@@ -662,7 +662,11 @@ func TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand(t *testing.T) {
 // heard before its Start returns (Codex's sequence on round 6, where that
 // Audible answered both commands nil), or started and not yet heard, where
 // the settle answered the Play nil. The PlayID answers nil and its entry
-// plays. A Play whose Resume is under way, replaced by a Next, answers
+// plays. So it goes for a Play whose first entry was refused at its start,
+// carried on to the session after the skip's release, when a PlayID comes
+// during that release (the Claude API on round 7: carried into the commands
+// that share that session, the Play answered nil once the PlayID's entry was
+// heard). A Play whose Resume is under way, replaced by a Next, answers
 // ReasonSuperseded too, naming the Next: the paused content never played on.
 func TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded(t *testing.T) {
 	for _, heardFirst := range []bool{true, false} {
@@ -713,6 +717,35 @@ func TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a Play whose first entry was refused, replaced by a PlayID while the skip releases", func(t *testing.T) {
+		h := startHarness(t)
+		ids := h.insert("a", "b", "x")
+		unplayable(h, "a")
+		h.available()
+		g := holdReleases(h)
+		play := async(func() error { return h.eng.Play(bg) })
+		// Session 1 starts at a, which is refused: the skip selects b and
+		// releases session 1 to play it, the Play carried on to the session
+		// after the release.
+		h.waitSnap("the skip releasing session 1", func(sn *Snapshot) bool {
+			return sn.State() == Releasing && sn.Pending() == IntentPlay && sn.Selected() == ids[1]
+		})
+		mark := h.appliedMark()
+		playID := async(func() error { return h.eng.PlayID(bg, ids[2]) })
+		h.waitApplied("play id", mark)
+		g.open()
+		s2 := h.be.nth(2)
+		if s2.first.Entry != ids[2] {
+			t.Fatalf("the second session started %d, want x, the PlayID's", s2.first.Entry)
+		}
+		heard(h, s2)
+		h.must("the PlayID whose session was heard", h.result("play id", playID))
+		err := h.result("play", play)
+		h.refused("the Play whose skip the PlayID replaced", err, ReasonSuperseded)
+		if !strings.Contains(err.Error(), "play id") {
+			t.Fatalf("the Play answered %q, want it to name the PlayID that replaced its playback", err)
+		}
+	})
 	t.Run("a resuming Play, replaced by a Next", func(t *testing.T) {
 		h := startHarness(t)
 		ids, _ := h.playing(0, "a", "b")
@@ -742,6 +775,36 @@ func TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded(t *testing.T) {
 			t.Fatalf("the Next's session started %d, want b", s2.first.Entry)
 		}
 	})
+}
+
+// TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt pins the other side
+// of a carried play command (carry): a Play sent while the skip past an
+// entry refused at its start releases the first session moves no target, so
+// it replaces nothing, and it and the carried Play share the session after
+// the release, both answering nil once that session is heard. Only a Next,
+// Previous, PlayID or PlayIndex supersedes the carried Play
+// (TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded).
+func TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt(t *testing.T) {
+	h := startHarness(t)
+	ids := h.insert("a", "b")
+	unplayable(h, "a")
+	h.available()
+	g := holdReleases(h)
+	first := async(func() error { return h.eng.Play(bg) })
+	h.waitSnap("the skip releasing session 1", func(sn *Snapshot) bool {
+		return sn.State() == Releasing && sn.Pending() == IntentPlay && sn.Selected() == ids[1]
+	})
+	mark := h.appliedMark()
+	second := async(func() error { return h.eng.Play(bg) })
+	h.waitApplied("play", mark)
+	g.open()
+	s2 := h.be.nth(2)
+	if s2.first.Entry != ids[1] {
+		t.Fatalf("the second session started %d, want b, where the skip moved on to", s2.first.Entry)
+	}
+	heard(h, s2)
+	h.must("the carried Play", h.result("the first play", first))
+	h.must("the Play sent during the skip", h.result("the second play", second))
 }
 
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a

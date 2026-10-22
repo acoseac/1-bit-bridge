@@ -291,6 +291,9 @@ func (e *Engine) transport(c *command) {
 		e.releaseSession(o.sess, r.then, stop)
 		e.wait(c, r.then == IntentPlay)
 	case actIntent:
+		if r.then == IntentPlay && r.move != moveKeep {
+			e.replacedCarry(name)
+		}
 		e.setIntent(r.then, name)
 		e.wait(c, r.then == IntentPlay)
 	case actStop:
@@ -379,28 +382,46 @@ func (e *Engine) replaced(s *session, by string) {
 	if s == nil {
 		return
 	}
-	err := refuse("play", ReasonSuperseded, "replaced before playback began: "+by)
-	for i := range e.o.waiters {
-		if w := &e.o.waiters[i]; w.play && !w.decided && w.sess == s.id {
-			w.decided, w.err = true, err
-		}
-	}
+	e.supersedeWaiters(by, func(w *waiter) bool { return w.sess == s.id })
 	if tc := s.transportCall; tc != nil && tc.kind == callResume && tc.waiter != nil && tc.waitErr == nil {
 		tc.waitErr = refuse("play", ReasonSuperseded, "replaced before playback resumed: "+by)
+	}
+}
+
+// replacedCarry records that by, a Next, Previous, PlayID or PlayIndex sent
+// while a release to play is under way, replaced the playback the engine
+// itself was moving on to: the play commands carried past an entry refused
+// at its start (carry) answer ReasonSuperseded, naming by, as they would
+// have had by come while their session started (replaced). The commands that
+// set the pending intent themselves, by among them, share the session after
+// the release, as before; one whose playback began keeps its answer.
+func (e *Engine) replacedCarry(by string) {
+	e.supersedeWaiters(by, func(w *waiter) bool { return w.carried })
+}
+
+// supersedeWaiters answers ReasonSuperseded, naming by, on the play waiters
+// with no outcome yet that which picks.
+func (e *Engine) supersedeWaiters(by string, which func(w *waiter) bool) {
+	err := refuse("play", ReasonSuperseded, "replaced before playback began: "+by)
+	for i := range e.o.waiters {
+		if w := &e.o.waiters[i]; w.play && !w.decided && which(w) {
+			w.decided, w.err = true, err
+		}
 	}
 }
 
 // carry hands the play commands s was started for, with no outcome yet, on
 // to the session that follows s's release: the engine itself moved on, past
 // s's first entry refused before any of its content played, and their
-// playback goes on in that session (startSession). The other release the
-// engine makes to play on, onFinished's when s took no successor, has no
-// such command: it needs s live, and the settle answers every waiter once
-// s's Start has.
+// playback goes on in that session (startSession), unless a command replaces
+// it first (replacedCarry), which the carried mark lets it tell. The other
+// release the engine makes to play on, onFinished's when s took no
+// successor, has no such command: it needs s live, and the settle answers
+// every waiter once s's Start has.
 func (e *Engine) carry(s *session) {
 	for i := range e.o.waiters {
 		if w := &e.o.waiters[i]; w.play && !w.decided && w.sess == s.id {
-			w.sess = 0
+			w.sess, w.carried = 0, true
 		}
 	}
 }
@@ -448,7 +469,7 @@ func (e *Engine) startSession(target uint32) {
 	s := &session{id: SessionID(o.nextSess), phase: sessStarting}
 	for i := range o.waiters {
 		if w := &o.waiters[i]; w.play && w.sess == 0 {
-			w.sess = s.id
+			w.sess, w.carried = s.id, false
 		}
 	}
 	first := e.newOcc(target)
