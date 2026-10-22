@@ -51112,5 +51112,60 @@ all three).
 The gate, through the build lock: `make fmt vet` clean, `make test` green
 (about 19 minutes on this Mac), `make build-all` clean, `make docs-check`
 clean; the hotplug package passed `-count=20 -cpu 1,2,8`. No test here
-needs Linux. The rules for rounds 1 and 2 are one note, not yet applied
-to the rules files.
+needs Linux. The rules for rounds 1 and 2 are one note, applied in
+481d3144 to `player.md`, `output.md`, `config-lifecycle.md`,
+`cli-serve.md` and `CLAUDE.md`.
+
+**Round 3 (the Claude API and Codex on round 2; Argon queued): two items,
+both real.** The Claude API checked the hold's bound, the set-aside, the
+partial /proc readings, the drain, the named result, each test against
+its revert, and races, and found only item 2.
+
+1. *A held answer's bound was judged at the reading's start* (Codex,
+Medium). `reconcile` took `now` from the timer, before Observe, and
+compared the hold's bound with it twice, setting a reading aside and
+holding its answer. A reading that began short of the bound and ended past
+it was held again, or set aside, and the bound, past by then, started
+another reading at once, which may block as the first did. The same start
+time scheduled what follows a reading: the next follow-up, a failed
+reading's retry and the periodic reading, so one that outlasted its
+interval was followed at once by another. The follow-up was the review's
+own test's business too: with the bound fixed alone, the follow-up due
+0.5 s after the parked reading began started at once. The reading's end,
+its queued events taken (`done`), now judges the bound and schedules the
+follow-up, the retry and the periodic reading; `now` stays the reading's
+time, the snapshot's Observed and the hold's start. Every reading still
+moves the periodic on first, so one that returns early, the player just
+turned off, leaves nothing due at once: moving that assignment below
+Observe would have let such a reading come round again and again until
+the service stopped the watch. Red on 481d3144:
+`TestAReadingThatOutlastsAHeldAnswersBoundIsPublished` (the follow-up at
+3.3 s parked while the clock passed the 3.8 s bound: nothing published
+from it, held or with a removal queued behind it),
+`TestARetryIsDueItsBackoffAfterAFailedReadingEnds` (a failed reading that
+took 5 s was retried at once) and
+`TestThePeriodicReadingIsDueAPeriodAfterTheLastReadingEnds` (a reading
+that took 11 s was followed at once). Controls, each red: the hold judged
+at the start (both cases of the first test); the set-aside judged at the
+start (its queued case); the follow-up due from the start (its held case,
+a ninth reading at once); the retry from the start; the periodic not
+moved again from the end.
+
+2. *The round-2 entry said the rules were not yet applied* (the Claude
+API, Low). They were, in 481d3144; its last sentence now says so and names
+the files.
+
+The gate's stress run found a race in round 1's
+`TestAnOverflowWithNoWindowReadsAtOnce`: it read `Status().Next` as soon
+as the reading was counted, and the watcher sets its next deadline only on
+its loop's next turn, so the read could see the overflow reading's own
+deadline (12 failures in 1200 runs of the test alone under `-race -cpu
+1,2,8`). It now waits for the deadline (`waitNext`), as the other tests
+do: none in 1200. Control: the periodic a second off (red at the test's
+watchdog).
+
+The gate, through the build lock: `make fmt vet test` green on f9de73a4
+(17.7 minutes, after 19 minutes waiting for a slot), `make build-all`
+and `make docs-check` clean, and the hotplug package, its test fix included, passed
+`-race -count=20 -cpu 1,2,8`. The rules text is a note, OLD/NEW against
+481d3144's `player.md`.
