@@ -125,6 +125,13 @@ func strictJSON(data []byte, v any) error {
 	return nil
 }
 
+// maxFileCounter bounds the queue file's counters. A run's own grow by a
+// block for each start while they are exhausted, far short of it, and a
+// start past it would wrap the uint64 (startCounter adds a block, target
+// another), so an ID or token handed out before could be handed out again
+// (CodeRabbit on #1309).
+const maxFileCounter = 1 << 62
+
 // decodeQueue reads a queue file and checks everything the engine would
 // not have written: the version, the bounds, every ID nonzero, unique,
 // handed out and inside its reservation, every reference, shuffle off. A
@@ -149,6 +156,9 @@ func decodeQueue(data []byte) (*queueFile, []entry, error) {
 		return nil, nil, fmt.Errorf("%d entries, more than %d", len(f.Entries), MaxEntries)
 	case f.Shuffle:
 		return nil, nil, errors.New("shuffle is on, which this release does not play")
+	case f.IDs.Next > maxFileCounter || f.IDs.Reserved > maxFileCounter || f.Tokens.Reserved > maxFileCounter:
+		return nil, nil, fmt.Errorf("a counter past %d (ids next %d, reserved %d; tokens reserved %d), which no run writes and a start would wrap",
+			uint64(maxFileCounter), f.IDs.Next, f.IDs.Reserved, f.Tokens.Reserved)
 	}
 	entries := make([]entry, 0, len(f.Entries))
 	seen := make(map[uint32]bool, len(f.Entries))

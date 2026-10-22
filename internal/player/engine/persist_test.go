@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -374,6 +376,20 @@ func TestEachKindOfBadFileIsMovedAside(t *testing.T) {
 		{"an ID past its reservation", func(t *testing.T, h *harness, m map[string]any) []byte {
 			reserved := m["ids"].(map[string]any)["reserved"].(float64)
 			entriesOfFile(m)[0].(map[string]any)["id"] = reserved + 1
+			return writeJSON(t, h, m)
+		}},
+		// A counter a start would wrap (startCounter adds a block): no run
+		// writes one, and taken it could hand out an ID or token again.
+		{"IDs reserved where a start would wrap", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["ids"].(map[string]any)["reserved"] = json.Number(strconv.FormatUint(math.MaxUint64-idBlock, 10))
+			return writeJSON(t, h, m)
+		}},
+		{"a next ID where a start would wrap", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["ids"].(map[string]any)["next"] = json.Number(strconv.FormatUint(math.MaxUint64, 10))
+			return writeJSON(t, h, m)
+		}},
+		{"tokens reserved where a start would wrap", func(t *testing.T, h *harness, m map[string]any) []byte {
+			m["tokens"].(map[string]any)["reserved"] = json.Number(strconv.FormatUint(math.MaxUint64-1, 10))
 			return writeJSON(t, h, m)
 		}},
 		{"a bad reference", func(t *testing.T, h *harness, m map[string]any) []byte {

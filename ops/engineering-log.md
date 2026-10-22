@@ -51669,7 +51669,7 @@ is a note, OLD/NEW against 9e6eea1c's `player.md`.
 
 ### The numbers
 
-- The queue: 1,000 entries; 64 KiB of metadata an entry and 16 MiB in all;
+- The queue: 1,000 entries; 64 KiB of metadata per entry and 16 MiB in all;
   references of 1 to 128 printable ASCII bytes; a ReadList of at most 1,000
   IDs.
 - The deadlines: `ReleaseTimeout` 2 s; `StartTimeout` 5 s; `CallTimeout`
@@ -51728,7 +51728,8 @@ is a note, OLD/NEW against 9e6eea1c's `player.md`.
   of the paused selection, leave the transport paused at the start of the
   new selection with the paused content released, as the brief asks of the
   deletion; Play then starts a session there.
-- **The policy.** Next and Previous keep the transport's state: they play on
+- **The policy** (for Next and Previous superseded by 228792a1 below: they
+  select and play in every state). Next and Previous keep the transport's state: they play on
   while playing, stay paused while paused, and only select while stopped,
   so a Next never starts sound on a stopped bridge; PlayID and PlayIndex
   play in every state, as SeekId and SeekIndex are used; a Next past the end
@@ -52143,7 +52144,7 @@ branch again (`/tmp/b470-4b1-rules-r4.md`, against `player.md`).
   New started an engine whose reservation could never be written. A
   regular file is a PathError wrapping `syscall.ENOTDIR`, and New says the
   directory is not one. Red: the probe and New both answered nil.
-- 59b44524. **A context derived from a call's ends with DeadlineExceeded
+- 59b44524. **A context derived from a call's context ends with DeadlineExceeded
   too** (3, both): callCtx's Done was its base's, so `WithCancel` and
   errgroup's `WithCancelCause` attached children to the base, which ended
   them `Canceled`. callCtx now has a Done of its own, closed through
