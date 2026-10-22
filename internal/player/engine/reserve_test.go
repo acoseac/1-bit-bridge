@@ -331,6 +331,58 @@ func TestABadReservationFileIsMovedAside(t *testing.T) {
 	}
 }
 
+// TestNewRequiresADataDirectoryTheReservationLiesBelow pins New's checks of
+// the reservations' durable root: a DataDir is required, must exist and be a
+// directory (New never creates it), and the reservation file must lie below
+// it, as written and, where symbolic links are to be had, as its links
+// resolve; each is refused with nothing written. The probe is the real one,
+// over a barrier the test answers, so it runs on Windows too.
+func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
+	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
+	t.Cleanup(restore)
+	h := newHarness(t)
+	h.be = newFakeBackend(t)
+	data := filepath.Join(h.dir, "data")
+	file := filepath.Join(h.dir, "a-file")
+	outside := filepath.Join(h.dir, "outside")
+	for _, d := range []string{data, outside} {
+		h.must("make "+d, os.Mkdir(d, 0o700))
+	}
+	h.must("write the file", os.WriteFile(file, []byte("x"), 0o600))
+	type refusal struct {
+		name               string
+		dataDir, queuePath string
+		says               string
+		is                 error
+	}
+	refusals := []refusal{
+		{"no DataDir", "", filepath.Join(data, "queue.json"), "a DataDir is required", nil},
+		{"a DataDir that does not exist", filepath.Join(h.dir, "missing"), filepath.Join(h.dir, "missing", "queue.json"), "must exist", fs.ErrNotExist},
+		{"a DataDir that is a regular file", file, filepath.Join(file, "queue.json"), "is not a directory", nil},
+		{"a reservation file outside it", data, filepath.Join(outside, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot},
+	}
+	if link := filepath.Join(data, "link"); os.Symlink(outside, link) == nil {
+		refusals = append(refusals, refusal{"a reservation file a link below it leads out of", data, filepath.Join(link, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot})
+	} else {
+		t.Log("no symbolic link here: the case of a link leading out of the data directory is not run")
+	}
+	for _, tc := range refusals {
+		cfg := h.config()
+		cfg.DataDir, cfg.QueuePath = tc.dataDir, tc.queuePath
+		cfg.seams.probe, cfg.seams.writeReserve = nil, nil
+		_, err := New(cfg)
+		switch {
+		case err == nil:
+			t.Errorf("%s: New built an engine", tc.name)
+		case !strings.Contains(err.Error(), tc.says) || (tc.is != nil && !errors.Is(err, tc.is)):
+			t.Errorf("%s: New = %v, want it to say %q (%v)", tc.name, err, tc.says, tc.is)
+		}
+		if _, err := os.Lstat(tc.queuePath + ".ids"); err == nil {
+			t.Errorf("%s: a refused New wrote the reservation file", tc.name)
+		}
+	}
+}
+
 // restartWith shuts the engine down, runs f, and boots another on the same
 // files.
 func (h *harness) restartWith(f func()) {

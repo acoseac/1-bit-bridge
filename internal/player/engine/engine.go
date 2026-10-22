@@ -47,8 +47,23 @@ type Config struct {
 	// QueuePath is the queue file. Required.
 	QueuePath string
 	// ReservePath is the ID and token reservation file, "" for QueuePath
-	// with ".ids" appended.
+	// with ".ids" appended. It must lie below DataDir.
 	ReservePath string
+	// DataDir is the bridge's data directory, which 4b2 passes, and the
+	// durable root of every reservation (atomicwrite.WriteBytesDurable):
+	// each makes every directory entry between its file and DataDir durable,
+	// and never DataDir's own. Required. It must exist (New refuses one that
+	// does not, or is not a directory), and the reservation file must lie
+	// below it as written and as its links resolve.
+	//
+	// Nothing makes DataDir's own entry durable: bridge init creates it, and
+	// serve creates it where it is missing (lockServeDataDir), and neither
+	// syncs it. No ID or token is handed out twice all the same, because
+	// DataDir holds the player's identity (player-uuid,
+	// config.EnsurePlayerUUID): a crash that takes DataDir takes that
+	// identity with it, and the player that comes back is a new device to
+	// every controller, which has seen none of its IDs or tokens.
+	DataDir string
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it, passed to every session; 0 is DefaultPauseRelease, and
 	// it must be 1 s to 10 min.
@@ -130,8 +145,9 @@ type Engine struct {
 // moving a bad one aside, and makes the reservation of this run durable
 // before anything is handed out. A file problem is logged and leaves the
 // engine running, refusing what it cannot do safely (Snapshot.Edits). A bad
-// Config is an error, and so is a reservation file whose directory cannot be
-// synced (atomicwrite.ProbeDurable, run before anything is read): a
+// Config is an error, a DataDir that is not an existing directory included,
+// and so is a reservation file that is not below DataDir, or whose directory
+// cannot be synced (atomicwrite.ProbeDurable, run before anything is read): a
 // filesystem whose directory fsync always fails, as some network and FUSE
 // mounts' does, would make every reservation fail and the engine refuse
 // every edit for ever, so the error names the directory and says the data
@@ -146,6 +162,8 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("player: a Backend is required")
 	case cfg.QueuePath == "":
 		return nil, errors.New("player: a QueuePath is required")
+	case cfg.DataDir == "":
+		return nil, errors.New("player: a DataDir is required")
 	}
 	if cfg.ReservePath == "" {
 		cfg.ReservePath = cfg.QueuePath + ".ids"
@@ -174,21 +192,28 @@ func New(cfg Config) (*Engine, error) {
 			return atomicwrite.WriteBytes(path, data, ".player-queue-*.tmp")
 		}
 	}
+	dataDir := cfg.DataDir
 	if sm.writeReserve == nil {
-		// A reservation is made only once its bytes and the directory entry
-		// naming them are fsynced: the values it covers are handed out at
-		// once, and a rename whose entry is not durable can roll back at a
-		// crash, so atomicwrite's tolerance of a failed directory fsync is
-		// not taken here.
+		// A reservation is made only once its bytes and every directory
+		// entry between it and the data directory are fsynced: the values it
+		// covers are handed out at once, and a rename whose entry is not
+		// durable can roll back at a crash, so atomicwrite's tolerance of a
+		// failed directory fsync is not taken here.
 		sm.writeReserve = func(path string, data []byte) error {
-			return atomicwrite.WriteBytesDurable(path, data, ".player-ids-*.tmp")
+			return atomicwrite.WriteBytesDurable(dataDir, path, data, ".player-ids-*.tmp")
 		}
 	}
 	if sm.probe == nil {
-		sm.probe = atomicwrite.ProbeDurable
+		sm.probe = func(path string) error { return atomicwrite.ProbeDurable(dataDir, path) }
+	}
+	switch info, err := os.Stat(dataDir); {
+	case err != nil:
+		return nil, fmt.Errorf("player: the data directory %s cannot be used, and it must exist before the player starts: %w", dataDir, err)
+	case !info.IsDir():
+		return nil, fmt.Errorf("player: the data directory %s is not a directory", dataDir)
 	}
 	if err := sm.probe(cfg.ReservePath); err != nil {
-		return nil, notDurable(cfg.ReservePath, err)
+		return nil, notDurable(cfg.ReservePath, dataDir, err)
 	}
 	if sm.readFile == nil {
 		sm.readFile = readLimited
@@ -228,13 +253,16 @@ func New(cfg Config) (*Engine, error) {
 // notDurable is New's refusal of a reservation file whose directory the
 // barrier probe refused: every reservation written there would fail, and the
 // engine would refuse every edit for ever, so it does not start. It advises
-// moving the data directory only where a barrier ran and failed
+// moving the data directory only where a directory fsync ran and failed
 // (atomicwrite.ErrBarrierFailed); a directory the probe could not read (a
 // Stat or an open refused: EACCES, EIO) is said to be unreadable, with the
-// probe's error, since another filesystem would not mend it.
-func notDurable(path string, err error) error {
+// probe's error, since another filesystem would not mend it, and a
+// reservation file outside the data directory is said to be so.
+func notDurable(path, dataDir string, err error) error {
 	dir := filepath.Dir(path)
 	switch {
+	case errors.Is(err, atomicwrite.ErrNotUnderRoot):
+		return fmt.Errorf("player: the reservation file %s is not below the data directory %s, as written or as its links resolve, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", dir, err)
 	case errors.Is(err, syscall.ENOTDIR):

@@ -304,6 +304,7 @@ func (h *harness) config() Config {
 	cfg := Config{
 		Backend:   h.be,
 		QueuePath: h.queuePath(),
+		DataDir:   h.dir,
 		Log:       slog.New(h.logs),
 		seams: seams{
 			clock:        h.clk,

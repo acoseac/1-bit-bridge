@@ -47,9 +47,11 @@
 // out nothing a file covers until the file is durable (the player's ID
 // and token reservation, B470 PR 4b1): a rename whose directory entry
 // is not durable can roll back at a crash, and what was handed out from
-// it would be handed out again. Where there is no barrier at all
-// (Windows), `WriteBytesDurable` refuses with `ErrNoDirectoryBarrier`
-// and the others write as before.
+// it would be handed out again. It syncs every entry between the file
+// and a root the caller vouches for, on every write, and keeps nothing
+// between writes. Where there is no barrier at all (Windows),
+// `WriteBytesDurable` refuses with `ErrNoDirectoryBarrier` and the others
+// write as before.
 package atomicwrite
 
 import (
@@ -61,6 +63,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -87,6 +90,12 @@ var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync 
 // no descriptor left): a caller that advises moving to another filesystem
 // asks errors.Is first.
 var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
+
+// ErrNotUnderRoot is WriteBytesDurable's and ProbeDurable's refusal of a path
+// that does not lie below the durable root they are given, as written or as
+// its symbolic links resolve: the root is what the caller vouches for, and
+// it vouches for nothing outside it. Nothing is created, written or synced.
+var ErrNotUnderRoot = errors.New("atomicwrite: the path is not below the durable root")
 
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
@@ -189,9 +198,10 @@ func SetSyncDirForTest(fn func(dir string) error) (restore func()) {
 }
 
 // beforeMkdirAll is a test seam, nil in production: a strict write calls it
-// once it has looked for the directories it must create and before it
-// creates them, so a test can act there as another writer would. In-package
-// tests set it with a `t.Cleanup` restore and never call `t.Parallel()`.
+// once it has checked the path against its root and before it creates the
+// directories it needs, so a test can act there as another writer would.
+// In-package tests set it with a `t.Cleanup` restore and never call
+// `t.Parallel()`.
 var beforeMkdirAll func(dir string)
 
 // platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
@@ -359,61 +369,161 @@ func durableDirEntry(path string) error {
 	return nil
 }
 
-// missing is dir and the directories above it that do not exist, the
-// deepest first, up to the first that does, or that Stat cannot answer for.
-func missing(dir string) []string {
-	var out []string
-	for d := dir; ; {
-		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
-			return out
+// underRoot makes root and path absolute and clean, and checks what a
+// strict write and its probe both require before they touch anything:
+// path's directory at or below root as written (ErrNotUnderRoot), and root
+// a directory that exists, which neither creates. It returns root and
+// path's directory. An empty root is refused rather than taken for the
+// working directory, which is what filepath.Abs makes of it.
+func underRoot(root, path string) (string, string, error) {
+	if root == "" {
+		return "", "", fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", err
+	}
+	if path, err = filepath.Abs(path); err != nil {
+		return "", "", err
+	}
+	dir := filepath.Dir(path)
+	if !within(root, dir) {
+		return "", "", fmt.Errorf("%w: %s is not below %s", ErrNotUnderRoot, path, root)
+	}
+	switch info, err := os.Stat(root); {
+	case err != nil:
+		return "", "", err
+	case !info.IsDir():
+		return "", "", &fs.PathError{Op: "root", Path: root, Err: syscall.ENOTDIR}
+	}
+	return root, dir, nil
+}
+
+// within reports whether p is root or lies below it; both are absolute and
+// clean.
+func within(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// nearest is the directory at or below root that holds dir, or holds the
+// first of the directories a write of dir creates: dir itself when it
+// exists, and otherwise the nearest above it that does, root at the
+// highest. It must be a directory (syscall.ENOTDIR), and lie at or below
+// root as its symbolic links resolve too (ErrNotUnderRoot), so nothing is
+// created through a link that leads out of root. Any error Stat gives but
+// fs.ErrNotExist is returned as it is.
+func nearest(root, dir string) (string, error) {
+	for d := dir; ; d = filepath.Dir(d) {
+		info, err := os.Stat(d)
+		switch {
+		case err == nil && !info.IsDir():
+			return "", &fs.PathError{Op: "probe", Path: d, Err: syscall.ENOTDIR}
+		case err == nil:
+			real, err := filepath.EvalSymlinks(d)
+			if err != nil {
+				return "", err
+			}
+			realRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				return "", err
+			}
+			if !within(realRoot, real) {
+				return "", fmt.Errorf("%w: %s resolves to %s, outside %s", ErrNotUnderRoot, d, real, realRoot)
+			}
+			return d, nil
+		case !errors.Is(err, fs.ErrNotExist) || d == root:
+			return "", err
 		}
-		out = append(out, d)
-		up := filepath.Dir(d)
-		if up == d {
-			return out
-		}
-		d = up
 	}
 }
 
+// durableChain is the directories whose fsync makes every entry between dir
+// and root durable: dir, which holds the file, then each directory above it
+// up to root, each of which holds the entry of the one below; root is among
+// them, its own entry never. It walks the path as written, which makes the
+// entry of every symbolic link it passes through durable, and then as it
+// resolves, which reaches a directory a link points to in its own parent.
+// Each directory is taken once, by where it resolves to, the deepest first.
+// dir exists and lies at or below root as written (underRoot); it must lie
+// below root as it resolves too (ErrNotUnderRoot).
+func durableChain(root, dir string) ([]string, error) {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !within(realRoot, realDir) {
+		return nil, fmt.Errorf("%w: %s resolves to %s, outside %s", ErrNotUnderRoot, dir, realDir, realRoot)
+	}
+	var chain []string
+	seen := map[string]bool{}
+	for _, walk := range [][2]string{{dir, root}, {realDir, realRoot}} {
+		for d := walk[0]; ; d = filepath.Dir(d) {
+			real, err := filepath.EvalSymlinks(d)
+			if err != nil {
+				return nil, err
+			}
+			if !seen[real] {
+				seen[real] = true
+				chain = append(chain, d)
+			}
+			if d == walk[1] {
+				break
+			}
+		}
+	}
+	return chain, nil
+}
+
 // ProbeDurable reports, without writing anything, whether WriteBytesDurable
-// can make a write of path durable: ErrNoDirectoryBarrier on a platform with
-// no directory barrier, and otherwise the barrier's answer for path's
-// directory or, while that directory does not exist yet, for the nearest one
-// above it that does, on whose filesystem it will be created. Some network
-// and FUSE mounts fail every directory fsync (EINVAL, ENOTSUP), and there
-// every WriteBytesDurable fails; a caller that would then refuse its work
-// for ever, with nothing naming the cause, asks once as it starts and
-// refuses to start instead.
+// can make a write of path below root durable: ErrNoDirectoryBarrier on a
+// platform with no directory barrier, the refusals WriteBytesDurable makes
+// before it writes (ErrNotUnderRoot, a root that does not exist, a regular
+// file where a directory should be), and otherwise the strict barrier's
+// answer for every directory a write would fsync that exists now: path's
+// directory, or while that does not exist yet the nearest one above it that
+// does, on whose filesystem it will be created, and each above that up to
+// root. Some network and FUSE mounts fail every directory fsync (EINVAL,
+// ENOTSUP), and there every WriteBytesDurable fails; a caller that would then
+// refuse its work for ever, with nothing naming the cause, asks once as it
+// starts and refuses to start instead.
 //
-// What it probes must be a directory: the barrier opens and fsyncs whatever
-// is there, and answers nil for a regular file, where no write can ever be
+// What it probes must be a directory: a barrier opens and fsyncs whatever is
+// there, and answers nil for a regular file, where no write can ever be
 // made. A regular file is an error wrapping syscall.ENOTDIR, and any other
-// error Stat gives is returned as it is. The directory is then opened once,
-// and that descriptor fsynced (syncDirAt): one this process cannot open
+// error Stat gives is returned as it is. Each directory is opened once, and
+// that descriptor fsynced (syncDirAt): one this process cannot open
 // (searchable and not readable, or no descriptor left) is the open's error,
-// unmarked, and only the fsync's own failure, a directory the filesystem
-// would not sync, is marked ErrBarrierFailed. Nothing opens it a second
-// time, so no failure of a second open can pass for the fsync's.
-func ProbeDurable(path string) error {
+// unmarked, and only an fsync's own failure, a directory the filesystem
+// would not sync, is marked ErrBarrierFailed. Nothing opens a directory a
+// second time, so no failure of a second open can pass for the fsync's.
+func ProbeDurable(root, path string) error {
 	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	dir := filepath.Dir(path)
-	if m := missing(dir); len(m) > 0 {
-		dir = filepath.Dir(m[len(m)-1])
-	}
-	switch info, err := os.Stat(dir); {
-	case err != nil:
+	root, dir, err := underRoot(root, path)
+	if err != nil {
 		return err
-	case !info.IsDir():
-		return &fs.PathError{Op: "probe", Path: dir, Err: syscall.ENOTDIR}
 	}
-	if err := syncDirAt(dir); err != nil {
-		if errors.Is(err, ErrBarrierFailed) {
-			return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)
+	near, err := nearest(root, dir)
+	if err != nil {
+		return err
+	}
+	chain, err := durableChain(root, near)
+	if err != nil {
+		return err
+	}
+	for _, d := range chain {
+		if err := syncDirAt(d); err != nil {
+			if errors.Is(err, ErrBarrierFailed) {
+				return fmt.Errorf("the directory %s cannot be synced: %w", d, err)
+			}
+			return err
 		}
-		return err
 	}
 	return nil
 }
@@ -469,77 +579,6 @@ func (e *barrierError) Error() string        { return e.err.Error() }
 func (e *barrierError) Unwrap() error        { return e.err }
 func (e *barrierError) Is(target error) bool { return target == ErrBarrierFailed }
 
-// unconfirmed is the directories a strict write found missing whose entry
-// in their parent has not been made durable since: their barrier failed, or
-// never ran because the write stopped first. Every strict write runs the
-// barrier of each member on its path before it reports success, and a
-// member leaves the set only once its barrier has succeeded.
-//
-// Nothing is removed to make a later write sync an entry again. A removal
-// raced every other writer in those directories: one that made the same
-// directory in the meantime lost it, a regular file one put at the path was
-// deleted, and a directory one filled could not be removed and was then
-// taken by the next strict write for one that was always there.
-//
-// The set is the process's, and that is enough across a crash: a directory
-// still present after one has a durable entry, and one that is gone is
-// created again, its barrier with it. A process that exits with a member
-// unconfirmed leaves the next to take that directory as found, as it takes
-// every directory that was there already (the caller's). Barriering every
-// directory up to the root on every write would not depend on the set, and
-// was not taken: it syncs directories outside the caller's tree, which the
-// process may not be able to open (a parent searchable and not readable) or
-// whose filesystem cannot sync a directory, and so refuses writes that are
-// durable.
-//
-// Strict writes find, create and confirm their directories one at a time,
-// under mu, so a member joins before its directory is created and leaves
-// only by a barrier that ran after it was. The barriers' I/O is under the
-// lock: strict writes are rare, and the player's, the one caller, are one at
-// a time already.
-var unconfirmed = struct {
-	mu   sync.Mutex
-	dirs map[string]bool
-}{dirs: map[string]bool{}}
-
-// mkdirAllDurable is fsutil.MkdirAll for the strict writer: each directory
-// it creates is made durable in its parent, the deepest first, before
-// anything is written into it, so a crash cannot take a durable file's
-// directory with it. A directory that was there already is the caller's,
-// and is not synced, unless a strict write of this process found it missing
-// and has not confirmed its entry since (unconfirmed): that barrier runs
-// again, here, on every write below it until it succeeds.
-func mkdirAllDurable(dir string) error {
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	unconfirmed.mu.Lock()
-	defer unconfirmed.mu.Unlock()
-	for _, d := range missing(dir) {
-		unconfirmed.dirs[d] = true
-	}
-	if beforeMkdirAll != nil {
-		beforeMkdirAll(dir)
-	}
-	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	for d := dir; ; {
-		if unconfirmed.dirs[d] {
-			if err := syncDirAt(filepath.Dir(d)); err != nil {
-				return fmt.Errorf("the directory %s was created, but its entry is not durable: %w", d, err)
-			}
-			delete(unconfirmed.dirs, d)
-		}
-		up := filepath.Dir(d)
-		if up == d {
-			return nil
-		}
-		d = up
-	}
-}
-
 // WriteBytes writes `data` to `path` via tmp-file + rename so a
 // concurrent reader never sees a torn file. The tmp file is
 // created in the SAME directory as `path` so the rename is a
@@ -580,47 +619,81 @@ func mkdirAllDurable(dir string) error {
 // fails) so the caller can route on `errors.Is` / `os.IsNotExist`
 // as appropriate.
 func WriteBytes(path string, data []byte, tmpPrefix string) error {
+	if err := fsutil.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	return writeBytes(path, data, tmpPrefix, false)
 }
 
 // WriteBytesDurable is WriteBytes for a caller that hands out nothing the
-// file covers until the write is durable: it fails unless the file's bytes
-// and the directory entry that names them were both fsynced. WriteBytes
-// tolerates a failed directory fsync once its rename has landed
+// file covers until the write is durable: it fails unless the file's bytes,
+// and every directory entry between the file and root, were fsynced.
+// WriteBytes tolerates a failed directory fsync once its rename has landed
 // (commitDirEntry); here that failure is the write's, because a rename
-// whose entry is not durable can roll back at a crash. A failure may leave
-// the new bytes in place, so the caller counts the write as not made, never
-// as undone. A rename that fails while the destination already holds the
-// same bytes is taken as WriteBytes takes it, once the destination itself
-// and then its directory are synced.
+// whose entry is not durable can roll back at a crash, and so can a file
+// whose directory's own entry is not. A failure may leave the new bytes in
+// place, so the caller counts the write as not made, never as undone. A
+// rename that fails while the destination already holds the same bytes is
+// taken as WriteBytes takes it, once the destination itself and then its
+// directory are synced.
 //
-// The directories it creates for path are made durable too, each in its
-// parent, the deepest first, before the file is written: a durable entry in
-// a directory whose own entry is not durable is lost with it. When that
-// fails, nothing is removed: the process keeps each such directory, and
-// every later strict write below it runs its barrier again before it
-// reports success, until one succeeds (unconfirmed).
+// Every write syncs every entry from the file up to root, the directories
+// it creates for path included, the deepest first and before the file is
+// written, and the file's own entry once its rename lands (durableChain):
+// root is fsynced, for the entry of the directory below it, and its own
+// entry never. The writer keeps nothing between writes. A directory whose
+// entry an earlier write, or an earlier run, could not sync is synced again
+// by the next write that passes through it, whoever made it and whatever
+// happened since: process-local state would not survive the restart that
+// leaves such a directory behind. Nothing is ever removed to make a later
+// write create a directory again: a removal races every other writer there.
+// The path is walked as written and as its symbolic links resolve, so a
+// directory reached through a link is synced in its own parent, and the
+// link's own entry in the link's parent.
 //
-// On a platform with no directory barrier (Windows) it refuses with
-// ErrNoDirectoryBarrier before it writes anything: no write there could be
-// counted durable. WriteBytes and the renames keep their best effort there.
-func WriteBytesDurable(path string, data []byte, tmpPrefix string) error {
-	return writeBytes(path, data, tmpPrefix, true)
-}
-
-// writeBytes is WriteBytes, or WriteBytesDurable when durable is set.
-func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
-	if durable && syncDir == nil {
+// root is the caller's guarantee: it must exist (the writer never creates
+// it), and its own entry, and those above it, must be durable already, or
+// need not be, which only the caller can say (the player's engine passes
+// its data directory: engine.Config.DataDir). path must lie below root as
+// written and as its links resolve (ErrNotUnderRoot); a root that does not
+// exist is Stat's error. Each is refused before anything is created,
+// written or synced, and so is a platform with no directory barrier
+// (Windows: ErrNoDirectoryBarrier), where no write could be counted
+// durable; WriteBytes and the renames keep their best effort there.
+func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
+	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	dir := filepath.Dir(path)
-	if durable {
-		if err := mkdirAllDurable(dir); err != nil {
-			return err
-		}
-	} else if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+	root, dir, err := underRoot(root, path)
+	if err != nil {
 		return err
 	}
+	if _, err := nearest(root, dir); err != nil {
+		return err
+	}
+	if beforeMkdirAll != nil {
+		beforeMkdirAll(dir)
+	}
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	chain, err := durableChain(root, dir)
+	if err != nil {
+		return err
+	}
+	for _, d := range chain[1:] {
+		if err := syncDirAt(d); err != nil {
+			return fmt.Errorf("the directory entries between %s and %s are not durable: %w", dir, root, err)
+		}
+	}
+	return writeBytes(filepath.Join(dir, filepath.Base(path)), data, tmpPrefix, true)
+}
+
+// writeBytes stages data beside path and renames it into place: the file
+// half of WriteBytes, or of WriteBytesDurable when durable is set, whose
+// barrier then makes the file's own entry durable. path's directory exists.
+func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
+	dir := filepath.Dir(path)
 	// Same directory as `path` so the rename is a same-filesystem atomic op.
 	tmp, err := os.CreateTemp(dir, tmpPrefix)
 	if err != nil {
