@@ -164,6 +164,59 @@ func TestParseBlocks(t *testing.T) {
 	}
 }
 
+// TestTheVerdictsSettingsAreRead pins the three settings the reading's
+// verdict needs beside the ones above: an output's filters and its
+// deprecated mixer_enabled, and the top-level mixer_type an output without
+// its own takes. Each is kept as written, the last top-level mixer_type
+// wins, an include sets it too, and none prints the password.
+func TestTheVerdictsSettingsAreRead(t *testing.T) {
+	const secret = "verdict-secret-value"
+	text := "" +
+		"password \"" + secret + "\"\n" +
+		"mixer_type \"hardware\"\n" +
+		"mixer_type \"software\"\n" +
+		"audio_output {\n" +
+		"  type \"alsa\"\n" +
+		"  name \"dac\"\n" +
+		"  filters \"eq," + secret + "\"\n" +
+		"  mixer_enabled \"no\"\n" +
+		"}\n"
+	f, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.MixerType != "software" {
+		t.Errorf("mixer_type %q; the last value is kept", f.MixerType)
+	}
+	if len(f.Outputs) != 1 || f.Outputs[0].Filters != "eq,"+secret || f.Outputs[0].MixerEnabled != "no" {
+		t.Fatalf("outputs %+v", f.Outputs)
+	}
+	shown := f.Display()
+	if shown.Outputs[0].Filters != "eq,[redacted]" {
+		t.Errorf("filters shown as %q", shown.Outputs[0].Filters)
+	}
+	assertNoSecret(t, secret, f)
+	for _, want := range []string{"filters eq,[redacted]", "mixer type: software", "enabled no"} {
+		if !strings.Contains(f.String(), want) {
+			t.Errorf("summary lacks %q:\n%s", want, f.String())
+		}
+	}
+	if !bytesContains(mustJSON(t, f), `"mixerType":"software"`) || !bytesContains(mustJSON(t, f), `"mixerEnabled":"no"`) {
+		t.Errorf("json %s", mustJSON(t, f))
+	}
+
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "mixer.conf"), "mixer_type \"null\"\n")
+	mustWrite(t, filepath.Join(root, "mpd.conf"), "mixer_type \"software\"\ninclude \"mixer.conf\"\n")
+	read, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.MixerType != "null" {
+		t.Errorf("mixer_type %q; the include came after the file's own line", read.MixerType)
+	}
+}
+
 func TestPasswordIsRedacted(t *testing.T) {
 	const secret = "super-secret-mpd-password"
 	text := "password \"" + secret + "@read,control\"\nmusic_directory \"/m\"\npassword \"" + secret + "-2@admin\"\n"
