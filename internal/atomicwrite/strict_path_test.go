@@ -273,6 +273,259 @@ func TestWriteBytesDurable_RefusesAMountBelowTheRoot(t *testing.T) {
 	}
 }
 
+// stubMountIDs replaces the kernel's mount IDs with id's answers, and
+// restores them on cleanup. Callers MUST NOT call `t.Parallel()`, as with
+// stubSyncParentDir.
+func stubMountIDs(t *testing.T, id func(path string) (uint64, bool, error)) {
+	t.Helper()
+	prev := mountIDOf
+	mountIDOf = id
+	t.Cleanup(func() { mountIDOf = prev })
+}
+
+// noMountIDs is a kernel that gives no mount IDs: one older than Linux 5.8,
+// or a statx a policy refuses.
+func noMountIDs(string) (uint64, bool, error) { return 0, false, nil }
+
+// mountedAt is the mount IDs of a kernel with a mount of its own at point,
+// as point is now: what a path reaches is on that mount when it is point
+// itself (os.SameFile), however the path spells it, as the kernel finds a
+// mount by the entry a path reaches, never by its name; everything else is
+// on the root's mount.
+func mountedAt(t *testing.T, point string) func(string) (uint64, bool, error) {
+	t.Helper()
+	at, err := os.Lstat(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(path string) (uint64, bool, error) {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return 0, false, err
+		}
+		if os.SameFile(fi, at) {
+			return 2, true, nil
+		}
+		return 1, true, nil
+	}
+}
+
+// TestWriteBytesDurable_RefusesABindMountByItsMountID pins the mount check
+// the writer makes on every write, and the probe, by the kernel's mount IDs:
+// a directory below the root on a mount of its own, a bind mount of the
+// root's own filesystem, which shows the root's device, is refused
+// (ErrNotUnderRoot) before anything is created, written or synced, though
+// the mount table names nothing; the probe reads no table with IDs to go by.
+// Round 7 looked for such a mount in the probe alone, by the table, so a
+// bind mount made after the probe was never looked for.
+func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
+	root := realTempDir(t)
+	sub := filepath.Join(root, "sub")
+	mkdirs(t, sub)
+	synced := stubSyncDir(t, nil)
+	reads := stubMountTable(t, nil, nil)
+	stubMountIDs(t, mountedAt(t, sub))
+	for _, path := range []string{filepath.Join(sub, "ids"), filepath.Join(sub, "new", "ids")} {
+		*synced = nil
+		err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp")
+		refusedPlainly(t, "WriteBytesDurable of "+path, err, synced, filepath.Join(sub, "ids"), filepath.Join(sub, "new"))
+		*synced = nil
+		refusedPlainly(t, "ProbeDurable of "+path, ProbeDurable(root, path), synced)
+	}
+	if *reads != 0 {
+		t.Errorf("the probe read the mount table %d times with mount IDs to go by", *reads)
+	}
+}
+
+// TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling pins Codex's
+// round 7 finding: on a filesystem that folds case, root/Player reaches a
+// mount at root/player, which the kernel's table names by that spelling
+// alone, so round 7's probe, matching the table by spelling, passed
+// root/Player/ids, and the writer synced none of the mount source's
+// entries. By mount ID the spelling does not matter. The test runs where the
+// filesystem folds case (APFS and NTFS by default), and skips where another
+// spelling names another directory.
+func TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling(t *testing.T) {
+	root := realTempDir(t)
+	point := filepath.Join(root, "player")
+	mkdirs(t, point)
+	other := filepath.Join(root, "Player")
+	if _, err := os.Lstat(other); err != nil {
+		t.Skipf("this filesystem tells %s from %s: no other spelling reaches the mount (%v)", other, point, err)
+	}
+	synced := stubSyncDir(t, nil)
+	stubMountTable(t, []string{point}, nil)
+	stubMountIDs(t, mountedAt(t, point))
+	path := filepath.Join(other, "ids")
+	refusedPlainly(t, "ProbeDurable through the mount by another spelling", ProbeDurable(root, path), synced)
+	*synced = nil
+	err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp")
+	refusedPlainly(t, "WriteBytesDurable through the mount by another spelling", err, synced, filepath.Join(point, "ids"))
+}
+
+// TestWriteBytesDurable_RefusesAMountedDestination pins the destination's own
+// mount check (Codex on round 7): a file mounted at the destination, by
+// its mount ID, is refused by the probe and the write before anything is
+// written or synced, with the bytes the write would write already there.
+// Round 7 checked the directories alone, and a rename over a mounted file,
+// which fails with EBUSY, took the fallback for matching bytes: it fsynced
+// the mounted file and the root and answered nil, never the mount source's
+// directory entry.
+func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
+	root := realTempDir(t)
+	dst := filepath.Join(root, "ids")
+	want := []byte("reserved")
+	if err := os.WriteFile(dst, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	synced := stubSyncDir(t, nil)
+	stubMountTable(t, nil, nil)
+	stubMountIDs(t, mountedAt(t, dst))
+	refusedPlainly(t, "ProbeDurable of a destination on a mount of its own", ProbeDurable(root, dst), synced)
+	*synced = nil
+	err := WriteBytesDurable(root, dst, want, ".durable-*.tmp")
+	refusedPlainly(t, "WriteBytesDurable over a destination on a mount of its own", err, synced)
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 {
+		t.Errorf("the refused write left %v (%v), want the destination alone", entries, err)
+	}
+}
+
+// TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile pins the fallback
+// a failed rename takes when the destination already holds the bytes: it
+// takes them only from a regular file on its directory's own mount, asked
+// again as it takes them, since what is there now may not be what the
+// checks saw. A file mounted there once the checks have passed (its mount
+// ID), the rename then failing with EBUSY, as a rename over a mount point
+// does, and a symbolic link to a file with those bytes, the rename failing,
+// each answer the rename's error, with neither the bytes nor the root
+// synced: round 7 synced the mounted file, or the link's target, and the
+// root, and answered nil, the entry naming those bytes never synced.
+func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
+	want := []byte("reserved")
+	for _, tc := range []struct {
+		name    string
+		failErr error
+		set     func(t *testing.T, root, dst string) (mount func())
+	}{
+		{"a file mounted once the checks passed", syscall.EBUSY, func(t *testing.T, root, dst string) func() {
+			if err := os.WriteFile(dst, want, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			at, err := os.Lstat(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mounted := false
+			stubMountIDs(t, func(path string) (uint64, bool, error) {
+				fi, err := os.Lstat(path)
+				if err != nil {
+					return 0, false, err
+				}
+				if mounted && os.SameFile(fi, at) {
+					return 2, true, nil
+				}
+				return 1, true, nil
+			})
+			return func() { mounted = true }
+		}},
+		{"a symbolic link to a file with the bytes", os.ErrPermission, func(t *testing.T, root, dst string) func() {
+			target := filepath.Join(root, "elsewhere")
+			if err := os.WriteFile(target, want, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, target, dst)
+			return func() {}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := realTempDir(t)
+			dst := filepath.Join(root, "ids")
+			stubMountTable(t, nil, nil)
+			mount := tc.set(t, root, dst)
+			prev := SetRenameFuncForTest(func(string, string) error {
+				mount()
+				return tc.failErr
+			})
+			t.Cleanup(func() { SetRenameFuncForTest(prev) })
+			// syncs is every sync after the rename: of the destination's bytes
+			// and of a directory.
+			var syncs []string
+			renamed := false
+			prevFile, prevDir := syncFile, syncDir
+			t.Cleanup(func() { syncFile, syncDir = prevFile, prevDir })
+			syncFile = func(f *os.File) error {
+				if f.Name() != dst {
+					renamed = true // the staged file's sync comes just before the rename
+					return f.Sync()
+				}
+				syncs = append(syncs, "file "+f.Name())
+				return nil
+			}
+			syncDir = func(d *os.File) error {
+				if renamed {
+					syncs = append(syncs, "dir "+d.Name())
+				}
+				return nil
+			}
+			err := WriteBytesDurable(root, dst, want, ".durable-*.tmp")
+			if !errors.Is(err, tc.failErr) {
+				t.Errorf("WriteBytesDurable = %v, want the rename's %v: the bytes there are not the write's to vouch for", err, tc.failErr)
+			}
+			if len(syncs) != 0 {
+				t.Errorf("after the failed rename the write synced %v, want nothing", syncs)
+			}
+		})
+	}
+}
+
+// TestPlatformMountIDReadsTheKernels pins the mount IDs the writer reads: on
+// Linux the kernel's (statx, 5.8 and later), / and /proc on mounts of their
+// own and a directory on its parent's; elsewhere none, and no error. A Linux
+// kernel older than 5.8 gives none, and the test then skips, saying so: the
+// probe falls back to the mount table there.
+func TestPlatformMountIDReadsTheKernels(t *testing.T) {
+	top, ok, err := platformMountID("/")
+	if runtime.GOOS != "linux" {
+		if ok || err != nil {
+			t.Fatalf("platformMountID on %s = %d, %v, %v, want no ID", runtime.GOOS, top, ok, err)
+		}
+		return
+	}
+	if !ok && err == nil && !kernelGivesMountIDs(t) {
+		t.Skip("this kernel is older than Linux 5.8 and gives no mount IDs: the probe falls back to the mount table")
+	}
+	if !ok || err != nil {
+		t.Fatalf("platformMountID(/) = %d, %v, %v, want the kernel's ID", top, ok, err)
+	}
+	if proc, ok, err := platformMountID("/proc"); !ok || err != nil || proc == top {
+		t.Errorf("platformMountID(/proc) = %d, %v, %v, want an ID of its own, not /'s %d", proc, ok, err, top)
+	}
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	mkdirs(t, sub)
+	a, okA, errA := platformMountID(dir)
+	b, okB, errB := platformMountID(sub)
+	if !okA || !okB || errA != nil || errB != nil || a != b {
+		t.Errorf("a directory and the one below it: %d (%v, %v) and %d (%v, %v), want one ID", a, okA, errA, b, okB, errB)
+	}
+}
+
+// kernelGivesMountIDs reports whether the running Linux kernel is 5.8 or
+// later, the first to give statx's STATX_MNT_ID, from its release
+// (/proc/sys/kernel/osrelease, "6.5.0-1025-azure" and the like).
+func kernelGivesMountIDs(t *testing.T) bool {
+	t.Helper()
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		t.Fatalf("the kernel's release: %v", err)
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(string(data), "%d.%d", &major, &minor); err != nil {
+		t.Fatalf("the kernel's release %q: %v", data, err)
+	}
+	return major > 5 || (major == 5 && minor >= 8)
+}
+
 // stubMountTable replaces the kernel's mount table with points and err, and
 // counts the reads. Callers MUST NOT call `t.Parallel()`, as with
 // stubSyncParentDir.
@@ -295,11 +548,13 @@ func stubMountTable(t *testing.T, points []string, err error) *int {
 	return &reads
 }
 
-// TestProbeDurable_RefusesAMountPointTheKernelLists pins the probe's read of
-// the mount table, for a mount the device cannot show: a bind mount of the
-// root's own filesystem onto a directory below the root, whose source's
-// entries are outside the walk up to the root (Codex on round 6). The table
-// is the test's, so it runs everywhere; Linux's own is
+// TestProbeDurable_RefusesAMountPointTheKernelLists pins the probe's
+// fallback where the kernel gives no mount IDs (an older kernel, or a statx a
+// policy refuses: TestWriteBytesDurable_RefusesABindMountByItsMountID is the
+// check by ID): its read of the mount table, for a mount the device cannot
+// show, a bind mount of the root's own filesystem onto a directory below the
+// root, whose source's entries are outside the walk up to the root (Codex on
+// round 6). The table is the test's, so it runs everywhere; Linux's own is
 // TestPlatformMountTableReadsTheKernels. A mount point between the file and
 // the root is refused (ErrNotUnderRoot) with nothing fsynced; a table that
 // cannot be read is ErrMountsUnknown while a directory lies between them;
@@ -311,6 +566,7 @@ func TestProbeDurable_RefusesAMountPointTheKernelLists(t *testing.T) {
 	sub := filepath.Join(root, "sub")
 	mkdirs(t, sub, filepath.Join(root, "other"))
 	synced := stubSyncDir(t, nil)
+	stubMountIDs(t, noMountIDs)
 	path := filepath.Join(sub, "missing", "ids")
 
 	stubMountTable(t, []string{sub}, nil)

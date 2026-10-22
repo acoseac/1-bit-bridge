@@ -282,7 +282,7 @@ func notDurable(path, dataDir string, err error) error {
 	}
 	switch {
 	case errors.Is(err, atomicwrite.ErrNotUnderRoot):
-		return fmt.Errorf("player: the reservation file %s is not below the data directory %s as the strict writer takes it, with no \"..\" element and no symbolic link or mount point between them, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
+		return fmt.Errorf("player: the reservation file %s is not below the data directory %s as the strict writer takes it, with no \"..\" element and no symbolic link or mount point between them or at the file, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
 	case errors.Is(err, atomicwrite.ErrMountsUnknown):
 		return fmt.Errorf("player: the mount table cannot be read, so no mount point between the data directory %s and the reservation file %s can be ruled out: %w", dataDir, path, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
