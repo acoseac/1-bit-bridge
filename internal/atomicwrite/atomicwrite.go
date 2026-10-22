@@ -79,12 +79,13 @@ var logger = logging.Component("atomicwrite")
 var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync a directory, so no write here is made durable: %w", errors.ErrUnsupported)
 
 // ErrBarrierFailed marks, in what WriteBytesDurable and ProbeDurable
-// return, a directory barrier that ran and failed; nothing else they return
-// wraps it. ProbeDurable opens the directory itself before it runs the
-// barrier, so there it marks a directory the filesystem would not sync, as
-// some network and FUSE mounts answer every directory fsync (EINVAL,
-// ENOTSUP), and never one this process cannot read: a caller that advises
-// moving to another filesystem asks errors.Is first.
+// return, a directory fsync that failed; nothing else they return wraps it.
+// Each opens a directory once and fsyncs that descriptor (syncDirAt), so the
+// mark means the filesystem would not sync the directory, as some network
+// and FUSE mounts answer every directory fsync (EINVAL, ENOTSUP), and never
+// that the directory could not be opened (one this process cannot read, or
+// no descriptor left): a caller that advises moving to another filesystem
+// asks errors.Is first.
 var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
 
 // renameFunc is the rename implementation called by RenameWithRetry.
@@ -113,13 +114,14 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 }
 
 // syncParentDir is the parent-directory durability barrier run after
-// a successful rename. Wrapped in a var purely as a test seam — the
-// real syscall can't be made to fail portably, and a dir-sync failure
-// is exactly the branch that MUST NOT turn a completed write into a
-// returned error, except in `WriteBytesDurable`, whose caller asked for
-// that. Production code MUST NOT mutate this; in-package tests override
-// it (with a `t.Cleanup` restore), and tests in other packages through
-// `SetSyncParentDirForTest`, same convention as `renameFunc`.
+// a successful rename by WriteBytes and the renames (commitDirEntry).
+// Wrapped in a var purely as a test seam — the real syscall can't be
+// made to fail portably, and a dir-sync failure is exactly the branch
+// that MUST NOT turn a completed write into a returned error. The strict
+// writer and its probe do not use it: they open each directory once and
+// fsync that descriptor (syncDir, syncDirAt). Production code MUST NOT
+// mutate this; in-package tests override it (with a `t.Cleanup`
+// restore), same convention as `renameFunc`.
 //
 // **A test that overrides this MUST NOT call `t.Parallel()`.** The seam
 // is process-global, so two parallel tests installing different stubs
@@ -137,7 +139,8 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // no-op (`fsutil.SyncsParentDir` is false; see its docblock for why
 // FlushFileBuffers can't service a directory handle), and a no-op that
 // answers nil is not one a caller can tell from a barrier that ran.
-// commitDirEntry then has nothing to run, and WriteBytesDurable refuses.
+// commitDirEntry then has nothing to run (and syncDir is nil there too, so
+// WriteBytesDurable refuses).
 var syncParentDir = platformBarrier()
 
 // syncFile is the file fsync each write runs on what it stages, and the
@@ -146,6 +149,44 @@ var syncParentDir = platformBarrier()
 // in-package tests override it with a `t.Cleanup` restore and never call
 // `t.Parallel()`.
 var syncFile = (*os.File).Sync
+
+// syncDir is the strict writer's and the probe's directory barrier: the
+// fsync of a directory they opened themselves, so that its failure, and
+// only its failure, is ErrBarrierFailed. It is (*os.File).Sync where the
+// platform has a directory barrier, and nil where it has none (Windows,
+// where fsutil.SyncsParentDir is false), and then WriteBytesDurable and
+// ProbeDurable refuse with ErrNoDirectoryBarrier. A test seam, process-global
+// like syncParentDir, with the same contract: in-package tests override it
+// with a `t.Cleanup` restore and never call `t.Parallel()`, and tests in
+// other packages go through SetSyncDirForTest.
+var syncDir = platformSyncDir()
+
+// platformSyncDir is (*os.File).Sync where the platform has a directory
+// barrier, and nil where it has none.
+func platformSyncDir() func(d *os.File) error {
+	if !fsutil.SyncsParentDir {
+		return nil
+	}
+	return (*os.File).Sync
+}
+
+// SetSyncDirForTest swaps the strict writer's and the probe's directory
+// barrier for a test in another package: fn is handed the name of the
+// directory the barrier is to fsync, which it has opened, and fn's answer is
+// the fsync's; nil is a platform with no barrier. It returns what puts the
+// barrier before it back. The seam is process-global: a test that uses it
+// MUST NOT call `t.Parallel()`, and restores it in a `t.Cleanup`. Public only
+// because the player engine's tests drive its reservation and its probe
+// through the real WriteBytesDurable and ProbeDurable, with a barrier that
+// fails and, on Windows too, with one that answers.
+func SetSyncDirForTest(fn func(dir string) error) (restore func()) {
+	prev := syncDir
+	syncDir = nil
+	if fn != nil {
+		syncDir = func(d *os.File) error { return fn(d.Name()) }
+	}
+	return func() { syncDir = prev }
+}
 
 // beforeMkdirAll is a test seam, nil in production: a strict write calls it
 // once it has looked for the directories it must create and before it
@@ -160,19 +201,6 @@ func platformBarrier() func(path string) error {
 		return nil
 	}
 	return fsutil.SyncParentDir
-}
-
-// SetSyncParentDirForTest swaps the parent-directory barrier for a test
-// in another package and returns the previous one, the
-// `SetRenameFuncForTest` pattern; nil is a platform with no barrier. The
-// seam is process-global: a test that uses it MUST NOT call `t.Parallel()`,
-// and restores it in a `t.Cleanup`. Public only because the player engine's
-// tests drive its reservation through the real `WriteBytesDurable` with a
-// barrier that fails, and, on Windows too, with one that answers.
-func SetSyncParentDirForTest(fn func(path string) error) func(path string) error {
-	prev := syncParentDir
-	syncParentDir = fn
-	return prev
 }
 
 // dirSyncWarnOnce keeps the "this filesystem can't fsync a directory"
@@ -325,7 +353,7 @@ func renameRetry(ctx context.Context, src, dst string) error {
 // durable. A platform with no barrier is ErrNoDirectoryBarrier, never a
 // barrier that ran.
 func durableDirEntry(path string) error {
-	if err := barrier(path); err != nil {
+	if err := syncDirAt(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
 	}
 	return nil
@@ -361,13 +389,14 @@ func missing(dir string) []string {
 // What it probes must be a directory: the barrier opens and fsyncs whatever
 // is there, and answers nil for a regular file, where no write can ever be
 // made. A regular file is an error wrapping syscall.ENOTDIR, and any other
-// error Stat gives is returned as it is. The directory is then opened here,
-// before the barrier opens it: one this process cannot read (searchable,
-// not readable) is the open's error, unmarked, and only the barrier's own
-// failure, a directory the filesystem would not sync, is marked
-// ErrBarrierFailed.
+// error Stat gives is returned as it is. The directory is then opened once,
+// and that descriptor fsynced (syncDirAt): one this process cannot open
+// (searchable and not readable, or no descriptor left) is the open's error,
+// unmarked, and only the fsync's own failure, a directory the filesystem
+// would not sync, is marked ErrBarrierFailed. Nothing opens it a second
+// time, so no failure of a second open can pass for the fsync's.
 func ProbeDurable(path string) error {
-	if syncParentDir == nil {
+	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
 	dir := filepath.Dir(path)
@@ -380,13 +409,11 @@ func ProbeDurable(path string) error {
 	case !info.IsDir():
 		return &fs.PathError{Op: "probe", Path: dir, Err: syscall.ENOTDIR}
 	}
-	d, err := os.Open(dir)
-	if err != nil {
+	if err := syncDirAt(dir); err != nil {
+		if errors.Is(err, ErrBarrierFailed) {
+			return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)
+		}
 		return err
-	}
-	_ = d.Close()
-	if err := barrier(filepath.Join(dir, filepath.Base(path))); err != nil {
-		return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)
 	}
 	return nil
 }
@@ -412,21 +439,30 @@ func sameAndSynced(path string, data []byte) (bool, error) {
 	return true, nil
 }
 
-// barrier runs the parent-directory barrier for path: ErrNoDirectoryBarrier
-// on a platform with none, never a barrier that ran, and the barrier's
-// failure marked ErrBarrierFailed.
-func barrier(path string) error {
-	if syncParentDir == nil {
+// syncDirAt is the strict barrier on dir: it opens dir and fsyncs that
+// descriptor, which makes the entries dir holds durable. Only the fsync's
+// own failure is marked ErrBarrierFailed. An open that fails (a directory
+// this process cannot read, no descriptor left) is returned as it is, since
+// no fsync ran, and so is a platform with no barrier
+// (ErrNoDirectoryBarrier). The close of a descriptor opened to read is not
+// checked: the fsync has answered by then.
+func syncDirAt(dir string) error {
+	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	if err := syncParentDir(path); err != nil {
-		return &barrierError{err: err}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if err := syncDir(d); err != nil {
+		return &barrierError{err: fmt.Errorf("sync dir %q: %w", dir, err)}
 	}
 	return nil
 }
 
-// barrierError is a barrier's failure: it reads as the barrier's own error,
-// which it wraps, and errors.Is matches it to ErrBarrierFailed.
+// barrierError is a directory fsync's failure: it reads as the fsync's
+// error, which it wraps, and errors.Is matches it to ErrBarrierFailed.
 type barrierError struct{ err error }
 
 func (e *barrierError) Error() string        { return e.err.Error() }
@@ -491,7 +527,7 @@ func mkdirAllDurable(dir string) error {
 	}
 	for d := dir; ; {
 		if unconfirmed.dirs[d] {
-			if err := barrier(d); err != nil {
+			if err := syncDirAt(filepath.Dir(d)); err != nil {
 				return fmt.Errorf("the directory %s was created, but its entry is not durable: %w", d, err)
 			}
 			delete(unconfirmed.dirs, d)
@@ -574,7 +610,7 @@ func WriteBytesDurable(path string, data []byte, tmpPrefix string) error {
 
 // writeBytes is WriteBytes, or WriteBytesDurable when durable is set.
 func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
-	if durable && syncParentDir == nil {
+	if durable && syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
 	dir := filepath.Dir(path)

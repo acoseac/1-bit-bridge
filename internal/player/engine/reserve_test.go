@@ -144,13 +144,13 @@ func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 	errNoSync := errors.New("fsync: input/output error")
 	// Registered before the harness, so it is restored after every engine
 	// goroutine that could read it has ended.
-	prev := atomicwrite.SetSyncParentDirForTest(func(string) error {
+	restore := atomicwrite.SetSyncDirForTest(func(string) error {
 		if broken.Load() {
 			return errNoSync
 		}
 		return nil
 	})
-	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	t.Cleanup(restore)
 	h := newHarness(t)
 	h.tweak = func(c *Config) { c.seams.writeReserve = nil }
 	h.boot()
@@ -210,13 +210,13 @@ func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
 	errNoSync := errors.New("sync dir: invalid argument")
 	// Registered before the harness, so it is restored after every engine
 	// goroutine that could read it has ended.
-	prev := atomicwrite.SetSyncParentDirForTest(func(string) error {
+	restore := atomicwrite.SetSyncDirForTest(func(string) error {
 		if broken.Load() {
 			return errNoSync
 		}
 		return nil
 	})
-	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	t.Cleanup(restore)
 	h := newHarness(t)
 	h.tweak = func(c *Config) { c.seams.writeReserve, c.seams.probe = nil, nil }
 	h.boot()
@@ -264,8 +264,8 @@ func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
 // what is not a directory. The barrier is the test's, answering nil, so only
 // the probe's own check can refuse, on Windows too.
 func TestNewRefusesAReservationDirectoryThatIsAFile(t *testing.T) {
-	prev := atomicwrite.SetSyncParentDirForTest(func(string) error { return nil })
-	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
+	t.Cleanup(restore)
 	h := newHarness(t)
 	file := filepath.Join(h.dir, "existing-file")
 	h.must("write the file", os.WriteFile(file, []byte("x"), 0o600))

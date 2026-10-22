@@ -39,15 +39,32 @@ func stubSyncParentDir(t *testing.T, ret error) *[]string {
 	return &seen
 }
 
-// noDirectoryBarrier sets the platform seam to a platform with no
+// stubSyncDir installs a recording stub over the strict barrier, the fsync
+// of a directory the strict writer or the probe opened (syncDir), and
+// restores it on cleanup. It returns the names of the directories fsynced,
+// in call order, each answered with ret. Callers MUST NOT call
+// `t.Parallel()`, as with stubSyncParentDir.
+func stubSyncDir(t *testing.T, ret error) *[]string {
+	t.Helper()
+	var seen []string
+	prev := syncDir
+	syncDir = func(d *os.File) error {
+		seen = append(seen, d.Name())
+		return ret
+	}
+	t.Cleanup(func() { syncDir = prev })
+	return &seen
+}
+
+// noDirectoryBarrier sets both barrier seams to a platform with no
 // directory barrier (Windows, where fsutil.SyncsParentDir is false) and
-// restores it on cleanup. Callers MUST NOT call `t.Parallel()`, as with
+// restores them on cleanup. Callers MUST NOT call `t.Parallel()`, as with
 // stubSyncParentDir.
 func noDirectoryBarrier(t *testing.T) {
 	t.Helper()
-	prev := syncParentDir
-	syncParentDir = nil
-	t.Cleanup(func() { syncParentDir = prev })
+	prevParent, prevDir := syncParentDir, syncDir
+	syncParentDir, syncDir = nil, nil
+	t.Cleanup(func() { syncParentDir, syncDir = prevParent, prevDir })
 }
 
 // TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier pins the
@@ -104,22 +121,18 @@ func TestWriteBytesDurable_OnThisPlatform(t *testing.T) {
 // directory with it; and a barrier that fails for one of them fails the
 // write before the file is written.
 func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
-	seen := stubSyncParentDir(t, nil)
+	synced := stubSyncDir(t, nil)
 	root := t.TempDir()
 	dst := filepath.Join(root, "a", "b", "reserved.json")
 	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
 	}
-	var synced []string
-	for _, p := range *seen {
-		synced = append(synced, filepath.Dir(p))
-	}
-	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b")}; !slices.Equal(synced, want) {
-		t.Fatalf("directories synced %v, want %v: b's entry in a, then a's in the root, then the file's in b", synced, want)
+	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b")}; !slices.Equal(*synced, want) {
+		t.Fatalf("directories synced %v, want %v: b's entry in a, then a's in the root, then the file's in b", *synced, want)
 	}
 
 	syncErr := errors.New("fsync: input/output error")
-	stubSyncParentDir(t, syncErr)
+	stubSyncDir(t, syncErr)
 	other := filepath.Join(root, "c", "reserved.json")
 	if err := WriteBytesDurable(other, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
 		t.Fatalf("WriteBytesDurable with the barrier failing for the directory it created = %v, want the barrier's failure", err)
@@ -143,16 +156,16 @@ func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) 
 	dst := filepath.Join(dir, "reserved.json")
 	theirs := filepath.Join(dir, "theirs")
 	syncErr := errors.New("fsync: input/output error")
-	// seen is the paths the barrier is asked for. The one for a's entry in
-	// the root fails twice, and the first time another writer puts a file
-	// in a before it answers.
+	// seen is the directories fsynced. The root's, which makes a's entry
+	// durable, fails twice, and the first time another writer puts a file in
+	// a before it answers.
 	var seen []string
 	fails := 0
-	prev := syncParentDir
-	t.Cleanup(func() { syncParentDir = prev })
-	syncParentDir = func(path string) error {
-		seen = append(seen, path)
-		if path != dir || fails == 2 {
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+	syncDir = func(d *os.File) error {
+		seen = append(seen, d.Name())
+		if d.Name() != root || fails == 2 {
 			return nil
 		}
 		if fails++; fails == 1 {
@@ -175,15 +188,15 @@ func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) 
 	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("the write once a's barrier answers: %v", err)
 	}
-	if !slices.Contains(seen, dir) {
-		t.Fatalf("the write after the failures ran the barrier for %v: never for a's entry in the root, whose barrier had failed", seen)
+	if !slices.Contains(seen, root) {
+		t.Fatalf("the write after the failures fsynced %v: never the root, for a's entry, whose barrier had failed", seen)
 	}
 	seen = nil
 	if err := WriteBytesDurable(dst, []byte("again"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("the write after a's barrier succeeded: %v", err)
 	}
-	if !slices.Equal(seen, []string{dst}) {
-		t.Fatalf("the write after a's barrier succeeded ran the barrier for %v, want the file's entry alone", seen)
+	if !slices.Equal(seen, []string{dir}) {
+		t.Fatalf("the write after a's barrier succeeded fsynced %v, want a alone, for the file's entry", seen)
 	}
 	if got, err := os.ReadFile(dst); err != nil || string(got) != "again" {
 		t.Fatalf("destination %q, %v", got, err)
@@ -205,7 +218,7 @@ func TestWriteBytesDurable_RemovesNothingAnotherWriterMade(t *testing.T) {
 	}
 	t.Run("a directory", func(t *testing.T) {
 		syncErr := errors.New("fsync: input/output error")
-		stubSyncParentDir(t, syncErr)
+		stubSyncDir(t, syncErr)
 		dir := filepath.Join(t.TempDir(), "a")
 		inTheWindow(t, func() {
 			if err := os.Mkdir(dir, 0o700); err != nil {
@@ -223,7 +236,7 @@ func TestWriteBytesDurable_RemovesNothingAnotherWriterMade(t *testing.T) {
 		}
 	})
 	t.Run("a file at the path", func(t *testing.T) {
-		stubSyncParentDir(t, nil)
+		stubSyncDir(t, nil)
 		path := filepath.Join(t.TempDir(), "a")
 		inTheWindow(t, func() {
 			if err := os.WriteFile(path, []byte("theirs"), 0o600); err != nil {
@@ -246,12 +259,9 @@ func TestWriteBytesDurable_RemovesNothingAnotherWriterMade(t *testing.T) {
 // ErrNoDirectoryBarrier on a platform with none.
 func TestProbeDurable(t *testing.T) {
 	root := t.TempDir()
-	seen := stubSyncParentDir(t, nil)
+	seen := stubSyncDir(t, nil)
 	synced := func() []string {
-		var out []string
-		for _, p := range *seen {
-			out = append(out, filepath.Dir(p))
-		}
+		out := slices.Clone(*seen)
 		*seen = nil
 		return out
 	}
@@ -285,8 +295,8 @@ func TestProbeDurable(t *testing.T) {
 	}
 	synced()
 
-	syncErr := errors.New("sync dir: invalid argument")
-	stubSyncParentDir(t, syncErr)
+	syncErr := errors.New("invalid argument")
+	stubSyncDir(t, syncErr)
 	if err := ProbeDurable(filepath.Join(root, "reserved.json")); !errors.Is(err, syncErr) || !strings.Contains(err.Error(), root) {
 		t.Fatalf("ProbeDurable with a failing barrier = %v, want its failure, naming %s", err, root)
 	}
@@ -297,14 +307,16 @@ func TestProbeDurable(t *testing.T) {
 }
 
 // TestBarrierFailuresAreMarked pins ErrBarrierFailed: in what ProbeDurable
-// and WriteBytesDurable return it marks a barrier that ran and failed, for
+// and WriteBytesDurable return it marks a directory fsync that failed, for
 // the file's entry and for a directory the write created, beside the
-// barrier's own error; it marks nothing else, neither a regular file where
-// the directory should be nor a platform with no barrier.
+// fsync's own error; it marks nothing else, neither a regular file where the
+// directory should be nor a platform with no barrier (nor an open that
+// failed: TestProbeDurable_SyncsTheDirectoryItOpened and the two
+// unreadable-directory tests).
 func TestBarrierFailuresAreMarked(t *testing.T) {
 	root := t.TempDir()
-	syncErr := errors.New("sync dir: invalid argument")
-	stubSyncParentDir(t, syncErr)
+	syncErr := errors.New("invalid argument")
+	stubSyncDir(t, syncErr)
 	for name, err := range map[string]error{
 		"the probe":                     ProbeDurable(filepath.Join(root, "reserved.json")),
 		"the write's entry":             WriteBytesDurable(filepath.Join(root, "reserved.json"), []byte("reserved"), ".durable-*.tmp"),
@@ -337,7 +349,7 @@ func TestBarrierFailuresAreMarked(t *testing.T) {
 // gave, a permission error, never marked ErrBarrierFailed, whose caller
 // would advise moving to a filesystem that can sync a directory. A
 // directory it can stat and not open (searchable, not readable) is refused
-// by the probe's own open, before the barrier, which here would answer nil;
+// by the probe's own open, before any fsync, which here would answer nil;
 // one below a directory it cannot search is refused by Stat. POSIX
 // permissions as a user other than root; Windows and root skip.
 func TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
@@ -347,7 +359,7 @@ func TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads and searches every directory")
 	}
-	stubSyncParentDir(t, nil)
+	stubSyncDir(t, nil)
 	root := t.TempDir()
 	closed := filepath.Join(root, "closed")
 	locked := filepath.Join(root, "locked")
@@ -369,6 +381,63 @@ func TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
 		if err := ProbeDurable(path); !errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrBarrierFailed) {
 			t.Errorf("ProbeDurable of %s = %v, want its permission error, unmarked", name, err)
 		}
+	}
+}
+
+// TestProbeDurable_SyncsTheDirectoryItOpened pins the probe's one open: it
+// fsyncs the descriptor it opened, through the strict barrier (syncDir), and
+// opens nothing a second time to sync it, so no failure of such an open (an
+// EMFILE, an EACCES, an EIO) can be taken for the filesystem refusing to
+// sync. Here the best-effort barrier, which opens the directory again, fails
+// as a second open would; the probe never asks it. Only the fsync's own
+// failure is marked ErrBarrierFailed.
+func TestProbeDurable_SyncsTheDirectoryItOpened(t *testing.T) {
+	root := t.TempDir()
+	secondOpen := stubSyncParentDir(t, &fs.PathError{Op: "open", Path: root, Err: syscall.EMFILE})
+	var synced []string
+	var syncErr error
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+	syncDir = func(d *os.File) error {
+		synced = append(synced, d.Name())
+		return syncErr
+	}
+	if err := ProbeDurable(filepath.Join(root, "reserved.json")); err != nil {
+		t.Fatalf("ProbeDurable = %v, want nil: it fsyncs the descriptor it opened", err)
+	}
+	if !slices.Equal(synced, []string{root}) || len(*secondOpen) != 0 {
+		t.Fatalf("the probe fsynced %v through its own descriptor and asked a second open for %v, want %s and nothing", synced, *secondOpen, root)
+	}
+	syncErr = errors.New("invalid argument")
+	if err := ProbeDurable(filepath.Join(root, "reserved.json")); !errors.Is(err, ErrBarrierFailed) || !errors.Is(err, syncErr) {
+		t.Fatalf("ProbeDurable with the fsync failing = %v, want the fsync's failure marked ErrBarrierFailed", err)
+	}
+}
+
+// TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure pins a
+// strict write into a directory this process can write and search but not
+// read: the rename lands, and the barrier on the file's entry cannot open
+// the directory, so the write fails with that open's permission error,
+// never marked ErrBarrierFailed, since no fsync ran. POSIX permissions as a
+// user other than root; Windows and root skip.
+func TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every directory")
+	}
+	closed := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(closed, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+	err := WriteBytesDurable(filepath.Join(closed, "reserved.json"), []byte("reserved"), ".durable-*.tmp")
+	if !errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrBarrierFailed) {
+		t.Fatalf("WriteBytesDurable into a directory it cannot read = %v, want the open's permission error, unmarked", err)
 	}
 }
 
@@ -493,29 +562,30 @@ func TestRenameWithRetryCtx_DirSyncFailureDoesNotFailRename(t *testing.T) {
 // per write. The bytes may be in place; the write is not counted as made.
 func TestWriteBytesDurable_DirSyncFailureFailsTheWrite(t *testing.T) {
 	syncErr := errors.New("fsync: input/output error")
-	seen := stubSyncParentDir(t, syncErr)
+	seen := stubSyncDir(t, syncErr)
 
 	dst := filepath.Join(t.TempDir(), "reserved.json")
 	err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp")
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("WriteBytesDurable = %v, want the barrier's failure", err)
 	}
-	if len(*seen) != 1 || (*seen)[0] != dst {
-		t.Fatalf("parent-dir sync calls = %v, want exactly one, for %q", *seen, dst)
+	if len(*seen) != 1 || (*seen)[0] != filepath.Dir(dst) {
+		t.Fatalf("directory fsyncs = %v, want exactly one, of %q", *seen, filepath.Dir(dst))
 	}
 }
 
 // TestWriteBytesDurable_SyncsParentDirectoryOnce pins the strict writer's
-// success: nil only after the barrier ran, once, on the destination.
+// success: nil only after the barrier ran, once, on the destination's
+// directory.
 func TestWriteBytesDurable_SyncsParentDirectoryOnce(t *testing.T) {
-	seen := stubSyncParentDir(t, nil)
+	seen := stubSyncDir(t, nil)
 
 	dst := filepath.Join(t.TempDir(), "reserved.json")
 	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
 	}
-	if len(*seen) != 1 || (*seen)[0] != dst {
-		t.Fatalf("parent-dir sync calls = %v, want exactly one, for %q", *seen, dst)
+	if len(*seen) != 1 || (*seen)[0] != filepath.Dir(dst) {
+		t.Fatalf("directory fsyncs = %v, want exactly one, of %q", *seen, filepath.Dir(dst))
 	}
 	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
 		t.Fatalf("destination %q, %v", got, err)
@@ -543,8 +613,8 @@ func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
 	// order; fileErr fails the destination's, dirErr the barrier.
 	var syncs []string
 	var fileErr, dirErr error
-	prevFile, prevDir := syncFile, syncParentDir
-	t.Cleanup(func() { syncFile, syncParentDir = prevFile, prevDir })
+	prevFile, prevDir := syncFile, syncDir
+	t.Cleanup(func() { syncFile, syncDir = prevFile, prevDir })
 	syncFile = func(f *os.File) error {
 		if f.Name() != dst {
 			return f.Sync() // the staged file
@@ -552,10 +622,11 @@ func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
 		syncs = append(syncs, "file "+f.Name())
 		return fileErr
 	}
-	syncParentDir = func(path string) error {
-		syncs = append(syncs, "dir "+path)
+	syncDir = func(d *os.File) error {
+		syncs = append(syncs, "dir "+d.Name())
 		return dirErr
 	}
+	dir := filepath.Dir(dst)
 	syncErr := errors.New("fsync: input/output error")
 	for _, tc := range []struct {
 		name            string
@@ -564,9 +635,9 @@ func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
 		want            error
 		syncs           []string
 	}{
-		{"the destination, then its entry", want, nil, nil, nil, []string{"file " + dst, "dir " + dst}},
+		{"the destination, then its entry", want, nil, nil, nil, []string{"file " + dst, "dir " + dir}},
 		{"a destination that cannot be synced", want, syncErr, nil, syncErr, []string{"file " + dst}},
-		{"an entry that cannot be synced", want, nil, syncErr, syncErr, []string{"file " + dst, "dir " + dst}},
+		{"an entry that cannot be synced", want, nil, syncErr, syncErr, []string{"file " + dst, "dir " + dir}},
 		{"other bytes", []byte("other bytes"), nil, nil, os.ErrPermission, nil},
 	} {
 		syncs, fileErr, dirErr = nil, tc.fileErr, tc.dirErr
