@@ -643,8 +643,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **No refusal, warning or log line of the config path prints a value that
   can hold a secret or text pasted where it does not belong: a password, a
   token, a serial, a URL's credentials, a value a setting refused, an entry
-  of a list this build does not know, or a key** (2026-10-22, backlog B505
-  rounds 2 to 4). What a config refuses is often something pasted onto the
+  of a list this build does not know, or a key; a path the operator
+  configured excepted** (2026-10-22, backlog B505 rounds 2 to 5). What a
+  config refuses is often something pasted onto the
   wrong line, MPD's password or a DAC's serial, and `bridge serve`, `bridge
   doctor` and init print the refusal, which a service's journal keeps.
   **A path the operator configured is outside the rule** (the orchestrator's
@@ -691,7 +692,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   serves, which are published. **Don't print a password, a token, a serial,
   a URL's user name, password, query or fragment, a value a setting
   refused, an entry of a list this build does not know, or a key, in a
-  refusal, a warning or a log line; and don't print yaml.v3's error without
+  refusal, a warning or a log line, a path the operator configured
+  excepted (`LibraryRootError` and init's directory errors name the path
+  the operator must find and fix); and don't print yaml.v3's error without
   `ValueFreeYAMLError`.** `TestNoLoadRefusalOrWarningCarriesAValue` (a word
   and a serial of digits on every setting `envBindings` knows, and on each
   setting Validate checks only beside another, with that one set; it holds

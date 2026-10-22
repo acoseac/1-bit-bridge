@@ -840,7 +840,13 @@
   put 1,000 library roots, 200 custom endpoints and 100 upstream servers
   beside the block,
   `TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt`,
-  `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`.)
+  `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`, and
+  `TestPriorOutputOfAFileTheDecoderRefusesElsewhere`, which puts a
+  misspelt top-level key beside a merged block the decoder takes alone,
+  kept as Load decodes it once the typo is put right, and beside Codex's
+  alias-heavy block, of which nothing is kept: since round 4 gave every
+  file that decodes Load's own block, its fixtures are the only ones that
+  reach that reading (the Claude API on round 4; the test, round 5).)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.
