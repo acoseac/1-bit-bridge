@@ -2554,6 +2554,31 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_smart_playlist_served_at
 			ON smart_playlist_served(served_at);`,
 	},
+	{
+		// v59 is the sample kind a PCM track's header states
+		// (Track.SampleFormat, backlog B513): "integer", "float", or ''
+		// for a row whose header states none. NULL is a row nothing has
+		// decided yet: every row this column finds, and any a rolled-back
+		// binary inserts. Store.migrate decides on every open what a row's
+		// codec decides (backfillSampleFormatByCodec), without reading a
+		// file or assigning indexed_at, and BackfillSampleFormats reads the
+		// header of each WAV and AIFF row left. The partial index serves
+		// both, and the readiness count.
+		version: 59,
+		name:    "tracks.sample_format (the sample kind a PCM header states)",
+		sql:     `-- the column and its index are added in post()`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "tracks", tableColumn{
+				name: "sample_format",
+				ddl:  `ALTER TABLE tracks ADD COLUMN sample_format TEXT`,
+			}); err != nil {
+				return err
+			}
+			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_null
+				ON tracks(path) WHERE sample_format IS NULL`)
+			return err
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

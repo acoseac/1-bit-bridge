@@ -1,0 +1,407 @@
+package manifest
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+)
+
+// The rows a library held before tracks.sample_format existed get their kind
+// without a rescan (backlog B513): what a codec decides on every open, and a
+// header read for each WAV and AIFF row, the formats a header must tell.
+
+// rewindToBeforeSampleFormat makes s's rows what a store from before the
+// column holds: every row undecided (NULL), every row at the delta cursor
+// cursor, enriched (enriched_at 7), and the ladder at v58, so the next
+// migrate runs v59 and the open-time fill.
+func rewindToBeforeSampleFormat(t *testing.T, s *Store, cursor int64) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL, indexed_at = ?, enriched_at = 7`, cursor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 58`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireSampleFormats fails unless each path's column is what want says:
+// "NULL" for a row nothing has decided, else the value.
+func requireSampleFormats(t *testing.T, s *Store, want map[string]string) {
+	t.Helper()
+	for path, w := range want {
+		col := storedSampleFormat(t, s, path)
+		got := "NULL"
+		if col.Valid {
+			got = col.String
+		}
+		if got != w {
+			t.Errorf("%s: sample_format = %q, want %q", path, got, w)
+		}
+	}
+}
+
+// TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor: every open
+// decides, without reading a file, each row its codec decides. A FLAC or ALAC
+// row is "integer"; every row whose codec carries no PCM kind (a lossy codec,
+// DSD, a compressed WAV or AIFF-C, an unread AIFF-C, no codec) is "", and so
+// is a UPnP-routed row, whose header the bridge never reads, a routed FLAC
+// included. A WAV or AIFF row is left NULL for the header read. Nothing moves
+// a row's delta cursor (indexed_at) or its enrichment, and a second open
+// changes nothing.
+func TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	pcm, dsd := false, true
+	at := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	rows := []*Track{
+		{Path: "a/flac.flac", Codec: "FLAC", IsDSD: &pcm, SampleFormat: SampleFormatInteger},
+		{Path: "a/alac.m4a", Codec: "ALAC", SampleFormat: SampleFormatInteger},
+		{Path: "a/aac.m4a", Codec: "AAC"},
+		{Path: "a/lossy.mp3", Codec: "MP3"},
+		{Path: "a/dsd.dsf", Codec: "DSF", IsDSD: &dsd},
+		{Path: "a/alaw.wav", Codec: "ALAW"},
+		{Path: "a/unread.aifc", Codec: "AIFC"},
+		{Path: "a/nocodec.flac"},
+		{Path: "a/float.wav", Codec: "WAV", IsDSD: &pcm, SampleFormat: SampleFormatFloat},
+		{Path: "a/fl32.aifc", Codec: "AIFF", SampleFormat: SampleFormatFloat},
+		{Path: "up/routed.flac", Codec: "FLAC"},
+		{Path: "up/routed.wav", Codec: "WAV"},
+	}
+	for _, r := range rows {
+		r.Size, r.ModTime = 1, at
+	}
+	if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"up/routed.flac", "up/routed.wav"} {
+		if err := s.UpsertUPnPRouting(ctx, &UPnPRouting{SourcePath: p, ServerUDN: "uuid:up", ObjectID: p, ResURL: "http://192.0.2.1/" + p, LastSeenAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const cursor = 42
+	rewindToBeforeSampleFormat(t, s, cursor)
+	want := map[string]string{
+		"a/flac.flac":    SampleFormatInteger,
+		"a/alac.m4a":     SampleFormatInteger,
+		"a/aac.m4a":      "",
+		"a/lossy.mp3":    "",
+		"a/dsd.dsf":      "",
+		"a/alaw.wav":     "",
+		"a/unread.aifc":  "",
+		"a/nocodec.flac": "",
+		"a/float.wav":    "NULL",
+		"a/fl32.aifc":    "NULL",
+		"up/routed.flac": "",
+		"up/routed.wav":  "",
+	}
+	for _, pass := range []string{"the first open", "a second open"} {
+		if err := s.migrate(); err != nil {
+			t.Fatalf("%s: %v", pass, err)
+		}
+		requireSampleFormats(t, s, want)
+		for path := range want {
+			if got := trackIndexedAt(t, s, path); got != cursor {
+				t.Errorf("%s: %s indexed_at = %d, want the cursor %d left alone", pass, path, got, cursor)
+			}
+			if got := trackColumn(t, s, path, "enriched_at"); got != 7 {
+				t.Errorf("%s: %s enriched_at = %d, want 7 left alone", pass, path, got)
+			}
+		}
+	}
+}
+
+// TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind: the health
+// key waits for rows a codec decides (a FLAC row an older binary inserted is
+// one, until the next open fills it), never for a WAV or AIFF row whose header
+// is unread, which reaches clients through a delta when it is read.
+func TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	rows := []*Track{
+		{Path: "a/one.flac", Size: 1, ModTime: at, Codec: "FLAC", SampleFormat: SampleFormatInteger},
+		{Path: "a/two.wav", Size: 1, ModTime: at, Codec: "WAV", SampleFormat: SampleFormatFloat},
+	}
+	if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	ready := func(when string, want bool) {
+		t.Helper()
+		got, err := s.SampleFormatReady(ctx)
+		if err != nil || got != want {
+			t.Fatalf("%s: SampleFormatReady = %v, %v; want %v", when, got, err, want)
+		}
+		if p := NewProvider(s, nil).SampleFormatReady(ctx); p != want {
+			t.Fatalf("%s: Provider.SampleFormatReady = %v, want %v", when, p, want)
+		}
+	}
+	ready("every row decided", true)
+	if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	ready("a FLAC row undecided", false)
+	if err := s.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, s, map[string]string{"a/one.flac": SampleFormatInteger, "a/two.wav": "NULL"})
+	ready("only a WAV row's header unread", true)
+
+	closed := openTestStore(t)
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if NewProvider(closed, nil).SampleFormatReady(ctx) {
+		t.Fatal("a store whose count cannot be read answered ready")
+	}
+}
+
+// TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows is the backfill
+// without a rescan. A library is scanned, then rewound to a store from before
+// the column; the open fill decides the FLAC and the A-law WAV, and
+// BackfillSampleFormats asks the resolver for exactly the WAV and AIFF rows
+// still undecided, reads their headers, and stores what each states. A row
+// that gains a kind advances its delta cursor, so a client's next delta
+// carries it; a row whose header states none ("") does not move. A row whose
+// file has changed since it was written, and one whose file is gone, are left
+// undecided for a later pass. Enrichment and tags_json are untouched. A
+// second pass asks only for those two and changes nothing.
+func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
+	ctx := context.Background()
+	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
+	files := []struct {
+		name string
+		data []byte
+		want string // the column after the passes, "NULL" for undecided
+		gain bool   // the row's cursor advances
+	}{
+		{"float.wav", fx("wav/float.wav"), SampleFormatFloat, true},
+		{"s24.wav", fx("wav/s24.wav"), SampleFormatInteger, true},
+		{"af_fl64.aifc", fx("aifc/af_fl64.aifc"), SampleFormatFloat, true},
+		{"af_be16.aiff", fx("aifc/af_be16.aiff"), SampleFormatInteger, true},
+		{"g726.wav", fx("wav/g726.wav"), "", false},
+		{"alaw.wav", fx("wav/alaw.wav"), "", false},
+		{"lossless.flac", flacBytes(t, 44100, 16), SampleFormatInteger, false},
+		{"changed.wav", fx("wav/af_f64.wav"), "NULL", false},
+		{"gone.wav", fx("wav/af_i16.wav"), "NULL", false},
+	}
+	root := t.TempDir()
+	rels := map[string]string{}
+	for _, f := range files {
+		rels[f.name] = writeAlone(t, root, f.name, f.data)
+	}
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	const cursor = 42
+	rewindToBeforeSampleFormat(t, store, cursor)
+	if err := store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	tagsBefore := map[string]map[string]any{}
+	for _, f := range files {
+		tagsBefore[f.name] = tagsJSONKeys(t, store, rels[f.name])
+	}
+	// After the rows were written, one file changes and one is removed.
+	changed, err := os.OpenFile(filepath.Join(root, filepath.FromSlash(rels["changed.wav"])), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := changed.Write([]byte("more")); err != nil {
+		t.Fatal(err)
+	}
+	if err := changed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(rels["gone.wav"]))); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := bridgefs.New([]string{root})
+	var asked []string
+	resolve := func(rel string) (string, os.FileInfo, error) {
+		asked = append(asked, rel)
+		return resolver.ResolveChecked(rel)
+	}
+	res, err := store.BackfillSampleFormats(ctx, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAsked := func(pass string, names ...string) {
+		t.Helper()
+		var want []string
+		for _, n := range names {
+			want = append(want, rels[n])
+		}
+		slices.Sort(want)
+		slices.Sort(asked)
+		if !slices.Equal(asked, want) {
+			t.Errorf("%s asked the resolver for %q, want %q", pass, asked, want)
+		}
+	}
+	requireAsked("the first pass", "float.wav", "s24.wav", "af_fl64.aifc", "af_be16.aiff", "g726.wav", "changed.wav", "gone.wav")
+	if want := (SampleFormatBackfill{Read: 5, Gained: 4, None: 1, Changed: 1, Unreadable: 1}); res != want {
+		t.Errorf("the first pass did %+v, want %+v", res, want)
+	}
+	wantCols := map[string]string{}
+	for _, f := range files {
+		wantCols[rels[f.name]] = f.want
+	}
+	requireSampleFormats(t, store, wantCols)
+	cursors := map[string]int64{}
+	for _, f := range files {
+		rel := rels[f.name]
+		got := trackIndexedAt(t, store, rel)
+		cursors[rel] = got
+		switch {
+		case f.gain && got <= cursor:
+			t.Errorf("%s gained %q and its cursor did not advance (%d): a client's delta would never carry it", f.name, f.want, got)
+		case !f.gain && got != cursor:
+			t.Errorf("%s: cursor moved %d -> %d for a row a client sees no change in", f.name, cursor, got)
+		}
+		if e := trackColumn(t, store, rel, "enriched_at"); e != 7 {
+			t.Errorf("%s: enriched_at = %d, want 7: the backfill does not re-queue enrichment", f.name, e)
+		}
+		if after := tagsJSONKeys(t, store, rel); !mapsEqualJSON(tagsBefore[f.name], after) {
+			t.Errorf("%s: the backfill rewrote tags_json", f.name)
+		}
+	}
+	served := servedTracksByPath(t, store, root)
+	for _, f := range files {
+		got, present := served[rels[f.name]]["sampleFormat"]
+		wantWire := f.want
+		if wantWire == "NULL" {
+			wantWire = ""
+		}
+		if (wantWire == "") == present || (present && got != wantWire) {
+			t.Errorf("the manifest serves %s with \"sampleFormat\" %#v (present %v), want %q", f.name, got, present, wantWire)
+		}
+	}
+
+	asked = nil
+	res, err = store.BackfillSampleFormats(ctx, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAsked("the second pass", "changed.wav", "gone.wav")
+	if want := (SampleFormatBackfill{Changed: 1, Unreadable: 1}); res != want {
+		t.Errorf("the second pass did %+v, want %+v", res, want)
+	}
+	requireSampleFormats(t, store, wantCols)
+	for rel, c := range cursors {
+		if got := trackIndexedAt(t, store, rel); got != c {
+			t.Errorf("the second pass moved %s's cursor %d -> %d", rel, c, got)
+		}
+	}
+}
+
+// mapsEqualJSON reports whether two decoded JSON objects hold the same keys
+// and values.
+func mapsEqualJSON(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		w, ok := b[k]
+		if !ok || !jsonValuesEqual(v, w) {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonValuesEqual(a, b any) bool {
+	switch av := a.(type) {
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		return ok && mapsEqualJSON(av, bv)
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !jsonValuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return a == b
+	}
+}
+
+// TestTheVersionStaleStampRecordsTheKindItReads: a file re-read because its
+// row's extractor version is stale, whose tags come back as they were, takes
+// the light stamp leg, and the stamp records the kind the extraction read: a
+// row from before the column gains it, and a kind a past extractor got wrong
+// is replaced, each advancing the delta cursor without re-queueing
+// enrichment. A stale row whose kind is already right keeps its cursor.
+func TestTheVersionStaleStampRecordsTheKindItReads(t *testing.T) {
+	root := t.TempDir()
+	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
+	floatRel := writeAlone(t, root, "float.wav", fx("wav/float.wav"))
+	intRel := writeAlone(t, root, "s24.wav", fx("wav/s24.wav"))
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "first")
+	const cursor = 42
+	stale := func(rel string, kind any) {
+		t.Helper()
+		if _, err := store.db.Exec(`UPDATE tracks SET sample_format = ?, extractor_version = ?, indexed_at = ?, enriched_at = 7 WHERE path = ?`,
+			kind, ExtractorVersion-1, cursor, rel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale(floatRel, nil)
+	stale(intRel, SampleFormatFloat)
+	scanOnce(t, sc, "version-stale")
+	requireSampleFormats(t, store, map[string]string{floatRel: SampleFormatFloat, intRel: SampleFormatInteger})
+	for _, rel := range []string{floatRel, intRel} {
+		if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+			t.Errorf("%s: extractor_version = %d, want %d", rel, v, ExtractorVersion)
+		}
+		if got := trackIndexedAt(t, store, rel); got <= cursor {
+			t.Errorf("%s: the stamp changed its kind and left its cursor at %d", rel, got)
+		}
+		if e := trackColumn(t, store, rel, "enriched_at"); e != 7 {
+			t.Errorf("%s: enriched_at = %d: the stamp leg must not re-queue enrichment", rel, e)
+		}
+	}
+	stale(floatRel, SampleFormatFloat)
+	scanOnce(t, sc, "version-stale, kind already right")
+	if got := trackIndexedAt(t, store, floatRel); got != cursor {
+		t.Errorf("a stamp that left the kind as it was moved the cursor %d -> %d", cursor, got)
+	}
+}
+
+// TestTheSampleFormatQueriesUseThePartialIndex: the open-time fill, the
+// header pass's candidate read and the readiness count each contain the
+// partial index's predicate (sample_format IS NULL), so each reads only the
+// undecided rows, which are none once the backfill is done.
+func TestTheSampleFormatQueriesUseThePartialIndex(t *testing.T) {
+	if strings.Contains(sampleFormatUndecidedRowidsSQL, "ORDER BY") {
+		t.Fatal("ordering the fill's select makes SQLite skip the partial index")
+	}
+	fill := strings.Join(strings.Fields(sampleFormatFillSQL), " ")
+	inner := strings.Join(strings.Fields(sampleFormatUndecidedRowidsSQL), " ")
+	if !strings.Contains(fill, inner) {
+		t.Fatal("the fill no longer selects the statement this test explains")
+	}
+	s := openTestStore(t)
+	for _, q := range []struct {
+		name, sql string
+		args      []any
+	}{
+		{"the open-time fill", sampleFormatUndecidedRowidsSQL, []any{1}},
+		{"the header pass", sampleFormatCandidatesSQL, []any{"", 1}},
+		{"the readiness count", sampleFormatReadySQL, nil},
+	} {
+		if plan := explainPlan(t, s, q.sql, q.args...); !strings.Contains(plan, "idx_tracks_sample_format_null") {
+			t.Errorf("%s: plan %q does not use idx_tracks_sample_format_null", q.name, plan)
+		}
+	}
+}

@@ -2640,6 +2640,11 @@ type serveOpts struct {
 	// playerHotplugWiring.Boot). Nil in production; a boot test waits on
 	// it instead of polling.
 	hotplugBoot func(*hotplug.Service, *config.RuntimeConfig, <-chan struct{})
+	// sampleFormatPassed is told what each sample-format header pass did
+	// (manifest.Store.BackfillSampleFormats). Nil in production; a boot
+	// test waits on it instead of polling. Per invocation for
+	// tailscaleCLI's reason.
+	sampleFormatPassed func(manifest.SampleFormatBackfill)
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
