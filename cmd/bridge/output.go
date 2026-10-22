@@ -34,6 +34,10 @@ func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		// Not in outputUsage: the B470 hardware harness, run by hand on a
 		// box with a DAC (output_pcmtest.go). It has its own -h.
 		return outputPCMTestCmd(ctx, args[1:], stdout, stderr)
+	case "play":
+		// Not in outputUsage either: the player's engine and backend by hand,
+		// B470 PR 4b2's hardware harness (output_play.go). Its own -h.
+		return outputPlayCmd(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		outputUsage(stdout)
 		return 0
