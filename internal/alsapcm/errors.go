@@ -30,6 +30,11 @@ const (
 	// not an ALSA device, or one the kernel says is another card, device
 	// or direction.
 	ReasonNotPCM Reason = "not_the_endpoint"
+	// ReasonWrongDevice is a node the caller's check after open refused
+	// (SinkConfig.Admit): the endpoint is now another unit than the one
+	// the binding resolved, renumbered or swapped between the resolve and
+	// the open. Nothing was written to it.
+	ReasonWrongDevice Reason = "wrong_device"
 	// ReasonProtocol is a kernel PCM protocol this backend does not open.
 	ReasonProtocol Reason = "unsupported_protocol"
 	// ReasonNotSupported is a rate, channel count or format the hardware

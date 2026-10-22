@@ -53,12 +53,38 @@ libraryName: "My Music Library"
 #   only (no other address, no SSDP, no auth), so MPD can fetch a track
 #   its database does not have. Default 7791. Keep it fixed: MPD keeps
 #   these URLs in its queue across a bridge restart.
+#
+# player: the bridge as a player of its own files through one USB DAC it
+#   opens exclusively (in development; off by default, Linux only, never on
+#   a public bridge). An invalid block turns the player off with a logged
+#   reason and stops nothing else. `bridge output dac inspect` shows each
+#   card and how the binding resolves; `bridge output dac bind <card>
+#   --binding serial|uniqueModel|port` writes device: for you, the serial
+#   into this file alone (it is never printed, logged or served). There is
+#   no resampling, software volume or normalization setting, and there will
+#   not be. dsdMode takes off, allowDoP false and mixer {type: none} alone
+#   in this release. The player's UUID is kept in <dataDir>/player-uuid.
 # output:
 #   mpd: auto
 #   # endpoint: "127.0.0.1:6600"
 #   # conf: "/etc/mpd.conf"
 #   # password: ""
 #   # loopbackPort: 7791
+#   # player:
+#   #   enabled: false
+#   #   room: "Listening Room"
+#   #   pauseReleaseSeconds: 30
+#   #   device:
+#   #     transport: usb
+#   #     binding: serial         # serial | uniqueModel | port
+#   #     vendorId: "20b1"
+#   #     productId: "3009"
+#   #     serial: "…"             # bind writes it; local only
+#   #     pcmDevice: 0
+#   #     subdevice: 0
+#   #   dsdMode: off
+#   #   allowDoP: false
+#   #   mixer: {type: none, control: null}
 
 # deployment.mode: "loopback" (default) | "public"
 #

@@ -242,6 +242,7 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 				listen, _ := configuredPort(cfg.ListenAddress)
 				return advertise.URLs(advertise.Params{Port: listen, CustomEndpoints: cfg.CustomEndpoints})
 			},
+			Cards:           hostTrees.cards,
 			LoopbackBaseURL: route.BaseURL,
 		}
 		if seam != nil {

@@ -188,7 +188,7 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 				fmt.Fprintln(stderr, "  --proc-root reads a /proc tree captured on a Linux box.")
 				return 1
 			}
-			root = alsa.DefaultProcRoot
+			root = hostTrees.proc
 		}
 		dev := -1
 		if set["device"] {
@@ -202,7 +202,7 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 		return 2
 	}
 	if root == "" {
-		root = alsa.DefaultProcRoot
+		root = hostTrees.proc
 	}
 	if len(sf.files) > 0 {
 		return runPCMTestFiles(ctx, env, sf, *card, *device, *alsaFormat, root, stdout, stderr)
