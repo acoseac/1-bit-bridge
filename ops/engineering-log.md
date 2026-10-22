@@ -50807,3 +50807,169 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B505: the player's identity in the backup, the output block across a rewrite, and the player-off warning once per reason
+
+Three follow-ups from B470 PR 4a (#1307), one commit each on
+`fix/b505-player-followups`: f3f1c6d0, dcc0b530, and 101b7012 with its
+test's follow-up 2490770a.
+
+**1. `bridge backup` carries `<dataDir>/player-uuid`, and `bridge restore`
+gives it back.** The UUID is the player's identity to a controller (PR 5a
+makes it the OpenHome device's UDN), and the bundle did not hold it, so a
+restored box kept the identity it had, or had none and made a new one:
+every controller saw a new player. `backup.Sources.PlayerUUID` and
+`Targets.PlayerUUID` name it, through `buildBackupSources` and
+`buildRestoreTargets`, so the CLI, the serve ticker and the console's
+snapshot all carry it (`TestBuildBackupSourcesNamesThePlayerUUID`).
+`Snapshot` copies it as stored, 0600, and skips a box with none
+(`TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`). `Restore` reads the copy
+before its loop by the player's own rule, `config.ReadPlayerUUIDFile`, which
+`ReadPlayerUUID` now wraps with the live file's remedy (its message is
+unchanged), and writes it through the identity file's one writer,
+`config.WritePlayerUUIDFile`, which `EnsurePlayerUUID` now calls: the UUID
+and a newline, 0600, `fsutil.KeepOwner`, staged, synced and renamed, and it
+refuses anything but one lowercase UUID
+(`TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse`). The edge cases, as
+decided:
+
+- A snapshot from before this change lists no `player-uuid`. The restore
+  leaves the box's identity as it is and makes none where there is none, as
+  B200 decided for the console account; so does a snapshot that lists the
+  file and no longer holds it
+  (`TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`).
+- The box's player already has another identity: **the snapshot's wins**. A
+  restore makes the box the bridge the snapshot was taken from, its
+  database, tokens, TLS pair and config included, and that bridge's player
+  is the device its controllers know by that UUID; keeping the box's would
+  put a new player beside a restored bridge. An operator who wants the
+  box's identity removes `player-uuid` from the snapshot directory first
+  (`TestBackupAndRestoreGiveThePlayerTheIdentityItHad`, through the real
+  `backupCmd` and `restoreCmd`).
+- A copy that does not hold one UUID (empty, a lone newline, upper case, two
+  UUIDs, a byte order mark, white space before it, text after it, cut short,
+  past 128 bytes) fails the restore before any file is written, as a console
+  account that does not parse does, and the refusal names the copy and says
+  to remove it to restore the rest
+  (`TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`). White
+  space after the UUID (an editor's CR LF) reads, as in the live file, and is
+  written back as the UUID and a newline. The snapshot copies whatever the
+  live file holds: a backup that refused a damaged identity would stop every
+  backup, the ticker's included, and the live player refuses that file
+  already, with its own remedy.
+- Permissions: the snapshot's copy is 0600 whatever the live file's mode,
+  the restored file 0600 whatever the copy's
+  (`TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`),
+  and run as root each takes the install's owner once
+  (`TestSnapshotAndRestoreAsRootKeepThePlayerUUID`).
+- The schema stays 1: an older bridge's restore skips a file its mapping
+  does not know.
+
+`PROTOCOL.md`'s "Operator: Backup & restore" listed `bridge.db`,
+`tokens.json`, the TLS pair and `bridge.yaml`, and had lacked
+`adminauth.json` and `atlas-harvest.json` since B200. It lists the whole
+bundle now and says how a restore treats the console account and the
+player's identity. The app's copy, `docs/BridgeProtocol.md`, takes the same
+text in its companion PR, which this branch does not make.
+
+**2. `bridge init --force` keeps the output block.** A rewrite built
+`bridge.yaml` from `baseConfig`, the run's flags and the list of what it
+keeps, and output was not on the list, so `--force`, or "Overwrite?"
+answered y, dropped `output.player`, its binding included, beside
+`output.mpd`. Measured with the real `initCmd` twice over one `--dir`: the
+saved config had no output block, and the serial was gone from the file.
+**Kept, in either posture, a change of posture included.** That does not
+conflict with what `--force` promises, so nothing is said loudly in its
+place: the flag's help promised the data dir and the TLS pair, and
+`init_rewrite.go`'s rule for the rest is who could give a value back. init
+asks for nothing in output, and dropping it cost what only the box gives
+back: the binding's serial comes from the unit alone (bind reads it from
+sysfs and never prints it), MPD's password from MPD's own configuration, the
+loopback route's port is where MPD's queued URLs point, and `output.mpd:
+off` is the operator's opt-out, which the default would turn back on. The
+block says what is beside the bridge on this box, not a feature or a
+cadence of the bridge, which are what a rewrite resets.
+`TestInitRewriteKeepsTheOutputBlock` runs both postures and a loopback
+install rewritten public.
+
+`priorOutput` reads the block from the bytes the run read, on its own and a
+setting at a time. Read as a field of `priorInstallFile`, a type error in it
+would fail that struct's whole decode, and `refuseRewrite` would refuse the
+rewrite with a message about the data dir and the TLS pair, which it could
+read; `TestPriorInstallTagsAreConfigs` is unchanged. A setting that does not
+read, or that the config's own check refuses (`OutputConfig.Problem`, which
+holds Validate's two output refusals word for word), is one the config did
+not load with either, which is often why init runs again: it is not kept,
+and a warning after the save names it by its key, its line and the check's
+words, never by a value that does not read
+(`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo`: a mode,
+loopback ports that are not a number or not a port, a password that is not
+text, and an output that is not a block). A player block never fails, and
+one this release cannot read is kept as written, as Load keeps it
+(`TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten`). A key output
+does not take is dropped silently, as a rewrite drops every key a config
+does not have. `printKept` lists each kept setting, MPD's password as "set
+(not shown)" and the player by whether it is enabled and its binding's
+kind, never the serial, the ids or the port; its key column widens only for
+`output.loopbackPort`. `--force`'s help and `bridge.yaml.example` say the
+block is kept.
+
+**3. Validate logs the player-off warning once each time its reason
+changes.** It wrote `output.player: the player is off` on every Validate:
+each Load and each save that validates a clone first (the console's PATCH,
+the UPnP-upstream writer, init), the same line for a block that had not
+changed. PR 4a's entry above called that repetition the point. Measured on
+main: two loads and two saves of one config wrote four lines. **Once per
+change of the reason, not once per process.** `logPlayerOff` keeps the
+reason last seen, the process's (under a mutex, since saves can validate at
+once; Validate still writes no field of the config it judges), and writes
+the line when the reason differs. No reason (a player that runs, or one
+that is simply off) clears it, so the same reason coming back is written
+again; once per process would stay silent about a problem that came back,
+and about a second one after the first. A reason that names a line (a block
+that does not read) changes when a save moves the block, and the line is
+written once more, naming where it is now. The test clears the reason
+through the same behaviour, a Validate of a config with none, at its start
+and its end, so it holds under `-count` and `-shuffle`: twenty shuffled runs
+under `-race` passed (`TestThePlayerOffWarningIsLoggedOnceForEachReason`).
+
+**Red first.** On main, through the real commands:
+`TestBackupAndRestoreGiveThePlayerTheIdentityItHad` failed with "the
+snapshot lists [bridge.db bridge.yaml], without player-uuid", and
+`TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo` with exit 0
+and "Restore complete"; the package tests failed to build (`undefined:
+WritePlayerUUIDFile`, `src.PlayerUUID undefined`).
+`TestInitRewriteKeepsTheOutputBlock` (all three runs),
+`TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten` and
+`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` (all five
+cases) failed: no output block in the saved config, no warning.
+`TestThePlayerOffWarningIsLoggedOnceForEachReason` failed with four lines
+where one was due.
+
+**Controls, each on a committed tree, each restored from git, the tree clean
+after each.**
+- 1a, the snapshot no longer captures the file: red in the four backup tests
+  that read its copy and in both CLI tests.
+- 1b, the restore copies the file's bytes (no read before the loop, no
+  identity writer): red in all ten refusal cases, the CLI refusal, and the
+  test that the restore writes the identity file ("\r\n" kept as it was);
+  the CLI round trip and the owner test stayed green, as they should, since
+  a byte copy also gives the identity back and keeps the owner.
+- 2a, the rewrite keeps no output block: red in every case but the output
+  that is not a block, which keeps nothing either way.
+- 2b, the block decoded whole instead of a setting at a time: red in exactly
+  the four cases where one setting does not read (the player's binding lost
+  beside it); the keep tests stayed green.
+- 3a, every Validate logs: red, "logged 4 player-off lines, want 1".
+- 3b, no reason leaves the last one in place (once per distinct reason):
+  **green on 101b7012**. Between the reason going away and coming back the
+  test logged a different one, so the line came back for that change alone.
+  2490770a brings the same reason back straight after a player that runs,
+  and the control is red there, "logged 2 player-off lines, want 3".
+- 3c, the mutex removed: the race detector reports the concurrent saves.
+
+**Not in this change.** The app's mirror of the PROTOCOL.md text. The
+player's start (PR 4b) is what reads a restored identity; nothing here
+starts it. The rules text for the three is this batch's OLD/NEW note, not
+in these commits.
