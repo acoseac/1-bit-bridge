@@ -44,6 +44,16 @@ func DefaultTiming() Timing {
 		FollowUpEvery: DefaultFollowUpEvery, BackoffMin: DefaultBackoffMin, BackoffMax: DefaultBackoffMax, StopWait: DefaultStopWait}
 }
 
+// holdMax is the longest the binding's answer is held for a card that may
+// be the bound unit, from the first reading that held it: a burst's
+// longest wait and a full run of follow-ups after it (3.5 s by default).
+// Each window renews the follow-ups, so without this an unrelated device
+// sending an event every second held the answer for as long as it went on
+// (B470 PR 4a2 round 2).
+func (t Timing) holdMax() time.Duration {
+	return t.MaxDelay + time.Duration(t.FollowUps)*t.FollowUpEvery
+}
+
 // backoff is the wait after the n-th failed reading in a row.
 func (t Timing) backoff(n int) time.Duration {
 	d := t.BackoffMin

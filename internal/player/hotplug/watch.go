@@ -42,6 +42,11 @@ type watch struct {
 	followLeft int
 	followAt   time.Time
 	transient  []int
+	// heldSince is when the first reading whose answer is held back was
+	// taken, zero while none is: a reading is due at heldSince plus
+	// Timing.holdMax at the latest, and from then the answer is published
+	// as it stands, whatever renewed the follow-ups.
+	heldSince time.Time
 	// failures are the failed readings in a row, and retryAt the earliest
 	// the next may be taken.
 	failures int
@@ -120,8 +125,8 @@ func (w *watch) run(ctx context.Context) {
 
 // next is when the next reading is due: the window's end while a burst is
 // open (everything else folds into it), else a pending reading, else the
-// earlier of the periodic tick and a follow-up; never before a retry's
-// backoff.
+// earlier of the periodic tick and a follow-up; never after a held answer's
+// bound, and never before a retry's backoff.
 func (w *watch) next() time.Time {
 	var due time.Time
 	switch {
@@ -136,6 +141,11 @@ func (w *watch) next() time.Time {
 		due = w.nextPeriodic
 		if !w.followAt.IsZero() && w.followAt.Before(due) {
 			due = w.followAt
+		}
+	}
+	if !w.heldSince.IsZero() {
+		if end := w.heldSince.Add(w.timing.holdMax()); end.Before(due) {
+			due = end
 		}
 	}
 	if w.failures > 0 && due.Before(w.retryAt) {
@@ -224,6 +234,8 @@ func (w *watch) onTimer(ctx context.Context) {
 		w.pending = nil
 	case !w.followAt.IsZero() && !now.Before(w.followAt):
 		t = trigger{why: "follow-up"}
+	case !w.heldSince.IsZero() && !now.Before(w.heldSince.Add(w.timing.holdMax())):
+		t = trigger{why: "hold"}
 	default:
 		t = trigger{why: "periodic"}
 	}
@@ -234,7 +246,9 @@ func (w *watch) onTimer(ctx context.Context) {
 // changed. A reading that fails, or is partial, publishes no answer: the
 // last snapshot stands, marked stale, and the next attempt backs off. A
 // transient card is followed up, and the binding's answer held back while
-// a transient card may be the bound unit, until the follow-ups run out.
+// a transient card may be the bound unit, until the follow-ups run out or
+// Timing.holdMax has passed since the first reading that held it, which
+// events renewing the follow-ups do not move.
 func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	defer w.svc.update(func() { w.svc.stats.Reconciles++ })
 	w.nextPeriodic = now.Add(w.timing.Periodic)
@@ -277,9 +291,15 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 		w.followLeft--
 		w.followAt = now.Add(w.timing.FollowUpEvery)
 		if !settled {
-			return
+			if w.heldSince.IsZero() {
+				w.heldSince = now
+			}
+			if now.Before(w.heldSince.Add(w.timing.holdMax())) {
+				return
+			}
 		}
 	}
+	w.heldSince = time.Time{}
 	switch w.svc.feed.offer(w.session, reading{observed: now, inv: inv, res: res, device: set.Device, source: w.mode, removed: w.removed}, w.svc.log) {
 	case published, republished:
 		w.svc.update(func() { w.svc.stats.Publishes++ })

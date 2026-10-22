@@ -217,6 +217,54 @@ func TestACardThatNeverSettlesIsPublishedTransientAfterTheFollowUps(t *testing.T
 	}
 }
 
+// TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn: the bound DAC
+// unplugged while its card lingers in /proc with no sysfs half holds the
+// binding's answer back (that card may be the bound unit), and an unrelated
+// device on a marginal hub sending an event every 400 ms renews the
+// follow-ups at every window. The hold still ends: the answer is published
+// as it stands, identity_transient naming card 5, MaxDelay + FollowUps x
+// FollowUpEvery after the first reading that held it, and not before.
+// Until round 2 every window renewed the follow-ups and nothing was ever
+// published, so subscribers read available on a card that had gone.
+func TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn(t *testing.T) {
+	h := newHarness(t)
+	// The GO bar's sysfs half goes; /proc/asound still lists card 5.
+	h.apply("remove sys/class/sound/card5\nremove sys/bus/usb/devices/1-1\nremove sys/bus/usb/devices/1-1:1.0\nremove " + goBar + "\n")
+	storm := Uevent{Action: "change", DevPath: devpath(usb1) + "/1-4", Subsystem: "usb"}
+	const every = 400 * time.Millisecond
+	// The first reading is the first window's, and holds the answer.
+	held := h.clock.Now().Add(quiet)
+	deadline := held.Add(maxDelay + DefaultFollowUps*followUp)
+	reads := uint64(1)
+	for at := h.clock.Now(); ; at = at.Add(every) {
+		if at.After(deadline) {
+			t.Fatalf("events went on past the hold's bound (%v) and nothing was published: %+v", deadline.Sub(held), h.svc.Status().Stats)
+		}
+		h.advance(at.Sub(h.clock.Now()))
+		h.send(storm)
+		// The step's reading: the window's, or the hold's end inside it.
+		read := at.Add(quiet)
+		if deadline.After(at) && deadline.Before(read) {
+			read = deadline
+		}
+		h.advance(read.Sub(h.clock.Now()))
+		reads++
+		st := h.reconciles(reads)
+		if st.Publishes == 1 {
+			if !read.Before(deadline) {
+				t.Fatalf("the hold's bound came at %v and nothing was published: %+v", deadline.Sub(held), st)
+			}
+			continue
+		}
+		s := h.state(binding.StateIdentityTransient, -1, 2)
+		if !s.Observed().Equal(deadline) || !strings.Contains(s.Resolution().Reason, "card 5") {
+			t.Errorf("published %v after the first held reading (%s); want at its bound, %v",
+				s.Observed().Sub(held), s.Resolution().Reason, deadline.Sub(held))
+		}
+		return
+	}
+}
+
 // TestAnUnplugBesideAnUnrelatedTransientCardIsMissingAtOnce: the bound DAC
 // unplugged while another model's card is still in /proc alone is
 // device_missing in the first reading, not after the follow-ups: that card
