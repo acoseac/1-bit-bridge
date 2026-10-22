@@ -269,6 +269,7 @@ func (e *Engine) transport(c *command) {
 			return
 		}
 	}
+	moved := sel != o.selected
 	e.selectEntry(sel)
 	switch r.act {
 	case actNothing:
@@ -291,7 +292,7 @@ func (e *Engine) transport(c *command) {
 		e.releaseSession(o.sess, r.then, stop)
 		e.wait(c, r.then == IntentPlay)
 	case actIntent:
-		if r.then == IntentPlay && r.move != moveKeep {
+		if r.then == IntentPlay && moved {
 			e.replacedCarry(name)
 		}
 		e.setIntent(r.then, name)
@@ -389,12 +390,14 @@ func (e *Engine) replaced(s *session, by string) {
 }
 
 // replacedCarry records that by, a Next, Previous, PlayID or PlayIndex sent
-// while a release to play is under way, replaced the playback the engine
-// itself was moving on to: the play commands carried past an entry refused
-// at its start (carry) answer ReasonSuperseded, naming by, as they would
-// have had by come while their session started (replaced). The commands that
-// set the pending intent themselves, by among them, share the session after
-// the release, as before; one whose playback began keeps its answer.
+// while a release to play is under way, moved the pending target off the
+// entry the engine itself was moving on to: the play commands carried past an
+// entry refused at its start (carry) answer ReasonSuperseded, naming by, as
+// they would have had by come while their session started (replaced). One
+// that names the entry already pending replaces nothing, the same session
+// playing it (Codex on round 8). The commands that set the pending intent
+// themselves, by among them, share the session after the release, as before;
+// one whose playback began keeps its answer.
 func (e *Engine) replacedCarry(by string) {
 	e.supersedeWaiters(by, func(w *waiter) bool { return w.carried })
 }

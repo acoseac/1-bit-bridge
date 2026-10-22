@@ -78,10 +78,11 @@ type owner struct {
 // answers it nil only while sess is the session playing. The engine's own
 // move past an entry refused at its start hands it on to the session that
 // follows (carry), and carried marks it until that session starts: a Next,
-// Previous, PlayID or PlayIndex sent meanwhile replaces the playback the
-// engine was moving on to, and supersedes it (replacedCarry), where the
-// commands that set the pending intent themselves share the session after
-// the release.
+// Previous, PlayID or PlayIndex sent meanwhile that moves the pending target
+// replaces the playback the engine was moving on to, and supersedes it
+// (replacedCarry), where the commands that set the pending intent
+// themselves, and one that names the entry already pending, share the
+// session after the release.
 type waiter struct {
 	c       *command
 	play    bool

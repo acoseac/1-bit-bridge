@@ -778,33 +778,47 @@ func TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded(t *testing.T) {
 }
 
 // TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt pins the other side
-// of a carried play command (carry): a Play sent while the skip past an
-// entry refused at its start releases the first session moves no target, so
-// it replaces nothing, and it and the carried Play share the session after
-// the release, both answering nil once that session is heard. Only a Next,
-// Previous, PlayID or PlayIndex supersedes the carried Play
-// (TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded).
+// of a carried play command (carry): a command sent while the skip past an
+// entry refused at its start releases the first session, that leaves the
+// pending target where the skip put it, replaces nothing, and it and the
+// carried Play share the session after the release, both answering nil once
+// that session is heard: a Play, which moves no target, and a PlayID or a
+// PlayIndex naming the entry the skip moved on to (Codex on round 8: round 8
+// superseded the carried Play for any PlayID or PlayIndex, though the same
+// session then played it). Only a command that moves the target supersedes
+// the carried Play (TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded).
 func TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt(t *testing.T) {
-	h := startHarness(t)
-	ids := h.insert("a", "b")
-	unplayable(h, "a")
-	h.available()
-	g := holdReleases(h)
-	first := async(func() error { return h.eng.Play(bg) })
-	h.waitSnap("the skip releasing session 1", func(sn *Snapshot) bool {
-		return sn.State() == Releasing && sn.Pending() == IntentPlay && sn.Selected() == ids[1]
-	})
-	mark := h.appliedMark()
-	second := async(func() error { return h.eng.Play(bg) })
-	h.waitApplied("play", mark)
-	g.open()
-	s2 := h.be.nth(2)
-	if s2.first.Entry != ids[1] {
-		t.Fatalf("the second session started %d, want b, where the skip moved on to", s2.first.Entry)
+	for _, tc := range []struct {
+		name, op string
+		send     func(h *harness, ids []uint32) error
+	}{
+		{"a Play", "play", func(h *harness, _ []uint32) error { return h.eng.Play(bg) }},
+		{"a PlayID of the entry the skip moved on to", "play id", func(h *harness, ids []uint32) error { return h.eng.PlayID(bg, ids[1]) }},
+		{"a PlayIndex of the entry the skip moved on to", "play index", func(h *harness, _ []uint32) error { return h.eng.PlayIndex(bg, 1) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			ids := h.insert("a", "b")
+			unplayable(h, "a")
+			h.available()
+			g := holdReleases(h)
+			first := async(func() error { return h.eng.Play(bg) })
+			h.waitSnap("the skip releasing session 1", func(sn *Snapshot) bool {
+				return sn.State() == Releasing && sn.Pending() == IntentPlay && sn.Selected() == ids[1]
+			})
+			mark := h.appliedMark()
+			second := async(func() error { return tc.send(h, ids) })
+			h.waitApplied(tc.op, mark)
+			g.open()
+			s2 := h.be.nth(2)
+			if s2.first.Entry != ids[1] {
+				t.Fatalf("the second session started %d, want b, where the skip moved on to", s2.first.Entry)
+			}
+			heard(h, s2)
+			h.must("the carried Play", h.result("the first play", first))
+			h.must("the command sent during the skip", h.result(tc.op, second))
+		})
 	}
-	heard(h, s2)
-	h.must("the carried Play", h.result("the first play", first))
-	h.must("the Play sent during the skip", h.result("the second play", second))
 }
 
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a
