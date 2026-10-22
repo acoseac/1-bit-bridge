@@ -562,7 +562,7 @@ func TestALACCorruptPacketHeadersRefused(t *testing.T) {
 // the padding, and the zero run that follows read four bytes from past the
 // padded buffer (golomb.go: dynGet's read32bit; ops/upstream/saprobe-alac.md).
 // No check of the cookie or the header can tell it apart from a good packet.
-// The patched copy in third_party/saprobe-alac refuses it at the escape.
+// saprobe-alac v1.0.0-rc3 refuses it at the escape (GHSA-g66f-c97f-q276).
 var alacPanicPacket = []byte{0x20, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0xFF}
 
 // A packet the library refuses with an error is a truncated_or_corrupt
