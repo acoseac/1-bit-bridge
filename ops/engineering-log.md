@@ -51364,8 +51364,9 @@ in the file, of which nothing is kept, its line saying why. Controls on
 4f569b1d: each mutation red in exactly its case. 3cae962e also gives the
 B505 entry the index line round 1 left out.
 
-**The merge with main-62556b9b (#1311, #1312) is not in this branch.** The
-branch main-62556b9b was already in the repository's refs, so no fetch was
+**The merge with main-62556b9b (#1311, #1312) was not made in this
+session; it was made afterwards, in e9bf68e2.** The branch main-62556b9b
+was already in the repository's refs, so no fetch was
 needed, but `git fetch`, `git merge` and `git cat-file` all ask for an
 approval this headless session cannot give, and the merge was not made any
 other way. It was computed and tested instead. Main changed 70 files since
@@ -51394,7 +51395,8 @@ build-all docs-check` (`go fmt` rewrote nothing; main's `internal/alsa`,
 branch; docs-check ok). Nothing main adds calls what this branch changed
 (the value-free messages, `UnknownManagedControls`), and none of its tests
 asserts a load error's text. The prepared resolutions and a script that
-makes the merge with them are left for a session that may merge.
+makes the merge with them are left for a session that may merge. The
+orchestrator then ran that script, which made the merge as e9bf68e2.
 
 ## 2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it
 
