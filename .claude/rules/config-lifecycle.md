@@ -252,8 +252,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   Validate allows that and does not dial MPD to decide, and `auto` still
   requires a root. **Don't treat `auto` as on inside Validate.** Nor does
   `output.player` ever refuse a config: an invalid block turns the player
-  off with a logged reason (the first bullet under **Player output
-  binding** in `output.md`).
+  off with a reason logged once each time it changes (the first two
+  bullets under **Player output binding** in `player.md`, which has held
+  that section since 2026-10-22).
 - **Cadence ceilings are unit-appropriate and ports admit 0.**
   `time.Duration(n)*time.Second` overflows negative past ~9.2e9 and
   `time.NewTicker` PANICS, crashing `bridge serve` at startup; a single seconds

@@ -750,6 +750,32 @@
   rewrite dropped the demo's pinned token from every shipped app or handed a
   tenant's withheld controls to its console. A fresh start is moving
   `bridge.yaml` aside, never `--force`.
+  **So is the output block, whole, in either posture, a change of posture
+  included** (2026-10-22, backlog B505). It says what is beside the
+  bridge on this box, MPD and the player's DAC, and init asks for none of
+  it, so nothing in a run replaces it; a rewrite dropped it, `output.player`
+  and its binding with it. Only the unit gives the binding's serial back
+  (bind reads it from sysfs and never prints it), MPD's password comes
+  from MPD's own configuration, the loopback route's port is where MPD's
+  queued URLs point, and `output.mpd: off` is the operator's opt-out, which
+  the default would turn back on. `--force`'s help names the block beside
+  the data dir and the pair. `priorOutput` reads it from the bytes the run
+  read, on its own and a setting at a time: as a field of
+  `priorInstallFile` a type error in it fails that struct's whole decode,
+  and `refuseRewrite` refuses the rewrite about a data dir and a pair it
+  could read. A setting that does not read, or that
+  `config.OutputConfig.Problem` (Validate's two output refusals, word for
+  word) refuses, is one the config did not load with either: it is not
+  kept, and a warning after the save names it by key, line and the check's
+  words, never a value that does not read (`warnOutputNotKept`). A player
+  block never fails, and one this release cannot read is kept as written. A
+  key output does not take goes, as every unknown key does. `printKept`
+  lists each kept setting, the password as "set (not shown)" and the
+  player by whether it is enabled and its binding's kind. **Don't drop the
+  output block, and don't read it as a field of `priorInstallFile`.**
+  (`TestInitRewriteKeepsTheOutputBlock`,
+  `TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten`,
+  `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo`.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.
