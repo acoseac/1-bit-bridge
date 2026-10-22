@@ -64,7 +64,9 @@ func TestBindingLocatorNamesTheBoundUnitAndItsCheck(t *testing.T) {
 
 // TestBindingLocatorRefusesWhatDoesNotResolve pins a binding that names no
 // unit now: an unplugged DAC is a UnitError with the binding's state,
-// device_missing, and so is a second unit of a uniqueModel, ambiguous.
+// device_missing, and so is a second unit of a uniqueModel, ambiguous; and a
+// reading that is not whole gives no answer, as the hotplug watcher
+// publishes none from it, though the bound card itself was read.
 func TestBindingLocatorRefusesWhatDoesNotResolve(t *testing.T) {
 	loc, root := goBarLocator(t)
 	sysfstest.Apply(t, root, "unplug "+goBar+"\n")
@@ -81,6 +83,15 @@ func TestBindingLocatorRefusesWhatDoesNotResolve(t *testing.T) {
 		"usbcard 6 "+other+"/3-1:1.0\nproccard 6 Audio_1 \"iFi (by AMR) HD USB Audio\" usb=20b1:3009 pcm=0.0\n")
 	if _, err := loc.Locate(context.Background()); !errors.As(err, &ue) || ue.State != binding.StateDeviceAmbiguous {
 		t.Fatalf("Locate with two units of a uniqueModel: %v, want device_ambiguous", err)
+	}
+
+	// Card 0's PCM directory is a link out of the tree, so its devices
+	// cannot all be listed: the inventory is partial, the GO bar's card 5
+	// read whole beside it.
+	loc, root = goBarLocator(t)
+	sysfstest.Apply(t, root, "remove proc/asound/card0/pcm0p\nlink proc/asound/card0/pcm0p !../../../outside\n")
+	if u, err := loc.Locate(context.Background()); !errors.As(err, &ue) || ue.State != "" || !strings.Contains(err.Error(), "whole") {
+		t.Fatalf("Locate on a reading that is not whole: %+v, %v; want a UnitError that says so", u, err)
 	}
 }
 
