@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,6 +235,51 @@ type pcmDef struct {
 	device      int
 	hasDevice   bool
 	opaque      bool
+	// typeUnsure is a definition whose type is not one value: a second
+	// type in its block, or its name defined more than once.
+	typeUnsure bool
+}
+
+// sampleStageTypes are the plugin types whose stage changes the samples it
+// passes on, whatever the format it hands its slave: software volume, a
+// rate converter, a mixer of several streams into one format and rate of
+// its own, a channel router, and a LADSPA filter.
+var sampleStageTypes = []string{"softvol", "rate", "dmix", "route", "ladspa"}
+
+// SampleStageTypes is every plugin type SampleStage can name.
+func SampleStageTypes() []string { return append([]string(nil), sampleStageTypes...) }
+
+// SampleStage is the plugin type of the first stage that changes the
+// samples (SampleStageTypes) the walk from device meets, through empty and
+// plug stages, as the configuration read defines them; "" when it meets
+// none before it reaches a card or stops. The walk does not go through such
+// a stage, so what lies past it is not read, and a device string names no
+// definition here. It is what the files say, not what alsa-lib loaded for
+// the process that opened the card: information, not proof.
+func (c PCMConfig) SampleStage(device string) string {
+	device = strings.TrimSpace(device)
+	if !c.ok || device == "" {
+		return ""
+	}
+	return sampleStage(c, device, map[string]bool{}, 0)
+}
+
+func sampleStage(c PCMConfig, name string, seen map[string]bool, hops int) string {
+	if strings.Contains(name, ":") || hops > maxPCMHops || seen[name] {
+		return ""
+	}
+	def, found := c.defs[name]
+	if !found || def.typeUnsure {
+		return ""
+	}
+	if slices.Contains(sampleStageTypes, def.typ) {
+		return def.typ
+	}
+	if def.opaque || (def.typ != "empty" && def.typ != "plug") || def.slave == "" {
+		return ""
+	}
+	seen[name] = true
+	return sampleStage(c, def.slave, seen, hops+1)
 }
 
 func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
@@ -333,7 +379,7 @@ func loadPCMDefs(root string) (map[string]pcmDef, map[string]bool, bool) {
 		}
 		for name, def := range parsed {
 			if prev, exists := defs[name]; exists {
-				prev.opaque = true
+				prev.opaque, prev.typeUnsure = true, true
 				defs[name] = prev
 				continue
 			}
@@ -411,7 +457,7 @@ func parsePCMFile(src string) (map[string]pcmDef, map[string]bool, bool) {
 				return nil, nil, false
 			}
 			if prev, exists := defs[name]; exists {
-				prev.opaque = true
+				prev.opaque, prev.typeUnsure = true, true
 				defs[name] = prev
 				continue
 			}
@@ -627,7 +673,7 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 	switch key {
 	case "type":
 		if *sawType {
-			def.opaque = true
+			def.opaque, def.typeUnsure = true, true
 		}
 		*sawType = true
 		def.typ = val

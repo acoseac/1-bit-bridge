@@ -26,8 +26,9 @@ import (
 
 // OutputReading is GET /v1/outputs/{id}/reading: what the DAC of one
 // output receives now, read by the bridge from the kernel and from the MPD
-// beside it, and the bridge's verdict on it. Every key is always present;
-// a list is [] and a value the reading could not establish is null.
+// beside it, and the bridge's verdict on its format. Every key is always
+// present; a list is [] and a value the reading could not establish is
+// null.
 type OutputReading struct {
 	OutputID string    `json:"outputId"`
 	TakenAt  time.Time `json:"takenAt"`
@@ -69,16 +70,18 @@ type ReadingMPDOutput struct {
 	Attributes map[string]string `json:"attributes"`
 }
 
-// ReadingMPDConfig is what mpd.conf, read at this reading, says that the
-// verdict reads.
+// ReadingMPDConfig is what mpd.conf, read at this reading, says of the
+// output and the settings the warnings name: information, which MPD may
+// not run with.
 type ReadingMPDConfig struct {
 	VolumeNormalization string                `json:"volumeNormalization"`
 	AudioOutputFormat   string                `json:"audioOutputFormat"`
 	Output              *ReadingMPDConfOutput `json:"output"`
 }
 
-// ReadingMPDConfOutput is the enabled alsa output whose device reaches
-// this output's card.
+// ReadingMPDConfOutput is the output whose thread holds this output's
+// card, or with none holding it the one enabled alsa output whose device
+// reaches it, as mpd.conf configures it.
 type ReadingMPDConfOutput struct {
 	Name           string   `json:"name"`
 	Device         string   `json:"device"`
@@ -140,11 +143,23 @@ type ReadingMixer struct {
 	Volume  *int   `json:"volume"`
 }
 
-// ReadingVerdict is the bridge's verdict: bit_exact, bit_exact_dop or
-// withheld, and a code for each reason it is withheld.
+// ReadingVerdict is the bridge's verdict on the format the DAC receives:
+// format_preserved, format_preserved_dop or withheld, a code for each
+// reason it is withheld, bitExactness (not_verifiable: no reading of an
+// MPD output shows its samples), and the warnings beside it.
 type ReadingVerdict struct {
-	Value   string   `json:"value"`
-	Reasons []string `json:"reasons"`
+	Value        string           `json:"value"`
+	Reasons      []string         `json:"reasons"`
+	BitExactness string           `json:"bitExactness"`
+	Warnings     []ReadingWarning `json:"warnings"`
+}
+
+// ReadingWarning is one setting the reading read that would change the
+// samples, and where it read it: mpd (MPD reported it), mpd_conf (mpd.conf
+// says it) or alsa_conf (the ALSA files say it).
+type ReadingWarning struct {
+	Code   string `json:"code"`
+	Source string `json:"source"`
 }
 
 // OutputTrack is what the reading needs of one of this bridge's rows: its
@@ -193,17 +208,10 @@ var defaultReadingLimits = readingLimits{
 	file:    500 * time.Millisecond,
 }
 
-// configSlack is how much earlier than the start of the process holding the
-// card the last change of mpd.conf must be: the two times come from clocks
-// read a tick apart (/proc's hundredths of a second, the file system's
-// coarse clock), and a file changed in the same instant as the start is not
-// shown to be what the process read.
-const configSlack = 100 * time.Millisecond
-
 // readingSnap is one reading of the box, which every output's view is cut
 // from: MPD's status before the /proc read and after it, the read commands
-// between and the settings read again after it, every card, mpd.conf, the
-// ALSA configuration's verdict on each output's device, and the song's row.
+// between and the settings read again after it, every card, mpd.conf, what
+// the ALSA configuration says of each output's device, and the song's row.
 type readingSnap struct {
 	at       time.Time
 	rep      mpd.Report
@@ -229,19 +237,13 @@ type readingSnap struct {
 
 	cards    alsa.Snapshot
 	procCode string
-	// procAt is the bridge's clock just before the /proc read: an owner's
-	// process started its age (alsa.Snapshot.ProcessAge) before it, at the
-	// latest.
-	procAt time.Time
 	// picks are the cards GET /v1/outputs lists from these cards, and
 	// chains every alsa output of mpd.conf's with the chain its device
-	// takes: both are resolved once a reading, from the ALSA configuration
-	// files, so a call the cache answers reads nothing.
+	// takes and the first stage on the way that changes samples: both are
+	// resolved once a reading, from the ALSA configuration files, so a call
+	// the cache answers reads nothing.
 	picks  []dacPick
 	chains []outputChain
-	// users is, for each uid an owner runs as, whether the ALSA files
-	// alsa-lib loads from that user's home are there (alsa.UserConfig).
-	users map[int]userALSA
 
 	row *songRow
 
@@ -254,37 +256,17 @@ type readingSnap struct {
 	unidentified bool
 }
 
-// userALSA is alsa.UserConfig's answer for one uid.
-type userALSA struct {
-	present, known bool
-}
-
-// alsaContext is what the reading reads of the ALSA configuration, once a
-// reading: the PCM definitions under etc, and each owner's own files.
-type alsaContext struct {
-	pcm   alsa.PCMConfig
-	users map[int]userALSA
-}
-
-// readALSAContext is the production ALSA configuration read.
-func readALSAContext(root string, uids []int) alsaContext {
-	c := alsaContext{pcm: alsa.LoadPCMConfig(root), users: map[int]userALSA{}}
-	for _, uid := range uids {
-		present, known := alsa.UserConfig(root, uid)
-		c.users[uid] = userALSA{present: present, known: known}
-	}
-	return c
-}
-
 // outputChain is one alsa audio_output of mpd.conf: the live outputs
-// element of the same name, whether MPD reports it enabled, and the chain
-// its device takes to a card when there is one.
+// element of the same name, whether MPD reports it enabled, the chain its
+// device takes to a card when there is one, and the first stage of a
+// plugin that changes samples on the way (alsa.PCMConfig.SampleStage).
 type outputChain struct {
 	conf    conf.AudioOutput
 	live    *mpd.ServerOutput
 	enabled bool
 	chain   alsa.Chain
 	ok      bool
+	stage   string
 }
 
 // songRow is one of this bridge's rows for the song MPD is on.
@@ -378,12 +360,13 @@ func (o *localOutputs) readingSnapshot(ctx context.Context) (*readingSnap, error
 // read and again after it, with currentsong, replay_gain_status and
 // outputs between and the last two read again after it, so a song change,
 // a seek, a pause or a change of the settings across the read shows.
-// mpd.conf is read again here, after the /proc read: the player rewrites
-// it and restarts MPD when its settings change, the probe's copy can be
-// half a minute old, and a file that last changed before the process the
-// /proc read found holding the card started is what that process read. A
-// step that cannot be had leaves a code and the rest of the reading
-// stands; a step of the bridge's own that panics leaves reading_failed.
+// mpd.conf and the ALSA configuration are read after that bracket, so their
+// deadlines never widen it: what they say is information beside the
+// verdict, read again at every reading (the player rewrites mpd.conf and
+// restarts MPD when its settings change, and the probe's copy can be half a
+// minute old). A step that cannot be had leaves a code and the rest of the
+// reading stands; a step of the bridge's own that panics leaves
+// reading_failed.
 func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -431,7 +414,6 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	s.current, _ = ask(func(c outputSession, ctx context.Context) (mpd.Reply, error) { return c.CurrentSong(ctx) })
 	s.gain, _ = ask(gainCommand)
 	s.outputs, _ = ask(outputsCommand)
-	s.procAt = o.now()
 	s.cards, s.procCode = o.readCards(ctx)
 	s.after, _ = ask(statusCommand)
 	s.between = o.now().Sub(first)
@@ -444,10 +426,9 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	// With no card there is nothing to resolve a device to, and the ALSA
 	// configuration is not read.
 	if s.procCode == "" && len(s.cards.Cards) > 0 {
-		alsaConf := o.readALSAConfig(ctx, alsa.ConfigRoot(s.cards.ProcRoot), ownerUIDs(s.cards))
-		s.users = alsaConf.users
-		s.picks = dacsFrom(s.cards, s.rep, alsaConf.pcm.ResolveOutputDevice)
-		s.chains = outputChains(s, alsaConf.pcm)
+		pcm := o.readALSAConfig(ctx, alsa.ConfigRoot(s.cards.ProcRoot))
+		s.picks = dacsFrom(s.cards, s.rep, pcm.ResolveOutputDevice)
+		s.chains = outputChains(s, pcm)
 	}
 	if s.mpdCode == "" {
 		s.row = o.lookUpSong(ctx, s)
@@ -456,11 +437,11 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	return s
 }
 
-// outputChains resolves the chain of every alsa output mpd.conf names,
-// from the ALSA configuration this reading read, enabled only as the live
-// outputs reply says: a file's enabled setting is not what MPD runs with
-// (its state file restores another). An output with no device plays to
-// ALSA's default PCM.
+// outputChains resolves the chain of every alsa output mpd.conf names, and
+// the first stage on its way that changes samples, from the ALSA
+// configuration this reading read, enabled only as the live outputs reply
+// says: a file's enabled setting is not what MPD runs with (its state file
+// restores another). An output with no device plays to ALSA's default PCM.
 func outputChains(s *readingSnap, pcm alsa.PCMConfig) []outputChain {
 	if !s.confRead {
 		return nil
@@ -488,22 +469,8 @@ func outputChains(s *readingSnap, pcm alsa.PCMConfig) []outputChain {
 			device = "default"
 		}
 		oc.chain, oc.ok = pcm.ResolveOutputChain(device, cards)
+		oc.stage = pcm.SampleStage(device)
 		out = append(out, oc)
-	}
-	return out
-}
-
-// ownerUIDs is every uid an owner of a substream in snap runs as, once.
-func ownerUIDs(snap alsa.Snapshot) []int {
-	var out []int
-	for _, c := range snap.Cards {
-		for _, d := range c.Devices {
-			for _, sub := range d.Substreams {
-				if sub.Owner != nil && sub.Owner.UID != nil && !slices.Contains(out, *sub.Owner.UID) {
-					out = append(out, *sub.Owner.UID)
-				}
-			}
-		}
 	}
 	return out
 }
@@ -569,7 +536,8 @@ func logOutputPanic(step string, r any) {
 
 // readConf reads mpd.conf whole, its includes too, under the conf
 // deadline (boundedStep). read is false when it could not be read, did
-// not answer in time, or the step failed: mpd_config_unread.
+// not answer in time, or the step failed: mpd.config is then null, and no
+// warning comes from it.
 func (o *localOutputs) readConf(ctx context.Context, root, path string) (conf.File, bool) {
 	type result struct {
 		f   conf.File
@@ -587,13 +555,13 @@ func (o *localOutputs) readConf(ctx context.Context, root, path string) (conf.Fi
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
 // (boundedStep). One that is not had in time is none: no device a PCM name
-// resolves, no chain, no owner's files known.
-func (o *localOutputs) readALSAConfig(ctx context.Context, root string, uids []int) alsaContext {
-	c, late, failed := boundedStep(o, &o.reading.alsa, ctx, o.limits.alsa, "the ALSA configuration read", func() alsaContext {
-		return o.alsaConfig(root, uids)
+// resolves, no chain, no stage named.
+func (o *localOutputs) readALSAConfig(ctx context.Context, root string) alsa.PCMConfig {
+	c, late, failed := boundedStep(o, &o.reading.alsa, ctx, o.limits.alsa, "the ALSA configuration read", func() alsa.PCMConfig {
+		return o.alsaConfig(root)
 	})
 	if late || failed {
-		return alsaContext{}
+		return alsa.PCMConfig{}
 	}
 	return c
 }
@@ -889,7 +857,7 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 		AgeMs:        age,
 		State:        state,
 		StateReasons: signalpath.Sorted(reasons),
-		Verdict:      ReadingVerdict{Value: verdict.Value, Reasons: verdict.Reasons},
+		Verdict:      readingVerdict(verdict),
 	}
 	if s.failed {
 		return out, true
@@ -906,10 +874,19 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 	return out, true
 }
 
+// readingVerdict is the verdict's wire form.
+func readingVerdict(v signalpath.Verdict) ReadingVerdict {
+	out := ReadingVerdict{Value: v.Value, Reasons: v.Reasons, BitExactness: v.BitExactness, Warnings: []ReadingWarning{}}
+	for _, w := range v.Warnings {
+		out.Warnings = append(out.Warnings, ReadingWarning{Code: w.Code, Source: w.Source})
+	}
+	return out
+}
+
 // readingSettling is the settling codes: the two status reads; the song
 // currentsong named between them, which while MPD plays must be the song
-// both reads name, by an id it gives; and the settings the verdict reads,
-// which must be the same at both ends of the /proc read.
+// both reads name, by an id it gives; and what MPD reports of its outputs
+// and settings, which must be the same at both ends of the /proc read.
 func readingSettling(s *readingSnap) []string {
 	status := func(r mpd.Reply) signalpath.Status {
 		state, _ := r.Get("state")
@@ -1001,69 +978,31 @@ func namedChain(s *readingSnap, name string) (*outputChain, bool) {
 	return nil, false
 }
 
-// outputsMatch reports whether mpd.conf's audio_output blocks are the
-// outputs MPD reports: as many, in order, each by name and plugin. MPD
-// numbers its outputs in the file's order, and with no block at all it
-// makes one of its own, which no file describes.
-func outputsMatch(blocks []conf.AudioOutput, live []mpd.ServerOutput) bool {
-	if len(live) == 0 || len(blocks) != len(live) {
-		return false
-	}
-	for i := range live {
-		if live[i].Name != blocks[i].Name || live[i].Plugin != blocks[i].Type {
-			return false
-		}
-	}
-	return true
-}
-
-// configFacts is what the reading shows of mpd.conf: it was read; read
-// whole; its outputs are the ones MPD reports; and nothing it depends on
-// changed after the process holding the card started, which reads it only
-// then. That start is the bridge's clock before the /proc read less the
-// process's age, so its latest possible time, and the file's last change
-// must precede it by configSlack.
-func configFacts(s *readingSnap, owner *alsa.Owner) signalpath.Config {
-	if !s.confRead {
-		return signalpath.Config{}
-	}
-	c := signalpath.Config{
-		Read:     true,
-		Complete: len(s.conf.Problems) == 0,
-		Matches:  outputsMatch(s.conf.Outputs, mpd.ServerOutputs(s.outputs)),
-	}
-	if age, ok := s.cards.ProcessAge(owner); ok {
-		started := s.procAt.Add(-age)
-		c.Current = s.conf.Changed().Before(started.Add(-configSlack))
-	}
-	return c
-}
-
 // holderOutput is the output whose thread holds the card, as the verdict
-// judges it: its live plugin, allowed_formats and dop; and from its block
-// in mpd.conf, when the file is proven, its mixer, format and filters, the
-// file's allowed_formats and dop where MPD reports none, and the chain its
-// device takes, when that reaches pick's card and PCM device through the
-// configuration the bridge read whole and no ALSA file of the owner's own
-// is in its home (alsa.UserConfig).
-func holderOutput(s *readingSnap, pick *dacPick, owner *alsa.Owner, h mpd.ServerOutput, proven bool) signalpath.Output {
+// and its warnings read it: its live plugin, allowed_formats and dop; and,
+// when mpd.conf was read and has its block, that block's mixer, format and
+// filters, the block's allowed_formats and dop where MPD reports none, and
+// the first stage that changes samples on its device's way as the ALSA
+// files read. What the block says is information: the verdict claims none
+// of it, and only the dop it falls back to can withhold one.
+func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	out := signalpath.Output{Plugin: h.Plugin}
 	liveFormats, haveFormats := h.Attribute("allowed_formats")
 	liveDoP, haveDoP := h.Attribute("dop")
 	if haveFormats {
-		out.AllowedFormats = liveFormats
+		out.AllowedFormats, out.AllowedFormatsLive = liveFormats, true
 	}
 	if haveDoP {
 		out.DoP, _ = signalpath.ParseBool(liveDoP)
+	}
+	if !s.confRead {
+		return out
 	}
 	block, ok := namedBlock(s, h.Name)
 	if !ok {
 		return out
 	}
 	out.Configured = true
-	if !proven {
-		return out
-	}
 	out.MixerType = signalpath.EffectiveMixerType(block.MixerType, block.MixerEnabled, s.conf.MixerType)
 	out.Format, out.Filters = block.Format, block.Filters
 	if !haveFormats {
@@ -1072,21 +1011,10 @@ func holderOutput(s *readingSnap, pick *dacPick, owner *alsa.Owner, h mpd.Server
 	if !haveDoP {
 		out.DoP, _ = signalpath.ParseBool(block.DOP)
 	}
-	oc, ok := namedChain(s, h.Name)
-	if ok && oc.ok && pick != nil && oc.chain.Card == pick.dac.Card && oc.chain.Device == pick.pcm && ownALSAFilesAbsent(s, owner) {
-		out.Stages = oc.chain.Stages
+	if oc, ok := namedChain(s, h.Name); ok {
+		out.SampleStage = oc.stage
 	}
 	return out
-}
-
-// ownALSAFilesAbsent reports whether the reading knows that the owner's
-// user has no ALSA file of its own for alsa-lib to load after etc's.
-func ownALSAFilesAbsent(s *readingSnap, owner *alsa.Owner) bool {
-	if owner == nil || owner.UID == nil {
-		return false
-	}
-	u, ok := s.users[*owner.UID]
-	return ok && u.known && !u.present
 }
 
 // shown is the output a reading describes for a card, information beside
@@ -1163,13 +1091,15 @@ func shownMixerType(s *readingSnap, sh *shown) string {
 	return signalpath.EffectiveMixerType(sh.block.MixerType, sh.block.MixerEnabled, s.conf.MixerType)
 }
 
-// readingFacts is what the verdict judges for one output.
+// readingFacts is what the verdict judges, and its warnings read, for one
+// output.
 func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 	state, _ := s.after.Get("state")
 	audio, _ := s.after.Get("audio")
 	mode, _ := s.gain.Get("replay_gain_mode")
 	xfade, _ := s.after.Get("xfade")
 	mixramp, _ := s.after.Get("mixrampdelay")
+	volume, _ := s.after.Get("volume")
 	f := signalpath.Facts{
 		State:  state,
 		Audio:  audio,
@@ -1178,6 +1108,8 @@ func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 			ReplayGainMode:      mode,
 			Crossfade:           xfade,
 			MixRampDelay:        mixramp,
+			Volume:              volume,
+			ConfRead:            s.confRead,
 			VolumeNormalization: s.conf.VolumeNormalization,
 			AudioOutputFormat:   s.conf.AudioOutputFormat,
 		},
@@ -1212,13 +1144,11 @@ func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 		if owner.Thread != nil {
 			f.PCM.Thread = *owner.Thread
 		}
-		_, f.PCM.Started = s.cards.ProcessAge(owner)
 	}
-	f.MPD.Config = configFacts(s, owner)
 	hs := holders(s, sub)
 	f.MPD.Holders = len(hs)
 	if len(hs) == 1 {
-		f.MPD.Output = holderOutput(s, pick, owner, hs[0], f.MPD.Config.Proven())
+		f.MPD.Output = holderOutput(s, hs[0])
 	}
 	return f
 }

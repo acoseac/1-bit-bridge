@@ -253,10 +253,10 @@ type localOutputs struct {
 	loopTrack  func(string) (string, string, bool)
 	limits     readingLimits
 	// confFile and alsaConfig are the reading's mpd.conf and ALSA
-	// configuration reads: conf.ReadFile and readALSAContext, which a test
-	// replaces with one that hangs or panics.
+	// configuration reads: conf.ReadFile and alsa.LoadPCMConfig, which a
+	// test replaces with one that hangs or panics.
 	confFile   func(root, logical, host string) (conf.File, error)
-	alsaConfig func(root string, uids []int) alsaContext
+	alsaConfig func(root string) alsa.PCMConfig
 
 	mu           sync.Mutex
 	client       outputSession
@@ -362,7 +362,7 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		loopTrack:  cfg.LoopbackTrack,
 		limits:     defaultReadingLimits,
 		confFile:   conf.ReadFile,
-		alsaConfig: readALSAContext,
+		alsaConfig: alsa.LoadPCMConfig,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS

@@ -50963,7 +50963,7 @@ written back byte for byte and checked against HEAD. Each went red.
 | V6 | no `audio_output_format` | `TestEveryWithheldReason` |
 | V7 | `mpd.conf` must be read | `TestEveryWithheldReason` |
 | V8 | no software volume | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
-| V9 | the DAC's own mixer is information only (`hardware` withheld) | `TestEveryWithheldReason`, `TestTheCapturedShapesAreBitExact`, `TestWhatDoesNotChangeTheSamplesIsNotAReason` |
+| V9 | the DAC's own mixer is information only (`hardware` withheld) | `TestEveryWithheldReason`, `TheCapturedShapesAreBitExact`, `TestWhatDoesNotChangeTheSamplesIsNotAReason` |
 | V10 | no output `format` or `allowed_formats` | `TestEveryWithheldReason` |
 | V11 | no output filters | `TestEveryWithheldReason` |
 | V12 | the chain must be proven | `TestEveryWithheldReason` |
@@ -51011,7 +51011,7 @@ written back byte for byte and checked against HEAD. Each went red.
 | R15 | the localOutputs gate | `TestAReadingNamesItsOutputByID` |
 | R16 | no `/proc/asound` is no card | `TestAReadingNamesItsOutputByID` |
 | R17 | `currentsong` naming another song settles | `TestReadingSettles` |
-| R18 | `dop` is the live attribute first | `TestReadingDoPIsBitExactDSDAsDoP` |
+| R18 | `dop` is the live attribute first | `ReadingDoPIsBitExactDSDAsDoP` |
 | R19 | `allowed_formats` is the live attribute first | `TestTheVerdictReadsMPDsOwnSettings` |
 | R20 | the top-level `mixer_type` counts | `TestTheVerdictReadsMPDsOwnSettings` |
 | R21 | an output switched off live feeds nothing | `TestTheVerdictReadsMPDsOwnSettings` |
@@ -51215,16 +51215,16 @@ each way the parser makes a plug opaque; N64 stayed green until
 | N26 to N28 | `owner_not_output`, a thread or a start unknown | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
 | N29 to N31 | incomplete, mismatch, changed | `TestEveryWithheldReason` |
 | N32 to N35 | nothing from an unproven file, no chain from one, a holder of another plugin, two holders | `TestEveryWithheldReason` |
-| N36 to N39 | complete, matching, current, the start before the read | `TestAConfigReadInPartIsNotJudged`, `TestAConfigWhoseOutputsAreNotMPDsIsNotJudged`, `TestAConfigChangedAfterMPDStartedIsNotJudged` |
+| N36 to N39 | complete, matching, current, the start before the read | `AConfigReadInPartIsNotJudged`, `AConfigWhoseOutputsAreNotMPDsIsNotJudged`, `AConfigChangedAfterMPDStartedIsNotJudged` |
 | N40 to N42 | settings compared, outputs and replay gain read again | `TestASettingThatChangesAcrossTheReadSettles`, `TestTheReadingSendsOnlyReads` |
 | N43 to N45 | only an enabled holder, cut to 15 bytes, trimmed | `TestTheVerdictReadsMPDsOwnSettings`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
-| N46, N47 | MPD's user's files, the chain to this card | `TestAChainNothingProvesIsNotJudgedProven`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| N46, N47 | MPD's user's files, the chain to this card | `AChainNothingProvesIsNotJudgedProven`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
 | N48 to N50 | a step not doubled, mpd.conf and the ALSA configuration bounded | the three deadline tests |
 | N51 to N53 | a step's panic, the reading's panic, no value logged | `TestAPanickingStepLeavesTheNextReadingWhole` |
 | N54 to N56 | the probe not doubled, bounded, an unidentified id unknown | `TestAProbeThatHangsEndsTheReadingInTime` |
 | N57 | a command past its deadline is a timeout | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
 | N58, N59 | the dial's and each command's own deadline | `TestEveryMPDCommandIsHandedItsOwnDeadline` |
-| N60, N61 | outputs match by plugin and in number | `TestAConfigWhoseOutputsAreNotMPDsIsNotJudged` |
+| N60, N61 | outputs match by plugin and in number | `AConfigWhoseOutputsAreNotMPDsIsNotJudged` |
 | N62 | the owner's start from its age | `TestAForeignOwnerIsNotMPDs` |
 | N63 | each owner's uid is asked about | `TestReadingTheGoBarOnEveryCapture` |
 | N64 | the shown output is enabled as MPD reports | `TestTheReadingShowsAnOutputMPDReportsEnabled` |

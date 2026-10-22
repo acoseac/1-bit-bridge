@@ -16,7 +16,8 @@ import (
 // TestAnIncludeThatIsANamedPipeEndsTheReadingInTime: an open of a named
 // pipe waits for a writer and nothing cancels it, so mpd.conf's include of
 // one is refused at once (conf.ReadFile opens without waiting) and the
-// reading answers, the file read only in part, rather than wait for good.
+// reading answers, the file read only in part and shown as read, rather
+// than wait for good.
 func TestAnIncludeThatIsANamedPipeEndsTheReadingInTime(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
@@ -38,8 +39,10 @@ func TestAnIncludeThatIsANamedPipeEndsTheReadingInTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{signalpath.MPDConfigIncomplete, signalpath.ALSAChainUnproven}
-	if got.State != "whole" || !slices.Equal(got.Verdict.Reasons, want) {
-		t.Fatalf("state %s verdict %+v, want %v", got.State, got.Verdict, want)
+	if got.State != "whole" || got.Verdict.Value != signalpath.FormatPreserved || !slices.Equal(got.Verdict.Reasons, []string{}) {
+		t.Fatalf("state %s verdict %+v", got.State, got.Verdict)
+	}
+	if got.MPD == nil || got.MPD.Config == nil || got.MPD.Config.Output == nil {
+		t.Fatalf("the file as read is not shown: %+v", got.MPD)
 	}
 }

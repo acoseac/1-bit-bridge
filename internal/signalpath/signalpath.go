@@ -1,18 +1,29 @@
 // Package signalpath judges what the box's DAC receives against the file
 // the MPD beside the bridge is on: the verdict GET /v1/outputs/{id}/reading
-// carries (B473 B3, decision 3 of the bridge-as-output plan). It reads
+// carries (B473 B3, and the owner's two levels of 2026-10-22). It reads
 // nothing. The route gathers the facts (MPD's status around the /proc read,
-// mpd.conf, the ALSA chain, the substream's hw_params and owner, the file's
-// own row), and Judge decides from them alone, so every case is a row of a
-// table.
+// the substream's hw_params and owner, the file's own row, and what MPD
+// reports and mpd.conf and the ALSA files say of its settings), and Judge
+// decides from them alone, so every case is a row of a table.
 //
-// The wording is the plan's. The DAC receives; it never "plays", and
-// nothing is said about what happens inside it. A verdict is bit_exact
-// (PCM, or native DSD, every condition proven), bit_exact_dop (the file's
-// DSD in DoP frames whose PCM path is proven untouched, which never claims
-// that the DAC locked onto the DoP or decoded it), or withheld, with a code
-// for every condition that is not proven. A code is a word the app maps to
-// its own copy, never a sentence.
+// The verdict claims only what the kernel shows: the format the DAC
+// receives, against the file's. It is format_preserved (PCM at the file's
+// rate and channels in a format that holds every bit of its depth, or native
+// DSD at the file's rate), format_preserved_dop (PCM at the rate and in the
+// format DoP of the file's DSD rate takes, which is consistent with DoP and
+// never a claim that the DAC locked onto it or decoded it), or withheld,
+// with a code for every condition that does not hold. It never says
+// bit-exact. From outside a player the bridge does not run it cannot show
+// which configuration MPD runs with or what MPD does to the samples, so
+// every verdict carries that bit-exactness is not verifiable for this
+// player; bit-exact is the bridge's own player's claim (B470), which runs
+// the whole path. A setting that would change the samples is a warning
+// beside the verdict, labelled with where it was read: information, never
+// a reason, and no warning is a proof that the samples are unchanged.
+//
+// The DAC receives; it never "plays", and nothing is said about what
+// happens inside it. A code is a word the app maps to its own copy, never a
+// sentence.
 package signalpath
 
 import (
@@ -28,10 +39,15 @@ import (
 
 // The verdict's values.
 const (
-	BitExact    = "bit_exact"
-	BitExactDoP = "bit_exact_dop"
-	Withheld    = "withheld"
+	FormatPreserved    = "format_preserved"
+	FormatPreservedDoP = "format_preserved_dop"
+	Withheld           = "withheld"
 )
+
+// NotVerifiable is every verdict's bit-exactness: the kernel shows the
+// format a stream reaches the DAC in, never its samples, and what an MPD the
+// bridge does not run does to them cannot be verified from outside it.
+const NotVerifiable = "not_verifiable"
 
 // Codes a reading's state carries: why it is unknown or settling. A
 // verdict withheld for such a reading carries the same codes.
@@ -66,8 +82,8 @@ const (
 	// SongStarting: elapsed was under half a second, or not given while
 	// playing.
 	SongStarting = "song_starting"
-	// SettingsChanged: what MPD reports of the settings the verdict reads
-	// (its outputs and their attributes, replay gain, the audio format,
+	// SettingsChanged: what MPD reports of its outputs and settings (its
+	// outputs and their attributes, replay gain, the audio format,
 	// crossfade, MixRamp) differed between the reads before the /proc read
 	// and after it.
 	SettingsChanged = "settings_changed"
@@ -85,9 +101,9 @@ const (
 	// PCMNotRunning: the substream is open and not RUNNING (prepared,
 	// paused, an xrun, draining).
 	PCMNotRunning = "pcm_not_running"
-	// OwnerUnknown: the thread that holds the substream, its process, or
-	// when that process started could not be read (a /proc mounted with
-	// hidepid, another pid namespace).
+	// OwnerUnknown: the thread that holds the substream, or its process,
+	// could not be named (a /proc mounted with hidepid, another pid
+	// namespace).
 	OwnerUnknown = "owner_unknown"
 	// OwnerNotMPD: a process other than mpd holds the substream.
 	OwnerNotMPD = "owner_not_mpd"
@@ -104,7 +120,8 @@ const (
 	// SourceChanged: the file is one of this bridge's rows and has changed
 	// on disk since the bridge read it.
 	SourceChanged = "source_changed"
-	// SourceLossy: the file is a lossy encode.
+	// SourceLossy: the file is a lossy encode, which has no sample format of
+	// its own to preserve.
 	SourceLossy = "source_lossy"
 	// SourceCodecUnknown: the file's codec is not one the bridge knows to
 	// be lossless.
@@ -114,62 +131,25 @@ const (
 	SourceMismatch = "source_mismatch"
 	// MPDAudioUnknown: MPD's status gave no audio: format this reads.
 	MPDAudioUnknown = "mpd_audio_unknown"
-	// MPDConfigUnread: mpd.conf could not be read, so the settings only
-	// it holds are not proven.
-	MPDConfigUnread = "mpd_config_unread"
-	// MPDConfigIncomplete: mpd.conf was read only in part (an include not
-	// followed, a line that did not parse), so what that part sets is not
-	// proven.
-	MPDConfigIncomplete = "mpd_config_incomplete"
-	// MPDConfigMismatch: the outputs mpd.conf defines are not the outputs
-	// the MPD the bridge reads reports, by name and plugin, in order, so
-	// the file is not shown to be its configuration.
-	MPDConfigMismatch = "mpd_config_mismatch"
-	// MPDConfigChanged: mpd.conf, or a file it depends on, changed after
-	// the MPD that holds the card started, which reads it only then.
-	MPDConfigChanged = "mpd_config_changed"
 	// MPDOutputAmbiguous: more than one enabled output of MPD's has an
 	// output thread named as the one that holds the card is.
 	MPDOutputAmbiguous = "mpd_output_ambiguous"
-	// MPDReplayGain: replay gain is not off.
-	MPDReplayGain = "mpd_replay_gain"
-	// MPDSoftwareVolume: the output's mixer is MPD's software volume, or
-	// one MPD's mixer types do not name.
-	MPDSoftwareVolume = "mpd_software_volume"
-	// MPDNormalization: volume_normalization is on.
-	MPDNormalization = "mpd_normalization"
-	// MPDFormatOverride: audio_output_format, the output's format, or its
-	// allowed_formats is set.
-	MPDFormatOverride = "mpd_format_override"
-	// MPDCrossfade: crossfade (xfade) is not 0.
-	MPDCrossfade = "mpd_crossfade"
-	// MPDMixRamp: MixRamp is on (mixrampdelay above 0).
-	MPDMixRamp = "mpd_mixramp"
-	// MPDFilters: the output applies filters.
-	MPDFilters = "mpd_filters"
-	// ALSAChainUnproven: the output that holds the card does not reach it
-	// through a chain the bridge parsed, from a configuration it read whole:
-	// hw, or plug and empty stages to hw, with no softvol, dmix, rate or
-	// route stage, and no definition of MPD's user's own replacing them.
-	ALSAChainUnproven = "alsa_chain_unproven"
-	// ALSAPlugConverts: the chain has a plug stage and the card's format,
-	// rate or channels are not the stream's, so the plug converted.
-	ALSAPlugConverts = "alsa_plug_converts"
-	// StreamFloat: MPD's decoder hands on floating point.
+	// StreamFloat: MPD's decoder hands on floating point, not the file's
+	// integer samples.
 	StreamFloat = "stream_float"
 	// FormatMismatch: the card's format cannot carry the stream as it is
 	// (a float, unsigned or non-linear format, DSD for PCM, PCM for DSD
 	// outside DoP).
 	FormatMismatch = "format_mismatch"
 	// RateMismatch: the card's rate is not the stream's (for DoP, not the
-	// DSD rate over 16).
+	// DSD rate over 16): the stream was resampled on its way.
 	RateMismatch = "rate_mismatch"
 	// ChannelsMismatch: the card's channels are not the stream's.
 	ChannelsMismatch = "channels_mismatch"
 	// DepthReduced: the card's PCM format carries fewer bits than the file.
 	DepthReduced = "depth_reduced"
-	// DSDConvertedToPCM: a DSD file reaches the card as PCM, and not as
-	// DoP.
+	// DSDConvertedToPCM: a DSD file reaches the card as PCM, and the output
+	// does not send DoP.
 	DSDConvertedToPCM = "dsd_converted_to_pcm"
 	// DoPContainerTooNarrow: DoP in a PCM format of fewer than 24 bits.
 	DoPContainerTooNarrow = "dop_container_too_narrow"
@@ -177,21 +157,19 @@ const (
 
 // codeOrder is every code in the order a list of them is given: the
 // reading's codes first, then what stops a stream being judged, then the
-// file, MPD, the ALSA chain and the formats.
+// file, MPD's stream, the output and the formats.
 var codeOrder = []string{
 	MPDUnreachable, MPDTimeout, MPDRefused, ProcUnreadable, ProcTimeout, NoCard, ReadingFailed,
 	StateChanged, SongChanged, Seeked, SongStarting, SettingsChanged,
 	NotPlaying, PCMAmbiguous, PCMClosed, PCMNotRunning, OwnerUnknown, OwnerNotMPD, OwnerNotOutput, HWParamsUnknown,
 	SourceUnknown, SourceChanged, SourceLossy, SourceCodecUnknown, SourceMismatch,
-	MPDAudioUnknown, MPDConfigUnread, MPDConfigIncomplete, MPDConfigMismatch, MPDConfigChanged,
-	MPDOutputAmbiguous, MPDReplayGain, MPDSoftwareVolume,
-	MPDNormalization, MPDFormatOverride, MPDCrossfade, MPDMixRamp, MPDFilters,
-	ALSAChainUnproven, ALSAPlugConverts,
+	MPDAudioUnknown, MPDOutputAmbiguous,
 	StreamFloat, FormatMismatch, RateMismatch, ChannelsMismatch, DepthReduced,
 	DSDConvertedToPCM, DoPContainerTooNarrow,
 }
 
-// Codes is every code a reading or a verdict can carry, in their order.
+// Codes is every code a reading's state or a verdict's reasons can carry,
+// in their order.
 func Codes() []string { return append([]string(nil), codeOrder...) }
 
 // Sorted returns codes once each, in the order Codes gives them. A code
@@ -203,27 +181,106 @@ func Sorted(codes []string) []string {
 			out = append(out, c)
 		}
 	}
-	slices.SortStableFunc(out, func(a, b string) int { return rank(a) - rank(b) })
+	slices.SortStableFunc(out, func(a, b string) int { return rank(codeOrder, a) - rank(codeOrder, b) })
 	return out
 }
 
-func rank(code string) int {
-	if i := slices.Index(codeOrder, code); i >= 0 {
+func rank(order []string, code string) int {
+	if i := slices.Index(order, code); i >= 0 {
 		return i
 	}
-	return len(codeOrder)
+	return len(order)
 }
 
-// Verdict is Judge's answer. Reasons is empty, never nil, unless the
-// value is Withheld.
+// Warnings: a setting the reading read that would change the samples on
+// their way to the DAC. A warning never changes the verdict, which claims
+// no sample, and its absence proves nothing.
+const (
+	// MPDReplayGain: MPD reports replay gain on (track, album or auto).
+	MPDReplayGain = "mpd_replay_gain"
+	// MPDCrossfade: MPD reports crossfade (xfade above 0), which mixes the
+	// end of one song into the next.
+	MPDCrossfade = "mpd_crossfade"
+	// MPDMixRamp: MPD reports MixRamp on (mixrampdelay above 0).
+	MPDMixRamp = "mpd_mixramp"
+	// MPDSoftwareVolume: the output's mixer is MPD's software volume and
+	// MPD reports a volume below 100.
+	MPDSoftwareVolume = "mpd_software_volume"
+	// MPDNormalization: volume_normalization is on.
+	MPDNormalization = "mpd_normalization"
+	// MPDFormatOverride: audio_output_format, the output's format, or its
+	// allowed_formats is set.
+	MPDFormatOverride = "mpd_format_override"
+	// MPDFilters: the output applies filters.
+	MPDFilters = "mpd_filters"
+	// ALSASoftvol: the output's device goes through a softvol stage.
+	ALSASoftvol = "alsa_softvol"
+	// ALSARate: the output's device goes through a rate stage, a resampler.
+	ALSARate = "alsa_rate"
+	// ALSADmix: the output's device goes through a dmix stage, which mixes
+	// streams at a format and rate of its own.
+	ALSADmix = "alsa_dmix"
+	// ALSARoute: the output's device goes through a route stage, which
+	// routes and mixes channels.
+	ALSARoute = "alsa_route"
+	// ALSALadspa: the output's device goes through a LADSPA stage, a
+	// filter of a plugin's.
+	ALSALadspa = "alsa_ladspa"
+)
+
+// Where a warning's setting was read.
+const (
+	// FromMPD: reported by MPD over its protocol (status,
+	// replay_gain_status, an outputs attribute).
+	FromMPD = "mpd"
+	// FromMPDConf: read from the mpd.conf the bridge finds, which MPD may
+	// not have been started with.
+	FromMPDConf = "mpd_conf"
+	// FromALSAConf: read from the ALSA configuration files under /etc,
+	// which may not be the ones MPD's ALSA loaded.
+	FromALSAConf = "alsa_conf"
+)
+
+var (
+	warningOrder = []string{
+		MPDReplayGain, MPDCrossfade, MPDMixRamp, MPDSoftwareVolume, MPDNormalization, MPDFormatOverride, MPDFilters,
+		ALSASoftvol, ALSARate, ALSADmix, ALSARoute, ALSALadspa,
+	}
+	sourceOrder = []string{FromMPD, FromMPDConf, FromALSAConf}
+	// stageWarnings is the warning for each plugin type alsa.SampleStage
+	// names.
+	stageWarnings = map[string]string{
+		"softvol": ALSASoftvol, "rate": ALSARate, "dmix": ALSADmix, "route": ALSARoute, "ladspa": ALSALadspa,
+	}
+)
+
+// WarningCodes is every code a warning can carry, in their order.
+func WarningCodes() []string { return append([]string(nil), warningOrder...) }
+
+// WarningSources is every place a warning can say it was read, in their
+// order.
+func WarningSources() []string { return append([]string(nil), sourceOrder...) }
+
+// Verdict is Judge's answer. Reasons is empty, never nil, unless the value
+// is Withheld; Warnings is never nil.
 type Verdict struct {
 	Value   string
 	Reasons []string
+	// BitExactness is NotVerifiable, for every verdict.
+	BitExactness string
+	Warnings     []Warning
 }
 
-// WithheldFor is a verdict withheld for the given codes.
+// Warning is one setting that would change the samples, and where the
+// reading read it (FromMPD, FromMPDConf, FromALSAConf).
+type Warning struct {
+	Code   string
+	Source string
+}
+
+// WithheldFor is a verdict withheld for the given codes, with no warning.
 func WithheldFor(codes ...string) Verdict {
-	return Verdict{Value: Withheld, Reasons: Sorted(codes)}
+	return Verdict{Value: Withheld, Reasons: Sorted(codes), BitExactness: NotVerifiable, Warnings: []Warning{}}
 }
 
 // Facts is what one whole reading established. A fact the reading could
@@ -264,21 +321,24 @@ type Source struct {
 	Channels int
 }
 
-// MPD is how the MPD the bridge dialled is set.
+// MPD is the MPD the bridge dialled: which of its outputs holds the card,
+// and what it reports and mpd.conf says of the settings the warnings name.
 type MPD struct {
-	// ReplayGainMode is replay_gain_status's mode: off, track, album, auto.
+	// ReplayGainMode is replay_gain_status's mode: off, track, album, auto;
+	// "" when it gave none.
 	ReplayGainMode string
 	// Crossfade is status xfade as MPD prints it; "" when absent.
 	Crossfade string
 	// MixRampDelay is status mixrampdelay as MPD prints it; "" when
 	// absent, which is off, as is "nan".
 	MixRampDelay string
-	// Config is how far mpd.conf is shown to be what MPD runs with. What
-	// only the file says (normalization, the format override, the mixer,
-	// the filters, the output's device) is judged only from a proven one.
-	Config Config
-	// VolumeNormalization and AudioOutputFormat are the file's top-level
-	// settings, as written.
+	// Volume is status volume as MPD prints it; "" when absent.
+	Volume string
+	// ConfRead is whether mpd.conf was read at this reading.
+	// VolumeNormalization and AudioOutputFormat are its top-level settings,
+	// as written: what the file says, which is not shown to be what MPD runs
+	// with (MPD reads its configuration when it starts).
+	ConfRead            bool
 	VolumeNormalization string
 	AudioOutputFormat   string
 	// Holders is how many enabled outputs of MPD's have an output thread
@@ -289,40 +349,29 @@ type MPD struct {
 	Output  Output
 }
 
-// Config is what the reading showed of mpd.conf.
-type Config struct {
-	// Read: the file was read.
-	Read bool
-	// Complete: every include was followed and every line parsed.
-	Complete bool
-	// Matches: its audio_output blocks are the outputs MPD reports, by
-	// name and plugin, in order.
-	Matches bool
-	// Current: nothing the read depended on changed after the process that
-	// holds the card started; MPD reads its configuration only then.
-	Current bool
-}
-
-// Proven is a file read whole that is shown to be what MPD runs with.
-func (c Config) Proven() bool { return c.Read && c.Complete && c.Matches && c.Current }
-
 // Output is the MPD output whose thread holds the card.
 type Output struct {
 	// Plugin is its live plugin: alsa, ao, oss…
 	Plugin string
-	// Configured is whether mpd.conf has its block (by name).
+	// Configured is whether mpd.conf was read and has its block (by name).
+	// MixerType (EffectiveMixerType's answer), Format and Filters are that
+	// block's.
 	Configured bool
-	// MixerType is the effective mixer: EffectiveMixerType's answer.
-	MixerType      string
-	Format         string
-	AllowedFormats string
-	Filters        string
+	MixerType  string
+	Format     string
+	Filters    string
+	// AllowedFormats is the live allowed_formats attribute when MPD reports
+	// one (AllowedFormatsLive), else its block's.
+	AllowedFormats     string
+	AllowedFormatsLive bool
 	// DoP is whether the output sends DSD as DoP: the live dop attribute,
-	// else the file's dop setting.
+	// else its block's dop setting.
 	DoP bool
-	// Stages is the chain from the output's device to the card, as
-	// alsa.Chain names it; nil when it is not proven.
-	Stages []string
+	// SampleStage is the plugin type of the first stage that changes the
+	// samples (softvol, rate, dmix, route, ladspa) on the way from its
+	// device, as the ALSA files the bridge read define it
+	// (alsa.PCMConfig.SampleStage); "" when the bridge met none.
+	SampleStage string
 }
 
 // PCM is the card's playback substream the reading read.
@@ -346,14 +395,13 @@ type PCM struct {
 	// Thread is the name of the thread that holds it (owner_pid), as
 	// /proc's status shows it; "" when it could not be named.
 	Thread string
-	// Started is whether the reading read when that process started.
-	Started bool
 }
 
 // Judge decides the verdict for one whole reading. A stream that is not
 // MPD's, or not running, stops the judging with the one code that says
-// so; past that, every condition that is not proven adds its code, so the
-// list is whole and the app can say each.
+// so, and no warning; past that, every condition that does not hold adds
+// its code, so the list is whole and the app can say each, and the
+// warnings are every setting read that would change the samples.
 func Judge(f Facts) Verdict {
 	switch {
 	case f.State != "play":
@@ -370,9 +418,6 @@ func Judge(f Facts) Verdict {
 		return WithheldFor(OwnerNotMPD)
 	case f.MPD.Holders == 0:
 		return WithheldFor(OwnerNotOutput)
-	case !f.PCM.Started:
-		// When MPD's process started is what ties mpd.conf to it.
-		return WithheldFor(OwnerUnknown)
 	case f.PCM.Format == "" || f.PCM.Rate <= 0 || f.PCM.Channels <= 0:
 		return WithheldFor(HWParamsUnknown)
 	}
@@ -403,70 +448,10 @@ func Judge(f Facts) Verdict {
 		}
 	}
 
-	if f.MPD.ReplayGainMode != "off" {
-		add(MPDReplayGain)
-	}
-	if crossfadeOn(f.MPD.Crossfade) {
-		add(MPDCrossfade)
-	}
-	if mixRampOn(f.MPD.MixRampDelay) {
-		add(MPDMixRamp)
-	}
-	cfg := f.MPD.Config
-	if !cfg.Read {
-		add(MPDConfigUnread)
-	} else {
-		if !cfg.Complete {
-			add(MPDConfigIncomplete)
-		}
-		if !cfg.Matches {
-			add(MPDConfigMismatch)
-		}
-		if !cfg.Current {
-			add(MPDConfigChanged)
-		}
-	}
-	// What only the file says is judged from a file shown to be MPD's
-	// running configuration; from any other it would be a claim about a
-	// configuration MPD may not run with, and the codes above say why.
-	proven := cfg.Proven()
-	if proven {
-		if on, ok := ParseBool(f.MPD.VolumeNormalization); f.MPD.VolumeNormalization != "" && (!ok || on) {
-			add(MPDNormalization)
-		}
-		if strings.TrimSpace(f.MPD.AudioOutputFormat) != "" {
-			add(MPDFormatOverride)
-		}
-	}
-	out := f.MPD.Output
-	if f.MPD.Holders > 1 {
-		add(MPDOutputAmbiguous)
-	} else {
-		// The output's own settings: its allowed_formats may be the live
-		// attribute, the rest come from its block in the file.
-		fromFile := proven && out.Configured
-		if fromFile {
-			switch out.MixerType {
-			case "hardware", "null", "none":
-			default:
-				add(MPDSoftwareVolume)
-			}
-		}
-		if (fromFile && strings.TrimSpace(out.Format) != "") || strings.TrimSpace(out.AllowedFormats) != "" {
-			add(MPDFormatOverride)
-		}
-		if fromFile && strings.TrimSpace(out.Filters) != "" {
-			add(MPDFilters)
-		}
-		// The chain is the output's device in the file, resolved through the
-		// ALSA configuration: an output of another plugin reaches the card
-		// some other way.
-		if out.Plugin != "alsa" || !fromFile || len(out.Stages) == 0 {
-			add(ALSAChainUnproven)
-		}
-	}
 	oneOutput := f.MPD.Holders == 1
-	plug := oneOutput && slices.Contains(out.Stages, "plug")
+	if !oneOutput {
+		add(MPDOutputAmbiguous)
+	}
 
 	dop := false
 	if audioOK {
@@ -476,33 +461,27 @@ func Judge(f Facts) Verdict {
 		case audio.DSD && dsdHW:
 			// Native DSD: the card's one-bit rate is its frame rate times
 			// the format's width.
-			hwRate, known := alsa.NativeDSDRate(f.PCM.Format, f.PCM.Rate)
-			changed := false
-			if !known {
+			if hwRate, known := alsa.NativeDSDRate(f.PCM.Format, f.PCM.Rate); !known {
 				add(FormatMismatch)
 			} else if hwRate != audio.Rate {
 				add(RateMismatch)
-				changed = true
 			}
 			if f.PCM.Channels != audio.Channels {
 				add(ChannelsMismatch)
-				changed = true
-			}
-			if plug && changed {
-				add(ALSAPlugConverts)
 			}
 		case audio.DSD && linear:
 			switch {
 			case !oneOutput:
 				// Which output, and so whether it sends DoP, is not known;
-				// the chain's code already says why.
-			case !out.DoP:
+				// mpd_output_ambiguous already says so.
+			case !f.MPD.Output.DoP:
 				add(DSDConvertedToPCM)
 			default:
 				// DoP: 16 one-bit samples a channel in each PCM frame, in
-				// the top 24 bits of a sample.
+				// the top 24 bits of a sample. The kernel shows the frames'
+				// format and rate, never the samples, so this is consistent
+				// with DoP and no more.
 				dop = true
-				changed := false
 				if !signed {
 					add(FormatMismatch)
 				}
@@ -513,15 +492,9 @@ func Judge(f Facts) Verdict {
 				// rate times 16 can wrap in an int to the DSD rate.
 				if audio.Rate%16 != 0 || f.PCM.Rate != audio.Rate/16 {
 					add(RateMismatch)
-					changed = true
 				}
 				if f.PCM.Channels != audio.Channels {
 					add(ChannelsMismatch)
-					changed = true
-				}
-				// MPD hands a plug DoP as 24-bit samples.
-				if plug && (changed || bits != 24) {
-					add(ALSAPlugConverts)
 				}
 			}
 		case audio.DSD:
@@ -531,17 +504,15 @@ func Judge(f Facts) Verdict {
 		case dsdHW || !linear || !signed:
 			add(FormatMismatch)
 		default:
-			changed := false
 			if f.PCM.Rate != audio.Rate {
 				add(RateMismatch)
-				changed = true
 			}
 			if f.PCM.Channels != audio.Channels {
 				add(ChannelsMismatch)
-				changed = true
 			}
-			// The container must hold the file's bits; when the file is not
-			// known, the stream's stand in.
+			// The format must hold the file's bits; a wider one carries
+			// them in a wider word. When the file's bits are not known, the
+			// stream's stand in.
 			floor := audio.Bits
 			if f.Source.Known && !f.Source.DSD && f.Source.Bits > 0 {
 				floor = f.Source.Bits
@@ -549,19 +520,97 @@ func Judge(f Facts) Verdict {
 			if bits < floor {
 				add(DepthReduced)
 			}
-			if plug && (changed || bits != audio.Bits) {
-				add(ALSAPlugConverts)
-			}
 		}
 	}
 
-	if len(codes) > 0 {
-		return WithheldFor(codes...)
+	v := Verdict{Value: FormatPreserved, Reasons: []string{}, BitExactness: NotVerifiable, Warnings: warnings(f)}
+	switch {
+	case len(codes) > 0:
+		v.Value, v.Reasons = Withheld, Sorted(codes)
+	case dop:
+		v.Value = FormatPreservedDoP
 	}
-	if dop {
-		return Verdict{Value: BitExactDoP, Reasons: []string{}}
+	return v
+}
+
+// warnings is every setting that would change the samples of MPD's own
+// running stream that the reading read, once each, in WarningCodes order
+// and then WarningSources order: what MPD reports (replay gain, crossfade,
+// MixRamp, the output's live allowed_formats), what mpd.conf says
+// (normalization, the format overrides, the holder's software volume while
+// MPD reports a volume below 100, its filters), and the first sample stage
+// the holder's device goes through as the ALSA files define it. A setting
+// that does not read as on is no warning, and what was not read is none.
+func warnings(f Facts) []Warning {
+	out := []Warning{}
+	add := func(code, source string) {
+		if w := (Warning{Code: code, Source: source}); !slices.Contains(out, w) {
+			out = append(out, w)
+		}
 	}
-	return Verdict{Value: BitExact, Reasons: []string{}}
+	m := f.MPD
+	if mode := strings.TrimSpace(m.ReplayGainMode); mode != "" && mode != "off" {
+		add(MPDReplayGain, FromMPD)
+	}
+	if above(m.Crossfade, 0) {
+		add(MPDCrossfade, FromMPD)
+	}
+	if above(m.MixRampDelay, 0) {
+		add(MPDMixRamp, FromMPD)
+	}
+	if m.ConfRead {
+		if on, ok := ParseBool(m.VolumeNormalization); ok && on {
+			add(MPDNormalization, FromMPDConf)
+		}
+		if strings.TrimSpace(m.AudioOutputFormat) != "" {
+			add(MPDFormatOverride, FromMPDConf)
+		}
+	}
+	if m.Holders == 1 {
+		o := m.Output
+		if strings.TrimSpace(o.AllowedFormats) != "" {
+			source := FromMPDConf
+			if o.AllowedFormatsLive {
+				source = FromMPD
+			}
+			add(MPDFormatOverride, source)
+		}
+		if o.Configured {
+			if o.MixerType == "software" && volumeBelowFull(m.Volume) {
+				add(MPDSoftwareVolume, FromMPDConf)
+			}
+			if strings.TrimSpace(o.Format) != "" {
+				add(MPDFormatOverride, FromMPDConf)
+			}
+			if strings.TrimSpace(o.Filters) != "" {
+				add(MPDFilters, FromMPDConf)
+			}
+			if code, ok := stageWarnings[o.SampleStage]; ok {
+				add(code, FromALSAConf)
+			}
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Warning) int {
+		if d := rank(warningOrder, a.Code) - rank(warningOrder, b.Code); d != 0 {
+			return d
+		}
+		return rank(sourceOrder, a.Source) - rank(sourceOrder, b.Source)
+	})
+	return out
+}
+
+// above reports whether v, a number as MPD prints it, reads as more than
+// floor; absent, nan and a value that does not parse do not.
+func above(v string, floor float64) bool {
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	return err == nil && !math.IsNaN(n) && n > floor
+}
+
+// volumeBelowFull reports whether status volume, as MPD prints it, is 0 to
+// 99: MPD's software volume leaves a sample as it is only at 100.
+func volumeBelowFull(v string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	return err == nil && n >= 0 && n < 100
 }
 
 // losslessCodec is the decision's list: flac, alac, wav, aiff, wv, ape,
@@ -593,33 +642,6 @@ func sourceAgrees(src Source, a Audio) bool {
 		return false
 	}
 	return true
-}
-
-// crossfadeOn reads status xfade: absent or 0 is off. MPD prints it only
-// above 0 (lround of the seconds); a value that does not parse is not
-// proven off.
-func crossfadeOn(v string) bool {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return false
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	return err != nil || math.IsNaN(n) || n != 0
-}
-
-// mixRampOn reads status mixrampdelay: MPD prints it only above 0, and
-// MixRamp overlaps songs only then; absent, nan, 0 and below are off. A
-// value that does not parse is not proven off.
-func mixRampOn(v string) bool {
-	v = strings.TrimSpace(v)
-	if v == "" || strings.EqualFold(v, "nan") {
-		return false
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return true
-	}
-	return n > 0
 }
 
 // Audio is one MPD audio format: status audio: or currentsong Format:.
@@ -706,7 +728,7 @@ func ParseBool(v string) (value, ok bool) {
 // mixer_enabled is false; else the top-level mixer_type; else hardware.
 // The answer is hardware, software, null or none ("disabled" is none). A
 // value MPD does not name, or a mixer_enabled that is not a boolean, is
-// returned as "", which Judge counts as software volume not ruled out.
+// returned as "", which MPD refuses to start on.
 func EffectiveMixerType(outputType, mixerEnabled, globalType string) string {
 	if t := strings.TrimSpace(outputType); t != "" {
 		return mixerName(t)

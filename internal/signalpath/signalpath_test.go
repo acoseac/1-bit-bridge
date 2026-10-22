@@ -6,20 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
 )
 
-// volumioChain is the chain MPD's "volumio" device takes on the captured
-// Pi: volumio (empty) -> volumioOutput (plug) -> volumioHw (hw).
-var volumioChain = []string{"empty", "plug", "hw"}
-
-// provenConfig is an mpd.conf read whole whose outputs are the daemon's and
-// whose files last changed before the MPD holding the card started.
-var provenConfig = Config{Read: true, Complete: true, Matches: true, Current: true}
-
 // pcmOnTheGoBar is the capture pcm-44k1-16: a 16-bit 44.1 kHz FLAC that
-// reaches the iFi GO bar as S16_LE through Volumio's chain, MPD set as
-// Volumio sets it (no replay gain, no normalization, no mixer that works),
-// held by MPD's output thread for its one alsa output.
+// reaches the iFi GO bar as S16_LE, MPD set as Volumio sets it (no replay
+// gain, no normalization, a hardware mixer that does not work), held by
+// MPD's output thread for its one alsa output, whose block mpd.conf has.
 func pcmOnTheGoBar() Facts {
 	return Facts{
 		State:  "play",
@@ -27,12 +21,12 @@ func pcmOnTheGoBar() Facts {
 		Source: Source{Known: true, Codec: "FLAC", SampleRate: 44100, Bits: 16},
 		MPD: MPD{
 			ReplayGainMode:      "off",
-			Config:              provenConfig,
+			ConfRead:            true,
 			VolumeNormalization: "no",
 			Holders:             1,
-			Output:              Output{Plugin: "alsa", Configured: true, MixerType: "hardware", Stages: volumioChain},
+			Output:              Output{Plugin: "alsa", Configured: true, MixerType: "hardware", AllowedFormatsLive: true},
 		},
-		PCM: PCM{Open: true, State: "RUNNING", Format: "S16_LE", Rate: 44100, Channels: 2, Owner: "mpd", Thread: "output:alsa", Started: true},
+		PCM: PCM{Open: true, State: "RUNNING", Format: "S16_LE", Rate: 44100, Channels: 2, Owner: "mpd", Thread: "output:alsa"},
 	}
 }
 
@@ -47,40 +41,76 @@ func dsd256OnTheGoBar() Facts {
 }
 
 // dsd64AsDoP is a DSD64 file an output with dop on sends as 24-bit PCM at
-// 176.4 kHz, straight to hw.
+// 176.4 kHz.
 func dsd64AsDoP() Facts {
 	f := pcmOnTheGoBar()
 	f.Audio = "dsd64:2"
 	f.Source = Source{Known: true, Codec: "DFF", DSD: true, SampleRate: 2822400, Bits: 1, Channels: 2}
-	f.MPD.Output = Output{Plugin: "alsa", Configured: true, MixerType: "none", DoP: true, Stages: []string{"hw"}}
+	f.MPD.Output = Output{Plugin: "alsa", Configured: true, MixerType: "none", DoP: true}
 	f.PCM.Format, f.PCM.Rate = "S24_3LE", 176400
 	return f
 }
 
-func TestTheCapturedShapesAreBitExact(t *testing.T) {
+// wantVerdict holds v to value with exactly reasons and warnings, and to
+// bit-exactness not verifiable, which every verdict carries.
+func wantVerdict(t *testing.T, name string, v Verdict, value string, reasons []string, warnings ...Warning) {
+	t.Helper()
+	if reasons == nil {
+		reasons = []string{}
+	}
+	if warnings == nil {
+		warnings = []Warning{}
+	}
+	if v.Value != value || !slices.Equal(v.Reasons, Sorted(reasons)) || v.Reasons == nil ||
+		!slices.Equal(v.Warnings, warnings) || v.Warnings == nil || v.BitExactness != NotVerifiable {
+		t.Errorf("%s: %+v, want %s, reasons %v, warnings %v, bit-exactness %s", name, v, value, Sorted(reasons), warnings, NotVerifiable)
+	}
+}
+
+// TestTheCapturedShapesHaveTheirFormatPreserved: what the Pi measured
+// reaches the DAC in the file's format, and the verdict says that and no
+// more: format_preserved for PCM and native DSD, format_preserved_dop for
+// DoP, each with bit-exactness not verifiable.
+func TestTheCapturedShapesHaveTheirFormatPreserved(t *testing.T) {
 	pcm96 := pcmOnTheGoBar()
 	pcm96.Audio = "96000:24:2"
 	pcm96.Source = Source{Known: true, Codec: "FLAC", SampleRate: 96000, Bits: 24}
 	pcm96.PCM.Format, pcm96.PCM.Rate = "S24_3LE", 96000
-	cases := map[string]struct {
+	for name, tc := range map[string]struct {
 		f    Facts
 		want string
 	}{
-		"44.1/16 through Volumio's plug": {pcmOnTheGoBar(), BitExact},
-		"96/24 through Volumio's plug":   {pcm96, BitExact},
-		"native DSD256":                  {dsd256OnTheGoBar(), BitExact},
-		"DSD64 as DoP":                   {dsd64AsDoP(), BitExactDoP},
+		"44.1/16":       {pcmOnTheGoBar(), FormatPreserved},
+		"96/24":         {pcm96, FormatPreserved},
+		"native DSD256": {dsd256OnTheGoBar(), FormatPreserved},
+		"DSD64 as DoP":  {dsd64AsDoP(), FormatPreservedDoP},
+	} {
+		wantVerdict(t, name, Judge(tc.f), tc.want, nil)
 	}
-	for name, tc := range cases {
-		got := Judge(tc.f)
-		if got.Value != tc.want || len(got.Reasons) != 0 || got.Reasons == nil {
-			t.Errorf("%s: %+v, want %s with reasons []", name, got, tc.want)
+}
+
+// TestNoVerdictIsBitExact: whatever the facts, an MPD output's verdict is
+// one of the three values, and bit-exactness is not verifiable in every
+// one of them, a withheld verdict and one for a reading that is not whole
+// included.
+func TestNoVerdictIsBitExact(t *testing.T) {
+	stopped := pcmOnTheGoBar()
+	stopped.State = "stop"
+	resampled := pcmOnTheGoBar()
+	resampled.PCM.Rate = 48000
+	for _, v := range []Verdict{
+		Judge(pcmOnTheGoBar()), Judge(dsd64AsDoP()), Judge(stopped), Judge(resampled), WithheldFor(ProcTimeout),
+	} {
+		if !slices.Contains([]string{FormatPreserved, FormatPreservedDoP, Withheld}, v.Value) || v.BitExactness != NotVerifiable {
+			t.Errorf("%+v", v)
 		}
 	}
 }
 
-// TestEveryWithheldReason changes one fact of a bit-exact reading at a
-// time and names the code, and only the codes, that change brings.
+// TestEveryWithheldReason changes one fact of a reading whose format is
+// preserved and names the code, and only the codes, that change brings.
+// Each is what the kernel shows against the file, or what ties the stream
+// to it.
 func TestEveryWithheldReason(t *testing.T) {
 	type change struct {
 		name  string
@@ -89,7 +119,6 @@ func TestEveryWithheldReason(t *testing.T) {
 		want  []string
 	}
 	pcm, dsd, dop := pcmOnTheGoBar, dsd256OnTheGoBar, dsd64AsDoP
-	direct := func(f *Facts) { f.MPD.Output.Stages = []string{"hw"} }
 	cases := []change{
 		{"paused", pcm, func(f *Facts) { f.State = "pause" }, []string{NotPlaying}},
 		{"stopped", pcm, func(f *Facts) { f.State = "stop" }, []string{NotPlaying}},
@@ -99,7 +128,6 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"an xrun", pcm, func(f *Facts) { f.PCM.State = "XRUN" }, []string{PCMNotRunning}},
 		{"an owner nobody can name", pcm, func(f *Facts) { f.PCM.Owner = "" }, []string{OwnerUnknown}},
 		{"a thread nobody can name", pcm, func(f *Facts) { f.PCM.Thread = "" }, []string{OwnerUnknown}},
-		{"a process whose start nobody can read", pcm, func(f *Facts) { f.PCM.Started = false }, []string{OwnerUnknown}},
 		{"a foreign owner", pcm, func(f *Facts) { f.PCM.Owner = "aplay" }, []string{OwnerNotMPD}},
 		{"another player", pcm, func(f *Facts) { f.PCM.Owner = "squeezelite" }, []string{OwnerNotMPD}},
 		{"a thread that is no enabled output's", pcm, func(f *Facts) { f.MPD.Holders = 0 }, []string{OwnerNotOutput}},
@@ -122,60 +150,21 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"the file is mono", pcm, func(f *Facts) { f.Source.Channels = 1 }, []string{SourceMismatch}},
 		{"a DSD row and a PCM stream", pcm, func(f *Facts) { f.Source.DSD = true }, []string{SourceMismatch}},
 
-		{"replay gain track", pcm, func(f *Facts) { f.MPD.ReplayGainMode = "track" }, []string{MPDReplayGain}},
-		{"replay gain auto", pcm, func(f *Facts) { f.MPD.ReplayGainMode = "auto" }, []string{MPDReplayGain}},
-		{"no replay gain mode", pcm, func(f *Facts) { f.MPD.ReplayGainMode = "" }, []string{MPDReplayGain}},
-		{"crossfade", pcm, func(f *Facts) { f.MPD.Crossfade = "5" }, []string{MPDCrossfade}},
-		{"a crossfade this does not read", pcm, func(f *Facts) { f.MPD.Crossfade = "five" }, []string{MPDCrossfade}},
-		{"mixramp", pcm, func(f *Facts) { f.MPD.MixRampDelay = "2.5" }, []string{MPDMixRamp}},
-		{"a mixrampdelay this does not read", pcm, func(f *Facts) { f.MPD.MixRampDelay = "soon" }, []string{MPDMixRamp}},
-		// What only mpd.conf says is judged only from a file shown to be the
-		// one MPD runs with; the output's chain comes from its device there.
-		{"mpd.conf unread", pcm, func(f *Facts) { f.MPD.Config = Config{} }, []string{MPDConfigUnread, ALSAChainUnproven}},
-		{"mpd.conf read in part", pcm, func(f *Facts) { f.MPD.Config.Complete = false }, []string{MPDConfigIncomplete, ALSAChainUnproven}},
-		{"mpd.conf's outputs are not the daemon's", pcm, func(f *Facts) { f.MPD.Config.Matches = false }, []string{MPDConfigMismatch, ALSAChainUnproven}},
-		{"mpd.conf changed after MPD started", pcm, func(f *Facts) { f.MPD.Config.Current = false }, []string{MPDConfigChanged, ALSAChainUnproven}},
-		{"every way at once", pcm, func(f *Facts) { f.MPD.Config = Config{Read: true} }, []string{MPDConfigIncomplete, MPDConfigMismatch, MPDConfigChanged, ALSAChainUnproven}},
-		{"what a changed file says is not claimed", pcm, func(f *Facts) {
-			f.MPD.Config.Current = false
-			f.MPD.Output.MixerType, f.MPD.Output.Filters, f.MPD.AudioOutputFormat, f.MPD.VolumeNormalization = "software", "eq", "48000:24:2", "yes"
-		}, []string{MPDConfigChanged, ALSAChainUnproven}},
-		{"a live allowed_formats with a changed file", pcm, func(f *Facts) {
-			f.MPD.Config.Current = false
-			f.MPD.Output.AllowedFormats = "96000:16:*"
-		}, []string{MPDConfigChanged, MPDFormatOverride, ALSAChainUnproven}},
-		{"normalization yes", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "yes" }, []string{MPDNormalization}},
-		{"normalization true", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "TRUE" }, []string{MPDNormalization}},
-		{"normalization that is not a boolean", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "sometimes" }, []string{MPDNormalization}},
-		{"audio_output_format", pcm, func(f *Facts) { f.MPD.AudioOutputFormat = "48000:24:2" }, []string{MPDFormatOverride}},
-		{"the output's format", pcm, func(f *Facts) { f.MPD.Output.Format = "44100:24:2" }, []string{MPDFormatOverride}},
-		{"allowed_formats", pcm, func(f *Facts) { f.MPD.Output.AllowedFormats = "96000:16:*" }, []string{MPDFormatOverride}},
-		{"software volume", pcm, func(f *Facts) { f.MPD.Output.MixerType = "software" }, []string{MPDSoftwareVolume}},
-		{"a mixer MPD does not name", pcm, func(f *Facts) { f.MPD.Output.MixerType = "" }, []string{MPDSoftwareVolume}},
-		{"filters", pcm, func(f *Facts) { f.MPD.Output.Filters = "eq" }, []string{MPDFilters}},
-		{"a chain to the card nobody proved", pcm, func(f *Facts) { f.MPD.Output.Stages = nil }, []string{ALSAChainUnproven}},
-		{"the holder is not an alsa output", pcm, func(f *Facts) { f.MPD.Output.Plugin = "ao" }, []string{ALSAChainUnproven}},
-		{"the holder has no block in mpd.conf", pcm, func(f *Facts) { f.MPD.Output.Configured = false }, []string{ALSAChainUnproven}},
 		// Two enabled outputs whose names are alike past the 15 bytes a
 		// thread name keeps: which one holds the card is not known.
 		{"two outputs whose threads are named alike", pcm, func(f *Facts) { f.MPD.Holders = 2 }, []string{MPDOutputAmbiguous}},
 
-		{"the plug pads 16 to 24", pcm, func(f *Facts) { f.PCM.Format = "S24_3LE" }, []string{ALSAPlugConverts}},
-		{"the plug resamples", pcm, func(f *Facts) { f.PCM.Rate = 48000 }, []string{RateMismatch, ALSAPlugConverts}},
-		{"the plug mixes down", pcm, func(f *Facts) { f.PCM.Channels = 1 }, []string{ChannelsMismatch, ALSAPlugConverts}},
-		{"hw at another rate", pcm, func(f *Facts) { direct(f); f.PCM.Rate = 48000 }, []string{RateMismatch}},
-		{"hw truncates 24 to 16", pcm, func(f *Facts) {
-			direct(f)
-			f.Audio, f.Source.Bits = "44100:24:2", 24
-		}, []string{DepthReduced}},
+		{"resampled", pcm, func(f *Facts) { f.PCM.Rate = 48000 }, []string{RateMismatch}},
+		{"mixed down", pcm, func(f *Facts) { f.PCM.Channels = 1 }, []string{ChannelsMismatch}},
+		{"24 truncated to 16", pcm, func(f *Facts) { f.Audio, f.Source.Bits = "44100:24:2", 24 }, []string{DepthReduced}},
 		{"a float stream", pcm, func(f *Facts) { f.Audio = "44100:f:2" }, []string{StreamFloat}},
-		{"a float card format", pcm, func(f *Facts) { direct(f); f.PCM.Format = "FLOAT_LE" }, []string{FormatMismatch}},
-		{"an unsigned card format", pcm, func(f *Facts) { direct(f); f.PCM.Format = "U16_LE" }, []string{FormatMismatch}},
-		{"a DSD card format for PCM", pcm, func(f *Facts) { direct(f); f.PCM.Format = "DSD_U32_BE" }, []string{FormatMismatch}},
+		{"a float card format", pcm, func(f *Facts) { f.PCM.Format = "FLOAT_LE" }, []string{FormatMismatch}},
+		{"an unsigned card format", pcm, func(f *Facts) { f.PCM.Format = "U16_LE" }, []string{FormatMismatch}},
+		{"a DSD card format for PCM", pcm, func(f *Facts) { f.PCM.Format = "DSD_U32_BE" }, []string{FormatMismatch}},
 
-		{"DSD at another rate", dsd, func(f *Facts) { f.PCM.Rate = 176400 }, []string{RateMismatch, ALSAPlugConverts}},
-		{"MPD decodes DSD128 for a DSD256 file", dsd, func(f *Facts) { f.Audio = "dsd128:2" }, []string{SourceMismatch, RateMismatch, ALSAPlugConverts}},
-		{"DSD on one channel", dsd, func(f *Facts) { direct(f); f.PCM.Channels = 1 }, []string{ChannelsMismatch}},
+		{"DSD at another rate", dsd, func(f *Facts) { f.PCM.Rate = 176400 }, []string{RateMismatch}},
+		{"MPD decodes DSD128 for a DSD256 file", dsd, func(f *Facts) { f.Audio = "dsd128:2" }, []string{SourceMismatch, RateMismatch}},
+		{"DSD on one channel", dsd, func(f *Facts) { f.PCM.Channels = 1 }, []string{ChannelsMismatch}},
 		{"a DSD width nobody defines", dsd, func(f *Facts) { f.PCM.Format = "DSD_U64_BE" }, []string{FormatMismatch}},
 		{"DSD made PCM", dsd, func(f *Facts) { f.PCM.Format, f.PCM.Rate = "S32_LE", 352800 }, []string{DSDConvertedToPCM}},
 		{"DSD to a float card", dsd, func(f *Facts) { f.PCM.Format = "FLOAT_LE" }, []string{FormatMismatch}},
@@ -189,99 +178,184 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"DoP at a rate whose sixteenfold wraps to the DSD rate", dop, func(f *Facts) { f.PCM.Rate = math.MaxInt>>3 + 1 + 176400 }, []string{RateMismatch}},
 		{"DoP for a DSD rate that is not a multiple of 16", dop, func(f *Facts) { f.Audio = "352801:dsd:2"; f.Source.SampleRate = 2822408 }, []string{RateMismatch}},
 		{"DoP unsigned", dop, func(f *Facts) { f.PCM.Format = "U24_3LE" }, []string{FormatMismatch}},
-		{"DoP through a plug into 32 bits", dop, func(f *Facts) {
-			f.MPD.Output.Stages = volumioChain
-			f.PCM.Format = "S32_LE"
-		}, []string{ALSAPlugConverts}},
-		{"DoP with software volume", dop, func(f *Facts) { f.MPD.Output.MixerType = "software" }, []string{MPDSoftwareVolume}},
+		{"DoP on one channel", dop, func(f *Facts) { f.PCM.Channels = 1 }, []string{ChannelsMismatch}},
+		{"DoP from one of two outputs named alike", dop, func(f *Facts) { f.MPD.Holders = 2 }, []string{MPDOutputAmbiguous}},
 	}
 	for _, tc := range cases {
 		f := tc.base()
 		tc.apply(&f)
 		got := Judge(f)
-		if got.Value != Withheld || !slices.Equal(got.Reasons, Sorted(tc.want)) {
+		if got.Value != Withheld || !slices.Equal(got.Reasons, Sorted(tc.want)) || got.BitExactness != NotVerifiable {
 			t.Errorf("%s: %+v, want withheld %v", tc.name, got, Sorted(tc.want))
 		}
 	}
 }
 
-// TestWhatDoesNotChangeTheSamplesIsNotAReason pins the settings the
-// decision leaves the verdict alone for: the DAC's own mixer, a padded
-// container straight to hw, a decoder that widens, mixramp off, and
-// crossfade 0.
+// TestWhatDoesNotChangeTheSamplesIsNotAReason pins what leaves the format
+// preserved and adds no warning: a container wider than the file, a decoder
+// that widens, the DAC's own mixer, MPD's software volume at 100, mixramp
+// and crossfade off, and what the row does not say.
 func TestWhatDoesNotChangeTheSamplesIsNotAReason(t *testing.T) {
 	cases := map[string]func(*Facts){
-		"16 bits padded to 24 straight to hw": func(f *Facts) {
-			f.MPD.Output.Stages = []string{"hw"}
-			f.PCM.Format = "S24_3LE"
-		},
-		"16 bits padded to 32 straight to hw": func(f *Facts) {
-			f.MPD.Output.Stages = []string{"hw"}
-			f.PCM.Format = "S32_LE"
-		},
+		"16 bits in a 24-bit format": func(f *Facts) { f.PCM.Format = "S24_3LE" },
+		"16 bits in a 32-bit format": func(f *Facts) { f.PCM.Format = "S32_LE" },
 		"24-bit ALAC that FFmpeg hands on as 32": func(f *Facts) {
 			f.Audio = "96000:32:2"
 			f.Source = Source{Known: true, Codec: "ALAC", SampleRate: 96000, Bits: 24, Channels: 2}
 			f.PCM.Format, f.PCM.Rate = "S32_LE", 96000
 		},
-		"24-bit ALAC, 32 from FFmpeg, packed to 24 by MPD itself": func(f *Facts) {
-			f.MPD.Output.Stages = []string{"hw"}
+		"24-bit ALAC, 32 from FFmpeg, packed to 24": func(f *Facts) {
 			f.Audio = "96000:32:2"
 			f.Source = Source{Known: true, Codec: "ALAC", SampleRate: 96000, Bits: 24, Channels: 2}
 			f.PCM.Format, f.PCM.Rate = "S24_3LE", 96000
 		},
-		"the DAC's mixer, through MPD's hardware mixer": func(f *Facts) { f.MPD.Output.MixerType = "hardware" },
-		"the null mixer":                func(f *Facts) { f.MPD.Output.MixerType = "null" },
-		"no mixer":                      func(f *Facts) { f.MPD.Output.MixerType = "none" },
-		"crossfade 0":                   func(f *Facts) { f.MPD.Crossfade = "0" },
-		"mixramp nan":                   func(f *Facts) { f.MPD.MixRampDelay = "nan" },
-		"mixramp 0":                     func(f *Facts) { f.MPD.MixRampDelay = "0" },
-		"mixramp below 0":               func(f *Facts) { f.MPD.MixRampDelay = "-1" },
-		"normalization unset":           func(f *Facts) { f.MPD.VolumeNormalization = "" },
-		"normalization 0":               func(f *Facts) { f.MPD.VolumeNormalization = "0" },
-		"a row with no channels":        func(f *Facts) { f.Source.Channels = 0 },
-		"a row with no rate":            func(f *Facts) { f.Source.SampleRate = 0 },
-		"WavPack":                       func(f *Facts) { f.Source.Codec = "WV" },
-		"Monkey's Audio":                func(f *Facts) { f.Source.Codec = "APE" },
-		"a lower-case codec":            func(f *Facts) { f.Source.Codec = "flac" },
-		"hw straight, no plug in front": func(f *Facts) { f.MPD.Output.Stages = []string{"hw"} },
+		"the DAC's mixer, through MPD's hardware mixer": func(f *Facts) { f.MPD.Volume = "62" },
+		"the null mixer":                     func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "null", "40" },
+		"no mixer":                           func(f *Facts) { f.MPD.Output.MixerType = "none" },
+		"software volume at 100":             func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "software", "100" },
+		"software volume with no volume":     func(f *Facts) { f.MPD.Output.MixerType = "software" },
+		"crossfade 0":                        func(f *Facts) { f.MPD.Crossfade = "0" },
+		"a crossfade this does not read":     func(f *Facts) { f.MPD.Crossfade = "five" },
+		"mixramp nan":                        func(f *Facts) { f.MPD.MixRampDelay = "nan" },
+		"mixramp 0":                          func(f *Facts) { f.MPD.MixRampDelay = "0" },
+		"mixramp below 0":                    func(f *Facts) { f.MPD.MixRampDelay = "-1" },
+		"no replay gain mode":                func(f *Facts) { f.MPD.ReplayGainMode = "" },
+		"normalization unset":                func(f *Facts) { f.MPD.VolumeNormalization = "" },
+		"normalization 0":                    func(f *Facts) { f.MPD.VolumeNormalization = "0" },
+		"normalization that is not boolean":  func(f *Facts) { f.MPD.VolumeNormalization = "sometimes" },
+		"an empty live allowed_formats":      func(f *Facts) { f.MPD.Output.AllowedFormats = " " },
+		"a row with no channels":             func(f *Facts) { f.Source.Channels = 0 },
+		"a row with no rate":                 func(f *Facts) { f.Source.SampleRate = 0 },
+		"WavPack":                            func(f *Facts) { f.Source.Codec = "WV" },
+		"Monkey's Audio":                     func(f *Facts) { f.Source.Codec = "APE" },
+		"a lower-case codec":                 func(f *Facts) { f.Source.Codec = "flac" },
+		"an output of another plugin":        func(f *Facts) { f.MPD.Output.Plugin = "ao" },
+		"an output mpd.conf does not define": func(f *Facts) { f.MPD.Output = Output{Plugin: "alsa"} },
+		"mpd.conf unread":                    func(f *Facts) { f.MPD.ConfRead, f.MPD.Output.Configured = false, false },
+		"a stage type that changes nothing":  func(f *Facts) { f.MPD.Output.SampleStage = "plug" },
 	}
 	for name, apply := range cases {
 		f := pcmOnTheGoBar()
 		apply(&f)
-		if got := Judge(f); got.Value != BitExact {
-			t.Errorf("%s: %+v, want bit_exact", name, got)
-		}
+		wantVerdict(t, name, Judge(f), FormatPreserved, nil)
 	}
 	direct := dsd64AsDoP()
 	direct.PCM.Format = "S32_LE"
-	if got := Judge(direct); got.Value != BitExactDoP {
-		t.Errorf("DoP in 32 bits straight to hw: %+v", got)
+	wantVerdict(t, "DoP in 32 bits", Judge(direct), FormatPreservedDoP, nil)
+}
+
+// TestASettingThatChangesTheSamplesIsAWarning: a setting the reading read
+// that would change the samples is a warning beside the verdict, labelled
+// with where it was read, and never a reason: the format at the DAC is
+// still the file's, and the verdict never claimed the samples.
+func TestASettingThatChangesTheSamplesIsAWarning(t *testing.T) {
+	fromMPD := func(code string) Warning { return Warning{Code: code, Source: FromMPD} }
+	fromConf := func(code string) Warning { return Warning{Code: code, Source: FromMPDConf} }
+	fromALSA := func(code string) Warning { return Warning{Code: code, Source: FromALSAConf} }
+	cases := []struct {
+		name  string
+		apply func(*Facts)
+		want  []Warning
+	}{
+		{"replay gain track", func(f *Facts) { f.MPD.ReplayGainMode = "track" }, []Warning{fromMPD(MPDReplayGain)}},
+		{"replay gain auto", func(f *Facts) { f.MPD.ReplayGainMode = "auto" }, []Warning{fromMPD(MPDReplayGain)}},
+		{"crossfade", func(f *Facts) { f.MPD.Crossfade = "5" }, []Warning{fromMPD(MPDCrossfade)}},
+		{"mixramp", func(f *Facts) { f.MPD.MixRampDelay = "2.5" }, []Warning{fromMPD(MPDMixRamp)}},
+		{"software volume below 100", func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "software", "62" }, []Warning{fromConf(MPDSoftwareVolume)}},
+		{"software volume at 0", func(f *Facts) { f.MPD.Output.MixerType, f.MPD.Volume = "software", "0" }, []Warning{fromConf(MPDSoftwareVolume)}},
+		{"normalization yes", func(f *Facts) { f.MPD.VolumeNormalization = "yes" }, []Warning{fromConf(MPDNormalization)}},
+		{"normalization TRUE", func(f *Facts) { f.MPD.VolumeNormalization = "TRUE" }, []Warning{fromConf(MPDNormalization)}},
+		{"audio_output_format", func(f *Facts) { f.MPD.AudioOutputFormat = "48000:24:2" }, []Warning{fromConf(MPDFormatOverride)}},
+		{"the output's format", func(f *Facts) { f.MPD.Output.Format = "44100:24:2" }, []Warning{fromConf(MPDFormatOverride)}},
+		{"a live allowed_formats", func(f *Facts) { f.MPD.Output.AllowedFormats = "96000:16:*" }, []Warning{fromMPD(MPDFormatOverride)}},
+		{"the file's allowed_formats, with none live", func(f *Facts) {
+			f.MPD.Output.AllowedFormats, f.MPD.Output.AllowedFormatsLive = "96000:16:*", false
+		}, []Warning{fromConf(MPDFormatOverride)}},
+		{"filters", func(f *Facts) { f.MPD.Output.Filters = "eq" }, []Warning{fromConf(MPDFilters)}},
+		{"a softvol stage", func(f *Facts) { f.MPD.Output.SampleStage = "softvol" }, []Warning{fromALSA(ALSASoftvol)}},
+		{"a rate stage", func(f *Facts) { f.MPD.Output.SampleStage = "rate" }, []Warning{fromALSA(ALSARate)}},
+		{"a dmix stage", func(f *Facts) { f.MPD.Output.SampleStage = "dmix" }, []Warning{fromALSA(ALSADmix)}},
+		{"a route stage", func(f *Facts) { f.MPD.Output.SampleStage = "route" }, []Warning{fromALSA(ALSARoute)}},
+		{"a LADSPA stage", func(f *Facts) { f.MPD.Output.SampleStage = "ladspa" }, []Warning{fromALSA(ALSALadspa)}},
+		{"every one at once, in their order", func(f *Facts) {
+			f.MPD.ReplayGainMode, f.MPD.Crossfade, f.MPD.MixRampDelay, f.MPD.Volume = "album", "3", "1", "50"
+			f.MPD.VolumeNormalization, f.MPD.AudioOutputFormat = "yes", "*:24:*"
+			f.MPD.Output.MixerType, f.MPD.Output.Format, f.MPD.Output.Filters = "software", "44100:16:2", "eq"
+			f.MPD.Output.AllowedFormats, f.MPD.Output.SampleStage = "dsd64:2", "softvol"
+		}, []Warning{
+			fromMPD(MPDReplayGain), fromMPD(MPDCrossfade), fromMPD(MPDMixRamp), fromConf(MPDSoftwareVolume),
+			fromConf(MPDNormalization), fromMPD(MPDFormatOverride), fromConf(MPDFormatOverride), fromConf(MPDFilters),
+			fromALSA(ALSASoftvol),
+		}},
 	}
+	for _, tc := range cases {
+		f := pcmOnTheGoBar()
+		tc.apply(&f)
+		wantVerdict(t, tc.name, Judge(f), FormatPreserved, nil, tc.want...)
+	}
+	// Beside a verdict withheld for what the kernel shows, the warnings are
+	// the same.
+	f := pcmOnTheGoBar()
+	f.PCM.Rate = 48000
+	f.MPD.ReplayGainMode = "track"
+	wantVerdict(t, "a resampled stream with replay gain", Judge(f), Withheld, []string{RateMismatch}, fromMPD(MPDReplayGain))
+	f = dsd64AsDoP()
+	f.MPD.Output.MixerType, f.MPD.Volume = "software", "80"
+	wantVerdict(t, "DoP with software volume", Judge(f), FormatPreservedDoP, nil, fromConf(MPDSoftwareVolume))
+}
+
+// TestAWarningNeedsWhatItIsReadFrom: what only mpd.conf says is no warning
+// when mpd.conf was not read or has no block for the output, and an
+// output's settings are none when two outputs could be the one that holds
+// the card. MPD's own reports still are.
+func TestAWarningNeedsWhatItIsReadFrom(t *testing.T) {
+	unread := pcmOnTheGoBar()
+	unread.MPD.ConfRead, unread.MPD.Output.Configured = false, false
+	unread.MPD.VolumeNormalization, unread.MPD.AudioOutputFormat = "yes", "48000:24:2"
+	unread.MPD.Output.MixerType, unread.MPD.Volume, unread.MPD.Output.Filters = "software", "10", "eq"
+	unread.MPD.ReplayGainMode = "track"
+	wantVerdict(t, "mpd.conf unread", Judge(unread), FormatPreserved, nil, Warning{Code: MPDReplayGain, Source: FromMPD})
+
+	ambiguous := pcmOnTheGoBar()
+	ambiguous.MPD.Holders = 2
+	ambiguous.MPD.Output.AllowedFormats, ambiguous.MPD.Output.SampleStage = "96000:16:*", "softvol"
+	ambiguous.MPD.AudioOutputFormat = "48000:24:2"
+	wantVerdict(t, "two outputs that could hold the card", Judge(ambiguous), Withheld, []string{MPDOutputAmbiguous},
+		Warning{Code: MPDFormatOverride, Source: FromMPDConf})
 }
 
 // TestAStreamThatIsNotMPDsIsJudgedNoFurther: once the stream is not MPD's
-// running stream, the one code says so and nothing about MPD's settings
-// is claimed for a stream they do not shape.
+// running stream, the one code says so, and no warning about MPD's
+// settings is given for a stream they do not shape.
 func TestAStreamThatIsNotMPDsIsJudgedNoFurther(t *testing.T) {
 	f := pcmOnTheGoBar()
 	f.MPD.ReplayGainMode = "track"
-	f.MPD.Output.MixerType = "software"
+	f.MPD.Output.MixerType, f.MPD.Volume = "software", "50"
 	f.PCM.Owner = "aplay"
-	if got := Judge(f); !slices.Equal(got.Reasons, []string{OwnerNotMPD}) {
-		t.Fatalf("%+v", got)
-	}
+	wantVerdict(t, "a foreign owner", Judge(f), Withheld, []string{OwnerNotMPD})
 	// An mpd whose thread is no enabled output of the MPD the bridge reads:
 	// another MPD, or an output the bridge cannot see.
 	f.PCM.Owner = "mpd"
 	f.MPD.Holders = 0
-	if got := Judge(f); !slices.Equal(got.Reasons, []string{OwnerNotOutput}) {
-		t.Fatalf("%+v", got)
-	}
+	wantVerdict(t, "an output MPD does not report", Judge(f), Withheld, []string{OwnerNotOutput})
 	f.MPD.Holders = 1
-	got := Judge(f)
-	if !slices.Equal(got.Reasons, []string{MPDReplayGain, MPDSoftwareVolume}) {
-		t.Fatalf("every reason of MPD's own stream: %+v", got)
+	wantVerdict(t, "MPD's own stream", Judge(f), FormatPreserved, nil,
+		Warning{Code: MPDReplayGain, Source: FromMPD}, Warning{Code: MPDSoftwareVolume, Source: FromMPDConf})
+}
+
+// TestEveryStageTheALSAReaderNamesIsAWarning: alsa.SampleStage names a
+// plugin type from a set of its own, and each is a warning here.
+func TestEveryStageTheALSAReaderNamesIsAWarning(t *testing.T) {
+	types := alsa.SampleStageTypes()
+	if len(types) == 0 {
+		t.Fatal("no stage types")
+	}
+	for _, typ := range types {
+		f := pcmOnTheGoBar()
+		f.MPD.Output.SampleStage = typ
+		if v := Judge(f); len(v.Warnings) != 1 || v.Warnings[0].Source != FromALSAConf || !slices.Contains(WarningCodes(), v.Warnings[0].Code) {
+			t.Errorf("%s: %+v", typ, v.Warnings)
+		}
 	}
 }
 
@@ -382,11 +456,14 @@ func TestSettling(t *testing.T) {
 	}
 }
 
-// TestCodesAreWords holds every code to the wire's rule: a lower-case
-// word with underscores, never a sentence, each once.
+// TestCodesAreWords holds every code, every warning's code and source, and
+// the verdict's words to the wire's rule: a lower-case word with
+// underscores, never a sentence, each once.
 func TestCodesAreWords(t *testing.T) {
 	seen := map[string]bool{}
-	for _, c := range Codes() {
+	all := append(append(append(Codes(), WarningCodes()...), WarningSources()...),
+		FormatPreserved, FormatPreservedDoP, Withheld, NotVerifiable)
+	for _, c := range all {
 		if seen[c] {
 			t.Errorf("%s twice", c)
 		}

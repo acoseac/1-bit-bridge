@@ -355,27 +355,6 @@ type readingRig struct {
 	cfg      LocalOutputsConfig
 }
 
-// rigAhead is how far ahead of the real clock a rig's clock runs, and
-// mpdAge how long before a reading the rig's MPD started: every file a test
-// writes, at the real time, then predates MPD's start, as on a box where
-// MPD was started after its configuration was written. A test that wants a
-// change after the start dates the file past rigNow() - mpdAge.
-const (
-	rigAhead = 2 * time.Hour
-	mpdAge   = time.Hour
-)
-
-// rigNow is a rig's clock.
-func rigNow() time.Time { return time.Now().Add(rigAhead) }
-
-// rigStat is /proc/6551/stat for the rig's MPD: started at tick 360000,
-// 3600 s after boot, which rigUptime puts mpdAge before the reading.
-const (
-	rigStat   = "6551 (mpd) S 1 6551 6551 0 -1 4194560 2412 0 23 0 1013 1022 0 0 20 0 9 0 360000 1234567 2345\n"
-	rigUptime = "7200.00 14000.00\n"
-	rigPasswd = "root:x:0:0:root:/root:/bin/bash\nvolumio:x:1000:1000::/home/volumio:/bin/bash\n"
-)
-
 // writeRigFile writes one file under dir, by a slash-separated path.
 func writeRigFile(t *testing.T, dir, rel, body string) {
 	t.Helper()
@@ -392,12 +371,6 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 	t.Helper()
 	r := &readingRig{t: t, file: file, loop: map[string][2]string{}}
 	r.procRoot = piCapture(t, capture)
-	// The captures hold no stat for MPD's process and no uptime, and the
-	// box's etc no passwd: the rig writes them, MPD running as the
-	// captured thread's uid 1000, whose home holds no ALSA file.
-	writeRigFile(t, r.procRoot, "6551/stat", rigStat)
-	writeRigFile(t, r.procRoot, "uptime", rigUptime)
-	writeRigFile(t, filepath.Dir(r.procRoot), "etc/passwd", rigPasswd)
 	r.music = t.TempDir()
 	r.root = filepath.Join(r.music, "INTERNAL", "Demo Library")
 	abs := filepath.Join(r.root, filepath.FromSlash(file))
@@ -428,7 +401,7 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 	r.cards = func() (alsa.Snapshot, error) { return (alsa.Reader{ProcRoot: r.procRoot}).Read() }
 	r.cfg = LocalOutputsConfig{
 		GOOS: "linux",
-		Now:  rigNow,
+		Now:  time.Now,
 		Output: func() config.OutputConfig {
 			return config.OutputConfig{MPD: "on"}
 		},
@@ -528,11 +501,27 @@ func getReading(t *testing.T, hs *httptest.Server, token, id string) (int, Outpu
 	return resp.StatusCode, got, raw
 }
 
+// wantVerdict holds the verdict to value and exactly reasons, and to
+// bit-exactness not verifiable, which every verdict carries.
 func wantVerdict(t *testing.T, got OutputReading, raw []byte, value string, reasons ...string) {
 	t.Helper()
 	want := signalpath.Sorted(reasons)
-	if got.Verdict.Value != value || !slices.Equal(got.Verdict.Reasons, want) {
-		t.Fatalf("verdict %+v, want %s %v\n%s", got.Verdict, value, want, raw)
+	if got.Verdict.Value != value || !slices.Equal(got.Verdict.Reasons, want) || got.Verdict.BitExactness != signalpath.NotVerifiable {
+		t.Fatalf("verdict %+v, want %s %v, bit-exactness %s\n%s", got.Verdict, value, want, signalpath.NotVerifiable, raw)
+	}
+}
+
+// warning is one warning as the wire carries it.
+func warning(code, source string) ReadingWarning { return ReadingWarning{Code: code, Source: source} }
+
+// wantWarnings holds the verdict's warnings to exactly want, in order.
+func wantWarnings(t *testing.T, got OutputReading, raw []byte, want ...ReadingWarning) {
+	t.Helper()
+	if want == nil {
+		want = []ReadingWarning{}
+	}
+	if !slices.Equal(got.Verdict.Warnings, want) || got.Verdict.Warnings == nil {
+		t.Fatalf("warnings %+v, want %+v\n%s", got.Verdict.Warnings, want, raw)
 	}
 }
 
@@ -546,8 +535,9 @@ func str(s *string) string {
 // TestReadingTheGoBarOnEveryCapture drives the route over each of the Pi's
 // captures: what card 5 received, its owner resolved through the thread's
 // Tgid to mpd, MPD's own status from the same minute, Volumio's chain, and
-// the song as one of the bridge's rows. Each is bit-exact, which is what the
-// Pi measured: the formats reached the DAC unchanged.
+// the song as one of the bridge's rows. Each has its format preserved,
+// which is what the Pi measured, with bit-exactness not verifiable and
+// nothing read that would change the samples.
 func TestReadingTheGoBarOnEveryCapture(t *testing.T) {
 	for _, c := range piCaptures {
 		t.Run(c.name, func(t *testing.T) {
@@ -561,7 +551,8 @@ func TestReadingTheGoBarOnEveryCapture(t *testing.T) {
 			if got.OutputID != id || got.State != "whole" || len(got.StateReasons) != 0 {
 				t.Fatalf("id %s state %s %v\n%s", got.OutputID, got.State, got.StateReasons, raw)
 			}
-			wantVerdict(t, got, raw, signalpath.BitExact)
+			wantVerdict(t, got, raw, signalpath.FormatPreserved)
+			wantWarnings(t, got, raw)
 			dac := got.DAC
 			if dac == nil || dac.Card != 5 || dac.ID != "Audio" || dac.Device != 0 || dac.Subdevice == nil || *dac.Subdevice != 0 {
 				t.Fatalf("dac %+v", dac)
@@ -687,6 +678,7 @@ func TestReadingJSONKeepsEveryKey(t *testing.T) {
 	for _, want := range []string{
 		`"reasons":[]`, `"volume":null`, `"mixrampDelay":null`, `"attributes":{"allowed_formats":"","dop":"0"}`,
 		`"attributes":{}`, `"channels":null`, `"chain":["empty","plug","hw"]`,
+		`"value":"format_preserved"`, `"bitExactness":"not_verifiable"`, `"warnings":[]`,
 	} {
 		if !jsonContains(raw, want) {
 			t.Errorf("body lacks %s:\n%s", want, raw)
@@ -696,7 +688,7 @@ func TestReadingJSONKeepsEveryKey(t *testing.T) {
 		"mpd":     {"state", "songId", "elapsed", "audio", "replayGainMode", "volume", "xfade", "mixrampDb", "mixrampDelay", "outputs", "config"},
 		"song":    {"uri", "format", "row"},
 		"dac":     {"card", "id", "device", "subdevice", "state", "format", "rate", "channels", "owner", "mixer"},
-		"verdict": {"value", "reasons"},
+		"verdict": {"value", "reasons", "bitExactness", "warnings"},
 	}
 	for obj, keys := range nested {
 		var m map[string]json.RawMessage
@@ -720,7 +712,10 @@ func TestReadingJSONKeepsEveryKey(t *testing.T) {
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.MPDUnreachable}) {
 		t.Fatalf("state %s %v", got.State, got.StateReasons)
 	}
-	for _, want := range []string{`"mpd":null`, `"song":null`, `"stateReasons":["mpd_unreachable"]`} {
+	for _, want := range []string{
+		`"mpd":null`, `"song":null`, `"stateReasons":["mpd_unreachable"]`,
+		`"value":"withheld"`, `"bitExactness":"not_verifiable"`, `"warnings":[]`,
+	} {
 		if !jsonContains(raw2, want) {
 			t.Errorf("body lacks %s:\n%s", want, raw2)
 		}
@@ -731,74 +726,88 @@ func TestReadingJSONKeepsEveryKey(t *testing.T) {
 }
 
 // TestTheVerdictReadsMPDsOwnSettings goes through the route for the
-// settings the verdict reads from each of its sources: mpd.conf read at
+// settings the warnings read from each of their sources: mpd.conf read at
 // the reading, status, replay_gain_status, the live outputs attributes,
-// and the chain from MPD's device to the card.
+// and the ALSA files MPD's device goes through. Each is a warning, labelled
+// with where it was read, beside a verdict the kernel decides: the format
+// is still the file's, and no setting is a reason.
 func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 	c := piCaptures[0]
+	at62 := func(t *testing.T, r *readingRig) { r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "62")) }
 	cases := []struct {
-		name   string
-		change func(t *testing.T, r *readingRig)
-		value  string
-		codes  []string
+		name     string
+		change   func(t *testing.T, r *readingRig)
+		value    string
+		codes    []string
+		warnings []ReadingWarning
 	}{
-		{"the box as it is", func(*testing.T, *readingRig) {}, signalpath.BitExact, nil},
-		{"software volume in the file", func(t *testing.T, r *readingRig) {
+		{"the box as it is", func(*testing.T, *readingRig) {}, signalpath.FormatPreserved, nil, nil},
+		{"software volume below 100", func(t *testing.T, r *readingRig) {
 			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_type", "software"))
-		}, signalpath.Withheld, []string{signalpath.MPDSoftwareVolume}},
+			at62(t, r)
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDSoftwareVolume, signalpath.FromMPDConf)}},
+		{"software volume at 100", func(t *testing.T, r *readingRig) {
+			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_type", "software"))
+			r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "100"))
+		}, signalpath.FormatPreserved, nil, nil},
 		{"the deprecated top-level software mixer", func(t *testing.T, r *readingRig) {
 			r.writeConf("mixer_type \"software\"\n" + volumioConf(t, r.music))
-		}, signalpath.Withheld, []string{signalpath.MPDSoftwareVolume}},
+			at62(t, r)
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDSoftwareVolume, signalpath.FromMPDConf)}},
 		{"the DAC's own mixer", func(t *testing.T, r *readingRig) {
 			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_control", "Speaker"))
-			r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "62"))
-		}, signalpath.BitExact, nil},
+			at62(t, r)
+		}, signalpath.FormatPreserved, nil, nil},
 		{"normalization", func(t *testing.T, r *readingRig) {
 			r.writeConf(normalizationLine.ReplaceAllString(volumioConf(t, r.music), `volume_normalization "yes"`))
-		}, signalpath.Withheld, []string{signalpath.MPDNormalization}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDNormalization, signalpath.FromMPDConf)}},
 		{"audio_output_format", func(t *testing.T, r *readingRig) {
 			r.writeConf(volumioConf(t, r.music) + "audio_output_format \"48000:24:2\"\n")
-		}, signalpath.Withheld, []string{signalpath.MPDFormatOverride}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDFormatOverride, signalpath.FromMPDConf)}},
 		{"filters on the output", func(t *testing.T, r *readingRig) {
 			r.writeConf(withOutputSetting(volumioConf(t, r.music), "filters", "eq"))
-		}, signalpath.Withheld, []string{signalpath.MPDFilters}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDFilters, signalpath.FromMPDConf)}},
 		{"allowed_formats set live", func(t *testing.T, r *readingRig) {
 			r.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("1", "allowed_formats=96000:16:*", "dop=0") })
-		}, signalpath.Withheld, []string{signalpath.MPDFormatOverride}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDFormatOverride, signalpath.FromMPD)}},
 		{"replay gain", func(t *testing.T, r *readingRig) {
 			r.mpd.set(func(m *scriptedMPD) { m.gain = replyOf("replay_gain_mode", "album") })
-		}, signalpath.Withheld, []string{signalpath.MPDReplayGain}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDReplayGain, signalpath.FromMPD)}},
 		{"crossfade", func(t *testing.T, r *readingRig) {
 			r.mpd.restart(withPair(capturedStatus(t, c.name), "xfade", "4"))
-		}, signalpath.Withheld, []string{signalpath.MPDCrossfade}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDCrossfade, signalpath.FromMPD)}},
 		{"mixramp", func(t *testing.T, r *readingRig) {
 			r.mpd.restart(withPair(capturedStatus(t, c.name), "mixrampdelay", "2"))
-		}, signalpath.Withheld, []string{signalpath.MPDMixRamp}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDMixRamp, signalpath.FromMPD)}},
 		{"hw: straight to the card", func(t *testing.T, r *readingRig) {
 			r.writeConf(withDevice(volumioConf(t, r.music), "hw:CARD=Audio,DEV=0"))
-		}, signalpath.BitExact, nil},
+		}, signalpath.FormatPreserved, nil, nil},
 		{"a dmix in front of the card", func(t *testing.T, r *readingRig) {
-			etc := filepath.Join(filepath.Dir(r.procRoot), "etc", "asound.conf")
-			b, err := os.ReadFile(etc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			mixed := string(b) + "\npcm.mixed {\n    type dmix\n    slave.pcm \"volumioHw\"\n}\n"
-			if err := os.WriteFile(etc, []byte(mixed), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			appendAsound(t, r, "pcm.mixed {\n    type dmix\n    slave.pcm \"volumioHw\"\n}\n")
 			r.writeConf(withDevice(volumioConf(t, r.music), "mixed"))
-		}, signalpath.Withheld, []string{signalpath.ALSAChainUnproven}},
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSADmix, signalpath.FromALSAConf)}},
+		{"a softvol in front of the card", func(t *testing.T, r *readingRig) {
+			appendAsound(t, r, "pcm.soft {\n    type softvol\n    slave.pcm \"volumioHw\"\n    control.name \"SoftMaster\"\n}\n")
+			r.writeConf(withDevice(volumioConf(t, r.music), "soft"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSASoftvol, signalpath.FromALSAConf)}},
 		// The card held by the thread of an output MPD reports switched off
 		// is not that output's stream.
 		{"the output switched off live", func(t *testing.T, r *readingRig) {
 			r.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("0") })
-		}, signalpath.Withheld, []string{signalpath.OwnerNotOutput}},
+		}, signalpath.Withheld, []string{signalpath.OwnerNotOutput}, nil},
+		// What only mpd.conf says is not read: no warning comes from it, and
+		// its absence proves nothing; MPD's own reports still count.
 		{"mpd.conf gone", func(t *testing.T, r *readingRig) {
 			if err := os.Remove(r.confPath); err != nil {
 				t.Fatal(err)
 			}
-		}, signalpath.Withheld, []string{signalpath.MPDConfigUnread, signalpath.ALSAChainUnproven}},
+			r.mpd.set(func(m *scriptedMPD) { m.gain = replyOf("replay_gain_mode", "track") })
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDReplayGain, signalpath.FromMPD)}},
+		// Beside a format the kernel shows changed, the warnings stand.
+		{"a resampled stream with replay gain", func(t *testing.T, r *readingRig) {
+			resampleTo(t, r, 48000)
+			r.mpd.set(func(m *scriptedMPD) { m.gain = replyOf("replay_gain_mode", "album") })
+		}, signalpath.Withheld, []string{signalpath.RateMismatch}, []ReadingWarning{warning(signalpath.MPDReplayGain, signalpath.FromMPD)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -812,7 +821,27 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 				t.Fatalf("status %d state %s %v\n%s", code, got.State, got.StateReasons, raw)
 			}
 			wantVerdict(t, got, raw, tc.value, tc.codes...)
+			wantWarnings(t, got, raw, tc.warnings...)
 		})
+	}
+}
+
+// resampleTo rewrites the capture's card 5 hw_params to rate, in a copy:
+// what reaches the card once something resampled the stream.
+func resampleTo(t *testing.T, r *readingRig, rate int) {
+	t.Helper()
+	hw := filepath.Join(r.procRoot, "asound", "card5", "pcm0p", "sub0", "hw_params")
+	b, err := os.ReadFile(hw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^rate: [0-9]+ \([0-9]+/1\)$`)
+	text := re.ReplaceAllString(string(b), "rate: "+itoa(rate)+" ("+itoa(rate)+"/1)")
+	if text == string(b) {
+		t.Fatalf("no rate line in %s", hw)
+	}
+	if err := os.WriteFile(hw, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -823,17 +852,17 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 func TestTheReadingReadsMPDConfAgain(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: rigNow()}
+	clock := &manualClock{now: time.Now()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	hs, token, id := rig.serve()
 	_, first, raw := getReading(t, hs, token, id)
-	wantVerdict(t, first, raw, signalpath.BitExact)
-	rig.writeConf(withOutputSetting(volumioConf(t, rig.music), "mixer_type", "software"))
+	wantWarnings(t, first, raw)
+	rig.writeConf(withOutputSetting(normalizationLine.ReplaceAllString(volumioConf(t, rig.music), `volume_normalization "yes"`), "mixer_type", "software"))
 	clock.Advance(outputCacheTTL)
 	_, second, raw2 := getReading(t, hs, token, id)
-	wantVerdict(t, second, raw2, signalpath.Withheld, signalpath.MPDSoftwareVolume)
-	if second.MPD.Config.Output == nil || second.MPD.Config.Output.MixerType != "software" {
+	wantWarnings(t, second, raw2, warning(signalpath.MPDNormalization, signalpath.FromMPDConf))
+	if second.MPD.Config.VolumeNormalization != "yes" || second.MPD.Config.Output == nil || second.MPD.Config.Output.MixerType != "software" {
 		t.Fatalf("config %+v", second.MPD.Config)
 	}
 }
@@ -884,11 +913,17 @@ func doPRig(t *testing.T, dop string) *readingRig {
 	return rig
 }
 
-func TestReadingDoPIsBitExactDSDAsDoP(t *testing.T) {
+// TestReadingDoPHasTheFormatDoPTakes: a DSD64 file that reaches the card
+// as 24-bit PCM at 176.4 kHz from an output MPD reports sending DoP is in
+// the format DoP of its rate takes, format_preserved_dop, which says
+// nothing of whether the DAC locked onto it; with dop off MPD converted the
+// DSD to PCM.
+func TestReadingDoPHasTheFormatDoPTakes(t *testing.T) {
 	rig := doPRig(t, "1")
 	hs, token, id := rig.serve()
 	_, got, raw := getReading(t, hs, token, id)
-	wantVerdict(t, got, raw, signalpath.BitExactDoP)
+	wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	wantWarnings(t, got, raw)
 	if got.MPD.Config.Output == nil || !got.MPD.Config.Output.DoP {
 		t.Fatalf("dop not read from the live attribute: %+v", got.MPD.Config.Output)
 	}
@@ -913,7 +948,7 @@ func TestReadingNamesTheBridgesOwnRow(t *testing.T) {
 		rig.mpd.current = replyOf("file", "http://127.0.0.1:7791/dlna/file/"+trackID, "Id", "13")
 		hs, token, id := rig.serve()
 		_, got, raw := getReading(t, hs, token, id)
-		wantVerdict(t, got, raw, signalpath.BitExact)
+		wantVerdict(t, got, raw, signalpath.FormatPreserved)
 		if got.Song.Row == nil || got.Song.Row.Via != "loopback" || got.Song.Row.Path != c.file || !got.Song.Row.Current {
 			t.Fatalf("row %+v", got.Song.Row)
 		}
@@ -1046,7 +1081,7 @@ func withoutPair(r mpd.Reply, key string) mpd.Reply {
 func TestTheReadingIsReadThroughForHalfASecond(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: rigNow()}
+	clock := &manualClock{now: time.Now()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	hs, token := newOutputsHTTP(t, "fp", rig.cfg)
@@ -1092,7 +1127,7 @@ func TestTheReadingIsReadThroughForHalfASecond(t *testing.T) {
 func TestTheReadingsConnectionIsLazyAndShared(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: rigNow()}
+	clock := &manualClock{now: time.Now()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	store := outputsToken(t)
@@ -1185,7 +1220,7 @@ func waitForCall(t *testing.T, m *scriptedMPD, name string, n int) {
 func TestAProcReadPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: rigNow()}
+	clock := &manualClock{now: time.Now()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
@@ -1246,7 +1281,7 @@ func TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 		rep.MPD.Endpoint = fake.addr()
 		return rep
 	}
-	clock := &manualClock{now: rigNow()}
+	clock := &manualClock{now: time.Now()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
@@ -1299,17 +1334,6 @@ func TestAForeignOwnerIsNotMPDs(t *testing.T) {
 		if got.DAC.Owner == nil || str(got.DAC.Owner.Process) != "aplay" {
 			t.Fatalf("owner %+v", got.DAC.Owner)
 		}
-	})
-	// mpd.conf is tied to the MPD holding the card by when its process
-	// started, which /proc's stat for it says.
-	t.Run("an owner whose process start /proc does not say", func(t *testing.T) {
-		rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-		if err := os.Remove(filepath.Join(rig.procRoot, "6551", "stat")); err != nil {
-			t.Fatal(err)
-		}
-		hs, token, id := rig.serve()
-		_, got, raw := getReading(t, hs, token, id)
-		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.OwnerUnknown)
 	})
 	t.Run("an owner /proc does not name", func(t *testing.T) {
 		rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))

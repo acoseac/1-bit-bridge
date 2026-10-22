@@ -247,6 +247,83 @@ func TestAUsersOwnALSAConfigurationIsLookedFor(t *testing.T) {
 	})
 }
 
+// TestTheFirstStageThatChangesSamplesIsNamed: the walk from a device goes
+// through empty and plug stages as the files define them and names the
+// first stage of a plugin that changes samples, whatever else its block
+// holds; a chain through empty, plug and hw alone, a device string, a stage
+// it does not follow, a definition whose type is not one value, and a
+// configuration not read whole name none.
+func TestTheFirstStageThatChangesSamplesIsNamed(t *testing.T) {
+	body := `
+pcm.hwcard { type hw
+    card "Audio" }
+pcm.soft {
+    type softvol
+    slave.pcm "hwcard"
+    control { name "Soft"; card 2 }
+}
+pcm.mixed {
+    type dmix
+    ipc_key 1024
+    slave { pcm "hw:2,0"; period_time 0 }
+}
+pcm.resampled { type rate
+    slave.pcm "hwcard"
+    converter "samplerate_best" }
+pcm.routed { type route
+    slave.pcm "hwcard"
+    ttable.0.0 1 }
+pcm.filtered { type ladspa
+    slave.pcm "hwcard" }
+pcm.toSoft { type empty
+    slave.pcm "plugSoft" }
+pcm.plugSoft { type plug
+    slave.pcm "soft" }
+pcm.passthrough { type plug
+    slave.pcm "hwcard" }
+pcm.routingPlug { type plug
+    slave.pcm "soft"
+    ttable.0.0 1 }
+pcm.twice { type softvol
+    type plug
+    slave.pcm "hwcard" }
+pcm.a { type empty
+    slave.pcm "b" }
+pcm.b { type empty
+    slave.pcm "a" }
+pcm.dup { type softvol
+    slave.pcm "hwcard" }
+pcm.dup { type plug
+    slave.pcm "hwcard" }
+`
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"etc/asound.conf": body})
+	c := LoadPCMConfig(root)
+	for device, want := range map[string]string{
+		"soft": "softvol", "mixed": "dmix", "resampled": "rate", "routed": "route", "filtered": "ladspa",
+		"toSoft": "softvol", " toSoft ": "softvol",
+		"passthrough": "", "hwcard": "", "hw:2,0": "", "plughw:2,0": "", "routingPlug": "",
+		"twice": "", "a": "", "dup": "", "nothing": "", "": "",
+	} {
+		if got := c.SampleStage(device); got != want {
+			t.Errorf("%q: %q, want %q", device, got, want)
+		}
+	}
+	for _, typ := range SampleStageTypes() {
+		if !slices.Contains([]string{"softvol", "rate", "dmix", "route", "ladspa"}, typ) {
+			t.Errorf("a stage type the walk was not shown naming: %s", typ)
+		}
+	}
+	hooked := t.TempDir()
+	writeTree(t, hooked, map[string]string{"etc/asound.conf": body + "@hooks [ { func load files [ \"/etc/more.conf\" ] } ]\n"})
+	if got := LoadPCMConfig(hooked).SampleStage("soft"); got != "" {
+		t.Errorf("a configuration not read whole named %q", got)
+	}
+	if got := LoadPCMConfig(filepath.Join("testdata", "volumio-asound-chain")).SampleStage("volumio"); got != "" {
+		t.Errorf("Volumio's chain: %q", got)
+	}
+}
+
 // TestAChainIsWhereTheCardResolverGoes holds the chain to the card
 // resolver it extends: every device either has no chain or has the card
 // and PCM device ResolveOutputDevice gives it.

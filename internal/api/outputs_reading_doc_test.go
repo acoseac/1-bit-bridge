@@ -9,8 +9,10 @@ import (
 )
 
 // TestEveryReadingCodeIsInTheProtocol: every code a reading's state or its
-// verdict can carry is one the app maps to its own copy, so PROTOCOL.md's
-// GET /v1/outputs/{id}/reading section names each of them, in backticks.
+// verdict can carry, every warning's code and source, the verdict's values
+// and its bit-exactness are words the app maps to its own copy, so
+// PROTOCOL.md's GET /v1/outputs/{id}/reading section names each of them, in
+// backticks.
 func TestEveryReadingCodeIsInTheProtocol(t *testing.T) {
 	raw, err := os.ReadFile("../../PROTOCOL.md")
 	if err != nil {
@@ -26,9 +28,16 @@ func TestEveryReadingCodeIsInTheProtocol(t *testing.T) {
 	if end := strings.Index(section, "\n### "); end >= 0 {
 		section = section[:end]
 	}
-	for _, code := range signalpath.Codes() {
-		if !strings.Contains(section, "`"+code+"`") {
-			t.Errorf("the reading's section of PROTOCOL.md does not name %s", code)
+	words := append(append(signalpath.Codes(), signalpath.WarningCodes()...), signalpath.WarningSources()...)
+	words = append(words, signalpath.FormatPreserved, signalpath.FormatPreservedDoP, signalpath.Withheld, signalpath.NotVerifiable)
+	for _, word := range words {
+		if !strings.Contains(section, "`"+word+"`") {
+			t.Errorf("the reading's section of PROTOCOL.md does not name %s", word)
+		}
+	}
+	for _, gone := range []string{"`bit_exact`", "`bit_exact_dop`"} {
+		if strings.Contains(section, gone) {
+			t.Errorf("the reading's section of PROTOCOL.md still names %s, which no MPD output's verdict is", gone)
 		}
 	}
 }
