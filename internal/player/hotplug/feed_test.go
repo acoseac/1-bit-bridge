@@ -12,11 +12,13 @@ import (
 // TestAConsumerThatNeverReadsGetsTheNewest: a subscription nobody reads
 // holds one snapshot, the newest: the watcher goes on reading and
 // publishing past it, and when the consumer reads at last it gets the
-// latest generation, once.
+// latest generation, once. A publish that waited on the consumer would
+// stop the watcher, and this test fails at its watchdog: nothing here
+// takes the feed's lock on the way out (the mailbox is closed only once
+// the test has passed), so the binary does not hang with it.
 func TestAConsumerThatNeverReadsGetsTheNewest(t *testing.T) {
 	h := newHarness(t)
 	idle := h.svc.Feed().Subscribe()
-	defer idle.Close()
 	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
 	h.step(plug(goBar, 5, "20b1:3009", goBarSerial, 3), plugEvents(goBar, 5))
 	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
@@ -36,6 +38,7 @@ func TestAConsumerThatNeverReadsGetsTheNewest(t *testing.T) {
 		t.Errorf("a second snapshot was waiting: generation %d", s.Generation())
 	default:
 	}
+	idle.Close()
 }
 
 // TestASnapshotIsTheSameForEveryConsumer: what one consumer does with what
