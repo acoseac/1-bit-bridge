@@ -444,14 +444,16 @@ func TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard(t *testing.T) {
 // that carries two cards the opened card must be the one the binding
 // chooses there now: the card on the interface it records, and with none
 // recorded, or another, neither. The check reads both trees again and
-// reconciles them as Resolve does: a card it cannot identify (unreadable in
-// sysfs, vanished as it was read, or listed by /proc/asound and not by
-// sysfs) may be another card of the unit in the port, so it refuses there
-// as Resolve does, unless card 5 is on the recorded interface; a card that
-// is not USB, or a readable one at another port, refuses nothing. A sysfs
-// reading that cannot list the cards, or whose listing was cut short, and a
-// /proc/asound that cannot be read are no answer: the check refuses on each
-// with a reason of its own, even where card 5's own lookup still reads.
+// reconciles them as Resolve does: a card unreadable in sysfs may be
+// another card of the unit in the port, so it refuses there as Resolve
+// does, unless card 5 is on the recorded interface; a card the kernel is
+// adding or removing (vanished as it was read, or listed by /proc/asound
+// and not by sysfs) refuses whatever the binding records, as Resolve's
+// identity_transient does; a card that is not USB, or a readable one at
+// another port, refuses nothing. A sysfs reading that cannot list the
+// cards, or whose listing was cut short, and a /proc/asound that cannot be
+// read are no answer: the check refuses on each with a reason of its own,
+// even where card 5's own lookup still reads.
 func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 	root := pi5(t)
 	sys := alsa.SysfsReader{Root: filepath.Join(root, "sys")}
@@ -499,38 +501,49 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 		}
 	}
 
-	// A unit swapped in whose other card the check cannot identify:
-	// registered on the unit itself rather than on an interface (unreadable),
-	// losing its device link as it goes (vanished), or gone from sysfs while
-	// /proc/asound still lists it. Resolve on the same tree answers
-	// device_ambiguous or identity_transient, so the check after open refuses
-	// card 5 too, unless it is on the interface the binding records, which no
-	// other card of that unit can be.
+	// A unit swapped in whose other card the check cannot identify. One
+	// registered on the unit itself rather than on an interface is
+	// unreadable: Resolve on the same tree answers device_ambiguous, so the
+	// check after open refuses card 5 too, unless it is on the interface the
+	// binding records, which no other card of that unit can be. One losing
+	// its device link as it goes (vanished), or gone from sysfs while
+	// /proc/asound still lists it, is a card the kernel is adding or
+	// removing: Resolve answers identity_transient whatever the binding
+	// records, so the check refuses card 5 on the recorded interface too.
 	for _, tc := range []struct {
-		name, layout, then, says string
-		resolves                 State
+		name, layout, then, refusal, says string
+		resolves                          State
+		onTheInterface                    bool
 	}{
 		{"unreadable", plug(goBar, 5, "1234:0c20", "") + "card 6 " + goBar + "\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n", "",
-			"not an interface", StateDeviceAmbiguous},
+			"card 6 cannot be identified now", "not an interface", StateDeviceAmbiguous, true},
 		{"vanished", composite(goBar, 5, 6, "1234:0c20"), "remove " + goBar + "/1-1:1.2/sound/card6/device\n",
-			"went while they were read", StateIdentityTransient},
+			"card 6 is being added or removed now", "went while they were read", StateIdentityTransient, false},
 		{"listed by /proc/asound alone", composite(goBar, 5, 6, "1234:0c20"), "remove sys/class/sound/card6\n",
-			"in /proc/asound and not in sysfs", StateIdentityTransient},
+			"card 6 is being added or removed now", "in /proc/asound and not in sysfs", StateIdentityTransient, false},
 	} {
 		sysfstest.Apply(t, root, "unplug "+goBar+"\nprocremove 6\n"+tc.layout)
 		if tc.then != "" {
 			sysfstest.Apply(t, root, tc.then)
 		}
-		want(t, Resolve(byPort(goBarPlace), observe(t, root)), tc.resolves, -1)
-		for name, r := range map[string]Resolution{"no interface recorded": place, "another interface recorded": other} {
+		inv := observe(t, root)
+		want(t, Resolve(byPort(goBarPlace), inv), tc.resolves, -1)
+		recorded := map[string]Resolution{"no interface recorded": place, "another interface recorded": other}
+		if tc.onTheInterface {
+			want(t, Resolve(byPort(goBarPort), inv), StateAvailable, 5)
+			if err := check(older); err != nil {
+				t.Errorf("the card on the recorded interface, beside a card that is %s: %v", tc.name, err)
+			}
+		} else {
+			want(t, Resolve(byPort(goBarPort), inv), tc.resolves, -1)
+			recorded["the interface recorded"] = older
+		}
+		for name, r := range recorded {
 			err := check(r)
-			if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "card 6 cannot be identified now") ||
+			if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), tc.refusal) ||
 				!strings.Contains(err.Error(), tc.says) || !strings.Contains(err.Error(), goBarPlace) {
 				t.Errorf("%s, beside card 5 a card that is %s: %v", name, tc.name, err)
 			}
-		}
-		if err := check(older); err != nil {
-			t.Errorf("the card on the recorded interface, beside a card that is %s: %v", tc.name, err)
 		}
 	}
 
@@ -547,9 +560,7 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 	// is on the recorded interface and no other card would matter. So is a
 	// /proc/asound that cannot be read.
 	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(goBar, 5, "1234:0c20", ""))
-	failed := readingAs{SysfsReader: sys, edit: func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
-		return alsa.SysfsSnapshot{Root: s.Root, Problems: []string{"class/sound: permission denied"}}
-	}}
+	failed := readingAs{SysfsReader: sys, edit: unlisted}
 	if id, ok := failed.Card(5); !ok || id.USB == nil || id.USB.Port != goBarPort {
 		t.Fatalf("premise: card 5's own lookup does not read: %+v, %v", id, ok)
 	}
@@ -570,17 +581,7 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 	// A listing cut at the cap that keeps card 5 and cuts its sibling, card
 	// 6, whether /proc/asound lists card 6 (as Resolve would see it) or not
 	// yet (a card being added, which only the cut says may be there).
-	cut := readingAs{SysfsReader: sys, edit: func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
-		var kept []alsa.Identity
-		for _, id := range s.Cards {
-			if id.Card != 6 {
-				kept = append(kept, id)
-			}
-		}
-		s.Cards, s.CardsComplete = kept, false
-		s.Problems = append(s.Problems, "class/sound lists more than 1024 entries; the rest are not read")
-		return s
-	}}
+	cut := readingAs{SysfsReader: sys, edit: cutAtTheCap(6)}
 	for _, step := range []string{"unplug " + goBar + "\n" + composite(goBar, 5, 6, "1234:0c20"), "procremove 6\n"} {
 		sysfstest.Apply(t, root, step)
 		for name, r := range map[string]Resolution{"no interface recorded": place, "another interface recorded": other, "the interface recorded": older} {
@@ -614,6 +615,219 @@ type readingAs struct {
 }
 
 func (r readingAs) Read() alsa.SysfsSnapshot { return r.edit(r.SysfsReader.Read()) }
+
+// unlisted is a sysfs reading that could not list class/sound, as Read
+// returns one: not present, no cards, and the problem that says why.
+func unlisted(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
+	return alsa.SysfsSnapshot{Root: s.Root, Problems: []string{"class/sound: permission denied"}}
+}
+
+// cutAtTheCap is a sysfs reading cut short at the reader's entry cap, as
+// Read returns one (CardsComplete false, and the problem it adds), with the
+// cards in drop left out of it.
+func cutAtTheCap(drop ...int) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
+	return func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
+		var kept []alsa.Identity
+		for _, id := range s.Cards {
+			if !slices.Contains(drop, id.Card) {
+				kept = append(kept, id)
+			}
+		}
+		s.Cards, s.CardsComplete = kept, false
+		s.Problems = append(s.Problems, "class/sound lists more than 1024 entries; the rest are not read")
+		return s
+	}
+}
+
+// TestTheCheckAfterOpenAgreesWithResolveOnEachReading runs each shape a
+// reading can take through Resolve and through the check after open, under
+// each form of binding: by serial, by uniqueModel, by the port alone, and
+// by the port with the GO bar's configuration and interface. Each check is
+// made from the resolution of the GO bar alone, as an open is made from the
+// resolve before it, and the box changes in between; it must admit card 5
+// exactly when Resolve, on the reading the check takes, answers available
+// on card 5, and refuse it whenever Resolve refuses. Under a port binding
+// that holds for every shape: the check chooses the card again there, since
+// a unit Resolve never saw may be in the port by then. Under a serial or
+// uniqueModel binding the check chooses nothing, and where it answers
+// otherwise than Resolve the table says so and why.
+func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
+	forms := []struct {
+		name string
+		dev  config.PlayerDevice
+	}{
+		{"serial", bySerial(goBarSerial)},
+		{"uniqueModel", byModel("20b1", "3009")},
+		{"the port alone", byPort(goBarPlace)},
+		{"the port and its interface", byPort(goBarPort)},
+	}
+	base := observe(t, pi5(t))
+	var made [4]Resolution
+	for i, f := range forms {
+		made[i] = Resolve(f.dev, base)
+		want(t, made[i], StateAvailable, 5)
+	}
+
+	// Why the check after open answers otherwise than Resolve on one
+	// reading, under a serial or a uniqueModel binding. Under a port binding
+	// nothing does.
+	const (
+		unitChosen = "under a serial or uniqueModel binding the check chooses no card: it asks whether the node opened is " +
+			"the unit Resolve chose, by SameUnit on that card's own sysfs identity, which pins the unit's ids and serial " +
+			"and the card's port and interface; a card beside it that Resolve cannot identify, a second card or unit " +
+			"Resolve would have to choose among, and a listing Resolve cannot read whole are why Resolve chooses none, " +
+			"and none of them makes card 5 another unit"
+		unitMoved = "SameUnit compares the opened card with the identity the open was made from, its port included, so " +
+			"the bound unit moved to another port between the resolve and the open is refused, to be resolved again: " +
+			"here the check refuses a card Resolve would choose now, the safe way to differ"
+		unitInSysfs = "under a serial or uniqueModel binding the check reads the opened card's identity from sysfs, " +
+			"which is where a USB card's identity comes from (/proc/asound's usbid only cross-checks it), and requires " +
+			"the unit Resolve chose: a card /proc/asound does not list yet or any more is that unit being added or " +
+			"removed, and a removed card's next write is a disconnect, which ends the sink"
+	)
+	byUnit := func(why string) [4]string { return [4]string{why, why, "", ""} }
+	every := func(s State) [4]State { return [4]State{s, s, s, s} }
+	available, ambiguous, missing := StateAvailable, StateDeviceAmbiguous, StateDeviceMissing
+	// second is card 6 on the GO bar's interface 2: a second card of its
+	// unit, which another driver made, so /proc/asound has no usbid for it.
+	second := "usbcard 6 " + goBar + "/1-1:1.2\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n"
+	for _, row := range []struct {
+		name string
+		// steps are laid out in turn on a new Pi 5 tree, and edit, when set,
+		// makes the sysfs reading one the reader could have returned.
+		steps []string
+		edit  func(alsa.SysfsSnapshot) alsa.SysfsSnapshot
+		// resolves is what each form resolves to on the reading (available is
+		// on card 5), and differs, for a form, why the check answers
+		// otherwise.
+		resolves [4]State
+		differs  [4]string
+	}{
+		{name: "the GO bar beside the two HDMI cards, which are not USB", resolves: every(available)},
+		{name: "a virtual card beside it", resolves: every(available), steps: []string{
+			"dir sys/devices/virtual/sound/card3\nlink sys/class/sound/card3 sys/devices/virtual/sound/card3\n" +
+				"proccard 3 Virtual \"A virtual card\" driver=Virtual pcm=0.0\n"}},
+		{name: "a card at another port", resolves: every(available),
+			steps: []string{plug(usb1+"/1-2", 7, "1234:0f02", "OTHER-UNIT-SERIAL-9")}},
+		{name: "another model in the port as card 5", resolves: [4]State{missing, missing, available, available},
+			steps: []string{"unplug " + goBar + "\n" + plugOn(goBar, 1, 5, "1234:0c12", "HUGO2-UNIT-0000000042")}},
+		{name: "the GO bar in another port as card 5", resolves: [4]State{available, available, missing, missing}, differs: byUnit(unitMoved),
+			steps: []string{"unplug " + goBar + "\n" + plug(usb1+"/1-2", 5, "20b1:3009", goBarSerial)}},
+		{name: "card 5 unplugged", resolves: every(missing), steps: []string{"unplug " + goBar + "\n"}},
+		{name: "a second card of the unit that both trees read", resolves: [4]State{ambiguous, ambiguous, ambiguous, available},
+			differs: byUnit(unitChosen), steps: []string{second}},
+		{name: "the listing cut short with no card missing from it", resolves: every(StateIdentityIncomplete),
+			differs: byUnit(unitChosen), edit: cutAtTheCap()},
+		{name: "the second card cut from the listing while /proc/asound lists it", resolves: every(StateIdentityIncomplete),
+			differs: byUnit(unitChosen), steps: []string{second}, edit: cutAtTheCap(6)},
+		{name: "the second card cut from the listing before /proc/asound lists it", resolves: every(StateIdentityIncomplete),
+			differs: byUnit(unitChosen), steps: []string{second, "procremove 6\n"}, edit: cutAtTheCap(6)},
+		{name: "the second card listed by /proc/asound and no longer by sysfs", resolves: every(StateIdentityTransient),
+			differs: byUnit(unitChosen), steps: []string{second, "remove sys/class/sound/card6\n"}},
+		{name: "the second card listed by sysfs and not by /proc/asound", resolves: every(StateIdentityTransient),
+			differs: byUnit(unitChosen), steps: []string{second, "procremove 6\n"}},
+		{name: "the second card vanished as it was read", resolves: every(StateIdentityTransient),
+			differs: byUnit(unitChosen), steps: []string{second, "remove " + goBar + "/1-1:1.2/sound/card6/device\n"}},
+		{name: "a second card whose identity cannot be read", resolves: [4]State{ambiguous, ambiguous, ambiguous, available},
+			differs: byUnit(unitChosen), steps: []string{
+				"card 6 " + goBar + "\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n"}},
+		{name: "a card at another port listed by sysfs and not by /proc/asound", resolves: every(StateIdentityTransient),
+			differs: byUnit(unitChosen), steps: []string{"usbdev " + usb1 + "/1-2 vendor=1234 product=0f05\nusbcard 7 " + usb1 + "/1-2/1-2:1.0\n"}},
+		{name: "card 5 listed by /proc/asound and no longer by sysfs", resolves: every(StateIdentityTransient),
+			steps: []string{"remove sys/class/sound/card5\n"}},
+		{name: "card 5 listed by sysfs and not by /proc/asound", resolves: every(StateIdentityTransient),
+			differs: byUnit(unitInSysfs), steps: []string{"procremove 5\n"}},
+		{name: "card 5 vanished as it was read", resolves: every(StateIdentityTransient),
+			steps: []string{"remove " + goBar + "/1-1:1.0/sound/card5/device\n"}},
+		{name: "a listing that cannot be read", resolves: every(StateIdentityUnsupported), differs: byUnit(unitChosen), edit: unlisted},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root := pi5(t)
+			for _, step := range row.steps {
+				sysfstest.Apply(t, root, step)
+			}
+			proc := alsa.Reader{ProcRoot: filepath.Join(root, "proc")}
+			var sys SysfsReading = alsa.SysfsReader{Root: filepath.Join(root, "sys")}
+			if row.edit != nil {
+				sys = readingAs{SysfsReader: alsa.SysfsReader{Root: filepath.Join(root, "sys")}, edit: row.edit}
+			}
+			snap, err := proc.Read()
+			if err != nil {
+				t.Fatalf("/proc/asound: %v", err)
+			}
+			// Observe's reading of the two trees, through the sysfs reading the
+			// check takes.
+			inv := inventory(snap, sys.Read())
+			if inv.CardsComplete != (row.edit == nil) {
+				t.Errorf("the inventory says its card listing is whole: %v", inv.CardsComplete)
+			}
+			for i, f := range forms {
+				r := Resolve(f.dev, inv)
+				if r.State != row.resolves[i] || (r.State == StateAvailable && r.Card != 5) {
+					t.Errorf("by %s: resolves %s on card %d (%s), and the table says %s", f.name, r.State, r.Card, r.Reason, row.resolves[i])
+				}
+				err := Checker{Proc: proc, Sysfs: sys, Want: made[i]}.Check(alsapcm.NodeInfo{Card: 5, Playback: true})
+				if err != nil && !errors.Is(err, ErrWrongDevice) {
+					t.Errorf("by %s: the check refused with %v, which is not ErrWrongDevice", f.name, err)
+				}
+				admitted, chosen := err == nil, r.State == StateAvailable && r.Card == 5
+				switch why := row.differs[i]; {
+				case why == "" && admitted != chosen:
+					t.Errorf("by %s: Resolve answers %s (%s), and the check %s", f.name, r.State, r.Reason, verdict(err))
+				case why != "" && admitted == chosen:
+					t.Errorf("by %s: Resolve answers %s (%s), and the check %s, where the table says they differ: %s",
+						f.name, r.State, r.Reason, verdict(err), why)
+				}
+				for _, s := range []string{goBarSerial, "HUGO2-UNIT-0000000042", "OTHER-UNIT-SERIAL-9"} {
+					if strings.Contains(r.Reason, s[4:]) || (err != nil && strings.Contains(err.Error(), s[4:])) {
+						t.Errorf("by %s: a serial in the reason or the refusal: %s; %v", f.name, r.Reason, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// verdict words the check after open's answer on card 5 for a failure
+// message.
+func verdict(err error) string {
+	if err == nil {
+		return "admits card 5"
+	}
+	return "refuses it: " + err.Error()
+}
+
+// TestACutListingResolvesToNoCardAndBindsNone: a sysfs whose card listing
+// was cut short at the reader's cap may be missing a card, the one a
+// binding names or one beside it that makes it ambiguous. Resolve answers
+// identity_incomplete under every binding and says why, and bind refuses
+// every kind of binding with that state, whether the cut kept card 5 or
+// left it to /proc/asound alone, where it reads as a card being added or
+// removed, which it is not.
+func TestACutListingResolvesToNoCardAndBindsNone(t *testing.T) {
+	root := pi5(t)
+	snap, err := alsa.Reader{ProcRoot: filepath.Join(root, "proc")}.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := alsa.SysfsReader{Root: filepath.Join(root, "sys")}
+	for _, drop := range [][]int{nil, {5}} {
+		inv := inventory(snap, cutAtTheCap(drop...)(sys.Read()))
+		for _, dev := range []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009"), byPort(goBarPlace), byPort(goBarPort)} {
+			r := Resolve(dev, inv)
+			want(t, r, StateIdentityIncomplete, -1)
+			if !strings.Contains(r.Reason, "card listing at "+filepath.Join(root, "sys")+" was cut short") {
+				t.Errorf("cards %v cut, by %s: reason %s", drop, dev.Binding, r.Reason)
+			}
+		}
+		for _, kind := range []string{config.BindingSerial, config.BindingUniqueModel, config.BindingPort} {
+			if _, err := For(inv, 5, kind, Endpoint{}); err == nil || !strings.Contains(err.Error(), "identity_incomplete") ||
+				!strings.Contains(err.Error(), "cut short") {
+				t.Errorf("cards %v cut, bind by %s: %v", drop, kind, err)
+			}
+		}
+	}
+}
 
 // TestACardOneTreeListsAloneIsTransient: a card in /proc/asound that sysfs
 // lacks, one in sysfs that /proc lacks, one whose two readings name

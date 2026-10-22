@@ -58,6 +58,11 @@ const (
 	// one tree lists it and the other does not, or the two name different
 	// units. Nothing is concluded from it: resolve again.
 	StateIdentityTransient State = "identity_transient"
+	// StateIdentityIncomplete is a sysfs whose card listing was cut short
+	// (alsa.SysfsSnapshot.CardsComplete): the card a binding names, or one
+	// beside it that makes it ambiguous, may be missing from it, so none is
+	// chosen.
+	StateIdentityIncomplete State = "identity_incomplete"
 )
 
 // CardState is what the readings say about one card.
@@ -115,6 +120,11 @@ type Inventory struct {
 	// Sysfs says the sysfs tree could be read at all; SysfsRoot is where.
 	Sysfs     bool
 	SysfsRoot string
+	// CardsComplete says sysfs's card listing was read whole: present, and
+	// not cut at the reader's entry cap (alsa.SysfsSnapshot.CardsComplete).
+	// A listing cut short may leave out a card that /proc/asound does not
+	// list either, which Cards then lacks.
+	CardsComplete bool
 	// Cards are every card either tree lists, by index.
 	Cards []Card
 	// Controllers and Devices are sysfs's USB controllers and devices,
@@ -168,7 +178,7 @@ func (o Observer) Observe() (Inventory, error) {
 // after open (checkPort) makes of its own readings too: each card's state as
 // the two trees agree on it.
 func inventory(snap alsa.Snapshot, sys alsa.SysfsSnapshot) Inventory {
-	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, Controllers: sys.Controllers, Devices: sys.Devices,
+	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, CardsComplete: sys.CardsComplete, Controllers: sys.Controllers, Devices: sys.Devices,
 		Problems: append(append([]string{}, snap.Problems...), sys.Problems...)}
 	ids := map[int]alsa.Identity{}
 	for _, id := range sys.Cards {
@@ -246,10 +256,11 @@ type Resolution struct {
 }
 
 // Resolve resolves dev on inv: the card it names now, or the state that
-// says why there is none. It decides nothing it cannot read: a transient
-// card makes the whole answer identity_transient, and a card whose identity
-// cannot be read is never ruled out as a second unit, or as a second card
-// of the unit in a bound port.
+// says why there is none. It decides nothing it cannot read: a card listing
+// cut short makes the whole answer identity_incomplete and a transient card
+// identity_transient, and a card whose identity cannot be read is never
+// ruled out as a second unit, or as a second card of the unit in a bound
+// port.
 //
 // A port binding names a port and not a unit (usbid.Port): its card is the
 // one the unit in that port carries, whatever model it is and whichever
@@ -271,6 +282,9 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	}
 	if !inv.Sysfs {
 		return fail(StateIdentityUnsupported, "sysfs cannot be read at %s, so no card's identity can be", inv.SysfsRoot)
+	}
+	if why, cut := inv.cutShort(); cut {
+		return fail(StateIdentityIncomplete, "%s", why)
 	}
 	for _, c := range inv.Cards {
 		if c.State == CardTransient {
@@ -347,6 +361,16 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	c, _ := inv.Card(r.Matches[0])
 	r.Matches = nil
 	return r.found(c, what)
+}
+
+// cutShort says why inv is no answer when sysfs's card listing was cut
+// short: Resolve's reason for identity_incomplete, and bind's (For).
+func (inv Inventory) cutShort() (string, bool) {
+	if !inv.Sysfs || inv.CardsComplete {
+		return "", false
+	}
+	return fmt.Sprintf("sysfs's card listing at %s was cut short, so the card the binding names, or one beside it that makes it ambiguous, may be missing from it: no card is chosen",
+		inv.SysfsRoot), true
 }
 
 // found finishes a resolution on its one card.
@@ -528,12 +552,15 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 // of their own. The opened card must be a USB card both trees agree on, at
 // the bound port (SamePort), and the card the binding chooses there now,
 // which on a unit swapped into the port between the resolve and the open it
-// may be. A card on the configuration and interface the binding records is
-// that card whatever else the unit carries. Any other is only while the
-// unit carries no other card, and, as Resolve rules out no card it cannot
-// identify, a card unreadable in sysfs, vanished as it was read, or listed
-// by one tree alone may be another card of that unit and refuses too; a
-// card that is not USB, or a readable one at another port, does not.
+// may be. A card the kernel is adding or removing (vanished as it was read,
+// listed by one tree alone, or read as two units) refuses wherever it is
+// and whatever the binding records, as Resolve concludes nothing from such
+// a reading. Then a card on the configuration and interface the binding
+// records is the card whatever else the unit carries. Any other is only
+// while the unit carries no other card, and, as Resolve rules out no card
+// it cannot identify, a card unreadable in sysfs may be another card of
+// that unit and refuses too; a card that is not USB, or a readable one at
+// another port, does not.
 func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 	w := c.Want
 	place := w.Port.Place().String()
@@ -551,9 +578,10 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		return wrongDevice("/proc/asound's cards could not be read (%v), so the cards beside card %d cannot be checked: resolve again", err, n.Card)
 	}
 	var (
-		opened  *Card
-		at      = []int{n.Card}
-		unknown []Card
+		opened     *Card
+		at         = []int{n.Card}
+		transient  []Card
+		unreadable []Card
 	)
 	inv := inventory(snap, sys)
 	for i, card := range inv.Cards {
@@ -565,8 +593,10 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 			if placeOf(card.USB.Port) == place {
 				at = append(at, card.Index)
 			}
+		case card.State == CardTransient:
+			transient = append(transient, card)
 		default:
-			unknown = append(unknown, card)
+			unreadable = append(unreadable, card)
 		}
 	}
 	switch {
@@ -576,6 +606,11 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		return wrongDevice("card %d is not a USB card both trees agree on now (%s): resolve again", n.Card, opened.Why)
 	case !SamePort(*opened.USB, w.Identity):
 		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(*opened.USB), place)
+	case len(transient) > 0:
+		// Before the interface's preference: Resolve answers
+		// identity_transient on such a reading whatever the binding records.
+		return wrongDevice("card %d is being added or removed now (%s), and no card is chosen at the bound port %s while one is, whatever interface the binding records: resolve again",
+			transient[0].Index, transient[0].Why, place)
 	}
 	if !w.Port.HasInterface() || opened.USB.Port != w.Port.String() {
 		sort.Ints(at)
@@ -585,9 +620,9 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 				place, joinInts(at), n.Card, w.Port.Config, w.Port.Interface)
 		case len(at) > 1:
 			return wrongDevice("the unit at the bound port %s carries cards %s, and the binding records no interface to choose one: resolve again", place, joinInts(at))
-		case len(unknown) > 0:
+		case len(unreadable) > 0:
 			return wrongDevice("card %d cannot be identified now (%s), and may be another card of the unit at the bound port %s: resolve again",
-				unknown[0].Index, unknown[0].Why, place)
+				unreadable[0].Index, unreadable[0].Why, place)
 		}
 	}
 	if n.Card != w.Card {
@@ -632,11 +667,15 @@ func Describe(u alsa.USBIdentity) string {
 // bridge output dac bind writes it: each kind with its own fields only, the
 // serial straight from sysfs, and a port binding's port alone, or, when the
 // unit in that port carries more than one card, the card's port path, whose
-// configuration and interface choose it among them. It refuses a card that
-// cannot be bound (not there, transient, not USB, unreadable, no such
-// endpoint) and a binding that would not resolve to that card now, an
-// ambiguous one above all.
+// configuration and interface choose it among them. It refuses a reading
+// whose card listing was cut short, as Resolve does, before it looks for
+// the card, which such a listing may lack; a card that cannot be bound (not
+// there, transient, not USB, unreadable, no such endpoint); and a binding
+// that would not resolve to that card now, an ambiguous one above all.
 func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, error) {
+	if why, cut := inv.cutShort(); cut {
+		return config.PlayerDevice{}, fmt.Errorf("binding card %d by %s would be %s now: %s", n, kind, StateIdentityIncomplete, why)
+	}
 	c, ok := inv.Card(n)
 	if !ok {
 		return config.PlayerDevice{}, fmt.Errorf("there is no card %d", n)
