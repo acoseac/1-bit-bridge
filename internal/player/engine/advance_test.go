@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -119,7 +120,9 @@ func TestTheEndOfTheQueueWithRepeatOn(t *testing.T) {
 }
 
 // TestDeletingTheSelection pins a deleted selection while playing, paused
-// and stopped.
+// and stopped, and what a play command waiting for the deleted entry
+// answers, behind a held release and while its session starts, with an
+// entry after it and with none: ReasonSuperseded, naming the deletion.
 func TestDeletingTheSelection(t *testing.T) {
 	t.Run("while playing plays the next", func(t *testing.T) {
 		h := startHarness(t)
@@ -215,6 +218,45 @@ func TestDeletingTheSelection(t *testing.T) {
 		h.must("delete b", h.eng.Delete(bg, ids[1]))
 		held.open()
 		superseded(t, h, ids, play)
+	})
+	// The same with nothing after the deleted entry: playback stops and
+	// nothing is selected, and the play command answers ReasonSuperseded
+	// too, its entry deleted before it played. The answer names the
+	// deletion: the stop that follows records no reason over it. The
+	// transport is read as the answer comes, which is after the step's
+	// snapshot.
+	supersededAndStopped := func(t *testing.T, h *harness, play <-chan error) {
+		t.Helper()
+		err := h.result("play id", play)
+		h.refused("the play id whose entry, the last, was deleted", err, ReasonSuperseded)
+		if !strings.Contains(err.Error(), "the entry to play was deleted") {
+			t.Fatalf("the play id answered %q, want the deletion's reason, not that of the stop after it", err)
+		}
+		if sn := h.snap(); sn.State() != Stopped || sn.Selected() != 0 || h.be.starts() != 1 {
+			t.Fatalf("%s with %d selected after %d sessions, want stopped with none after one", sn.State(), sn.Selected(), h.be.starts())
+		}
+	}
+	t.Run("a pending play's entry, the last, while its release is held", func(t *testing.T) {
+		h := startHarness(t)
+		ids, _ := h.playing(0, "a", "b")
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		play := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+		h.waitApplied("play id", mark)
+		h.must("delete b", h.eng.Delete(bg, ids[1]))
+		g.open()
+		supersededAndStopped(t, h, play)
+	})
+	t.Run("a play's entry, the last, while its session starts", func(t *testing.T) {
+		h := startHarness(t)
+		ids := h.insert("a", "b")
+		h.available()
+		held := holdStart(h, 1)
+		play := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+		h.be.nth(1)
+		h.must("delete b", h.eng.Delete(bg, ids[1]))
+		held.open()
+		supersededAndStopped(t, h, play)
 	})
 }
 

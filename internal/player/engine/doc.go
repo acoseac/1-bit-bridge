@@ -101,7 +101,10 @@
 // only selected; with nothing after it, playback stops and nothing is
 // selected. A command still waiting for the deleted entry's playback,
 // behind a release or while its session starts, answers ReasonSuperseded,
-// though the entry that followed plays. An entry the backend refuses before
+// whether the entry that followed plays or nothing follows and playback
+// stops: its entry was deleted before it played, and the stop that follows
+// records no reason over that one. One whose session was heard before the
+// deletion played, and answers nil. An entry the backend refuses before
 // any of its content played is skipped with its reason (Snapshot.Skipped);
 // a pass that refuses every entry, counted from the last session start or
 // queue change, stops with ReasonAllUnplayable, so repeat on makes one lap,
