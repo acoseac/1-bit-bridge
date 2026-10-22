@@ -302,6 +302,29 @@ func TestAPlaysAnswerIsItsOwn(t *testing.T) {
 			t.Fatalf("%s with %d sessions, want the second play's session playing", sn.State(), h.be.starts())
 		}
 	})
+	t.Run("play, stop, then maintenance", func(t *testing.T) {
+		h := startHarness(t)
+		h.playing(0, "a", "b")
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		stopped := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		mark = h.appliedMark()
+		first := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		mark = h.appliedMark()
+		again := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		enter := async(func() error {
+			_, err := h.eng.EnterMaintenance(bg, h.snap().Generation(), "the test")
+			return err
+		})
+		h.refused("the play the stop replaced, answered as maintenance began", h.result("the first play", first), ReasonSuperseded)
+		g.open()
+		h.must("enter", h.result("enter", enter))
+		h.must("the stop that began the release", h.result("the first stop", stopped))
+		h.must("the stop after the play", h.result("the second stop", again))
+	})
 	t.Run("a refused start, then a play", func(t *testing.T) {
 		h := startHarness(t)
 		h.insert("a", "b")
