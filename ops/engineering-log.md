@@ -50881,3 +50881,47 @@ round's text.
 The suite: 97 tests, about 13 s a run under `-race`; ten runs in a row
 green, and three each at GOMAXPROCS 1, 2 and 4; `make fmt vet test`,
 `make build-all` and `make docs-check` clean.
+
+### Round 4
+
+The Claude API and Codex reviewed round 3: four findings, all real, each
+fixed red-first with a negative control on the committed tree, restored
+from git. Round 3's rules text was applied from beside the branch
+(5ba2c4b4), and main's #1310, merged in 3bd98c1a, moved the player's
+sections to `.claude/rules/player.md`; this round's text went beside the
+branch again (`/tmp/b470-4b1-rules-r4.md`, against `player.md`).
+
+- d6633afd. **A strict write removes a directory it created whose entry
+  it could not make durable** (1, both): the next write found the
+  directory, synced only the file's entry and answered nil. Removing what
+  the call created, deepest first, on any failure after MkdirAll was taken
+  over barriering every directory entry on every write, which from the
+  file's directory alone misses a failed entry two levels up. Red: "the
+  next write ran the barrier for [root/a/reserved.json]: never for a's
+  entry in the root".
+- 196af21c. **The probe refuses what is not a directory** (2, Codex): the
+  barrier fsyncs whatever is there and answered nil for a regular file, so
+  New started an engine whose reservation could never be written. A
+  regular file is a PathError wrapping `syscall.ENOTDIR`, and New says the
+  directory is not one. Red: the probe and New both answered nil.
+- 59b44524. **A context derived from a call's ends with DeadlineExceeded
+  too** (3, both): callCtx's Done was its base's, so `WithCancel` and
+  errgroup's `WithCancelCause` attached children to the base, which ended
+  them `Canceled`. callCtx now has a Done of its own, closed through
+  `context.AfterFunc`, on either clock: `WithDeadlineCause` on the real
+  clock was not taken, since the engine's own deadline handling would race
+  its timer, whichever ended the call first deciding the error, and the
+  tests, on the fake clock, would not run the production path. Red: both
+  derived contexts "context canceled" in all ten cases.
+- 996ba929. **Deleting the entry a waiting play command is to play
+  supersedes it** (4, Codex): with an entry after it the selection moved
+  on silently, and a PlayID behind a held release, or with its session
+  starting, answered nil once the next entry played. It now answers
+  `ReasonSuperseded`, and the next entry still plays. Red: nil in both.
+
+Controls, each red: the removal disabled; the probe's directory check
+disabled (both tests); `callCtx.Done` handing out the base's channel; the
+supersession call removed.
+
+The suite: 98 tests, about 14 s a run under `-race`; ten runs in a row
+green; `make fmt vet test`, `make build-all` and `make docs-check` clean.
