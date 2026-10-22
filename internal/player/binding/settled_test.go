@@ -1,6 +1,7 @@
 package binding
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -53,8 +54,10 @@ func TestSettledSetsAsideACardThatCannotBeTheBoundUnit(t *testing.T) {
 		devs       []config.PlayerDevice
 	}{
 		{"another model in /proc alone", procOnly("1234:0f05"), []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009")}},
-		{"another model in sysfs alone", sysfsOnly("1234:0f05", ""), []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009"), byPort(goBarPort)}},
-		{"another unit of the model in sysfs alone", sysfsOnly("20b1:3009", "OTHER-UNIT-SERIAL-9"), []config.PlayerDevice{bySerial(goBarSerial), byPort(goBarPort)}},
+		{"another model in sysfs alone", sysfsOnly("1234:0f05", ""),
+			[]config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009"), byPort(goBarPort), byPort(goBarPlace)}},
+		{"another unit of the model in sysfs alone", sysfsOnly("20b1:3009", "OTHER-UNIT-SERIAL-9"),
+			[]config.PlayerDevice{bySerial(goBarSerial), byPort(goBarPort), byPort(goBarPlace)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := pi5(t)
@@ -75,20 +78,34 @@ func TestSettledSetsAsideACardThatCannotBeTheBoundUnit(t *testing.T) {
 
 // TestSettledWaitsOnACardThatMayBeTheBoundUnit: a transient card of the
 // bound model, one whose model nothing said, and, for a port binding with
-// the port empty, one whose port nothing said, may be the bound unit (or a
-// second unit of it), so the answer is identity_transient, naming that
-// card, and unsettled.
+// the port empty, one whose port nothing said or is the bound place, may be
+// the bound unit (or a second unit of it), so the answer is
+// identity_transient, naming that card, and unsettled. A port binding's
+// place is compared as Resolve compares it: the binding names the port
+// alone or with an interface, and a card's port path always has its own
+// (round 4: compared as strings, the GO bar's own card read in sysfs alone
+// was set aside under a binding of its port alone, the form bind writes,
+// and so was a card on another interface of the unit under a binding that
+// records one).
 func TestSettledWaitsOnACardThatMayBeTheBoundUnit(t *testing.T) {
 	for _, tc := range []struct {
 		name, step string
 		unplug     bool
 		devs       []config.PlayerDevice
+		// card is the transient card the reason names; 0 is card 7.
+		card int
+		// after is laid out once step is, since a manifest makes its links
+		// after its directives and step's may be ones after removes.
+		after string
 	}{
-		{"the bound model in /proc alone", procOnly("20b1:3009"), false, []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009")}},
-		{"no usbid in /proc alone", procOnly(""), false, []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009")}},
-		{"the bound model in sysfs alone", sysfsOnly("20b1:3009", ""), false, []config.PlayerDevice{byModel("20b1", "3009")}},
-		{"the bound serial in sysfs alone", sysfsOnly("20b1:3009", goBarSerial), false, []config.PlayerDevice{bySerial(goBarSerial)}},
-		{"an empty port beside a card in /proc alone", procOnly("1234:0f05"), true, []config.PlayerDevice{byPort(goBarPort)}},
+		{"the bound model in /proc alone", procOnly("20b1:3009"), false, []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009")}, 0, ""},
+		{"no usbid in /proc alone", procOnly(""), false, []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009")}, 0, ""},
+		{"the bound model in sysfs alone", sysfsOnly("20b1:3009", ""), false, []config.PlayerDevice{byModel("20b1", "3009")}, 0, ""},
+		{"the bound serial in sysfs alone", sysfsOnly("20b1:3009", goBarSerial), false, []config.PlayerDevice{bySerial(goBarSerial)}, 0, ""},
+		{"an empty port beside a card in /proc alone", procOnly("1234:0f05"), true, []config.PlayerDevice{byPort(goBarPort), byPort(goBarPlace)}, 0, ""},
+		{"the bound port's own card in sysfs alone", "procremove 5\n", false, []config.PlayerDevice{byPort(goBarPlace), byPort(goBarPort)}, 5, ""},
+		{"another card of the unit in sysfs alone, the recorded interface's card gone", composite(goBar, 5, 6, "20b1:3009"), true,
+			[]config.PlayerDevice{byPort(goBarPort), byPort(goBarPlace)}, 6, "procremove 5\nremove sys/class/sound/card5\nprocremove 6\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := pi5(t)
@@ -96,14 +113,76 @@ func TestSettledWaitsOnACardThatMayBeTheBoundUnit(t *testing.T) {
 				sysfstest.Apply(t, root, "unplug "+goBar+"\n")
 			}
 			sysfstest.Apply(t, root, tc.step)
+			if tc.after != "" {
+				sysfstest.Apply(t, root, tc.after)
+			}
 			inv := observe(t, root)
+			card := tc.card
+			if card == 0 {
+				card = 7
+			}
 			for _, dev := range tc.devs {
 				r := settled(t, dev, inv, StateIdentityTransient, -1, false)
-				if !strings.Contains(r.Reason, "card 7") {
-					t.Errorf("%s binding: the reason does not name card 7: %s", dev.Binding, r.Reason)
+				if !strings.Contains(r.Reason, "card "+strconv.Itoa(card)) {
+					t.Errorf("%s binding: the reason does not name card %d: %s", dev.Binding, card, r.Reason)
 				}
 			}
 		})
+	}
+}
+
+// TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort: under a port
+// binding the unit in the port can carry more than one card, so a port
+// binding's answer stands whatever the transient cards are only when its
+// card is on the interface the binding records. Any other answer that found
+// a card waits on a transient card that may be another card of that unit,
+// its place unknown or the bound one and its model unknown or the unit's,
+// since once it settles the answer is device_ambiguous, or that card on the
+// recorded interface; a card the trees say is another model, which one
+// port's single unit cannot be, is set aside. Round 1's "a port that has its
+// card is settled, since one interface is one card" held while a port
+// binding named an interface; the port-binding fix made it name the port
+// (round 4).
+func TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort(t *testing.T) {
+	// The composite unit in the GO bar's port, its second card, card 6 on
+	// interface 2, being added: sysfs lists it and /proc/asound not yet.
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+composite(goBar, 5, 6, "20b1:3009")+"procremove 6\n")
+	inv := observe(t, root)
+	for _, port := range []string{goBarPlace, goBarPlace + ":1.2"} {
+		if r := settled(t, byPort(port), inv, StateIdentityTransient, -1, false); !strings.Contains(r.Reason, "card 6") {
+			t.Errorf("by %s: the reason does not name card 6: %s", port, r.Reason)
+		}
+	}
+	settled(t, byPort(goBarPort), inv, StateAvailable, 5, true)
+	// Once card 6 is there, the answers that waited are another, and the
+	// one on the recorded interface stands.
+	sysfstest.Apply(t, root, "proccard 6 Other6 \"Synthetic composite DAC, second card\" driver=snd-synthetic pcm=0.0\n")
+	inv = observe(t, root)
+	want(t, Resolve(byPort(goBarPlace), inv), StateDeviceAmbiguous, -1)
+	want(t, Resolve(byPort(goBarPlace+":1.2"), inv), StateAvailable, 6)
+	want(t, Resolve(byPort(goBarPort), inv), StateAvailable, 5)
+
+	// The GO bar alone in its port beside a card in /proc/asound alone,
+	// whose place nothing says: another card of the GO bar's unit unless its
+	// usbid says another model.
+	for _, tc := range []struct {
+		model   string
+		settled bool
+	}{
+		{"1234:0f05", true},
+		{"20b1:3009", false},
+		{"", false},
+	} {
+		root := pi5(t)
+		sysfstest.Apply(t, root, procOnly(tc.model))
+		inv := observe(t, root)
+		if tc.settled {
+			settled(t, byPort(goBarPlace), inv, StateAvailable, 5, true)
+		} else if r := settled(t, byPort(goBarPlace), inv, StateIdentityTransient, -1, false); !strings.Contains(r.Reason, "card 7") {
+			t.Errorf("a card in /proc alone with usbid %q: the reason does not name card 7: %s", tc.model, r.Reason)
+		}
+		settled(t, byPort(goBarPort), inv, StateAvailable, 5, true)
 	}
 }
 

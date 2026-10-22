@@ -429,10 +429,15 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 // transient stands as settled when no transient card can change it: a
 // binding that does not resolve whatever the cards are (not_configured,
 // binding_invalid, identity_unsupported), an ambiguity, which another card
-// cannot undo, or a port binding whose port has its card, since one
-// interface is one card. Otherwise it is Resolve's identity_transient,
-// naming a card that may be the bound unit, and unsettled. It latches
-// nothing, as Resolve does: the caller resolves again.
+// cannot undo, or a port binding whose card is on the interface it records,
+// the one card at that port it names whatever else the unit carries. A port
+// binding's card found otherwise is the port's while the unit carries no
+// other card, so a transient card that may be another card of that unit
+// holds it (round 4: a port binding names the port since the port-binding
+// fix, where round 1's "the port has its card" assumed it named an
+// interface). Otherwise it is Resolve's identity_transient, naming a card
+// that may be the bound unit, or a card at the bound port, and unsettled.
+// It latches nothing, as Resolve does: the caller resolves again.
 func Settled(dev config.PlayerDevice, inv Inventory) (Resolution, bool) {
 	r := Resolve(dev, inv)
 	if r.State != StateIdentityTransient {
@@ -455,7 +460,11 @@ func Settled(dev config.PlayerDevice, inv Inventory) (Resolution, bool) {
 	}
 	for _, c := range transient {
 		if mayBeBound(dev, c, r0) {
-			r.Reason = fmt.Sprintf("card %d is %s, and may be the bound unit; resolve again", c.Index, c.Why)
+			what := "the bound unit"
+			if dev.Binding == config.BindingPort {
+				what = "a card at the bound port"
+			}
+			r.Reason = fmt.Sprintf("card %d is %s, and may be %s; resolve again", c.Index, c.Why, what)
 			return r, false
 		}
 	}
@@ -463,9 +472,13 @@ func Settled(dev config.PlayerDevice, inv Inventory) (Resolution, bool) {
 }
 
 // mayBeBound reports whether the transient card c may be the unit dev
-// binds, given r0, the answer from the cards that are not transient: not
-// when what its trees said rules it out, and always when they said nothing
-// that does.
+// binds, or under a port binding a card at the port it names, given r0, the
+// answer from the cards that are not transient: not when what its trees
+// said rules it out, and always when they said nothing that does. A port is
+// compared by its place, as Resolve compares it: a binding names the port
+// alone, or with the interface it prefers, and a card's port path always
+// has its own (round 4: compared as strings, a binding of the port alone,
+// the form bind writes, set aside its own card being added or removed).
 func mayBeBound(dev config.PlayerDevice, c Card, r0 Resolution) bool {
 	switch dev.Binding {
 	case config.BindingSerial, config.BindingUniqueModel:
@@ -490,11 +503,39 @@ func mayBeBound(dev config.PlayerDevice, c Card, r0 Resolution) bool {
 		return !known
 	case config.BindingPort:
 		if r0.State == StateAvailable || r0.State == StateEndpointMissing {
-			return false
+			// The card on the interface the binding records is the card at
+			// its port whatever else the unit there carries.
+			if r0.Port.HasInterface() && r0.Identity.Port == r0.Port.String() {
+				return false
+			}
+			// Any other is the port's while the unit carries no other card,
+			// and one port holds one unit: a card of another model is not one.
+			if !mayBeModel(c, r0.Identity.ID) {
+				return false
+			}
 		}
-		return c.SysfsUSB == nil || c.SysfsUSB.Port == "" || c.SysfsUSB.Port == dev.Port
+		return c.SysfsUSB == nil || c.SysfsUSB.Port == "" || placeOf(c.SysfsUSB.Port) == placeOf(dev.Port)
 	}
 	return true
+}
+
+// mayBeModel reports whether the transient card c may be a unit of the
+// model id: what its trees said of it does not rule that out.
+func mayBeModel(c Card, id alsa.USBID) bool {
+	known := false
+	if c.ProcUSBID != nil {
+		known = true
+		if *c.ProcUSBID == id {
+			return true
+		}
+	}
+	if c.SysfsUSB != nil {
+		known = true
+		if c.SysfsUSB.ID == id {
+			return true
+		}
+	}
+	return !known
 }
 
 // cutShort says why inv is no answer when sysfs's card listing was cut
