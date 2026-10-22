@@ -218,7 +218,9 @@ func TestTheSourceNeverWaitsForTheWatcher(t *testing.T) {
 	sock.push(burst...)
 	deadline := time.NewTimer(time.Minute)
 	defer deadline.Stop()
-	for src.Status().Counts.Messages < uint64(len(burst)) {
+	// Every message here wakes the watcher, so each is handed over or
+	// dropped as behind; a message is counted read before either.
+	for c := src.Status().Counts; c.Woke+c.Behind < uint64(len(burst)); c = src.Status().Counts {
 		select {
 		case <-src.Notes():
 		case <-deadline.C:

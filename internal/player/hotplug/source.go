@@ -24,6 +24,8 @@ const (
 	ModePolling Mode = "polling only"
 	// ModeUnsupported is a platform with no player: not Linux.
 	ModeUnsupported Mode = "unsupported on this platform"
+	// ModeOff is no watch running: the player is not enabled.
+	ModeOff Mode = "off"
 )
 
 // Counts are what an event source has read and done with it.
