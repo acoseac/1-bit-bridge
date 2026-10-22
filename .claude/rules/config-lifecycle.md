@@ -336,8 +336,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `Chmod` / `Sync` / parent-dir fsync — **don't collapse them into a shared
   `WriteBytes`**, which silently drops e.g. the auth store's belt-and-braces
   `Chmod(0o600)`.
-- **`atomicwrite.WriteBytesDurable(root, path, …)` is the strict writer:
-  nil means the file's bytes and every directory entry between the file and
+- **`atomicwrite.WriteBytesDurable(root, path, …)` is the strict writer: nil
+  means the file's bytes and every directory entry between the file and
   `root` were fsynced by that write, and a failed directory fsync is the
   write's error, never tolerated as `WriteBytes` tolerates it once its
   rename has landed** (B470 PR 4b1; its one caller is the player's ID and
@@ -346,60 +346,77 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   between writes: each syncs every entry from the file's directory up to
   `root`, whoever made those directories, so one an earlier write or an
   earlier run could not sync is synced by the next, across a restart too.
-  Round 5 kept a process-local set of such directories, which a SIGKILL or
-  a clean exit dropped while the directory sat in the kernel's cache, and
+  Round 5 kept a process-local set of such directories, which a SIGKILL or a
+  clean exit dropped while the directory sat in the kernel's cache, and
   round 4 removed them, which raced every other writer. **The path must lie
   plainly below `root`, so that one walk from the file's directory up to
   `root` reaches every entry** (round 7): a `..` element in `root` or the
   path is refused, since `filepath.Abs` cleans it lexically while a reader
   resolves the link before it (round 6 wrote and fsynced `root/ids` for
-  `root/link/../ids`, which a reader opens below where the link points, so
-  a restart read no reservation, with no crash at all), and so is a path
-  whose last element names a directory, a trailing separator, `.` or `..`
+  `root/link/../ids`, which a reader opens below where the link points, so a
+  restart read no reservation, with no crash at all), and so is a path whose
+  last element names a directory, a trailing separator, `.` or `..`
   (`NamesDirectory`, `EISDIR`: round 7 wrote `root/ids/` as `root/ids`,
   which the engine's restart read as given and found stuck; Codex on round
   7); so is a symbolic link strictly below `root`, whether it leads out or
-  stays inside, found by `Lstat` from `root` down; and so is a mount there
-  or at the file itself, one of another filesystem by its `st_dev`, and on
-  Linux any, by the mount ID the kernel gives each entry (statx's
-  `STATX_MNT_ID`, Linux 5.8), a bind mount of `root`'s own filesystem
-  included, whatever the path's spelling, on every write (round 7's probe
-  matched the mount table by spelling, which a filesystem that folds case
-  reaches a mount around, looked for a bind mount at New alone, and never
-  looked at the file: Codex on round 7). The checks run before anything is
-  created and again once the missing directories are, for a link another
-  writer puts in place meanwhile. Round 6 walked the path as written and as
-  it resolved instead, and missed a link reached through another link and
-  synced outside `root` for a link out and back (Codex, the Claude API and
-  Argon on round 6). `root` is the caller's to vouch for: it must exist (the
-  writer never creates it), its own entry is never synced, and a link at or
-  above it, a data directory that is a link included, is the caller's too:
-  `root` is resolved once, and every path the write opens, creates and
-  fsyncs, and every name its errors give, is spelled from where it
-  resolved. It refuses, before anything is created, a platform with no
-  directory barrier (`ErrNoDirectoryBarrier`), a root that does not exist,
-  and a path not plainly below `root` (`ErrNotUnderRoot`). Each directory
-  is opened once and that descriptor fsynced (`syncDirAt`), so only an
-  fsync's own failure is `ErrBarrierFailed`, an `*fs.PathError` naming the
-  directory that would not sync: an open that fails (EACCES, EMFILE) is
-  returned as it is. A rename that fails while the destination holds the
-  same bytes takes them only from a regular file on its directory's own
-  device and mount, asked as it takes them (`onItsDirectorysMount`): a file
-  mounted there after the checks, or a symbolic link, leaves the rename's
-  error. `ProbeDurable(root, path)` runs the same checks and barriers,
-  without writing, on every directory a write would fsync that exists now;
-  where the kernel gives no mount IDs (older than 5.8, or a statx a policy
-  refuses) it falls back to the mount table for the directories and the
-  file (`/proc/self/mountinfo`, read only when there is something to check,
-  and matched by its spelling; `ErrMountsUnknown` when it cannot be read),
-  and elsewhere than Linux it reads none (a mount of another filesystem is
-  still refused by its device). **Don't count a write durable without every
-  entry up to its root, don't keep in memory which entries are durable,
-  don't delete anything to recover durability, don't sync above the root,
-  don't walk a link or a mount below the root or at the file, don't tell a
-  mount by its spelling where the kernel gives its ID, don't clean a `..`
-  or a trailing separator away, don't take a fallback's bytes from a file
-  the directory's entry does not name, and don't advise moving to another
+  stays inside, found by `Lstat` from `root` down; and so is any mount there
+  or at the file itself, a bind mount of `root`'s own filesystem included,
+  **told by the identity the platform gives each entry's mount, never by the
+  device (`st_dev`) a stat reports**, whatever the path's spelling, on every
+  write: on Linux the kernel's mount ID, from statx's `STATX_MNT_ID` (Linux
+  5.8) or, where statx gives none (an older kernel, or a statx a seccomp
+  policy refuses), the `mnt_id` `/proc/self/fdinfo` lists for an `O_PATH`
+  descriptor (Linux 3.15; `mountIDFrom`); on macOS the mount's filesystem ID
+  (statfs's `f_fsid`). Round 7's probe matched the mount table by spelling,
+  which a filesystem that folds case reaches a mount around, looked for a
+  bind mount at New alone, and never looked at the file (Codex on round 7);
+  round 8 compared devices, and overlayfs with its layers on different
+  filesystems and xino off, the Raspberry Pi OS "Overlay File System"
+  option, reports the overlay's device for a directory and a pseudo device
+  per layer for every other entry, and btrfs a device per subvolume, each on
+  one mount, so round 8 refused the reservation file there once it existed
+  (the Claude API on round 8). The checks run before anything is created and
+  again once the missing directories are, for a link another writer puts in
+  place meanwhile. Round 6 walked the path as written and as it resolved
+  instead, and missed a link reached through another link and synced outside
+  `root` for a link out and back (Codex, the Claude API and Argon on round
+  6). `root` is the caller's to vouch for: it must exist (the writer never
+  creates it), its own entry is never synced, and a link at or above it, a
+  data directory that is a link included, is the caller's too: `root` is
+  resolved once, and every path the write opens, creates and fsyncs, and
+  every name its errors give, is spelled from where it resolved. It refuses,
+  before anything is created, a platform with no directory barrier
+  (`ErrNoDirectoryBarrier`), a root that does not exist, and a path not
+  plainly below `root` (`ErrNotUnderRoot`). Each directory is opened once
+  and that descriptor fsynced (`syncDirAt`), so only an fsync's own failure
+  is `ErrBarrierFailed`, an `*fs.PathError` naming the directory that would
+  not sync: an open that fails (EACCES, EMFILE) is returned as it is. A
+  rename that fails while the destination holds the same bytes takes them
+  only from a regular file on its directory's own mount, by identity, asked
+  as it takes them (`onItsDirectorysMount`): a file mounted there after the
+  checks, or a symbolic link, leaves the rename's error, and a file or a
+  directory the platform gives no mount identity for leaves
+  `ErrMountsUnknown` beside it. `ProbeDurable(root, path)` runs the same
+  checks and barriers, without writing, on every directory a write would
+  fsync that exists now. **Where the platform gives no mount identity, for
+  `root` or for an entry below it, the write, the probe and the fallback say
+  so (`ErrMountsUnknown`) rather than take two mounts for one** (Codex on
+  round 8: where the kernel gave no mount IDs, round 8 compared no mount on
+  a write, its probe read the mount table, matched by spelling, and its
+  fallback took two unknown identities for one). `root`'s is asked for on
+  every call, a file directly in `root` included, so that the probe refuses
+  as its caller starts what every write would; no mount table is read. On
+  Linux that leaves a kernel older than 3.15, or one whose statx gives none
+  with no `/proc` mounted, and elsewhere every platform but macOS and
+  Windows, where the player does not run; Windows gives none and asks for
+  none, refusing first (`ErrNoDirectoryBarrier`). **Don't count a write
+  durable without every entry up to its root, don't keep in memory which
+  entries are durable, don't delete anything to recover durability, don't
+  sync above the root, don't walk a link or a mount below the root or at the
+  file, don't tell a mount by its spelling or its device, don't take two
+  mounts the platform gives no identity for as one, don't clean a `..` or a
+  trailing separator away, don't take a fallback's bytes from a file the
+  directory's entry does not name, and don't advise moving to another
   filesystem for an error not marked `ErrBarrierFailed`.**
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
@@ -418,9 +435,13 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`,
   `TestWriteBytesDurable_RefusesAMountedDestination`,
   `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`,
+  `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`,
+  `TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad`,
   `TestPlatformMountIDReadsTheKernels`,
   `TestProbeDurable_RefusesAMountPointTheKernelLists`, `TestParseMountInfo`,
-  `TestPlatformMountTableReadsTheKernels`, `TestBarrierFailuresAreMarked`,
+  `TestPlatformMountTableReadsTheKernels`, `TestParseFdinfoMountID`,
+  `TestMountIDFromFallsBackToFdinfoOnlyWhereStatxGivesNone`,
+  `TestBarrierFailuresAreMarked`,
   `TestProbeDurable_SyncsTheDirectoryItOpened` and
   `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
