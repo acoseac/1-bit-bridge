@@ -474,6 +474,38 @@ func TestPlaybackReportsAudibleWhenThePlayedContentCrosses(t *testing.T) {
 	}
 }
 
+// TestPlaybackDiscardForgetsThePackingTheUnitTook pins Discard: a DAC that
+// takes 24 bits as S32_LE alone costs a session two refused offers first
+// (S24_3LE, S24_LE); the next session offers what the unit took first and
+// opens once; after Discard, which the engine calls when the output changes
+// while nothing plays, the offers start again from the table.
+func TestPlaybackDiscardForgetsThePackingTheUnitTook(t *testing.T) {
+	d := newDirect(t, nil)
+	d.k.Formats(format.S32LE)
+	d.files.add("a", wav(48000, 24, pattern(1, 1000, 24)))
+	opens := func(s engine.SessionID) int {
+		before := d.k.View().Opens
+		if err := d.start(s, "a"); err != nil {
+			t.Fatal(err)
+		}
+		d.release(s)
+		return d.k.View().Opens - before
+	}
+	if n := opens(1); n != 3 {
+		t.Errorf("the first session opened %d times, want 3: two refused packings, then S32_LE", n)
+	}
+	if n := opens(2); n != 1 {
+		t.Errorf("the second session opened %d times, want once: the packing the unit took", n)
+	}
+	if err := d.be.Discard(bg); err != nil {
+		t.Fatal(err)
+	}
+	if n := opens(3); n != 3 {
+		t.Errorf("after Discard a session opened %d times, want 3: the offers from the table again", n)
+	}
+	d.k.CheckClosedEach(t)
+}
+
 // receiveIn waits for ch under the watchdog and returns what it gave.
 func receiveIn[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
