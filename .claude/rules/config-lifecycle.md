@@ -506,7 +506,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   space but the ASCII space, don't take a bind of a directory inside an
   overlay, nor sync its copy-ups through another mount of the superblock,
   don't refuse an overlay because totals that moved differ, and don't advise
-  moving to another filesystem for an error not marked `ErrBarrierFailed`.**
+  moving to another filesystem for an error not marked `ErrBarrierFailed`,
+  but for the two overlay copy-up refusals (a bind of a directory inside an
+  overlay, a directory above the root its sync cannot open), where leaving
+  the overlay removes that sync.**
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
   `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
