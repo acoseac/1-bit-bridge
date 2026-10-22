@@ -50976,3 +50976,48 @@ at another port counted (R2-5), the recorded interface not settling it
 the unlistable `class/sound`), `SamePort` always true (R2-8), a unit's
 readable second card not counted (R2-9), and no port dispatch in `Check`
 (R2-10: the check test and the CLI test).
+
+**Round 3 (Codex P2 twice, and the Claude API Low with one of them; Argon
+found none). Both findings had one root: the check after open read sysfs
+alone and never asked whether its reading was whole.** A sibling card
+whose `class/sound` link was gone while `/proc/asound` still listed it (the
+kernel's removal order) was invisible, so the check admitted card 5 under
+a port binding where Resolve answers `identity_transient`; round 2's
+vanished case had kept the class link, and missed it. `SysfsReader.Read`
+caps `class/sound` at 1,024 entries and said so only in `Problems`, so a
+listing that kept the opened card and cut its sibling admitted it too. And
+an unlistable reading refused only because `Read` then returns no cards;
+round 2's test for it changed `class/sound`'s permissions, under which the
+direct lookup of card 5 also failed on macOS, so it would have passed
+round 1's shape, a separate `Card()` lookup beside a loop that never asked
+whether the listing was whole. `alsa.SysfsSnapshot` now says whether its
+card listing is whole (`CardsComplete`), and the check refuses a reading
+that is not present, one cut short, and a `/proc/asound` that cannot be
+read, each with a reason of its own and whatever interface the binding
+records. It then reads `/proc/asound`'s cards and reconciles the two trees
+with the function `Observe` now shares (`inventory`), so a card listed by
+one tree alone refuses as an unreadable or vanished one does, unless the
+opened card is on the recorded interface. `Checker` gained `Proc`, and its
+`Sysfs` is an interface `alsa.SysfsReader` satisfies (`SysfsReading`), the
+seam the failed-listing test stands a reading in through while card 5's
+own lookup still reads; `--verify-card` passes the check both trees. Red
+first, with the new `Checker` fields in place and round 2's check: the
+sibling listed by `/proc/asound` alone (twice), a `/proc/asound` that
+cannot be read, and the cut listing, whether `/proc/asound` listed the cut
+card or not (six), were admitted; the cases round 2 already refused (an
+unreadable or vanished sibling, the failed listing, card 5 gone or listed
+by `/proc/asound` alone) failed on their reasons only. Controls on
+6cd98ba0, all red, each restored from git: cards that `/proc/asound` lists
+and sysfs does not dropped before the reconciliation (R3-1: the sibling
+admitted twice, Codex's case), no refusal of a cut listing (R3-2: with
+`/proc/asound` no longer listing the cut card, all three bindings
+admitted), no reason of its own for a listing that failed (R3-3: refused as
+cut short), round 1's shape (R3-4: a separate `Card()` lookup admitted the
+failed listing with and without the recorded interface, and every round 2
+and 3 case besides), `--verify-card` without the `/proc` reader (R3-5: the
+CLI test failed, and the suite's TestMain reported the host's `/proc`
+read), no early exit (R3-6), `CardsComplete` always true (R3-7) and never
+(R3-8), and a card that is not USB refusing (R3-9). R3-3's first edit
+matched `inventory`'s `!sys.Present` too and was not applied; the run was
+of the unchanged tree, and the control was made again on `checkPort`'s
+line alone.
