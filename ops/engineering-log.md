@@ -53270,6 +53270,15 @@ mutation left `was` and `is` unused) and was rerun with them kept in use.
 | C2 | the conf.d listing's error dropped (`bad, unread = true, true` removed from its case) | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread` (conf.d a file), `TestAConfigurationDirectoryThatCannotBeListedIsUnread` (cannot be listed) |
 | C3 | the `plug` case never taken | `TestTheFirstStageThatChangesSamplesIsNamed` (every `plug:` row), `TestTheVerdictReadsMPDsOwnSettings/alsa-lib's_plug_over_dmix,_plug:dmix` |
 
+**Gates**, through the build lock. `make fmt vet test` passed whole, after
+881 s waiting for a slot: `make fmt` rewrote nothing, `go vet` was clean,
+and 73 packages were ok, saprobe-alac's own module included (`cmd/bridge`
+476 s, `internal/api` 91 s, no race). `make build-all` was clean, after
+1,096 s waiting for a slot. `make docs-check` was clean on the branch, and
+again with the round-5 note applied to the tree (worst load 45.9%, 46.4%
+with it); with the note applied, the whole `cmd/bridge` package, which
+holds the doc sweeps, passed. The note was then reverted.
+
 **Residuals, named, not fixed here**
 
 - A change of `dop` or `allowed_formats` and a change back between two
