@@ -377,22 +377,93 @@ func TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain(t *testing.T) {
 }
 
 // TestAnUnrelatedEditLeavesTheSessionAlone pins edits that do not change a
-// successor: no call reaches the backend.
+// successor: no call reaches the backend. And after a skip: queue a, b, c,
+// b refused, so c follows a and is submitted; appending d, which starts a
+// new pass, changes nothing between a and c, so c is neither cut nor
+// marked, and heard it plays, whether a Cut would have come too late or a
+// Prepare is under way when it is heard. The only call is the Prepare that
+// names d after c.
 func TestAnUnrelatedEditLeavesTheSessionAlone(t *testing.T) {
-	h := startHarness(t)
-	ids, _, _, _ := handoff(t, h, true, "a", "b", "c", "d")
-	mark := h.be.mark()
-	h.must("delete d", h.eng.Delete(bg, ids[3]))
-	if _, err := h.eng.InsertAfter(bg, ids[2], ref("x"), nil); err != nil {
-		t.Fatal(err)
+	t.Run("no successor changes", func(t *testing.T) {
+		h := startHarness(t)
+		ids, _, _, _ := handoff(t, h, true, "a", "b", "c", "d")
+		mark := h.be.mark()
+		h.must("delete d", h.eng.Delete(bg, ids[3]))
+		if _, err := h.eng.InsertAfter(bg, ids[2], ref("x"), nil); err != nil {
+			t.Fatal(err)
+		}
+		h.must("repeat off, as it was", h.eng.SetRepeat(bg, false))
+		if got := h.be.callsSince(mark); len(got) != 0 {
+			t.Fatalf("an unrelated edit made calls %v", got)
+		}
+		if sn := h.snap(); sn.State() != Playing || sn.Selected() != ids[0] {
+			t.Fatalf("%s at %d", sn.State(), sn.Selected())
+		}
+	})
+	// skipped plays a, b, c with b refused when it is named after a, so c
+	// follows a, submits c, and returns the IDs, the session and c.
+	skipped := func(t *testing.T, h *harness) ([]uint32, *fakeSession, *Occurrence) {
+		t.Helper()
+		ids, s := h.playing(0, "a", "b", "c")
+		c := s.prepared(s.first.ID, 2)
+		if c == nil || c.Entry != ids[2] {
+			t.Fatalf("the successor named after b was refused is %+v, want c", c)
+		}
+		s.submitted(c.ID)
+		return ids, s, c
 	}
-	h.must("repeat off, as it was", h.eng.SetRepeat(bg, false))
-	if got := h.be.callsSince(mark); len(got) != 0 {
-		t.Fatalf("an unrelated edit made calls %v", got)
-	}
-	if sn := h.snap(); sn.State() != Playing || sn.Selected() != ids[0] {
-		t.Fatalf("%s at %d", sn.State(), sn.Selected())
-	}
+	t.Run("after a skip, its cut late", func(t *testing.T) {
+		h := startHarness(t)
+		h.be.script(func() {
+			h.be.unplayable["b"] = Unplayable{Reason: ReasonMissing}
+			h.be.onCut = func(context.Context, *fakeSession, OccurrenceID) (bool, error) { return false, nil }
+		})
+		ids, s, c := skipped(t, h)
+		// b's Prepare, c's and the end's after c have all been answered.
+		h.waitAppliedTimes("handled call prepare", 0, 3)
+		mark := h.be.mark()
+		d, err := h.eng.InsertAfter(bg, ids[2], ref("d"), nil)
+		h.must("append d", err)
+		h.be.waitFor("the call the append makes", func() bool { return len(h.be.calls) > mark })
+		if got := h.be.callsSince(mark); !slices.Equal(got, []string{"prepare " + idName(d)}) {
+			t.Fatalf("appending d made calls %v, want only d named after c", got)
+		}
+		applied := h.appliedMark()
+		s.audible(c.ID)
+		h.waitApplied("handled audible", applied)
+		if sn := h.snap(); sn.State() != Playing || sn.Selected() != ids[2] {
+			t.Fatalf("c, heard after the append: %s at %d (c is %d), last stop %+v", sn.State(), sn.Selected(), ids[2], sn.LastStop())
+		}
+	})
+	t.Run("after a skip, a prepare under way", func(t *testing.T) {
+		h := startHarness(t)
+		held := newGate()
+		h.be.script(func() {
+			h.be.onPrepare = func(ctx context.Context, fs *fakeSession, _ OccurrenceID, next *Occurrence) error {
+				switch {
+				case next == nil:
+					return held.wait(ctx, h.be, false)
+				case next.Ref.String() == "b":
+					fs.ev.Refused(fs.id, next.ID, Unplayable{Reason: ReasonMissing})
+				}
+				return nil
+			}
+		})
+		ids, s, c := skipped(t, h)
+		h.be.waitFor("the end named after c", func() bool { return h.be.countLocked("prepare") == 3 })
+		d, err := h.eng.InsertAfter(bg, ids[2], ref("d"), nil)
+		h.must("append d", err)
+		applied := h.appliedMark()
+		s.audible(c.ID)
+		h.waitApplied("handled audible", applied)
+		if sn := h.snap(); sn.State() != Playing || sn.Selected() != ids[2] {
+			t.Fatalf("c, heard with the end's Prepare under way: %s at %d (c is %d), last stop %+v", sn.State(), sn.Selected(), ids[2], sn.LastStop())
+		}
+		held.open()
+		if next := s.prepared(c.ID, 2); next == nil || next.Entry != d {
+			t.Fatalf("named after c once the Prepare answered: %+v, want d", next)
+		}
+	})
 }
 
 // occName is an occurrence as fakeCall prints it.

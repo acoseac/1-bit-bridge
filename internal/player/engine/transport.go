@@ -54,6 +54,12 @@ type occ struct {
 	// late is a Cut that answered it could not: some of its frames have
 	// been or will be played, so no Cut is asked of it again.
 	late bool
+	// skipped is the entries its hand-off passed over between the
+	// occurrence before it and its own, refused in the pass it was named
+	// in. An edit starts a new pass, which offers them again further on,
+	// but this hand-off keeps them passed over: it follows the occurrence
+	// before it while the queue still holds nothing else between them.
+	skipped []uint32
 }
 
 func (oc *occ) public() Occurrence { return Occurrence{ID: oc.id, Entry: oc.entry, Ref: oc.ref} }
@@ -586,19 +592,29 @@ func (e *Engine) current(id SessionID) *session {
 // following is the entry that follows id in play order, passing over the
 // entries refused in this pass, or 0.
 func (e *Engine) following(id uint32) uint32 {
+	next, _ := e.walk(id, nil)
+	return next
+}
+
+// walk is the entry that follows id in play order, passing over the entries
+// refused in this pass and those in past (a hand-off's own skips), or 0, and
+// the entries it passed over.
+func (e *Engine) walk(id uint32, past []uint32) (uint32, []uint32) {
 	o := &e.o
+	var passed []uint32
 	cur := id
 	for i := 0; i < o.q.len(); i++ {
 		next := o.q.after(cur, o.repeat)
 		if next == 0 {
-			return 0
+			return 0, passed
 		}
-		if !o.pass[next] {
-			return next
+		if !o.pass[next] && !slices.Contains(past, next) {
+			return next, passed
 		}
+		passed = append(passed, next)
 		cur = next
 	}
-	return 0
+	return 0, passed
 }
 
 // reconcile holds the session's hand-offs to what the queue now says
@@ -607,11 +623,14 @@ func (e *Engine) following(id uint32) uint32 {
 // no longer follows the one before it is marked unwanted, and one that
 // follows again is cleared: an unwanted occurrence that is heard stops
 // playback at once (onAudible), whatever a Prepare or a Cut answers after.
-// Then, with no call under way, the first unwanted occurrence not yet
-// submitted is replaced by a new Prepare, and a submitted one is cut at its
-// boundary; one whose cut came too late is left to stop playback if it is
-// heard. One Prepare or Cut is under way at a time, and the tail's
-// successor is named once its frames are in the sink.
+// An occurrence still follows when the walk from the one before it, passing
+// over this pass's refusals and the entries its own hand-off passed over
+// (occ.skipped), reaches it: an edit elsewhere starts a new pass, and
+// changes nothing between the two. Then, with no call under way, the first
+// unwanted occurrence not yet submitted is replaced by a new Prepare, and a
+// submitted one is cut at its boundary; one whose cut came too late is left
+// to stop playback if it is heard. One Prepare or Cut is under way at a
+// time, and the tail's successor is named once its frames are in the sink.
 func (e *Engine) reconcile(s *session) {
 	o := &e.o
 	if s == nil || s != o.sess || s.phase != sessLive || o.closing || len(s.chain) == 0 {
@@ -619,8 +638,8 @@ func (e *Engine) reconcile(s *session) {
 	}
 	for i := 1; i < len(s.chain); i++ {
 		prev, cur := s.chain[i-1], s.chain[i]
-		switch {
-		case cur.entry == e.following(prev.entry):
+		switch next, _ := e.walk(prev.entry, cur.skipped); {
+		case cur.entry == next:
 			cur.unwanted = ""
 		case !o.q.has(cur.entry):
 			cur.unwanted = fmt.Sprintf("entry %d was deleted", cur.entry)
@@ -639,7 +658,7 @@ func (e *Engine) reconcile(s *session) {
 		case cur.late:
 		case cur.stage < stageSubmitted:
 			s.chain = s.chain[:i]
-			e.prepare(s, prev, e.following(prev.entry))
+			e.prepare(s, prev)
 		default:
 			e.cut(s, cur)
 		}
@@ -649,20 +668,20 @@ func (e *Engine) reconcile(s *session) {
 	if last.stage < stageSubmitted || s.noMore {
 		return
 	}
-	switch want := e.following(last.entry); {
-	case want == 0 && !s.endSent:
-		e.prepare(s, last, 0)
-	case want != 0:
-		e.prepare(s, last, want)
+	if e.following(last.entry) != 0 || !s.endSent {
+		e.prepare(s, last)
 	}
 }
 
-// prepare names entry (0: nothing) as what follows after.
-func (e *Engine) prepare(s *session, after *occ, entry uint32) {
+// prepare names what follows after now (nothing, when the walk ends), with
+// the entries the walk passed over as the new occurrence's skips.
+func (e *Engine) prepare(s *session, after *occ) {
+	entry, passed := e.walk(after.entry, nil)
 	var next *occ
 	var pub *Occurrence
 	if entry != 0 {
 		next = e.newOcc(entry)
+		next.skipped = passed
 		s.chain = append(s.chain, next)
 		p := next.public()
 		pub = &p

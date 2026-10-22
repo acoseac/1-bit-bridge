@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -497,22 +496,31 @@ func (h *harness) appliedMark() int {
 // first since.
 func (h *harness) waitApplied(op string, since int) {
 	h.t.Helper()
+	h.waitAppliedTimes(op, since, 1)
+}
+
+// waitAppliedTimes waits until the owner has applied op, or handled it, n
+// times after the first since.
+func (h *harness) waitAppliedTimes(op string, since, n int) {
+	h.t.Helper()
 	timer := time.NewTimer(*watchdog)
 	defer timer.Stop()
 	for {
 		h.appliedMu.Lock()
-		ch, found := h.appliedCh, false
-		if since < len(h.appliedOps) {
-			found = slices.Contains(h.appliedOps[since:], op)
+		ch, count := h.appliedCh, 0
+		for _, a := range h.appliedOps[min(since, len(h.appliedOps)):] {
+			if a == op {
+				count++
+			}
 		}
 		h.appliedMu.Unlock()
-		if found {
+		if count >= n {
 			return
 		}
 		select {
 		case <-ch:
 		case <-timer.C:
-			h.t.Fatalf("waited %v for the owner to apply %s", *watchdog, op)
+			h.t.Fatalf("waited %v for the owner to apply %s %d times", *watchdog, op, n)
 		}
 	}
 }

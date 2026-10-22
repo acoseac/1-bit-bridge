@@ -99,9 +99,12 @@
 // selected. An entry the backend refuses before any of its content played
 // is skipped with its reason (Snapshot.Skipped); a pass that refuses every
 // entry, counted from the last session start or queue change, stops with
-// ReasonAllUnplayable, so repeat on makes one lap, never a spin. A failure
-// after content played is a fault: recorded (Snapshot.Faults), playback
-// stopped, never restarted.
+// ReasonAllUnplayable, so repeat on makes one lap, never a spin. A hand-off
+// made past a skipped entry keeps that skip when a queue change starts a
+// new pass: an edit that leaves the entries between it and the occurrence
+// before it as they were neither cuts it nor stops it. A failure after
+// content played is a fault: recorded (Snapshot.Faults), playback stopped,
+// never restarted.
 //
 // The output's availability is an input (ReportOutput, OutputReport). It
 // starts unknown. Its going away, or the bound unit changing, stops
