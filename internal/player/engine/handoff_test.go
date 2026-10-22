@@ -464,6 +464,25 @@ func TestAnUnrelatedEditLeavesTheSessionAlone(t *testing.T) {
 			t.Fatalf("named after c once the Prepare answered: %+v, want d", next)
 		}
 	})
+	// The skip keeps only what lies between: an entry put after b, between
+	// a and c, follows a now, so c is cut, b is offered again in the new
+	// pass and refused again, and the new entry is named after a.
+	t.Run("after a skip, an entry put between them", func(t *testing.T) {
+		h := startHarness(t)
+		h.be.script(func() { h.be.unplayable["b"] = Unplayable{Reason: ReasonMissing} })
+		ids, s, c := skipped(t, h)
+		h.waitAppliedTimes("handled call prepare", 0, 3)
+		mark := h.be.mark()
+		x, err := h.eng.InsertAfter(bg, ids[1], ref("x"), nil)
+		h.must("insert x after b", err)
+		h.be.waitFor("the call the insert makes", func() bool { return len(h.be.calls) > mark })
+		if got := h.be.callsSince(mark); got[0] != "cut "+occName(c.ID) {
+			t.Fatalf("inserting x between b and c made calls %v, want c cut first", got)
+		}
+		if next := s.prepared(s.first.ID, 4); next == nil || next.Entry != x {
+			t.Fatalf("named after a once c was cut: %+v, want x", next)
+		}
+	})
 }
 
 // occName is an occurrence as fakeCall prints it.
