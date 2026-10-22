@@ -169,8 +169,9 @@ func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 		{"mpd that is not a mode", "output:\n    mpd: maybe\n" + player, "maybe", notAMode, true},
 		{"MPD's password on mpd's line", "output:\n    mpd: " + rewriteMPDPassword + "\n" + player, rewriteMPDPassword, notAMode, true},
 		{"the DAC's serial on mpd's line", "output:\n    mpd: \"" + rewriteSerial + "\"\n" + player, rewriteSerial[len(rewriteSerial)-6:], notAMode, true},
+		// No key of the block's own wrote it, so no line is certain.
 		{"MPD's password on mpd's line in a merged block", "output:\n    <<: {mpd: " + rewriteMPDPassword + "}\n" + player,
-			rewriteMPDPassword, notAMode, true},
+			rewriteMPDPassword, []string{"output.mpd (from a merged block): that value is not auto, on or off"}, true},
 		{"a loopback port that is not a number", "output:\n    loopbackPort: " + rewriteMPDPassword + "\n" + player,
 			rewriteMPDPassword, []string{"output.loopbackPort (line ", "): it does not read as that setting"}, true},
 		{"a serial of digits as the loopback port", "output:\n    loopbackPort: 202311050044\n" + player, "202311050044", notAPort, true},
@@ -179,6 +180,10 @@ func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 			[]string{"output.password (line ", "): it does not read as that setting"}, true},
 		{"an output that is not a block", "output: " + rewriteMPDPassword + "\n", rewriteMPDPassword,
 			[]string{"output (line ", "): it is not a block of output settings"}, false},
+		// Named by its line, never its text, which can be a value pasted
+		// where a key goes. Round 2 dropped it without a word.
+		{"a key output does not take", "output:\n    mpd: \"off\"\n    mdp: maybe\n" + player, "mdp",
+			[]string{"a key of output (line ", "): it is not an output setting"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
@@ -282,14 +287,25 @@ func TestInitRewriteKeepsWhatTheOutputBlockLoadedWith(t *testing.T) {
 	}
 }
 
-// TestPriorOutputResolvesMergeKeysAsLoadDoes holds resolveOutput to the
-// decoder it mirrors: for each block, a config that loads, what priorOutput
-// keeps is exactly the output block config.Load read from the same bytes,
-// with nothing left out. The shapes go past the rewrite tests': merges
-// inside a sequence's blocks, an alias inside a sequence, empty merges, null
-// values over merged ones, and a port of 0.
+// TestPriorOutputResolvesMergeKeysAsLoadDoes holds priorOutput to Load: for
+// each block, a config that loads, what priorOutput keeps is exactly the
+// output block config.Load read from the same bytes, with nothing left out.
+// The shapes go past the rewrite tests': merges inside a sequence's blocks,
+// an alias inside a sequence, empty merges, null values over merged ones, a
+// port of 0, and the shapes round 2's resolver read otherwise than the
+// decoder (B505's round 3): a key written as !!binary, which the decoder
+// reads as the text it encodes (Codex); a merge sequence past the 64 blocks
+// the resolver followed, which dropped a setting a valid config holds
+// (Codex); and a setting a merged block writes twice, once through an alias,
+// which the decoder takes the first of and the resolver dropped (the Claude
+// API); and values with a tag.
 func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
 	for _, block := range []string{
+		`{!!binary cGFzc3dvcmQ=: "", <<: {password: old-pw}}`,
+		`{<<: [` + strings.Repeat(`{}, `, 63) + `{password: saved-pw}]}`,
+		`{<<: [` + strings.Repeat(`{}, `, 200) + `{password: saved-pw, mpd: "off"}]}`,
+		`{conf: &k mpd, <<: {mpd: "on", *k: "off"}}`,
+		`{loopbackPort: !!int "7795", password: !!binary bXBkLXB3}`,
 		`{mpd: "off", <<: {mpd: "on"}}`,
 		`{<<: {mpd: "on"}, mpd: "off"}`,
 		`{<<: [{mpd: "on", conf: /a}, {mpd: "off", conf: /b, endpoint: "127.0.0.1:6601"}]}`,
@@ -327,17 +343,25 @@ func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
 	}
 }
 
-// TestInitRewriteResolvesMergesBesideASettingItCannotKeep: when a setting
-// does not read, the rest of the block is still resolved as Load resolves
-// it. A key the block writes hides a merged value for its setting even when
-// the key is the one refused (the operator overrode the merged value, so
-// the rewrite keeps neither); a merged setting that is refused costs that
-// setting alone; and what makes Load refuse the whole block (a key written
-// twice in one block, two merge keys in one block, a merge key that names
-// no block) costs that key alone, named in the warning. kept is the block
-// the saved config must hold.
+// TestInitRewriteResolvesMergesBesideASettingItCannotKeep: a block yaml.v3
+// decodes, merges and all, and whose setting Validate refuses, keeps the
+// rest as the decoder resolved it. A key the block writes hides a merged
+// value for its setting even when the key is the one refused (the operator
+// overrode the merged value, so the rewrite keeps neither), a merged
+// setting that is refused costs that setting alone, and the warning names
+// the line of the block's own key or says the value was merged. A block
+// yaml.v3 does not decode is one Load refuses, and the rewrite keeps of it
+// only what it can name with certainty (B505's round 3): with plain keys,
+// each setting but one written twice; with a merge key, an alias, a tag
+// among its keys, nothing, since which setting a value is for is the
+// decoder's to say (round 2's resolver kept what it resolved on its own,
+// and two of these shapes it resolved otherwise without a word, the Claude
+// API); and a block written twice, nothing. kept is the block the saved
+// config must hold.
 func TestInitRewriteResolvesMergesBesideASettingItCannotKeep(t *testing.T) {
 	const player = "    player: " + mergeTestPlayer + "\n"
+	notCertain := []string{"output (line ", "): it does not load, and a key of it is a merge key (<<), an alias, tagged or not plain text",
+		"none of it is kept"}
 	for _, tc := range []struct {
 		name, block, kept string
 		says              []string
@@ -350,19 +374,38 @@ func TestInitRewriteResolvesMergesBesideASettingItCannotKeep(t *testing.T) {
 			"output:\n    conf: /etc/merged.conf\n" + player, []string{"output.mpd (line ", "): that value is not auto, on or off"}},
 		{"a refused merged setting costs itself alone",
 			"output:\n    <<: {loopbackPort: 70000, conf: /etc/merged.conf}\n    mpd: \"off\"\n" + player,
-			"output:\n    mpd: \"off\"\n    conf: /etc/merged.conf\n" + player, []string{"output.loopbackPort (line ", "): that value is not a port"}},
+			"output:\n    mpd: \"off\"\n    conf: /etc/merged.conf\n" + player,
+			[]string{"output.loopbackPort (from a merged block): that value is not a port"}},
+		{"a refused setting whose key is an alias",
+			"output:\n    conf: &k mpd\n    *k : maybe\n" + player,
+			"output:\n    conf: mpd\n" + player, []string{"output.mpd (line ", "): that value is not auto, on or off"}},
 		{"a key written twice",
 			"output:\n    mpd: \"on\"\n    mpd: \"off\"\n" + player,
-			"output:\n" + player, []string{"output.mpd (line ", "): it is written twice in one block"}},
+			"output:\n" + player, []string{"output.mpd (lines ", "): it is written more than once in one block, so no value of it is kept"}},
 		{"two merge keys in one block",
 			"output:\n    <<: {mpd: \"on\"}\n    <<: {conf: /etc/merged.conf}\n    password: kept-pw\n" + player,
-			"output:\n    password: kept-pw\n" + player, []string{"a merge key of output (line ", "): it is written twice in one block"}},
+			"output:\n", notCertain},
 		{"a merge key that names no block",
 			"output:\n    <<: 5\n    mpd: \"off\"\n" + player,
-			"output:\n    mpd: \"off\"\n" + player, []string{"a merge key of output (line ", "): it names no block of settings"}},
+			"output:\n", notCertain},
 		{"a merge sequence with something but blocks in it",
 			"output:\n    <<: [{conf: /etc/merged.conf}, 5]\n    mpd: \"off\"\n" + player,
-			"output:\n    mpd: \"off\"\n" + player, []string{"a merge key of output (line ", "): it names no block of settings"}},
+			"output:\n", notCertain},
+		{"a merged block that writes a key twice",
+			"output:\n    mpd: \"off\"\n    <<: {mpd: \"on\", mpd: auto}\n" + player,
+			"output:\n", notCertain},
+		{"a merge key beside a quoted one",
+			"output:\n    \"<<\": {mpd: \"on\"}\n    <<: {conf: /etc/merged.conf}\n    mpd: \"off\"\n" + player,
+			"output:\n", notCertain},
+		{"a key written as an alias in a block that does not load",
+			"output:\n    conf: &k mpd\n    *k : \"off\"\n    loopbackPort: maybe\n" + player,
+			"output:\n", notCertain},
+		{"a key with a tag in a block that does not load",
+			"output:\n    !!str mpd: \"off\"\n    loopbackPort: maybe\n" + player,
+			"output:\n", notCertain},
+		{"a block written twice, once as !!binary",
+			"output:\n    mpd: \"off\"\n" + player + "!!binary b3V0cHV0:\n    mpd: \"on\"\n",
+			"output:\n", []string{"output (lines ", "): it is written twice, which Load refuses, so none of it is kept"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wantDir := filepath.Join(t.TempDir(), "want")

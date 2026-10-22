@@ -176,17 +176,30 @@ func (p *OutputProblem) Error() string { return p.Setting + ": " + p.Why }
 
 // Problem is the refusal Validate makes of the output block, an
 // *OutputProblem, or nil: an output.mpd that is not auto, on or off, or an
-// output.loopbackPort that is not a port. The player block is never one
-// (PlayerEnabled turns the player off instead). bridge init's rewrite keeps
-// no setting it refuses.
+// output.loopbackPort that is not a port, the first of WithoutRefused's. The
+// player block is never one (PlayerEnabled turns the player off instead).
 func (o OutputConfig) Problem() error {
-	if o.Mode() == "" {
-		return &OutputProblem{Setting: "output.mpd", Why: "that value is not auto, on or off"}
-	}
-	if p := o.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
-		return &OutputProblem{Setting: "output.loopbackPort", Why: "that value is not a port (0 to 65535)"}
+	if _, refused := o.WithoutRefused(); len(refused) > 0 {
+		return refused[0]
 	}
 	return nil
+}
+
+// WithoutRefused is o less each setting Validate refuses, with the refusal
+// of each, in the order Problem checks them: what bridge init's rewrite
+// keeps of a block that decodes, which Load refuses for those settings
+// alone.
+func (o OutputConfig) WithoutRefused() (OutputConfig, []*OutputProblem) {
+	var refused []*OutputProblem
+	if o.Mode() == "" {
+		refused = append(refused, &OutputProblem{Setting: "output.mpd", Why: "that value is not auto, on or off"})
+		o.MPD = ""
+	}
+	if p := o.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
+		refused = append(refused, &OutputProblem{Setting: "output.loopbackPort", Why: "that value is not a port (0 to 65535)"})
+		o.LoopbackPort = nil
+	}
+	return o, refused
 }
 
 // MetricsConfig controls who may scrape /metrics without a session.
