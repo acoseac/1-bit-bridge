@@ -709,6 +709,28 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 	}
 }
 
+// TestTheReadingReadsMPDConfAgain: the player rewrites mpd.conf and
+// restarts MPD when its settings change (Volumio's volume options do), so
+// every reading reads the file again rather than keep the one it read
+// before.
+func TestTheReadingReadsMPDConfAgain(t *testing.T) {
+	c := piCaptures[0]
+	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	rig.cfg.Now = clock.Now
+	rig.cfg.AfterFunc = clock.AfterFunc
+	hs, token, id := rig.serve()
+	_, first, raw := getReading(t, hs, token, id)
+	wantVerdict(t, first, raw, signalpath.BitExact)
+	rig.writeConf(withOutputSetting(volumioConf(t, rig.music), "mixer_type", "software"))
+	clock.Advance(outputCacheTTL)
+	_, second, raw2 := getReading(t, hs, token, id)
+	wantVerdict(t, second, raw2, signalpath.Withheld, signalpath.MPDSoftwareVolume)
+	if second.MPD.Config.Output == nil || second.MPD.Config.Output.MixerType != "software" {
+		t.Fatalf("config %+v", second.MPD.Config)
+	}
+}
+
 // doPRig is a DSD64 file an output with dop on sends as DoP: 24-bit PCM at
 // 176.4 kHz on card 5 (synthetic, from the 96 kHz capture with its rate
 // changed in a copy), MPD's audio dsd64:2.
@@ -1297,6 +1319,12 @@ func TestAReadingNamesItsOutputByID(t *testing.T) {
 	_, got3, raw3 := getReading(t, hs3, token3, id)
 	if got3.State != "unknown" || !slices.Equal(got3.StateReasons, []string{signalpath.ProcUnreadable}) {
 		t.Fatalf("unreadable /proc: %s", raw3)
+	}
+	// Only an id of the right form is answered when the cards cannot say.
+	for _, bad := range []string{"abc", strings.ToUpper(id)} {
+		if code, _, raw := getReading(t, hs3, token3, bad); code != http.StatusNotFound || !jsonContains(raw, `"output_not_found"`) {
+			t.Fatalf("%s with /proc unreadable: status %d %s", bad, code, raw)
+		}
 	}
 
 	for _, gate := range []struct{ goos, mode string }{{"linux", "off"}, {"darwin", "on"}} {
