@@ -233,7 +233,8 @@ func TestADeadlineQueuedBehindItsAcknowledgementChangesNothing(t *testing.T) {
 // comes at or past it is late even when it reaches the owner before the
 // expiry does (the expiry's timer has not run yet): the call is treated as
 // failed, its session released with ReasonTimeout, and the command that
-// waited on it answers so.
+// waited on it answers so. The session's own Prepare is taken before the
+// clock moves, so that only the held call answers late.
 func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -258,7 +259,7 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 			},
 			func(h *harness) error { return h.eng.Play(bg) }},
 		{"pause", "pause", CallTimeout,
-			func(h *harness) { h.playing(0, "a", "b") },
+			func(h *harness) { h.playing(0, "a", "b"); h.waitApplied("handled call prepare", 0) },
 			func(h *harness, held gate, deadline func(context.Context)) {
 				h.be.onPause = func(ctx context.Context, _ *fakeSession) error {
 					deadline(ctx)
@@ -267,7 +268,11 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 			},
 			func(h *harness) error { return h.eng.Pause(bg) }},
 		{"resume", "resume", CallTimeout,
-			func(h *harness) { h.playing(0, "a", "b"); h.must("pause", h.eng.Pause(bg)) },
+			func(h *harness) {
+				h.playing(0, "a", "b")
+				h.waitApplied("handled call prepare", 0)
+				h.must("pause", h.eng.Pause(bg))
+			},
 			func(h *harness, held gate, deadline func(context.Context)) {
 				h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
 					deadline(ctx)

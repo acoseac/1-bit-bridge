@@ -60,6 +60,9 @@ func TestARefusedReopenStaysPausedWithTheReason(t *testing.T) {
 func TestAPausesReleaseThatNeverComesIsUnconfirmed(t *testing.T) {
 	h := startHarness(t)
 	h.playing(0, "a")
+	// The session's Prepare (nothing follows a) answers at once; the clock
+	// moves past its deadline only once the owner has taken that answer.
+	h.waitApplied("handled call prepare", 0)
 	h.must("pause", h.eng.Pause(bg))
 	h.clk.Advance(DefaultPauseRelease + ReleaseTimeout)
 	sn := h.waitSnap("the pause's release overdue", func(sn *Snapshot) bool { _, ok := sn.ReleaseUnconfirmed(); return ok })
