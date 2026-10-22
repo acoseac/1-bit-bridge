@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -603,6 +604,46 @@ func TestSaveAtomicRename(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".bridge-") {
 			t.Errorf("temp file leaked: %q", e.Name())
 		}
+	}
+}
+
+// TestSaveIfAsksJustBeforeTheRename: SaveIf asks unchanged once the new
+// file is staged beside the config, and an error from it comes back as it
+// is, the config left as it was and the staged file removed; nil saves.
+func TestSaveIfAsksJustBeforeTheRename(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bridge.yaml")
+	before := []byte("libraryName: Before\n")
+	if err := os.WriteFile(p, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged := func() []string {
+		names, err := filepath.Glob(filepath.Join(dir, ".bridge-*.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	cfg := &Config{LibraryName: "After"}
+	refused := errors.New("the file changed")
+	var asked []string
+	if err := cfg.SaveIf(p, func() error { asked = staged(); return refused }); err != refused {
+		t.Errorf("SaveIf returned %v, want unchanged's error as it is", err)
+	}
+	if len(asked) != 1 {
+		t.Errorf("staged when unchanged was asked: %q, want the new file", asked)
+	}
+	if after, err := os.ReadFile(p); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("a refused SaveIf changed the config: %q, %v", after, err)
+	}
+	if left := staged(); len(left) != 0 {
+		t.Errorf("a refused SaveIf left %q behind", left)
+	}
+	if err := cfg.SaveIf(p, func() error { return nil }); err != nil {
+		t.Fatalf("SaveIf: %v", err)
+	}
+	if after, err := os.ReadFile(p); err != nil || !bytes.Contains(after, []byte("libraryName: After")) {
+		t.Errorf("SaveIf did not save: %q, %v", after, err)
 	}
 }
 

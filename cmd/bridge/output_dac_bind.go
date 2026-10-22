@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -32,6 +34,10 @@ type outputBindEnv struct {
 	// and its taking the data dir's lock: the window a test lands another
 	// writer in.
 	beforeLock func()
+	// beforeSave, when set, runs between bind's read of the config under
+	// the lock and its save: the window a writer that takes no lock (library
+	// add or remove, init) can save in.
+	beforeSave func()
 }
 
 // outputDACBindingCmd is inspect and bind on this host.
@@ -436,6 +442,10 @@ func serialPhrase(label string) string {
 	return label
 }
 
+// errBindConfigChanged is bind's save refused because the config file no
+// longer holds the bytes bind read under the lock.
+var errBindConfigChanged = errors.New("the config changed after bind read it")
+
 // runDACBind is `bridge output dac bind <card> --binding
 // serial|uniqueModel|port`: it writes the binding for card's unit into the
 // config file's output.player.device, which Save writes 0600, keeping the
@@ -516,8 +526,15 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	// as it was read before it: a restore, or a serve's last settings save
 	// before it stopped, that committed in between would otherwise be
 	// written over with the older copy. The path is the one resolved
-	// above, so this reads that file again.
-	if cfg, _, err = loadCLIConfig(cfgPath); err != nil {
+	// above, so this reads that file again. read is the bytes this read
+	// parses, or older ones: the save replaces the file only while it still
+	// holds them, since library add and remove and init save it without the
+	// lock.
+	read, err := os.ReadFile(cfgPath)
+	if err == nil {
+		cfg, _, err = loadCLIConfig(cfgPath)
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
 		return 1
 	}
@@ -547,7 +564,21 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		return 1
 	}
 	cfg.Output.Player.Device = dev
-	if err := cfg.Save(cfgPath); err != nil {
+	if env.beforeSave != nil {
+		env.beforeSave()
+	}
+	err = cfg.SaveIf(cfgPath, func() error {
+		if now, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(now, read) {
+			return errBindConfigChanged
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errBindConfigChanged):
+		fmt.Fprintf(stderr, "%s: %s changed after bind read it, so the binding was not written: run bind again\n", cmd, cfgPath)
+		fmt.Fprintln(stderr, "  library add, library remove and init save the config without the data dir's lock, and bind does not write over what they saved.")
+		return 1
+	case err != nil:
 		fmt.Fprintf(stderr, "%s: save config: %v\n", cmd, err)
 		return 1
 	}

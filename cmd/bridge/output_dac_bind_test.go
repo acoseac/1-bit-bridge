@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -421,6 +423,83 @@ func TestOutputDACBindSavesTheConfigItReadUnderTheLock(t *testing.T) {
 			if cfg.LibraryName != "Restored" || cfg.Output.Player.Room != "Kitchen" || cfg.Output.Player.Device.Binding != config.BindingSerial {
 				t.Errorf("bind wrote over what landed before its lock: libraryName %q, room %q, binding %q",
 					cfg.LibraryName, cfg.Output.Player.Room, cfg.Output.Player.Device.Binding)
+			}
+		})
+	}
+}
+
+// TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead: library add and
+// remove and init save the config without the data dir's lock, so one of
+// them can save between bind's read under the lock and its own save. bind
+// replaces the file only while it still holds the bytes bind read: an
+// update, one of the same size whose modification time was put back (which
+// a look at the size and the time would miss), and a file removed are each
+// refused, and the file is left as the other writer left it.
+func TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead(t *testing.T) {
+	root := dacTree(t)
+	for _, tc := range []struct {
+		name string
+		// land is what the other writer does to the file at path, and
+		// returns what it left there, nil for no file.
+		land func(t *testing.T, path string) []byte
+	}{
+		{"an update", func(t *testing.T, path string) []byte {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b = append(b, "libraryName: Added\n"...)
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}},
+		{"an update of the same size, its modification time put back", func(t *testing.T, path string) []byte {
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b = bytes.Replace(b, []byte("room: Study"), []byte("room: Stody"), 1)
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if again, err := os.Stat(path); err != nil || again.Size() != st.Size() || !again.ModTime().Equal(st.ModTime()) {
+				t.Fatalf("premise: the size and the time are not as they were: %v", err)
+			}
+			return b
+		}},
+		{"the file removed", func(t *testing.T, path string) []byte {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := dacConfig(t, "  player:\n    room: Study\n")
+			var landed []byte
+			env := dacEnv()
+			env.beforeSave = func() { landed = tc.land(t, cfgPath) }
+			out, errOut, code := runDAC(t, env, append([]string{"bind", "5", "--binding", "serial", "--config", cfgPath}, treeFlags(root)...)...)
+			if code != 1 || !strings.Contains(errOut, "changed after bind read it") || !strings.Contains(errOut, "run bind again") {
+				t.Errorf("exit %d, stdout %q, stderr %q; want a refusal saying the file changed", code, out, errOut)
+			}
+			after, err := os.ReadFile(cfgPath)
+			switch {
+			case landed == nil && !errors.Is(err, fs.ErrNotExist):
+				t.Errorf("the removed config is back: %v\n%s", err, after)
+			case landed != nil && !bytes.Equal(after, landed):
+				t.Errorf("bind wrote over the update; the file is\n%s", after)
+			}
+			if dacLeaks(out+errOut, dacSerial) {
+				t.Errorf("the refusal printed the serial:\n%s%s", out, errOut)
 			}
 		})
 	}

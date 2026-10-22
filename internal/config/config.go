@@ -4253,6 +4253,21 @@ func (c *Config) VariantSweepMaxDeletePercent() int {
 // preserved — callers that want to keep hand-authored comments should not
 // use Save. `bridge init` and admin-console edits are the intended callers.
 func (c *Config) Save(path string) error {
+	return c.save(path, nil)
+}
+
+// SaveIf is Save, asking unchanged once the new file is staged, just before
+// it replaces path: when unchanged returns an error, path is left as it is,
+// the staged file is removed, and that error is returned as it is. A writer
+// that cannot hold off every other writer (library add and remove and init
+// take no lock) asks whether the file still holds what it read, so a save
+// made since is not written over (bridge output dac bind).
+func (c *Config) SaveIf(path string, unchanged func() error) error {
+	return c.save(path, unchanged)
+}
+
+// save is Save, with SaveIf's unchanged when it is not nil.
+func (c *Config) save(path string, unchanged func() error) error {
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -4288,6 +4303,11 @@ func (c *Config) Save(path string) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
+	}
+	if unchanged != nil {
+		if err := unchanged(); err != nil {
+			return err
+		}
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("rename: %w", err)
