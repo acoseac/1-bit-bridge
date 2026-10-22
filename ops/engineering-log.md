@@ -51224,3 +51224,109 @@ round-2 bullet widened to the whole config path, and the tally of claims
 found wrong in CLAUDE.md and History-Workflow.md, nineteen to twenty-one
 (round 2's "resolves as the decoder does" and "an output refusal names the
 setting, never its value").
+
+**Round 4 (Codex and the Claude API on round 3; Argon unavailable): four
+findings; two fixed, one declined by the orchestrator's decision, one
+rejected on evidence.** The orchestrator, before the round: Codex's first
+is a correctness bug, fix it by decoding the unchanged bytes into
+config.Config the way Load does (no defaults, no environment overrides)
+and taking its output, partial recovery only when that decode fails;
+Codex's second, fix it, naming an unknown control by its index with a fixed
+explanation; Codex's third, decline it and narrow the rule, since a path the
+operator configured is what they need to find and fix and paths are not
+secrets the config path guards; and the Claude API's Low, fix it with a
+guard. Verified against the code, the Low is not real, so it is rejected
+with the measurement below and only its guard is taken.
+
+1. *A block Load takes was dropped, by yaml.v3's alias counting (Codex,
+P2).* yaml.v3 counts alias expansions across the whole document and refuses
+one where they pass 99 in 100 decodes (`allowedAliasRatio`, under 400,000
+decodes). Round 3 decoded the output block on its own, so nothing outside
+it counted. Codex's case, measured: 1,000 `libraryRoots` entries, then an
+output block with a password and a merge sequence of five maps, `&a {}` and
+each next one merging the one before ten times. Load takes it with
+`password: saved-pw`; round 3's `priorOutput` met "excessive aliasing" in
+the block's decode, fell to its certainty recovery, met the merge key and
+kept nothing. Fix eb10c4d5: `outputAsLoadDecodes` decodes the bytes as Load
+does, the same decoder set the same way into `config.Config`, before
+Load's defaults, overrides, paths and checks, and when that decode takes
+the whole file, its output block is kept, less what `WithoutRefused`
+refuses; the warning lines come from `outputNode`, the node the decoder
+hands the output field, read without decoding a value. Only a file the
+decoder refuses somewhere goes on to round 3's reading. Red on 76ac8bb1:
+`TestPriorOutputResolvesMergeKeysAsLoadDoes`'s new whole-config shape
+(Codex's), the password dropped; its three other whole-config shapes (1,000
+roots beside a player and merged MPD settings, 200 custom endpoints and 100
+upstream servers whose anchors the block aliases, a top-level merge naming
+the block) pass on both, guards. Control on eb10c4d5: the Load decode
+skipped, red in exactly Codex's shape.
+
+2. *An unknown managed control was printed as written (Codex, P2).*
+`madeElsewhere` joined `deployment.managedControls` into the refusal
+`refuseRewrite` prints, and serve's startup warning logged the unknown
+names; with a password pasted onto the list's line, both printed it whole.
+Fix 619f37bb: `UnknownManagedControls` returns each unknown entry by its
+place, `deployment.managedControls[1]`; the warning logs those under
+`entries` beside the known names, a fixed set, and init names the known
+controls as they are and each other entry by its place with the fixed "not
+a control this build knows" (`managedControlsSaid`). Red first:
+`TestUnknownManagedControlsAreNamed` (the names returned),
+`TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`, the real
+init, the password printed whole, and
+`TestServeNamesAManagedControlItDoesNotKnowByItsPlace`, the real serve,
+`names=p4ssw0rd-kitchen` in the warning. Controls on 619f37bb: the entry's
+text back in `UnknownManagedControls`, red in all three; init joining the
+list as written, red in the init test alone.
+
+3. *Filesystem errors name configured paths (Codex, P2): declined, by the
+orchestrator's decision.* True as described: `LibraryRootError` prints the
+root's path and the `os.PathError` that repeats it, which serve prints in
+loopback mode and logs in public mode, and init prints `mkdir data dir:`
+with its path. A path the operator configured is what they need to find and
+fix a missing root or an unwritable data directory, and a path is not a
+secret the config path guards. The rule round 3 wrote ("carries any part of
+a value or a key") promised more than this, and it is narrowed to what the
+code guarantees: no password, token, serial, URL credential, value a
+setting refused, entry of a list this build does not know, or key, in any
+refusal, warning or log line, configured paths left out. The sweep
+`TestNoLoadRefusalOrWarningCarriesAValue` holds Load to more than the rule,
+paths included, which is what Load does.
+
+4. *"line N+1" in "field X already set" (the Claude API, Low): rejected.*
+The finding read yaml.v3 v3.0.1 as printing `ni.Line+1` there. The module
+cache's decode.go:924 prints `ni.Line`, and v3's node lines are 1-based (the
++1 is yaml.v2's, whose were 0-based). Measured through `Decode` into
+`config.Config`: a `!!binary bXBk` key and a `*k` alias key, each on line 7
+beside a plain `mpd` on line 6, are refused as "line 7: field mpd already
+set in type config.OutputConfig", and an output block written twice, its
+`!!binary` key on line 4, as "line 4: field output already set in type
+config.Config". The test gap it named is real, so 58e99c18 adds the guard:
+`TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine` holds yaml.v3's
+own message and Load's to the second key's own line for the three shapes. It
+passes on the code as it stands; the control is the finding's proposed fix,
+the line less one, red in all three shapes, where Load would point at the
+plain key before it.
+
+**Decisions.** For a file the decoder refuses, round 3's reading of the
+block on its own stays before the certainty recovery: its values are the
+decoder's, and what it does not count can only make it refuse more, so it
+keeps nothing it should not; a file with a misspelt key elsewhere, the
+config init is run again to replace, keeps its merged output block that
+way. The orchestrator's decisions are in the round-4 rules note too
+(cli-serve.md and config-lifecycle.md).
+
+**Stress runs and gate.** `internal/config` under `-race -count=10
+-shuffle=1792700001` (18 s), and cmd/bridge's `TestInit`,
+`TestPriorInstall`, `TestPriorOutput` and
+`TestServeNamesAManagedControl` tests under `-race -count=10
+-shuffle=1792700002` (107 s), both passed; then `make fmt vet test
+build-all docs-check` at 58e99c18 with this entry uncommitted, clean (`go
+fmt` rewrote nothing), all in one slot of the build lock.
+
+**Rules.** Round 4's note, OLD/NEW against 76ac8bb1: cli-serve.md's line
+and its long form for Load's own decode of a file that decodes and for the
+managed-control refusal, config-lifecycle.md's managed-controls bullet for
+the warning's entries and round 3's bullet narrowed to what the code
+guarantees, and the tally of claims found wrong, twenty-one to
+twenty-three (round 3's "a block yaml.v3 does not decode is one Load
+refuses" and "carries any part of a value or a key").
