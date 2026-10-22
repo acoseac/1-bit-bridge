@@ -3,6 +3,7 @@ package alsa
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -17,6 +18,12 @@ import (
 
 // sysfsManifest is a manifest in testdata/sysfs.
 func sysfsManifest(name string) string { return filepath.Join("testdata", "sysfs", name+".txt") }
+
+// The GO bar's USB device in pi5-go-bar, and the root hub above it.
+const (
+	goBarHub    = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1"
+	goBarDevice = goBarHub + "/1-1"
+)
 
 // readSysfs builds a manifest's tree and reads its sysfs half.
 func readSysfs(t *testing.T, name string) (SysfsSnapshot, string) {
@@ -184,6 +191,70 @@ link sys/class/sound/card10 !`+filepath.ToSlash(string(filepath.Separator))+`etc
 	}
 }
 
+// TestSysfsRefusesALinkSwappedInAfterItsCheck: an attribute, or the unit's
+// directory above one, swapped for a link out of the tree after the reader
+// looked at the attribute and before it opened it, is refused at the open:
+// nothing of the outside is read, and the card is unreadable, naming the
+// attribute.
+func TestSysfsRefusesALinkSwappedInAfterItsCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege this test does not have")
+	}
+	const secret = "OUTSIDE-SERIAL-0001"
+	for _, tc := range []struct {
+		name string
+		// at is the attribute the swap waits for, and swap what the link
+		// replaces: that attribute, or the unit's directory.
+		at, swap string
+		outside  map[string]string
+	}{
+		{"an attribute", "idVendor", goBarDevice + "/idVendor", map[string]string{"": "dead\n"}},
+		{"the unit's directory", "serial", goBarDevice,
+			map[string]string{"idVendor": "dead\n", "idProduct": "beef\n", "serial": secret + "\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			target := filepath.Join(t.TempDir(), "outside")
+			if text, ok := tc.outside[""]; ok {
+				if err := os.WriteFile(target, []byte(text), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeTree(t, target, tc.outside)
+			}
+			at := filepath.Join(root, filepath.FromSlash(tc.swap))
+			var once sync.Once
+			var swapped bool
+			var swapErr error
+			r := SysfsReader{Root: filepath.Join(root, "sys"), beforeOpen: func(rel string) {
+				if path.Base(rel) != tc.at {
+					return
+				}
+				once.Do(func() {
+					swapped = true
+					if swapErr = os.Rename(at, at+".before"); swapErr == nil {
+						swapErr = os.Symlink(target, at)
+					}
+				})
+			}}
+			c, ok := r.Card(5)
+			if swapErr != nil {
+				t.Fatal(swapErr)
+			}
+			if !swapped {
+				t.Fatalf("the reading never came to %s", tc.at)
+			}
+			probs := strings.Join(c.Problems, "; ")
+			if !ok || c.Kind != IdentityUnreadable || c.USB != nil || !strings.Contains(probs, tc.at+": ") {
+				t.Errorf("card 5 with %s swapped: %+v, %v", tc.at, c, ok)
+			}
+			if strings.Contains(probs, secret) || strings.Contains(probs, "dead") {
+				t.Errorf("the problems quote the outside: %s", probs)
+			}
+		})
+	}
+}
+
 // TestSysfsAnchorsOnlyWhatTheGrammarNames: a controller under a subsystem
 // the port grammar does not name leaves a USB card without a port, said
 // so, and still identified by its ids and serial.
@@ -247,7 +318,7 @@ func TestSysfsCapsTheCardsAndTheDevices(t *testing.T) {
 		m.WriteString("usbcard " + itoa(i) + " " + dev + "/1-" + itoa(i) + ":1.0\n")
 	}
 	root := sysfstest.BuildText(t, m.String())
-	r := SysfsReader{Root: filepath.Join(root, "sys"), limits: &sysfsLimits{entries: 4, file: maxSysfsFile, links: maxSysfsLinks, hops: maxSysfsHops}}
+	r := SysfsReader{Root: filepath.Join(root, "sys"), limits: &sysfsLimits{entries: 4, file: maxSysfsFile, links: maxLinks, hops: maxHops}}
 	snap := r.Read()
 	if len(snap.Cards) > 4 || len(snap.Devices) > 4 || !strings.Contains(strings.Join(snap.Problems, "; "), "more than 4") {
 		t.Errorf("cards %d, devices %d, problems %q", len(snap.Cards), len(snap.Devices), snap.Problems)

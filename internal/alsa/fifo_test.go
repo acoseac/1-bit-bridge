@@ -24,12 +24,6 @@ import (
 // returns in milliseconds.
 const fifoWatchdog = 5 * time.Second
 
-// The GO bar's USB device in pi5-go-bar, and the root hub above it.
-const (
-	goBarHub    = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1"
-	goBarDevice = goBarHub + "/1-1"
-)
-
 // plantFIFO replaces rel, under root, with a FIFO, and returns its path.
 func plantFIFO(root, rel string) (string, error) {
 	p := filepath.Join(root, filepath.FromSlash(rel))

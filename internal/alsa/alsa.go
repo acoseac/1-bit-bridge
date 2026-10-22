@@ -31,7 +31,6 @@ package alsa
 
 import (
 	"fmt"
-	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,23 +163,18 @@ const maxFileBytes = 1 << 20
 // most 16 bytes, and a status about 1.5 KiB.
 const maxProcFileBytes = 64 << 10
 
-// readCapped reads a whole file, refusing one longer than limit bytes. A
-// /proc file reports size 0 to stat, so the limit is applied to what is
-// read, not to what the file claims. It opens without blocking and reads
-// only what opened as a regular file (openRegular), so a FIFO in a
-// --proc-root tree is refused, never waited on.
+// readCapped reads a whole file at path, refusing one longer than limit
+// bytes: the ALSA configuration files, which name the host's own etc/ or a
+// captured tree's and are not confined to a tree (a /proc or sysfs file is
+// read through one: tree.readFile). A /proc file reports size 0 to stat,
+// so the limit is applied to what is read, not to what the file claims. It
+// opens without blocking and reads only what opened as a regular file
+// (openRegular), so a FIFO there is refused, never waited on.
 func readCapped(path string, limit int64) ([]byte, error) {
 	f, err := openRegular(pathOpener(path))
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("longer than %d bytes", limit)
-	}
-	return b, nil
+	return readAllCapped(f, limit)
 }

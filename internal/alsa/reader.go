@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -17,13 +16,20 @@ import (
 const DefaultProcRoot = "/proc"
 
 // Reader takes readings of a /proc tree: the host's by default, or one
-// captured from another box, which is how the tests run on every OS.
+// captured from another box, which is how the tests run on every OS. It
+// reads its two roots through a tree each, so nothing it opens, lists or
+// prints lies outside them, whatever the trees do while it reads.
 type Reader struct {
 	// ProcRoot is the /proc tree a substream's owner is looked up in; ""
 	// means DefaultProcRoot.
 	ProcRoot string
 	// AsoundRoot is the ALSA tree; "" means ProcRoot's asound directory.
 	AsoundRoot string
+	// beforeOpen, when set, is called with a file's or a directory's path
+	// in a raw dump (asound/card5/stream0, 6584/status) after the path is
+	// resolved and before it is opened or listed: the window a test swaps a
+	// link in.
+	beforeOpen func(path string)
 }
 
 // Snapshot is one reading of every card.
@@ -158,10 +164,12 @@ func (r Reader) roots() (procRoot, asoundRoot string) {
 }
 
 // read is Read, handing each file it reads to collect when collect is not
-// nil, and then also reading the files only a raw dump wants.
+// nil, and then also reading the files only a raw dump wants. It reads only
+// through the two roots, each opened once as a tree, so every file and
+// directory it reaches is inside its root when it is opened.
 func (r Reader) read(collect collector) (Snapshot, error) {
 	procRoot, asoundRoot := r.roots()
-	t := walk{procRoot: procRoot, asoundRoot: asoundRoot, collect: collect, raw: collect != nil}
+	t := walk{collect: collect, raw: collect != nil, beforeOpen: r.beforeOpen}
 	if t.collect == nil {
 		t.collect = func(string, []byte, error) {}
 	}
@@ -172,7 +180,13 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 			return snap, fmt.Errorf("read %s: %w", path, err)
 		}
 	}
-	b, err := readUnderRoot(asoundRoot, path, maxFileBytes)
+	asound, err := openTree(asoundRoot, maxLinks, maxHops)
+	var b []byte
+	if err == nil {
+		defer asound.close()
+		t.asound = asound
+		b, err = asound.readFile("cards", maxFileBytes, t.hook("asound/cards"))
+	}
 	if err != nil {
 		// The path once: a *fs.PathError would name it again. What it
 		// wraps still answers errors.Is(err, fs.ErrNotExist).
@@ -181,6 +195,11 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 			err = pe.Err
 		}
 		return snap, fmt.Errorf("read %s: %w", path, err)
+	}
+	// A /proc tree that cannot be opened leaves every owner unknown, as a
+	// task's entry that cannot be read does (procFile).
+	if t.proc, t.procErr = openTree(procRoot, maxLinks, maxHops); t.procErr == nil {
+		defer t.proc.close()
 	}
 	t.collect("asound/cards", b, nil)
 	cards, probs := ParseCards(b)
@@ -193,20 +212,31 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 
 // walk is one reading in progress.
 type walk struct {
-	procRoot, asoundRoot string
-	collect              collector
-	raw                  bool
+	// asound is the ALSA tree, and proc the tree an owner is looked up in;
+	// procErr is why proc could not be opened, and proc is nil then.
+	asound, proc *tree
+	procErr      error
+	collect      collector
+	raw          bool
+	beforeOpen   func(path string)
+}
+
+// hook is the Reader's beforeOpen for path, nil when there is none.
+func (t walk) hook(path string) func() {
+	if t.beforeOpen == nil {
+		return nil
+	}
+	return func() { t.beforeOpen(path) }
 }
 
 // card reads one card's directory.
 func (t walk) card(c Card) CardReading {
 	cr := CardReading{Card: c, Devices: []Device{}, Problems: []string{}}
 	dirName := "card" + strconv.Itoa(c.Index)
-	dir := filepath.Join(t.asoundRoot, dirName)
 	// read reads a file under the card. A missing one is absent; any
 	// other failure is a problem, and the file is absent too.
 	read := func(rel string) ([]byte, bool) {
-		b, err := readUnderRoot(t.asoundRoot, filepath.Join(dir, filepath.FromSlash(rel)), maxFileBytes)
+		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				cr.Problems = append(cr.Problems, dirName+"/"+rel+": "+errText(err))
@@ -222,7 +252,7 @@ func (t walk) card(c Card) CardReading {
 		if !t.raw {
 			return
 		}
-		b, err := readUnderRoot(t.asoundRoot, filepath.Join(dir, filepath.FromSlash(rel)), maxFileBytes)
+		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
 		if err == nil || !errors.Is(err, fs.ErrNotExist) {
 			t.collect("asound/"+dirName+"/"+rel, b, err)
 		}
@@ -230,6 +260,20 @@ func (t walk) card(c Card) CardReading {
 	note := func(rel string, probs []string) {
 		cr.Problems = append(cr.Problems, prefixed(dirName+"/"+rel, probs)...)
 	}
+	// is reports whether what rel names under the card, its links followed
+	// inside the tree, is what want asks. DirEntry.IsDir reports a link
+	// itself, so a tree that links pcmNp or subM would otherwise have no
+	// playback device. A link that leaves the tree is kept, so the read or
+	// the listing it was kept for reports the refusal.
+	is := func(rel string, want func(fs.FileInfo) bool) bool {
+		info, err := t.asound.stat(dirName + "/" + rel)
+		if err != nil {
+			return errors.Is(err, errOutsideRoot)
+		}
+		return want(info)
+	}
+	regular := func(fi fs.FileInfo) bool { return fi.Mode().IsRegular() }
+	directory := func(fi fs.FileInfo) bool { return fi.IsDir() }
 
 	if b, ok := read("usbid"); ok && len(bytes.TrimSpace(b)) > 0 {
 		if id, err := ParseUSBID(b); err != nil {
@@ -239,7 +283,7 @@ func (t walk) card(c Card) CardReading {
 		}
 	}
 
-	entries, err := readDirUnder(t.asoundRoot, dir)
+	entries, err := t.asound.readDir(dirName, t.hook("asound/"+dirName))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			cr.Problems = append(cr.Problems, dirName+": "+errText(err))
@@ -248,18 +292,12 @@ func (t walk) card(c Card) CardReading {
 	}
 	streams, pcms := map[int]bool{}, map[int]bool{}
 	for _, e := range entries {
-		// streamN is a regular file and pcmNp a directory, followed
-		// through a symlink. DirEntry.IsDir reports the link itself, so
-		// a tree that links them would otherwise have no playback device.
-		// A stream whose target is not a regular file is not one.
-		info, err := os.Stat(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if n, ok := numbered(streamName, "stream", e.Name()); ok && info.Mode().IsRegular() {
+		// streamN is a regular file and pcmNp a directory: a stream whose
+		// target is not a regular file is not one.
+		if n, ok := numbered(streamName, "stream", e.Name()); ok && is(e.Name(), regular) {
 			streams[n] = true
 		}
-		if n, ok := numbered(pcmPlaybackName, "pcm", e.Name()); ok && info.IsDir() {
+		if n, ok := numbered(pcmPlaybackName, "pcm", e.Name()); ok && is(e.Name(), directory) {
 			pcms[n] = true
 		}
 	}
@@ -282,21 +320,15 @@ func (t walk) card(c Card) CardReading {
 		}
 		pcmRel := "pcm" + strconv.Itoa(n) + "p"
 		rawOnly(pcmRel + "/info")
-		subs, err := readDirUnder(t.asoundRoot, filepath.Join(dir, pcmRel))
+		subs, err := t.asound.readDir(dirName+"/"+pcmRel, t.hook("asound/"+dirName+"/"+pcmRel))
 		if err != nil {
 			cr.Problems = append(cr.Problems, dirName+"/"+pcmRel+": "+errText(err))
 		}
 		subNums := map[int]bool{}
 		for _, e := range subs {
-			m, ok := numbered(subName, "sub", e.Name())
-			if !ok {
-				continue
+			if m, ok := numbered(subName, "sub", e.Name()); ok && is(pcmRel+"/"+e.Name(), directory) {
+				subNums[m] = true
 			}
-			info, err := os.Stat(filepath.Join(dir, pcmRel, e.Name()))
-			if err != nil || !info.IsDir() {
-				continue
-			}
-			subNums[m] = true
 		}
 		for _, m := range sortedKeys(subNums) {
 			base := pcmRel + "/sub" + strconv.Itoa(m) + "/"
@@ -401,7 +433,11 @@ func (t walk) comm(id int) (string, bool) {
 // procFile reads a file under the proc root. A failure is never a
 // problem: it leaves the owner unknown.
 func (t walk) procFile(rel string) ([]byte, bool) {
-	b, err := readUnderRoot(t.procRoot, filepath.Join(t.procRoot, filepath.FromSlash(rel)), maxProcFileBytes)
+	var b []byte
+	err := t.procErr
+	if t.proc != nil {
+		b, err = t.proc.readFile(rel, maxProcFileBytes, t.hook(rel))
+	}
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.collect(rel, nil, err)
@@ -462,58 +498,6 @@ func prefixed(file string, probs []string) []string {
 		out = append(out, file+": "+p)
 	}
 	return out
-}
-
-// errOutsideRoot is a path that resolved outside the root it was read
-// under. The file is not opened, so a symlink in a --proc-root tree
-// cannot make --raw print something from the rest of the filesystem.
-// The message names no target path.
-var errOutsideRoot = errors.New("path leaves the root")
-
-// staysInRoot reports whether path, after following symlinks, is the root
-// or a file inside it. A path that is not there returns that error, which
-// is fs.ErrNotExist, so a card with no directory stays a quiet absence.
-// Both sides are made absolute first: a link to an absolute target would
-// otherwise be absolute while the root is still relative, and Rel refuses
-// the pair. On macOS that also folds /var and /tmp onto /private.
-func staysInRoot(root, path string) error {
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	path, err = filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return err
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(resolvedRoot, resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return errOutsideRoot
-	}
-	return nil
-}
-
-// readUnderRoot reads path only when it stays inside root.
-func readUnderRoot(root, path string, limit int64) ([]byte, error) {
-	if err := staysInRoot(root, path); err != nil {
-		return nil, err
-	}
-	return readCapped(path, limit)
-}
-
-// readDirUnder lists path only when it stays inside root.
-func readDirUnder(root, path string) ([]fs.DirEntry, error) {
-	if err := staysInRoot(root, path); err != nil {
-		return nil, err
-	}
-	return os.ReadDir(path)
 }
 
 // errText is an error without the path a *fs.PathError repeats, since a
