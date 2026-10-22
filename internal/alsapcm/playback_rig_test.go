@@ -59,24 +59,50 @@ type files struct {
 	fail    map[string]error
 	opened  []*tracked
 	block   map[string]chan struct{} // an open that waits for the channel's close
+	changed chan struct{}            // closed and replaced at each content's close
 }
 
 func newFiles() *files {
-	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{}}
+	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{}, changed: make(chan struct{})}
 }
 
 // tracked is one content the resolver handed out.
 type tracked struct {
 	ref    string
 	closed bool
-	mu     *sync.Mutex
+	f      *files
 }
 
 func (c *tracked) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
 	c.closed = true
+	close(c.f.changed)
+	c.f.changed = make(chan struct{})
 	return nil
+}
+
+// fed waits until the producer has given the sink every frame of ref: it
+// closes an occurrence's content at its decoder's end. A grant of
+// simulated time plays at once, faster than any producer decodes, so a test
+// that grants more than the hardware buffer holds waits for this first, or
+// the fake DAC runs dry.
+func (f *files) fed(t *testing.T, ref string) {
+	t.Helper()
+	waitOn(t, "every frame of "+ref+" in the sink", func() <-chan struct{} {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.changed
+	}, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, c := range f.opened {
+			if c.ref == ref && c.closed {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func (f *files) add(ref string, b []byte) {
@@ -104,7 +130,7 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	if !ok {
 		return playback.Content{}, fmt.Errorf("no file %q", ref)
 	}
-	c := &tracked{ref: ref.String(), mu: &f.mu}
+	c := &tracked{ref: ref.String(), f: f}
 	f.mu.Lock()
 	f.opened = append(f.opened, c)
 	f.mu.Unlock()

@@ -386,11 +386,13 @@ func (s *session) closeOutput(out *output) {
 
 // drainOutput has out play everything submitted. A paused sink holds what
 // it was given, so a drain it refuses for its pause waits for the resume,
-// asking again when its state has changed since the refusal.
+// asking again when its state has changed since the refusal. The drain is
+// a call (call): a sink whose writer the kernel holds answers no command,
+// and the producer leaves at the session's release all the same.
 func (s *session) drainOutput(out *output) error {
 	for {
 		changed := out.sink.Changed()
-		err := out.sink.Drain(s.ctx)
+		err := s.call(s.ctx, func() error { return out.sink.Drain(s.ctx) })
 		switch {
 		case err == nil:
 			return nil
@@ -850,11 +852,12 @@ func (s *session) release(ctx context.Context) error {
 }
 
 // teardown waits for Start, joins the session's goroutines, closes every
-// sink it opened and every decoder and content, ends its hold of the device,
-// and acknowledges the release: at once when Release still waits, through
-// Events.Released when Release has answered its context's error. A sink the
-// kernel holds in a call keeps it in Close, abandoned, and the release is
-// never acknowledged: the session still holds the device.
+// decoder and content and then every sink it opened, ends its hold of the
+// device, and acknowledges the release: at once when Release still waits,
+// through Events.Released when Release has answered its context's error. A
+// sink the kernel holds in a call keeps it in Close, abandoned, its files
+// already closed, and the release is never acknowledged: the session still
+// holds the device.
 func (s *session) teardown() {
 	s.mu.Lock()
 	started := s.started
@@ -864,6 +867,9 @@ func (s *session) teardown() {
 	}
 	s.wg.Wait()
 	s.mu.Lock()
+	for _, o := range s.chain {
+		closeOcc(o)
+	}
 	outs := slices.Clone(s.outs)
 	if s.handed != nil {
 		outs = append(outs, s.handed)
@@ -877,11 +883,6 @@ func (s *session) teardown() {
 	for _, out := range outs {
 		s.closeOutput(out)
 	}
-	s.mu.Lock()
-	for _, o := range s.chain {
-		closeOcc(o)
-	}
-	s.mu.Unlock()
 	s.b.letGo(s, started)
 	s.mu.Lock()
 	close(s.down)
