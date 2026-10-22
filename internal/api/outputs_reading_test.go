@@ -911,6 +911,40 @@ func TestReadingSettles(t *testing.T) {
 			}
 		})
 	}
+
+	// While MPD plays, a song identity one of the three replies does not
+	// give is not shown to be the song the others name.
+	unnamed := map[string]func(*scriptedMPD){
+		"currentsong names no song id": func(m *scriptedMPD) { m.current = withoutPair(m.current, "Id") },
+		"the status reads name no song id": func(m *scriptedMPD) {
+			m.statuses = []mpd.Reply{withoutPair(captured, "songid")}
+			m.current = withoutPair(m.current, "Id")
+		},
+	}
+	for name, change := range unnamed {
+		t.Run(name, func(t *testing.T) {
+			rig := newReadingRig(t, c.name, c.file, c.track, captured)
+			hs, token, id := rig.serve()
+			rig.mpd.restart(captured)
+			rig.mpd.set(change)
+			_, got, raw := getReading(t, hs, token, id)
+			if got.State != "settling" || !slices.Equal(got.StateReasons, []string{signalpath.SongChanged}) {
+				t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
+			}
+			wantVerdict(t, got, raw, signalpath.Withheld, signalpath.SongChanged)
+		})
+	}
+}
+
+// withoutPair returns r without any line whose key is key.
+func withoutPair(r mpd.Reply, key string) mpd.Reply {
+	out := mpd.Reply{Pairs: []mpd.Pair{}}
+	for _, p := range r.Pairs {
+		if p.Key != key {
+			out.Pairs = append(out.Pairs, p)
+		}
+	}
+	return out
 }
 
 // TestTheReadingIsReadThroughForHalfASecond: one reading serves every call

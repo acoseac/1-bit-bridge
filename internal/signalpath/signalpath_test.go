@@ -1,6 +1,7 @@
 package signalpath
 
 import (
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -157,6 +158,10 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"DoP off", dop, func(f *Facts) { f.MPD.Output.DoP = false }, []string{DSDConvertedToPCM}},
 		{"DoP in 16 bits", dop, func(f *Facts) { f.PCM.Format = "S16_LE" }, []string{DoPContainerTooNarrow}},
 		{"DoP at the wrong rate", dop, func(f *Facts) { f.PCM.Rate = 88200 }, []string{RateMismatch}},
+		// A rate whose sixteenfold wraps to the DSD rate in an int: 2^60 +
+		// 176400 on a 64-bit int, 2^28 + 176400 on a 32-bit one.
+		{"DoP at a rate whose sixteenfold wraps to the DSD rate", dop, func(f *Facts) { f.PCM.Rate = math.MaxInt>>3 + 1 + 176400 }, []string{RateMismatch}},
+		{"DoP for a DSD rate that is not a multiple of 16", dop, func(f *Facts) { f.Audio = "352801:dsd:2"; f.Source.SampleRate = 2822408 }, []string{RateMismatch}},
 		{"DoP unsigned", dop, func(f *Facts) { f.PCM.Format = "U24_3LE" }, []string{FormatMismatch}},
 		{"DoP through a plug into 32 bits", dop, func(f *Facts) {
 			f.MPD.Output.Stages = volumioChain
@@ -322,6 +327,14 @@ func TestSettling(t *testing.T) {
 		{"a seek forward", play("12", "10.0"), play("12", "70.0"), 5 * time.Millisecond, []string{Seeked}},
 		{"a seek back", play("12", "70.0"), play("12", "10.0"), 5 * time.Millisecond, []string{Seeked}},
 		{"a seek back to the start", play("12", "70.0"), play("12", "0.1"), 5 * time.Millisecond, []string{Seeked, SongStarting}},
+		// Inside the half second either way, but backwards: MPD's elapsed
+		// never goes back while it plays on.
+		{"a small seek back", play("12", "4.8"), play("12", "4.7"), 5 * time.Millisecond, []string{Seeked}},
+		{"elapsed that stands still", play("12", "4.8"), play("12", "4.8"), time.Millisecond, nil},
+		// A song identity neither read gives cannot be shown to be one song.
+		{"no song id while playing", Status{State: "play", Elapsed: "5.000"}, Status{State: "play", Elapsed: "5.006"}, 6 * time.Millisecond, []string{SongChanged}},
+		{"a song id that does not read", play("x", "5.000"), play("x", "5.006"), 6 * time.Millisecond, []string{SongChanged}},
+		{"no song id in the second read", play("12", "5.000"), Status{State: "play", Elapsed: "5.006"}, 6 * time.Millisecond, []string{SongChanged}},
 		{"a pause and resume between", play("12", "10.0"), play("12", "10.0"), 900 * time.Millisecond, []string{Seeked}},
 		{"no elapsed while playing", play("12", ""), play("12", "5"), time.Millisecond, []string{SongStarting}},
 		{"an elapsed that does not read", play("12", "5"), play("12", "x"), time.Millisecond, []string{SongStarting}},

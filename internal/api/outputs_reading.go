@@ -737,7 +737,8 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 }
 
 // readingSettling is the settling codes: the two status reads, and the
-// song currentsong named between them.
+// song currentsong named between them, which while MPD plays must be the
+// song both reads name, by an id it gives.
 func readingSettling(s *readingSnap) []string {
 	status := func(r mpd.Reply) signalpath.Status {
 		state, _ := r.Get("state")
@@ -746,10 +747,11 @@ func readingSettling(s *readingSnap) []string {
 		return signalpath.Status{State: state, SongID: song, Elapsed: elapsed}
 	}
 	codes := signalpath.Settling(status(s.before), status(s.after), s.between)
-	if id, ok := s.current.Get("Id"); ok {
-		if after, _ := s.after.Get("songid"); after != id {
-			codes = append(codes, signalpath.SongChanged)
-		}
+	id, ok := s.current.Get("Id")
+	after, _ := s.after.Get("songid")
+	state, _ := s.after.Get("state")
+	if (ok || state == "play") && (!ok || after != id) {
+		codes = append(codes, signalpath.SongChanged)
 	}
 	return signalpath.Sorted(codes)
 }

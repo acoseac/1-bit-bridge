@@ -54,10 +54,11 @@ const (
 	// StateChanged: MPD's state differed between the status read before
 	// the /proc read and the one after it.
 	StateChanged = "state_changed"
-	// SongChanged: MPD's songid differed between the two reads.
+	// SongChanged: MPD's songid differed between the two reads, currentsong
+	// named another song, or one of them named no song id while MPD plays.
 	SongChanged = "song_changed"
-	// Seeked: elapsed moved by more than the time between the two reads
-	// allows, or went back.
+	// Seeked: elapsed went back, by however little, or moved forward by
+	// more than the time between the two reads allows.
 	Seeked = "seeked"
 	// SongStarting: elapsed was under half a second, or not given while
 	// playing.
@@ -426,7 +427,9 @@ func Judge(f Facts) Verdict {
 				if bits < 24 {
 					add(DoPContainerTooNarrow)
 				}
-				if f.PCM.Rate*16 != audio.Rate {
+				// The DSD rate over 16, compared by division: the card's
+				// rate times 16 can wrap in an int to the DSD rate.
+				if audio.Rate%16 != 0 || f.PCM.Rate != audio.Rate/16 {
 					add(RateMismatch)
 					changed = true
 				}
@@ -672,8 +675,9 @@ const seekSlack = 0.5
 
 // Settling returns the codes that make a reading settle: the status read
 // before the /proc read and the one after it, between apart, disagree on
-// the state or the song, the song is not half a second in, or elapsed
-// moved by more than between allows. Empty when the reading is steady.
+// the state or the song, a read while MPD plays names no song id, the song
+// is not half a second in, or elapsed went back or moved by more than
+// between allows. Empty when the reading is steady.
 func Settling(before, after Status, between time.Duration) []string {
 	var codes []string
 	if before.State != after.State {
@@ -685,6 +689,12 @@ func Settling(before, after Status, between time.Duration) []string {
 	if len(codes) > 0 || after.State != "play" {
 		return Sorted(codes)
 	}
+	// While MPD plays, every status names the song by its id: two reads
+	// that name none, or one that does not read, are not shown to be on one
+	// song.
+	if !ValidSongID(before.SongID) || !ValidSongID(after.SongID) {
+		return []string{SongChanged}
+	}
 	e1, ok1 := elapsed(before.Elapsed)
 	e2, ok2 := elapsed(after.Elapsed)
 	if !ok1 || !ok2 {
@@ -693,12 +703,25 @@ func Settling(before, after Status, between time.Duration) []string {
 	if e1 < settleBelow || e2 < settleBelow {
 		codes = append(codes, SongStarting)
 	}
+	// MPD's elapsed never goes back while it plays on, so any move back is
+	// a seek, however small; forward, half a second off the time between
+	// the reads is a jump.
 	moved := e2 - e1
 	took := between.Seconds()
-	if moved < took-seekSlack || moved > took+seekSlack {
+	if moved < 0 || moved < took-seekSlack || moved > took+seekSlack {
 		codes = append(codes, Seeked)
 	}
 	return Sorted(codes)
+}
+
+// ValidSongID reports whether id is a song id as MPD prints one: an
+// unsigned decimal.
+func ValidSongID(id string) bool {
+	if id == "" {
+		return false
+	}
+	_, err := strconv.ParseUint(id, 10, 32)
+	return err == nil
 }
 
 func elapsed(v string) (float64, bool) {
