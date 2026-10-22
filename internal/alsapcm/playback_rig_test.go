@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,11 +60,13 @@ type files struct {
 	fail    map[string]error
 	opened  []*tracked
 	block   map[string]chan struct{} // an open that waits for the channel's close
+	stalls  map[string]*stall        // reads that do not return (stall)
 	changed chan struct{}            // closed and replaced at each content's close
 }
 
 func newFiles() *files {
-	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{}, changed: make(chan struct{})}
+	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{},
+		stalls: map[string]*stall{}, changed: make(chan struct{})}
 }
 
 // tracked is one content the resolver handed out.
@@ -71,15 +74,95 @@ type tracked struct {
 	ref    string
 	closed bool
 	f      *files
+	st     *stall
 }
 
 func (c *tracked) Close() error {
+	if c.st != nil {
+		c.st.mu.Lock()
+		if c.st.in > 0 {
+			c.st.closedUnder = true
+		}
+		c.st.mu.Unlock()
+	}
 	c.f.mu.Lock()
 	defer c.f.mu.Unlock()
 	c.closed = true
 	close(c.f.changed)
 	c.f.changed = make(chan struct{})
 	return nil
+}
+
+// stall is a read of a content held inside its ReadAt (files.stall).
+type stall struct {
+	at     int64
+	parked chan struct{}
+	gate   chan struct{}
+	held   sync.Once // parked closed
+	open   sync.Once // gate closed
+
+	mu          sync.Mutex
+	in          int  // the reads held now
+	closedUnder bool // the content was closed while a read of it was held
+}
+
+// stalledReader is a content whose reads past its stall's byte wait for
+// the stall's release.
+type stalledReader struct {
+	r  io.ReaderAt
+	st *stall
+}
+
+func (s stalledReader) ReadAt(p []byte, off int64) (int, error) {
+	if off+int64(len(p)) > s.st.at {
+		s.st.mu.Lock()
+		s.st.in++
+		s.st.mu.Unlock()
+		s.st.held.Do(func() { close(s.st.parked) })
+		<-s.st.gate
+		s.st.mu.Lock()
+		s.st.in--
+		s.st.mu.Unlock()
+	}
+	return s.r.ReadAt(p, off)
+}
+
+// stall holds every read of ref's content that reaches past byte at inside
+// its ReadAt until release is called: a read that does not return, as one
+// of a file on a mount that hangs does, which no context ends. parked is
+// closed once a read is held.
+func (f *files) stall(ref string, at int64) (parked <-chan struct{}, release func()) {
+	st := &stall{at: at, parked: make(chan struct{}), gate: make(chan struct{})}
+	f.mu.Lock()
+	f.stalls[ref] = st
+	f.mu.Unlock()
+	return st.parked, func() { st.open.Do(func() { close(st.gate) }) }
+}
+
+// isClosed reports whether a content of ref was handed out and closed.
+func (f *files) isClosed(ref string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.opened {
+		if c.ref == ref && c.closed {
+			return true
+		}
+	}
+	return false
+}
+
+// closedUnderARead reports whether a content of ref was closed while a read
+// of it was held in its ReadAt.
+func (f *files) closedUnderARead(ref string) bool {
+	f.mu.Lock()
+	st := f.stalls[ref]
+	f.mu.Unlock()
+	if st == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.closedUnder
 }
 
 // fed waits until the producer has given the sink every frame of ref: it
@@ -93,16 +176,7 @@ func (f *files) fed(t *testing.T, ref string) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return f.changed
-	}, func() bool {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		for _, c := range f.opened {
-			if c.ref == ref && c.closed {
-				return true
-			}
-		}
-		return false
-	})
+	}, func() bool { return f.isClosed(ref) })
 }
 
 func (f *files) add(ref string, b []byte) {
@@ -116,6 +190,7 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	b, ok := f.content[ref.String()]
 	fail := f.fail[ref.String()]
 	block := f.block[ref.String()]
+	st := f.stalls[ref.String()]
 	f.mu.Unlock()
 	if block != nil {
 		select {
@@ -130,11 +205,15 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	if !ok {
 		return playback.Content{}, fmt.Errorf("no file %q", ref)
 	}
-	c := &tracked{ref: ref.String(), f: f}
+	c := &tracked{ref: ref.String(), f: f, st: st}
 	f.mu.Lock()
 	f.opened = append(f.opened, c)
 	f.mu.Unlock()
-	return playback.Content{Data: bytes.NewReader(b), Size: int64(len(b)), Closer: c}, nil
+	var data io.ReaderAt = bytes.NewReader(b)
+	if st != nil {
+		data = stalledReader{r: data, st: st}
+	}
+	return playback.Content{Data: data, Size: int64(len(b)), Closer: c}, nil
 }
 
 // allClosed fails the test unless every content handed out was closed.

@@ -182,3 +182,49 @@ func TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInAWrite(t *testing.T) 
 		})
 	}
 }
+
+// TestPlaybackReleaseWaitsForTheProducerToLeaveItsDecoder pins the release's
+// join of the producer: held in a read of the content that does not return
+// (a file on a mount that hangs, which no context ends), the producer still
+// holds its decoder and the content, so the release closes neither under it
+// and is not acknowledged: past its deadline the engine holds it
+// unconfirmed. Once the read returns, the producer leaves, the content is
+// closed, and the release is acknowledged, late.
+func TestPlaybackReleaseWaitsForTheProducerToLeaveItsDecoder(t *testing.T) {
+	r := newRig(t)
+	r.files.add("a", wav(48000, 24, pattern(1, 200000, 24)))
+	// The open decodes the first 4096 frames, bytes 44 to 24620 of the file;
+	// the producer's first read of its own is held.
+	parked, unpark := r.files.stall("a", 30000)
+	t.Cleanup(unpark)
+	r.insert("a")
+	r.play()
+	receiveIn(t, parked, "the producer's read of the content to hang")
+	if err := r.eng.Stop(bg); err != nil {
+		t.Fatal(err)
+	}
+	s := r.waitSnap("the release past its deadline, or the content closed", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return unconfirmed || r.files.isClosed("a")
+	})
+	if r.files.closedUnderARead("a") {
+		t.Fatal("the release closed the content while the producer was in a read of it")
+	}
+	if _, unconfirmed := s.ReleaseUnconfirmed(); !unconfirmed {
+		t.Fatal("the release was acknowledged while the producer was in a read of the content")
+	}
+	if n := count(r.rec.events(), "released", 0); n != 0 {
+		t.Fatalf("Released reported while the producer held the content")
+	}
+	unpark()
+	r.waitSnap("the late acknowledgement", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return !unconfirmed
+	})
+	if !r.files.isClosed("a") || r.files.closedUnderARead("a") {
+		t.Errorf("the content was not closed once the producer left its read")
+	}
+	if n := count(r.rec.events(), "released", 0); n != 1 {
+		t.Errorf("Released reported %d times, want once, late: %s", n, kinds(r.rec.events()))
+	}
+}
