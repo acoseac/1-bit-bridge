@@ -392,9 +392,11 @@ func (e *Engine) replaced(s *session, by string) {
 
 // carry hands the play commands s was started for, with no outcome yet, on
 // to the session that follows s's release: the engine itself moved on, past
-// s's first entry refused before any of its content played, or past the
-// last entry s took once it played out, and their playback goes on in that
-// session (startSession).
+// s's first entry refused before any of its content played, and their
+// playback goes on in that session (startSession). The other release the
+// engine makes to play on, onFinished's when s took no successor, has no
+// such command: it needs s live, and the settle answers every waiter once
+// s's Start has.
 func (e *Engine) carry(s *session) {
 	for i := range e.o.waiters {
 		if w := &e.o.waiters[i]; w.play && !w.decided && w.sess == s.id {
@@ -475,7 +477,7 @@ func (e *Engine) startSession(target uint32) {
 // its playback) or as superseded, a Pause under way with nil. Released to
 // play, the caller has already said whose playback that is: a command's
 // that replaced s's (replaced), or the one s's own commands asked for, going
-// on past an entry (carry).
+// on past an entry refused at its start (carry).
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
@@ -1216,7 +1218,6 @@ func (e *Engine) onFinished(id SessionID) {
 	}
 	if next := e.following(e.o.selected); s.noMore && next != 0 {
 		e.selectEntry(next)
-		e.carry(s)
 		e.releaseSession(s, IntentPlay, StopInfo{})
 		return
 	}

@@ -76,8 +76,8 @@ type owner struct {
 // starts once the release is acknowledged is started for it, and for every
 // other command waiting so. Only sess's Audible decides it, and the settle
 // answers it nil only while sess is the session playing. The engine's own
-// moves, past an entry refused at its start or one that played out, hand it
-// on to the session that follows (carry).
+// move past an entry refused at its start hands it on to the session that
+// follows (carry).
 type waiter struct {
 	c       *command
 	play    bool
