@@ -217,8 +217,13 @@ pcm.dup { type plug
 			t.Errorf("a stage type the walk was not shown naming: %s", typ)
 		}
 	}
+	// The definitions in a file read whole, beside one that is not: no
+	// definition of the configuration is used.
 	hooked := t.TempDir()
-	writeTree(t, hooked, map[string]string{"etc/asound.conf": body + "@hooks [ { func load files [ \"/etc/more.conf\" ] } ]\n"})
+	writeTree(t, hooked, map[string]string{
+		"etc/alsa/conf.d/10-soft.conf": body,
+		"etc/asound.conf":              "@hooks [ { func load files [ \"/etc/more.conf\" ] } ]\n",
+	})
 	if got := LoadPCMConfig(hooked).SampleStage("soft"); got != "" {
 		t.Errorf("a configuration not read whole named %q", got)
 	}
