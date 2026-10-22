@@ -250,6 +250,25 @@ func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {
 // card's unit into the config file, 0600, the serial whole there and
 // nowhere on the terminal, keeps the block's other fields, and the binding
 // it wrote resolves to that card.
+// TestOutputDACBindSaysTheBindingAppliesAtTheNextStart: bind writes the
+// config file only while no bridge serves the data dir, and a serve reads
+// output.player when it starts (B470 PR 4a2: nothing reloads the file), so
+// bind says the binding applies when bridge serve next starts, whether the
+// player is on or off.
+func TestOutputDACBindSaysTheBindingAppliesAtTheNextStart(t *testing.T) {
+	root := dacTree(t)
+	for _, block := range []string{"  player:\n    room: Study\n", "  player:\n    enabled: true\n"} {
+		cfgPath := dacConfig(t, block)
+		out, errOut, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "uniqueModel", "--config", cfgPath}, treeFlags(root)...)...)
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		if !strings.Contains(out, "the binding applies when bridge serve next starts") {
+			t.Errorf("bind with %q does not say when the binding applies:\n%s", block, out)
+		}
+	}
+}
+
 func TestOutputDACBindWritesTheSerialToTheFileAndPrintsNone(t *testing.T) {
 	root := dacTree(t)
 	cfgPath := dacConfig(t, "  player:\n    room: Study\n")

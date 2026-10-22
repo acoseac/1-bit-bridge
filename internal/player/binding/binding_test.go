@@ -400,6 +400,32 @@ func TestAHubOrAGoneControllerInvalidatesAPortBinding(t *testing.T) {
 	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2:1.0"), inv), StateDeviceMissing, -1)
 }
 
+// TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort: a device in the
+// bound port whose class (bDeviceClass) cannot be read may be a hub, so a
+// port binding with no card at the port is refused (binding_invalid), as a
+// hub there is, never read as an empty port (device_missing). The reading
+// says the class could not be read, and a serial binding still follows the
+// unit behind it.
+func TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+goBar+"\nusbdev "+goBar+" vendor=05e3 product=0610 class=09\n"+
+		"remove "+goBar+"/bDeviceClass\ndir "+goBar+"/bDeviceClass\n"+plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial))
+	inv := observe(t, root)
+	d, ok := inv.deviceAt(goBarPort)
+	if !ok || d.Hub || !d.HubUnknown {
+		t.Fatalf("the device in the bound port: %+v, %v; want its hub status unknown", d, ok)
+	}
+	if !strings.Contains(strings.Join(inv.Problems, "; "), "bDeviceClass") {
+		t.Errorf("the reading's problems do not name the class: %q", inv.Problems)
+	}
+	r := Resolve(byPort(goBarPort), inv)
+	want(t, r, StateBindingInvalid, -1)
+	if !strings.Contains(r.Reason, "class") {
+		t.Errorf("reason %s", r.Reason)
+	}
+	want(t, Resolve(bySerial(goBarSerial), inv), StateAvailable, 5)
+}
+
 // TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard: the check passes
 // the node Resolve named, and refuses, naming why, the same card number
 // once another DAC has taken it (a swap between the resolve and the open),
@@ -738,6 +764,9 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 		// otherwise.
 		resolves [4]State
 		differs  [4]string
+		// partial says the row's reading is partial (Inventory.Partial), a
+		// premise the row checks.
+		partial bool
 	}{
 		{name: "the GO bar beside the two HDMI cards, which are not USB", resolves: every(available)},
 		{name: "a virtual card beside it", resolves: every(available), steps: []string{
@@ -799,6 +828,18 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 				plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial)}},
 		{name: "card 5 without the bound playback stream", resolves: every(StateEndpointMissing), differs: byUnit(unitStream),
 			steps: []string{"remove proc/asound/card5/pcm0p\n"}},
+		// A reading partial elsewhere (B470 PR 4a2: Inventory.Partial) is one
+		// Resolve answers from, and the check with it: what a partial reading
+		// lacks it lacks, so it can hide no card at the bound port, and every
+		// piece the check's answer depends on (the card listing, /proc/asound's
+		// cards, the bound controller, the opened card's stream) is asked of
+		// it on its own (round 4: CodeRabbit asked the check to refuse any
+		// partial inventory, which would refuse card 5 where Resolve chooses
+		// it).
+		{name: "another card whose PCM directory cannot be listed", resolves: every(available), partial: true,
+			steps: []string{"remove proc/asound/card0/pcm0p\nlink proc/asound/card0/pcm0p !../../../outside\n"}},
+		{name: "a root hub of another controller that cannot be read in the USB listing", resolves: every(available), partial: true,
+			steps: []string{"link sys/bus/usb/devices/usb3 !../../../../outside\n"}},
 		{name: "another model in the port as card 5 without the bound playback stream",
 			resolves: [4]State{missing, missing, StateEndpointMissing, StateEndpointMissing}, steps: []string{"unplug " + goBar + "\n" +
 				"usbdev " + goBar + " vendor=1234 product=0c12 serial=HUGO2-UNIT-0000000042\nusbcard 5 " + goBar + "/1-1:1.1\n" +
@@ -824,6 +865,9 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 			inv := inventory(snap, reading)
 			if inv.CardsComplete != reading.CardsComplete {
 				t.Errorf("the inventory says its card listing is whole (%v), and the reading says %v", inv.CardsComplete, reading.CardsComplete)
+			}
+			if row.partial && !inv.Partial {
+				t.Fatalf("premise: the reading is not partial (problems %q)", inv.Problems)
 			}
 			for i, f := range forms {
 				r := Resolve(f.dev, inv)

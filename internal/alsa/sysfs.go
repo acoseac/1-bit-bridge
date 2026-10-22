@@ -1,6 +1,7 @@
 package alsa
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -32,14 +33,24 @@ const DefaultSysfsRoot = "/sys"
 // a file is read to 4 KiB at most, and a directory is listed to 1024
 // entries at most. Like Reader it carries no build tag, so its tests read
 // fake trees (internal/alsa/sysfstest) on every OS.
+//
+// What it touches: the class/sound and bus/usb/devices listings; the links
+// class/sound/cardN, a card's device, and the subsystem link of each device
+// above it; a USB unit's idVendor, idProduct, serial and devnum; each root
+// hub's speed; and each listed USB device's bDeviceClass. Of these only
+// serial takes the USB device's lock in the kernel (usb_string_attr), and a
+// disconnect can hold that lock for as long as it runs, so a read of it can
+// block; no read can be interrupted once it has started. ReadContext stops
+// before the next card or file once its context is done, and a caller that
+// must not wait on a stuck read abandons it (the hotplug watcher's stop).
 type SysfsReader struct {
 	// Root is the sysfs tree; "" means DefaultSysfsRoot.
 	Root string
 	// limits replaces the bounds, for the tests that reach them.
 	limits *sysfsLimits
 	// beforeOpen, when set, is called with an attribute's path after the
-	// attribute is checked and before it is opened, and with "." just
-	// before the root itself is opened: the windows a test swaps a FIFO in.
+	// attribute is checked and before it is opened: the window a test swaps
+	// a FIFO or a link in. The root's own open is osOpenRoot's seam.
 	beforeOpen func(rel string)
 }
 
@@ -49,6 +60,8 @@ const (
 	maxSysfsEntries = 1024
 	// maxSysfsProblems bounds the problems one snapshot keeps.
 	maxSysfsProblems = 16
+	// maxDevNum is the largest USB device number: an address is 1 to 127.
+	maxDevNum = 127
 )
 
 // sysfsLimits are SysfsReader's bounds.
@@ -90,6 +103,13 @@ type Identity struct {
 	// Problems are what could not be read, by file, never quoting a
 	// serial.
 	Problems []string `json:"problems"`
+	// Dir is the card's directory in the tree with its links resolved
+	// (devices/…/1-1:1.0/sound/card5), "" when it could not be resolved:
+	// where the kernel's events about the card, and about the device and
+	// the interface above it, point (the hotplug watcher matches a removal
+	// to the card by it). Not encoded: it is a place this reading found, not
+	// part of the diagnostic shape.
+	Dir string `json:"-"`
 }
 
 // USBIdentity is a USB card's unit and place.
@@ -106,6 +126,14 @@ type USBIdentity struct {
 	PortProblem string `json:"portProblem"`
 	// Interface is the number of the USB interface the card is.
 	Interface int `json:"interface"`
+	// DevNum is the unit's device number on its bus (sysfs's devnum), 0
+	// when it could not be read. The kernel gives each enumeration of a
+	// unit a new one, so a unit unplugged and plugged back into the same
+	// port reads another: it says which enumeration this is, never which
+	// unit, and is kept in memory alone (B470 PR 4a2). It is never
+	// persisted, never encoded and never part of a binding, which must not
+	// name a bus or device number.
+	DevNum int `json:"-"`
 }
 
 // USBDevice is one USB device sysfs lists (bus/usb/devices), root hubs and
@@ -117,6 +145,11 @@ type USBDevice struct {
 	Chain  string `json:"chain"`
 	// Hub is a device whose class is 09.
 	Hub bool `json:"hub"`
+	// HubUnknown is a device whose class could not be read, so whether it
+	// is a hub is not known (Hub is false): a port binding whose port it
+	// holds is refused, never read as an empty port. The snapshot's
+	// problems say why.
+	HubUnknown bool `json:"hubUnknown"`
 }
 
 // Port is the device's place as a port path without the configuration
@@ -141,6 +174,14 @@ type SysfsSnapshot struct {
 	Controllers []string    `json:"controllers"`
 	Devices     []USBDevice `json:"devices"`
 	Problems    []string    `json:"problems"`
+	// Partial says the reading is not the whole tree: the root, class/sound
+	// or bus/usb/devices could not be opened or listed whole (an error, or a
+	// cap that cut a listing), a root hub could not be read, or the reading
+	// was stopped (ReadContext). What it lacks is not absent from the box,
+	// so a consumer that compares readings (the hotplug watcher) does not
+	// take it for a change. A tree with no class/sound is not partial: it
+	// has no sound cards for this reader to identify (Present).
+	Partial bool `json:"partial"`
 }
 
 // hostWatch is WatchHostReads' function, nil while nothing watches.
@@ -172,24 +213,43 @@ func checkHostRead(root, hostRoot string) error {
 }
 
 // Read takes one reading. It never fails: what cannot be read is a problem,
-// on the card it is about or on the snapshot.
-func (r SysfsReader) Read() SysfsSnapshot {
-	snap := SysfsSnapshot{Root: r.root(), Cards: []Identity{}, Controllers: []string{}, Devices: []USBDevice{}, Problems: []string{}}
+// on the card it is about or on the snapshot, and a reading that is not the
+// whole tree says so (Partial).
+func (r SysfsReader) Read() SysfsSnapshot { return r.ReadContext(context.Background()) }
+
+// ReadContext is Read, stopping before the next card or file once ctx is
+// done; a read already started is not interrupted (SysfsReader). A stopped
+// reading is Partial, wherever it stopped: the result is named, so the
+// deferred mark reaches what every return hands back (B470 PR 4a2 round 2:
+// unnamed, `return snap` copied the reading before the mark was made, and a
+// stop before the last card or in the USB loops returned it whole).
+func (r SysfsReader) ReadContext(ctx context.Context) (snap SysfsSnapshot) {
+	snap = SysfsSnapshot{Root: r.root(), Cards: []Identity{}, Controllers: []string{}, Devices: []USBDevice{}, Problems: []string{}}
 	t, err := r.open()
 	if err != nil {
+		snap.Partial = true
 		snap.addProblem("%s: %s", snap.Root, errText(err))
 		return snap
 	}
 	defer t.close()
+	t.ctx = ctx
+	defer func() {
+		if t.stopped() {
+			snap.Partial = true
+			snap.addProblem("the reading was stopped before its end: %s", ctx.Err())
+		}
+	}()
 	names, more, err := t.list("class/sound")
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
+			snap.Partial = true
 			snap.addProblem("class/sound: %s", errText(err))
 		}
 		return snap
 	}
 	snap.Present, snap.CardsComplete = true, !more
 	if more {
+		snap.Partial = true
 		snap.addProblem("class/sound lists more than %d entries; the rest are not read", t.lim.entries)
 	}
 	var cards []int
@@ -200,6 +260,13 @@ func (r SysfsReader) Read() SysfsSnapshot {
 	}
 	sort.Ints(cards)
 	for _, n := range cards {
+		if t.stopped() {
+			// The cards after this one are not read: Cards no longer holds
+			// every card the listing names, as CardsComplete promises (B470
+			// PR 4a2 round 4).
+			snap.CardsComplete = false
+			return snap
+		}
 		snap.Cards = append(snap.Cards, t.card(n))
 	}
 	t.usb(&snap)
@@ -237,11 +304,7 @@ func (r SysfsReader) open() (*sysfsTree, error) {
 	if r.limits != nil {
 		lim = *r.limits
 	}
-	var before func()
-	if r.beforeOpen != nil {
-		before = func() { r.beforeOpen(".") }
-	}
-	tr, err := openTree(r.root(), lim.links, lim.hops, before)
+	tr, err := openTree(r.root(), lim.links, lim.hops)
 	if err != nil {
 		return nil, err
 	}
@@ -280,12 +343,24 @@ type sysfsTree struct {
 	*tree
 	lim        sysfsLimits
 	beforeOpen func(rel string)
+	// ctx stops the reading before its next card or file once it is done;
+	// nil never stops it.
+	ctx context.Context
 }
+
+// errStopped is a file not read because the reading was stopped.
+var errStopped = errors.New("the reading was stopped")
+
+// stopped reports whether the reading's context is done.
+func (t *sysfsTree) stopped() bool { return t.ctx != nil && t.ctx.Err() != nil }
 
 // list names a directory's entries, at most the cap, sorted; more is true
 // when the directory holds more than that. It opens the directory
 // directory-only (openDirectory), so a FIFO in its place is refused at once.
 func (t *sysfsTree) list(rel string) (names []string, more bool, err error) {
+	if t.stopped() {
+		return nil, false, errStopped
+	}
 	dir, err := t.resolve(rel)
 	if err != nil {
 		return nil, false, err
@@ -311,6 +386,9 @@ func (t *sysfsTree) list(rel string) (names []string, more bool, err error) {
 // descriptor's (openRegular), so a FIFO swapped in after the look is
 // refused, never read.
 func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
+	if t.stopped() {
+		return nil, errStopped
+	}
 	rel := path.Join(dir, name)
 	fi, err := t.root.Lstat(filepath.FromSlash(rel))
 	if err != nil {
@@ -328,6 +406,13 @@ func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
 	}
 	defer f.Close()
 	return readAllCapped(f, int64(t.lim.file))
+}
+
+// gone reports whether dir, a directory resolve returned, is no longer in
+// the tree: a device the kernel removed after it was listed.
+func (t *sysfsTree) gone(dir string) bool {
+	_, err := t.root.Lstat(filepath.FromSlash(dir))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // subsystem is the name of the subsystem dir's subsystem link points at
@@ -367,6 +452,7 @@ func (t *sysfsTree) card(n int) Identity {
 	if err != nil {
 		return fail(err, "class/sound/%s: %s", name, errText(err))
 	}
+	id.Dir = cardDir
 	devDir, err := t.resolve(cardDir + "/device")
 	switch {
 	case errors.Is(err, fs.ErrNotExist) && strings.HasPrefix(cardDir, virtualDevices):
@@ -425,6 +511,14 @@ func (t *sysfsTree) usbIdentity(iface string) (*USBIdentity, error) {
 		return nil, fileError{"serial", err}
 	default:
 		u.Serial = usbid.New(string(b))
+	}
+	// devnum says which enumeration of the unit this is. One that cannot be
+	// read leaves it 0, unknown: it identifies nothing, so the card's
+	// identity stands without it.
+	if b, err := t.attr(unit, "devnum"); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n > 0 && n <= maxDevNum {
+			u.DevNum = n
+		}
 	}
 	iface8, ok := portNum(m[4], 0)
 	if !ok {
@@ -513,7 +607,7 @@ func (t *sysfsTree) rootHub(dir string) (string, error) {
 func (t *sysfsTree) gen(hub string) (int, error) {
 	b, err := t.attr(hub, "speed")
 	if err != nil {
-		return 0, fmt.Errorf("%s/speed: %s", path.Base(hub), errText(err))
+		return 0, fileError{path.Base(hub) + "/speed", err}
 	}
 	switch s := strings.TrimSpace(string(b)); s {
 	case "1.5", "12":
@@ -561,17 +655,28 @@ func (t *sysfsTree) anchor(dir string) ([]string, error) {
 }
 
 // usb reads the root hubs and the devices bus/usb/devices lists into snap:
-// the controllers' anchors and each device's place.
+// the controllers' anchors and each device's place. A listing it could not
+// read whole, or a root hub it could not read, makes the reading Partial:
+// a controller missing from it would read as a controller gone. A root hub
+// or a device that went while it was read is simply not there, and one
+// under a controller the port grammar does not name is the box as it is.
 func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 	names, more, err := t.list("bus/usb/devices")
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
+			snap.Partial = true
 			snap.addProblem("bus/usb/devices: %s", errText(err))
 		}
 		return
 	}
 	if more {
+		snap.Partial = true
 		snap.addProblem("bus/usb/devices lists more than %d entries; the rest are not read", t.lim.entries)
+	}
+	unread := func(err error) {
+		if !errors.Is(err, fs.ErrNotExist) {
+			snap.Partial = true
+		}
 	}
 	type root struct {
 		anchor string
@@ -584,13 +689,20 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		if m == nil {
 			continue
 		}
+		if t.stopped() {
+			return
+		}
 		dir, err := t.resolve("bus/usb/devices/" + name)
 		if err != nil {
+			unread(err)
 			snap.addProblem("bus/usb/devices/%s: %s", name, errText(err))
 			continue
 		}
 		gen, err := t.gen(dir)
 		if err != nil {
+			if errors.As(err, new(fileError)) {
+				unread(err)
+			}
 			snap.addProblem("%s", err)
 			continue
 		}
@@ -616,14 +728,29 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		if !ok {
 			continue
 		}
+		if t.stopped() {
+			return
+		}
 		dir, err := t.resolve("bus/usb/devices/" + name)
 		if err != nil {
+			unread(err)
 			snap.addProblem("bus/usb/devices/%s: %s", name, errText(err))
 			continue
 		}
-		class, _ := t.attr(dir, "bDeviceClass")
-		snap.Devices = append(snap.Devices, USBDevice{Anchor: r.anchor, Gen: r.gen, Chain: m[2],
-			Hub: strings.TrimSpace(string(class)) == "09"})
+		d := USBDevice{Anchor: r.anchor, Gen: r.gen, Chain: m[2]}
+		class, err := t.attr(dir, "bDeviceClass")
+		switch {
+		case err == nil:
+			d.Hub = strings.TrimSpace(string(class)) == "09"
+		case errors.Is(err, fs.ErrNotExist) && t.gone(dir):
+			// The device went between the listing and its class: it is
+			// being removed, and is not in a port any more.
+			continue
+		default:
+			d.HubUnknown = true
+			snap.addProblem("bus/usb/devices/%s/bDeviceClass: %s; whether it is a hub is not known", name, errText(err))
+		}
+		snap.Devices = append(snap.Devices, d)
 	}
 	sort.Slice(snap.Devices, func(i, j int) bool { return snap.Devices[i].Port() < snap.Devices[j].Port() })
 }

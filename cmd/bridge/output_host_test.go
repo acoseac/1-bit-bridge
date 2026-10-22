@@ -59,10 +59,11 @@ func TestTheSuiteReadsEmptyTreesForTheHosts(t *testing.T) {
 
 // TestOnlyHostTreesNamesTheHostsTrees: in this package's own code the
 // host's /proc and /sys are named in output_host.go alone, an ALSA reader
-// is never built without its root, and every outputs builder is handed
-// its cards, since the one GET /v1/outputs falls back to reads the host's
-// /proc. Any of the three would take a test that reaches it, on Linux, to
-// the host's trees.
+// is never built without its root, every outputs builder is handed its
+// cards, since the one GET /v1/outputs falls back to reads the host's
+// /proc, and the player's hotplug watcher is handed its Observe, since
+// the one it falls back to reads the host's /proc and /sys. Any of these
+// would take a test that reaches it, on Linux, to the host's trees.
 func TestOnlyHostTreesNamesTheHostsTrees(t *testing.T) {
 	fset := token.NewFileSet()
 	for _, name := range nonTestGoFilesInPackage(t) {
@@ -87,6 +88,7 @@ func TestOnlyHostTreesNamesTheHostsTrees(t *testing.T) {
 					{"alsa", "Reader", "ProcRoot"},
 					{"alsa", "SysfsReader", "Root"},
 					{"api", "LocalOutputsConfig", "Cards"},
+					{"hotplug", "Config", "Observe"},
 				} {
 					if isIdent(sel.X, want.pkg) && sel.Sel.Name == want.typ && !keys[want.key] {
 						t.Errorf("%s builds a %s.%s without %s, which then reads the host's trees",

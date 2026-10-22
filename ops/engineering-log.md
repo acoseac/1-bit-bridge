@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
@@ -50427,8 +50428,8 @@ refusal and Validate logs it (`output.player: the player is off`, the reason
 as an attribute) and returns nil. The YAML half needed the same treatment:
 `Load` decodes with `KnownFields(true)`, so a typo'd key or a wrong type
 inside the block failed the whole config before Validate ran, and yaml.v3's
-own type errors quote up to seven bytes of the value (`cannot unmarshal !!str
-\`GOBAR-7...\``), which is a serial in the wrong field. So the block is read by
+own type errors quote up to seven bytes of the value
+(`` cannot unmarshal !!str `GOBAR-7...` ``), which is a serial in the wrong field. So the block is read by
 hand (`playerReader`): `UnmarshalYAML` never errors, each value is decoded by
 yaml.v3 (a bool or an int reads as it does elsewhere in the config), every
 message is this package's own (field, line, never a value unless it is a
@@ -51166,3 +51167,477 @@ Controls on d9ce5a00, each restored from git: the controller gate dropped
 (R5-1: the three USB-listing rows under both port forms, and the focused
 test's controller case) and the stream check dropped (R5-2: the two
 stream rows under both port forms, and its stream case), both red.
+
+## 2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation
+
+**What landed.** `internal/player/hotplug`: the kernel's uevents (a bounded
+parser and a netlink source that hears only the kernel), a watcher that
+debounces them and reads the whole box with 4a's readers, a `Feed` that
+publishes immutable snapshots under an inventory generation the serve
+owns, and a `Service` that runs a watch while the live config enables the
+player. Around it: `ReadContext` and a `Partial` mark on 4a's readers, each
+unit's `devnum` and each card's directory kept in memory, `binding.Settled`,
+`config.RuntimeConfig.Changed`, the serve wiring (`cmd/bridge/output_hotplug.go`),
+and bind's line that the binding applies when bridge serve next starts. It
+plays nothing and opens nothing under `/dev/snd`: what playback does about a
+change is PR 4b's.
+
+**Item 0: the root-swap test is now red against round 3.** 4a's
+`TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly` swapped the root
+from `openTree`'s `before` hook, which ran ahead of anything `openTree` did,
+so round 3's shape (a directory-only look, then `os.OpenRoot(dir)`) refused
+the FIFO at its look and passed: run again here on main's tree with round
+3's body, the old test was green on all three roots. The seam is now the
+open itself, `osOpenRoot`, called as `osOpenRoot(rootPath(dir))`, whose test
+stand-in swaps when it is handed this root's name (`dir` or `dir/.`) and then
+opens it; `openTree` lost its `before` parameter. Controls: round 3's body
+(the look, then `osOpenRoot(dir)`) and `rootPath` returning `dir` each block
+all three roots until the watchdog.
+
+**Item 0b: an unreadable `bDeviceClass` is an unknown hub status.** The
+reader dropped the error, so a hub whose class could not be read was no hub,
+and a port binding whose port it held read as `device_missing`. `USBDevice`
+now carries `HubUnknown`, the reading names the file, and `Resolve` refuses
+a port binding with no card at its port when the device there may be a hub
+(`binding_invalid`, "resolves again once the class reads"). A device whose
+directory went between the listing and its class is left out: it is being
+removed. `TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort` was red
+before the fix both ways: by build (`HubUnknown` undefined), and with that
+assertion dropped, by behaviour (`device_missing`, no problem recorded).
+The log's YAML example in 4a's entry is now a double-backtick span (MD038).
+
+**The source hears the kernel and nothing else.** A `NETLINK_KOBJECT_UEVENT`
+socket joined to group 1 (never udev's 2), `SOCK_CLOEXEC|SOCK_NONBLOCK`, its
+receive buffer raised to 4 MiB (`SO_RCVBUFFORCE`, else `SO_RCVBUF`, capped
+at `rmem_max`), `SO_PASSCRED` on, read with `MSG_TRUNC` into 8 KiB. A
+message from a port id other than 0, or without root's credentials when they
+were asked for, is dropped and counted (`Foreign`); a truncated or malformed
+one too; another subsystem's is counted and ignored. ENOBUFS, and an event
+the watcher had no room for (the source never waits for it), are reported as
+lost, which makes the watcher read everything. Until the kernel's first
+message the mode is "netlink (no events yet)"; a socket that will not open
+leaves "polling only" and the reason; other systems compile a stub,
+"unsupported on this platform". The source's logic is portable and the
+socket is its one seam, as `alsapcm`'s kernel is, so its tests run on every
+OS on a fake socket; the Linux socket is compiled and vetted here for
+linux/amd64 and linux/arm64, and its three tests (`TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly`,
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`) run on CI's Linux legs alone: no
+Linux box or container runtime was at hand. **The uevent fixtures are
+reconstructions, not captures**, for the same reason: `reconstruct.py` lays
+each out as `alloc_uevent_skb` and `kobject_uevent_env` do (v6.12), at the GO
+bar's place on the Pi 5, and `TestCaptureKernelUevents`, run by hand on the
+Pi with `-capture-uevents DIR`, writes real ones to replace them. The parser
+reads at most 64 records and 8 KiB, ACTION and DEVPATH as the header says,
+SUBSYSTEM and SEQNUM once each; `FuzzParseUevent` ran 27.9 million inputs in
+45 s with no failure. A DEVPATH is only ever compared, as a string, with the
+card directories a reading found: nothing is opened by it.
+
+**One owner, absolute deadlines.** A watch is one goroutine that takes every
+reading: a burst once quiet for 300 ms and never later than 2 s after its
+first event, the periodic tick every 10 s, an overflow (folded into an open
+window, at once with none), a changed binding, a retry, and once at start.
+Every reading reads the whole box, so the brief's "full" reading is every
+reading; a tick or an overflow inside a window folds into it. The timers take
+absolute deadlines (`Timer.Reset(deadline)`): with `Reset(d)`, a deadline
+turned into a duration by one read of the clock and armed after the test's
+clock moved lost the fire the move made and landed a whole step late, which
+`-count=10` found as a hang in one test of fifty; the stop's deadline is
+armed before the stop says it is stopping, for the same reason. Fake-clock
+tests advance the clock and wait on `Service.Updates`, never a sleep.
+
+**Settled resolution.** 4a's `Resolve` answers `identity_transient` for any
+transient card, rightly for bind and inspect, and the watcher must not hold
+the bound DAC's own answer back for an unrelated card being added. So
+`Observe` keeps what each tree said of a transient card (its usbid, its sysfs
+identity), and `binding.Settled` resolves without the transient cards and
+calls the answer settled unless one of them may be the bound unit: its model
+unknown or the bound one, its serial the bound one, its port unknown or the
+bound one; an ambiguity, a binding the config refuses, a topology refusal
+and a port that has its card are settled whatever the transient cards are.
+An unsettled answer is held for three follow-ups 500 ms apart and then
+published as it stands; a periodic reading renews the follow-ups only when
+the transient cards differ. `Resolve` is unchanged.
+
+**What changes the generation.** The cards (index, ALSA id and name, state,
+unit, endpoints), a unit re-enumerated, the binding's state, unit or card,
+its matches, and the configured binding; never a card's `Why`, its
+directory or what a transient card's trees said. A unit re-enumerated is the
+same unit (`SameUnit`) at another `devnum` (both read), another card number,
+or behind a removal the watcher saw (a remove or unbind whose DEVPATH is the
+card's directory, below it or above it): a node opened before is dead.
+`devnum` stays in memory, `json:"-"`, never persisted. A reading that failed,
+or was partial (a root that would not open, a listing a cap cut or could not
+read, a root hub that could not be read), publishes no answer: the last
+snapshot stands, republished at its generation marked stale, and the next
+attempt backs off from 1 s, doubling, to 30 s. A tree with no class/sound is
+not partial: it is `identity_unsupported`. The health of a snapshot (stale,
+the source's mode) republishes it at its generation, its `Change` the
+generation's own.
+
+**The Feed is the serve's.** Its generation starts at 1 and only grows,
+across a disable and re-enable, beside a random 128-bit instance id; the
+disable publishes `disabled`, with no cards and the source off. Each
+subscription is a one-slot mailbox that keeps the newest; a publish takes out
+what a consumer has not received and puts the newest in, under the feed's
+lock, so it never waits. Every accessor copies. Each generation is one INFO
+line: "player DAC: <state>" (or another unit, the same one re-enumerated)
+with the binding's label, the card and 4a's description of the unit, and
+"player hotplug: the inventory changed" with the cards by model for the rest,
+so the owner sees another DAC come and go; no line holds a serial.
+
+**Lifecycle.** The `Service` runs a watch while the live config enables the
+player (`config.PlayerEnabled`: enabled, a valid block, not public, Linux) and
+stops it when it does not. A stop cancels, waits at most 2 s for the watch's
+goroutine and its source's, and abandons what has not stopped, saying which
+(a read stuck in the kernel, where a USB serial's read takes the device's
+lock that a disconnect holds, or a source that did not end); the abandoned
+watch's reading is discarded (`Discarded`), never published, by its context
+and by the feed's session check. The readers stop before their next card or
+file once their context ends; a read already started cannot be interrupted.
+Serve starts the service on Linux alone, after the live config holder
+exists, reads the box through `hostTrees`, and its teardown cancels and joins
+the service within the shutdown grace.
+
+**How a config change reaches a running serve: only at a restart, today.**
+Every admin writer goes through `RuntimeConfig.Update` (clone, Save, Store),
+none touches `output.player`, nothing reloads `bridge.yaml` from disk, and
+`bridge output dac bind` refuses a data dir a serve holds. So bind now says
+"the binding applies when bridge serve next starts". The watcher still reads
+`output.player` from the holder on every reading and wakes on its new
+`Changed`, a channel the next Store closes (an Update's included, not a
+refused or failed one), so the console's DAC page (PR 6a) reaches it with no
+more wiring: a changed binding is read at once, an enable starts the watch, a
+disable stops it.
+
+**Red first.** The parser's and the watcher's tests were written first and
+failed to build (`undefined: ParseUevent`, `undefined: Settings`); the bind
+test failed on the missing line; the config test on `rc.Changed undefined`.
+The source's tests were written before its code too, but not run between
+the two. `binding.Settled`'s tests, the readers' and the serve wiring's came
+after the code; all of these are held by controls instead. On the first
+green run one watcher test was wrong (the polling reason set after the source
+started) and one had a flake (it waited on the message count, which ticks
+before the message's outcome); `-count=50 -cpu 1,2,8` then passed.
+
+**Controls: 38, each on a committed tree, each restored from git, all
+red.** Item 0: round 3's `openTree` body; `rootPath` returning `dir`. Item
+0b: `Resolve` ignoring `HubUnknown`; the class read's error dropped. The
+readers: `Settled` answering as `Resolve`; `mayBeBound` ruling every card
+out; the readers ignoring their context; a cut listing and an unread root
+hub left whole. The source: any sender accepted; a truncated message read;
+the parser's record cap gone; the source waiting for the watcher. The
+watcher: a reading per event; the generation advanced on every reading; the
+publish waiting on a consumer (red by the test's watchdog; it hung the binary
+at first through the test's own deferred `Close`, which now runs only on a
+pass); a transient card's answer published at once with no follow-up; units
+compared without their `devnum`; removals not recorded; no max delay; the
+tick read inside an open window; an overflow not read at once; `Resolve` in
+place of `Settled`; a partial reading taken as an answer; no backoff (17
+million readings in 30 s); the binding read once at start; the generation
+restarted per watch; accessors sharing the snapshot's slices (the race
+detector); the stop with no deadline; an abandoned reading published;
+disabling publishing nothing; every reading logging the state again; the
+inventory's own change logged at DEBUG. The wiring: serve starting no
+watcher; the watcher deaf to the config's change
+(red at the binary's deadline, run with `-timeout 120s`); serve's stop not
+joining (green against the boot test, where the service finishes first
+anyway, so `TestThePlayersWatcherStopJoinsItsService` holds the source open
+and was then red); the wiring without `Observe` (the sweep); an Update
+storing without closing `Changed`; the watcher started off Linux.
+
+**Hardware: none in this PR.** The owner's gate on the Pi follows it; two
+units of one model, which ambiguity needs, are the fake trees'
+(`TestASecondUnitOfAUniqueModelIsAmbiguous`, and 4a's
+`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`).
+
+**Round 2 (the Claude API, Codex and Argon on round 1): five findings, all
+real, none rejected.** Argon found nothing; the Claude API's Low was one of
+Codex's four. Each was reproduced red on 3114e6c8's code (round 1's head)
+before its fix, and each control mutated the committed fix alone, ran, and
+was restored from git.
+
+1. *A held answer was never published while events kept coming* (the
+Claude API, Medium). An answer a transient card may change (`Settled`'s
+unsettled one) was held while follow-ups remained, and every window's
+reading renewed them. With the bound DAC's card in /proc alone, its sysfs
+half gone first, under a serial binding, and an unrelated device sending a
+change every 400 ms, 3114e6c8's watcher read the box 51 times in 20 s of
+fake time and published once: subscribers read generation 1, available on
+card 5, not stale, for as long as the events went on (a throwaway test,
+not committed). The watch now records the first reading that held the
+answer (`heldSince`), schedules a reading at `heldSince + Timing.holdMax`
+(`MaxDelay + FollowUps×FollowUpEvery`, 3.5 s) at the latest, and from then
+publishes the answer as it stands; a publish ends the hold. The follow-ups
+and what renews them are round 1's. Renewing them only when the transient
+cards change, the review's other option, would not bound a storm whose
+transient cards change too. `TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn`
+publishes identity_transient naming card 5 exactly at the bound and not
+before; on 3114e6c8 it stopped at its watchdog with ten readings and one
+publish, the next reading due at the window's end (3.9 s), not at the
+bound (3.8 s). Controls: the bound's check in `reconcile` removed (red:
+nothing published at the bound's reading); the bound's deadline in
+`next()` removed (red: no reading at the bound).
+
+2. *One replug could advance the generation twice* (Codex). Reachable with
+the real source: it never waits for the watcher, so the kernel's events
+queue in its channel while the watch's goroutine is inside Observe, and
+select picks at random between a fired timer and queued events. A reading
+lasts milliseconds and a replug hundreds, so it takes a reading that blocks
+(a USB serial's read waits on the device lock a disconnect holds, the
+hotplug case itself) or a timer chosen over queued events after one: rare,
+and nothing rules it out. It harms 4b, which stops on a re-enumeration: a
+play started on the new node between the two publishes would be stopped
+for nothing. A reading now takes the events queued behind it before it
+publishes (`takeQueued`, those queued when it starts, each as the loop
+takes one); when a removal among them reaches a card, the reading may show
+it or precede it, so it is set aside (`Stats.SetAside`) and the window
+those events opened reads the box again. Taking the removals into the
+reading's own publish, the review's other option, was run as a control and
+refused: when the removal came after a reading that still showed the unit,
+it publishes a re-enumeration of an unchanged unit, then device_missing. A
+reading is set aside once in a row and never at a held answer's bound, so
+events that keep coming during readings hold nothing back. The harness
+parks a reading before it reads the tree (`parkNextReading`) and queues
+events without waiting for the watcher (`queue`). Red on 3114e6c8:
+`TestAReplugThatQueuedDuringAReadingIsOneGeneration` and
+`TestAReadingIsSetAsideOnceInARow` (a second generation, the unchanged
+unit re-enumerated), and `TestAReadingAtAHeldAnswersBoundIsNeverSetAside`
+(no hold's bound there: its watchdog). `TestAnUnplugThatQueuedDuringAReadingIsOneGeneration`
+is green on 3114e6c8 and holds the fix's choice against folding. Controls:
+the queued removals taken into the publish (red: the unplug test and the
+once-in-a-row test); nothing taken (red: the replug test and the
+once-in-a-row test); no once-in-a-row limit (red: that test); set aside at
+the hold's bound too (red: the hold test).
+
+3. *An incomplete /proc reading counted as complete* (Codex). A card's
+directory or a pcmNp directory that could not be listed was a problem on
+the /proc card alone, which Observe dropped, and the inventory's
+completeness was sysfs's. With the identity files readable, the card read
+as having no endpoint, and 3114e6c8's watcher published endpoint_missing at
+generation 2. The /proc reader now marks a card `Partial`
+(`alsa.CardReading`, in memory only: `TestOutputDACJSONHasOneShapeInEveryState`
+pins the `--json` shape, and the problems say it there) when its directory
+or a pcmNp directory cannot be listed, or the type of a pcmNp or subM entry
+a listing named cannot be read, for any reason but the entry's absence: one
+gone since the listing that named it is the card or the device going, as a
+missing file is. Observe makes the inventory partial when a card is
+(`partialCards`, on the line where the inventory decides its completeness)
+and carries those cards' problems, so the watcher's failure names the
+directory. `os.Root` opens each directory on a file's way for reading, on
+every Unix, so a card directory without read permission hides its usbid
+too, and a USB-Audio card is then transient; the binding test's card there
+is one whose driver writes no usbid. Red on 3114e6c8:
+`TestAReadingThatCannotListACardsDevicesIsPartial` (a PCM directory without
+read permission, one whose link leaves the tree, a card directory without
+read permission: each partial false and endpoint_missing; its two absences
+are green there) and `TestACardWhoseDevicesCannotBeListedIsAFailure`
+(endpoint_missing at generation 2). `TestAProcCardSaysWhenItsDevicesCannotAllBeListed`
+pins the reader, link loops and a directory gone between two listings
+included (red on 3114e6c8 by build: no `CardReading.Partial`). Controls:
+Observe ignoring the card's mark (red: the binding and watcher tests); the
+reader never setting it (red: all three); the reader setting it for an
+absent entry too (red: the reader's gone-before-its-listing case). The
+port-binding PR, which merges first, moves Observe's body into
+`inventory(snap, sys)` and adds `SysfsSnapshot.CardsComplete`; the merge
+carries `partialCards` and `Partial: sys.Partial || procPartial` into
+`inventory`, and its check after open (`checkPort`, which builds an
+inventory too) does not yet look at `Partial`.
+
+4. *Continuous traffic held the source past its stop* (Codex). `run`
+looked at its context only in `wait`, which the drain reaches once recv
+answers EAGAIN, and a socket refilled as fast as it is read never does.
+The drain now looks at the context before every recv, the EINTR and
+ENOBUFS retries included. `TestTheSourceStopsWhileTheKernelKeepsSending`
+(a fake socket answering a message, EINTR or ENOBUFS without end,
+cancelled once it is draining) was red on 3114e6c8 in all three cases:
+each read on to the 30 s watchdog, 12.4 million messages and 52 million
+ENOBUFS. Control: the check removed (red: all three). It runs on every OS.
+
+5. *A stopped sysfs reading could come back whole* (Codex, and the Claude
+API's Low). `ReadContext`'s result was unnamed, so `return snap` copied
+the reading before the deferred function marked it Partial: a stop before
+the last card, or in usb()'s root-hub or device loop, returned what came
+after it missing with Partial false. The watcher was safe only because
+ObserveContext checks the context itself. The result is now named.
+`TestAStoppedReadingOpensNothingMore` stopped at card 5, the last, where
+Partial came from usb()'s listing, which the stop refused: round 1's test
+stayed green here with the deferred mark deleted. It now stops in card 0
+of 0, 1 and 5 (a USB DAC put in for the first HDMI card), in a root hub
+before three more, and in a USB device before another; each was red on
+3114e6c8 (partial false, no problem). Control: the unnamed result (red:
+all three).
+
+The gate, through the build lock: `make fmt vet` clean, `make test` green
+(about 19 minutes on this Mac), `make build-all` clean, `make docs-check`
+clean; the hotplug package passed `-count=20 -cpu 1,2,8`. No test here
+needs Linux. The rules for rounds 1 and 2 are one note, applied in
+481d3144 to `player.md`, `output.md`, `config-lifecycle.md`,
+`cli-serve.md` and `CLAUDE.md`.
+
+**Round 3 (the Claude API and Codex on round 2; Argon queued): two items,
+both real.** The Claude API checked the hold's bound, the set-aside, the
+partial /proc readings, the drain, the named result, each test against
+its revert, and races, and found only item 2.
+
+1. *A held answer's bound was judged at the reading's start* (Codex,
+Medium). `reconcile` took `now` from the timer, before Observe, and
+compared the hold's bound with it twice, setting a reading aside and
+holding its answer. A reading that began short of the bound and ended past
+it was held again, or set aside, and the bound, past by then, started
+another reading at once, which may block as the first did. The same start
+time scheduled what follows a reading: the next follow-up, a failed
+reading's retry and the periodic reading, so one that outlasted its
+interval was followed at once by another. The follow-up was the review's
+own test's business too: with the bound fixed alone, the follow-up due
+0.5 s after the parked reading began started at once. The reading's end,
+its queued events taken (`done`), now judges the bound and schedules the
+follow-up, the retry and the periodic reading; `now` stays the reading's
+time, the snapshot's Observed and the hold's start. Every reading still
+moves the periodic on first, so one that returns early, the player just
+turned off, leaves nothing due at once: moving that assignment below
+Observe would have let such a reading come round again and again until
+the service stopped the watch. Red on 481d3144:
+`TestAReadingThatOutlastsAHeldAnswersBoundIsPublished` (the follow-up at
+3.3 s parked while the clock passed the 3.8 s bound: nothing published
+from it, held or with a removal queued behind it),
+`TestARetryIsDueItsBackoffAfterAFailedReadingEnds` (a failed reading that
+took 5 s was retried at once) and
+`TestThePeriodicReadingIsDueAPeriodAfterTheLastReadingEnds` (a reading
+that took 11 s was followed at once). Controls, each red: the hold judged
+at the start (both cases of the first test); the set-aside judged at the
+start (its queued case); the follow-up due from the start (its held case,
+a ninth reading at once); the retry from the start; the periodic not
+moved again from the end.
+
+2. *The round-2 entry said the rules were not yet applied* (the Claude
+API, Low). They were, in 481d3144; its last sentence now says so and names
+the files.
+
+The gate's stress run found a race in round 1's
+`TestAnOverflowWithNoWindowReadsAtOnce`: it read `Status().Next` as soon
+as the reading was counted, and the watcher sets its next deadline only on
+its loop's next turn, so the read could see the overflow reading's own
+deadline (12 failures in 1200 runs of the test alone under `-race -cpu
+1,2,8`). It now waits for the deadline (`waitNext`), as the other tests
+do: none in 1200. Control: the periodic a second off (red at the test's
+watchdog).
+
+The gate, through the build lock: `make fmt vet test` green on f9de73a4
+(17.7 minutes, after 19 minutes waiting for a slot), `make build-all`
+and `make docs-check` clean, and the hotplug package, its test fix included, passed
+`-race -count=20 -cpu 1,2,8`. The round-3 rules text is applied to
+`.claude/rules/player.md` in this change (7cdb5af0).
+
+**Round 4 (CodeRabbit and SonarCloud on #1312, and the merge with main at
+2094c1b4): four fixes and one finding declined.** 9e6eea1c merged main's
+port-binding fix (#1311). A port binding names the port (`placeOf`),
+Observe and the check after open share `inventory()`, which carries this
+PR's `Partial` and `partialCards`, and a cut card listing is
+`identity_incomplete` (`cutShort`). Read as its author would, the merge
+left three things of this PR on a model that changed under them, one of
+them CodeRabbit's first finding, and the merged rules text said one thing
+two ways.
+
+1. *Settled compared a transient card's port as a string* (CodeRabbit,
+Minor). A card's port path always carries its interface, and bind now
+writes the port alone unless the unit carries two cards. So under a
+binding of the port alone, the GO bar's own card read in one tree alone
+(a fast replug, /proc/asound dropping it before sysfs) never matched:
+`mayBeBound` set it aside and Settled answered device_missing as settled,
+skipping the follow-ups. Under a binding that records ":1.0", a card on
+another interface of the unit was set aside the same way. It now compares
+places, as Resolve does. Round 1's "a port that has its card is settled,
+since one interface is one card" held only while a port binding named an
+interface. Now a unit may carry two cards, and a port binding's answer
+stands whatever the transient cards are only when its card is on the
+recorded interface. Any other card found is the port's while the unit
+carries no other, so a transient card that may be another card of that
+unit (its place unknown or the bound one, its model unknown or the
+unit's, since one port holds one unit) holds the answer: once it settles
+the answer is device_ambiguous, or the card on the recorded interface.
+The reason says "a card at the bound port" under a port binding. Red on
+9e6eea1c: `TestSettledWaitsOnACardThatMayBeTheBoundUnit`'s rows "the
+bound port's own card in sysfs alone" (by the port alone) and "another
+card of the unit in sysfs alone, the recorded interface's card gone" (by
+the port and ":1.0"), and `TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort`
+(the composite unit's second card being added, available on card 5,
+settled). Controls, each red: the string comparison (both rows and the
+composite test); round 1's shortcut (the composite test); the model check
+removed (its case of another model in /proc alone); the recorded
+interface's shortcut removed (the composite test's ":1.0" case, and
+`TestSettledHoldsWhatNoCardCanChange`).
+
+2. *A snapshot handed every consumer the bound port's slices* (read in the
+merge). The port-binding fix added `Resolution.Port`, a `usbid.Port`
+whose segments and chain are slices. `copyResolution`, which every
+accessor and the feed's offer go through, cloned only the matches, so
+under a port binding one consumer's write to its copy reached the
+snapshot. It now clones both. `TestEachConsumerGetsItsOwnCopyOfTheBoundPort`
+was red on 1b257a89: "pci-0000:00:00.0/usb2-9:1.0" in the snapshot and
+the feed's newest, where it was "platform-xhci-hcd.0/usb2-1:1.0".
+Control: the matches cloned alone (red).
+
+3. *A stopped sysfs reading said its card listing was complete* (read in
+the merge; round 2's notes left it for this merge). `CardsComplete`
+promises that `Cards` holds every card the listing names, and a stop
+before the last card left it true. No caller saw it: `ObserveContext`
+returns the context's error, and the check after open reads without one.
+The card loop's stop now clears it. `TestAStoppedReadingOpensNothingMore`
+asserts it per case: red on 22797734 at card 0 of 3, and green where the
+stop came in the USB loops, which have read every card. Control: the
+stop leaving it (red).
+
+4. *The check after open on a partial inventory* (CodeRabbit, Minor,
+posted on this entry but about `checkPort`): declined. The evidence:
+- A partial reading lacks only what it says it lacks: a failed listing
+  or an unread root hub drops controllers or devices, and a /proc card
+  whose devices could not all be listed drops that card's streams. It can
+  hide no card at the bound port: sysfs's card listing must be whole
+  (`CardsComplete`), and a card one tree lists alone is transient.
+- Every piece the check's answer depends on is asked of the reading on
+  its own: the card listing, /proc's cards, the bound controller, the
+  opened card's stream. A partial reading can therefore make it refuse,
+  never admit a card a whole reading would refuse.
+- Resolve chooses card 5 on such a reading. A refusal would make the check
+  and Resolve answer differently on one reading, which the rules forbid
+  under a port binding.
+
+Nothing changes for the sink: the check's refusals are those it had, each
+`ReasonWrongDevice` at an open or a reopen. Two rows in
+`TestTheCheckAfterOpenAgreesWithResolveOnEachReading`, each checking that
+its reading is partial, pin it: another card whose PCM directory cannot
+be listed, and a root hub of another controller that cannot be read.
+Control: CodeRabbit's diff applied. Red: both rows, and main's
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream`, whose controller
+refusal the blanket one pre-empts.
+
+The merged rules text forbade checking "a reading that is not whole",
+which `Inventory.Partial` now names while Resolve answers it. The round's
+note says which readings the check refuses (a card listing that is not
+whole, a /proc/asound that cannot be read) and that it answers a reading
+partial elsewhere as Resolve does.
+
+5. *The fixtures' script wrote under a path from the command line*
+(SonarCloud's gate, pythonsecurity:S8707). `reconstruct.py` now takes no
+argument and writes only into its own directory; to write elsewhere, copy
+it there. The fixtures are unchanged:
+- Run in place, it rewrote all 15, and git saw no change.
+- A copy run from a scratch directory wrote 15 byte-identical messages
+  (`filecmp`, `shallow=False`).
+- Given a directory, it exits with its usage and writes nothing.
+Control: the previous script, given a directory, wrote 15 files into it.
+SonarCloud's own verdict comes with the next CI run.
+
+The gate, through the build lock: `make fmt vet test` green on 2c2f7e1a
+(18.5 minutes, after 10.5 minutes waiting for a slot), and `make
+build-all` and `make docs-check` clean. `internal/player/...` and
+`internal/alsa` passed `-race -count=10` under `-timeout 60m`, decode
+taking 1106 s. The first such run, under `go test`'s default 10 minutes,
+stopped in decode at 600 s with a goroutine dump and no assertion: the
+timeout `build-ci-tests.md` describes, not a failure. The hotplug suite's
+Linux-only tests are run on a Linux host: `TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly` and
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`, unchanged since round 1, and
+`TestCaptureKernelUevents`, run by hand on the Pi. The round-4 rules text
+is a note, OLD/NEW against 9e6eea1c's `player.md`.
