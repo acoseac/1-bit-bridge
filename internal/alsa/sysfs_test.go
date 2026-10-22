@@ -201,6 +201,28 @@ usbcard 4 sys/devices/virtio0/xhci-hcd.0/usb1/1-1/1-1:1.0
 	}
 }
 
+// TestSysfsTellsAVirtualCardFromOneBeingRemoved: a card with no parent
+// device sits under devices/virtual/sound and never has a device link, so
+// it is a card that is not USB, and nothing vanished. A card anywhere else
+// whose device link is gone is being removed: the kernel removes a card's
+// device link first (device_remove_class_symlinks), and adds it before the
+// class link that lists the card.
+func TestSysfsTellsAVirtualCardFromOneBeingRemoved(t *testing.T) {
+	root := sysfstest.BuildText(t, `dir sys/devices/virtual/sound/card3
+link sys/class/sound/card3 sys/devices/virtual/sound/card3
+platform sys/devices/platform/soc
+dir sys/devices/platform/soc/sound/card4
+link sys/class/sound/card4 sys/devices/platform/soc/sound/card4
+`)
+	snap := SysfsReader{Root: filepath.Join(root, "sys")}.Read()
+	if c := cardOf(t, snap, 3); c.Kind != IdentityUnsupported || c.Bus != "virtual" || c.Vanished || c.USB != nil {
+		t.Errorf("the virtual card: %+v", c)
+	}
+	if c := cardOf(t, snap, 4); c.Kind != IdentityUnreadable || !c.Vanished {
+		t.Errorf("the card whose device link went: %+v", c)
+	}
+}
+
 // TestSysfsWithoutClassSoundIsNotPresent: a tree with no class/sound (no
 // sysfs, as on macOS or in a container without /sys) says so, and reads
 // no card.

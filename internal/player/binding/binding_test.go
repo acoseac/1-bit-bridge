@@ -342,6 +342,64 @@ func TestACardOneTreeListsAloneIsTransient(t *testing.T) {
 	}
 }
 
+// TestAUSBCardWithNoUsbidIsReadFromSysfs: snd-usb-audio alone writes
+// /proc/asound/cardN/usbid, so a USB card another driver made (snd-usb-
+// hiface's M2Tech hiFace, caiaq, ua101, 6fire, line6) has none, and sysfs
+// gives its whole identity. Beside it the GO bar stays available by every
+// binding, and the card is bound and resolved by its sysfs identity. A
+// USB-Audio card with no usbid is snd-usb-audio's own window, which is
+// transient: it lists a card before it writes the usbid, and the usbid
+// reads empty while it disconnects one.
+func TestAUSBCardWithNoUsbidIsReadFromSysfs(t *testing.T) {
+	root := pi5(t)
+	other := usb1 + "/1-2"
+	sysfstest.Apply(t, root, "usbdev "+other+" vendor=1234 product=0f10 serial=HIFACE-LIKE-UNIT-0042\nusbcard 6 "+other+"/1-2:1.0\n"+
+		"proccard 6 hiFace \"Synthetic hiFace\" driver=snd-usb-hiface pcm=0.0\n")
+	inv := observe(t, root)
+	c, ok := inv.Card(6)
+	if !ok || c.State != CardUSB || c.USB == nil || c.USB.ID.String() != "1234:0f10" || c.USB.Port != "platform-xhci-hcd.0/usb2-2:1.0" {
+		t.Fatalf("card 6: %+v, %v", c, ok)
+	}
+	for _, dev := range []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009"), byPort(goBarPort)} {
+		want(t, Resolve(dev, inv), StateAvailable, 5)
+	}
+	for _, kind := range []string{config.BindingSerial, config.BindingUniqueModel, config.BindingPort} {
+		dev, err := For(inv, 6, kind, Endpoint{})
+		if err != nil {
+			t.Fatalf("bind card 6 by %s: %v", kind, err)
+		}
+		want(t, Resolve(dev, inv), StateAvailable, 6)
+	}
+	for _, step := range []string{"file proc/asound/card5/usbid \"\"\n", "remove proc/asound/card5/usbid\n"} {
+		sysfstest.Apply(t, root, step)
+		inv = observe(t, root)
+		if c, _ := inv.Card(5); c.State != CardTransient {
+			t.Fatalf("the GO bar after %q: %+v", step, c)
+		}
+		want(t, Resolve(byModel("1234", "0f10"), inv), StateIdentityTransient, -1)
+	}
+}
+
+// TestAVirtualCardIsUnsupportedNotTransient: a card with no parent device
+// sits under devices/virtual/sound with no device link, as the kernel
+// places it. It never had a link to lose, so it is not vanishing: it is not
+// USB (identity_unsupported), cannot be bound, and blocks no binding.
+func TestAVirtualCardIsUnsupportedNotTransient(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "dir sys/devices/virtual/sound/card3\nlink sys/class/sound/card3 sys/devices/virtual/sound/card3\n"+
+		"proccard 3 Virtual \"A virtual card\" driver=Virtual pcm=0.0\n")
+	inv := observe(t, root)
+	if c, ok := inv.Card(3); !ok || c.State != CardUnsupported || !strings.Contains(c.Why, "virtual") {
+		t.Fatalf("card 3: %+v, %v", c, ok)
+	}
+	for _, dev := range []config.PlayerDevice{bySerial(goBarSerial), byModel("20b1", "3009"), byPort(goBarPort)} {
+		want(t, Resolve(dev, inv), StateAvailable, 5)
+	}
+	if _, err := For(inv, 3, config.BindingPort, Endpoint{}); err == nil || !strings.Contains(err.Error(), "identity_unsupported") {
+		t.Errorf("bind the virtual card: %v", err)
+	}
+}
+
 // TestAnUnreadableCardIsNeverRuledOut: a USB card whose identity cannot be
 // read may be a second unit of the bound one, so a match beside it is
 // ambiguous, never the first.

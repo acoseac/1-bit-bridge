@@ -77,12 +77,14 @@ type Identity struct {
 	Card int          `json:"card"`
 	Kind IdentityKind `json:"kind"`
 	// Bus is the subsystem of the card's device: "usb", "platform", "pci",
-	// or "" when it could not be read.
+	// "virtual" for a card with no device (one under devices/virtual), or
+	// "" when it could not be read.
 	Bus string `json:"bus"`
 	// USB is the unit's identity, for a USB card.
 	USB *USBIdentity `json:"usb"`
-	// Vanished says a file the card's reading needed was not there: a card
-	// the kernel is adding or removing, whose reading is not an answer.
+	// Vanished says a link or a file the card had went while it was read:
+	// a card the kernel is removing (or adding), whose reading is not an
+	// answer. A device link a virtual card never has is not one.
 	Vanished bool `json:"vanished"`
 	// Problems are what could not be read, by file, never quoting a
 	// serial.
@@ -390,7 +392,19 @@ func (t *sysfsTree) subsystem(dir string) string {
 	return path.Base(filepath.ToSlash(text))
 }
 
-// card reads card n's identity.
+// virtualDevices is where the kernel places a class device that has no
+// parent device (get_device_parent): a sound card there has no device link,
+// and never had one.
+const virtualDevices = "devices/virtual/"
+
+// card reads card n's identity. What it needed and could not find makes
+// the card Vanished: the card class/sound listed, gone before its link
+// resolved, or a link or attribute the card had and lost. The kernel
+// removes a card's device link first when it removes the card
+// (device_remove_class_symlinks), and makes it before the class/sound link
+// that lists the card, so a missing device link is a card going, unless the
+// card is under devices/virtual, which never has one: such a card is not
+// USB, and nothing vanished.
 func (t *sysfsTree) card(n int) Identity {
 	id := Identity{Card: n, Kind: IdentityUnreadable, Problems: []string{}}
 	name := "card" + strconv.Itoa(n)
@@ -406,7 +420,11 @@ func (t *sysfsTree) card(n int) Identity {
 		return fail(err, "class/sound/%s: %s", name, errText(err))
 	}
 	devDir, err := t.resolve(cardDir + "/device")
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && strings.HasPrefix(cardDir, virtualDevices):
+		id.Kind, id.Bus = IdentityUnsupported, "virtual"
+		return id
+	case err != nil:
 		return fail(err, "%s/device: %s", name, errText(err))
 	}
 	id.Bus = t.subsystem(devDir)

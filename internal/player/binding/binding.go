@@ -141,9 +141,21 @@ type Observer struct {
 	Sysfs alsa.SysfsReader
 }
 
+// sndUSBAudio is the driver name snd-usb-audio gives its cards in
+// /proc/asound/cards.
+const sndUSBAudio = "USB-Audio"
+
 // Observe takes one reading of both trees. The error is /proc/asound's
 // cards file's alone, a box with no ALSA: everything else that cannot be
 // read is a card's state or a problem.
+//
+// A USB card's identity is sysfs's. /proc/asound's usbid cross-checks it
+// where there is one, and only snd-usb-audio writes one: a USB card another
+// driver made (snd-usb-hiface, caiaq, ua101, 6fire, line6) has none, ever,
+// and is read from sysfs alone. A USB-Audio card with no usbid is in
+// snd-usb-audio's own window, transient: it lists a card in
+// /proc/asound/cards before it writes the card's proc files, and its usbid
+// reads empty while it disconnects the card.
 func (o Observer) Observe() (Inventory, error) {
 	snap, err := o.Proc.Read()
 	if err != nil {
@@ -177,9 +189,9 @@ func (o Observer) Observe() (Inventory, error) {
 			c.State, c.Why = CardUnsupported, "a "+orUnknown(id.Bus)+" card, not USB: it has no identity a binding names"
 		case id.Kind == alsa.IdentityUnreadable:
 			c.State, c.Why = CardUnreadable, strings.Join(id.Problems, "; ")
-		case cr.USBID == nil:
-			c.State, c.Why = CardTransient, "USB in sysfs with no usbid in /proc/asound: being disconnected"
-		case *cr.USBID != id.USB.ID:
+		case cr.USBID == nil && cr.Driver == sndUSBAudio:
+			c.State, c.Why = CardTransient, "a USB-Audio card with no usbid in /proc/asound: snd-usb-audio is adding or disconnecting it"
+		case cr.USBID != nil && *cr.USBID != id.USB.ID:
 			c.State, c.Why = CardTransient, fmt.Sprintf("/proc/asound says %s and sysfs %s: renumbered between the readings", cr.USBID, id.USB.ID)
 		default:
 			c.State, c.USB = CardUSB, id.USB
