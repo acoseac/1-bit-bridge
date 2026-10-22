@@ -552,10 +552,11 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 // of their own. The opened card must be a USB card both trees agree on, at
 // the bound port (SamePort), and the card the binding chooses there now,
 // which on a unit swapped into the port between the resolve and the open it
-// may be. A card the kernel is adding or removing (vanished as it was read,
-// listed by one tree alone, or read as two units) refuses wherever it is
-// and whatever the binding records, as Resolve concludes nothing from such
-// a reading. Then a card on the configuration and interface the binding
+// may be. A card the kernel is adding or removing, any card inventory calls
+// transient (vanished as it was read, listed by one tree alone, read as two
+// units, or a USB-Audio card with no usbid), refuses wherever it is and
+// whatever the binding records, as Resolve concludes nothing from such a
+// reading. Then a card on the configuration and interface the binding
 // records is the card whatever else the unit carries. Any other is only
 // while the unit carries no other card, and, as Resolve rules out no card
 // it cannot identify, a card unreadable in sysfs may be another card of
