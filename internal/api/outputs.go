@@ -625,18 +625,24 @@ func probeKey(cfg config.OutputConfig) string {
 	return strings.Join([]string{cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password}, "\n")
 }
 
+// errOutputsBuildPanicked is a build of the outputs body that panicked.
+var errOutputsBuildPanicked = errors.New("api: the outputs body's build panicked")
+
 // Response builds the route body. One build runs at a time, on a context
 // detached from the caller with its own deadline. A success that finished
 // inside that deadline is reused for outputCacheTTL. The MPD connection
 // opens on the first build that can dial and closes outputIdle after the
-// last call.
-func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
+// last call. The build's flight completes however the build ends: one that
+// panics (a command that panicked has dropped its session) is an error,
+// logged without the panic's value and never cached, and the next call
+// builds afresh.
+func (o *localOutputs) Response(ctx context.Context) (body OutputsResponse, err error) {
 	o.armIdle()
 	o.mu.Lock()
 	if o.cached.ok && o.now().Sub(o.cached.at) < outputCacheTTL {
-		body := o.cached.body
+		cached := o.cached.body
 		o.mu.Unlock()
-		return body, nil
+		return cached, nil
 	}
 	if o.flight != nil {
 		f := o.flight
@@ -657,17 +663,26 @@ func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
 
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.buildLimit)
 	defer cancel()
-	body, err := o.build(buildCtx)
-	o.mu.Lock()
-	if err == nil && buildCtx.Err() == nil {
-		o.cached = outputCache{at: o.now(), body: body, ok: true}
-	}
-	o.flight = nil
-	f.body, f.err = body, err
-	close(f.done)
-	o.mu.Unlock()
-	o.armIdle()
-	return body, err
+	// Deferred after cancel, so it runs first and reads the build's own
+	// deadline. A flight left open would hold every later call until its
+	// own context ends, and the idle close never runs while a build is in
+	// flight.
+	defer func() {
+		if r := recover(); r != nil {
+			logOutputPanic("the outputs body", r)
+			body, err = OutputsResponse{}, errOutputsBuildPanicked
+		}
+		o.mu.Lock()
+		if err == nil && buildCtx.Err() == nil {
+			o.cached = outputCache{at: o.now(), body: body, ok: true}
+		}
+		o.flight = nil
+		f.body, f.err = body, err
+		close(f.done)
+		o.mu.Unlock()
+		o.armIdle()
+	}()
+	return o.build(buildCtx)
 }
 
 func (o *localOutputs) armIdle() {

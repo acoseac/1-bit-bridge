@@ -532,16 +532,17 @@ func boundedStep[T any](o *localOutputs, busy *bool, ctx context.Context, limit 
 	return val, true, false
 }
 
-// logOutputPanic logs a panic in a step of the reading or the probe: the
-// step and the stack, and the panic's value only when it is the runtime's
-// own error, which carries none of what the step read (a value code
-// panics with could quote a file, and mpd.conf holds a password).
+// logOutputPanic logs a panic in a step of the reading, the probe or the
+// outputs body's build: the step and the stack, and the panic's value only
+// when it is the runtime's own error, which carries none of what the step
+// read (a value code panics with could quote a file, and mpd.conf holds a
+// password).
 func logOutputPanic(step string, r any) {
 	attrs := []any{"step", step, "stack", string(debug.Stack())}
 	if rerr, ok := r.(runtime.Error); ok {
 		attrs = append(attrs, "error", rerr.Error())
 	}
-	logger.Error("output reading: a step panicked", attrs...)
+	logger.Error("local outputs: a step panicked", attrs...)
 }
 
 // readConf reads mpd.conf whole, its includes too, under the conf
@@ -564,13 +565,17 @@ func (o *localOutputs) readConf(ctx context.Context, root, path string) (conf.Fi
 }
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
-// (boundedStep). had is false for one not had in time, or whose read
-// failed: nothing is resolved from it.
+// (boundedStep). had is false for one not had in time, whose read failed,
+// or whose read stopped at a file that is there and could not be read
+// (alsa.PCMConfig.Unread): nothing is resolved from it, since what that
+// file says is not known and may be read the next time. A file read that
+// the parser does not model is had: it resolves no PCM name, the same way
+// at every read and for GET /v1/outputs alike, so their ids agree.
 func (o *localOutputs) readALSAConfig(ctx context.Context, root string) (pcm alsa.PCMConfig, had bool) {
 	c, late, failed := boundedStep(o, &o.reading.alsa, ctx, o.limits.alsa, "the ALSA configuration read", func() alsa.PCMConfig {
 		return o.alsaConfig(root)
 	})
-	if late || failed {
+	if late || failed || c.Unread() {
 		return alsa.PCMConfig{}, false
 	}
 	return c, true
@@ -1120,7 +1125,11 @@ func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 	mode, _ := s.gain.Get("replay_gain_mode")
 	xfade, _ := s.after.Get("xfade")
 	mixramp, _ := s.after.Get("mixrampdelay")
+	// The volume is read from both statuses, which need not agree on it (a
+	// volume change does not settle a reading): the card held samples at
+	// the volume of either.
 	volume, _ := s.after.Get("volume")
+	volumeBefore, _ := s.before.Get("volume")
 	f := signalpath.Facts{
 		State:  state,
 		Audio:  audio,
@@ -1130,6 +1139,7 @@ func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 			Crossfade:           xfade,
 			MixRampDelay:        mixramp,
 			Volume:              volume,
+			VolumeBefore:        volumeBefore,
 			ConfRead:            s.confRead,
 			VolumeNormalization: s.conf.VolumeNormalization,
 			AudioOutputFormat:   s.conf.AudioOutputFormat,

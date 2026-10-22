@@ -750,6 +750,17 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_type", "software"))
 			r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "100"))
 		}, signalpath.FormatPreserved, nil, nil},
+		// The volume is read on both sides of the /proc read and is not a
+		// setting a change of which settles the reading: below 100 at either
+		// read, the card held attenuated samples.
+		{"software volume at 60, then 100", func(t *testing.T, r *readingRig) {
+			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_type", "software"))
+			r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "60"), withPair(capturedStatus(t, c.name), "volume", "100"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDSoftwareVolume, signalpath.FromMPDConf)}},
+		{"software volume at 100, then 60", func(t *testing.T, r *readingRig) {
+			r.writeConf(withOutputSetting(volumioConf(t, r.music), "mixer_type", "software"))
+			r.mpd.restart(withPair(capturedStatus(t, c.name), "volume", "100"), withPair(capturedStatus(t, c.name), "volume", "60"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.MPDSoftwareVolume, signalpath.FromMPDConf)}},
 		{"the deprecated top-level software mixer", func(t *testing.T, r *readingRig) {
 			r.writeConf("mixer_type \"software\"\n" + volumioConf(t, r.music))
 			at62(t, r)
@@ -790,6 +801,20 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 			appendAsound(t, r, "pcm.soft {\n    type softvol\n    slave.pcm \"volumioHw\"\n    control.name \"SoftMaster\"\n}\n")
 			r.writeConf(withDevice(volumioConf(t, r.music), "soft"))
 		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSASoftvol, signalpath.FromALSAConf)}},
+		// A plug whose transfer table swaps the channels keeps the format,
+		// the rate and the channel count, and has no chain the bridge
+		// follows; it is the route stage.
+		{"a plug that swaps the channels", func(t *testing.T, r *readingRig) {
+			appendAsound(t, r, "pcm.swapped {\n    type plug\n    slave.pcm \"volumioHw\"\n    ttable.0.1 1\n    ttable.1.0 1\n}\n")
+			r.writeConf(withDevice(volumioConf(t, r.music), "swapped"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSARoute, signalpath.FromALSAConf)}},
+		{"alsa-lib's dmix by its device string", func(t *testing.T, r *readingRig) {
+			r.writeConf(withDevice(volumioConf(t, r.music), "dmix:CARD=Audio,DEV=0"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSADmix, signalpath.FromALSAConf)}},
+		{"a plug over a dmix: device string", func(t *testing.T, r *readingRig) {
+			appendAsound(t, r, "pcm.shared {\n    type plug\n    slave.pcm \"dmix:CARD=Audio,DEV=0\"\n}\n")
+			r.writeConf(withDevice(volumioConf(t, r.music), "shared"))
+		}, signalpath.FormatPreserved, nil, []ReadingWarning{warning(signalpath.ALSADmix, signalpath.FromALSAConf)}},
 		// The card held by the thread of an output MPD reports switched off
 		// is not that output's stream.
 		{"the output switched off live", func(t *testing.T, r *readingRig) {
@@ -889,10 +914,11 @@ func TestMPDConfIsReadUnderItsOwnVolume(t *testing.T) {
 	}
 }
 
-// doPRig is a DSD64 file an output with dop on sends as DoP: 24-bit PCM at
-// 176.4 kHz on card 5 (synthetic, from the 96 kHz capture with its rate
-// changed in a copy), MPD's audio dsd64:2.
-func doPRig(t *testing.T, dop string) *readingRig {
+// doPRig is a DSD64 file that reaches card 5 as 24-bit PCM at 176.4 kHz,
+// DoP's shape (synthetic, from the 96 kHz capture with its rate changed in
+// a copy), MPD's audio dsd64:2, and the output's live dop and
+// allowed_formats as given.
+func doPRig(t *testing.T, dop, formats string) *readingRig {
 	t.Helper()
 	status := withPair(withPair(capturedStatus(t, "pcm-96k-24"), "audio", "dsd64:2"), "bitrate", "5645")
 	rate, one, two, yes := 2822400.0, 1, 2, true
@@ -909,7 +935,7 @@ func doPRig(t *testing.T, dop string) *readingRig {
 		t.Fatal(err)
 	}
 	rig.writeConf(withDevice(volumioConf(t, rig.music), "hw:CARD=Audio,DEV=0"))
-	rig.mpd.outputs = volumioOutputs("1", "allowed_formats=", "dop="+dop)
+	rig.mpd.outputs = volumioOutputs("1", "allowed_formats="+formats, "dop="+dop)
 	return rig
 }
 
@@ -917,21 +943,67 @@ func doPRig(t *testing.T, dop string) *readingRig {
 // as 24-bit PCM at 176.4 kHz from an output MPD reports sending DoP is in
 // the format DoP of its rate takes, format_preserved_dop, which says
 // nothing of whether the DAC locked onto it; with dop off MPD converted the
-// DSD to PCM.
+// DSD to PCM. With an allowed_formats MPD reports, MPD's ALSA output takes
+// DoP from the entry that matches the stream and not from dop: dop on and
+// an entry of PCM is MPD's conversion, of DoP's shape, and dop off and the
+// stream's =dop entry is DoP.
 func TestReadingDoPHasTheFormatDoPTakes(t *testing.T) {
-	rig := doPRig(t, "1")
+	override := warning(signalpath.MPDFormatOverride, signalpath.FromMPD)
+	for _, tc := range []struct {
+		name, dop, formats string
+		value              string
+		codes              []string
+		warnings           []ReadingWarning
+	}{
+		{"dop on", "1", "", signalpath.FormatPreservedDoP, nil, nil},
+		{"dop off", "0", "", signalpath.Withheld, []string{signalpath.DSDConvertedToPCM}, nil},
+		{"dop on and allowed_formats of PCM", "1", "176400:24:2", signalpath.Withheld, []string{signalpath.DSDConvertedToPCM}, []ReadingWarning{override}},
+		{"dop off and the stream's =dop entry", "0", "dsd64:*=dop", signalpath.FormatPreservedDoP, nil, []ReadingWarning{override}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := doPRig(t, tc.dop, tc.formats)
+			hs, token, id := rig.serve()
+			_, got, raw := getReading(t, hs, token, id)
+			if got.State != "whole" {
+				t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
+			}
+			wantVerdict(t, got, raw, tc.value, tc.codes...)
+			wantWarnings(t, got, raw, tc.warnings...)
+			// The output shown carries the settings as MPD reports them.
+			out := got.MPD.Config.Output
+			if out == nil || out.DoP != (tc.dop == "1") || out.AllowedFormats != tc.formats {
+				t.Fatalf("the output shown: %+v\n%s", out, raw)
+			}
+		})
+	}
+}
+
+// TestAWiderContainerHasTheFormatPreserved: PCM at the card holds the
+// file's samples when its container is at least the file's bit depth (the
+// plan's decision (d)): a 16-bit file that reaches the card in S24_3LE, its
+// 16 bits in a 24-bit word, is format_preserved, as it is in S16_LE.
+func TestAWiderContainerHasTheFormatPreserved(t *testing.T) {
+	c := piCaptures[0]
+	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+	hw := filepath.Join(rig.procRoot, "asound", "card5", "pcm0p", "sub0", "hw_params")
+	b, err := os.ReadFile(hw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(b), "format: S16_LE\n", "format: S24_3LE\n", 1)
+	if text == string(b) {
+		t.Fatalf("no S16_LE in %s", hw)
+	}
+	if err := os.WriteFile(hw, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	hs, token, id := rig.serve()
 	_, got, raw := getReading(t, hs, token, id)
-	wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	wantVerdict(t, got, raw, signalpath.FormatPreserved)
 	wantWarnings(t, got, raw)
-	if got.MPD.Config.Output == nil || !got.MPD.Config.Output.DoP {
-		t.Fatalf("dop not read from the live attribute: %+v", got.MPD.Config.Output)
+	if got.DAC == nil || got.DAC.Format != "S24_3LE" || got.Song == nil || got.Song.Row == nil || *got.Song.Row.BitsPerSample != 16 {
+		t.Fatalf("not a 16-bit file in S24_3LE:\n%s", raw)
 	}
-
-	off := doPRig(t, "0")
-	hs2, token2, id2 := off.serve()
-	_, got2, raw2 := getReading(t, hs2, token2, id2)
-	wantVerdict(t, got2, raw2, signalpath.Withheld, signalpath.DSDConvertedToPCM)
 }
 
 // TestReadingNamesTheBridgesOwnRow: a song MPD names by database path is

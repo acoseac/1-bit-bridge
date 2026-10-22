@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -391,17 +393,31 @@ func TestAnALSAConfigurationReadPastItsDeadline(t *testing.T) {
 // id names can come from the ALSA configuration alone: Volumio's volumio
 // PCM pointed at a card that is not USB (an I2S HAT, here the HDMI card) is
 // listed by resolving that name. A reading whose ALSA configuration read ran
-// past its deadline, or failed, cannot tell that id from one that names no
-// output, so it answers every well-formed id unknown with
-// alsa_config_unread, never a 404 for an output that is there.
+// past its deadline, panicked, or stopped at a file that is there and could
+// not be read cannot tell that id from one that names no output, so it
+// answers every well-formed id unknown with alsa_config_unread, never a 404
+// for an output that is there.
 func TestAnALSAConfigurationNotHadLeavesEveryIdUnknown(t *testing.T) {
-	for name, read := range map[string]func(stuck <-chan struct{}) func(string) alsa.PCMConfig{
-		"late": func(stuck <-chan struct{}) func(string) alsa.PCMConfig {
+	for name, tc := range map[string]struct {
+		read  func(stuck <-chan struct{}) func(string) alsa.PCMConfig
+		after func(t *testing.T, etc string)
+	}{
+		"late": {read: func(stuck <-chan struct{}) func(string) alsa.PCMConfig {
 			return func(root string) alsa.PCMConfig { <-stuck; return alsa.LoadPCMConfig(root) }
-		},
-		"failed": func(<-chan struct{}) func(string) alsa.PCMConfig {
+		}},
+		"panicked": {read: func(<-chan struct{}) func(string) alsa.PCMConfig {
 			return func(string) alsa.PCMConfig { panic("an ALSA configuration read that panics") }
-		},
+		}},
+		// An ordinary read failure, through the loader itself: the
+		// asound.conf the listing read is now there and cannot be read.
+		"unreadable": {after: func(t *testing.T, etc string) {
+			if err := os.Remove(etc); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(etc, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := piCaptures[0]
@@ -429,7 +445,12 @@ func TestAnALSAConfigurationNotHadLeavesEveryIdUnknown(t *testing.T) {
 			id := body.Outputs[0].ID
 			stuck := make(chan struct{})
 			t.Cleanup(func() { close(stuck) })
-			srv.localOutputs.alsaConfig = read(stuck)
+			if tc.read != nil {
+				srv.localOutputs.alsaConfig = tc.read(stuck)
+			}
+			if tc.after != nil {
+				tc.after(t, etc)
+			}
 			srv.localOutputs.limits.alsa = 50 * time.Millisecond
 			got, found, err := srv.localOutputs.Reading(context.Background(), id)
 			if err != nil || !found {
@@ -443,6 +464,35 @@ func TestAnALSAConfigurationNotHadLeavesEveryIdUnknown(t *testing.T) {
 				t.Fatal("a malformed id was answered")
 			}
 		})
+	}
+}
+
+// TestAConfigurationNotReadWholeResolvesAsTheListingDoes: an ALSA
+// configuration the bridge read that holds what its parser does not model
+// (a top-level @hooks here; a softvol's max_dB 0.0, or a library path
+// unquoted, does the same) resolves no PCM name, for GET /v1/outputs and
+// for the reading alike, the same way at every read, so their ids agree:
+// the listing names the USB card as a candidate, and the reading of it is
+// whole and judged, with no chain and no stage from the files. It is not
+// a configuration the reading did not have.
+func TestAConfigurationNotReadWholeResolvesAsTheListingDoes(t *testing.T) {
+	c := piCaptures[0]
+	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+	appendAsound(t, rig, "@hooks [ ]\n")
+	hs, token := newOutputsHTTP(t, "fp", rig.cfg)
+	resp := outputsGet(t, hs, token, "/v1/outputs")
+	body, raw := decodeOutputs(t, resp)
+	if len(body.Outputs) != 1 || body.Outputs[0].DAC == nil || body.Outputs[0].DAC.Card != 5 || body.Outputs[0].DAC.IsMPDsOutput != nil {
+		t.Fatalf("the listing does not name the USB card as a candidate: %s", raw)
+	}
+	code, got, raw2 := getReading(t, hs, token, body.Outputs[0].ID)
+	if code != 200 || got.State != "whole" {
+		t.Fatalf("status %d state %s %v\n%s", code, got.State, got.StateReasons, raw2)
+	}
+	wantVerdict(t, got, raw2, signalpath.FormatPreserved)
+	wantWarnings(t, got, raw2)
+	if got.DAC == nil || got.DAC.Card != 5 || got.MPD.Config.Output == nil || len(got.MPD.Config.Output.Chain) != 0 {
+		t.Fatalf("the card and the output shown:\n%s", raw2)
 	}
 }
 
@@ -584,6 +634,58 @@ func TestACommandThatPanicsDropsTheSession(t *testing.T) {
 	}
 	if n := rig.dials.Load(); n != 2 {
 		t.Fatalf("%d dials: the reading after the panic used the session it panicked on", n)
+	}
+}
+
+// TestAPanicInTheOutputsBodyClosesItsFlight: a command that panics in the
+// outputs body's build (a find, proving the library root) drops its session,
+// and the build is an error, logged without the panic's value and never
+// cached: its flight completes, so the next GET /v1/outputs builds afresh
+// and answers within its deadline instead of waiting on a flight nothing
+// will close.
+func TestAPanicInTheOutputsBodyClosesItsFlight(t *testing.T) {
+	rec := loggingtest.Record(t)
+	c := piCaptures[0]
+	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+	rig.mpd.set(func(m *scriptedMPD) { m.panics = map[string]bool{"find": true} })
+	hs, token := newOutputsHTTP(t, "fp", rig.cfg)
+	get := func() (int, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hs.URL+"/v1/outputs", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := hs.Client().Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		_, err = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode, err
+	}
+	first, err1 := get()
+	rig.mpd.set(func(m *scriptedMPD) { m.panics = nil })
+	second, err2 := get()
+	if err2 != nil || second != http.StatusOK {
+		t.Fatalf("the call after a build that panicked: status %d, %v", second, err2)
+	}
+	if err1 != nil || first != http.StatusInternalServerError {
+		t.Fatalf("the call whose build panicked: status %d, %v; want 500", first, err1)
+	}
+	if n := rig.mpd.closed.Load(); n != 1 {
+		t.Fatalf("the session a find panicked on was closed %d times, want once", n)
+	}
+	var logged bool
+	for _, line := range rec.All() {
+		if strings.Contains(line, "panicked once it was written") {
+			t.Fatalf("a log line carries the panic's value: %s", line)
+		}
+		logged = logged || (strings.Contains(line, "a step panicked") && strings.Contains(line, "the outputs body"))
+	}
+	if !logged {
+		t.Fatal("the build's panic was not logged")
 	}
 }
 
