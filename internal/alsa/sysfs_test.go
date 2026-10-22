@@ -307,6 +307,38 @@ func TestSysfsWithoutClassSoundIsNotPresent(t *testing.T) {
 	}
 }
 
+// TestSysfsSaysWhenADevicesClassCannotBeRead: a USB device whose
+// bDeviceClass cannot be read (not a file, or missing while its directory
+// is there) is listed with its hub status unknown, never as a device that
+// is not a hub, and the reading names the file; a device whose class reads
+// is a hub or not, and nothing is said of it.
+func TestSysfsSaysWhenADevicesClassCannotBeRead(t *testing.T) {
+	for _, tc := range []struct{ name, step string }{
+		{"not a file", "remove " + goBarDevice + "/bDeviceClass\ndir " + goBarDevice + "/bDeviceClass\n"},
+		{"missing", "remove " + goBarDevice + "/bDeviceClass\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			sysfstest.Apply(t, root, tc.step)
+			snap := SysfsReader{Root: filepath.Join(root, "sys")}.Read()
+			if len(snap.Devices) != 1 || snap.Devices[0].Hub || !snap.Devices[0].HubUnknown {
+				t.Fatalf("devices %+v; want the GO bar with its hub status unknown", snap.Devices)
+			}
+			if !strings.Contains(strings.Join(snap.Problems, "; "), "bus/usb/devices/1-1/bDeviceClass") {
+				t.Errorf("problems %q", snap.Problems)
+			}
+			if c := cardOf(t, snap, 5); c.Kind != IdentityUSB {
+				t.Errorf("the GO bar's card: %+v", c)
+			}
+		})
+	}
+	snap, _ := readSysfs(t, "pi5-hub")
+	if len(snap.Devices) != 2 || !snap.Devices[0].Hub || snap.Devices[0].HubUnknown || snap.Devices[1].Hub ||
+		snap.Devices[1].HubUnknown || len(snap.Problems) != 0 {
+		t.Errorf("a tree whose classes read: devices %+v, problems %q", snap.Devices, snap.Problems)
+	}
+}
+
 // TestSysfsCapsTheCardsAndTheDevices: a tree that lists more than the caps
 // is read up to them, and says so.
 func TestSysfsCapsTheCardsAndTheDevices(t *testing.T) {
@@ -322,6 +354,17 @@ func TestSysfsCapsTheCardsAndTheDevices(t *testing.T) {
 	snap := r.Read()
 	if len(snap.Cards) > 4 || len(snap.Devices) > 4 || !strings.Contains(strings.Join(snap.Problems, "; "), "more than 4") {
 		t.Errorf("cards %d, devices %d, problems %q", len(snap.Cards), len(snap.Devices), snap.Problems)
+	}
+	// A listing cut at the cap is not the whole of the cards, and says so
+	// apart from its problems; so is a tree with no class/sound to list.
+	if !snap.Present || snap.CardsComplete {
+		t.Errorf("a cut listing: present %v, cards complete %v", snap.Present, snap.CardsComplete)
+	}
+	if whole := (SysfsReader{Root: filepath.Join(root, "sys")}).Read(); !whole.CardsComplete || len(whole.Cards) != 6 {
+		t.Errorf("the whole listing: cards complete %v, %d cards", whole.CardsComplete, len(whole.Cards))
+	}
+	if none := (SysfsReader{Root: t.TempDir()}).Read(); none.Present || none.CardsComplete {
+		t.Errorf("no class/sound: present %v, cards complete %v", none.Present, none.CardsComplete)
 	}
 }
 

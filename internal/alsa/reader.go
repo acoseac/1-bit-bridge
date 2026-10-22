@@ -2,6 +2,7 @@ package alsa
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -27,9 +28,8 @@ type Reader struct {
 	AsoundRoot string
 	// beforeOpen, when set, is called with a file's or a directory's path
 	// in a raw dump (asound/card5/stream0, 6584/status) after the path is
-	// resolved and before it is opened or listed, and with "asound" and "."
-	// just before the ALSA root and the /proc root are opened: the windows a
-	// test swaps a link or a FIFO in.
+	// resolved and before it is opened or listed: the window a test swaps a
+	// link or a FIFO in. A root's own open is osOpenRoot's seam.
 	beforeOpen func(path string)
 }
 
@@ -55,6 +55,15 @@ type CardReading struct {
 	// Problems are what the card's files could not say, each opening with
 	// the file's path under the ALSA root ("card5/stream0: line 9: …").
 	Problems []string `json:"problems"`
+	// Partial says the card's devices could not all be enumerated: its
+	// directory or a pcmNp directory could not be listed, or the type of an
+	// entry a listing named could not be read, for a reason other than its
+	// absence (a card or a device going, which is the box as it is). What
+	// it lacks is not absent from the card, so a consumer that compares
+	// readings (the hotplug watcher, through binding.Inventory.Partial)
+	// does not take it for a change; Problems say which. Not encoded: the
+	// --json shape is pinned, and Problems say it there (B470 PR 4a2 round 2).
+	Partial bool `json:"-"`
 }
 
 // Device is one PCM device of a card: hw:<card>,<device>.
@@ -130,7 +139,16 @@ var (
 // cannot be read is a problem on its card, and the rest of the reading
 // stands.
 func (r Reader) Read() (Snapshot, error) {
-	return r.read(nil)
+	return r.read(context.Background(), nil)
+}
+
+// ReadContext is Read, stopping before the next card or file once ctx is
+// done, and then returning ctx's error with what it read: a reading cut
+// short would read a card's files as absent. A read already started is not
+// interrupted; a card's /proc/asound files take the card's locks, which a
+// driver disconnecting the card can hold.
+func (r Reader) ReadContext(ctx context.Context) (Snapshot, error) {
+	return r.read(ctx, nil)
 }
 
 // Raw reads what Read reads and returns the files themselves, in the
@@ -141,7 +159,7 @@ func (r Reader) Read() (Snapshot, error) {
 func (r Reader) Raw() ([]RawFile, error) {
 	var files []RawFile
 	seen := map[string]bool{}
-	_, err := r.read(func(path string, data []byte, err error) {
+	_, err := r.read(context.Background(), func(path string, data []byte, err error) {
 		if seen[path] {
 			return
 		}
@@ -167,10 +185,11 @@ func (r Reader) roots() (procRoot, asoundRoot string) {
 // read is Read, handing each file it reads to collect when collect is not
 // nil, and then also reading the files only a raw dump wants. It reads only
 // through the two roots, each opened once as a tree, so every file and
-// directory it reaches is inside its root when it is opened.
-func (r Reader) read(collect collector) (Snapshot, error) {
+// directory it reaches is inside its root when it is opened. Once ctx is
+// done it opens nothing more and returns ctx's error.
+func (r Reader) read(ctx context.Context, collect collector) (Snapshot, error) {
 	procRoot, asoundRoot := r.roots()
-	t := walk{collect: collect, raw: collect != nil, beforeOpen: r.beforeOpen}
+	t := walk{ctx: ctx, collect: collect, raw: collect != nil, beforeOpen: r.beforeOpen}
 	if t.collect == nil {
 		t.collect = func(string, []byte, error) {}
 	}
@@ -181,7 +200,7 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 			return snap, fmt.Errorf("read %s: %w", path, err)
 		}
 	}
-	asound, err := openTree(asoundRoot, maxLinks, maxHops, t.hook("asound"))
+	asound, err := openTree(asoundRoot, maxLinks, maxHops)
 	var b []byte
 	if err == nil {
 		defer asound.close()
@@ -199,20 +218,28 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 	}
 	// A /proc tree that cannot be opened leaves every owner unknown, as a
 	// task's entry that cannot be read does (procFile).
-	if t.proc, t.procErr = openTree(procRoot, maxLinks, maxHops, t.hook(".")); t.procErr == nil {
+	if t.proc, t.procErr = openTree(procRoot, maxLinks, maxHops); t.procErr == nil {
 		defer t.proc.close()
 	}
 	t.collect("asound/cards", b, nil)
 	cards, probs := ParseCards(b)
 	snap.Problems = prefixed("cards", probs)
 	for _, c := range cards {
+		if t.stopped() {
+			break
+		}
 		snap.Cards = append(snap.Cards, t.card(c))
+	}
+	if t.stopped() {
+		return snap, fmt.Errorf("read %s: the reading was stopped: %w", asoundRoot, ctx.Err())
 	}
 	return snap, nil
 }
 
 // walk is one reading in progress.
 type walk struct {
+	// ctx stops the reading before its next file once it is done.
+	ctx context.Context
 	// asound is the ALSA tree, and proc the tree an owner is looked up in;
 	// procErr is why proc could not be opened, and proc is nil then.
 	asound, proc *tree
@@ -221,6 +248,10 @@ type walk struct {
 	raw          bool
 	beforeOpen   func(path string)
 }
+
+// stopped reports whether the reading's context is done: nothing more is
+// opened, and read returns its error.
+func (t walk) stopped() bool { return t.ctx.Err() != nil }
 
 // hook is the Reader's beforeOpen for path, nil when there is none.
 func (t walk) hook(path string) func() {
@@ -237,6 +268,9 @@ func (t walk) card(c Card) CardReading {
 	// read reads a file under the card. A missing one is absent; any
 	// other failure is a problem, and the file is absent too.
 	read := func(rel string) ([]byte, bool) {
+		if t.stopped() {
+			return nil, false
+		}
 		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
@@ -250,7 +284,7 @@ func (t walk) card(c Card) CardReading {
 	}
 	// rawOnly reads a file only a raw dump wants.
 	rawOnly := func(rel string) {
-		if !t.raw {
+		if !t.raw || t.stopped() {
 			return
 		}
 		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
@@ -261,17 +295,33 @@ func (t walk) card(c Card) CardReading {
 	note := func(rel string, probs []string) {
 		cr.Problems = append(cr.Problems, prefixed(dirName+"/"+rel, probs)...)
 	}
+	// unlisted records a listing, or an entry's type, that could not be
+	// read, as a problem, and the card's devices as not all known
+	// (Partial), unless what could not be read was not there: the card or
+	// the device going, which is the box as it is, as a missing file is.
+	unlisted := func(rel string, err error) {
+		if !errors.Is(err, fs.ErrNotExist) {
+			cr.Partial = true
+		}
+		cr.Problems = append(cr.Problems, rel+": "+errText(err))
+	}
 	// is reports whether what rel names under the card, its links followed
 	// inside the tree, is what want asks. DirEntry.IsDir reports a link
 	// itself, so a tree that links pcmNp or subM would otherwise have no
 	// playback device. A link that leaves the tree is kept, so the read or
-	// the listing it was kept for reports the refusal.
+	// the listing it was kept for reports the refusal; an entry gone since
+	// the listing is not there; any other failure is unlisted.
 	is := func(rel string, want func(fs.FileInfo) bool) bool {
 		info, err := t.asound.stat(dirName + "/" + rel)
-		if err != nil {
-			return errors.Is(err, errOutsideRoot)
+		switch {
+		case err == nil:
+			return want(info)
+		case errors.Is(err, errOutsideRoot):
+			return true
+		case !errors.Is(err, fs.ErrNotExist):
+			unlisted(dirName+"/"+rel, err)
 		}
-		return want(info)
+		return false
 	}
 	regular := func(fi fs.FileInfo) bool { return fi.Mode().IsRegular() }
 	directory := func(fi fs.FileInfo) bool { return fi.IsDir() }
@@ -284,10 +334,13 @@ func (t walk) card(c Card) CardReading {
 		}
 	}
 
+	if t.stopped() {
+		return cr
+	}
 	entries, err := t.asound.readDir(dirName, t.hook("asound/"+dirName))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			cr.Problems = append(cr.Problems, dirName+": "+errText(err))
+			unlisted(dirName, err)
 		}
 		return cr
 	}
@@ -321,9 +374,12 @@ func (t walk) card(c Card) CardReading {
 		}
 		pcmRel := "pcm" + strconv.Itoa(n) + "p"
 		rawOnly(pcmRel + "/info")
+		if t.stopped() {
+			return cr
+		}
 		subs, err := t.asound.readDir(dirName+"/"+pcmRel, t.hook("asound/"+dirName+"/"+pcmRel))
 		if err != nil {
-			cr.Problems = append(cr.Problems, dirName+"/"+pcmRel+": "+errText(err))
+			unlisted(dirName+"/"+pcmRel, err)
 		}
 		subNums := map[int]bool{}
 		for _, e := range subs {
@@ -434,6 +490,9 @@ func (t walk) comm(id int) (string, bool) {
 // procFile reads a file under the proc root. A failure is never a
 // problem: it leaves the owner unknown.
 func (t walk) procFile(rel string) ([]byte, bool) {
+	if t.stopped() {
+		return nil, false
+	}
 	var b []byte
 	err := t.procErr
 	if t.proc != nil {

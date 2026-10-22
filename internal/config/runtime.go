@@ -17,6 +17,38 @@ type RuntimeConfig struct {
 	// silently drop the other's fields from both bridge.yaml and the
 	// final live snapshot (2026-07-21 review finding M13).
 	mu sync.Mutex
+	// changedMu guards changed, the channel the next Store closes
+	// (Changed), nil until someone asks for it.
+	changedMu sync.Mutex
+	changed   chan struct{}
+}
+
+// Changed returns a channel that the next Store closes, the Store an
+// Update makes included: a consumer that follows a setting without polling
+// (the player's hotplug watcher follows output.player) takes the channel,
+// then Loads, then waits on it, so a Store between its Load and its wait
+// still wakes it. An Update that stores nothing closes nothing. A nil
+// holder's channel is nil: it never changes.
+func (r *RuntimeConfig) Changed() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
+	r.changedMu.Lock()
+	defer r.changedMu.Unlock()
+	if r.changed == nil {
+		r.changed = make(chan struct{})
+	}
+	return r.changed
+}
+
+// notifyChanged closes the channel Changed handed out, after a Store.
+func (r *RuntimeConfig) notifyChanged() {
+	r.changedMu.Lock()
+	defer r.changedMu.Unlock()
+	if r.changed != nil {
+		close(r.changed)
+		r.changed = nil
+	}
 }
 
 // NewRuntimeConfig initialises a RuntimeConfig from cfg.
@@ -34,12 +66,14 @@ func (r *RuntimeConfig) Load() *Config {
 	return r.ptr.Load()
 }
 
-// Store atomically swaps the current snapshot. Nil is ignored.
+// Store atomically swaps the current snapshot, and then closes the
+// channel Changed handed out. Nil is ignored.
 func (r *RuntimeConfig) Store(cfg *Config) {
 	if r == nil || cfg == nil {
 		return
 	}
 	r.ptr.Store(cfg)
+	r.notifyChanged()
 }
 
 // Clone returns a deep clone of the current snapshot.
@@ -78,7 +112,7 @@ func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 	if err := next.Save(path); err != nil {
 		return err
 	}
-	r.ptr.Store(next)
+	r.Store(next)
 	return nil
 }
 
