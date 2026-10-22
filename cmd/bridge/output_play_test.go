@@ -107,7 +107,10 @@ func (b *playStandIn) Start(ctx context.Context, req engine.StartRequest) error 
 	b.notify(playback.Note{Session: req.Session, Kind: playback.NoteOpened, Unit: "the stand-in DAC",
 		Params:    alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}, Format: format.S243LE, Channels: 2, RateHz: 48000, BufferFrames: 9600, Periods: 4},
 		Transport: alsapcm.Transport{Kind: format.KindPCM, RateHz: 48000, Channels: 2, Format: format.S243LE, ValidBits: 24}})
-	go req.Events.Audible(req.Session, req.First.ID)
+	// In order, as a backend's one reporter sends them: the first
+	// occurrence's Audible before Start answers, and so before the Prepare
+	// of its successor, which the engine makes only once Start has answered.
+	req.Events.Audible(req.Session, req.First.ID)
 	return nil
 }
 
@@ -433,6 +436,10 @@ func TestOutputPlayKeysDriveTheEngine(t *testing.T) {
 	press(" ", "space: pause: done")
 	press(" ", "space: play: done")
 	press("d", "d: delete entry "+ids["b.flac"]+", after the playing entry "+ids["a.flac"]+": done")
+	// The engine cuts b once the call under way for its successor answers,
+	// which may come after the delete has: the next key would release the
+	// session first.
+	stdout.waitFor(t, "b.flac) in time: none of its frames reaches the DAC")
 	press("n", "n: next: done")
 	press("p", "p: previous: done")
 	press("m", "m: maintenance entered")
@@ -451,7 +458,7 @@ func TestOutputPlayKeysDriveTheEngine(t *testing.T) {
 	calls := strings.Join(c.standIn.callList(), " ")
 	for _, want := range []string{"pause", "resume", "cut"} {
 		if !strings.Contains(calls, want) {
-			t.Errorf("the keys made no %s call: %s", want, calls)
+			t.Errorf("the keys made no %s call: %s\n%s", want, calls, stdout.String())
 		}
 	}
 	if !strings.Contains(stdout.String(), "shut down") {
