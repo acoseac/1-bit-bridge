@@ -104,6 +104,8 @@ func TestAConfigWhoseOutputsAreNotMPDsIsNotJudged(t *testing.T) {
 	}{
 		{"an output the file does not define", liveOutputs([3]string{"alsa", "alsa", "1"}, [3]string{"multiroom", "fifo", "0"}, [3]string{"bt", "alsa", "0"}),
 			[]string{signalpath.MPDConfigMismatch, signalpath.ALSAChainUnproven}},
+		{"an output the file defines and MPD does not report", liveOutputs([3]string{"alsa", "alsa", "1"}),
+			[]string{signalpath.MPDConfigMismatch, signalpath.ALSAChainUnproven}},
 		{"the outputs in another order", liveOutputs([3]string{"multiroom", "fifo", "0"}, [3]string{"alsa", "alsa", "1"}),
 			[]string{signalpath.MPDConfigMismatch, signalpath.ALSAChainUnproven}},
 		{"an output by another plugin", liveOutputs([3]string{"alsa", "pipewire", "1"}, [3]string{"multiroom", "fifo", "0"}),
@@ -227,6 +229,10 @@ func TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged(t *testing.T) {
 			return strings.Replace(s, "\t\ttype\t\t\"alsa\"", "\t\ttype\t\t\"ao\"", 1)
 		}, "", liveOutputs([3]string{"alsa", "ao", "1"}, [3]string{"multiroom", "fifo", "0"}), "output:alsa", signalpath.Withheld,
 			[]string{signalpath.ALSAChainUnproven}},
+		// The holder's device reaches the HDMI card, not the card whose
+		// substream it holds: the chain is not this card's.
+		{"a device that reaches another card", func(s string) string { return withDevice(s, "hw:0,0") }, "",
+			volumioOutputs("1", "allowed_formats=", "dop=0"), "output:alsa", signalpath.Withheld, []string{signalpath.ALSAChainUnproven}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))

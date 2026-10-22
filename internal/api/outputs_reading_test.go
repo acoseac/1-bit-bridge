@@ -1294,6 +1294,17 @@ func TestAForeignOwnerIsNotMPDs(t *testing.T) {
 			t.Fatalf("owner %+v", got.DAC.Owner)
 		}
 	})
+	// mpd.conf is tied to the MPD holding the card by when its process
+	// started, which /proc's stat for it says.
+	t.Run("an owner whose process start /proc does not say", func(t *testing.T) {
+		rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+		if err := os.Remove(filepath.Join(rig.procRoot, "6551", "stat")); err != nil {
+			t.Fatal(err)
+		}
+		hs, token, id := rig.serve()
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.OwnerUnknown)
+	})
 	t.Run("an owner /proc does not name", func(t *testing.T) {
 		rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
 		for _, pid := range []string{"6551", "6584"} {
