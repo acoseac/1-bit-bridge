@@ -141,13 +141,12 @@ type rule struct {
 // policy is the package documentation's table, in one place: what op does
 // in state st, where live is a session held (false for paused at the start
 // of the selection, with none) and atEnd a Next whose selection is the last
-// entry with repeat off. Navigation keeps the transport's state: Next and
-// Previous play on while playing, stay paused while paused (the paused
-// content dropped, as a deletion drops it) and only select while stopped,
-// so a stopped bridge never starts sound on a Next; PlayID and PlayIndex
-// play in every state, as their OpenHome actions (SeekId, SeekIndex) are
-// used to; a Next past the end follows the end of the queue's rule. Release
-// 5a may adjust it once named controllers have been tested.
+// entry with repeat off. Next and Previous select and play in every state,
+// as PlayID and PlayIndex do, as their OpenHome actions (Next, Previous,
+// SeekId, SeekIndex) are used to: OpenHome's reference Playlist source
+// (ohPipeline's SourcePlaylist) plays after Next and Previous, paused and
+// stopped included. A Next past the end follows the end of the queue's
+// rule. Release 5a may adjust it once named controllers have been tested.
 func policy(op op, st State, live, atEnd bool) rule {
 	held := st == Playing || (st == Paused && live)
 	switch op {
@@ -173,7 +172,7 @@ func policy(op op, st State, live, atEnd bool) rule {
 		case st == Releasing:
 			return rule{act: actIntent, then: IntentStop}
 		}
-	case opNext:
+	case opNext, opPrevious, opPlayID, opPlayIndex:
 		if atEnd {
 			switch {
 			case held:
@@ -185,29 +184,20 @@ func policy(op op, st State, live, atEnd bool) rule {
 			}
 			return rule{}
 		}
-		switch {
-		case st == Playing:
-			return rule{move: moveNext, act: actRelease, then: IntentPlay, output: true}
-		case st == Paused && live:
-			return rule{move: moveNext, act: actRelease, then: IntentPause}
+		mv := moveTo
+		switch op {
+		case opNext:
+			mv = moveNext
+		case opPrevious:
+			mv = movePrevious
 		}
-		return rule{move: moveNext}
-	case opPrevious:
-		switch {
-		case st == Playing:
-			return rule{move: movePrevious, act: actRelease, then: IntentPlay, output: true}
-		case st == Paused && live:
-			return rule{move: movePrevious, act: actRelease, then: IntentPause}
-		}
-		return rule{move: movePrevious}
-	case opPlayID, opPlayIndex:
 		switch {
 		case st == Stopped, st == Paused && !live:
-			return rule{move: moveTo, act: actStart, output: true}
+			return rule{move: mv, act: actStart, output: true}
 		case held:
-			return rule{move: moveTo, act: actRelease, then: IntentPlay, output: true}
+			return rule{move: mv, act: actRelease, then: IntentPlay, output: true}
 		case st == Releasing:
-			return rule{move: moveTo, act: actIntent, then: IntentPlay, output: true}
+			return rule{move: mv, act: actIntent, then: IntentPlay, output: true}
 		}
 	}
 	return rule{}

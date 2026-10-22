@@ -50,10 +50,10 @@
 //	Play      start (1)        nothing             resume (2)           start (1)           pending: play         refused
 //	Pause     nothing          pause               nothing              nothing             nothing               refused
 //	Stop      nothing          release, stop       release, stop        stop                pending: stop         nothing
-//	Next (3)  select next      next, release,      next, release,       select next         select next           refused
-//	                           play                stay paused
-//	Previous  select previous  previous, release,  previous, release,   select previous     select previous       refused
-//	(4)                        play                stay paused
+//	Next (3)  next, start      next, release,      next, release,       next, start         next, pending:        refused
+//	                           play                play                                     play
+//	Previous  previous, start  previous, release,  previous, release,   previous, start     previous, pending:    refused
+//	(4)                        play                play                                     play
 //	PlayID    select, start    select, release,    select, release,     select, start       select, pending:      refused
 //	                           play                play                                     play
 //	PlayIndex as PlayID, with the ID at the index, which the owner looks up as it plays it
@@ -67,13 +67,13 @@
 // At the head Previous restarts the selection. In every state Play, PlayID,
 // PlayIndex, Next and Previous are refused while a release is unconfirmed;
 // whatever starts a session, or will, is refused while the output is
-// unknown or unavailable; and everything is refused once shutdown begins.
-// The policy function, policy, is the table: navigation keeps the
-// transport's state (Next and Previous play on while playing, stay paused
-// while paused with the paused content dropped as a deletion drops it, and
-// only select while stopped, so a Next never starts sound on a stopped
-// bridge), and PlayID and PlayIndex play in every state, as controllers
-// use SeekId and SeekIndex. Release 5a may adjust it after testing named
+// unknown or unavailable (Next and Previous with it, past the end aside),
+// and an empty queue refuses it; and everything is refused once shutdown
+// begins. The policy function, policy, is the table: Next and Previous
+// select and play in every state, paused and stopped included, as PlayID
+// and PlayIndex do, as controllers use them and SeekId and SeekIndex, and
+// as OpenHome's reference Playlist source (ohPipeline's SourcePlaylist)
+// plays after both. Release 5a may adjust it after testing named
 // controllers.
 //
 // A command that waits on the transport (a start, a release, a pending

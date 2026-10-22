@@ -259,6 +259,7 @@ func TestAReplyComesAfterItsSnapshot(t *testing.T) {
 	h.boot()
 	ids := h.insert("a", "b", "c")
 	h.must("repeat", h.eng.SetRepeat(bg, true))
+	h.available()
 	h.must("next", h.eng.Next(bg))
 	h.must("next", h.eng.Next(bg))
 	mu.Lock()

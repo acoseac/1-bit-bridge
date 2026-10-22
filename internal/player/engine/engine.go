@@ -267,13 +267,14 @@ func (e *Engine) Stop(ctx context.Context, conds ...Cond) error {
 	return e.do(&command{op: opStop, ctx: ctx, conds: conds}).err
 }
 
-// Next goes to the entry after the selection.
+// Next plays the entry after the selection, in every state; past the last
+// entry with repeat off it stops (the package documentation's table).
 func (e *Engine) Next(ctx context.Context, conds ...Cond) error {
 	return e.do(&command{op: opNext, ctx: ctx, conds: conds}).err
 }
 
-// Previous goes to the entry before the selection, or restarts the
-// selection at the head.
+// Previous plays the entry before the selection, or the selection again at
+// the head, in every state.
 func (e *Engine) Previous(ctx context.Context, conds ...Cond) error {
 	return e.do(&command{op: opPrevious, ctx: ctx, conds: conds}).err
 }

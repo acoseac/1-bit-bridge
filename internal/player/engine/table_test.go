@@ -45,12 +45,12 @@ var tableStates = []tableState{
 		return nil
 	}},
 	{"paused with no session", func(h *harness, ids []uint32) gate {
-		h.must("play a", h.eng.PlayID(bg, ids[0]))
+		x, err := h.eng.InsertAfter(bg, ids[0], ref("x"), nil)
+		h.must("insert x after a", err)
+		h.must("play x", h.eng.PlayID(bg, x))
 		h.must("pause", h.eng.Pause(bg))
-		h.must("next", h.eng.Next(bg))
-		if s := h.snap(); s.State() != Paused || s.Selected() != ids[1] {
-			h.t.Fatalf("setup: %s at %d", s.State(), s.Selected())
-		}
+		h.must("delete x", h.eng.Delete(bg, x))
+		h.waitSnap("paused at b with no session", func(sn *Snapshot) bool { return sn.State() == Paused && sn.Selected() == ids[1] })
 		return nil
 	}},
 	{"releasing", func(h *harness, ids []uint32) gate {
@@ -116,8 +116,8 @@ var tableCells = map[string]map[string]tableCell{
 		"play":         {state: Playing, sel: "b", calls: []string{"start b"}},
 		"pause":        {state: Stopped, sel: "b"},
 		"stop":         {state: Stopped, sel: "b"},
-		"next":         {state: Stopped, sel: "c"},
-		"previous":     {state: Stopped, sel: "a"},
+		"next":         {state: Playing, sel: "c", calls: []string{"start c"}},
+		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
 	},
@@ -143,8 +143,8 @@ var tableCells = map[string]map[string]tableCell{
 		"play":         {state: Playing, sel: "b", calls: []string{"resume"}},
 		"pause":        {state: Paused, sel: "b"},
 		"stop":         {state: Stopped, sel: "b", calls: []string{"release"}},
-		"next":         {state: Paused, sel: "c", calls: []string{"release"}},
-		"previous":     {state: Paused, sel: "a", calls: []string{"release"}},
+		"next":         {state: Playing, sel: "c", calls: []string{"release", "start c"}},
+		"previous":     {state: Playing, sel: "a", calls: []string{"release", "start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"release", "start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"release", "start a"}},
 	},
@@ -152,8 +152,8 @@ var tableCells = map[string]map[string]tableCell{
 		"play":         {state: Playing, sel: "b", calls: []string{"start b"}},
 		"pause":        {state: Paused, sel: "b"},
 		"stop":         {state: Stopped, sel: "b"},
-		"next":         {state: Paused, sel: "c"},
-		"previous":     {state: Paused, sel: "a"},
+		"next":         {state: Playing, sel: "c", calls: []string{"start c"}},
+		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
 	},
@@ -161,8 +161,8 @@ var tableCells = map[string]map[string]tableCell{
 		"play":         {state: Playing, sel: "b", calls: []string{"start b"}},
 		"pause":        {state: Stopped, sel: "b"},
 		"stop":         {state: Stopped, sel: "b"},
-		"next":         {state: Stopped, sel: "c"},
-		"previous":     {state: Stopped, sel: "a"},
+		"next":         {state: Playing, sel: "c", calls: []string{"start c"}},
+		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
 	},
@@ -231,7 +231,8 @@ func TestTheStateCommandTable(t *testing.T) {
 
 // TestTheTableEdges pins the cells at the queue's ends and the refusals
 // that hold in every state: Next past the end, Previous at the head, Play
-// with nothing selected, an empty queue, and the output.
+// with nothing selected, an empty queue, and the output, which refuses Next
+// and Previous too, since they play.
 func TestTheTableEdges(t *testing.T) {
 	t.Run("next past the end while stopped stays on the last", func(t *testing.T) {
 		h := startHarness(t)
@@ -299,7 +300,8 @@ func TestTheTableEdges(t *testing.T) {
 		h := startHarness(t)
 		h.available()
 		h.refused("play of an empty queue", h.eng.Play(bg), ReasonEmptyQueue)
-		h.must("next of an empty queue", h.eng.Next(bg))
+		h.refused("next of an empty queue", h.eng.Next(bg), ReasonEmptyQueue)
+		h.refused("previous of an empty queue", h.eng.Previous(bg), ReasonEmptyQueue)
 		if h.be.starts() != 0 {
 			t.Fatal("an empty queue started a session")
 		}
@@ -310,8 +312,9 @@ func TestTheTableEdges(t *testing.T) {
 		h.refused("play", h.eng.Play(bg), ReasonOutputUnknown)
 		h.refused("play id", h.eng.PlayID(bg, ids[1]), ReasonOutputUnknown)
 		h.refused("play index", h.eng.PlayIndex(bg, 1), ReasonOutputUnknown)
-		h.must("next only moves the selection", h.eng.Next(bg))
-		if s := h.snap(); s.Selected() != ids[1] || h.be.starts() != 0 {
+		h.refused("next", h.eng.Next(bg), ReasonOutputUnknown)
+		h.refused("previous", h.eng.Previous(bg), ReasonOutputUnknown)
+		if s := h.snap(); s.Selected() != ids[0] || h.be.starts() != 0 {
 			t.Fatalf("selected %d, %d sessions", s.Selected(), h.be.starts())
 		}
 		h.report(OutputReport{Available: false, Reason: "device_missing"})
