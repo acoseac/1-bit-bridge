@@ -337,7 +337,8 @@ func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
 // the root's parent, whose entry for the root is the caller's to vouch for.
 // And it refuses, with nothing created, written or fsynced: a root that does
 // not exist, which the writer never creates; a path not below the root as
-// written; and a path below it that a symbolic link leads out of.
+// written, the path or the root spelled through a link to the other
+// included; and a path below it that a symbolic link leads out of.
 func TestWriteBytesDurable_NeverSyncsAboveTheRoot(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "root")
@@ -369,7 +370,15 @@ func TestWriteBytesDurable_NeverSyncsAboveTheRoot(t *testing.T) {
 	if link := filepath.Join(root, "link"); os.Symlink(out, link) == nil {
 		refusals = append(refusals, refusal{"a path a link below the root leads out of", root, filepath.Join(link, "new", "reserved.json"), filepath.Join(out, "new"), ErrNotUnderRoot})
 	} else {
-		t.Log("no symbolic link here: the case of a link leading out of the root is not run")
+		t.Log("no symbolic link here: the cases of links are not run")
+	}
+	// The root and the path spelled one through a link to the other: below
+	// the root as they resolve, not as written, so the walk up from the path
+	// as written would never meet the root. Refused before anything is made.
+	if alias := filepath.Join(base, "root-alias"); os.Symlink(root, alias) == nil {
+		refusals = append(refusals,
+			refusal{"a path spelled through a link to the root", root, filepath.Join(alias, "new", "reserved.json"), filepath.Join(root, "new"), ErrNotUnderRoot},
+			refusal{"a root spelled through a link to it", alias, filepath.Join(root, "new", "reserved.json"), filepath.Join(root, "new"), ErrNotUnderRoot})
 	}
 	for _, tc := range refusals {
 		*synced = nil

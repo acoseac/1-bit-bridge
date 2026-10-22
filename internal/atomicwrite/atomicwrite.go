@@ -371,10 +371,11 @@ func durableDirEntry(path string) error {
 
 // underRoot makes root and path absolute and clean, and checks what a
 // strict write and its probe both require before they touch anything:
-// path's directory at or below root as written (ErrNotUnderRoot), and root
-// a directory that exists, which neither creates. It returns root and
-// path's directory. An empty root is refused rather than taken for the
-// working directory, which is what filepath.Abs makes of it.
+// path's directory at or below root as written (ErrNotUnderRoot), so a path
+// spelled through a link to root, or root through a link to it, is refused
+// rather than walked. It returns root and path's directory; that root
+// exists is nearest's to check. An empty root is refused rather than taken
+// for the working directory, which is what filepath.Abs makes of it.
 func underRoot(root, path string) (string, string, error) {
 	if root == "" {
 		return "", "", fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
@@ -388,13 +389,7 @@ func underRoot(root, path string) (string, string, error) {
 	}
 	dir := filepath.Dir(path)
 	if !within(root, dir) {
-		return "", "", fmt.Errorf("%w: %s is not below %s", ErrNotUnderRoot, path, root)
-	}
-	switch info, err := os.Stat(root); {
-	case err != nil:
-		return "", "", err
-	case !info.IsDir():
-		return "", "", &fs.PathError{Op: "root", Path: root, Err: syscall.ENOTDIR}
+		return "", "", fmt.Errorf("%w: %s is not below %s as written", ErrNotUnderRoot, path, root)
 	}
 	return root, dir, nil
 }
@@ -409,10 +404,11 @@ func within(root, p string) bool {
 // nearest is the directory at or below root that holds dir, or holds the
 // first of the directories a write of dir creates: dir itself when it
 // exists, and otherwise the nearest above it that does, root at the
-// highest. It must be a directory (syscall.ENOTDIR), and lie at or below
-// root as its symbolic links resolve too (ErrNotUnderRoot), so nothing is
-// created through a link that leads out of root. Any error Stat gives but
-// fs.ErrNotExist is returned as it is.
+// highest, so a root that does not exist is Stat's error (neither the
+// writer nor the probe creates it). It must be a directory
+// (syscall.ENOTDIR), and lie at or below root as its symbolic links resolve
+// too (ErrNotUnderRoot), so nothing is created through a link that leads
+// out of root. Any error Stat gives but fs.ErrNotExist is returned as it is.
 func nearest(root, dir string) (string, error) {
 	for d := dir; ; d = filepath.Dir(d) {
 		info, err := os.Stat(d)
@@ -462,7 +458,12 @@ func durableChain(root, dir string) ([]string, error) {
 	var chain []string
 	seen := map[string]bool{}
 	for _, walk := range [][2]string{{dir, root}, {realDir, realRoot}} {
-		for d := walk[0]; ; d = filepath.Dir(d) {
+		for d := walk[0]; d != walk[1]; d = filepath.Dir(d) {
+			if filepath.Dir(d) == d {
+				// The top of the filesystem, and walk[1] never met: refused,
+				// never walked past (underRoot keeps this from happening).
+				return nil, fmt.Errorf("%w: %s does not lead up to %s", ErrNotUnderRoot, walk[0], walk[1])
+			}
 			real, err := filepath.EvalSymlinks(d)
 			if err != nil {
 				return nil, err
@@ -471,9 +472,10 @@ func durableChain(root, dir string) ([]string, error) {
 				seen[real] = true
 				chain = append(chain, d)
 			}
-			if d == walk[1] {
-				break
-			}
+		}
+		if !seen[realRoot] {
+			seen[realRoot] = true
+			chain = append(chain, walk[1])
 		}
 	}
 	return chain, nil
