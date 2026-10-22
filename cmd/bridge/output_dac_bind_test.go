@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -357,6 +358,76 @@ func TestOutputDACBindRefusesWhileABridgeServesTheDataDir(t *testing.T) {
 		t.Errorf("bind once the serve stopped: exit %d, %s", code, errOut)
 	}
 }
+
+// TestOutputDACBindSavesTheConfigItReadUnderTheLock: bind reads the config
+// again once it holds the data dir's lock, so what another writer committed
+// between bind's first read and the lock (a restore, a serve's last
+// settings save before it stopped) is kept beside the binding, never
+// written over with the copy read before it. A data dir that moved in
+// between, whose lock bind does not hold, and a player block that no longer
+// reads are refused, and the file is left as the other writer left it.
+func TestOutputDACBindSavesTheConfigItReadUnderTheLock(t *testing.T) {
+	root := dacTree(t)
+	for _, tc := range []struct {
+		name string
+		// rewrite is what the other writer does to the file's text.
+		rewrite func(t *testing.T, text string) string
+		// says is bind's refusal, "" when the bind goes through.
+		says string
+	}{
+		{"a restore", func(t *testing.T, text string) string {
+			return strings.Replace(text, "room: Study", "room: Kitchen", 1) + "libraryName: Restored\n"
+		}, ""},
+		{"a data dir moved", func(t *testing.T, text string) string {
+			return regexpDataDir.ReplaceAllString(text, "dataDir: '"+filepath.Join(t.TempDir(), "moved")+"'")
+		}, "data dir"},
+		{"a block that no longer reads", func(t *testing.T, text string) string {
+			return strings.Replace(text, "room: Study", "room: Study\n    resample: soxr", 1)
+		}, "does not read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := dacConfig(t, "  player:\n    room: Study\n")
+			var landed []byte
+			env := dacEnv()
+			env.beforeLock = func() {
+				b, err := os.ReadFile(cfgPath)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				landed = []byte(tc.rewrite(t, string(b)))
+				if err := os.WriteFile(cfgPath, landed, 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+			_, errOut, code := runDAC(t, env, append([]string{"bind", "5", "--binding", "serial", "--config", cfgPath}, treeFlags(root)...)...)
+			after, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.says != "" {
+				if code != 1 || !strings.Contains(errOut, tc.says) || !bytes.Equal(after, landed) {
+					t.Errorf("exit %d, stderr %q; the file is\n%s\nwant a refusal naming %q and the file as the other writer left it", code, errOut, after, tc.says)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("exit %d, stderr %q", code, errOut)
+			}
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LibraryName != "Restored" || cfg.Output.Player.Room != "Kitchen" || cfg.Output.Player.Device.Binding != config.BindingSerial {
+				t.Errorf("bind wrote over what landed before its lock: libraryName %q, room %q, binding %q",
+					cfg.LibraryName, cfg.Output.Player.Room, cfg.Output.Player.Device.Binding)
+			}
+		})
+	}
+}
+
+// regexpDataDir is the dataDir line dacConfig writes.
+var regexpDataDir = regexp.MustCompile(`(?m)^dataDir: '[^']*'`)
 
 // TestOutputDACVerifyCardRefusesAnotherDAC: --verify-card runs the check
 // after open against a card's sysfs reading without opening its PCM: the

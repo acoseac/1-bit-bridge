@@ -28,6 +28,10 @@ type outputBindEnv struct {
 	goos string
 	now  func() time.Time
 	lan  lan.Lister
+	// beforeLock, when set, runs between bind's first read of the config
+	// and its taking the data dir's lock: the window a test lands another
+	// writer in.
+	beforeLock func()
 }
 
 // outputDACBindingCmd is inspect and bind on this host.
@@ -440,8 +444,10 @@ func serialPhrase(label string) string {
 // an ambiguous one above all, a player block that does not read (Save
 // would write its old text back), and a data dir a running bridge holds,
 // which would write its own copy of the config over the binding at its next
-// settings save. When the player is enabled it makes the player's UUID, the
-// first time only.
+// settings save. Once it holds the data dir's lock it reads the config
+// again and saves that copy, refusing a data dir that moved in between.
+// When the player is enabled it makes the player's UUID, the first time
+// only.
 //
 // Exit codes: 0 the binding was written, 1 refused, 2 usage error.
 func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, stderr io.Writer) int {
@@ -486,14 +492,40 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
 		return 2
 	}
-	if err := cfg.Output.Player.Unread(); err != nil {
-		fmt.Fprintf(stderr, "%s: output.player in %s does not read: %v\n", cmd, cfgPath, err)
-		fmt.Fprintln(stderr, "  Fix the block first: a bind would leave the file's own text in place of the binding.")
+	unread := func(c *config.Config) bool {
+		err := c.Output.Player.Unread()
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: output.player in %s does not read: %v\n", cmd, cfgPath, err)
+			fmt.Fprintln(stderr, "  Fix the block first: a bind would leave the file's own text in place of the binding.")
+		}
+		return err != nil
+	}
+	if unread(cfg) {
 		return 1
 	}
-	release, fallback, refused := holdDataDirForMutation(cfg.DataDir, cmd, stderr)
+	if env.beforeLock != nil {
+		env.beforeLock()
+	}
+	dataDir := cfg.DataDir
+	release, fallback, refused := holdDataDirForMutation(dataDir, cmd, stderr)
 	defer release()
 	if refused {
+		return 1
+	}
+	// The binding is saved into the config as it stands under the lock, not
+	// as it was read before it: a restore, or a serve's last settings save
+	// before it stopped, that committed in between would otherwise be
+	// written over with the older copy.
+	if cfg, err = config.Load(cfgPath); err != nil {
+		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
+		return 1
+	}
+	if cfg.DataDir != dataDir {
+		fmt.Fprintf(stderr, "%s: the config's data dir changed from %s to %s while bind took the lock on the first\n", cmd, dataDir, cfg.DataDir)
+		fmt.Fprintln(stderr, "  Run bind again: it locks the data dir the config names.")
+		return 1
+	}
+	if unread(cfg) {
 		return 1
 	}
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, cmd, stderr) {
