@@ -18,7 +18,8 @@ const (
 
 // reserveFile is the reservation file: the highest ID and the highest
 // token any run may hand out without writing the file again. It is written,
-// and fsynced, before any ID or token it covers is handed out.
+// and it and its directory entry fsynced, before any ID or token it covers
+// is handed out.
 type reserveFile struct {
 	Version int    `json:"version"`
 	IDs     uint32 `json:"ids"`
@@ -59,9 +60,10 @@ type counter struct {
 	want    uint64 // the highest value the reservation being written covers
 }
 
-// startCounter starts past base by one block: a reservation written but
-// lost with its directory entry (a filesystem that cannot fsync a
-// directory) covered at most one block past what survived.
+// startCounter starts past base by one block, a margin for one reservation
+// that storage acknowledged and did not keep: one block past what
+// survived. A reservation whose directory fsync failed was never made
+// (atomicwrite.WriteBytesDurable), so nothing was handed out from it.
 func startCounter(base uint64) counter {
 	return counter{next: base + idBlock + 1, durable: base}
 }

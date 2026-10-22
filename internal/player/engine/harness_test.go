@@ -154,7 +154,7 @@ func (f *fakeFiles) writeReserve(path string, data []byte) error {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return fmt.Errorf("the test cannot read a reservation write: %w", err)
 	}
-	if err := atomicwrite.WriteBytes(path, data, ".player-ids-*.tmp"); err != nil {
+	if err := atomicwrite.WriteBytesDurable(path, data, ".player-ids-*.tmp"); err != nil {
 		return err
 	}
 	f.reserves = append(f.reserves, rec)

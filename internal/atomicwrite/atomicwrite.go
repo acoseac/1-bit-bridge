@@ -40,11 +40,20 @@
 // durability is the whole point, and the added cost is one
 // metadata-only fsync against writes that already fsync their full
 // contents.
+//
+// What a failed barrier means is the caller's choice. `WriteBytes` and
+// the renames tolerate it (`commitDirEntry`): the write has landed and
+// is visible. `WriteBytesDurable` fails on it, for a caller that hands
+// out nothing a file covers until the file is durable (the player's ID
+// and token reservation, B470 PR 4b1): a rename whose directory entry
+// is not durable can roll back at a crash, and what was handed out from
+// it would be handed out again.
 package atomicwrite
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -85,9 +94,10 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // a successful rename. Wrapped in a var purely as a test seam — the
 // real syscall can't be made to fail portably, and a dir-sync failure
 // is exactly the branch that MUST NOT turn a completed write into a
-// returned error. Production code MUST NOT mutate this; only in-package
-// tests override it (with a `t.Cleanup` restore), same convention as
-// `renameFunc`.
+// returned error, except in `WriteBytesDurable`, whose caller asked for
+// that. Production code MUST NOT mutate this; in-package tests override
+// it (with a `t.Cleanup` restore), and tests in other packages through
+// `SetSyncParentDirForTest`, same convention as `renameFunc`.
 //
 // **A test that overrides this MUST NOT call `t.Parallel()`.** The seam
 // is process-global, so two parallel tests installing different stubs
@@ -103,6 +113,18 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // On Windows `fsutil.SyncParentDir` is a compile-time no-op — see its
 // docblock for why FlushFileBuffers can't service a directory handle.
 var syncParentDir = fsutil.SyncParentDir
+
+// SetSyncParentDirForTest swaps the parent-directory barrier for a test
+// in another package and returns the previous one, the
+// `SetRenameFuncForTest` pattern. The seam is process-global: a test that
+// uses it MUST NOT call `t.Parallel()`, and restores it in a `t.Cleanup`.
+// Public only because the player engine's tests drive its reservation
+// through the real `WriteBytesDurable` with a barrier that fails.
+func SetSyncParentDirForTest(fn func(path string) error) func(path string) error {
+	prev := syncParentDir
+	syncParentDir = fn
+	return prev
+}
 
 // dirSyncWarnOnce keeps the "this filesystem can't fsync a directory"
 // signal to exactly one log line per process. The condition is a
@@ -135,6 +157,8 @@ var dirSyncWarnOnce sync.Once
 // operator) for an operation that actually completed — strictly worse
 // than the pre-existing behaviour, which had no barrier at all. So the
 // error is swallowed, and surfaced once per process via `logger.Warn`.
+// WriteBytesDurable alone does not come here: its caller asked for the
+// failure (durableDirEntry).
 func commitDirEntry(path string) {
 	if err := syncParentDir(path); err != nil {
 		dirSyncWarnOnce.Do(func() {
@@ -213,6 +237,20 @@ func RenameWithRetry(src, dst string) error {
 // downgrade durability exactly during shutdown — when a crash window
 // is most likely.
 func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
+	if err := renameRetry(ctx, src, dst); err != nil {
+		return err
+	}
+	// Rename committed — flush the directory entry so a crash
+	// immediately after can't lose it. Best-effort: see commitDirEntry
+	// for why a failure here must not fail an already-successful write.
+	commitDirEntry(dst)
+	return nil
+}
+
+// renameRetry is the rename and its retries, without the barrier: each
+// caller runs that in its own mode (commitDirEntry, or durableDirEntry
+// for WriteBytesDurable).
+func renameRetry(ctx context.Context, src, dst string) error {
 	var err error
 	for _, d := range renameBackoff {
 		if d > 0 {
@@ -222,17 +260,22 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 			case <-time.After(d):
 			}
 		}
-		err = renameFunc(src, dst)
-		if err == nil {
-			// Rename committed — flush the directory entry so a
-			// crash immediately after can't lose it. Best-effort:
-			// see commitDirEntry for why a failure here must not
-			// fail an already-successful write.
-			commitDirEntry(dst)
+		if err = renameFunc(src, dst); err == nil {
 			return nil
 		}
 	}
 	return err
+}
+
+// durableDirEntry is the barrier WriteBytesDurable requires: unlike
+// commitDirEntry's, its failure is the write's, because the caller hands
+// out nothing the file covers until the directory entry naming it is
+// durable.
+func durableDirEntry(path string) error {
+	if err := syncParentDir(path); err != nil {
+		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
+	}
+	return nil
 }
 
 // WriteBytes writes `data` to `path` via tmp-file + rename so a
@@ -275,6 +318,24 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 // fails) so the caller can route on `errors.Is` / `os.IsNotExist`
 // as appropriate.
 func WriteBytes(path string, data []byte, tmpPrefix string) error {
+	return writeBytes(path, data, tmpPrefix, false)
+}
+
+// WriteBytesDurable is WriteBytes for a caller that hands out nothing the
+// file covers until the write is durable: it fails unless the file's bytes
+// and the directory entry that names them were both fsynced. WriteBytes
+// tolerates a failed directory fsync once its rename has landed
+// (commitDirEntry); here that failure is the write's, because a rename
+// whose entry is not durable can roll back at a crash. A failure may leave
+// the new bytes in place, so the caller counts the write as not made, never
+// as undone. A rename that fails while the destination already holds the
+// same bytes is taken as WriteBytes takes it, once the directory is synced.
+func WriteBytesDurable(path string, data []byte, tmpPrefix string) error {
+	return writeBytes(path, data, tmpPrefix, true)
+}
+
+// writeBytes is WriteBytes, or WriteBytesDurable when durable is set.
+func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
 	dir := filepath.Dir(path)
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -308,7 +369,7 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := RenameWithRetry(tmpName, path); err != nil {
+	if err := renameRetry(context.Background(), tmpName, path); err != nil {
 		// Race / AV scan window may have produced a valid
 		// destination already. Verify byte-equivalence —
 		// size alone isn't proof (mbid-keyed names don't
@@ -323,15 +384,23 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 		// race / AV-window hit, accumulating over a long
 		// uptime).
 		//
-		// No parent-dir barrier on this branch: we didn't
-		// publish the directory entry, the concurrent winner
-		// did — and its own RenameWithRetry already ran the
-		// barrier for it.
+		// No parent-dir barrier on this branch for WriteBytes:
+		// we didn't publish the directory entry, the concurrent
+		// winner did — and its own rename already ran the
+		// barrier for it. WriteBytesDurable runs it again, since
+		// the winner's may have been tolerated.
 		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
+			if durable {
+				return durableDirEntry(path)
+			}
 			return nil
 		}
 		return err
 	}
 	tmpName = "" // rename succeeded — suppress the deferred os.Remove
+	if durable {
+		return durableDirEntry(path)
+	}
+	commitDirEntry(path)
 	return nil
 }

@@ -148,6 +148,67 @@ func TestRenameWithRetryCtx_DirSyncFailureDoesNotFailRename(t *testing.T) {
 	}
 }
 
+// TestWriteBytesDurable_DirSyncFailureFailsTheWrite pins the strict
+// writer's half of the contract, the inverse of the tolerance above: a
+// caller that hands out nothing the file covers until the write is durable
+// gets the barrier's failure as the write's, through the same one barrier
+// per write. The bytes may be in place; the write is not counted as made.
+func TestWriteBytesDurable_DirSyncFailureFailsTheWrite(t *testing.T) {
+	syncErr := errors.New("fsync: input/output error")
+	seen := stubSyncParentDir(t, syncErr)
+
+	dst := filepath.Join(t.TempDir(), "reserved.json")
+	err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp")
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("WriteBytesDurable = %v, want the barrier's failure", err)
+	}
+	if len(*seen) != 1 || (*seen)[0] != dst {
+		t.Fatalf("parent-dir sync calls = %v, want exactly one, for %q", *seen, dst)
+	}
+}
+
+// TestWriteBytesDurable_SyncsParentDirectoryOnce pins the strict writer's
+// success: nil only after the barrier ran, once, on the destination.
+func TestWriteBytesDurable_SyncsParentDirectoryOnce(t *testing.T) {
+	seen := stubSyncParentDir(t, nil)
+
+	dst := filepath.Join(t.TempDir(), "reserved.json")
+	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable: %v", err)
+	}
+	if len(*seen) != 1 || (*seen)[0] != dst {
+		t.Fatalf("parent-dir sync calls = %v, want exactly one, for %q", *seen, dst)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
+		t.Fatalf("destination %q, %v", got, err)
+	}
+}
+
+// TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier pins the fallback a
+// failed rename takes when the destination already holds the same bytes:
+// WriteBytes accepts it as the winner's write, while the strict writer
+// accepts it only once the directory entry is durable, since the winner's
+// barrier may have been tolerated.
+func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "reserved.json")
+	want := []byte("same bytes")
+	if err := os.WriteFile(dst, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
+	t.Cleanup(func() { SetRenameFuncForTest(prev) })
+
+	syncErr := errors.New("fsync: input/output error")
+	stubSyncParentDir(t, syncErr)
+	if err := WriteBytesDurable(dst, want, ".durable-*.tmp"); !errors.Is(err, syncErr) {
+		t.Fatalf("WriteBytesDurable over the winner's bytes with a failing barrier = %v, want the barrier's failure", err)
+	}
+	seen := stubSyncParentDir(t, nil)
+	if err := WriteBytesDurable(dst, want, ".durable-*.tmp"); err != nil || len(*seen) != 1 {
+		t.Fatalf("WriteBytesDurable over the winner's bytes = %v with %d barriers, want nil after one", err, len(*seen))
+	}
+}
+
 // TestWriteBytes_RealParentFsyncSucceeds exercises the PRODUCTION
 // barrier (no stub) end-to-end against a real temp directory, so the
 // wiring is proven against the actual syscall — on POSIX a genuine

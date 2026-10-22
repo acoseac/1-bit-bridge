@@ -162,8 +162,13 @@ func New(cfg Config) (*Engine, error) {
 		}
 	}
 	if sm.writeReserve == nil {
+		// A reservation is made only once its bytes and the directory entry
+		// naming them are fsynced: the values it covers are handed out at
+		// once, and a rename whose entry is not durable can roll back at a
+		// crash, so atomicwrite's tolerance of a failed directory fsync is
+		// not taken here.
 		sm.writeReserve = func(path string, data []byte) error {
-			return atomicwrite.WriteBytes(path, data, ".player-ids-*.tmp")
+			return atomicwrite.WriteBytesDurable(path, data, ".player-ids-*.tmp")
 		}
 	}
 	if sm.readFile == nil {

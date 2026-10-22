@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // TestAFailingReservationWriteRefusesEdits pins a reservation that cannot
@@ -117,6 +119,61 @@ func TestAStartWithoutItsReservationPublishesNoToken(t *testing.T) {
 				t.Fatalf("the first start that can reserve published token %d, not past %d", tok, published)
 			}
 		})
+	}
+}
+
+// TestAReservationIsMadeOnlyWithItsDirectoryEntry pins the reservation's
+// durability through the engine's own writer, atomicwrite's: a reservation
+// whose directory entry could not be fsynced is not made, so nothing it
+// covers is handed out, and a crash that rolls the reservation file back
+// to its last durable content (what an entry that was never fsynced
+// allows) never yields an ID or a token a run handed out before.
+func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
+	h := newHarness(t)
+	h.tweak = func(c *Config) { c.seams.writeReserve = nil }
+	h.boot()
+	seen := map[uint32]bool{}
+	for _, id := range h.insert("a", "b") {
+		seen[id] = true
+	}
+	published := h.snap().Token()
+	h.shutdown()
+	h.joinAfter(h.eng)
+	durable, err := os.ReadFile(h.reservePath())
+	h.must("read the reservation file", err)
+
+	broken := errors.New("fsync: input/output error")
+	prev := atomicwrite.SetSyncParentDirForTest(func(string) error { return broken })
+	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	h.boot()
+	sn := h.snap()
+	published = max(published, sn.Token())
+	if ed := sn.Edits(); ed.Refused != ReasonReservation {
+		t.Errorf("edits %+v with the reservation's directory entry not durable, want refused %s", ed, ReasonReservation)
+	}
+	if id, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); err == nil {
+		seen[id] = true
+		published = max(published, h.snap().Token())
+		t.Errorf("an insert took ID %d with the reservation's directory entry not durable", id)
+	}
+	// A crash: this run's queue writes are lost, and the reservation
+	// file's renames roll back to the last durable one.
+	h.files.mu.Lock()
+	h.files.dropQueue = true
+	h.files.mu.Unlock()
+	h.shutdown()
+	h.joinAfter(h.eng)
+	h.must("roll the reservation file back", os.WriteFile(h.reservePath(), durable, 0o600))
+	h.files.mu.Lock()
+	h.files.dropQueue = false
+	h.files.mu.Unlock()
+	atomicwrite.SetSyncParentDirForTest(prev)
+	h.boot()
+	if tok := h.snap().Token(); tok <= published {
+		t.Fatalf("after the rollback the token is %d, not past %d, which a run published", tok, published)
+	}
+	if id := h.insert("y")[0]; seen[id] {
+		t.Fatalf("after the rollback ID %d was handed out again", id)
 	}
 }
 
