@@ -38,10 +38,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -130,6 +132,8 @@ type File struct {
 
 	passwords    []string
 	hadResampler bool
+	// changed is what Changed returns.
+	changed time.Time
 }
 
 // AudioOutput is one audio_output block. An omitted setting is an empty
@@ -168,6 +172,27 @@ type Resampler struct {
 type Filter struct {
 	Name   string `json:"name"`
 	Plugin string `json:"plugin"`
+}
+
+// Changed is the latest time anything Read read was changed: each file it
+// read (mpd.conf and every include), each link a file was named by, and the
+// nearest directory there of an include_optional it did not find, which a
+// file deleted from it moves. A time is the later of the modification time
+// and, where the system keeps one, the inode's change time, which a write,
+// a rename or a chmod moves and nobody can set back. The zero time for a
+// File that Parse made, which read no file. MPD reads its configuration
+// once, when it starts, so the output reading compares Changed with the
+// start of the MPD that holds the card.
+func (f File) Changed() time.Time { return f.changed }
+
+// changeTime is the time fi was last changed: the later of its modification
+// time and its inode change time.
+func changeTime(fi fs.FileInfo) time.Time {
+	at := fi.ModTime()
+	if c, ok := statusChange(fi); ok && c.After(at) {
+		at = c
+	}
+	return at
 }
 
 // passwordValues returns the top-level password values. It exists so the
@@ -612,7 +637,16 @@ type loader struct {
 	depth int
 	stack map[string]struct{}
 	files int
-	open  func(host string) (string, error)
+	// changed is the latest change of what the read depends on, which
+	// File.Changed reports.
+	changed time.Time
+}
+
+// note records one change time of what the read depends on.
+func (l *loader) note(at time.Time) {
+	if at.After(l.changed) {
+		l.changed = at
+	}
 }
 
 func parseFile(text, name, dir string, load *loader) File {
@@ -913,6 +947,13 @@ func (p *prober) closeBlock(b *blockState) {
 }
 
 func (p *prober) include(line int, name string, optional bool) {
+	// MPD expands a pattern in either directive; this reader does not, so
+	// the files MPD reads through one are not read here, and a pattern is
+	// never a missing file include_optional may skip.
+	if strings.ContainsAny(name, "*?[") {
+		p.add(line, "include %s: a pattern is not followed", quotePath(name))
+		return
+	}
 	if p.load == nil {
 		if !optional {
 			p.add(line, "include %s: not followed", quotePath(name))
@@ -941,6 +982,11 @@ func (p *prober) include(line int, name string, optional bool) {
 	text, err := p.load.open(host)
 	if err != nil {
 		if optional && errors.Is(err, errNotFound) {
+			// A file deleted after MPD read it is gone from here too; the
+			// directory it was deleted from records when.
+			if err := p.load.noteMissing(host); err != nil {
+				p.add(line, "include %s: %s", quotePath(name), cleanErr(err))
+			}
 			return
 		}
 		p.add(line, "include %s: %s", quotePath(name), cleanErr(err))

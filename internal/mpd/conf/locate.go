@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // errOutside is a path that resolved outside the root it was read under.
@@ -149,6 +152,12 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err := staysInRoot(root, host); err != nil {
 		return File{}, err
 	}
+	load := &loader{}
+	// A link mpd.conf is named by is part of what the read depends on:
+	// re-pointed, it hands the read another file, whose own times are old.
+	if fi, err := os.Lstat(host); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		load.note(changeTime(fi))
+	}
 	// Stack keys are symlink-resolved, so an include that names the same
 	// file by another path is the same entry. On macOS that also folds
 	// /tmp onto /private/tmp.
@@ -160,37 +169,64 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	text, err := readCapped(host)
+	text, changed, err := readCapped(host)
 	if err != nil {
 		return File{}, err
 	}
-	load := &loader{
-		root:  root,
-		stack: map[string]struct{}{host: {}},
-		open: func(path string) (string, error) {
-			if _, err := os.Lstat(path); err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					return "", errNotFound
-				}
-				return "", errUnreadable
-			}
-			if err := staysInRoot(root, path); err != nil {
-				return "", err
-			}
-			text, err := readCapped(path)
-			// Open's error names the host path. An include problem
-			// already quotes the name from the file, and that path
-			// can hold a password.
-			if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
-				return "", errUnreadable
-			}
-			return text, err
-		},
-	}
+	load.note(changed)
+	load.root = root
+	load.stack = map[string]struct{}{host: {}}
 	f := parseFile(text, logical, filepath.Dir(host), load)
 	f.Path = logical
+	f.changed = load.changed
 	f.finish()
 	return f, nil
+}
+
+// open reads the include at path, a path resolve gave, and notes when it
+// changed. A path that is not there is errNotFound, and one that cannot be
+// looked at or opened is errUnreadable: the open's error names the host
+// path, an include problem already quotes the name from the file, and that
+// path can hold a password.
+func (l *loader) open(path string) (string, error) {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", errNotFound
+		}
+		return "", errUnreadable
+	}
+	if err := staysInRoot(l.root, path); err != nil {
+		return "", err
+	}
+	text, changed, err := readCapped(path)
+	if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
+		return "", errUnreadable
+	}
+	if err == nil {
+		l.note(changed)
+	}
+	return text, err
+}
+
+// noteMissing notes, for an include_optional that is not at path, the
+// change time of the nearest directory there on the way up to the root: a
+// file deleted from it, or a directory removed below it, moves it. One that
+// cannot be looked at is errUnreadable: what was deleted when is not known.
+func (l *loader) noteMissing(path string) error {
+	for dir := filepath.Dir(path); lexicalInside(l.root, dir); dir = filepath.Dir(dir) {
+		fi, err := os.Stat(dir)
+		if err == nil && fi.IsDir() {
+			l.note(changeTime(fi))
+			return nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return errUnreadable
+		}
+		if dir == l.root || filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return errUnreadable
 }
 
 // confCandidate reports whether a stat mode can be an mpd.conf.
@@ -234,12 +270,16 @@ func (l *loader) resolve(dir, name string) (string, error) {
 	}
 	// A symlink is the file it names. Refuse one that leaves the root,
 	// and let a missing file through as itself so include_optional can
-	// ignore it.
-	if _, err := os.Lstat(host); err != nil {
+	// ignore it. The link itself is part of what the read depends on.
+	fi, err := os.Lstat(host)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return host, nil
 		}
 		return "", errUnreadable
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		l.note(changeTime(fi))
 	}
 	if err := staysInRoot(l.root, host); err != nil {
 		return "", err
@@ -339,7 +379,7 @@ func ReadLogical(root, logical string, limit int64) ([]byte, error) {
 	if err := staysInRoot(root, h); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(h)
+	f, _, err := fsutil.OpenAsFile(h)
 	if err != nil {
 		return nil, err
 	}
@@ -354,21 +394,30 @@ func ReadLogical(root, logical string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-func readCapped(path string) (string, error) {
-	f, err := os.Open(path)
+// readCapped reads the file at path whole, at most MaxConfBytes, opened as
+// a file (fsutil.OpenAsFile): a named pipe, a device or a directory is
+// refused at once and never waited on, since nothing cancels an open that
+// waits for a pipe's writer. changed is the opened file's change time, read
+// after the read, so a write while it was read counts.
+func readCapped(path string) (string, time.Time, error) {
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", errNotFound
+			return "", time.Time{}, errNotFound
 		}
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, MaxConfBytes+1))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	if len(b) > MaxConfBytes {
-		return "", errTooLong
+		return "", time.Time{}, errTooLong
 	}
-	return string(b), nil
+	fi, err := f.Stat()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return string(b), changeTime(fi), nil
 }

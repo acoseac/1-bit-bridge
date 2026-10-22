@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseVolumioFixture(t *testing.T) {
@@ -623,6 +624,78 @@ func TestIncludeStaysInsideTheRoot(t *testing.T) {
 	assertNoSecret(t, secret, f)
 	if !strings.Contains(strings.Join(f.Problems, "\n"), "path leaves the root") {
 		t.Errorf("problems %q", f.Problems)
+	}
+}
+
+// TestAnIncludePatternIsNotFollowed: MPD expands a pattern in an include
+// and this reader does not, so the files MPD reads through one are not read
+// here: a pattern is the file's problem for both directives, even where
+// files match it, and never a missing file include_optional may skip.
+func TestAnIncludePatternIsNotFollowed(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "conf.d", "a.conf"), "mixer_type \"software\"\n")
+	for _, directive := range []string{"include", "include_optional"} {
+		for _, pattern := range []string{"conf.d/*.conf", "conf.d/?.conf", "conf.d/[a].conf"} {
+			mustWrite(t, filepath.Join(root, "mpd.conf"), directive+" \""+pattern+"\"\nmusic_directory \"/kept\"\n")
+			f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.MixerType != "" || f.MusicDirectory != "/kept" || !strings.Contains(strings.Join(f.Problems, "\n"), "a pattern is not followed") {
+				t.Errorf("%s %q: mixer %q music %q problems %q", directive, pattern, f.MixerType, f.MusicDirectory, f.Problems)
+			}
+		}
+	}
+}
+
+// TestChangedIsTheLatestChangeOfWhatTheReadDependsOn: Changed is the latest
+// modification or change time of every file the read read (the main file
+// and each include, nested ones too) and of the nearest directory there of
+// an include_optional it did not find, which a file deleted from it moves.
+// A File that Parse made read no file and has none.
+func TestChangedIsTheLatestChangeOfWhatTheReadDependsOn(t *testing.T) {
+	later := time.Now().Add(time.Hour).Truncate(time.Second)
+	layout := func(t *testing.T) string {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "mpd.conf"),
+			"include \"sub/one.conf\"\ninclude_optional \"opt/missing.conf\"\ninclude_optional \"absent/missing.conf\"\nmusic_directory \"/m\"\n")
+		mustWrite(t, filepath.Join(root, "sub", "one.conf"), "include \"two.conf\"\n")
+		mustWrite(t, filepath.Join(root, "sub", "two.conf"), "replaygain \"off\"\n")
+		mustWrite(t, filepath.Join(root, "opt", "kept.conf"), "")
+		return root
+	}
+	for name, rel := range map[string]string{
+		"the main file":                       "mpd.conf",
+		"an include":                          "sub/one.conf",
+		"an include's include":                "sub/two.conf",
+		"the directory of a missing include":  "opt",
+		"the nearest directory there instead": ".",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := layout(t)
+			if err := os.Chtimes(filepath.Join(root, filepath.FromSlash(rel)), later, later); err != nil {
+				t.Fatal(err)
+			}
+			f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+			if err != nil || len(f.Problems) != 0 {
+				t.Fatalf("err %v problems %q", err, f.Problems)
+			}
+			if got := f.Changed(); !got.Equal(later) {
+				t.Fatalf("changed %s, want %s, the time %s was changed", got, later, rel)
+			}
+		})
+	}
+	root := layout(t)
+	f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Changed(); got.IsZero() || !got.Before(later) {
+		t.Fatalf("changed %s with nothing set later", got)
+	}
+	parsed, err := Parse("music_directory \"/m\"\n")
+	if err != nil || !parsed.Changed().IsZero() {
+		t.Fatalf("a parsed file changed at %s (err %v)", parsed.Changed(), err)
 	}
 }
 
