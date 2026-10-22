@@ -148,11 +148,13 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 //
 // Calls. The engine makes every call on a goroutine of its own, never the
 // owner's, under a context whose deadline is the call's (StartTimeout,
-// ReleaseTimeout, CallTimeout), and takes what the call returns as its
-// result. A call that has not answered by its deadline is treated as failed:
-// for Release the release is unconfirmed (below); for any other call the
-// engine releases the session, playback stops with ReasonTimeout, and the
-// late answer is ignored. A call that ignores its context and never returns
+// ReleaseTimeout, CallTimeout): ctx.Deadline reports it and the context ends
+// there, both on the engine's clock. The engine takes what the call returns
+// as its result. A call that has not answered by its deadline is treated as
+// failed: for Release the release is unconfirmed (below); for any other call
+// the engine releases the session, playback stops with ReasonTimeout, and
+// the late answer is ignored, even when it reaches the engine before the
+// deadline's own expiry does. A call that ignores its context and never returns
 // is abandoned and logged; its goroutine then outlives Run. Events come back
 // through the session's Events from any goroutine, in order within a
 // session.

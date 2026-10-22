@@ -228,6 +228,97 @@ func TestADeadlineQueuedBehindItsAcknowledgementChangesNothing(t *testing.T) {
 	}
 }
 
+// TestALateAnswerIsRefusedWhateverTheOrder pins a call's deadline: its
+// context carries the deadline, on the engine's clock, and an answer that
+// comes at or past it is late even when it reaches the owner before the
+// expiry does (the expiry's timer has not run yet): the call is treated as
+// failed, its session released with ReasonTimeout, and the command that
+// waited on it answers so.
+func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		call    string
+		timeout time.Duration
+		// setup brings the engine to where cmd makes the call; hook holds
+		// the call on held and records its context's deadline.
+		setup func(h *harness)
+		hook  func(h *harness, held gate, deadline func(context.Context))
+		cmd   func(h *harness) error
+	}{
+		{"start", "start", StartTimeout,
+			func(h *harness) { h.insert("a", "b"); h.available() },
+			func(h *harness, held gate, deadline func(context.Context)) {
+				h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+					deadline(ctx)
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+					return s.open()
+				}
+			},
+			func(h *harness) error { return h.eng.Play(bg) }},
+		{"pause", "pause", CallTimeout,
+			func(h *harness) { h.playing(0, "a", "b") },
+			func(h *harness, held gate, deadline func(context.Context)) {
+				h.be.onPause = func(ctx context.Context, _ *fakeSession) error {
+					deadline(ctx)
+					return held.wait(ctx, h.be, false)
+				}
+			},
+			func(h *harness) error { return h.eng.Pause(bg) }},
+		{"resume", "resume", CallTimeout,
+			func(h *harness) { h.playing(0, "a", "b"); h.must("pause", h.eng.Pause(bg)) },
+			func(h *harness, held gate, deadline func(context.Context)) {
+				h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
+					deadline(ctx)
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return 0, err
+					}
+					return ResumeContinued, nil
+				}
+			},
+			func(h *harness) error { return h.eng.Play(bg) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			tc.setup(h)
+			held := newGate()
+			deadlines := make(chan time.Time, 1)
+			h.be.script(func() {
+				tc.hook(h, held, func(ctx context.Context) {
+					d, ok := ctx.Deadline()
+					if !ok {
+						d = time.Time{}
+					}
+					deadlines <- d
+				})
+			})
+			called := h.clk.Now()
+			done := async(func() error { return tc.cmd(h) })
+			var deadline time.Time
+			select {
+			case deadline = <-deadlines:
+			case <-time.After(*watchdog):
+				t.Fatalf("waited %v for the %s", *watchdog, tc.call)
+			}
+			if want := called.Add(tc.timeout); !deadline.Equal(want) {
+				t.Errorf("the %s's context has the deadline %v, want %v, the engine's clock at the call plus %v", tc.call, deadline, want, tc.timeout)
+			}
+			// The deadline passes; its timer's callback has not run.
+			h.clk.Skip(tc.timeout)
+			mark := h.appliedMark()
+			held.open()
+			h.waitApplied("handled call "+tc.call, mark)
+			h.refused("the command whose call answered late", h.result(tc.name, done), ReasonTimeout)
+			h.clk.Advance(0)
+			sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+			if sn.LastStop().Reason != ReasonTimeout || h.be.starts() != 1 {
+				t.Fatalf("last stop %+v, %d sessions", sn.LastStop(), h.be.starts())
+			}
+		})
+	}
+}
+
 // TestAStopThatNeverAnswersLeavesTheReleaseUnconfirmed pins the confirmed
 // release: past ReleaseTimeout the release is unconfirmed, everything that
 // would open the device is refused with that reason, and the late

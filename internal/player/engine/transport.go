@@ -395,8 +395,9 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	}
 	o.starting, o.audible, o.join = false, Audible{}, nil
 	e.visible()
-	s.releaseCall = e.call(callRelease, s, 0, func(ctx context.Context) callResult { return callResult{err: e.be.Release(ctx, s.id)} })
-	s.releaseTimer = e.clk.AfterFunc(ReleaseTimeout, func() { e.post(msgReleaseDeadline{s: s}) })
+	rc := e.call(callRelease, s, ReleaseTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Release(ctx, s.id)} })
+	s.releaseCall = rc
+	s.releaseTimer = e.clk.At(rc.deadline, func() { e.post(msgReleaseDeadline{s: s}) })
 }
 
 // releaseDeadline is s's release past ReleaseTimeout: unconfirmed, the
@@ -688,38 +689,75 @@ type call struct {
 	timer   timer
 	expired bool
 	waiter  *command
+	// deadline is the call's, on the engine's clock (zero: none): an answer
+	// returned at or past it is late, whichever of the answer and the
+	// expiry reaches the owner first.
+	deadline time.Time
 	// after and next are a Prepare's; from a Cut's.
 	after, next, from *occ
 }
 
-// callResult is what a backend call returned.
+// callResult is what a backend call returned, and when, on the engine's
+// clock.
 type callResult struct {
 	err    error
 	cut    bool
 	resume ResumeResult
+	at     time.Time
 }
 
+// callCtx is a backend call's context: the engine's life, ended at the
+// call's deadline, which Deadline reports, both on the engine's clock.
+type callCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+// Deadline is the call's deadline.
+func (c callCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
 // call runs fn on a goroutine of its own under a context derived from the
-// engine's life, ended at timeout (none for 0), and hands the owner what it
-// returns.
+// engine's life that carries the call's deadline, timeout from now (none
+// for 0), and ends there; it hands the owner what fn returns and when. At
+// the deadline a call is expired, but a Release's deadline is the
+// confirmed-release rule's (releaseDeadline), and its late acknowledgement
+// is still taken.
 func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(ctx context.Context) callResult) *call {
 	o := &e.o
 	o.nextCall++
 	c := &call{id: o.nextCall, kind: kind, sess: s}
-	ctx, cancel := context.WithCancelCause(e.life)
+	base, cancel := context.WithCancelCause(e.life)
 	c.cancel = cancel
+	ctx := context.Context(base)
 	if timeout > 0 {
-		c.timer = e.clk.AfterFunc(timeout, func() { e.post(msgCallExpired{c: c}) })
+		c.deadline = e.clk.Now().Add(timeout)
+		ctx = callCtx{Context: base, deadline: c.deadline}
+		expires := kind != callRelease
+		c.timer = e.clk.At(c.deadline, func() {
+			cancel(errCallDeadline)
+			if expires {
+				e.post(msgCallExpired{c: c})
+			}
+		})
 	}
 	o.calls[c.id] = c
-	e.spawn(func() { e.post(msgCallDone{c: c, r: fn(ctx)}) })
+	e.spawn(func() {
+		r := fn(ctx)
+		r.at = e.clk.Now()
+		e.post(msgCallDone{c: c, r: r})
+	})
 	return c
 }
 
-// callDone applies what a call returned; a call past its deadline was
-// already treated as failed, and what it returns late is not taken.
+// callDone applies what a call returned. An answer at or past the call's
+// deadline is late: the call is treated as failed (callExpired) even when
+// the answer reaches the owner before the expiry, and what it returned is
+// not taken. A Release's late answer is an acknowledgement, and taken.
 func (e *Engine) callDone(c *call, r callResult) {
 	o := &e.o
+	if c.kind != callRelease && !c.expired && !c.deadline.IsZero() && !r.at.Before(c.deadline) {
+		e.callExpired(c)
+	}
 	delete(o.calls, c.id)
 	if c.timer != nil {
 		c.timer.Stop()

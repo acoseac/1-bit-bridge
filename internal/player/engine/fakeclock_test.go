@@ -117,6 +117,15 @@ func (c *fakeClock) Advance(d time.Duration) {
 	}
 }
 
+// Skip moves the clock d on and fires nothing: the moment after an instant
+// has passed and before its timers' callbacks have run, which a real
+// timer's goroutine can be late for. Advance(0) fires them.
+func (c *fakeClock) Skip(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 // Pending is the number of timers not yet fired or stopped.
 func (c *fakeClock) Pending() int {
 	c.mu.Lock()
