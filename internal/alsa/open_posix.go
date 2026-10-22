@@ -12,3 +12,9 @@ const (
 	openNonblock      = syscall.O_NONBLOCK
 	openDirectoryOnly = syscall.O_DIRECTORY
 )
+
+// rootPath is the name a tree's root is opened by: dir/., which path
+// resolution refuses with ENOTDIR before it opens anything unless dir is a
+// directory, so a FIFO in the root's place is never opened
+// (TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly).
+func rootPath(dir string) string { return dir + "/." }

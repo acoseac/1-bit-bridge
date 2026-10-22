@@ -38,8 +38,8 @@ type SysfsReader struct {
 	// limits replaces the bounds, for the tests that reach them.
 	limits *sysfsLimits
 	// beforeOpen, when set, is called with an attribute's path after the
-	// attribute is checked and before it is opened: the window a test
-	// swaps a FIFO in.
+	// attribute is checked and before it is opened, and with "." just
+	// before the root itself is opened: the windows a test swaps a FIFO in.
 	beforeOpen func(rel string)
 }
 
@@ -233,7 +233,11 @@ func (r SysfsReader) open() (*sysfsTree, error) {
 	if r.limits != nil {
 		lim = *r.limits
 	}
-	tr, err := openTree(r.root(), lim.links, lim.hops)
+	var before func()
+	if r.beforeOpen != nil {
+		before = func() { r.beforeOpen(".") }
+	}
+	tr, err := openTree(r.root(), lim.links, lim.hops, before)
 	if err != nil {
 		return nil, err
 	}

@@ -27,8 +27,9 @@ type Reader struct {
 	AsoundRoot string
 	// beforeOpen, when set, is called with a file's or a directory's path
 	// in a raw dump (asound/card5/stream0, 6584/status) after the path is
-	// resolved and before it is opened or listed: the window a test swaps a
-	// link in.
+	// resolved and before it is opened or listed, and with "asound" and "."
+	// just before the ALSA root and the /proc root are opened: the windows a
+	// test swaps a link or a FIFO in.
 	beforeOpen func(path string)
 }
 
@@ -180,7 +181,7 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 			return snap, fmt.Errorf("read %s: %w", path, err)
 		}
 	}
-	asound, err := openTree(asoundRoot, maxLinks, maxHops)
+	asound, err := openTree(asoundRoot, maxLinks, maxHops, t.hook("asound"))
 	var b []byte
 	if err == nil {
 		defer asound.close()
@@ -198,7 +199,7 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 	}
 	// A /proc tree that cannot be opened leaves every owner unknown, as a
 	// task's entry that cannot be read does (procFile).
-	if t.proc, t.procErr = openTree(procRoot, maxLinks, maxHops); t.procErr == nil {
+	if t.proc, t.procErr = openTree(procRoot, maxLinks, maxHops, t.hook(".")); t.procErr == nil {
 		defer t.proc.close()
 	}
 	t.collect("asound/cards", b, nil)

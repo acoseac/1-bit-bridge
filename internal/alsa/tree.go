@@ -60,17 +60,18 @@ var (
 
 // openTree opens the directory at dir as a tree. os.OpenRoot opens its path
 // with a plain open, which a FIFO there would hold until a writer came, so
-// the path is first opened directory-only and seen to be a directory
-// (openDirectory). What is left is a swap of the root's own path between
-// that look and os.OpenRoot: the root is the operator's path (or /proc, or
-// /sys), and everything below it is checked at the open itself.
-func openTree(dir string, links, hops int) (*tree, error) {
-	d, err := openDirectory(pathOpener(dir))
-	if err != nil {
-		return nil, err
+// it is handed rootPath(dir): on unix dir/., whose resolution fails at once
+// (ENOTDIR) unless dir is a directory, so that one open never opens
+// anything else, whatever is swapped in for the root. A look before the
+// open would leave the instant between the two (round 3's directory-only
+// look did). Everything below the root is checked at its own open. before,
+// when it is set, runs just before the open: the window a test swaps the
+// root in.
+func openTree(dir string, links, hops int, before func()) (*tree, error) {
+	if before != nil {
+		before()
 	}
-	_ = d.Close()
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(rootPath(dir))
 	if err != nil {
 		return nil, err
 	}

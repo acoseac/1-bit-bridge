@@ -202,3 +202,72 @@ func TestAFIFOInTheProcTreeIsRefusedPromptly(t *testing.T) {
 		})
 	}
 }
+
+// TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly: each root is
+// opened once, as its path stands at that open, so nothing a look at the
+// root before it saw can be swapped out from under it. A root replaced by a
+// FIFO the instant before its open (the sysfs root, the ALSA root, the
+// /proc root) is refused at once, never waited on: the sysfs reading has no
+// tree, the /proc reading no cards file, and a /proc root it cannot open
+// leaves every owner unknown.
+func TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// at is the root as the reader's beforeOpen names it, and root the
+		// directory the swap replaces with a FIFO.
+		at, root string
+		// asound, when set, is where the ALSA tree is moved and read from,
+		// so the /proc root can be swapped on its own.
+		asound string
+	}{
+		{name: "the sysfs root", at: ".", root: "sys"},
+		{name: "the ALSA root", at: "asound", root: "proc/asound"},
+		{name: "the /proc root", at: ".", root: "proc", asound: "asound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			dir := filepath.Join(tree, filepath.FromSlash(tc.root))
+			var once sync.Once
+			var swapped bool
+			var swapErr error
+			swap := func(path string) {
+				if path != tc.at {
+					return
+				}
+				once.Do(func() {
+					swapped = true
+					if swapErr = os.Rename(dir, dir+".before"); swapErr == nil {
+						swapErr = unix.Mkfifo(dir, 0o600)
+					}
+				})
+			}
+			if tc.root == "sys" {
+				var snap SysfsSnapshot
+				readsPromptly(t, []string{dir}, func() { snap = SysfsReader{Root: dir, beforeOpen: swap}.Read() })
+				if snap.Present || len(snap.Cards) != 0 || len(snap.Problems) != 1 {
+					t.Errorf("the sysfs root swapped for a FIFO read as %+v", snap)
+				}
+			} else {
+				r := Reader{ProcRoot: filepath.Join(tree, "proc"), beforeOpen: swap}
+				if tc.asound != "" {
+					r.AsoundRoot = filepath.Join(tree, tc.asound)
+					if err := os.Rename(filepath.Join(tree, "proc", "asound"), r.AsoundRoot); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var snap Snapshot
+				var readErr error
+				readsPromptly(t, []string{dir}, func() { snap, readErr = r.Read() })
+				if alsaRoot := tc.asound == ""; (readErr != nil) != alsaRoot || (!alsaRoot && len(snap.Cards) == 0) {
+					t.Errorf("%s swapped for a FIFO: %d cards, the reading's error %v", tc.name, len(snap.Cards), readErr)
+				}
+			}
+			if swapErr != nil {
+				t.Fatal(swapErr)
+			}
+			if !swapped {
+				t.Fatalf("the reader never came to %s", tc.name)
+			}
+		})
+	}
+}
