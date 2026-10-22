@@ -51528,3 +51528,103 @@ The gate, through the build lock: `make fmt vet test` green on f9de73a4
 and `make docs-check` clean, and the hotplug package, its test fix included, passed
 `-race -count=20 -cpu 1,2,8`. The round-3 rules text is applied to
 `.claude/rules/player.md` in this change (7cdb5af0).
+
+**Round 4 (CodeRabbit and SonarCloud on #1312, and the merge with main at
+2094c1b4): four fixes and one finding declined.** 9e6eea1c merged main's
+port-binding fix (#1311). A port binding names the port (`placeOf`),
+Observe and the check after open share `inventory()`, which carries this
+PR's `Partial` and `partialCards`, and a cut card listing is
+`identity_incomplete` (`cutShort`). Read as its author would, the merge
+left three things of this PR on a model that changed under them, one of
+them CodeRabbit's first finding, and the merged rules text said one thing
+two ways.
+
+1. *Settled compared a transient card's port as a string* (CodeRabbit,
+Minor). A card's port path always carries its interface, and bind now
+writes the port alone unless the unit carries two cards. So under a
+binding of the port alone, the GO bar's own card read in one tree alone
+(a fast replug, /proc/asound dropping it before sysfs) never matched:
+`mayBeBound` set it aside and Settled answered device_missing as settled,
+skipping the follow-ups. Under a binding that records ":1.0", a card on
+another interface of the unit was set aside the same way. It now compares
+places, as Resolve does. Round 1's "a port that has its card is settled,
+since one interface is one card" held only while a port binding named an
+interface. Now a unit may carry two cards, and a port binding's answer
+stands whatever the transient cards are only when its card is on the
+recorded interface. Any other card found is the port's while the unit
+carries no other, so a transient card that may be another card of that
+unit (its place unknown or the bound one, its model unknown or the
+unit's, since one port holds one unit) holds the answer: once it settles
+the answer is device_ambiguous, or the card on the recorded interface.
+The reason says "a card at the bound port" under a port binding. Red on
+9e6eea1c: `TestSettledWaitsOnACardThatMayBeTheBoundUnit`'s rows "the
+bound port's own card in sysfs alone" (by the port alone) and "another
+card of the unit in sysfs alone, the recorded interface's card gone" (by
+the port and ":1.0"), and `TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort`
+(the composite unit's second card being added, available on card 5,
+settled). Controls, each red: the string comparison (both rows and the
+composite test); round 1's shortcut (the composite test); the model check
+removed (its case of another model in /proc alone); the recorded
+interface's shortcut removed (the composite test's ":1.0" case, and
+`TestSettledHoldsWhatNoCardCanChange`).
+
+2. *A snapshot handed every consumer the bound port's slices* (read in the
+merge). The port-binding fix added `Resolution.Port`, a `usbid.Port`
+whose segments and chain are slices. `copyResolution`, which every
+accessor and the feed's offer go through, cloned only the matches, so
+under a port binding one consumer's write to its copy reached the
+snapshot. It now clones both. `TestEachConsumerGetsItsOwnCopyOfTheBoundPort`
+was red on 1b257a89: "pci-0000:00:00.0/usb2-9:1.0" in the snapshot and
+the feed's newest, where it was "platform-xhci-hcd.0/usb2-1:1.0".
+Control: the matches cloned alone (red).
+
+3. *A stopped sysfs reading said its card listing was complete* (read in
+the merge; round 2's notes left it for this merge). `CardsComplete`
+promises that `Cards` holds every card the listing names, and a stop
+before the last card left it true. No caller saw it: `ObserveContext`
+returns the context's error, and the check after open reads without one.
+The card loop's stop now clears it. `TestAStoppedReadingOpensNothingMore`
+asserts it per case: red on 22797734 at card 0 of 3, and green where the
+stop came in the USB loops, which have read every card. Control: the
+stop leaving it (red).
+
+4. *The check after open on a partial inventory* (CodeRabbit, Minor,
+posted on this entry but about `checkPort`): declined. The evidence:
+- A partial reading lacks only what it says it lacks: a failed listing
+  or an unread root hub drops controllers or devices, and a /proc card
+  whose devices could not all be listed drops that card's streams. It can
+  hide no card at the bound port: sysfs's card listing must be whole
+  (`CardsComplete`), and a card one tree lists alone is transient.
+- Every piece the check's answer depends on is asked of the reading on
+  its own: the card listing, /proc's cards, the bound controller, the
+  opened card's stream. A partial reading can therefore make it refuse,
+  never admit a card a whole reading would refuse.
+- Resolve chooses card 5 on such a reading. A refusal would make the check
+  and Resolve answer differently on one reading, which the rules forbid
+  under a port binding.
+
+Nothing changes for the sink: the check's refusals are those it had, each
+`ReasonWrongDevice` at an open or a reopen. Two rows in
+`TestTheCheckAfterOpenAgreesWithResolveOnEachReading`, each checking that
+its reading is partial, pin it: another card whose PCM directory cannot
+be listed, and a root hub of another controller that cannot be read.
+Control: CodeRabbit's diff applied. Red: both rows, and main's
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream`, whose controller
+refusal the blanket one pre-empts.
+
+The merged rules text forbade checking "a reading that is not whole",
+which `Inventory.Partial` now names while Resolve answers it. The round's
+note says which readings the check refuses (a card listing that is not
+whole, a /proc/asound that cannot be read) and that it answers a reading
+partial elsewhere as Resolve does.
+
+5. *The fixtures' script wrote under a path from the command line*
+(SonarCloud's gate, pythonsecurity:S8707). `reconstruct.py` now takes no
+argument and writes only into its own directory; to write elsewhere, copy
+it there. The fixtures are unchanged:
+- Run in place, it rewrote all 15, and git saw no change.
+- A copy run from a scratch directory wrote 15 byte-identical messages
+  (`filecmp`, `shallow=False`).
+- Given a directory, it exits with its usage and writes nothing.
+Control: the previous script, given a directory, wrote 15 files into it.
+SonarCloud's own verdict comes with the next CI run.
