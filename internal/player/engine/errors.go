@@ -73,8 +73,10 @@ const (
 	ReasonTimeout Reason = "backend_timeout"
 	// ReasonSuperseded answers a command that asked for playback, which ran
 	// and whose playback a later command or edit replaced before it began:
-	// a Stop, a DeleteAll, a deletion of the entry to play. Whatever else
-	// the command did (a PlayID's selection) stands.
+	// a Stop, a DeleteAll, a deletion of the entry to play, or a Next,
+	// Previous, PlayID or PlayIndex that replaced the session started for it,
+	// or the Resume under way for it. Whatever else the command did (a
+	// PlayID's selection) stands.
 	ReasonSuperseded Reason = "superseded"
 	// ReasonOvertaken answers a transport command still waiting its turn
 	// (behind a Pause or a Resume under way) when a Stop ran: the Stop

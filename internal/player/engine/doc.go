@@ -86,9 +86,17 @@
 // playback began once the session started for it is heard (its first
 // Audible), and from then on it answers nil, whatever stops playback after;
 // otherwise the first reason recorded for it stands, so a later Play that
-// plays never makes an earlier one's answer nil. Pause and a resume answer
-// with the backend's answer; Stop and EnterMaintenance once the release is
-// confirmed or its deadline passed.
+// plays never makes an earlier one's answer nil. The session started for a
+// command is the one it starts, or, for the commands that waited behind a
+// release or set a pending intent, the one that starts once the release is
+// acknowledged, the latest intent's, which all of them share; past an entry
+// refused at its start, or one that played out with no successor taken, it
+// is the session that follows. Only that session's Audible decides the
+// command, and a Next, Previous, PlayID or PlayIndex that replaces it before
+// it is heard answers the command ReasonSuperseded, and a Play whose Resume
+// is under way the same. Pause and a resume answer with the backend's
+// answer; Stop and EnterMaintenance once the release is confirmed or its
+// deadline passed.
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;

@@ -589,8 +589,10 @@ func TestAPlayWhosePlaybackBeganAnswersAsPlayed(t *testing.T) {
 // waiting behind that release is decided only by the session that follows,
 // and answers why that one did not play: a PlayID that replaced a Play whose
 // Start is held, the first session then heard, answers the second session's
-// refused Start; a PlayID behind a held release, the releasing session's
-// successor then heard, answers the output going away.
+// refused Start, and the Play ReasonSuperseded, its own session replaced; a
+// PlayID behind a held release, the releasing session's successor then
+// heard, answers the output going away. With the second session played,
+// TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded.
 func TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand(t *testing.T) {
 	t.Run("a PlayID that replaced a starting Play, then the first session heard", func(t *testing.T) {
 		h := startHarness(t)
@@ -623,9 +625,7 @@ func TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand(t *testing.T) {
 		if err := h.result("play id", playID); ReasonOf(err) != ReasonBackend || !errors.Is(err, busy) {
 			t.Fatalf("the PlayID whose session's Start was refused answered %v, want %s with the backend's error", err, ReasonBackend)
 		}
-		if err := h.result("play", play); err == nil {
-			t.Fatal("the Play answered nil, though its session was released before it was heard and the next was refused")
-		}
+		h.refused("the Play whose session the PlayID replaced before it was heard", h.result("play", play), ReasonSuperseded)
 		if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 2 {
 			t.Fatalf("%s after %d sessions, want stopped after two", sn.State(), h.be.starts())
 		}
@@ -651,6 +651,96 @@ func TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand(t *testing.T) {
 		h.report(OutputReport{Available: false, Reason: "device_missing"})
 		g.open()
 		h.refused("the PlayID behind the release", h.result("play id", playID), ReasonOutputUnavailable)
+	})
+}
+
+// TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded pins a play
+// command whose session a later command replaced before it was heard: a
+// PlayID sent while the Play's session starts releases that session to play
+// another entry, so the Play's playback never happens, and the Play answers
+// ReasonSuperseded, naming the PlayID, however the PlayID's own session goes:
+// heard before its Start returns (Codex's sequence on round 6, where that
+// Audible answered both commands nil), or started and not yet heard, where
+// the settle answered the Play nil. The PlayID answers nil and its entry
+// plays. A Play whose Resume is under way, replaced by a Next, answers
+// ReasonSuperseded too, naming the Next: the paused content never played on.
+func TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded(t *testing.T) {
+	for _, heardFirst := range []bool{true, false} {
+		name := "the PlayID's session heard before its Start returns"
+		if !heardFirst {
+			name = "the PlayID's session started and not yet heard"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := startHarness(t)
+			ids := h.insert("a", "x")
+			h.available()
+			first, second := newGate(), newGate()
+			h.be.script(func() {
+				h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+					g := first
+					if s.id == 2 {
+						g = second
+					}
+					if err := g.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+					return s.open()
+				}
+			})
+			play := async(func() error { return h.eng.Play(bg) })
+			h.be.nth(1)
+			mark := h.appliedMark()
+			playID := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+			h.waitApplied("play id", mark)
+			first.open()
+			s2 := h.be.nth(2)
+			if s2.first.Entry != ids[1] {
+				t.Fatalf("the second session started %d, want x, the PlayID's", s2.first.Entry)
+			}
+			if heardFirst {
+				heard(h, s2)
+			}
+			second.open()
+			h.must("the PlayID whose session played", h.result("play id", playID))
+			err := h.result("play", play)
+			h.refused("the Play whose session the PlayID replaced", err, ReasonSuperseded)
+			if !strings.Contains(err.Error(), "play id") {
+				t.Fatalf("the Play answered %q, want it to name the PlayID that replaced its playback", err)
+			}
+			sn := h.waitSnap("x playing", func(sn *Snapshot) bool { return sn.State() == Playing && sn.Selected() == ids[1] })
+			if h.be.starts() != 2 {
+				t.Fatalf("%s at %d after %d sessions, want x playing in the second", sn.State(), sn.Selected(), h.be.starts())
+			}
+		})
+	}
+	t.Run("a resuming Play, replaced by a Next", func(t *testing.T) {
+		h := startHarness(t)
+		ids, _ := h.playing(0, "a", "b")
+		h.must("pause", h.eng.Pause(bg))
+		held := newGate()
+		h.be.script(func() {
+			h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
+				if err := held.wait(ctx, h.be, false); err != nil {
+					return 0, err
+				}
+				return ResumeContinued, nil
+			}
+		})
+		play := async(func() error { return h.eng.Play(bg) })
+		h.be.waitFor("the resume", func() bool { return h.be.countLocked("resume") == 1 })
+		mark := h.appliedMark()
+		next := async(func() error { return h.eng.Next(bg) })
+		h.waitApplied("next", mark)
+		held.open()
+		h.must("the Next", h.result("next", next))
+		err := h.result("play", play)
+		h.refused("the resuming Play the Next replaced", err, ReasonSuperseded)
+		if !strings.Contains(err.Error(), "next") {
+			t.Fatalf("the Play answered %q, want it to name the Next that replaced its playback", err)
+		}
+		if s2 := h.be.nth(2); s2.first.Entry != ids[1] {
+			t.Fatalf("the Next's session started %d, want b", s2.first.Entry)
+		}
 	})
 }
 

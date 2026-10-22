@@ -274,8 +274,8 @@ func (e *Engine) transport(c *command) {
 	case actNothing:
 		e.answer(c, reply{})
 	case actStart:
-		e.startSession(sel)
 		e.wait(c, true)
+		e.startSession(sel)
 	case actResume:
 		e.resume(c)
 	case actPause:
@@ -284,6 +284,9 @@ func (e *Engine) transport(c *command) {
 		stop := StopInfo{Reason: ReasonStopped, Detail: name}
 		if atEnd {
 			stop = StopInfo{Reason: ReasonEndOfQueue, Detail: "next past the last entry"}
+		}
+		if r.then == IntentPlay {
+			e.replaced(o.sess, name)
 		}
 		e.releaseSession(o.sess, r.then, stop)
 		e.wait(c, r.then == IntentPlay)
@@ -363,23 +366,56 @@ func (e *Engine) superseded(by string) {
 	e.playFailed(refuse("play", ReasonSuperseded, "replaced before playback began: "+by))
 }
 
-// playBegan records, on the waiting play commands that have no outcome yet,
-// that their playback began: the session started for them was heard. Every
-// one of them waits for that session. onAudible takes an Audible only from
-// the current session, starting or live (current): a session released, its
-// release unconfirmed, finished or replaced reports in vain. And play
-// commands wait only while a session starts or releases (settleWaiters
-// answers them all once neither is under way), so when the current session
-// is heard they wait for it: those it was started for, and those that waited
-// behind the release before it. Each answers nil from then on, whatever
-// stops playback after (playFailed passes it over); one already given a
-// reason keeps it, since deciding again changes nothing recorded. A Play
-// whose Resume is under way is not one of them: an Audible while a session
-// is paused can be content a pause by zeros was still playing out, so the
-// Resume's own answer stands.
-func (e *Engine) playBegan() {
+// replaced records that by, a later command, replaced s's playback with
+// another before it was heard: Next, Previous, PlayID or PlayIndex while s
+// starts or holds the device, which releases s to play the command's own
+// target. The play commands s was started for answer ReasonSuperseded, and
+// so does a Play whose Resume is under way on s, whose paused content never
+// plays on; one whose playback began (playBegan), or that was given a reason
+// already, keeps its answer. The commands that waited behind a release are
+// not s's: the session that starts once that release is acknowledged is
+// started for them, as for the command by.
+func (e *Engine) replaced(s *session, by string) {
+	if s == nil {
+		return
+	}
+	err := refuse("play", ReasonSuperseded, "replaced before playback began: "+by)
 	for i := range e.o.waiters {
-		if w := &e.o.waiters[i]; w.play {
+		if w := &e.o.waiters[i]; w.play && !w.decided && w.sess == s.id {
+			w.decided, w.err = true, err
+		}
+	}
+	if tc := s.transportCall; tc != nil && tc.kind == callResume && tc.waiter != nil && tc.waitErr == nil {
+		tc.waitErr = refuse("play", ReasonSuperseded, "replaced before playback resumed: "+by)
+	}
+}
+
+// carry hands the play commands s was started for, with no outcome yet, on
+// to the session that follows s's release: the engine itself moved on, past
+// s's first entry refused before any of its content played, or past the
+// last entry s took once it played out, and their playback goes on in that
+// session (startSession).
+func (e *Engine) carry(s *session) {
+	for i := range e.o.waiters {
+		if w := &e.o.waiters[i]; w.play && !w.decided && w.sess == s.id {
+			w.sess = 0
+		}
+	}
+}
+
+// playBegan records, on the play commands s was started for that have no
+// outcome yet, that their playback began: s was heard. Only s's Audible
+// decides them, and onAudible takes one only from the current session,
+// starting or live (current): a session released, its release unconfirmed,
+// finished or replaced reports in vain. Each answers nil from then on,
+// whatever stops playback after (playFailed passes it over); one already
+// given a reason keeps it, since deciding again changes nothing recorded. A
+// Play whose Resume is under way is not one of them: an Audible while a
+// session is paused can be content a pause by zeros was still playing out,
+// so the Resume's own answer stands.
+func (e *Engine) playBegan(s *session) {
+	for i := range e.o.waiters {
+		if w := &e.o.waiters[i]; w.play && w.sess == s.id {
 			w.decided = true
 		}
 	}
@@ -400,12 +436,19 @@ func (e *Engine) newOcc(id uint32) *occ {
 	return &occ{id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref}
 }
 
-// startSession starts a session at entry target. The owner starts one only
-// with no other session unacknowledged.
+// startSession starts a session at entry target, for the play commands
+// waiting with none started for them: the one that starts it, and those
+// that waited behind the release before it. The owner starts one only with
+// no other session unacknowledged.
 func (e *Engine) startSession(target uint32) {
 	o := &e.o
 	o.nextSess++
 	s := &session{id: SessionID(o.nextSess), phase: sessStarting}
+	for i := range o.waiters {
+		if w := &o.waiters[i]; w.play && w.sess == 0 {
+			w.sess = s.id
+		}
+	}
 	first := e.newOcc(target)
 	s.chain = []*occ{first}
 	o.sess = s
@@ -428,8 +471,11 @@ func (e *Engine) startSession(target uint32) {
 // anything but play, a session still starting supersedes the plays waiting
 // for it, but for those it was heard for (playBegan), and so does one whose
 // Resume is under way: that Play is answered at once with the reason
-// already recorded for it (the output, a fault) or as superseded, a Pause
-// under way with nil.
+// already recorded for it (the output, a fault, a command that replaced
+// its playback) or as superseded, a Pause under way with nil. Released to
+// play, the caller has already said whose playback that is: a command's
+// that replaced s's (replaced), or the one s's own commands asked for, going
+// on past an entry (carry).
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
@@ -440,8 +486,8 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
 		var err error
-		if tc.kind == callResume && then != IntentPlay {
-			if err = tc.waitErr; err == nil {
+		if tc.kind == callResume {
+			if err = tc.waitErr; err == nil && then != IntentPlay {
 				err = refuse(tc.waiter.op.String(), ReasonSuperseded, "replaced before playback resumed: "+why.Detail)
 			}
 		}
@@ -1020,6 +1066,7 @@ func (e *Engine) skipAtStart(s *session, u Unplayable) {
 		return
 	}
 	e.selectEntry(next)
+	e.carry(s)
 	e.releaseSession(s, IntentPlay, StopInfo{})
 }
 
@@ -1150,7 +1197,7 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	o.audible = Audible{Occurrence: oc.id, Entry: oc.entry}
 	o.pos = Position{Occurrence: oc.id}
 	o.starting = false
-	e.playBegan()
+	e.playBegan(s)
 	if _, ok := o.skips[oc.entry]; ok {
 		e.setSkips(func(m map[uint32]Skip) { delete(m, oc.entry) })
 	}
@@ -1169,6 +1216,7 @@ func (e *Engine) onFinished(id SessionID) {
 	}
 	if next := e.following(e.o.selected); s.noMore && next != 0 {
 		e.selectEntry(next)
+		e.carry(s)
 		e.releaseSession(s, IntentPlay, StopInfo{})
 		return
 	}

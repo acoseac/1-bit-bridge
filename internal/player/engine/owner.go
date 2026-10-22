@@ -65,12 +65,23 @@ type owner struct {
 // answer is the first outcome recorded for that playback, whatever later
 // commands do: decided is set by that outcome, and err is it, nil once the
 // playback began, the session started for it heard (playBegan), and
-// otherwise why it did not happen (playFailed). So a later Play that plays
-// never answers for an earlier one, and nothing that stops a playback after
-// it began is the answer of the command that asked for it.
+// otherwise why it did not happen (playFailed): a later command that
+// replaced the session started for it before it was heard (replaced)
+// among them. So a later Play that plays never answers for an earlier one,
+// and nothing that stops a playback after it began is the answer of the
+// command that asked for it.
+//
+// sess is the session started for a play command (startSession), and 0
+// while it waits behind a release or a pending intent: the session that
+// starts once the release is acknowledged is started for it, and for every
+// other command waiting so. Only sess's Audible decides it, and the settle
+// answers it nil only while sess is the session playing. The engine's own
+// moves, past an entry refused at its start or one that played out, hand it
+// on to the session that follows (carry).
 type waiter struct {
 	c       *command
 	play    bool
+	sess    SessionID
 	decided bool
 	err     error
 }
@@ -539,7 +550,8 @@ func (e *Engine) condsHold(conds []Cond) bool {
 }
 
 // settleWaiters answers the waiters once no start and no release is under
-// way.
+// way. A play command with no outcome recorded answers nil only while the
+// session started for it plays.
 func (e *Engine) settleWaiters() {
 	o := &e.o
 	if len(o.waiters) == 0 || e.busy() {
@@ -549,10 +561,10 @@ func (e *Engine) settleWaiters() {
 		var err error
 		if w.play {
 			err = w.err
-			if !w.decided && o.state != Playing {
+			if !w.decided && (o.state != Playing || o.sess == nil || o.sess.id != w.sess) {
 				// Every path that ends without the playback records why
-				// (playFailed); this keeps the answer from being nil if one
-				// is ever missed.
+				// (playFailed, replaced); this keeps the answer from being nil
+				// if one is ever missed.
 				err = refuse(w.c.op.String(), ReasonSuperseded, "playback did not begin")
 			}
 		}
