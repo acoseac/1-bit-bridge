@@ -228,6 +228,38 @@ func TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged(t *testing.T) {
 	}
 }
 
+// TestTheChainShownReachesThisCard: the chain shown for the output whose
+// thread holds the card is the stages from its device to this card and PCM
+// device; a device that reaches another card, or another PCM device of this
+// one, shows no chain, since its stages are not the way to this card.
+func TestTheChainShownReachesThisCard(t *testing.T) {
+	c := piCaptures[0]
+	for _, tc := range []struct {
+		device string
+		chain  []string
+	}{
+		{"volumio", []string{"empty", "plug", "hw"}},
+		{"hw:CARD=Audio,DEV=0", []string{"hw"}},
+		// The HDMI card, not the card whose substream the thread holds.
+		{"hw:0,0", []string{}},
+		// Another PCM device of this card.
+		{"hw:CARD=Audio,DEV=1", []string{}},
+	} {
+		t.Run(tc.device, func(t *testing.T) {
+			rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+			rig.writeConf(withDevice(volumioConf(t, rig.music), tc.device))
+			hs, token, id := rig.serve()
+			_, got, raw := getReading(t, hs, token, id)
+			if got.MPD == nil || got.MPD.Config == nil || got.MPD.Config.Output == nil || got.MPD.Config.Output.Name != "alsa" {
+				t.Fatalf("no output shown:\n%s", raw)
+			}
+			if chain := got.MPD.Config.Output.Chain; !slices.Equal(chain, tc.chain) || chain == nil {
+				t.Fatalf("chain %v, want %v\n%s", chain, tc.chain, raw)
+			}
+		})
+	}
+}
+
 // TestTheReadingShowsAnOutputMPDReportsEnabled: with nothing holding the
 // card, the output a reading shows for it is the one enabled alsa output
 // whose chain reaches it, enabled as MPD reports it, never as the file says.

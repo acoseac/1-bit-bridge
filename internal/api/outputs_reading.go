@@ -1032,16 +1032,24 @@ func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 
 // shown is the output a reading describes for a card, information beside
 // the verdict: mpd.conf's block, MPD's live element of the same name, and
-// the chain its device resolves to.
+// the chain its device takes to this card.
 type shown struct {
 	block conf.AudioOutput
 	live  *mpd.ServerOutput
 	chain []string
 }
 
-// shownOutput is the output whose thread holds the card; with nothing held,
-// the one enabled alsa output MPD reports whose chain reaches the card;
-// nil when there is no such one output.
+// reaches reports whether oc's device resolves, through a chain the bridge
+// follows, to pick's card and PCM device: a chain that reaches another is
+// not the way to this card.
+func reaches(oc *outputChain, pick *dacPick) bool {
+	return oc.ok && oc.chain.Card == pick.dac.Card && oc.chain.Device == pick.pcm
+}
+
+// shownOutput is the output whose thread holds the card; when no enabled
+// output's thread holds it, the one enabled alsa output MPD reports whose
+// chain reaches the card; nil when there is no such one output. Its chain
+// is shown only when it reaches this card and PCM device.
 func shownOutput(s *readingSnap, pick *dacPick, sub *alsa.Substream) *shown {
 	if !s.confRead || pick == nil {
 		return nil
@@ -1054,7 +1062,7 @@ func shownOutput(s *readingSnap, pick *dacPick, sub *alsa.Substream) *shown {
 			return nil
 		}
 		sh := &shown{block: block, live: &hs[0]}
-		if oc, ok := namedChain(s, hs[0].Name); ok && oc.ok {
+		if oc, ok := namedChain(s, hs[0].Name); ok && reaches(oc, pick) {
 			sh.chain = oc.chain.Stages
 		}
 		return sh
@@ -1065,7 +1073,7 @@ func shownOutput(s *readingSnap, pick *dacPick, sub *alsa.Substream) *shown {
 	var found *shown
 	for i := range s.chains {
 		oc := &s.chains[i]
-		if !oc.enabled || !oc.ok || oc.chain.Card != pick.dac.Card || oc.chain.Device != pick.pcm {
+		if !oc.enabled || !reaches(oc, pick) {
 			continue
 		}
 		if found != nil {
