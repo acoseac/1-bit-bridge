@@ -53114,6 +53114,18 @@ row).
 | R4 | the live `allowed_formats` reaches the verdict as live | `TestReadingDoPHasTheFormatDoPTakes`, `TestTheVerdictReadsMPDsOwnSettings` |
 | F1 to F3 | a build that panics is recovered, not cached, and logged | `TestAPanicInTheOutputsBodyClosesItsFlight` |
 
+**Gates**, through the build lock. `make fmt` rewrote nothing and `make
+vet` is clean; `make build-all` clean; `make docs-check` clean before and
+with the note applied (CLAUDE.md 62.3%; the worst load 45.2%, 45.9% with
+it). `make test` on the branch passed whole: 73 packages ok, saprobe-alac's
+own module included, `cmd/bridge` 473 s and `internal/api` 91 s (1125 s);
+with the note applied to the tree, then reverted, `make test` passed whole
+again, `cmd/bridge` re-run against it (1031 s). `internal/api`,
+`internal/signalpath` and `internal/alsa` under `-race -count=10 -timeout
+60m` passed (`api` 876 s). `go vet` of the touched packages and
+`cmd/bridge` for linux and windows is clean, and their linux and windows
+test binaries build.
+
 **Residuals, named, not fixed here**
 
 - **The ALSA parser refuses a float, a negative number and an unquoted
