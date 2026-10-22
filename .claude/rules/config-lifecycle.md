@@ -630,3 +630,21 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   is reversible and playlist deletion is a revivable tombstone, so either
   trigger silently destroys operator-uploaded content to reclaim a JPEG. An
   AST-based guard fails if a production caller appears.
+
+- **An output refusal names the setting, never its value** (2026-10-22,
+  backlog B505 round 2). `OutputConfig.Problem`, which Validate calls and
+  `bridge init`'s rewrite checks each kept setting with, returns an
+  `*OutputProblem`: the setting, and a reason with no value in it ("that
+  value is not auto, on or off", "that value is not a port (0 to
+  65535)"). What is refused there is often something pasted onto the wrong
+  line: MPD's password or a DAC's serial on `output.mpd`'s, a serial of
+  digits on `output.loopbackPort`'s. Validate's refusal quoted a refused
+  mpd (`%q`) and printed a refused port (`%d`), and `bridge serve`,
+  `bridge doctor` and init print it at load; init's rewrite warning took
+  its words. The player block's reasons and a configured URL's refusals
+  already name a field without its value (the bullet on a configured URL
+  above; `player.md`). The rewrite builds its warning line from the
+  refusal's parts and the key's line (`outputRefusal`), never from the
+  error's own text. **Don't quote a refused output setting.**
+  `TestOutputRefusalsCarryNoValue` and
+  `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` pin it.
