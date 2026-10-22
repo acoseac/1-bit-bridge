@@ -220,43 +220,41 @@ func TestOutputTrackLookupReadsTheRowAndItsStat(t *testing.T) {
 	}
 }
 
-// TestOutputTrackLookupReadsOneVersionOfTheRow: the format and the size
-// and time the lookup returns are one version of the row. A scan that
-// commits a new version while the lookup runs (an ALAC file replaced by an
-// AAC one at the same path) must not pair the old codec with the new
-// file's size and time, which the file on disk then matches: a lossy file
-// judged as the lossless row it replaced.
+// countedRows is an outputRowReader that answers one row and counts the
+// reads it is asked for.
+type countedRows struct {
+	track       manifest.Track
+	size, mtime int64
+	reads       []string
+}
+
+func (r *countedRows) GetTrackWithStat(_ context.Context, path string) (*manifest.Track, int64, int64, error) {
+	r.reads = append(r.reads, path)
+	if path != r.track.Path {
+		return nil, 0, 0, nil
+	}
+	t := r.track
+	return &t, r.size, r.mtime, nil
+}
+
+// TestOutputTrackLookupReadsOneVersionOfTheRow: the format and the size and
+// time the lookup returns are one version of the row only while one
+// statement reads them all, since a scan can commit between two (an ALAC
+// file replaced by an AAC one at the same path would pair the old codec with
+// the new file's size and time, which the file on disk then matches). The
+// lookup's reader has GetTrackWithStat alone, which the manifest pins to one
+// statement (TestGetTrackWithStatIsOneStatement), and it is called once a
+// look, for the row and its stat together.
 func TestOutputTrackLookupReadsOneVersionOfTheRow(t *testing.T) {
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
 	rate, bits := 44100.0, 16
-	first := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
-	then := first.Add(time.Hour)
-	ctx := context.Background()
-	if err := store.UpsertTrack(ctx, &manifest.Track{Path: "Album/a.m4a", Size: 1000, ModTime: first, Codec: "ALAC", SampleRate: &rate, BitsPerSample: &bits}); err != nil {
-		t.Fatal(err)
+	rows := &countedRows{track: manifest.Track{Path: "Album/a.m4a", Codec: "ALAC", SampleRate: &rate, BitsPerSample: &bits}, size: 1000, mtime: 42}
+	lookup := outputTrackLookup(rows)
+	got, ok, err := lookup(context.Background(), "Album/a.m4a")
+	if err != nil || !ok || got.Codec != "ALAC" || got.Size != 1000 || got.MTimeNS != 42 {
+		t.Fatalf("ok %v err %v track %+v", ok, err, got)
 	}
-	var rescanned bool
-	lookup := outputTrackLookupWith(store, func() {
-		if rescanned {
-			return
-		}
-		rescanned = true
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: "Album/a.m4a", Size: 2000, ModTime: then, Codec: "AAC", SampleRate: &rate}); err != nil {
-			t.Error(err)
-		}
-	})
-	got, ok, err := lookup(ctx, "Album/a.m4a")
-	if err != nil || !ok || !rescanned {
-		t.Fatalf("ok %v err %v rescanned %v", ok, err, rescanned)
-	}
-	alac := got.Codec == "ALAC" && got.Size == 1000 && got.MTimeNS == first.UnixNano()
-	aac := got.Codec == "AAC" && got.Size == 2000 && got.MTimeNS == then.UnixNano()
-	if !alac && !aac {
-		t.Fatalf("a row of two versions: %s at size %d and mtime %d", got.Codec, got.Size, got.MTimeNS)
+	if !slices.Equal(rows.reads, []string{"Album/a.m4a"}) {
+		t.Fatalf("the lookup read the row %d times: %v", len(rows.reads), rows.reads)
 	}
 }
 

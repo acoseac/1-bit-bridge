@@ -8,25 +8,23 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// outputTrackLookup is the reading's view of one of this bridge's rows
-// (GET /v1/outputs/{id}/reading, B473 B3): its format from the track, and
-// the size and modification time from the columns the scanner's skip gate
-// compares (GetTrackStat), which say whether the file on disk is still the
-// one the row describes. All of it is one statement (GetTrackWithStat), so
-// one version of the row.
-func outputTrackLookup(store *manifest.Store) func(context.Context, string) (api.OutputTrack, bool, error) {
-	return outputTrackLookupWith(store, nil)
+// outputRowReader is the one store read the reading's row lookup makes: a
+// row's format and the size and modification time the scanner's skip gate
+// compares, from one statement (manifest.Store.GetTrackWithStat), so one
+// version of the row. It has no other method, so the lookup cannot read the
+// row in two reads a scan could commit between.
+type outputRowReader interface {
+	GetTrackWithStat(ctx context.Context, path string) (*manifest.Track, int64, int64, error)
 }
 
-// outputTrackLookupWith is outputTrackLookup with afterRead, when it is
-// set, run once the row is read: where a scan's commit would fall between
-// two reads of it.
-func outputTrackLookupWith(store *manifest.Store, afterRead func()) func(context.Context, string) (api.OutputTrack, bool, error) {
+// outputTrackLookup is the reading's view of one of this bridge's rows
+// (GET /v1/outputs/{id}/reading, B473 B3): its format from the track, and
+// the size and modification time from the columns GetTrackStat reads,
+// which say whether the file on disk is still the one the row describes,
+// all from one call of rows.
+func outputTrackLookup(rows outputRowReader) func(context.Context, string) (api.OutputTrack, bool, error) {
 	return func(ctx context.Context, path string) (api.OutputTrack, bool, error) {
-		t, size, mtimeNS, err := store.GetTrackWithStat(ctx, path)
-		if afterRead != nil {
-			afterRead()
-		}
+		t, size, mtimeNS, err := rows.GetTrackWithStat(ctx, path)
 		if err != nil || t == nil {
 			return api.OutputTrack{}, false, err
 		}
