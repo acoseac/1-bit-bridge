@@ -873,6 +873,15 @@ func (e *Engine) callDone(c *call, r callResult) {
 					s.chain = s.chain[:i]
 				}
 			}
+			// A successor heard before its Prepare answered was taken: the
+			// hand-off the refusal is about happened, so the refusal is stale
+			// and the session goes on naming successors, unless the backend
+			// said the session is ending.
+			if c.next != nil && s.index(c.next.id) == 0 && !errors.Is(r.err, ErrSessionEnding) {
+				e.log.Info("player: the backend refused a successor it had already played; the session plays on", "session", uint64(s.id), "err", r.err)
+				e.reconcile(s)
+				return
+			}
 			s.noMore = true
 			if !errors.Is(r.err, ErrSessionEnding) {
 				e.log.Info("player: the backend took no successor; what follows plays in a session of its own", "session", uint64(s.id), "err", r.err)

@@ -348,13 +348,25 @@ func TestACutAnsweredAfterItsEntryWasHeardStops(t *testing.T) {
 
 // TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain pins a Prepare
 // that answers it took no successor after that successor was reported
-// heard, which a backend that keeps the contract never does: the chain keeps
-// the occurrence heard, so the next edit reconciles a session that plays on.
+// heard, which a backend that keeps the contract never does: the hand-off
+// the refusal is about happened, so the chain keeps the occurrence heard,
+// the refusal is stale, and the session plays on, naming the successor of
+// what is heard: one Prepare after b's occurrence, naming c. A refusal that
+// emptied the chain would leave nothing to name it after (a control that
+// truncates at 0 passed this test until it counted that Prepare).
 func TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain(t *testing.T) {
 	h := startHarness(t)
 	held := newGate()
 	h.be.script(func() {
+		first := true
 		h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, _ *Occurrence) error {
+			h.be.mu.Lock()
+			hold := first
+			first = false
+			h.be.mu.Unlock()
+			if !hold {
+				return nil
+			}
 			if err := held.wait(ctx, h.be, false); err != nil {
 				return err
 			}
@@ -370,6 +382,12 @@ func TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain(t *testing.T) {
 	mark = h.appliedMark()
 	held.open()
 	h.waitApplied("handled call prepare", mark)
+	if next := s.prepared(b.ID, 1); next == nil || next.Entry != ids[2] {
+		t.Fatalf("named after b once the refusal was handled: %+v, want c", next)
+	}
+	if n := len(s.preparesAfter(b.ID)); n != 1 {
+		t.Fatalf("%d Prepares after b's occurrence, want one", n)
+	}
 	h.insert("d")
 	if sn := h.snap(); sn.State() != Playing || sn.Selected() != ids[1] {
 		t.Fatalf("after the refusal and an edit: %s at %d, want playing b", sn.State(), sn.Selected())

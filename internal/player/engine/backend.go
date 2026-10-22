@@ -205,7 +205,10 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 // order. An occurrence refused before any of its content played is
 // reported Refused and never submitted; a first occurrence so refused makes
 // Start return an *Unplayable. Prepare returns ErrSessionEnding once the
-// session is playing out its last content.
+// session is playing out its last content, and then the engine names no
+// further successor in the session. Any other error from a Prepare whose
+// successor the backend has already reported Audible is stale: what was
+// heard is kept and successors are named after it.
 //
 // Edits after hand-off. An edit that changes the successor before it is
 // submitted is a new Prepare. After submission the engine asks Cut(from):
