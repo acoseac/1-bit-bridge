@@ -480,11 +480,13 @@ func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options
 
 // probeVerdict is probe, the number of its verdict, and whether the
 // inspection it answers from ran past its deadline (expired), which a
-// caller that stopped waiting has not had either. Every answer is a
-// verdict, numbered under mu as it is produced: a cache read when it is
-// read, a probe when it completes (stored or past its own deadline),
-// whichever caller ran it. The false of a caller that stopped waiting on
-// another caller's probe is none, and carries 0.
+// caller that stopped waiting has not had either. An answer is a verdict,
+// numbered under mu as it is produced: a cache read when it is read, a
+// probe when its inspection returns (stored, or past its own deadline),
+// whichever caller ran it. Two answers are none and carry 0: the false of
+// a caller that stopped waiting on another caller's probe, and a probe
+// whose inspection never returned, was skipped because one still runs, or
+// panicked (inspectBounded's abandoned), which read nothing about MPD.
 func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64, bool) {
 	cfg := o.outputConfig()
 	key := probeKey(cfg)
@@ -517,12 +519,12 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 	opt, refuse := mpd.OptionsForHost(o.goos, "", cfg.Conf, cfg.Endpoint, cfg.Password, o.getenv)
 	var rep mpd.Report
 	found := false
-	expired := false
+	expired, abandoned := false, false
 	if !refuse {
 		// Detached from the caller: a cancelled /v1/health must not
 		// store a miss that hides the output for the miss TTL.
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
-		rep, expired = o.inspectBounded(pctx, opt)
+		rep, expired, abandoned = o.inspectBounded(pctx, opt)
 		cancel()
 		found = rep.Found()
 	}
@@ -535,10 +537,14 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	}
 	delete(o.probeFlights, key)
-	f.found, f.rep, f.opt, f.seq, f.expired = found, rep, opt, o.nextVerdictLocked(), expired
+	var seq uint64
+	if !abandoned {
+		seq = o.nextVerdictLocked()
+	}
+	f.found, f.rep, f.opt, f.seq, f.expired = found, rep, opt, seq, expired
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt, f.seq, expired
+	return found, rep, opt, seq, expired
 }
 
 // outputProbeGrace is how long past its deadline a probe waits for its
@@ -548,15 +554,17 @@ const outputProbeGrace = 100 * time.Millisecond
 
 // inspectBounded runs the inspection on a goroutine of its own and waits for
 // it until ctx ends and outputProbeGrace more. One that has not returned by
-// then is expired with no report, and while it still runs no probe starts
-// another: a file that holds a read for good holds one goroutine, not one
-// per probe. A panic in it is an expired probe, logged. expired is whether
-// ctx had ended when the report came.
-func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep mpd.Report, expired bool) {
+// then is abandoned, with no report, and while it still runs no probe starts
+// another, which is abandoned at once: a file that holds a read for good
+// holds one goroutine, not one per probe. A panic in it is abandoned too,
+// and logged. expired is whether ctx had ended when the report came, and an
+// abandoned inspection is expired; abandoned is no report at all, which
+// says nothing about MPD.
+func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep mpd.Report, expired, abandoned bool) {
 	o.mu.Lock()
 	if o.inspecting {
 		o.mu.Unlock()
-		return mpd.Report{}, true
+		return mpd.Report{}, true, true
 	}
 	o.inspecting = true
 	o.mu.Unlock()
@@ -584,13 +592,13 @@ func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep
 		select {
 		case <-done:
 		case <-timer.C:
-			return mpd.Report{}, true
+			return mpd.Report{}, true, true
 		}
 	}
 	if panicked {
-		return mpd.Report{}, true
+		return mpd.Report{}, true, true
 	}
-	return out, ctx.Err() != nil
+	return out, ctx.Err() != nil, false
 }
 
 // nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.

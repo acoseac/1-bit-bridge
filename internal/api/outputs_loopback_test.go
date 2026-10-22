@@ -317,6 +317,81 @@ func TestACallerThatStopsWaitingGetsTheGatesLastAnswer(t *testing.T) {
 	}
 }
 
+// TestAnInspectionThatNeverReturnsIsNoVerdict: an inspection that has not
+// returned by its deadline and the grace (a file on a dead mount), one a
+// probe skips because that inspection still runs, and one that panics read
+// nothing about MPD. Each leaves the gate's last answer, recorded nothing,
+// so the loopback route keeps serving; an inspection that returns, even
+// past its deadline, is still a verdict (the two expired-probe tests
+// above). The reading still hears that the probe was late.
+func TestAnInspectionThatNeverReturnsIsNoVerdict(t *testing.T) {
+	clock := &manualClock{}
+	var hang, explode atomic.Bool
+	stuck := make(chan struct{})
+	var stuckOnce sync.Once
+	t.Cleanup(func() { stuckOnce.Do(func() { close(stuck) }) })
+	var inspects atomic.Int32
+	cfg := quietOutputs("linux", "auto")
+	cfg.Now, cfg.AfterFunc = clock.Now, clock.AfterFunc
+	cfg.Inspect = func(context.Context, mpd.Options) mpd.Report {
+		inspects.Add(1)
+		if explode.Load() {
+			panic("an inspection that panics")
+		}
+		if hang.Load() {
+			<-stuck // nothing the context does ends it
+		}
+		return mpd.Report{ConfPath: "/etc/mpd.conf"}
+	}
+	o := newLocalOutputs(cfg)
+	if !o.Active(context.Background()) || !o.activeNow() {
+		t.Fatal("a probe that found MPD: the gate or the route said off")
+	}
+	hang.Store(true)
+	for _, step := range []string{"an inspection that never returns", "a probe that skips it while it runs"} {
+		clock.Advance(outputProbeHit + time.Second)
+		if !o.Active(context.Background()) {
+			t.Fatalf("%s: the gate said off, and nothing said MPD had gone", step)
+		}
+		if !o.activeNow() {
+			t.Fatalf("%s: the loopback route stopped serving", step)
+		}
+		if _, _, _, seq, late := o.probeVerdict(context.Background()); seq != 0 || !late {
+			t.Fatalf("%s: verdict number %d, late %v; want none, and late", step, seq, late)
+		}
+	}
+	if n := inspects.Load(); n != 2 {
+		t.Fatalf("%d inspections, want the first and the one that hangs", n)
+	}
+	stuckOnce.Do(func() { close(stuck) })
+	waitFor(t, "the hung inspection to return", func() bool {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		return !o.inspecting
+	})
+	hang.Store(false)
+	explode.Store(true)
+	clock.Advance(outputProbeHit + time.Second)
+	if !o.Active(context.Background()) || !o.activeNow() {
+		t.Fatal("an inspection that panicked: the gate or the route said off")
+	}
+	if n := inspects.Load(); n != 3 {
+		t.Fatalf("%d inspections: the one that panics did not run", n)
+	}
+}
+
+// waitFor polls cond until it holds, and fails the test after five seconds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waited five seconds for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestAnOlderCacheVerdictNeverOverwritesANewerOne: a caller whose cache hit
 // said MPD is there is parked between that read and its record. The cache
 // expires, and another caller's probe finds MPD gone and records it. When
