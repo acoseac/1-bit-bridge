@@ -450,7 +450,8 @@ var ErrWrongDevice = errors.New("the opened node is not the bound unit")
 // opening the PCM and sending samples, at every open (SinkConfig.Admit is
 // Check, so a sink's reopen after a release is checked as its open is).
 type Checker struct {
-	// Sysfs is where the opened card's identity is read again.
+	// Sysfs is where the opened card's identity is read again, and under a
+	// port binding the cards beside it.
 	Sysfs alsa.SysfsReader
 	// Want is the resolution the open was made from.
 	Want Resolution
@@ -475,14 +476,15 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 	if got := (Endpoint{Device: n.Device, Subdevice: n.Subdevice}); got != w.Endpoint {
 		return wrongDevice("the kernel opened %s of card %d, and the binding names %s", got, n.Card, w.Endpoint)
 	}
+	if w.Binding == config.BindingPort {
+		return c.checkPort(n)
+	}
 	id, ok := c.Sysfs.Card(n.Card)
 	switch {
 	case !ok:
 		return wrongDevice("card %d is not in sysfs now: it went away (unplugged or renumbered) between the resolve and the open", n.Card)
 	case id.Kind != alsa.IdentityUSB || id.USB == nil:
 		return wrongDevice("card %d is not a USB unit whose identity can be read now", n.Card)
-	case w.Binding == config.BindingPort:
-		return c.checkPort(n, *id.USB)
 	case !SameUnit(*id.USB, w.Identity):
 		return wrongDevice("card %d is %s, not the bound unit %s: renumbered or swapped between the resolve and the open",
 			n.Card, Describe(*id.USB), Describe(w.Identity))
@@ -493,27 +495,47 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 }
 
 // checkPort is Check under a port binding, which names a port and not a
-// unit: the opened card must be at the bound port (SamePort, from the
-// reading of that card), and be the card the binding chooses there now,
-// which on a unit swapped into the port between the resolve and the open
-// it may be. A card on the configuration and interface the binding records
-// is that card whatever else the unit carries; any other card is only
-// while the unit carries no other, which sysfs is read again for. Like
-// Check under the other bindings, it judges by the cards it can read: an
-// unreadable or a transient card is Resolve's to fail closed on.
-func (c Checker) checkPort(n alsapcm.NodeInfo, u alsa.USBIdentity) error {
+// unit. It reads sysfs once, so the opened card and the cards beside it are
+// one reading, and one that cannot be read refuses. The opened card must be
+// a readable USB card at the bound port (SamePort), and the card the
+// binding chooses there now, which on a unit swapped into the port between
+// the resolve and the open it may be. A card on the configuration and
+// interface the binding records is that card whatever else the unit
+// carries. Any other is only while the unit carries no other card, and, as
+// Resolve rules out no card it cannot read, a card the reading cannot
+// identify (unreadable, or vanished as it was read) may be another card of
+// that unit and refuses too; a card that is not USB, or a readable one at
+// another port, does not.
+func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 	w := c.Want
 	place := w.Port.Place().String()
-	if !SamePort(u, w.Identity) {
-		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(u), place)
-	}
-	if !w.Port.HasInterface() || u.Port != w.Port.String() {
-		at := []int{n.Card}
-		for _, id := range c.Sysfs.Read().Cards {
-			if id.Card != n.Card && id.Kind == alsa.IdentityUSB && id.USB != nil && placeOf(id.USB.Port) == place {
+	var (
+		u       *alsa.USBIdentity
+		at      = []int{n.Card}
+		unknown []alsa.Identity
+	)
+	for _, id := range c.Sysfs.Read().Cards {
+		switch {
+		case id.Card == n.Card:
+			if id.Kind == alsa.IdentityUSB {
+				u = id.USB
+			}
+		case id.Kind == alsa.IdentityUnsupported:
+		case id.Kind == alsa.IdentityUSB && id.USB != nil:
+			if placeOf(id.USB.Port) == place {
 				at = append(at, id.Card)
 			}
+		default:
+			unknown = append(unknown, id)
 		}
+	}
+	switch {
+	case u == nil:
+		return wrongDevice("card %d is not a USB card whose identity sysfs gives now: unplugged, renumbered or swapped between the resolve and the open, or sysfs could not be read", n.Card)
+	case !SamePort(*u, w.Identity):
+		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(*u), place)
+	}
+	if !w.Port.HasInterface() || u.Port != w.Port.String() {
 		sort.Ints(at)
 		switch {
 		case len(at) > 1 && w.Port.HasInterface():
@@ -521,6 +543,11 @@ func (c Checker) checkPort(n alsapcm.NodeInfo, u alsa.USBIdentity) error {
 				place, joinInts(at), n.Card, w.Port.Config, w.Port.Interface)
 		case len(at) > 1:
 			return wrongDevice("the unit at the bound port %s carries cards %s, and the binding records no interface to choose one: resolve again", place, joinInts(at))
+		case len(unknown) > 0 && unknown[0].Vanished:
+			return wrongDevice("card %d is being added or removed (its sysfs files went while they were read), and may be another card of the unit at the bound port %s: resolve again",
+				unknown[0].Card, place)
+		case len(unknown) > 0:
+			return wrongDevice("card %d could not be read, and may be another card of the unit at the bound port %s: resolve again", unknown[0].Card, place)
 		}
 	}
 	if n.Card != w.Card {

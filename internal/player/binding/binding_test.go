@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -443,7 +444,11 @@ func TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard(t *testing.T) {
 // binding's check refuses it; a card at another port is refused. On a unit
 // that carries two cards the opened card must be the one the binding
 // chooses there now: the card on the interface it records, and with none
-// recorded, or another, neither.
+// recorded, or another, neither. A card the check's re-read of sysfs cannot
+// identify (unreadable, or vanished as it was read) may be another card of
+// the unit in the port, so it refuses there as Resolve does, and so does
+// sysfs that cannot be read again; a card that is not USB, or a readable
+// one at another port, refuses nothing.
 func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 	root := pi5(t)
 	sys := alsa.SysfsReader{Root: filepath.Join(root, "sys")}
@@ -488,6 +493,66 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 		if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "cards 5 and 6") {
 			t.Errorf("%s, a unit with two cards: %v", name, err)
 		}
+	}
+
+	// A unit swapped in whose other card the re-read cannot identify:
+	// registered on the unit itself rather than on an interface (unreadable),
+	// or losing its device link as it goes (vanished). Resolve on the same
+	// tree answers device_ambiguous or identity_transient, so the check
+	// after open refuses card 5 too, unless it is on the interface the
+	// binding records, which no other card of that unit can be.
+	for _, tc := range []struct {
+		name, layout, then, says string
+		resolves                 State
+	}{
+		{"unreadable", plug(goBar, 5, "1234:0c20", "") + "card 6 " + goBar + "\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n", "",
+			"card 6 could not be read", StateDeviceAmbiguous},
+		{"vanished", composite(goBar, 5, 6, "1234:0c20"), "remove " + goBar + "/1-1:1.2/sound/card6/device\n",
+			"card 6 is being added or removed", StateIdentityTransient},
+	} {
+		sysfstest.Apply(t, root, "unplug "+goBar+"\n"+tc.layout)
+		if tc.then != "" {
+			sysfstest.Apply(t, root, tc.then)
+		}
+		want(t, Resolve(byPort(goBarPlace), observe(t, root)), tc.resolves, -1)
+		for name, r := range map[string]Resolution{"no interface recorded": place, "another interface recorded": other} {
+			err := check(r)
+			if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), tc.says) || !strings.Contains(err.Error(), goBarPlace) {
+				t.Errorf("%s, a unit with an %s card beside card 5: %v", name, tc.name, err)
+			}
+		}
+		if err := check(older); err != nil {
+			t.Errorf("the card on the recorded interface beside an %s card: %v", tc.name, err)
+		}
+	}
+
+	// A card that is not USB (the HDMI cards) and a readable card at another
+	// port are ruled out. A reading that cannot list the cards rules out
+	// nothing, as it does not for Resolve: the opened card is not in it.
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plugOn(goBar, 1, 5, "1234:0c12", "HUGO2-UNIT-0000000042")+plug(usb1+"/1-2", 7, "20b1:3009", goBarSerial))
+	if err := check(place); err != nil {
+		t.Errorf("a unit with one card in the port, another at port 2, and the HDMI cards: %v", err)
+	}
+	const notThere = "card 5 is not a USB card whose identity sysfs gives now"
+	t.Run("sysfs that cannot list its cards", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs a POSIX permission bit a non-root reader honours")
+		}
+		classSound := filepath.Join(root, "sys", "class", "sound")
+		if err := os.Chmod(classSound, 0o311); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(classSound, 0o755) })
+		if sys.Read().Present {
+			t.Fatal("premise: class/sound still lists")
+		}
+		if err := check(place); !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), notThere) {
+			t.Errorf("sysfs that cannot list its cards: %v", err)
+		}
+	})
+	sysfstest.Apply(t, root, "unplug "+goBar+"\n")
+	if err := check(place); !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), notThere) {
+		t.Errorf("card 5 gone from the port: %v", err)
 	}
 }
 
