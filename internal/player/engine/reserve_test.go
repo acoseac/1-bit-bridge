@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,7 +133,10 @@ func TestAStartWithoutItsReservationPublishesNoToken(t *testing.T) {
 // to its last durable content (what an entry that was never fsynced
 // allows) never yields an ID or a token a run handed out before. The
 // barrier is the test's on every platform, one that answers and then one
-// that fails, so it runs on Windows too, which has none of its own.
+// that fails, so it runs on Windows too, which has none of its own. New's
+// probe is the harness's, which passes, so the barrier fails for the writes
+// alone, as one that fails now and then does; one that fails every time is
+// New's refusal (TestNewRefusesADirectoryThatCannotBeSynced).
 func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 	var broken atomic.Bool
 	errNoSync := errors.New("fsync: input/output error")
@@ -186,6 +192,66 @@ func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 	}
 	if id := h.insert("y")[0]; seen[id] {
 		t.Fatalf("after the rollback ID %d was handed out again", id)
+	}
+}
+
+// TestNewRefusesADirectoryThatCannotBeSynced pins New's probe of the
+// barrier: a reservation directory whose fsync fails on every call, as on a
+// mount that cannot sync a directory, is a configuration error that names
+// the directory and says where the data directory must go, at every start,
+// with nothing read, moved aside or written; once the directory can be
+// synced, the queue loads as it was. Without the probe the engine started
+// and refused every edit for ever (reservation_not_durable), with nothing
+// naming the cause. The barrier is the test's, so it runs on Windows too.
+func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
+	var broken atomic.Bool
+	errNoSync := errors.New("sync dir: invalid argument")
+	// Registered before the harness, so it is restored after every engine
+	// goroutine that could read it has ended.
+	prev := atomicwrite.SetSyncParentDirForTest(func(string) error {
+		if broken.Load() {
+			return errNoSync
+		}
+		return nil
+	})
+	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	h := newHarness(t)
+	h.tweak = func(c *Config) { c.seams.writeReserve, c.seams.probe = nil, nil }
+	h.boot()
+	ids := h.insert("a", "b")
+	h.shutdown()
+	h.joinAfter(h.eng)
+	queue, err := os.ReadFile(h.queuePath())
+	h.must("read the queue file", err)
+	reserved, err := os.ReadFile(h.reservePath())
+	h.must("read the reservation file", err)
+
+	broken.Store(true)
+	for start := 1; start <= 2; start++ {
+		_, err := New(h.config())
+		switch {
+		case err == nil:
+			t.Fatalf("start %d: New over a directory that cannot be synced built an engine, want a configuration error", start)
+		case !errors.Is(err, errNoSync):
+			t.Fatalf("start %d: New = %v, want the barrier's failure", start, err)
+		case !strings.Contains(err.Error(), h.dir) || !strings.Contains(err.Error(), "a filesystem that can sync a directory"):
+			t.Fatalf("start %d: New = %q, want it to name the directory %s and where the data directory must go", start, err, h.dir)
+		}
+	}
+	if got, _ := os.ReadFile(h.queuePath()); !bytes.Equal(got, queue) {
+		t.Fatal("a refused start changed the queue file")
+	}
+	if got, _ := os.ReadFile(h.reservePath()); !bytes.Equal(got, reserved) {
+		t.Fatal("a refused start changed the reservation file")
+	}
+	if aside, _ := filepath.Glob(filepath.Join(h.dir, "*.bad-*")); len(aside) != 0 {
+		t.Fatalf("a refused start moved files aside: %v", aside)
+	}
+
+	broken.Store(false)
+	h.boot()
+	if got := h.snap().IDs(); !slices.Equal(got, ids) {
+		t.Fatalf("once the directory syncs the queue loads as %v, want %v", got, ids)
 	}
 }
 

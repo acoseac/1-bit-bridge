@@ -120,26 +120,33 @@
 // Both come from counters whose reservations, a block (idBlock, 4,096) at
 // a time, are written to a file of their own (Config.ReservePath) and made
 // before anything they cover is handed out: a reservation is made once its
-// bytes and the directory entry naming them are fsynced
-// (atomicwrite.WriteBytesDurable), and a write whose directory fsync fails
-// is a reservation not made, since its rename can roll back at a crash. The
-// next block is reserved in the background, so a command waits on a write
-// only when that write has not landed by the time the current block runs
-// out, and at most reserveTimeout: past it the waiting edits are refused
-// with ReasonReservation, and so is every edit that needs a value until the
-// write lands. A start begins one block past the larger of the saved reservations,
-// the queue file's values and its largest ID, a margin for one reservation
-// that storage acknowledged and did not keep, and every start advances the
-// token once its own reservation is durable: until then the token is 0,
-// none (a start whose reservation failed, or whose bad reservation file
-// stays). A start
-// spends at most three blocks beyond what it hands out, so the 4,294,967,295
-// IDs last some 4.29 billion inserts, or at least some 349,000 starts (957
-// years at one a day), and the tokens as long; the last is followed by
-// ReasonIDsExhausted, logged once, never by a reuse. A
-// reservation that cannot be made durable refuses every insert and every
-// other edit that advances the token with ReasonReservation; it is retried
-// by the next such edit, never in the background as if it were optional.
+// bytes and the directory entry naming them are fsynced, and the entries of
+// the directories it creates (atomicwrite.WriteBytesDurable), and a write
+// whose directory fsync fails is a reservation not made, since its rename
+// can roll back at a crash. New probes that barrier on the reservation
+// file's directory before it reads anything (atomicwrite.ProbeDurable) and
+// fails when it cannot sync it: on a filesystem whose directory fsync always
+// fails, as some network and FUSE mounts' does, every reservation would fail
+// and every edit be refused for ever, so the error names the directory and
+// says the data directory must move to a filesystem that can sync a
+// directory. A platform with no directory fsync (Windows) is refused the
+// same way. The next block is reserved in the background, so a command
+// waits on a write only when that write has not landed by the time the
+// current block runs out, and at most reserveTimeout: past it the waiting
+// edits are refused with ReasonReservation, and so is every edit that needs
+// a value until the write lands. A start begins one block past the larger
+// of the saved reservations, the queue file's values and its largest ID, a
+// margin for one reservation that storage acknowledged and did not keep,
+// and every start advances the token once its own reservation is durable:
+// until then the token is 0, none (a start whose reservation failed, or
+// whose bad reservation file stays). A start spends at most three blocks
+// beyond what it hands out, so the 4,294,967,295 IDs last some 4.29 billion
+// inserts, or at least some 349,000 starts (957 years at one a day), and the
+// tokens as long; the last is followed by ReasonIDsExhausted, logged once,
+// never by a reuse. A reservation that cannot be made durable refuses every
+// insert and every other edit that advances the token with
+// ReasonReservation; it is retried by the next such edit, never in the
+// background as if it were optional.
 //
 // # Persistence
 //

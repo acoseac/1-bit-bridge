@@ -170,6 +170,11 @@ func (f *fakeFiles) writeReserve(path string, data []byte) error {
 	return nil
 }
 
+// probe is New's barrier probe: it passes, as on a filesystem that can sync
+// a directory, on every platform. The real one, over a barrier the test
+// replaces, is TestNewRefusesADirectoryThatCannotBeSynced's.
+func (f *fakeFiles) probe(string) error { return nil }
+
 func (f *fakeFiles) readFile(path string, limit int64) ([]byte, error) {
 	f.mu.Lock()
 	err := f.readErr[filepath.Base(path)]
@@ -305,6 +310,7 @@ func (h *harness) config() Config {
 			clock:        h.clk,
 			writeQueue:   h.files.writeQueue,
 			writeReserve: h.files.writeReserve,
+			probe:        h.files.probe,
 			readFile:     h.files.readFile,
 			rename:       h.files.rename,
 			admitted:     func(c *command) { h.noteApplied("admitted " + c.op.String()) },

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,7 @@ type seams struct {
 	clock        clock
 	writeQueue   func(path string, data []byte) error
 	writeReserve func(path string, data []byte) error
+	probe        func(path string) error
 	readFile     func(path string, limit int64) ([]byte, error)
 	lstat        func(path string) (fs.FileInfo, error)
 	rename       func(from, to string) error
@@ -126,8 +128,15 @@ type Engine struct {
 // New builds an engine: it loads the queue file and the reservation file,
 // moving a bad one aside, and makes the reservation of this run durable
 // before anything is handed out. A file problem is logged and leaves the
-// engine running, refusing what it cannot do safely (Snapshot.Edits);
-// only a bad Config is an error. Commands wait until Run starts the owner.
+// engine running, refusing what it cannot do safely (Snapshot.Edits). A bad
+// Config is an error, and so is a reservation file whose directory cannot be
+// synced (atomicwrite.ProbeDurable, run before anything is read): a
+// filesystem whose directory fsync always fails, as some network and FUSE
+// mounts' does, would make every reservation fail and the engine refuse
+// every edit for ever, so the error names the directory and says the data
+// directory must move to a filesystem that can sync a directory; a platform
+// with no directory fsync (Windows) is refused the same way. Commands wait
+// until Run starts the owner.
 func New(cfg Config) (*Engine, error) {
 	switch {
 	case cfg.Backend == nil:
@@ -172,6 +181,12 @@ func New(cfg Config) (*Engine, error) {
 			return atomicwrite.WriteBytesDurable(path, data, ".player-ids-*.tmp")
 		}
 	}
+	if sm.probe == nil {
+		sm.probe = atomicwrite.ProbeDurable
+	}
+	if err := sm.probe(cfg.ReservePath); err != nil {
+		return nil, notDurable(cfg.ReservePath, err)
+	}
 	if sm.readFile == nil {
 		sm.readFile = readLimited
 	}
@@ -205,6 +220,17 @@ func New(cfg Config) (*Engine, error) {
 	e.w = newWriter(e)
 	e.start()
 	return e, nil
+}
+
+// notDurable is New's refusal of a reservation file whose directory the
+// barrier probe could not sync: every reservation written there would fail,
+// and the engine would refuse every edit for ever, so it does not start.
+func notDurable(path string, err error) error {
+	dir := filepath.Dir(path)
+	if errors.Is(err, atomicwrite.ErrNoDirectoryBarrier) {
+		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", dir, err)
+	}
+	return fmt.Errorf("player: the reservation file's directory %s cannot be synced, so no ID or token reserved there would survive a crash: move the data directory to a filesystem that can sync a directory: %w", dir, err)
 }
 
 // Run is the owner: it runs commands and events until ctx ends, then shuts

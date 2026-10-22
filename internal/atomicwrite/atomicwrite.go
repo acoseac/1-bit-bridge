@@ -70,11 +70,11 @@ import (
 
 var logger = logging.Component("atomicwrite")
 
-// ErrNoDirectoryBarrier is WriteBytesDurable's refusal on a platform with no
-// directory barrier (Windows, where fsutil.SyncParentDir is a no-op): a
-// rename there is atomic, and nothing makes the directory entry naming it
-// durable, so no write can be counted durable. It wraps
-// errors.ErrUnsupported.
+// ErrNoDirectoryBarrier is WriteBytesDurable's refusal, and ProbeDurable's
+// answer, on a platform with no directory barrier (Windows, where
+// fsutil.SyncParentDir is a no-op): a rename there is atomic, and nothing
+// makes the directory entry naming it durable, so no write can be counted
+// durable. It wraps errors.ErrUnsupported.
 var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync a directory, so no write here is made durable: %w", errors.ErrUnsupported)
 
 // renameFunc is the rename implementation called by RenameWithRetry.
@@ -315,6 +315,46 @@ func durableDirEntry(path string) error {
 	return nil
 }
 
+// missing is dir and the directories above it that do not exist, the
+// deepest first, up to the first that does, or that Stat cannot answer for.
+func missing(dir string) []string {
+	var out []string
+	for d := dir; ; {
+		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
+			return out
+		}
+		out = append(out, d)
+		up := filepath.Dir(d)
+		if up == d {
+			return out
+		}
+		d = up
+	}
+}
+
+// ProbeDurable reports, without writing anything, whether WriteBytesDurable
+// can make a write of path durable: ErrNoDirectoryBarrier on a platform with
+// no directory barrier, and otherwise the barrier's answer for path's
+// directory or, while that directory does not exist yet, for the nearest one
+// above it that does, on whose filesystem it will be created. Some network
+// and FUSE mounts fail every directory fsync (EINVAL, ENOTSUP), and there
+// every WriteBytesDurable fails; a caller that would then refuse its work
+// for ever, with nothing naming the cause, asks once as it starts and
+// refuses to start instead.
+func ProbeDurable(path string) error {
+	if syncParentDir == nil {
+		return ErrNoDirectoryBarrier
+	}
+	dir := filepath.Dir(path)
+	if m := missing(dir); len(m) > 0 {
+		dir = filepath.Dir(m[len(m)-1])
+	}
+	if err := syncParentDir(filepath.Join(dir, filepath.Base(path))); err != nil {
+		return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)
+	}
+	return nil
+}
+
 // sameAndSynced reports whether path holds exactly data and, when it does,
 // fsyncs it through the open it read the bytes from: bytes another writer
 // renamed into place are visible once its rename lands, and durable only
@@ -351,18 +391,7 @@ func barrier(path string) error {
 // directory with it. A directory that was there already is the caller's,
 // and is not synced.
 func mkdirAllDurable(dir string) error {
-	var created []string
-	for d := dir; ; {
-		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		created = append(created, d)
-		up := filepath.Dir(d)
-		if up == d {
-			break
-		}
-		d = up
-	}
+	created := missing(dir)
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

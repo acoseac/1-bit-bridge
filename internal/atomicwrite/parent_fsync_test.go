@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -124,6 +125,49 @@ func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 	}
 	if _, err := os.Lstat(other); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the write whose directory is not durable wrote %q (%v), want nothing", other, err)
+	}
+}
+
+// TestProbeDurable pins the probe a caller runs before it counts on
+// WriteBytesDurable: the barrier on the destination's directory, or, while
+// that directory does not exist, on the nearest one above it that does,
+// creating nothing; the barrier's failure, naming the directory; and
+// ErrNoDirectoryBarrier on a platform with none.
+func TestProbeDurable(t *testing.T) {
+	root := t.TempDir()
+	seen := stubSyncParentDir(t, nil)
+	synced := func() []string {
+		var out []string
+		for _, p := range *seen {
+			out = append(out, filepath.Dir(p))
+		}
+		*seen = nil
+		return out
+	}
+	if err := ProbeDurable(filepath.Join(root, "reserved.json")); err != nil {
+		t.Fatalf("ProbeDurable of a directory that syncs: %v", err)
+	}
+	if got := synced(); !slices.Equal(got, []string{root}) {
+		t.Fatalf("synced %v, want the destination's directory %s", got, root)
+	}
+	if err := ProbeDurable(filepath.Join(root, "a", "b", "reserved.json")); err != nil {
+		t.Fatalf("ProbeDurable below a missing directory: %v", err)
+	}
+	if got := synced(); !slices.Equal(got, []string{root}) {
+		t.Fatalf("below a missing directory synced %v, want the nearest that exists, %s", got, root)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "a")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the probe created %s (%v)", filepath.Join(root, "a"), err)
+	}
+
+	syncErr := errors.New("sync dir: invalid argument")
+	stubSyncParentDir(t, syncErr)
+	if err := ProbeDurable(filepath.Join(root, "reserved.json")); !errors.Is(err, syncErr) || !strings.Contains(err.Error(), root) {
+		t.Fatalf("ProbeDurable with a failing barrier = %v, want its failure, naming %s", err, root)
+	}
+	noDirectoryBarrier(t)
+	if err := ProbeDurable(filepath.Join(root, "reserved.json")); !errors.Is(err, ErrNoDirectoryBarrier) {
+		t.Fatalf("ProbeDurable with no directory barrier = %v, want ErrNoDirectoryBarrier", err)
 	}
 }
 
