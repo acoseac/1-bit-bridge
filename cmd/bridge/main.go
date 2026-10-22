@@ -4260,6 +4260,26 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	catalogNudge := make(chan struct{}, 1)
 	postScanNudges = append(postScanNudges, catalogNudge)
 
+	// The sample kind of the WAV and AIFF rows indexed before
+	// tracks.sample_format (backlog B513): a header pass at once and one
+	// after every successful scan, each reading only the rows still
+	// undecided, through the resolver the API serves files with (hot on a
+	// root change). The store's open already decided every other row by its
+	// codec. Joined through bgWriters: a pass writes the store.
+	sampleFormatNudge := make(chan struct{}, 1)
+	postScanNudges = append(postScanNudges, sampleFormatNudge)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runSampleFormatBackfill(scanCtx, sampleFormatNudge, func(ctx context.Context) {
+			res, err := manifestStore.BackfillSampleFormats(ctx, apiSrv.Resolver().ResolveChecked)
+			logSampleFormatPass(ctx, res, err)
+			if opts.sampleFormatPassed != nil {
+				opts.sampleFormatPassed(res)
+			}
+		})
+	}()
+
 	// Auto-analysis: a long-lived analyze pool + a background sweeper that
 	// enqueues tracks missing a fresh waveform on a settle-delay-then-
 	// scan-interval cadence, whenever the live analysis gate is open (a

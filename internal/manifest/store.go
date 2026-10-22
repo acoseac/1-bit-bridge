@@ -162,7 +162,8 @@ type Store struct {
 // post(). Migrations are append-only and MUST NOT be rewritten once shipped
 // (both live bridges ran it at v34/v35), so changing its SQL would alter
 // only fresh installs while diverging from what deployed DBs actually did.
-// StampExtractorVersionBatch is not an indexed_at writer.
+// StampExtractorVersionBatch's own UPDATE writes no indexed_at; the lyrics
+// and sample-format writes it makes bump through bumpIndexedAtByPathSQL.
 //
 // Written out VERBATIM at each statement below rather than concatenated
 // in (`"… " + indexedAtAdvanceSQL + " …"`), following the
@@ -173,16 +174,18 @@ type Store struct {
 // TestIndexedAtAdvanceIsShared does.
 const indexedAtAdvanceSQL = nextDeltaStampSQL
 
-// bumpIndexedAtByPathSQL is the whole statement for the six writers whose
+// bumpIndexedAtByPathSQL is the whole statement for the eight writers whose
 // ONLY job is the bump (UpsertVariant / deleteVariantRow, the body of
 // DeleteVariant and DeleteVariantIfUnchanged / UpsertAnalysis /
-// DeleteAnalysis / writeLyricsRowTx / UpsertAtlasLyrics) — one const, six
-// callers, so those six cannot drift from each other at all. Binds:
-// (clock, path).
+// DeleteAnalysis / writeLyricsRowTx / UpsertAtlasLyrics / writeSampleFormatTx /
+// decideSampleFormats) — one const, eight callers, so those eight cannot
+// drift from each other at all. Binds: (clock, path).
 //
 // Said FIVE until 2026-09-23, having missed UpsertAtlasLyrics
 // (atlas_lyrics.go), which uses the const correctly. The rule held; the
 // count did not — an enumeration in a docblock is a claim like any other.
+// The two sample-format writers (sample_format.go, backlog B513) made it
+// eight.
 const bumpIndexedAtByPathSQL = `
 		UPDATE tracks
 		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
@@ -2861,6 +2864,13 @@ func (s *Store) migrate() error {
 	if err := s.backfillFirstIndexedAt(ctx); err != nil {
 		return fmt.Errorf("first_indexed_at backfill: %w", err)
 	}
+	// And decides the sample kind of every undecided row its codec
+	// decides (v59): a row from before the column, or one a rolled-back
+	// binary inserted. It reads no file and assigns no indexed_at; the WAV
+	// and AIFF rows are BackfillSampleFormats'.
+	if err := s.backfillSampleFormatByCodec(ctx); err != nil {
+		return fmt.Errorf("sample_format backfill: %w", err)
+	}
 	return nil
 }
 
@@ -3076,6 +3086,11 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// FirstIndexedAt is spliced from tracks.first_indexed_at. A round trip
 	// through tags_json would freeze a column the next read overwrites.
 	clone.FirstIndexedAt = nil
+	// SampleFormat is spliced from tracks.sample_format, the column the
+	// track writes store it in (sampleFormatColumn), like FirstIndexedAt:
+	// in tags_json it would be a second copy, and the version-stale diff
+	// compares tags_json, which must not see a kind the stamp leg records.
+	clone.SampleFormat = ""
 	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
 	// extracted it — must persist) OR an analysis splice (must NOT
 	// persist, else a round-tripped read Track freezes the analysis value
@@ -3510,6 +3525,12 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // other row is stamped as not refused, so a file that reads again clears
 // the mark.
 //
+// Every row read whole also records its sample kind (writeSampleFormatTx,
+// v59): it lives in its own column, which the byte-identical tags_json
+// cannot carry, and indexed_at advances only when a client would see the
+// kind change, like the lyrics tag's bump. The two bumps are the only
+// indexed_at writes the stamp leg makes, each through bumpIndexedAtByPathSQL.
+//
 // Holds `s.mu` per the writer contract on Store; one transaction with a
 // prepared statement (the applyReconciledTracks template).
 func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) error {
@@ -3548,7 +3569,8 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 			return err
 		}
 		if t.extractRefused {
-			// A refusal says nothing about the lyrics: its row stays.
+			// A refusal says nothing about the lyrics, nor about the sample
+			// kind: both stay as they were.
 			continue
 		}
 		// The stamp leg carries the lyrics row too (the v7 backfill lands
@@ -3559,7 +3581,16 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		if err != nil {
 			return err
 		}
-		lyricsBumped = lyricsBumped || bumped
+		// And the sample kind this read found (v59, backlog B513), which
+		// tags_json, and so the diff that sent the row here, does not hold:
+		// a row from before the column gains it, a kind an older extractor
+		// got wrong is replaced, and indexed_at bumps only when a client
+		// would see the change.
+		kindBumped, err := writeSampleFormatTx(ctx, tx, t.Path, sampleFormatColumn(t), now)
+		if err != nil {
+			return err
+		}
+		lyricsBumped = lyricsBumped || bumped || kindBumped
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -3734,8 +3765,9 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused, first_indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused, first_indexed_at,
+		                   sample_format)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3801,7 +3833,12 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 			-- v50: whether this extraction refused the file
 			-- (Track.extractRefused), unconditional like the version it
 			-- rides with: a file that reads now clears it.
-			extract_refused = excluded.extract_refused
+			extract_refused = excluded.extract_refused,
+			-- v59: the sample kind this extraction read (Track.SampleFormat
+			-- through sampleFormatColumn, '' for none), unconditional like
+			-- the format facts: this row runs because the file changed, so
+			-- a kept kind could describe the old bytes.
+			sample_format = excluded.sample_format
 			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
 	`)
 }
@@ -3854,7 +3891,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	defer stmt.Close()
 	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, stamp,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
-		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now))
+		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now),
+		sampleFormatColumn(t))
 	if err != nil {
 		return err
 	}
@@ -3923,6 +3961,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		artKey      string
 		refused     int
 		firstNS     int64
+		sampleFmt   string
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -3945,6 +3984,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			artKey:      t.folderArtKey,
 			refused:     boolToInt(t.extractRefused),
 			firstNS:     t.carryFirstIndexedNS,
+			sampleFmt:   sampleFormatColumn(t),
 		}
 	}
 
@@ -3980,7 +4020,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, stamp,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
-			r.refused, firstIndexedInsertNS(r.firstNS, now)); err != nil {
+			r.refused, firstIndexedInsertNS(r.firstNS, now), r.sampleFmt); err != nil {
 			return err
 		}
 	}
@@ -4386,7 +4426,8 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
 	var version int64
 	var firstNS sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at, first_indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version, &firstNS)
+	var sampleFmt sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at, first_indexed_at, sample_format FROM tracks WHERE path = ?`, path).Scan(&raw, &version, &firstNS, &sampleFmt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -4399,6 +4440,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	}
 	t.rowVersion, t.hasRowVersion = version, true
 	spliceFirstIndexedAt(&t, firstNS)
+	spliceSampleFormat(&t, sampleFmt)
 	return &t, nil
 }
 
@@ -4724,9 +4766,12 @@ func scanTrackVariants(t *Track, raw []byte) {
 		// emits `label = variant_id` as a placeholder so the
 		// label is non-null on the wire even if the producer
 		// didn't compute one. Replace with a human-friendly
-		// rendering here so iOS clients don't have to.
+		// rendering here so iOS clients don't have to. The sample
+		// kind is the rendition's format's (variantSampleFormat,
+		// backlog B513): no row stores it.
 		for i := range vs {
 			vs[i].Label = humanLabelForVariant(vs[i])
+			vs[i].SampleFormat = variantSampleFormat(vs[i].Format)
 		}
 		t.Variants = vs
 	}
@@ -4850,7 +4895,7 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 }
 
 // scanListedTrack reads one row of the list, stream and page SELECT
-// (tags_json through first_indexed_at) into t, replacing whatever t held.
+// (tags_json through sample_format) into t, replacing whatever t held.
 func scanListedTrack(rows *sql.Rows, t *Track) error {
 	var raw []byte
 	var version int64
@@ -4863,7 +4908,8 @@ func scanListedTrack(rows *sql.Rows, t *Track) error {
 	var bkTag sql.NullString
 	var lyTag sql.NullString
 	var firstNS sql.NullInt64
-	if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
+	var sampleFmt sql.NullString
+	if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS, &sampleFmt); err != nil {
 		return err
 	}
 	*t = Track{}
@@ -4880,6 +4926,7 @@ func scanListedTrack(rows *sql.Rows, t *Track) error {
 	spliceAnalysisReplayGain(t, rg)
 	spliceAnalysisScalars(t, ktRaw)
 	spliceFirstIndexedAt(t, firstNS)
+	spliceSampleFormat(t, sampleFmt)
 	return nil
 }
 
@@ -4895,7 +4942,7 @@ func collectListedTracks(rows *sql.Rows, out []Track) ([]Track, error) {
 }
 
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -4942,7 +4989,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks`
 	where, args := trackReadPredicates(servedOnly, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
@@ -5008,7 +5055,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		limit = 1000
 	}
 	q := `
-		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks
+		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks
 		WHERE path > ?`
 	if servedOnly {
 		q += ` AND dupe_suppressed = 0`

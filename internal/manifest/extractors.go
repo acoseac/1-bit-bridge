@@ -764,6 +764,11 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 			"path", absPath, "err", err)
 	} else if codec != "" {
 		t.Codec = codec
+		if codec == "ALAC" {
+			// Apple Lossless is integer-only (backlog B513). AAC states no
+			// PCM kind.
+			t.SampleFormat = SampleFormatInteger
+		}
 	}
 	// When the codec walk identified ALAC, descend one level into
 	// the inner `alac` config atom to capture the source bit depth
@@ -2386,6 +2391,9 @@ func extractFLACFormatFromReader(r io.ReadSeeker, absPath string, t *Track) erro
 	// in `extractDSF` below.
 	isDSD := false
 	t.IsDSD = &isDSD
+	// And always integer PCM: FLAC has no floating-point samples (backlog
+	// B513). An Ogg FLAC stream reads its STREAMINFO here too.
+	t.SampleFormat = SampleFormatInteger
 	// Through plausibleDuration like every other derived duration (v12).
 	// STREAMINFO's totalSamples is a 36-bit field read straight out of an
 	// untrusted header, and the rate beside it is declared by the same
