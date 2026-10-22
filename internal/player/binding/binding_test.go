@@ -518,11 +518,11 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 		for name, r := range map[string]Resolution{"no interface recorded": place, "another interface recorded": other} {
 			err := check(r)
 			if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), tc.says) || !strings.Contains(err.Error(), goBarPlace) {
-				t.Errorf("%s, a unit with an %s card beside card 5: %v", name, tc.name, err)
+				t.Errorf("%s, beside card 5 a card that is %s: %v", name, tc.name, err)
 			}
 		}
 		if err := check(older); err != nil {
-			t.Errorf("the card on the recorded interface beside an %s card: %v", tc.name, err)
+			t.Errorf("the card on the recorded interface, beside a card that is %s: %v", tc.name, err)
 		}
 	}
 
