@@ -50752,3 +50752,19 @@ never refusing (2a: all three cases), comparing sizes alone (2b: the
 same-size case alone), and `SaveIf` asking after the rename (2c:
 `TestSaveIfAsksJustBeforeTheRename` and all three bind cases); and the
 old tags (3a: sixteen assertions, over the eight GOOSes).
+
+**Round 4 (the Claude API and Codex on round 3): two items.** `SaveIf`
+narrows the window to the instant before its rename and does not close
+it, since no rename can be made conditional on the file it replaces; its
+doc comment and bind's comment said otherwise, and now say that, naming a
+lock every config writer takes (backlog) as the fix. And `openTree`'s
+directory-only look, closed before `os.OpenRoot` reopened the path
+plainly, left a root swapped for a FIFO in between to block the reader
+(Codex, P2): the root is now opened once, through `dir/.` on unix
+(`rootPath`), whose resolution fails with ENOTDIR before it opens
+anything but a directory. `TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly`
+swaps the sysfs, ALSA and /proc roots through the readers' `beforeOpen`
+(now also called with "." and "asound" just before a root's open): red
+on all three before, each blocked until the watchdog. Control: `rootPath`
+returning `dir` itself on unix blocked those three and round 3's three
+FIFO-at-a-root cases; restored from git, the tree clean.
