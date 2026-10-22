@@ -51929,3 +51929,134 @@ check, or during its syncs, is not seen either; the commands that set the
 pending intent share the session after the release, a carried one now
 superseded by a command that moves the target; shutdown's ReasonClosed, as
 in rounds 5 to 7.
+
+### Round 9
+
+Codex and the Claude API reviewed round 8 (#1309); Argon was unavailable.
+Round 8's two rules notes were applied from beside the branch (916f8903 for
+`player.md`, 9876527b for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r9.md` for `player.md` and
+`/tmp/b470-4b1-rules-r9-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. All three findings were verified against the code
+and were real; none was rejected. Each was fixed red first, with negative
+controls on the committed tree, restored from git each time. The owner set
+the writer's bar for the round: no install the bridge supports may be
+refused for how its filesystem reports devices (overlayfs with xino off is
+the Raspberry Pi OS "Overlay File System" option, and the Pi is the
+player's main target), and where mount identity cannot be established the
+writer says so (`ErrMountsUnknown`) rather than assume two mounts are one.
+
+What changed:
+
+- b22208d3. **A command that names the entry already pending, sent while a
+  skip releases, leaves the play command the skip carried in the session
+  that plays it** (Codex 2, P2). Round 8 superseded the carried waiters for
+  every Next, Previous, PlayID or PlayIndex that took the pending-intent
+  path, whether it moved the target or not, so a PlayID or a PlayIndex of
+  the entry the skip had already moved on to answered the carried Play
+  `ReasonSuperseded`, though the session after the release played that very
+  entry; only a plain Play shared that session with it. The transport step
+  now compares the resolved target with the selection before the selection
+  moves (`moved`), and `replacedCarry` runs only for an intent to play that
+  moved it. `TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt` is a
+  table of three: a Play, a PlayID of the entry the skip moved on to, and a
+  PlayIndex of it, each answered nil with the carried Play once that entry
+  is heard.
+- bb750493, 7d03cc30. **The strict writer tells a mount by its identity
+  alone, never by device, and says so where it has none** (the Claude API,
+  High; Codex 1, P2). The Claude API: round 8 compared each entry's device
+  (`st_dev`) with the root's, the destination's included, and overlayfs
+  with its layers on different filesystems and xino off reports the
+  overlay's device for a directory and a pseudo device per layer for every
+  other entry (the kernel's `ovl_map_dev_ino`), so a reservation file there
+  was refused once it existed, and the restart's probe with it; btrfs gives
+  each subvolume a device of its own on one mount too. Codex: where the
+  kernel gave no mount IDs, round 8 compared no mount on a write, its probe
+  matched the mount table by spelling, and its fallback after a failed
+  rename took two unknown identities for one (`okA == okB && a == b`).
+  Mounts are now decided by identity alone (`mountIDOf`), on every write,
+  in the probe and in the fallback: on Linux the kernel's mount ID from
+  statx (`STATX_MNT_ID`, Linux 5.8) or, where statx gives none (an older
+  kernel, or a statx a seccomp policy refuses: ENOSYS, EPERM), the `mnt_id`
+  `/proc/self/fdinfo` lists for an `O_PATH` descriptor (Linux 3.15), in that
+  order (`mountIDFrom`, platform-neutral so that its order is tested here);
+  on macOS the mount's filesystem ID (statfs's `f_fsid`); on Windows none,
+  asked for by nothing, since the writer refuses there first for want of a
+  directory barrier (`mountIDsExpected` false). Where the platform gives no
+  identity for the root, or gives the root's and not that of an entry below
+  it, the write, the probe and the fallback answer `ErrMountsUnknown` (the
+  fallback beside the rename's error), never a match; the root's is asked
+  for on every call, a file directly in the root included, so that the
+  probe refuses at New what every write would. The mount table is no longer
+  read: `parseMountInfo` moved into the tests, as the oracle that
+  `TestPlatformMountTableReadsTheKernels` holds statx's and fdinfo's IDs to
+  on Linux, and `mountinfo.go`, `device_unix.go` and `device_other.go` are
+  gone. The writer sees each entry through an `lstat` seam, so that a test
+  can report the devices overlayfs and btrfs report
+  (`TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`); no decision
+  reads them. The engine's refusal for `ErrMountsUnknown` now says the
+  platform gives no mount identity (`notDurable`), no longer that the mount
+  table cannot be read.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| Codex 2 | `TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt`, the PlayID and PlayIndex cases | the carried Play answered `superseded: replaced before playback began: play id` (and `play index`); the Play case passed, round 8's guard |
+| the Claude API | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice` | the probe and the write refused a destination a stat put on another device, the mount IDs one: `not plainly below the durable root` |
+| Codex 1 | `TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad` | nil for `root/ids`, `sub/ids`, `sub/new/ids` and a destination already there, from the write and from the probe |
+| Codex 1 | `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`, the case whose mount cannot be told once the checks passed | nil, the bytes taken and synced |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`, with no mount identity | nil |
+
+The writer's red runs were round 8's code with its three `os.Lstat` calls
+routed through an `lstat` seam that a temporary file beside it declared,
+with `mountIDsExpected`, and the tests in another temporary file; both were
+removed after.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| same target | `replacedCarry` on every intent to play (`moved` always true) | all three sharing cases |
+| same target | `moved` read after the selection moves (always false) | round 8's skip case: the carried Play unsuperseded |
+| mounts | a root with no identity taken as nothing to compare | four tests: the no-identity cases of the say-so test, the probe test, the spelling test and the mounted destination |
+| mounts | the device comparison put back | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`: the probe refused |
+| mounts | the fdinfo fallback dropped | `TestMountIDFromFallsBackToFdinfoOnlyWhereStatxGivesNone` |
+| mounts | the destination's own check dropped | the mounted-destination test |
+| mounts | the fallback taking two unknown identities for one, round 8's comparison | the fallback's no-identity case: nil, the bytes synced |
+| mounts | the fallback's identity comparison dropped | the mounted-after case |
+| mounts | an entry below with no identity taken for the root's mount | the root-ID-alone case |
+| mounts | macOS's identity a constant | `TestPlatformMountIDReadsTheKernels`: `/dev` given `/`'s ID |
+| mounts | the root's identity asked for only with a directory below it | the say-so test's `root/ids` and the probe test's file in the root |
+| engine | `notDurable` without its `ErrMountsUnknown` case | `TestNewNamesTheDirectoryTheProbeRefused`: "cannot be read" |
+
+The first mutation of the fallback's comparison (`return true, nil`) did
+not build, `a` and `b` then unused; `a == b || true` built, and was red.
+
+The suite: 107 tests in the engine and 47 in `internal/atomicwrite` on this
+Mac (48 on Linux, with `TestPlatformMountTableReadsTheKernels`); ten runs
+in a row of each green under `-race` (142.4 s and 82.3 s, no skips);
+`make fmt vet test` (72 packages ok, cmd/bridge 472 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 7d03cc30 with no `-dirty`:
+the committed tree) and `make docs-check` clean, in one run through the build lock; `go vet` of both packages
+for darwin, linux and windows on amd64 and arm64, and of
+`internal/atomicwrite` for freebsd/amd64, clean. The Linux statx and
+fdinfo readers, `TestPlatformMountTableReadsTheKernels` and the Linux half
+of `TestPlatformMountIDReadsTheKernels` run on CI's Linux legs alone: this
+Mac has no Linux. Their order (`mountIDFrom`) runs here, and so does the
+macOS half of `TestPlatformMountIDReadsTheKernels`, against statfs, with
+`/` and `/dev` on mounts of their own, which
+`TestWriteBytesDurable_RefusesAMountBelowTheRoot` refuses here by that
+identity. Both notes checked against HEAD, each OLD found once: `player.md`
+76,167 to 76,597 bytes and `config-lifecycle.md` 50,603 to 52,089, of
+100,000 each; with both applied to the worktree's rules files,
+`check-doc-budgets` ok and `TestEveryCitedTestNameExists` green, the files
+restored from git after.
+
+Not changed, for the owner: the writer now refuses (`ErrMountsUnknown`)
+where round 8 checked devices alone: on Linux a kernel older than 3.15, or
+one whose statx gives no mount ID with no `/proc` mounted, and every
+platform but Linux, macOS and Windows, where the player does not run; a
+link or a mount another writer puts in place after the write's second
+check, or during its syncs, is not seen; shutdown's ReasonClosed, as in
+rounds 5 to 8.
