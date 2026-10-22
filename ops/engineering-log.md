@@ -50430,3 +50430,98 @@ and the LAN takes a tunnel (C46) or an interface with no carrier (C47).
 Altair) follows it; ambiguity needs two units of one model, which the fake
 trees give (`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`,
 `TestASerialTwoUnitsShareIsAmbiguous`).
+
+**Round 2 (the Claude API and Codex): six findings, all real, none
+rejected.** Each was reproduced red first, fixed, and negative-controlled
+on the committed tree.
+
+1. *A serial in the wrong field was quoted.* `tokenShape` took any short
+plain word, and the PR's own test serial is one: `device.binding:
+"GOBAR-7Q2X-91KZ-4471" is not serial, uniqueModel or port` reached
+Validate's log, `PlayerEnabled`, `Status`, Resolve's reason and inspect.
+The same pattern had two more sites the review did not name: the numeric
+refusals echoed the number (a serial of digits in `pauseReleaseSeconds`,
+`pcmDevice` or `subdevice` came back whole), and inspect's binding line
+and JSON printed `binding`, the ids, the port and the endpoint as written,
+which `TestOutputDACInspectNeverQuotesASerialInTheWrongField` found after
+the reasons were fixed. A refusal now quotes a value only inside the case
+of the words its field knows, says "that value" or "that key" (listing
+the section's settings) of anything else, and drops the number; the
+reader names a key in a path only once it is known or refused by name;
+inspect shows a field only when it holds a value that field takes, an
+endpoint out of range as null. `TestASerialInTheWrongFieldIsNeverQuoted`
+was red on all ten cases. Four expectations in `TestEveryPlayerRefusal`
+and two in `TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse`
+asserted the quoting, and were changed with it.
+
+2. *A USB card without a usbid blocked every binding.* Only snd-usb-audio
+registers `/proc/asound/cardN/usbid`, so a hiFace's card (snd-usb-hiface;
+caiaq, ua101, 6fire and line6 likewise) was transient on every reading.
+Its sysfs identity now stands, and a usbid cross-checks it only where
+there is one. A `USB-Audio` card with no usbid stays transient:
+snd-usb-audio lists a card in `/proc/asound/cards` before it writes the
+card's proc files, and its usbid reads empty once it starts disconnecting
+the card (the reader's comment on `USBID` already said so). A card with
+no parent device sits under `devices/virtual/sound` with no device link;
+`Vanished` marked it transient for good, and it is now
+`identity_unsupported`, bus `virtual`. A missing device link anywhere
+else stays `Vanished`: `device_remove_class_symlinks` removes it first,
+and `device_add_class_symlinks` makes it before the class link that lists
+the card. Red: `TestAUSBCardWithNoUsbidIsReadFromSysfs`,
+`TestAVirtualCardIsUnsupportedNotTransient`,
+`TestSysfsTellsAVirtualCardFromOneBeingRemoved`.
+
+3. *A FIFO hung the readers.* The sysfs reader opened `class/sound` and
+`bus/usb/devices` with a plain open, an attribute after an `Lstat` (a
+swap in between blocked), and `os.OpenRoot` opens its own path plainly
+too. The /proc reader's `readCapped`, which also reads the ALSA
+configuration files, had the same open; its listings were safe, because
+`os.ReadDir` opens directory-only. Every open now asks not to block, a
+directory is opened directory-only, and the opened descriptor's type
+decides (`openRegular`, `openDirectory`, flags for Linux and macOS in
+`open_posix.go`; Windows has no FIFO and keeps the type check). The root
+is opened directory-only before `os.OpenRoot`, which leaves one window: a
+swap of the root's own path between the two, the operator's path or
+`/sys`. Red: the root, `class/sound`, `bus/usb/devices`, the swapped
+attribute (`SysfsReader.beforeOpen` parks it), and `/proc`'s cards,
+usbid and status, each a five-second watchdog that opens the FIFO for
+writing so the blocked reader goes.
+
+4. *bind saved a stale config.* It loaded, locked, and saved what it had
+loaded. It now reads the config again under the lock, through
+`loadCLIConfig` with the path it resolved (`config.Load` there was
+refused by `TestNoSubcommandTailBypassesLoadCLIConfig` on the first full
+run), refuses a data dir that moved and a block that no longer reads, and
+saves that copy. `outputBindEnv.beforeLock` lands the other writer in the
+window; `TestOutputDACBindSavesTheConfigItReadUnderTheLock` was red on all
+three cases.
+
+5. *A kept block's alias broke the next load.* With `libraryName: &room
+Kitchen` and `player.room: *room` beside an unknown setting, a save wrote
+`*room` without `&room` (yaml.v3 encodes an alias by name), and the next
+load failed on an unknown anchor, which stops the bridge. `keepable`
+copies what an alias outside the block names into the kept block and
+leaves an alias to an anchor inside it; the copies are bounded at 1024
+nodes and 32 aliases deep, and a block past them is not kept, its reason
+saying a save drops it. Without the bounds an alias to the block's own
+parent overflowed the goroutine stack at load (control 5b), worse than the
+defect. Red: the libraryName alias, an alias as a key, aliases in a
+value, the parent alias and a 1100-alias bomb; an anchor inside the block
+round-tripped before and after.
+
+6. *cmd/bridge's TestMain had only the PCM guard.* `WatchHostReads` now
+refuses and reports there too, with each read's stack. A whole
+cmd/bridge run under it reported no read, so no test needed a fake root.
+
+**Controls, round 2: nineteen, each with the result it should have.** The binding
+refusal quoting its value (1a), the unknown key quoted (1b), the endpoint
+number echoed (1c), inspect's raw binding view (1d); every driver's
+missing usbid transient (2a), USB-Audio's not (2b), the virtual branch
+gone (2c), every missing device link virtual (2d); the sysfs listing's
+plain open (3a), no type check after the open (3b), no `O_NONBLOCK` (3c,
+which hangs), no directory-only look at the root (3d); no reload under the
+lock (4a, run again after the `loadCLIConfig` change), no data-dir check
+(4b), no second unread check (4c); the raw node kept (5a), the bounds gone
+(5b); a probe test reading `/proc` failed the binary with the watch (6a)
+and passed without it (6b). Each was restored from git; the tree was clean
+after every run.
