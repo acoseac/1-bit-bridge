@@ -84,10 +84,7 @@ func TestTheSampleFormatPassRunsAtBootAndAfterEveryScan(t *testing.T) {
 		defer close(done)
 		runSampleFormatBackfill(ctx, nudge, func(context.Context) { ran <- struct{}{} })
 	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	drainLoopOnCleanup(t, cancel, done, "the sample-format loop")
 	giveUp := serveGiveUp(t)
 	wait := func(what string) {
 		t.Helper()
