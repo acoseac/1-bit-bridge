@@ -32,7 +32,6 @@ package alsa
 import (
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -167,9 +166,11 @@ const maxProcFileBytes = 64 << 10
 
 // readCapped reads a whole file, refusing one longer than limit bytes. A
 // /proc file reports size 0 to stat, so the limit is applied to what is
-// read, not to what the file claims.
+// read, not to what the file claims. It opens without blocking and reads
+// only what opened as a regular file (openRegular), so a FIFO in a
+// --proc-root tree is refused, never waited on.
 func readCapped(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := openRegular(pathOpener(path))
 	if err != nil {
 		return nil, err
 	}

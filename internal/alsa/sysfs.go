@@ -38,6 +38,10 @@ type SysfsReader struct {
 	Root string
 	// limits replaces the bounds, for the tests that reach them.
 	limits *sysfsLimits
+	// beforeOpen, when set, is called with an attribute's path after the
+	// attribute is checked and before it is opened: the window a test
+	// swaps a FIFO in.
+	beforeOpen func(rel string)
 }
 
 // The reader's bounds.
@@ -223,11 +227,21 @@ func (r SysfsReader) root() string {
 }
 
 // open opens the tree's root, after asking the watch when it is the
-// host's.
+// host's. os.OpenRoot opens its path with a plain open, which a FIFO there
+// would hold until a writer came, so the root is first opened
+// directory-only and seen to be a directory (openDirectory). What is left
+// is a swap of the root's own path between that look and os.OpenRoot: the
+// root is the operator's path (or /sys), and everything below it is checked
+// at the open itself.
 func (r SysfsReader) open() (*sysfsTree, error) {
 	if err := checkHostRead(r.root(), DefaultSysfsRoot); err != nil {
 		return nil, err
 	}
+	d, err := openDirectory(pathOpener(r.root()))
+	if err != nil {
+		return nil, err
+	}
+	_ = d.Close()
 	root, err := os.OpenRoot(r.root())
 	if err != nil {
 		return nil, err
@@ -236,7 +250,7 @@ func (r SysfsReader) open() (*sysfsTree, error) {
 	if r.limits != nil {
 		lim = *r.limits
 	}
-	return &sysfsTree{root: root, lim: lim}, nil
+	return &sysfsTree{root: root, lim: lim, beforeOpen: r.beforeOpen}, nil
 }
 
 // addProblem records a snapshot problem, at most maxSysfsProblems.
@@ -261,7 +275,6 @@ var (
 	errLinkAbsolute   = errors.New("an absolute link is refused")
 	errLinkLoop       = errors.New("too many links: a loop")
 	errTooDeep        = errors.New("too many path components")
-	errNotAFile       = errors.New("not a regular file")
 )
 
 // fileError is a file that could not be read, printed without the path a
@@ -277,8 +290,9 @@ func (e fileError) Unwrap() error { return e.err }
 
 // sysfsTree is one reading's open root.
 type sysfsTree struct {
-	root *os.Root
-	lim  sysfsLimits
+	root       *os.Root
+	lim        sysfsLimits
+	beforeOpen func(rel string)
 }
 
 func (t *sysfsTree) close() { _ = t.root.Close() }
@@ -334,13 +348,14 @@ func (t *sysfsTree) resolve(rel string) (string, error) {
 }
 
 // list names a directory's entries, at most the cap, sorted; more is true
-// when the directory holds more than that.
+// when the directory holds more than that. It opens the directory
+// directory-only (openDirectory), so a FIFO in its place is refused at once.
 func (t *sysfsTree) list(rel string) (names []string, more bool, err error) {
 	dir, err := t.resolve(rel)
 	if err != nil {
 		return nil, false, err
 	}
-	f, err := t.root.Open(filepath.FromSlash(dir))
+	f, err := openDirectory(t.opener(dir))
 	if err != nil {
 		return nil, false, err
 	}
@@ -356,18 +371,29 @@ func (t *sysfsTree) list(rel string) (names []string, more bool, err error) {
 	return names, more, nil
 }
 
+// opener opens rel, a slash-separated path under the root, with the flags
+// it is handed.
+func (t *sysfsTree) opener(rel string) func(flag int) (*os.File, error) {
+	return func(flag int) (*os.File, error) { return t.root.OpenFile(filepath.FromSlash(rel), flag, 0) }
+}
+
 // attr reads one attribute file in a directory resolve returned, to the
-// cap: a regular file, never a link.
+// cap: a regular file, never a link. The type that decides is the opened
+// descriptor's (openRegular), so a FIFO swapped in after the look is
+// refused, never read.
 func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
-	p := filepath.FromSlash(path.Join(dir, name))
-	fi, err := t.root.Lstat(p)
+	rel := path.Join(dir, name)
+	fi, err := t.root.Lstat(filepath.FromSlash(rel))
 	if err != nil {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, errNotAFile
 	}
-	f, err := t.root.Open(p)
+	if t.beforeOpen != nil {
+		t.beforeOpen(rel)
+	}
+	f, err := openRegular(t.opener(rel))
 	if err != nil {
 		return nil, err
 	}
