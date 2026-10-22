@@ -27,6 +27,21 @@ func linuxStatfs(path string) (fsStat, error) {
 	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files)}, nil
 }
 
+// platformCopyUps is the directories above root a copy-up can create entries
+// in, on Linux: on an overlay, every one up to the root of root's mount, by the
+// mount IDs the kernel gives (ancestorsOnMount); elsewhere none, as nothing
+// copies up.
+func platformCopyUps(root string, mountID uint64) ([]string, error) {
+	st, err := linuxStatfs(root)
+	if err != nil {
+		return nil, err
+	}
+	if st.Type != overlayfsMagic {
+		return nil, nil
+	}
+	return ancestorsOnMount(root, mountID, mountIDOf)
+}
+
 // readMountInfo is the kernel's mount table for this process's mount
 // namespace.
 func readMountInfo() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") }

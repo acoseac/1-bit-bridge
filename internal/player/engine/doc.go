@@ -147,9 +147,13 @@
 // (Config.DataDir) are fsynced, on every write, whoever made those
 // directories (atomicwrite.WriteBytesDurable), and a write whose directory
 // fsync fails is a reservation not made, since its rename can roll back at a
-// crash. The data directory's own entry is never synced, nor needs to be: it
-// holds the player's identity, so a crash that takes it makes the player a
-// new device. New requires the data directory to exist, and the reservation
+// crash. Off an overlay the data directory's own entry is never synced, nor
+// needs to be: it holds the player's identity, so a crash that takes it
+// makes the player a new device. On an overlay a data directory in the lower
+// layer alone is copied up by the first write, and a crash that took the
+// copy would keep the identity below it, so there every directory from the
+// data directory up to the root of its mount is synced, by New's probe and
+// once each reservation lands. New requires the data directory to exist, and the reservation
 // file to lie plainly below it, with no ".." element and no symbolic link or
 // mount point between them (the data directory itself may be a link), and
 // probes those barriers before it reads anything (atomicwrite.ProbeDurable);

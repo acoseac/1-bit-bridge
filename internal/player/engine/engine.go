@@ -70,11 +70,13 @@ type Config struct {
 	// DataDir holds the player's identity (player-uuid,
 	// config.EnsurePlayerUUID): a crash that takes DataDir takes that
 	// identity with it, and the player that comes back is a new device to
-	// every controller, which has seen none of its IDs or tokens. One case is
-	// not covered: a DataDir in an overlay's lower layer alone, its identity
-	// with it, is copied up by the first write, and the entry the copy-up
-	// creates above DataDir is not synced, so a crash could take the copy and
-	// keep the identity below it.
+	// every controller, which has seen none of its IDs or tokens. On an
+	// overlay that does not hold: a DataDir in the lower layer alone, its
+	// identity with it, is copied up by the first write, and a crash that
+	// took the copy would keep the identity below it, so there the writer
+	// syncs every directory from DataDir up to the root of its mount, in
+	// New's probe and once each reservation lands, New's first among them
+	// (atomicwrite.WriteBytesDurable; Codex on round 10).
 	DataDir string
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it, passed to every session; 0 is DefaultPauseRelease, and

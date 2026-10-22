@@ -12,5 +12,9 @@ const mountIDsExpected = true
 // platform before it asks, for want of a mount identity (ErrMountsUnknown).
 func platformMedium(string, uint64) error { return nil }
 
+// platformCopyUps is none: the strict writer refuses on this platform before
+// it asks.
+func platformCopyUps(string, uint64) ([]string, error) { return nil, nil }
+
 // platformMountID is no ID: the strict writer reads none on this platform.
 func platformMountID(string) (uint64, bool, error) { return 0, false, nil }

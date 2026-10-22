@@ -379,9 +379,12 @@ func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
 	}
 }
 
-// TestWriteBytesDurable_NeverSyncsAboveTheRoot pins the root's bound: a
-// write fsyncs the root, for the entry of the directory below it, and never
-// the root's parent, whose entry for the root is the caller's to vouch for.
+// TestWriteBytesDurable_NeverSyncsAboveTheRoot pins the root's bound off an
+// overlay: a write fsyncs the root, for the entry of the directory below it,
+// and never the root's parent, whose entry for the root is the caller's to
+// vouch for (on an overlay, where a copy-up creates those entries, the writer
+// syncs up to the root of the root's mount:
+// TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay).
 // And it refuses, with nothing created, written or fsynced: a root that does
 // not exist, which the writer never creates; a path not below the root as
 // written, the path or the root spelled through a link to the other

@@ -13,6 +13,9 @@ import (
 // alone.
 func platformMedium(string, uint64) error { return nil }
 
+// platformCopyUps is none on macOS: nothing there copies up.
+func platformCopyUps(string, uint64) ([]string, error) { return nil, nil }
+
 // mountIDsExpected is whether this platform gives a mount's identity, so that
 // the strict writer refuses (ErrMountsUnknown) where it gets none.
 const mountIDsExpected = true

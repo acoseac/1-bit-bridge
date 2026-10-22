@@ -13,5 +13,9 @@ const mountIDsExpected = false
 // it nothing unless it gives mount IDs itself.
 func platformMedium(string, uint64) error { return nil }
 
+// platformCopyUps is none: nothing copies up on Windows, and the strict writer
+// refuses there before it asks.
+func platformCopyUps(string, uint64) ([]string, error) { return nil, nil }
+
 // platformMountID is no ID: none is asked for on Windows.
 func platformMountID(string) (uint64, bool, error) { return 0, false, nil }

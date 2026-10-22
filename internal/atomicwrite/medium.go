@@ -3,6 +3,7 @@ package atomicwrite
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -19,13 +20,20 @@ type fsStat struct {
 	Files  uint64
 }
 
+// sameTotals reports whether two statfs answers give one filesystem's totals.
+func (a fsStat) sameTotals(b fsStat) bool {
+	return a.Bsize == b.Bsize && a.Blocks == b.Blocks && a.Files == b.Files
+}
+
 // The filesystems the medium check knows by their f_type, Linux's magic
 // numbers (TestMediumMagicsAreLinuxs): tmpfs and ramfs keep everything in
-// memory, and an overlay keeps what is written to it in its upper layer.
+// memory, an overlay keeps what is written to it in its upper layer, and FUSE
+// is whatever its daemon serves, fuse-overlayfs among them.
 const (
 	tmpfsMagic     = 0x01021994
 	ramfsMagic     = 0x858458f6
 	overlayfsMagic = 0x794c7630
+	fuseMagic      = 0x65735546
 )
 
 // maxOverlayDepth is how many overlays, each the upper layer of the one
@@ -33,23 +41,40 @@ const (
 const maxOverlayDepth = 8
 
 // mediumFrom is the medium check on what statfs, the mount table and the
-// mount IDs answer: nil for a root on storage that keeps what is written to
-// it through a reboot, ErrVolatile for one that does not, and
-// ErrMediumUnknown where that cannot be told, the check failing closed
-// (strictPath.medium). id is the root's mount ID, which the writer already
-// holds. tmpfs and ramfs are told by their f_type. An overlay keeps what is
-// written to it in its upper layer: the one the mount table names on the
-// line of the overlay's own mount ID (overlayLayer), never on a line picked
-// by its mount point's spelling, and that upper layer's path must reach,
-// here, the filesystem the overlay reports, since a statfs of an overlay
-// gives its upper layer's totals: a path the mount table gives as its
-// mounter named it may reach another filesystem in this mount namespace, or
-// none. An overlay mounted volatile skips every sync of its upper layer, so
-// nothing written there outlives a crash, and an overlay over an overlay is
-// followed by the inner one's mount ID. A read-only overlay, with no upper
-// layer, takes nothing: a write there fails by itself (EROFS).
+// mount IDs answer: nil for a root on storage the check finds no volatile
+// layer in, ErrVolatile for one that does not keep what is written to it
+// through a reboot, and ErrMediumUnknown where it cannot read what it must,
+// failing closed (strictPath.storage). It refuses what it can tell is
+// volatile and what it cannot read, and does not try to prove every stack
+// persistent, which no check from outside can: ext4 on a zram device or on a
+// loop image kept in tmpfs, and an NFS export written async, read as a disk
+// does (the orchestrator's scope on round 10's review); the data directory
+// must be on persistent storage, and those are the operator's to avoid.
+//
+// id is the root's mount ID, which the writer already holds. tmpfs and ramfs
+// are told by their f_type. An overlay keeps what is written to it in its
+// upper layer: the one the mount table names on the line of the overlay's
+// own mount ID (overlayLayer), never on a line picked by its mount point's
+// spelling. The path the table gives is as the overlay's mounter named it, so
+// it must reach, here, the filesystem the overlay reports, since a statfs of
+// an overlay gives its upper layer's totals; but some filesystems' totals
+// move with ordinary writes (XFS's inode total with its free blocks, ZFS's
+// block total with the pool's use), so where the two answers differ the
+// overlay is read again: totals that held still while the path's differ name
+// another filesystem, or none (ErrMediumUnknown), and totals that moved are
+// no tmpfs's or ramfs's, which no write moves, so the upper layer is taken
+// for what the path reaches, unless that is tmpfs or ramfs itself (both
+// reviewers on round 10: round 10 refused XFS and ZFS upper layers at
+// random). An overlay mounted volatile skips every sync of its upper layer,
+// so nothing written there outlives a crash; an overlay over an overlay is
+// followed by the inner one's mount ID; and a read-only overlay, with no
+// upper layer, takes nothing, since a write there fails by itself (EROFS).
+// FUSE is taken but for fuse-overlayfs (the Claude API on round 10), whose
+// upper layer, what rootless Podman writes a container's files to, the
+// table does not show.
 func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error), idOf func(string) (uint64, bool, error)) error {
-	st, err := statfs(root)
+	path := root
+	st, err := statfs(path)
 	if err != nil {
 		return err
 	}
@@ -62,6 +87,8 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 			return fmt.Errorf("%w: %s is on %stmpfs", ErrVolatile, root, on)
 		case ramfsMagic:
 			return fmt.Errorf("%w: %s is on %sramfs", ErrVolatile, root, on)
+		case fuseMagic:
+			return fuseMedium(root, on, id, mountinfo)
 		case overlayfsMagic:
 		default:
 			return nil
@@ -85,25 +112,94 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 			return fmt.Errorf("%w: %s is on %san overlay whose upper layer the mount table names by a relative path, %s, which reaches nothing certain here", ErrMediumUnknown, root, on, layer.upper)
 		}
 		upper, err := statfs(layer.upper)
-		switch {
-		case err != nil:
+		if err != nil {
 			return fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, cannot be read here: %w", ErrMediumUnknown, root, on, layer.upper, err)
-		case upper.Bsize != st.Bsize || upper.Blocks != st.Blocks || upper.Files != st.Files:
-			return fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, reaches another filesystem here than the one the overlay writes to", ErrMediumUnknown, root, on, layer.upper)
+		}
+		if !upper.sameTotals(st) {
+			again, err := statfs(path)
+			switch {
+			case err != nil:
+				return fmt.Errorf("%w: %s is on %san overlay that cannot be read again: %w", ErrMediumUnknown, root, on, err)
+			case again.sameTotals(st):
+				return fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, reaches another filesystem here than the one the overlay writes to", ErrMediumUnknown, root, on, layer.upper)
+			case upper.Type == tmpfsMagic || upper.Type == ramfsMagic:
+				return fmt.Errorf("%w: %s is on %san overlay whose totals move with what is written to it, while its upper layer %s, as the mount table names it, reaches tmpfs or ramfs here, whose totals do not", ErrMediumUnknown, root, on, layer.upper)
+			}
 		}
 		on += "an overlay whose upper layer " + layer.upper + " is on "
-		if upper.Type == overlayfsMagic {
+		if upper.Type == overlayfsMagic || upper.Type == fuseMagic {
 			next, ok, err := idOf(layer.upper)
 			switch {
 			case err != nil:
-				return fmt.Errorf("%w: %s is on %san overlay whose mount cannot be told: %w", ErrMediumUnknown, root, on, err)
+				return fmt.Errorf("%w: %s is on %sa filesystem whose mount cannot be told: %w", ErrMediumUnknown, root, on, err)
 			case !ok:
-				return fmt.Errorf("%w: %s is on %san overlay the platform gives no mount ID for", ErrMediumUnknown, root, on)
+				return fmt.Errorf("%w: %s is on %sa filesystem the platform gives no mount ID for", ErrMediumUnknown, root, on)
 			}
 			id = next
 		}
-		st = upper
+		path, st = layer.upper, upper
 	}
+}
+
+// fuseMedium is the medium check of a FUSE filesystem, the mount id: taken,
+// as the check cannot see what a FUSE daemon writes to, but for
+// fuse-overlayfs, whose upper layer the mount table does not show, and a
+// mount whose line cannot be read, refused as storage that cannot be told
+// (ErrMediumUnknown).
+func fuseMedium(root, on string, id uint64, mountinfo func() ([]byte, error)) error {
+	table, err := mountinfo()
+	if err != nil {
+		return fmt.Errorf("%w: %s is on %sFUSE, and the mount table that names its filesystem cannot be read: %w", ErrMediumUnknown, root, on, err)
+	}
+	rec, err := mountLine(table, id)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %s is on %sFUSE: %w", ErrMediumUnknown, root, on, err)
+	case rec.fstype == "fuse.fuse-overlayfs":
+		return fmt.Errorf("%w: %s is on %sfuse-overlayfs, whose upper layer the mount table does not show", ErrMediumUnknown, root, on)
+	}
+	return nil
+}
+
+// mountRecord is one line of a mountinfo table, as the medium check reads it:
+// its filesystem type, and its super options, split on their commas, each
+// still escaped as the filesystem wrote it.
+type mountRecord struct {
+	fstype string
+	super  []string
+}
+
+// mountLine reads the line of a mountinfo table (proc(5)) whose first field
+// is id, the mount ID the writer holds, never a line picked by its mount
+// point's spelling. The kernel separates the fields with one ASCII space and
+// escapes a space, a tab, a newline and a backslash in each, so the line is
+// split on that space alone: a Unicode white space in a path, which the
+// kernel leaves as it is, stays inside its field (Codex on round 10:
+// strings.Fields split U+00A0 out of a lowerdir, and the upperdir and
+// volatile after it were lost). The record must be whole: six fields, any
+// optional fields, the "-" that ends them, then exactly the type, the source
+// and the super options, none of them empty. A line cut short, with a field
+// too many or an empty one, and an id the table does not list are errors.
+func mountLine(table []byte, id uint64) (mountRecord, error) {
+	want := strconv.FormatUint(id, 10)
+	for _, line := range strings.Split(string(table), "\n") {
+		fields := strings.Split(line, " ")
+		if fields[0] != want {
+			continue
+		}
+		sep := -1
+		for i := 6; i < len(fields); i++ {
+			if fields[i] == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep < 0 || len(fields) != sep+4 || slices.Contains(fields, "") {
+			return mountRecord{}, fmt.Errorf("the mount table's line for mount %d does not read as one", id)
+		}
+		return mountRecord{fstype: fields[sep+1], super: strings.Split(fields[sep+3], ",")}, nil
+	}
+	return mountRecord{}, fmt.Errorf("the mount table lists no mount %d", id)
 }
 
 // overlayMount is what the medium check reads of an overlay's mount in the
@@ -114,48 +210,36 @@ type overlayMount struct {
 	volatile bool
 }
 
-// overlayLayer reads the overlay mounted as id from a mountinfo table
-// (proc(5)): the line whose first field is id, the mount ID the writer
-// holds, never a line picked by its mount point's spelling; its type, the
-// field after the "-" that ends the optional fields, which must be overlay;
-// and its super options, the field after the source: upperdir, unescaped as
-// the kernel escapes an option's value (a backslash and three octal digits
-// for a space, a comma, a backslash and the like), and volatile, an option of
-// its own or fsync=volatile. A mount that is not an overlay, one the table
-// does not list, and a line that does not read as one are errors.
+// overlayLayer reads the overlay mounted as id from a mountinfo table, on the
+// line of its mount ID (mountLine), whose type must be overlay: its super
+// options give the upper layer (upperdir, unescaped as the kernel escapes an
+// option's value, a backslash and three octal digits for a space, a comma, a
+// backslash and the like) and volatile (an option of its own, or
+// fsync=volatile). The kernel writes the superblock's ro or rw first among
+// them, and only an overlay that is read-only there may name no upper layer:
+// a writable one that names none is an error, never taken for read-only.
 func overlayLayer(table []byte, id uint64) (overlayMount, error) {
-	want := strconv.FormatUint(id, 10)
-	for _, line := range strings.Split(string(table), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != want {
-			continue
-		}
-		sep := -1
-		for i := 6; i < len(fields); i++ {
-			if fields[i] == "-" {
-				sep = i
-				break
-			}
-		}
-		if sep < 0 || sep+3 >= len(fields) {
-			return overlayMount{}, fmt.Errorf("the mount table's line for mount %d does not read as one", id)
-		}
-		if fstype := fields[sep+1]; fstype != "overlay" {
-			return overlayMount{}, fmt.Errorf("the mount table names mount %d %s, not an overlay", id, fstype)
-		}
-		var m overlayMount
-		for _, opt := range strings.Split(fields[sep+3], ",") {
-			key, value, _ := strings.Cut(opt, "=")
-			switch {
-			case key == "upperdir":
-				m.upper = unescapeMountInfo(value)
-			case key == "volatile", key == "fsync" && value == "volatile":
-				m.volatile = true
-			}
-		}
-		return m, nil
+	rec, err := mountLine(table, id)
+	if err != nil {
+		return overlayMount{}, err
 	}
-	return overlayMount{}, fmt.Errorf("the mount table lists no mount %d", id)
+	if rec.fstype != "overlay" {
+		return overlayMount{}, fmt.Errorf("the mount table names mount %d %s, not an overlay", id, rec.fstype)
+	}
+	var m overlayMount
+	for _, opt := range rec.super {
+		key, value, _ := strings.Cut(opt, "=")
+		switch {
+		case key == "upperdir":
+			m.upper = unescapeMountInfo(value)
+		case key == "volatile", key == "fsync" && value == "volatile":
+			m.volatile = true
+		}
+	}
+	if m.upper == "" && rec.super[0] != "ro" {
+		return overlayMount{}, fmt.Errorf("the mount table names no upper layer for mount %d, an overlay that is not read-only", id)
+	}
+	return m, nil
 }
 
 // unescapeMountInfo undoes mountinfo's escaping of a path: the kernel writes
@@ -181,30 +265,59 @@ func unescapeMountInfo(s string) string {
 	return b.String()
 }
 
-// medium refuses a root on storage that does not keep what is written to it
-// through a reboot (ErrVolatile), or on storage of which that cannot be told
-// (ErrMediumUnknown), as the medium check answers for the root and the mount
-// it lies on (mediumOf). On such storage every barrier answers, and a reboot
-// takes what was written and leaves what was there before: the reservation
-// the player wrote goes, and the identity it wrote before the storage became
-// volatile stays, so the IDs and tokens the reservation covered would be
-// handed out again, with no crash at all (the Claude API on round 9: the
-// Raspberry Pi OS "Overlay File System" option, an overlay whose upper layer
-// is a tmpfs). The orchestrator's decision is to fail closed there, and so
-// where the storage cannot be told. Every entry the write reaches is on the
-// root's mount (plain), so the root's storage is every entry's. Where the
-// platform gives no mount identity, plain has refused already, and where it
-// is not expected to (Windows, which refuses before it gets here), the check
-// is not asked.
-func (p strictPath) medium() error {
+// ancestorsOnMount is every directory above root while it lies on root's
+// mount, id, by the mount ID the platform gives each (idOf), never by its
+// spelling: the parent first, the mount's own root last, and none for a root
+// that is its mount's root or the filesystem's. root is resolved, so each is
+// a directory, never a link. A directory on the way the platform gives no
+// mount ID for is ErrMountsUnknown, and its error is returned as it is.
+func ancestorsOnMount(root string, id uint64, idOf func(string) (uint64, bool, error)) ([]string, error) {
+	var above []string
+	for d := root; ; {
+		parent := filepath.Dir(d)
+		if parent == d {
+			return above, nil
+		}
+		m, ok, err := idOf(parent)
+		switch {
+		case err != nil:
+			return nil, err
+		case !ok:
+			return nil, fmt.Errorf("%w: the platform gives no mount ID for %s, above %s", ErrMountsUnknown, parent, root)
+		case m != id:
+			return above, nil
+		}
+		above = append(above, parent)
+		d = parent
+	}
+}
+
+// storage asks the platform what the writer must know of the storage under
+// root, by the mount root lies on: the medium check (mediumOf), and the
+// directories above root, up to the root of its mount, that a copy-up can
+// create entries in (copyUpAncestorsOf), which a write that lands, and the
+// probe, sync once the chain is synced. On an overlay a write below a root
+// found in the lower layer alone copies the root up, and every directory
+// above it up to the overlay's own root, creating entries the chain never
+// syncs, so a crash could take the copy and the reservation in it while the
+// player's identity below it stayed (Codex on round 10; the orchestrator
+// chose to sync every directory from the data directory up to its mount's
+// root). Every entry the write reaches is on root's mount (plain), so root's
+// storage is every entry's. Where the platform gives no mount identity, plain
+// has refused already, and where it is not expected to (Windows, which
+// refuses before it gets here), neither is asked.
+func (p strictPath) storage() ([]string, error) {
 	id, ok, err := mountIDOf(p.root)
 	switch {
 	case err != nil:
-		return err
+		return nil, err
 	case !ok:
-		return nil
+		return nil, nil
 	}
-	return mediumOf(p.root, id)
+	if err := mediumOf(p.root, id); err != nil {
+		return nil, err
+	}
+	return copyUpAncestorsOf(p.root, id)
 }
 
 // SetMediumForTest swaps the strict writer's and the probe's medium check for

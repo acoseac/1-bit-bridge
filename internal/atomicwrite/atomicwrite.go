@@ -120,7 +120,7 @@ var ErrMountsUnknown = errors.New("atomicwrite: the mounts between the file and 
 // layer is any of those, as Raspberry Pi OS's "Overlay File System" option
 // sets one up over its root, told by statfs and, for an overlay, by the upper
 // layer the mount table names on the line of the root's own mount ID
-// (strictPath.medium). Every barrier answers there, and a reboot takes what
+// (strictPath.storage). Every barrier answers there, and a reboot takes what
 // was written. Nothing is created, written or synced.
 var ErrVolatile = errors.New("atomicwrite: the root is on storage that does not keep what is written to it through a reboot")
 
@@ -248,12 +248,19 @@ var beforeMkdirAll func(dir string)
 // never call `t.Parallel()`.
 var mountIDOf = platformMountID
 
-// mediumOf is the medium check (strictPath.medium), asked of the root and the
+// mediumOf is the medium check (strictPath.storage), asked of the root and the
 // ID of the mount it lies on: platformMedium. A test seam, process-global like
 // syncParentDir, with the same contract: in-package tests override it with a
 // `t.Cleanup` restore and never call `t.Parallel()`, and tests in other
 // packages go through SetMediumForTest.
 var mediumOf = platformMedium
+
+// copyUpAncestorsOf is the directories above the root, up to the root of its
+// mount, that a copy-up can create entries in (strictPath.storage), asked of
+// the root and the ID of the mount it lies on: platformCopyUps, every one on
+// an overlay and none elsewhere. A test seam, process-global like
+// syncParentDir, with the same contract.
+var copyUpAncestorsOf = platformCopyUps
 
 // lstat is the Lstat the strict writer sees each entry through: a test seam,
 // so that a test can report a device (st_dev) as some filesystems report it,
@@ -699,10 +706,11 @@ func ProbeDurable(root, path string) error {
 	if err != nil {
 		return err
 	}
-	if err := p.medium(); err != nil {
+	above, err := p.storage()
+	if err != nil {
 		return err
 	}
-	for _, d := range p.chain(n) {
+	for _, d := range append(p.chain(n), above...) {
 		if err := syncDirAt(d); err != nil {
 			if errors.Is(err, ErrBarrierFailed) {
 				return fmt.Errorf("the directory %s cannot be synced: %w", d, err)
@@ -841,8 +849,13 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // entry first (strictPath.chain, durableChain): staging the file on an
 // overlay copies a lower-only directory up, creating its entry and those
 // above it after the first syncs (Codex on round 9). root is fsynced, for
-// the entry of the directory below it, and its own entry never. The writer
-// keeps nothing between writes. A directory whose
+// the entry of the directory below it, and off an overlay its own entry
+// never. On an overlay every directory above root, up to the root of its
+// mount, is synced too once the write lands (strictPath.storage): a write
+// below a root found in the lower layer alone copies root and those
+// directories up, and their entries are the copy-up's, which the caller
+// could not have made durable (Codex on round 10). The writer keeps nothing
+// between writes. A directory whose
 // entry an earlier write, or an earlier run, could not sync is synced again
 // by the next write that passes through it, whoever made it and whatever
 // happened since: process-local state would not survive the restart that
@@ -870,13 +883,16 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 //
 // root must be on storage that keeps what is written to it through a reboot
 // (ErrVolatile): a write on tmpfs, ramfs, or an overlay whose upper layer is
-// one, has every barrier answer and is gone after the reboot, and where the
-// storage cannot be told the writer says so (ErrMediumUnknown), failing
-// closed (strictPath.medium).
+// one, has every barrier answer and is gone after the reboot, and where what
+// the check must read cannot be read the writer says so (ErrMediumUnknown),
+// failing closed (strictPath.storage, mediumFrom). It refuses what it can
+// tell is volatile, and does not prove every stack persistent: storage that
+// keeps nothing under a filesystem that reads as a disk's is the caller's to
+// avoid.
 //
 // root is the caller's guarantee: it must exist (the writer never creates
-// it), and its own entry, and those above it, must be durable already, or
-// need not be, which only the caller can say (the player's engine passes
+// it), and off an overlay its own entry, and those above it, must be durable
+// already, or need not be, which only the caller can say (the player's engine passes
 // its data directory: engine.Config.DataDir). A link at or above root is
 // the caller's too, and so is root as a mount point: root is resolved once,
 // as the write begins, and every path the write opens, creates and fsyncs is
@@ -896,7 +912,8 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 	if _, err := p.plain(); err != nil {
 		return err
 	}
-	if err := p.medium(); err != nil {
+	above, err := p.storage()
+	if err != nil {
 		return err
 	}
 	if beforeMkdirAll != nil {
@@ -916,7 +933,7 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 			return fmt.Errorf("the directory entries between %s and %s are not durable: %w", p.dir(), p.root, err)
 		}
 	}
-	return writeBytes(p.file, data, tmpPrefix, p.chain(len(p.dirs)))
+	return writeBytes(p.file, data, tmpPrefix, append(p.chain(len(p.dirs)), above...))
 }
 
 // writeBytes stages data beside path and renames it into place: the file

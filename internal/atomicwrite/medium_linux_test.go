@@ -29,6 +29,7 @@ func TestMediumMagicsAreLinuxs(t *testing.T) {
 		{"tmpfs", tmpfsMagic, uint32(unix.TMPFS_MAGIC)},
 		{"ramfs", ramfsMagic, uint32(unix.RAMFS_MAGIC)},
 		{"overlayfs", overlayfsMagic, uint32(unix.OVERLAYFS_SUPER_MAGIC)},
+		{"fuse", fuseMagic, uint32(unix.FUSE_SUPER_MAGIC)},
 	} {
 		if m.got != m.want {
 			t.Errorf("%s's magic is %#x here, and %#x in x/sys/unix", m.name, m.got, m.want)
@@ -80,13 +81,6 @@ func TestPlatformMediumReadsTheKernels(t *testing.T) {
 		}
 	}
 }
-
-// The scenario TestOverlayNamespaceHelper runs, in a child process of the
-// test binary, and the directory it works in.
-const (
-	overlayScenarioEnv = "ATOMICWRITE_OVERLAY_SCENARIO"
-	overlayBaseEnv     = "ATOMICWRITE_OVERLAY_BASE"
-)
 
 // inOverlayNamespace runs scenario in a child process of this test binary
 // that is root in a user namespace of its own, with a mount namespace of its
@@ -164,6 +158,29 @@ func TestWriteBytesDurable_SyncsWhatACopyUpCreated(t *testing.T) {
 	inOverlayNamespace(t, "copy-up", base)
 }
 
+// TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck pins the
+// medium check's wiring (the Claude API on round 10): with mediumOf as the
+// package initializes it, not as TestMain may have taken it or a test stubbed
+// it, the probe of a directory on /dev/shm, a tmpfs, is refused
+// (ErrVolatile). A no-op in its place passed every other test.
+func TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck(t *testing.T) {
+	if info, err := os.Stat("/dev/shm"); err != nil || !info.IsDir() || statfsType(t, "/dev/shm") != tmpfsMagic {
+		t.Skip("no tmpfs at /dev/shm here")
+	}
+	prev := mediumOf
+	mediumOf = initialMediumOf
+	t.Cleanup(func() { mediumOf = prev })
+	root, err := os.MkdirTemp("/dev/shm", "atomicwrite-test-")
+	if err != nil {
+		t.Skipf("no directory can be made in /dev/shm: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	synced := stubSyncDir(t, nil)
+	if err := ProbeDurable(root, filepath.Join(root, "ids")); !errors.Is(err, ErrVolatile) || len(*synced) != 0 {
+		t.Errorf("ProbeDurable on /dev/shm through the package's own medium check = %v after syncing %v, want ErrVolatile and nothing synced", err, *synced)
+	}
+}
+
 // TestOverlayNamespaceHelper is the child inOverlayNamespace starts, root in
 // a user namespace of its own; it does nothing unless that set its scenario.
 func TestOverlayNamespaceHelper(t *testing.T) {
@@ -172,9 +189,6 @@ func TestOverlayNamespaceHelper(t *testing.T) {
 		return
 	}
 	base := os.Getenv(overlayBaseEnv)
-	// The real check, whatever TestMain took the system's temporary
-	// directory for.
-	mediumOf = platformMedium
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		t.Skipf("the namespace's mounts cannot be made private: %v", err)
 	}
@@ -227,8 +241,9 @@ func TestOverlayNamespaceHelper(t *testing.T) {
 				t.Errorf("the write left %s out of the upper layer (%v)", d, err)
 			}
 		}
-		if want := []string{root, "rename", player, root}; !slices.Equal(log, want) {
-			t.Errorf("the write synced %v, want %v: the root while the player directory was in the lower layer alone, then once the write landed the player directory and the root, which holds its copied-up entry", log, want)
+		merged := filepath.Dir(root)
+		if want := []string{root, "rename", player, root, merged}; !slices.Equal(log, want) {
+			t.Errorf("the write synced %v, want %v: the root while the player directory was in the lower layer alone, then once the write landed the player directory, the root, which holds its copied-up entry, and the overlay's own root, which holds the root's (Codex on round 10)", log, want)
 		}
 	default:
 		t.Fatalf("no scenario %q", scenario)

@@ -61,27 +61,26 @@ func TestPlatformMountTableReadsTheKernels(t *testing.T) {
 // and /proc are the ones the kernel's mount table lists. Round 9's tests held
 // each reader to the table and the order to stubs (mountIDFrom), so a
 // platformMountID that asked statx alone passed on every kernel from 5.8 up,
-// and on an older one refused every install (ErrMountsUnknown).
+// and on an older one refused every install (ErrMountsUnknown). Only statx's
+// seam is replaced, so the fallback answers through fdinfoMountIDOf as the
+// package initializes it: round 10 replaced that seam too, and a no-op in its
+// default passed (the Claude API on round 10).
 func TestPlatformMountIDAsksFdinfoWhereStatxGivesNone(t *testing.T) {
 	table := kernelMountTable(t)
-	var statxAsked, fdinfoAsked []string
-	prevStatx, prevFdinfo := statxMountIDOf, fdinfoMountIDOf
-	t.Cleanup(func() { statxMountIDOf, fdinfoMountIDOf = prevStatx, prevFdinfo })
+	var statxAsked []string
+	prevStatx := statxMountIDOf
+	t.Cleanup(func() { statxMountIDOf = prevStatx })
 	statxMountIDOf = func(p string) (uint64, bool, error) {
 		statxAsked = append(statxAsked, p)
 		return 0, false, nil
 	}
-	fdinfoMountIDOf = func(p string) (uint64, bool, error) {
-		fdinfoAsked = append(fdinfoAsked, p)
-		return fdinfoMountID(p)
-	}
 	paths := []string{"/", "/proc"}
 	for _, p := range paths {
 		if id, ok, err := platformMountID(p); !ok || err != nil || id != table[p] {
-			t.Errorf("platformMountID(%s) with statx giving none = %d, %v, %v, want the table's %d", p, id, ok, err, table[p])
+			t.Errorf("platformMountID(%s) with statx giving none = %d, %v, %v, want the table's %d, from fdinfo", p, id, ok, err, table[p])
 		}
 	}
-	if !slices.Equal(statxAsked, paths) || !slices.Equal(fdinfoAsked, paths) {
-		t.Errorf("platformMountID asked statx for %v and fdinfo for %v, want each for %v", statxAsked, fdinfoAsked, paths)
+	if !slices.Equal(statxAsked, paths) {
+		t.Errorf("platformMountID asked statx for %v, want %v", statxAsked, paths)
 	}
 }
