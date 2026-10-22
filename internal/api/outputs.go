@@ -247,6 +247,11 @@ type localOutputs struct {
 	track      func(context.Context, string) (OutputTrack, bool, error)
 	loopTrack  func(string) (string, string, bool)
 	limits     readingLimits
+	// confFile and alsaConfig are the reading's mpd.conf and ALSA
+	// configuration reads: conf.ReadFile and readALSAContext, which a test
+	// replaces with one that hangs or panics.
+	confFile   func(root, logical, host string) (conf.File, error)
+	alsaConfig func(root string, uids []int) alsaContext
 
 	mu           sync.Mutex
 	client       outputSession
@@ -257,6 +262,9 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	// inspecting is an inspection still running past its probe's deadline
+	// (inspectBounded): a probe does not start a second while it runs.
+	inspecting bool
 	// answered is auto's newest verdict that a caller of Active recorded,
 	// whichever way the gate reached it: a probe it stored, a probe past its
 	// own deadline it did not store, the cache, or another caller's probe
@@ -319,11 +327,12 @@ type outputProbe struct {
 // set under mu before done closes, so every waiter carries the number the
 // probe was given.
 type probeFlight struct {
-	done  chan struct{}
-	found bool
-	rep   mpd.Report
-	opt   mpd.Options
-	seq   uint64
+	done    chan struct{}
+	found   bool
+	rep     mpd.Report
+	opt     mpd.Options
+	seq     uint64
+	expired bool
 }
 
 func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
@@ -347,6 +356,8 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		track:      cfg.Track,
 		loopTrack:  cfg.LoopbackTrack,
 		limits:     defaultReadingLimits,
+		confFile:   conf.ReadFile,
+		alsaConfig: readALSAContext,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -427,7 +438,7 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 // records nothing, so a request that ends while a probe runs cannot turn
 // the loopback route off.
 func (o *localOutputs) answerAuto(ctx context.Context) bool {
-	found, _, _, seq := o.probeVerdict(ctx)
+	found, _, _, seq, _ := o.probeVerdict(ctx)
 	if o.beforeRecord != nil {
 		o.beforeRecord(ctx)
 	}
@@ -463,16 +474,18 @@ func (o *localOutputs) activeNow() bool {
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
-	found, rep, opt, _ := o.probeVerdict(ctx)
+	found, rep, opt, _, _ := o.probeVerdict(ctx)
 	return found, rep, opt
 }
 
-// probeVerdict is probe, and the number of its verdict. Every answer is a
+// probeVerdict is probe, the number of its verdict, and whether the
+// inspection it answers from ran past its deadline (expired), which a
+// caller that stopped waiting has not had either. Every answer is a
 // verdict, numbered under mu as it is produced: a cache read when it is
 // read, a probe when it completes (stored or past its own deadline),
 // whichever caller ran it. The false of a caller that stopped waiting on
 // another caller's probe is none, and carries 0.
-func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64) {
+func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64, bool) {
 	cfg := o.outputConfig()
 	key := probeKey(cfg)
 	o.mu.Lock()
@@ -480,7 +493,7 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		p := o.probed
 		seq := o.nextVerdictLocked()
 		o.mu.Unlock()
-		return p.found, p.rep, p.opt, seq
+		return p.found, p.rep, p.opt, seq, false
 	}
 	if f := o.probeFlights[key]; f != nil {
 		o.mu.Unlock()
@@ -489,9 +502,9 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		}
 		select {
 		case <-f.done:
-			return f.found, f.rep, f.opt, f.seq
+			return f.found, f.rep, f.opt, f.seq, f.expired
 		case <-ctx.Done():
-			return false, mpd.Report{}, mpd.Options{}, 0
+			return false, mpd.Report{}, mpd.Options{}, 0, true
 		}
 	}
 	f := &probeFlight{done: make(chan struct{})}
@@ -509,8 +522,7 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		// Detached from the caller: a cancelled /v1/health must not
 		// store a miss that hides the output for the miss TTL.
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
-		rep = o.inspect(pctx, opt)
-		expired = pctx.Err() != nil
+		rep, expired = o.inspectBounded(pctx, opt)
 		cancel()
 		found = rep.Found()
 	}
@@ -523,10 +535,62 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	}
 	delete(o.probeFlights, key)
-	f.found, f.rep, f.opt, f.seq = found, rep, opt, o.nextVerdictLocked()
+	f.found, f.rep, f.opt, f.seq, f.expired = found, rep, opt, o.nextVerdictLocked(), expired
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt, f.seq
+	return found, rep, opt, f.seq, expired
+}
+
+// outputProbeGrace is how long past its deadline a probe waits for its
+// inspection to return: the dial and the greeting end with the context, a
+// read of a file on a dead mount does not.
+const outputProbeGrace = 100 * time.Millisecond
+
+// inspectBounded runs the inspection on a goroutine of its own and waits for
+// it until ctx ends and outputProbeGrace more. One that has not returned by
+// then is expired with no report, and while it still runs no probe starts
+// another: a file that holds a read for good holds one goroutine, not one
+// per probe. A panic in it is an expired probe, logged. expired is whether
+// ctx had ended when the report came.
+func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep mpd.Report, expired bool) {
+	o.mu.Lock()
+	if o.inspecting {
+		o.mu.Unlock()
+		return mpd.Report{}, true
+	}
+	o.inspecting = true
+	o.mu.Unlock()
+	done := make(chan struct{})
+	var out mpd.Report
+	var panicked bool
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				logOutputPanic("the probe", r)
+			}
+			o.mu.Lock()
+			o.inspecting = false
+			o.mu.Unlock()
+			close(done)
+		}()
+		out = o.inspect(ctx, opt)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		timer := time.NewTimer(outputProbeGrace)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			return mpd.Report{}, true
+		}
+	}
+	if panicked {
+		return mpd.Report{}, true
+	}
+	return out, ctx.Err() != nil
 }
 
 // nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.
@@ -871,7 +935,10 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	if err != nil {
 		return nil
 	}
-	picks := dacsFrom(snap, rep)
+	root := alsa.ConfigRoot(snap.ProcRoot)
+	picks := dacsFrom(snap, rep, func(device string, cards []alsa.Card) (int, int, bool) {
+		return alsa.ResolveOutputDevice(root, device, cards)
+	})
 	if picks == nil {
 		return nil
 	}
@@ -893,8 +960,10 @@ type dacPick struct {
 // in its order: the one card MPD's enabled alsa device resolves to, else
 // each card several devices resolve to, else every USB card. The reading
 // lists them from its own snapshot, so an id it matches is the one the
-// outputs route gives.
-func dacsFrom(snap alsa.Snapshot, rep mpd.Report) []dacPick {
+// outputs route gives. resolve maps a device to a card: the route's reads
+// the ALSA configuration for a PCM name, and the reading's resolves from
+// the configuration it read once, under its deadline.
+func dacsFrom(snap alsa.Snapshot, rep mpd.Report, resolve func(device string, cards []alsa.Card) (int, int, bool)) []dacPick {
 	cards := make([]alsa.Card, len(snap.Cards))
 	for i, c := range snap.Cards {
 		cards[i] = c.Card
@@ -906,7 +975,7 @@ func dacsFrom(snap alsa.Snapshot, rep mpd.Report) []dacPick {
 	var hits []hit
 	seen := map[int]bool{}
 	for _, device := range alsaDevices(rep) {
-		idx, pcm, ok := alsa.ResolveOutputDevice(alsa.ConfigRoot(snap.ProcRoot), device, cards)
+		idx, pcm, ok := resolve(device, cards)
 		if !ok || seen[idx] {
 			continue
 		}

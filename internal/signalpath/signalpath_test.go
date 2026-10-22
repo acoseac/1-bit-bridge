@@ -12,9 +12,14 @@ import (
 // Pi: volumio (empty) -> volumioOutput (plug) -> volumioHw (hw).
 var volumioChain = []string{"empty", "plug", "hw"}
 
+// provenConfig is an mpd.conf read whole whose outputs are the daemon's and
+// whose files last changed before the MPD holding the card started.
+var provenConfig = Config{Read: true, Complete: true, Matches: true, Current: true}
+
 // pcmOnTheGoBar is the capture pcm-44k1-16: a 16-bit 44.1 kHz FLAC that
 // reaches the iFi GO bar as S16_LE through Volumio's chain, MPD set as
-// Volumio sets it (no replay gain, no normalization, no mixer that works).
+// Volumio sets it (no replay gain, no normalization, no mixer that works),
+// held by MPD's output thread for its one alsa output.
 func pcmOnTheGoBar() Facts {
 	return Facts{
 		State:  "play",
@@ -22,12 +27,12 @@ func pcmOnTheGoBar() Facts {
 		Source: Source{Known: true, Codec: "FLAC", SampleRate: 44100, Bits: 16},
 		MPD: MPD{
 			ReplayGainMode:      "off",
-			ConfigRead:          true,
+			Config:              provenConfig,
 			VolumeNormalization: "no",
-			Outputs:             1,
-			Output:              Output{MixerType: "hardware", Stages: volumioChain},
+			Holders:             1,
+			Output:              Output{Plugin: "alsa", Configured: true, MixerType: "hardware", Stages: volumioChain},
 		},
-		PCM: PCM{Open: true, State: "RUNNING", Format: "S16_LE", Rate: 44100, Channels: 2, Owner: "mpd"},
+		PCM: PCM{Open: true, State: "RUNNING", Format: "S16_LE", Rate: 44100, Channels: 2, Owner: "mpd", Thread: "output:alsa", Started: true},
 	}
 }
 
@@ -47,7 +52,7 @@ func dsd64AsDoP() Facts {
 	f := pcmOnTheGoBar()
 	f.Audio = "dsd64:2"
 	f.Source = Source{Known: true, Codec: "DFF", DSD: true, SampleRate: 2822400, Bits: 1, Channels: 2}
-	f.MPD.Output = Output{MixerType: "none", DoP: true, Stages: []string{"hw"}}
+	f.MPD.Output = Output{Plugin: "alsa", Configured: true, MixerType: "none", DoP: true, Stages: []string{"hw"}}
 	f.PCM.Format, f.PCM.Rate = "S24_3LE", 176400
 	return f
 }
@@ -93,8 +98,11 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"prepared, not running", pcm, func(f *Facts) { f.PCM.State = "PREPARED" }, []string{PCMNotRunning}},
 		{"an xrun", pcm, func(f *Facts) { f.PCM.State = "XRUN" }, []string{PCMNotRunning}},
 		{"an owner nobody can name", pcm, func(f *Facts) { f.PCM.Owner = "" }, []string{OwnerUnknown}},
+		{"a thread nobody can name", pcm, func(f *Facts) { f.PCM.Thread = "" }, []string{OwnerUnknown}},
+		{"a process whose start nobody can read", pcm, func(f *Facts) { f.PCM.Started = false }, []string{OwnerUnknown}},
 		{"a foreign owner", pcm, func(f *Facts) { f.PCM.Owner = "aplay" }, []string{OwnerNotMPD}},
 		{"another player", pcm, func(f *Facts) { f.PCM.Owner = "squeezelite" }, []string{OwnerNotMPD}},
+		{"a thread that is no enabled output's", pcm, func(f *Facts) { f.MPD.Holders = 0 }, []string{OwnerNotOutput}},
 		{"no format", pcm, func(f *Facts) { f.PCM.Format = "" }, []string{HWParamsUnknown}},
 		{"no rate", pcm, func(f *Facts) { f.PCM.Rate = 0 }, []string{HWParamsUnknown}},
 		{"no channels", pcm, func(f *Facts) { f.PCM.Channels = 0 }, []string{HWParamsUnknown}},
@@ -121,7 +129,21 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"a crossfade this does not read", pcm, func(f *Facts) { f.MPD.Crossfade = "five" }, []string{MPDCrossfade}},
 		{"mixramp", pcm, func(f *Facts) { f.MPD.MixRampDelay = "2.5" }, []string{MPDMixRamp}},
 		{"a mixrampdelay this does not read", pcm, func(f *Facts) { f.MPD.MixRampDelay = "soon" }, []string{MPDMixRamp}},
-		{"mpd.conf unread", pcm, func(f *Facts) { f.MPD.ConfigRead = false }, []string{MPDConfigUnread}},
+		// What only mpd.conf says is judged only from a file shown to be the
+		// one MPD runs with; the output's chain comes from its device there.
+		{"mpd.conf unread", pcm, func(f *Facts) { f.MPD.Config = Config{} }, []string{MPDConfigUnread, ALSAChainUnproven}},
+		{"mpd.conf read in part", pcm, func(f *Facts) { f.MPD.Config.Complete = false }, []string{MPDConfigIncomplete, ALSAChainUnproven}},
+		{"mpd.conf's outputs are not the daemon's", pcm, func(f *Facts) { f.MPD.Config.Matches = false }, []string{MPDConfigMismatch, ALSAChainUnproven}},
+		{"mpd.conf changed after MPD started", pcm, func(f *Facts) { f.MPD.Config.Current = false }, []string{MPDConfigChanged, ALSAChainUnproven}},
+		{"every way at once", pcm, func(f *Facts) { f.MPD.Config = Config{Read: true} }, []string{MPDConfigIncomplete, MPDConfigMismatch, MPDConfigChanged, ALSAChainUnproven}},
+		{"what a changed file says is not claimed", pcm, func(f *Facts) {
+			f.MPD.Config.Current = false
+			f.MPD.Output.MixerType, f.MPD.Output.Filters, f.MPD.AudioOutputFormat, f.MPD.VolumeNormalization = "software", "eq", "48000:24:2", "yes"
+		}, []string{MPDConfigChanged, ALSAChainUnproven}},
+		{"a live allowed_formats with a changed file", pcm, func(f *Facts) {
+			f.MPD.Config.Current = false
+			f.MPD.Output.AllowedFormats = "96000:16:*"
+		}, []string{MPDConfigChanged, MPDFormatOverride, ALSAChainUnproven}},
 		{"normalization yes", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "yes" }, []string{MPDNormalization}},
 		{"normalization true", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "TRUE" }, []string{MPDNormalization}},
 		{"normalization that is not a boolean", pcm, func(f *Facts) { f.MPD.VolumeNormalization = "sometimes" }, []string{MPDNormalization}},
@@ -131,8 +153,12 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"software volume", pcm, func(f *Facts) { f.MPD.Output.MixerType = "software" }, []string{MPDSoftwareVolume}},
 		{"a mixer MPD does not name", pcm, func(f *Facts) { f.MPD.Output.MixerType = "" }, []string{MPDSoftwareVolume}},
 		{"filters", pcm, func(f *Facts) { f.MPD.Output.Filters = "eq" }, []string{MPDFilters}},
-		{"no output reaches the card", pcm, func(f *Facts) { f.MPD.Outputs = 0 }, []string{ALSAChainUnproven}},
-		{"two outputs reach the card", pcm, func(f *Facts) { f.MPD.Outputs = 2 }, []string{MPDOutputAmbiguous}},
+		{"a chain to the card nobody proved", pcm, func(f *Facts) { f.MPD.Output.Stages = nil }, []string{ALSAChainUnproven}},
+		{"the holder is not an alsa output", pcm, func(f *Facts) { f.MPD.Output.Plugin = "ao" }, []string{ALSAChainUnproven}},
+		{"the holder has no block in mpd.conf", pcm, func(f *Facts) { f.MPD.Output.Configured = false }, []string{ALSAChainUnproven}},
+		// Two enabled outputs whose names are alike past the 15 bytes a
+		// thread name keeps: which one holds the card is not known.
+		{"two outputs whose threads are named alike", pcm, func(f *Facts) { f.MPD.Holders = 2 }, []string{MPDOutputAmbiguous}},
 
 		{"the plug pads 16 to 24", pcm, func(f *Facts) { f.PCM.Format = "S24_3LE" }, []string{ALSAPlugConverts}},
 		{"the plug resamples", pcm, func(f *Facts) { f.PCM.Rate = 48000 }, []string{RateMismatch, ALSAPlugConverts}},
@@ -245,7 +271,14 @@ func TestAStreamThatIsNotMPDsIsJudgedNoFurther(t *testing.T) {
 	if got := Judge(f); !slices.Equal(got.Reasons, []string{OwnerNotMPD}) {
 		t.Fatalf("%+v", got)
 	}
+	// An mpd whose thread is no enabled output of the MPD the bridge reads:
+	// another MPD, or an output the bridge cannot see.
 	f.PCM.Owner = "mpd"
+	f.MPD.Holders = 0
+	if got := Judge(f); !slices.Equal(got.Reasons, []string{OwnerNotOutput}) {
+		t.Fatalf("%+v", got)
+	}
+	f.MPD.Holders = 1
 	got := Judge(f)
 	if !slices.Equal(got.Reasons, []string{MPDReplayGain, MPDSoftwareVolume}) {
 		t.Fatalf("every reason of MPD's own stream: %+v", got)

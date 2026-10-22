@@ -51,6 +51,9 @@ const (
 	// NoCard: this output names no sound card, so nothing says what a DAC
 	// receives.
 	NoCard = "no_card"
+	// ReadingFailed: the bridge could not take the reading (a step of its
+	// own failed); a later reading is taken afresh.
+	ReadingFailed = "reading_failed"
 	// StateChanged: MPD's state differed between the status read before
 	// the /proc read and the one after it.
 	StateChanged = "state_changed"
@@ -63,6 +66,11 @@ const (
 	// SongStarting: elapsed was under half a second, or not given while
 	// playing.
 	SongStarting = "song_starting"
+	// SettingsChanged: what MPD reports of the settings the verdict reads
+	// (its outputs and their attributes, replay gain, the audio format,
+	// crossfade, MixRamp) differed between the reads before the /proc read
+	// and after it.
+	SettingsChanged = "settings_changed"
 )
 
 // Codes a withheld verdict carries for a whole reading.
@@ -77,11 +85,16 @@ const (
 	// PCMNotRunning: the substream is open and not RUNNING (prepared,
 	// paused, an xrun, draining).
 	PCMNotRunning = "pcm_not_running"
-	// OwnerUnknown: the process that holds the substream could not be
-	// named (a /proc mounted with hidepid, another pid namespace).
+	// OwnerUnknown: the thread that holds the substream, its process, or
+	// when that process started could not be read (a /proc mounted with
+	// hidepid, another pid namespace).
 	OwnerUnknown = "owner_unknown"
 	// OwnerNotMPD: a process other than mpd holds the substream.
 	OwnerNotMPD = "owner_not_mpd"
+	// OwnerNotOutput: an mpd holds the substream from a thread that is no
+	// enabled output's of the MPD the bridge reads (another MPD, or an
+	// output it does not report).
+	OwnerNotOutput = "owner_not_output"
 	// HWParamsUnknown: the substream's hw_params did not say its format,
 	// rate and channels.
 	HWParamsUnknown = "hw_params_unknown"
@@ -104,8 +117,19 @@ const (
 	// MPDConfigUnread: mpd.conf could not be read, so the settings only
 	// it holds are not proven.
 	MPDConfigUnread = "mpd_config_unread"
-	// MPDOutputAmbiguous: more than one enabled alsa output of MPD's
-	// reaches this card.
+	// MPDConfigIncomplete: mpd.conf was read only in part (an include not
+	// followed, a line that did not parse), so what that part sets is not
+	// proven.
+	MPDConfigIncomplete = "mpd_config_incomplete"
+	// MPDConfigMismatch: the outputs mpd.conf defines are not the outputs
+	// the MPD the bridge reads reports, by name and plugin, in order, so
+	// the file is not shown to be its configuration.
+	MPDConfigMismatch = "mpd_config_mismatch"
+	// MPDConfigChanged: mpd.conf, or a file it depends on, changed after
+	// the MPD that holds the card started, which reads it only then.
+	MPDConfigChanged = "mpd_config_changed"
+	// MPDOutputAmbiguous: more than one enabled output of MPD's has an
+	// output thread named as the one that holds the card is.
 	MPDOutputAmbiguous = "mpd_output_ambiguous"
 	// MPDReplayGain: replay gain is not off.
 	MPDReplayGain = "mpd_replay_gain"
@@ -123,9 +147,10 @@ const (
 	MPDMixRamp = "mpd_mixramp"
 	// MPDFilters: the output applies filters.
 	MPDFilters = "mpd_filters"
-	// ALSAChainUnproven: no enabled alsa output of MPD's reaches this card
-	// through a chain the bridge parses: hw, or plug and empty stages to
-	// hw, with no softvol, dmix, rate or route stage.
+	// ALSAChainUnproven: the output that holds the card does not reach it
+	// through a chain the bridge parsed, from a configuration it read whole:
+	// hw, or plug and empty stages to hw, with no softvol, dmix, rate or
+	// route stage, and no definition of MPD's user's own replacing them.
 	ALSAChainUnproven = "alsa_chain_unproven"
 	// ALSAPlugConverts: the chain has a plug stage and the card's format,
 	// rate or channels are not the stream's, so the plug converted.
@@ -154,11 +179,12 @@ const (
 // reading's codes first, then what stops a stream being judged, then the
 // file, MPD, the ALSA chain and the formats.
 var codeOrder = []string{
-	MPDUnreachable, MPDTimeout, MPDRefused, ProcUnreadable, ProcTimeout, NoCard,
-	StateChanged, SongChanged, Seeked, SongStarting,
-	NotPlaying, PCMAmbiguous, PCMClosed, PCMNotRunning, OwnerUnknown, OwnerNotMPD, HWParamsUnknown,
+	MPDUnreachable, MPDTimeout, MPDRefused, ProcUnreadable, ProcTimeout, NoCard, ReadingFailed,
+	StateChanged, SongChanged, Seeked, SongStarting, SettingsChanged,
+	NotPlaying, PCMAmbiguous, PCMClosed, PCMNotRunning, OwnerUnknown, OwnerNotMPD, OwnerNotOutput, HWParamsUnknown,
 	SourceUnknown, SourceChanged, SourceLossy, SourceCodecUnknown, SourceMismatch,
-	MPDAudioUnknown, MPDConfigUnread, MPDOutputAmbiguous, MPDReplayGain, MPDSoftwareVolume,
+	MPDAudioUnknown, MPDConfigUnread, MPDConfigIncomplete, MPDConfigMismatch, MPDConfigChanged,
+	MPDOutputAmbiguous, MPDReplayGain, MPDSoftwareVolume,
 	MPDNormalization, MPDFormatOverride, MPDCrossfade, MPDMixRamp, MPDFilters,
 	ALSAChainUnproven, ALSAPlugConverts,
 	StreamFloat, FormatMismatch, RateMismatch, ChannelsMismatch, DepthReduced,
@@ -247,23 +273,45 @@ type MPD struct {
 	// MixRampDelay is status mixrampdelay as MPD prints it; "" when
 	// absent, which is off, as is "nan".
 	MixRampDelay string
-	// ConfigRead is whether mpd.conf was read. What only the file says
-	// (normalization, the format override, the mixer, the filters, the
-	// outputs' devices) is proven only then.
-	ConfigRead bool
+	// Config is how far mpd.conf is shown to be what MPD runs with. What
+	// only the file says (normalization, the format override, the mixer,
+	// the filters, the output's device) is judged only from a proven one.
+	Config Config
 	// VolumeNormalization and AudioOutputFormat are the file's top-level
 	// settings, as written.
 	VolumeNormalization string
 	AudioOutputFormat   string
-	// Outputs is how many enabled alsa outputs of MPD's reach this card
-	// through a chain the bridge resolved (alsa.ResolveOutputChain).
-	// Output is that output when there is exactly one.
-	Outputs int
+	// Holders is how many enabled outputs of MPD's have an output thread
+	// named as the thread that holds the card is: MPD names each output's
+	// thread "output:" and its name, cut to the 15 bytes a thread name
+	// keeps. Output is that output when there is exactly one.
+	Holders int
 	Output  Output
 }
 
-// Output is the MPD audio_output that feeds the card.
+// Config is what the reading showed of mpd.conf.
+type Config struct {
+	// Read: the file was read.
+	Read bool
+	// Complete: every include was followed and every line parsed.
+	Complete bool
+	// Matches: its audio_output blocks are the outputs MPD reports, by
+	// name and plugin, in order.
+	Matches bool
+	// Current: nothing the read depended on changed after the process that
+	// holds the card started; MPD reads its configuration only then.
+	Current bool
+}
+
+// Proven is a file read whole that is shown to be what MPD runs with.
+func (c Config) Proven() bool { return c.Read && c.Complete && c.Matches && c.Current }
+
+// Output is the MPD output whose thread holds the card.
 type Output struct {
+	// Plugin is its live plugin: alsa, ao, oss…
+	Plugin string
+	// Configured is whether mpd.conf has its block (by name).
+	Configured bool
 	// MixerType is the effective mixer: EffectiveMixerType's answer.
 	MixerType      string
 	Format         string
@@ -273,7 +321,7 @@ type Output struct {
 	// else the file's dop setting.
 	DoP bool
 	// Stages is the chain from the output's device to the card, as
-	// alsa.Chain names it.
+	// alsa.Chain names it; nil when it is not proven.
 	Stages []string
 }
 
@@ -295,6 +343,11 @@ type PCM struct {
 	// Owner is the name of the process that holds it (the owner thread's
 	// Tgid); "" when it could not be named.
 	Owner string
+	// Thread is the name of the thread that holds it (owner_pid), as
+	// /proc's status shows it; "" when it could not be named.
+	Thread string
+	// Started is whether the reading read when that process started.
+	Started bool
 }
 
 // Judge decides the verdict for one whole reading. A stream that is not
@@ -311,10 +364,15 @@ func Judge(f Facts) Verdict {
 		return WithheldFor(PCMClosed)
 	case f.PCM.State != "RUNNING":
 		return WithheldFor(PCMNotRunning)
-	case f.PCM.Owner == "":
+	case f.PCM.Owner == "" || f.PCM.Thread == "":
 		return WithheldFor(OwnerUnknown)
 	case f.PCM.Owner != "mpd":
 		return WithheldFor(OwnerNotMPD)
+	case f.MPD.Holders == 0:
+		return WithheldFor(OwnerNotOutput)
+	case !f.PCM.Started:
+		// When MPD's process started is what ties mpd.conf to it.
+		return WithheldFor(OwnerUnknown)
 	case f.PCM.Format == "" || f.PCM.Rate <= 0 || f.PCM.Channels <= 0:
 		return WithheldFor(HWParamsUnknown)
 	}
@@ -354,9 +412,25 @@ func Judge(f Facts) Verdict {
 	if mixRampOn(f.MPD.MixRampDelay) {
 		add(MPDMixRamp)
 	}
-	if !f.MPD.ConfigRead {
+	cfg := f.MPD.Config
+	if !cfg.Read {
 		add(MPDConfigUnread)
 	} else {
+		if !cfg.Complete {
+			add(MPDConfigIncomplete)
+		}
+		if !cfg.Matches {
+			add(MPDConfigMismatch)
+		}
+		if !cfg.Current {
+			add(MPDConfigChanged)
+		}
+	}
+	// What only the file says is judged from a file shown to be MPD's
+	// running configuration; from any other it would be a claim about a
+	// configuration MPD may not run with, and the codes above say why.
+	proven := cfg.Proven()
+	if proven {
 		if on, ok := ParseBool(f.MPD.VolumeNormalization); f.MPD.VolumeNormalization != "" && (!ok || on) {
 			add(MPDNormalization)
 		}
@@ -365,25 +439,33 @@ func Judge(f Facts) Verdict {
 		}
 	}
 	out := f.MPD.Output
-	switch {
-	case f.MPD.Outputs == 0:
-		add(ALSAChainUnproven)
-	case f.MPD.Outputs > 1:
+	if f.MPD.Holders > 1 {
 		add(MPDOutputAmbiguous)
-	default:
-		switch out.MixerType {
-		case "hardware", "null", "none":
-		default:
-			add(MPDSoftwareVolume)
+	} else {
+		// The output's own settings: its allowed_formats may be the live
+		// attribute, the rest come from its block in the file.
+		fromFile := proven && out.Configured
+		if fromFile {
+			switch out.MixerType {
+			case "hardware", "null", "none":
+			default:
+				add(MPDSoftwareVolume)
+			}
 		}
-		if strings.TrimSpace(out.Format) != "" || strings.TrimSpace(out.AllowedFormats) != "" {
+		if (fromFile && strings.TrimSpace(out.Format) != "") || strings.TrimSpace(out.AllowedFormats) != "" {
 			add(MPDFormatOverride)
 		}
-		if strings.TrimSpace(out.Filters) != "" {
+		if fromFile && strings.TrimSpace(out.Filters) != "" {
 			add(MPDFilters)
 		}
+		// The chain is the output's device in the file, resolved through the
+		// ALSA configuration: an output of another plugin reaches the card
+		// some other way.
+		if out.Plugin != "alsa" || !fromFile || len(out.Stages) == 0 {
+			add(ALSAChainUnproven)
+		}
 	}
-	oneOutput := f.MPD.Outputs == 1
+	oneOutput := f.MPD.Holders == 1
 	plug := oneOutput && slices.Contains(out.Stages, "plug")
 
 	dop := false

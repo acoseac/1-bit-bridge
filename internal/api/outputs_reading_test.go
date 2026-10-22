@@ -146,6 +146,18 @@ func volumioConf(t *testing.T, dir string) string {
 	return music.ReplaceAllLiteralString(string(b), `music_directory "`+filepath.ToSlash(dir)+`"`)
 }
 
+// volumioOutputs is MPD's outputs reply on the box with its alsa output
+// enabled or not and with attrs ("key=value" each), and the multiroom fifo
+// output as the box reports it: the outputs Volumio's mpd.conf defines.
+func volumioOutputs(enabled string, attrs ...string) mpd.Reply {
+	kv := []string{"outputid", "0", "outputname", "alsa", "plugin", "alsa", "outputenabled", enabled}
+	for _, a := range attrs {
+		kv = append(kv, "attribute", a)
+	}
+	kv = append(kv, "outputid", "1", "outputname", "multiroom", "plugin", "fifo", "outputenabled", "0")
+	return replyOf(kv...)
+}
+
 func replyOf(kv ...string) mpd.Reply {
 	r := mpd.Reply{Pairs: []mpd.Pair{}}
 	for i := 0; i+1 < len(kv); i += 2 {
@@ -170,8 +182,10 @@ func withPair(r mpd.Reply, key, value string) mpd.Reply {
 
 // scriptedMPD is the MPD the reading tests reach through the session
 // interface. status answers from a list whose last element repeats, and
-// the other commands from fixed replies. A command can be made to fail, or
-// to hold until released or until its context ends.
+// the other commands from fixed replies, or from a list of their own when
+// one is set (outputsSeq, gainSeq). A command can be made to fail, or to
+// hold until released or until its context ends. Each command's remaining
+// time to its context's deadline when it was sent is recorded (left).
 type scriptedMPD struct {
 	mu          sync.Mutex
 	statuses    []mpd.Reply
@@ -179,17 +193,39 @@ type scriptedMPD struct {
 	current     mpd.Reply
 	gain        mpd.Reply
 	outputs     mpd.Reply
+	gainSeq     []mpd.Reply
+	nGain       int
+	outputsSeq  []mpd.Reply
+	nOutputs    int
 	errs        map[string]error
 	hold        map[string]chan struct{}
 	calls       []string
+	left        map[string][]time.Duration
 	inFlight    int
 	maxInFlight int
 	closed      atomic.Int32
 }
 
+// next answers from seq, its last element repeating, counting with n; or
+// fixed when seq is unset. Caller holds mu.
+func next(seq []mpd.Reply, n *int, fixed mpd.Reply) mpd.Reply {
+	if len(seq) == 0 {
+		return fixed
+	}
+	i := min(*n, len(seq)-1)
+	*n++
+	return seq[i]
+}
+
 func (m *scriptedMPD) run(ctx context.Context, name string, answer func() mpd.Reply) (mpd.Reply, error) {
 	m.mu.Lock()
 	m.calls = append(m.calls, name)
+	if dl, ok := ctx.Deadline(); ok {
+		if m.left == nil {
+			m.left = map[string][]time.Duration{}
+		}
+		m.left[name] = append(m.left[name], time.Until(dl))
+	}
 	m.inFlight++
 	if m.inFlight > m.maxInFlight {
 		m.maxInFlight = m.inFlight
@@ -233,11 +269,26 @@ func (m *scriptedMPD) CurrentSong(ctx context.Context) (mpd.Reply, error) {
 }
 
 func (m *scriptedMPD) ReplayGainStatus(ctx context.Context) (mpd.Reply, error) {
-	return m.run(ctx, "replay_gain_status", func() mpd.Reply { return m.gain })
+	return m.run(ctx, "replay_gain_status", func() mpd.Reply {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return next(m.gainSeq, &m.nGain, m.gain)
+	})
 }
 
 func (m *scriptedMPD) Outputs(ctx context.Context) (mpd.Reply, error) {
-	return m.run(ctx, "outputs", func() mpd.Reply { return m.outputs })
+	return m.run(ctx, "outputs", func() mpd.Reply {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return next(m.outputsSeq, &m.nOutputs, m.outputs)
+	})
+}
+
+// deadlinesLeft is the remaining time each name was sent with.
+func (m *scriptedMPD) deadlinesLeft(name string) []time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]time.Duration(nil), m.left[name]...)
 }
 
 func (m *scriptedMPD) Version() string { return "0.24.0" }
@@ -298,10 +349,49 @@ type readingRig struct {
 	cfg      LocalOutputsConfig
 }
 
+// rigAhead is how far ahead of the real clock a rig's clock runs, and
+// mpdAge how long before a reading the rig's MPD started: every file a test
+// writes, at the real time, then predates MPD's start, as on a box where
+// MPD was started after its configuration was written. A test that wants a
+// change after the start dates the file past rigNow() - mpdAge.
+const (
+	rigAhead = 2 * time.Hour
+	mpdAge   = time.Hour
+)
+
+// rigNow is a rig's clock.
+func rigNow() time.Time { return time.Now().Add(rigAhead) }
+
+// rigStat is /proc/6551/stat for the rig's MPD: started at tick 360000,
+// 3600 s after boot, which rigUptime puts mpdAge before the reading.
+const (
+	rigStat   = "6551 (mpd) S 1 6551 6551 0 -1 4194560 2412 0 23 0 1013 1022 0 0 20 0 9 0 360000 1234567 2345\n"
+	rigUptime = "7200.00 14000.00\n"
+	rigPasswd = "root:x:0:0:root:/root:/bin/bash\nvolumio:x:1000:1000::/home/volumio:/bin/bash\n"
+)
+
+// writeRigFile writes one file under dir, by a slash-separated path.
+func writeRigFile(t *testing.T, dir, rel, body string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status mpd.Reply) *readingRig {
 	t.Helper()
 	r := &readingRig{t: t, file: file, loop: map[string][2]string{}}
 	r.procRoot = piCapture(t, capture)
+	// The captures hold no stat for MPD's process and no uptime, and the
+	// box's etc no passwd: the rig writes them, MPD running as the
+	// captured thread's uid 1000, whose home holds no ALSA file.
+	writeRigFile(t, r.procRoot, "6551/stat", rigStat)
+	writeRigFile(t, r.procRoot, "uptime", rigUptime)
+	writeRigFile(t, filepath.Dir(r.procRoot), "etc/passwd", rigPasswd)
 	r.music = t.TempDir()
 	r.root = filepath.Join(r.music, "INTERNAL", "Demo Library")
 	abs := filepath.Join(r.root, filepath.FromSlash(file))
@@ -332,6 +422,7 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 	r.cards = func() (alsa.Snapshot, error) { return (alsa.Reader{ProcRoot: r.procRoot}).Read() }
 	r.cfg = LocalOutputsConfig{
 		GOOS: "linux",
+		Now:  rigNow,
 		Output: func() config.OutputConfig {
 			return config.OutputConfig{MPD: "on"}
 		},
@@ -666,10 +757,7 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 			r.writeConf(withOutputSetting(volumioConf(t, r.music), "filters", "eq"))
 		}, signalpath.Withheld, []string{signalpath.MPDFilters}},
 		{"allowed_formats set live", func(t *testing.T, r *readingRig) {
-			r.mpd.set(func(m *scriptedMPD) {
-				m.outputs = replyOf("outputid", "0", "outputname", "alsa", "plugin", "alsa", "outputenabled", "1",
-					"attribute", "allowed_formats=96000:16:*", "attribute", "dop=0")
-			})
+			r.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("1", "allowed_formats=96000:16:*", "dop=0") })
 		}, signalpath.Withheld, []string{signalpath.MPDFormatOverride}},
 		{"replay gain", func(t *testing.T, r *readingRig) {
 			r.mpd.set(func(m *scriptedMPD) { m.gain = replyOf("replay_gain_mode", "album") })
@@ -695,11 +783,11 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 			}
 			r.writeConf(withDevice(volumioConf(t, r.music), "mixed"))
 		}, signalpath.Withheld, []string{signalpath.ALSAChainUnproven}},
+		// The card held by the thread of an output MPD reports switched off
+		// is not that output's stream.
 		{"the output switched off live", func(t *testing.T, r *readingRig) {
-			r.mpd.set(func(m *scriptedMPD) {
-				m.outputs = replyOf("outputid", "0", "outputname", "alsa", "plugin", "alsa", "outputenabled", "0")
-			})
-		}, signalpath.Withheld, []string{signalpath.ALSAChainUnproven}},
+			r.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("0") })
+		}, signalpath.Withheld, []string{signalpath.OwnerNotOutput}},
 		{"mpd.conf gone", func(t *testing.T, r *readingRig) {
 			if err := os.Remove(r.confPath); err != nil {
 				t.Fatal(err)
@@ -729,7 +817,7 @@ func TestTheVerdictReadsMPDsOwnSettings(t *testing.T) {
 func TestTheReadingReadsMPDConfAgain(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	clock := &manualClock{now: rigNow()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	hs, token, id := rig.serve()
@@ -786,8 +874,7 @@ func doPRig(t *testing.T, dop string) *readingRig {
 		t.Fatal(err)
 	}
 	rig.writeConf(withDevice(volumioConf(t, rig.music), "hw:CARD=Audio,DEV=0"))
-	rig.mpd.outputs = replyOf("outputid", "0", "outputname", "alsa", "plugin", "alsa", "outputenabled", "1",
-		"attribute", "allowed_formats=", "attribute", "dop="+dop)
+	rig.mpd.outputs = volumioOutputs("1", "allowed_formats=", "dop="+dop)
 	return rig
 }
 
@@ -953,7 +1040,7 @@ func withoutPair(r mpd.Reply, key string) mpd.Reply {
 func TestTheReadingIsReadThroughForHalfASecond(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	clock := &manualClock{now: rigNow()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	hs, token := newOutputsHTTP(t, "fp", rig.cfg)
@@ -999,7 +1086,7 @@ func TestTheReadingIsReadThroughForHalfASecond(t *testing.T) {
 func TestTheReadingsConnectionIsLazyAndShared(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	clock := &manualClock{now: rigNow()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	store := outputsToken(t)
@@ -1092,7 +1179,7 @@ func waitForCall(t *testing.T, m *scriptedMPD, name string, n int) {
 func TestAProcReadPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
-	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	clock := &manualClock{now: rigNow()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
@@ -1105,16 +1192,17 @@ func TestAProcReadPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 		<-stuck
 		return read()
 	}
-	srv.localOutputs.limits.proc = 20 * time.Millisecond
+	srv.localOutputs.limits.proc = 50 * time.Millisecond
 	// The whole reading's deadline is far off, so only the /proc read's own
-	// deadline can end this one in time.
+	// deadline can end this one in time: it waits that deadline, and ends
+	// well before a second, which a step deadline of a second would not.
 	srv.localOutputs.limits.build = 30 * time.Second
 	t.Cleanup(func() { close(stuck) })
 
 	start := time.Now()
 	_, got, raw := getReading(t, hs, token, id)
-	if took := time.Since(start); took > 10*time.Second {
-		t.Fatalf("the reading waited %s for a /proc read with a 20ms deadline", took)
+	if took := time.Since(start); took < 50*time.Millisecond || took > time.Second {
+		t.Fatalf("the reading took %s for a /proc read with a 50ms deadline", took)
 	}
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ProcTimeout}) {
 		t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
@@ -1152,18 +1240,19 @@ func TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 		rep.MPD.Endpoint = fake.addr()
 		return rep
 	}
-	clock := &manualClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	clock := &manualClock{now: rigNow()}
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
 	srv.localOutputs.limits.command = 300 * time.Millisecond
-	// Only the command's own deadline can end this reading in time.
+	// Only the command's own deadline can end this reading in time: it
+	// waits that deadline, and ends well before a second.
 	srv.localOutputs.limits.build = 30 * time.Second
 	id := firstOutputID(t, hs, token)
 	start := time.Now()
 	_, got, raw := getReading(t, hs, token, id)
-	if took := time.Since(start); took > 10*time.Second {
-		t.Fatalf("the reading waited %s for a command with a 300ms deadline", took)
+	if took := time.Since(start); took < 300*time.Millisecond || took > time.Second {
+		t.Fatalf("the reading took %s for a command with a 300ms deadline", took)
 	}
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.MPDTimeout}) {
 		t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
@@ -1289,7 +1378,8 @@ func TestTheMPDPasswordReachesNoReadingAndNoLog(t *testing.T) {
 
 // TestTheReadingSendsOnlyReads holds the reading to its commands, in
 // order: status, then currentsong, replay_gain_status and outputs, the
-// /proc read, then status again. Nothing is written, update least of all.
+// /proc read, then status, replay_gain_status and outputs again. Nothing is
+// written, update least of all.
 func TestTheReadingSendsOnlyReads(t *testing.T) {
 	c := piCaptures[0]
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
@@ -1298,7 +1388,7 @@ func TestTheReadingSendsOnlyReads(t *testing.T) {
 	before := len(rig.mpd.commands())
 	getReading(t, hs, token, id)
 	got := rig.mpd.commands()[before:]
-	want := []string{"status", "currentsong", "replay_gain_status", "outputs", "status"}
+	want := []string{"status", "currentsong", "replay_gain_status", "outputs", "status", "replay_gain_status", "outputs"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("commands %v, want %v", got, want)
 	}
@@ -1331,7 +1421,9 @@ func TestOneMPDCommandAtATime(t *testing.T) {
 	}()
 	waitForCall(t, rig.mpd, "find", 1)
 	snap, _ := rig.cards()
-	picks := dacsFrom(snap, rig.cfg.Inspect(context.Background(), mpd.Options{}))
+	picks := dacsFrom(snap, rig.cfg.Inspect(context.Background(), mpd.Options{}), func(device string, cards []alsa.Card) (int, int, bool) {
+		return alsa.ResolveOutputDevice(alsa.ConfigRoot(snap.ProcRoot), device, cards)
+	})
 	id := outputID(OutputIdentity(""), "127.0.0.1:6600", picks[0].dac.ID, picks[0].dac.USBID)
 	got, found, err := srv.localOutputs.Reading(context.Background(), id)
 	if err != nil || !found {
