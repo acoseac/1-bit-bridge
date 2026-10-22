@@ -472,7 +472,7 @@ func TestTheCheckAfterOpenFollowsAPortBinding(t *testing.T) {
 	sysfstest.Apply(t, root, "unplug "+goBar+"\n"+plug(usb1+"/1-2", 5, "20b1:3009", goBarSerial))
 	for _, r := range []Resolution{place, older, other} {
 		err := check(r)
-		if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "not at the bound port "+goBarPlace) {
+		if !errors.Is(err, ErrWrongDevice) || !strings.Contains(err.Error(), "at platform-xhci-hcd.0/usb2-2:1.0, not at the bound port "+goBarPlace) {
 			t.Errorf("a card at another port: %v", err)
 		} else if strings.Contains(err.Error(), goBarSerial[4:]) {
 			t.Errorf("the refusal carries a serial: %v", err)

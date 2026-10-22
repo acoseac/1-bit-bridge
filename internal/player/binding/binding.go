@@ -493,14 +493,14 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 }
 
 // checkPort is Check under a port binding, which names a port and not a
-// unit: the opened card must be at the bound port, and be the card the
-// binding chooses there now, which on a unit swapped into the port between
-// the resolve and the open it may be. A card on the configuration and
-// interface the binding records is that card whatever else the unit
-// carries; any other card is only while it is the one card the unit
-// carries, which sysfs is read again for. Like Check under the other
-// bindings, it judges by the cards it can read: an unreadable or a
-// transient card is Resolve's to fail closed on.
+// unit: the opened card must be at the bound port (SamePort, from the
+// reading of that card), and be the card the binding chooses there now,
+// which on a unit swapped into the port between the resolve and the open
+// it may be. A card on the configuration and interface the binding records
+// is that card whatever else the unit carries; any other card is only
+// while the unit carries no other, which sysfs is read again for. Like
+// Check under the other bindings, it judges by the cards it can read: an
+// unreadable or a transient card is Resolve's to fail closed on.
 func (c Checker) checkPort(n alsapcm.NodeInfo, u alsa.USBIdentity) error {
 	w := c.Want
 	place := w.Port.Place().String()
@@ -508,20 +508,19 @@ func (c Checker) checkPort(n alsapcm.NodeInfo, u alsa.USBIdentity) error {
 		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(u), place)
 	}
 	if !w.Port.HasInterface() || u.Port != w.Port.String() {
-		var at []int
+		at := []int{n.Card}
 		for _, id := range c.Sysfs.Read().Cards {
-			if id.Kind == alsa.IdentityUSB && id.USB != nil && placeOf(id.USB.Port) == place {
+			if id.Card != n.Card && id.Kind == alsa.IdentityUSB && id.USB != nil && placeOf(id.USB.Port) == place {
 				at = append(at, id.Card)
 			}
 		}
+		sort.Ints(at)
 		switch {
 		case len(at) > 1 && w.Port.HasInterface():
 			return wrongDevice("the unit at the bound port %s carries cards %s, and card %d is not on the interface the binding records (configuration %d, interface %d): resolve again",
 				place, joinInts(at), n.Card, w.Port.Config, w.Port.Interface)
 		case len(at) > 1:
 			return wrongDevice("the unit at the bound port %s carries cards %s, and the binding records no interface to choose one: resolve again", place, joinInts(at))
-		case len(at) == 0 || at[0] != n.Card:
-			return wrongDevice("card %d is not at the bound port %s now: resolve again", n.Card, place)
 		}
 	}
 	if n.Card != w.Card {
