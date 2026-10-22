@@ -51108,3 +51108,61 @@ without round 3's cut refusal (R4-8: the two cut shapes under both port
 forms, and the port-binding test), and every binding checked as a port
 (R4-9: eleven shapes under the unit forms, ten named differences agreeing
 and another model in the port admitted, and both check tests).
+
+**Round 5 (Codex P2; the Claude API found nothing, and Argon was queued).
+The check after open skipped Resolve's controller gate.** Resolve passes a
+port binding through that gate before it looks at any card: the bound
+anchor must be among the controllers the USB listing (`bus/usb/devices`)
+names, or the answer is `binding_invalid`. `checkPort` never read that
+listing, and a card's own port path is read from its device's ancestors,
+not from the listing, so on a reading whose USB listing could not be
+listed, was cut at the cap, or lost the bound controller's root hub
+entries, card 5 still read as at the bound port and the check admitted it
+under either port form. The check now refuses unless the reconciled
+inventory names the bound controller, and its reason carries the
+reading's problems, which say why the listing lacks it. The review asked
+for a sweep of every piece of the inventory Resolve consults against the
+check: whether the card listing is whole, each card's state in both
+trees, the cards' port paths and interfaces (both take the place with
+`placeOf`, and the interface preference compares the whole path), the
+controllers, the hub status, and the bound playback stream. The stream
+was a second gap: Resolve requires it on the card it chooses
+(`endpoint_missing`), and the check took the endpoint from the node
+alone, so another model swapped into the port without the bound stream,
+or card 5 read without it, was admitted. Under a port binding the check
+now requires it on the opened card in /proc/asound. The hub status needs
+nothing: Resolve reads it only when no card is at the bound port, to
+answer `binding_invalid` rather than `device_missing`, and the check
+refuses there too, since the opened card must be at the bound port.
+
+**The rows.** The table gained seven: the USB listing unreadable (a file
+in place of `bus/usb/devices`), the bound controller's two root hub
+entries unreadable in it, and the listing cut before them (an edit, as
+the card listing's cut is); card 5's port path unreadable (its root hub's
+speed unreadable, the controller still listed through its other root
+hub); a hub in the bound port with the GO bar behind it; card 5 without
+the bound stream, and another model in the port without it. Under the
+port forms each agrees. Under the unit forms two differences are named:
+the unreadable port path and the hub refuse a card Resolve would choose
+now, since `SameUnit` compares the port path the open was made from; and
+card 5 without the stream is admitted where Resolve answers
+`endpoint_missing`, since the unit check reads no /proc/asound and takes
+the stream from the kernel's INFO on the open descriptor. The carry
+assertion now compares the inventory's `CardsComplete` with the
+reading's, because the USB cut keeps the card listing whole.
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream` pins the two new
+refusals' reasons. Resolve itself is unchanged: on a USB listing it
+cannot read whole it still answers `binding_invalid`, and on a card whose
+port path cannot be read `device_missing`, both failing closed; telling
+those readings apart would need the reader to say whether its USB listing
+is whole, as `CardsComplete` says of the card listing.
+
+**Red first, and the controls.** On 517de480 with the new rows, the three
+USB-listing rows failed under both port forms (Resolve `binding_invalid`,
+the check admitting card 5), the two stream rows under both port forms
+(Resolve `endpoint_missing`, the check admitting), and the focused test
+four times; the port-path and hub rows passed, as the sweep expected.
+Controls on d9ce5a00, each restored from git: the controller gate dropped
+(R5-1: the three USB-listing rows under both port forms, and the focused
+test's controller case) and the stream check dropped (R5-2: the two
+stream rows under both port forms, and its stream case), both red.
