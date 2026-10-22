@@ -50991,3 +50991,126 @@ storing without closing `Changed`; the watcher started off Linux.
 units of one model, which ambiguity needs, are the fake trees'
 (`TestASecondUnitOfAUniqueModelIsAmbiguous`, and 4a's
 `TestTwoSerialLessUnitsOfOneModelAreAmbiguous`).
+
+**Round 2 (the Claude API, Codex and Argon on round 1): five findings, all
+real, none rejected.** Argon found nothing; the Claude API's Low was one of
+Codex's four. Each was reproduced red on 3114e6c8's code (round 1's head)
+before its fix, and each control mutated the committed fix alone, ran, and
+was restored from git.
+
+1. *A held answer was never published while events kept coming* (the
+Claude API, Medium). An answer a transient card may change (`Settled`'s
+unsettled one) was held while follow-ups remained, and every window's
+reading renewed them. With the bound DAC's card in /proc alone, its sysfs
+half gone first, under a serial binding, and an unrelated device sending a
+change every 400 ms, 3114e6c8's watcher read the box 51 times in 20 s of
+fake time and published once: subscribers read generation 1, available on
+card 5, not stale, for as long as the events went on (a throwaway test,
+not committed). The watch now records the first reading that held the
+answer (`heldSince`), schedules a reading at `heldSince + Timing.holdMax`
+(`MaxDelay + FollowUps×FollowUpEvery`, 3.5 s) at the latest, and from then
+publishes the answer as it stands; a publish ends the hold. The follow-ups
+and what renews them are round 1's. Renewing them only when the transient
+cards change, the review's other option, would not bound a storm whose
+transient cards change too. `TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn`
+publishes identity_transient naming card 5 exactly at the bound and not
+before; on 3114e6c8 it stopped at its watchdog with ten readings and one
+publish, the next reading due at the window's end (3.9 s), not at the
+bound (3.8 s). Controls: the bound's check in `reconcile` removed (red:
+nothing published at the bound's reading); the bound's deadline in
+`next()` removed (red: no reading at the bound).
+
+2. *One replug could advance the generation twice* (Codex). Reachable with
+the real source: it never waits for the watcher, so the kernel's events
+queue in its channel while the watch's goroutine is inside Observe, and
+select picks at random between a fired timer and queued events. A reading
+lasts milliseconds and a replug hundreds, so it takes a reading that blocks
+(a USB serial's read waits on the device lock a disconnect holds, the
+hotplug case itself) or a timer chosen over queued events after one: rare,
+and nothing rules it out. It harms 4b, which stops on a re-enumeration: a
+play started on the new node between the two publishes would be stopped
+for nothing. A reading now takes the events queued behind it before it
+publishes (`takeQueued`, those queued when it starts, each as the loop
+takes one); when a removal among them reaches a card, the reading may show
+it or precede it, so it is set aside (`Stats.SetAside`) and the window
+those events opened reads the box again. Taking the removals into the
+reading's own publish, the review's other option, was run as a control and
+refused: when the removal came after a reading that still showed the unit,
+it publishes a re-enumeration of an unchanged unit, then device_missing. A
+reading is set aside once in a row and never at a held answer's bound, so
+events that keep coming during readings hold nothing back. The harness
+parks a reading before it reads the tree (`parkNextReading`) and queues
+events without waiting for the watcher (`queue`). Red on 3114e6c8:
+`TestAReplugThatQueuedDuringAReadingIsOneGeneration` and
+`TestAReadingIsSetAsideOnceInARow` (a second generation, the unchanged
+unit re-enumerated), and `TestAReadingAtAHeldAnswersBoundIsNeverSetAside`
+(no hold's bound there: its watchdog). `TestAnUnplugThatQueuedDuringAReadingIsOneGeneration`
+is green on 3114e6c8 and holds the fix's choice against folding. Controls:
+the queued removals taken into the publish (red: the unplug test and the
+once-in-a-row test); nothing taken (red: the replug test and the
+once-in-a-row test); no once-in-a-row limit (red: that test); set aside at
+the hold's bound too (red: the hold test).
+
+3. *An incomplete /proc reading counted as complete* (Codex). A card's
+directory or a pcmNp directory that could not be listed was a problem on
+the /proc card alone, which Observe dropped, and the inventory's
+completeness was sysfs's. With the identity files readable, the card read
+as having no endpoint, and 3114e6c8's watcher published endpoint_missing at
+generation 2. The /proc reader now marks a card `Partial`
+(`alsa.CardReading`, in memory only: `TestOutputDACJSONHasOneShapeInEveryState`
+pins the `--json` shape, and the problems say it there) when its directory
+or a pcmNp directory cannot be listed, or the type of a pcmNp or subM entry
+a listing named cannot be read, for any reason but the entry's absence: one
+gone since the listing that named it is the card or the device going, as a
+missing file is. Observe makes the inventory partial when a card is
+(`partialCards`, on the line where the inventory decides its completeness)
+and carries those cards' problems, so the watcher's failure names the
+directory. `os.Root` opens each directory on a file's way for reading, on
+every Unix, so a card directory without read permission hides its usbid
+too, and a USB-Audio card is then transient; the binding test's card there
+is one whose driver writes no usbid. Red on 3114e6c8:
+`TestAReadingThatCannotListACardsDevicesIsPartial` (a PCM directory without
+read permission, one whose link leaves the tree, a card directory without
+read permission: each partial false and endpoint_missing; its two absences
+are green there) and `TestACardWhoseDevicesCannotBeListedIsAFailure`
+(endpoint_missing at generation 2). `TestAProcCardSaysWhenItsDevicesCannotAllBeListed`
+pins the reader, link loops and a directory gone between two listings
+included (red on 3114e6c8 by build: no `CardReading.Partial`). Controls:
+Observe ignoring the card's mark (red: the binding and watcher tests); the
+reader never setting it (red: all three); the reader setting it for an
+absent entry too (red: the reader's gone-before-its-listing case). The
+port-binding PR, which merges first, moves Observe's body into
+`inventory(snap, sys)` and adds `SysfsSnapshot.CardsComplete`; the merge
+carries `partialCards` and `Partial: sys.Partial || procPartial` into
+`inventory`, and its check after open (`checkPort`, which builds an
+inventory too) does not yet look at `Partial`.
+
+4. *Continuous traffic held the source past its stop* (Codex). `run`
+looked at its context only in `wait`, which the drain reaches once recv
+answers EAGAIN, and a socket refilled as fast as it is read never does.
+The drain now looks at the context before every recv, the EINTR and
+ENOBUFS retries included. `TestTheSourceStopsWhileTheKernelKeepsSending`
+(a fake socket answering a message, EINTR or ENOBUFS without end,
+cancelled once it is draining) was red on 3114e6c8 in all three cases:
+each read on to the 30 s watchdog, 12.4 million messages and 52 million
+ENOBUFS. Control: the check removed (red: all three). It runs on every OS.
+
+5. *A stopped sysfs reading could come back whole* (Codex, and the Claude
+API's Low). `ReadContext`'s result was unnamed, so `return snap` copied
+the reading before the deferred function marked it Partial: a stop before
+the last card, or in usb()'s root-hub or device loop, returned what came
+after it missing with Partial false. The watcher was safe only because
+ObserveContext checks the context itself. The result is now named.
+`TestAStoppedReadingOpensNothingMore` stopped at card 5, the last, where
+Partial came from usb()'s listing, which the stop refused: round 1's test
+stayed green here with the deferred mark deleted. It now stops in card 0
+of 0, 1 and 5 (a USB DAC put in for the first HDMI card), in a root hub
+before three more, and in a USB device before another; each was red on
+3114e6c8 (partial false, no problem). Control: the unnamed result (red:
+all three).
+
+The gate, through the build lock: `make fmt vet` clean, `make test` green
+(about 19 minutes on this Mac), `make build-all` clean, `make docs-check`
+clean; the hotplug package passed `-count=20 -cpu 1,2,8`. No test here
+needs Linux. The rules for rounds 1 and 2 are one note, not yet applied
+to the rules files.
