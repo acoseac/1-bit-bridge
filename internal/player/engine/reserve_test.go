@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -252,6 +253,28 @@ func TestNewRefusesADirectoryThatCannotBeSynced(t *testing.T) {
 	h.boot()
 	if got := h.snap().IDs(); !slices.Equal(got, ids) {
 		t.Fatalf("once the directory syncs the queue loads as %v, want %v", got, ids)
+	}
+}
+
+// TestNewRefusesAReservationDirectoryThatIsAFile pins New's probe on a
+// reservation path whose directory is a regular file: the barrier, which
+// opens and fsyncs whatever is there, answers nil for a file, and the
+// reservation could never be written, so New refuses it, naming the file as
+// what is not a directory. The barrier is the test's, answering nil, so only
+// the probe's own check can refuse, on Windows too.
+func TestNewRefusesAReservationDirectoryThatIsAFile(t *testing.T) {
+	prev := atomicwrite.SetSyncParentDirForTest(func(string) error { return nil })
+	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	h := newHarness(t)
+	file := filepath.Join(h.dir, "existing-file")
+	h.must("write the file", os.WriteFile(file, []byte("x"), 0o600))
+	h.be = newFakeBackend(t)
+	cfg := h.config()
+	cfg.ReservePath = filepath.Join(file, "ids")
+	cfg.seams.probe = nil
+	_, err := New(cfg)
+	if !errors.Is(err, syscall.ENOTDIR) || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("New with the reservation's directory a regular file = %v, want a refusal naming %s as not a directory", err, file)
 	}
 }
 

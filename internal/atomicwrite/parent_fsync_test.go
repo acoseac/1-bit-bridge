@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -203,6 +204,20 @@ func TestProbeDurable(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(root, "a")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the probe created %s (%v)", filepath.Join(root, "a"), err)
 	}
+
+	// A regular file where the directory should be is no directory, though
+	// the barrier, which opens and fsyncs whatever is there, answers nil for
+	// it; and below it too, where Stat's own error stands.
+	file := filepath.Join(root, "existing-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(file, "reserved.json"), filepath.Join(file, "sub", "reserved.json")} {
+		if err := ProbeDurable(p); !errors.Is(err, syscall.ENOTDIR) || !strings.Contains(err.Error(), file) {
+			t.Fatalf("ProbeDurable(%s) = %v, want ENOTDIR naming %s", p, err, file)
+		}
+	}
+	synced()
 
 	syncErr := errors.New("sync dir: invalid argument")
 	stubSyncParentDir(t, syncErr)

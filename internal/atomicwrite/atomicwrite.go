@@ -62,6 +62,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -341,6 +342,11 @@ func missing(dir string) []string {
 // every WriteBytesDurable fails; a caller that would then refuse its work
 // for ever, with nothing naming the cause, asks once as it starts and
 // refuses to start instead.
+//
+// What it probes must be a directory: the barrier opens and fsyncs whatever
+// is there, and answers nil for a regular file, where no write can ever be
+// made. A regular file is an error wrapping syscall.ENOTDIR, and any other
+// error Stat gives is returned as it is.
 func ProbeDurable(path string) error {
 	if syncParentDir == nil {
 		return ErrNoDirectoryBarrier
@@ -348,6 +354,12 @@ func ProbeDurable(path string) error {
 	dir := filepath.Dir(path)
 	if m := missing(dir); len(m) > 0 {
 		dir = filepath.Dir(m[len(m)-1])
+	}
+	switch info, err := os.Stat(dir); {
+	case err != nil:
+		return err
+	case !info.IsDir():
+		return &fs.PathError{Op: "probe", Path: dir, Err: syscall.ENOTDIR}
 	}
 	if err := syncParentDir(filepath.Join(dir, filepath.Base(path))); err != nil {
 		return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)

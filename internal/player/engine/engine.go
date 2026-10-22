@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -227,8 +228,11 @@ func New(cfg Config) (*Engine, error) {
 // and the engine would refuse every edit for ever, so it does not start.
 func notDurable(path string, err error) error {
 	dir := filepath.Dir(path)
-	if errors.Is(err, atomicwrite.ErrNoDirectoryBarrier) {
+	switch {
+	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", dir, err)
+	case errors.Is(err, syscall.ENOTDIR):
+		return fmt.Errorf("player: the reservation file's directory %s is not a directory, so no reservation can be written there: %w", dir, err)
 	}
 	return fmt.Errorf("player: the reservation file's directory %s cannot be synced, so no ID or token reserved there would survive a crash: move the data directory to a filesystem that can sync a directory: %w", dir, err)
 }

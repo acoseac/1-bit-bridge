@@ -130,16 +130,17 @@
 // whose directory fsync fails is a reservation not made, since its rename
 // can roll back at a crash. New probes that barrier on the reservation
 // file's directory before it reads anything (atomicwrite.ProbeDurable) and
-// fails when it cannot sync it: on a filesystem whose directory fsync always
-// fails, as some network and FUSE mounts' does, every reservation would fail
-// and every edit be refused for ever, so the error names the directory and
-// says the data directory must move to a filesystem that can sync a
-// directory. A platform with no directory fsync (Windows) is refused the
-// same way. The next block is reserved in the background, so a command
-// waits on a write only when that write has not landed by the time the
-// current block runs out, and at most reserveTimeout: past it the waiting
-// edits are refused with ReasonReservation, and so is every edit that needs
-// a value until the write lands. A start begins one block past the larger
+// fails when that is not a directory, or cannot be synced: on a filesystem
+// whose directory fsync always fails, as some network and FUSE mounts'
+// does, every reservation would fail and every edit be refused for ever, so
+// the error names the directory and says the data directory must move to a
+// filesystem that can sync a directory. A platform with no directory fsync
+// (Windows) is refused the same way. The next block is reserved in the
+// background, so a command waits on a write only when that write has not
+// landed by the time the current block runs out, and at most
+// reserveTimeout: past it the waiting edits are refused with
+// ReasonReservation, and so is every edit that needs a value until the
+// write lands. A start begins one block past the larger
 // of the saved reservations, the queue file's values and its largest ID, a
 // margin for one reservation that storage acknowledged and did not keep,
 // and every start advances the token once its own reservation is durable:
