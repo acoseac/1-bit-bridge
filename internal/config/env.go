@@ -226,7 +226,8 @@ func envBindings() []envBinding {
 // yaml/default value stands. That direction is deliberate: coercing a
 // typo like `yes` or `on` to false would silently turn a feature off,
 // and a bridge that quietly stopped doing something is much harder to
-// notice than one that ignored an override and said so.
+// notice than one that ignored an override and said so. The warning names
+// the variable alone (unparseableBoolEnv, unparseableIntEnv).
 func (c *Config) applyEnvOverrides() {
 	byPath := make(map[string]envBinding, 128)
 	for _, b := range envBindings() {
@@ -253,6 +254,15 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
+// The warnings for a BRIDGE_* variable that does not read as its setting's
+// boolean or whole number. They name the variable and never its value, nor
+// strconv's error, which repeats the value: a secret set in the wrong
+// variable reached the journal with them until B505's round 3.
+const (
+	unparseableBoolEnv = "ignoring unparseable boolean env var"
+	unparseableIntEnv  = "ignoring unparseable integer env var"
+)
+
 func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 	fv := reflect.ValueOf(c).Elem()
 	for _, i := range b.index {
@@ -267,7 +277,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 	case reflect.Bool:
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
-			validateLogger.Warn("ignoring unparseable boolean env var", "var", name, "value", raw, "err", err)
+			validateLogger.Warn(unparseableBoolEnv, "var", name)
 			return
 		}
 		fv.SetBool(v)
@@ -276,14 +286,14 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 		case reflect.Bool:
 			v, err := strconv.ParseBool(raw)
 			if err != nil {
-				validateLogger.Warn("ignoring unparseable boolean env var", "var", name, "value", raw, "err", err)
+				validateLogger.Warn(unparseableBoolEnv, "var", name)
 				return
 			}
 			fv.Set(reflect.ValueOf(&v))
 		case reflect.Int, reflect.Int64:
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
-				validateLogger.Warn("ignoring unparseable integer env var", "var", name, "value", raw, "err", err)
+				validateLogger.Warn(unparseableIntEnv, "var", name)
 				return
 			}
 			// Allocate through the field's own element type so an
@@ -295,7 +305,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 	case reflect.Int, reflect.Int64:
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			validateLogger.Warn("ignoring unparseable integer env var", "var", name, "value", raw, "err", err)
+			validateLogger.Warn(unparseableIntEnv, "var", name)
 			return
 		}
 		fv.SetInt(v)

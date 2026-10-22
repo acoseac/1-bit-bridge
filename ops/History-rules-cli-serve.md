@@ -748,8 +748,105 @@
   mints one, the same pin break); and one setting
   `demo.enabled` or `deployment.managed*`, postures init never writes, whose
   rewrite dropped the demo's pinned token from every shipped app or handed a
-  tenant's withheld controls to its console. A fresh start is moving
-  `bridge.yaml` aside, never `--force`.
+  tenant's withheld controls to its console. That refusal names the
+  controls this build knows, a fixed set, and each other entry of
+  `deployment.managedControls` by its place in the list
+  (`deployment.managedControls[1]: not a control this build knows`), never
+  by what it holds: an entry that names no control can hold anything, and
+  the refusal joined the list as written, a password pasted onto the line
+  with it (B505's round 4, Codex; `managedControlsSaid`,
+  `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`). A fresh
+  start is moving `bridge.yaml` aside, never `--force`.
+  **So is the output block, whole, in either posture, a change of posture
+  included** (2026-10-22, backlog B505). It says what is beside the
+  bridge on this box, MPD and the player's DAC, and init asks for none of
+  it, so nothing in a run replaces it; a rewrite dropped it, `output.player`
+  and its binding with it. Only the unit gives the binding's serial back
+  (bind reads it from sysfs and never prints it), MPD's password comes
+  from MPD's own configuration, the loopback route's port is where MPD's
+  queued URLs point, and `output.mpd: off` is the operator's opt-out, which
+  the default would turn back on. `--force`'s help names the block beside
+  the data dir and the pair. `priorOutput` reads it from the bytes the run
+  read, on its own and a setting at a time: as a field of
+  `priorInstallFile` a type error in it fails that struct's whole decode,
+  and `refuseRewrite` refuses the rewrite about a data dir and a pair it
+  could read. **Every setting it keeps holds the value Load gave it, and a
+  file Load's decoder takes whole gives up Load's own block** (rounds 2 to
+  4). `priorOutput` decodes the unchanged bytes as Load does, the same
+  decoder set the same way (`KnownFields`) into `config.Config`, before
+  Load's defaults, its BRIDGE_* overrides, its paths and its checks, and
+  keeps that decode's output block (`outputAsLoadDecodes`; the
+  orchestrator's decision on round 4). So nothing the decoder reads or
+  counts differs from Load's. Round 1 decoded the block's pairs in the
+  file's order and kept each value that was not zero: a merge written after
+  a key overwrote it (`mpd: off` was saved `on`, a serial binding replaced
+  by a merged port binding), and an explicit empty or null value let a
+  merged one through (Codex). Round 2's `resolveOutput` resolved the merge
+  keys itself, as a copy of the decoder's rules, and the copy disagreed
+  with the decoder three ways (Codex and the Claude API on round 2): it
+  compared a key written as `!!binary` by its base64 text, so `{!!binary
+  cGFzc3dvcmQ=: "", <<: {password: old-pw}}`, an empty password to Load,
+  was saved with `old-pw`; it followed 64 merged blocks, so a password
+  listed after 63 empty ones was dropped from a config that loads; and it
+  dropped a setting a merged block names twice through an alias key, where
+  the decoder takes the first. Round 3 decoded the block on its own with
+  the decoder (`outputAsLoaded`, an Unmarshaler of yaml.v3's older form,
+  whose callback decodes with the decoder at hand and returns the errors of
+  that value alone), which read every value as Load does but not what
+  yaml.v3 counts across the document: it refuses a document whose alias
+  expansions pass 99 in 100 decodes, so a block whose merges expand aliases
+  tenfold a level, beside 1,000 library roots, which Load takes, was refused
+  there, fell to the certainty recovery, met the merge key and kept
+  nothing, its password with it (Codex on round 3). Of the block Load
+  decodes, every setting is kept but those
+  `config.OutputConfig.WithoutRefused` refuses (Validate's refusals, of
+  which `Problem` is the first), each named by the line of the block's own
+  key that writes it, or as merged when none does; the lines come from the
+  node the decoder hands the output field, read without decoding a value
+  (`outputNode`). Only a file the decoder refuses somewhere, one Load
+  refuses, goes further, and of it the rewrite keeps only what is certain:
+  the block as the decoder decodes it on its own, when it does
+  (`outputAsLoaded`; what the decoder counts outside the block can only make
+  it refuse more, never read a value otherwise); else, when every key is
+  text with no tag (`plainKey`), each setting a key names once, decoded on
+  its own, unless refused (`outputRecovered`); a key written more than once
+  and a key output does not take are left out and named by their lines (an
+  unknown key went without a word until round 3). A merge key, an alias or
+  a tag among the keys, or a block that is not a mapping, keeps nothing,
+  and the warning says so: which setting a value is for is the decoder's to
+  say, and the decoder refused the block. So does a block the file writes
+  twice, once encoded (`outputKeyLines`; written twice as it is,
+  `refuseRewrite` refuses the rewrite). Every line names the setting or the
+  block and a line, **never a value**: `OutputProblem`'s reason carries
+  none, a key output does not take is named by its line alone
+  (`warnOutputNotKept`), and round 1's warning, which quoted a refused
+  `output.mpd`, put MPD's password pasted onto that line on stderr (round
+  2). The refusal of a config that does not decode prints yaml.v3's error
+  without the file's text (`config.ValueFreeYAMLError`, round 3). A player
+  block never fails, and one this release cannot read is kept as written.
+  `printKept` lists each kept setting, the password as "set (not shown)"
+  and the player by whether it is enabled and its binding's kind. **Don't
+  drop the output block, and don't read it as a field of
+  `priorInstallFile`.** **Don't read the output block apart from the file
+  when the whole file decodes: keep Load's own decode, and of a file the
+  decoder refuses keep only what is certain; don't print a refused
+  setting's value, or a managed control this build does not know.**
+  (`TestInitRewriteKeepsTheOutputBlock`,
+  `TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten`,
+  `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo`,
+  `TestInitRewriteKeepsWhatTheOutputBlockLoadedWith`,
+  `TestInitRewriteResolvesMergesBesideASettingItCannotKeep`,
+  `TestPriorOutputResolvesMergeKeysAsLoadDoes`, whose whole-config shapes
+  put 1,000 library roots, 200 custom endpoints and 100 upstream servers
+  beside the block,
+  `TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt`,
+  `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`, and
+  `TestPriorOutputOfAFileTheDecoderRefusesElsewhere`, which puts a
+  misspelt top-level key beside a merged block the decoder takes alone,
+  kept as Load decodes it once the typo is put right, and beside Codex's
+  alias-heavy block, of which nothing is kept: since round 4 gave every
+  file that decodes Load's own block, its fixtures are the only ones that
+  reach that reading (the Claude API on round 4; the test, round 5).)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.
@@ -1183,6 +1280,48 @@ mentions across the four `ops/audit-*.md` files.
   `TestBuildBackupSourcesNamesTheConsoleAccountAndHarvestState`,
   `TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState`,
   `TestCopyFileStreamsRatherThanReadingTheFileWhole`.)
+
+- **A snapshot captures the player's identity, and restore gives the box
+  the snapshot's: read by the player's rule before any file is written,
+  and written by the identity file's own writer** (2026-10-22, backlog
+  B505). `<dataDir>/player-uuid` is the player's identity to a controller
+  (PR 5a makes it the OpenHome device's UDN), and the bundle did not hold
+  it, so a restored box kept the identity it had, or had none and made a
+  new one: every controller saw a new player. `Sources.PlayerUUID` and
+  `Targets.PlayerUUID` name it, through `buildBackupSources` and
+  `buildRestoreTargets`. `Snapshot` copies it as stored, 0600, whatever it
+  holds (a backup that refused a damaged identity would stop every
+  backup), and skips a box with none. **The snapshot's identity wins over
+  the box's**: a restore makes the box the bridge the snapshot was taken
+  from, its database, tokens, TLS pair and config included, and that
+  bridge's player is the device its controllers know by that UUID. A
+  snapshot without the file, taken before B505 or of a box whose player
+  had none, leaves the box's identity as it is and makes none. `Restore`
+  reads the copy before its loop, by the player's own rule
+  (`config.ReadPlayerUUIDFile`: one lowercase UUID, white space after it
+  and nothing else, 128 bytes at most), for the console account's
+  reason: the manifest lists the file last, and a check at its turn would
+  come after every other file was replaced. A copy that does not hold one
+  UUID fails the restore before any file is written; the refusal names
+  the copy and says to remove it from the snapshot, which restores the
+  rest and leaves the box's identity as it is (a copy the snapshot lists
+  and no longer holds is skipped). The refusal tests restore the database
+  too and watch its -wal and -shm, and the CLI's a track added after the
+  snapshot: a check moved after the database step, the first file a
+  restore writes, passed tests that restored no database (round 2,
+  Codex). The UUID is written by `config.WritePlayerUUIDFile`, the writer
+  `EnsurePlayerUUID` uses: the UUID and a newline, 0600 whatever the
+  copy's mode, one `KeepOwner`. Schema stays 1. **Don't restore
+  `player-uuid` as bytes, and don't let a copy that does not hold one UUID
+  reach the loop.**
+  (`TestBackupAndRestoreGiveThePlayerTheIdentityItHad`,
+  `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`,
+  `TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`,
+  `TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`,
+  `TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`,
+  `TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`,
+  `TestBuildBackupSourcesNamesThePlayerUUID`.)
 
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
   It fails closed on anything but connection-refused, which is right; but

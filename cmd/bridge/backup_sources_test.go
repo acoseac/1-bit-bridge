@@ -35,3 +35,22 @@ func TestBuildBackupSourcesNamesTheConsoleAccountAndHarvestState(t *testing.T) {
 		t.Fatalf("harvest path %q, snapshot name %q", src.AtlasHarvest, backup.AtlasHarvestFileName)
 	}
 }
+
+// The player's UUID is in the data dir, and every snapshot path and the
+// restore name it there, or a restored box's player would be a new device
+// to every controller.
+func TestBuildBackupSourcesNamesThePlayerUUID(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{DataDir: filepath.Join(dir, "data")}
+	yamlPath := filepath.Join(dir, "bridge.yaml")
+	src := buildBackupSources(cfg, yamlPath)
+	dst := buildRestoreTargets(cfg, yamlPath)
+
+	want := filepath.Join(cfg.DataDir, config.PlayerUUIDFile)
+	if src.PlayerUUID != want || dst.PlayerUUID != want {
+		t.Fatalf("player-uuid src %q dst %q, want %q", src.PlayerUUID, dst.PlayerUUID, want)
+	}
+	if backup.PlayerUUIDFileName != config.PlayerUUIDFile {
+		t.Fatalf("backup names %q, the player names %q", backup.PlayerUUIDFileName, config.PlayerUUIDFile)
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +147,10 @@ func TestLoadMalformedYAML(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnknownKeys: a misspelt key fails the load, named by its
+// line and never by its text, since a scalar written alone in a flow block
+// is a key too, and that can be a password pasted there (B505's round 3;
+// the error quoted the key until then).
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	configPath, _ := writeConfig(t, `
 libraryRoots:
@@ -155,8 +158,9 @@ libraryRoots:
 libraryRootz: "typo"
 `)
 	_, err := Load(configPath)
-	if err == nil || !strings.Contains(err.Error(), "libraryRootz") {
-		t.Errorf("expected typo to be caught, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "line 4: that key is not a field of type config.Config") ||
+		strings.Contains(err.Error(), "libraryRootz") {
+		t.Errorf("expected the typo to be caught and named by its line alone, got %v", err)
 	}
 }
 
@@ -1097,8 +1101,10 @@ func TestValidateRejectsBadTailscaleMode(t *testing.T) {
 	if !strings.Contains(err.Error(), "tailscale.mode") {
 		t.Errorf("error should mention tailscale.mode, got %v", err)
 	}
-	if !strings.Contains(err.Error(), strconv.Quote("tnset")) {
-		t.Errorf("error should preserve the original input %q verbatim, got %v", "tnset", err)
+	// The modes the field takes, and nothing of what was written (B505's
+	// round 3: it quoted the value until then).
+	if !strings.Contains(err.Error(), "cli, tsnet or disabled") || strings.Contains(err.Error(), "tnset") {
+		t.Errorf("error should name the modes and not quote %q, got %v", "tnset", err)
 	}
 }
 
@@ -1132,9 +1138,9 @@ func TestValidateAcceptsKnownTailscaleModes(t *testing.T) {
 //
 // The parser tolerates leading/trailing whitespace and case
 // differences (`mode: " TSNet "` → `tsnet`) — common from
-// hand-edited YAML — but preserves the original (untrimmed) value
-// in the error message so a typo report doesn't mislead with an
-// invisible-whitespace explanation.
+// hand-edited YAML. The error names the words the field takes and
+// never the value, which can be a secret pasted onto the wrong line
+// (B505's round 3; it quoted the original value until then).
 func TestTailscaleEffectiveMode(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -1161,7 +1167,7 @@ func TestTailscaleEffectiveMode(t *testing.T) {
 		{"tnset", "", true},     // typo
 		{"enabled", "", true},   // user might guess "enabled" as the inverse of "disabled"
 		{"on", "", true},        // truthy synonym
-		{"   tnset ", "", true}, // trimmed but still a typo — error message must carry the original
+		{"   tnset ", "", true}, // trimmed but still a typo
 		{"TS-NET", "", true},    // hyphenated guess
 	}
 	for _, c := range cases {
@@ -1171,10 +1177,9 @@ func TestTailscaleEffectiveMode(t *testing.T) {
 				t.Errorf("EffectiveMode(%q) want error, got %v", c.in, got)
 				continue
 			}
-			// Error message preserves the ORIGINAL (untrimmed) input
-			// so the operator sees what they actually typed.
-			if !strings.Contains(err.Error(), strconv.Quote(c.in)) {
-				t.Errorf("EffectiveMode(%q) error message %q must contain the original input verbatim", c.in, err.Error())
+			// The words the field takes, and nothing of what was written.
+			if !strings.Contains(err.Error(), "cli, tsnet or disabled") || strings.Contains(err.Error(), strings.TrimSpace(c.in)) {
+				t.Errorf("EffectiveMode(%q) error message %q must name the modes and carry none of the value", c.in, err.Error())
 			}
 			continue
 		}

@@ -38,7 +38,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what can be DIALED, and they differ on exactly port 0.** → History-rules-cli-serve.md
 - **A doctor hint is read by an OPERATOR, so no string in `internal/doctor` names a `Deps` field** (2026-09-28) → History-rules-cli-serve.md
 - **`bridge init` decides every refusal BEFORE it writes `bridge.yaml`, and keeps what an install already has: its TLS pair and a public install's admin ACCOUNT** (#1038) **Don't mint over a store that does not load** **don't keep silently** → History-rules-cli-serve.md
-- **A rewrite replaces the SETTINGS, never the INSTALL.** **Never drop or rewrite it** **never "proceed when init's data dir holds a pair"** **never "keep the paths only when both are set"** → History-rules-cli-serve.md
+- **A rewrite replaces the SETTINGS, never the INSTALL.** **Never drop or rewrite it** **never "proceed when init's data dir holds a pair"** **never "keep the paths only when both are set"** **Don't drop the output block, and don't read it as a field of `priorInstallFile`.** **Don't read the output block apart from the file when the whole file decodes: keep Load's own decode, and of a file the decoder refuses keep only what is certain; don't print a refused setting's value, or a managed control this build does not know.** → History-rules-cli-serve.md
 - **A flag the run would not write is never dropped without a word, and a posture flag stops no first install** (2026-09-29, backlog B61) **Don't refuse a run over one that loses nothing by it** → History-rules-cli-serve.md
 
 
@@ -68,6 +68,7 @@ The largest package in the repo (`main.go` alone 4,698 lines) had **no section h
 - **A lock file is opened through `fsutil.OpenLockFile`, which asks again when its create loses a race** (2026-10-14, backlog B185) **Don't open a lock file with a bare `os.Root.OpenFile(name, O_CREATE)`** → History-rules-cli-serve.md
 - **`bridge restore` and `bridge manifest clear-missing` hold the data-dir lock for the whole run.** → History-rules-cli-serve.md
 - **A snapshot captures the console account and the harvest state, and restore brings the account back signed out** (2026-10-13, backlog B200) → History-rules-cli-serve.md
+- **A snapshot captures the player's identity, and restore gives the box the snapshot's: read by the player's rule before any file is written, and written by the identity file's own writer** (2026-10-22, backlog B505) **Don't restore `player-uuid` as bytes, and don't let a copy that does not hold one UUID reach the loop.** → History-rules-cli-serve.md
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.** → History-rules-cli-serve.md
 - **`flag.Parse` stops at the first non-flag argument, so an unguarded
   subcommand silently WIDENS its scope.** `bridge enrichment retry

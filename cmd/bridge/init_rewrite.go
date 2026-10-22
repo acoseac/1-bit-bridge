@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +63,17 @@ import (
 //     name. A script that re-runs init --yes --force and expects :7788
 //     keeps the old port instead. printKept lists an address only when a
 //     first install of this posture would have written another.
+//   - output, the whole block, in either posture (backlog B505). It says
+//     what is beside the bridge on this box, the MPD and the player's DAC,
+//     and init asks for none of it. The player's binding names a unit by a
+//     serial that bridge output dac bind reads from the unit and never
+//     prints, so only the unit can give it back; MPD's password is typed
+//     from MPD's own configuration; MPD keeps the loopback route's URLs in
+//     its queue, so a port the rewrite reset broke every queued track; and
+//     output.mpd: off is the operator's opt-out, which the default, auto,
+//     would turn back on. A setting that does not read, or that the
+//     config's own check refuses, is not kept, and the run says which and
+//     why (priorOutput, warnOutputNotKept).
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features and cadences. The ports are kept under
@@ -122,7 +134,9 @@ func priorInstallFrom(cfgPath string, read configAsRead) (*priorInstallFile, err
 	}
 	var p priorInstallFile
 	if err := yaml.Unmarshal(read.raw, &p); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
+		// Without the file's text, as config.Load says it: refuseRewrite
+		// prints this, and yaml.v3 quotes what it cannot decode.
+		return nil, fmt.Errorf("parse %s: %w", cfgPath, config.ValueFreeYAMLError(err))
 	}
 	abs, err := filepath.Abs(cfgPath)
 	if err != nil {
@@ -292,14 +306,36 @@ func (p *priorInstallFile) madeElsewhere() []postureKey {
 	}
 	if len(p.Deployment.ManagedControls) > 0 {
 		out = append(out, postureKey{"deployment.managedControls",
-			"its console would offer the controls its operator withholds (" +
-				strings.Join(p.Deployment.ManagedControls, ", ") + ")"})
+			"its console would offer the controls its operator withholds (" + managedControlsSaid(p.Deployment) + ")"})
 	}
 	if len(p.Deployment.ManagedSettings) > 0 {
 		out = append(out, postureKey{"deployment.managedSettings",
 			"its console could change the settings its operator manages"})
 	}
 	return out
+}
+
+// managedControlsSaid names the managed controls d lists, for init's
+// refusal: each name this build knows as it is, one of a fixed set, and each
+// other entry by its place in the list with a fixed explanation
+// (config.DeploymentConfig.UnknownManagedControls), never by what it holds,
+// which can be anything, a password pasted onto the list's line included
+// (B505's round 4: the entries were joined as written).
+func managedControlsSaid(d config.DeploymentConfig) string {
+	var known []string
+	for _, m := range d.ManagedControls {
+		if slices.Contains(config.KnownManagedControls(), m) && !slices.Contains(known, m) {
+			known = append(known, m)
+		}
+	}
+	said := strings.Join(known, ", ")
+	if unknown := d.UnknownManagedControls(); len(unknown) > 0 {
+		if said != "" {
+			said += "; "
+		}
+		said += strings.Join(unknown, ", ") + ": not a control this build knows"
+	}
+	return said
 }
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
@@ -471,13 +507,362 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	if adminKept {
 		add("adminAddress", cfg.AdminAddress)
 	}
+	// A first install writes no output block, so one in cfg was kept.
+	for _, l := range keptOutputLines(cfg.Output) {
+		add(l[0], l[1])
+	}
 	if len(lines) == 0 {
 		return
+	}
+	// Sixteen columns, or the longest key's (output.loopbackPort is 19).
+	width := 16
+	for _, l := range lines {
+		width = max(width, len(l[0]))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, keptFromHeading)
 	for _, l := range lines {
-		fmt.Fprintf(w, "  %-16s %s\n", l[0], l[1])
+		fmt.Fprintf(w, "  %-*s %s\n", width, l[0], l[1])
 	}
 	fmt.Fprintln(w, "every other setting is this run's or the default.")
+}
+
+// priorOutput reads the output block of the config a rewrite replaces (raw,
+// the bytes the run read): what the rewrite keeps of it, and a line for each
+// setting, or for the block, it does not keep.
+//
+// A file Load's decoder takes whole gives up Load's own block: raw decoded
+// as Load decodes it, the same decoder set the same way (KnownFields) into
+// config.Config, before Load's defaults, its BRIDGE_* overrides, its paths
+// and its checks (outputAsLoadDecodes). So no merge key, alias, tag or
+// encoded key is read one way here and another by Load, and neither is
+// anything the decoder counts across the document (B505's round 4: round 3
+// decoded the block on its own, and yaml.v3 counts aliases document-wide, so
+// a block whose merges expand aliases tenfold a level beside 1,000 library
+// roots, which Load takes, was refused as "excessive aliasing" and lost its
+// password; round 2's resolver of its own disagreed with the decoder on
+// encoded keys, on a merge past 64 blocks and on an alias key). Of that
+// block, the settings config.OutputConfig.WithoutRefused refuses are the
+// ones Load refuses it for: each is left out, and the rest kept as decoded.
+//
+// A file the decoder refuses, anywhere, is one Load refuses, and of its
+// block the rewrite keeps only what is certain: the block as the decoder
+// decodes it on its own, when it does (outputAsLoaded; what the decoder
+// counts outside the block can only make it refuse more, never read a value
+// otherwise); else, of a block whose keys are plain text, each written once,
+// beside no merge key, alias or tag among the keys, each setting decoded on
+// its own (outputRecovered); else nothing, and a line that says so. So is a
+// block the file writes twice, which Load refuses whatever each holds.
+//
+// Each line names the setting and the line of its key, or the block and its
+// line, never a value. A player block never fails: one this release cannot
+// read is kept as the file holds it, as Load keeps it, and the player stays
+// off. Read on its own, never as a field of priorInstallFile: a type error in
+// the block fails that struct's whole decode, and refuseRewrite would then
+// refuse the rewrite over a block it can do without.
+func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
+	if block, ok := outputAsLoadDecodes(raw); ok {
+		kept, refused := block.WithoutRefused()
+		node := outputNode(raw)
+		for _, p := range refused {
+			notKept = append(notKept, outputRefusal(p, node))
+		}
+		return kept, notKept
+	}
+	keyLines := outputKeyLines(raw)
+	if len(keyLines) > 1 {
+		return config.OutputConfig{}, []string{fmt.Sprintf("output (lines %s): it is written twice, which Load refuses, so none of it is kept",
+			lineList(keyLines))}
+	}
+	var file struct {
+		Output outputAsLoaded `yaml:"output"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	// Every other key of the file is one this struct does not have, and the
+	// decoder's error says so: what matters is what outputAsLoaded recorded.
+	_ = dec.Decode(&file)
+	o := file.Output
+	switch {
+	case !o.found:
+		// No block, or a null one: Load decodes none either.
+		return config.OutputConfig{}, nil
+	case o.node == nil:
+		return config.OutputConfig{}, []string{"output: it does not load, so none of it is kept"}
+	case o.err == nil:
+		kept, refused := o.block.WithoutRefused()
+		for _, p := range refused {
+			notKept = append(notKept, outputRefusal(p, o.node))
+		}
+		return kept, notKept
+	}
+	at := o.node.Line
+	if len(keyLines) == 1 {
+		at = keyLines[0]
+	}
+	return outputRecovered(o.node, at)
+}
+
+// outputAsLoadDecodes is the output block of raw as config.Load decodes it,
+// when Load's decoder takes the whole file: the same decoder, set as Load
+// sets it (KnownFields), into config.Config, the type Load decodes into,
+// taken before anything Load does after the decode. ok is false when the
+// decoder refuses any of the file. An empty file decodes as no block.
+func outputAsLoadDecodes(raw []byte) (block config.OutputConfig, ok bool) {
+	var cfg config.Config
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		return config.OutputConfig{}, false
+	}
+	return cfg.Output, true
+}
+
+// outputNode is the node the decoder hands the file's output field, through
+// a top-level merge or an alias as it reads them, and nil for no block or a
+// null one: where the lines of a block's own keys are, for the warnings. It
+// decodes no value, so it counts no alias the block expands.
+func outputNode(raw []byte) *yaml.Node {
+	var file struct {
+		Output nodeOf `yaml:"output"`
+	}
+	_ = yaml.Unmarshal(raw, &file)
+	return file.Output.node
+}
+
+// outputAsLoaded is the output block as Load's decoder decodes it on its
+// own: the node the decoder hands it, through an alias, and
+// config.OutputConfig decoded from that node by the same decoder, with the
+// error of that decode alone, nil for a block the decoder takes. found is
+// false for a file with no block, or a null one, which Load decodes as none.
+// It is what priorOutput reads of a file the decoder refuses elsewhere.
+type outputAsLoaded struct {
+	found bool
+	node  *yaml.Node
+	block config.OutputConfig
+	err   error
+}
+
+// UnmarshalYAML is yaml.v3's older Unmarshaler, whose unmarshal decodes a
+// value with the decoder at hand, Load's settings included, and returns the
+// errors of that value alone, a refusal the decoder panics with included. It
+// never fails the file's decode.
+func (o *outputAsLoaded) UnmarshalYAML(unmarshal func(any) error) error {
+	o.found = true
+	var n nodeOf
+	_ = unmarshal(&n)
+	o.node = n.node
+	o.err = unmarshal(&o.block)
+	return nil
+}
+
+// nodeOf holds the node yaml.v3 decodes into it.
+type nodeOf struct{ node *yaml.Node }
+
+// UnmarshalYAML takes the node.
+func (n *nodeOf) UnmarshalYAML(v *yaml.Node) error {
+	n.node = v
+	return nil
+}
+
+// outputRecovered is what a rewrite keeps of n, an output block yaml.v3
+// does not decode, whose key is on line at. A block whose keys are each
+// plain text (plainKey) gives up each setting a key names once, when the
+// setting's value decodes on its own and config.OutputConfig.WithoutRefused
+// keeps it, and a line for each key it does not: one output does not take,
+// one written more than once, a value that does not read or is refused. Any
+// other block gives up nothing, and one line that says so: a merge key, an
+// alias or a tag among the keys is the decoder's to resolve, and the decoder
+// refused the block, so which setting a value is for is not certain.
+func outputRecovered(n *yaml.Node, at int) (kept config.OutputConfig, notKept []string) {
+	if n.Kind != yaml.MappingNode {
+		return config.OutputConfig{}, []string{fmt.Sprintf("output (line %d): it is not a block of output settings, so none of it is kept", at)}
+	}
+	lines := map[string][]int{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		if !plainKey(k) {
+			return config.OutputConfig{}, []string{fmt.Sprintf("output (line %d): it does not load, and a key of it is a merge key (<<), an alias, "+
+				"tagged or not plain text, so which setting a value is for is not certain: none of it is kept", at)}
+		}
+		lines[k.Value] = append(lines[k.Value], k.Line)
+	}
+	said := map[string]bool{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		setting, known := outputSettingNamed(k.Value)
+		switch {
+		case !known:
+			notKept = append(notKept, fmt.Sprintf("a key of output (line %d): it is not an output setting", k.Line))
+			continue
+		case len(lines[k.Value]) > 1:
+			if !said[k.Value] {
+				said[k.Value] = true
+				notKept = append(notKept, fmt.Sprintf("%s (lines %s): it is written more than once in one block, so no value of it is kept",
+					setting, lineList(lines[k.Value])))
+			}
+			continue
+		}
+		var one config.OutputConfig
+		if err := (&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{k, v}}).Decode(&one); err != nil {
+			notKept = append(notKept, fmt.Sprintf("%s (line %d): it does not read as that setting", setting, k.Line))
+			continue
+		}
+		one, refused := one.WithoutRefused()
+		for _, p := range refused {
+			notKept = append(notKept, fmt.Sprintf("%s (line %d): %s", p.Setting, k.Line, p.Why))
+		}
+		// The one setting the pair holds, into what is kept. Each comes once,
+		// so one left at its zero (an explicit "" or null) is its value.
+		from, into := reflect.ValueOf(one), reflect.ValueOf(&kept).Elem()
+		for f := 0; f < from.NumField(); f++ {
+			if from.Type().Field(f).IsExported() && !from.Field(f).IsZero() {
+				into.Field(f).Set(from.Field(f))
+			}
+		}
+	}
+	return kept, notKept
+}
+
+// plainKey reports whether k is a key that names its setting with
+// certainty: text with no tag written on it, which yaml.v3 reads as the text
+// itself. A merge key (<<) resolves to !!merge, an alias is no scalar, and a
+// key that resolves to a number, a boolean, a null or a time is read as one.
+func plainKey(k *yaml.Node) bool {
+	return k.Kind == yaml.ScalarNode && k.Style&yaml.TaggedStyle == 0 && k.Tag == "!!str"
+}
+
+// outputSettingNamed is output.<name> when name is a key of
+// config.OutputConfig's own, and false for any other key, which is never
+// quoted.
+func outputSettingNamed(name string) (string, bool) {
+	t := reflect.TypeOf(config.OutputConfig{})
+	for f := 0; f < t.NumField(); f++ {
+		if tag, _, _ := strings.Cut(t.Field(f).Tag.Get("yaml"), ","); tag != "" && tag == name {
+			return "output." + tag, true
+		}
+	}
+	return "", false
+}
+
+// outputRefusal is the line for a setting of a block yaml.v3 decodes that
+// Validate refuses (config.OutputProblem, whose reason carries no value): the
+// setting and the line of the block's own key that writes it, or that it was
+// merged when none does.
+func outputRefusal(p *config.OutputProblem, block *yaml.Node) string {
+	if line := settingKeyLine(block, strings.TrimPrefix(p.Setting, "output.")); line > 0 {
+		return fmt.Sprintf("%s (line %d): %s", p.Setting, line, p.Why)
+	}
+	return fmt.Sprintf("%s (from a merged block): %s", p.Setting, p.Why)
+}
+
+// settingKeyLine is the line of the key of block, the output block as the
+// decoder handed it, that names name as the decoder reads a key, and 0 when
+// none of the block's own keys does. In a block yaml.v3 decodes, one key of
+// its own at most names a setting, and its value is the one decoded: a key
+// of the block wins over a merged one.
+func settingKeyLine(block *yaml.Node, name string) int {
+	if block == nil || block.Kind != yaml.MappingNode {
+		return 0
+	}
+	for i := 0; i+1 < len(block.Content); i += 2 {
+		var key string
+		if block.Content[i].Decode(&key) == nil && key == name {
+			return block.Content[i].Line
+		}
+	}
+	return 0
+}
+
+// outputKeyLines lists the lines of the keys of the file's top level that
+// name output, as the decoder reads a key. Two are a block written twice,
+// once encoded (a key written twice as it is, refuseRewrite refuses): the
+// decoder takes the first and Load refuses the config, so neither is certain
+// to be the block the operator meant.
+func outputKeyLines(raw []byte) []int {
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	top := doc.Content[0]
+	var lines []int
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		var key string
+		if top.Content[i].Decode(&key) == nil && key == "output" {
+			lines = append(lines, top.Content[i].Line)
+		}
+	}
+	return lines
+}
+
+// lineList is lines as a warning says them: "5", "5 and 9", "5, 9 and 12".
+func lineList(lines []int) string {
+	s := make([]string, len(lines))
+	for i, l := range lines {
+		s[i] = strconv.Itoa(l)
+	}
+	if len(s) < 2 {
+		return strings.Join(s, "")
+	}
+	return strings.Join(s[:len(s)-1], ", ") + " and " + s[len(s)-1]
+}
+
+// keptOutputLines lists, for printKept, the output settings a rewrite kept:
+// each key, with its value where it is no secret. MPD's password and the
+// player's serial are never shown, nor anything the player's binding names
+// but its kind.
+func keptOutputLines(o config.OutputConfig) [][2]string {
+	var lines [][2]string
+	if o.MPD != "" {
+		lines = append(lines, [2]string{"output.mpd", o.Mode()})
+	}
+	if o.Endpoint != "" {
+		lines = append(lines, [2]string{"output.endpoint", o.Endpoint})
+	}
+	if o.Conf != "" {
+		lines = append(lines, [2]string{"output.conf", o.Conf})
+	}
+	if o.Password != "" {
+		lines = append(lines, [2]string{"output.password", "set (not shown)"})
+	}
+	if o.LoopbackPort != nil {
+		lines = append(lines, [2]string{"output.loopbackPort", strconv.Itoa(*o.LoopbackPort)})
+	}
+	if !o.Player.IsZero() {
+		lines = append(lines, [2]string{"output.player", keptPlayerSummary(o.Player)})
+	}
+	return lines
+}
+
+// keptPlayerSummary says what a kept player block asks for: whether the
+// player is enabled, and the binding's kind when it is one this release
+// knows.
+func keptPlayerSummary(p config.PlayerConfig) string {
+	if p.Unread() != nil {
+		return "kept as written (it does not read, so the player is off)"
+	}
+	s := "not enabled"
+	if p.Enabled {
+		s = "enabled"
+	}
+	switch b := p.Device.Binding; {
+	case b == config.BindingSerial || b == config.BindingUniqueModel || b == config.BindingPort:
+		return s + ", bound by " + b
+	case p.Device.Configured():
+		return s + ", with a binding this release refuses"
+	}
+	return s + ", no DAC bound"
+}
+
+// warnOutputNotKept names, once the rewrite is saved, the output settings it
+// could not keep (priorOutput), so none is dropped without a word.
+func warnOutputNotKept(w io.Writer, notKept []string) {
+	if len(notKept) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "warning: output settings in the config this run replaced do not read, so the rewrite did not keep them:")
+	for _, s := range notKept {
+		fmt.Fprintf(w, "  %s\n", s)
+	}
+	fmt.Fprintln(w, "the config did not load with them either. Set them again in bridge.yaml if you want them.")
 }

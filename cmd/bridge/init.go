@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -117,6 +118,12 @@ func initAddresses(public, proxy bool, listenFlag, adminFlag string) (listen, ad
 // (config.ValidateLoopbackAddress), as that install's adminAddress must: its
 // console has no login, so binding loopback is its whole trust boundary. A
 // public run's console has a login and may bind any interface.
+//
+// The refusal names the flag with the address it was given. The config's
+// refusals of the same address quote none of it (a value read from a file or
+// the environment can be a secret pasted onto the wrong line), but a flag's
+// value is what the operator typed on this command line, shown back on the
+// terminal that typed it.
 func initAddressFlagsError(public bool, listen, admin string) error {
 	for _, f := range []struct{ flag, addr string }{
 		{"--listen-address", listen},
@@ -125,14 +132,14 @@ func initAddressFlagsError(public bool, listen, admin string) error {
 		if f.addr == "" {
 			continue
 		}
-		if err := config.ValidateBindAddress(f.flag, f.addr); err != nil {
+		if err := config.ValidateBindAddress(f.flag+" "+strconv.Quote(f.addr), f.addr); err != nil {
 			return err
 		}
 	}
 	if public || admin == "" {
 		return nil
 	}
-	if err := config.ValidateLoopbackAddress("--admin-address", admin); err != nil {
+	if err := config.ValidateLoopbackAddress("--admin-address "+strconv.Quote(admin), admin); err != nil {
 		return fmt.Errorf("%w\nwithout --public the admin console has no login, so it listens on this machine only: "+
 			"reach it from another over an SSH tunnel, or run init with --public for a console with a login", err)
 	}
@@ -286,7 +293,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgDirFlag := fs.String("dir", "", "config directory (default per-OS standard)")
 	nonInteractive := fs.Bool("yes", false, "accept all defaults without prompting")
 	fs.BoolVar(nonInteractive, "y", *nonInteractive, "alias for --yes")
-	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir and TLS pair are kept")
+	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir, TLS pair and output block are kept")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: the existing config's, or the hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
@@ -736,6 +743,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// The TLS pair the install serves, and a loopback install's custom
 	// endpoints. The data dir and the roots are in cfg already.
 	endpointsKept := keepFromPrior(cfg, prior)
+	// And the output block, in either posture, but for a setting the config
+	// did not load with either (priorOutput).
+	var outputNotKept []string
+	if prior != nil {
+		cfg.Output, outputNotKept = priorOutput(asRead.raw)
+	}
 	if err := cfg.NormalizeAndValidate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
@@ -869,6 +882,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if endpointsKept {
 		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
 	}
+	warnOutputNotKept(stderr, outputNotKept)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding

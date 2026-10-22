@@ -25,10 +25,11 @@ import (
 // a WAL-mode database produces an atomic clean copy without locking
 // out the running process. The other captured files (tokens.json,
 // cert/key, config, adminauth.json when the console has an account,
-// atlas-harvest.json when a harvest credential is stored) are read
-// normally — a write race with serve is harmless for these because
-// they're mutated rarely and atomically (temp + rename). A restore
-// brings the console account back and signs its sessions out.
+// atlas-harvest.json when a harvest credential is stored, player-uuid
+// once the player has an identity) are read normally — a write race with
+// serve is harmless for these because they're mutated rarely and
+// atomically (temp + rename). A restore brings the console account back
+// and signs its sessions out, and gives the player the identity it had.
 func backupCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -195,6 +196,7 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 		BridgeYAML:   configPath,
 		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
 		AtlasHarvest: harvestStatePath(cfg.DataDir),
+		PlayerUUID:   filepath.Join(cfg.DataDir, config.PlayerUUIDFile),
 	}
 }
 
@@ -354,5 +356,6 @@ func buildRestoreTargets(cfg *config.Config, configPath string) backup.Targets {
 		BridgeYAML:   configPath,
 		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
 		AtlasHarvest: harvestStatePath(cfg.DataDir),
+		PlayerUUID:   filepath.Join(cfg.DataDir, config.PlayerUUIDFile),
 	}
 }

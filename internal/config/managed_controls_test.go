@@ -42,21 +42,28 @@ deployment:
 // unrecognised name manages NOTHING, and the only thing standing between
 // that and silence is this list. See the docblock for why it is not an
 // error — a rollback to an older binary must not take every tenant on a
-// host offline.
+// host offline. Each is named by its place in the list, never by what it
+// holds, which can be anything, a password pasted onto the line included
+// (B505's round 4, Codex: serve's warning and init's refusal printed it).
 func TestUnknownManagedControlsAreNamed(t *testing.T) {
 	d := DeploymentConfig{ManagedControls: []string{"restart", "restarts", "Updates"}}
 
 	unknown := d.UnknownManagedControls()
-	if !slices.Contains(unknown, "restarts") {
-		t.Errorf("unknown = %v, want the typo `restarts` named", unknown)
+	if !slices.Contains(unknown, "deployment.managedControls[1]") {
+		t.Errorf("unknown = %v, want the typo `restarts` named by its place", unknown)
 	}
 	// Exact comparison, same rule as ManagedSettings: a fold-insensitive
 	// match would let a control plane's casing decide what is locked.
-	if !slices.Contains(unknown, "Updates") {
-		t.Errorf("unknown = %v, want `Updates` named — comparison must stay exact", unknown)
+	if !slices.Contains(unknown, "deployment.managedControls[2]") {
+		t.Errorf("unknown = %v, want `Updates` named by its place — comparison must stay exact", unknown)
 	}
-	if slices.Contains(unknown, "restart") {
+	if slices.Contains(unknown, "deployment.managedControls[0]") {
 		t.Errorf("unknown = %v names a control this build does know", unknown)
+	}
+	for _, u := range unknown {
+		if strings.Contains(u, "restarts") || strings.Contains(u, "Updates") {
+			t.Errorf("unknown = %v carries what an entry holds", unknown)
+		}
 	}
 	// The typo really is permissive — that is the risk being accepted.
 	if d.IsManagedControl("restart") && d.IsManagedControl("updates") {

@@ -357,6 +357,61 @@ func TestInitRewriteOverAConfigItCannotParse(t *testing.T) {
 	})
 }
 
+// TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt: a config that
+// is YAML and does not decode as what a rewrite reads from it is refused
+// (refuseRewrite), and the refusal prints the decoder's error, which quoted
+// what it could not decode: a password pasted onto demo.enabled's line, or
+// given a tag it does not fit, or left unquoted after a *, reached the
+// terminal (B505's round 3). Each fixture is checked to carry the password
+// in yaml.v3's own error first, so it is one the refusal has to change.
+func TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt(t *testing.T) {
+	const secret = "p4ssw0rd-kitchen"
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, cfgDir string)
+		says string
+	}{
+		{"a password on a yes-or-no line", func(t *testing.T, cfgDir string) {
+			appendToConfig(t, cfgDir, "demo:\n  enabled: "+secret+"\n")
+		}, "cannot unmarshal a !!str value into bool"},
+		{"a password its tag does not fit", func(t *testing.T, cfgDir string) {
+			setConfigKey(t, cfgDir, "libraryName", "libraryName: !!int "+secret)
+		}, "cannot decode a !!str value as a !!int"},
+		{"a password starting with * left unquoted", func(t *testing.T, cfgDir string) {
+			setConfigKey(t, cfgDir, "libraryName", "libraryName: *"+secret)
+		}, "an alias names an anchor the file does not define"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			cfgDir := filepath.Join(tmp, "cfg")
+			rewrite := rewritePostures[0].setUp(t, cfgDir)
+			tc.edit(t, cfgDir)
+			before := readConfigFile(t, cfgDir)
+			if err := yaml.Unmarshal([]byte(before), &priorInstallFile{}); err == nil || !strings.Contains(err.Error(), secret[:7]) {
+				t.Fatalf("yaml.v3's own error is %v: the fixture does not carry the password there, so it pins nothing", err)
+			}
+
+			code, out := rewrite()
+			defer logRunOnFailure(t, out)
+
+			if code == 0 || readConfigFile(t, cfgDir) != before || !strings.Contains(out, configNotChanged) {
+				t.Errorf("init exited %d over a config it cannot read, want a refusal that changes nothing", code)
+			}
+			if !strings.Contains(out, tc.says) {
+				t.Errorf("the refusal does not say %q", tc.says)
+			}
+			// Any four bytes of it in a row. The temporary directory is the
+			// test's, and its name the test's.
+			printed := strings.ReplaceAll(out, tmp, "")
+			for i := 0; i+4 <= len(secret); i++ {
+				if strings.Contains(printed, secret[i:i+4]) {
+					t.Errorf("the refusal carries part of the password: %q", secret[i:i+4])
+				}
+			}
+		})
+	}
+}
+
 // TestInitRewriteKeepsALoopbackInstallsCustomEndpoints: the endpoints an
 // operator adds by hand or in Settings, which init never asks for. iOS
 // replaces its alternates with /v1/health's endpoints on every successful
@@ -826,6 +881,40 @@ func TestInitRefusesToRewriteAConfigItDoesNotMake(t *testing.T) {
 				t.Errorf("a run that keeps the config exited %d:\n%s", keepCode, keepOut)
 			}
 		})
+	}
+}
+
+// TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace: the refusal of
+// a managed tenant's config names the controls it withholds, and an entry
+// that names no control this build knows by its place in the list, never by
+// what it holds: refuseRewrite prints the explanation, and it joined the
+// entries as written, so a password pasted onto the list's line reached the
+// terminal (B505's round 4, Codex).
+func TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace(t *testing.T) {
+	const secret = "p4ssw0rd-kitchen"
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+	rewrite := rewritePostures[0].setUp(t, cfgDir)
+	appendToConfig(t, cfgDir, "deployment:\n    managedControls:\n        - restart\n        - "+secret+"\n")
+	before := readConfigFile(t, cfgDir)
+
+	code, out := rewrite()
+	defer logRunOnFailure(t, out)
+
+	if code == 0 || readConfigFile(t, cfgDir) != before || !strings.Contains(out, configNotChanged) {
+		t.Errorf("init exited %d over a managed tenant's config, want a refusal that changes nothing", code)
+	}
+	for _, want := range []string{"deployment.managedControls", "restart", "deployment.managedControls[1]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not say %q", want)
+		}
+	}
+	// The temporary directory is the test's, and its name the test's.
+	printed := strings.ReplaceAll(out, tmp, "")
+	for i := 0; i+4 <= len(secret); i++ {
+		if strings.Contains(printed, secret[i:i+4]) {
+			t.Errorf("the refusal carries part of the entry: %q", secret[i:i+4])
+		}
 	}
 }
 
