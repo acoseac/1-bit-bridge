@@ -3226,6 +3226,10 @@ func (c *Config) NormalizeAndValidate() error {
 // `rc.Load().Validate()` would, if Validate mutated, write straight into the
 // live snapshot and race every reader. Keeping the write side in a
 // separately-named method makes that mistake impossible to make by accident.
+// The one thing it keeps is the process's, never the receiver's: the reason
+// it last logged output.player off for, so that line is written once each
+// time the reason changes, not at every Load and settings save
+// (logPlayerOff).
 func (c *Config) Validate() error {
 	// Surface deployment.mode typos at load time rather than letting
 	// them silently fall through to "loopback" (IsPublic-returns-false
@@ -3239,11 +3243,11 @@ func (c *Config) Validate() error {
 	// output.player is never a reason to refuse the config: a block that
 	// does not read or is refused turns the player off, and MPD, the
 	// library and the server load as they would without it. The reason is
-	// logged, and names no serial. Nothing here reads hardware, sysfs or
-	// the interfaces: whether a LAN is up yet is the player's runtime state.
-	if on, why := c.PlayerEnabled(c.playerPlatform()); !on && why != nil {
-		validateLogger.Warn(playerOffMessage, "reason", why.Error())
-	}
+	// logged once each time it changes, and names no serial. Nothing here
+	// reads hardware, sysfs or the interfaces: whether a LAN is up yet is the
+	// player's runtime state.
+	_, why := c.PlayerEnabled(c.playerPlatform())
+	logPlayerOff(why)
 
 	// Retention: a NON-ZERO playback-history window below the longest
 	// bounded smart-mix window is REFUSED, not clamped. 30 days would
