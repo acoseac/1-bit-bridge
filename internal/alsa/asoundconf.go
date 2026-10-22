@@ -24,13 +24,26 @@ type PCMConfig struct {
 	// ok is false when a file that is present could not be used whole: no
 	// definition is then used.
 	ok bool
+	// unread is ok false because the read stopped at a file it could not
+	// read (Unread).
+	unread bool
 }
 
 // LoadPCMConfig reads the ALSA configuration under root once.
 func LoadPCMConfig(root string) PCMConfig {
-	defs, ok := loadPCMDefs(root)
-	return PCMConfig{defs: defs, ok: ok}
+	defs, ok, unread := loadPCMDefs(root)
+	return PCMConfig{defs: defs, ok: ok, unread: unread}
 }
+
+// Unread reports whether the read of the configuration stopped at a file
+// that is there and could not be read (an open or read error, what opened
+// as no regular file, a file past the read's bounds), rather than at a file
+// it read that holds what the parser does not model. Either way no
+// definition is used; but what an unread file says is not known, and it
+// can read the next time, while a file the parser does not model resolves
+// nothing the same way every time. The output reading takes an unread
+// configuration for one it did not have.
+func (c PCMConfig) Unread() bool { return c.unread }
 
 // ResolveOutputDevice is the package's ResolveOutputDevice from c.
 func (c PCMConfig) ResolveOutputDevice(device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
@@ -165,6 +178,10 @@ type pcmDef struct {
 	// typeUnsure is a definition whose type is not one value: a second
 	// type in its block, or its name defined more than once.
 	typeUnsure bool
+	// routes is a block with a transfer table or a route policy (ttable,
+	// route_policy), which a plug runs through the route plugin inside it.
+	// Such a field makes the definition opaque too: its chain is not known.
+	routes bool
 }
 
 // sampleStageTypes are the plugin types whose stage changes the samples it
@@ -179,34 +196,61 @@ func SampleStageTypes() []string { return append([]string(nil), sampleStageTypes
 // SampleStage is the plugin type of the first stage that changes the
 // samples (SampleStageTypes) the walk from device meets, through empty and
 // plug stages, as the configuration read defines them; "" when it meets
-// none before it reaches a card or stops. The walk does not go through such
-// a stage, so what lies past it is not read, and a device string names no
-// definition here. It is what the files say, not what alsa-lib loaded for
-// the process that opened the card: information, not proof.
+// none before it reaches a card or stops. A plug with a transfer table or
+// a route policy is the route plugin inside it, a route stage, though it
+// has no chain. alsa-lib's own dmix is a dmix stage: a dmix: device string,
+// which names its plugin without the files, and the name dmix where the
+// files define none. The walk does not go through such a stage, so what
+// lies past it is not read, and any other device string names none. It is
+// what the files say, not what alsa-lib loaded for the process that opened
+// the card: information, not proof.
 func (c PCMConfig) SampleStage(device string) string {
 	device = strings.TrimSpace(device)
-	if !c.ok || device == "" {
+	switch {
+	case device == "":
+		return ""
+	case strings.Contains(device, ":"):
+		return deviceStringStage(device)
+	case !c.ok:
 		return ""
 	}
 	return sampleStage(c, device, map[string]bool{}, 0)
 }
 
 func sampleStage(c PCMConfig, name string, seen map[string]bool, hops int) string {
-	if strings.Contains(name, ":") || hops > maxPCMHops || seen[name] {
+	if strings.Contains(name, ":") {
+		return deviceStringStage(name)
+	}
+	if hops > maxPCMHops || seen[name] {
 		return ""
 	}
 	def, found := c.defs[name]
-	if !found || def.typeUnsure {
+	switch {
+	case !found && name == "dmix":
+		return "dmix"
+	case !found || def.typeUnsure:
 		return ""
-	}
-	if slices.Contains(sampleStageTypes, def.typ) {
+	case slices.Contains(sampleStageTypes, def.typ):
 		return def.typ
-	}
-	if def.opaque || (def.typ != "empty" && def.typ != "plug") || def.slave == "" {
+	case def.typ == "plug" && def.routes:
+		// The route plugin inside the plug can swap, mix or attenuate
+		// channels at the same format, rate and channels.
+		return "route"
+	case def.opaque || (def.typ != "empty" && def.typ != "plug") || def.slave == "":
 		return ""
 	}
 	seen[name] = true
 	return sampleStage(c, def.slave, seen, hops+1)
+}
+
+// deviceStringStage is the sample stage a device string names by its
+// plugin: alsa-lib's dmix (dmix:CARD=…,DEV=…), which mixes every stream
+// into a format and rate of its own; none for any other.
+func deviceStringStage(device string) string {
+	if plugin, _, _ := strings.Cut(device, ":"); plugin == "dmix" {
+		return "dmix"
+	}
+	return ""
 }
 
 func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
@@ -271,10 +315,11 @@ func walkChain(c PCMConfig, name string, cards []Card, seen map[string]bool, hop
 
 // loadPCMDefs reads conf.d and then asound.conf. ok is false when any
 // file that is present cannot be read, or parses as something this
-// reader does not fully model. A missing file is not that: the other
-// files still count. A false ok means no definition may be used.
-func loadPCMDefs(root string) (map[string]pcmDef, bool) {
-	defs := map[string]pcmDef{}
+// reader does not fully model, and unread is true when it is the first of
+// those the read stopped at. A missing file is neither: the other files
+// still count. A false ok means no definition may be used.
+func loadPCMDefs(root string) (defs map[string]pcmDef, ok, unread bool) {
+	defs = map[string]pcmDef{}
 	var files int
 	var total int
 	bad := false
@@ -287,11 +332,11 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 			if os.IsNotExist(err) {
 				return
 			}
-			bad = true
+			bad, unread = true, true
 			return
 		}
 		if files >= maxAsoundFiles || total+len(b) > maxAsoundBytes {
-			bad = true
+			bad, unread = true, true
 			return
 		}
 		files++
@@ -317,9 +362,9 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
 	if bad {
-		return nil, false
+		return nil, false, unread
 	}
-	return defs, true
+	return defs, true, false
 }
 
 const (
@@ -536,6 +581,9 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 	key, plain, ok := p.readFieldKey()
 	if !ok {
 		return false
+	}
+	if key == "ttable" || strings.HasPrefix(key, "ttable.") || key == "route_policy" {
+		def.routes = true
 	}
 	if p.peek().kind == tokLBrace {
 		if plain && key == "slave" {

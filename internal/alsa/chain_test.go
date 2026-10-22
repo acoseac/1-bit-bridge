@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -130,22 +131,62 @@ pcm.b { type empty
 // TestAPlugThatRoutesHasNoChain: a plug stage passes samples through only
 // while it has nothing to convert, and a transfer table or a route policy
 // is the route plugin inside it, which can attenuate or swap channels at
-// the same format, rate and channels. Such a plug is opaque in every form:
-// a dotted ttable entry, a ttable block, route_policy; a ttable entry
-// whose value is a float makes the file one this parser does not read.
+// the same format, rate and channels. Such a plug is opaque in every form,
+// a dotted ttable entry, a ttable block, route_policy, so it has no chain,
+// and it is the route stage the reading warns of. A ttable entry whose
+// value is a float makes the file one this parser does not read, which
+// names no stage.
 func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 	cards := []Card{{Index: 2, ID: "Audio"}}
 	hw := "pcm.hwcard {\n    type hw\n    card \"Audio\"\n}\n"
-	for name, plug := range map[string]string{
-		"a dotted ttable entry": "pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 1 }\n",
-		"a ttable block":        "pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable { 0 { 0 0.5 } 1 { 1 0.5 } } }\n",
-		"a route policy":        "pcm.out { type plug\n    slave.pcm \"hwcard\"\n    route_policy \"average\" }\n",
-		"a float ttable entry":  "pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 0.5 }\n",
+	for name, tc := range map[string]struct{ plug, stage string }{
+		"a dotted ttable entry": {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 1 }\n", "route"},
+		"a ttable block":        {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable { 0 { 0 0.5 } 1 { 1 0.5 } } }\n", "route"},
+		"a route policy":        {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    route_policy \"average\" }\n", "route"},
+		"a float ttable entry":  {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 0.5 }\n", ""},
 	} {
 		root := t.TempDir()
-		writeTree(t, root, map[string]string{"etc/asound.conf": hw + plug})
+		writeTree(t, root, map[string]string{"etc/asound.conf": hw + tc.plug})
 		if chain, ok := ResolveOutputChain(root, "out", cards); ok {
 			t.Errorf("%s: %+v", name, chain)
+		}
+		if got := LoadPCMConfig(root).SampleStage("out"); got != tc.stage {
+			t.Errorf("%s: stage %q, want %q", name, got, tc.stage)
+		}
+	}
+}
+
+// TestAFileOfTheConfigurationThatCannotBeReadIsUnread: a file that is there
+// and cannot be read (an open or read error, what is not a regular file, a
+// file past the read's bounds) leaves the configuration unread, which the
+// reading takes for a configuration it did not have; a file it read that
+// holds what the parser does not model, and a file that is not there, do
+// not. Either one that is there leaves no definition used.
+func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
+	plain := "pcm.hwcard { type hw\n    card \"Audio\" }\n"
+	for name, tc := range map[string]struct {
+		files      map[string]string
+		dir        string
+		unread, ok bool
+	}{
+		"nothing there":                 {files: map[string]string{}, ok: true},
+		"asound.conf alone":             {files: map[string]string{"etc/asound.conf": plain}, ok: true},
+		"asound.conf a directory":       {files: map[string]string{"etc/alsa/conf.d/10-a.conf": plain}, dir: "etc/asound.conf", unread: true},
+		"a conf.d entry a directory":    {files: map[string]string{"etc/asound.conf": plain}, dir: "etc/alsa/conf.d/20-b.conf", unread: true},
+		"a file past the read's bounds": {files: map[string]string{"etc/asound.conf": plain + strings.Repeat("#\n", maxFileBytes)}, unread: true},
+		"a top-level @hooks":            {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
+		"a value the parser refuses":    {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0 }\n"}},
+	} {
+		root := t.TempDir()
+		writeTree(t, root, tc.files)
+		if tc.dir != "" {
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(tc.dir)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c := LoadPCMConfig(root)
+		if c.Unread() != tc.unread || c.ok != tc.ok {
+			t.Errorf("%s: unread %v ok %v, want unread %v ok %v", name, c.Unread(), c.ok, tc.unread, tc.ok)
 		}
 	}
 }
@@ -153,9 +194,12 @@ func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 // TestTheFirstStageThatChangesSamplesIsNamed: the walk from a device goes
 // through empty and plug stages as the files define them and names the
 // first stage of a plugin that changes samples, whatever else its block
-// holds; a chain through empty, plug and hw alone, a device string, a stage
-// it does not follow, a definition whose type is not one value, and a
-// configuration not read whole name none.
+// holds: a plug with a transfer table or a route policy is the route plugin
+// inside it, and alsa-lib's dmix, as a dmix: device string or the name dmix
+// the files do not define, is dmix. A chain through empty, plug and hw
+// alone, any other device string, a stage it does not follow, a definition
+// whose type is not one value, and a name in a configuration not read whole
+// name none.
 func TestTheFirstStageThatChangesSamplesIsNamed(t *testing.T) {
 	body := `
 pcm.hwcard { type hw
@@ -187,6 +231,18 @@ pcm.passthrough { type plug
 pcm.routingPlug { type plug
     slave.pcm "soft"
     ttable.0.0 1 }
+pcm.policyPlug { type plug
+    slave.pcm "hwcard"
+    route_policy "average" }
+pcm.tablePlug { type plug
+    slave.pcm "hwcard"
+    ttable { 0 { 1 1 } 1 { 0 1 } } }
+pcm.plugOverDmixString { type plug
+    slave.pcm "dmix:2,0" }
+pcm.emptyOverDmixString { type empty
+    slave { pcm "dmix:CARD=Audio,DEV=0" } }
+pcm.plugOverDmix { type plug
+    slave.pcm "dmix" }
 pcm.twice { type softvol
     type plug
     slave.pcm "hwcard" }
@@ -205,7 +261,10 @@ pcm.dup { type plug
 	for device, want := range map[string]string{
 		"soft": "softvol", "mixed": "dmix", "resampled": "rate", "routed": "route", "filtered": "ladspa",
 		"toSoft": "softvol", " toSoft ": "softvol",
-		"passthrough": "", "hwcard": "", "hw:2,0": "", "plughw:2,0": "", "routingPlug": "",
+		"routingPlug": "route", "policyPlug": "route", "tablePlug": "route",
+		"dmix:2,0": "dmix", " dmix:CARD=Audio,DEV=0 ": "dmix", "dmix": "dmix",
+		"plugOverDmixString": "dmix", "emptyOverDmixString": "dmix", "plugOverDmix": "dmix",
+		"passthrough": "", "hwcard": "", "hw:2,0": "", "plughw:2,0": "", "front:2": "", "dmixer": "",
 		"twice": "", "a": "", "dup": "", "nothing": "", "": "",
 	} {
 		if got := c.SampleStage(device); got != want {
@@ -226,6 +285,22 @@ pcm.dup { type plug
 	})
 	if got := LoadPCMConfig(hooked).SampleStage("soft"); got != "" {
 		t.Errorf("a configuration not read whole named %q", got)
+	}
+	// A device string names its plugin without the files; a name is looked
+	// up in them, and one that may redefine dmix is not read.
+	if got := LoadPCMConfig(hooked).SampleStage("dmix:2,0"); got != "dmix" {
+		t.Errorf("a dmix: device string beside a configuration not read whole: %q", got)
+	}
+	if got := LoadPCMConfig(hooked).SampleStage("dmix"); got != "" {
+		t.Errorf("the name dmix in a configuration not read whole: %q", got)
+	}
+	// The files' own dmix is what they define.
+	redefined := t.TempDir()
+	writeTree(t, redefined, map[string]string{
+		"etc/asound.conf": "pcm.hwcard { type hw\n    card \"Audio\" }\npcm.dmix { type plug\n    slave.pcm \"hwcard\" }\n",
+	})
+	if got := LoadPCMConfig(redefined).SampleStage("dmix"); got != "" {
+		t.Errorf("a dmix the files define as a plug to hw: %q", got)
 	}
 	if got := LoadPCMConfig(filepath.Join("testdata", "volumio-asound-chain")).SampleStage("volumio"); got != "" {
 		t.Errorf("Volumio's chain: %q", got)
