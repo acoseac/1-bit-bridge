@@ -51035,3 +51035,220 @@ written back byte for byte and checked against HEAD. Each went red.
 - A song another bridge serves stays `source_unknown`; letting the app
   complete such a verdict from its own row would be a protocol change.
 - The DAC mixer's level in dB.
+
+### Round 2 (2026-10-22): what ties the verdict to the MPD and the output that holds the card
+
+Round 1's reviews (Codex, twelve findings; the Claude API, four) were each
+checked against the code. Fourteen were real, two were not. The bar, the
+owner's: `bit_exact` and `bit_exact_dop` are claims of proof, so a fact the
+reading did not read, read in part, read outside the bracket, or cannot tie
+to the daemon and the output that holds the substream withholds the verdict
+with a code that says which; and a reading ends within its deadlines
+whatever the filesystem does, without a stuck or panicking reading taking
+the shared session or later readings with it.
+
+**Round 1 decisions this round found wrong**, each replaced below:
+`mpd.conf` read fresh was taken for MPD's settings (Codex 1; MPD reads it
+once, at its start); the MPD the bridge dialled was tied to the stream by
+"an enabled alsa output whose device reaches this card", which a second
+output on the card hides behind (the Claude API); an output MPD did not
+report took the file's `enabled` (Codex 8); a `hw:` device's stages were
+trusted without the configuration that can redefine `hw` (Codex 4);
+elapsed "half a second more or less" let a small move back through
+(Codex 11), and two status reads with no song id matched (Codex 9); the row
+was two statements (Codex 7). Kept: `dop` and `allowed_formats` live first,
+the per-step deadlines, the single-outstanding `/proc` read, the session
+dropped once a written command fails, and the read-through cache.
+
+**What changed**
+
+- **The holder is the output whose thread holds the card.** MPD names each
+  output's thread `output:` and the output's name, formatted into 16 bytes
+  (`src/output/Thread.cxx`, `FmtThreadName("output:{}")`, so cut to 15), and
+  `/proc`'s status of `owner_pid` names that thread (`output:alsa` on the
+  Pi). The verdict judges the one enabled output MPD reports whose thread
+  name, as the status file shows it (backslash and newline escaped, white
+  space trimmed as the reader trims), is the owner thread's: no such output
+  is `owner_not_output` (early stop; another MPD, or an output switched off
+  that still holds the card), two whose names agree in 15 bytes are
+  `mpd_output_ambiguous`, an output of another plugin (`ao`, `oss`, which
+  open the card in MPD's process) and an alsa output whose chain is not
+  proven to this card and PCM device are `alsa_chain_unproven`. This
+  replaces counting the enabled alsa outputs whose chains resolve: a softvol
+  output on the same card that holds it is no longer hidden behind the one
+  whose chain resolves, and two outputs on one card no longer withhold when
+  the thread says which holds it.
+- **`mpd.conf` is shown to be what MPD runs with, four ways, before anything
+  only it says is judged.** Read (`mpd_config_unread`); whole, with no
+  problem (`mpd_config_incomplete`: an include not followed, an include
+  pattern, a line that does not parse); its `audio_output` blocks are the
+  outputs MPD reports, by name and plugin, in order (`mpd_config_mismatch`:
+  MPD numbers outputs in its file's order, and with no block makes one of
+  its own); and nothing the read depended on changed after the process
+  holding the card started (`mpd_config_changed`). From a file that fails
+  any, normalization, `audio_output_format`, the mixer, the output's format
+  and filters are not claimed and the chain is unproven; the live
+  `allowed_formats` still counts.
+- **The change time.** `conf.File.Changed` is the latest of each file read
+  (the later of its modification time and its inode change time, which a
+  write, a rename or a chmod moves and nobody sets back, read by fstat after
+  the read), each link a file was named by, and the nearest directory of an
+  `include_optional` not found. The process's start is the bridge's clock
+  just before the `/proc` read less the process's age (`/proc/uptime` less
+  field 22 of `/proc/<pid>/stat`, in USER_HZ, 100 on amd64 and arm64), so
+  its latest possible time, and the file must predate it by 100 ms
+  (`configSlack`: two clocks a tick apart). `mpd.conf` is now read after the
+  `/proc` read, so the fstat after the read comes after the start of the
+  process `/proc` found. A start `/proc` does not give is `owner_unknown`.
+- **Settings read on both sides of the `/proc` read.** `replay_gain_status`
+  and `outputs` are sent again after the second `status`, and the two
+  `outputs` replies, the two replay gain replies and the two statuses'
+  `audio`, `xfade` and `mixrampdelay` must agree, else the reading settles
+  with `settings_changed`.
+- **The ALSA chain.** A `hw:` or `plughw:` device, directly or as a slave,
+  has stages only from a configuration read whole (a top-level `@hooks`
+  makes even `hw:` unproven) that defines no PCM of that name (`pcm.!hw`,
+  `pcm.hw` with `@args`) and no `pcm_type` for a type the chain is made of
+  (`pcm_type.hw`, `pcm_type.!empty`; a `pcm_type { }` block is every type).
+  The configuration is loaded once a reading (`alsa.PCMConfig`) and
+  resolved from in memory. MPD's user's own files, which alsa-lib's
+  `alsa.conf` loads after `/etc` (`~/.asoundrc`,
+  `~/.config/alsa/asoundrc`), are looked for in the home `/etc/passwd`
+  gives the owner thread's uid (the `Uid:` line B1 now reads): either there,
+  or a home the bridge cannot tell about, is `alsa_chain_unproven`.
+- **Every step that reads files is bounded.** `boundedStep` runs the `/proc`
+  read, `mpd.conf` with its includes (`limits.conf`), the ALSA configuration
+  (`limits.alsa`) and the row look on a goroutine each, single-outstanding,
+  and turns a panic into the step's failure, logged with the step and the
+  stack and the value only when it is the runtime's own error.
+  `conf.ReadFile`, its includes and `ReadLogical` open through
+  `fsutil.OpenAsFile`, so a named pipe is refused at once, never waited on.
+  The probe's inspection (B2's, which the reading takes first) runs the
+  same way (`inspectBounded`: its deadline, 100 ms of grace for a dial
+  that ends with its context, and no second while one runs); a probe that
+  expired with no MPD endpoint leaves the output ids unknowable, and every
+  well-formed id is then answered `unknown` with `mpd_timeout`, as for an
+  unreadable `/proc`. The flight's completion is deferred, and a panic in
+  the reading's own code is `reading_failed`.
+- **Small ones.** DoP's rate is compared by division (`audio.Rate%16`, then
+  `/16`): a forged `/proc` rate of 2^60 + 176400 times 16 wraps to DSD64's
+  2822400 in an int (Codex 10). Any move back of elapsed is `seeked`, and
+  while MPD plays a status or `currentsong` that names no song id is
+  `song_changed`, as a missing elapsed is `song_starting` (Codex 11, 9). The
+  row's format and its size and time are one statement,
+  `Store.GetTrackWithStat` (Codex 7; red with a rescan parked between the
+  two old reads: "ALAC at size 2000").
+- **Found this round:** `readingCommand` called a command past its deadline
+  `mpd_unreachable` when the client's socket deadline (the context's own)
+  fired before the context's timer: the client returns "mpd: deadline
+  exceeded" while `cctx.Err()` is still nil. A failure once the deadline has
+  passed is now `mpd_timeout` (the `fileBudgetExpired` rule). The reorder
+  made `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` lose that race
+  every time on this Mac; its control is N57.
+- **Codex 12:** the deadline tests assert what each step is handed (the
+  dial's and every command's remaining time on its context, within 250 ms
+  of its own limit) and bound the reading at under a second with a 50 ms
+  `/proc` and a 300 ms command deadline, so a step deadline of a second
+  fails.
+
+**Rejected, with the evidence**
+
+- **Codex 6 (SameFile is not root confinement).** True of SameFile, and not
+  a gap in the verdict: the scanner indexes a file the walk reaches through
+  a link under its target's stat and its target's content (the
+  `walkedFileInfo` bullet, `scanner.md`), so a row named by a link to a file
+  outside the root describes that file, and SameFile plus the row's size and
+  time tie MPD's file to it. The reading serves no bytes, so the loopback
+  route's confinement, a serving boundary, does not apply; and a loopback
+  URL reaches `rowAt` only for a file MPD fetched from that route, which
+  refused one whose links leave the roots.
+- **The Claude API on `plug` with `ttable`.** The parser already makes any
+  field it does not model opaque (`parsePCMField`'s `default`, a dotted key,
+  a nested block), and a float value makes the file one it does not read.
+  The accurate half is taken: `TestAPlugThatRoutesHasNoChain` pins all four
+  forms (controls N23a to N23c).
+
+**Red first.** signalpath: the overflow row, a small seek back, no song id
+and an unreadable one, then twelve rows of the new model and
+`TestAStreamThatIsNotMPDsIsJudgedNoFurther`. conf: the named pipe (held
+5 s), patterns (`include` said "file not found", `include_optional` said
+nothing), `Changed` (zero). alsa: the owner's uid and start, against HEAD
+with stub fields; nine override cases and six home cases (the ttable test
+passed: rejected above). cmd/bridge: the row of two versions. The route's
+new tests, against HEAD's code with compile-only stubs: red for the changed
+file, the four mismatches, the three partial reads, the six settings, the
+softvol holder and the foreign thread, the home's asoundrc and the unknown
+uid, both seam deadlines, the hung probe (5 s), the command list, the
+named-pipe include (bit_exact there: the conf commit before had already
+refused the pipe without waiting) and the panic (the test binary panicked).
+Green at HEAD, as pins: the deadlines handed to commands, the tightened
+`/proc` test, and `pcm.!hw` (the ALSA commit before had already distrusted
+it). `TestEveryReadingCodeIsInTheProtocol` was red on the six new codes
+before PROTOCOL.md named them.
+
+**Negative controls.** Sixty-eight, each one anchor asserted to occur once,
+run against the named tests with the change committed and the file written
+back byte for byte and checked against HEAD; all went red. Three first
+failed to build (N5, N12a, N14) and were rerun with the variable kept in
+use; N23's first anchor did not occur, and it became N23a to N23c, one for
+each way the parser makes a plug opaque; N64 stayed green until
+`TestTheReadingShowsAnOutputMPDReportsEnabled` was added (5599073c).
+
+| Control | Rule | Red |
+|---|---|---|
+| N1, N2 | DoP's rate by division, with the divisibility half | `TestEveryWithheldReason` |
+| N3 | any move back is a seek | `TestSettling` |
+| N4 | a status with no song id while playing | `TestSettling` |
+| N5 | currentsong with no Id while playing | `TestReadingSettles` |
+| N6, N7 | mpd.conf and `ReadLogical` never wait on a pipe | `TestANamedPipeIsRefusedWithoutWaiting` |
+| N8 | an include pattern is a problem | `TestAnIncludePatternIsNotFollowed` |
+| N9 | a missing include_optional notes its directory | `TestChangedIsTheLatestChangeOfWhatTheReadDependsOn` |
+| N10, N11 | an include's link, and mpd.conf's own | `TestChangedCountsTheLinkAFileIsNamedBy` |
+| N12a, N12b | the main file's change, and an include's | `TestChangedIsTheLatestChangeOfWhatTheReadDependsOn` |
+| N13 | the inode change time counts | `TestChangedIsNotSetBackWithTheModificationTime` |
+| N14 to N17 | the owner's uid, stat counted after the last `)`, the uptime, no age before the start | `TestReaderReadsWhoTheOwnerRunsAsAndWhenItsProcessStarted` |
+| N18 to N20 | a redefined PCM, a `pcm_type`, a configuration not read whole | `TestADeviceStringHasAChainOnlyWhileNothingRedefinesIt` |
+| N21, N22 | a user's asoundrc, a home it cannot look in | `TestAUsersOwnALSAConfigurationIsLookedFor` |
+| N23a to N23c | an unmodeled field, a dotted ttable, a ttable block | `TestAPlugThatRoutesHasNoChain` |
+| N24 | the size and time are the columns | `TestGetTrackWithStatReadsTheColumnsTheSkipGateReads` |
+| N25 | one statement for the row | `TestOutputTrackLookupReadsOneVersionOfTheRow` |
+| N26 to N28 | `owner_not_output`, a thread or a start unknown | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| N29 to N31 | incomplete, mismatch, changed | `TestEveryWithheldReason` |
+| N32 to N35 | nothing from an unproven file, no chain from one, a holder of another plugin, two holders | `TestEveryWithheldReason` |
+| N36 to N39 | complete, matching, current, the start before the read | `TestAConfigReadInPartIsNotJudged`, `TestAConfigWhoseOutputsAreNotMPDsIsNotJudged`, `TestAConfigChangedAfterMPDStartedIsNotJudged` |
+| N40 to N42 | settings compared, outputs and replay gain read again | `TestASettingThatChangesAcrossTheReadSettles`, `TestTheReadingSendsOnlyReads` |
+| N43 to N45 | only an enabled holder, cut to 15 bytes, trimmed | `TestTheVerdictReadsMPDsOwnSettings`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| N46, N47 | MPD's user's files, the chain to this card | `TestAChainNothingProvesIsNotJudgedProven`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| N48 to N50 | a step not doubled, mpd.conf and the ALSA configuration bounded | the three deadline tests |
+| N51 to N53 | a step's panic, the reading's panic, no value logged | `TestAPanickingStepLeavesTheNextReadingWhole` |
+| N54 to N56 | the probe not doubled, bounded, an unidentified id unknown | `TestAProbeThatHangsEndsTheReadingInTime` |
+| N57 | a command past its deadline is a timeout | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| N58, N59 | the dial's and each command's own deadline | `TestEveryMPDCommandIsHandedItsOwnDeadline` |
+| N60, N61 | outputs match by plugin and in number | `TestAConfigWhoseOutputsAreNotMPDsIsNotJudged` |
+| N62 | the owner's start from its age | `TestAForeignOwnerIsNotMPDs` |
+| N63 | each owner's uid is asked about | `TestReadingTheGoBarOnEveryCapture` |
+| N64 | the shown output is enabled as MPD reports | `TestTheReadingShowsAnOutputMPDReportsEnabled` |
+| N65 | PROTOCOL.md names every code | `TestEveryReadingCodeIsInTheProtocol` |
+
+**Residuals, named, not fixed here**
+
+- A second MPD with an output of the same name holding the card (as round
+  1). MPD's command line, which can name the file it read, is not read: a
+  file the bridge found other than MPD's, with the same outputs, passes the
+  structural tie.
+- The change time compares wall clocks: a forward clock step after a change
+  made after MPD started (a Pi with no RTC whose NTP sync lands late) makes
+  the change look older. A daemonizing MPD forks after reading its
+  configuration, so a change in that instant reads as before. A directory
+  above the files re-pointed or renamed is not looked at (`/etc` changes
+  with every DHCP lease).
+- MPD's own environment (`HOME`, `XDG_CONFIG_HOME`, `ALSA_CONFIG_PATH`) is
+  readable only by its user; the home is `/etc/passwd`'s. alsa-lib's
+  `/usr/etc/asound.conf`, which newer releases load when `/etc/asound.conf`
+  is absent, is not read.
+- An include relative to a `mpd.conf` named by a link is taken from the
+  link's target's directory, where MPD takes the named one (B2's
+  `ReadFile`).
+- On the Pi, a Volumio that rewrites `mpd.conf` after starting MPD without
+  restarting it would read `mpd_config_changed` until MPD restarts: the
+  hardware gate should look for it after a fresh boot.
