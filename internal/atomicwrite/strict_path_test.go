@@ -341,6 +341,15 @@ func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
 	if *reads != 0 {
 		t.Errorf("the probe read the mount table %d times with mount IDs to go by", *reads)
 	}
+	// A kernel that gives the root's mount ID and not that of a directory
+	// below it rules nothing out there: ErrMountsUnknown.
+	stubMountIDs(t, func(path string) (uint64, bool, error) { return 1, path == root, nil })
+	if err := ProbeDurable(root, filepath.Join(other, "ids")); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("ProbeDurable with the mount ID of the root alone = %v, want ErrMountsUnknown", err)
+	}
+	if err := WriteBytesDurable(root, filepath.Join(other, "ids"), []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("WriteBytesDurable with the mount ID of the root alone = %v, want ErrMountsUnknown", err)
+	}
 }
 
 // TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling pins Codex's
