@@ -51476,3 +51476,135 @@ Not changed, for the owner: finding 1's clean exit with a member
 unconfirmed (above); shutdown's ReasonClosed for a play command whose
 session was heard; and a Play whose Resume is under way, which keeps the
 Resume's answer.
+
+### Round 6
+
+Codex, the Claude API and Argon reviewed round 5 (#1309); Argon found
+nothing. Round 5's two rules notes were applied from beside the branch
+(0183b59b for `player.md`, cae43e68 for `config-lifecycle.md`); this
+round's went beside it again, `/tmp/b470-4b1-rules-r6.md` for `player.md`
+and `/tmp/b470-4b1-rules-r6-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. Each fix went red first, with negative controls on
+the committed tree, restored from git each time.
+
+What changed:
+
+- 24d9b857, 4f4ff044. **The strict writer syncs every entry up to a
+  durable root on every write, and keeps nothing between writes** (1;
+  Codex P1, with P2 and P3). Round 5's process-local set did not survive a
+  restart: a directory whose barrier failed stays in the kernel's cache, a
+  SIGKILL or a clean exit drops the set, and the next process took the
+  directory as found and could report a reservation durable that a power
+  loss would then drop, and an ID or token be handed out again. Round 5's
+  brief said a directory still present after a crash has a durable entry,
+  which holds for a machine crash and not for a process restart (the
+  coordinator's correction); and `ProbeDurable` syncs a directory's
+  contents, never its entry in its parent. `WriteBytesDurable(root, path)`
+  now walks from the file's directory up to `root`, along the path as
+  written (each symbolic link's own entry) and as it resolves (a linked
+  directory's entry in its real parent), each directory once, and syncs
+  every one, `root` included, `root`'s own entry never. It refuses, before
+  anything is created, a root that does not exist, a path not below `root`
+  as written, so a path or a root spelled through a link to the other is
+  refused rather than walked, and a link below `root` that leads out
+  (`ErrNotUnderRoot`). The cost is a directory fsync per level per
+  reservation write, one write per 4,096 values. With no state, the
+  symlinked alias the set's keys missed (P2) and the set's growth across
+  tests (P3) went with it. The root is a parameter, not a writer value the
+  engine holds: the engine keeps it in `Config.DataDir`, now required, and
+  passes it to every write and to the probe; a value would add a
+  constructor and a resolved root to keep current. **The root's own
+  requirement**: it must exist, and nothing syncs its entry; `bridge init`
+  creates the data directory, and serve creates it where it is missing
+  (`lockServeDataDir`), neither syncing it. The invariant does not rest on
+  that: the data directory holds `player-uuid`, so a crash that takes it
+  takes the player's identity with it, and the player that comes back is a
+  new device to every controller. 4b2 must pass the directory that holds
+  `player-uuid`. In 4f4ff044 the walk up from the path as written, which
+  ended only because `underRoot` had checked the path lexically, stops at
+  the top of the filesystem and refuses (a control that removed both looped
+  until its 30 s timeout), and `underRoot`'s Stat of the root went: it was
+  the second of two checks, `nearest` stopping at the root with Stat's own
+  error, and no control could see it.
+- 37a39401. **The strict writer and its probe open each directory once and
+  fsync that descriptor; only an fsync's failure is `ErrBarrierFailed`**
+  (2; Codex P3). The probe opened the directory, closed it, and let
+  `fsutil.SyncParentDir` open it again, so an EACCES, EIO or EMFILE from
+  that second open was marked as the filesystem refusing to sync; the
+  strict writer's barriers marked their own open's failure the same way.
+  `syncDirAt` opens once and fsyncs through the `syncDir` seam, nil where
+  the platform has no barrier. `WriteBytes` and the renames keep
+  `syncParentDir` and `commitDirEntry` unchanged. `SetSyncDirForTest`
+  replaces `SetSyncParentDirForTest`, whose only users were the engine's
+  tests.
+- 6616e09c. **Finding 3 (the Claude API, Medium) does not reproduce, and
+  is pinned.** `playBegan` decides every waiting play command, but only an
+  Audible from the current session reaches it: `onAudible` begins with
+  `current`, which drops a session released (`releaseSession` marks it in
+  the step that asks), its release unconfirmed (`releaseDeadline` clears
+  `o.sess`), finished, or replaced. And play commands wait only while a
+  session starts or releases (`settleWaiters` answers them all once neither
+  is under way), so every one `playBegan` decides is waiting for the
+  session heard. The three scenarios: the releasing session's successor
+  heard is dropped; a PlayID that replaced a Play whose Start is held
+  releases session 1 in its own step, so session 1's Audible after it is
+  dropped, and one before it decides the Play alone, whose session it is; a
+  pause by zeros playing out finds no play command waiting while its
+  session is live, and a resuming Play is the Resume's waiter, which
+  `playBegan` passes over. The two tests the brief named pass as the code
+  stands and are kept as pins, with `playBegan`'s doc saying why. The
+  waiter-to-session tie the brief proposed was not added: it could never
+  decide otherwise than `current` does, and no control could see it.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 2 | `TestProbeDurable_SyncsTheDirectoryItOpened` | the probe answered a second open's EMFILE, marked as a sync failure |
+| 2 | `TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure` | the barrier's own open, EACCES, marked `ErrBarrierFailed` |
+| 1 | `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft` | a fresh writer synced the file's entry alone, none of those an earlier run left |
+| 1 | `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated` | the write after a's barrier succeeded synced the file's entry alone |
+| 1 | `TestWriteBytesDurable_RetriesThroughASymlinkedAlias` | the retry through the alias never synced b, x or the root |
+| 1 | `TestWriteBytesDurable_NeverSyncsAboveTheRoot` | a missing root created and its parent synced; a path outside the root written; a link out of it followed |
+| 1 | `TestProbeDurable` | the probe synced the leaf alone, not the chain up to the root |
+
+Finding 2's red runs had the `syncDir` seam declared and unused. Finding
+1's had `WriteBytesDurable(root, …)` and `ProbeDurable(root, …)` shimmed
+onto round 5's logic, the root ignored, and `ErrNotUnderRoot` declared.
+Finding 3's pins passed from the start; their control is below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 3 | `onAudible` takes an Audible from any registered session | both pins: the PlayID answered nil; the selection moved back to the released session's entry |
+| 2 | the probe syncs through a second open again | the probe's tests and `TestBarrierFailuresAreMarked` |
+| 2 | `syncDirAt` marks an open that failed | both unreadable-directory tests |
+| 1 | no entry synced between the file's directory and the root | five tests |
+| 1 | the walk as the path resolves dropped | the alias test, at b |
+| 1 | the walk as the path is written dropped | the alias test, at x, and every test that names the directories synced |
+| 1 | the root's parent synced too | every test that lists the directories synced |
+| 1 | `underRoot`'s check of the path as written disabled | both mixed spellings: root/new created before the refusal |
+| 1 | and the walk's stop at the top of the filesystem removed | a hang, ended by the 30 s timeout |
+| 1 | `nearest`'s check of the resolved path disabled | the link out of the root: out/new created |
+| 1 | New's check that the data directory exists made a no-op | the missing data directory said "cannot be read", not "must exist" |
+| 1 | New's case for a reservation file outside the data directory dropped | both outside cases said "cannot be read" |
+
+The first try at the New control deleted the case, which left a variable
+unused, so the build failed; it was rerun with a mutation that builds
+before its result was counted.
+
+The suite: 102 tests in the engine and 30 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (137.5 s and 58.4 s, no skips);
+`make fmt vet test` (72 packages ok, cmd/bridge 545 s), `make build-all`
+and `make docs-check` clean, all through the build lock; `go vet` of both
+packages for windows/amd64, linux/amd64 and linux/arm64 clean. Both notes
+applied to a checkout copy of HEAD, `check-doc-budgets` ok after each:
+`player.md` 73,803 bytes and `config-lifecycle.md` 47,042, of 100,000
+each; every test name they cite is defined.
+
+Not changed, for the owner: 4b2 must pass the data directory that holds
+`player-uuid` as `Config.DataDir`, with the reservation file below it as
+written; a link reached only through another link is on neither walk, so its
+entry is the caller's, like the root's; shutdown's ReasonClosed and a
+resuming Play's own answer, as in round 5.
