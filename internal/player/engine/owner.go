@@ -96,6 +96,10 @@ func (e *Engine) start() {
 	if qf, entries := e.loadQueue(); qf != nil {
 		o.q = newQueue(entries)
 		o.selected, o.repeat = qf.Selected, qf.Repeat
+		if qf.dangling != 0 {
+			e.log.Warn("player: the queue file's selection is not in its queue; the queue loads with nothing selected",
+				"path", e.cfg.QueuePath, "selected", qf.dangling)
+		}
 		idsBase = max(idsBase, qf.IDs.Reserved)
 		if qf.IDs.Next > 0 {
 			idsBase = max(idsBase, qf.IDs.Next-1)

@@ -404,6 +404,11 @@ func (b *fakeBackend) starts() int {
 func (b *fakeBackend) count(kind string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.countLocked(kind)
+}
+
+// countLocked is count with b.mu held, as waitFor's condition holds it.
+func (b *fakeBackend) countLocked(kind string) int {
 	n := 0
 	for _, c := range b.calls {
 		if c.kind == kind {

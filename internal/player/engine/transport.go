@@ -43,8 +43,14 @@ type occ struct {
 	ref   Reference
 	stage stage
 	// unwanted is why it must not be heard: an edit removed it, or made it
-	// no longer next, and the cut came too late.
+	// no longer follow the occurrence before it. reconcile sets it in the
+	// edit's own step, even while a Prepare or a Cut is under way, and clears
+	// it when an edit makes it follow again; heard while it is set, it stops
+	// playback.
 	unwanted string
+	// late is a Cut that answered it could not: some of its frames have
+	// been or will be played, so no Cut is asked of it again.
+	late bool
 }
 
 func (oc *occ) public() Occurrence { return Occurrence{ID: oc.id, Entry: oc.entry, Ref: oc.ref} }
@@ -538,37 +544,47 @@ func (e *Engine) following(id uint32) uint32 {
 }
 
 // reconcile holds the session's hand-offs to what the queue now says
-// follows the audible occurrence. An occurrence not yet submitted that is no
-// longer the one that follows is replaced by a new Prepare; a submitted one
-// is cut at its boundary, and when the cut comes too late it is marked so
-// that playback stops at once if it is heard. One Prepare or Cut is under
-// way at a time, and the tail's successor is named once its frames are in
-// the sink.
+// follows the audible occurrence. First, in the step of the edit that
+// changed it and whatever call is under way, every occurrence whose entry
+// no longer follows the one before it is marked unwanted, and one that
+// follows again is cleared: an unwanted occurrence that is heard stops
+// playback at once (onAudible), whatever a Prepare or a Cut answers after.
+// Then, with no call under way, the first unwanted occurrence not yet
+// submitted is replaced by a new Prepare, and a submitted one is cut at its
+// boundary; one whose cut came too late is left to stop playback if it is
+// heard. One Prepare or Cut is under way at a time, and the tail's
+// successor is named once its frames are in the sink.
 func (e *Engine) reconcile(s *session) {
 	o := &e.o
-	if s == nil || s != o.sess || s.phase != sessLive || s.succCall != nil || o.closing {
+	if s == nil || s != o.sess || s.phase != sessLive || o.closing || len(s.chain) == 0 {
 		return
 	}
 	for i := 1; i < len(s.chain); i++ {
 		prev, cur := s.chain[i-1], s.chain[i]
-		want := e.following(prev.entry)
-		if cur.entry == want {
+		switch {
+		case cur.entry == e.following(prev.entry):
 			cur.unwanted = ""
+		case !o.q.has(cur.entry):
+			cur.unwanted = fmt.Sprintf("entry %d was deleted", cur.entry)
+		default:
+			cur.unwanted = fmt.Sprintf("entry %d is no longer next", cur.entry)
+		}
+	}
+	if s.succCall != nil {
+		return
+	}
+	for i := 1; i < len(s.chain); i++ {
+		prev, cur := s.chain[i-1], s.chain[i]
+		switch {
+		case cur.unwanted == "":
 			continue
-		}
-		if cur.unwanted != "" {
-			return
-		}
-		if cur.stage < stageSubmitted {
+		case cur.late:
+		case cur.stage < stageSubmitted:
 			s.chain = s.chain[:i]
-			e.prepare(s, prev, want)
-			return
+			e.prepare(s, prev, e.following(prev.entry))
+		default:
+			e.cut(s, cur)
 		}
-		why := fmt.Sprintf("entry %d is no longer next", cur.entry)
-		if !o.q.has(cur.entry) {
-			why = fmt.Sprintf("entry %d was deleted", cur.entry)
-		}
-		e.cut(s, cur, why)
 		return
 	}
 	last := s.chain[len(s.chain)-1]
@@ -609,12 +625,12 @@ func (e *Engine) prepare(s *session, after *occ, entry uint32) {
 
 // cut asks the backend to end the content before from at its boundary and
 // to discard from and what follows it.
-func (e *Engine) cut(s *session, from *occ, why string) {
+func (e *Engine) cut(s *session, from *occ) {
 	cc := e.call(callCut, s, CallTimeout, func(ctx context.Context) callResult {
 		ok, err := e.be.Cut(ctx, s.id, from.id)
 		return callResult{err: err, cut: ok && err == nil}
 	})
-	cc.from, cc.why = from, why
+	cc.from = from
 	s.succCall = cc
 }
 
@@ -665,9 +681,8 @@ type call struct {
 	timer   timer
 	expired bool
 	waiter  *command
-	// after and next are a Prepare's; from and why a Cut's.
+	// after and next are a Prepare's; from a Cut's.
 	after, next, from *occ
-	why               string
 }
 
 // callResult is what a backend call returned.
@@ -718,8 +733,10 @@ func (e *Engine) callDone(c *call, r callResult) {
 			return
 		}
 		if r.err != nil {
+			// The chain keeps its audible occurrence: one the backend reported
+			// heard is not taken back by its Prepare's refusal.
 			if c.next != nil {
-				if i := s.index(c.next.id); i >= 0 {
+				if i := s.index(c.next.id); i > 0 {
 					s.chain = s.chain[:i]
 				}
 			}
@@ -737,15 +754,20 @@ func (e *Engine) callDone(c *call, r callResult) {
 		if e.current(s.id) != s {
 			return
 		}
-		if i := s.index(c.from.id); i >= 0 {
-			if r.cut {
-				s.chain = s.chain[:i]
-				s.endSent = false
-			} else {
-				for _, oc := range s.chain[i:] {
-					oc.unwanted = c.why
-				}
-			}
+		switch i := s.index(c.from.id); {
+		case i < 0:
+		case !r.cut:
+			c.from.late = true
+		case i == 0:
+			// A cut of what was heard: the backend answered it could after
+			// reporting the occurrence audible, which a backend that keeps the
+			// contract never does, and the chain would be left with nothing.
+			e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible,
+				Detail: fmt.Sprintf("occurrence %d was cut after it became audible", c.from.id)})
+			return
+		default:
+			s.chain = s.chain[:i]
+			s.endSent = false
 		}
 		e.reconcile(s)
 	case callPause:
@@ -905,7 +927,8 @@ func (e *Engine) callExpired(c *call) {
 
 // onAudible is the played content crossing an occurrence's first frame:
 // the selection moves to its entry. An occurrence an edit removed, or made
-// no longer next, stops playback at once.
+// no longer next, stops playback at once, and so does one crossed on the way
+// to it; the selection never moves to an entry the queue does not hold.
 func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	o := &e.o
 	s := e.current(id)
@@ -917,9 +940,15 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: fmt.Sprintf("occurrence %d, which the engine did not hand off, became audible", oid)})
 		return
 	}
+	for _, crossed := range s.chain[1 : i+1] {
+		if crossed.unwanted != "" {
+			e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: crossed.unwanted + ", and it became audible"})
+			return
+		}
+	}
 	oc := s.chain[i]
-	if oc.unwanted != "" {
-		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: oc.unwanted + ", and it became audible"})
+	if !o.q.has(oc.entry) {
+		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: fmt.Sprintf("entry %d is not in the queue, and it became audible", oc.entry)})
 		return
 	}
 	s.chain = s.chain[i:]

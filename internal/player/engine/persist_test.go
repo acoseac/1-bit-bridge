@@ -375,10 +375,6 @@ func TestEachKindOfBadFileIsMovedAside(t *testing.T) {
 			entriesOfFile(m)[0].(map[string]any)["id"] = reserved + 1
 			return writeJSON(t, h, m)
 		}},
-		{"a selection not in the queue", func(t *testing.T, h *harness, m map[string]any) []byte {
-			m["selected"] = 4242
-			return writeJSON(t, h, m)
-		}},
 		{"a bad reference", func(t *testing.T, h *harness, m map[string]any) []byte {
 			entriesOfFile(m)[0].(map[string]any)["ref"] = "bad\u0001"
 			return writeJSON(t, h, m)
@@ -442,6 +438,29 @@ func TestEachKindOfBadFileIsMovedAside(t *testing.T) {
 				t.Fatalf("after a bad file the engine saved %v", ids)
 			}
 		})
+	}
+}
+
+// TestADanglingSelectionIsClearedAtLoad pins a queue file whose selection
+// its queue does not hold: the queue loads whole with nothing selected, the
+// log says so once, and nothing is moved aside.
+func TestADanglingSelectionIsClearedAtLoad(t *testing.T) {
+	h, m := savedQueue(t)
+	var want []uint32
+	for _, e := range entriesOfFile(m) {
+		want = append(want, uint32(e.(map[string]any)["id"].(float64)))
+	}
+	m["selected"] = 4242
+	writeJSON(t, h, m)
+	h.boot()
+	if sn := h.snap(); !slices.Equal(sn.IDs(), want) || sn.Selected() != 0 {
+		t.Fatalf("loaded %v with %d selected, want %v with nothing selected", sn.IDs(), sn.Selected(), want)
+	}
+	if aside, _ := filepath.Glob(h.queuePath() + ".bad-*"); len(aside) != 0 {
+		t.Fatalf("a queue with a dangling selection was moved aside: %v", aside)
+	}
+	if n := h.logs.count("selection is not in its queue"); n != 1 {
+		t.Fatalf("%d log lines for the dangling selection, want 1: %v", n, h.logs.all())
 	}
 }
 

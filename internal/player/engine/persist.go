@@ -46,6 +46,10 @@ type queueFile struct {
 	Shuffle  bool        `json:"shuffle"`
 	Selected uint32      `json:"selected"`
 	Entries  []fileEntry `json:"entries"`
+
+	// dangling is a selection the file named that its queue does not hold,
+	// which decodeQueue clears.
+	dangling uint32
 }
 
 // fileIDs is the ID counter: the next ID and the reservation.
@@ -120,8 +124,10 @@ func strictJSON(data []byte, v any) error {
 
 // decodeQueue reads a queue file and checks everything the engine would
 // not have written: the version, the bounds, every ID nonzero, unique,
-// handed out and inside its reservation, every reference, the selection in
-// the queue, shuffle off.
+// handed out and inside its reservation, every reference, shuffle off. A
+// selection the queue does not hold is cleared (queueFile.dangling), never a
+// reason to move a good queue aside: nothing selected is a state the engine
+// has.
 func decodeQueue(data []byte) (*queueFile, []entry, error) {
 	if len(data) > maxQueueFileBytes {
 		return nil, nil, fmt.Errorf("%d bytes or more, past the cap of %d", len(data), maxQueueFileBytes)
@@ -167,7 +173,7 @@ func decodeQueue(data []byte) (*queueFile, []entry, error) {
 		entries = append(entries, entry{id: fe.ID, ref: r, meta: fe.Meta})
 	}
 	if f.Selected != 0 && !seen[f.Selected] {
-		return nil, nil, fmt.Errorf("the selection %d is not in the queue", f.Selected)
+		f.dangling, f.Selected = f.Selected, 0
 	}
 	f.Entries = nil
 	return &f, entries, nil

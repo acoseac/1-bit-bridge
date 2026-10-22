@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
@@ -150,7 +151,8 @@ func TestAnEditAfterSubmissionAsksForACut(t *testing.T) {
 // TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible pins a cut that came
 // too late: the deleted entry, or the one no longer next, plays no further
 // than its first report, and the selection never names an ID outside the
-// queue.
+// queue. The report is sent once the owner has handled the cut's answer, so
+// the test is of that order alone.
 func TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -169,15 +171,9 @@ func TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible(t *testing.T) {
 			h.be.script(func() {
 				h.be.onCut = func(context.Context, *fakeSession, OccurrenceID) (bool, error) { return false, nil }
 			})
+			mark := h.appliedMark()
 			tc.edit(h, ids)
-			h.be.waitFor("the cut", func() bool {
-				for _, c := range h.be.calls {
-					if c.kind == "cut" {
-						return true
-					}
-				}
-				return false
-			})
+			h.waitApplied("handled call cut", mark)
 			s.audible(b.ID)
 			sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
 			if sn.LastStop().Reason != ReasonRemovedAudible {
@@ -190,6 +186,119 @@ func TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible(t *testing.T) {
 				t.Fatalf("a successor was named after the failed cut: %v", s.preparesAfter(a))
 			}
 		})
+	}
+}
+
+// TestAnEntryHeardWhileItsCallIsUnderWayStops pins the edit's mark: an
+// occurrence whose entry an edit removed, or made no longer next, is marked
+// in the edit's own step, even while a Cut or a Prepare is under way, so its
+// audible report stops playback whatever that call answers after it, the
+// selection never names an entry outside the queue, and the next start loads
+// the queue.
+func TestAnEntryHeardWhileItsCallIsUnderWayStops(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		submitted bool
+		// prepare is the Prepare held (counted from 1), or 0 for the Cut;
+		// cut is what the held Cut answers.
+		prepare int
+		cut     bool
+	}{
+		{"a cut that answers it could", true, 0, true},
+		{"a cut that answers it could not", true, 0, false},
+		{"a prepare of it", false, 1, false},
+		{"a prepare of what follows it", true, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			held := newGate()
+			h.be.script(func() {
+				n := 0
+				h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, _ *Occurrence) error {
+					h.be.mu.Lock()
+					n++
+					hold := n == tc.prepare
+					h.be.mu.Unlock()
+					if hold {
+						return held.wait(ctx, h.be, false)
+					}
+					return nil
+				}
+				h.be.onCut = func(ctx context.Context, _ *fakeSession, _ OccurrenceID) (bool, error) {
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return false, err
+					}
+					return tc.cut, nil
+				}
+			})
+			ids, s, _, b := handoff(t, h, tc.submitted, "a", "b", "c")
+			mark := h.appliedMark()
+			h.must("delete b", h.eng.Delete(bg, ids[1]))
+			if tc.prepare == 0 {
+				h.be.waitFor("the cut", func() bool { return h.be.countLocked("cut") == 1 })
+			}
+			if !tc.submitted {
+				s.submitted(b.ID)
+			}
+			s.audible(b.ID)
+			h.waitApplied("handled audible", mark)
+			sn := h.snap()
+			if sn.Selected() != ids[0] || sn.LastStop().Reason != ReasonRemovedAudible {
+				t.Fatalf("the deleted entry was heard with its call under way: selected %d (b is %d), %s, last stop %+v",
+					sn.Selected(), ids[1], sn.State(), sn.LastStop())
+			}
+			mark = h.appliedMark()
+			held.open()
+			call := "handled call cut"
+			if tc.prepare != 0 {
+				call = "handled call prepare"
+			}
+			h.waitApplied(call, mark)
+			sn = h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+			if sn.Selected() != ids[0] || h.be.starts() != 1 {
+				t.Fatalf("after the call answered: selected %d, %d sessions", sn.Selected(), h.be.starts())
+			}
+			h.restart()
+			if aside, _ := filepath.Glob(h.queuePath() + ".bad-*"); len(aside) != 0 || !slices.Equal(h.snap().IDs(), []uint32{ids[0], ids[2]}) {
+				t.Fatalf("the next start: queue %v, moved aside %v", h.snap().IDs(), aside)
+			}
+		})
+	}
+}
+
+// TestACutAnsweredAfterItsEntryWasHeardStops pins a Cut that answers it
+// could after the occurrence it cut was heard, which a backend that keeps
+// the contract never does: the edit that asked for it was undone, the entry
+// heard and selected, and then the cut. The chain is never left empty;
+// playback stops.
+func TestACutAnsweredAfterItsEntryWasHeardStops(t *testing.T) {
+	h := startHarness(t)
+	ids, s, _, b := handoff(t, h, true, "a", "b", "c")
+	held := newGate()
+	h.be.script(func() {
+		h.be.onCut = func(ctx context.Context, _ *fakeSession, _ OccurrenceID) (bool, error) {
+			if err := held.wait(ctx, h.be, false); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	})
+	x, err := h.eng.InsertAfter(bg, ids[0], ref("x"), nil)
+	h.must("insert x after a", err)
+	h.be.waitFor("the cut", func() bool { return h.be.countLocked("cut") == 1 })
+	h.must("delete x", h.eng.Delete(bg, x))
+	mark := h.appliedMark()
+	s.audible(b.ID)
+	h.waitApplied("handled audible", mark)
+	if sn := h.snap(); sn.Selected() != ids[1] || sn.State() != Playing {
+		t.Fatalf("b, wanted again, was heard: selected %d, %s", sn.Selected(), sn.State())
+	}
+	mark = h.appliedMark()
+	held.open()
+	h.waitApplied("handled call cut", mark)
+	sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	if sn.LastStop().Reason != ReasonRemovedAudible || sn.Selected() != ids[1] {
+		t.Fatalf("last stop %+v, selected %d", sn.LastStop(), sn.Selected())
 	}
 }
 
