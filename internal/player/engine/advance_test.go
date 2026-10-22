@@ -582,6 +582,78 @@ func TestAPlayWhosePlaybackBeganAnswersAsPlayed(t *testing.T) {
 	})
 }
 
+// TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand pins whose
+// Audible decides a waiting play command's playback: only that of the
+// session started for it. A session released (here to play another entry)
+// is no longer current, and onAudible drops what it reports, so a PlayID
+// waiting behind that release is decided only by the session that follows,
+// and answers why that one did not play: a PlayID that replaced a Play whose
+// Start is held, the first session then heard, answers the second session's
+// refused Start; a PlayID behind a held release, the releasing session's
+// successor then heard, answers the output going away.
+func TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand(t *testing.T) {
+	t.Run("a PlayID that replaced a starting Play, then the first session heard", func(t *testing.T) {
+		h := startHarness(t)
+		ids := h.insert("a", "x")
+		h.available()
+		held := newGate()
+		busy := errors.New("the device is busy")
+		h.be.script(func() {
+			h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+				switch s.id {
+				case 1:
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+				case 2:
+					return busy
+				}
+				return s.open()
+			}
+		})
+		play := async(func() error { return h.eng.Play(bg) })
+		s1 := h.be.nth(1)
+		mark := h.appliedMark()
+		playID := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+		h.waitApplied("play id", mark)
+		mark = h.appliedMark()
+		s1.audible(s1.first.ID)
+		h.waitApplied("handled audible", mark)
+		held.open()
+		if err := h.result("play id", playID); ReasonOf(err) != ReasonBackend || !errors.Is(err, busy) {
+			t.Fatalf("the PlayID whose session's Start was refused answered %v, want %s with the backend's error", err, ReasonBackend)
+		}
+		if err := h.result("play", play); err == nil {
+			t.Fatal("the Play answered nil, though its session was released before it was heard and the next was refused")
+		}
+		if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 2 {
+			t.Fatalf("%s after %d sessions, want stopped after two", sn.State(), h.be.starts())
+		}
+	})
+	t.Run("a PlayID behind a held release, then the releasing session's successor heard", func(t *testing.T) {
+		h := startHarness(t)
+		ids, s := h.playing(0, "a", "b", "c")
+		b := s.prepared(s.first.ID, 1)
+		if b == nil || b.Entry != ids[1] {
+			t.Fatalf("the successor of a is %+v, want b", b)
+		}
+		s.submitted(b.ID)
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		playID := async(func() error { return h.eng.PlayID(bg, ids[2]) })
+		h.waitApplied("play id", mark)
+		mark = h.appliedMark()
+		s.audible(b.ID)
+		h.waitApplied("handled audible", mark)
+		if sel := h.snap().Selected(); sel != ids[2] {
+			t.Fatalf("selected %d after the releasing session's Audible, want c, the PlayID's", sel)
+		}
+		h.report(OutputReport{Available: false, Reason: "device_missing"})
+		g.open()
+		h.refused("the PlayID behind the release", h.result("play id", playID), ReasonOutputUnavailable)
+	})
+}
+
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a
 // deletion and a skip set while playing: the new target as soon as the
 // owner has applied it, with nothing audible, before any backend event.

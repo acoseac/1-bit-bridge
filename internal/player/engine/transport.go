@@ -364,13 +364,19 @@ func (e *Engine) superseded(by string) {
 }
 
 // playBegan records, on the waiting play commands that have no outcome yet,
-// that their playback began: the session started for them was heard, which
-// is the only session they wait for while one is current. Each answers nil
-// from then on, whatever stops playback after (playFailed passes it over);
-// one already given a reason keeps it, since deciding again changes nothing
-// recorded. A Play whose Resume is under way is not one of them: an Audible
-// while a session is paused can be content a pause by zeros was still
-// playing out, so the Resume's own answer stands.
+// that their playback began: the session started for them was heard. Every
+// one of them waits for that session. onAudible takes an Audible only from
+// the current session, starting or live (current): a session released, its
+// release unconfirmed, finished or replaced reports in vain. And play
+// commands wait only while a session starts or releases (settleWaiters
+// answers them all once neither is under way), so when the current session
+// is heard they wait for it: those it was started for, and those that waited
+// behind the release before it. Each answers nil from then on, whatever
+// stops playback after (playFailed passes it over); one already given a
+// reason keeps it, since deciding again changes nothing recorded. A Play
+// whose Resume is under way is not one of them: an Audible while a session
+// is paused can be content a pause by zeros was still playing out, so the
+// Resume's own answer stands.
 func (e *Engine) playBegan() {
 	for i := range e.o.waiters {
 		if w := &e.o.waiters[i]; w.play {
