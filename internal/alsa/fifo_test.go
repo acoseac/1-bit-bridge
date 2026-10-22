@@ -149,17 +149,23 @@ func TestAnAttributeSwappedForAFIFOAfterItsCheckIsRefused(t *testing.T) {
 }
 
 // TestAFIFOInTheProcTreeIsRefusedPromptly: the /proc reader too. A FIFO at
-// the cards file is the reading's error; one at a card's usbid, its
-// directory, a playback device's directory or a substream's status is the
-// card's problem; and the reading returns.
+// the ALSA root or the cards file is the reading's error; one at the /proc
+// root leaves every owner unknown; one at a card's usbid, its directory, a
+// playback device's directory or a substream's status is the card's
+// problem; and the reading returns.
 func TestAFIFOInTheProcTreeIsRefusedPromptly(t *testing.T) {
 	for _, tc := range []struct {
 		name, at string
+		// asound, when set, is where the ALSA tree is moved and read from,
+		// so the FIFO can take the /proc root's place.
+		asound string
 		// problem is what card 5's problems say, "" for nothing; fails is
 		// the reading's own error, for the cards file.
 		problem string
 		fails   bool
 	}{
+		{name: "the ALSA root", at: "proc/asound", fails: true},
+		{name: "the /proc root", at: "proc", asound: "asound"},
 		{name: "the cards file", at: "proc/asound/cards", fails: true},
 		{name: "a usbid", at: "proc/asound/card5/usbid", problem: "card5/usbid"},
 		{name: "a card's directory", at: "proc/asound/card5", problem: "card5"},
@@ -168,15 +174,25 @@ func TestAFIFOInTheProcTreeIsRefusedPromptly(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			r := Reader{ProcRoot: filepath.Join(root, "proc")}
+			if tc.asound != "" {
+				r.AsoundRoot = filepath.Join(root, tc.asound)
+				if err := os.Rename(filepath.Join(root, "proc", "asound"), r.AsoundRoot); err != nil {
+					t.Fatal(err)
+				}
+			}
 			fifo, err := plantFIFO(root, tc.at)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var snap Snapshot
 			var readErr error
-			readsPromptly(t, []string{fifo}, func() { snap, readErr = Reader{ProcRoot: filepath.Join(root, "proc")}.Read() })
+			readsPromptly(t, []string{fifo}, func() { snap, readErr = r.Read() })
 			if (readErr != nil) != tc.fails {
 				t.Fatalf("a FIFO at %s: the reading's error is %v", tc.at, readErr)
+			}
+			if !tc.fails && len(snap.Cards) == 0 {
+				t.Errorf("a FIFO at %s: no card was read", tc.at)
 			}
 			for _, c := range snap.Cards {
 				if c.Index == 5 && !strings.Contains(strings.Join(c.Problems, "; "), tc.problem) {
