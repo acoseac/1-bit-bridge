@@ -32,8 +32,9 @@ func (d onAnotherDevice) Sys() any { return &d.st }
 // with it. Here a stat reports every entry but a directory on another device,
 // and a directory below the root on a device of its own, the mount IDs all
 // the root's: the probe and a write over the destination already there
-// succeed, syncing what they always sync, and so does a write that makes a
-// directory below that one.
+// succeed, syncing what they always sync, and so do a write that makes a
+// directory below that one and the fallback a failed rename takes for the
+// same bytes.
 func TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice(t *testing.T) {
 	root := realTempDir(t)
 	sub := filepath.Join(root, "sub")
@@ -88,5 +89,21 @@ func TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice(t *testing.T) {
 	}
 	if got, err := os.ReadFile(deeper); err != nil || string(got) != "reserved" {
 		t.Errorf("%s holds %q (%v), want the write's bytes", deeper, got, err)
+	}
+	// The fallback a failed rename takes for the same bytes asks the same of
+	// the destination and its directory (onItsDirectorysMount): by mount ID,
+	// never by device. With the rename failing, as when another writer's
+	// rename wins, the bytes already there are taken, and every directory
+	// from the destination's up to the root synced. Round 8's device
+	// comparison put back there passed every test until this case (the
+	// Claude API on round 9), and on overlayfs it fails the reservation write.
+	renamePrev := SetRenameFuncForTest(func(string, string) error { return syscall.EBUSY })
+	t.Cleanup(func() { SetRenameFuncForTest(renamePrev) })
+	*synced = nil
+	if err := WriteBytesDurable(root, dst, []byte("reserved again"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable over the same bytes with the rename failing = %v, want nil: the fallback takes them", err)
+	}
+	if want := []string{root, sub, root}; !slices.Equal(*synced, want) {
+		t.Errorf("the fallback synced %v, want %v", *synced, want)
 	}
 }
