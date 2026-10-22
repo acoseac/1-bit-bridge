@@ -51481,6 +51481,18 @@ or renamed that `output.md` cites; this log cites them with their `Test`
 prefix elided (round 1's V9 and R18 rows, round 2's N9 to N22, N36 to N39,
 N46 and N60 rows), as it does a renamed test.
 
+**Gates**, through the build lock. `make fmt vet` clean, `go fmt`
+rewriting nothing; `make build-all` clean; `make docs-check` clean before
+and with the note applied (CLAUDE.md 61.2%, 61.6% with it). `make test` on
+the branch: 69 packages ok and `cmd/bridge` red on
+`TestEveryCitedTestNameExists` alone, the twelve `output.md` citations
+above (1638 s); with the note applied to the tree, then reverted, `make
+test` passed whole, saprobe-alac's own module included (1023 s).
+`internal/api`, `internal/signalpath`, `internal/alsa` and
+`internal/mpd/...` under `-race -count=10 -timeout 60m` passed (`api`
+865 s). `go vet` of the touched packages for windows and linux is clean,
+and the windows test binaries build.
+
 **Residuals, named, not fixed here**
 
 - Codex 2 and Codex 10, narrowed (the table above).
