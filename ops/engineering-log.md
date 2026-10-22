@@ -51021,3 +51021,90 @@ read), no early exit (R3-6), `CardsComplete` always true (R3-7) and never
 matched `inventory`'s `!sys.Present` too and was not applied; the run was
 of the unchanged tree, and the control was made again on `checkPort`'s
 line alone.
+
+**Round 4 (Codex P2 twice, the Claude API Low with the second; Argon
+found none). Both findings: Resolve and the check after open still
+answered differently on one reading, so round 4 added a table that runs
+each shape of reading through both.** `checkPort` filed a card the kernel
+is adding or removing (vanished as it was read, or listed by one tree
+alone) with the unreadable cards, whose refusal the interface preference
+skips, so card 5 on the recorded interface was admitted beside it, where
+Resolve answers `identity_transient` before it looks at the binding;
+round 3's test required that admission for its vanished and /proc-only
+cases, and now requires the refusal. Such a card now refuses before the
+preference, wherever it is; the preference stays for an unreadable card,
+which Resolve's own preference (`byInterface`) covers. And `inventory`,
+shared since round 3, dropped `SysfsSnapshot.CardsComplete`: on a listing
+cut at the cap Resolve answered available (status, and bind accepted)
+while the check refused every open "cut short … resolve again", and
+resolving again answered available again, so a port-bound player never
+played; and a cut sibling that /proc/asound did not list was invisible to
+Resolve, which answered available where that sibling made the binding
+ambiguous. `Inventory` now carries `CardsComplete`, and Resolve answers
+`identity_incomplete`, a new state, before it looks at any card,
+`identity_transient` included, since a card cut from sysfs's listing that
+/proc/asound lists reads as one tree's alone, which it is not. bind
+(`For`) refuses such a reading before it looks for its card, which the
+listing may lack: it said "there is no card 5", or "being added or
+removed: try again". Nothing outside `internal/player/binding` changed:
+`--verify-card` runs the check only on a resolution that is available,
+so on a cut listing it now says the binding does not resolve
+(`identity_incomplete`).
+
+**The table.** `TestTheCheckAfterOpenAgreesWithResolveOnEachReading`
+lays out nineteen shapes on the Pi 5 tree: the GO bar beside the HDMI
+cards, a virtual card, a card at another port, another model in the port,
+the GO bar in another port, the port empty; a second card of the GO bar's
+unit read whole, cut from the listing while /proc/asound lists it and
+before it does, listed by one tree alone each way, vanished, and
+unreadable; a card at another port that sysfs alone lists; card 5 itself
+listed by one tree alone each way, and vanished; a listing cut with no
+card missing, and one that cannot be read. Each runs through Resolve and
+through the check of card 5, made from the resolution of the GO bar
+alone, under a serial, a uniqueModel and a port binding with and without
+the GO bar's interface, and the check must admit card 5 exactly when
+Resolve answers available on it. Under a port binding they agree on every
+shape: the check chooses again there, since a unit Resolve never saw may
+be in the port. Under a serial or uniqueModel binding the check chooses
+nothing: it pins the unit Resolve chose by `SameUnit` on the opened
+card's own sysfs identity, and the table names the shapes where that
+answers otherwise, for three reasons. A second card or unit, a card
+Resolve cannot identify, or a listing it cannot read whole is why Resolve
+chooses none, and none makes card 5 another unit (ten shapes); the GO bar
+moved to another port as card 5 is refused, the safe way to differ, since
+`SameUnit` compares the port the open was made from; and card 5 that
+sysfs lists and /proc/asound does not is admitted, since a USB card's
+identity is sysfs's and the kernel holds its node. A named difference
+that stops differing fails the table too.
+
+**Red first, and the controls.** With the new state, the field and
+`inventory`'s carry in place and round 3's Resolve and check, the table
+failed on seven shapes. Finding 1 on four: the second card listed by one
+tree alone each way or vanished, and the card at another port that sysfs
+alone lists, where Resolve answered `identity_transient` and the check
+admitted card 5 under the port with its interface. Finding 2 on three:
+the listing cut with no card missing and the second card cut before
+/proc/asound lists it, under both port forms Resolve available and the
+check refusing "cut short", under the unit forms the named difference
+not holding; and on the third, the second card cut while /proc/asound
+lists it, Resolve answered `identity_transient` where the table says
+`identity_incomplete`. `TestTheCheckAfterOpenFollowsAPortBinding`
+failed on its vanished and /proc-only cases, and
+`TestACutListingResolvesToNoCardAndBindsNone` on its first resolution.
+Controls on 90781dac, all red, each restored from git: a transient card
+filed with the unreadable ones again (R4-1: the four transient shapes
+under the port with its interface, and the port-binding test), transient
+cards ignored (R4-2: the same shapes under both port forms), the
+preference dropped for an unreadable card (R4-3: the unreadable shape
+under the port with its interface, and the port-binding test), Resolve
+without `identity_incomplete` (R4-4: the three cut shapes, two on
+agreement and one on its state, and the cut-listing test), `inventory`
+calling every listing whole (R4-5: the same, and the carry on the four
+shapes not whole), `identity_transient` answered first (R4-6: the cut
+sibling /proc/asound lists, and the cut-listing test with card 5 cut),
+bind without its check (R4-7: "card 5 is in /proc/asound and not in
+sysfs: being added or removed: try again" for each kind), the check
+without round 3's cut refusal (R4-8: the two cut shapes under both port
+forms, and the port-binding test), and every binding checked as a port
+(R4-9: eleven shapes under the unit forms, ten named differences agreeing
+and another model in the port admitted, and both check tests).
