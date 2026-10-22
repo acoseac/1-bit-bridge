@@ -631,20 +631,44 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   trigger silently destroys operator-uploaded content to reclaim a JPEG. An
   AST-based guard fails if a production caller appears.
 
-- **An output refusal names the setting, never its value** (2026-10-22,
-  backlog B505 round 2). `OutputConfig.Problem`, which Validate calls and
-  `bridge init`'s rewrite checks each kept setting with, returns an
-  `*OutputProblem`: the setting, and a reason with no value in it ("that
-  value is not auto, on or off", "that value is not a port (0 to
-  65535)"). What is refused there is often something pasted onto the wrong
-  line: MPD's password or a DAC's serial on `output.mpd`'s, a serial of
-  digits on `output.loopbackPort`'s. Validate's refusal quoted a refused
-  mpd (`%q`) and printed a refused port (`%d`), and `bridge serve`,
-  `bridge doctor` and init print it at load; init's rewrite warning took
-  its words. The player block's reasons and a configured URL's refusals
-  already name a field without its value (the bullet on a configured URL
-  above; `player.md`). The rewrite builds its warning line from the
-  refusal's parts and the key's line (`outputRefusal`), never from the
-  error's own text. **Don't quote a refused output setting.**
-  `TestOutputRefusalsCarryNoValue` and
+- **No refusal, warning or log line of the config path carries any part of
+  a value or a key** (2026-10-22, backlog B505 rounds 2 and 3). What a
+  config refuses is often something pasted onto the wrong line, MPD's
+  password or a DAC's serial, and `bridge serve`, `bridge doctor` and init
+  print the refusal, which a service's journal keeps. Round 2 made
+  `OutputConfig.Problem` return an `*OutputProblem`, the setting and a
+  reason with no value in it, after Validate's refusal quoted a refused
+  mpd (`%q`) and printed a refused port (`%d`); init's rewrite builds its
+  warning lines from its parts. That left yaml.v3's own errors, which Load
+  printed (the Claude API and Codex on round 2): v3.0.1 quotes a value it
+  cannot decode, whole up to ten bytes and its first seven past that,
+  writes a value tagged `!!map` or `!!seq` whole and unquoted, prints whole
+  a value its explicit tag does not fit, names the anchor of an alias that
+  names none (an unquoted password starting with `*`), and names a key it
+  does not take or finds twice. `config.ValueFreeYAMLError` rebuilds each
+  message from its line, the Go type, a standard tag and the decoder's own
+  words; the parser's own messages (a line and a problem from its fixed
+  set) stay, and any other error, a type's own unmarshaler's, is replaced.
+  Load and init's read of the config it replaces print it. A key goes as a
+  value does, named by its line: a scalar written alone in a flow block is
+  a key, and the player block's reasons say "that key" for the same reason.
+  Validate's refusals name the setting and what it takes, never what it
+  holds: no `got %d`, no quoted mode, address, quiet-hours window or
+  directory, no effective durations, no `net.SplitHostPort` error, which
+  repeats the address (`splitHostPortWhy` keeps its reason), a library
+  root and an upstream server by their index. An unparseable `BRIDGE_*`
+  variable's warning names the variable alone, never its value or
+  strconv's error, which repeats it. Left as they were: init's
+  `--listen-address` and `--admin-address` refusals, which name what the
+  operator typed on that command line; a URL's scheme and host
+  (`urlFieldForLog`, B54); and the `libraryName` and autocert host Load
+  serves, which are published. **Don't quote, print or name any part of a
+  config value or key in a refusal, a warning or a log line, and don't
+  print yaml.v3's error without `ValueFreeYAMLError`.**
+  `TestNoLoadRefusalOrWarningCarriesAValue` (a word and a serial of digits
+  on every setting `envBindings` knows, and on each setting Validate checks
+  only beside another, with that one set), `TestOutputRefusalsCarryNoValue`
+  (each yaml.v3 shape, checked to carry the value in yaml.v3's own error
+  first), `TestNoEnvironmentOverrideWarningCarriesAValue`,
+  `TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt` and
   `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` pin it.

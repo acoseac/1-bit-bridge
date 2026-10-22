@@ -763,41 +763,61 @@
   read, on its own and a setting at a time: as a field of
   `priorInstallFile` a type error in it fails that struct's whole decode,
   and `refuseRewrite` refuses the rewrite about a data dir and a pair it
-  could read. **Every setting it keeps holds the value Load gave it**
-  (round 2, Codex). `resolveOutput` resolves the block's merge keys as
-  gopkg.in/yaml.v3 v3.0.1's decoder does (`decoder.mappingStruct` and
-  `decoder.merge`): the block's own keys first, then each merged block's,
-  in order, where nothing set that setting, a merged block's own merge
-  after its keys, a key written as an alias read through it. Each setting
-  is then decoded once. Round 1 decoded the block's pairs in the file's
-  order and kept each value that was not zero. So a merge written after a
-  key overwrote it: `mpd: off` was saved `on`, and the player's serial
-  binding was replaced by a merged port binding. And an explicit empty or
-  null value let a merged one through. What makes Load refuse the whole
-  block costs that much alone: a key written twice in one block, two merge
-  keys in one block, a merge key naming no block. A key written beside a
-  merge hides the merged value even when the written one is refused. A
-  setting that does not read, or that `config.OutputConfig.Problem`
-  refuses, is one the config did not load with either: it is not kept, and
-  a warning after the save names it by key, line and the check's reason,
-  **never its value**. `Problem` returns an `*config.OutputProblem` whose
-  reason carries none, and `outputRefusal` builds the warning line from its
-  parts (`warnOutputNotKept`). This is round 2's fix, after Codex and the
-  Claude API: round 1's warning quoted a refused `output.mpd`, so MPD's
-  password pasted onto that line reached stderr. A player block never
-  fails, and one this release cannot read is kept as written. A key output
-  does not take goes, as every unknown key does. `printKept` lists each
+  could read. **Every setting it keeps holds the value Load gave it, and a
+  block yaml.v3 decodes is kept as it decoded it** (rounds 2 and 3).
+  `priorOutput` decodes the block with yaml.v3's own decoder, set as Load
+  sets it (`KnownFields`), into `config.OutputConfig`, the type Load decodes
+  it into, through `outputAsLoaded`, an Unmarshaler of yaml.v3's older form:
+  its callback decodes with the decoder at hand and returns the errors of
+  that value alone, a refusal the decoder panics with included. So no merge
+  key, alias, tag or encoded key is read one way there and another by Load.
+  Round 1 decoded the block's pairs in the file's order and kept each value
+  that was not zero: a merge written after a key overwrote it (`mpd: off`
+  was saved `on`, a serial binding replaced by a merged port binding), and
+  an explicit empty or null value let a merged one through (Codex). Round
+  2's `resolveOutput` resolved the merge keys itself, as a copy of the
+  decoder's rules, and the copy disagreed with the decoder three ways
+  (Codex and the Claude API on round 2): it compared a key written as
+  `!!binary` by its base64 text, so `{!!binary cGFzc3dvcmQ=: "", <<:
+  {password: old-pw}}`, an empty password to Load, was saved with
+  `old-pw`; it followed 64 merged blocks, so a password listed after 63
+  empty ones was dropped from a config that loads; and it dropped a setting
+  a merged block names twice through an alias key, where the decoder takes
+  the first. A block that decodes keeps every setting but those
+  `config.OutputConfig.WithoutRefused` refuses (Validate's refusals, of
+  which `Problem` is the first), each named by the line of the block's own
+  key that writes it, or as merged when none does. A block yaml.v3 does not
+  decode is one Load refuses, and of it the rewrite keeps only what it can
+  name with certainty (`outputRecovered`): when every key is text with no
+  tag (`plainKey`), each setting a key names once, decoded on its own,
+  unless refused; a key written more than once and a key output does not
+  take are left out and named by their lines (an unknown key went without
+  a word until round 3). A merge key, an alias or a tag among the keys, or a
+  block that is not a mapping, keeps nothing, and the warning says so:
+  which setting a value is for is the decoder's to say, and the decoder
+  refused the block. So does a block the file writes twice, once encoded
+  (`outputKeyLines`; written twice as it is, `refuseRewrite` refuses the
+  rewrite). Every line names the setting or the block and a line, **never a
+  value**: `OutputProblem`'s reason carries none, a key output does not
+  take is named by its line alone (`warnOutputNotKept`), and round 1's
+  warning, which quoted a refused `output.mpd`, put MPD's password pasted
+  onto that line on stderr (round 2). The refusal of a config that does not
+  decode prints yaml.v3's error without the file's text
+  (`config.ValueFreeYAMLError`, round 3). A player block never fails, and
+  one this release cannot read is kept as written. `printKept` lists each
   kept setting, the password as "set (not shown)" and the player by
   whether it is enabled and its binding's kind. **Don't drop the output
   block, and don't read it as a field of `priorInstallFile`.** **Don't
-  decode the block's pairs in the file's order: resolve its merge keys as
-  the decoder does, and don't print a refused setting's value.**
+  resolve the block with a resolver of your own: keep what yaml.v3 decodes
+  for Load, and of a block it refuses only settings plain keys name once;
+  don't print a refused setting's value.**
   (`TestInitRewriteKeepsTheOutputBlock`,
   `TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten`,
   `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo`,
   `TestInitRewriteKeepsWhatTheOutputBlockLoadedWith`,
   `TestInitRewriteResolvesMergesBesideASettingItCannotKeep`,
-  `TestPriorOutputResolvesMergeKeysAsLoadDoes`.)
+  `TestPriorOutputResolvesMergeKeysAsLoadDoes`,
+  `TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt`.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.
