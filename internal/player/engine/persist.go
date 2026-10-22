@@ -18,8 +18,9 @@ const (
 	queueVersion = 1
 	// maxQueueFileBytes caps the queue file read at a start: the real
 	// encoding of a full queue (MaxEntries entries carrying
-	// MaxTotalMetadataBytes, base64 rounding up on each, every reference
-	// byte escaped) is under 23.2 MB, and this leaves room above it.
+	// MaxTotalMetadataBytes, base64 rounding up on each, references whose
+	// bytes JSON escapes) measures 22,595,456 bytes
+	// (TestAMaximumSizeQueueRoundTrips), and this leaves room above it.
 	maxQueueFileBytes = 24 << 20
 	// writeCoalesce is how long the writer waits after a change for the
 	// next before it writes.
