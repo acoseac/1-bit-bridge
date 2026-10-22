@@ -61,7 +61,9 @@ Subcommands:
   dac bind <card> --binding serial|uniqueModel|port
            Write that card's unit into the config as the player's binding,
            the serial into the file alone; refused when it would be
-           ambiguous, or while a bridge runs on the data dir.
+           ambiguous, or while a bridge runs on the data dir. With the
+           player enabled, the first bind also writes the player's UUID
+           file, <dataDir>/player-uuid.
   player   Report this box's player (Volumio, moOde or MPD) and how MPD is
            set: its version, music directory, outputs, replay gain,
            normalization, resampler and filters. Read-only. Linux only;

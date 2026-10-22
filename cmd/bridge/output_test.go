@@ -383,13 +383,17 @@ func TestOutputCommandUsage(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "  dac ") {
 		t.Errorf("output help: exit %d, %q", code, stdout)
 	}
+	if !strings.Contains(stdout, "With the\n           player enabled, the first bind also writes the player's UUID\n           file, <dataDir>/player-uuid.") {
+		t.Errorf("output help does not say dac bind writes the player's UUID file:\n%s", stdout)
+	}
 	var b bytes.Buffer
 	usage(&b)
 	if !strings.Contains(b.String(), "\n  output   This box as an audio output: bridge output dac") {
 		t.Errorf("bridge's usage does not list output:\n%s", b.String())
 	}
-	if !strings.Contains(b.String(), "Linux only; only dac bind changes anything (the config file).") {
-		t.Errorf("usage does not say which output command writes:\n%s", b.String())
+	if !strings.Contains(b.String(), "Linux only; only dac bind changes anything: the config file, and\n"+
+		"           the player's UUID file the first time it binds an enabled player.") {
+		t.Errorf("usage does not say which output command writes, and what:\n%s", b.String())
 	}
 }
 
