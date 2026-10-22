@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
 - [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
 - [2026-10-21 — B470 PR 2b round 2: the writer's watch, five sink windows, the position test's Linux race, and pcm-test's stop, time and keys](#2026-10-21--b470-pr-2b-round-2-the-writers-watch-five-sink-windows-the-position-tests-linux-race-and-pcm-tests-stop-time-and-keys)
@@ -50259,3 +50260,239 @@ follow every rate. Round 4 changed a test only, so the result holds for it.
 Not exercised: an xrun, which cannot be made to order on the box. Noted:
 `--pause-at` acts on the harness's one-second tick, so a pause lands up to
 a second after the time asked (5 s gave 6.015 s); the sink is not involved.
+
+## 2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown
+
+### What shipped
+
+- `internal/player/engine`, new and hardware-free: `Engine` (`New`, `Run`,
+  the commands, the reads), the immutable `Snapshot`, `Generation` and
+  `IfGeneration`, `Lease` and `Hold`, `OutputReport`, the queue's
+  `Reference` and `Entry` and their bounds, typed refusals (`Error`,
+  `Reason`), and the backend seam, `Backend` and `Events`, whose contract is
+  `Backend`'s doc. PR 4b2 implements the seam over `internal/player/decode`
+  and `alsapcm.Sink`; this PR's tests implement it with a fake.
+- The package doc's state × command table, which the `policy` function is.
+- The tests: a fake backend that enforces the contract's first term (a
+  Start while another session's release is unacknowledged is a violation
+  that fails the test), a fake clock, and a harness that requires, at every
+  test's end, every goroutine the engine started to have ended.
+- Rules text for `.claude/rules/output.md`, which the brief had this session
+  leave to the owner, went beside the branch (`/tmp/b470-4b1-rules.md`): a
+  new section after PR 2b's. The file's `paths:` already cover the package.
+  `CLAUDE.md`'s package table gained the engine's row.
+- Nothing outside the package changed: no serve wiring (4b2), and the
+  engine reads no configuration of its own (every configured value is a
+  `Config` field 4b2 fills).
+
+### The numbers
+
+- The queue: 1,000 entries; 64 KiB of metadata an entry and 16 MiB in all;
+  references of 1 to 128 printable ASCII bytes; a ReadList of at most 1,000
+  IDs.
+- The deadlines: `ReleaseTimeout` 2 s; `StartTimeout` 5 s; `CallTimeout`
+  2 s (Prepare, Cut, Pause, Resume, Discard); a paused session's own
+  release of the device, `PauseRelease` (30 s by default, 1 s to 10 min)
+  plus `ReleaseTimeout`; a maintenance hold, `MaintenanceTTL` (1 min by
+  default, 1 s to 1 h); `shutdownGrace` 1 s for calls still under way once
+  the release has settled and the queue file is flushed.
+- The reservations: blocks of 4,096 IDs or tokens. A start skips one block
+  past the larger saved value and reserves one, and a run's first edit
+  reserves the next ahead, so a start spends at most 12,288 values beyond
+  what it hands out: the 4,294,967,295 IDs last about 4.29 billion inserts,
+  or at least 349,525 starts (957 years at one a day).
+- The queue file: `writeCoalesce` 250 ms, `writeMaxAge` 2 s, a failed
+  write's backoff from 1 s doubling to 30 s. Its cap, 24 MiB (25,165,824
+  bytes), against a full queue's real encoding, measured at 22,595,456
+  bytes: 1,000 entries, 16,777,216 bytes of metadata split so base64 rounds
+  up on every entry, 128-byte references of `"\<&` (the encoder escapes the
+  first two).
+- The suite: 77 tests, the table's 49 cells as subtests; about 11 s a run
+  under `-race` on the dev Mac; green ten runs in a row, and three each at
+  GOMAXPROCS 1, 2 and 4.
+
+### Decisions
+
+- **One owner, one message at a time, and a reply after its step's
+  snapshot.** Commands, backend events, call results, timers and the file
+  results all reach the owner as messages; it publishes a snapshot after
+  each step that changed anything and only then sends the step's replies.
+  The first run of the implementation failed in nine tests for want of
+  that: the harness read the queue right after `InsertAfter` returned and
+  inserted after the wrong entry, because the reply had gone out during the
+  step, before its publish. The tests that read right after a command then
+  passed against replies sent first again (the window is microseconds), so
+  a seam sees the published snapshot as each reply goes, and
+  `TestAReplyComesAfterItsSnapshot` pins the order there.
+- **Every session ends with a Release the engine asks for, and every
+  backend call is its own goroutine under a deadline.** A refused Start, a
+  failed one, a fault and Finished each release, a trivial acknowledgement
+  when nothing is held, so one rule (a new session opens only once the last
+  release is acknowledged) covers every path, and the fake can enforce it.
+  A call that has not answered by its deadline is treated as failed and its
+  session released, rather than trusted half way; for Release the deadline
+  is the confirmed-release rule. Rejected: methods that return at once with
+  every result an event, since a backend blocking in one would stall the
+  owner, and one that never answers could not be abandoned.
+- **A Release can reach the backend before its own Start.** Found in the
+  first run, as a nil dereference in the fake: a Stop during a slow open
+  spawns the Release's goroutine after the Start's, and the two run in
+  either order. The contract says so, and the fake models it: that Start
+  acquires nothing.
+- **While releasing, a command moves the selection at once and sets the one
+  pending intent** (stop, pause or play), the latest winning, run once on
+  the acknowledgement. Three Nexts run once, for the last target.
+- **Paused with no session.** Next or Previous while paused, and a deletion
+  of the paused selection, leave the transport paused at the start of the
+  new selection with the paused content released, as the brief asks of the
+  deletion; Play then starts a session there.
+- **The policy.** Next and Previous keep the transport's state: they play on
+  while playing, stay paused while paused, and only select while stopped,
+  so a Next never starts sound on a stopped bridge; PlayID and PlayIndex
+  play in every state, as SeekId and SeekIndex are used; a Next past the end
+  follows the end of the queue (playback stops on the last entry);
+  maintenance refuses everything but Stop, which does nothing. Release 5a
+  may adjust it once named controllers are tested; it is one function.
+- **What a command answers.** A start, a release or a pending intent
+  answers once no start and no release is under way: nil, or for a command
+  that asked for playback that did not come, why (the backend's refusal,
+  every entry unplayable, an unconfirmed release, the output, a fault). A
+  skip chain answers when something plays or nothing can. Pause and a
+  resume answer with the backend's answer; Stop and EnterMaintenance once
+  the release is confirmed or past its deadline.
+- **A pass runs from a session's start or a queue change.** Resetting it at
+  every audible boundary made the engine re-prepare a successor it had just
+  prepared, since the pass changed under it: harmless, but work on every
+  lap. Within a session an entry refused is not offered again until the
+  queue changes or a session starts.
+- **At load, the queue file's counters are not checked against its
+  reservation; its entries are.** Found reviewing the code before the first
+  commit: a run whose reservation write fails still publishes its start
+  token and holds its counters past the durable reservation, and its next
+  queue write records them; the first validation called such a file invalid
+  and would have moved a good queue aside at the next start.
+  `TestAQueueSavedWithoutItsRunsReservationLoads` pins it.
+- **The reservation file is its own.** While a bad queue file stays (its
+  rename failed), the reservation is still written, so the start's token is
+  durable; while a bad reservation file stays, none is. Either refuses
+  every insert and token-advancing edit until the operator moves the file,
+  which the engine notices with one Lstat each refused edit (`unstick`, the
+  owner's one piece of I/O).
+- **The writer and the maintenance expiry arm absolute deadlines
+  (`clock.At`).** Found by a three-run stress: the writer read the clock,
+  then armed its timer, and a clock advance in between left the timer late,
+  so `TestAFailingWriteStaysDirtyAndRetries` waited for a write that never
+  came. A timer armed with `At` fires as soon as the clock has passed it.
+- **The token is 0 when the tokens are exhausted at a start**, never a value
+  handed out before. **The position is the backend's last measurement**,
+  frozen when playback stops; interpolation is 5a's or 7a's.
+
+### Red first
+
+- Against a skeleton whose every command answered "unimplemented", all 73
+  tests then written failed (the API, the types, the fakes and the harness
+  were real; New loaded nothing).
+- Four came later: `TestAQueueSavedWithoutItsRunsReservationLoads` with the
+  fix it pins, and three because a control stayed green (below), when a
+  fourth such test, `TestMaintenanceDiscardsEarlierSessionsEvents`, was
+  strengthened in place. Each was green on the code and red on its
+  control.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against its test with a
+3–5 s watchdog, then restored from git and the tree checked clean.
+
+| Control | Mutation | Red |
+|---|---|---|
+| NC1 | a start ignores the reservation file's IDs | `TestIDsAndTokensSurviveRepeatedCrashes` ("crash 1: ID 4097 handed out again") |
+| NC2 | events applied without the session check | `TestALateEventFromAnOldSessionIsDiscarded` |
+| NC3 | the unconfirmed-release refusal removed | `TestAStopThatNeverAnswersLeavesTheReleaseUnconfirmed`, and the fake's violation |
+| NC4 | autoplay when the output returns | `TestTheOutputComingBackPlaysNothing` |
+| NC5 | the selection moved on Submitted | `TestAdvanceFollowsAudibleReportsNotHandOff` |
+| NC6 | each write on its own goroutine | `TestAnOlderWriteNeverLandsAfterANewerOne` (revision 1 landed last) |
+| NC7 | the next session opened without waiting for the acknowledgement | the fake's violations in `TestNoOpenOverlapsAnUnacknowledgedRelease` and `TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget` |
+| NC8 | the pass forgets each refusal | `TestRepeatWithAllUnplayableStopsAfterOneLap`: Play never answered |
+| NC9 | a removed entry heard after a failed cut plays on | `TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible` (the deleted entry became the selection) |
+| NC10 | a position moves the generation | `TestAnExpectedGenerationHoldsThroughSteadyPlayback` |
+| NC11 | the owner's admission check removed | `TestACommandCancelledBeforeAdmissionDoesNotRun` |
+| NC12 | exit without the lease | `TestOnlyTheLeaseEndsAHold` |
+| NC13 | the lease in a snapshot field | first in the reason, red at the reason's own check; then in another field, red at the walk |
+| NC14 | the start's token not past the saved reservation | `TestTokensAdvanceOnEveryChangeAndAtEveryStart`, `TestIDsAndTokensSurviveRepeatedCrashes` |
+| NC15 | values handed out past the durable reservation | first run: nothing, the next block's background write always lands first; then `TestACommandWaitsForAReservationThatHasNotLanded`, which holds that write |
+| NC16 | a start ignores the queue file's IDs | `TestLoadStartsPastTheReservationAndTheLargestID` |
+| NC17 | a failed write counted as written | `TestAFailingWriteStaysDirtyAndRetries` |
+| NC18 | mutations taken during shutdown | `TestAMutationDuringTheShutdownFlushIsRefused` |
+| NC19 | a bad file deleted | `TestEachKindOfBadFileIsMovedAside`, every kind |
+| NC20 | a failed rename does not stop the writes | `TestAFailedMoveAsideKeepsTheOriginal` at its edit check; NC20b, the writer alone left on, at its overwrite check |
+| NC21 | shutdown waits for every call | `TestShutdownJoinsWithinItsBound`: Run never returned |
+| NC22 | a read hands out the queue's metadata | first run did not build (an unused import: invalid, not a pass); with `slices.Clip`, `TestSnapshotsAreImmutable` |
+| NC23 | no Discard when the output changes | `TestAUnitChangeWhileStoppedDiscardsPreparedWork` |
+| NC24 | a report at the same generation applied | `TestAStaleOutputReportIsDiscarded` |
+| NC25 | no deadline for a pause's own release | `TestAPausesReleaseThatNeverComesIsUnconfirmed` |
+| NC26 | a refused resume taken as playing | `TestARefusedReopenStaysPausedWithTheReason` |
+| NC27 | a successor not yet submitted cut | `TestAnEditBeforeSubmissionReplacesTheSuccessor` |
+| NC28 | deleting another entry restarts playback | `TestAnUnrelatedEditLeavesTheSessionAlone` |
+| NC29 | Next while releasing ignored | `TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget` |
+| NC30 | the counters checked against the reservation | `TestAQueueSavedWithoutItsRunsReservationLoads` (the queue lost) |
+| NC31 | a late Start's success taken | `TestALateOpenIsClosedAndNeverWrittenTo` |
+| NC32 | maintenance entered without the generation check | `TestAStaleGenerationEnterIsRefused` |
+| NC33 | a releasing session's events applied | first run: nothing, the test sent them after the acknowledgement; then `TestMaintenanceDiscardsEarlierSessionsEvents`, which holds the release |
+| NC34 | exit resumes | `TestExitLeavesTheTransportStopped` |
+| NC35 | a hold never expires | `TestAnExpiredHoldEndsByItself` |
+| NC36 | a renewal does not extend | `TestRenewalKeepsAHold` (the holder cut off) |
+| NC37 | the same run ID every run | `TestAGenerationFromBeforeARestartIsRefused` |
+| NC38 | replies before the step's snapshot | first run: nothing, the window is microseconds; then `TestAReplyComesAfterItsSnapshot` |
+| NC39 | a delete keeps the token | `TestTokensAdvanceOnEveryChangeAndAtEveryStart` |
+| NC40 | no bound on the queue's metadata | `TestTheQueueIsFullByCountAndByMetadata` |
+| NC42 | no coalescing | first run: nothing, the Mac's fsync coalesced the burst; then `TestTheWriterCoalescesAndBoundsTheDirtyAge` |
+| NC43 | no maximum dirty age | `TestTheWriterCoalescesAndBoundsTheDirtyAge` |
+| NC44 | deleting the paused selection plays | `TestDeletingTheSelection` |
+| NC45 | no skip reason | `TestAnUnplayableEntryIsSkippedWithItsReason`, both cases |
+| NC46 | a fault taken as a skip | `TestAFailureAfterContentPlayedIsAFault` |
+| NC47 | the first insert selects nothing | `TestTheFirstInsertIntoAnEmptyQueueSelectsIt` |
+| NC48 | Play taken while the output is unknown | `TestTheOutputStartsUnknownAndRefusesPlay` |
+| NC49 | the position reset when the output goes | `TestTheOutputGoingAwayStopsAndFreezes`, all three cases |
+| NC50 | ReadList in queue order | `TestReadListAnswersInTheOrderAskedAndIsBounded` |
+| NC51 | a command blocks after shutdown | `TestAfterRunReturnsEveryCommandIsClosed`, once it waited under the watchdog |
+| NC52 | Next while stopped starts | `TestTheStateCommandTable`, the stopped/next cell |
+| NC53 | the successor walk retries this pass's refusals | `TestOnePlayableAmongUnplayablePlaysWithoutSpinning` |
+
+(There is no NC41.) Four controls found weak tests, each fixed in its own
+commit before the control ran again: NC15, NC33, NC38 and NC42. Two tests
+that could only fail by hanging (the lap and the closed engine) were moved
+under the watchdog first, so their controls fail rather than hang.
+
+The tests never sleep. The clock is a fake the test advances; a test waits
+on a signal the owner or a fake publishes (`Changed`, the owner's notes of
+what it applied and handled, the writer's report that it waits, the fake
+backend's and files' own), under a one-minute watchdog flag. A GOMAXPROCS 1
+run found one race, in the fake: its late-acknowledgement goroutine was
+added to its WaitGroup while the test's cleanup already waited on it.
+
+### For 4b2
+
+The seam is `Backend`'s doc; 4b2 implements it on the decoder and the sink.
+Two pieces the sink lacks: a cut at a boundary (drop the frames the store
+holds that have not reached the device, from an occurrence's first frame
+on, and say whether any of them had), and a reopen that checks the opened
+unit is the bound one (4a) before any sample flows, keeping the retained
+frames: `Sink`'s own reopen opens the saved card number with no identity
+hook. 4b2's owner gate must cover, on the GO bar: autonomous two-track
+playback with the selection moving at the boundary; a bounded Stop that
+closes the device (`/proc/asound/.../status` closed) within ReleaseTimeout;
+pause, the device released after PauseRelease, resume reopening the same
+unit; a busy resume (MPD holding the device) refused and left paused with
+the reason; an unplug while playing and while paused, stopped with the
+position frozen, and no autoplay on replug; an edit after hand-off cut in
+time (no frame of the removed entry heard) and one too late (playback stops
+at the boundary); maintenance entered while playing, the device released;
+and shutdown with the device busy in a kernel call, bounded.
+
+### Not in this change
+
+- The real backend, `bridge output play`, the serve wiring and its
+  listening gate (4b2); OpenHome SOAP, GENA and URI confinement (5a); seek
+  within an entry and shuffle (7a); the admin page (6a); DSD playback.
+- The rules text is not in `.claude/rules/output.md` yet: the owner applies
+  it from beside the branch.

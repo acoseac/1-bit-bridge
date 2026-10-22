@@ -22,7 +22,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
-| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), the player PCM format/decode layer (`internal/player/format`, `internal/player/decode`), and the player's ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`) | `output.md` |
+| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), the player PCM format/decode layer (`internal/player/format`, `internal/player/decode`), the player's ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`), and the player's state owner and queue (`internal/player/engine`) | `output.md` |
 | Auth, pairing, sessions and login tickets, TLS and the pin, what logs and error bodies may say | `auth-tls.md` |
 | The admin console, the web player, uploads and the trash | `admin-console.md` |
 | Test discipline, CI, SonarCloud and Docker (loads with every test file) | `build-ci-tests.md` |
@@ -60,6 +60,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
 | `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF), DSF and DFF demuxers into canonical native DSD (B470 PR 1b), ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder (B470 PR 1c), and typed refusals |
 | `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470 PR 2a): asound.h definitions pinned to a kernel tag and checked by the `alsa-abi` CI job (`scripts/alsa-abi`), an endpoint opened by card and device number, exact rate/channels/format, cancellable non-blocking writes, bounded drain; and its streaming `Sink` (PR 2b): a preallocated two-second lookahead, the position the kernel establishes, pause by PAUSE or zeros with a 30 s release, xruns reported and recovered only when asked, the gapless decision between tracks. Linux amd64/arm64; `bridge output pcm-test` is its hardware harness |
+| `internal/player/engine` | The player's state owner and queue (B470 PR 4b1), hardware-free: one owner goroutine for the transport, the OpenHome Playlist-shaped queue, generations and maintenance, immutable snapshots, IDs and tokens never handed out twice (fsynced reservations), the queue file, and the `Backend` seam whose doc is the contract PR 4b2 implements over the decoders and the sink |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/version` | `ServerVersion` + `ProtocolVersion` constants (source of truth for `PROTOCOL.md`) |
 
