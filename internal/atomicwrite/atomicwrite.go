@@ -49,9 +49,11 @@
 // is not durable can roll back at a crash, and what was handed out from
 // it would be handed out again. It syncs every entry between the file
 // and a root the caller vouches for, on every write, and keeps nothing
-// between writes. Where there is no barrier at all (Windows),
-// `WriteBytesDurable` refuses with `ErrNoDirectoryBarrier` and the others
-// write as before.
+// between writes; it refuses a path that does not lie plainly below that
+// root (a ".." element, or a symbolic link or a mount point below it), so
+// that one walk up from the file reaches every entry. Where there is no
+// barrier at all (Windows), `WriteBytesDurable` refuses with
+// `ErrNoDirectoryBarrier` and the others write as before.
 package atomicwrite
 
 import (
@@ -63,6 +65,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -93,10 +96,19 @@ var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync 
 var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
 
 // ErrNotUnderRoot is WriteBytesDurable's and ProbeDurable's refusal of a path
-// that does not lie below the durable root they are given, as written or as
-// its symbolic links resolve: the root is what the caller vouches for, and
-// it vouches for nothing outside it. Nothing is created, written or synced.
-var ErrNotUnderRoot = errors.New("atomicwrite: the path is not below the durable root")
+// that does not lie plainly below the durable root they are given: outside
+// it as written, the path or the root spelled with a ".." element, or the
+// path reached through a symbolic link or a mount point strictly below the
+// root. The root is what the caller vouches for, and the walk from the file
+// up to it is all the writer syncs: a link's target and a mount's source
+// have entries outside that walk. Nothing is created, written or synced.
+var ErrNotUnderRoot = errors.New("atomicwrite: the path is not plainly below the durable root")
+
+// ErrMountsUnknown is ProbeDurable's refusal, on Linux, of a path with a
+// directory between the file and the root while the kernel's mount table
+// (/proc/self/mountinfo) cannot be read: a bind mount there, which shows no
+// device of its own, could not be ruled out.
+var ErrMountsUnknown = errors.New("atomicwrite: the mount table cannot be read")
 
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
@@ -204,6 +216,14 @@ func SetSyncDirForTest(fn func(dir string) error) (restore func()) {
 // In-package tests set it with a `t.Cleanup` restore and never call
 // `t.Parallel()`.
 var beforeMkdirAll func(dir string)
+
+// mountTable is the mount points the kernel lists for this process, which
+// ProbeDurable refuses strictly below its root: Linux's /proc/self/mountinfo
+// (platformMountTable), and nil, no table, where the platform keeps none the
+// probe reads. A test seam, process-global like syncParentDir, with the same
+// contract: in-package tests override it with a `t.Cleanup` restore and
+// never call `t.Parallel()`.
+var mountTable = platformMountTable
 
 // platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
 // where it is a no-op.
@@ -370,116 +390,162 @@ func durableDirEntry(path string) error {
 	return nil
 }
 
-// underRoot makes root and path absolute and clean, and checks what a
-// strict write and its probe both require before they touch anything:
-// path's directory at or below root as written (ErrNotUnderRoot), so a path
-// spelled through a link to root, or root through a link to it, is refused
-// rather than walked. It returns root and path's directory; that root
-// exists is nearest's to check. An empty root is refused rather than taken
-// for the working directory, which is what filepath.Abs makes of it.
-func underRoot(root, path string) (string, string, error) {
-	if root == "" {
-		return "", "", fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
+// strictPath is a strict write's path, checked against its root
+// (checkPath): root with its links resolved, the directories strictly below
+// it down to the file's directory, the shallowest first, and the file, each
+// spelled from that resolved root.
+type strictPath struct {
+	root string
+	dirs []string
+	file string
+}
+
+// dir is the file's directory.
+func (p strictPath) dir() string {
+	if len(p.dirs) == 0 {
+		return p.root
 	}
-	root, err := filepath.Abs(root)
+	return p.dirs[len(p.dirs)-1]
+}
+
+// chain is the directories whose fsync makes every entry between the file
+// and the root durable, while the first n of p.dirs exist: the deepest of
+// them, which holds the file, or the first of the directories a write
+// creates, then each above it, each holding the entry of the one below, and
+// the root last, its own entry never. With no link and no mount below the
+// root (plain), each entry is in the directory above it on this one walk.
+func (p strictPath) chain(n int) []string {
+	chain := make([]string, 0, n+1)
+	for i := n - 1; i >= 0; i-- {
+		chain = append(chain, p.dirs[i])
+	}
+	return append(chain, p.root)
+}
+
+// checkPath checks what a strict write and its probe both require of root
+// and path before they touch anything: no ".." element in either, since
+// filepath.Abs removes one lexically while a reader resolves the link before
+// it (round 6 wrote root/ids for root/link/../ids, which a reader opens below
+// where link points); path's directory at or below root as written, so a
+// path spelled through a link to root, or root through a link to it, is
+// refused rather than walked; and root a directory that exists, which
+// neither the writer nor the probe creates. Each of the first two is
+// ErrNotUnderRoot, and an empty root is refused rather than taken for the
+// working directory, which is what filepath.Abs makes of it. root's links
+// are resolved here, once, and every path of the write is spelled from where
+// it resolved: a link at or above root is the caller's, as root's own entry
+// is.
+func checkPath(root, path string) (strictPath, error) {
+	switch {
+	case root == "":
+		return strictPath{}, fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
+	case hasDotDot(root) || hasDotDot(path):
+		return strictPath{}, fmt.Errorf("%w: %s or %s has a \"..\" element", ErrNotUnderRoot, path, root)
+	}
+	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", "", err
+		return strictPath{}, err
 	}
-	if path, err = filepath.Abs(path); err != nil {
-		return "", "", err
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return strictPath{}, err
 	}
-	dir := filepath.Dir(path)
-	if !within(root, dir) {
-		return "", "", fmt.Errorf("%w: %s is not below %s as written", ErrNotUnderRoot, path, root)
+	rel, err := filepath.Rel(absRoot, filepath.Dir(absPath))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return strictPath{}, fmt.Errorf("%w: %s is not below %s as written", ErrNotUnderRoot, path, root)
 	}
-	return root, dir, nil
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return strictPath{}, err
+	}
+	if info, err := os.Stat(realRoot); err != nil {
+		return strictPath{}, err
+	} else if !info.IsDir() {
+		return strictPath{}, &fs.PathError{Op: "probe", Path: realRoot, Err: syscall.ENOTDIR}
+	}
+	p := strictPath{root: realRoot}
+	if rel != "." {
+		d := realRoot
+		for _, el := range strings.Split(rel, string(filepath.Separator)) {
+			d = filepath.Join(d, el)
+			p.dirs = append(p.dirs, d)
+		}
+	}
+	p.file = filepath.Join(p.dir(), filepath.Base(absPath))
+	return p, nil
 }
 
-// within reports whether p is root or lies below it; both are absolute and
-// clean.
-func within(root, p string) bool {
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+// hasDotDot reports whether p has a ".." element.
+func hasDotDot(p string) bool {
+	return slices.Contains(strings.Split(filepath.ToSlash(p), "/"), "..")
 }
 
-// nearest is the directory at or below root that holds dir, or holds the
-// first of the directories a write of dir creates: dir itself when it
-// exists, and otherwise the nearest above it that does, root at the
-// highest, so a root that does not exist is Stat's error (neither the
-// writer nor the probe creates it). It must be a directory
-// (syscall.ENOTDIR), and lie at or below root as its symbolic links resolve
-// too (ErrNotUnderRoot), so nothing is created through a link that leads
-// out of root. Any error Stat gives but fs.ErrNotExist is returned as it is.
-func nearest(root, dir string) (string, error) {
-	for d := dir; ; d = filepath.Dir(d) {
-		info, err := os.Stat(d)
+// plain checks each of p's directories that exists, from the root down: a
+// directory (an *fs.PathError wrapping syscall.ENOTDIR), not a symbolic link,
+// and on the root's filesystem, its device (st_dev) the root's
+// (ErrNotUnderRoot). A link's target has its entry in the target's own
+// parent, and a mount's source in the source's, both outside the walk up to
+// the root, so neither is walked, whether it leads out of the root or not.
+// It returns how many exist: the first that does not ends the walk, since
+// nothing below it exists either. A bind mount of the root's own filesystem
+// shows the root's device, and is ProbeDurable's to refuse, from the mount
+// table (noMountsBelow). Where a FileInfo carries no device (devicesKnown
+// false: Windows, which refuses before it gets here), no device is compared;
+// where it should carry one and does not, the path is refused.
+func (p strictPath) plain() (int, error) {
+	rootInfo, err := os.Stat(p.root)
+	if err != nil {
+		return 0, err
+	}
+	rootDev, ok := device(rootInfo)
+	if devicesKnown && !ok {
+		return 0, fmt.Errorf("%w: the filesystem of %s cannot be told", ErrNotUnderRoot, p.root)
+	}
+	for i, d := range p.dirs {
+		info, err := os.Lstat(d)
 		switch {
-		case err == nil && !info.IsDir():
-			return "", &fs.PathError{Op: "probe", Path: d, Err: syscall.ENOTDIR}
-		case err == nil:
-			real, err := filepath.EvalSymlinks(d)
-			if err != nil {
-				return "", err
-			}
-			realRoot, err := filepath.EvalSymlinks(root)
-			if err != nil {
-				return "", err
-			}
-			if !within(realRoot, real) {
-				return "", fmt.Errorf("%w: %s resolves to %s, outside %s", ErrNotUnderRoot, d, real, realRoot)
-			}
-			return d, nil
-		case !errors.Is(err, fs.ErrNotExist) || d == root:
-			return "", err
+		case errors.Is(err, fs.ErrNotExist):
+			return i, nil
+		case err != nil:
+			return 0, err
+		case info.Mode()&fs.ModeSymlink != 0:
+			return 0, fmt.Errorf("%w: %s is a symbolic link below %s", ErrNotUnderRoot, d, p.root)
+		case !info.IsDir():
+			return 0, &fs.PathError{Op: "probe", Path: d, Err: syscall.ENOTDIR}
+		}
+		if !devicesKnown {
+			continue
+		}
+		switch dev, ok := device(info); {
+		case !ok:
+			return 0, fmt.Errorf("%w: the filesystem of %s cannot be told", ErrNotUnderRoot, d)
+		case dev != rootDev:
+			return 0, fmt.Errorf("%w: %s is a mount point below %s, of another filesystem", ErrNotUnderRoot, d, p.root)
 		}
 	}
+	return len(p.dirs), nil
 }
 
-// durableChain is the directories whose fsync makes every entry between dir
-// and root durable: dir, which holds the file, then each directory above it
-// up to root, each of which holds the entry of the one below; root is among
-// them, its own entry never. It walks the path as written, which makes the
-// entry of every symbolic link it passes through durable, and then as it
-// resolves, which reaches a directory a link points to in its own parent.
-// Each directory is taken once, by where it resolves to, the deepest first.
-// dir exists and lies at or below root as written (underRoot); it must lie
-// below root as it resolves too (ErrNotUnderRoot).
-func durableChain(root, dir string) ([]string, error) {
-	realRoot, err := filepath.EvalSymlinks(root)
+// noMountsBelow refuses a mount point the kernel lists among dirs, which lie
+// strictly below a root (ErrNotUnderRoot): a bind mount of the root's own
+// filesystem, which plain cannot tell by its device. It reads the mount
+// table (mountTable) only when there is a directory to check, and a table
+// it cannot read is ErrMountsUnknown, since it then rules no mount out.
+// Where the platform keeps no table it reads, it refuses nothing.
+func noMountsBelow(dirs []string) error {
+	if len(dirs) == 0 {
+		return nil
+	}
+	points, err := mountTable()
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("%w, so no mount point between %s and the root can be ruled out: %w", ErrMountsUnknown, dirs[len(dirs)-1], err)
 	}
-	realDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return nil, err
-	}
-	if !within(realRoot, realDir) {
-		return nil, fmt.Errorf("%w: %s resolves to %s, outside %s", ErrNotUnderRoot, dir, realDir, realRoot)
-	}
-	var chain []string
-	seen := map[string]bool{}
-	for _, walk := range [][2]string{{dir, root}, {realDir, realRoot}} {
-		for d := walk[0]; d != walk[1]; d = filepath.Dir(d) {
-			if filepath.Dir(d) == d {
-				// The top of the filesystem, and walk[1] never met: refused,
-				// never walked past (underRoot keeps this from happening).
-				return nil, fmt.Errorf("%w: %s does not lead up to %s", ErrNotUnderRoot, walk[0], walk[1])
-			}
-			real, err := filepath.EvalSymlinks(d)
-			if err != nil {
-				return nil, err
-			}
-			if !seen[real] {
-				seen[real] = true
-				chain = append(chain, d)
-			}
-		}
-		if !seen[realRoot] {
-			seen[realRoot] = true
-			chain = append(chain, walk[1])
+	for _, d := range dirs {
+		if points[d] {
+			return fmt.Errorf("%w: %s is a mount point", ErrNotUnderRoot, d)
 		}
 	}
-	return chain, nil
+	return nil
 }
 
 // ProbeDurable reports, without writing anything, whether WriteBytesDurable
@@ -495,10 +561,20 @@ func durableChain(root, dir string) ([]string, error) {
 // refuse its work for ever, with nothing naming the cause, asks once as it
 // starts and refuses to start instead.
 //
+// It refuses one more thing the writer does not look for: a mount point
+// between the file and root that its device does not show, a bind mount of
+// root's own filesystem onto a directory below root, whose source's entries
+// are outside the walk up to root (ErrNotUnderRoot). It reads the kernel's
+// mount table for it, on Linux, the strict writer's one caller's platform,
+// once, as that caller starts, and only when a directory lies between the
+// file and root; a table it cannot read is ErrMountsUnknown. Elsewhere it
+// reads none (a mount of another filesystem is still refused by its device),
+// and a bind mount made after the probe is not looked for.
+//
 // What it probes must be a directory: a barrier opens and fsyncs whatever is
 // there, and answers nil for a regular file, where no write can ever be
 // made. A regular file is an error wrapping syscall.ENOTDIR, and any other
-// error Stat gives is returned as it is. Each directory is opened once, and
+// error Lstat gives is returned as it is. Each directory is opened once, and
 // that descriptor fsynced (syncDirAt): one this process cannot open
 // (searchable and not readable, or no descriptor left) is the open's error,
 // unmarked, and only an fsync's own failure, a directory the filesystem
@@ -508,19 +584,18 @@ func ProbeDurable(root, path string) error {
 	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	root, dir, err := underRoot(root, path)
+	p, err := checkPath(root, path)
 	if err != nil {
 		return err
 	}
-	near, err := nearest(root, dir)
+	n, err := p.plain()
 	if err != nil {
 		return err
 	}
-	chain, err := durableChain(root, near)
-	if err != nil {
+	if err := noMountsBelow(p.dirs[:n]); err != nil {
 		return err
 	}
-	for _, d := range chain {
+	for _, d := range p.chain(n) {
 		if err := syncDirAt(d); err != nil {
 			if errors.Is(err, ErrBarrierFailed) {
 				return fmt.Errorf("the directory %s cannot be synced: %w", d, err)
@@ -649,7 +724,7 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 //
 // Every write syncs every entry from the file up to root, the directories
 // it creates for path included, the deepest first and before the file is
-// written, and the file's own entry once its rename lands (durableChain):
+// written, and the file's own entry once its rename lands (strictPath.chain):
 // root is fsynced, for the entry of the directory below it, and its own
 // entry never. The writer keeps nothing between writes. A directory whose
 // entry an earlier write, or an earlier run, could not sync is synced again
@@ -657,46 +732,61 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // happened since: process-local state would not survive the restart that
 // leaves such a directory behind. Nothing is ever removed to make a later
 // write create a directory again: a removal races every other writer there.
-// The path is walked as written and as its symbolic links resolve, so a
-// directory reached through a link is synced in its own parent, and the
-// link's own entry in the link's parent.
+//
+// path must lie plainly below root (ErrNotUnderRoot): no ".." element in
+// either, path's directory at or below root as written, and no symbolic link
+// and no mount of another filesystem (a device, st_dev, other than root's)
+// strictly below root on the way to it. Then every entry the file depends on
+// is in the directory above it on one walk from the file's directory up to
+// root, and that walk is all the writer syncs: a link's target, or a
+// mount's source, keeps an entry outside it, which the writer does not
+// chase. Round 6 walked the path as written and as it resolved instead, and
+// missed a link reached through another (Codex, the Claude API and Argon on
+// round 6). The check runs before anything is created, and again once the
+// missing directories are, before any is synced, for one another writer put
+// in place meanwhile. A bind mount of root's own filesystem shows root's
+// device, and is ProbeDurable's to refuse, from the kernel's mount table.
 //
 // root is the caller's guarantee: it must exist (the writer never creates
 // it), and its own entry, and those above it, must be durable already, or
 // need not be, which only the caller can say (the player's engine passes
-// its data directory: engine.Config.DataDir). path must lie below root as
-// written and as its links resolve (ErrNotUnderRoot); a root that does not
-// exist is Stat's error. Each is refused before anything is created,
-// written or synced, and so is a platform with no directory barrier
-// (Windows: ErrNoDirectoryBarrier), where no write could be counted
-// durable; WriteBytes and the renames keep their best effort there.
+// its data directory: engine.Config.DataDir). A link at or above root is
+// the caller's too, and so is root as a mount point: root is resolved once,
+// as the write begins, and every path the write opens, creates and fsyncs is
+// spelled from where it resolved, as are the names its errors give. A root
+// that does not exist is EvalSymlinks's error. Each refusal comes before
+// anything is created, written or synced, and so does a platform with no
+// directory barrier (Windows: ErrNoDirectoryBarrier), where no write could be
+// counted durable; WriteBytes and the renames keep their best effort there.
 func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 	if syncDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	root, dir, err := underRoot(root, path)
+	p, err := checkPath(root, path)
 	if err != nil {
 		return err
 	}
-	if _, err := nearest(root, dir); err != nil {
+	if _, err := p.plain(); err != nil {
 		return err
 	}
 	if beforeMkdirAll != nil {
-		beforeMkdirAll(dir)
+		beforeMkdirAll(p.dir())
 	}
-	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+	if err := fsutil.MkdirAll(p.dir(), 0o700); err != nil {
 		return err
 	}
-	chain, err := durableChain(root, dir)
-	if err != nil {
+	switch n, err := p.plain(); {
+	case err != nil:
 		return err
+	case n < len(p.dirs):
+		return &fs.PathError{Op: "mkdir", Path: p.dirs[n], Err: fs.ErrNotExist}
 	}
-	for _, d := range chain[1:] {
+	for _, d := range p.chain(len(p.dirs))[1:] {
 		if err := syncDirAt(d); err != nil {
-			return fmt.Errorf("the directory entries between %s and %s are not durable: %w", dir, root, err)
+			return fmt.Errorf("the directory entries between %s and %s are not durable: %w", p.dir(), p.root, err)
 		}
 	}
-	return writeBytes(filepath.Join(dir, filepath.Base(path)), data, tmpPrefix, true)
+	return writeBytes(p.file, data, tmpPrefix, true)
 }
 
 // writeBytes stages data beside path and renames it into place: the file

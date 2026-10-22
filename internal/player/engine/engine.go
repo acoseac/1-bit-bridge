@@ -54,7 +54,9 @@ type Config struct {
 	// each makes every directory entry between its file and DataDir durable,
 	// and never DataDir's own. Required. It must exist (New refuses one that
 	// does not, or is not a directory), and the reservation file must lie
-	// below it as written and as its links resolve.
+	// plainly below it: no ".." element, and no symbolic link or mount point
+	// between them (atomicwrite.ErrNotUnderRoot). A data directory that is a
+	// link, or lies below one, is taken: the writer resolves it once.
 	//
 	// Nothing makes DataDir's own entry durable: bridge init creates it, and
 	// serve creates it where it is missing (lockServeDataDir), and neither
@@ -146,16 +148,16 @@ type Engine struct {
 // before anything is handed out. A file problem is logged and leaves the
 // engine running, refusing what it cannot do safely (Snapshot.Edits). A bad
 // Config is an error, a DataDir that is not an existing directory included,
-// and so is a reservation file that is not below DataDir, or whose directory
-// cannot be synced (atomicwrite.ProbeDurable, run before anything is read): a
-// filesystem whose directory fsync always fails, as some network and FUSE
-// mounts' does, would make every reservation fail and the engine refuse
-// every edit for ever, so the error names the directory and says the data
-// directory must move to a filesystem that can sync a directory; a platform
-// with no directory fsync (Windows) is refused the same way, and a directory
-// that is not one, or that the probe could not read, is refused saying so,
-// with no advice to move (notDurable). Commands wait until Run starts the
-// owner.
+// and so is a reservation file that does not lie plainly below DataDir, or
+// whose directories cannot be synced (atomicwrite.ProbeDurable, run before
+// anything is read): a filesystem whose directory fsync always fails, as
+// some network and FUSE mounts' does, would make every reservation fail and
+// the engine refuse every edit for ever, so the error names the directory
+// that failed and says the data directory must move to a filesystem that
+// can sync a directory; a platform with no directory fsync (Windows) is
+// refused the same way, and a directory that is not one, or that the probe
+// could not read, is refused saying so, with no advice to move (notDurable).
+// Commands wait until Run starts the owner.
 func New(cfg Config) (*Engine, error) {
 	switch {
 	case cfg.Backend == nil:
@@ -259,8 +261,10 @@ func New(cfg Config) (*Engine, error) {
 // the data directory only where a directory fsync ran and failed
 // (atomicwrite.ErrBarrierFailed); a directory the probe could not read (a
 // Stat or an open refused: EACCES, EIO) is said to be unreadable, with the
-// probe's error, since another filesystem would not mend it, and a
-// reservation file outside the data directory is said to be so.
+// probe's error, since another filesystem would not mend it; a reservation
+// file that does not lie plainly below the data directory is said to be so;
+// and a mount table that cannot be read is named as that, never as a
+// directory.
 func notDurable(path, dataDir string, err error) error {
 	dir := filepath.Dir(path)
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) {
@@ -268,7 +272,9 @@ func notDurable(path, dataDir string, err error) error {
 	}
 	switch {
 	case errors.Is(err, atomicwrite.ErrNotUnderRoot):
-		return fmt.Errorf("player: the reservation file %s is not below the data directory %s, as written or as its links resolve, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
+		return fmt.Errorf("player: the reservation file %s is not below the data directory %s as the strict writer takes it, with no \"..\" element and no symbolic link or mount point between them, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
+	case errors.Is(err, atomicwrite.ErrMountsUnknown):
+		return fmt.Errorf("player: the mount table cannot be read, so no mount point between the data directory %s and the reservation file %s can be ruled out: %w", dataDir, path, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", filepath.Dir(path), err)
 	case errors.Is(err, syscall.ENOTDIR):

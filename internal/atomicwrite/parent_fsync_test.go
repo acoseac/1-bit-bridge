@@ -123,7 +123,7 @@ func TestWriteBytesDurable_OnThisPlatform(t *testing.T) {
 // write before the file is written.
 func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 	synced := stubSyncDir(t, nil)
-	root := t.TempDir()
+	root := realTempDir(t)
 	dst := filepath.Join(root, "a", "b", "reserved.json")
 	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
@@ -153,7 +153,7 @@ func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 // time. While the first barrier fails another writer puts a file in the
 // directory, so no removal could have made the next write create it again.
 func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	dir := filepath.Join(root, "a")
 	dst := filepath.Join(dir, "reserved.json")
 	theirs := filepath.Join(dir, "theirs")
@@ -264,7 +264,7 @@ func TestWriteBytesDurable_RemovesNothingAnotherWriterMade(t *testing.T) {
 // Nothing records them, as nothing survives a restart: the writer syncs
 // every entry between the file and the root on every write.
 func TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	dir := filepath.Join(root, "a", "b")
 	if err := os.MkdirAll(dir, 0o700); err != nil { // the earlier run's
 		t.Fatal(err)
@@ -280,12 +280,16 @@ func TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft(t *testing.T
 
 // TestWriteBytesDurable_RetriesThroughASymlinkedAlias pins a retry that
 // names the directory through a symbolic link: a write to root/b/real fails
-// at the barrier for real's entry in b, and the retry, through root/x/alias,
-// a link to root/b/real, must still sync that entry, in real's own parent b,
-// which the path as written never passes through, and the alias's own entry
-// in x, through which the path is found after a crash.
+// at the barrier for real's entry in b, and the retry through root/x/alias,
+// a link to root/b/real, is refused (ErrNotUnderRoot) with nothing fsynced.
+// real's entry is in b and the alias's in x, and round 6, which walked the
+// path as written and as it resolved to reach both, still missed a link
+// reached through another link, so a link strictly below the root is
+// refused, never walked (TestWriteBytesDurable_RefusesALinkBelowTheRoot).
+// The retry by real's own path syncs real's entry in b again, then b's in
+// the root, then the file's.
 func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	b, x := filepath.Join(root, "b"), filepath.Join(root, "x")
 	real, alias := filepath.Join(b, "real"), filepath.Join(x, "alias")
 	if err := os.Mkdir(x, 0o700); err != nil {
@@ -306,29 +310,16 @@ func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
 	if err := WriteBytesDurable(root, filepath.Join(real, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
 		t.Fatalf("the write whose barrier for real's entry in b failed = %v, want its failure", err)
 	}
-	if err := os.Symlink(real, alias); err != nil {
-		t.Skipf("no symbolic link here: %v", err)
-	}
+	symlink(t, real, alias)
 	failB, synced = false, nil
-	if err := WriteBytesDurable(root, filepath.Join(alias, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); err != nil {
-		t.Fatalf("the retry through the alias: %v", err)
+	if err := WriteBytesDurable(root, filepath.Join(alias, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, ErrNotUnderRoot) || len(synced) != 0 {
+		t.Fatalf("the retry through the alias = %v after fsyncing %v, want ErrNotUnderRoot and nothing fsynced", err, synced)
 	}
-	got := map[string]bool{}
-	for _, name := range synced {
-		r, err := filepath.EvalSymlinks(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got[r] = true
+	if err := WriteBytesDurable(root, filepath.Join(real, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("the retry by real's own path: %v", err)
 	}
-	for what, d := range map[string]string{"b, for real's entry": b, "x, for the alias's": x, "the root, for b's and x's": root, "real, for the file's": real} {
-		r, err := filepath.EvalSymlinks(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !got[r] {
-			t.Errorf("the retry through the alias never fsynced %s (%s); it fsynced %v", what, d, synced)
-		}
+	if want := []string{b, root, real}; !slices.Equal(synced, want) {
+		t.Fatalf("the retry by real's own path fsynced %v, want %v: real's entry in b, b's in the root, then the file's", synced, want)
 	}
 }
 
@@ -338,9 +329,10 @@ func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
 // And it refuses, with nothing created, written or fsynced: a root that does
 // not exist, which the writer never creates; a path not below the root as
 // written, the path or the root spelled through a link to the other
-// included; and a path below it that a symbolic link leads out of.
+// included; and a path through a symbolic link below the root, here one
+// that leads out of it.
 func TestWriteBytesDurable_NeverSyncsAboveTheRoot(t *testing.T) {
-	base := t.TempDir()
+	base := realTempDir(t)
 	root := filepath.Join(base, "root")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -401,7 +393,7 @@ func TestWriteBytesDurable_NeverSyncsAboveTheRoot(t *testing.T) {
 // nothing; the barrier's failure, naming the directory; and
 // ErrNoDirectoryBarrier on a platform with none.
 func TestProbeDurable(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	seen := stubSyncDir(t, nil)
 	synced := func() []string {
 		out := slices.Clone(*seen)
@@ -468,7 +460,7 @@ func TestProbeDurable(t *testing.T) {
 // TestProbeDurable_SyncsTheDirectoryItOpened and the two
 // unreadable-directory tests).
 func TestBarrierFailuresAreMarked(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	syncErr := errors.New("invalid argument")
 	stubSyncDir(t, syncErr)
 	for name, err := range map[string]error{
@@ -549,7 +541,7 @@ func TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
 // as a second open would; the probe never asks it. Only the fsync's own
 // failure is marked ErrBarrierFailed.
 func TestProbeDurable_SyncsTheDirectoryItOpened(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	secondOpen := stubSyncParentDir(t, &fs.PathError{Op: "open", Path: root, Err: syscall.EMFILE})
 	var synced []string
 	var syncErr error
@@ -722,7 +714,7 @@ func TestWriteBytesDurable_DirSyncFailureFailsTheWrite(t *testing.T) {
 	syncErr := errors.New("fsync: input/output error")
 	seen := stubSyncDir(t, syncErr)
 
-	root := t.TempDir()
+	root := realTempDir(t)
 	dst := filepath.Join(root, "reserved.json")
 	err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp")
 	if !errors.Is(err, syncErr) {
@@ -739,7 +731,7 @@ func TestWriteBytesDurable_DirSyncFailureFailsTheWrite(t *testing.T) {
 func TestWriteBytesDurable_SyncsParentDirectoryOnce(t *testing.T) {
 	seen := stubSyncDir(t, nil)
 
-	root := t.TempDir()
+	root := realTempDir(t)
 	dst := filepath.Join(root, "reserved.json")
 	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
@@ -761,7 +753,7 @@ func TestWriteBytesDurable_SyncsParentDirectoryOnce(t *testing.T) {
 // barrier may have been tolerated. Other bytes are the rename's failure,
 // and nothing is synced for them.
 func TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	dst := filepath.Join(root, "reserved.json")
 	want := []byte("same bytes")
 	if err := os.WriteFile(dst, want, 0o600); err != nil {

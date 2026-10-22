@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -355,6 +356,9 @@ func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
 			return &fs.PathError{Op: "probe", Path: above, Err: syscall.ENOTDIR}
 		}, "player: " + above + " is not a directory"},
 		{"an error that names no directory", func(string) error { return syscall.EIO }, "player: the directory " + own + " cannot be read"},
+		{"a mount table that cannot be read", func(string) error {
+			return fmt.Errorf("%w: %w", atomicwrite.ErrMountsUnknown, &fs.PathError{Op: "open", Path: "/proc/self/mountinfo", Err: syscall.EACCES})
+		}, "player: the mount table cannot be read"},
 	} {
 		cfg := h.config()
 		cfg.DataDir, cfg.ReservePath = data, reserve
@@ -397,10 +401,13 @@ func TestABadReservationFileIsMovedAside(t *testing.T) {
 
 // TestNewRequiresADataDirectoryTheReservationLiesBelow pins New's checks of
 // the reservations' durable root: a DataDir is required, must exist and be a
-// directory (New never creates it), and the reservation file must lie below
-// it, as written and, where symbolic links are to be had, as its links
-// resolve; each is refused with nothing written. The probe is the real one,
-// over a barrier the test answers, so it runs on Windows too.
+// directory (New never creates it), and the reservation file must lie
+// plainly below it: not outside it, not spelled with a ".." element (with a
+// link before it, round 6 reserved in one file and read another), and, where
+// symbolic links are to be had, through no link below it, whether the link
+// leads out of it or stays inside; each is refused with nothing written. The
+// probe is the real one, over a barrier the test answers, so it runs on
+// Windows too.
 func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
 	t.Cleanup(restore)
@@ -409,8 +416,9 @@ func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 	data := filepath.Join(h.dir, "data")
 	file := filepath.Join(h.dir, "a-file")
 	outside := filepath.Join(h.dir, "outside")
-	for _, d := range []string{data, outside} {
-		h.must("make "+d, os.Mkdir(d, 0o700))
+	real := filepath.Join(data, "real", "sub")
+	for _, d := range []string{data, outside, real} {
+		h.must("make "+d, os.MkdirAll(d, 0o700))
 	}
 	h.must("write the file", os.WriteFile(file, []byte("x"), 0o600))
 	type refusal struct {
@@ -424,11 +432,17 @@ func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 		{"a DataDir that does not exist", filepath.Join(h.dir, "missing"), filepath.Join(h.dir, "missing", "queue.json"), "must exist", fs.ErrNotExist},
 		{"a DataDir that is a regular file", file, filepath.Join(file, "queue.json"), "is not a directory", nil},
 		{"a reservation file outside it", data, filepath.Join(outside, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot},
+		{"a reservation file with a \"..\" element", data, data + string(filepath.Separator) + "real" + string(filepath.Separator) + ".." + string(filepath.Separator) + "queue.json", "is not below the data directory", atomicwrite.ErrNotUnderRoot},
 	}
 	if link := filepath.Join(data, "link"); os.Symlink(outside, link) == nil {
-		refusals = append(refusals, refusal{"a reservation file a link below it leads out of", data, filepath.Join(link, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot})
+		inner := filepath.Join(data, "inner")
+		h.must("link inside the data directory", os.Symlink(real, inner))
+		refusals = append(refusals,
+			refusal{"a reservation file a link below it leads out of", data, filepath.Join(link, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot},
+			refusal{"a reservation file through a link that stays inside it", data, filepath.Join(inner, "queue.json"), "is not below the data directory", atomicwrite.ErrNotUnderRoot},
+			refusal{"a reservation file through a link and back", data, inner + string(filepath.Separator) + ".." + string(filepath.Separator) + "queue.json", "is not below the data directory", atomicwrite.ErrNotUnderRoot})
 	} else {
-		t.Log("no symbolic link here: the case of a link leading out of the data directory is not run")
+		t.Log("no symbolic link here: the cases of a link below the data directory are not run")
 	}
 	for _, tc := range refusals {
 		cfg := h.config()
@@ -444,6 +458,37 @@ func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 		if _, err := os.Lstat(tc.queuePath + ".ids"); err == nil {
 			t.Errorf("%s: a refused New wrote the reservation file", tc.name)
 		}
+	}
+}
+
+// TestADataDirectoryThatIsALinkIsTaken pins the layout some installs have:
+// the data directory a symbolic link to where the data lives. The strict
+// writer resolves it once, so New starts, the reservation is written
+// through the real writer below where the link points, and a restart reads
+// it back: the IDs go on past the first run's. The barrier is the test's, so
+// it runs on Windows too, where symbolic links can be made.
+func TestADataDirectoryThatIsALinkIsTaken(t *testing.T) {
+	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
+	t.Cleanup(restore)
+	h := newHarness(t)
+	real := filepath.Join(h.dir, "real")
+	link := filepath.Join(h.dir, "link")
+	h.must("make the data", os.Mkdir(real, 0o700))
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("no symbolic link here: %v", err)
+	}
+	h.tweak = func(c *Config) {
+		c.DataDir, c.QueuePath = link, filepath.Join(link, "queue.json")
+		c.seams.writeReserve, c.seams.probe = nil, nil
+	}
+	h.boot()
+	first := h.insert("a", "b")
+	h.restart()
+	if _, err := os.Stat(filepath.Join(real, "queue.json.ids")); err != nil {
+		t.Fatalf("the reservation is not where the data directory's link points: %v", err)
+	}
+	if id := h.insert("c")[0]; id <= first[1] {
+		t.Fatalf("after a restart through the link, ID %d, not past %d", id, first[1])
 	}
 }
 
