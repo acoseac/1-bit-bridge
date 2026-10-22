@@ -51330,3 +51330,149 @@ supersession call removed.
 
 The suite: 98 tests, about 14 s a run under `-race`; ten runs in a row
 green; `make fmt vet test`, `make build-all` and `make docs-check` clean.
+
+### Round 5
+
+Codex and the Claude API reviewed round 4 (#1309); Argon found nothing.
+Four findings, all real, each fixed red-first with negative controls on the
+committed tree, restored from git each time. Round 4's rules text was
+applied from beside the branch (4b3a4d79), and main's B470 PR 4a was merged
+in (00e1c9ba), which put 4a's "Player output binding" section ahead of this
+PR's in `player.md`. This round's text went beside the branch in two notes:
+`/tmp/b470-4b1-rules-r5.md` for `player.md`, and
+`/tmp/b470-4b1-rules-r5-config.md`, a new bullet on the strict writer for
+`.claude/rules/config-lifecycle.md`, which governs `internal/atomicwrite`
+and named neither `WriteBytesDurable` nor `ProbeDurable` (the owner's
+decision on round 4's gate).
+
+What changed:
+
+- c68f28ec. **A strict write removes nothing; the process keeps each
+  directory whose entry it could not sync** (1; Codex P1 twice, the Claude
+  API Low). Round 4's cleanup removed what `missing` had seen before
+  `MkdirAll`. On a barrier failure it so removed a directory another writer
+  made between the two, whose `CreateTemp` then failed; deleted a regular
+  file another writer put at the path, contents and all; and, where another
+  writer had filled a directory this write made, could not remove it
+  (ENOTEMPTY, unrecorded), so the next strict write took it as found and
+  skipped its barrier: round 3's defect again. Now `unconfirmed`, a
+  process-local set under a mutex, holds every directory a strict write
+  found missing until a barrier on it succeeds: every strict write runs the
+  barrier of each member on its path before it reports success, and drops a
+  member only when that barrier succeeds. Strict writes find, create and
+  confirm their directories one at a time under the set's lock, so a member
+  joins before its directory is created and leaves only by a barrier that
+  ran after it was; the lock is held across the barriers' I/O, which a
+  writer whose one caller makes one write at a time can afford. Taken over
+  a barrier on every ancestor up to a root on every write, which would need
+  no set: that syncs directories outside the caller's tree, which the
+  process may not be able to open (a parent searchable and not readable) or
+  whose filesystem cannot sync a directory, and so refuses writes that are
+  durable; a root to stop at would change the writer's API and need the
+  engine to be told its data directory. Process-local is enough across a
+  crash: a directory still present after one has a durable entry, and one
+  that is gone is created again, its barrier with it. Not closed, for the
+  owner: a process that exits cleanly while a member is unconfirmed leaves
+  the next process to take that directory as found, as it takes every
+  directory that was there already. That needs a barrier failure, a clean
+  exit before any later strict write succeeded, and a crash before the
+  filesystem committed the creation; and the engine creates no directory at
+  all where 4b2 puts its files in the data directory, which `bridge init`
+  makes.
+- b293b160. **New advises moving the data directory only for a barrier
+  that ran and failed** (4; the Claude API Low). Every probe error but
+  ENOTDIR and a missing barrier, a Stat's EACCES or EIO among them, got
+  "move the data directory to a filesystem that can sync a directory",
+  where nothing had failed to sync. `atomicwrite.ErrBarrierFailed` now
+  marks every barrier failure the strict writer and the probe return
+  (`barrierError`, which reads as the barrier's own error and wraps it), and
+  New gives the advice for it alone; any other error says the directory
+  cannot be read, with the error. The class: the barrier opens the
+  directory before it syncs it, so a directory that can be stat'ed and not
+  read (searchable, not readable) failed at the barrier's open and would
+  have been marked, and advised, as well. The probe now opens the directory
+  itself first, and that error is the open's, unmarked. The package doc's
+  line on the created directory's retry (finding 1) went in here too.
+- 6e3d9dbe, 92b52b2f. **A play command whose session was heard answers
+  nil** (2; Codex P2). `onAudible` cleared `starting` while the session
+  stayed starting until Start answered, so a Play still waited, and deleting
+  its entry, audible by then, answered it ReasonSuperseded although it had
+  played. The class, not the instance: a Stop, the output going away, a
+  fault and maintenance in that window answered it with their own reasons
+  too. Each waiting play command now keeps the first outcome recorded for
+  its playback, whichever of `playBegan` (the session's first Audible) and
+  `playFailed` (a reason) comes first, and the settle and maintenance read
+  it; a reason recorded before the session was heard still stands. Not
+  extended to a Play whose Resume is under way: an Audible while a session
+  is paused can be what a pause by zeros still plays out of the hardware
+  buffer, no evidence that the resume played, so that Play keeps the
+  Resume's answer. Not changed: shutdown still answers every waiting
+  command ReasonClosed.
+- 7037a75a. **Deleting the entry a waiting play command is to play, with
+  nothing after it, supersedes it too** (3; the Claude API Low; the
+  coordinator's recommendation, taken). The code already did, through
+  `selectionDeleted`'s own call and again through the stop that follows,
+  and no doc or test said so. ReasonSuperseded in both cases: the entry was
+  deleted before it played, and the first reason recorded is the
+  deletion's, which the stop after it does not replace. Pinned behind a held
+  release and with the session starting, the answer required to name the
+  deletion; `doc.go`, the code's docs and the rules note say so.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated` | write 2 answered nil, its barrier asked for the file's entry alone: never for a's, whose barrier had failed while another writer filled a |
+| 1 | `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`, both cases | the directory the other writer made, gone; the file it put at the path, deleted |
+| 4 | `TestBarrierFailuresAreMarked` | no barrier failure marked: the probe's, the write's entry's, a created directory's |
+| 4 | `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` | a directory searchable and not readable probed as nil |
+| 4 | `TestNewSaysWhenTheReservationDirectoryCannotBeRead`, EACCES and EIO | "move the data directory to a filesystem that can sync a directory" |
+| 2 | `TestAPlayWhosePlaybackBeganAnswersAsPlayed`, six cases | superseded (the deletion, with an entry after it and without, and the stop), output_unavailable, fault, maintenance |
+
+Finding 1's red run had `beforeMkdirAll`, the seam the test acts through in
+the window, added to round 4's code and nothing else; finding 4's had
+`ErrBarrierFailed` declared and marking nothing. The last case of
+`TestAPlayWhosePlaybackBeganAnswersAsPlayed`, a reason recorded before the
+session was heard, passed before the fix: it guards the fix (its control is
+below). Finding 3's tests pin what the code already did, so they passed
+from the start, and their controls are what shows they can fail.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | the set cleared at every write | the retry test, at write 2 |
+| 1 | a member dropped though its barrier failed | the retry test, at write 2 |
+| 1 | a member never dropped | the retry test: the write after a's barrier succeeded ran it again |
+| 1 | the directories found missing removed again on a failure | both cases of the removes-nothing test (the retry test stays green: the other writer's file keeps the directory, and the set its entry) |
+| 4 | a barrier failure not marked | `TestBarrierFailuresAreMarked`, all three; `TestNewRefusesADirectoryThatCannotBeSynced` (New said "cannot be read") |
+| 4 | the probe's own open removed | the unreadable-directory test, at the directory it can stat and not open |
+| 4 | New advises moving for every error | the cannot-be-read test, both errors |
+| 2 | `onAudible` without `playBegan` | all six cases |
+| 2 | `playFailed` records over an outcome already decided | five of the six (maintenance answers before `playFailed` runs; the row after next covers it), and round 3's refused-start case of `TestAPlaysAnswerIsItsOwn` |
+| 2 | the settle's backstop applied to a decided command | the four that end stopped |
+| 2 | maintenance refuses a command whose playback began | the maintenance case |
+| 2 | `playBegan` clears a reason recorded before | the guard case |
+| 3 | the deletion supersedes only when an entry follows | the starting form, at the answer's text: the stop's, not the deletion's (the held-release form stays green: there the deletion supersedes through `setIntent`, with the same text) |
+| 3 | no stop intent for a pending play whose entry, the last, was deleted | the held-release form: the first entry played |
+
+One control found a weak design, fixed before the controls ran again:
+finding 2's first version kept `played` beside `err`, and with
+`playFailed`'s played check removed the test stayed green, the readers' own
+check masking it. 92b52b2f made the outcome one flag, `decided`, set by
+whichever outcome comes first, so that check is the first-outcome rule
+itself and `playBegan` needs none.
+
+The suite: 100 tests in the engine, about 15 s a run under `-race`, and
+25 in `internal/atomicwrite`; ten runs in a row of each green
+(`-race -count=10`: 150.8 s and 56.9 s); `make fmt vet test` (72 packages
+ok), `make build-all` and `make docs-check` clean; `go vet` of both
+packages for windows/amd64, linux/amd64 and linux/arm64 clean. Both notes
+applied to a checkout copy of HEAD, `check-doc-budgets` ok after each:
+`player.md` 73,145 bytes and `config-lifecycle.md` 46,614, of 100,000
+each.
+
+Not changed, for the owner: finding 1's clean exit with a member
+unconfirmed (above); shutdown's ReasonClosed for a play command whose
+session was heard; and a Play whose Resume is under way, which keeps the
+Resume's answer.
