@@ -515,8 +515,9 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	// The binding is saved into the config as it stands under the lock, not
 	// as it was read before it: a restore, or a serve's last settings save
 	// before it stopped, that committed in between would otherwise be
-	// written over with the older copy.
-	if cfg, err = config.Load(cfgPath); err != nil {
+	// written over with the older copy. The path is the one resolved
+	// above, so this reads that file again.
+	if cfg, _, err = loadCLIConfig(cfgPath); err != nil {
 		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
 		return 1
 	}
