@@ -419,8 +419,22 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   entries are the copy-up's, which no caller could have synced; a crash that
   took them would take the reservation and keep the identity below (Codex on
   round 10, which round 10 left as an owner item; the orchestrator chose
-  this fix). **`root` must be on storage that keeps what is written to it
-  through a reboot** (`ErrVolatile`; the orchestrator's decision on round
+  this fix). A directory there the service cannot open is named, with the
+  fix: read access for the service, or a data directory on a filesystem that
+  is not an overlay (the Claude API on round 11). **A root on a bind of a
+  directory inside an overlay, its mount's root field another than `/`, is
+  refused** (`ErrMediumUnknown`, wherever the overlay would be taken, naming
+  the bind's root and the fix: a data directory on a filesystem that is not
+  an overlay, or on the overlay's own mount): the copy-ups above it are out
+  of that mount's reach. An operator's systemd `ProtectSystem=strict` with
+  `ReadWritePaths` on an overlay root makes such a bind of the data
+  directory, as do a chroot and a container's bind of an overlay host's
+  directory; our own unit adds no sandboxing, and an overlay root's own
+  mount, Volumio's shape, is taken (Codex and the Claude API on round 11;
+  the orchestrator's decision, which rejected syncing through another mount
+  of the superblock, and syncfs, whose errors overlayfs reports only on
+  recent kernels). **`root` must be on storage that keeps what is written to
+  it through a reboot** (`ErrVolatile`; the orchestrator's decision on round
   9's review, to fail closed): on Linux tmpfs and ramfs, by statfs's
   `f_type`, an overlay mounted volatile, and an overlay whose upper layer is
   one of those, the Raspberry Pi OS "Overlay File System" option among them
@@ -433,55 +447,65 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (Codex on round 10: `strings.Fields` split a lowerdir at a U+00A0 the
   kernel leaves unescaped, and lost the upperdir and volatile after it),
   whole (six fields, the optional ones, the `-`, then exactly the type, the
-  source and the super options, none empty), and naming no upper layer only
-  for an overlay that is read-only; and the path that names it must reach
-  here the filesystem the overlay reports (statfs's totals, which an overlay
-  takes from its upper layer), **read twice where they differ**: totals that
-  moved between the two reads of the overlay are no tmpfs's or ramfs's,
-  which no write moves, so the upper layer is taken for what the path
-  reaches (both reviewers on round 10: XFS's inode total and ZFS's block
-  total move with ordinary writes, and round 10 refused such overlays at
-  random, at New and mid-run), and totals that held still while the path's
-  differ name another filesystem. Where they do not, where the table cannot
-  be read or names the upper layer by a relative path, past eight overlays
-  one over another, and on fuse-overlayfs, whose upper layer the table does
-  not show (the Claude API on round 10), the writer says it cannot tell
-  (`ErrMediumUnknown`). **It refuses what it can tell is volatile and what
-  it cannot read, and does not try to prove every stack persistent** (the
-  orchestrator's scope on round 10's review, which rejected Codex's Highs 1
-  and 3): the data directory must be on persistent storage, and ext4 on a
-  zram device or on a loop image kept in tmpfs, an NFS export written async,
-  a FUSE filesystem other than fuse-overlayfs whose daemon writes to memory,
-  and a mount namespace that maps an overlay's upper path onto a filesystem
-  with the same totals are stacks it cannot tell, the operator's to avoid.
-  macOS takes every root, having neither tmpfs nor overlayfs.
-  `ProbeDurable(root, path)` runs the same checks and barriers, without
-  writing, on every directory a write would fsync that exists now. **Where
-  the platform gives no mount identity, for `root` or for an entry below it,
-  the write, the probe and the fallback say so (`ErrMountsUnknown`) rather
-  than take two mounts for one** (Codex on round 8: where the kernel gave no
-  mount IDs, round 8 compared no mount on a write, its probe read the mount
-  table, matched by spelling, and its fallback took two unknown identities
-  for one). `root`'s is asked for on every call, a file directly in `root`
-  included, so that the probe refuses as its caller starts what every write
-  would; the mount table is never read for a mount's identity, and only for
-  an overlay's upper layer, on the line of `root`'s mount ID. On Linux that
-  leaves a kernel older than 3.15, or one whose statx gives none with no
-  `/proc` mounted, and elsewhere every platform but macOS and Windows, where
-  the player does not run; Windows gives none and asks for none, refusing
-  first (`ErrNoDirectoryBarrier`). **Don't count a write durable without
-  every entry up to its root, don't keep in memory which entries are
-  durable, don't delete anything to recover durability, don't sync above the
-  root off an overlay, nor above the root of its mount on one, don't walk a
-  link or a mount below the root or at the file, don't tell a mount by its
-  spelling or its device, don't take two mounts the platform gives no
-  identity for as one, don't clean a `..` or a trailing separator away,
-  don't take a fallback's bytes from a file the directory's entry does not
-  name, don't count a write durable before the chain is synced again once it
-  lands, don't take a root on storage that does not outlive a reboot, or
-  that cannot be told to, don't pick an overlay's line in the mount table by
-  its spelling or split it on any white space but the ASCII space, don't
-  refuse an overlay because totals that moved differ, and don't advise
+  source and the super options, none empty but the source, which the kernel
+  writes empty for a filesystem mounted with none: the Claude API on round
+  11), and naming no upper layer only for an overlay that is read-only; and
+  the path that names it must reach here the filesystem the overlay reports
+  (statfs's totals, which an overlay takes from its upper layer), **read for
+  up to three rounds where they differ** (`upperAsReached`): the path is
+  taken as soon as it matches a read of the overlay beside it; totals that
+  moved between two reads of the overlay are no tmpfs's or ramfs's, which no
+  write moves, so the upper layer is taken for what the path reaches (both
+  reviewers on round 10: XFS's inode total and ZFS's block total move with
+  ordinary writes, and round 10 refused such overlays at random, at New and
+  mid-run); and only totals that held still in every round while the path's
+  differed name another filesystem (both reviewers on round 11: totals that
+  moved and came back, A, B, A, still refused at random). Where they do not,
+  where the table cannot be read or names the upper layer by a relative
+  path, past eight overlays one over another, and on fuse-overlayfs, told by
+  its type's subtype or, for a build that sets none, its source, whose upper
+  layer the table does not show (the Claude API on rounds 10 and 11), the
+  writer says it cannot tell (`ErrMediumUnknown`). **It refuses what it can
+  tell is volatile and what it cannot read, and does not try to prove every
+  stack persistent** (the orchestrator's scope on round 10's review, which
+  rejected Codex's Highs 1 and 3): the data directory must be on persistent
+  storage, and ext4 on a zram device or on a loop image kept in tmpfs, an
+  NFS export written async, a FUSE filesystem other than fuse-overlayfs
+  whose daemon writes to memory, an overlay nested in another's upper
+  directory, whose copy-ups above the outer upper directory are not synced
+  (the orchestrator on round 11), and a mount namespace that maps an
+  overlay's upper path onto a filesystem with the same totals are stacks it
+  cannot tell, the operator's to avoid. macOS takes every root, having
+  neither tmpfs nor overlayfs. `ProbeDurable(root, path)` runs the same
+  checks and barriers, without writing, on every directory a write would
+  fsync that exists now. **Where the platform gives no mount identity, for
+  `root` or for an entry below it, the write, the probe and the fallback say
+  so (`ErrMountsUnknown`) rather than take two mounts for one** (Codex on
+  round 8: where the kernel gave no mount IDs, round 8 compared no mount on
+  a write, its probe read the mount table, matched by spelling, and its
+  fallback took two unknown identities for one). `root`'s is asked for on
+  every call, a file directly in `root` included, so that the probe refuses
+  as its caller starts what every write would; the mount table is never read
+  for a mount's identity, and only for an overlay's upper layer and root
+  field and a FUSE mount's type and source, on the line of `root`'s mount ID
+  (Codex on round 11). On Linux that leaves a kernel older than 3.15, or one
+  whose statx gives none with no `/proc` mounted, and elsewhere every
+  platform but macOS and Windows, where the player does not run; Windows
+  gives none and asks for none, refusing first (`ErrNoDirectoryBarrier`).
+  **Don't count a write durable without every entry up to its root, don't
+  keep in memory which entries are durable, don't delete anything to recover
+  durability, don't sync above the root off an overlay, nor above the root
+  of its mount on one, don't walk a link or a mount below the root or at the
+  file, don't tell a mount by its spelling or its device, don't take two
+  mounts the platform gives no identity for as one, don't clean a `..` or a
+  trailing separator away, don't take a fallback's bytes from a file the
+  directory's entry does not name, don't count a write durable before the
+  chain is synced again once it lands, don't take a root on storage that
+  does not outlive a reboot, or that cannot be told to, don't pick an
+  overlay's line in the mount table by its spelling or split it on any white
+  space but the ASCII space, don't take a bind of a directory inside an
+  overlay, nor sync its copy-ups through another mount of the superblock,
+  don't refuse an overlay because totals that moved differ, and don't advise
   moving to another filesystem for an error not marked `ErrBarrierFailed`.**
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
@@ -507,6 +531,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestWriteBytesDurable_RefusesARootThatDoesNotOutliveAReboot`,
   `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
   `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`,
+  `TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree`,
+  `TestCopyUpsFromWalkOnlyOnAnOverlay`,
   `TestAncestorsOnMountStopAtTheRootOfTheirMount`,
   `TestMediumTakesTotalsThatMoveWithWhatIsWritten`,
   `TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck`,
