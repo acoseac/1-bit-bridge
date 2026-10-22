@@ -112,7 +112,9 @@
 // write has not landed by the time the current block runs out. A start
 // begins one block past the larger of the saved reservations, the queue
 // file's values and its largest ID, which covers one reservation write lost
-// with its directory entry, and every start advances the token. A start
+// with its directory entry, and every start advances the token once its own
+// reservation is durable: until then the token is 0, none (a start whose
+// reservation failed, or whose bad reservation file stays). A start
 // spends at most three blocks beyond what it hands out, so the 4,294,967,295
 // IDs last some 4.29 billion inserts, or at least some 349,000 starts (957
 // years at one a day), and the tokens as long; the last is followed by

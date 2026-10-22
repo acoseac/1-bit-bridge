@@ -68,6 +68,58 @@ func TestAQueueSavedWithoutItsRunsReservationLoads(t *testing.T) {
 	}
 }
 
+// TestAStartWithoutItsReservationPublishesNoToken pins the start's token:
+// published only once a durable reservation covers it, and 0, none, until
+// then. Two starts in a row whose reservation write fails, or whose bad
+// reservation file stays where it is, with no queue write between them,
+// publish no token, so never the same one twice; the first start that can
+// reserve publishes one past every token an earlier run published.
+func TestAStartWithoutItsReservationPublishesNoToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakIt func(h *harness)
+		mend    func(h *harness)
+		refused Reason
+	}{
+		{"the write fails", func(h *harness) {
+			h.files.failReserve = errors.New("read-only file system")
+		}, func(h *harness) {
+			h.files.failReserve = nil
+		}, ReasonReservation},
+		{"the bad file stays", func(h *harness) {
+			h.must("corrupt", os.WriteFile(h.reservePath(), []byte("not json"), 0o600))
+			h.files.renameErr = errors.New("read-only file system")
+		}, func(h *harness) {
+			h.files.renameErr = nil
+		}, ReasonFileStuck},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			h.insert("a", "b")
+			published := h.snap().Token()
+			var tokens []uint32
+			h.restartWith(func() { tc.breakIt(h) })
+			for run := 0; run < 2; run++ {
+				if run > 0 {
+					h.restartWith(func() {})
+				}
+				sn := h.snap()
+				if ed := sn.Edits(); ed.Refused != tc.refused {
+					t.Fatalf("start %d: edits %+v, want refused %s", run+1, ed, tc.refused)
+				}
+				tokens = append(tokens, sn.Token())
+			}
+			if tokens[0] != 0 || tokens[1] != 0 {
+				t.Fatalf("two starts with no durable reservation published tokens %v, want none (0)", tokens)
+			}
+			h.restartWith(func() { tc.mend(h) })
+			if tok := h.snap().Token(); tok <= published {
+				t.Fatalf("the first start that can reserve published token %d, not past %d", tok, published)
+			}
+		})
+	}
+}
+
 // TestABadReservationFileIsMovedAside pins the reservation file's own
 // checks: moved aside, logged, and the IDs then start past the queue
 // file's.

@@ -282,7 +282,9 @@ func (s *Snapshot) Repeat() bool { return s.repeat }
 // Shuffle is always false in this release.
 func (s *Snapshot) Shuffle() bool { return s.shuffle }
 
-// Token advances on every change of the queue's membership or order.
+// Token advances on every change of the queue's membership or order. It is
+// 0, no token, while the run has none it may hand out: its reservation is
+// not durable yet (Edits says why), or every token has been handed out.
 func (s *Snapshot) Token() uint32 { return s.token }
 
 // Len is the number of entries.

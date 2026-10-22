@@ -120,7 +120,11 @@ func (e *Engine) start() {
 			o.res.ids.durable, o.res.tokens.durable = ids, tokens
 		}
 	}
-	if !o.res.tokens.exhausted() {
+	// The run's token is published only once a durable reservation covers
+	// it: after a reservation write that failed, or with a bad reservation
+	// file that stays, there is none (0) until an edit's reservation lands,
+	// so two such starts never publish one token twice.
+	if !o.res.tokens.exhausted() && !o.res.tokens.needs() {
 		o.token = o.res.tokens.take()
 	}
 	if o.res.stuckQueue != "" {
