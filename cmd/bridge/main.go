@@ -2884,10 +2884,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// binary rolled BACK during an incident) cannot stop every bridge on
 	// the host from booting; see config.DeploymentConfig.UnknownManagedControls
 	// for the whole argument. The warning is what keeps the permissive
-	// direction from also being the silent one.
+	// direction from also being the silent one. It names each entry by its
+	// place in the list and never by what it holds, which can be anything
+	// (B505's round 4); the known names are a fixed set.
 	if unknown := cfg.Deployment.UnknownManagedControls(); len(unknown) > 0 {
 		logger.Warn("deployment.managedControls: unrecognised name(s) — these manage nothing on this build, and the control they were meant to disable is still available",
-			"names", strings.Join(unknown, ", "),
+			"entries", strings.Join(unknown, ", "),
 			"known", strings.Join(config.KnownManagedControls(), ", "))
 	}
 

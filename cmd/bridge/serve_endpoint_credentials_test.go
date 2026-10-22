@@ -85,6 +85,48 @@ func TestAStartupRefusalNamesAURLWithoutItsCredential(t *testing.T) {
 	}
 }
 
+// TestServeNamesAManagedControlItDoesNotKnowByItsPlace boots the real `serve`
+// on a bridge.yaml whose deployment.managedControls holds a control this
+// build knows and a password pasted onto the next entry's line. A name this
+// build does not know is tolerated, not refused
+// (config.DeploymentConfig.UnknownManagedControls says why), so serve starts
+// and warns, and the warning names the entry by its place in the list: it
+// logged the names as written, the password with them (B505's round 4,
+// Codex). No line serve logs or prints carries any of it.
+func TestServeNamesAManagedControlItDoesNotKnowByItsPlace(t *testing.T) {
+	const secret = "p4ssw0rd-kitchen"
+	// Recorded from before the boot, so the startup warning is in it, and
+	// registered before the bridge's drain, so it is put back after serve
+	// has returned.
+	rec := loggingtest.Record(t)
+	b := startConsoleBridge(t, "deployment:\n  managedControls:\n    - restart\n    - "+secret+"\n", nil)
+
+	warned := rec.Failures("deployment.managedControls: unrecognised name(s) — these manage nothing on this build, " +
+		"and the control they were meant to disable is still available")
+	if len(warned) != 1 || !strings.Contains(warned[0], "deployment.managedControls[1]") ||
+		strings.Contains(warned[0], "deployment.managedControls[0]") {
+		t.Errorf("serve's warning about the entries it does not know = %q, want one naming deployment.managedControls[1] alone", warned)
+	}
+	carries := func(s string) bool {
+		for i := 0; i+4 <= len(secret); i++ {
+			if strings.Contains(s, secret[i:i+4]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, l := range rec.All() {
+		if carries(l) {
+			t.Errorf("a log line carries part of the entry: %s", l)
+		}
+	}
+	for name, out := range map[string]string{"stdout": b.stdout.String(), "stderr": b.stderr.String()} {
+		if carries(out) {
+			t.Errorf("serve's %s carries part of the entry:\n%s", name, out)
+		}
+	}
+}
+
 // TestServePublishesNoCustomEndpointCredential boots the real `serve` on a
 // bridge.yaml whose customEndpoints carry a secret in each part of a URL
 // that can carry one (backlog B54; the path since B66), and asks every

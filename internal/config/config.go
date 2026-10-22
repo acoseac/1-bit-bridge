@@ -1415,8 +1415,9 @@ func (d DeploymentConfig) IsManaged() bool {
 	return len(d.ManagedControls) > 0
 }
 
-// UnknownManagedControls returns the configured names this build does
-// not recognise, for a startup warning.
+// UnknownManagedControls returns the configured entries this build does
+// not recognise, for a startup warning and init's refusal, each by its place
+// in the list ("deployment.managedControls[2]").
 //
 // Tolerated rather than refused, because the two failure directions are
 // not symmetric in the way they first look. Refusing an unknown name
@@ -1425,13 +1426,18 @@ func (d DeploymentConfig) IsManaged() bool {
 // file written by another program is not a typo an operator is standing
 // there to fix. Tolerating it means a misspelling (`restarts`) leaves
 // the control live, which is the silently-permissive direction and the
-// reason this returns the names instead of swallowing them: a warning
+// reason this returns the entries instead of swallowing them: a warning
 // at startup is what turns a silent one into a visible one.
+//
+// By its place, never by what it holds: a name this build knows is one of
+// a fixed set, but an entry that is not one can hold anything, a password
+// pasted onto the list's line included, and the warning reaches the journal
+// (B505's round 4; it was the entry as written until then).
 func (d DeploymentConfig) UnknownManagedControls() []string {
 	var out []string
-	for _, m := range d.ManagedControls {
+	for i, m := range d.ManagedControls {
 		if !slices.Contains(knownManagedControls, m) {
-			out = append(out, m)
+			out = append(out, fmt.Sprintf("deployment.managedControls[%d]", i))
 		}
 	}
 	return out

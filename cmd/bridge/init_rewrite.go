@@ -306,14 +306,36 @@ func (p *priorInstallFile) madeElsewhere() []postureKey {
 	}
 	if len(p.Deployment.ManagedControls) > 0 {
 		out = append(out, postureKey{"deployment.managedControls",
-			"its console would offer the controls its operator withholds (" +
-				strings.Join(p.Deployment.ManagedControls, ", ") + ")"})
+			"its console would offer the controls its operator withholds (" + managedControlsSaid(p.Deployment) + ")"})
 	}
 	if len(p.Deployment.ManagedSettings) > 0 {
 		out = append(out, postureKey{"deployment.managedSettings",
 			"its console could change the settings its operator manages"})
 	}
 	return out
+}
+
+// managedControlsSaid names the managed controls d lists, for init's
+// refusal: each name this build knows as it is, one of a fixed set, and each
+// other entry by its place in the list with a fixed explanation
+// (config.DeploymentConfig.UnknownManagedControls), never by what it holds,
+// which can be anything, a password pasted onto the list's line included
+// (B505's round 4: the entries were joined as written).
+func managedControlsSaid(d config.DeploymentConfig) string {
+	var known []string
+	for _, m := range d.ManagedControls {
+		if slices.Contains(config.KnownManagedControls(), m) && !slices.Contains(known, m) {
+			known = append(known, m)
+		}
+	}
+	said := strings.Join(known, ", ")
+	if unknown := d.UnknownManagedControls(); len(unknown) > 0 {
+		if said != "" {
+			said += "; "
+		}
+		said += strings.Join(unknown, ", ") + ": not a control this build knows"
+	}
+	return said
 }
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not

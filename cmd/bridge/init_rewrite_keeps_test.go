@@ -884,6 +884,40 @@ func TestInitRefusesToRewriteAConfigItDoesNotMake(t *testing.T) {
 	}
 }
 
+// TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace: the refusal of
+// a managed tenant's config names the controls it withholds, and an entry
+// that names no control this build knows by its place in the list, never by
+// what it holds: refuseRewrite prints the explanation, and it joined the
+// entries as written, so a password pasted onto the list's line reached the
+// terminal (B505's round 4, Codex).
+func TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace(t *testing.T) {
+	const secret = "p4ssw0rd-kitchen"
+	tmp := t.TempDir()
+	cfgDir := filepath.Join(tmp, "cfg")
+	rewrite := rewritePostures[0].setUp(t, cfgDir)
+	appendToConfig(t, cfgDir, "deployment:\n    managedControls:\n        - restart\n        - "+secret+"\n")
+	before := readConfigFile(t, cfgDir)
+
+	code, out := rewrite()
+	defer logRunOnFailure(t, out)
+
+	if code == 0 || readConfigFile(t, cfgDir) != before || !strings.Contains(out, configNotChanged) {
+		t.Errorf("init exited %d over a managed tenant's config, want a refusal that changes nothing", code)
+	}
+	for _, want := range []string{"deployment.managedControls", "restart", "deployment.managedControls[1]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not say %q", want)
+		}
+	}
+	// The temporary directory is the test's, and its name the test's.
+	printed := strings.ReplaceAll(out, tmp, "")
+	for i := 0; i+4 <= len(secret); i++ {
+		if strings.Contains(printed, secret[i:i+4]) {
+			t.Errorf("the refusal carries part of the entry: %q", secret[i:i+4])
+		}
+	}
+}
+
 // TestInitRefusesToRewriteAConfigThisUserCannotRead: a config this user may
 // not read is one the bridge's own user reads at every start, so this run is
 // the wrong user's, and it cannot tell which data dir and pair the rewrite
