@@ -426,12 +426,14 @@ func (p strictPath) chain(n int) []string {
 // and path before they touch anything: no ".." element in either, since
 // filepath.Abs removes one lexically while a reader resolves the link before
 // it (round 6 wrote root/ids for root/link/../ids, which a reader opens below
-// where link points); path's directory at or below root as written, so a
-// path spelled through a link to root, or root through a link to it, is
-// refused rather than walked; and root a directory that exists, which
-// neither the writer nor the probe creates. Each of the first two is
-// ErrNotUnderRoot, and an empty root is refused rather than taken for the
-// working directory, which is what filepath.Abs makes of it. root's links
+// where link points); a path whose last element names a directory
+// (NamesDirectory: syscall.EISDIR), which the cleaning would take away;
+// path's directory at or below root as written, so a path spelled through a
+// link to root, or root through a link to it, is refused rather than walked;
+// and root a directory that exists, which neither the writer nor the probe
+// creates. The ".." and the "as written" refusals are ErrNotUnderRoot, and an
+// empty root is refused rather than taken for the working directory, which
+// is what filepath.Abs makes of it. root's links
 // are resolved here, once, and every path of the write is spelled from where
 // it resolved: a link at or above root is the caller's, as root's own entry
 // is.
@@ -441,6 +443,8 @@ func checkPath(root, path string) (strictPath, error) {
 		return strictPath{}, fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
 	case hasDotDot(root) || hasDotDot(path):
 		return strictPath{}, fmt.Errorf("%w: %s or %s has a \"..\" element", ErrNotUnderRoot, path, root)
+	case NamesDirectory(path):
+		return strictPath{}, &fs.PathError{Op: "probe", Path: path, Err: syscall.EISDIR}
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -478,6 +482,23 @@ func checkPath(root, path string) (strictPath, error) {
 // hasDotDot reports whether p has a ".." element.
 func hasDotDot(p string) bool {
 	return slices.Contains(strings.Split(filepath.ToSlash(p), "/"), "..")
+}
+
+// NamesDirectory reports whether path's last element names a directory
+// rather than a file: none at all (path empty, or ending in a separator),
+// "." or "..". filepath.Abs and filepath.Clean take such an element away
+// (root/ids/ cleans to root/ids), so a writer that cleans the path makes a
+// file a reader of the path as given cannot open: a regular file answers
+// root/ids/ with ENOTDIR (Codex on round 7, where the player engine's
+// restart then found its reservation stuck). WriteBytesDurable refuses such
+// a path, an *fs.PathError wrapping syscall.EISDIR, and a caller that keeps
+// the path to read it again refuses it too (the player engine's New, for its
+// queue and reservation files). A root may end in a separator: a root is a
+// directory.
+func NamesDirectory(path string) bool {
+	slash := filepath.ToSlash(path)
+	last := slash[strings.LastIndex(slash, "/")+1:]
+	return last == "" || last == "." || last == ".."
 }
 
 // plain checks each of p's directories that exists, from the root down: a

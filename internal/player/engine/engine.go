@@ -47,7 +47,9 @@ type Config struct {
 	// QueuePath is the queue file. Required.
 	QueuePath string
 	// ReservePath is the ID and token reservation file, "" for QueuePath
-	// with ".ids" appended. It must lie below DataDir.
+	// with ".ids" appended. It must lie below DataDir. Neither path may end
+	// in a separator, "." or "..", which name a directory
+	// (atomicwrite.NamesDirectory): New refuses it.
 	ReservePath string
 	// DataDir is the bridge's data directory, which 4b2 passes, and the
 	// durable root of every reservation (atomicwrite.WriteBytesDurable):
@@ -169,6 +171,14 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.ReservePath == "" {
 		cfg.ReservePath = cfg.QueuePath + ".ids"
+	}
+	// A path whose last element names a directory would be written where it
+	// cleans to and read as it is given, which a regular file answers ENOTDIR:
+	// the restart would find the file stuck and refuse every insert.
+	for _, f := range []struct{ what, path string }{{"queue", cfg.QueuePath}, {"reservation", cfg.ReservePath}} {
+		if atomicwrite.NamesDirectory(f.path) {
+			return nil, fmt.Errorf("player: the %s file's path %s names a directory, not a file: it ends in a separator, \".\" or \"..\"", f.what, f.path)
+		}
 	}
 	if cfg.PauseRelease == 0 {
 		cfg.PauseRelease = DefaultPauseRelease

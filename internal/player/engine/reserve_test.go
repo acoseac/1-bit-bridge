@@ -461,6 +461,70 @@ func TestNewRequiresADataDirectoryTheReservationLiesBelow(t *testing.T) {
 	}
 }
 
+// TestNewRefusesAFilePathThatNamesADirectory pins a queue or reservation
+// file path whose last element names a directory, a trailing separator or a
+// ".": New refuses it, naming the path, with nothing written, so no run takes
+// it and leaves its restart stuck. Codex on round 7: round 7's strict writer
+// cleaned data/ids/ to data/ids and wrote the reservation there, the engine
+// read data/ids/ at the restart, which a regular file answers ENOTDIR, could
+// not move it aside under that name either, and refused every insert for
+// ever (ReasonFileStuck); a queue path so spelled made the queue writer
+// create a directory in the file's place. Should New take such a path, the
+// test runs it through a restart to say how it breaks. The probe is the real
+// one, over a barrier the test answers, so it runs on Windows too.
+func TestNewRefusesAFilePathThatNamesADirectory(t *testing.T) {
+	restore := atomicwrite.SetSyncDirForTest(func(string) error { return nil })
+	t.Cleanup(restore)
+	sep := string(filepath.Separator)
+	for _, tc := range []struct {
+		name               string
+		queuePath, reserve string
+		says               string
+	}{
+		{"a reservation path with a trailing separator", "queue.json", "ids" + sep, "reservation"},
+		{"a reservation path ending in \".\"", "queue.json", "ids" + sep + ".", "reservation"},
+		{"a queue path with a trailing separator", "queue.json" + sep, "", "queue"},
+		{"a queue path ending in \".\"", "queue.json" + sep + ".", "", "queue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.tweak = func(c *Config) {
+				c.QueuePath = h.dir + sep + tc.queuePath
+				c.ReservePath = ""
+				if tc.reserve != "" {
+					c.ReservePath = h.dir + sep + tc.reserve
+				}
+				c.seams.writeReserve, c.seams.probe = nil, nil
+			}
+			h.be = newFakeBackend(t)
+			cfg := h.config()
+			e, err := New(cfg)
+			if err == nil {
+				// Round 7's way: run it, take an ID, and start again on the same
+				// files.
+				h.eng = e
+				h.run()
+				h.insert("a")
+				h.shutdown()
+				h.joinAfter(e)
+				h.be = newFakeBackend(t)
+				again, err := New(h.config())
+				refused := "New refused it: " + fmt.Sprint(err)
+				if err == nil {
+					refused = string(again.Snapshot().Edits().Refused)
+				}
+				t.Fatalf("New took the %s path; at the restart the edits are refused with %q", tc.says, refused)
+			}
+			if !strings.Contains(err.Error(), "names a directory") || !strings.Contains(err.Error(), tc.says) {
+				t.Errorf("New = %v, want it to say the %s file's path names a directory", err, tc.says)
+			}
+			if entries, rerr := os.ReadDir(h.dir); rerr != nil || len(entries) != 0 {
+				t.Errorf("a refused New left %v (%v)", entries, rerr)
+			}
+		})
+	}
+}
+
 // TestADataDirectoryThatIsALinkIsTaken pins the layout some installs have:
 // the data directory a symbolic link to where the data lives. The strict
 // writer resolves it once, so New starts, the reservation is written

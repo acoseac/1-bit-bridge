@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -86,6 +87,44 @@ func TestWriteBytesDurable_RefusesADotDotElement(t *testing.T) {
 			filepath.Join(root, "ids"), filepath.Join(root, "real", "ids"), filepath.Join(root, "real", "sub", "ids"))
 		*synced = nil
 		refusedPlainly(t, tc.name+": ProbeDurable", ProbeDurable(tc.root, tc.path), synced)
+	}
+}
+
+// TestWriteBytesDurable_RefusesAPathThatNamesADirectory pins a path whose
+// last element names a directory, a trailing separator or a ".": refused,
+// an *fs.PathError wrapping syscall.EISDIR, before anything is created,
+// written or synced, by the write and by the probe. filepath.Abs cleans
+// root/ids/ and root/ids/. to root/ids, so round 7 wrote the file there,
+// while a reader opens the path as it was given, which a regular file
+// answers ENOTDIR (Codex on round 7: the engine's restart found its
+// reservation stuck). The root may keep a trailing separator: it names a
+// directory, which a root is.
+func TestWriteBytesDurable_RefusesAPathThatNamesADirectory(t *testing.T) {
+	root := realTempDir(t)
+	synced := stubSyncDir(t, nil)
+	sep := string(filepath.Separator)
+	for _, path := range []string{root + sep + "ids" + sep, root + sep + "ids" + sep + ".", root + sep + "sub" + sep + "ids" + sep} {
+		*synced = nil
+		err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp")
+		if !errors.Is(err, syscall.EISDIR) || !strings.Contains(err.Error(), path) {
+			t.Errorf("WriteBytesDurable(%q) = %v, want EISDIR naming the path", path, err)
+		}
+		if err := ProbeDurable(root, path); !errors.Is(err, syscall.EISDIR) {
+			t.Errorf("ProbeDurable(%q) = %v, want EISDIR", path, err)
+		}
+		if len(*synced) != 0 {
+			t.Errorf("the refusals of %q fsynced %v", path, *synced)
+		}
+		if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+			t.Errorf("the refusals of %q left %v (%v) in the root", path, entries, err)
+		}
+	}
+	*synced = nil
+	if err := WriteBytesDurable(root+sep, filepath.Join(root, "ids"), []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable below a root with a trailing separator: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "ids")); err != nil || string(got) != "reserved" {
+		t.Fatalf("the file below a root with a trailing separator: %q, %v", got, err)
 	}
 }
 
