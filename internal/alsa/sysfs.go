@@ -130,8 +130,12 @@ type SysfsSnapshot struct {
 	// Present says the tree has class/sound: a host with no sysfs (macOS,
 	// a container without /sys) has none, and nothing here says who a
 	// card is.
-	Present bool       `json:"present"`
-	Cards   []Identity `json:"cards"`
+	Present bool `json:"present"`
+	// CardsComplete says Cards holds every card class/sound lists: it is
+	// Present and its listing was not cut at the entry cap. A reading cut
+	// short may leave a card out, which only a problem would otherwise say.
+	CardsComplete bool       `json:"cardsComplete"`
+	Cards         []Identity `json:"cards"`
 	// Controllers are the anchors of every USB controller with a root hub,
 	// sorted, each once.
 	Controllers []string    `json:"controllers"`
@@ -184,7 +188,7 @@ func (r SysfsReader) Read() SysfsSnapshot {
 		}
 		return snap
 	}
-	snap.Present = true
+	snap.Present, snap.CardsComplete = true, !more
 	if more {
 		snap.addProblem("class/sound lists more than %d entries; the rest are not read", t.lim.entries)
 	}
