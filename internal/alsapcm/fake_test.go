@@ -129,6 +129,7 @@ type fakeKernel struct {
 
 	// The record.
 	opened     []string
+	openAt     []int // len(played) at each open: where each open's bytes begin
 	opens      int
 	isOpen     bool
 	fd         int
@@ -241,6 +242,7 @@ func (k *fakeKernel) open(path string) (int, error) {
 	k.state = stateOpen
 	k.isOpen = true
 	k.opens++
+	k.openAt = append(k.openAt, len(k.played))
 	return k.fd, nil
 }
 
