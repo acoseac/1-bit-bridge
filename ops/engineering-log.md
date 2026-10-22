@@ -52243,3 +52243,160 @@ volume). Storage that is RAM under a disk filesystem (an ext4 zram device,
 a macOS RAM disk) is not told from a disk. A link or a mount another writer
 puts in place after the write's second check, or during its syncs, is not
 seen; shutdown's ReasonClosed, as in rounds 5 to 9.
+
+### Round 11
+
+Codex and the Claude API reviewed round 10 (#1309); Argon was unavailable.
+Round 10's two rules notes were applied from beside the branch (db1a52e3
+for `player.md`, 39ba660c for `config-lifecycle.md`); this round's went
+beside it again, `/tmp/b470-4b1-rules-r11.md` for `player.md` and
+`/tmp/b470-4b1-rules-r11-config.md` for the strict-writer bullet in
+`config-lifecycle.md`, every block fenced. Round 10's Linux tests ran on a
+Linux host (kernel 7.0, ext4): both suites passed under `-race -count=3`,
+the tmpfs refusal included, and
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs` skipped
+there (no root for an overlay mount).
+
+**The orchestrator, who made round 9's fail-closed call, set this round's
+scope:** proving from outside that any storage stack survives a reboot is
+open-ended, so the writer refuses what it can tell is volatile, and what it
+cannot read, and does not try to prove every stack persistent. Refused, as
+before: tmpfs and ramfs by `f_type`, an overlay mounted volatile, an
+overlay whose upper layer is tmpfs or ramfs (Raspberry Pi OS's "Overlay
+File System"), a root whose storage cannot be read (`ErrMediumUnknown`),
+and now a fuse-overlayfs root, whose upper layer the table cannot show.
+Fixed: totals that move with ordinary writes, the mount table's
+tokenizing, the copy-up above the data directory, and the two test-wiring
+Lows. Named, not chased: ext4 on zram or on a loop image kept in tmpfs, an
+NFS export written async, and a namespace that maps the upper path onto a
+filesystem with identical totals are stacks the writer cannot tell; the
+rules say the data directory must be on persistent storage and name these
+as the operator's to avoid.
+
+Rejected, with that reasoning: **Codex High 1** (the medium check fails open
+for ext4 on zram, ext4 on a loop image in tmpfs, overlays over either, and
+NFS with async exports) and **Codex High 3** (a namespace can map the
+recorded upper path onto another filesystem whose totals match a tmpfs
+upper's). Both are true of the code; neither is a stack the writer can
+tell from outside, recursing through loop and device-mapper backings would
+still stop at NFS and at a zram device that reads as any block device, and
+an independently verified backing identity for an overlay's upper layer is
+not something the kernel offers. They are named in the rules instead.
+
+What changed, all in 11993805:
+
+- **Totals that move with ordinary writes no longer refuse an overlay**
+  (both reviewers: Codex Medium 5, the Claude API Medium 1). XFS's `f_files`
+  counts the inodes it could still make from its free blocks and ZFS's
+  `f_blocks` is what is referenced plus what is available, so an overlay's
+  totals and its upper path's, read one after the other, differed with a
+  write between them, and round 10 refused the overlay with "another
+  filesystem", at New or at any reservation write. Where they differ the
+  overlay is now read again (the Claude API's approach): totals that moved
+  between the two reads are no tmpfs's or ramfs's, which no write moves, so
+  the upper layer is taken for what the path reaches, unless that is itself
+  tmpfs or ramfs; totals that held still while the path's differ still
+  name another filesystem (`ErrMediumUnknown`).
+- **The mount table is split on the ASCII space the kernel writes, and
+  nowhere else** (Codex High 2). The kernel escapes a space, a tab, a
+  newline and a backslash in a field and leaves Unicode white space as it
+  is, and `strings.Fields` split a lowerdir at a U+00A0, so the upperdir
+  and volatile after it were lost and the overlay read as read-only. The
+  record must now be whole (six fields, the optional ones, the `-`, then
+  exactly the type, the source and the super options, none empty:
+  `mountLine`), and only an overlay whose superblock is read-only (the `ro`
+  the kernel writes first among the super options) may name no upper layer.
+- **fuse-overlayfs is refused as storage that cannot be told** (the Claude
+  API Low 2): its `f_type` is FUSE's, so round 10 took it whatever its upper
+  layer was on, rootless Podman's writable layer among them. A FUSE root is
+  now read on its own mount ID's line, and `fuse.fuse-overlayfs` is
+  `ErrMediumUnknown`, as is a FUSE root whose line cannot be read; other
+  FUSE filesystems are taken.
+- **On an overlay, every directory above the root, up to the root of its
+  mount, is synced once the write lands and in the probe** (Codex High 4,
+  closed as the orchestrator chose, where round 10 left an owner item). A
+  data directory in the lower layer alone, `player-uuid` with it, is copied
+  up by the first write, and the entries that copy-up creates above the
+  data directory were synced by nothing, so a crash could take the copy and
+  the reservation and keep the identity below. `strictPath.storage` asks the
+  platform for those directories (`copyUpAncestorsOf`: on Linux, on an
+  overlay alone, every directory above the root while its mount ID is the
+  root's, `ancestorsOnMount`; none elsewhere), and the write syncs them
+  after the chain, as the probe does: New's probe, and New's first
+  reservation, which `start` writes inside New before anything is handed
+  out, so the window closes at New; each later write syncs them again,
+  which covers a run whose first write failed and keeps nothing between
+  writes. Off an overlay nothing copies up, and the root's own entry stays
+  the caller's. A directory there that cannot be opened fails the write and
+  the probe, so New refuses it, naming it.
+- **Both seams' production defaults are exercised** (the Claude API Lows 3
+  and 4). `TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` replaces
+  statx's seam alone, so the fallback answers through `fdinfoMountIDOf` as
+  the package initializes it. `TestMain` keeps the medium check it found
+  (`initialMediumOf`) and takes nothing in a namespace scenario's child,
+  whose helper no longer reassigns it, and
+  `TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck` holds that
+  default to the kernel on `/dev/shm`.
+
+Red first, against round 10's code with the new API declared beside it and
+unwired (FUSE's magic, the copy-up seam answering none, `ancestorsOnMount`
+answering none):
+
+| Finding | Test | Red |
+|---|---|---|
+| both reviewers | `TestMediumTakesTotalsThatMoveWithWhatIsWritten` | the XFS and the ZFS overlay refused, "another filesystem"; the tmpfs-under-moving-totals case refused without naming tmpfs |
+| Codex High 2 | `TestOverlayLayerIsTheLineOfTheRootsMountID` | the U+00A0 line read with no upper layer and no volatile; a U+2028 in the upperdir cut it to `/u`; a writable overlay with no upper layer, a line with a field too many and one with an empty field all taken |
+| Codex High 2 | `TestMediumRefusesWhatDoesNotOutliveAReboot`, the Unicode and writable cases | an overlay over tmpfs whose lowerdir holds U+00A0 taken; a writable overlay naming no upper layer taken |
+| the Claude API Low 2 | the same test's FUSE cases | fuse-overlayfs taken; a FUSE root whose table cannot be read taken |
+| Codex High 4 | `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`, `TestAncestorsOnMountStopAtTheRootOfTheirMount` | the write and the probe synced the root alone; a directory above that cannot be synced, and a walk the platform cannot make, changed nothing |
+
+The two test-wiring Lows are Linux's alone, below.
+
+Negative controls, each a mutation of 11993805, all red:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| totals | differing totals refused without the second read (round 10) | the XFS and ZFS cases |
+| totals | a path that reaches tmpfs taken while the overlay's totals move | that case |
+| totals | totals that held still taken as moving | the "another filesystem" cases of both tests |
+| table | the line split on any white space (round 10) | the line test's Unicode cases, and the Unicode overlay over tmpfs |
+| table | a record with a field too many taken | the line test |
+| table | a writable overlay with no upper layer taken for read-only | the line test, and the table test's writable case |
+| fuse | fuse-overlayfs taken | its case |
+| fuse | a FUSE root whose table cannot be read taken | its case |
+| copy-up | the write without the syncs above the root | the overlay test's write |
+| copy-up | the probe without them | the overlay test's probe |
+| copy-up | the walk not stopping at the mount's root | the walk test |
+| copy-up | an ancestor with no mount ID taken as on the mount | the walk test |
+
+Linux-only, for the Linux host, which this Mac cannot run:
+`TestPlatformMountTableReadsTheKernels`, the Linux half of
+`TestPlatformMountIDReadsTheKernels`,
+`TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` (its control: make
+`fdinfoMountIDOf`'s default answer none, and it goes red),
+`TestMediumMagicsAreLinuxs` (FUSE's added),
+`TestPlatformMediumReadsTheKernels`,
+`TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck` (its
+control: make `mediumOf`'s default a no-op, and it goes red),
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated` (which now also wants the
+overlay's own root synced, the entry of the copied-up data directory; its
+control: make `platformCopyUps` answer none), and the child both mount
+through, `TestOverlayNamespaceHelper`.
+
+The suite: 108 tests in the engine and 55 in `internal/atomicwrite` on this Mac
+(63 on Linux); ten runs in a row of each green under `-race` (151.6 s and
+99.8 s, no skips); `make fmt vet test` (72 packages ok, cmd/bridge 467 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 11993805 with no
+`-dirty`: the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of both packages for darwin, linux and windows on amd64 and arm64,
+and of `internal/atomicwrite` for linux/arm and freebsd/amd64, clean. Both
+notes checked against HEAD, each OLD found once: `player.md` 77,788 to
+78,594 bytes and `config-lifecycle.md` 54,964 to 57,383, of 100,000 each;
+with both applied to the worktree's rules files, `check-doc-budgets` ok and
+`TestEveryCitedTestNameExists` green, the files restored from git after.
+
+Not changed, for the owner: the stacks named above, by the orchestrator's
+scope; a link or a mount another writer puts in place after the write's
+second check, or during its syncs, is not seen; shutdown's ReasonClosed, as
+in rounds 5 to 10.
