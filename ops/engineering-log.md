@@ -50973,3 +50973,114 @@ after each.**
 player's start (PR 4b) is what reads a restored identity; nothing here
 starts it. The rules text for the three is this batch's OLD/NEW note, not
 in these commits.
+
+**Round 2 (Codex and the Claude API on round 1; Argon unavailable): four
+findings, all real, none rejected.** Each was reproduced red first, or for
+the test gap shown with the mutation it let through, fixed, committed, and
+negative-controlled on the committed tree. The bar for the rewrite: every
+setting it keeps holds the value Load used, under merge keys and explicit
+empty overrides too, and no warning carries a value, whatever was pasted
+where.
+
+1. *Merge keys changed the kept settings (Codex, P2).* `priorOutput`
+decoded the block's pairs in the file's order and kept each value that was
+not zero, while yaml.v3 v3.0.1's decoder, which Load uses, takes a block's
+own keys first and a merged block's keys only where nothing set them,
+whatever the order in the file (`decoder.mappingStruct` and
+`decoder.merge`, read in the module cache). Measured through the real
+initCmd: `mpd: off` beside a later `<<: {mpd: on}` was saved `on`; `<<:
+{password: merged-pw}` with `password: ""` kept the merged password; a null
+`loopbackPort` kept a merged 7795; and a player written beside a merged one
+took the merged player's port binding in place of its serial one.
+`resolveOutput` now resolves the block as the decoder does: the block's
+keys in order, then the merged block, or each block of a merged sequence
+in order, each key only where nothing set it, a merged block's own merge
+after its keys, keys written as aliases read through them. Each setting is
+then decoded and checked once, so a zero value is the value Load gave it.
+What makes Load refuse the whole block costs that much alone and is named:
+a key written twice in one block (neither value kept, and it still hides a
+merged one), two merge keys in one block, and a merge key naming no block
+or a sequence with anything but blocks in it. A key written beside a merge
+hides the merged value even when the written one is refused: the operator
+overrode it, so the rewrite keeps neither. Red on 74b0f558:
+`TestInitRewriteKeepsWhatTheOutputBlockLoadedWith`, twelve shapes that
+load, five red (a key before its merge, an empty password after and before
+a merged one, a null port over a merged one, the player beside a merged
+one); `TestInitRewriteResolvesMergesBesideASettingItCannotKeep`, seven
+shapes that do not load, all seven red. `TestPriorOutputResolvesMergeKeysAsLoadDoes`,
+added with the fix, holds the resolver to `config.Load` on sixteen shapes:
+merges inside a sequence's blocks, an alias inside a sequence, empty merges,
+null values and a player over merged ones, and a port of 0. Fix eaa3cb15.
+Controls on eaa3cb15: a merged key no longer yielding to one already set
+(red: ten of the twelve rewrite shapes, twelve of the sixteen
+differential ones, the fallback cases); merged sequences walked last first
+(red: the three sequence cases, one rewrite and two differential).
+
+2. *Warnings carried values (Codex, P2; the Claude API, Low).* The warning
+was `OutputConfig.Problem`'s text, which kept Validate's words: `%q` of a
+refused `output.mpd`, `%d` of a refused `output.loopbackPort`. With MPD's
+password on mpd's line the rewrite printed `output.mpd:
+"mpd-kitchen-pw-8812" is not auto, on or off` to stderr, and round 1's test
+required the quoted `"maybe"`, which pinned the leak. Validate's own
+refusal, which `bridge serve`, `bridge doctor` and init print at load,
+quoted it the same way. `Problem` now returns a `*config.OutputProblem`:
+the setting, and a reason with no value in it ("that value is not auto, on
+or off", "that value is not a port (0 to 65535)"). So Validate's refusal
+names the field alone, as the player block's reasons and a URL's refusals
+already do, and the rewrite builds its line from those parts and the key's
+line (`outputRefusal`), never from the error's text. Red on eccded97:
+`TestOutputRefusalsCarryNoValue`, all six cases (MPD's password, a serial
+and a stray word on mpd's line; a serial of digits, 70000 and -5 as the
+port), and six of the rewrite test's nine cases, each of which now requires
+the value to reach neither the run's output nor the saved config (the
+three that passed were value-free already: a port or a password that does
+not read, and an output that is not a block). Fix 74b0f558. Control on
+74b0f558: `Problem`'s reasons quoting the value again, red in all six
+config cases and the same six rewrite cases.
+
+3. *The refusal tests restored no database (Codex, P3).* The package test's
+targets left `ManifestDB` out, and the CLI test watched the config and the
+identity alone, so a restore that read the player-uuid only once it reached
+the first file after `bridge.db` passed both. That mutation, on eaa3cb15:
+both green. A test gap, not a defect: the code read the copy before its
+loop. The package test now restores the database too, moves the live
+database on after the snapshot (a table added), lays a -wal and a -shm
+beside it, and requires all three as they were after the refusal; the CLI
+test adds a track after the snapshot and requires it after the refusal
+(8fcea95a). The same mutation on 8fcea95a: all ten package cases red
+(bridge.db replaced, its -wal and -shm removed), and the CLI test red.
+
+4. *The tests that assert the player-off line depended on test order (the
+Claude API, Low).* `logPlayerOff` keeps its reason for the process, and
+only the new test cleared it, so a test that asserts the line passed or
+failed by what ran before it. Measured on 691da49c: `go test
+./internal/config -run 'TestASerialInTheWrongFieldIsNeverQuoted/^binding$'
+-count=2` failed, the second run logging nothing.
+`TestValidateTurnsThePlayerOffWithALoggedReason` passed twice only because
+it ends with no reason. Round 1's "twenty shuffled runs" named the new test
+alone. `forgetPlayerOffReason` clears the reason at a test's start and in
+its cleanup, and every test that asserts the line calls it, each subtest of
+`TestASerialInTheWrongFieldIsNeverQuoted` included; the new test dropped
+its clearing Validate for it (eccded97). Control: the helper made a no-op,
+red on that invocation.
+
+**Decisions.** Validate's refusal is value-free too, not only the warning:
+the same function and the same leak, printed at load by serve, doctor and
+init. The resolver mirrors the decoder by hand rather than decoding the
+block into a map (which applies the decoder's own merges): a map decode
+fails whole on a key written twice, and the rewrite keeps everything else
+in that block. The differential test is what holds the mirror to the
+decoder, and a yaml.v3 upgrade that changed merge precedence would fail it.
+For what makes Load refuse the whole block there is no value Load used, so
+the rewrite keeps the rest and names what it left out.
+
+**Stress runs.** `internal/config` under `-race -count=10 -shuffle=on`
+(seed 1792677679782983000) and under `-shuffle=on -count=5` (seed
+1792677700544182000); cmd/bridge's `TestInit`, `TestPriorInstall` and
+`TestPriorOutput` tests under `-race -count=10 -shuffle=on` (seed
+1792677582499704000, 93 s). All passed.
+
+**Rules.** 691da49c applied six of round 1's seven OLD/NEW edits. The long
+form of the cli-serve.md line on the player's identity in a snapshot is not
+in ops/History-rules-cli-serve.md, so that line points at nothing. Round 2's
+note carries it again, beside its own edits.
