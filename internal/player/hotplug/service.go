@@ -7,9 +7,10 @@
 //
 // It plays nothing and opens nothing under /dev/snd, ever. What playback
 // does about a change (stop, keep the position, never play again by
-// itself) is the engine's (PR 4b), which subscribes to the Feed; the check
-// before audio (binding.Checker) stays the authority on what an open node
-// is.
+// itself) is the engine's (PR 4b), which a Reporter feeds from a
+// subscription to the Feed (PR 4b2): one output report per generation, its
+// generation the Reporter's own for the engine's life; the check before
+// audio (binding.Checker) stays the authority on what an open node is.
 package hotplug
 
 import (
