@@ -252,6 +252,26 @@ func TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged(t *testing.T) {
 	}
 }
 
+// TestTheReadingShowsAnOutputMPDReportsEnabled: with nothing holding the
+// card, the output a reading shows for it is the one enabled alsa output
+// whose chain reaches it, enabled as MPD reports it, never as the file says.
+func TestTheReadingShowsAnOutputMPDReportsEnabled(t *testing.T) {
+	replies := volumioReplies(t)
+	for _, tc := range []struct {
+		enabled string
+		shown   bool
+	}{{"1", true}, {"0", false}} {
+		rig := newReadingRig(t, "idle", "Album/01.flac", flacRow(44100, 16), replies["status"])
+		rig.mpd.current = replies["currentsong"]
+		rig.mpd.outputs = volumioOutputs(tc.enabled, "allowed_formats=", "dop=0")
+		hs, token, id := rig.serve()
+		_, got, raw := getReading(t, hs, token, id)
+		if got.MPD == nil || got.MPD.Config == nil || (got.MPD.Config.Output != nil) != tc.shown {
+			t.Fatalf("alsa enabled %s: the output shown %+v\n%s", tc.enabled, got.MPD, raw)
+		}
+	}
+}
+
 // TestAChainNothingProvesIsNotJudgedProven: a hw device's stages are known
 // only while the ALSA configuration the bridge read whole redefines no hw
 // PCM, and only while MPD's own user has no ALSA file in its home that
