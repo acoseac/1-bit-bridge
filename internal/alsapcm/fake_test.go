@@ -121,6 +121,11 @@ type fakeKernel struct {
 	at        []fakeAt
 	gone      bool // the device went away: ENODEV to every call, POLLERR to a poll
 	conds     []fakeCond
+	// writeGate, when set, parks the next WRITEI_FRAMES inside the call,
+	// none of its frames taken yet, until the gate is closed, as a driver
+	// that holds a write does; writeParked is closed once it has parked
+	// (parkNextWrite).
+	writeGate, writeParked chan struct{}
 
 	// The record.
 	opened     []string
@@ -598,6 +603,17 @@ func (k *fakeKernel) unplug() {
 	k.check()
 }
 
+// parkNextWrite parks the next WRITEI_FRAMES inside the call, before the
+// kernel takes any of its frames, and returns a channel closed once it has
+// parked and the release that lets it go on. A write that is never released
+// is a kernel call that never returns.
+func (k *fakeKernel) parkNextWrite() (parked <-chan struct{}, release func()) {
+	gate, in := make(chan struct{}), make(chan struct{})
+	k.inspect(func(k *fakeKernel) { k.writeGate, k.writeParked = gate, in })
+	var once sync.Once
+	return in, func() { once.Do(func() { close(gate) }) }
+}
+
 // inspect runs f with k.mu held, for a test that reads the fake while a
 // sink's writer may be calling it.
 func (k *fakeKernel) inspect(f func(k *fakeKernel)) {
@@ -785,6 +801,14 @@ func (k *fakeKernel) ioctlValue(fd int, req uint32, arg uintptr) error {
 func (k *fakeKernel) writei(x *xferi) error {
 	if k.committed == nil {
 		return errnoEBADFD
+	}
+	if g := k.writeGate; g != nil {
+		parked := k.writeParked
+		k.writeGate, k.writeParked = nil, nil
+		k.mu.Unlock()
+		close(parked)
+		<-g
+		k.mu.Lock()
 	}
 	step := fakeWrite{take: -1}
 	if len(k.writes) > 0 {
