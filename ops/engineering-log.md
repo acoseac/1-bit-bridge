@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
@@ -50807,3 +50808,186 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation
+
+**What landed.** `internal/player/hotplug`: the kernel's uevents (a bounded
+parser and a netlink source that hears only the kernel), a watcher that
+debounces them and reads the whole box with 4a's readers, a `Feed` that
+publishes immutable snapshots under an inventory generation the serve
+owns, and a `Service` that runs a watch while the live config enables the
+player. Around it: `ReadContext` and a `Partial` mark on 4a's readers, each
+unit's `devnum` and each card's directory kept in memory, `binding.Settled`,
+`config.RuntimeConfig.Changed`, the serve wiring (`cmd/bridge/output_hotplug.go`),
+and bind's line that the binding applies when bridge serve next starts. It
+plays nothing and opens nothing under `/dev/snd`: what playback does about a
+change is PR 4b's.
+
+**Item 0: the root-swap test is now red against round 3.** 4a's
+`TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly` swapped the root
+from `openTree`'s `before` hook, which ran ahead of anything `openTree` did,
+so round 3's shape (a directory-only look, then `os.OpenRoot(dir)`) refused
+the FIFO at its look and passed: run again here on main's tree with round
+3's body, the old test was green on all three roots. The seam is now the
+open itself, `osOpenRoot`, called as `osOpenRoot(rootPath(dir))`, whose test
+stand-in swaps when it is handed this root's name (`dir` or `dir/.`) and then
+opens it; `openTree` lost its `before` parameter. Controls: round 3's body
+(the look, then `osOpenRoot(dir)`) and `rootPath` returning `dir` each block
+all three roots until the watchdog.
+
+**Item 0b: an unreadable `bDeviceClass` is an unknown hub status.** The
+reader dropped the error, so a hub whose class could not be read was no hub,
+and a port binding whose port it held read as `device_missing`. `USBDevice`
+now carries `HubUnknown`, the reading names the file, and `Resolve` refuses
+a port binding with no card at its port when the device there may be a hub
+(`binding_invalid`, "resolves again once the class reads"). A device whose
+directory went between the listing and its class is left out: it is being
+removed. `TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort` was red
+before the fix both ways: by build (`HubUnknown` undefined), and with that
+assertion dropped, by behaviour (`device_missing`, no problem recorded).
+The log's YAML example in 4a's entry is now a double-backtick span (MD038).
+
+**The source hears the kernel and nothing else.** A `NETLINK_KOBJECT_UEVENT`
+socket joined to group 1 (never udev's 2), `SOCK_CLOEXEC|SOCK_NONBLOCK`, its
+receive buffer raised to 4 MiB (`SO_RCVBUFFORCE`, else `SO_RCVBUF`, capped
+at `rmem_max`), `SO_PASSCRED` on, read with `MSG_TRUNC` into 8 KiB. A
+message from a port id other than 0, or without root's credentials when they
+were asked for, is dropped and counted (`Foreign`); a truncated or malformed
+one too; another subsystem's is counted and ignored. ENOBUFS, and an event
+the watcher had no room for (the source never waits for it), are reported as
+lost, which makes the watcher read everything. Until the kernel's first
+message the mode is "netlink (no events yet)"; a socket that will not open
+leaves "polling only" and the reason; other systems compile a stub,
+"unsupported on this platform". The source's logic is portable and the
+socket is its one seam, as `alsapcm`'s kernel is, so its tests run on every
+OS on a fake socket; the Linux socket is compiled and vetted here for
+linux/amd64 and linux/arm64, and its three tests (`TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly`,
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`) run on CI's Linux legs alone: no
+Linux box or container runtime was at hand. **The uevent fixtures are
+reconstructions, not captures**, for the same reason: `reconstruct.py` lays
+each out as `alloc_uevent_skb` and `kobject_uevent_env` do (v6.12), at the GO
+bar's place on the Pi 5, and `TestCaptureKernelUevents`, run by hand on the
+Pi with `-capture-uevents DIR`, writes real ones to replace them. The parser
+reads at most 64 records and 8 KiB, ACTION and DEVPATH as the header says,
+SUBSYSTEM and SEQNUM once each; `FuzzParseUevent` ran 27.9 million inputs in
+45 s with no failure. A DEVPATH is only ever compared, as a string, with the
+card directories a reading found: nothing is opened by it.
+
+**One owner, absolute deadlines.** A watch is one goroutine that takes every
+reading: a burst once quiet for 300 ms and never later than 2 s after its
+first event, the periodic tick every 10 s, an overflow (folded into an open
+window, at once with none), a changed binding, a retry, and once at start.
+Every reading reads the whole box, so the brief's "full" reading is every
+reading; a tick or an overflow inside a window folds into it. The timers take
+absolute deadlines (`Timer.Reset(deadline)`): with `Reset(d)`, a deadline
+turned into a duration by one read of the clock and armed after the test's
+clock moved lost the fire the move made and landed a whole step late, which
+`-count=10` found as a hang in one test of fifty; the stop's deadline is
+armed before the stop says it is stopping, for the same reason. Fake-clock
+tests advance the clock and wait on `Service.Updates`, never a sleep.
+
+**Settled resolution.** 4a's `Resolve` answers `identity_transient` for any
+transient card, rightly for bind and inspect, and the watcher must not hold
+the bound DAC's own answer back for an unrelated card being added. So
+`Observe` keeps what each tree said of a transient card (its usbid, its sysfs
+identity), and `binding.Settled` resolves without the transient cards and
+calls the answer settled unless one of them may be the bound unit: its model
+unknown or the bound one, its serial the bound one, its port unknown or the
+bound one; an ambiguity, a binding the config refuses, a topology refusal
+and a port that has its card are settled whatever the transient cards are.
+An unsettled answer is held for three follow-ups 500 ms apart and then
+published as it stands; a periodic reading renews the follow-ups only when
+the transient cards differ. `Resolve` is unchanged.
+
+**What changes the generation.** The cards (index, ALSA id and name, state,
+unit, endpoints), a unit re-enumerated, the binding's state, unit or card,
+its matches, and the configured binding; never a card's `Why`, its
+directory or what a transient card's trees said. A unit re-enumerated is the
+same unit (`SameUnit`) at another `devnum` (both read), another card number,
+or behind a removal the watcher saw (a remove or unbind whose DEVPATH is the
+card's directory, below it or above it): a node opened before is dead.
+`devnum` stays in memory, `json:"-"`, never persisted. A reading that failed,
+or was partial (a root that would not open, a listing a cap cut or could not
+read, a root hub that could not be read), publishes no answer: the last
+snapshot stands, republished at its generation marked stale, and the next
+attempt backs off from 1 s, doubling, to 30 s. A tree with no class/sound is
+not partial: it is `identity_unsupported`. The health of a snapshot (stale,
+the source's mode) republishes it at its generation, its `Change` the
+generation's own.
+
+**The Feed is the serve's.** Its generation starts at 1 and only grows,
+across a disable and re-enable, beside a random 128-bit instance id; the
+disable publishes `disabled`, with no cards and the source off. Each
+subscription is a one-slot mailbox that keeps the newest; a publish takes out
+what a consumer has not received and puts the newest in, under the feed's
+lock, so it never waits. Every accessor copies. Each generation is one INFO
+line: "player DAC: <state>" (or another unit, the same one re-enumerated)
+with the binding's label, the card and 4a's description of the unit, and
+"player hotplug: the inventory changed" with the cards by model for the rest,
+so the owner sees another DAC come and go; no line holds a serial.
+
+**Lifecycle.** The `Service` runs a watch while the live config enables the
+player (`config.PlayerEnabled`: enabled, a valid block, not public, Linux) and
+stops it when it does not. A stop cancels, waits at most 2 s for the watch's
+goroutine and its source's, and abandons what has not stopped, saying which
+(a read stuck in the kernel, where a USB serial's read takes the device's
+lock that a disconnect holds, or a source that did not end); the abandoned
+watch's reading is discarded (`Discarded`), never published, by its context
+and by the feed's session check. The readers stop before their next card or
+file once their context ends; a read already started cannot be interrupted.
+Serve starts the service on Linux alone, after the live config holder
+exists, reads the box through `hostTrees`, and its teardown cancels and joins
+the service within the shutdown grace.
+
+**How a config change reaches a running serve: only at a restart, today.**
+Every admin writer goes through `RuntimeConfig.Update` (clone, Save, Store),
+none touches `output.player`, nothing reloads `bridge.yaml` from disk, and
+`bridge output dac bind` refuses a data dir a serve holds. So bind now says
+"the binding applies when bridge serve next starts". The watcher still reads
+`output.player` from the holder on every reading and wakes on its new
+`Changed`, a channel the next Store closes (an Update's included, not a
+refused or failed one), so the console's DAC page (PR 6a) reaches it with no
+more wiring: a changed binding is read at once, an enable starts the watch, a
+disable stops it.
+
+**Red first.** The parser's and the watcher's tests were written first and
+failed to build (`undefined: ParseUevent`, `undefined: Settings`); the bind
+test failed on the missing line; the config test on `rc.Changed undefined`.
+The source's tests were written before its code too, but not run between
+the two. `binding.Settled`'s tests, the readers' and the serve wiring's came
+after the code; all of these are held by controls instead. On the first
+green run one watcher test was wrong (the polling reason set after the source
+started) and one had a flake (it waited on the message count, which ticks
+before the message's outcome); `-count=50 -cpu 1,2,8` then passed.
+
+**Controls: 38, each on a committed tree, each restored from git, all
+red.** Item 0: round 3's `openTree` body; `rootPath` returning `dir`. Item
+0b: `Resolve` ignoring `HubUnknown`; the class read's error dropped. The
+readers: `Settled` answering as `Resolve`; `mayBeBound` ruling every card
+out; the readers ignoring their context; a cut listing and an unread root
+hub left whole. The source: any sender accepted; a truncated message read;
+the parser's record cap gone; the source waiting for the watcher. The
+watcher: a reading per event; the generation advanced on every reading; the
+publish waiting on a consumer (red by the test's watchdog; it hung the binary
+at first through the test's own deferred `Close`, which now runs only on a
+pass); a transient card's answer published at once with no follow-up; units
+compared without their `devnum`; removals not recorded; no max delay; the
+tick read inside an open window; an overflow not read at once; `Resolve` in
+place of `Settled`; a partial reading taken as an answer; no backoff (17
+million readings in 30 s); the binding read once at start; the generation
+restarted per watch; accessors sharing the snapshot's slices (the race
+detector); the stop with no deadline; an abandoned reading published;
+disabling publishing nothing; every reading logging the state again; the
+inventory's own change logged at DEBUG. The wiring: serve starting no
+watcher; the watcher deaf to the config's change
+(red at the binary's deadline, run with `-timeout 120s`); serve's stop not
+joining (green against the boot test, where the service finishes first
+anyway, so `TestThePlayersWatcherStopJoinsItsService` holds the source open
+and was then red); the wiring without `Observe` (the sweep); an Update
+storing without closing `Changed`; the watcher started off Linux.
+
+**Hardware: none in this PR.** The owner's gate on the Pi follows it; two
+units of one model, which ambiguity needs, are the fake trees'
+(`TestASecondUnitOfAUniqueModelIsAmbiguous`, and 4a's
+`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`).
