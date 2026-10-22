@@ -54183,6 +54183,16 @@ Each against the committed `4ae87be5`, restored with `git checkout` after:
 22. The candidate query's predicate disguised (`IS NULL OR = 'x'`): its plan
     leaves the partial index, red.
 
+### The gate
+
+The first `make fmt vet test` through the build lock failed one guard,
+`TestEveryBackgroundGoroutineDrainsOnCleanup`: the loop test drained its
+goroutine with a hand-rolled `t.Cleanup` where the audit wants
+`drainLoopOnCleanup` (`f8bb4629`). Then, in one run through the lock on
+`f8bb4629`: `make fmt vet test` (73 packages ok and the `saprobe-alac`
+module, `cmd/bridge` 474 s, `go fmt` changing nothing), `make build-all` (six
+targets, stamped `f8bb4629` with no `-dirty`) and `make docs-check`, clean.
+
 ### Not covered
 
 A rolled-back binary that updates a row (a changed file) leaves its
