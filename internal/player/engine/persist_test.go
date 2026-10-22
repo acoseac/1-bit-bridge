@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -506,19 +507,24 @@ func TestAFailedMoveAsideKeepsTheOriginal(t *testing.T) {
 // TestABadFileWithNoNameToMoveToStays pins the name a bad file is moved to:
 // a name is taken only when Lstat says nothing is there. An Lstat that fails
 // any other way (a parent without search permission, ENOTDIR, an I/O
-// error), or a run of names every one of which is taken, leaves the bad file
-// where it is, logged, with inserts refused: New returns, and no name is
-// probed for ever.
+// error) is asked once and logged with its error, and a run of names every
+// one of which is taken ends at maxAsideNames; either leaves the bad file
+// where it is, with inserts refused: New returns, and no name is probed for
+// ever.
 func TestABadFileWithNoNameToMoveToStays(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		lstat func(t *testing.T, h *harness) func(string) (fs.FileInfo, error)
+		// asks is the number of Lstats the move may make; logged, what its
+		// log line says.
+		asks   int
+		logged string
 	}{
 		{"an Lstat that keeps failing", func(*testing.T, *harness) func(string) (fs.FileInfo, error) {
 			return func(path string) (fs.FileInfo, error) {
 				return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
 			}
-		}},
+		}, 1, fs.ErrPermission.Error()},
 		{"every name taken", func(t *testing.T, h *harness) func(string) (fs.FileInfo, error) {
 			taken, err := os.Lstat(h.dir)
 			if err != nil {
@@ -530,13 +536,19 @@ func TestABadFileWithNoNameToMoveToStays(t *testing.T) {
 				}
 				return os.Lstat(path)
 			}
-		}},
+		}, maxAsideNames + 1, "names beside it are taken"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _ := savedQueue(t)
 			h.must("write", os.WriteFile(h.queuePath(), []byte("{"), 0o600))
 			lstat := tc.lstat(t, h)
-			h.tweak = func(c *Config) { c.seams.lstat = lstat }
+			var asks atomic.Int64
+			h.tweak = func(c *Config) {
+				c.seams.lstat = func(path string) (fs.FileInfo, error) {
+					asks.Add(1)
+					return lstat(path)
+				}
+			}
 			h.be = newFakeBackend(t)
 			built := make(chan *Engine, 1)
 			go func() {
@@ -561,8 +573,11 @@ func TestABadFileWithNoNameToMoveToStays(t *testing.T) {
 			if ed := e.Snapshot().Edits(); ed.Refused != ReasonFileStuck {
 				t.Fatalf("edits %+v, want refused %s", ed, ReasonFileStuck)
 			}
-			if n := h.logs.count("could not be moved aside"); n != 1 {
-				t.Fatalf("%d log lines say so, want 1: %v", n, h.logs.all())
+			if n := h.logs.count("could not be moved aside"); n != 1 || h.logs.count(tc.logged) != 1 {
+				t.Fatalf("%d log lines say so, want 1 that says %q: %v", n, tc.logged, h.logs.all())
+			}
+			if n := asks.Load(); n != int64(tc.asks) {
+				t.Fatalf("the move asked Lstat %d times, want %d", n, tc.asks)
 			}
 		})
 	}
