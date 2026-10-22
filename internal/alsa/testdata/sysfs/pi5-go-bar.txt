@@ -26,7 +26,8 @@ platform sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1
 roothub sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3 speed=480
 roothub sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4 speed=5000
 
-# The GO bar on xhci-hcd.0's port 1, its audio control interface 0 card 5.
-usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1 vendor=20b1 product=3009 serial=GOBAR-7Q2X-91KZ-4471
+# The GO bar on xhci-hcd.0's port 1, its audio control interface 0 card 5,
+# enumerated second on its bus (devnum 2: the root hub is 1).
+usbdev sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1 vendor=20b1 product=3009 serial=GOBAR-7Q2X-91KZ-4471 devnum=2
 usbcard 5 sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1/1-1:1.0
 proccard 5 Audio "iFi (by AMR) HD USB Audio" usb=20b1:3009 pcm=0.0

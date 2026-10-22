@@ -104,6 +104,34 @@ func TestThePlayerIsOffByDefault(t *testing.T) {
 	}
 }
 
+// TestAPortBindingLoadsInEitherForm: a port binding loads as bind writes it,
+// the port alone, and as B470 PR 4a's bind wrote it, the bound card's
+// configuration and interface after the port; each is no refusal, the
+// player runs on it, and a save keeps its text.
+func TestAPortBindingLoadsInEitherForm(t *testing.T) {
+	for _, port := range []string{"platform-xhci-hcd.1/usb2-2", "platform-xhci-hcd.1/usb2-2:1.0"} {
+		path := writePlayerConfig(t, "  player:\n    enabled: true\n    device:\n      binding: port\n      port: "+port+"\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", port, err)
+		}
+		d := cfg.Output.Player.Device
+		if d.Binding != BindingPort || d.Port != port || d.Problem() != nil {
+			t.Errorf("%s: loaded %+v, problem %v", port, d, d.Problem())
+		}
+		if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
+			t.Errorf("%s: PlayerEnabled = %v, %v", port, on, why)
+		}
+		if err := cfg.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		again, err := Load(path)
+		if err != nil || again.Output.Player.Device.Port != port || again.Output.Player.Device.Problem() != nil {
+			t.Errorf("%s: after a save: %+v, %v", port, again.Output.Player.Device, err)
+		}
+	}
+}
+
 // TestThePlayerBlockLoadsAndRoundTrips: every field reads, the ids come
 // back canonical, the serial is kept, and a Save writes the file 0600 with
 // the serial whole, which loads back the same.
@@ -281,6 +309,7 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leaks := func(out string) bool { return playerLeaks(out) || leaksSerial(out, numericSerial) }
+			forgetPlayerOffReason(t)
 			rec := loggingtest.Record(t)
 			path := writePlayerConfig(t, "  player:\n    enabled: true\n"+tc.block)
 			for _, pass := range []string{"load", "load after a save"} {
@@ -485,6 +514,13 @@ func TestEveryPlayerRefusal(t *testing.T) {
 		}, "a port binding names a port, not a model"},
 		{"port with no port", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort} }, "device.port"},
 		{"port unanchored", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort, Port: "1-1.3:1.0"} }, "device.port"},
+		{"the port alone", func(p *PlayerConfig) {
+			p.Device = PlayerDevice{Transport: "usb", Binding: BindingPort, Port: "platform-xhci-hcd.0/usb2-1"}
+		}, ""},
+		{"port unanchored alone", func(p *PlayerConfig) { p.Device = PlayerDevice{Binding: BindingPort, Port: "1-1.3"} }, "device.port"},
+		{"port with half an interface", func(p *PlayerConfig) {
+			p.Device = PlayerDevice{Binding: BindingPort, Port: "platform-xhci-hcd.0/usb2-1:1"}
+		}, "device.port"},
 		{"vendor upper", func(p *PlayerConfig) { p.Device.VendorID = "20B1" }, ""},
 		{"vendor 0x", func(p *PlayerConfig) { p.Device.VendorID = "0x20b1" }, ""},
 		{"vendor three digits", func(p *PlayerConfig) { p.Device.VendorID = "2b1" }, "device.vendorId"},
@@ -539,10 +575,27 @@ func TestThePlayerIsLinuxOnlyAndNeverPublic(t *testing.T) {
 	}
 }
 
+// forgetPlayerOffReason clears the reason Validate last logged the player
+// off for, now and when the test ends. logPlayerOff keeps that reason for
+// the process, so a test that asserts the line would otherwise pass or fail
+// by what ran before it (the same subtest run twice, under -count=2, logged
+// nothing the second time). Every test that asserts the line calls it.
+func forgetPlayerOffReason(t testing.TB) {
+	t.Helper()
+	forget := func() {
+		playerOffLogged.mu.Lock()
+		defer playerOffLogged.mu.Unlock()
+		playerOffLogged.reason = ""
+	}
+	forget()
+	t.Cleanup(forget)
+}
+
 // TestValidateTurnsThePlayerOffWithALoggedReason: Validate never fails a
 // config over its player block; it logs why the player is off, through
 // the GOOS it is given, and the line carries no serial.
 func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
+	forgetPlayerOffReason(t)
 	rec := loggingtest.Record(t)
 	cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
 		Output: OutputConfig{Player: fullPlayer()}}
@@ -573,6 +626,77 @@ func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
 	if got := rec.Failures(playerOffMessage); len(got) != 2 || len(rec.All()) != before {
 		t.Errorf("a player that runs was logged: %q", rec.All()[before:])
 	}
+}
+
+// TestThePlayerOffWarningIsLoggedOnceForEachReason: Validate runs on every
+// Load and every settings save (a clone, mutated, NormalizeAndValidate), and
+// it wrote the player-off warning each time, the same line for a block that
+// had not changed. It writes the line once each time the reason changes: two
+// loads and two saves with one reason write one line, a changed reason
+// writes again, and so does the same reason once it went away (the player
+// runs, or is simply off) and came back, which is a change too. Saves made at
+// once write a changed reason once.
+func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
+	forgetPlayerOffReason(t)
+	rec := loggingtest.Record(t)
+	loadAndSave := func(t *testing.T, path string) {
+		t.Helper()
+		for i := 0; i < 2; i++ {
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := Clone(cfg)
+			next.LibraryName = fmt.Sprintf("Study %d", i)
+			if err := next.NormalizeAndValidate(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	wantLines := func(t *testing.T, reasons ...string) {
+		t.Helper()
+		got := rec.Failures(playerOffMessage)
+		if len(got) != len(reasons) {
+			t.Fatalf("logged %d player-off lines, want %d:\n%s", len(got), len(reasons), strings.Join(got, "\n"))
+		}
+		for i, r := range reasons {
+			if !strings.Contains(got[i], r) {
+				t.Errorf("line %d is %q, want the reason %q", i+1, got[i], r)
+			}
+		}
+	}
+	const native, dop = `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release"
+	loadAndSave(t, writePlayerConfig(t, "  player:\n    enabled: true\n    dsdMode: native\n"))
+	wantLines(t, native)
+
+	dopPath := writePlayerConfig(t, "  player:\n    enabled: true\n    allowDoP: true\n")
+	loadAndSave(t, dopPath)
+	wantLines(t, native, dop)
+
+	// The reason goes away, the player running, and the same one comes back.
+	runs := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+		Output: OutputConfig{Player: fullPlayer()}, playerGOOS: "linux"}
+	if err := runs.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	loadAndSave(t, dopPath)
+	wantLines(t, native, dop, dop)
+
+	// Saves at once, from many goroutines, write a changed reason once. The
+	// config is built in memory, so these saves are the first to see its
+	// reason.
+	inMemory := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+		Output: OutputConfig{Player: PlayerConfig{Enabled: true, DSDMode: "native"}}}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = Clone(inMemory).NormalizeAndValidate()
+		}()
+	}
+	wg.Wait()
+	wantLines(t, native, dop, dop, native)
 }
 
 // TestValidateReadsNoHardware: the player's checks read the block and
@@ -687,6 +811,53 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 		if got, _, err := EnsurePlayerUUID(bad); err == nil {
 			t.Errorf("EnsurePlayerUUID replaced a player-uuid it could not read with %q", got)
 		}
+	}
+}
+
+// TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse: the identity file's
+// writer, which EnsurePlayerUUID makes the file with and a restore writes a
+// snapshot's UUID through, writes the UUID and a newline, 0600, over what
+// was there; and it refuses to write anything but one lowercase UUID,
+// leaving the file as it was and nothing staged beside it.
+func TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse(t *testing.T) {
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	dir := t.TempDir()
+	path := filepath.Join(dir, PlayerUUIDFile)
+	if err := os.WriteFile(path, []byte("7c9e6679-7425-40de-944b-e07fc1f90ae7\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePlayerUUIDFile(path, id); err != nil {
+		t.Fatalf("WritePlayerUUIDFile: %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != id+"\n" {
+		t.Fatalf("player-uuid holds %q, %v; want the UUID and a newline", b, err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+			t.Errorf("player-uuid mode %v, %v; want 0600", st.Mode().Perm(), err)
+		}
+	}
+	for _, bad := range []string{"", "not-a-uuid", strings.ToUpper(id), id + "\n", " " + id, id + id, id[:35]} {
+		if err := WritePlayerUUIDFile(path, bad); err == nil {
+			t.Errorf("WritePlayerUUIDFile wrote %q", bad)
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != id+"\n" {
+			t.Fatalf("a refused write of %q left player-uuid holding %q, %v", bad, b, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != PlayerUUIDFile {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("the data dir holds %v; want player-uuid alone", names)
+	}
+	if got, err := ReadPlayerUUIDFile(path); err != nil || got != id {
+		t.Fatalf("ReadPlayerUUIDFile = %q, %v", got, err)
 	}
 }
 

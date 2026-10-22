@@ -296,9 +296,11 @@ func TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad(t *testing.T) {
 		if c.Name != "config-file" {
 			continue
 		}
-		if c.Status != string(doctor.Fail) || !strings.Contains(c.Summary, "libraryNmae") ||
-			!strings.Contains(c.Summary, defaultConfigPath) {
-			t.Errorf("config-file = %s %q, want a fail naming the local file and the key "+
+		// The key by its line, never its text: a key can be a password
+		// pasted where one goes (config.ValueFreeYAMLError, B505's round 3).
+		if c.Status != string(doctor.Fail) || !strings.Contains(c.Summary, "line 1: that key is not a field") ||
+			strings.Contains(c.Summary, "libraryNmae") || !strings.Contains(c.Summary, defaultConfigPath) {
+			t.Errorf("config-file = %s %q, want a fail naming the local file and the line of the key "+
 				"that does not load", c.Status, c.Summary)
 		}
 		return

@@ -23,7 +23,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
 | The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), and the live reading of the DAC with the bridge's verdict (`GET /v1/outputs/{id}/reading`, `internal/signalpath`) | `output.md` |
-| The bridge's own player (B470): its PCM format and decode layer (`internal/player/format`, `internal/player/decode`, `third_party/saprobe-alac`), the DSD and ALAC containers, the ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`), the streaming sink, the player's DAC binding (`output.player`, `internal/usbid`, `internal/player/binding`, `internal/player/lan`, `bridge output dac inspect` and `bind`), and the player PRs after them | `player.md` |
+| The bridge's own player (B470): its PCM format and decode layer (`internal/player/format`, `internal/player/decode`, `third_party/saprobe-alac`), the DSD and ALAC containers, the ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`), the streaming sink, the player's DAC binding (`output.player`, `internal/usbid`, `internal/player/binding`, `internal/player/lan`, `bridge output dac inspect` and `bind`), its hotplug watcher (`internal/player/hotplug`), and the player PRs after them | `player.md` |
 | Auth, pairing, sessions and login tickets, TLS and the pin, what logs and error bodies may say | `auth-tls.md` |
 | The admin console, the web player, uploads and the trash | `admin-console.md` |
 | Test discipline, CI, SonarCloud and Docker (loads with every test file) | `build-ci-tests.md` |
@@ -64,6 +64,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF), DSF and DFF demuxers into canonical native DSD (B470 PR 1b), ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder (B470 PR 1c), and typed refusals |
 | `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470 PR 2a): asound.h definitions pinned to a kernel tag and checked by the `alsa-abi` CI job (`scripts/alsa-abi`), an endpoint opened by card and device number, exact rate/channels/format, cancellable non-blocking writes, bounded drain; and its streaming `Sink` (PR 2b): a preallocated two-second lookahead, the position the kernel establishes, pause by PAUSE or zeros with a 30 s release, xruns reported and recovered only when asked, the gapless decision between tracks. Linux amd64/arm64; `bridge output pcm-test` is its hardware harness |
 | `internal/player/binding` | Resolves `output.player.device` to the card it names now (serial, uniqueModel or port; ambiguous, missing, transient and the rest as states), the check after open (`Checker`, which `SinkConfig.Admit` takes), and the binding `bridge output dac bind` writes (B470 PR 4a) |
+| `internal/player/hotplug` | Watches for DACs arriving and leaving (B470 PR 4a2): the kernel's uevents on a netlink socket (group 1, the kernel alone), debounced, the whole box read with 4a's readers and the binding resolved (`binding.Settled`), published as immutable snapshots under a serve-wide inventory generation; serve runs it on Linux while the live config enables the player |
 | `internal/player/lan` | Whether the box has an eligible LAN interface for the player yet: runtime state (`lan_unavailable`), never a config refusal |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/version` | `ServerVersion` + `ProtocolVersion` constants (source of truth for `PROTOCOL.md`) |
@@ -179,7 +180,7 @@ it.
 loads with its code, and the record in the log** — never only in the log, because
 nothing there reaches a session that has not gone looking for it.
 
-**Nineteen claims in this list have been wrong and been corrected**: **Check the code before believing any doc about it, including this one** — and when you find a stale claim, correct it here rather than working around it. → History-Workflow.md
+**Twenty-three claims in this list have been wrong and been corrected**: **Check the code before believing any doc about it, including this one** — and when you find a stale claim, correct it here rather than working around it. → History-Workflow.md
 
 **The same rot reaches CODE COMMENTS, and there it is more dangerous**, because a comment is read as the reason for the code beside it: a false comment that explains a design choice is how the next change gets made on the same reasoning. → History-Workflow.md
 

@@ -24,10 +24,10 @@ func TestDuplicatesEffectiveFilter(t *testing.T) {
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("EffectiveFilter(%q): want error, got %q", c.in, got)
-			} else if !strings.Contains(err.Error(), c.in) {
-				// The TailscaleMode convention: the error preserves the
-				// operator's original input verbatim.
-				t.Errorf("EffectiveFilter(%q) error must quote the input: %v", c.in, err)
+			} else if strings.Contains(err.Error(), c.in) || !strings.Contains(err.Error(), "highest-quality, same-format or off") {
+				// The TailscaleMode convention: the error names the words
+				// the field takes and never the value (B505's round 3).
+				t.Errorf("EffectiveFilter(%q) error must name the filters and not quote the input: %v", c.in, err)
 			}
 			continue
 		}

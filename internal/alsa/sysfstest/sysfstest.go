@@ -20,9 +20,10 @@
 //	subsys DIR NAME             DIR/subsystem, a link to sys/bus/NAME
 //	platform DIR, pci DIR       a platform or PCI device directory
 //	roothub DIR speed=MBITS     a USB root hub (usbN), its speed, and its sys/bus/usb/devices link
-//	usbdev DIR vendor=V product=P [serial=S] [serialraw="…"] [class=C]
+//	usbdev DIR vendor=V product=P [serial=S] [serialraw="…"] [class=C] [devnum=N]
 //	                            a USB device: its ids, its serial as sysfs prints it (or exact bytes),
-//	                            its class (09 is a hub), and its sys/bus/usb/devices link
+//	                            its class (09 is a hub), the device number of this enumeration,
+//	                            and its sys/bus/usb/devices link
 //	usbcard N IFACE             a USB interface IFACE ("1-1.3:1.0") that is sound card N: its
 //	                            bInterfaceNumber, sound/cardN with its device link, and sys/class/sound/cardN
 //	card N DEVDIR               sound card N under any device directory (HDMI, I2S)
@@ -290,7 +291,8 @@ func (b *builder) usbDevice(dir string, opts map[string]string) error {
 	if err := b.subsys(dir, "usb"); err != nil {
 		return err
 	}
-	attrs := map[string]string{"speed": opts["speed"], "idVendor": opts["vendor"], "idProduct": opts["product"], "serial": opts["serial"]}
+	attrs := map[string]string{"speed": opts["speed"], "idVendor": opts["vendor"], "idProduct": opts["product"], "serial": opts["serial"],
+		"devnum": opts["devnum"]}
 	class := opts["class"]
 	if class == "" {
 		class = "00"

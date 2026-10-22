@@ -64,6 +64,10 @@ libraryName: "My Music Library"
 #   no resampling, software volume or normalization setting, and there will
 #   not be. dsdMode takes off, allowDoP false and mixer {type: none} alone
 #   in this release. The player's UUID is kept in <dataDir>/player-uuid.
+#
+# init asks for none of this block, so `bridge init --force` (or a rewrite
+# answered yes at init's prompt) keeps it whole, and says which setting it
+# could not keep when one does not read.
 # output:
 #   mpd: auto
 #   # endpoint: "127.0.0.1:6600"

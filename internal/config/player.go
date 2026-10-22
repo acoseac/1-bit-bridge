@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -23,8 +24,8 @@ const (
 	// BindingUniqueModel names a model that has one unit on the box: two
 	// units of it are ambiguous, never the first.
 	BindingUniqueModel = "uniqueModel"
-	// BindingPort names a port, not a unit: whatever sound card sits on that
-	// interface of that port.
+	// BindingPort names a port, not a unit: whatever unit is in that port,
+	// and the sound card it carries (usbid.Port).
 	BindingPort = "port"
 )
 
@@ -43,6 +44,37 @@ const (
 // playerOffMessage is the warning Validate logs when output.player asks for
 // a player this config cannot have, with the reason as an attribute.
 const playerOffMessage = "output.player: the player is off"
+
+// playerOffLogged is the reason Validate last saw the player off for, ""
+// for none (a player that runs, or one that is simply off), so that it
+// writes playerOffMessage once each time the reason changes (logPlayerOff).
+// It is the process's: Validate runs on every Load and every settings save,
+// each time on a config of its own (a clone), and a reason that has not
+// changed is the line the operator has already read.
+var playerOffLogged struct {
+	mu     sync.Mutex
+	reason string
+}
+
+// logPlayerOff writes playerOffMessage with why as its reason, unless why is
+// the reason last seen, and records why as that reason. A nil why logs
+// nothing and records that there is none, so a reason that went away and
+// comes back is written again.
+func logPlayerOff(why error) {
+	reason := ""
+	if why != nil {
+		reason = why.Error()
+	}
+	playerOffLogged.mu.Lock()
+	defer playerOffLogged.mu.Unlock()
+	if reason == playerOffLogged.reason {
+		return
+	}
+	playerOffLogged.reason = reason
+	if reason != "" {
+		validateLogger.Warn(playerOffMessage, "reason", reason)
+	}
+}
 
 // PlayerConfig is output.player: the bridge as a player of its own indexed
 // files through one DAC it opens exclusively (B470). It is off by default,
@@ -111,7 +143,10 @@ type PlayerDevice struct {
 	// Serial is the unit's serial, for a serial binding: password-class,
 	// written to the config file and printed nowhere.
 	Serial usbid.Serial `yaml:"serial,omitempty"`
-	// Port is the anchored port path, for a port binding (usbid.Port).
+	// Port is the anchored port, for a port binding: the controller and the
+	// port chain, and a card's configuration and interface after them only
+	// as a preference among the cards of a unit that carries more than one
+	// (usbid.Port).
 	Port string `yaml:"port,omitempty"`
 	// PCMDevice and Subdevice are the playback endpoint on the card: the
 	// D of pcmC<card>D<D>p and its substream, 0 to 255.
@@ -323,7 +358,7 @@ func (p PlayerConfig) Unread() error {
 // A refusal quotes a value only when it is one of the words its field
 // knows, and says "that value" of anything else, a number included: a
 // serial pasted into the wrong field, letters or digits, must not reach the
-// log line Validate writes on every load and save.
+// log line Validate writes when the reason changes.
 func (p PlayerConfig) Problem() error {
 	if p.unread != "" {
 		return errors.New(p.unread)

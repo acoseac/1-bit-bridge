@@ -5,9 +5,10 @@
 // database (`bridge.db`), the token store (`tokens.json`), the TLS
 // material (`server.crt` + `server.key`), the live config
 // (`bridge.yaml`), the public-mode console account (`adminauth.json`,
-// when one exists), and the Atlas harvest credential and sync cursor
-// (`atlas-harvest.json`, when one is stored). The snapshot also writes
-// a small `manifest.json`
+// when one exists), the Atlas harvest credential and sync cursor
+// (`atlas-harvest.json`, when one is stored), and the player's identity
+// (`player-uuid`, once the player has one: config.PlayerUUIDFile). The
+// snapshot also writes a small `manifest.json`
 // describing the bridge version and protocol version that produced it
 // — Restore refuses incompatible snapshots so a future schema change
 // doesn't get silently rolled back into.
@@ -36,7 +37,9 @@
 // config, the database, the token store and the TLS pair root's 0600,
 // so the service could not start. The console account and the harvest
 // state take that same write. Restore keeps the console account and
-// signs its sessions out (adminauth.SignedOutFile) in that one write.
+// signs its sessions out (adminauth.SignedOutFile) in that one write, and
+// writes the player's identity through the identity file's own writer
+// (config.WritePlayerUUIDFile), which keeps the owner the same way.
 package backup
 
 import (
@@ -55,6 +58,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -83,6 +87,13 @@ const AdminAuthFileName = "adminauth.json"
 // cursor. Snapshot and restore copy it byte for byte. A missing file is
 // skipped, the same way tokens.json is.
 const AtlasHarvestFileName = "atlas-harvest.json"
+
+// PlayerUUIDFileName is the player's identity (config.PlayerUUIDFile),
+// which controllers know the player by. Snapshot copies it as stored, and a
+// missing file is skipped: a box whose player was never enabled has none.
+// Restore reads the copy by the player's own rule and writes it through the
+// identity file's writer, so the box's player is the device it was (Restore).
+const PlayerUUIDFileName = "player-uuid"
 
 // BackupsDirName is the dir under `dataDir` that holds snapshots.
 const BackupsDirName = "backups"
@@ -130,6 +141,7 @@ type Sources struct {
 	BridgeYAML   string // path to the bridge config file
 	AdminAuth    string // typically `<dataDir>/adminauth.json`; absent on a loopback install
 	AtlasHarvest string // typically `<dataDir>/atlas-harvest.json`; absent until a harvest credential is stored
+	PlayerUUID   string // typically `<dataDir>/player-uuid`; absent until the player has an identity
 }
 
 // Targets points at where each restored file should land. Mirrors
@@ -144,6 +156,7 @@ type Targets struct {
 	BridgeYAML   string
 	AdminAuth    string
 	AtlasHarvest string
+	PlayerUUID   string
 }
 
 // Snapshot captures every present file in `src` into a fresh
@@ -198,6 +211,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		{src.BridgeYAML, "bridge.yaml"},
 		{src.AdminAuth, AdminAuthFileName},
 		{src.AtlasHarvest, AtlasHarvestFileName},
+		{src.PlayerUUID, PlayerUUIDFileName},
 	} {
 		if pair.src == "" {
 			continue
@@ -238,7 +252,18 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // snapshot was atomic (created in one Snapshot call) so a partial
 // restore is the most useful failure mode anyway. The console account is
 // the exception: it is rewritten, not copied, and one that does not parse
-// fails the restore before any file is written (signedOutAdminAuth).
+// fails the restore before any file is written (signedOutAdminAuth). So is
+// the player's identity: it is written through the identity file's writer
+// (config.WritePlayerUUIDFile), and a copy that does not hold one UUID
+// fails the restore before any file is written (snapshotPlayerUUID).
+//
+// The snapshot's identity wins over the one the box has. A restore makes
+// the box the bridge the snapshot was taken from, its database, tokens, TLS
+// pair and config included, and that bridge's player is the device its
+// controllers know by that UUID: keeping the box's would put a new player
+// beside a restored bridge. A snapshot that holds none (taken before the
+// file was in the bundle, or of a box whose player had none) leaves the
+// box's identity as it is.
 func Restore(snapshotDir string, dst Targets) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -262,6 +287,7 @@ func Restore(snapshotDir string, dst Targets) error {
 		"bridge.yaml":        dst.BridgeYAML,
 		AdminAuthFileName:    dst.AdminAuth,
 		AtlasHarvestFileName: dst.AtlasHarvest,
+		PlayerUUIDFileName:   dst.PlayerUUID,
 	}
 	// Sign the console account out before the loop. The manifest lists it
 	// after bridge.db, the token store, the TLS pair and bridge.yaml, so a
@@ -272,6 +298,16 @@ func Restore(snapshotDir string, dst Targets) error {
 	accountRead := false
 	if dst.AdminAuth != "" && slices.Contains(m.Files, AdminAuthFileName) {
 		account, accountRead, err = signedOutAdminAuth(filepath.Join(snapshotDir, AdminAuthFileName))
+		if err != nil {
+			return err
+		}
+	}
+	// The player's identity is read before the loop for the same reason:
+	// the manifest lists it last.
+	var playerUUID string
+	playerUUIDRead := false
+	if dst.PlayerUUID != "" && slices.Contains(m.Files, PlayerUUIDFileName) {
+		playerUUID, playerUUIDRead, err = snapshotPlayerUUID(filepath.Join(snapshotDir, PlayerUUIDFileName))
 		if err != nil {
 			return err
 		}
@@ -312,6 +348,17 @@ func Restore(snapshotDir string, dst Targets) error {
 			}
 			if err := writeFrom(target, bytes.NewReader(account), 0o600); err != nil {
 				return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
+			}
+			continue
+		}
+		if name == PlayerUUIDFileName {
+			// The UUID read before the loop, written the way the player
+			// writes its own file, never a copy of the snapshot's bytes.
+			if !playerUUIDRead {
+				return fmt.Errorf("restore %s: the snapshot changed during the restore", PlayerUUIDFileName)
+			}
+			if err := config.WritePlayerUUIDFile(target, playerUUID); err != nil {
+				return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 			}
 			continue
 		}
@@ -706,6 +753,28 @@ func signedOutAdminAuth(srcPath string) (out []byte, read bool, err error) {
 		return nil, false, fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 	}
 	return out, true, nil
+}
+
+// snapshotPlayerUUID reads a snapshot's copy of the player's UUID by the
+// rule the player reads its own with (config.ReadPlayerUUIDFile). Restore
+// calls it before its loop, so a copy that does not hold one UUID fails the
+// restore before any file is written: neither the box's identity nor any
+// other file is replaced, and no identity is made from it. read is false
+// when the snapshot lists the file but does not hold it, which the loop
+// skips the same way; removing the copy is how an operator restores the
+// rest of such a snapshot and leaves the box's identity as it is.
+func snapshotPlayerUUID(srcPath string) (id string, read bool, err error) {
+	id, err = config.ReadPlayerUUIDFile(srcPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "", false, nil
+	case errors.Is(err, config.ErrNotOnePlayerUUID):
+		return "", false, fmt.Errorf("restore %s: %w, so the player cannot have the identity it had; nothing was restored: "+
+			"remove it from the snapshot to restore the rest and leave this box's player identity as it is", PlayerUUIDFileName, err)
+	case err != nil:
+		return "", false, fmt.Errorf("restore %s: %w; nothing was restored", PlayerUUIDFileName, err)
+	}
+	return id, true, nil
 }
 
 // writeManifest commits the snapshot metadata ATOMICALLY — temp file in

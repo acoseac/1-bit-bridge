@@ -26,6 +26,9 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
+- [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
+- [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
+- [2026-10-22 — B505: the player's identity in the backup, the output block across a rewrite, and the player-off warning once per reason](#2026-10-22--b505-the-players-identity-in-the-backup-the-output-block-across-a-rewrite-and-the-player-off-warning-once-per-reason)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
@@ -50427,8 +50430,8 @@ refusal and Validate logs it (`output.player: the player is off`, the reason
 as an attribute) and returns nil. The YAML half needed the same treatment:
 `Load` decodes with `KnownFields(true)`, so a typo'd key or a wrong type
 inside the block failed the whole config before Validate ran, and yaml.v3's
-own type errors quote up to seven bytes of the value (`cannot unmarshal !!str
-\`GOBAR-7...\``), which is a serial in the wrong field. So the block is read by
+own type errors quote up to seven bytes of the value
+(`` cannot unmarshal !!str `GOBAR-7...` ``), which is a serial in the wrong field. So the block is read by
 hand (`playerReader`): `UnmarshalYAML` never errors, each value is decoded by
 yaml.v3 (a bool or an int reads as it does elsewhere in the config), every
 message is this package's own (field, line, never a value unless it is a
@@ -50808,6 +50811,1425 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B505: the player's identity in the backup, the output block across a rewrite, and the player-off warning once per reason
+
+Three follow-ups from B470 PR 4a (#1307), one commit each on
+`fix/b505-player-followups`: f3f1c6d0, dcc0b530, and 101b7012 with its
+test's follow-up 2490770a.
+
+**1. `bridge backup` carries `<dataDir>/player-uuid`, and `bridge restore`
+gives it back.** The UUID is the player's identity to a controller (PR 5a
+makes it the OpenHome device's UDN), and the bundle did not hold it, so a
+restored box kept the identity it had, or had none and made a new one:
+every controller saw a new player. `backup.Sources.PlayerUUID` and
+`Targets.PlayerUUID` name it, through `buildBackupSources` and
+`buildRestoreTargets`, so the CLI, the serve ticker and the console's
+snapshot all carry it (`TestBuildBackupSourcesNamesThePlayerUUID`).
+`Snapshot` copies it as stored, 0600, and skips a box with none
+(`TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`). `Restore` reads the copy
+before its loop by the player's own rule, `config.ReadPlayerUUIDFile`, which
+`ReadPlayerUUID` now wraps with the live file's remedy (its message is
+unchanged), and writes it through the identity file's one writer,
+`config.WritePlayerUUIDFile`, which `EnsurePlayerUUID` now calls: the UUID
+and a newline, 0600, `fsutil.KeepOwner`, staged, synced and renamed, and it
+refuses anything but one lowercase UUID
+(`TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse`). The edge cases, as
+decided:
+
+- A snapshot from before this change lists no `player-uuid`. The restore
+  leaves the box's identity as it is and makes none where there is none, as
+  B200 decided for the console account; so does a snapshot that lists the
+  file and no longer holds it
+  (`TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`).
+- The box's player already has another identity: **the snapshot's wins**. A
+  restore makes the box the bridge the snapshot was taken from, its
+  database, tokens, TLS pair and config included, and that bridge's player
+  is the device its controllers know by that UUID; keeping the box's would
+  put a new player beside a restored bridge. An operator who wants the
+  box's identity removes `player-uuid` from the snapshot directory first
+  (`TestBackupAndRestoreGiveThePlayerTheIdentityItHad`, through the real
+  `backupCmd` and `restoreCmd`).
+- A copy that does not hold one UUID (empty, a lone newline, upper case, two
+  UUIDs, a byte order mark, white space before it, text after it, cut short,
+  past 128 bytes) fails the restore before any file is written, as a console
+  account that does not parse does, and the refusal names the copy and says
+  to remove it to restore the rest
+  (`TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`). White
+  space after the UUID (an editor's CR LF) reads, as in the live file, and is
+  written back as the UUID and a newline. The snapshot copies whatever the
+  live file holds: a backup that refused a damaged identity would stop every
+  backup, the ticker's included, and the live player refuses that file
+  already, with its own remedy.
+- Permissions: the snapshot's copy is 0600 whatever the live file's mode,
+  the restored file 0600 whatever the copy's
+  (`TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`),
+  and run as root each takes the install's owner once
+  (`TestSnapshotAndRestoreAsRootKeepThePlayerUUID`).
+- The schema stays 1: an older bridge's restore skips a file its mapping
+  does not know.
+
+`PROTOCOL.md`'s "Operator: Backup & restore" listed `bridge.db`,
+`tokens.json`, the TLS pair and `bridge.yaml`, and had lacked
+`adminauth.json` and `atlas-harvest.json` since B200. It lists the whole
+bundle now and says how a restore treats the console account and the
+player's identity. The app's copy, `docs/BridgeProtocol.md`, takes the same
+text in its companion PR, which this branch does not make.
+
+**2. `bridge init --force` keeps the output block.** A rewrite built
+`bridge.yaml` from `baseConfig`, the run's flags and the list of what it
+keeps, and output was not on the list, so `--force`, or "Overwrite?"
+answered y, dropped `output.player`, its binding included, beside
+`output.mpd`. Measured with the real `initCmd` twice over one `--dir`: the
+saved config had no output block, and the serial was gone from the file.
+**Kept, in either posture, a change of posture included.** That does not
+conflict with what `--force` promises, so nothing is said loudly in its
+place: the flag's help promised the data dir and the TLS pair, and
+`init_rewrite.go`'s rule for the rest is who could give a value back. init
+asks for nothing in output, and dropping it cost what only the box gives
+back: the binding's serial comes from the unit alone (bind reads it from
+sysfs and never prints it), MPD's password from MPD's own configuration, the
+loopback route's port is where MPD's queued URLs point, and `output.mpd:
+off` is the operator's opt-out, which the default would turn back on. The
+block says what is beside the bridge on this box, not a feature or a
+cadence of the bridge, which are what a rewrite resets.
+`TestInitRewriteKeepsTheOutputBlock` runs both postures and a loopback
+install rewritten public.
+
+`priorOutput` reads the block from the bytes the run read, on its own and a
+setting at a time. Read as a field of `priorInstallFile`, a type error in it
+would fail that struct's whole decode, and `refuseRewrite` would refuse the
+rewrite with a message about the data dir and the TLS pair, which it could
+read; `TestPriorInstallTagsAreConfigs` is unchanged. A setting that does not
+read, or that the config's own check refuses (`OutputConfig.Problem`, which
+holds Validate's two output refusals word for word), is one the config did
+not load with either, which is often why init runs again: it is not kept,
+and a warning after the save names it by its key, its line and the check's
+words, never by a value that does not read
+(`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo`: a mode,
+loopback ports that are not a number or not a port, a password that is not
+text, and an output that is not a block). A player block never fails, and
+one this release cannot read is kept as written, as Load keeps it
+(`TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten`). A key output
+does not take is dropped silently, as a rewrite drops every key a config
+does not have. `printKept` lists each kept setting, MPD's password as "set
+(not shown)" and the player by whether it is enabled and its binding's
+kind, never the serial, the ids or the port; its key column widens only for
+`output.loopbackPort`. `--force`'s help and `bridge.yaml.example` say the
+block is kept.
+
+**3. Validate logs the player-off warning once each time its reason
+changes.** It wrote `output.player: the player is off` on every Validate:
+each Load and each save that validates a clone first (the console's PATCH,
+the UPnP-upstream writer, init), the same line for a block that had not
+changed. PR 4a's entry above called that repetition the point. Measured on
+main: two loads and two saves of one config wrote four lines. **Once per
+change of the reason, not once per process.** `logPlayerOff` keeps the
+reason last seen, the process's (under a mutex, since saves can validate at
+once; Validate still writes no field of the config it judges), and writes
+the line when the reason differs. No reason (a player that runs, or one
+that is simply off) clears it, so the same reason coming back is written
+again; once per process would stay silent about a problem that came back,
+and about a second one after the first. A reason that names a line (a block
+that does not read) changes when a save moves the block, and the line is
+written once more, naming where it is now. The test clears the reason
+through the same behaviour, a Validate of a config with none, at its start
+and its end, so it holds under `-count` and `-shuffle`: twenty shuffled runs
+under `-race` passed (`TestThePlayerOffWarningIsLoggedOnceForEachReason`).
+
+**Red first.** On main, through the real commands:
+`TestBackupAndRestoreGiveThePlayerTheIdentityItHad` failed with "the
+snapshot lists [bridge.db bridge.yaml], without player-uuid", and
+`TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo` with exit 0
+and "Restore complete"; the package tests failed to build (`undefined:
+WritePlayerUUIDFile`, `src.PlayerUUID undefined`).
+`TestInitRewriteKeepsTheOutputBlock` (all three runs),
+`TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten` and
+`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` (all five
+cases) failed: no output block in the saved config, no warning.
+`TestThePlayerOffWarningIsLoggedOnceForEachReason` failed with four lines
+where one was due.
+
+**Controls, each on a committed tree, each restored from git, the tree clean
+after each.**
+- 1a, the snapshot no longer captures the file: red in the four backup tests
+  that read its copy and in both CLI tests.
+- 1b, the restore copies the file's bytes (no read before the loop, no
+  identity writer): red in all ten refusal cases, the CLI refusal, and the
+  test that the restore writes the identity file ("\r\n" kept as it was);
+  the CLI round trip and the owner test stayed green, as they should, since
+  a byte copy also gives the identity back and keeps the owner.
+- 2a, the rewrite keeps no output block: red in every case but the output
+  that is not a block, which keeps nothing either way.
+- 2b, the block decoded whole instead of a setting at a time: red in exactly
+  the four cases where one setting does not read (the player's binding lost
+  beside it); the keep tests stayed green.
+- 3a, every Validate logs: red, "logged 4 player-off lines, want 1".
+- 3b, no reason leaves the last one in place (once per distinct reason):
+  **green on 101b7012**. Between the reason going away and coming back the
+  test logged a different one, so the line came back for that change alone.
+  2490770a brings the same reason back straight after a player that runs,
+  and the control is red there, "logged 2 player-off lines, want 3".
+- 3c, the mutex removed: the race detector reports the concurrent saves.
+
+**Not in this change.** The app's mirror of the PROTOCOL.md text. The
+player's start (PR 4b) is what reads a restored identity; nothing here
+starts it. The rules text for the three is this batch's OLD/NEW note, not
+in these commits.
+
+**Round 2 (Codex and the Claude API on round 1; Argon unavailable): four
+findings, all real, none rejected.** Each was reproduced red first, or for
+the test gap shown with the mutation it let through, fixed, committed, and
+negative-controlled on the committed tree. The bar for the rewrite: every
+setting it keeps holds the value Load used, under merge keys and explicit
+empty overrides too, and no warning carries a value, whatever was pasted
+where.
+
+1. *Merge keys changed the kept settings (Codex, P2).* `priorOutput`
+decoded the block's pairs in the file's order and kept each value that was
+not zero, while yaml.v3 v3.0.1's decoder, which Load uses, takes a block's
+own keys first and a merged block's keys only where nothing set them,
+whatever the order in the file (`decoder.mappingStruct` and
+`decoder.merge`, read in the module cache). Measured through the real
+initCmd: `mpd: off` beside a later `<<: {mpd: on}` was saved `on`; `<<:
+{password: merged-pw}` with `password: ""` kept the merged password; a null
+`loopbackPort` kept a merged 7795; and a player written beside a merged one
+took the merged player's port binding in place of its serial one.
+`resolveOutput` now resolves the block as the decoder does: the block's
+keys in order, then the merged block, or each block of a merged sequence
+in order, each key only where nothing set it, a merged block's own merge
+after its keys, keys written as aliases read through them. Each setting is
+then decoded and checked once, so a zero value is the value Load gave it.
+What makes Load refuse the whole block costs that much alone and is named:
+a key written twice in one block (neither value kept, and it still hides a
+merged one), two merge keys in one block, and a merge key naming no block
+or a sequence with anything but blocks in it. A key written beside a merge
+hides the merged value even when the written one is refused: the operator
+overrode it, so the rewrite keeps neither. Red on 74b0f558:
+`TestInitRewriteKeepsWhatTheOutputBlockLoadedWith`, twelve shapes that
+load, five red (a key before its merge, an empty password after and before
+a merged one, a null port over a merged one, the player beside a merged
+one); `TestInitRewriteResolvesMergesBesideASettingItCannotKeep`, seven
+shapes that do not load, all seven red. `TestPriorOutputResolvesMergeKeysAsLoadDoes`,
+added with the fix, holds the resolver to `config.Load` on sixteen shapes:
+merges inside a sequence's blocks, an alias inside a sequence, empty merges,
+null values and a player over merged ones, and a port of 0. Fix eaa3cb15.
+Controls on eaa3cb15: a merged key no longer yielding to one already set
+(red: ten of the twelve rewrite shapes, twelve of the sixteen
+differential ones, the fallback cases); merged sequences walked last first
+(red: the three sequence cases, one rewrite and two differential).
+
+2. *Warnings carried values (Codex, P2; the Claude API, Low).* The warning
+was `OutputConfig.Problem`'s text, which kept Validate's words: `%q` of a
+refused `output.mpd`, `%d` of a refused `output.loopbackPort`. With MPD's
+password on mpd's line the rewrite printed `output.mpd:
+"mpd-kitchen-pw-8812" is not auto, on or off` to stderr, and round 1's test
+required the quoted `"maybe"`, which pinned the leak. Validate's own
+refusal, which `bridge serve`, `bridge doctor` and init print at load,
+quoted it the same way. `Problem` now returns a `*config.OutputProblem`:
+the setting, and a reason with no value in it ("that value is not auto, on
+or off", "that value is not a port (0 to 65535)"). So Validate's refusal
+names the field alone, as the player block's reasons and a URL's refusals
+already do, and the rewrite builds its line from those parts and the key's
+line (`outputRefusal`), never from the error's text. Red on eccded97:
+`TestOutputRefusalsCarryNoValue`, all six cases (MPD's password, a serial
+and a stray word on mpd's line; a serial of digits, 70000 and -5 as the
+port), and six of the rewrite test's nine cases, each of which now requires
+the value to reach neither the run's output nor the saved config (the
+three that passed were value-free already: a port or a password that does
+not read, and an output that is not a block). Fix 74b0f558. Control on
+74b0f558: `Problem`'s reasons quoting the value again, red in all six
+config cases and the same six rewrite cases.
+
+3. *The refusal tests restored no database (Codex, P3).* The package test's
+targets left `ManifestDB` out, and the CLI test watched the config and the
+identity alone, so a restore that read the player-uuid only once it reached
+the first file after `bridge.db` passed both. That mutation, on eaa3cb15:
+both green. A test gap, not a defect: the code read the copy before its
+loop. The package test now restores the database too, moves the live
+database on after the snapshot (a table added), lays a -wal and a -shm
+beside it, and requires all three as they were after the refusal; the CLI
+test adds a track after the snapshot and requires it after the refusal
+(8fcea95a). The same mutation on 8fcea95a: all ten package cases red
+(bridge.db replaced, its -wal and -shm removed), and the CLI test red.
+
+4. *The tests that assert the player-off line depended on test order (the
+Claude API, Low).* `logPlayerOff` keeps its reason for the process, and
+only the new test cleared it, so a test that asserts the line passed or
+failed by what ran before it. Measured on 691da49c: `go test
+./internal/config -run 'TestASerialInTheWrongFieldIsNeverQuoted/^binding$'
+-count=2` failed, the second run logging nothing.
+`TestValidateTurnsThePlayerOffWithALoggedReason` passed twice only because
+it ends with no reason. Round 1's "twenty shuffled runs" named the new test
+alone. `forgetPlayerOffReason` clears the reason at a test's start and in
+its cleanup, and every test that asserts the line calls it, each subtest of
+`TestASerialInTheWrongFieldIsNeverQuoted` included; the new test dropped
+its clearing Validate for it (eccded97). Control: the helper made a no-op,
+red on that invocation.
+
+**Decisions.** Validate's refusal is value-free too, not only the warning:
+the same function and the same leak, printed at load by serve, doctor and
+init. The resolver mirrors the decoder by hand rather than decoding the
+block into a map (which applies the decoder's own merges): a map decode
+fails whole on a key written twice, and the rewrite keeps everything else
+in that block. The differential test is what holds the mirror to the
+decoder, and a yaml.v3 upgrade that changed merge precedence would fail it.
+For what makes Load refuse the whole block there is no value Load used, so
+the rewrite keeps the rest and names what it left out.
+
+**Stress runs.** `internal/config` under `-race -count=10 -shuffle=on`
+(seed 1792677679782983000) and under `-shuffle=on -count=5` (seed
+1792677700544182000); cmd/bridge's `TestInit`, `TestPriorInstall` and
+`TestPriorOutput` tests under `-race -count=10 -shuffle=on` (seed
+1792677582499704000, 93 s). All passed.
+
+**Rules.** 691da49c applied six of round 1's seven OLD/NEW edits. The long
+form of the cli-serve.md line on the player's identity in a snapshot is not
+in ops/History-rules-cli-serve.md, so that line points at nothing. Round 2's
+note carries it again, beside its own edits.
+
+**Round 3 (Codex and the Claude API on round 2; Argon unavailable): five
+findings, four defects (Codex's third and the Claude API's Medium are one),
+all real, none rejected.** The owner's bar: for an output block Load
+accepts, the rewrite keeps exactly what Load decoded, taken from yaml.v3's
+own decoding of the block and never from a resolver of its own; a block
+Load refuses keeps a setting only where the rewrite can name it with
+certainty, and otherwise leaves it out and says so; and no error, refusal,
+warning or log line of the config path carries any part of a value,
+yaml.v3's own type errors included, whatever their length.
+
+1. *An encoded key changed MPD's password (Codex, P2).* yaml.v3 decodes the
+key of `{!!binary cGFzc3dvcmQ=: "", <<: {password: old-pw}}` to `password`,
+so Load has an empty password, set before the merge; `resolveOutput`
+compared the key's base64 text, and kept the merged `old-pw`.
+
+2. *The resolver's bound dropped a valid config's settings (Codex, P2).*
+`maxMergedBlocks` (64) counted the output block and every merged one, so a
+merge sequence of 63 empty blocks and then `{password: saved-pw}`, which
+loads, lost the password, with a warning that the merge "names more blocks
+than a rewrite follows (64)".
+
+3. *Values reached stderr through yaml.v3's own errors and the rest of
+Validate (Codex, P2; the Claude API, Medium).* Read in the module cache,
+v3.0.1: `decoder.terror` quotes a value of ten bytes or fewer whole and the
+first seven of a longer one, and writes a value tagged !!map or !!seq whole
+and unquoted beside the tag; `resolve` prints whole a value its explicit tag
+does not fit (`!!int <password>`); `parser.alias` names the anchor an alias
+names when there is none (`password: *<password>`, unquoted); and a key not
+taken, or written twice, is named (a password written alone in a flow block
+is a key). The parser's own problems are constants, "exceeded max depth of
+%d" and an event's name aside (scannerc.go, parserc.go). Load printed all of
+them, and so did init's refusal of a config that does not decode. Beyond
+the output block round 2 fixed, Validate's refusals printed what they
+refused: `got %d` on 25 bounds and `%d is below` or `above` on the three
+retention ones, the quoted mode, address, quiet-hours window
+and directory, the effective durations of the two TTL checks,
+`net.SplitHostPort`'s error (which repeats the address), a library root's
+path and an upstream server's name. An unparseable BRIDGE_* variable was
+logged with its value and strconv's error. Fix 0895d238:
+`config.ValueFreeYAMLError` rebuilds yaml.v3's messages from the line, the
+Go type, a standard tag and the decoder's own words, keeps the parser's
+messages, and replaces an error that is not yaml.v3's own; Load and init's
+read of the prior config print it. Every Validate refusal names the setting
+and what it takes (a library root and a server by their index,
+`splitHostPortWhy` keeping net's reason alone), and the env warning names
+the variable.
+
+4. *The resolver's "written twice" disagreed with the decoder in merged
+blocks (the Claude API, Low).* Load takes `{conf: &k mpd, <<: {mpd: "on",
+*k: "off"}}` with mpd `on`: inside a merged block a second key naming a
+setting is skipped as merged, not refused. The resolver dropped mpd and
+warned. Two shapes Load refuses it resolved without a word: a merged block
+writing a key twice (`{mpd: "off", <<: {mpd: "on", mpd: "auto"}}`, kept
+`off`), and a merge key beside a quoted "<<" (kept the merged block).
+
+Fix for 1, 2 and 4, cbff00a7: no resolver. `priorOutput` decodes the file
+with yaml.v3's decoder set as Load sets it (`KnownFields`) into a struct
+whose output field is `outputAsLoaded`, an Unmarshaler of yaml.v3's older
+form, whose callback decodes with the decoder at hand into
+`config.OutputConfig` and returns that value's errors alone, a refusal the
+decoder panics with included (`callObsoleteUnmarshaler` recovers it); a
+`nodeOf` takes the node the decoder hands it. A block that decodes is kept
+exactly, less what `OutputConfig.WithoutRefused` refuses (`Problem` is now
+its first), each named by the line of the block's own key or as merged. A
+block that does not decode keeps only settings whose keys are text with no
+tag, each written once, beside no merge key, alias or tag
+(`outputRecovered`), each decoded on its own; any other, nothing, and a
+line that says so. Two more things the bar asks for: a key output does not
+take, which round 2 dropped without a word (it decoded to nothing), is
+named by its line, and a block the file writes twice, once as `!!binary
+b3V0cHV0`, which round 2 dropped silently (its `yaml.Unmarshal` failed and
+it returned nothing), keeps nothing and says so (`outputKeyLines`).
+
+**Red first.** 3, on 8ea8af5c's production code with 0895d238's tests:
+`TestNoLoadRefusalOrWarningCarriesAValue` 115 subtests (a word and a serial
+of digits on every setting `envBindings` knows, and on those Validate checks
+only beside another, with that one set);
+`TestNoEnvironmentOverrideWarningCarriesAValue` 75;
+`TestOutputRefusalsCarryNoValue` its 11 new Load cases, each checked to
+carry the value in yaml.v3's own error first;
+`TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt` 3 of 3 (the
+password printed whole for an explicit tag and an alias, its first seven
+bytes on demo.enabled); and `TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad`,
+`TestLoadRejectsUnknownKeys`, `TestTailscaleEffectiveMode`,
+`TestValidateRejectsBadTailscaleMode` and `TestDuplicatesEffectiveFilter`,
+which asserted the quoted value or key and now assert its absence. The
+sweep's first version named each subtest after its value, which t.TempDir
+puts in the path Load names, and checked Load's refusal with that path in
+it, whose random digits can share four bytes with a serial of digits: it
+names the kind of value now and strips the path. 1, 2 and 4, on 0895d238
+(round 2's resolver) with cbff00a7's tests:
+`TestPriorOutputResolvesMergeKeysAsLoadDoes` 4 of its 5 new shapes (the
+!!binary key saved `password: old-pw`; 63 and 200 empty blocks lost
+`saved-pw`; the alias key dropped `mpd: "on"`); the tagged values pass on
+both, a guard. `TestInitRewriteResolvesMergesBesideASettingItCannotKeep` 10
+of its 13 cases (two of the three that pass on both are round 2's, and the
+third, a refused value whose key is an alias, guards the line
+`settingKeyLine` finds), and
+`TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` 2 (a merged
+refusal's wording, and the key output does not take).
+
+**Controls**, each on the committed fix and restored from git. 0895d238:
+the sanitizer out of Load, red in 81 subtests of the two Load tests; the
+value back in the integer env warning, red in 35; `got %d` back on
+scanIntervalSec, red in exactly `scanIntervalSec=digits`; the sanitizer out
+of init's read, red 3 of 3. cbff00a7: the decoded block never kept, red in
+20 of the differential's 21 shapes, 11 of the 12 load shapes and five more;
+`plainKey` taking any scalar, red in the six merge and tag cases; the
+written-twice check off, red in exactly that case; `KnownFields` off, red in
+exactly the unknown key's.
+
+**Decisions.** Keys go as values do: a misspelt key is named by its line,
+not its text (`line 8: that key is not a field of type config.Config`),
+since a scalar written alone in a flow block is a key and the player
+block's reasons already say "that key" so that a serial written as one
+never reaches a log; `bridge doctor`'s config-file line changes with it.
+init's address flags still name what they were given, the operator's own
+typing on that command line. Left as they were: a URL's scheme and host
+(`urlFieldForLog`, B54), and the repaired `libraryName` and the autocert
+host Normalize logs, both published. Round 2 mirrored the decoder by hand
+rather than decode the block into a map, which fails whole on a key written
+twice; round 3 decodes it with the decoder, into the config's own type,
+through the callback that keeps the block's errors its own, and what Load
+refuses keeps only what is certain, so the case that cost round 2 the map
+decode is now the rule.
+
+**Stress runs and gate.** `internal/config` under `-race -count=10
+-shuffle=on` (18 s; a passing run prints no seed), and cmd/bridge's
+`TestInit`, `TestPriorInstall` and `TestPriorOutput` tests under `-race
+-count=10 -shuffle=1792684400` (98 s), both passed; then `make fmt vet test
+build-all docs-check` at cbff00a7 with this entry uncommitted, clean (`go
+fmt` rewrote nothing), all through the build lock.
+
+**Rules.** Round 3's note, OLD/NEW against 8ea8af5c: cli-serve.md's line
+and its long form for the decoder in place of the resolver, config-lifecycle.md's
+round-2 bullet widened to the whole config path, and the tally of claims
+found wrong in CLAUDE.md and History-Workflow.md, nineteen to twenty-one
+(round 2's "resolves as the decoder does" and "an output refusal names the
+setting, never its value").
+
+**Round 4 (Codex and the Claude API on round 3; Argon unavailable): four
+findings; two fixed, one declined by the orchestrator's decision, one
+rejected on evidence.** The orchestrator, before the round: Codex's first
+is a correctness bug, fix it by decoding the unchanged bytes into
+config.Config the way Load does (no defaults, no environment overrides)
+and taking its output, partial recovery only when that decode fails;
+Codex's second, fix it, naming an unknown control by its index with a fixed
+explanation; Codex's third, decline it and narrow the rule, since a path the
+operator configured is what they need to find and fix and paths are not
+secrets the config path guards; and the Claude API's Low, fix it with a
+guard. Verified against the code, the Low is not real, so it is rejected
+with the measurement below and only its guard is taken.
+
+1. *A block Load takes was dropped, by yaml.v3's alias counting (Codex,
+P2).* yaml.v3 counts alias expansions across the whole document and refuses
+one where they pass 99 in 100 decodes (`allowedAliasRatio`, under 400,000
+decodes). Round 3 decoded the output block on its own, so nothing outside
+it counted. Codex's case, measured: 1,000 `libraryRoots` entries, then an
+output block with a password and a merge sequence of five maps, `&a {}` and
+each next one merging the one before ten times. Load takes it with
+`password: saved-pw`; round 3's `priorOutput` met "excessive aliasing" in
+the block's decode, fell to its certainty recovery, met the merge key and
+kept nothing. Fix eb10c4d5: `outputAsLoadDecodes` decodes the bytes as Load
+does, the same decoder set the same way into `config.Config`, before
+Load's defaults, overrides, paths and checks, and when that decode takes
+the whole file, its output block is kept, less what `WithoutRefused`
+refuses; the warning lines come from `outputNode`, the node the decoder
+hands the output field, read without decoding a value. Only a file the
+decoder refuses somewhere goes on to round 3's reading. Red on 76ac8bb1:
+`TestPriorOutputResolvesMergeKeysAsLoadDoes`'s new whole-config shape
+(Codex's), the password dropped; its three other whole-config shapes (1,000
+roots beside a player and merged MPD settings, 200 custom endpoints and 100
+upstream servers whose anchors the block aliases, a top-level merge naming
+the block) pass on both, guards. Control on eb10c4d5: the Load decode
+skipped, red in exactly Codex's shape.
+
+2. *An unknown managed control was printed as written (Codex, P2).*
+`madeElsewhere` joined `deployment.managedControls` into the refusal
+`refuseRewrite` prints, and serve's startup warning logged the unknown
+names; with a password pasted onto the list's line, both printed it whole.
+Fix 619f37bb: `UnknownManagedControls` returns each unknown entry by its
+place, `deployment.managedControls[1]`; the warning logs those under
+`entries` beside the known names, a fixed set, and init names the known
+controls as they are and each other entry by its place with the fixed "not
+a control this build knows" (`managedControlsSaid`). Red first:
+`TestUnknownManagedControlsAreNamed` (the names returned),
+`TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`, the real
+init, the password printed whole, and
+`TestServeNamesAManagedControlItDoesNotKnowByItsPlace`, the real serve,
+`names=p4ssw0rd-kitchen` in the warning. Controls on 619f37bb: the entry's
+text back in `UnknownManagedControls`, red in all three; init joining the
+list as written, red in the init test alone.
+
+3. *Filesystem errors name configured paths (Codex, P2): declined, by the
+orchestrator's decision.* True as described: `LibraryRootError` prints the
+root's path and the `os.PathError` that repeats it, which serve prints in
+loopback mode and logs in public mode, and init prints `mkdir data dir:`
+with its path. A path the operator configured is what they need to find and
+fix a missing root or an unwritable data directory, and a path is not a
+secret the config path guards. The rule round 3 wrote ("carries any part of
+a value or a key") promised more than this, and it is narrowed to what the
+code guarantees: no password, token, serial, URL credential, value a
+setting refused, entry of a list this build does not know, or key, in any
+refusal, warning or log line, configured paths left out. The sweep
+`TestNoLoadRefusalOrWarningCarriesAValue` holds Load to more than the rule,
+paths included, which is what Load does.
+
+4. *"line N+1" in "field X already set" (the Claude API, Low): rejected.*
+The finding read yaml.v3 v3.0.1 as printing `ni.Line+1` there. The module
+cache's decode.go:924 prints `ni.Line`, and v3's node lines are 1-based (the
++1 is yaml.v2's, whose were 0-based). Measured through `Decode` into
+`config.Config`: a `!!binary bXBk` key and a `*k` alias key, each on line 7
+beside a plain `mpd` on line 6, are refused as "line 7: field mpd already
+set in type config.OutputConfig", and an output block written twice, its
+`!!binary` key on line 4, as "line 4: field output already set in type
+config.Config". The test gap it named is real, so 58e99c18 adds the guard:
+`TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine` holds yaml.v3's
+own message and Load's to the second key's own line for the three shapes. It
+passes on the code as it stands; the control is the finding's proposed fix,
+the line less one, red in all three shapes, where Load would point at the
+plain key before it.
+
+**Decisions.** For a file the decoder refuses, round 3's reading of the
+block on its own stays before the certainty recovery: its values are the
+decoder's, and what it does not count can only make it refuse more, so it
+keeps nothing it should not; a file with a misspelt key elsewhere, the
+config init is run again to replace, keeps its merged output block that
+way. The orchestrator's decisions are in the round-4 rules note too
+(cli-serve.md and config-lifecycle.md).
+
+**Stress runs and gate.** `internal/config` under `-race -count=10
+-shuffle=1792700001` (18 s), and cmd/bridge's `TestInit`,
+`TestPriorInstall`, `TestPriorOutput` and
+`TestServeNamesAManagedControl` tests under `-race -count=10
+-shuffle=1792700002` (107 s), both passed; then `make fmt vet test
+build-all docs-check` at 58e99c18 with this entry uncommitted, clean (`go
+fmt` rewrote nothing), all in one slot of the build lock.
+
+**Rules.** Round 4's note, OLD/NEW against 76ac8bb1: cli-serve.md's line
+and its long form for Load's own decode of a file that decodes and for the
+managed-control refusal, config-lifecycle.md's managed-controls bullet for
+the warning's entries and round 3's bullet narrowed to what the code
+guarantees, and the tally of claims found wrong, twenty-one to
+twenty-three (round 3's "a block yaml.v3 does not decode is one Load
+refuses" and "carries any part of a value or a key").
+
+**Round 5 (the Claude API on round 4; Codex found nothing): two Lows, both
+real, then the merge with main.**
+
+1. *The narrowed rule's bold lines forbade what the code does (the Claude
+API, Low).* The bullet's bold title and its bold Don't named "a value a
+setting refused" with no word of the configured paths the same bullet
+leaves out, so a reader of the summary alone would take `LibraryRootError`,
+which prints a missing root's path, for a violation, and might strip the
+path the orchestrator decided operators need. Rules text only: round 5's
+note puts "a path the operator configured excepted" into both.
+
+2. *The reading of a block on its own was no longer pinned (the Claude API,
+Low).* Since round 4 every file whose whole decode succeeds keeps Load's
+own block, and every fixture of the rewrite's tests decodes whole (a
+Validate refusal is no decode refusal), so the reading left for a file the
+decoder refuses elsewhere, `outputAsLoaded` before the certainty recovery,
+had no test. Measured on 5b807e14: that reading removed (a block that
+decodes on its own sent to the certainty recovery), every test passed; the
+fallback keeping a block refused only for its aliases, every test passed.
+(Keeping any block that fails on its own is caught: eleven of the refused
+-block cases fail.) 4f569b1d adds
+`TestPriorOutputOfAFileTheDecoderRefusesElsewhere`: a misspelt top-level
+key (`libraryRoot: /x`) beside a merged block the decoder takes alone,
+kept as Load decodes it once the typo is put right, with no line; and
+beside Codex's alias-heavy block (now `aliasHeavyBlock`, shared with
+`wholeConfigShapes`), which Load refuses for its aliases with little else
+in the file, of which nothing is kept, its line saying why. Controls on
+4f569b1d: each mutation red in exactly its case. 3cae962e also gives the
+B505 entry the index line round 1 left out.
+
+**The merge with main-62556b9b (#1311, #1312) was not made in this
+session; it was made afterwards, in e9bf68e2.** The branch main-62556b9b
+was already in the repository's refs, so no fetch was
+needed, but `git fetch`, `git merge` and `git cat-file` all ask for an
+approval this headless session cannot give, and the merge was not made any
+other way. It was computed and tested instead. Main changed 70 files since
+the base, e095d14b, and eight of them are files this branch changed too. A
+three-way merge of those eight (`difflib`, from `git show` of the three
+versions) merges six cleanly and leaves three conflicts, resolved as their
+authors would:
+- `.claude/rules/player.md`, one: main rewrote the five binding bullets
+  (the port binding, the sysfs reader, Resolve, the check after open,
+  inspect and bind), and the branch the player-UUID bullet after them,
+  which main left as it was, so the two touch. Main's five, then the
+  branch's UUID bullet.
+- `ops/engineering-log.md`, the index: main's two lines, then B505's.
+- `ops/engineering-log.md`, the end: B505's entry, then main's two
+  entries, the hardware gate and 4a2, since the index lists newest first
+  and the body runs in date order.
+
+Each merged file was checked to add and remove exactly the lines each
+side's own diff does. The merged tree, built in the worktree uncommitted
+(main's other 62 files as main has them) and restored after, passed
+`internal/config` under `-race -count=10 -shuffle=1792710001` (19.5 s),
+cmd/bridge's `TestInit`, `TestPriorInstall` and `TestPriorOutput` tests
+under `-race -count=10 -shuffle=1792710002` (103 s), and `make fmt vet test
+build-all docs-check` (`go fmt` rewrote nothing; main's `internal/alsa`,
+`internal/player/binding` and `internal/player/hotplug` passed beside this
+branch; docs-check ok). Nothing main adds calls what this branch changed
+(the value-free messages, `UnknownManagedControls`), and none of its tests
+asserts a load error's text. The prepared resolutions and a script that
+makes the merge with them are left for a session that may merge. The
+orchestrator then ran that script, which made the merge as e9bf68e2.
+
+## 2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it
+
+**What the gate showed.** On the owner's Raspberry Pi 5 with three DACs
+(the GO bar, a Hugo 2, an Altair), the GO bar was bound with
+`--binding port`, which 4a's bind wrote as
+`platform-xhci-hcd.1/usb2-2:1.0`: the controller anchor, the port chain,
+and the card's configuration and interface (the GO bar's audio interface
+is 0). With the Hugo 2 in that physical port, inspect read
+`card 3: Hugo2, port: platform-xhci-hcd.1/usb2-2:1.1, interface 1` (the
+Hugo 2's audio interface is 1), and the binding
+`resolves: device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`.
+A port binding meant "this port and this interface", and the interface
+belongs to the model: snd-usb-audio makes one card per USB device, on its
+audio control interface, which the GO bar has at 0 and the Hugo 2 at 1,
+after an interface of another class. 4a's entry said a port binding names
+"a port and an interface, not a model"; the interface was the model's.
+Everything else in the gate passed: the serial binding, renumbering,
+unplug and replug, `--verify-card`, and the bound unit moved to another
+port.
+
+**Two forms.** `usbid.Port`'s grammar (its doc) now takes an optional
+`:CONFIG.INTERFACE`. Without it the string is a port,
+`anchor/usbG-CHAIN`, what a port binding names and bind writes; with it,
+one card's port path, what sysfs gives a card (`alsa.USBIdentity.Port`,
+unchanged, and so is `sysfs.go`) and what 4a's bind wrote. `ParsePort`
+reads both, `Place` is the port alone, `HasInterface` says whether there
+is a suffix (the grammar's configurations start at 1, so 0 is none), and
+`String` prints the suffix only when there is one, and nothing for the
+zero Port, which a serial binding's resolution carries. Resolve matches a
+port binding by place: every USB card whose port path's place is the
+bound port is a card of the unit in it, and that unit gives the card, so
+its interface, and the bound pcmDevice and subdevice are looked up on
+that card (`endpoint_missing` when it lacks them). A binding with the
+suffix, from 4a's bind, loads and resolves as its port: the suffix is only
+a preference.
+
+**A unit with more than one card.** Two cards on one unit (a composite
+device) take two drivers, since snd-usb-audio makes one card per device.
+As the brief asked, the card on the configuration and interface the
+binding records is the one chosen, and with none recorded, or no card on
+it, the unit is `device_ambiguous`, never its first card. A serial or
+uniqueModel binding cannot tell such a unit's cards apart either (both are
+the unit, so both match: ambiguous), so a bind that always wrote the port
+alone would leave a composite unit with no binding at all. bind therefore
+writes the card's port path, suffix included, for a unit with more than
+one card, and the port alone for every other, and says which it wrote. The
+brief said bind writes the new form; this is the one exception, the case
+the preference exists for. Configuration and interface are recorded and
+matched together, since an interface number means something only in its
+configuration.
+
+**An unreadable card beside a port binding.** 4a exempted a port binding
+from the rule that a card whose identity cannot be read is never ruled
+out, because one port was one card. Under the new meaning a port is one
+unit, which may carry several cards, and the unreadable card may be
+another of them. So a port binding's one match beside an unreadable card
+is now `device_ambiguous`, as a serial or model match is, unless the match
+is on the interface the binding records, which no other card of that unit
+can be. `TestAnUnreadableCardIsNeverRuledOut` kept its assertion for the
+older form (available, on the recorded interface) and gained one for the
+port alone (ambiguous, and bind refused). A box with no unreadable card
+sees no change.
+
+**The check after open.** `Checker.Check`, which `SinkConfig.Admit` runs at
+every open and reopen, compared the opened card with the resolution's
+identity by `SameUnit`, so a unit swapped into the bound port between the
+resolve and the open was refused, though the binding names the port. Under
+a port binding it now asks `SamePort` (SameUnit's counterpart: the same
+place, whatever the unit and the interface) and then whether the card is
+the one the binding chooses there now: a card on the recorded interface
+is, and any other only while its unit carries no other card, which it
+reads sysfs again for. `Resolution` carries the binding's kind and its
+parsed port for it. Serial and uniqueModel bindings are checked as before.
+`--verify-card` runs the same check, and its pass says "at the bound
+port"; bind's line names the port it wrote. The check judges the cards it
+can read; an unreadable or a transient card is Resolve's to fail closed
+on, as under the other bindings.
+
+**What did not change.** A hub in the bound port and a controller that is
+gone are `binding_invalid` in either form, an empty port `device_missing`,
+and a card that is not USB `identity_unsupported` at bind. B470 PR 4a2's
+item that refuses a port whose device class cannot be read is that
+branch's: the lines of Resolve's no-match branch it changes are as main
+has them here, and so is the last line of the hub test, which that branch
+adds a test after.
+
+**Red first.** With the tests written and the code at e095d14b, eight
+binding tests failed (the grammar refused the port alone; bind wrote
+`platform-xhci-hcd.1/usb2-2:1.0`), two config tests, and the CLI test on
+bind's line. A scratch test of the gate itself, the binding 4a's bind
+wrote with the Hugo 2's card on interface 1 in that port, failed
+`device_missing: no card is at platform-xhci-hcd.1/usb2-2:1.0`, as the Pi
+did, and inspect printed the gate's lines. The usbid tests did not build
+(`Place`, `HasInterface`); with a stub of HEAD's meaning they failed on
+every port alone and every place. `TestTheEndpointMustBeThere`'s port case
+was added after the fix; control 20 shows it red.
+
+**Controls: twenty-one, each on a committed tree, each restored from git,
+all red.** Resolve matching a port binding by the stored string (1: nine
+binding tests and the CLI's); the grammar requiring the suffix (2: the
+usbid, config, binding and CLI tests); bind writing the card's port path
+for every unit (3) and the port alone for a unit with two cards (4: bind
+refused, ambiguous); a unit with two cards resolving to its first (5); the
+recorded interface never choosing (6); a port binding exempt from an
+unreadable card again (7), and no exemption for the recorded interface
+(8); the hub never found (9), missed for the port alone (10a) and, by
+comparing the stored string, for the older form (10b); the
+gone-controller check removed (11); the check after open by `SameUnit`
+under a port binding (12), `SamePort` always true (13), the check not
+reading the unit's other cards (14), and the recorded interface not
+settling it (15); Resolve not recording the binding's kind (16); `Place`
+keeping the interface (17); a port alone printing `:0.0` (18); bind's old
+line (19); and no endpoint check under a port binding (20). Control 13
+stayed green on its first run: with `SamePort` always true a card at
+another port was still refused, by the second sysfs read, which also
+asked whether the opened card was among the cards at the bound port.
+`SamePort` was redundant there, so `checkPort` now asks each question once
+(abcebb43): `SamePort` says where the opened card is, naming it, and the
+read only whether its unit carries another card. Run again, the control
+was red.
+
+**Hardware: the gate's step 6c, again, not run here.** On the Pi with this
+build, the service stopped (bind refuses a data dir a serve holds):
+`bridge output dac bind <the GO bar's card> --binding port` writes
+`port: platform-xhci-hcd.1/usb2-2` and says so; with the Hugo 2 in that
+port, `bridge output dac inspect --verify-card <its card>` resolves
+`available` at that port and passes; the GO bar in another port is
+refused by `--verify-card <its card>`, which names the bound port; the
+binding the gate wrote, `platform-xhci-hcd.1/usb2-2:1.0`, resolves the
+same; and the port left empty is `device_missing`.
+
+**Round 2 (Codex P2 and the Claude API Low, one finding; Argon found
+none).** `checkPort`'s re-read counted only readable USB cards at the bound
+port. Suppose a composite unit is swapped into the port between the
+resolve and the open, its first card takes the opened card's number, and
+its second card's reading is not a readable USB identity (registered on
+the unit itself rather than on an interface, or vanished as it was read).
+Then the opened card stood alone at the port and the check passed, where
+Resolve on the same tree answers `device_ambiguous` or
+`identity_transient`. Under a serial or uniqueModel binding `SameUnit` pins
+the opened card to the unit Resolve analysed; under a port binding the
+check admits a unit Resolve never saw, so Resolve's fail-closed reading
+did not cover it. The check now refuses such a card, as Resolve does,
+unless the opened card is on the interface the binding records. A card
+that is not USB, or a readable one at another port, is ruled out: refusing
+every reading that is not a readable USB identity would refuse on every Pi,
+whose HDMI cards are not USB (control R2-4). The same hole had a second
+way in: a re-read that could not list the cards saw none and passed. Under
+a port binding the check now reads sysfs once, for the opened card and the
+cards beside it, so a reading that fails does not hold the opened card and
+refuses, with no branch of its own. Red first, the final test against
+round 1's `binding.go`: the unreadable and vanished cases, each with no
+interface recorded and with another one, passed the check (four failures).
+The two cases in which the opened card is not in the reading (the port
+left empty, and a `class/sound` that cannot be listed) were refused on
+round 1 too, with its older message, because round 1's own lookup of
+card 5 failed as well (on macOS a lookup through a directory without read
+permission fails); they pin the one reading, and R2-7 shows them red.
+Controls on 0b8ca51e, all red, each restored from git: unreadable and
+vanished cards ignored (R2-1), vanished ones alone ignored (R2-2),
+unreadable ones alone ignored (R2-3), a card that is not USB refusing
+(R2-4: the first check, on HDMI card 0, and the CLI test), a readable card
+at another port counted (R2-5), the recorded interface not settling it
+(R2-6), a reading without the opened card passing (R2-7: the empty port and
+the unlistable `class/sound`), `SamePort` always true (R2-8), a unit's
+readable second card not counted (R2-9), and no port dispatch in `Check`
+(R2-10: the check test and the CLI test).
+
+**Round 3 (Codex P2 twice, and the Claude API Low with one of them; Argon
+found none). Both findings had one root: the check after open read sysfs
+alone and never asked whether its reading was whole.** A sibling card
+whose `class/sound` link was gone while `/proc/asound` still listed it (the
+kernel's removal order) was invisible, so the check admitted card 5 under
+a port binding where Resolve answers `identity_transient`; round 2's
+vanished case had kept the class link, and missed it. `SysfsReader.Read`
+caps `class/sound` at 1,024 entries and said so only in `Problems`, so a
+listing that kept the opened card and cut its sibling admitted it too. And
+an unlistable reading refused only because `Read` then returns no cards;
+round 2's test for it changed `class/sound`'s permissions, under which the
+direct lookup of card 5 also failed on macOS, so it would have passed
+round 1's shape, a separate `Card()` lookup beside a loop that never asked
+whether the listing was whole. `alsa.SysfsSnapshot` now says whether its
+card listing is whole (`CardsComplete`), and the check refuses a reading
+that is not present, one cut short, and a `/proc/asound` that cannot be
+read, each with a reason of its own and whatever interface the binding
+records. It then reads `/proc/asound`'s cards and reconciles the two trees
+with the function `Observe` now shares (`inventory`), so a card listed by
+one tree alone refuses as an unreadable or vanished one does, unless the
+opened card is on the recorded interface. `Checker` gained `Proc`, and its
+`Sysfs` is an interface `alsa.SysfsReader` satisfies (`SysfsReading`), the
+seam the failed-listing test stands a reading in through while card 5's
+own lookup still reads; `--verify-card` passes the check both trees. Red
+first, with the new `Checker` fields in place and round 2's check: the
+sibling listed by `/proc/asound` alone (twice), a `/proc/asound` that
+cannot be read, and the cut listing, whether `/proc/asound` listed the cut
+card or not (six), were admitted; the cases round 2 already refused (an
+unreadable or vanished sibling, the failed listing, card 5 gone or listed
+by `/proc/asound` alone) failed on their reasons only. Controls on
+6cd98ba0, all red, each restored from git: cards that `/proc/asound` lists
+and sysfs does not dropped before the reconciliation (R3-1: the sibling
+admitted twice, Codex's case), no refusal of a cut listing (R3-2: with
+`/proc/asound` no longer listing the cut card, all three bindings
+admitted), no reason of its own for a listing that failed (R3-3: refused as
+cut short), round 1's shape (R3-4: a separate `Card()` lookup admitted the
+failed listing with and without the recorded interface, and every round 2
+and 3 case besides), `--verify-card` without the `/proc` reader (R3-5: the
+CLI test failed, and the suite's TestMain reported the host's `/proc`
+read), no early exit (R3-6), `CardsComplete` always true (R3-7) and never
+(R3-8), and a card that is not USB refusing (R3-9). R3-3's first edit
+matched `inventory`'s `!sys.Present` too and was not applied; the run was
+of the unchanged tree, and the control was made again on `checkPort`'s
+line alone.
+
+**Round 4 (Codex P2 twice, the Claude API Low with the second; Argon
+found none). Both findings: Resolve and the check after open still
+answered differently on one reading, so round 4 added a table that runs
+each shape of reading through both.** `checkPort` filed a card the kernel
+is adding or removing (vanished as it was read, or listed by one tree
+alone) with the unreadable cards, whose refusal the interface preference
+skips, so card 5 on the recorded interface was admitted beside it, where
+Resolve answers `identity_transient` before it looks at the binding;
+round 3's test required that admission for its vanished and /proc-only
+cases, and now requires the refusal. Such a card now refuses before the
+preference, wherever it is; the preference stays for an unreadable card,
+which Resolve's own preference (`byInterface`) covers. And `inventory`,
+shared since round 3, dropped `SysfsSnapshot.CardsComplete`: on a listing
+cut at the cap Resolve answered available (status, and bind accepted)
+while the check refused every open "cut short … resolve again", and
+resolving again answered available again, so a port-bound player never
+played; and a cut sibling that /proc/asound did not list was invisible to
+Resolve, which answered available where that sibling made the binding
+ambiguous. `Inventory` now carries `CardsComplete`, and Resolve answers
+`identity_incomplete`, a new state, before it looks at any card,
+`identity_transient` included, since a card cut from sysfs's listing that
+/proc/asound lists reads as one tree's alone, which it is not. bind
+(`For`) refuses such a reading before it looks for its card, which the
+listing may lack: it said "there is no card 5", or "being added or
+removed: try again". Nothing outside `internal/player/binding` changed:
+`--verify-card` runs the check only on a resolution that is available,
+so on a cut listing it now says the binding does not resolve
+(`identity_incomplete`).
+
+**The table.** `TestTheCheckAfterOpenAgreesWithResolveOnEachReading`
+lays out nineteen shapes on the Pi 5 tree: the GO bar beside the HDMI
+cards, a virtual card, a card at another port, another model in the port,
+the GO bar in another port, the port empty; a second card of the GO bar's
+unit read whole, cut from the listing while /proc/asound lists it and
+before it does, listed by one tree alone each way, vanished, and
+unreadable; a card at another port that sysfs alone lists; card 5 itself
+listed by one tree alone each way, and vanished; a listing cut with no
+card missing, and one that cannot be read. Each runs through Resolve and
+through the check of card 5, made from the resolution of the GO bar
+alone, under a serial, a uniqueModel and a port binding with and without
+the GO bar's interface, and the check must admit card 5 exactly when
+Resolve answers available on it. Under a port binding they agree on every
+shape: the check chooses again there, since a unit Resolve never saw may
+be in the port. Under a serial or uniqueModel binding the check chooses
+nothing: it pins the unit Resolve chose by `SameUnit` on the opened
+card's own sysfs identity, and the table names the shapes where that
+answers otherwise, for three reasons. A second card or unit, a card
+Resolve cannot identify, or a listing it cannot read whole is why Resolve
+chooses none, and none makes card 5 another unit (ten shapes); the GO bar
+moved to another port as card 5 is refused, the safe way to differ, since
+`SameUnit` compares the port the open was made from; and card 5 that
+sysfs lists and /proc/asound does not is admitted, since a USB card's
+identity is sysfs's and the kernel holds its node. A named difference
+that stops differing fails the table too.
+
+**Red first, and the controls.** With the new state, the field and
+`inventory`'s carry in place and round 3's Resolve and check, the table
+failed on seven shapes. Finding 1 on four: the second card listed by one
+tree alone each way or vanished, and the card at another port that sysfs
+alone lists, where Resolve answered `identity_transient` and the check
+admitted card 5 under the port with its interface. Finding 2 on three:
+the listing cut with no card missing and the second card cut before
+/proc/asound lists it, under both port forms Resolve available and the
+check refusing "cut short", under the unit forms the named difference
+not holding; and on the third, the second card cut while /proc/asound
+lists it, Resolve answered `identity_transient` where the table says
+`identity_incomplete`. `TestTheCheckAfterOpenFollowsAPortBinding`
+failed on its vanished and /proc-only cases, and
+`TestACutListingResolvesToNoCardAndBindsNone` on its first resolution.
+Controls on 90781dac, all red, each restored from git: a transient card
+filed with the unreadable ones again (R4-1: the four transient shapes
+under the port with its interface, and the port-binding test), transient
+cards ignored (R4-2: the same shapes under both port forms), the
+preference dropped for an unreadable card (R4-3: the unreadable shape
+under the port with its interface, and the port-binding test), Resolve
+without `identity_incomplete` (R4-4: the three cut shapes, two on
+agreement and one on its state, and the cut-listing test), `inventory`
+calling every listing whole (R4-5: the same, and the carry on the four
+shapes not whole), `identity_transient` answered first (R4-6: the cut
+sibling /proc/asound lists, and the cut-listing test with card 5 cut),
+bind without its check (R4-7: "card 5 is in /proc/asound and not in
+sysfs: being added or removed: try again" for each kind), the check
+without round 3's cut refusal (R4-8: the two cut shapes under both port
+forms, and the port-binding test), and every binding checked as a port
+(R4-9: eleven shapes under the unit forms, ten named differences agreeing
+and another model in the port admitted, and both check tests).
+
+**Round 5 (Codex P2; the Claude API found nothing, and Argon was queued).
+The check after open skipped Resolve's controller gate.** Resolve passes a
+port binding through that gate before it looks at any card: the bound
+anchor must be among the controllers the USB listing (`bus/usb/devices`)
+names, or the answer is `binding_invalid`. `checkPort` never read that
+listing, and a card's own port path is read from its device's ancestors,
+not from the listing, so on a reading whose USB listing could not be
+listed, was cut at the cap, or lost the bound controller's root hub
+entries, card 5 still read as at the bound port and the check admitted it
+under either port form. The check now refuses unless the reconciled
+inventory names the bound controller, and its reason carries the
+reading's problems, which say why the listing lacks it. The review asked
+for a sweep of every piece of the inventory Resolve consults against the
+check: whether the card listing is whole, each card's state in both
+trees, the cards' port paths and interfaces (both take the place with
+`placeOf`, and the interface preference compares the whole path), the
+controllers, the hub status, and the bound playback stream. The stream
+was a second gap: Resolve requires it on the card it chooses
+(`endpoint_missing`), and the check took the endpoint from the node
+alone, so another model swapped into the port without the bound stream,
+or card 5 read without it, was admitted. Under a port binding the check
+now requires it on the opened card in /proc/asound. The hub status needs
+nothing: Resolve reads it only when no card is at the bound port, to
+answer `binding_invalid` rather than `device_missing`, and the check
+refuses there too, since the opened card must be at the bound port.
+
+**The rows.** The table gained seven: the USB listing unreadable (a file
+in place of `bus/usb/devices`), the bound controller's two root hub
+entries unreadable in it, and the listing cut before them (an edit, as
+the card listing's cut is); card 5's port path unreadable (its root hub's
+speed unreadable, the controller still listed through its other root
+hub); a hub in the bound port with the GO bar behind it; card 5 without
+the bound stream, and another model in the port without it. Under the
+port forms each agrees. Under the unit forms two differences are named:
+the unreadable port path and the hub refuse a card Resolve would choose
+now, since `SameUnit` compares the port path the open was made from; and
+card 5 without the stream is admitted where Resolve answers
+`endpoint_missing`, since the unit check reads no /proc/asound and takes
+the stream from the kernel's INFO on the open descriptor. The carry
+assertion now compares the inventory's `CardsComplete` with the
+reading's, because the USB cut keeps the card listing whole.
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream` pins the two new
+refusals' reasons. Resolve itself is unchanged: on a USB listing it
+cannot read whole it still answers `binding_invalid`, and on a card whose
+port path cannot be read `device_missing`, both failing closed; telling
+those readings apart would need the reader to say whether its USB listing
+is whole, as `CardsComplete` says of the card listing.
+
+**Red first, and the controls.** On 517de480 with the new rows, the three
+USB-listing rows failed under both port forms (Resolve `binding_invalid`,
+the check admitting card 5), the two stream rows under both port forms
+(Resolve `endpoint_missing`, the check admitting), and the focused test
+four times; the port-path and hub rows passed, as the sweep expected.
+Controls on d9ce5a00, each restored from git: the controller gate dropped
+(R5-1: the three USB-listing rows under both port forms, and the focused
+test's controller case) and the stream check dropped (R5-2: the two
+stream rows under both port forms, and its stream case), both red.
+
+## 2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation
+
+**What landed.** `internal/player/hotplug`: the kernel's uevents (a bounded
+parser and a netlink source that hears only the kernel), a watcher that
+debounces them and reads the whole box with 4a's readers, a `Feed` that
+publishes immutable snapshots under an inventory generation the serve
+owns, and a `Service` that runs a watch while the live config enables the
+player. Around it: `ReadContext` and a `Partial` mark on 4a's readers, each
+unit's `devnum` and each card's directory kept in memory, `binding.Settled`,
+`config.RuntimeConfig.Changed`, the serve wiring (`cmd/bridge/output_hotplug.go`),
+and bind's line that the binding applies when bridge serve next starts. It
+plays nothing and opens nothing under `/dev/snd`: what playback does about a
+change is PR 4b's.
+
+**Item 0: the root-swap test is now red against round 3.** 4a's
+`TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly` swapped the root
+from `openTree`'s `before` hook, which ran ahead of anything `openTree` did,
+so round 3's shape (a directory-only look, then `os.OpenRoot(dir)`) refused
+the FIFO at its look and passed: run again here on main's tree with round
+3's body, the old test was green on all three roots. The seam is now the
+open itself, `osOpenRoot`, called as `osOpenRoot(rootPath(dir))`, whose test
+stand-in swaps when it is handed this root's name (`dir` or `dir/.`) and then
+opens it; `openTree` lost its `before` parameter. Controls: round 3's body
+(the look, then `osOpenRoot(dir)`) and `rootPath` returning `dir` each block
+all three roots until the watchdog.
+
+**Item 0b: an unreadable `bDeviceClass` is an unknown hub status.** The
+reader dropped the error, so a hub whose class could not be read was no hub,
+and a port binding whose port it held read as `device_missing`. `USBDevice`
+now carries `HubUnknown`, the reading names the file, and `Resolve` refuses
+a port binding with no card at its port when the device there may be a hub
+(`binding_invalid`, "resolves again once the class reads"). A device whose
+directory went between the listing and its class is left out: it is being
+removed. `TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort` was red
+before the fix both ways: by build (`HubUnknown` undefined), and with that
+assertion dropped, by behaviour (`device_missing`, no problem recorded).
+The log's YAML example in 4a's entry is now a double-backtick span (MD038).
+
+**The source hears the kernel and nothing else.** A `NETLINK_KOBJECT_UEVENT`
+socket joined to group 1 (never udev's 2), `SOCK_CLOEXEC|SOCK_NONBLOCK`, its
+receive buffer raised to 4 MiB (`SO_RCVBUFFORCE`, else `SO_RCVBUF`, capped
+at `rmem_max`), `SO_PASSCRED` on, read with `MSG_TRUNC` into 8 KiB. A
+message from a port id other than 0, or without root's credentials when they
+were asked for, is dropped and counted (`Foreign`); a truncated or malformed
+one too; another subsystem's is counted and ignored. ENOBUFS, and an event
+the watcher had no room for (the source never waits for it), are reported as
+lost, which makes the watcher read everything. Until the kernel's first
+message the mode is "netlink (no events yet)"; a socket that will not open
+leaves "polling only" and the reason; other systems compile a stub,
+"unsupported on this platform". The source's logic is portable and the
+socket is its one seam, as `alsapcm`'s kernel is, so its tests run on every
+OS on a fake socket; the Linux socket is compiled and vetted here for
+linux/amd64 and linux/arm64, and its three tests (`TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly`,
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`) run on CI's Linux legs alone: no
+Linux box or container runtime was at hand. **The uevent fixtures are
+reconstructions, not captures**, for the same reason: `reconstruct.py` lays
+each out as `alloc_uevent_skb` and `kobject_uevent_env` do (v6.12), at the GO
+bar's place on the Pi 5, and `TestCaptureKernelUevents`, run by hand on the
+Pi with `-capture-uevents DIR`, writes real ones to replace them. The parser
+reads at most 64 records and 8 KiB, ACTION and DEVPATH as the header says,
+SUBSYSTEM and SEQNUM once each; `FuzzParseUevent` ran 27.9 million inputs in
+45 s with no failure. A DEVPATH is only ever compared, as a string, with the
+card directories a reading found: nothing is opened by it.
+
+**One owner, absolute deadlines.** A watch is one goroutine that takes every
+reading: a burst once quiet for 300 ms and never later than 2 s after its
+first event, the periodic tick every 10 s, an overflow (folded into an open
+window, at once with none), a changed binding, a retry, and once at start.
+Every reading reads the whole box, so the brief's "full" reading is every
+reading; a tick or an overflow inside a window folds into it. The timers take
+absolute deadlines (`Timer.Reset(deadline)`): with `Reset(d)`, a deadline
+turned into a duration by one read of the clock and armed after the test's
+clock moved lost the fire the move made and landed a whole step late, which
+`-count=10` found as a hang in one test of fifty; the stop's deadline is
+armed before the stop says it is stopping, for the same reason. Fake-clock
+tests advance the clock and wait on `Service.Updates`, never a sleep.
+
+**Settled resolution.** 4a's `Resolve` answers `identity_transient` for any
+transient card, rightly for bind and inspect, and the watcher must not hold
+the bound DAC's own answer back for an unrelated card being added. So
+`Observe` keeps what each tree said of a transient card (its usbid, its sysfs
+identity), and `binding.Settled` resolves without the transient cards and
+calls the answer settled unless one of them may be the bound unit: its model
+unknown or the bound one, its serial the bound one, its port unknown or the
+bound one; an ambiguity, a binding the config refuses, a topology refusal
+and a port that has its card are settled whatever the transient cards are.
+An unsettled answer is held for three follow-ups 500 ms apart and then
+published as it stands; a periodic reading renews the follow-ups only when
+the transient cards differ. `Resolve` is unchanged.
+
+**What changes the generation.** The cards (index, ALSA id and name, state,
+unit, endpoints), a unit re-enumerated, the binding's state, unit or card,
+its matches, and the configured binding; never a card's `Why`, its
+directory or what a transient card's trees said. A unit re-enumerated is the
+same unit (`SameUnit`) at another `devnum` (both read), another card number,
+or behind a removal the watcher saw (a remove or unbind whose DEVPATH is the
+card's directory, below it or above it): a node opened before is dead.
+`devnum` stays in memory, `json:"-"`, never persisted. A reading that failed,
+or was partial (a root that would not open, a listing a cap cut or could not
+read, a root hub that could not be read), publishes no answer: the last
+snapshot stands, republished at its generation marked stale, and the next
+attempt backs off from 1 s, doubling, to 30 s. A tree with no class/sound is
+not partial: it is `identity_unsupported`. The health of a snapshot (stale,
+the source's mode) republishes it at its generation, its `Change` the
+generation's own.
+
+**The Feed is the serve's.** Its generation starts at 1 and only grows,
+across a disable and re-enable, beside a random 128-bit instance id; the
+disable publishes `disabled`, with no cards and the source off. Each
+subscription is a one-slot mailbox that keeps the newest; a publish takes out
+what a consumer has not received and puts the newest in, under the feed's
+lock, so it never waits. Every accessor copies. Each generation is one INFO
+line: "player DAC: <state>" (or another unit, the same one re-enumerated)
+with the binding's label, the card and 4a's description of the unit, and
+"player hotplug: the inventory changed" with the cards by model for the rest,
+so the owner sees another DAC come and go; no line holds a serial.
+
+**Lifecycle.** The `Service` runs a watch while the live config enables the
+player (`config.PlayerEnabled`: enabled, a valid block, not public, Linux) and
+stops it when it does not. A stop cancels, waits at most 2 s for the watch's
+goroutine and its source's, and abandons what has not stopped, saying which
+(a read stuck in the kernel, where a USB serial's read takes the device's
+lock that a disconnect holds, or a source that did not end); the abandoned
+watch's reading is discarded (`Discarded`), never published, by its context
+and by the feed's session check. The readers stop before their next card or
+file once their context ends; a read already started cannot be interrupted.
+Serve starts the service on Linux alone, after the live config holder
+exists, reads the box through `hostTrees`, and its teardown cancels and joins
+the service within the shutdown grace.
+
+**How a config change reaches a running serve: only at a restart, today.**
+Every admin writer goes through `RuntimeConfig.Update` (clone, Save, Store),
+none touches `output.player`, nothing reloads `bridge.yaml` from disk, and
+`bridge output dac bind` refuses a data dir a serve holds. So bind now says
+"the binding applies when bridge serve next starts". The watcher still reads
+`output.player` from the holder on every reading and wakes on its new
+`Changed`, a channel the next Store closes (an Update's included, not a
+refused or failed one), so the console's DAC page (PR 6a) reaches it with no
+more wiring: a changed binding is read at once, an enable starts the watch, a
+disable stops it.
+
+**Red first.** The parser's and the watcher's tests were written first and
+failed to build (`undefined: ParseUevent`, `undefined: Settings`); the bind
+test failed on the missing line; the config test on `rc.Changed undefined`.
+The source's tests were written before its code too, but not run between
+the two. `binding.Settled`'s tests, the readers' and the serve wiring's came
+after the code; all of these are held by controls instead. On the first
+green run one watcher test was wrong (the polling reason set after the source
+started) and one had a flake (it waited on the message count, which ticks
+before the message's outcome); `-count=50 -cpu 1,2,8` then passed.
+
+**Controls: 38, each on a committed tree, each restored from git, all
+red.** Item 0: round 3's `openTree` body; `rootPath` returning `dir`. Item
+0b: `Resolve` ignoring `HubUnknown`; the class read's error dropped. The
+readers: `Settled` answering as `Resolve`; `mayBeBound` ruling every card
+out; the readers ignoring their context; a cut listing and an unread root
+hub left whole. The source: any sender accepted; a truncated message read;
+the parser's record cap gone; the source waiting for the watcher. The
+watcher: a reading per event; the generation advanced on every reading; the
+publish waiting on a consumer (red by the test's watchdog; it hung the binary
+at first through the test's own deferred `Close`, which now runs only on a
+pass); a transient card's answer published at once with no follow-up; units
+compared without their `devnum`; removals not recorded; no max delay; the
+tick read inside an open window; an overflow not read at once; `Resolve` in
+place of `Settled`; a partial reading taken as an answer; no backoff (17
+million readings in 30 s); the binding read once at start; the generation
+restarted per watch; accessors sharing the snapshot's slices (the race
+detector); the stop with no deadline; an abandoned reading published;
+disabling publishing nothing; every reading logging the state again; the
+inventory's own change logged at DEBUG. The wiring: serve starting no
+watcher; the watcher deaf to the config's change
+(red at the binary's deadline, run with `-timeout 120s`); serve's stop not
+joining (green against the boot test, where the service finishes first
+anyway, so `TestThePlayersWatcherStopJoinsItsService` holds the source open
+and was then red); the wiring without `Observe` (the sweep); an Update
+storing without closing `Changed`; the watcher started off Linux.
+
+**Hardware: none in this PR.** The owner's gate on the Pi follows it; two
+units of one model, which ambiguity needs, are the fake trees'
+(`TestASecondUnitOfAUniqueModelIsAmbiguous`, and 4a's
+`TestTwoSerialLessUnitsOfOneModelAreAmbiguous`).
+
+**Round 2 (the Claude API, Codex and Argon on round 1): five findings, all
+real, none rejected.** Argon found nothing; the Claude API's Low was one of
+Codex's four. Each was reproduced red on 3114e6c8's code (round 1's head)
+before its fix, and each control mutated the committed fix alone, ran, and
+was restored from git.
+
+1. *A held answer was never published while events kept coming* (the
+Claude API, Medium). An answer a transient card may change (`Settled`'s
+unsettled one) was held while follow-ups remained, and every window's
+reading renewed them. With the bound DAC's card in /proc alone, its sysfs
+half gone first, under a serial binding, and an unrelated device sending a
+change every 400 ms, 3114e6c8's watcher read the box 51 times in 20 s of
+fake time and published once: subscribers read generation 1, available on
+card 5, not stale, for as long as the events went on (a throwaway test,
+not committed). The watch now records the first reading that held the
+answer (`heldSince`), schedules a reading at `heldSince + Timing.holdMax`
+(`MaxDelay + FollowUps×FollowUpEvery`, 3.5 s) at the latest, and from then
+publishes the answer as it stands; a publish ends the hold. The follow-ups
+and what renews them are round 1's. Renewing them only when the transient
+cards change, the review's other option, would not bound a storm whose
+transient cards change too. `TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn`
+publishes identity_transient naming card 5 exactly at the bound and not
+before; on 3114e6c8 it stopped at its watchdog with ten readings and one
+publish, the next reading due at the window's end (3.9 s), not at the
+bound (3.8 s). Controls: the bound's check in `reconcile` removed (red:
+nothing published at the bound's reading); the bound's deadline in
+`next()` removed (red: no reading at the bound).
+
+2. *One replug could advance the generation twice* (Codex). Reachable with
+the real source: it never waits for the watcher, so the kernel's events
+queue in its channel while the watch's goroutine is inside Observe, and
+select picks at random between a fired timer and queued events. A reading
+lasts milliseconds and a replug hundreds, so it takes a reading that blocks
+(a USB serial's read waits on the device lock a disconnect holds, the
+hotplug case itself) or a timer chosen over queued events after one: rare,
+and nothing rules it out. It harms 4b, which stops on a re-enumeration: a
+play started on the new node between the two publishes would be stopped
+for nothing. A reading now takes the events queued behind it before it
+publishes (`takeQueued`, those queued when it starts, each as the loop
+takes one); when a removal among them reaches a card, the reading may show
+it or precede it, so it is set aside (`Stats.SetAside`) and the window
+those events opened reads the box again. Taking the removals into the
+reading's own publish, the review's other option, was run as a control and
+refused: when the removal came after a reading that still showed the unit,
+it publishes a re-enumeration of an unchanged unit, then device_missing. A
+reading is set aside once in a row and never at a held answer's bound, so
+events that keep coming during readings hold nothing back. The harness
+parks a reading before it reads the tree (`parkNextReading`) and queues
+events without waiting for the watcher (`queue`). Red on 3114e6c8:
+`TestAReplugThatQueuedDuringAReadingIsOneGeneration` and
+`TestAReadingIsSetAsideOnceInARow` (a second generation, the unchanged
+unit re-enumerated), and `TestAReadingAtAHeldAnswersBoundIsNeverSetAside`
+(no hold's bound there: its watchdog). `TestAnUnplugThatQueuedDuringAReadingIsOneGeneration`
+is green on 3114e6c8 and holds the fix's choice against folding. Controls:
+the queued removals taken into the publish (red: the unplug test and the
+once-in-a-row test); nothing taken (red: the replug test and the
+once-in-a-row test); no once-in-a-row limit (red: that test); set aside at
+the hold's bound too (red: the hold test).
+
+3. *An incomplete /proc reading counted as complete* (Codex). A card's
+directory or a pcmNp directory that could not be listed was a problem on
+the /proc card alone, which Observe dropped, and the inventory's
+completeness was sysfs's. With the identity files readable, the card read
+as having no endpoint, and 3114e6c8's watcher published endpoint_missing at
+generation 2. The /proc reader now marks a card `Partial`
+(`alsa.CardReading`, in memory only: `TestOutputDACJSONHasOneShapeInEveryState`
+pins the `--json` shape, and the problems say it there) when its directory
+or a pcmNp directory cannot be listed, or the type of a pcmNp or subM entry
+a listing named cannot be read, for any reason but the entry's absence: one
+gone since the listing that named it is the card or the device going, as a
+missing file is. Observe makes the inventory partial when a card is
+(`partialCards`, on the line where the inventory decides its completeness)
+and carries those cards' problems, so the watcher's failure names the
+directory. `os.Root` opens each directory on a file's way for reading, on
+every Unix, so a card directory without read permission hides its usbid
+too, and a USB-Audio card is then transient; the binding test's card there
+is one whose driver writes no usbid. Red on 3114e6c8:
+`TestAReadingThatCannotListACardsDevicesIsPartial` (a PCM directory without
+read permission, one whose link leaves the tree, a card directory without
+read permission: each partial false and endpoint_missing; its two absences
+are green there) and `TestACardWhoseDevicesCannotBeListedIsAFailure`
+(endpoint_missing at generation 2). `TestAProcCardSaysWhenItsDevicesCannotAllBeListed`
+pins the reader, link loops and a directory gone between two listings
+included (red on 3114e6c8 by build: no `CardReading.Partial`). Controls:
+Observe ignoring the card's mark (red: the binding and watcher tests); the
+reader never setting it (red: all three); the reader setting it for an
+absent entry too (red: the reader's gone-before-its-listing case). The
+port-binding PR, which merges first, moves Observe's body into
+`inventory(snap, sys)` and adds `SysfsSnapshot.CardsComplete`; the merge
+carries `partialCards` and `Partial: sys.Partial || procPartial` into
+`inventory`, and its check after open (`checkPort`, which builds an
+inventory too) does not yet look at `Partial`.
+
+4. *Continuous traffic held the source past its stop* (Codex). `run`
+looked at its context only in `wait`, which the drain reaches once recv
+answers EAGAIN, and a socket refilled as fast as it is read never does.
+The drain now looks at the context before every recv, the EINTR and
+ENOBUFS retries included. `TestTheSourceStopsWhileTheKernelKeepsSending`
+(a fake socket answering a message, EINTR or ENOBUFS without end,
+cancelled once it is draining) was red on 3114e6c8 in all three cases:
+each read on to the 30 s watchdog, 12.4 million messages and 52 million
+ENOBUFS. Control: the check removed (red: all three). It runs on every OS.
+
+5. *A stopped sysfs reading could come back whole* (Codex, and the Claude
+API's Low). `ReadContext`'s result was unnamed, so `return snap` copied
+the reading before the deferred function marked it Partial: a stop before
+the last card, or in usb()'s root-hub or device loop, returned what came
+after it missing with Partial false. The watcher was safe only because
+ObserveContext checks the context itself. The result is now named.
+`TestAStoppedReadingOpensNothingMore` stopped at card 5, the last, where
+Partial came from usb()'s listing, which the stop refused: round 1's test
+stayed green here with the deferred mark deleted. It now stops in card 0
+of 0, 1 and 5 (a USB DAC put in for the first HDMI card), in a root hub
+before three more, and in a USB device before another; each was red on
+3114e6c8 (partial false, no problem). Control: the unnamed result (red:
+all three).
+
+The gate, through the build lock: `make fmt vet` clean, `make test` green
+(about 19 minutes on this Mac), `make build-all` clean, `make docs-check`
+clean; the hotplug package passed `-count=20 -cpu 1,2,8`. No test here
+needs Linux. The rules for rounds 1 and 2 are one note, applied in
+481d3144 to `player.md`, `output.md`, `config-lifecycle.md`,
+`cli-serve.md` and `CLAUDE.md`.
+
+**Round 3 (the Claude API and Codex on round 2; Argon queued): two items,
+both real.** The Claude API checked the hold's bound, the set-aside, the
+partial /proc readings, the drain, the named result, each test against
+its revert, and races, and found only item 2.
+
+1. *A held answer's bound was judged at the reading's start* (Codex,
+Medium). `reconcile` took `now` from the timer, before Observe, and
+compared the hold's bound with it twice, setting a reading aside and
+holding its answer. A reading that began short of the bound and ended past
+it was held again, or set aside, and the bound, past by then, started
+another reading at once, which may block as the first did. The same start
+time scheduled what follows a reading: the next follow-up, a failed
+reading's retry and the periodic reading, so one that outlasted its
+interval was followed at once by another. The follow-up was the review's
+own test's business too: with the bound fixed alone, the follow-up due
+0.5 s after the parked reading began started at once. The reading's end,
+its queued events taken (`done`), now judges the bound and schedules the
+follow-up, the retry and the periodic reading; `now` stays the reading's
+time, the snapshot's Observed and the hold's start. Every reading still
+moves the periodic on first, so one that returns early, the player just
+turned off, leaves nothing due at once: moving that assignment below
+Observe would have let such a reading come round again and again until
+the service stopped the watch. Red on 481d3144:
+`TestAReadingThatOutlastsAHeldAnswersBoundIsPublished` (the follow-up at
+3.3 s parked while the clock passed the 3.8 s bound: nothing published
+from it, held or with a removal queued behind it),
+`TestARetryIsDueItsBackoffAfterAFailedReadingEnds` (a failed reading that
+took 5 s was retried at once) and
+`TestThePeriodicReadingIsDueAPeriodAfterTheLastReadingEnds` (a reading
+that took 11 s was followed at once). Controls, each red: the hold judged
+at the start (both cases of the first test); the set-aside judged at the
+start (its queued case); the follow-up due from the start (its held case,
+a ninth reading at once); the retry from the start; the periodic not
+moved again from the end.
+
+2. *The round-2 entry said the rules were not yet applied* (the Claude
+API, Low). They were, in 481d3144; its last sentence now says so and names
+the files.
+
+The gate's stress run found a race in round 1's
+`TestAnOverflowWithNoWindowReadsAtOnce`: it read `Status().Next` as soon
+as the reading was counted, and the watcher sets its next deadline only on
+its loop's next turn, so the read could see the overflow reading's own
+deadline (12 failures in 1200 runs of the test alone under `-race -cpu
+1,2,8`). It now waits for the deadline (`waitNext`), as the other tests
+do: none in 1200. Control: the periodic a second off (red at the test's
+watchdog).
+
+The gate, through the build lock: `make fmt vet test` green on f9de73a4
+(17.7 minutes, after 19 minutes waiting for a slot), `make build-all`
+and `make docs-check` clean, and the hotplug package, its test fix included, passed
+`-race -count=20 -cpu 1,2,8`. The round-3 rules text is applied to
+`.claude/rules/player.md` in this change (7cdb5af0).
+
+**Round 4 (CodeRabbit and SonarCloud on #1312, and the merge with main at
+2094c1b4): four fixes and one finding declined.** 9e6eea1c merged main's
+port-binding fix (#1311). A port binding names the port (`placeOf`),
+Observe and the check after open share `inventory()`, which carries this
+PR's `Partial` and `partialCards`, and a cut card listing is
+`identity_incomplete` (`cutShort`). Read as its author would, the merge
+left three things of this PR on a model that changed under them, one of
+them CodeRabbit's first finding, and the merged rules text said one thing
+two ways.
+
+1. *Settled compared a transient card's port as a string* (CodeRabbit,
+Minor). A card's port path always carries its interface, and bind now
+writes the port alone unless the unit carries two cards. So under a
+binding of the port alone, the GO bar's own card read in one tree alone
+(a fast replug, /proc/asound dropping it before sysfs) never matched:
+`mayBeBound` set it aside and Settled answered device_missing as settled,
+skipping the follow-ups. Under a binding that records ":1.0", a card on
+another interface of the unit was set aside the same way. It now compares
+places, as Resolve does. Round 1's "a port that has its card is settled,
+since one interface is one card" held only while a port binding named an
+interface. Now a unit may carry two cards, and a port binding's answer
+stands whatever the transient cards are only when its card is on the
+recorded interface. Any other card found is the port's while the unit
+carries no other, so a transient card that may be another card of that
+unit (its place unknown or the bound one, its model unknown or the
+unit's, since one port holds one unit) holds the answer: once it settles
+the answer is device_ambiguous, or the card on the recorded interface.
+The reason says "a card at the bound port" under a port binding. Red on
+9e6eea1c: `TestSettledWaitsOnACardThatMayBeTheBoundUnit`'s rows "the
+bound port's own card in sysfs alone" (by the port alone) and "another
+card of the unit in sysfs alone, the recorded interface's card gone" (by
+the port and ":1.0"), and `TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort`
+(the composite unit's second card being added, available on card 5,
+settled). Controls, each red: the string comparison (both rows and the
+composite test); round 1's shortcut (the composite test); the model check
+removed (its case of another model in /proc alone); the recorded
+interface's shortcut removed (the composite test's ":1.0" case, and
+`TestSettledHoldsWhatNoCardCanChange`).
+
+2. *A snapshot handed every consumer the bound port's slices* (read in the
+merge). The port-binding fix added `Resolution.Port`, a `usbid.Port`
+whose segments and chain are slices. `copyResolution`, which every
+accessor and the feed's offer go through, cloned only the matches, so
+under a port binding one consumer's write to its copy reached the
+snapshot. It now clones both. `TestEachConsumerGetsItsOwnCopyOfTheBoundPort`
+was red on 1b257a89: "pci-0000:00:00.0/usb2-9:1.0" in the snapshot and
+the feed's newest, where it was "platform-xhci-hcd.0/usb2-1:1.0".
+Control: the matches cloned alone (red).
+
+3. *A stopped sysfs reading said its card listing was complete* (read in
+the merge; round 2's notes left it for this merge). `CardsComplete`
+promises that `Cards` holds every card the listing names, and a stop
+before the last card left it true. No caller saw it: `ObserveContext`
+returns the context's error, and the check after open reads without one.
+The card loop's stop now clears it. `TestAStoppedReadingOpensNothingMore`
+asserts it per case: red on 22797734 at card 0 of 3, and green where the
+stop came in the USB loops, which have read every card. Control: the
+stop leaving it (red).
+
+4. *The check after open on a partial inventory* (CodeRabbit, Minor,
+posted on this entry but about `checkPort`): declined. The evidence:
+- A partial reading lacks only what it says it lacks: a failed listing
+  or an unread root hub drops controllers or devices, and a /proc card
+  whose devices could not all be listed drops that card's streams. It can
+  hide no card at the bound port: sysfs's card listing must be whole
+  (`CardsComplete`), and a card one tree lists alone is transient.
+- Every piece the check's answer depends on is asked of the reading on
+  its own: the card listing, /proc's cards, the bound controller, the
+  opened card's stream. A partial reading can therefore make it refuse,
+  never admit a card a whole reading would refuse.
+- Resolve chooses card 5 on such a reading. A refusal would make the check
+  and Resolve answer differently on one reading, which the rules forbid
+  under a port binding.
+
+Nothing changes for the sink: the check's refusals are those it had, each
+`ReasonWrongDevice` at an open or a reopen. Two rows in
+`TestTheCheckAfterOpenAgreesWithResolveOnEachReading`, each checking that
+its reading is partial, pin it: another card whose PCM directory cannot
+be listed, and a root hub of another controller that cannot be read.
+Control: CodeRabbit's diff applied. Red: both rows, and main's
+`TestTheCheckAfterOpenNeedsTheBoundControllerAndStream`, whose controller
+refusal the blanket one pre-empts.
+
+The merged rules text forbade checking "a reading that is not whole",
+which `Inventory.Partial` now names while Resolve answers it. The round's
+note says which readings the check refuses (a card listing that is not
+whole, a /proc/asound that cannot be read) and that it answers a reading
+partial elsewhere as Resolve does.
+
+5. *The fixtures' script wrote under a path from the command line*
+(SonarCloud's gate, pythonsecurity:S8707). `reconstruct.py` now takes no
+argument and writes only into its own directory; to write elsewhere, copy
+it there. The fixtures are unchanged:
+- Run in place, it rewrote all 15, and git saw no change.
+- A copy run from a scratch directory wrote 15 byte-identical messages
+  (`filecmp`, `shallow=False`).
+- Given a directory, it exits with its usage and writes nothing.
+Control: the previous script, given a directory, wrote 15 files into it.
+SonarCloud's own verdict comes with the next CI run.
+
+The gate, through the build lock: `make fmt vet test` green on 2c2f7e1a
+(18.5 minutes, after 10.5 minutes waiting for a slot), and `make
+build-all` and `make docs-check` clean. `internal/player/...` and
+`internal/alsa` passed `-race -count=10` under `-timeout 60m`, decode
+taking 1106 s. The first such run, under `go test`'s default 10 minutes,
+stopped in decode at 600 s with a goroutine dump and no assertion: the
+timeout `build-ci-tests.md` describes, not a failure. The hotplug suite's
+Linux-only tests are run on a Linux host: `TestErrnoValuesAreLinuxs`,
+`TestTheKernelSocketOpensOrSkipsCleanly` and
+`TestLinuxWaitEndsAtOnceWhenItsContextDoes`, unchanged since round 1, and
+`TestCaptureKernelUevents`, run by hand on the Pi. The round-4 rules text
+is a note, OLD/NEW against 9e6eea1c's `player.md`.
 
 ## 2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it
 
