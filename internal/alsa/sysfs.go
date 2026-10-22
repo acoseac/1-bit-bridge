@@ -215,9 +215,12 @@ func (r SysfsReader) Read() SysfsSnapshot { return r.ReadContext(context.Backgro
 
 // ReadContext is Read, stopping before the next card or file once ctx is
 // done; a read already started is not interrupted (SysfsReader). A stopped
-// reading is Partial.
-func (r SysfsReader) ReadContext(ctx context.Context) SysfsSnapshot {
-	snap := SysfsSnapshot{Root: r.root(), Cards: []Identity{}, Controllers: []string{}, Devices: []USBDevice{}, Problems: []string{}}
+// reading is Partial, wherever it stopped: the result is named, so the
+// deferred mark reaches what every return hands back (B470 PR 4a2 round 2:
+// unnamed, `return snap` copied the reading before the mark was made, and a
+// stop before the last card or in the USB loops returned it whole).
+func (r SysfsReader) ReadContext(ctx context.Context) (snap SysfsSnapshot) {
+	snap = SysfsSnapshot{Root: r.root(), Cards: []Identity{}, Controllers: []string{}, Devices: []USBDevice{}, Problems: []string{}}
 	t, err := r.open()
 	if err != nil {
 		snap.Partial = true

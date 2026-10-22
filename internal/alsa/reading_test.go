@@ -74,25 +74,71 @@ func TestSysfsSaysWhenItsReadingIsNotWhole(t *testing.T) {
 }
 
 // TestAStoppedReadingOpensNothingMore: once its context is done, each
-// reader finishes the file it is reading and opens nothing after it; the
-// sysfs reading says it is partial, and the /proc reading returns the
+// reader finishes the file it is reading and opens nothing after it. The
+// sysfs reading says it is partial wherever the stop lands, and each case
+// here leaves something of its kind unread after it, which a reading that
+// only looked whole would report as gone: card 0 of 0, 1 and 5, a root hub
+// before three more, a USB device before another. Until round 2 the mark
+// was set in a deferred function on an unnamed result, after the result
+// was copied, so a stop anywhere but the last card returned the reading
+// whole; the old test stopped at card 5, the last, and its Partial came
+// from the USB listing the stop refused. The /proc reading returns the
 // context's error.
 func TestAStoppedReadingOpensNothingMore(t *testing.T) {
+	// card0Unit is a USB DAC on the Pi 5's second controller, put in for
+	// the first HDMI card as card 0, so the stop can land inside card 0.
+	const card0Unit = "sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-1"
+	for _, tc := range []struct {
+		name string
+		// step changes the Pi 5's tree; the stop lands on the first open
+		// whose path begins with at; read says the reading stopped there.
+		step, at string
+		read     func(SysfsSnapshot) bool
+	}{
+		{"card 0 of 0, 1 and 5", "usbdev " + card0Unit + " vendor=1234 product=0f05 devnum=2\nusbcard 0 " + card0Unit + "/3-1:1.0\n",
+			strings.TrimPrefix(card0Unit, "sys/") + "/",
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 1 && s.Cards[0].Card == 0 }},
+		{"a root hub before three more", "unplug " + goBarDevice + "\n",
+			strings.TrimPrefix(goBarHub, "sys/") + "/speed",
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 2 && len(s.Controllers) == 0 }},
+		{"a USB device before another", "usbdev " + goBarHub + "/1-4 vendor=046d product=c31c devnum=7\n",
+			strings.TrimPrefix(goBarDevice, "sys/") + "/bDeviceClass",
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 3 && len(s.Devices) == 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			sysfstest.Apply(t, root, tc.step)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var opened []string
+			stop := -1
+			sys := SysfsReader{Root: filepath.Join(root, "sys"), beforeOpen: func(rel string) {
+				opened = append(opened, rel)
+				if stop < 0 && strings.HasPrefix(rel, tc.at) {
+					stop = len(opened) - 1
+					cancel()
+				}
+			}}.ReadContext(ctx)
+			if stop < 0 {
+				t.Fatalf("the reading never opened %s: %q", tc.at, opened)
+			}
+			if after := opened[stop+1:]; len(after) > 0 {
+				t.Errorf("opened %q after the stop at %s", after, opened[stop])
+			}
+			if !sys.Partial || !strings.Contains(strings.Join(sys.Problems, "; "), "stopped") {
+				t.Errorf("the reading stopped at %s: partial %v, problems %q", opened[stop], sys.Partial, sys.Problems)
+			}
+			if !tc.read(sys) {
+				t.Errorf("the reading did not stop where the case says: %d cards, controllers %q, %d devices",
+					len(sys.Cards), sys.Controllers, len(sys.Devices))
+			}
+		})
+	}
+
 	root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var opened []string
-	sys := SysfsReader{Root: filepath.Join(root, "sys"), beforeOpen: func(rel string) {
-		opened = append(opened, rel)
-		cancel()
-	}}.ReadContext(ctx)
-	if len(opened) != 1 || !sys.Partial || !strings.Contains(strings.Join(sys.Problems, "; "), "stopped") {
-		t.Errorf("the sysfs reading after a stop at %q: opened %q, partial %v, problems %q", opened, opened, sys.Partial, sys.Problems)
-	}
-
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-	opened = nil
 	proc, err := Reader{ProcRoot: filepath.Join(root, "proc"), beforeOpen: func(path string) {
 		opened = append(opened, path)
 		if path == "asound/card0" {
