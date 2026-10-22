@@ -50924,6 +50924,13 @@ is the `GET /v1/outputs/{id}/reading` section of `PROTOCOL.md`.
 - **When `/proc/asound` cannot be read, any id of the right form is
   answered** (`unknown`, `proc_unreadable` or `proc_timeout`): the cards
   that would say which ids exist were not read. A malformed id is 404.
+- **`mpd.conf` is read under the volume its path names** (`confRoot`). The
+  probe's root is `/`, and the route's tests stand any OS in for Linux; on
+  GitHub's Windows runner `/` is the checkout's drive (D:) and a test's temp
+  directory is on C:, so every test that reads `mpd.conf` would have read
+  none there. A Linux path names no volume and keeps `/`
+  (`TestMPDConfIsReadUnderItsOwnVolume`; its Windows half runs on that leg
+  only, so no control on this Mac can turn it red).
 
 ### Red first
 
