@@ -5,6 +5,17 @@ import (
 	"strings"
 )
 
+// mountIDFrom is the mount ID statx gives path, or where statx gives none the
+// one fdinfo gives: Linux's platformMountID, with statxMountID and
+// fdinfoMountID. An error from either is the answer, never a reason to ask
+// the other. It is platform-neutral so its tests run everywhere.
+func mountIDFrom(path string, statx, fdinfo func(string) (uint64, bool, error)) (uint64, bool, error) {
+	if id, ok, err := statx(path); err != nil || ok {
+		return id, ok, err
+	}
+	return fdinfo(path)
+}
+
 // parseFdinfoMountID is the mount ID a /proc/<pid>/fdinfo/<fd> listing gives
 // its descriptor, the number on its "mnt_id:" line (proc(5), Linux 3.15), and
 // false where the listing has no such line, or one that does not read as a

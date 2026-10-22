@@ -27,10 +27,7 @@ const mountIDsExpected = true
 // own, which its device does not show. ok is false where neither gives one;
 // any other error is the stat's or the open's.
 func platformMountID(path string) (uint64, bool, error) {
-	if id, ok, err := statxMountID(path); err != nil || ok {
-		return id, ok, err
-	}
-	return fdinfoMountID(path)
+	return mountIDFrom(path, statxMountID, fdinfoMountID)
 }
 
 // statxMountID is statx's mount ID for path, a link at the end not followed,

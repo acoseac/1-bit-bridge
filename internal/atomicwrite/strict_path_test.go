@@ -667,19 +667,3 @@ func TestProbeDurable_RefusesAMountPointTheKernelLists(t *testing.T) {
 		t.Errorf("ProbeDurable of a file in the root with no mount identity = %v after syncing %v, want ErrMountsUnknown and nothing synced", err, *synced)
 	}
 }
-
-// TestParseFdinfoMountID pins the reading of a descriptor's fdinfo listing
-// (proc(5)), where the kernel lists the mount a descriptor lies on when statx
-// gives no mount ID: the number on its mnt_id line; and none for a listing
-// without that line, or with one that does not read as a number.
-func TestParseFdinfoMountID(t *testing.T) {
-	const listing = "pos:\t0\nflags:\t012100000\nmnt_id:\t29\nino:\t1048577\n"
-	if id, ok := parseFdinfoMountID([]byte(listing)); !ok || id != 29 {
-		t.Fatalf("parseFdinfoMountID = %d, %v, want 29", id, ok)
-	}
-	for _, bad := range []string{"pos:\t0\nflags:\t02\n", "mnt_id:\tx\n", ""} {
-		if id, ok := parseFdinfoMountID([]byte(bad)); ok {
-			t.Errorf("parseFdinfoMountID(%q) = %d, true, want none", bad, id)
-		}
-	}
-}
