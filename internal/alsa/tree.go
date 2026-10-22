@@ -58,20 +58,22 @@ var (
 	errTooDeep              = errors.New("too many path components")
 )
 
+// osOpenRoot is os.OpenRoot, the one open of a tree's root. It is a seam
+// at that open and nowhere before it: the test that swaps a FIFO in for the
+// root does so when this is handed the root's name, so the swap lands
+// after anything openTree does first, which is where a look before the
+// open would leave its window (TestARootSwappedForAFIFOBeforeItsOpenIsRefusedPromptly).
+var osOpenRoot = os.OpenRoot
+
 // openTree opens the directory at dir as a tree. os.OpenRoot opens its path
 // with a plain open, which a FIFO there would hold until a writer came, so
 // it is handed rootPath(dir): on unix dir/., whose resolution fails at once
 // (ENOTDIR) unless dir is a directory, so that one open never opens
 // anything else, whatever is swapped in for the root. A look before the
 // open would leave the instant between the two (round 3's directory-only
-// look did). Everything below the root is checked at its own open. before,
-// when it is set, runs just before the open: the window a test swaps the
-// root in.
-func openTree(dir string, links, hops int, before func()) (*tree, error) {
-	if before != nil {
-		before()
-	}
-	root, err := os.OpenRoot(rootPath(dir))
+// look did). Everything below the root is checked at its own open.
+func openTree(dir string, links, hops int) (*tree, error) {
+	root, err := osOpenRoot(rootPath(dir))
 	if err != nil {
 		return nil, err
 	}

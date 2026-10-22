@@ -47,12 +47,18 @@ func dacTree(t *testing.T) string {
 
 // dacPlug is the manifest of a unit at dir whose interface 0 is card n.
 func dacPlug(dir string, n int, vid, pid, serial string) string {
+	return dacPlugOn(dir, 0, n, vid, pid, serial)
+}
+
+// dacPlugOn is dacPlug with the card on interface iface (the Hugo 2's is
+// interface 1).
+func dacPlugOn(dir string, iface, n int, vid, pid, serial string) string {
 	s := ""
 	if serial != "" {
 		s = " serial=" + serial
 	}
 	base := filepath.Base(dir)
-	return "usbdev " + dir + " vendor=" + vid + " product=" + pid + s + "\nusbcard " + strconv.Itoa(n) + " " + dir + "/" + base + ":1.0\n" +
+	return "usbdev " + dir + " vendor=" + vid + " product=" + pid + s + "\nusbcard " + strconv.Itoa(n) + " " + dir + "/" + base + ":1." + strconv.Itoa(iface) + "\n" +
 		"proccard " + strconv.Itoa(n) + " DAC" + strconv.Itoa(n) + " \"Synthetic DAC\" usb=" + vid + ":" + pid + " pcm=0.0\n"
 }
 
@@ -244,6 +250,25 @@ func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {
 // card's unit into the config file, 0600, the serial whole there and
 // nowhere on the terminal, keeps the block's other fields, and the binding
 // it wrote resolves to that card.
+// TestOutputDACBindSaysTheBindingAppliesAtTheNextStart: bind writes the
+// config file only while no bridge serves the data dir, and a serve reads
+// output.player when it starts (B470 PR 4a2: nothing reloads the file), so
+// bind says the binding applies when bridge serve next starts, whether the
+// player is on or off.
+func TestOutputDACBindSaysTheBindingAppliesAtTheNextStart(t *testing.T) {
+	root := dacTree(t)
+	for _, block := range []string{"  player:\n    room: Study\n", "  player:\n    enabled: true\n"} {
+		cfgPath := dacConfig(t, block)
+		out, errOut, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "uniqueModel", "--config", cfgPath}, treeFlags(root)...)...)
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		if !strings.Contains(out, "the binding applies when bridge serve next starts") {
+			t.Errorf("bind with %q does not say when the binding applies:\n%s", block, out)
+		}
+	}
+}
+
 func TestOutputDACBindWritesTheSerialToTheFileAndPrintsNone(t *testing.T) {
 	root := dacTree(t)
 	cfgPath := dacConfig(t, "  player:\n    room: Study\n")
@@ -534,6 +559,64 @@ func TestOutputDACVerifyCardRefusesAnotherDAC(t *testing.T) {
 	out, _, code = runDAC(t, dacEnv(), append([]string{"inspect", "--verify-card", "5", "--config", cfgPath}, treeFlags(root)...)...)
 	if code != 1 || !strings.Contains(out, "verify card 5: the binding does not resolve (device_missing)") {
 		t.Errorf("an unplugged unit: exit %d\n%s", code, out)
+	}
+}
+
+// TestOutputDACVerifyCardFollowsAPortBinding is the hardware gate's step
+// with the CLI: bind by port writes the port alone and says so; with
+// another model in that port, its card on interface 1, inspect resolves the
+// binding to it and --verify-card passes its card, as it does for the form
+// B470 PR 4a's bind wrote, and the bound unit, now in another port, is
+// refused, naming the port; no serial is printed. A unit that carries two
+// cards is bound with the card's configuration and interface after the
+// port, which bind says it records.
+func TestOutputDACVerifyCardFollowsAPortBinding(t *testing.T) {
+	root := dacTree(t)
+	cfgPath := dacConfig(t, "")
+	out, errOut, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "port", "--config", cfgPath}, treeFlags(root)...)...)
+	if code != 0 || !strings.Contains(out, "bound card 5 by port platform-xhci-hcd.0/usb2-1, whatever unit is in it: now 20b1:3009 (…4471) at platform-xhci-hcd.0/usb2-1:1.0, device 0 subdevice 0") {
+		t.Fatalf("bind: exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cfg.Output.Player.Device; d.Binding != config.BindingPort || d.Port != "platform-xhci-hcd.0/usb2-1" || d.Serial.Present() || d.VendorID != "" {
+		t.Errorf("bind wrote %+v; want the port alone", d)
+	}
+	older := dacConfig(t, "  player:\n    device:\n      binding: port\n      port: platform-xhci-hcd.0/usb2-1:1.0\n")
+
+	const hugo = "HUGO2-UNIT-0000000042"
+	sysfstest.Apply(t, root, "unplug "+dacUSB1+"/1-1\n"+dacPlugOn(dacUSB1+"/1-1", 1, 3, "1234", "0c12", hugo)+dacPlug(dacUSB1+"/1-2", 5, "20b1", "3009", dacSerial))
+	for _, path := range []string{cfgPath, older} {
+		out, errOut, code = runDAC(t, dacEnv(), append([]string{"inspect", "--verify-card", "3", "--config", path}, treeFlags(root)...)...)
+		if code != 0 || !strings.Contains(out, "resolves: available: card 3 is at platform-xhci-hcd.0/usb2-1, device 0 subdevice 0\n") ||
+			!strings.Contains(out, "verify card 3: passes: card 3 is at the bound port, 1234:0c12 (…0042) at platform-xhci-hcd.0/usb2-1:1.1\n") {
+			t.Errorf("%s: the other model: exit %d, stdout %q, stderr %q", path, code, out, errOut)
+		}
+		out, errOut, code = runDAC(t, dacEnv(), append([]string{"inspect", "--verify-card", "5", "--config", path}, treeFlags(root)...)...)
+		if code != 1 || !strings.Contains(out, "verify card 5: refused:") || !strings.Contains(out, "not at the bound port platform-xhci-hcd.0/usb2-1") {
+			t.Errorf("%s: the bound unit in another port: exit %d, stdout %q, stderr %q", path, code, out, errOut)
+		}
+		if dacLeaks(out+errOut, dacSerial) || dacLeaks(out+errOut, hugo) {
+			t.Errorf("%s: inspect printed a serial:\n%s%s", path, out, errOut)
+		}
+	}
+
+	sysfstest.Apply(t, root, "unplug "+dacUSB1+"/1-1\nusbdev "+dacUSB1+"/1-1 vendor=1234 product=0c20\n"+
+		"usbcard 3 "+dacUSB1+"/1-1/1-1:1.0\nproccard 3 DAC3 \"Synthetic composite DAC\" usb=1234:0c20 pcm=0.0\n"+
+		"usbcard 4 "+dacUSB1+"/1-1/1-1:1.2\nproccard 4 Other4 \"Synthetic composite DAC, second card\" driver=snd-synthetic pcm=0.0\n")
+	out, errOut, code = runDAC(t, dacEnv(), append([]string{"bind", "4", "--binding", "port", "--config", cfgPath}, treeFlags(root)...)...)
+	if code != 0 || !strings.Contains(out, "bound card 4 by port platform-xhci-hcd.0/usb2-1:1.2,") ||
+		!strings.Contains(out, "carries more than one card") {
+		t.Fatalf("bind a unit with two cards: exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	if cfg, err := config.Load(cfgPath); err != nil || cfg.Output.Player.Device.Port != "platform-xhci-hcd.0/usb2-1:1.2" {
+		t.Errorf("bind of a unit with two cards wrote %+v, %v", cfg.Output.Player.Device, err)
+	}
+	out, _, code = runDAC(t, dacEnv(), append([]string{"inspect", "--verify-card", "4", "--config", cfgPath}, treeFlags(root)...)...)
+	if code != 0 || !strings.Contains(out, "resolves: available: card 4 is at platform-xhci-hcd.0/usb2-1, device 0 subdevice 0\n") {
+		t.Errorf("the card bound on a unit with two: exit %d\n%s", code, out)
 	}
 }
 

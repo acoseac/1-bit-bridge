@@ -242,7 +242,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   **Never mutate `Load()`'s result in place** — even under a mutex, concurrent
   readers race. Admin mutations must re-`Load()` and clone INSIDE `Server.mu`,
   or a settings PATCH committing between the load and the lock is silently
-  reverted.
+  reverted. **`Store` closes `Changed()`**, the channel a consumer that
+  follows a setting waits on (the player's hotplug watcher follows
+  `output.player`, B470 PR 4a2): take the channel, then `Load`, then wait,
+  so a Store in between still wakes it; an Update that stores nothing
+  closes nothing. `TestChangedIsClosedByTheNextStore` pins it.
 - **`Validate()` is a pure shape check; accessibility is
   `CheckLibraryRootsAccessible`, called only by `serve`.** Putting `os.Stat` back
   in `Validate` breaks `bridge update` on any host where the daemon user and the

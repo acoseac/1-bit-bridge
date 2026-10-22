@@ -1,0 +1,393 @@
+package hotplug
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+)
+
+// countLines counts the log lines that contain s.
+func countLines(logs, s string) int {
+	n := 0
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, s) {
+			n++
+		}
+	}
+	return n
+}
+
+// step changes the tree, sends the kernel's events for it, and waits for
+// the reading the window ends in.
+func (h *harness) step(manifest string, evs []Uevent) Stats {
+	h.t.Helper()
+	before := h.svc.Status().Stats.Reconciles
+	if manifest != "" {
+		h.apply(manifest)
+	}
+	h.send(evs...)
+	h.advance(quiet)
+	return h.reconciles(before + 1)
+}
+
+// hdmiAndGoBarLinks puts back pi5-go-bar's class/sound.
+const hdmiAndGoBarLinks = "link sys/class/sound/card0 sys/devices/platform/axi/107c701400.hdmi/sound/card0\n" +
+	"link sys/class/sound/card1 sys/devices/platform/axi/107c706400.hdmi/sound/card1\n" +
+	"link sys/class/sound/card5 " + goBar + "/1-1:1.0/sound/card5\n"
+
+// TestEachStateIsReachedFromAvailableAndBack: from available the binding
+// reaches each state 4a defines, and comes back, each change one
+// generation: endpoint_missing (the card there without its playback stream,
+// as mid-enumeration), identity_unsupported (no class/sound to identify a
+// card by), device_missing, disabled and not_configured.
+// device_ambiguous, binding_invalid and identity_transient have tests of
+// their own below; a binding the config refuses never reaches the watcher,
+// which config.PlayerEnabled keeps off.
+func TestEachStateIsReachedFromAvailableAndBack(t *testing.T) {
+	h := newHarness(t)
+	gen := uint64(1)
+	back := func() {
+		t.Helper()
+		gen++
+		h.state(binding.StateAvailable, 5, gen)
+	}
+	reach := func(state binding.State, card int) {
+		t.Helper()
+		gen++
+		h.state(state, card, gen)
+	}
+
+	h.step("procremove 5\nproccard 5 Audio \"iFi (by AMR) HD USB Audio\" usb=20b1:3009 pcm=1.0\n",
+		[]Uevent{{Action: "change", DevPath: devpath(goBar) + "/1-1:1.0/sound/card5", Subsystem: "sound"}})
+	reach(binding.StateEndpointMissing, 5)
+	h.step("procremove 5\nproccard 5 Audio \"iFi (by AMR) HD USB Audio\" usb=20b1:3009 pcm=0.0\n",
+		[]Uevent{{Action: "add", DevPath: devpath(goBar) + "/1-1:1.0/sound/card5/pcmC5D0p", Subsystem: "sound"}})
+	back()
+
+	h.step("remove sys/class/sound\n", []Uevent{{Action: "remove", DevPath: "/devices/virtual/sound", Subsystem: "sound"}})
+	reach(binding.StateIdentityUnsupported, -1)
+	h.step(hdmiAndGoBarLinks, []Uevent{{Action: "add", DevPath: "/devices/virtual/sound", Subsystem: "sound"}})
+	back()
+
+	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
+	reach(binding.StateDeviceMissing, -1)
+	h.step(plug(goBar, 5, "20b1:3009", goBarSerial, 4), plugEvents(goBar, 5))
+	back()
+
+	for _, tc := range []struct {
+		state binding.State
+		set   Settings
+	}{
+		{binding.StateDisabled, Settings{Enabled: false}},
+		{binding.StateNotConfigured, Settings{Enabled: true, Device: config.PlayerDevice{}}},
+	} {
+		h.settings.set(tc.set)
+		h.published(gen + 1)
+		reach(tc.state, -1)
+		h.settings.set(Settings{Enabled: true, Device: bySerial()})
+		h.published(gen + 1)
+		back()
+	}
+}
+
+// TestASecondUnitOfAUniqueModelIsAmbiguous: under a uniqueModel binding a
+// second unit of the model makes the binding device_ambiguous, neither
+// chosen, and its removal makes it available again.
+func TestASecondUnitOfAUniqueModelIsAmbiguous(t *testing.T) {
+	h := newHarness(t, func(o *options) { o.device = byModel("20b1", "3009") })
+	h.step(plug(usb1+"/1-2", 6, "20b1:3009", "", 3), plugEvents(usb1+"/1-2", 6))
+	s := h.state(binding.StateDeviceAmbiguous, -1, 2)
+	if m := s.Resolution().Matches; len(m) != 2 || m[0] != 5 || m[1] != 6 {
+		t.Errorf("matches %v", m)
+	}
+	h.step("unplug "+usb1+"/1-2\n", unplugEvents(usb1+"/1-2", 6))
+	h.state(binding.StateAvailable, 5, 3)
+}
+
+// TestAHubOrAGoneControllerInvalidatesAPortBinding: under a port binding,
+// a hub put in the bound port, or the controller the port hangs from gone,
+// is binding_invalid, and the DAC back in the port is available again.
+func TestAHubOrAGoneControllerInvalidatesAPortBinding(t *testing.T) {
+	h := newHarness(t, func(o *options) { o.device = byPort(goBarPort) })
+	h.state(binding.StateAvailable, 5, 1)
+	h.step("unplug "+goBar+"\nusbdev "+goBar+" vendor=05e3 product=0610 class=09 devnum=3\n"+
+		plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial, 4),
+		append(unplugEvents(goBar, 5), plugEvents(goBar+"/1-1.3", 5)...))
+	s := h.state(binding.StateBindingInvalid, -1, 2)
+	if !strings.Contains(s.Resolution().Reason, "hub") {
+		t.Errorf("reason %s", s.Resolution().Reason)
+	}
+	h.step("unplug "+goBar+"\n"+plug(goBar, 5, "20b1:3009", goBarSerial, 5), plugEvents(goBar, 5))
+	h.state(binding.StateAvailable, 5, 3)
+
+	const controller = "sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0"
+	h.step("unplug "+controller+"\n", []Uevent{{Action: "remove", DevPath: devpath(controller) + "/usb1", Subsystem: "usb", DevType: "usb_device"}})
+	s = h.state(binding.StateBindingInvalid, -1, 4)
+	if !strings.Contains(s.Resolution().Reason, "platform-xhci-hcd.0") {
+		t.Errorf("reason %s", s.Resolution().Reason)
+	}
+}
+
+// TestAnotherUnitAtTheBoundCardIsASwap: under a port binding another model
+// plugged into the bound port, at the bound card number, in one window, is
+// still available, and the snapshot says the unit changed at the same card.
+func TestAnotherUnitAtTheBoundCardIsASwap(t *testing.T) {
+	h := newHarness(t, func(o *options) { o.device = byPort(goBarPort) })
+	h.step("unplug "+goBar+"\n"+plug(goBar, 5, "1234:0f03", "", 3), append(unplugEvents(goBar, 5), plugEvents(goBar, 5)...))
+	s := h.state(binding.StateAvailable, 5, 2)
+	if c := s.Change(); !c.Unit || !c.Swap || c.State || c.ReEnumerated {
+		t.Errorf("change %+v; want another unit at the same card", c)
+	}
+	if id := s.Resolution().Identity.ID.String(); id != "1234:0f03" {
+		t.Errorf("the bound unit is %s", id)
+	}
+}
+
+// TestUnplugIsMissingAndReplugIsAvailableAndNothingElse: unplugged, the
+// bound DAC is device_missing in the next generation, and plugged back it
+// is available in the one after, with nothing else published and nothing
+// in the snapshot that could start playback: a state, its reason and what
+// changed.
+func TestUnplugIsMissingAndReplugIsAvailableAndNothingElse(t *testing.T) {
+	h := newHarness(t)
+	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
+	s := h.state(binding.StateDeviceMissing, -1, 2)
+	if c := s.Change(); !c.State || c.Previous != binding.StateAvailable || c.ReEnumerated || c.Unit {
+		t.Errorf("the unplug's change %+v", c)
+	}
+	h.step(plug(goBar, 5, "20b1:3009", goBarSerial, 3), plugEvents(goBar, 5))
+	s = h.state(binding.StateAvailable, 5, 3)
+	if c := s.Change(); !c.State || c.Previous != binding.StateDeviceMissing || c.ReEnumerated || c.Unit || c.Swap {
+		t.Errorf("the replug's change %+v", c)
+	}
+	h.advance(periodic)
+	if st := h.reconciles(4); st.Publishes != 3 {
+		t.Errorf("published %d times in all", st.Publishes)
+	}
+	if n := countLines(h.logs.String(), "level=INFO msg=\"player DAC: "); n != 3 {
+		t.Errorf("%d state lines, want 3 (available, device_missing, available):\n%s", n, h.logs.String())
+	}
+}
+
+// procOnly is a card 7 in /proc/asound alone: a unit the kernel is adding,
+// whose sysfs half is not there yet. usb is its usbid, "" for none.
+func procOnly(usb string) string {
+	if usb == "" {
+		return "proccard 7 New \"Arriving DAC\" driver=snd-usb-hiface pcm=0.0\n"
+	}
+	return "proccard 7 New \"Arriving DAC\" usb=" + usb + " pcm=0.0\n"
+}
+
+// TestACardThatNeverSettlesIsPublishedTransientAfterTheFollowUps: a card in
+// /proc alone that may be the bound unit holds the binding's answer back
+// for three follow-ups, 500 ms apart, and is then published as it stands:
+// the card transient, the binding identity_transient. No more follow-ups
+// come until the next event.
+func TestACardThatNeverSettlesIsPublishedTransientAfterTheFollowUps(t *testing.T) {
+	h := newHarness(t)
+	h.step(procOnly(""), []Uevent{{Action: "add", DevPath: devpath(usb1) + "/1-2/1-2:1.0/sound/card7", Subsystem: "sound"}})
+	r2 := h.clock.Now()
+	for i := 1; i <= DefaultFollowUps; i++ {
+		st := h.waitNext(r2.Add(time.Duration(i) * followUp))
+		if st.Stats.Publishes != 1 {
+			t.Fatalf("published before follow-up %d: %+v", i, st.Stats)
+		}
+		h.advance(followUp)
+		h.reconciles(uint64(2 + i))
+	}
+	s := h.state(binding.StateIdentityTransient, -1, 2)
+	var seven *Card
+	for _, c := range s.Cards() {
+		if c.Index == 7 {
+			c := c
+			seven = &c
+		}
+	}
+	if seven == nil || seven.State != binding.CardTransient || !strings.Contains(s.Resolution().Reason, "card 7") {
+		t.Errorf("card 7 %+v, reason %s", seven, s.Resolution().Reason)
+	}
+	last := r2.Add(time.Duration(DefaultFollowUps) * followUp)
+	h.waitNext(last.Add(periodic))
+	h.advance(periodic)
+	if st := h.waitNext(last.Add(2 * periodic)); st.Stats.Reconciles != uint64(3+DefaultFollowUps) {
+		t.Errorf("a periodic reading of the same transient card took follow-ups: %+v", st.Stats)
+	}
+}
+
+// TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn: the bound DAC
+// unplugged while its card lingers in /proc with no sysfs half holds the
+// binding's answer back (that card may be the bound unit), and an unrelated
+// device on a marginal hub sending an event every 400 ms renews the
+// follow-ups at every window. The hold still ends: the answer is published
+// as it stands, identity_transient naming card 5, MaxDelay + FollowUps x
+// FollowUpEvery after the first reading that held it, and not before.
+// Until round 2 every window renewed the follow-ups and nothing was ever
+// published, so subscribers read available on a card that had gone.
+func TestAHeldAnswerIsPublishedWithinItsBoundWhileEventsGoOn(t *testing.T) {
+	h := newHarness(t)
+	// The GO bar's sysfs half goes; /proc/asound still lists card 5.
+	h.apply("remove sys/class/sound/card5\nremove sys/bus/usb/devices/1-1\nremove sys/bus/usb/devices/1-1:1.0\nremove " + goBar + "\n")
+	storm := Uevent{Action: "change", DevPath: devpath(usb1) + "/1-4", Subsystem: "usb"}
+	const every = 400 * time.Millisecond
+	// The first reading is the first window's, and holds the answer.
+	held := h.clock.Now().Add(quiet)
+	deadline := held.Add(maxDelay + DefaultFollowUps*followUp)
+	reads := uint64(1)
+	for at := h.clock.Now(); ; at = at.Add(every) {
+		if at.After(deadline) {
+			t.Fatalf("events went on past the hold's bound (%v) and nothing was published: %+v", deadline.Sub(held), h.svc.Status().Stats)
+		}
+		h.advance(at.Sub(h.clock.Now()))
+		h.send(storm)
+		// The step's reading: the window's, or the hold's end inside it.
+		read := at.Add(quiet)
+		if deadline.After(at) && deadline.Before(read) {
+			read = deadline
+		}
+		h.advance(read.Sub(h.clock.Now()))
+		reads++
+		st := h.reconciles(reads)
+		if st.Publishes == 1 {
+			if !read.Before(deadline) {
+				t.Fatalf("the hold's bound came at %v and nothing was published: %+v", deadline.Sub(held), st)
+			}
+			continue
+		}
+		s := h.state(binding.StateIdentityTransient, -1, 2)
+		if !s.Observed().Equal(deadline) || !strings.Contains(s.Resolution().Reason, "card 5") {
+			t.Errorf("published %v after the first held reading (%s); want at its bound, %v",
+				s.Observed().Sub(held), s.Resolution().Reason, deadline.Sub(held))
+		}
+		return
+	}
+}
+
+// TestAReadingThatOutlastsAHeldAnswersBoundIsPublished: a reading that
+// starts before a held answer's bound and ends after it is judged when it
+// ends: published, as it stands and at the time it read the box, neither
+// held again nor set aside for a removal queued behind it, and no other
+// reading starts at once (its next follow-up runs from its end). Until
+// round 3 the bound was judged at the reading's start, so that reading was
+// held or set aside, and the bound, already past, started another
+// reading, which may block as the first did (Codex on round 2). The other
+// deadline tests keep the clock still while a reading runs.
+func TestAReadingThatOutlastsAHeldAnswersBoundIsPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// queued puts a removal reaching card 1 behind the reading, which
+		// would set it aside short of the bound.
+		queued bool
+	}{
+		{"the hold", false},
+		{"a removal queued behind it", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			// The GO bar's sysfs half goes; /proc/asound still lists card 5.
+			h.apply("remove sys/class/sound/card5\nremove sys/bus/usb/devices/1-1\nremove sys/bus/usb/devices/1-1:1.0\nremove " + goBar + "\n")
+			storm := Uevent{Action: "change", DevPath: devpath(usb1) + "/1-4", Subsystem: "usb"}
+			t0 := h.clock.Now()
+			at := func(d time.Duration) { h.advance(t0.Add(d).Sub(h.clock.Now())) }
+			reads := uint64(1)
+			read := func(d time.Duration) {
+				at(d)
+				reads++
+				h.reconciles(reads)
+			}
+			// The window's reading at 0.3 s holds the answer; two events renew
+			// the follow-ups before they run out, so the follow-up at 3.3 s is
+			// held still, 0.5 s short of the bound.
+			h.send(storm)
+			read(quiet)
+			deadline := t0.Add(quiet).Add(maxDelay + DefaultFollowUps*followUp)
+			read(800 * time.Millisecond)
+			read(1300 * time.Millisecond)
+			at(1500 * time.Millisecond)
+			h.send(storm)
+			read(1800 * time.Millisecond)
+			read(2300 * time.Millisecond)
+			at(2500 * time.Millisecond)
+			h.send(storm)
+			read(2800 * time.Millisecond)
+			if st := h.svc.Status(); st.Stats.Publishes != 1 {
+				t.Fatalf("published before the bound: %+v", st.Stats)
+			}
+			// That follow-up parks, and the clock passes the bound while it reads.
+			p := h.parkNextReading()
+			started := t0.Add(3300 * time.Millisecond)
+			at(3300 * time.Millisecond)
+			p.wait(t)
+			if tc.queued {
+				h.queue(Uevent{Action: "remove", DevPath: "/devices/platform/axi/107c706400.hdmi/sound/card1", Subsystem: "sound"})
+			}
+			ended := deadline.Add(100 * time.Millisecond)
+			at(ended.Sub(t0))
+			p.release()
+			reads++
+			h.reconciles(reads)
+			s := h.state(binding.StateIdentityTransient, -1, 2)
+			if !s.Observed().Equal(started) {
+				t.Errorf("published from the reading at %v; want the one that outlasted the bound, at %v", s.Observed().Sub(t0), started.Sub(t0))
+			}
+			st := h.waitStatus("the watcher waiting again", func(s Status) bool {
+				return s.Stats.Reconciles >= reads && s.Next.After(h.clock.Now())
+			})
+			if st.Stats.Reconciles != reads || st.Stats.SetAside != 0 {
+				t.Errorf("another reading started, or this one was set aside: %+v", st.Stats)
+			}
+			if !tc.queued && !st.Next.Equal(ended.Add(followUp)) {
+				t.Errorf("the next follow-up is due at %v; want %v after the reading ended, at %v", st.Next.Sub(t0), followUp, ended.Add(followUp).Sub(t0))
+			}
+		})
+	}
+}
+
+// TestAnUnplugBesideAnUnrelatedTransientCardIsMissingAtOnce: the bound DAC
+// unplugged while another model's card is still in /proc alone is
+// device_missing in the first reading, not after the follow-ups: that card
+// cannot be the bound unit. The follow-ups go on for it, and once it
+// settles it is published as the card it is.
+func TestAnUnplugBesideAnUnrelatedTransientCardIsMissingAtOnce(t *testing.T) {
+	h := newHarness(t)
+	h.step("unplug "+goBar+"\n"+procOnly("1234:0f05"), append(unplugEvents(goBar, 5),
+		Uevent{Action: "add", DevPath: devpath(usb1) + "/1-2/1-2:1.0/sound/card7", Subsystem: "sound"}))
+	r2 := h.clock.Now()
+	s := h.state(binding.StateDeviceMissing, -1, 2)
+	if len(s.Cards()) != 3 || s.Cards()[2].State != binding.CardTransient {
+		t.Errorf("cards %+v", s.Cards())
+	}
+	h.waitNext(r2.Add(followUp))
+	h.apply("usbdev " + usb1 + "/1-2 vendor=1234 product=0f05 devnum=3\nusbcard 7 " + usb1 + "/1-2/1-2:1.0\n")
+	h.advance(followUp)
+	h.reconciles(3)
+	s = h.state(binding.StateDeviceMissing, -1, 3)
+	if c := s.Cards()[2]; c.Index != 7 || c.State != binding.CardUSB {
+		t.Errorf("card 7 once settled: %+v", c)
+	}
+}
+
+// TestATransientCardIsNotLatched: a card in /proc alone that may be the
+// bound unit (its model) holds the answer back, and the next follow-up,
+// once its sysfs half is there, settles it: identity_transient is never
+// published.
+func TestATransientCardIsNotLatched(t *testing.T) {
+	h := newHarness(t)
+	h.step(procOnly("20b1:3009"), []Uevent{{Action: "add", DevPath: devpath(usb1) + "/1-2/1-2:1.0/sound/card7", Subsystem: "sound"}})
+	h.waitNext(h.clock.Now().Add(followUp))
+	if st := h.svc.Status(); st.Stats.Publishes != 1 {
+		t.Fatalf("a transient answer was published: %+v", st.Stats)
+	}
+	h.apply("usbdev " + usb1 + "/1-2 vendor=20b1 product=3009 serial=OTHER-GOBAR-0000000002 devnum=3\nusbcard 7 " + usb1 + "/1-2/1-2:1.0\n")
+	h.advance(followUp)
+	h.reconciles(3)
+	s := h.state(binding.StateAvailable, 5, 2)
+	if len(s.Cards()) != 4 {
+		t.Errorf("cards %+v", s.Cards())
+	}
+	if strings.Contains(h.logs.String(), string(binding.StateIdentityTransient)) {
+		t.Errorf("identity_transient reached the log:\n%s", h.logs.String())
+	}
+}
