@@ -304,16 +304,11 @@ func OpenStore(path string) (*Store, error) {
 	// (FlushFileBuffers) — a 29x test-suite penalty and a real tax on the
 	// per-track write paths (MarkEnriched, touchDevice) on Windows hosts.
 	uri := dsn.File(path, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"+vfsQuery)
-	db, err := sql.Open("sqlite", uri)
+	// SQLITE_BUSY at the open and ping is tried again for a few seconds;
+	// any other error fails here (openStoreDB).
+	db, err := openStoreDB(path, uri)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	// A single connection for writes keeps WAL + busy_timeout friendly.
-	// Reads are fine via the default pool; modernc.org/sqlite uses the
-	// standard database/sql connection pool.
-	if err := db.Ping(); err != nil {
-		db.Close() // release the handle + background goroutines; mirrors the migrate() error path below
-		return nil, storeOpenErr(path, "ping sqlite", err)
+		return nil, err
 	}
 	s := &Store{db: db, now: time.Now, path: path}
 	if err := s.migrate(); err != nil {

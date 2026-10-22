@@ -22,6 +22,7 @@ paths:
   - "internal/manifest/folder_art_state*.go"
   - "internal/manifest/provider*.go"
   - "internal/manifest/ladder_lock*.go"
+  - "internal/manifest/store_open_busy*.go"
   - "internal/manifest/dupe_stamps*.go"
   - "internal/manifest/playlist_files*.go"
   - "internal/manifest/sqlfunc*.go"
@@ -112,6 +113,7 @@ lost my library."
   is never rewritten — both live bridges already ran it, so editing it changes
   only fresh installs while diverging from what deployed DBs did.
 - **One opener of a database runs its migration ladder at a time** (2026-10-14, backlog B185) **Don't fix such a race inside a shipped migration or the frozen column helper** → History-rules-scanner.md
+- **…and an opener's open and ping are tried again while the error's primary code is SQLITE_BUSY, for 5 s from the first busy answer; any other error fails at once** (2026-10-22, `openStoreDB`): a plain code 5 there comes only once busy_timeout's own 5 s have run out, so a budget counted from the first try would never try again. **Don't raise `busy_timeout` instead, and don't widen the retry to the migration's statements without a failure there.**
 - **Column-only columns must never gain `json:` tags or be spliced onto wire
   output**: the v25 format facts, `acoustid_match` (v28), `dupe_*` (v31),
   `audio_md5` (v32), `booklet_tag`, `artwork_version`. `tags_json` stays the Go
