@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // writeTree lays files out under root, by their slash-separated paths.
@@ -59,8 +60,9 @@ func copyTree(t *testing.T, name string) string {
 func strPtr(s string) *string { return &s }
 
 // mpdOwner is the owner every playing capture's substream resolves to:
-// MPD's output thread, 6584, in the mpd process, 6551.
-var mpdOwner = &Owner{TID: 6584, Thread: strPtr("output:alsa"), PID: intPtr(6551), Process: strPtr("mpd")}
+// MPD's output thread, 6584, in the mpd process, 6551, as uid 1000 (the
+// synthetic status's Uid line). No capture holds the process's stat.
+var mpdOwner = &Owner{TID: 6584, Thread: strPtr("output:alsa"), PID: intPtr(6551), Process: strPtr("mpd"), UID: intPtr(1000)}
 
 // TestReaderOnEveryCapture reads each captured tree whole: the three cards,
 // the DAC's USB id, its one device with stream0 and one substream, and the
@@ -127,7 +129,16 @@ func describeOwner(o *Owner) string {
 		}
 		return *s
 	}
-	return strings.Join([]string{"tid", strconv.Itoa(o.TID), "thread", str(o.Thread), "pid", strconv.Itoa(deref(o.PID)), "process", str(o.Process)}, " ")
+	start := "<nil>"
+	if o.StartTicks != nil {
+		start = strconv.FormatInt(*o.StartTicks, 10)
+	}
+	uid := "<nil>"
+	if o.UID != nil {
+		uid = strconv.Itoa(*o.UID)
+	}
+	return strings.Join([]string{"tid", strconv.Itoa(o.TID), "thread", str(o.Thread), "pid", strconv.Itoa(deref(o.PID)), "process", str(o.Process),
+		"uid", uid, "start", start}, " ")
 }
 
 // TestReaderResolvesTheOwnerThroughTheThreadsTgid pins the attribution.
@@ -153,7 +164,7 @@ func TestReaderResolvesTheOwnerThroughTheThreadsTgid(t *testing.T) {
 		t.Fatal(err)
 	}
 	o = snap.Cards[1].Devices[0].Substreams[0].Owner
-	want := &Owner{TID: 812, Thread: strPtr("aplay"), PID: intPtr(812), Process: strPtr("aplay")}
+	want := &Owner{TID: 812, Thread: strPtr("aplay"), PID: intPtr(812), Process: strPtr("aplay"), UID: intPtr(1000)}
 	if !reflect.DeepEqual(o, want) {
 		t.Errorf("single-threaded owner = %s, want %s", describeOwner(o), describeOwner(want))
 	}
@@ -184,7 +195,7 @@ func TestReaderLeavesAnOwnerItCannotNameUnknown(t *testing.T) {
 		{
 			name:   "the process has no comm",
 			change: func(t *testing.T, root string) { removeAll(t, root, "6551") },
-			want:   Owner{TID: 6584, Thread: strPtr("output:alsa"), PID: intPtr(6551)},
+			want:   Owner{TID: 6584, Thread: strPtr("output:alsa"), PID: intPtr(6551), UID: intPtr(1000)},
 		},
 		{
 			name: "owner_pid 0: outside this pid namespace",
@@ -707,6 +718,77 @@ func TestReaderRefusesALinkSwappedInAfterItsCheck(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestReaderReadsWhoTheOwnerRunsAsAndWhenItsProcessStarted: the owner's
+// user is the real uid on the Uid line of the same status Name and Tgid
+// come from; its process's start is field 22 of /proc/<pid>/stat, counted
+// after the command name's closing parenthesis, since a name can hold
+// spaces and parentheses; and the reading's uptime is /proc/uptime's first
+// field. What is absent or does not read is nil, never a problem, as for
+// the rest of the owner.
+func TestReaderReadsWhoTheOwnerRunsAsAndWhenItsProcessStarted(t *testing.T) {
+	// Fields 3 to 21, then starttime, then a few more.
+	const tail = "S 1 6551 6551 0 -1 4194560 2412 0 23 0 1013 1022 0 0 20 0 9 0 351234 1234567 2345 18446744073709551615\n"
+	read := func(t *testing.T, files map[string]string) (*Owner, Snapshot) {
+		t.Helper()
+		root := copyTree(t, "pcm-44k1-16")
+		writeTree(t, root, files)
+		snap, err := Reader{ProcRoot: root}.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := snap.Cards[2].Devices[0].Substreams[0].Owner
+		if o == nil || deref(o.PID) != 6551 {
+			t.Fatalf("owner %s", describeOwner(o))
+		}
+		if len(snap.Cards[2].Problems) != 0 {
+			t.Fatalf("problems %q", snap.Cards[2].Problems)
+		}
+		return o, snap
+	}
+	o, snap := read(t, map[string]string{"6551/stat": "6551 (mpd) " + tail, "uptime": "4321.55 17000.12\n"})
+	if o.UID == nil || *o.UID != 1000 || o.StartTicks == nil || *o.StartTicks != 351234 {
+		t.Fatalf("uid %v start %v", o.UID, o.StartTicks)
+	}
+	if snap.Uptime == nil || *snap.Uptime != 4321.55 {
+		t.Fatalf("uptime %v", snap.Uptime)
+	}
+	if age, ok := snap.ProcessAge(o); !ok || age != 4321550*time.Millisecond-3512340*time.Millisecond {
+		t.Fatalf("age %s %v", age, ok)
+	}
+
+	o, _ = read(t, map[string]string{"6551/stat": "6551 (a) b (c)) " + tail})
+	if o.StartTicks == nil || *o.StartTicks != 351234 {
+		t.Fatalf("a name with parentheses: start %v", o.StartTicks)
+	}
+	for name, stat := range map[string]string{
+		"cut short":                 "6551 (mpd) S 1 6551 6551 0 -1\n",
+		"no name":                   "6551 mpd " + tail,
+		"a start that is no number": "6551 (mpd) " + strings.Replace(tail, "351234", "35x234", 1),
+		"a negative start":          "6551 (mpd) " + strings.Replace(tail, "351234", "-351234", 1),
+	} {
+		if o, _ := read(t, map[string]string{"6551/stat": stat}); o.StartTicks != nil {
+			t.Errorf("%s: start %d", name, *o.StartTicks)
+		}
+	}
+	for name, uptime := range map[string]string{"empty": "", "a word": "soon 1.0\n", "negative": "-1.00 2.00\n"} {
+		if _, snap := read(t, map[string]string{"uptime": uptime}); snap.Uptime != nil {
+			t.Errorf("uptime %s: %v", name, *snap.Uptime)
+		}
+	}
+	// A start after the uptime is no age.
+	o, snap = read(t, map[string]string{"6551/stat": "6551 (mpd) " + tail, "uptime": "3000.00 1.00\n"})
+	if age, ok := snap.ProcessAge(o); ok {
+		t.Fatalf("a process that started after the reading: age %s", age)
+	}
+	o, snap = read(t, map[string]string{"6584/status": "Name:\toutput:alsa\nTgid:\t6551\nUid:\tnobody\n"})
+	if o.UID != nil {
+		t.Fatalf("a Uid line that does not read: %d", *o.UID)
+	}
+	if _, ok := snap.ProcessAge(o); ok {
+		t.Fatal("an age with no start and no uptime")
 	}
 }
 

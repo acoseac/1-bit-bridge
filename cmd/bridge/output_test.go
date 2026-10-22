@@ -212,7 +212,7 @@ func jsonShape(v any, path string, into map[string][]string) {
 // wantDACJSONShape is the --json shape: every kind of object the DSD256
 // capture's reading holds, with its keys.
 var wantDACJSONShape = map[string][]string{
-	"":                                   {"asoundRoot", "cards", "problems", "procRoot", "readAt"},
+	"":                                   {"asoundRoot", "cards", "problems", "procRoot", "readAt", "uptime"},
 	".cards[]":                           {"devices", "driver", "id", "index", "longName", "name", "problems", "usbId"},
 	".cards[].devices[]":                 {"device", "stream", "substreams"},
 	".cards[].devices[].stream":          {"capture", "playback"},
@@ -225,7 +225,7 @@ var wantDACJSONShape = map[string][]string{
 		"rate", "rateDen", "rateNum", "subformat"},
 	".cards[].devices[].substreams[].status": {"applPtr", "avail", "availMax", "closed", "delay", "error", "hwPtr", "ownerPid",
 		"state", "triggerTime", "tstamp"},
-	".cards[].devices[].substreams[].owner": {"pid", "process", "thread", "tid"},
+	".cards[].devices[].substreams[].owner": {"pid", "process", "startTicks", "thread", "tid", "uid"},
 }
 
 // nullList matches a list-valued key printed as null.
