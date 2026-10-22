@@ -22,7 +22,8 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
-| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), the player PCM format/decode layer (`internal/player/format`, `internal/player/decode`), the player's ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`), and the player's state owner and queue (`internal/player/engine`) | `output.md` |
+| The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, the loopback track route for the MPD beside the bridge, and the Player / DAC / Music / Phone checklist (`internal/outputcheck`) | `output.md` |
+| The bridge's own player (B470): its PCM format and decode layer (`internal/player/format`, `internal/player/decode`, `third_party/saprobe-alac`), the DSD and ALAC containers, the ALSA PCM backend (`internal/alsapcm`, `scripts/alsa-abi`), the streaming sink, the player's state owner and queue (`internal/player/engine`), and the player PRs after them | `player.md` |
 | Auth, pairing, sessions and login tickets, TLS and the pin, what logs and error bodies may say | `auth-tls.md` |
 | The admin console, the web player, uploads and the trash | `admin-console.md` |
 | Test discipline, CI, SonarCloud and Docker (loads with every test file) | `build-ci-tests.md` |
