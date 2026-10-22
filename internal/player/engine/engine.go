@@ -273,8 +273,9 @@ func New(cfg Config) (*Engine, error) {
 // Stat or an open refused: EACCES, EIO) is said to be unreadable, with the
 // probe's error, since another filesystem would not mend it; a reservation
 // file that does not lie plainly below the data directory is said to be so;
-// and a mount table that cannot be read is named as that, never as a
-// directory.
+// and mounts the platform gives no identity for (atomicwrite.ErrMountsUnknown:
+// on Linux, no mount ID from statx or /proc/self/fdinfo) are named as that,
+// never as a directory.
 func notDurable(path, dataDir string, err error) error {
 	dir := filepath.Dir(path)
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) {
@@ -284,7 +285,7 @@ func notDurable(path, dataDir string, err error) error {
 	case errors.Is(err, atomicwrite.ErrNotUnderRoot):
 		return fmt.Errorf("player: the reservation file %s is not below the data directory %s as the strict writer takes it, with no \"..\" element and no symbolic link or mount point between them or at the file, so its durability cannot rest on the data directory's: %w", path, dataDir, err)
 	case errors.Is(err, atomicwrite.ErrMountsUnknown):
-		return fmt.Errorf("player: the mount table cannot be read, so no mount point between the data directory %s and the reservation file %s can be ruled out: %w", dataDir, path, err)
+		return fmt.Errorf("player: the platform gives no mount identity for the data directory %s or an entry below it, so no mount point between it and the reservation file %s can be ruled out: %w", dataDir, path, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", filepath.Dir(path), err)
 	case errors.Is(err, syscall.ENOTDIR):

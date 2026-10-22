@@ -316,9 +316,11 @@ func TestNewSaysWhenTheReservationDirectoryCannotBeRead(t *testing.T) {
 // failed on the directory above the reservation file's was blamed on the
 // reservation file's own, which had synced. Here through the real probe, its
 // barrier failing for that directory alone, and through the probe's seam, a
-// directory above it that cannot be read, or is not a directory; and an error
-// that names no directory falls back to the reservation file's. The barrier
-// and the probe are the test's, so it runs on every platform.
+// directory above it that cannot be read, or is not a directory; an error
+// that names no directory falls back to the reservation file's; and mounts
+// the platform gives no identity for are named as that, never as a
+// directory. The barrier and the probe are the test's, so it runs on every
+// platform.
 func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
 	h := newHarness(t)
 	// The data directory as its links resolve (the system's temporary
@@ -356,9 +358,9 @@ func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
 			return &fs.PathError{Op: "probe", Path: above, Err: syscall.ENOTDIR}
 		}, "player: " + above + " is not a directory"},
 		{"an error that names no directory", func(string) error { return syscall.EIO }, "player: the directory " + own + " cannot be read"},
-		{"a mount table that cannot be read", func(string) error {
-			return fmt.Errorf("%w: %w", atomicwrite.ErrMountsUnknown, &fs.PathError{Op: "open", Path: "/proc/self/mountinfo", Err: syscall.EACCES})
-		}, "player: the mount table cannot be read"},
+		{"a platform that gives no mount identity", func(string) error {
+			return fmt.Errorf("%w: the platform gives no mount ID for %s", atomicwrite.ErrMountsUnknown, data)
+		}, "player: the platform gives no mount identity for the data directory " + data},
 	} {
 		cfg := h.config()
 		cfg.DataDir, cfg.ReservePath = data, reserve

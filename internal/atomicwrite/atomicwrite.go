@@ -105,13 +105,14 @@ var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
 // created, written or synced.
 var ErrNotUnderRoot = errors.New("atomicwrite: the path is not plainly below the durable root")
 
-// ErrMountsUnknown is the strict writer's refusal, on Linux, where the mounts
-// between the file and the root cannot be ruled out: the probe's, of a path
-// with a directory between them while the kernel gives no mount IDs and its
-// mount table (/proc/self/mountinfo) cannot be read, and either's, where the
-// kernel gives the root's mount ID and not that of a directory below it. A
-// bind mount there shows no device of its own.
-var ErrMountsUnknown = errors.New("atomicwrite: the mount table cannot be read")
+// ErrMountsUnknown is WriteBytesDurable's and ProbeDurable's refusal where
+// the writer cannot tell one mount from another: the platform gives no mount
+// identity for the root, or gives the root's and not that of a directory or
+// the file below it (on Linux the kernel's mount ID comes from statx, Linux
+// 5.8, or else /proc/self/fdinfo, Linux 3.15), and so does the fallback after
+// a failed rename. The writer says so rather than take two mounts for one: a
+// bind mount shows no device of its own.
+var ErrMountsUnknown = errors.New("atomicwrite: the mounts between the file and the root cannot be told apart")
 
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
@@ -220,23 +221,23 @@ func SetSyncDirForTest(fn func(dir string) error) (restore func()) {
 // `t.Parallel()`.
 var beforeMkdirAll func(dir string)
 
-// mountTable is the mount points the kernel lists for this process, which
-// ProbeDurable refuses strictly below its root, and at the file, where the
-// kernel gives no mount IDs (mountIDOf) to check by: Linux's
-// /proc/self/mountinfo (platformMountTable), which names each mount by one
-// spelling, and nil, no table, where the platform keeps none the probe reads.
-// A test seam, process-global like syncParentDir, with the same contract:
-// in-package tests override it with a `t.Cleanup` restore and never call
-// `t.Parallel()`.
-var mountTable = platformMountTable
-
-// mountIDOf is the mount a path lies on, by the ID the kernel gives it, a
-// link at the end not followed: Linux's statx STATX_MNT_ID
-// (platformMountID), and no ID (ok false) where the platform or the kernel
-// gives none. A test seam, process-global like syncParentDir, with the same
-// contract: in-package tests override it with a `t.Cleanup` restore and
+// mountIDOf is the mount a path lies on, by the identity the platform gives
+// it (platformMountID), whatever the path's spelling: on Linux the kernel's
+// mount ID, from statx or else /proc/self/fdinfo, a link at the end not
+// followed; on macOS the mounted volume's filesystem ID (statfs); and no ID
+// (ok false) where the platform gives none (Windows, which never asks:
+// mountIDsExpected). A test seam, process-global like syncParentDir, with the
+// same contract: in-package tests override it with a `t.Cleanup` restore and
 // never call `t.Parallel()`.
 var mountIDOf = platformMountID
+
+// lstat is the Lstat the strict writer sees each entry through: a test seam,
+// so that a test can report a device (st_dev) as some filesystems report it,
+// differently for directories and other entries on one mount, on which no
+// decision rests (plain). Process-global like syncParentDir, with the same
+// contract: in-package tests override it with a `t.Cleanup` restore and never
+// call `t.Parallel()`.
+var lstat = os.Lstat
 
 // platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
 // where it is a no-op.
@@ -517,47 +518,41 @@ func NamesDirectory(path string) bool {
 // plain checks each of p's directories that exists, from the root down, and
 // then the destination itself when all of them do and it is there: each
 // directory a directory (an *fs.PathError wrapping syscall.ENOTDIR) and not a
-// symbolic link, and each, the destination included, on the root's own
-// mount (ErrNotUnderRoot). A link's target has its entry in the target's own
-// parent, and a mount's source in the source's, both outside the walk up to
-// the root, so neither is walked, whether it leads out of the root or not;
-// and a rename over a file mounted at the destination fails (EBUSY), its
-// source's entry never synced. A mount of another filesystem shows a device
-// (st_dev) other than the root's; a bind mount of the root's own filesystem
-// does not, and is told by the mount ID the kernel gives it (mountIDOf:
-// Linux's statx), whatever the path's spelling, on every write. The
-// destination may be a symbolic link: the rename replaces the link.
+// symbolic link, and each, the destination included unless it is a link, on
+// the root's own mount (ErrNotUnderRoot). A link's target has its entry in the
+// target's own parent, and a mount's source in the source's, both outside the
+// walk up to the root, so neither is walked, whether it leads out of the root
+// or not; and a rename over a file mounted at the destination fails (EBUSY),
+// its source's entry never synced. A link at the destination is an entry of
+// its directory, which the rename replaces.
 //
-// It returns how many directories exist, the first that does not ending the
-// walk, since nothing below it exists either, and whether the kernel gave
-// mount IDs to check by: where it gave none (an older kernel, or a statx a
-// policy refuses, and every platform but Linux), a bind mount is ProbeDurable's
-// to refuse, from the mount table (noMountsBelow). Where a FileInfo carries no
-// device (devicesKnown false: Windows, which refuses before it gets here), no
-// device is compared; where it should carry one and does not, or the kernel
-// gives the root's mount ID and not another's, the path is refused.
-func (p strictPath) plain() (int, bool, error) {
-	rootInfo, err := os.Stat(p.root)
-	if err != nil {
-		return 0, false, err
-	}
-	rootDev, ok := device(rootInfo)
-	if devicesKnown && !ok {
-		return 0, false, fmt.Errorf("%w: the filesystem of %s cannot be told", ErrNotUnderRoot, p.root)
-	}
+// A mount is told by the identity the platform gives it (mountIDOf), whatever
+// the path's spelling, never by the device (st_dev) a stat reports, which
+// some filesystems report differently on one mount: overlayfs with its layers
+// on different filesystems and xino off, the default and the Raspberry Pi OS
+// "Overlay File System" option, reports the overlay's device for directories
+// and a pseudo device per layer for every other entry, and btrfs a device per
+// subvolume (the Claude API on round 8: round 8 refused a reservation file
+// there once it existed, and the restart's probe with it). Where the platform
+// gives no identity for the root, or gives the root's and not that of an entry
+// below it, the writer cannot tell one mount from another, and says so
+// (ErrMountsUnknown) rather than take them for one (Codex on round 8). The
+// root's is asked for every time, a file in the root with nothing below it
+// included, so that a probe refuses as its caller starts what every write
+// after the first would refuse. Where no identity is expected (Windows, which
+// refuses before it gets here: mountIDsExpected), none is compared.
+//
+// It returns how many directories exist: the first that does not ends the
+// walk, since nothing below it exists either.
+func (p strictPath) plain() (int, error) {
 	rootMount, ids, err := mountIDOf(p.root)
-	if err != nil {
-		return 0, false, err
+	switch {
+	case err != nil:
+		return 0, err
+	case !ids && mountIDsExpected:
+		return 0, fmt.Errorf("%w: the platform gives no mount ID for %s", ErrMountsUnknown, p.root)
 	}
-	onRootsMount := func(d string, info fs.FileInfo) error {
-		if devicesKnown {
-			switch dev, ok := device(info); {
-			case !ok:
-				return fmt.Errorf("%w: the filesystem of %s cannot be told", ErrNotUnderRoot, d)
-			case dev != rootDev:
-				return fmt.Errorf("%w: %s is a mount point below %s, of another filesystem", ErrNotUnderRoot, d, p.root)
-			}
-		}
+	onRootsMount := func(d string) error {
 		if !ids {
 			return nil
 		}
@@ -565,88 +560,67 @@ func (p strictPath) plain() (int, bool, error) {
 		case err != nil:
 			return err
 		case !ok:
-			return fmt.Errorf("%w: the kernel gave %s's mount ID and not %s's", ErrMountsUnknown, p.root, d)
+			return fmt.Errorf("%w: the platform gives %s's mount ID and not %s's", ErrMountsUnknown, p.root, d)
 		case m != rootMount:
 			return fmt.Errorf("%w: %s is a mount point below %s", ErrNotUnderRoot, d, p.root)
 		}
 		return nil
 	}
 	for i, d := range p.dirs {
-		info, err := os.Lstat(d)
+		info, err := lstat(d)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return i, ids, nil
+			return i, nil
 		case err != nil:
-			return 0, ids, err
+			return 0, err
 		case info.Mode()&fs.ModeSymlink != 0:
-			return 0, ids, fmt.Errorf("%w: %s is a symbolic link below %s", ErrNotUnderRoot, d, p.root)
+			return 0, fmt.Errorf("%w: %s is a symbolic link below %s", ErrNotUnderRoot, d, p.root)
 		case !info.IsDir():
-			return 0, ids, &fs.PathError{Op: "probe", Path: d, Err: syscall.ENOTDIR}
+			return 0, &fs.PathError{Op: "probe", Path: d, Err: syscall.ENOTDIR}
 		}
-		if err := onRootsMount(d, info); err != nil {
-			return 0, ids, err
+		if err := onRootsMount(d); err != nil {
+			return 0, err
 		}
 	}
-	switch info, err := os.Lstat(p.file); {
+	switch info, err := lstat(p.file); {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		return 0, ids, err
-	default:
-		if err := onRootsMount(p.file, info); err != nil {
-			return 0, ids, err
+		return 0, err
+	case info.Mode()&fs.ModeSymlink == 0:
+		if err := onRootsMount(p.file); err != nil {
+			return 0, err
 		}
 	}
-	return len(p.dirs), ids, nil
+	return len(p.dirs), nil
 }
 
-// onItsDirectorysMount reports whether path is a regular file on the device
-// and the mount of the directory that holds it, which a rename into that
-// directory would have replaced: a file mounted there, or a symbolic link,
-// has its entry elsewhere, which the strict write's barrier never syncs.
-func onItsDirectorysMount(path string) bool {
-	info, err := os.Lstat(path)
+// onItsDirectorysMount reports whether path is a regular file on the mount of
+// the directory that holds it, which a rename into that directory would have
+// replaced: a file mounted there, or a symbolic link, has its entry
+// elsewhere, which the strict write's barrier never syncs. The mount is told
+// by identity, never by device (plain), and where the platform gives none
+// for either, that is ErrMountsUnknown, never a match: Codex on round 8,
+// where two unknown identities passed for one and a file mounted once the
+// checks had passed gave the fallback its bytes. Where no identity is
+// expected (Windows, which never gets here), none is compared.
+func onItsDirectorysMount(path string) (bool, error) {
+	info, err := lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return false
+		return false, nil
 	}
 	dir := filepath.Dir(path)
-	dirInfo, err := os.Stat(dir)
-	if err != nil {
-		return false
-	}
-	if devicesKnown {
-		a, okA := device(info)
-		b, okB := device(dirInfo)
-		if !okA || !okB || a != b {
-			return false
-		}
-	}
 	a, okA, errA := mountIDOf(path)
 	b, okB, errB := mountIDOf(dir)
-	return errA == nil && errB == nil && okA == okB && a == b
-}
-
-// noMountsBelow refuses a mount point the kernel lists among dirs, the
-// directories strictly below a root and the file at the end of them when it
-// is there (ErrNotUnderRoot): a bind mount of the root's own filesystem,
-// which plain cannot tell by its device where the kernel gives no mount IDs.
-// It reads the mount table (mountTable) only when there is something to
-// check, and a table it cannot read is ErrMountsUnknown, since it then rules
-// no mount out. It matches the table's spelling of each mount point. Where
-// the platform keeps no table it reads, it refuses nothing.
-func noMountsBelow(dirs []string) error {
-	if len(dirs) == 0 {
-		return nil
-	}
-	points, err := mountTable()
-	if err != nil {
-		return fmt.Errorf("%w, so no mount point between %s and the root can be ruled out: %w", ErrMountsUnknown, dirs[len(dirs)-1], err)
-	}
-	for _, d := range dirs {
-		if points[d] {
-			return fmt.Errorf("%w: %s is a mount point", ErrNotUnderRoot, d)
+	switch {
+	case errA != nil || errB != nil:
+		return false, nil
+	case !okA || !okB:
+		if !mountIDsExpected {
+			return true, nil
 		}
+		return false, fmt.Errorf("%w: the platform gives no mount ID for %s or %s", ErrMountsUnknown, path, dir)
 	}
-	return nil
+	return a == b, nil
 }
 
 // ProbeDurable reports, without writing anything, whether WriteBytesDurable
@@ -662,17 +636,11 @@ func noMountsBelow(dirs []string) error {
 // refuse its work for ever, with nothing naming the cause, asks once as it
 // starts and refuses to start instead.
 //
-// Where the kernel gives no mount IDs to check by (Linux older than 5.8, or a
-// statx a policy refuses), it falls back to the kernel's mount table for a
-// mount point its device does not show between the file and root, or at the
-// file, a bind mount of root's own filesystem, whose source's entries are
-// outside the walk up to root (ErrNotUnderRoot): read once, as its caller
-// starts, only when there is a directory or a file to check, and matched by
-// the spelling the table gives (a filesystem that folds case can reach a
-// mount by another); a table it cannot read is ErrMountsUnknown. With mount
-// IDs, which the writer checks too, on every write, it reads no table.
-// Elsewhere than Linux it reads none, and a mount of another filesystem is
-// still refused by its device.
+// It refuses what every write would: a mount between the file and root, or at
+// the file, told by the identity the platform gives each entry, never by its
+// device (ErrNotUnderRoot), and a root, or an entry below it, whose mount the
+// platform gives no identity for (ErrMountsUnknown), so that its caller learns
+// as it starts what the write after the first would refuse.
 //
 // What it probes must be a directory: a barrier opens and fsyncs whatever is
 // there, and answers nil for a regular file, where no write can ever be
@@ -691,18 +659,9 @@ func ProbeDurable(root, path string) error {
 	if err != nil {
 		return err
 	}
-	n, ids, err := p.plain()
+	n, err := p.plain()
 	if err != nil {
 		return err
-	}
-	if !ids {
-		check := p.dirs[:n]
-		if _, err := os.Lstat(p.file); err == nil && n == len(p.dirs) {
-			check = append(slices.Clone(check), p.file)
-		}
-		if err := noMountsBelow(check); err != nil {
-			return err
-		}
 	}
 	for _, d := range p.chain(n) {
 		if err := syncDirAt(d); err != nil {
@@ -719,17 +678,13 @@ func ProbeDurable(root, path string) error {
 // fsyncs it through the open it read the bytes from: bytes another writer
 // renamed into place are visible once its rename lands, and durable only
 // once they are fsynced. A destination it cannot open or read is not the
-// same, and the caller's own error stands; nor is one that is not a regular
-// file on its directory's own device and mount, asked as the bytes are taken
-// (onItsDirectorysMount): a file mounted there, as one mounted after the
-// write's checks would be, or a symbolic link, has its entry elsewhere, and
-// the barrier on path's directory would vouch for bytes it never named
-// (Codex on round 7: round 7 took a mounted file's bytes, synced it and the
-// root, and answered nil).
+// same, and the caller's own error stands. Its caller asks first whether
+// path is a regular file on its directory's own mount (onItsDirectorysMount):
+// a file mounted there, as one mounted after the write's checks would be, or
+// a symbolic link, has its entry elsewhere, and the barrier on path's
+// directory would vouch for bytes it never named (Codex on round 7: round 7
+// took a mounted file's bytes, synced it and the root, and answered nil).
 func sameAndSynced(path string, data []byte) (bool, error) {
-	if !onItsDirectorysMount(path) {
-		return false, nil
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return false, nil
@@ -854,20 +809,21 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // path must lie plainly below root (ErrNotUnderRoot): no ".." element in
 // either, its last element a file's (NamesDirectory: EISDIR), path's
 // directory at or below root as written, no symbolic link strictly below
-// root on the way to it, and no mount there or at the file itself: none of
-// another filesystem (a device, st_dev, other than root's), and on Linux
-// none at all, by the mount ID the kernel gives each entry, a bind mount of
-// root's own filesystem included, whatever the path's spelling. Then every
-// entry the file depends on is in the directory above it on one walk from
-// the file's directory up to root, and that walk is all the writer syncs: a
-// link's target, or a mount's source, keeps an entry outside it, which the
-// writer does not chase. Round 6 walked the path as written and as it
-// resolved instead, and missed a link reached through another (Codex, the
-// Claude API and Argon on round 6). The check runs before anything is
-// created, and again once the missing directories are, before any is synced,
-// for one another writer put in place meanwhile. Where the kernel gives no
-// mount IDs, a bind mount of root's own filesystem shows root's device, and
-// is ProbeDurable's to refuse, from the kernel's mount table.
+// root on the way to it, and no mount there or at the file itself, a bind
+// mount of root's own filesystem included, told by the identity the platform
+// gives each entry's mount (on Linux the kernel's mount ID, from statx or
+// else /proc/self/fdinfo), whatever the path's spelling, and never by the
+// device a stat reports, which overlayfs and btrfs report differently on one
+// mount. Where no identity can be had the writer says so (ErrMountsUnknown)
+// rather than take two mounts for one. Then every entry the file depends on
+// is in the directory above it on one walk from the file's directory up to
+// root, and that walk is all the writer syncs: a link's target, or a mount's
+// source, keeps an entry outside it, which the writer does not chase. Round 6
+// walked the path as written and as it resolved instead, and missed a link
+// reached through another (Codex, the Claude API and Argon on round 6). The
+// check runs before anything is created, and again once the missing
+// directories are, before any is synced, for one another writer put in place
+// meanwhile.
 //
 // root is the caller's guarantee: it must exist (the writer never creates
 // it), and its own entry, and those above it, must be durable already, or
@@ -888,7 +844,7 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := p.plain(); err != nil {
+	if _, err := p.plain(); err != nil {
 		return err
 	}
 	if beforeMkdirAll != nil {
@@ -897,7 +853,7 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 	if err := fsutil.MkdirAll(p.dir(), 0o700); err != nil {
 		return err
 	}
-	switch n, _, err := p.plain(); {
+	switch n, err := p.plain(); {
 	case err != nil:
 		return err
 	case n < len(p.dirs):
@@ -968,6 +924,12 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 		// bytes prove it visible, not durable, and the winner's
 		// barrier may have been tolerated.
 		if durable {
+			switch ours, idErr := onItsDirectorysMount(path); {
+			case idErr != nil:
+				return fmt.Errorf("%w; the rename had failed: %w", idErr, err)
+			case !ours:
+				return err
+			}
 			switch same, syncErr := sameAndSynced(path, data); {
 			case syncErr != nil:
 				return syncErr

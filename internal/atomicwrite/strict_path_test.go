@@ -233,24 +233,24 @@ func TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot(t *testing.T) {
 // mounted filesystem's own root holds the entries below it, and its
 // mount point's entry is the mounted filesystem's to keep, outside the walk
 // up to the root (Codex on round 6), so the write and the probe refuse it by
-// its device (st_dev), before anything is created, written or synced. The
-// barrier is the test's: nothing is fsynced on the host's directories.
+// the identity the platform gives its mount (the kernel's mount ID on Linux,
+// the volume's filesystem ID on macOS), before anything is created, written
+// or synced. The barrier is the test's: nothing is fsynced on the host's
+// directories.
 func TestWriteBytesDurable_RefusesAMountBelowTheRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if !mountIDsExpected {
 		t.Skip("no directory barrier: the strict writer refuses before it looks at a path")
 	}
-	top, err := os.Lstat("/")
-	if err != nil {
-		t.Fatal(err)
+	if info, err := os.Lstat("/dev"); err != nil || !info.IsDir() {
+		t.Skipf("no /dev directory here: %v", err)
 	}
-	devInfo, err := os.Lstat("/dev")
-	if err != nil {
-		t.Skipf("no /dev here: %v", err)
-	}
-	if a, ok := device(top); !ok || !devInfo.IsDir() {
-		t.Skip("no device to compare here")
-	} else if b, _ := device(devInfo); a == b {
-		t.Skip("/dev is not a mount of another filesystem here")
+	top, okTop, errTop := mountIDOf("/")
+	dev, okDev, errDev := mountIDOf("/dev")
+	switch {
+	case !okTop || !okDev || errTop != nil || errDev != nil:
+		t.Skipf("no mount identity for / or /dev here: %v, %v", errTop, errDev)
+	case top == dev:
+		t.Skip("/dev is not a mount of its own here")
 	}
 	name := fmt.Sprintf("atomicwrite-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	missing := filepath.Join("/dev", name)
@@ -283,15 +283,16 @@ func stubMountIDs(t *testing.T, id func(path string) (uint64, bool, error)) {
 	t.Cleanup(func() { mountIDOf = prev })
 }
 
-// noMountIDs is a kernel that gives no mount IDs: one older than Linux 5.8,
-// or a statx a policy refuses.
+// noMountIDs is a platform that gives no mount identity: on Linux, a kernel
+// that gives no mount ID through statx (older than 5.8, or a statx a policy
+// refuses) with no /proc/self/fdinfo to read one from.
 func noMountIDs(string) (uint64, bool, error) { return 0, false, nil }
 
 // mountedAt is the mount IDs of a kernel with a mount of its own at point,
-// as point is now: what a path reaches is on that mount when it is point
-// itself (os.SameFile), however the path spells it, as the kernel finds a
-// mount by the entry a path reaches, never by its name; everything else is
-// on the root's mount.
+// as point is now: what a path reaches is on that mount when it is point, or
+// lies below it, however the path spells it (os.SameFile, as the kernel
+// finds a mount by the entry a path reaches, never by its name); everything
+// else is on another.
 func mountedAt(t *testing.T, point string) func(string) (uint64, bool, error) {
 	t.Helper()
 	at, err := os.Lstat(point)
@@ -299,31 +300,34 @@ func mountedAt(t *testing.T, point string) func(string) (uint64, bool, error) {
 		t.Fatal(err)
 	}
 	return func(path string) (uint64, bool, error) {
-		fi, err := os.Lstat(path)
-		if err != nil {
-			return 0, false, err
+		for d := path; ; d = filepath.Dir(d) {
+			fi, err := os.Lstat(d)
+			if err != nil {
+				return 0, false, err
+			}
+			if os.SameFile(fi, at) {
+				return 2, true, nil
+			}
+			if filepath.Dir(d) == d {
+				return 1, true, nil
+			}
 		}
-		if os.SameFile(fi, at) {
-			return 2, true, nil
-		}
-		return 1, true, nil
 	}
 }
 
 // TestWriteBytesDurable_RefusesABindMountByItsMountID pins the mount check
-// the writer makes on every write, and the probe, by the kernel's mount IDs:
-// a directory below the root on a mount of its own, a bind mount of the
-// root's own filesystem, which shows the root's device, is refused
-// (ErrNotUnderRoot) before anything is created, written or synced, though
-// the mount table names nothing; the probe reads no table with IDs to go by.
-// Round 7 looked for such a mount in the probe alone, by the table, so a
-// bind mount made after the probe was never looked for.
+// the writer makes on every write, and the probe, by the mount identity the
+// platform gives: a directory below the root on a mount of its own, a bind
+// mount of the root's own filesystem, which shows the root's device, is
+// refused (ErrNotUnderRoot) before anything is created, written or synced,
+// and a directory on the root's mount passes. Round 7 looked for such a
+// mount in the probe alone, by the mount table, so a bind mount made after
+// the probe was never looked for.
 func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
 	root := realTempDir(t)
 	sub := filepath.Join(root, "sub")
 	mkdirs(t, sub)
 	synced := stubSyncDir(t, nil)
-	reads := stubMountTable(t, nil, nil)
 	stubMountIDs(t, mountedAt(t, sub))
 	for _, path := range []string{filepath.Join(sub, "ids"), filepath.Join(sub, "new", "ids")} {
 		*synced = nil
@@ -332,16 +336,12 @@ func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
 		*synced = nil
 		refusedPlainly(t, "ProbeDurable of "+path, ProbeDurable(root, path), synced)
 	}
-	// A directory on the root's mount passes, the table not read.
 	other := filepath.Join(root, "other")
 	mkdirs(t, other)
 	if err := ProbeDurable(root, filepath.Join(other, "ids")); err != nil {
 		t.Errorf("ProbeDurable below a directory on the root's mount = %v", err)
 	}
-	if *reads != 0 {
-		t.Errorf("the probe read the mount table %d times with mount IDs to go by", *reads)
-	}
-	// A kernel that gives the root's mount ID and not that of a directory
+	// A platform that gives the root's mount ID and not that of a directory
 	// below it rules nothing out there: ErrMountsUnknown.
 	stubMountIDs(t, func(path string) (uint64, bool, error) { return 1, path == root, nil })
 	if err := ProbeDurable(root, filepath.Join(other, "ids")); !errors.Is(err, ErrMountsUnknown) {
@@ -354,12 +354,15 @@ func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
 
 // TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling pins Codex's
 // round 7 finding: on a filesystem that folds case, root/Player reaches a
-// mount at root/player, which the kernel's table names by that spelling
-// alone, so round 7's probe, matching the table by spelling, passed
+// mount at root/player, which the kernel's mount table names by that
+// spelling alone, so round 7's probe, matching the table by spelling, passed
 // root/Player/ids, and the writer synced none of the mount source's
-// entries. By mount ID the spelling does not matter. The test runs where the
-// filesystem folds case (APFS and NTFS by default), and skips where another
-// spelling names another directory.
+// entries. By mount identity the spelling does not matter. Where the
+// platform gives no identity, the writer and the probe say so
+// (ErrMountsUnknown) rather than pass the path, as round 8's fallback to the
+// table, matched by spelling, did (Codex on round 8). The test runs where
+// the filesystem folds case (APFS and NTFS by default), and skips where
+// another spelling names another directory.
 func TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling(t *testing.T) {
 	root := realTempDir(t)
 	point := filepath.Join(root, "player")
@@ -369,23 +372,33 @@ func TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling(t *testing.T) {
 		t.Skipf("this filesystem tells %s from %s: no other spelling reaches the mount (%v)", other, point, err)
 	}
 	synced := stubSyncDir(t, nil)
-	stubMountTable(t, []string{point}, nil)
 	stubMountIDs(t, mountedAt(t, point))
 	path := filepath.Join(other, "ids")
 	refusedPlainly(t, "ProbeDurable through the mount by another spelling", ProbeDurable(root, path), synced)
 	*synced = nil
 	err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp")
 	refusedPlainly(t, "WriteBytesDurable through the mount by another spelling", err, synced, filepath.Join(point, "ids"))
+	if !mountIDsExpected {
+		return
+	}
+	stubMountIDs(t, noMountIDs)
+	if err := ProbeDurable(root, path); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("ProbeDurable through another spelling with no mount identity = %v, want ErrMountsUnknown", err)
+	}
+	if err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("WriteBytesDurable through another spelling with no mount identity = %v, want ErrMountsUnknown", err)
+	}
 }
 
 // TestWriteBytesDurable_RefusesAMountedDestination pins the destination's own
-// mount check (Codex on round 7): a file mounted at the destination, by
-// its mount ID, is refused by the probe and the write before anything is
+// mount check (Codex on round 7): a file mounted at the destination, by its
+// mount identity, is refused by the probe and the write before anything is
 // written or synced, with the bytes the write would write already there.
 // Round 7 checked the directories alone, and a rename over a mounted file,
 // which fails with EBUSY, took the fallback for matching bytes: it fsynced
 // the mounted file and the root and answered nil, never the mount source's
-// directory entry.
+// directory entry. Where the platform gives no identity, the probe and the
+// write say so (ErrMountsUnknown).
 func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
 	root := realTempDir(t)
 	dst := filepath.Join(root, "ids")
@@ -394,7 +407,6 @@ func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	synced := stubSyncDir(t, nil)
-	stubMountTable(t, nil, nil)
 	stubMountIDs(t, mountedAt(t, dst))
 	refusedPlainly(t, "ProbeDurable of a destination on a mount of its own", ProbeDurable(root, dst), synced)
 	*synced = nil
@@ -403,12 +415,23 @@ func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 {
 		t.Errorf("the refused write left %v (%v), want the destination alone", entries, err)
 	}
-	// Where the kernel gives no mount IDs, the probe's mount table names the
-	// mounted file, and the probe refuses it there too.
+	// Where the platform gives no mount identity, whether a file is mounted
+	// there cannot be told, and the probe and the write say so (Codex on
+	// round 8), with nothing synced or written.
+	if !mountIDsExpected {
+		return
+	}
 	*synced = nil
 	stubMountIDs(t, noMountIDs)
-	stubMountTable(t, []string{dst}, nil)
-	refusedPlainly(t, "ProbeDurable of a destination the mount table names", ProbeDurable(root, dst), synced)
+	if err := ProbeDurable(root, dst); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("ProbeDurable of a destination with no mount identity = %v, want ErrMountsUnknown", err)
+	}
+	if err := WriteBytesDurable(root, dst, []byte("other"), ".durable-*.tmp"); !errors.Is(err, ErrMountsUnknown) {
+		t.Errorf("WriteBytesDurable over a destination with no mount identity = %v, want ErrMountsUnknown", err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != string(want) || len(*synced) != 0 {
+		t.Errorf("with no mount identity the destination holds %q (%v) and %v were synced, want it untouched and nothing synced", got, err, *synced)
+	}
 }
 
 // TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile pins the fallback
@@ -420,15 +443,31 @@ func TestWriteBytesDurable_RefusesAMountedDestination(t *testing.T) {
 // does, and a symbolic link to a file with those bytes, the rename failing,
 // each answer the rename's error, with neither the bytes nor the root
 // synced: round 7 synced the mounted file, or the link's target, and the
-// root, and answered nil, the entry naming those bytes never synced.
+// root, and answered nil, the entry naming those bytes never synced. A
+// destination whose mount the platform gives no identity for once the checks
+// have passed answers ErrMountsUnknown beside the rename's error, nothing
+// synced: round 8 took two unknown identities for one, and the bytes with
+// them (Codex on round 8).
 func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
 	want := []byte("reserved")
 	for _, tc := range []struct {
 		name    string
 		failErr error
+		alsoIs  error
 		set     func(t *testing.T, root, dst string) (mount func())
 	}{
-		{"a file mounted once the checks passed", syscall.EBUSY, func(t *testing.T, root, dst string) func() {
+		{"a file whose mount cannot be told once the checks passed", syscall.EBUSY, ErrMountsUnknown, func(t *testing.T, root, dst string) func() {
+			if !mountIDsExpected {
+				t.Skip("this platform refuses before it looks at a path: no directory barrier")
+			}
+			if err := os.WriteFile(dst, want, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gone := false
+			stubMountIDs(t, func(string) (uint64, bool, error) { return 1, !gone, nil })
+			return func() { gone = true }
+		}},
+		{"a file mounted once the checks passed", syscall.EBUSY, nil, func(t *testing.T, root, dst string) func() {
 			if err := os.WriteFile(dst, want, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -449,7 +488,7 @@ func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
 			})
 			return func() { mounted = true }
 		}},
-		{"a symbolic link to a file with the bytes", os.ErrPermission, func(t *testing.T, root, dst string) func() {
+		{"a symbolic link to a file with the bytes", os.ErrPermission, nil, func(t *testing.T, root, dst string) func() {
 			target := filepath.Join(root, "elsewhere")
 			if err := os.WriteFile(target, want, 0o600); err != nil {
 				t.Fatal(err)
@@ -461,7 +500,6 @@ func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := realTempDir(t)
 			dst := filepath.Join(root, "ids")
-			stubMountTable(t, nil, nil)
 			mount := tc.set(t, root, dst)
 			prev := SetRenameFuncForTest(func(string, string) error {
 				mount()
@@ -492,6 +530,9 @@ func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
 			if !errors.Is(err, tc.failErr) {
 				t.Errorf("WriteBytesDurable = %v, want the rename's %v: the bytes there are not the write's to vouch for", err, tc.failErr)
 			}
+			if tc.alsoIs != nil && !errors.Is(err, tc.alsoIs) {
+				t.Errorf("WriteBytesDurable = %v, want %v beside the rename's error", err, tc.alsoIs)
+			}
 			if len(syncs) != 0 {
 				t.Errorf("after the failed rename the write synced %v, want nothing", syncs)
 			}
@@ -499,27 +540,33 @@ func TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile(t *testing.T) {
 	}
 }
 
-// TestPlatformMountIDReadsTheKernels pins the mount IDs the writer reads: on
-// Linux the kernel's (statx, 5.8 and later), / and /proc on mounts of their
-// own and a directory on its parent's; elsewhere none, and no error. A Linux
-// kernel older than 5.8 gives none, and the test then skips, saying so: the
-// probe falls back to the mount table there.
+// TestPlatformMountIDReadsTheKernels pins the mount identity the writer reads
+// on each platform: on Linux the kernel's mount ID, from statx or else
+// /proc/self/fdinfo (TestPlatformMountTableReadsTheKernels holds both to the
+// kernel's own table), / and /proc on mounts of their own; on macOS the
+// mounted volume's filesystem ID, / and /dev on mounts of their own; and a
+// directory on its parent's wherever an identity is given. Windows gives
+// none, and no error: it refuses before it asks (mountIDsExpected).
 func TestPlatformMountIDReadsTheKernels(t *testing.T) {
 	top, ok, err := platformMountID("/")
-	if runtime.GOOS != "linux" {
+	if !mountIDsExpected {
 		if ok || err != nil {
 			t.Fatalf("platformMountID on %s = %d, %v, %v, want no ID", runtime.GOOS, top, ok, err)
 		}
 		return
 	}
-	if !ok && err == nil && !kernelGivesMountIDs(t) {
-		t.Skip("this kernel is older than Linux 5.8 and gives no mount IDs: the probe falls back to the mount table")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("no mount identity on %s: the strict writer refuses there", runtime.GOOS)
 	}
 	if !ok || err != nil {
-		t.Fatalf("platformMountID(/) = %d, %v, %v, want the kernel's ID", top, ok, err)
+		t.Fatalf("platformMountID(/) = %d, %v, %v, want the platform's ID", top, ok, err)
 	}
-	if proc, ok, err := platformMountID("/proc"); !ok || err != nil || proc == top {
-		t.Errorf("platformMountID(/proc) = %d, %v, %v, want an ID of its own, not /'s %d", proc, ok, err, top)
+	other := "/proc"
+	if runtime.GOOS == "darwin" {
+		other = "/dev"
+	}
+	if id, ok, err := platformMountID(other); !ok || err != nil || id == top {
+		t.Errorf("platformMountID(%s) = %d, %v, %v, want an ID of its own, not /'s %d", other, id, ok, err, top)
 	}
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "sub")
@@ -531,143 +578,108 @@ func TestPlatformMountIDReadsTheKernels(t *testing.T) {
 	}
 }
 
-// kernelGivesMountIDs reports whether the running Linux kernel is 5.8 or
-// later, the first to give statx's STATX_MNT_ID, from its release
-// (/proc/sys/kernel/osrelease, "6.5.0-1025-azure" and the like).
-func kernelGivesMountIDs(t *testing.T) bool {
-	t.Helper()
-	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
-	if err != nil {
-		t.Fatalf("the kernel's release: %v", err)
+// TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad pins Codex's round 8
+// finding: where the platform gives no mount identity, which on Linux takes a
+// kernel that gives no mount ID through statx and no /proc/self/fdinfo to
+// read one from, the writer cannot tell one mount from another, and says so
+// (ErrMountsUnknown) rather than take them for one. Round 8 then compared no
+// mount on any write, its probe matched the mount table by spelling, and its
+// fallback took two unknown identities for one. The write and the probe
+// refuse, with nothing created, written or synced: a file in the root, as the
+// probe of a reservation not yet written is asked, since every write after
+// the first needs the identity; one below a directory, there or to be made;
+// and a destination already there. Windows gives none and needs none: it
+// refuses before, for want of a directory barrier.
+func TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad(t *testing.T) {
+	if !mountIDsExpected {
+		t.Skip("this platform refuses before it looks at a path: no directory barrier")
 	}
-	var major, minor int
-	if _, err := fmt.Sscanf(string(data), "%d.%d", &major, &minor); err != nil {
-		t.Fatalf("the kernel's release %q: %v", data, err)
+	root := realTempDir(t)
+	sub := filepath.Join(root, "sub")
+	mkdirs(t, sub)
+	existing := filepath.Join(root, "existing")
+	if err := os.WriteFile(existing, []byte("theirs"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return major > 5 || (major == 5 && minor >= 8)
+	synced := stubSyncDir(t, nil)
+	stubMountIDs(t, noMountIDs)
+	for _, path := range []string{filepath.Join(root, "ids"), filepath.Join(sub, "ids"), filepath.Join(sub, "new", "ids"), existing} {
+		*synced = nil
+		if err := WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, ErrMountsUnknown) {
+			t.Errorf("WriteBytesDurable(%s) with no mount identity = %v, want ErrMountsUnknown", path, err)
+		}
+		if err := ProbeDurable(root, path); !errors.Is(err, ErrMountsUnknown) {
+			t.Errorf("ProbeDurable(%s) with no mount identity = %v, want ErrMountsUnknown", path, err)
+		}
+		if len(*synced) != 0 {
+			t.Errorf("with no mount identity the write and the probe of %s synced %v", path, *synced)
+		}
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 2 {
+		t.Errorf("the refusals left %v (%v) in the root, want sub and existing alone", entries, err)
+	}
+	if entries, err := os.ReadDir(sub); err != nil || len(entries) != 0 {
+		t.Errorf("the refusals left %v (%v) in sub, want nothing", entries, err)
+	}
+	if got, err := os.ReadFile(existing); err != nil || string(got) != "theirs" {
+		t.Errorf("the destination already there holds %q (%v), want it untouched", got, err)
+	}
 }
 
-// stubMountTable replaces the kernel's mount table with points and err, and
-// counts the reads. Callers MUST NOT call `t.Parallel()`, as with
-// stubSyncParentDir.
-func stubMountTable(t *testing.T, points []string, err error) *int {
-	t.Helper()
-	reads := 0
-	prev := mountTable
-	mountTable = func() (map[string]bool, error) {
-		reads++
-		if err != nil {
-			return nil, err
-		}
-		m := map[string]bool{}
-		for _, p := range points {
-			m[p] = true
-		}
-		return m, nil
-	}
-	t.Cleanup(func() { mountTable = prev })
-	return &reads
-}
-
-// TestProbeDurable_RefusesAMountPointTheKernelLists pins the probe's
-// fallback where the kernel gives no mount IDs (an older kernel, or a statx a
-// policy refuses: TestWriteBytesDurable_RefusesABindMountByItsMountID is the
-// check by ID): its read of the mount table, for a mount the device cannot
-// show, a bind mount of the root's own filesystem onto a directory below the
-// root, whose source's entries are outside the walk up to the root (Codex on
-// round 6). The table is the test's, so it runs everywhere; Linux's own is
-// TestPlatformMountTableReadsTheKernels. A mount point between the file and
-// the root is refused (ErrNotUnderRoot) with nothing fsynced; a table that
-// cannot be read is ErrMountsUnknown while a directory lies between them;
-// a mount point off the path, the root's own, or one below the directories
-// that exist yet refuses nothing; and with the file's directory the root,
-// nothing lies between them and the table is not read.
+// TestProbeDurable_RefusesAMountPointTheKernelLists pins the probe's mount
+// check by the identity the platform lists for each entry, beside the write's
+// (TestWriteBytesDurable_RefusesABindMountByItsMountID): a mount point between
+// the file and the root is refused (ErrNotUnderRoot) with nothing fsynced; a
+// mount point off the path, or the root's own, refuses nothing, the probe
+// syncing each directory a write would; and the root's identity is asked for
+// even where the file's directory is the root, a platform that gives none
+// saying so (ErrMountsUnknown). Round 8's probe read the mount table where
+// the kernel gave no mount ID and matched it by spelling; no table is read
+// now (Codex on round 8).
 func TestProbeDurable_RefusesAMountPointTheKernelLists(t *testing.T) {
 	root := realTempDir(t)
 	sub := filepath.Join(root, "sub")
-	mkdirs(t, sub, filepath.Join(root, "other"))
+	other := filepath.Join(root, "other")
+	mkdirs(t, sub, other)
 	synced := stubSyncDir(t, nil)
-	stubMountIDs(t, noMountIDs)
 	path := filepath.Join(sub, "missing", "ids")
 
-	stubMountTable(t, []string{sub}, nil)
-	refusedPlainly(t, "ProbeDurable through a mount point the kernel lists", ProbeDurable(root, path), synced)
+	stubMountIDs(t, mountedAt(t, sub))
+	refusedPlainly(t, "ProbeDurable through a mount point the platform lists", ProbeDurable(root, path), synced)
 
-	*synced = nil
-	readErr := errors.New("permission denied")
-	stubMountTable(t, nil, readErr)
-	if err := ProbeDurable(root, path); !errors.Is(err, ErrMountsUnknown) || !errors.Is(err, readErr) {
-		t.Errorf("ProbeDurable with the mount table unread = %v, want ErrMountsUnknown with the read's error", err)
-	}
-	if len(*synced) != 0 {
-		t.Errorf("the probe with the mount table unread fsynced %v", *synced)
-	}
-
-	for _, points := range [][]string{{filepath.Join(root, "other")}, {root}, {filepath.Join(sub, "missing")}} {
+	for _, point := range []string{other, root} {
 		*synced = nil
-		stubMountTable(t, points, nil)
+		stubMountIDs(t, mountedAt(t, point))
 		if err := ProbeDurable(root, path); err != nil {
-			t.Errorf("ProbeDurable with mount points %v, none between the file and the root = %v, want nil", points, err)
+			t.Errorf("ProbeDurable with a mount point at %s, none between the file and the root = %v, want nil", point, err)
 		}
 		if want := []string{sub, root}; !slices.Equal(*synced, want) {
-			t.Errorf("with mount points %v the probe fsynced %v, want %v", points, *synced, want)
+			t.Errorf("with a mount point at %s the probe fsynced %v, want %v", point, *synced, want)
 		}
 	}
 
-	reads := stubMountTable(t, nil, readErr)
-	*synced = nil
-	if err := ProbeDurable(root, filepath.Join(root, "ids")); err != nil || *reads != 0 {
-		t.Errorf("ProbeDurable of a file in the root = %v after %d reads of the table, want nil and none", err, *reads)
-	}
-}
-
-// TestParseMountInfo pins the mount table's reading: the fifth field of
-// each line, a mount point, unescaped as the kernel escapes a space, a tab,
-// a newline and a backslash; and a line that does not read as one, refused,
-// since a table that does not read rules no mount out.
-func TestParseMountInfo(t *testing.T) {
-	const table = `22 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw
-28 1 259:2 / / rw,relatime shared:1 - ext4 /dev/root rw
-61 28 259:2 /srv/real /data/with\040space rw,relatime shared:1 - ext4 /dev/root rw
-62 28 259:2 /srv/back /data/back\134slash rw,relatime - ext4 /dev/root rw
-`
-	got, err := parseMountInfo([]byte(table))
-	if err != nil {
-		t.Fatalf("parseMountInfo: %v", err)
-	}
-	want := map[string]bool{"/proc": true, "/": true, "/data/with space": true, `/data/back\slash`: true}
-	if len(got) != len(want) {
-		t.Fatalf("mount points %v, want %v", got, want)
-	}
-	for p := range want {
-		if !got[p] {
-			t.Fatalf("mount points %v, want %v", got, want)
-		}
-	}
-	for _, bad := range []string{"22 28 0:21 /\n", "22 28 0:21 / proc rw - proc proc rw\n"} {
-		if _, err := parseMountInfo([]byte(bad)); err == nil {
-			t.Errorf("parseMountInfo(%q) answered no error", bad)
-		}
-	}
-}
-
-// TestPlatformMountTableReadsTheKernels pins the table the probe reads: on
-// Linux the kernel's, which lists / and /proc for every process; elsewhere
-// none, and no error.
-func TestPlatformMountTableReadsTheKernels(t *testing.T) {
-	got, err := platformMountTable()
-	if runtime.GOOS != "linux" {
-		if got != nil || err != nil {
-			t.Fatalf("platformMountTable on %s = %v, %v, want no table", runtime.GOOS, got, err)
-		}
+	if !mountIDsExpected {
 		return
 	}
-	if err != nil {
-		t.Fatalf("platformMountTable: %v", err)
+	*synced = nil
+	stubMountIDs(t, noMountIDs)
+	if err := ProbeDurable(root, filepath.Join(root, "ids")); !errors.Is(err, ErrMountsUnknown) || len(*synced) != 0 {
+		t.Errorf("ProbeDurable of a file in the root with no mount identity = %v after syncing %v, want ErrMountsUnknown and nothing synced", err, *synced)
 	}
-	for _, p := range []string{"/", "/proc"} {
-		if !got[p] {
-			t.Errorf("the kernel's mount table has no %s: %v", p, got)
+}
+
+// TestParseFdinfoMountID pins the reading of a descriptor's fdinfo listing
+// (proc(5)), where the kernel lists the mount a descriptor lies on when statx
+// gives no mount ID: the number on its mnt_id line; and none for a listing
+// without that line, or with one that does not read as a number.
+func TestParseFdinfoMountID(t *testing.T) {
+	const listing = "pos:\t0\nflags:\t012100000\nmnt_id:\t29\nino:\t1048577\n"
+	if id, ok := parseFdinfoMountID([]byte(listing)); !ok || id != 29 {
+		t.Fatalf("parseFdinfoMountID = %d, %v, want 29", id, ok)
+	}
+	for _, bad := range []string{"pos:\t0\nflags:\t02\n", "mnt_id:\tx\n", ""} {
+		if id, ok := parseFdinfoMountID([]byte(bad)); ok {
+			t.Errorf("parseFdinfoMountID(%q) = %d, true, want none", bad, id)
 		}
 	}
 }
