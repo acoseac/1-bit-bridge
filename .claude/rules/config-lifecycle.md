@@ -354,18 +354,27 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   path is refused, since `filepath.Abs` cleans it lexically while a reader
   resolves the link before it (round 6 wrote and fsynced `root/ids` for
   `root/link/../ids`, which a reader opens below where the link points, so
-  a restart read no reservation, with no crash at all); so is a symbolic
-  link strictly below `root`, whether it leads out or stays inside, found
-  by `Lstat` from `root` down, and a directory there on another filesystem,
-  its `st_dev` not `root`'s, before anything is created and again once the
-  missing directories are, for a link another writer puts in place
-  meanwhile. Round 6 walked the path as written and as it resolved
-  instead, and missed a link reached through another link and synced
-  outside `root` for a link out and back (Codex, the Claude API and Argon
-  on round 6). `root` is the caller's to vouch for: it must exist (the
-  writer never creates it), its own entry is never synced, and a link at
-  or above it, a data directory that is a link included, is the caller's
-  too: `root` is resolved once, and every path the write opens, creates and
+  a restart read no reservation, with no crash at all), and so is a path
+  whose last element names a directory, a trailing separator, `.` or `..`
+  (`NamesDirectory`, `EISDIR`: round 7 wrote `root/ids/` as `root/ids`,
+  which the engine's restart read as given and found stuck; Codex on round
+  7); so is a symbolic link strictly below `root`, whether it leads out or
+  stays inside, found by `Lstat` from `root` down; and so is a mount there
+  or at the file itself, one of another filesystem by its `st_dev`, and on
+  Linux any, by the mount ID the kernel gives each entry (statx's
+  `STATX_MNT_ID`, Linux 5.8), a bind mount of `root`'s own filesystem
+  included, whatever the path's spelling, on every write (round 7's probe
+  matched the mount table by spelling, which a filesystem that folds case
+  reaches a mount around, looked for a bind mount at New alone, and never
+  looked at the file: Codex on round 7). The checks run before anything is
+  created and again once the missing directories are, for a link another
+  writer puts in place meanwhile. Round 6 walked the path as written and as
+  it resolved instead, and missed a link reached through another link and
+  synced outside `root` for a link out and back (Codex, the Claude API and
+  Argon on round 6). `root` is the caller's to vouch for: it must exist (the
+  writer never creates it), its own entry is never synced, and a link at or
+  above it, a data directory that is a link included, is the caller's too:
+  `root` is resolved once, and every path the write opens, creates and
   fsyncs, and every name its errors give, is spelled from where it
   resolved. It refuses, before anything is created, a platform with no
   directory barrier (`ErrNoDirectoryBarrier`), a root that does not exist,
@@ -373,20 +382,25 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   is opened once and that descriptor fsynced (`syncDirAt`), so only an
   fsync's own failure is `ErrBarrierFailed`, an `*fs.PathError` naming the
   directory that would not sync: an open that fails (EACCES, EMFILE) is
-  returned as it is. `ProbeDurable(root, path)` runs the same checks and
-  barriers, without writing, on every directory a write would fsync that
-  exists now, and on Linux also refuses a mount point the kernel lists
-  strictly below `root` (`/proc/self/mountinfo`, read only when a directory
-  lies between the file and `root`; `ErrMountsUnknown` when it cannot be
-  read): a bind mount of `root`'s own filesystem shows `root`'s device, and
-  its source's entries are off the walk. Elsewhere it reads no table (a
-  mount of another filesystem is still refused by its device), and a bind
-  mount made after the probe is not looked for. **Don't count a write
-  durable without every entry up to its root, don't keep in memory which
-  entries are durable, don't delete anything to recover durability, don't
-  sync above the root, don't walk a link or a mount below the root, don't
-  clean a `..` away, and don't advise moving to another filesystem for an
-  error not marked `ErrBarrierFailed`.**
+  returned as it is. A rename that fails while the destination holds the
+  same bytes takes them only from a regular file on its directory's own
+  device and mount, asked as it takes them (`onItsDirectorysMount`): a file
+  mounted there after the checks, or a symbolic link, leaves the rename's
+  error. `ProbeDurable(root, path)` runs the same checks and barriers,
+  without writing, on every directory a write would fsync that exists now;
+  where the kernel gives no mount IDs (older than 5.8, or a statx a policy
+  refuses) it falls back to the mount table for the directories and the
+  file (`/proc/self/mountinfo`, read only when there is something to check,
+  and matched by its spelling; `ErrMountsUnknown` when it cannot be read),
+  and elsewhere than Linux it reads none (a mount of another filesystem is
+  still refused by its device). **Don't count a write durable without every
+  entry up to its root, don't keep in memory which entries are durable,
+  don't delete anything to recover durability, don't sync above the root,
+  don't walk a link or a mount below the root or at the file, don't tell a
+  mount by its spelling where the kernel gives its ID, don't clean a `..`
+  or a trailing separator away, don't take a fallback's bytes from a file
+  the directory's entry does not name, and don't advise moving to another
+  filesystem for an error not marked `ErrBarrierFailed`.**
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
   `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
@@ -395,10 +409,16 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`,
   `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier`,
   `TestWriteBytesDurable_RefusesADotDotElement`,
+  `TestWriteBytesDurable_RefusesAPathThatNamesADirectory`,
   `TestWriteBytesDurable_RefusesALinkBelowTheRoot`,
   `TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites`,
   `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot`,
   `TestWriteBytesDurable_RefusesAMountBelowTheRoot`,
+  `TestWriteBytesDurable_RefusesABindMountByItsMountID`,
+  `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`,
+  `TestWriteBytesDurable_RefusesAMountedDestination`,
+  `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`,
+  `TestPlatformMountIDReadsTheKernels`,
   `TestProbeDurable_RefusesAMountPointTheKernelLists`, `TestParseMountInfo`,
   `TestPlatformMountTableReadsTheKernels`, `TestBarrierFailuresAreMarked`,
   `TestProbeDurable_SyncsTheDirectoryItOpened` and
