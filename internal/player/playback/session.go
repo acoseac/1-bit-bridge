@@ -48,7 +48,7 @@ type session struct {
 	fault    *engine.Fault
 	// decodeErr is a decode that failed after content played: the producer
 	// plays out what was decoded before it, and the session faults.
-	decodeErr *engine.Fault
+	decodeErr          *engine.Fault
 	faultSent, finSent bool
 
 	cur  *output   // the sink that plays now, nil between two transports

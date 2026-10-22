@@ -148,7 +148,9 @@ func (tk *FakeKernel) Await(t *testing.T, what string, cond func(KernelView) boo
 // Renumber makes the node another card's, as a DAC unplugged and plugged in
 // again comes back: INFO names card from now on, and its node is
 // pcmC<card>D0p.
-func (tk *FakeKernel) Renumber(card int) { tk.k.inspect(func(k *fakeKernel) { k.info.card = int32(card) }) }
+func (tk *FakeKernel) Renumber(card int) {
+	tk.k.inspect(func(k *fakeKernel) { k.info.card = int32(card) })
+}
 
 // Busy makes every open refused with EBUSY, as while MPD holds the device,
 // until it is called with false.
@@ -182,7 +184,9 @@ func (tk *FakeKernel) FailStatusAt(frames uint64) {
 
 // ParkNextWrite parks the next WRITEI_FRAMES inside the kernel call until
 // release: never released, a kernel call that does not return.
-func (tk *FakeKernel) ParkNextWrite() (parked <-chan struct{}, release func()) { return tk.k.parkNextWrite() }
+func (tk *FakeKernel) ParkNextWrite() (parked <-chan struct{}, release func()) {
+	return tk.k.parkNextWrite()
+}
 
 // CheckClosedEach fails the test unless every open of the node was closed
 // once and nothing reached it while closed.

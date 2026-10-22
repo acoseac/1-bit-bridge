@@ -322,15 +322,15 @@ func (b tee) Cut(ctx context.Context, s engine.SessionID, from engine.Occurrence
 // nopEvents is the engine's side of a session a test drives itself.
 type nopEvents struct{}
 
-func (nopEvents) Prepared(engine.SessionID, engine.OccurrenceID, engine.Join)        {}
-func (nopEvents) Refused(engine.SessionID, engine.OccurrenceID, engine.Unplayable)   {}
-func (nopEvents) Submitted(engine.SessionID, engine.OccurrenceID)                    {}
-func (nopEvents) Audible(engine.SessionID, engine.OccurrenceID)                      {}
-func (nopEvents) Position(engine.SessionID, engine.Position)                         {}
-func (nopEvents) Fault(engine.SessionID, engine.Fault)                               {}
-func (nopEvents) Finished(engine.SessionID)                                          {}
-func (nopEvents) DeviceReleased(engine.SessionID)                                    {}
-func (nopEvents) Released(engine.SessionID)                                          {}
+func (nopEvents) Prepared(engine.SessionID, engine.OccurrenceID, engine.Join)      {}
+func (nopEvents) Refused(engine.SessionID, engine.OccurrenceID, engine.Unplayable) {}
+func (nopEvents) Submitted(engine.SessionID, engine.OccurrenceID)                  {}
+func (nopEvents) Audible(engine.SessionID, engine.OccurrenceID)                    {}
+func (nopEvents) Position(engine.SessionID, engine.Position)                       {}
+func (nopEvents) Fault(engine.SessionID, engine.Fault)                             {}
+func (nopEvents) Finished(engine.SessionID)                                        {}
+func (nopEvents) DeviceReleased(engine.SessionID)                                  {}
+func (nopEvents) Released(engine.SessionID)                                        {}
 
 // direct is the backend over the fake kernel with no engine: a test calls
 // it as the engine would, and reads what it reported.
