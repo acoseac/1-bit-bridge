@@ -336,6 +336,37 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `Chmod` / `Sync` / parent-dir fsync — **don't collapse them into a shared
   `WriteBytes`**, which silently drops e.g. the auth store's belt-and-braces
   `Chmod(0o600)`.
+- **`atomicwrite.WriteBytesDurable` is the strict writer: nil means the
+  file's bytes and every directory entry naming them were fsynced, and a
+  failed directory fsync is the write's error, never tolerated as
+  `WriteBytes` tolerates it once its rename has landed** (B470 PR 4b1; its
+  one caller is the player's ID and token reservation, the "No ID and no
+  token is handed out twice" bullet in `player.md`). It refuses a platform
+  with no directory barrier before it writes anything
+  (`ErrNoDirectoryBarrier`: Windows, whose `fsutil.SyncParentDir` is a
+  no-op that answers nil), syncs each directory it creates in its parent
+  before the file, and takes a race winner's equal bytes only once it has
+  synced them and their entry itself. A directory it created whose entry
+  it could not sync stays where it is, and the process keeps it: every
+  later strict write below it runs that barrier again before it reports
+  success, until one succeeds. Round 4 removed such a directory instead,
+  which raced every other writer: it deleted a directory one made between
+  the look for what was missing and the creation, and a regular file one
+  put at the path, and could not remove one another had filled, which the
+  next write then took for a directory that was always there.
+  `ProbeDurable` asks the same of a directory without writing: not a
+  directory is `ENOTDIR`, one it cannot stat or open is that error, and
+  only a barrier that ran and failed is marked `ErrBarrierFailed`, the one
+  case another filesystem mends. **Don't count a write durable without its
+  directory barrier, don't delete anything to recover durability, and
+  don't advise moving to another filesystem for an error not marked
+  `ErrBarrierFailed`.**
+  `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
+  `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
+  `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`,
+  `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier`,
+  `TestBarrierFailuresAreMarked` and
+  `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.
