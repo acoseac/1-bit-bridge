@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -649,7 +650,7 @@ func TestAPanicInTheOutputsBodyClosesItsFlight(t *testing.T) {
 	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
 	rig.mpd.set(func(m *scriptedMPD) { m.panics = map[string]bool{"find": true} })
 	hs, token := newOutputsHTTP(t, "fp", rig.cfg)
-	get := func() (int, error) {
+	get := func() (int, []byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hs.URL+"/v1/outputs", nil)
@@ -659,17 +660,22 @@ func TestAPanicInTheOutputsBodyClosesItsFlight(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := hs.Client().Do(req)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		defer resp.Body.Close()
-		_, err = io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode, err
+		raw, err := io.ReadAll(resp.Body)
+		return resp.StatusCode, raw, err
 	}
-	first, err1 := get()
+	first, _, err1 := get()
 	rig.mpd.set(func(m *scriptedMPD) { m.panics = nil })
-	second, err2 := get()
+	second, raw, err2 := get()
 	if err2 != nil || second != http.StatusOK {
 		t.Fatalf("the call after a build that panicked: status %d, %v", second, err2)
+	}
+	// A build of its own, not the panicked one's empty body kept.
+	var body OutputsResponse
+	if err := json.Unmarshal(raw, &body); err != nil || len(body.Outputs) != 1 || body.Outputs[0].DAC == nil || body.Outputs[0].DAC.Card != 5 {
+		t.Fatalf("the call after a build that panicked: %v\n%s", err, raw)
 	}
 	if err1 != nil || first != http.StatusInternalServerError {
 		t.Fatalf("the call whose build panicked: status %d, %v; want 500", first, err1)

@@ -1,6 +1,7 @@
 package alsa
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -164,18 +165,23 @@ func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 // not. Either one that is there leaves no definition used.
 func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
 	plain := "pcm.hwcard { type hw\n    card \"Audio\" }\n"
+	tooMany := map[string]string{}
+	for i := 0; i <= maxAsoundFiles; i++ {
+		tooMany[fmt.Sprintf("etc/alsa/conf.d/%03d.conf", i)] = "# nothing\n"
+	}
 	for name, tc := range map[string]struct {
 		files      map[string]string
 		dir        string
 		unread, ok bool
 	}{
-		"nothing there":                 {files: map[string]string{}, ok: true},
-		"asound.conf alone":             {files: map[string]string{"etc/asound.conf": plain}, ok: true},
-		"asound.conf a directory":       {files: map[string]string{"etc/alsa/conf.d/10-a.conf": plain}, dir: "etc/asound.conf", unread: true},
-		"a conf.d entry a directory":    {files: map[string]string{"etc/asound.conf": plain}, dir: "etc/alsa/conf.d/20-b.conf", unread: true},
-		"a file past the read's bounds": {files: map[string]string{"etc/asound.conf": plain + strings.Repeat("#\n", maxFileBytes)}, unread: true},
-		"a top-level @hooks":            {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
-		"a value the parser refuses":    {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0 }\n"}},
+		"nothing there":                  {files: map[string]string{}, ok: true},
+		"asound.conf alone":              {files: map[string]string{"etc/asound.conf": plain}, ok: true},
+		"asound.conf a directory":        {files: map[string]string{"etc/alsa/conf.d/10-a.conf": plain}, dir: "etc/asound.conf", unread: true},
+		"a conf.d entry a directory":     {files: map[string]string{"etc/asound.conf": plain}, dir: "etc/alsa/conf.d/20-b.conf", unread: true},
+		"a file past the read's bounds":  {files: map[string]string{"etc/asound.conf": plain + strings.Repeat("#\n", maxFileBytes)}, unread: true},
+		"more files than the read takes": {files: tooMany, unread: true},
+		"a top-level @hooks":             {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
+		"a value the parser refuses":     {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0 }\n"}},
 	} {
 		root := t.TempDir()
 		writeTree(t, root, tc.files)
