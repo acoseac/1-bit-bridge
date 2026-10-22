@@ -461,9 +461,11 @@ func TestProbeDurable(t *testing.T) {
 // TestBarrierFailuresAreMarked pins ErrBarrierFailed: in what ProbeDurable
 // and WriteBytesDurable return it marks a directory fsync that failed, for
 // the file's entry and for a directory the write created, beside the
-// fsync's own error; it marks nothing else, neither a regular file where the
-// directory should be nor a platform with no barrier (nor an open that
-// failed: TestProbeDurable_SyncsTheDirectoryItOpened and the two
+// fsync's own error, as an *fs.PathError naming the directory that would not
+// sync, though the barrier here answers a bare error; it marks nothing else,
+// neither a regular file where the directory should be nor a platform with
+// no barrier (nor an open that failed:
+// TestProbeDurable_SyncsTheDirectoryItOpened and the two
 // unreadable-directory tests).
 func TestBarrierFailuresAreMarked(t *testing.T) {
 	root := t.TempDir()
@@ -476,6 +478,9 @@ func TestBarrierFailuresAreMarked(t *testing.T) {
 	} {
 		if !errors.Is(err, ErrBarrierFailed) || !errors.Is(err, syncErr) {
 			t.Errorf("%s with the barrier failing = %v, want its failure marked ErrBarrierFailed", name, err)
+		}
+		if pe := (*fs.PathError)(nil); !errors.As(err, &pe) || pe.Path != root {
+			t.Errorf("%s with the barrier failing = %v, want an *fs.PathError naming %s, the directory that would not sync", name, err, root)
 		}
 	}
 	file := filepath.Join(root, "existing-file")

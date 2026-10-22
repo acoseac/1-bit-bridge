@@ -88,7 +88,8 @@ var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync 
 // and FUSE mounts answer every directory fsync (EINVAL, ENOTSUP), and never
 // that the directory could not be opened (one this process cannot read, or
 // no descriptor left): a caller that advises moving to another filesystem
-// asks errors.Is first.
+// asks errors.Is first. The failure it marks is an *fs.PathError naming the
+// directory that would not sync, which errors.As finds.
 var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
 
 // ErrNotUnderRoot is WriteBytesDurable's and ProbeDurable's refusal of a path
@@ -553,11 +554,14 @@ func sameAndSynced(path string, data []byte) (bool, error) {
 
 // syncDirAt is the strict barrier on dir: it opens dir and fsyncs that
 // descriptor, which makes the entries dir holds durable. Only the fsync's
-// own failure is marked ErrBarrierFailed. An open that fails (a directory
-// this process cannot read, no descriptor left) is returned as it is, since
-// no fsync ran, and so is a platform with no barrier
-// (ErrNoDirectoryBarrier). The close of a descriptor opened to read is not
-// checked: the fsync has answered by then.
+// own failure is marked ErrBarrierFailed, and it is an *fs.PathError naming
+// dir, as (*os.File).Sync's is: a barrier a test sets that answers another
+// error is wrapped in one, so a caller that names the directory that failed
+// (the player engine's New) finds it in what is returned whatever the
+// barrier. An open that fails (a directory this process cannot read, no
+// descriptor left) is returned as it is, since no fsync ran, and so is a
+// platform with no barrier (ErrNoDirectoryBarrier). The close of a
+// descriptor opened to read is not checked: the fsync has answered by then.
 func syncDirAt(dir string) error {
 	if syncDir == nil {
 		return ErrNoDirectoryBarrier
@@ -568,7 +572,11 @@ func syncDirAt(dir string) error {
 	}
 	defer func() { _ = d.Close() }()
 	if err := syncDir(d); err != nil {
-		return &barrierError{err: fmt.Errorf("sync dir %q: %w", dir, err)}
+		var pe *fs.PathError
+		if !errors.As(err, &pe) {
+			err = &fs.PathError{Op: "sync", Path: dir, Err: err}
+		}
+		return &barrierError{err: err}
 	}
 	return nil
 }

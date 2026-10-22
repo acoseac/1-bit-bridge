@@ -309,6 +309,70 @@ func TestNewSaysWhenTheReservationDirectoryCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestNewNamesTheDirectoryTheProbeRefused pins the directory New's refusal
+// names: the one the probe's error names, the reservation file's directory or
+// one above it up to the data directory. Argon on round 6: a barrier that
+// failed on the directory above the reservation file's was blamed on the
+// reservation file's own, which had synced. Here through the real probe, its
+// barrier failing for that directory alone, and through the probe's seam, a
+// directory above it that cannot be read, or is not a directory; and an error
+// that names no directory falls back to the reservation file's. The barrier
+// and the probe are the test's, so it runs on every platform.
+func TestNewNamesTheDirectoryTheProbeRefused(t *testing.T) {
+	h := newHarness(t)
+	// The data directory as its links resolve (the system's temporary
+	// directory is a link on macOS), so the barrier is asked for the names
+	// built here.
+	data, err := filepath.EvalSymlinks(h.dir)
+	h.must("resolve the data directory", err)
+	above := filepath.Join(data, "player")
+	own := filepath.Join(above, "ids")
+	h.must("make the reservation's directory", os.MkdirAll(own, 0o700))
+	reserve := filepath.Join(own, "reserve.json")
+	errNoSync := errors.New("invalid argument")
+	// Registered before the engine is built, so it is restored after every
+	// engine goroutine that could read it has ended.
+	restore := atomicwrite.SetSyncDirForTest(func(dir string) error {
+		if dir == above {
+			return errNoSync
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+	h.be = newFakeBackend(t)
+	for _, tc := range []struct {
+		name  string
+		probe func(string) error // nil: the real one
+		// begins is how the refusal begins: it names the directory that
+		// failed.
+		begins string
+	}{
+		{"a barrier that failed above the reservation's directory", nil, "player: the directory " + above + " cannot be synced"},
+		{"a directory above it that cannot be read", func(string) error {
+			return &fs.PathError{Op: "open", Path: above, Err: syscall.EACCES}
+		}, "player: the directory " + above + " cannot be read"},
+		{"a directory above it that is a regular file", func(string) error {
+			return &fs.PathError{Op: "probe", Path: above, Err: syscall.ENOTDIR}
+		}, "player: " + above + " is not a directory"},
+		{"an error that names no directory", func(string) error { return syscall.EIO }, "player: the directory " + own + " cannot be read"},
+	} {
+		cfg := h.config()
+		cfg.DataDir, cfg.ReservePath = data, reserve
+		cfg.seams.probe = tc.probe
+		_, err := New(cfg)
+		if err == nil {
+			t.Errorf("%s: New built an engine", tc.name)
+			continue
+		}
+		if !strings.HasPrefix(err.Error(), tc.begins) {
+			t.Errorf("%s: New = %q, want it to begin %q", tc.name, err, tc.begins)
+		}
+		if !strings.HasPrefix(tc.begins, "player: the directory "+own) && strings.Contains(err.Error(), own+" ") {
+			t.Errorf("%s: New = %q, which blames the reservation file's own directory %s", tc.name, err, own)
+		}
+	}
+}
+
 // TestABadReservationFileIsMovedAside pins the reservation file's own
 // checks: moved aside, logged, and the IDs then start past the queue
 // file's.
