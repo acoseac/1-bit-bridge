@@ -2,6 +2,12 @@
 
 package fsutil
 
+// SyncsParentDir is false here: SyncParentDir is a no-op on Windows, so a
+// write is atomic but never made durable by it. A caller that must not
+// count a write as durable without the barrier
+// (atomicwrite.WriteBytesDurable) refuses on it.
+const SyncsParentDir = false
+
 // SyncParentDir is a no-op on Windows. NTFS journals metadata updates
 // implicitly once the file's data is durable (post the file-handle
 // Sync() in FsyncFileAndParent), so there's no separate directory-entry

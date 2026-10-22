@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,8 +128,21 @@ func TestAStartWithoutItsReservationPublishesNoToken(t *testing.T) {
 // whose directory entry could not be fsynced is not made, so nothing it
 // covers is handed out, and a crash that rolls the reservation file back
 // to its last durable content (what an entry that was never fsynced
-// allows) never yields an ID or a token a run handed out before.
+// allows) never yields an ID or a token a run handed out before. The
+// barrier is the test's on every platform, one that answers and then one
+// that fails, so it runs on Windows too, which has none of its own.
 func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
+	var broken atomic.Bool
+	errNoSync := errors.New("fsync: input/output error")
+	// Registered before the harness, so it is restored after every engine
+	// goroutine that could read it has ended.
+	prev := atomicwrite.SetSyncParentDirForTest(func(string) error {
+		if broken.Load() {
+			return errNoSync
+		}
+		return nil
+	})
+	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
 	h := newHarness(t)
 	h.tweak = func(c *Config) { c.seams.writeReserve = nil }
 	h.boot()
@@ -142,9 +156,7 @@ func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 	durable, err := os.ReadFile(h.reservePath())
 	h.must("read the reservation file", err)
 
-	broken := errors.New("fsync: input/output error")
-	prev := atomicwrite.SetSyncParentDirForTest(func(string) error { return broken })
-	t.Cleanup(func() { atomicwrite.SetSyncParentDirForTest(prev) })
+	broken.Store(true)
 	h.boot()
 	sn := h.snap()
 	published = max(published, sn.Token())
@@ -167,7 +179,7 @@ func TestAReservationIsMadeOnlyWithItsDirectoryEntry(t *testing.T) {
 	h.files.mu.Lock()
 	h.files.dropQueue = false
 	h.files.mu.Unlock()
-	atomicwrite.SetSyncParentDirForTest(prev)
+	broken.Store(false)
 	h.boot()
 	if tok := h.snap().Token(); tok <= published {
 		t.Fatalf("after the rollback the token is %d, not past %d, which a run published", tok, published)

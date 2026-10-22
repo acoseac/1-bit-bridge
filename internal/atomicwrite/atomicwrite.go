@@ -47,12 +47,15 @@
 // out nothing a file covers until the file is durable (the player's ID
 // and token reservation, B470 PR 4b1): a rename whose directory entry
 // is not durable can roll back at a crash, and what was handed out from
-// it would be handed out again.
+// it would be handed out again. Where there is no barrier at all
+// (Windows), `WriteBytesDurable` refuses with `ErrNoDirectoryBarrier`
+// and the others write as before.
 package atomicwrite
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,6 +67,13 @@ import (
 )
 
 var logger = logging.Component("atomicwrite")
+
+// ErrNoDirectoryBarrier is WriteBytesDurable's refusal on a platform with no
+// directory barrier (Windows, where fsutil.SyncParentDir is a no-op): a
+// rename there is atomic, and nothing makes the directory entry naming it
+// durable, so no write can be counted durable. It wraps
+// errors.ErrUnsupported.
+var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync a directory, so no write here is made durable: %w", errors.ErrUnsupported)
 
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
@@ -110,16 +120,30 @@ func SetRenameFuncForTest(fn func(src, dst string) error) func(src, dst string) 
 // `soxLookPath` / `soxProbeCommand` in internal/transcode,
 // `afterExtractHookForTests` in internal/manifest, `Pool.runner`).
 //
-// On Windows `fsutil.SyncParentDir` is a compile-time no-op — see its
-// docblock for why FlushFileBuffers can't service a directory handle.
-var syncParentDir = fsutil.SyncParentDir
+// It is nil on a platform that has no barrier, which is also the platform
+// seam a test sets: on Windows `fsutil.SyncParentDir` is a compile-time
+// no-op (`fsutil.SyncsParentDir` is false; see its docblock for why
+// FlushFileBuffers can't service a directory handle), and a no-op that
+// answers nil is not one a caller can tell from a barrier that ran.
+// commitDirEntry then has nothing to run, and WriteBytesDurable refuses.
+var syncParentDir = platformBarrier()
+
+// platformBarrier is fsutil.SyncParentDir where it is a barrier, and nil
+// where it is a no-op.
+func platformBarrier() func(path string) error {
+	if !fsutil.SyncsParentDir {
+		return nil
+	}
+	return fsutil.SyncParentDir
+}
 
 // SetSyncParentDirForTest swaps the parent-directory barrier for a test
 // in another package and returns the previous one, the
-// `SetRenameFuncForTest` pattern. The seam is process-global: a test that
-// uses it MUST NOT call `t.Parallel()`, and restores it in a `t.Cleanup`.
-// Public only because the player engine's tests drive its reservation
-// through the real `WriteBytesDurable` with a barrier that fails.
+// `SetRenameFuncForTest` pattern; nil is a platform with no barrier. The
+// seam is process-global: a test that uses it MUST NOT call `t.Parallel()`,
+// and restores it in a `t.Cleanup`. Public only because the player engine's
+// tests drive its reservation through the real `WriteBytesDurable` with a
+// barrier that fails, and, on Windows too, with one that answers.
 func SetSyncParentDirForTest(fn func(path string) error) func(path string) error {
 	prev := syncParentDir
 	syncParentDir = fn
@@ -160,6 +184,9 @@ var dirSyncWarnOnce sync.Once
 // WriteBytesDurable alone does not come here: its caller asked for the
 // failure (durableDirEntry).
 func commitDirEntry(path string) {
+	if syncParentDir == nil {
+		return
+	}
 	if err := syncParentDir(path); err != nil {
 		dirSyncWarnOnce.Do(func() {
 			logger.Warn("parent directory fsync failed; atomic writes on this filesystem are not crash-durable (logged once per process)",
@@ -270,8 +297,12 @@ func renameRetry(ctx context.Context, src, dst string) error {
 // durableDirEntry is the barrier WriteBytesDurable requires: unlike
 // commitDirEntry's, its failure is the write's, because the caller hands
 // out nothing the file covers until the directory entry naming it is
-// durable.
+// durable. A platform with no barrier is ErrNoDirectoryBarrier, never a
+// barrier that ran.
 func durableDirEntry(path string) error {
+	if syncParentDir == nil {
+		return ErrNoDirectoryBarrier
+	}
 	if err := syncParentDir(path); err != nil {
 		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
 	}
@@ -330,12 +361,19 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // the new bytes in place, so the caller counts the write as not made, never
 // as undone. A rename that fails while the destination already holds the
 // same bytes is taken as WriteBytes takes it, once the directory is synced.
+//
+// On a platform with no directory barrier (Windows) it refuses with
+// ErrNoDirectoryBarrier before it writes anything: no write there could be
+// counted durable. WriteBytes and the renames keep their best effort there.
 func WriteBytesDurable(path string, data []byte, tmpPrefix string) error {
 	return writeBytes(path, data, tmpPrefix, true)
 }
 
 // writeBytes is WriteBytes, or WriteBytesDurable when durable is set.
 func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
+	if durable && syncParentDir == nil {
+		return ErrNoDirectoryBarrier
+	}
 	dir := filepath.Dir(path)
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err

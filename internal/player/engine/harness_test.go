@@ -158,7 +158,12 @@ func (f *fakeFiles) writeReserve(path string, data []byte) error {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return fmt.Errorf("the test cannot read a reservation write: %w", err)
 	}
-	if err := atomicwrite.WriteBytesDurable(path, data, ".player-ids-*.tmp"); err != nil {
+	// The fake writes as the queue file is written, on every platform: the
+	// strict writer refuses one with no directory barrier (Windows, where
+	// this suite runs too). The reservation's own durability is pinned
+	// through the real writer with the barrier replaced
+	// (TestAReservationIsMadeOnlyWithItsDirectoryEntry).
+	if err := atomicwrite.WriteBytes(path, data, ".player-ids-*.tmp"); err != nil {
 		return err
 	}
 	f.reserves = append(f.reserves, rec)

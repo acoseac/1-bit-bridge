@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -32,6 +33,64 @@ func stubSyncParentDir(t *testing.T, ret error) *[]string {
 	}
 	t.Cleanup(func() { syncParentDir = prev })
 	return &seen
+}
+
+// noDirectoryBarrier sets the platform seam to a platform with no
+// directory barrier (Windows, where fsutil.SyncsParentDir is false) and
+// restores it on cleanup. Callers MUST NOT call `t.Parallel()`, as with
+// stubSyncParentDir.
+func noDirectoryBarrier(t *testing.T) {
+	t.Helper()
+	prev := syncParentDir
+	syncParentDir = nil
+	t.Cleanup(func() { syncParentDir = prev })
+}
+
+// TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier pins the
+// strict writer on a platform with no directory barrier, through the
+// platform seam: a rename there is atomic and never made durable, so
+// WriteBytesDurable refuses with ErrNoDirectoryBarrier, an
+// errors.ErrUnsupported, before it writes anything, the directory it would
+// create included. WriteBytes, best effort, writes as it always has.
+func TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier(t *testing.T) {
+	noDirectoryBarrier(t)
+	root := t.TempDir()
+	dst := filepath.Join(root, "missing", "reserved.json")
+	err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp")
+	if !errors.Is(err, ErrNoDirectoryBarrier) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("WriteBytesDurable with no directory barrier = %v, want ErrNoDirectoryBarrier, an errors.ErrUnsupported", err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("the refused write left %v (%v) behind, want nothing", entries, err)
+	}
+	cover := filepath.Join(root, "cover.jpg")
+	if err := WriteBytes(cover, []byte("cover"), ".caa-*.jpg.tmp"); err != nil {
+		t.Fatalf("WriteBytes with no directory barrier = %v, want nil: best effort is unchanged", err)
+	}
+	if got, err := os.ReadFile(cover); err != nil || string(got) != "cover" {
+		t.Fatalf("WriteBytes wrote %q, %v", got, err)
+	}
+}
+
+// TestWriteBytesDurable_OnThisPlatform pins the strict writer on the
+// platform the test runs on, with no seam replaced: on Windows, whose
+// barrier is a no-op, it refuses; everywhere else it writes, through a real
+// directory fsync.
+func TestWriteBytesDurable_OnThisPlatform(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "reserved.json")
+	err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp")
+	if runtime.GOOS == "windows" {
+		if !errors.Is(err, ErrNoDirectoryBarrier) {
+			t.Fatalf("WriteBytesDurable on Windows = %v, want ErrNoDirectoryBarrier", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("WriteBytesDurable: %v", err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
+		t.Fatalf("destination %q, %v", got, err)
+	}
 }
 
 // TestWriteBytes_SyncsParentDirectory pins the durability barrier on
