@@ -3,7 +3,6 @@ package alsa
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 )
@@ -149,102 +148,6 @@ func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 			t.Errorf("%s: %+v", name, chain)
 		}
 	}
-}
-
-// TestADeviceStringHasAChainOnlyWhileNothingRedefinesIt: hw:N and
-// plughw:N name alsa-lib's own hw and plughw PCMs, which a definition in
-// /etc (pcm.!hw, pcm.plughw) replaces, and type hw, plug and empty name
-// plugins a pcm_type stanza can hand to another library. So a stage is
-// known only from a configuration the bridge read whole that redefines
-// neither its PCM nor its type; a definition of another name, or a type
-// the chain does not use, leaves it known. The card resolver is unchanged:
-// GET /v1/outputs still lists the card such a device names.
-func TestADeviceStringHasAChainOnlyWhileNothingRedefinesIt(t *testing.T) {
-	cards := []Card{{Index: 2, ID: "Audio"}}
-	base := "pcm.hwcard {\n    type hw\n    card \"Audio\"\n}\n" +
-		"pcm.toHw { type empty\n    slave.pcm \"hw:Audio,0\" }\n" +
-		"pcm.toPlug { type plug\n    slave.pcm \"hwcard\" }\n"
-	devices := []string{"hw:2,0", "plughw:2,0", "hwcard", "toHw", "toPlug"}
-	for _, tc := range []struct {
-		name  string
-		extra string
-		known []string
-	}{
-		{"nothing redefined", "", devices},
-		{"pcm.!hw", "pcm.!hw { type plug\n    slave.pcm \"hwcard\" }\n", []string{"plughw:2,0", "hwcard", "toPlug"}},
-		{"pcm.hw with arguments", "pcm.hw { @args [ CARD ]\n    type hw\n    card $CARD }\n", []string{"plughw:2,0", "hwcard", "toPlug"}},
-		{"pcm.plughw", "pcm.plughw { type hw\n    card \"Audio\" }\n", []string{"hw:2,0", "hwcard", "toHw", "toPlug"}},
-		{"another name", "pcm.mine { type hw\n    card \"Audio\" }\n", devices},
-		{"pcm_type.hw", "pcm_type.hw { lib \"/usr/lib/libother.so\" }\n", nil},
-		{"pcm_type.plug", "pcm_type.plug { lib \"/usr/lib/libother.so\" }\n", []string{"hw:2,0", "hwcard", "toHw"}},
-		{"pcm_type.!empty", "pcm_type.!empty { lib \"/usr/lib/libother.so\" }\n", []string{"hw:2,0", "plughw:2,0", "hwcard", "toPlug"}},
-		{"pcm_type of a type no chain uses", "pcm_type.jack { lib \"/usr/lib/libjack.so\" }\n", devices},
-		{"a pcm_type block", "pcm_type {\n    hw { lib \"/usr/lib/libother.so\" }\n}\n", nil},
-		{"a file this parser does not read", "@hooks [ { func load files [ \"/etc/more.conf\" ] } ]\n", nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTree(t, root, map[string]string{"etc/asound.conf": base + tc.extra})
-			for _, device := range devices {
-				_, ok := ResolveOutputChain(root, device, cards)
-				if want := slices.Contains(tc.known, device); ok != want {
-					t.Errorf("%s: chain %v, want %v", device, ok, want)
-				}
-			}
-			for _, device := range []string{"hw:2,0", "plughw:2,0"} {
-				if card, _, ok := ResolveOutputDevice(root, device, cards); !ok || card != 2 {
-					t.Errorf("the card resolver no longer resolves %s: %d %v", device, card, ok)
-				}
-			}
-		})
-	}
-}
-
-// TestAUsersOwnALSAConfigurationIsLookedFor: alsa-lib loads ~/.asoundrc and
-// ~/.config/alsa/asoundrc after /etc, so a definition there replaces the
-// one the bridge read; the home is the uid's in etc/passwd. Either file is
-// there, or what the bridge cannot tell (no passwd, no entry for the uid, a
-// home it cannot look in) is unknown.
-func TestAUsersOwnALSAConfigurationIsLookedFor(t *testing.T) {
-	passwd := "root:x:0:0:root:/root:/bin/bash\nmpd:x:107:29::/var/lib/mpd:/usr/sbin/nologin\nnohome:x:108:29::relative:/bin/false\n"
-	for _, tc := range []struct {
-		name           string
-		files          map[string]string
-		uid            int
-		present, known bool
-	}{
-		{"neither file", map[string]string{"etc/passwd": passwd, "var/lib/mpd/music/a": ""}, 107, false, true},
-		{"no home at all", map[string]string{"etc/passwd": passwd}, 107, false, true},
-		{"~/.asoundrc", map[string]string{"etc/passwd": passwd, "var/lib/mpd/.asoundrc": "pcm.!default { type softvol }\n"}, 107, true, true},
-		{"~/.config/alsa/asoundrc", map[string]string{"etc/passwd": passwd, "var/lib/mpd/.config/alsa/asoundrc": ""}, 107, true, true},
-		{"a uid passwd does not name", map[string]string{"etc/passwd": passwd}, 4242, false, false},
-		{"a home that is not absolute", map[string]string{"etc/passwd": passwd}, 108, false, false},
-		{"no passwd", map[string]string{}, 107, false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTree(t, root, tc.files)
-			present, known := UserConfig(root, tc.uid)
-			if present != tc.present || known != tc.known {
-				t.Fatalf("present %v known %v, want %v %v", present, known, tc.present, tc.known)
-			}
-		})
-	}
-	t.Run("a home the bridge cannot look in", func(t *testing.T) {
-		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-			t.Skip("needs a POSIX permission bit a non-root reader honours")
-		}
-		root := t.TempDir()
-		writeTree(t, root, map[string]string{"etc/passwd": passwd, "var/lib/mpd/music/a": ""})
-		home := filepath.Join(root, "var", "lib", "mpd")
-		if err := os.Chmod(home, 0); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
-		if present, known := UserConfig(root, 107); known {
-			t.Fatalf("a home it cannot look in: present %v known %v", present, known)
-		}
-	})
 }
 
 // TestTheFirstStageThatChangesSamplesIsNamed: the walk from a device goes

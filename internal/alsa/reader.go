@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // DefaultProcRoot is the host's /proc, which a zero Reader reads.
@@ -42,31 +40,6 @@ type Snapshot struct {
 	Cards      []CardReading `json:"cards"`
 	// Problems are what the cards file itself could not say.
 	Problems []string `json:"problems"`
-	// Uptime is the first field of /proc/uptime, read once a reading: the
-	// seconds since the system booted, which ProcessAge measures an owner's
-	// process against. Nil when it could not be read.
-	Uptime *float64 `json:"uptime"`
-}
-
-// UserHZ is the kernel's USER_HZ, the clock ticks a second /proc counts a
-// process's start in: 100 on every architecture this bridge builds for
-// (include/asm-generic/param.h, which x86 and arm64 use).
-const UserHZ = 100
-
-// ProcessAge is how long before this reading's uptime o's process started:
-// the uptime less the start's ticks. ok is false when either was not read,
-// or the start is after the uptime. /proc/uptime prints hundredths of a
-// second, so the uptime is taken to the hundredth.
-func (s Snapshot) ProcessAge(o *Owner) (time.Duration, bool) {
-	if o == nil || o.StartTicks == nil || s.Uptime == nil {
-		return 0, false
-	}
-	up := time.Duration(math.Round(*s.Uptime*100)) * (time.Second / 100)
-	started := time.Duration(*o.StartTicks) * (time.Second / UserHZ)
-	if started > up {
-		return 0, false
-	}
-	return up - started, true
 }
 
 // CardReading is one card and what its directory says about it.
@@ -126,12 +99,6 @@ type Owner struct {
 	// is the same Name; otherwise it is the Name line of
 	// /proc/<pid>/status, with comm the same fallback.
 	Process *string `json:"process"`
-	// UID is the user the thread runs as: the real uid, the first value of
-	// the Uid line of the same /proc/<tid>/status.
-	UID *int `json:"uid"`
-	// StartTicks is when the process started, in clock ticks (UserHZ) after
-	// the system booted: field 22 of /proc/<pid>/stat.
-	StartTicks *int64 `json:"startTicks"`
 }
 
 // RawFile is one file a reading read, verbatim, for capturing a box's
@@ -241,66 +208,7 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 	for _, c := range cards {
 		snap.Cards = append(snap.Cards, t.card(c))
 	}
-	if b, ok := t.procFile("uptime"); ok {
-		snap.Uptime = uptimeSeconds(b)
-	}
 	return snap, nil
-}
-
-// uptimeSeconds is /proc/uptime's first field, which the kernel prints
-// "%lu.%02lu": the seconds since boot. Nil when it does not read so.
-func uptimeSeconds(b []byte) *float64 {
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return nil
-	}
-	whole, frac, ok := strings.Cut(fields[0], ".")
-	if !ok || !cardNumber(whole) || len(frac) != 2 || !cardNumber(frac) {
-		return nil
-	}
-	v, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return nil
-	}
-	return &v
-}
-
-// startTicks is field 22 of a /proc/<pid>/stat, starttime: the clock ticks
-// after boot at which the process started. The second field is the command
-// name in parentheses, which may itself hold spaces and parentheses, so the
-// fields are counted from the last closing parenthesis.
-func startTicks(b []byte) *int64 {
-	s := string(b)
-	end := strings.LastIndexByte(s, ')')
-	if end < 0 || !strings.Contains(s[:end], "(") {
-		return nil
-	}
-	// Field 3, the state, is the first after the name.
-	fields := strings.Fields(s[end+1:])
-	const at = 22 - 3
-	if len(fields) <= at || !cardNumber(fields[at]) {
-		return nil
-	}
-	n, err := strconv.ParseInt(fields[at], 10, 64)
-	if err != nil {
-		return nil
-	}
-	return &n
-}
-
-// statusUID reads the real uid, the first value of the Uid line of a /proc
-// status file.
-func statusUID(b []byte) (int, bool) {
-	for _, l := range lines(b) {
-		if v, ok := strings.CutPrefix(l, "Uid:"); ok {
-			f := strings.Fields(v)
-			if len(f) == 0 {
-				return 0, false
-			}
-			return atoiNonNeg(f[0])
-		}
-	}
-	return 0, false
 }
 
 // walk is one reading in progress.
@@ -457,10 +365,7 @@ func (t walk) owner(tid int) *Owner {
 	if tid <= 0 {
 		return o
 	}
-	name, haveName, pid, havePID, uid, haveUID := t.taskStatus(tid)
-	if haveUID {
-		o.UID = &uid
-	}
+	name, haveName, pid, havePID := t.taskStatus(tid)
 	if !haveName {
 		if n, ok := t.comm(tid); ok {
 			name, haveName = n, true
@@ -473,9 +378,6 @@ func (t walk) owner(tid int) *Owner {
 		return o
 	}
 	o.PID = &pid
-	if b, ok := t.procFile(strconv.Itoa(pid) + "/stat"); ok {
-		o.StartTicks = startTicks(b)
-	}
 	if pid == tid {
 		if haveName {
 			o.Process = &name
@@ -488,22 +390,21 @@ func (t walk) owner(tid int) *Owner {
 	return o
 }
 
-// taskStatus reads Name, Tgid and the real uid from one /proc/<id>/status.
-func (t walk) taskStatus(id int) (name string, haveName bool, pid int, havePID bool, uid int, haveUID bool) {
+// taskStatus reads Name and Tgid from one /proc/<id>/status.
+func (t walk) taskStatus(id int) (name string, haveName bool, pid int, havePID bool) {
 	b, ok := t.procFile(strconv.Itoa(id) + "/status")
 	if !ok {
-		return "", false, 0, false, 0, false
+		return "", false, 0, false
 	}
 	name, haveName = statusName(b)
 	pid, havePID = tgid(b)
-	uid, haveUID = statusUID(b)
-	return name, haveName, pid, havePID, uid, haveUID
+	return name, haveName, pid, havePID
 }
 
 // taskName is a task's name: the Name line of its status, or comm when
 // that file has none.
 func (t walk) taskName(id int) (string, bool) {
-	name, haveName, _, _, _, _ := t.taskStatus(id)
+	name, haveName, _, _ := t.taskStatus(id)
 	if haveName {
 		return name, true
 	}
