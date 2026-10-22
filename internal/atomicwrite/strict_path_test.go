@@ -332,6 +332,12 @@ func TestWriteBytesDurable_RefusesABindMountByItsMountID(t *testing.T) {
 		*synced = nil
 		refusedPlainly(t, "ProbeDurable of "+path, ProbeDurable(root, path), synced)
 	}
+	// A directory on the root's mount passes, the table not read.
+	other := filepath.Join(root, "other")
+	mkdirs(t, other)
+	if err := ProbeDurable(root, filepath.Join(other, "ids")); err != nil {
+		t.Errorf("ProbeDurable below a directory on the root's mount = %v", err)
+	}
 	if *reads != 0 {
 		t.Errorf("the probe read the mount table %d times with mount IDs to go by", *reads)
 	}
