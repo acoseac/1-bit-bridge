@@ -997,12 +997,14 @@ func namedChain(s *readingSnap, name string) (*outputChain, bool) {
 }
 
 // holderOutput is the output whose thread holds the card, as the verdict
-// and its warnings read it: its live plugin, allowed_formats and dop; and,
-// when mpd.conf was read and has its block, that block's mixer, format and
-// filters, the block's allowed_formats and dop where MPD reports none, and
-// the first stage that changes samples on its device's way as the ALSA
-// files read. What the block says is information: the verdict claims none
-// of it, and only the dop it falls back to can withhold one.
+// and its warnings read it: its live plugin, allowed_formats and dop (the
+// live allowed_formats, while it names a format, says whether the output
+// sends DoP, as MPD's ALSA output reads it); and, when mpd.conf was read and
+// has its block, that block's mixer, format and filters, the block's
+// allowed_formats and dop where MPD reports none, and the first stage that
+// changes samples on its device's way as the ALSA files read. What the
+// block says is information: the verdict claims none of it, and only the
+// dop it falls back to can withhold one.
 func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	out := signalpath.Output{Plugin: h.Plugin}
 	liveFormats, haveFormats := h.Attribute("allowed_formats")
