@@ -690,6 +690,53 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 	}
 }
 
+// TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse: the identity file's
+// writer, which EnsurePlayerUUID makes the file with and a restore writes a
+// snapshot's UUID through, writes the UUID and a newline, 0600, over what
+// was there; and it refuses to write anything but one lowercase UUID,
+// leaving the file as it was and nothing staged beside it.
+func TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse(t *testing.T) {
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	dir := t.TempDir()
+	path := filepath.Join(dir, PlayerUUIDFile)
+	if err := os.WriteFile(path, []byte("7c9e6679-7425-40de-944b-e07fc1f90ae7\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePlayerUUIDFile(path, id); err != nil {
+		t.Fatalf("WritePlayerUUIDFile: %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != id+"\n" {
+		t.Fatalf("player-uuid holds %q, %v; want the UUID and a newline", b, err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+			t.Errorf("player-uuid mode %v, %v; want 0600", st.Mode().Perm(), err)
+		}
+	}
+	for _, bad := range []string{"", "not-a-uuid", strings.ToUpper(id), id + "\n", " " + id, id + id, id[:35]} {
+		if err := WritePlayerUUIDFile(path, bad); err == nil {
+			t.Errorf("WritePlayerUUIDFile wrote %q", bad)
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != id+"\n" {
+			t.Fatalf("a refused write of %q left player-uuid holding %q, %v", bad, b, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != PlayerUUIDFile {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("the data dir holds %v; want player-uuid alone", names)
+	}
+	if got, err := ReadPlayerUUIDFile(path); err != nil || got != id {
+		t.Fatalf("ReadPlayerUUIDFile = %q, %v", got, err)
+	}
+}
+
 // TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse: an editor or
 // a shell can leave a CR LF, spaces, tabs or more newlines after the UUID
 // it saved, and the file still holds one UUID, so it reads; anything else

@@ -1992,7 +1992,7 @@ ProtocolVersion is unchanged for this surface — it's purely server-side + admi
 
 ## Operator: Backup & restore
 
-A snapshot bundles every file an operator would otherwise have to re-pair / re-scan to recover from corruption: the manifest SQLite database (`bridge.db`), the token store (`tokens.json`), the TLS material (`server.crt` + `server.key`), and the live config (`bridge.yaml`). Snapshots land in `<dataDir>/backups/<timestamp>/` (UTC, Windows-friendly format `2006-01-02T15-04-05Z`). The bundle is permissioned 0700/0600.
+A snapshot bundles every file an operator would otherwise have to re-pair / re-scan to recover from corruption: the manifest SQLite database (`bridge.db`), the token store (`tokens.json`), the TLS material (`server.crt` + `server.key`), the live config (`bridge.yaml`), and, where they exist, the public-mode console account (`adminauth.json`), the Atlas harvest credential and cursor (`atlas-harvest.json`) and the player's identity (`player-uuid`). Snapshots land in `<dataDir>/backups/<timestamp>/` (UTC, Windows-friendly format `2006-01-02T15-04-05Z`). The bundle is permissioned 0700/0600.
 
 **Sensitivity:** snapshots contain the TLS private key and token hashes — anyone with read access to a snapshot can impersonate the bridge or forge an authenticated request. Treat them as secret-grade material. The CLI prints this warning on every backup.
 
@@ -2006,7 +2006,7 @@ backup:
 
 **On-demand snapshot.** `bridge backup [--config bridge.yaml] [--keep N]` is safe to run while `bridge serve` is up: SQLite's `VACUUM INTO` on a WAL-mode database produces an atomic clean copy without locking out the running process.
 
-**Restore.** Stop the bridge first. Then `bridge restore [--yes] <snapshot-dir>`. The CLI validates the snapshot's `manifest.json` schema version and refuses incompatible bundles. Per-file copies are atomic (temp + rename); a partial failure leaves each restored file internally consistent. After restore, start the bridge service.
+**Restore.** Stop the bridge first. Then `bridge restore [--yes] <snapshot-dir>`. The CLI validates the snapshot's `manifest.json` schema version and refuses incompatible bundles. Per-file copies are atomic (temp + rename); a partial failure leaves each restored file internally consistent. The console account comes back with its sessions signed out. The player's identity is the snapshot's, over any the box has, so controllers see the player they knew; a `player-uuid` that does not hold one UUID fails the restore before any file is written (remove it from the snapshot to restore the rest and keep the box's identity). A file the snapshot does not hold, such as one added to the bundle after it was taken, is left as it is. After restore, start the bridge service.
 
 **Why no admin-UI download button.** The admin console exposes `GET /api/backups` (list) and `POST /api/backups` (snapshot) but deliberately does NOT offer a snapshot download — a one-click web download for a bundle containing the TLS private key would be a credential extraction surface. Operators move snapshots offsite via `scp`/`rsync` against `<dataDir>/backups/`.
 
