@@ -580,8 +580,9 @@ func TestValidateTurnsThePlayerOffWithALoggedReason(t *testing.T) {
 // it wrote the player-off warning each time, the same line for a block that
 // had not changed. It writes the line once each time the reason changes: two
 // loads and two saves with one reason write one line, a changed reason
-// writes again, and so does a reason that went away (the player runs, or is
-// simply off) and came back, which is a change too.
+// writes again, and so does the same reason once it went away (the player
+// runs, or is simply off) and came back, which is a change too. Saves made at
+// once write a changed reason once.
 func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
 	// A config whose player is simply off has no reason: whatever another
 	// test left as the reason last logged is gone, here and after this test.
@@ -617,38 +618,38 @@ func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
 			}
 		}
 	}
-	native := writePlayerConfig(t, "  player:\n    enabled: true\n    dsdMode: native\n")
-	loadAndSave(t, native)
-	wantLines(t, `dsdMode: "native" is not in this release`)
+	const native, dop = `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release"
+	loadAndSave(t, writePlayerConfig(t, "  player:\n    enabled: true\n    dsdMode: native\n"))
+	wantLines(t, native)
 
-	loadAndSave(t, writePlayerConfig(t, "  player:\n    enabled: true\n    allowDoP: true\n"))
-	wantLines(t, `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release")
+	dopPath := writePlayerConfig(t, "  player:\n    enabled: true\n    allowDoP: true\n")
+	loadAndSave(t, dopPath)
+	wantLines(t, native, dop)
 
+	// The reason goes away, the player running, and the same one comes back.
 	runs := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
 		Output: OutputConfig{Player: fullPlayer()}, playerGOOS: "linux"}
 	if err := runs.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	loadAndSave(t, native)
-	wantLines(t, `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release", `dsdMode: "native" is not in this release`)
+	loadAndSave(t, dopPath)
+	wantLines(t, native, dop, dop)
 
 	// Saves at once, from many goroutines, write a changed reason once. The
 	// config is built in memory, so these saves are the first to see its
 	// reason.
-	allow := true
-	dop := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
-		Output: OutputConfig{Player: PlayerConfig{Enabled: true, AllowDoP: &allow}}}
+	inMemory := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+		Output: OutputConfig{Player: PlayerConfig{Enabled: true, DSDMode: "native"}}}
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = Clone(dop).NormalizeAndValidate()
+			_ = Clone(inMemory).NormalizeAndValidate()
 		}()
 	}
 	wg.Wait()
-	wantLines(t, `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release", `dsdMode: "native" is not in this release`,
-		"allowDoP: true is not in this release")
+	wantLines(t, native, dop, dop, native)
 }
 
 // TestValidateReadsNoHardware: the player's checks read the block and
