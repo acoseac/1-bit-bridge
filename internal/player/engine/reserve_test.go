@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -402,6 +403,9 @@ func onStorageThatOutlivesAReboot(string) error { return nil }
 // the refusal of storage that cannot be told to outlive one. Through the real
 // probe, whose barrier and medium are the test's.
 func TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the strict writer asks no medium where the platform gives no mount identity: Windows refuses before it looks (ErrNoDirectoryBarrier)")
+	}
 	h := newHarness(t)
 	data, err := filepath.EvalSymlinks(h.dir)
 	h.must("resolve the data directory", err)

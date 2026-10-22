@@ -146,7 +146,10 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 		switch {
 		case layer.upper == "":
 			return taken()
-		case !filepath.IsAbs(layer.upper):
+		case !strings.HasPrefix(layer.upper, "/"):
+			// The mount table is Linux's, so a path in it is absolute by its
+			// leading slash, never by what filepath says on the system the
+			// tests run on (on Windows it wants a drive).
 			return fmt.Errorf("%w: %s is on %san overlay whose upper layer the mount table names by a relative path, %s, which reaches nothing certain here", ErrMediumUnknown, root, on, layer.upper)
 		}
 		upper, err := upperAsReached(root, on, path, layer.upper, st, statfs)

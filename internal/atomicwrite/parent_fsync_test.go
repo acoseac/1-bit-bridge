@@ -324,6 +324,9 @@ func TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands(t *testing.T) {
 
 	// The fallback: the rename fails while the destination holds the same
 	// bytes, and the write is taken once the chain is synced again.
+	if runtime.GOOS == "windows" {
+		t.Skip("the fallback flushes the destination through a read-only handle, which Windows refuses; the strict writer refuses there before any write (ErrNoDirectoryBarrier), the barrier above being this test's own")
+	}
 	log, renameErr = nil, syscall.EBUSY
 	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable over the same bytes with the rename failing: %v", err)
