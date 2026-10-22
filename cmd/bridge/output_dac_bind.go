@@ -89,10 +89,10 @@ func (f dacTreeFlags) observer(env outputBindEnv, cmd string, stderr io.Writer) 
 			return binding.Observer{}, false
 		}
 		if proc == "" {
-			proc = alsa.DefaultProcRoot
+			proc = hostTrees.proc
 		}
 		if sysfs == "" {
-			sysfs = alsa.DefaultSysfsRoot
+			sysfs = hostTrees.sysfs
 		}
 	}
 	return binding.Observer{Proc: alsa.Reader{ProcRoot: proc}, Sysfs: alsa.SysfsReader{Root: sysfs}}, true

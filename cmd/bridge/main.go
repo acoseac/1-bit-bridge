@@ -3910,6 +3910,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Tracks: func(ctx context.Context) ([]string, error) {
 			return manifestStore.TrackPathsLocal(ctx)
 		},
+		Cards:           hostTrees.cards,
 		LoopbackBaseURL: outLoop.BaseURL,
 		OnActive:        outLoop.ensureStarted,
 	})

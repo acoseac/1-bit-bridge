@@ -132,7 +132,7 @@ func runOutputDAC(ctx context.Context, args []string, env outputDACEnv, stdout, 
 			fmt.Fprintln(stderr, "  --proc-root reads a /proc tree captured on a Linux box.")
 			return 1
 		}
-		root = alsa.DefaultProcRoot
+		root = hostTrees.proc
 	}
 	r := alsa.Reader{ProcRoot: root}
 	switch {

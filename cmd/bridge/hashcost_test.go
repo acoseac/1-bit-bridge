@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sync"
 	"testing"
@@ -28,12 +29,14 @@ import (
 // make sure nothing outside a suite calls this.
 //
 // No test here opens /dev/snd or reads the box's own /proc or /sys: the
-// pcm-test harness's tests drive a fake device, and the output and DAC
-// binding commands read trees the tests lay out. The guard refuses any
-// open that reaches alsapcm.Open, and the watch any read of the host's
-// trees through the alsa readers, and the binary fails on either, so a test
-// that would play on, or read, the box it runs on (the owner's Pi has a
-// DAC) fails instead.
+// pcm-test harness's tests drive a fake device, the output and DAC binding
+// commands read trees the tests lay out, and hostTrees, which the outputs
+// builders of serve and bridge doctor read the cards through and the
+// commands fall back to, is two empty directories here, set before any
+// test runs and never again. The guard refuses any open that reaches
+// alsapcm.Open, and the watch any read of the host's trees through the
+// alsa readers, and the binary fails on either, so a test that would play
+// on, or read, the box it runs on (the owner's Pi has a DAC) fails instead.
 func TestMain(m *testing.M) {
 	// The fingerprint stand-in re-execs this binary as fpcalc. It must
 	// return before the suite starts, or the child runs every test.
@@ -41,11 +44,18 @@ func TestMain(m *testing.M) {
 		os.Exit(runFpcalcStandIn())
 	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
+	trees, err := emptyHostTrees()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "the empty trees the suite reads for the host's:", err)
+		os.Exit(1)
+	}
+	hostTrees = trees
 	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
 	stopReads := alsa.WatchHostReads(recordHostRead)
 	code := m.Run()
 	stopReads()
 	stopOpens()
+	_ = os.RemoveAll(filepath.Dir(trees.proc))
 	if opened := nodeOpens(); len(opened) > 0 {
 		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, which no test may: %q\n", opened)
 		code = 1
@@ -58,6 +68,23 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+// emptyHostTrees makes the two empty directories the suite reads in place
+// of the host's /proc and /sys, in a directory of their own.
+func emptyHostTrees() (outputTrees, error) {
+	dir, err := os.MkdirTemp("", "bridge-host-trees-")
+	if err != nil {
+		return outputTrees{}, err
+	}
+	trees := outputTrees{proc: filepath.Join(dir, "proc"), sysfs: filepath.Join(dir, "sys")}
+	for _, d := range []string{trees.proc, trees.sysfs} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			_ = os.RemoveAll(dir)
+			return outputTrees{}, err
+		}
+	}
+	return trees, nil
 }
 
 // openedNodes are the nodes the guard refused, for TestMain and the tests
