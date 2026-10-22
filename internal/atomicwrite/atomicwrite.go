@@ -390,8 +390,21 @@ func barrier(path string) error {
 // anything is written into it, so a crash cannot take a durable file's
 // directory with it. A directory that was there already is the caller's,
 // and is not synced.
-func mkdirAllDurable(dir string) error {
+//
+// When the creation or a barrier fails, the directories this call created
+// are removed again, the deepest first: left in place, the next write would
+// find them and take them for directories that were there already, and
+// never sync their entries. Every directory a strict write leaves behind is
+// one it found or one it made durable.
+func mkdirAllDurable(dir string) (err error) {
 	created := missing(dir)
+	defer func() {
+		if err != nil {
+			for _, d := range created {
+				_ = os.Remove(d)
+			}
+		}
+	}()
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -459,7 +472,9 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 //
 // The directories it creates for path are made durable too, each in its
 // parent, the deepest first, before the file is written: a durable entry in
-// a directory whose own entry is not durable is lost with it.
+// a directory whose own entry is not durable is lost with it. When that
+// fails, the directories it created are removed again, so the next write
+// creates them and runs their barriers rather than taking them as found.
 //
 // On a platform with no directory barrier (Windows) it refuses with
 // ErrNoDirectoryBarrier before it writes anything: no write there could be

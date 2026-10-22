@@ -128,6 +128,50 @@ func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 	}
 }
 
+// TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated pins a
+// directory whose barrier failed: the write that created it fails, and the
+// next write syncs its entry before it counts the file durable, rather than
+// finding the directory there and taking it for one that was always durable.
+// The failed write removes the directory it created, so the next creates it
+// again.
+func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "a")
+	dst := filepath.Join(dir, "reserved.json")
+	syncErr := errors.New("fsync: input/output error")
+	// seen is the paths the barrier is asked for; the one for a's entry in
+	// the root fails once.
+	var seen []string
+	failed := false
+	prev := syncParentDir
+	t.Cleanup(func() { syncParentDir = prev })
+	syncParentDir = func(path string) error {
+		seen = append(seen, path)
+		if path == dir && !failed {
+			failed = true
+			return syncErr
+		}
+		return nil
+	}
+	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
+		t.Fatalf("the write whose directory's barrier failed = %v, want the barrier's failure", err)
+	}
+	_, statErr := os.Lstat(dir)
+	seen = nil
+	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("the next write: %v", err)
+	}
+	if !slices.Contains(seen, dir) {
+		t.Fatalf("the next write ran the barrier for %v: never for a's entry in the root, whose barrier had failed", seen)
+	}
+	if !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("the failed write left the directory it created (%v)", statErr)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
+		t.Fatalf("destination %q, %v", got, err)
+	}
+}
+
 // TestProbeDurable pins the probe a caller runs before it counts on
 // WriteBytesDurable: the barrier on the destination's directory, or, while
 // that directory does not exist, on the nearest one above it that does,
