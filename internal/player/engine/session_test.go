@@ -235,11 +235,17 @@ func TestADeadlineQueuedBehindItsAcknowledgementChangesNothing(t *testing.T) {
 // deadline's, as context.Context's contract says. An answer that comes at
 // or past the deadline is late whichever reaches the owner first: the
 // answer, while the expiry's timer has not run ("answer first"), or the
-// expiry ("expiry first"). The call is treated as failed, its session
-// released with ReasonTimeout, and the command that waited on it answers
-// so. The session's own Prepare is taken before the clock moves, so that
-// only the held call answers late.
+// expiry ("expiry first"). A late Start, Pause or Resume is treated as
+// failed, its session released with ReasonTimeout, and the command that
+// waited on it answers so. A Release acknowledged late, by its answer or by
+// Events.Released, is held to its deadline's policy first in either order:
+// the release is unconfirmed and the pending play it would have run is
+// dropped, so the Next that asked for that play answers
+// ReasonReleaseUnconfirmed, and the acknowledgement then clears the
+// unconfirmed release without starting anything. The session's own Prepare
+// is taken before the clock moves, so that only the held call answers late.
 func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
+	playing := func(h *harness) { h.playing(0, "a", "b"); h.waitApplied("handled call prepare", 0) }
 	for _, tc := range []struct {
 		name    string
 		call    string
@@ -249,10 +255,15 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 		setup func(h *harness)
 		hook  func(h *harness, held gate, called func(context.Context))
 		cmd   func(h *harness) error
+		// answered and expired are the owner's notes of the late answer and
+		// of the expiry; want is what cmd answers, and stop the last stop's
+		// reason ("" for none: a Next whose play was dropped records none).
+		answered, expired string
+		want, stop        Reason
 	}{
-		{"start", "start", StartTimeout,
-			func(h *harness) { h.insert("a", "b"); h.available() },
-			func(h *harness, held gate, called func(context.Context)) {
+		{name: "start", call: "start", timeout: StartTimeout,
+			setup: func(h *harness) { h.insert("a", "b"); h.available() },
+			hook: func(h *harness, held gate, called func(context.Context)) {
 				h.be.onStart = func(ctx context.Context, s *fakeSession) error {
 					called(ctx)
 					if err := held.wait(ctx, h.be, false); err != nil {
@@ -261,23 +272,20 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 					return s.open()
 				}
 			},
-			func(h *harness) error { return h.eng.Play(bg) }},
-		{"pause", "pause", CallTimeout,
-			func(h *harness) { h.playing(0, "a", "b"); h.waitApplied("handled call prepare", 0) },
-			func(h *harness, held gate, called func(context.Context)) {
+			cmd:      func(h *harness) error { return h.eng.Play(bg) },
+			answered: "handled call start", expired: "handled call start expired", want: ReasonTimeout, stop: ReasonTimeout},
+		{name: "pause", call: "pause", timeout: CallTimeout, setup: playing,
+			hook: func(h *harness, held gate, called func(context.Context)) {
 				h.be.onPause = func(ctx context.Context, _ *fakeSession) error {
 					called(ctx)
 					return held.wait(ctx, h.be, false)
 				}
 			},
-			func(h *harness) error { return h.eng.Pause(bg) }},
-		{"resume", "resume", CallTimeout,
-			func(h *harness) {
-				h.playing(0, "a", "b")
-				h.waitApplied("handled call prepare", 0)
-				h.must("pause", h.eng.Pause(bg))
-			},
-			func(h *harness, held gate, called func(context.Context)) {
+			cmd:      func(h *harness) error { return h.eng.Pause(bg) },
+			answered: "handled call pause", expired: "handled call pause expired", want: ReasonTimeout, stop: ReasonTimeout},
+		{name: "resume", call: "resume", timeout: CallTimeout,
+			setup: func(h *harness) { playing(h); h.must("pause", h.eng.Pause(bg)) },
+			hook: func(h *harness, held gate, called func(context.Context)) {
 				h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
 					called(ctx)
 					if err := held.wait(ctx, h.be, false); err != nil {
@@ -286,7 +294,34 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 					return ResumeContinued, nil
 				}
 			},
-			func(h *harness) error { return h.eng.Play(bg) }},
+			cmd:      func(h *harness) error { return h.eng.Play(bg) },
+			answered: "handled call resume", expired: "handled call resume expired", want: ReasonTimeout, stop: ReasonTimeout},
+		{name: "release", call: "release", timeout: ReleaseTimeout, setup: playing,
+			hook: func(h *harness, held gate, called func(context.Context)) {
+				h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
+					called(ctx)
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+					fs.ack()
+					return nil
+				}
+			},
+			cmd:      func(h *harness) error { return h.eng.Next(bg) },
+			answered: "handled call release", expired: "handled release deadline", want: ReasonReleaseUnconfirmed},
+		{name: "released", call: "release", timeout: ReleaseTimeout, setup: playing,
+			hook: func(h *harness, held gate, called func(context.Context)) {
+				h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
+					called(ctx)
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+					fs.releasedLater()
+					return context.DeadlineExceeded
+				}
+			},
+			cmd:      func(h *harness) error { return h.eng.Next(bg) },
+			answered: "handled released", expired: "handled release deadline", want: ReasonReleaseUnconfirmed},
 	} {
 		for _, order := range []string{"answer first", "expiry first"} {
 			t.Run(tc.name+"/"+order, func(t *testing.T) {
@@ -308,22 +343,25 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 				}
 				mark := h.appliedMark()
 				if order == "answer first" {
-					// The deadline passes; its timer's callback has not run.
+					// The deadline passes; its timers' callbacks have not run.
 					h.clk.Skip(tc.timeout)
 					held.open()
-					h.waitApplied("handled call "+tc.call, mark)
+					h.waitApplied(tc.answered, mark)
 				} else {
 					h.clk.Advance(tc.timeout)
-					h.waitApplied("handled call "+tc.call+" expired", mark)
+					h.waitApplied(tc.expired, mark)
 					held.open()
 				}
 				if err := ctx.Err(); err != context.DeadlineExceeded || !errors.Is(context.Cause(ctx), errCallDeadline) {
 					t.Errorf("the %s's context past its deadline: Err %v, cause %v; want context.DeadlineExceeded, the deadline's cause", tc.call, err, context.Cause(ctx))
 				}
-				h.refused("the command whose call answered late", h.result(tc.name, done), ReasonTimeout)
+				h.refused("the command whose call answered late", h.result(tc.name, done), tc.want)
 				h.clk.Advance(0)
-				sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
-				if sn.LastStop().Reason != ReasonTimeout || h.be.starts() != 1 {
+				sn := h.waitSnap("stopped, no release unconfirmed", func(sn *Snapshot) bool {
+					_, unconfirmed := sn.ReleaseUnconfirmed()
+					return sn.State() == Stopped && !unconfirmed
+				})
+				if sn.LastStop().Reason != tc.stop || h.be.starts() != 1 {
 					t.Fatalf("last stop %+v, %d sessions", sn.LastStop(), h.be.starts())
 				}
 			})

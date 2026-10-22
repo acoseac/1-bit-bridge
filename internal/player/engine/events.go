@@ -1,6 +1,9 @@
 package engine
 
-import "slices"
+import (
+	"slices"
+	"time"
+)
 
 // events is the Events every session is started with: each report becomes
 // a message to the owner, which applies it only while its session is
@@ -21,7 +24,10 @@ func (v *events) Position(s SessionID, p Position)      { v.e.post(evPosition{s:
 func (v *events) Fault(s SessionID, f Fault)            { v.e.post(evFault{s: s, f: f}) }
 func (v *events) Finished(s SessionID)                  { v.e.post(evFinished{s: s}) }
 func (v *events) DeviceReleased(s SessionID)            { v.e.post(evDeviceReleased{s: s}) }
-func (v *events) Released(s SessionID)                  { v.e.post(evReleased{s: s}) }
+
+// Released is stamped as the backend calls it, so an acknowledgement past
+// the release's deadline is late whichever reaches the owner first (ackAt).
+func (v *events) Released(s SessionID) { v.e.post(evReleased{s: s, at: v.e.clk.Now()}) }
 
 // The messages the owner handles besides commands: backend events, call
 // results, timers, the reservation writes and the writer's reports.
@@ -54,8 +60,11 @@ type (
 	}
 	evFinished       struct{ s SessionID }
 	evDeviceReleased struct{ s SessionID }
-	evReleased       struct{ s SessionID }
-	msgCallDone      struct {
+	evReleased       struct {
+		s  SessionID
+		at time.Time
+	}
+	msgCallDone struct {
 		c *call
 		r callResult
 	}
@@ -124,7 +133,7 @@ func (e *Engine) handle(m any) {
 	case evReleased:
 		what = "released"
 		if s := o.sessions[m.s]; s != nil {
-			e.acked(s)
+			e.ackAt(s, m.at)
 		}
 	case msgCallDone:
 		what = "call " + m.c.kind.String()

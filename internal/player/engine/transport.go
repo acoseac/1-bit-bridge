@@ -456,8 +456,22 @@ func (e *Engine) releaseDeadline(s *session) {
 	e.visible()
 }
 
-// acked is s's release acknowledged: by Release returning nil, or by
-// Events.Released. s is finished from then on (sessAcked).
+// ackAt is s's release acknowledged at at, on the engine's clock: by Release
+// returning nil, or by Events.Released. An acknowledgement at or past the
+// release's deadline is late whichever reaches the owner first, it or the
+// deadline: the deadline's policy applies first (releaseDeadline: the
+// release unconfirmed, the pending intent dropped), and the acknowledgement
+// then clears the unconfirmed release without running the intent it
+// dropped.
+func (e *Engine) ackAt(s *session, at time.Time) {
+	if rc := s.releaseCall; s.phase == sessReleasing && rc != nil && !at.Before(rc.deadline) {
+		e.releaseDeadline(s)
+	}
+	e.acked(s)
+}
+
+// acked is s's release acknowledged (ackAt). s is finished from then on
+// (sessAcked).
 func (e *Engine) acked(s *session) {
 	o := &e.o
 	switch s.phase {
@@ -786,13 +800,17 @@ func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(
 }
 
 // callDone applies what a call returned. An answer at or past the call's
-// deadline is late: the call is treated as failed (callExpired) even when
-// the answer reaches the owner before the expiry, and what it returned is
-// not taken. A Release's late answer is an acknowledgement, and taken.
+// deadline is late whichever reaches the owner first, it or the expiry: its
+// context ends as the deadline ends it, and the call is treated as failed
+// (callExpired) and what it returned is not taken. A Release's late answer
+// is an acknowledgement, taken after its deadline's policy (ackAt).
 func (e *Engine) callDone(c *call, r callResult) {
 	o := &e.o
-	if c.kind != callRelease && !c.expired && !c.deadline.IsZero() && !r.at.Before(c.deadline) {
-		e.callExpired(c)
+	if !c.deadline.IsZero() && !r.at.Before(c.deadline) {
+		c.cancel(errCallDeadline)
+		if c.kind != callRelease && !c.expired {
+			e.callExpired(c)
+		}
 	}
 	delete(o.calls, c.id)
 	if c.timer != nil {
@@ -857,7 +875,7 @@ func (e *Engine) callDone(c *call, r callResult) {
 		e.resumeDone(c, r)
 	case callRelease:
 		if r.err == nil {
-			e.acked(s)
+			e.ackAt(s, r.at)
 		}
 	}
 }

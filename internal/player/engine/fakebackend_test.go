@@ -339,6 +339,25 @@ func (s *fakeSession) release(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// releasedLater acknowledges s's release through Events.Released on a
+// goroutine of the fake's own, as a Release that returned its context's
+// error does once it can.
+func (s *fakeSession) releasedLater() {
+	b := s.b
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return
+	}
+	b.wg.Add(1)
+	b.mu.Unlock()
+	go func() {
+		defer b.wg.Done()
+		s.ack()
+		s.ev.Released(s.id)
+	}()
+}
+
 // ack closes what the session opened and records the release as
 // acknowledged.
 func (s *fakeSession) ack() {

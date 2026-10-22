@@ -182,7 +182,10 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 // engine records the release as unconfirmed and opens nothing until the
 // acknowledgement comes: Play, PlayID, PlayIndex, Next and Previous are
 // refused with ReasonReleaseUnconfirmed, and maintenance is entered
-// unconfirmed. The late acknowledgement clears it. Every session ends with
+// unconfirmed. The late acknowledgement clears it, and runs nothing the
+// deadline dropped: an acknowledgement at or past the deadline is late
+// whichever reaches the engine first, it or the deadline, and the engine
+// stamps Events.Released as the backend calls it. Every session ends with
 // a Release the engine asks for and its acknowledgement: after Stop, after
 // Finished, after a fault, after a failed or refused Start.
 //
