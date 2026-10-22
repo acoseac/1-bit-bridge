@@ -125,35 +125,51 @@ func TestPlaybackFaultsOnADeviceError(t *testing.T) {
 	r.neverRecovered()
 }
 
-// TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInAWrite pins the
-// shutdown with the device stuck in a kernel call that does not return
-// (the writer's write parked inside the fake kernel): the engine's Run
-// returns within its bound, the release unconfirmed; the backend holds only
-// the goroutines that wait on that sink, abandoned: the teardown in its
-// Close, and, held during the session's last drain, the call that handed
-// the sink the drain; every decoder and content is closed meanwhile; and
-// once the kernel lets go the device closes and every goroutine the backend
-// started is joined.
-func TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInAWrite(t *testing.T) {
+// TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInTheKernel pins the
+// shutdown with the device stuck in a kernel call that does not return (a
+// write or a drain parked inside the fake kernel): the engine's Run returns
+// within its bound, the release unconfirmed; the backend holds only the
+// goroutines that wait on that sink, abandoned: the teardown in its Close,
+// and, held in a drain, the call that handed the sink the drain, never the
+// producer; every decoder and content is closed meanwhile, the next entry's
+// that a drain for its transport waits on among them; and once the kernel
+// lets go the device closes and every goroutine the backend started is
+// joined.
+func TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInTheKernel(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		frames int
+		// next is a second entry, of another transport.
+		next bool
+		// drain parks the kernel's DRAIN, the write otherwise.
+		drain bool
 		// held is the goroutines left waiting on the sink: the teardown alone
-		// mid-stream; at the last drain also the call that handed the sink the
-		// drain, unless the shutdown came first (0: one or two).
+		// mid-stream; held in a drain also the call that handed the sink the
+		// drain; at the last drain with the write held, that call unless the
+		// shutdown came before it (0: one or two).
 		held int
 	}{
-		{"mid-stream, the producer waiting for room", 200000, 1},
-		{"during the last drain", 1000, 0},
+		{"mid-stream, the producer waiting for room", 200000, false, false, 1},
+		{"during the last drain", 1000, false, false, 0},
+		{"in the drain for the next entry's transport, its content open", 1000, true, true, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)
-			parked, release := r.k.ParkNextWrite()
+			park, what := r.k.ParkNextWrite, "the writer's first write to stick in the kernel"
+			if c.drain {
+				park, what = r.k.ParkNextDrain, "the drain to stick in the kernel"
+			}
+			parked, release := park()
 			t.Cleanup(release)
 			r.files.add("a", wav(48000, 24, pattern(1, c.frames, 24)))
-			r.insert("a")
+			refs := []string{"a"}
+			if c.next {
+				r.files.add("b", wav(44100, 16, pattern(2, 3000, 16)))
+				refs = append(refs, "b")
+			}
+			r.insert(refs...)
 			r.play()
-			receiveIn(t, parked, "the writer's first write to stick in the kernel")
+			receiveIn(t, parked, what)
 			if c.held == 0 {
 				r.waitCall("the engine to name the end", func(x call) bool { return x.kind == "prepare" && x.next == nil })
 			}
