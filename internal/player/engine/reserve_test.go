@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -275,6 +276,36 @@ func TestNewRefusesAReservationDirectoryThatIsAFile(t *testing.T) {
 	_, err := New(cfg)
 	if !errors.Is(err, syscall.ENOTDIR) || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("New with the reservation's directory a regular file = %v, want a refusal naming %s as not a directory", err, file)
+	}
+}
+
+// TestNewSaysWhenTheReservationDirectoryCannotBeRead pins New's refusal of
+// a reservation directory the probe could not read, as a Stat that fails
+// with EACCES or EIO: the error names the directory, says it cannot be
+// read, and carries the probe's error. It does not advise moving the data
+// directory to a filesystem that can sync a directory: that is for a
+// barrier that ran and failed (atomicwrite.ErrBarrierFailed,
+// TestNewRefusesADirectoryThatCannotBeSynced), and nothing failed to sync
+// here. The probe is the test's, so it runs on every platform.
+func TestNewSaysWhenTheReservationDirectoryCannotBeRead(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EACCES, syscall.EIO} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			h := newHarness(t)
+			h.be = newFakeBackend(t)
+			cfg := h.config()
+			cfg.seams.probe = func(string) error { return &fs.PathError{Op: "stat", Path: h.dir, Err: errno} }
+			_, err := New(cfg)
+			switch {
+			case err == nil:
+				t.Fatal("New over a reservation directory it cannot read built an engine")
+			case !errors.Is(err, errno):
+				t.Fatalf("New = %v, want the probe's %v", err, errno)
+			case !strings.Contains(err.Error(), h.dir) || !strings.Contains(err.Error(), "cannot be read"):
+				t.Fatalf("New = %q, want it to say the directory %s cannot be read", err, h.dir)
+			case strings.Contains(err.Error(), "a filesystem that can sync a directory"):
+				t.Fatalf("New = %q: it advises moving the data directory for a directory it could not read", err)
+			}
+		})
 	}
 }
 

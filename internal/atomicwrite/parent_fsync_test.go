@@ -296,6 +296,82 @@ func TestProbeDurable(t *testing.T) {
 	}
 }
 
+// TestBarrierFailuresAreMarked pins ErrBarrierFailed: in what ProbeDurable
+// and WriteBytesDurable return it marks a barrier that ran and failed, for
+// the file's entry and for a directory the write created, beside the
+// barrier's own error; it marks nothing else, neither a regular file where
+// the directory should be nor a platform with no barrier.
+func TestBarrierFailuresAreMarked(t *testing.T) {
+	root := t.TempDir()
+	syncErr := errors.New("sync dir: invalid argument")
+	stubSyncParentDir(t, syncErr)
+	for name, err := range map[string]error{
+		"the probe":                     ProbeDurable(filepath.Join(root, "reserved.json")),
+		"the write's entry":             WriteBytesDurable(filepath.Join(root, "reserved.json"), []byte("reserved"), ".durable-*.tmp"),
+		"a directory the write created": WriteBytesDurable(filepath.Join(root, "a", "reserved.json"), []byte("reserved"), ".durable-*.tmp"),
+	} {
+		if !errors.Is(err, ErrBarrierFailed) || !errors.Is(err, syncErr) {
+			t.Errorf("%s with the barrier failing = %v, want its failure marked ErrBarrierFailed", name, err)
+		}
+	}
+	file := filepath.Join(root, "existing-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeDurable(filepath.Join(file, "reserved.json")); !errors.Is(err, syscall.ENOTDIR) || errors.Is(err, ErrBarrierFailed) {
+		t.Errorf("ProbeDurable below a regular file = %v, want ENOTDIR, unmarked", err)
+	}
+	noDirectoryBarrier(t)
+	for name, err := range map[string]error{
+		"the probe": ProbeDurable(filepath.Join(root, "reserved.json")),
+		"the write": WriteBytesDurable(filepath.Join(root, "reserved.json"), []byte("reserved"), ".durable-*.tmp"),
+	} {
+		if !errors.Is(err, ErrNoDirectoryBarrier) || errors.Is(err, ErrBarrierFailed) {
+			t.Errorf("%s with no directory barrier = %v, want ErrNoDirectoryBarrier, unmarked", name, err)
+		}
+	}
+}
+
+// TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure pins the probe
+// on a directory this process cannot read: the error is the one reading it
+// gave, a permission error, never marked ErrBarrierFailed, whose caller
+// would advise moving to a filesystem that can sync a directory. A
+// directory it can stat and not open (searchable, not readable) is refused
+// by the probe's own open, before the barrier, which here would answer nil;
+// one below a directory it cannot search is refused by Stat. POSIX
+// permissions as a user other than root; Windows and root skip.
+func TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads and searches every directory")
+	}
+	stubSyncParentDir(t, nil)
+	root := t.TempDir()
+	closed := filepath.Join(root, "closed")
+	locked := filepath.Join(root, "locked")
+	for _, d := range []string{closed, filepath.Join(locked, "dir")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for d, mode := range map[string]os.FileMode{closed: 0o300, locked: 0} {
+		if err := os.Chmod(d, mode); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(d, 0o700) })
+	}
+	for name, path := range map[string]string{
+		"a directory it can stat and not open": filepath.Join(closed, "reserved.json"),
+		"a directory it cannot stat":           filepath.Join(locked, "dir", "reserved.json"),
+	} {
+		if err := ProbeDurable(path); !errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrBarrierFailed) {
+			t.Errorf("ProbeDurable of %s = %v, want its permission error, unmarked", name, err)
+		}
+	}
+}
+
 // TestWriteBytes_SyncsParentDirectory pins the durability barrier on
 // the buffered write path: after the tmp-file rename commits, the
 // destination's parent directory entry MUST be flushed. Without it the

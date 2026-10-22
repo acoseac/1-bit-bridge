@@ -136,8 +136,10 @@ type Engine struct {
 // mounts' does, would make every reservation fail and the engine refuse
 // every edit for ever, so the error names the directory and says the data
 // directory must move to a filesystem that can sync a directory; a platform
-// with no directory fsync (Windows) is refused the same way. Commands wait
-// until Run starts the owner.
+// with no directory fsync (Windows) is refused the same way, and a directory
+// that is not one, or that the probe could not read, is refused saying so,
+// with no advice to move (notDurable). Commands wait until Run starts the
+// owner.
 func New(cfg Config) (*Engine, error) {
 	switch {
 	case cfg.Backend == nil:
@@ -224,8 +226,12 @@ func New(cfg Config) (*Engine, error) {
 }
 
 // notDurable is New's refusal of a reservation file whose directory the
-// barrier probe could not sync: every reservation written there would fail,
-// and the engine would refuse every edit for ever, so it does not start.
+// barrier probe refused: every reservation written there would fail, and the
+// engine would refuse every edit for ever, so it does not start. It advises
+// moving the data directory only where a barrier ran and failed
+// (atomicwrite.ErrBarrierFailed); a directory the probe could not read (a
+// Stat or an open refused: EACCES, EIO) is said to be unreadable, with the
+// probe's error, since another filesystem would not mend it.
 func notDurable(path string, err error) error {
 	dir := filepath.Dir(path)
 	switch {
@@ -233,8 +239,10 @@ func notDurable(path string, err error) error {
 		return fmt.Errorf("player: the reservation file's directory %s cannot be synced: the player keeps its IDs and tokens durable with a directory fsync, which this platform does not have: %w", dir, err)
 	case errors.Is(err, syscall.ENOTDIR):
 		return fmt.Errorf("player: the reservation file's directory %s is not a directory, so no reservation can be written there: %w", dir, err)
+	case errors.Is(err, atomicwrite.ErrBarrierFailed):
+		return fmt.Errorf("player: the reservation file's directory %s cannot be synced, so no ID or token reserved there would survive a crash: move the data directory to a filesystem that can sync a directory: %w", dir, err)
 	}
-	return fmt.Errorf("player: the reservation file's directory %s cannot be synced, so no ID or token reserved there would survive a crash: move the data directory to a filesystem that can sync a directory: %w", dir, err)
+	return fmt.Errorf("player: the reservation file's directory %s cannot be read, so no reservation can be written there: %w", dir, err)
 }
 
 // Run is the owner: it runs commands and events until ctx ends, then shuts

@@ -78,6 +78,15 @@ var logger = logging.Component("atomicwrite")
 // durable. It wraps errors.ErrUnsupported.
 var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync a directory, so no write here is made durable: %w", errors.ErrUnsupported)
 
+// ErrBarrierFailed marks, in what WriteBytesDurable and ProbeDurable
+// return, a directory barrier that ran and failed; nothing else they return
+// wraps it. ProbeDurable opens the directory itself before it runs the
+// barrier, so there it marks a directory the filesystem would not sync, as
+// some network and FUSE mounts answer every directory fsync (EINVAL,
+// ENOTSUP), and never one this process cannot read: a caller that advises
+// moving to another filesystem asks errors.Is first.
+var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
+
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
 // without waiting out the full retry backoff budget. Production
@@ -352,7 +361,11 @@ func missing(dir string) []string {
 // What it probes must be a directory: the barrier opens and fsyncs whatever
 // is there, and answers nil for a regular file, where no write can ever be
 // made. A regular file is an error wrapping syscall.ENOTDIR, and any other
-// error Stat gives is returned as it is.
+// error Stat gives is returned as it is. The directory is then opened here,
+// before the barrier opens it, so one this process cannot read (searchable
+// and not readable) is the open's error, as it is: only the barrier's own
+// failure is marked ErrBarrierFailed, a directory the filesystem would not
+// sync.
 func ProbeDurable(path string) error {
 	if syncParentDir == nil {
 		return ErrNoDirectoryBarrier
@@ -367,7 +380,12 @@ func ProbeDurable(path string) error {
 	case !info.IsDir():
 		return &fs.PathError{Op: "probe", Path: dir, Err: syscall.ENOTDIR}
 	}
-	if err := syncParentDir(filepath.Join(dir, filepath.Base(path))); err != nil {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	_ = d.Close()
+	if err := barrier(filepath.Join(dir, filepath.Base(path))); err != nil {
 		return fmt.Errorf("the directory %s cannot be synced: %w", dir, err)
 	}
 	return nil
@@ -395,13 +413,25 @@ func sameAndSynced(path string, data []byte) (bool, error) {
 }
 
 // barrier runs the parent-directory barrier for path: ErrNoDirectoryBarrier
-// on a platform with none, never a barrier that ran.
+// on a platform with none, never a barrier that ran, and the barrier's
+// failure marked ErrBarrierFailed.
 func barrier(path string) error {
 	if syncParentDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	return syncParentDir(path)
+	if err := syncParentDir(path); err != nil {
+		return &barrierError{err: err}
+	}
+	return nil
 }
+
+// barrierError is a barrier's failure: it reads as the barrier's own error,
+// which it wraps, and errors.Is matches it to ErrBarrierFailed.
+type barrierError struct{ err error }
+
+func (e *barrierError) Error() string        { return e.err.Error() }
+func (e *barrierError) Unwrap() error        { return e.err }
+func (e *barrierError) Is(target error) bool { return target == ErrBarrierFailed }
 
 // unconfirmed is the directories a strict write found missing whose entry
 // in their parent has not been made durable since: their barrier failed, or
