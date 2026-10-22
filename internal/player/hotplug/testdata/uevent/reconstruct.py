@@ -20,7 +20,10 @@ over, and run it with -test.run TestCaptureKernelUevents
 -capture-uevents DIR while the GO bar is plugged in and out; it writes
 each message the kernel sends, as it came, into DIR.
 
-Usage: reconstruct.py [DIR] (default: this file's directory).
+Usage: reconstruct.py, with no argument. It writes into its own directory
+and nowhere else, so no argument can point a write outside it; to write the
+messages somewhere else, to compare them, copy the script there and run the
+copy.
 """
 import os
 import sys
@@ -58,7 +61,10 @@ def message(action, devpath, subsystem, keys, seqnum):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+    if len(sys.argv) > 1:
+        sys.exit("usage: reconstruct.py (no argument: it writes into its own directory; "
+                 "to write elsewhere, copy it there and run the copy)")
+    out = os.path.dirname(os.path.abspath(__file__))
     for name, fields in sorted(MESSAGES.items()):
         with open(os.path.join(out, name), "wb") as f:
             f.write(message(*fields))
