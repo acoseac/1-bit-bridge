@@ -50668,3 +50668,87 @@ lock (4a, run again after the `loadCLIConfig` change), no data-dir check
 (5b); a probe test reading `/proc` failed the binary with the watch (6a)
 and passed without it (6b). Each was restored from git; the tree was clean
 after every run.
+
+**Round 3 (Codex and the Claude API on round 2): three findings, all real,
+none rejected.** Each was reproduced red first, fixed, and
+negative-controlled on the committed tree.
+
+1. *The /proc reader's confinement was a check, then a second open by
+name.* `readUnderRoot` checked a path with `EvalSymlinks` and opened the
+pathname again (`readCapped`), and `readDirUnder` listed it again with
+`os.ReadDir`: a file, or a directory above it, replaced by a link between
+the two redirected the open out of the tree, and `--raw` printed what it
+found there (Codex, P1). The reader now opens its ALSA root and its /proc
+root once per reading as a `tree` (`internal/alsa/tree.go`: an `os.Root`
+and the resolver the sysfs reader had, which both readers now share), and
+every read, listing and stat goes through the root's descriptor after
+`resolve`. A link that leaves a tree that holds still is refused by name
+(absolute, or climbing past the root: `errLinkAbsolute`,
+`errLinkLeavesRoot`, both `errors.Is` `errOutsideRoot`); one swapped in
+after the resolve is refused by `os.Root` at the open itself ("path
+escapes from parent"). The non-blocking open and the type check on the
+opened descriptor stay, and `openTree` takes round 2's directory-only look
+at each root. Two behaviours moved with it. An absolute link is refused
+even when it names a path inside the root, as `os.Root` refuses every
+absolute link (the kernel's own links in /proc/asound are relative). And
+the listing's stat goes through the tree too, so a stream or pcm name
+whose link leaves the tree is kept, for its read or listing to report the
+refusal, where the old `os.Stat` looked at the target outside.
+`TestReaderRefusesALinkSwappedInAfterItsCheck` swaps, through
+`Reader.beforeOpen`, a stream file, a substream's directory, a listed pcm
+directory, an owner's status and the cards file, each for an absolute and
+for a climbing link: red on all ten before (the files read from outside,
+and a `sub7` only the outside directory holds listed as a substream).
+`TestSysfsRefusesALinkSwappedInAfterItsCheck` pins the sysfs reader's
+attribute and unit directory, which were confined already (green before),
+and `TestAFIFOInTheProcTreeIsRefusedPromptly` gained the two roots the
+/proc reader now opens as trees. `TestReaderRefusesAFileThatLeavesTheRoot`
+asked for the message "path leaves the root", and now asks for "an
+absolute link is refused".
+
+2. *bind could still write over a config another command saved.* Round 2
+made bind read the config again under the data dir's lock, but library
+add and remove and init save it without that lock, so a save between
+bind's read and its own was written over (Codex, P2). bind now keeps the
+bytes its read parsed (read just before it, so a write in between is
+refused too) and saves through `Config.SaveIf`, which asks, once the new
+file is staged and just before the rename, whether the file still holds
+them: a change, the same-size change with its modification time put back,
+and the file removed are each refused with "run bind again", and the file
+is left as the other writer left it. Bytes, not the size and the time, as
+`tokens.json`'s writers compare (`config-lifecycle.md`); what remains is
+the rename itself. One lock that every config writer takes (library add
+and remove, init, bind, restore) is the wider fix, and it is not this
+PR's. `TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead` lands each
+writer through `outputBindEnv.beforeSave`: red on all three before (exit
+0, both updates written over, the removed file made again).
+`TestSaveIfAsksJustBeforeTheRename` pins `SaveIf` itself.
+
+3. *The FIFO guard was built for Linux and macOS alone.* `open_other.go`'s
+`!linux && !darwin` took in FreeBSD, OpenBSD, NetBSD, DragonFly, illumos,
+Solaris and AIX, whose flags were then 0, so a build there waited on a
+FIFO in a tree it read (the Claude API, Low). `open_posix.go` and
+`fifo_test.go` are built for `unix`, and `open_other.go` for `!unix`.
+syscall defines `O_NONBLOCK` and `O_DIRECTORY` on every unix port Go
+1.27.2 builds, so the production file keeps syscall; the test takes
+`Mkfifo` from x/sys, a dependency already, because syscall has none on
+aix, solaris or illumos. `TestOpenFlagsAreBuiltForEveryUnix` asks
+`go/build` which of the three files each GOOS builds: red before for aix,
+dragonfly, freebsd, hurd, illumos, netbsd, openbsd and solaris.
+`go vet ./internal/alsa/...` is clean for freebsd, openbsd, netbsd,
+dragonfly, illumos, solaris and aix, beside linux, darwin, windows, plan9
+and wasip1.
+
+**Controls, round 3: ten, each red, each restored from git; the tree was
+clean after every run.** `tree.readFile` opening the host path again (1a:
+the eight file cases of the swap test), `tree.readDir` listing it (1b: the
+two listing cases), the sysfs `attr` opening it (1c: both sysfs swap
+cases, which then read the outside attribute), the listing dropping a
+link out of the tree (1d) and `outsideRoot` no longer `errors.Is`
+`errOutsideRoot` (1e: `TestReaderRefusesAFileThatLeavesTheRoot` both
+times), and `openTree` without its directory-only look (1f: the sysfs
+root and both /proc roots blocked until the watchdog); bind's comparison
+never refusing (2a: all three cases), comparing sizes alone (2b: the
+same-size case alone), and `SaveIf` asking after the rename (2c:
+`TestSaveIfAsksJustBeforeTheRename` and all three bind cases); and the
+old tags (3a: sixteen assertions, over the eight GOOSes).
