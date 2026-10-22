@@ -381,10 +381,10 @@ func (u UPnPUpstreamConfig) Validate() error {
 	// letting EffectiveMSearchInterval's `> 0` guard silently substitute
 	// the default (the standardized negative-handling from the r1 review).
 	if u.MSearchIntervalSeconds < 0 || u.MSearchIntervalSeconds > maxIntervalSeconds {
-		return fmt.Errorf("upnpUpstream.msearchIntervalSeconds: must be between 0 and %d (0 uses the default), got %d", maxIntervalSeconds, u.MSearchIntervalSeconds)
+		return fmt.Errorf("upnpUpstream.msearchIntervalSeconds: must be between 0 and %d (0 uses the default)", maxIntervalSeconds)
 	}
 	if u.ServerTTLSeconds < 0 || u.ServerTTLSeconds > maxIntervalSeconds {
-		return fmt.Errorf("upnpUpstream.serverTTLSeconds: must be between 0 and %d (0 uses the default), got %d", maxIntervalSeconds, u.ServerTTLSeconds)
+		return fmt.Errorf("upnpUpstream.serverTTLSeconds: must be between 0 and %d (0 uses the default)", maxIntervalSeconds)
 	}
 	// Compare EFFECTIVE durations — raw-field comparison would falsely
 	// pass when one side is 0 (which silently falls back to the default),
@@ -397,8 +397,8 @@ func (u UPnPUpstreamConfig) Validate() error {
 	ttl := u.EffectiveServerTTL()
 	if ttl <= ms {
 		return fmt.Errorf(
-			"upnpUpstream: serverTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online servers evict between cycles",
-			ttl, ms)
+			"upnpUpstream: serverTTLSeconds must be > msearchIntervalSeconds, each as it takes effect (0 is the default, %v and %v) — otherwise still-online servers evict between cycles",
+			DefaultUPnPUpstreamServerTTL, DefaultUPnPUpstreamMSearchInterval)
 	}
 	seenPrefix := make(map[string]int, len(u.Servers))
 	seenUDN := make(map[string]int, len(u.Servers))
@@ -410,8 +410,8 @@ func (u UPnPUpstreamConfig) Validate() error {
 		hasURL := strings.TrimSpace(s.ManualDescriptionURL) != ""
 		if !hasUDN && !hasURL {
 			return fmt.Errorf(
-				"upnpUpstream.servers[%d] (%q): either udn or manualDescriptionURL is required",
-				i, s.Name)
+				"upnpUpstream.servers[%d]: either udn or manualDescriptionURL is required",
+				i)
 		}
 		// Normalize the way the walker does: trim spaces AND surrounding
 		// slashes. Otherwise "Chord 2Go" and "Chord 2Go/" would slip past
@@ -425,21 +425,21 @@ func (u UPnPUpstreamConfig) Validate() error {
 			// An empty prefix would route this upstream's tracks at the
 			// library root, tangling them with local paths — reject loudly.
 			return fmt.Errorf(
-				"upnpUpstream.servers[%d] (%q): resolved path prefix is empty (name and pathPrefix are only slashes/whitespace)",
-				i, s.Name)
+				"upnpUpstream.servers[%d]: resolved path prefix is empty (name and pathPrefix are only slashes/whitespace)",
+				i)
 		}
 		if other, dup := seenPrefix[strings.ToLower(prefix)]; dup {
 			return fmt.Errorf(
-				"upnpUpstream.servers[%d] (%q): pathPrefix %q collides with servers[%d]",
-				i, s.Name, prefix, other)
+				"upnpUpstream.servers[%d]: its path prefix (pathPrefix, or name when that is empty) collides with servers[%d]'s",
+				i, other)
 		}
 		seenPrefix[strings.ToLower(prefix)] = i
 		if hasUDN {
 			udn := strings.ToLower(strings.TrimSpace(s.UDN))
 			if other, dup := seenUDN[udn]; dup {
 				return fmt.Errorf(
-					"upnpUpstream.servers[%d] (%q): udn duplicates servers[%d]",
-					i, s.Name, other)
+					"upnpUpstream.servers[%d]: udn duplicates servers[%d]",
+					i, other)
 			}
 			seenUDN[udn] = i
 		}
@@ -1125,11 +1125,10 @@ const (
 // the YAML value — hand-edited config files frequently pick up
 // trailing spaces after a merge / format-on-save, and the
 // resulting "unknown value" error trapped operators who couldn't
-// see the invisible character. Normalisation is one-way: the
-// error message preserves the ORIGINAL untrimmed `t.Mode` so the
-// operator sees their actual input verbatim, which matters most
-// for a typo path where the invisible-whitespace explanation
-// would mislead.
+// see the invisible character. The error names the field and the
+// words it takes, never the value: what is refused here can be a
+// secret pasted onto the wrong line, and the refusal reaches the
+// journal (B505's round 3; it quoted the value until then).
 func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
 	mode := strings.ToLower(strings.TrimSpace(t.Mode))
 	switch mode {
@@ -1140,7 +1139,7 @@ func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
 	case string(TailscaleModeDisabled):
 		return TailscaleModeDisabled, nil
 	}
-	return "", fmt.Errorf("tailscale.mode: unknown value %q (want cli|tsnet|disabled)", t.Mode)
+	return "", errors.New("tailscale.mode: that value is not cli, tsnet or disabled")
 }
 
 // DeploymentConfig selects the overall deployment posture. `loopback`
@@ -1453,7 +1452,8 @@ const (
 // loopback-fallback that masks public-mode intent.
 //
 // Tolerant of leading/trailing whitespace and case differences in
-// the YAML value (mirrors TailscaleConfig.EffectiveMode).
+// the YAML value, and quoting no value in its error (mirrors
+// TailscaleConfig.EffectiveMode).
 func (d DeploymentConfig) EffectiveMode() (DeploymentMode, error) {
 	mode := strings.ToLower(strings.TrimSpace(d.Mode))
 	switch mode {
@@ -1462,7 +1462,7 @@ func (d DeploymentConfig) EffectiveMode() (DeploymentMode, error) {
 	case string(DeploymentModePublic):
 		return DeploymentModePublic, nil
 	}
-	return "", fmt.Errorf("deployment.mode: unknown value %q (want loopback|public)", d.Mode)
+	return "", errors.New("deployment.mode: that value is not loopback or public")
 }
 
 // AutocertConfig wires native Let's Encrypt provisioning via
@@ -2446,8 +2446,8 @@ const (
 
 // EffectiveFilter resolves the configured policy, applying the
 // highest-quality default for empty values and rejecting unknowns (the
-// TailscaleMode.EffectiveMode shape: tolerant of case/whitespace, error
-// message preserves the operator's original input verbatim).
+// TailscaleMode.EffectiveMode shape: tolerant of case/whitespace, and an
+// error that names the words the field takes and never the value).
 func (d DuplicatesConfig) EffectiveFilter() (string, error) {
 	v := strings.ToLower(strings.TrimSpace(d.Filter))
 	switch v {
@@ -2458,7 +2458,7 @@ func (d DuplicatesConfig) EffectiveFilter() (string, error) {
 	case DuplicatesFilterOff:
 		return DuplicatesFilterOff, nil
 	}
-	return "", fmt.Errorf("duplicates.filter: unknown value %q (want highest-quality|same-format|off)", d.Filter)
+	return "", errors.New("duplicates.filter: that value is not highest-quality, same-format or off")
 }
 
 // SmartPlaylistsConfig governs the optional server-side smart/dynamic
@@ -2787,7 +2787,9 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // typo-catcher: unknown YAML keys fail the load
 	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("parse config %q: %w", path, err)
+		// Without the file's text: yaml.v3 quotes what it cannot decode,
+		// and that is often a password or a serial on the wrong line.
+		return nil, fmt.Errorf("parse config %q: %w", path, ValueFreeYAMLError(err))
 	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
@@ -3278,18 +3280,18 @@ func (c *Config) Validate() error {
 		}
 		if d < MinPlaybackHistoryRetentionDays {
 			return fmt.Errorf(
-				"retention.playbackHistoryDays: %d is below the %d-day floor — the smart-mix "+
+				"retention.playbackHistoryDays: that value is below the %d-day floor — the smart-mix "+
 					"families read windows up to %d days, so a shorter retention would silently "+
 					"empty them. Use 0 to keep everything, or a value >= %d",
-				d, MinPlaybackHistoryRetentionDays, MinPlaybackHistoryRetentionDays,
+				MinPlaybackHistoryRetentionDays, MinPlaybackHistoryRetentionDays,
 				MinPlaybackHistoryRetentionDays)
 		}
 		if d > MaxRetentionDays {
 			return fmt.Errorf(
-				"retention.playbackHistoryDays: %d is above the %d-day ceiling — past roughly "+
+				"retention.playbackHistoryDays: that value is above the %d-day ceiling — past roughly "+
 					"349 years the cutoff timestamp overflows and the reap deletes the ENTIRE "+
 					"table rather than nothing. Use 0 to keep everything",
-				d, MaxRetentionDays)
+				MaxRetentionDays)
 		}
 	}
 	// The same ceiling, for the same overflow. This half is the more
@@ -3302,10 +3304,10 @@ func (c *Config) Validate() error {
 		}
 		if d > MaxRetentionDays {
 			return fmt.Errorf(
-				"retention.deviceRegistrationDays: %d is above the %d-day ceiling — past roughly "+
+				"retention.deviceRegistrationDays: that value is above the %d-day ceiling — past roughly "+
 					"349 years the cutoff timestamp overflows and the reap deletes EVERY "+
 					"registration, including ones bound to live tokens. Use 0 to keep them",
-				d, MaxRetentionDays)
+				MaxRetentionDays)
 		}
 	}
 
@@ -3343,19 +3345,19 @@ func (c *Config) Validate() error {
 	// mode-dependent strictness, mutation paths (`bridge library
 	// add`, admin's apiRootsAdd) already stat independently.
 	if c.ScanIntervalSec < 1 || c.ScanIntervalSec > maxIntervalSeconds {
-		return fmt.Errorf("scanIntervalSec: must be between 1 and %d, got %d", maxIntervalSeconds, c.ScanIntervalSec)
+		return fmt.Errorf("scanIntervalSec: must be between 1 and %d", maxIntervalSeconds)
 	}
 	// upload.sessionTtlSeconds feeds a time.Duration(n) * time.Second
 	// conversion that overflows to a NEGATIVE duration past ~9.2e9, and
 	// time.NewTicker panics on a non-positive interval — so an unchecked
 	// value here is a startup crash, not a slow sweeper.
 	if c.Upload.SessionTTLSeconds < 0 || c.Upload.SessionTTLSeconds > maxIntervalSeconds {
-		return fmt.Errorf("upload.sessionTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
-			maxIntervalSeconds, c.Upload.SessionTTLSeconds)
+		return fmt.Errorf("upload.sessionTtlSeconds: must be between 0 and %d (0 uses the default)",
+			maxIntervalSeconds)
 	}
 	if c.Library.TrashTtlSeconds < 0 || c.Library.TrashTtlSeconds > maxIntervalSeconds {
-		return fmt.Errorf("library.trashTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
-			maxIntervalSeconds, c.Library.TrashTtlSeconds)
+		return fmt.Errorf("library.trashTtlSeconds: must be between 0 and %d (0 uses the default)",
+			maxIntervalSeconds)
 	}
 	// Enrich upstream base URLs: require an absolute http(s) URL —
 	// surfaces typos at load time instead of as silent runtime enrichment
@@ -3372,14 +3374,14 @@ func (c *Config) Validate() error {
 	switch c.Enrich.CoverSize {
 	case 0, 250, 500, 1200:
 	default:
-		return fmt.Errorf("enrich.coverSize: must be one of 250, 500, 1200 (or 0 for the default 1200), got %d", c.Enrich.CoverSize)
+		return errors.New("enrich.coverSize: must be one of 250, 500, 1200 (or 0 for the default 1200)")
 	}
 	// Artwork cache cap: a negative value is almost certainly a typo. Zero
 	// is the valid "unbounded" sentinel; positive is a byte cap. Surface a
 	// negative at load time rather than letting the sweeper silently treat
 	// it as unbounded.
 	if c.Artwork.CacheMaxBytes < 0 {
-		return fmt.Errorf("artwork.cacheMaxBytes: must be >= 0 (0 = unbounded), got %d", c.Artwork.CacheMaxBytes)
+		return errors.New("artwork.cacheMaxBytes: must be >= 0 (0 = unbounded)")
 	}
 	// atlas.metaTtlHours: a huge value overflows the `time.Duration(h) *
 	// time.Hour` multiply in EffectiveMetaTTL — int64 wraps to a NEGATIVE
@@ -3387,7 +3389,7 @@ func (c *Config) Validate() error {
 	// the documented "use the 30-day default" sentinel, so only the top
 	// end needs a bound (one year, expressed in hours).
 	if c.Atlas.MetaTTLHours > maxIntervalHours {
-		return fmt.Errorf("atlas.metaTtlHours: must be <= %d (one year); 0 uses the default, got %d", maxIntervalHours, c.Atlas.MetaTTLHours)
+		return fmt.Errorf("atlas.metaTtlHours: must be <= %d (one year); 0 uses the default", maxIntervalHours)
 	}
 	// atlas.harvestBaseUrl pins which Atlas host the credential endpoint will
 	// accept, so a malformed value must fail at load rather than silently
@@ -3427,17 +3429,17 @@ func (c *Config) Validate() error {
 		// the existing TTL-vs-interval check + gated on Enabled, matching
 		// the upnpUpstream block's pattern.
 		if c.DLNA.Discovery.MSearchIntervalSeconds < 0 || c.DLNA.Discovery.MSearchIntervalSeconds > maxIntervalSeconds {
-			return fmt.Errorf("dlna.discovery.msearchIntervalSeconds: must be between 0 and %d (0 uses the default), got %d", maxIntervalSeconds, c.DLNA.Discovery.MSearchIntervalSeconds)
+			return fmt.Errorf("dlna.discovery.msearchIntervalSeconds: must be between 0 and %d (0 uses the default)", maxIntervalSeconds)
 		}
 		if c.DLNA.Discovery.RendererTTLSeconds < 0 || c.DLNA.Discovery.RendererTTLSeconds > maxIntervalSeconds {
-			return fmt.Errorf("dlna.discovery.rendererTTLSeconds: must be between 0 and %d (0 uses the default), got %d", maxIntervalSeconds, c.DLNA.Discovery.RendererTTLSeconds)
+			return fmt.Errorf("dlna.discovery.rendererTTLSeconds: must be between 0 and %d (0 uses the default)", maxIntervalSeconds)
 		}
 		ms := c.DLNA.Discovery.EffectiveMSearchInterval()
 		ttl := c.DLNA.Discovery.EffectiveRendererTTL()
 		if ttl <= ms {
 			return fmt.Errorf(
-				"dlna.discovery: rendererTTLSeconds (%v) must be > msearchIntervalSeconds (%v) — otherwise still-online renderers evict between cycles",
-				ttl, ms,
+				"dlna.discovery: rendererTTLSeconds must be > msearchIntervalSeconds, each as it takes effect (0 is the default, %v and %v) — otherwise still-online renderers evict between cycles",
+				DefaultDLNADiscoveryRendererTTL, DefaultDLNADiscoveryMSearchInterval,
 			)
 		}
 	}
@@ -3449,7 +3451,7 @@ func (c *Config) Validate() error {
 	// substitute the 24h default (same standardized handling as the
 	// upnpUpstream cadences above).
 	if c.SmartPlaylists.RegenerateIntervalSec < 0 || c.SmartPlaylists.RegenerateIntervalSec > maxIntervalSeconds {
-		return fmt.Errorf("smartPlaylists.regenerateIntervalSec: must be between 0 and %d (0 uses the default 24h), got %d", maxIntervalSeconds, c.SmartPlaylists.RegenerateIntervalSec)
+		return fmt.Errorf("smartPlaylists.regenerateIntervalSec: must be between 0 and %d (0 uses the default 24h)", maxIntervalSeconds)
 	}
 	// Public-mode refusal for upnpUpstream. The feature relies on SSDP
 	// multicast (LAN-only by spec) AND a route to the upstream's
@@ -3525,7 +3527,7 @@ func (c *Config) Validate() error {
 			// confirm an external port-forward maps WAN:443 →
 			// the bridge's listenAddress.
 			if !listenAddrIsPort443(c.ListenAddress) && !c.Autocert.External443Mapping {
-				return fmt.Errorf("autocert.enabled requires listenAddress on port :443 OR autocert.external443Mapping: true — got listenAddress %q (LE's TLS-ALPN-01 challenge is only validated on TCP/443)", c.ListenAddress)
+				return errors.New("autocert.enabled requires listenAddress on port :443 OR autocert.external443Mapping: true — listenAddress names another port (LE's TLS-ALPN-01 challenge is only validated on TCP/443)")
 			}
 		}
 	} else if err := ValidateLoopbackAddress("adminAddress", c.AdminAddress); err != nil {
@@ -3540,14 +3542,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Update.QuietHours != "" {
 		if _, _, err := ParseQuietHours(c.Update.QuietHours); err != nil {
-			return fmt.Errorf("update.quietHours %q: %w", c.Update.QuietHours, err)
+			return fmt.Errorf("update.quietHours: %w", err)
 		}
 	}
 	if err := validateVariantsDir(c.Upscale.VariantsDir, c.LibraryRoots); err != nil {
-		return fmt.Errorf("upscale.variantsDir %q: %w", c.Upscale.VariantsDir, err)
+		return fmt.Errorf("upscale.variantsDir: %w", err)
 	}
 	if err := validateRenderTempDir(c.Upscale.TempDir, c.LibraryRoots); err != nil {
-		return fmt.Errorf("upscale.tempDir %q: %w", c.Upscale.TempDir, err)
+		return fmt.Errorf("upscale.tempDir: %w", err)
 	}
 	// upscale / analysis worker + queue counts: zero is the documented
 	// "use the computed default" sentinel (EffectiveWorkers /
@@ -3555,10 +3557,10 @@ func (c *Config) Validate() error {
 	// Reject it loudly rather than let the `> 0` guards silently swallow
 	// it — matching the negative-cadence handling elsewhere in Validate.
 	if c.Upscale.Workers < 0 {
-		return fmt.Errorf("upscale.workers: must be >= 0 (0 uses the computed default), got %d", c.Upscale.Workers)
+		return errors.New("upscale.workers: must be >= 0 (0 uses the computed default)")
 	}
 	if c.Upscale.QueueCap < 0 {
-		return fmt.Errorf("upscale.queueCap: must be >= 0 (0 uses the default), got %d", c.Upscale.QueueCap)
+		return errors.New("upscale.queueCap: must be >= 0 (0 uses the default)")
 	}
 	// Auto-optimize cadence: ceiling-checked per the #529 overflow
 	// invariant — `time.Duration(n) * time.Second` wraps NEGATIVE past
@@ -3568,14 +3570,14 @@ func (c *Config) Validate() error {
 	// clamps them to the inherited scan cadence) so only the ceiling
 	// needs refusing.
 	if c.Upscale.AutoOptimize.IntervalSec > maxIntervalSeconds {
-		return fmt.Errorf("upscale.autoOptimize.intervalSec: must be <= %d (0 inherits scanIntervalSec), got %d",
-			maxIntervalSeconds, c.Upscale.AutoOptimize.IntervalSec)
+		return fmt.Errorf("upscale.autoOptimize.intervalSec: must be <= %d (0 inherits scanIntervalSec)",
+			maxIntervalSeconds)
 	}
 	if c.Analysis.Workers < 0 {
-		return fmt.Errorf("analysis.workers: must be >= 0 (0 uses the computed default), got %d", c.Analysis.Workers)
+		return errors.New("analysis.workers: must be >= 0 (0 uses the computed default)")
 	}
 	if c.Analysis.QueueCap < 0 {
-		return fmt.Errorf("analysis.queueCap: must be >= 0 (0 uses the default), got %d", c.Analysis.QueueCap)
+		return errors.New("analysis.queueCap: must be >= 0 (0 uses the default)")
 	}
 	// Fingerprint: shape checks only. Deliberately NOT "enabled requires a
 	// key" — a host with BRIDGE_FINGERPRINT_ENABLED set and no key must still
@@ -3583,16 +3585,16 @@ func (c *Config) Validate() error {
 	// missing sox does for upscaling. Refusing to start would turn a missing
 	// optional credential into an outage.
 	if c.Fingerprint.Workers < 0 {
-		return fmt.Errorf("fingerprint.workers: must be >= 0 (0 uses the default), got %d", c.Fingerprint.Workers)
+		return errors.New("fingerprint.workers: must be >= 0 (0 uses the default)")
 	}
 	if c.Fingerprint.MaxPerRun < 0 {
-		return fmt.Errorf("fingerprint.maxPerRun: must be >= 0 (0 uses the default), got %d", c.Fingerprint.MaxPerRun)
+		return errors.New("fingerprint.maxPerRun: must be >= 0 (0 uses the default)")
 	}
 	if c.Fingerprint.LengthSeconds < 0 {
-		return fmt.Errorf("fingerprint.lengthSeconds: must be >= 0 (0 uses the default), got %d", c.Fingerprint.LengthSeconds)
+		return errors.New("fingerprint.lengthSeconds: must be >= 0 (0 uses the default)")
 	}
 	if c.Fingerprint.SweepIntervalHours < 0 || c.Fingerprint.SweepIntervalHours > maxIntervalHours {
-		return fmt.Errorf("fingerprint.sweepIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Fingerprint.SweepIntervalHours)
+		return fmt.Errorf("fingerprint.sweepIntervalHours: must be between 0 and %d", maxIntervalHours)
 	}
 	// Duplicates: the resolver IS the validation (unknown value → error),
 	// so a typo'd policy fails at load rather than silently serving with
@@ -3601,10 +3603,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if c.Update.CheckIntervalHours < 0 || c.Update.CheckIntervalHours > maxIntervalHours {
-		return fmt.Errorf("update.checkIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Update.CheckIntervalHours)
+		return fmt.Errorf("update.checkIntervalHours: must be between 0 and %d", maxIntervalHours)
 	}
 	if c.Backup.IntervalHours != nil && (*c.Backup.IntervalHours < 0 || *c.Backup.IntervalHours > maxIntervalHours) {
-		return fmt.Errorf("backup.intervalHours: must be between 0 and %d (0 disables, omit for default), got %d", maxIntervalHours, *c.Backup.IntervalHours)
+		return fmt.Errorf("backup.intervalHours: must be between 0 and %d (0 disables, omit for default)", maxIntervalHours)
 	}
 	// Standardize negative-interval handling: reject loudly rather than
 	// silently clamp-to-disabled (the EffectiveX helpers still clamp as
@@ -3612,17 +3614,17 @@ func (c *Config) Validate() error {
 	// operator should hear about — matching CheckIntervalHours /
 	// IntervalHours above). 0 = "disabled", nil/omitted = "use default".
 	if c.Integrity.VariantSweepIntervalSec != nil && (*c.Integrity.VariantSweepIntervalSec < 0 || *c.Integrity.VariantSweepIntervalSec > maxIntervalSeconds) {
-		return fmt.Errorf("integrity.variantSweepIntervalSec: must be between 0 and %d (0 disables, omit for default), got %d", maxIntervalSeconds, *c.Integrity.VariantSweepIntervalSec)
+		return fmt.Errorf("integrity.variantSweepIntervalSec: must be between 0 and %d (0 disables, omit for default)", maxIntervalSeconds)
 	}
 	if c.Integrity.OrphanSidecarSweepIntervalSec != nil && (*c.Integrity.OrphanSidecarSweepIntervalSec < 0 || *c.Integrity.OrphanSidecarSweepIntervalSec > maxIntervalSeconds) {
-		return fmt.Errorf("integrity.orphanSidecarSweepIntervalSec: must be between 0 and %d (0 disables, omit for default), got %d", maxIntervalSeconds, *c.Integrity.OrphanSidecarSweepIntervalSec)
+		return fmt.Errorf("integrity.orphanSidecarSweepIntervalSec: must be between 0 and %d (0 disables, omit for default)", maxIntervalSeconds)
 	}
 	// A percentage: refuse (never clamp) anything outside 0..100, like
 	// every other bounded knob here — a typo'd 200 would silently mean
 	// "disabled", which is the setting an operator least expects to reach
 	// by accident.
 	if c.Integrity.VariantSweepMaxDeletePercent != nil && (*c.Integrity.VariantSweepMaxDeletePercent < 0 || *c.Integrity.VariantSweepMaxDeletePercent > 100) {
-		return fmt.Errorf("integrity.variantSweepMaxDeletePercent: must be between 0 and 100 (100 disables the guard, omit for default %d), got %d", DefaultVariantSweepMaxDeletePercent, *c.Integrity.VariantSweepMaxDeletePercent)
+		return fmt.Errorf("integrity.variantSweepMaxDeletePercent: must be between 0 and 100 (100 disables the guard, omit for default %d)", DefaultVariantSweepMaxDeletePercent)
 	}
 	// backup.Keep: any non-positive value disables pruning. No
 	// upper-bound check — an operator who wants 1000 retained
@@ -3684,9 +3686,19 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	// admin handler + the `bridge variants move` CLI so all three stay in
 	// lockstep.
 	if matched := fsutil.IsUnderAny(variantsDir, libraryRoots); matched != "" {
-		return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", matched)
+		return fmt.Errorf("must not be under a library root, %s (variants would tangle with source files)", libraryRootIndex(matched, libraryRoots))
 	}
 	return nil
+}
+
+// libraryRootIndex names the library root matched, one of roots, by its
+// place in libraryRoots, never its path: a refusal of a directory setting
+// carries no value, its own or another setting's.
+func libraryRootIndex(matched string, roots []string) string {
+	if i := slices.Index(roots, matched); i >= 0 {
+		return fmt.Sprintf("libraryRoots[%d]", i)
+	}
+	return "libraryRoots"
 }
 
 // validateRenderTempDir checks `upscale.tempDir` against the same two
@@ -3706,7 +3718,7 @@ func validateRenderTempDir(tempDir string, libraryRoots []string) error {
 		return errors.New("must be an absolute path")
 	}
 	if matched := fsutil.IsUnderAny(tempDir, libraryRoots); matched != "" {
-		return fmt.Errorf("must not be under library root %q (render scratch would land inside the read-only library)", matched)
+		return fmt.Errorf("must not be under a library root, %s (render scratch would land inside the read-only library)", libraryRootIndex(matched, libraryRoots))
 	}
 	return nil
 }
@@ -3959,19 +3971,22 @@ func parseHHMM(s string) (int, error) {
 	// silently accept "01:00:00" as ["01", "00:00"].
 	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
-		return 0, fmt.Errorf("%q: expected HH:MM", s)
+		return 0, errors.New("expected HH:MM")
 	}
 	// strconv.Atoi (not fmt.Sscanf) so trailing non-numeric input
 	// is rejected — "12abc" parses cleanly with Sscanf as 12 but
 	// errors with Atoi. PR #43 review caught the laxer Sscanf
 	// behaviour as a quiet-hours validation gap.
+	//
+	// The errors quote nothing of s: Validate prints them, and what is
+	// refused can be a secret pasted onto the wrong line (B505's round 3).
 	h, err := strconv.Atoi(parts[0])
 	if err != nil || h < 0 || h > 23 {
-		return 0, fmt.Errorf("%q: hour must be 00-23", s)
+		return 0, errors.New("hour must be 00-23")
 	}
 	m, err := strconv.Atoi(parts[1])
 	if err != nil || m < 0 || m > 59 {
-		return 0, fmt.Errorf("%q: minute must be 00-59", s)
+		return 0, errors.New("minute must be 00-59")
 	}
 	return h*60 + m, nil
 }
@@ -4032,6 +4047,9 @@ func validatePort(port string) error {
 	if port == "" {
 		return errors.New("port must not be empty")
 	}
+	// The errors quote nothing of the port: a refusal of an address
+	// setting is printed at load, and what is refused can be a secret
+	// pasted onto the wrong line (B505's round 3).
 	p, err := strconv.Atoi(port)
 	if err != nil {
 		if looksLikeServiceName(port) {
@@ -4039,12 +4057,12 @@ func validatePort(port string) error {
 			// operator can hit on a config that USED to work: without
 			// saying so, "must be a number" reads like the bridge simply
 			// cannot count.
-			return fmt.Errorf("port %q is a service name; use its number instead (the bridge requires a numeric port even where net.Listen would resolve the name)", port)
+			return errors.New("its port is a service name; use its number instead (the bridge requires a numeric port even where net.Listen would resolve the name)")
 		}
-		return fmt.Errorf("port %q must be a number between 0 and 65535", port)
+		return errors.New("its port must be a number between 0 and 65535")
 	}
 	if p < 0 || p > 65535 {
-		return fmt.Errorf("port %q must be a number between 0 and 65535", port)
+		return errors.New("its port must be a number between 0 and 65535")
 	}
 	return nil
 }
@@ -4089,25 +4107,42 @@ func looksLikeServiceName(port string) bool {
 // a --listen-address this refuses, and a public run's --admin-address,
 // before its preflight grades the port the address names (a loopback run's
 // --admin-address takes ValidateLoopbackAddress, as the file's does).
+//
+// The error names the field and why, never the address: Validate prints it
+// at load, and what is refused can be a secret pasted onto the wrong line
+// (B505's round 3). net.SplitHostPort's own error repeats the address, so
+// only its reason is kept (splitHostPortWhy).
 func ValidateBindAddress(field, addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("%s %q: %w", field, addr, err)
+		return fmt.Errorf("%s: %s", field, splitHostPortWhy(err))
 	}
 	if err := validatePort(port); err != nil {
-		return fmt.Errorf("%s %q: %w", field, addr, err)
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
 }
 
+// splitHostPortWhy is why net.SplitHostPort refused an address, without
+// the address: the reason of its *net.AddrError, which is one of net's own
+// fixed words ("missing port in address", "too many colons in address").
+func splitHostPortWhy(err error) string {
+	var ae *net.AddrError
+	if errors.As(err, &ae) {
+		return ae.Err
+	}
+	return "it is not a host:port address"
+}
+
 // ValidateLoopbackAddress is validateLoopbackAddress with the field named in
-// its error, as ValidateBindAddress names it. Validate checks a loopback
-// install's adminAddress with it, and `bridge init` a loopback run's
-// --admin-address, before its preflight grades the port the address names:
-// one rule for the file and for the flag that writes it.
+// its error, as ValidateBindAddress names it, and like it never the address.
+// Validate checks a loopback install's adminAddress with it, and `bridge
+// init` a loopback run's --admin-address, before its preflight grades the
+// port the address names: one rule for the file and for the flag that
+// writes it.
 func ValidateLoopbackAddress(field, addr string) error {
 	if err := validateLoopbackAddress(addr); err != nil {
-		return fmt.Errorf("%s %q: %w", field, addr, err)
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
 }
@@ -4116,10 +4151,11 @@ func ValidateLoopbackAddress(field, addr string) error {
 // loopback interface. Accepts "127.0.0.1:N", "[::1]:N", and "localhost:N" —
 // an empty host (":N" = all interfaces) or any non-loopback IP is rejected.
 // The admin console has no auth layer; loopback binding is the trust boundary.
+// Its errors quote nothing of addr (ValidateBindAddress says why).
 func validateLoopbackAddress(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return err
+		return errors.New(splitHostPortWhy(err))
 	}
 	if port == "" {
 		return errors.New("port must not be empty")
@@ -4132,12 +4168,12 @@ func validateLoopbackAddress(addr string) error {
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if !ip.IsLoopback() {
-			return fmt.Errorf("host %q is not a loopback address", host)
+			return errors.New("its host is not a loopback address (127.0.0.1, ::1, or localhost)")
 		}
 		return nil
 	}
 	if host != "localhost" {
-		return fmt.Errorf("host %q must be a loopback address (127.0.0.1, ::1, or localhost)", host)
+		return errors.New("its host must be a loopback address (127.0.0.1, ::1, or localhost)")
 	}
 	return nil
 }

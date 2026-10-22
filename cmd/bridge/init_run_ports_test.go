@@ -231,7 +231,7 @@ func TestInitRefusesAnAddressFlagTheConfigWouldRefuse(t *testing.T) {
 		{"loopback admin address out of range", false, "--admin-address", "127.0.0.1:99999",
 			[]string{"must be a number between 0 and 65535"}},
 		{"loopback admin address on every interface", false, "--admin-address", "0.0.0.0:17789",
-			[]string{`host "0.0.0.0" is not a loopback address`, noLogin}},
+			[]string{`is not a loopback address`, noLogin}},
 		{"loopback admin address with no host", false, "--admin-address", ":17789",
 			[]string{"an empty host binds all interfaces", noLogin}},
 		{"loopback admin address on a host name", false, "--admin-address", "bridge.example.test:17789",

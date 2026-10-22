@@ -134,7 +134,9 @@ func priorInstallFrom(cfgPath string, read configAsRead) (*priorInstallFile, err
 	}
 	var p priorInstallFile
 	if err := yaml.Unmarshal(read.raw, &p); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
+		// Without the file's text, as config.Load says it: refuseRewrite
+		// prints this, and yaml.v3 quotes what it cannot decode.
+		return nil, fmt.Errorf("parse %s: %w", cfgPath, config.ValueFreeYAMLError(err))
 	}
 	abs, err := filepath.Abs(cfgPath)
 	if err != nil {
