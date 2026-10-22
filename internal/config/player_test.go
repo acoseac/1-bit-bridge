@@ -315,6 +315,113 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 	}
 }
 
+// writeConfigBody writes a loopback bridge.yaml whose top-level keys after
+// listenAddress are top (libraryName among them), and whose output block is
+// output, and returns its path.
+func writeConfigBody(t *testing.T, top, output string) string {
+	t.Helper()
+	dir := t.TempDir()
+	music := filepath.Join(dir, "music")
+	if err := os.Mkdir(music, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "listenAddress: \":7788\"\nscanIntervalSec: 3600\n" + top + "libraryRoots: [" + yamlStr(music) + "]\n" +
+		"dataDir: " + yamlStr(filepath.Join(dir, "data")) + "\noutput:\n" + output
+	path := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestAnUnreadBlockWithAnAliasSavesAFileThatLoads: a block that does not
+// read is written back as the file held it, and the rest of the file is
+// written from the config's fields, which keep no anchor. So an alias in
+// the block to an anchor outside it (libraryName: &room Kitchen, then
+// player.room: *room) is saved as a copy of what it names, and the file
+// loads again, and again after a second save, with the same refusal; an
+// alias to an anchor inside the block is saved as it is.
+func TestAnUnreadBlockWithAnAliasSavesAFileThatLoads(t *testing.T) {
+	unlined := regexp.MustCompile(` \(line \d+\)`)
+	for _, tc := range []struct {
+		name, top, output string
+		// saved is what the saved file must hold.
+		saved []string
+	}{
+		{"an alias to libraryName", "libraryName: &room Kitchen\n", "  player:\n    room: *room\n    bogus: 1\n",
+			[]string{"room: Kitchen"}},
+		{"an alias as a key", "libraryName: &k Kitchen\n", "  player:\n    enabled: true\n    *k : 1\n", []string{"Kitchen: 1"}},
+		{"an alias inside a value", "libraryName: &room Kitchen\n", "  player:\n    bogus: [*room, *room]\n", []string{"Kitchen, Kitchen"}},
+		{"an anchor inside the block", "libraryName: Kitchen\n", "  player:\n    room: &r Study\n    bogus: *r\n",
+			[]string{"&r Study", "bogus: *r"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigBody(t, tc.top, tc.output)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, why := cfg.PlayerEnabled("linux")
+			if why == nil || !strings.Contains(why.Error(), "is not a player setting") {
+				t.Fatalf("PlayerEnabled's reason = %v", why)
+			}
+			for i := 0; i < 2; i++ {
+				if err := cfg.Save(path); err != nil {
+					t.Fatalf("save %d: %v", i+1, err)
+				}
+				saved, _ := os.ReadFile(path)
+				if cfg, err = Load(path); err != nil {
+					t.Fatalf("the file save %d wrote does not load: %v\n%s", i+1, err, saved)
+				}
+				if _, again := cfg.PlayerEnabled("linux"); again == nil ||
+					unlined.ReplaceAllString(again.Error(), "") != unlined.ReplaceAllString(why.Error(), "") {
+					t.Errorf("after save %d: %v; want the same refusal %v", i+1, again, why)
+				}
+				for _, s := range tc.saved {
+					if !strings.Contains(string(saved), s) {
+						t.Errorf("save %d does not hold %q:\n%s", i+1, s, saved)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAnUnreadBlockWhoseAliasesCannotBeCopiedIsNotKept: an alias that names
+// the block from inside it (room: *o, where &o is the output mapping that
+// holds the block) would copy without end, and copies past the bound are an
+// alias bomb. Such a block is not kept: its reason says a save drops it,
+// and the file a save writes loads, with no player block.
+func TestAnUnreadBlockWhoseAliasesCannotBeCopiedIsNotKept(t *testing.T) {
+	bomb := strings.TrimSuffix(strings.Repeat("*n, ", 1100), ", ")
+	for _, tc := range []struct{ name, top, output string }{
+		{"an alias to the block's own parent", "libraryName: Kitchen\n", "  &o\n  mpd: auto\n  player:\n    room: *o\n"},
+		{"an alias bomb", "libraryName: &n Kitchen\n", "  player:\n    bogus: [" + bomb + "]\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigBody(t, tc.top, tc.output)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, why := cfg.PlayerEnabled("linux"); why == nil || !strings.Contains(why.Error(), "a save drops it") {
+				t.Fatalf("PlayerEnabled's reason = %v", why)
+			}
+			if err := cfg.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			saved, _ := os.ReadFile(path)
+			back, err := Load(path)
+			if err != nil {
+				t.Fatalf("the file the save wrote does not load: %v\n%s", err, saved)
+			}
+			if strings.Contains(string(saved), "player:") || back.Output.Player.Unread() != nil || !back.Output.Player.IsZero() {
+				t.Errorf("the save kept a block it could not write back:\n%s", saved)
+			}
+		})
+	}
+}
+
 // fullPlayer is fullPlayerBlock in memory: every field set to a value
 // this release takes.
 func fullPlayer() PlayerConfig {

@@ -54,7 +54,8 @@ const playerOffMessage = "output.player: the player is off"
 // A block that does not read, or reads and is refused (Problem), turns the
 // player off with a logged reason and stops nothing else: MPD, the library
 // and the server load as they would without it. A block that does not read
-// is written back by Save as the file held it.
+// is written back by Save as the file held it, an alias to an anchor
+// outside the block written as a copy of what it names (keepable).
 //
 // Its serial is a usbid.Serial, which prints and encodes as a redaction
 // everywhere but the config file.
@@ -81,10 +82,10 @@ type PlayerConfig struct {
 	// none alone: the output is fixed.
 	Mixer PlayerMixer `yaml:"mixer,omitempty"`
 
-	// written is the block as the file holds it, kept only when it did not
-	// read (unread says why): Save writes it back as it was, so an
-	// operator's text is never lost to a block this release cannot read.
-	// It is never changed after the decode, so a Clone shares it.
+	// written is the block as the file holds it (keepable), kept only when
+	// it did not read (unread says why): Save writes it back as it was, so
+	// an operator's text is never lost to a block this release cannot
+	// read. It is never changed after the decode, so a Clone shares it.
 	written *yaml.Node
 	// unread is why the block did not read, naming the field and its line
 	// and never quoting a value.
@@ -211,20 +212,94 @@ func (p PlayerConfig) MarshalYAML() (any, error) {
 }
 
 // UnmarshalYAML reads the block, and never fails the load: a block that does
-// not read is kept as written, with the reason (Problem), and the player is
-// off. yaml.v3 decodes each value, so a bool or an integer reads as it does
-// everywhere else in the config, and the reason is this package's own,
-// naming the field and its line and quoting no value: a serial in the wrong
-// place must not reach a log.
+// not read is kept as written (keepable), with the reason (Problem), and the
+// player is off. yaml.v3 decodes each value, so a bool or an integer reads
+// as it does everywhere else in the config, and the reason is this
+// package's own, naming the field and its line and quoting no value: a
+// serial in the wrong place must not reach a log.
 func (p *PlayerConfig) UnmarshalYAML(n *yaml.Node) error {
 	var r playerReader
 	got := r.player(n)
-	if r.problem != "" {
-		*p = PlayerConfig{written: n, unread: r.problem}
+	if r.problem == "" {
+		*p = got
 		return nil
 	}
-	*p = got
+	if kept, ok := keepable(n); ok {
+		*p = PlayerConfig{written: kept, unread: r.problem}
+	} else {
+		*p = PlayerConfig{unread: r.problem + notKept}
+	}
 	return nil
+}
+
+// The bounds on what the aliases of a block kept as written may copy
+// (keepable): an alias bomb, or an alias that names the block from inside
+// it, passes them.
+const (
+	maxKeptCopies = 1024
+	maxKeptDepth  = 32
+)
+
+// notKept is what the reason of a block that cannot be kept ends with.
+const notKept = "; it also holds YAML aliases a save could not write back (an alias to the block itself, or more than 1024 nodes copied), " +
+	"so it is not kept, and a save drops it"
+
+// keepable is the block n as a save writes it back: as the file held it,
+// except that an alias to a node outside the block is a copy of that node.
+// The rest of the file is written from the config's fields, which keep no
+// anchor, so such an alias would name an anchor the saved file no longer
+// has, and the next load would fail. An alias inside the block to an anchor
+// inside it stays an alias, written with its anchor. A copy has no anchor
+// and no comment but the alias's own, and an alias inside a copy is copied
+// in its turn. ok is false when the copies pass maxKeptCopies nodes or
+// maxKeptDepth aliases deep. The parsed nodes are left as they are.
+func keepable(n *yaml.Node) (kept *yaml.Node, ok bool) {
+	inside := map[*yaml.Node]bool{}
+	var mark func(*yaml.Node)
+	mark = func(m *yaml.Node) {
+		if !inside[m] {
+			inside[m] = true
+			for _, c := range m.Content {
+				mark(c)
+			}
+		}
+	}
+	mark(n)
+	copies := 0
+	var walk func(m *yaml.Node, depth int, copying bool) (*yaml.Node, bool)
+	walk = func(m *yaml.Node, depth int, copying bool) (*yaml.Node, bool) {
+		if m.Kind == yaml.AliasNode {
+			if !copying && inside[m.Alias] {
+				c := *m
+				return &c, true
+			}
+			if m.Alias == nil || depth >= maxKeptDepth {
+				return nil, false
+			}
+			c, ok := walk(m.Alias, depth+1, true)
+			if ok {
+				c.HeadComment, c.LineComment, c.FootComment = m.HeadComment, m.LineComment, m.FootComment
+			}
+			return c, ok
+		}
+		c := *m
+		if copying {
+			if copies++; copies > maxKeptCopies {
+				return nil, false
+			}
+			c.Anchor, c.HeadComment, c.LineComment, c.FootComment = "", "", "", ""
+		}
+		c.Content = nil
+		for _, child := range m.Content {
+			cc, ok := walk(child, depth, copying)
+			if !ok {
+				return nil, false
+			}
+			c.Content = append(c.Content, cc)
+		}
+		return &c, true
+	}
+	return walk(n, 0, false)
 }
 
 // Unread is why the block did not read at all, or nil when it read. Such a
