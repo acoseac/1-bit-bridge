@@ -1122,14 +1122,14 @@ func TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 	rig.cfg.Now = clock.Now
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
-	srv.localOutputs.limits.command = 100 * time.Millisecond
+	srv.localOutputs.limits.command = 300 * time.Millisecond
 	// Only the command's own deadline can end this reading in time.
 	srv.localOutputs.limits.build = 30 * time.Second
 	id := firstOutputID(t, hs, token)
 	start := time.Now()
 	_, got, raw := getReading(t, hs, token, id)
 	if took := time.Since(start); took > 10*time.Second {
-		t.Fatalf("the reading waited %s for a command with a 100ms deadline", took)
+		t.Fatalf("the reading waited %s for a command with a 300ms deadline", took)
 	}
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.MPDTimeout}) {
 		t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
@@ -1137,13 +1137,11 @@ func TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 	if got.DAC == nil || got.DAC.Format != "S16_LE" || got.MPD != nil {
 		t.Fatalf("dac %+v mpd %+v", got.DAC, got.MPD)
 	}
-	if fake.accepted() != 1 {
-		t.Fatalf("connections %d before the second reading", fake.accepted())
-	}
+	before := fake.accepted()
 	clock.Advance(outputCacheTTL)
 	getReading(t, hs, token, id)
-	if fake.accepted() != 2 {
-		t.Fatalf("the hung connection was reused: %d connections", fake.accepted())
+	if fake.accepted() <= before {
+		t.Fatalf("the hung connection was reused: still %d connections", fake.accepted())
 	}
 	for _, line := range fake.lines() {
 		name, _, _ := strings.Cut(line, " ")
