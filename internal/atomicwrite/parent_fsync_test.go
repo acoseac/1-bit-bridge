@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -90,6 +92,38 @@ func TestWriteBytesDurable_OnThisPlatform(t *testing.T) {
 	}
 	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved" {
 		t.Fatalf("destination %q, %v", got, err)
+	}
+}
+
+// TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable pins the
+// directories the strict writer creates for a destination whose parents
+// are missing: each is made durable in its parent, the deepest first,
+// before the file is written, so a crash cannot take a durable file's
+// directory with it; and a barrier that fails for one of them fails the
+// write before the file is written.
+func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
+	seen := stubSyncParentDir(t, nil)
+	root := t.TempDir()
+	dst := filepath.Join(root, "a", "b", "reserved.json")
+	if err := WriteBytesDurable(dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable: %v", err)
+	}
+	var synced []string
+	for _, p := range *seen {
+		synced = append(synced, filepath.Dir(p))
+	}
+	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b")}; !slices.Equal(synced, want) {
+		t.Fatalf("directories synced %v, want %v: b's entry in a, then a's in the root, then the file's in b", synced, want)
+	}
+
+	syncErr := errors.New("fsync: input/output error")
+	stubSyncParentDir(t, syncErr)
+	other := filepath.Join(root, "c", "reserved.json")
+	if err := WriteBytesDurable(other, []byte("reserved"), ".durable-*.tmp"); !errors.Is(err, syncErr) {
+		t.Fatalf("WriteBytesDurable with the barrier failing for the directory it created = %v, want the barrier's failure", err)
+	}
+	if _, err := os.Lstat(other); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the write whose directory is not durable wrote %q (%v), want nothing", other, err)
 	}
 }
 

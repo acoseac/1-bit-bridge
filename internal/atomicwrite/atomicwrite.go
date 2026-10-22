@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -300,11 +301,46 @@ func renameRetry(ctx context.Context, src, dst string) error {
 // durable. A platform with no barrier is ErrNoDirectoryBarrier, never a
 // barrier that ran.
 func durableDirEntry(path string) error {
+	if err := barrier(path); err != nil {
+		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
+	}
+	return nil
+}
+
+// barrier runs the parent-directory barrier for path: ErrNoDirectoryBarrier
+// on a platform with none, never a barrier that ran.
+func barrier(path string) error {
 	if syncParentDir == nil {
 		return ErrNoDirectoryBarrier
 	}
-	if err := syncParentDir(path); err != nil {
-		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
+	return syncParentDir(path)
+}
+
+// mkdirAllDurable is fsutil.MkdirAll for the strict writer: each directory
+// it creates is made durable in its parent, the deepest first, before
+// anything is written into it, so a crash cannot take a durable file's
+// directory with it. A directory that was there already is the caller's,
+// and is not synced.
+func mkdirAllDurable(dir string) error {
+	var created []string
+	for d := dir; ; {
+		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		created = append(created, d)
+		up := filepath.Dir(d)
+		if up == d {
+			break
+		}
+		d = up
+	}
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, d := range created {
+		if err := barrier(d); err != nil {
+			return fmt.Errorf("the directory %s was created, but its entry is not durable: %w", d, err)
+		}
 	}
 	return nil
 }
@@ -362,6 +398,10 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // as undone. A rename that fails while the destination already holds the
 // same bytes is taken as WriteBytes takes it, once the directory is synced.
 //
+// The directories it creates for path are made durable too, each in its
+// parent, the deepest first, before the file is written: a durable entry in
+// a directory whose own entry is not durable is lost with it.
+//
 // On a platform with no directory barrier (Windows) it refuses with
 // ErrNoDirectoryBarrier before it writes anything: no write there could be
 // counted durable. WriteBytes and the renames keep their best effort there.
@@ -375,7 +415,11 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 		return ErrNoDirectoryBarrier
 	}
 	dir := filepath.Dir(path)
-	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+	if durable {
+		if err := mkdirAllDurable(dir); err != nil {
+			return err
+		}
+	} else if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	// Same directory as `path` so the rename is a same-filesystem atomic op.
