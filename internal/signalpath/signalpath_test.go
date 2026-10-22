@@ -41,12 +41,12 @@ func dsd256OnTheGoBar() Facts {
 }
 
 // dsd64AsDoP is a DSD64 file an output with dop on sends as 24-bit PCM at
-// 176.4 kHz.
+// 176.4 kHz, the stream watched opening with that setting.
 func dsd64AsDoP() Facts {
 	f := pcmOnTheGoBar()
 	f.Audio = "dsd64:2"
 	f.Source = Source{Known: true, Codec: "DFF", DSD: true, SampleRate: 2822400, Bits: 1, Channels: 2}
-	f.MPD.Output = Output{Plugin: "alsa", Configured: true, MixerType: "none", DoP: true}
+	f.MPD.Output = Output{Plugin: "alsa", Configured: true, MixerType: "none", DoP: true, DoPSettingsAtOpen: true}
 	f.PCM.Format, f.PCM.Rate = "S24_3LE", 176400
 	return f
 }
@@ -196,6 +196,22 @@ func TestEveryWithheldReason(t *testing.T) {
 		{"dop on, and =dop only for another DSD rate", dop, liveFormats("dsd128:*=dop"), []string{DSDConvertedToPCM}},
 		{"dop on, and =dop only for another channel count", dop, liveFormats("dsd64:1=dop"), []string{DSDConvertedToPCM}},
 		{"dop on, and an allowed_formats this does not read", dop, liveFormats("dsd64=dop"), []string{DSDConvertedToPCM}},
+
+		// MPD reads dop and allowed_formats when it opens the output, and an
+		// outputset since changes what it reports, not the stream it opened:
+		// DoP is claimed only for settings the stream was watched opening
+		// with. A report of conversion withholds either way.
+		{"DoP settings the stream was not watched opening with", dop, func(f *Facts) { f.MPD.Output.DoPSettingsAtOpen = false }, []string{DoPUnconfirmed}},
+		{"the stream's =dop entry, not watched at the open", dop, func(f *Facts) {
+			f.MPD.Output.DoP, f.MPD.Output.DoPSettingsAtOpen = false, false
+			liveFormats("dsd64:*=dop")(f)
+		}, []string{DoPUnconfirmed}},
+		{"DoP in 16 bits, not watched at the open", dop, func(f *Facts) {
+			f.MPD.Output.DoPSettingsAtOpen, f.PCM.Format = false, "S16_LE"
+		}, []string{DoPUnconfirmed, DoPContainerTooNarrow}},
+		{"dop off, not watched at the open", dop, func(f *Facts) {
+			f.MPD.Output.DoP, f.MPD.Output.DoPSettingsAtOpen = false, false
+		}, []string{DSDConvertedToPCM}},
 	}
 	for _, tc := range cases {
 		f := tc.base()

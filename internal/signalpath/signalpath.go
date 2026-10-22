@@ -160,6 +160,11 @@ const (
 	DSDConvertedToPCM = "dsd_converted_to_pcm"
 	// DoPContainerTooNarrow: DoP in a PCM format of fewer than 24 bits.
 	DoPContainerTooNarrow = "dop_container_too_narrow"
+	// DoPUnconfirmed: the output sends DoP as MPD reports its settings now,
+	// and the stream at the card was not watched opening with them: MPD
+	// reads them when it opens the output, and an outputset since changes
+	// what it reports, not the open stream.
+	DoPUnconfirmed = "dop_unconfirmed"
 )
 
 // codeOrder is every code in the order a list of them is given: the
@@ -172,7 +177,7 @@ var codeOrder = []string{
 	SourceUnknown, SourceChanged, SourceLossy, SourceCodecUnknown, SourceMismatch,
 	MPDAudioUnknown, MPDOutputAmbiguous,
 	StreamFloat, FormatMismatch, RateMismatch, ChannelsMismatch, DepthReduced,
-	DSDConvertedToPCM, DoPContainerTooNarrow,
+	DSDConvertedToPCM, DoPUnconfirmed, DoPContainerTooNarrow,
 }
 
 // Codes is every code a reading's state or a verdict's reasons can carry,
@@ -378,6 +383,12 @@ type Output struct {
 	// block's. MPD sends DSD as DoP by it only while the allowed_formats it
 	// runs with is empty (sendsDoP).
 	DoP bool
+	// DoPSettingsAtOpen is whether the stream at the card was watched
+	// opening with the dop and allowed_formats MPD reports now (the route's
+	// evidence). MPD reads both when it opens the output, and an outputset
+	// since changes what it reports, not the stream it opened, so a DoP
+	// claim needs it.
+	DoPSettingsAtOpen bool
 	// SampleStage is the plugin type of the first stage that changes the
 	// samples (softvol, rate, dmix, route, ladspa) on the way from its
 	// device, as the ALSA files the bridge read define it
@@ -496,6 +507,12 @@ func Judge(f Facts) Verdict {
 				// format and rate, never the samples, so this is consistent
 				// with DoP and no more.
 				dop = true
+				// MPD reads the settings sendsDoP read when it opens the
+				// output (AlsaOutput::Open): the stream must have been
+				// watched opening with them.
+				if !f.MPD.Output.DoPSettingsAtOpen {
+					add(DoPUnconfirmed)
+				}
 				if !signed {
 					add(FormatMismatch)
 				}

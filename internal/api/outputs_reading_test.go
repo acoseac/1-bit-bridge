@@ -939,6 +939,56 @@ func doPRig(t *testing.T, dop, formats string) *readingRig {
 	return rig
 }
 
+// manualClockOn gives the rig's route a manual clock, so a test takes one
+// reading after another by moving it past the cache.
+func manualClockOn(r *readingRig) *manualClock {
+	clock := &manualClock{now: time.Now()}
+	r.cfg.Now, r.cfg.AfterFunc = clock.Now, clock.AfterFunc
+	return clock
+}
+
+// closeStream makes card 5's playback substream read as the kernel prints
+// one no process holds, and returns what puts the stream back as it was.
+func closeStream(t *testing.T, r *readingRig) (reopen func()) {
+	t.Helper()
+	dir := filepath.Join(r.procRoot, "asound", "card5", "pcm0p", "sub0")
+	saved := map[string][]byte{}
+	for _, name := range []string{"hw_params", "status"} {
+		path := filepath.Join(dir, name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved[path] = b
+		if err := os.WriteFile(path, []byte("closed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return func() {
+		t.Helper()
+		for path, b := range saved {
+			if err := os.WriteFile(path, b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// watchOpen takes a reading with card 5's playback substream closed, then
+// one with it open again, each a reading of its own: the bridge watches the
+// stream open, as a phone that reads the output while playback starts has
+// it do. It returns the second.
+func watchOpen(t *testing.T, r *readingRig, clock *manualClock, hs *httptest.Server, token, id string) (OutputReading, []byte) {
+	t.Helper()
+	reopen := closeStream(t, r)
+	clock.Advance(outputCacheTTL)
+	getReading(t, hs, token, id)
+	reopen()
+	clock.Advance(outputCacheTTL)
+	_, got, raw := getReading(t, hs, token, id)
+	return got, raw
+}
+
 // TestReadingDoPHasTheFormatDoPTakes: a DSD64 file that reaches the card
 // as 24-bit PCM at 176.4 kHz from an output MPD reports sending DoP is in
 // the format DoP of its rate takes, format_preserved_dop, which says
@@ -946,7 +996,9 @@ func doPRig(t *testing.T, dop, formats string) *readingRig {
 // DSD to PCM. With an allowed_formats MPD reports, MPD's ALSA output takes
 // DoP from the entry that matches the stream and not from dop: dop on and
 // an entry of PCM is MPD's conversion, of DoP's shape, and dop off and the
-// stream's =dop entry is DoP.
+// stream's =dop entry is DoP. Each is read once the bridge has watched the
+// stream open with those settings (TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP
+// and TestADoPVerdictNeedsTheStreamWatchedOpening have the rest).
 func TestReadingDoPHasTheFormatDoPTakes(t *testing.T) {
 	override := warning(signalpath.MPDFormatOverride, signalpath.FromMPD)
 	for _, tc := range []struct {
@@ -962,8 +1014,9 @@ func TestReadingDoPHasTheFormatDoPTakes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := doPRig(t, tc.dop, tc.formats)
+			clock := manualClockOn(rig)
 			hs, token, id := rig.serve()
-			_, got, raw := getReading(t, hs, token, id)
+			got, raw := watchOpen(t, rig, clock, hs, token, id)
 			if got.State != "whole" {
 				t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
 			}
@@ -976,6 +1029,99 @@ func TestReadingDoPHasTheFormatDoPTakes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP: MPD reads dop and
+// allowed_formats when it opens the output, and an outputset changes what
+// it reports without opening it again. A DSD64 stream MPD opened as PCM of
+// DoP's shape (allowed_formats=176400:24:2) is still that PCM after an
+// outputset to dsd64:*=dop, which both reads of every reading then report:
+// the verdict withholds, dop_unconfirmed, never format_preserved_dop, for as
+// long as that stream plays. Once the bridge watches MPD open the output
+// again with those settings, it is DoP, and stays so while the stream and
+// the settings do.
+func TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP(t *testing.T) {
+	override := warning(signalpath.MPDFormatOverride, signalpath.FromMPD)
+	rig := doPRig(t, "1", "176400:24:2")
+	clock := manualClockOn(rig)
+	hs, token, id := rig.serve()
+	reading := func(what, value string, codes ...string) {
+		t.Helper()
+		clock.Advance(outputCacheTTL)
+		_, got, raw := getReading(t, hs, token, id)
+		if got.State != "whole" {
+			t.Fatalf("%s: state %s %v\n%s", what, got.State, got.StateReasons, raw)
+		}
+		wantVerdict(t, got, raw, value, codes...)
+		wantWarnings(t, got, raw, override)
+	}
+
+	got, raw := watchOpen(t, rig, clock, hs, token, id)
+	wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DSDConvertedToPCM)
+
+	// outputset 0 allowed_formats "dsd64:*=dop": the stream MPD opened plays on.
+	rig.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("1", "allowed_formats=dsd64:*=dop", "dop=1") })
+	reading("the settings changed on the open stream", signalpath.Withheld, signalpath.DoPUnconfirmed)
+	reading("the same stream read again", signalpath.Withheld, signalpath.DoPUnconfirmed)
+
+	// MPD opens the output again (a pause and a resume close and reopen it).
+	clock.Advance(outputCacheTTL)
+	got, raw = watchOpen(t, rig, clock, hs, token, id)
+	wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	reading("the stream watched opening, read again", signalpath.FormatPreservedDoP)
+}
+
+// TestADoPVerdictNeedsTheStreamWatchedOpening: DoP is claimed for settings
+// the bridge watched the stream open with, that is a reading at most ten
+// seconds before found the PCM device closed, or with another stream on it
+// (other hw_params), with the same settings reported. The first reading of a
+// stream already playing has no such reading; a stream that replaced
+// another has one; and two readings more than ten seconds apart are no
+// watch.
+func TestADoPVerdictNeedsTheStreamWatchedOpening(t *testing.T) {
+	t.Run("the first reading of a stream already playing", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		manualClockOn(rig)
+		hs, token, id := rig.serve()
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+	t.Run("a stream that replaced another", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		hw := filepath.Join(rig.procRoot, "asound", "card5", "pcm0p", "sub0", "hw_params")
+		doP, err := os.ReadFile(hw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The 96 kHz stream the capture holds, before the DSD64 one.
+		before := strings.Replace(string(doP), "rate: 176400 (176400/1)", "rate: 96000 (96000/1)", 1)
+		if before == string(doP) {
+			t.Fatal("no 176400 rate line to put back")
+		}
+		if err := os.WriteFile(hw, []byte(before), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		getReading(t, hs, token, id)
+		if err := os.WriteFile(hw, doP, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(outputCacheTTL)
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
+	t.Run("readings more than ten seconds apart", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		reopen := closeStream(t, rig)
+		getReading(t, hs, token, id)
+		reopen()
+		clock.Advance(openWatch + time.Second)
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
 }
 
 // TestAWiderContainerHasTheFormatPreserved: PCM at the card holds the
