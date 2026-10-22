@@ -230,8 +230,8 @@ type readingSnap struct {
 	gain    mpd.Reply
 	outputs mpd.Reply
 	// gainAfter and outputsAfter are replay_gain_status and outputs read
-	// again after the /proc read: what the verdict reads of them must be
-	// the same at both ends of it.
+	// again after the /proc read: what the verdict and its warnings read of
+	// them must be the same at both ends of it.
 	gainAfter    mpd.Reply
 	outputsAfter mpd.Reply
 
@@ -920,12 +920,12 @@ func readingSettling(s *readingSnap) []string {
 	return signalpath.Sorted(codes)
 }
 
-// sameSettings reports whether what MPD reports of the settings the
-// verdict reads was the same before the /proc read and after it: the
-// outputs reply whole (an output switched on or off, an attribute set with
-// outputset), replay_gain_status, and status's audio, xfade and
-// mixrampdelay. A reading judges them from one read; two that agree around
-// the /proc read are what held while it ran.
+// sameSettings reports whether what MPD reports of the outputs and settings
+// the verdict and its warnings read was the same before the /proc read and
+// after it: the outputs reply whole (an output switched on or off, an
+// attribute set with outputset), replay_gain_status, and status's audio,
+// xfade and mixrampdelay. A reading reads them from one read; two that
+// agree around the /proc read are what held while it ran.
 func sameSettings(s *readingSnap) bool {
 	for _, key := range []string{"audio", "xfade", "mixrampdelay"} {
 		a, okA := s.before.Get(key)
