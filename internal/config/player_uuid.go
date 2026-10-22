@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -32,10 +34,12 @@ const maxPlayerUUIDFile = 128
 var playerUUIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ReadPlayerUUID returns the player's UUID from dataDir, and an error that
-// is fs.ErrNotExist when none was made yet. A file that is there and holds
-// anything but one UUID is an error too, never a reason to make another:
-// a new UUID is a new player to every controller, so the operator decides
-// (removing the file makes a new one at the next start).
+// is fs.ErrNotExist when none was made yet. The UUID may be followed by
+// white space (unicode.IsSpace), such as the CR LF an editor leaves; a
+// file that is there and holds anything else is an error too, never a
+// reason to make another: a new UUID is a new player to every controller,
+// so the operator decides (removing the file makes a new one at the next
+// start).
 func ReadPlayerUUID(dataDir string) (string, error) {
 	path := filepath.Join(dataDir, PlayerUUIDFile)
 	f, err := os.Open(path)
@@ -47,10 +51,7 @@ func ReadPlayerUUID(dataDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
-	id := string(b)
-	if len(id) > 0 && id[len(id)-1] == '\n' {
-		id = id[:len(id)-1]
-	}
+	id := strings.TrimRightFunc(string(b), unicode.IsSpace)
 	if len(b) > maxPlayerUUIDFile || !playerUUIDShape.MatchString(id) {
 		return "", fmt.Errorf("%s does not hold one UUID: remove it, and the next start makes a new one, which "+
 			"controllers see as a new player", path)

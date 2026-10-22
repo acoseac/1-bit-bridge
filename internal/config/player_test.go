@@ -689,3 +689,35 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 		}
 	}
 }
+
+// TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse: an editor or
+// a shell can leave a CR LF, spaces, tabs or more newlines after the UUID
+// it saved, and the file still holds one UUID, so it reads; anything else
+// beside the UUID (before it, after it but not white space, a second line)
+// is still not one UUID, and is refused, never replaced.
+func TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse(t *testing.T) {
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, PlayerUUIDFile), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	for _, body := range []string{id, id + "\n", id + "\r\n", id + " \t\r\n\n", id + "   "} {
+		if got, err := ReadPlayerUUID(write(t, body)); err != nil || got != id {
+			t.Errorf("player-uuid %q read as %q, %v; want %s", body, got, err, id)
+		}
+	}
+	for _, body := range []string{" " + id + "\n", "\n" + id, "\xef\xbb\xbf" + id + "\n", id + " x\n", id + "\n" + id + "\n",
+		id + "\x00\n", strings.ToUpper(id) + "\r\n", id[:35] + " \n"} {
+		dir := write(t, body)
+		if got, err := ReadPlayerUUID(dir); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("player-uuid %q read as %q, %v; want a refusal", body, got, err)
+		}
+		if got, _, err := EnsurePlayerUUID(dir); err == nil {
+			t.Errorf("EnsurePlayerUUID replaced player-uuid %q with %q", body, got)
+		}
+	}
+}
