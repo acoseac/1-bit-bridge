@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
 - [2026-10-21 — B470 PR 2b round 3: a drain a resume overtook, the files' rate, a long run's time, and the key reader's descriptor](#2026-10-21--b470-pr-2b-round-3-a-drain-a-resume-overtook-the-files-rate-a-long-runs-time-and-the-key-readers-descriptor)
 - [2026-10-21 — B470 PR 2b round 2: the writer's watch, five sink windows, the position test's Linux race, and pcm-test's stop, time and keys](#2026-10-21--b470-pr-2b-round-2-the-writers-watch-five-sink-windows-the-position-tests-linux-race-and-pcm-tests-stop-time-and-keys)
@@ -50259,3 +50260,145 @@ follow every rate. Round 4 changed a test only, so the result holds for it.
 Not exercised: an xrun, which cannot be made to order on the box. Noted:
 `--pause-at` acts on the harness's one-second tick, so a pause lands up to
 a second after the time asked (5 s gave 6.015 s); the sink is not involved.
+
+## 2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY
+
+`TestConcurrentOpensOfAnOlderDatabaseAllSucceed`, B185's test (three
+goroutines open one database at user_version 44, ten rounds, each closing
+its store as soon as it opens), failed once on the windows-latest leg on
+2026-10-21, on #1305, whose change was unrelated: `round 10, opener 1: ping
+sqlite: database is locked (5) (SQLITE_BUSY)`. Main's six runs before it
+passed. `OpenStore` holds the ladder lock from before `sql.Open` until it
+returns, so openers serialize through the open, the ping and the
+migration; what is left is one opener's `Close`, after its `OpenStore`
+returned, beside the next opener's open and ping. A missing timeout is not
+the cause: modernc applies `busy_timeout` before the other `_pragma`s
+whatever their order (it sorts the list).
+
+**The fix.** `openStoreDB` (`internal/manifest/store_open_busy.go`) runs
+`sql.Open` and the ping again while the ping's error is SQLITE_BUSY by its
+primary code (`isSQLiteBusy`, `code & 0xff == 5`, so BUSY_RECOVERY,
+BUSY_SNAPSHOT and BUSY_TIMEOUT count), closing each failed `*sql.DB`,
+pausing 10 ms and doubling to 250 ms, until 5 s (`openStoreBusyBudget`)
+have passed since the first busy answer, and then fails with that error.
+It logs one Info line at the first retry ("the database was busy as the
+store opened; trying again", with the database's base name, the budget and
+the error). Any other error fails at once, as before. Not done: retrying
+the migration's statements, where nothing has failed, and a larger
+`busy_timeout`. The same overlap is real outside the test: `bridge scan`
+or `bridge doctor` opening the store while `bridge serve` closes or
+reopens it.
+
+**The mechanism, read in SQLite 3.53.4 as modernc v1.60.1 translates it**
+(`lib/sqlite_windows.go` and the `sqlite_g_*` files the Windows build
+compiles; the line numbers are v1.60.1's):
+- The driver turns extended result codes on, so `(5)` is a plain
+  SQLITE_BUSY: BUSY_RECOVERY would print 261, BUSY_SNAPSHOT 517.
+  SQLITE_ENABLE_SETLK_TIMEOUT is not compiled, so BUSY_TIMEOUT (773) cannot
+  occur.
+- A new connection runs `busy_timeout(5000)`, `foreign_keys(1)`,
+  `journal_mode(WAL)` and `synchronous(NORMAL)`, and the ping runs `select
+  1`. Only `journal_mode` reads the file: its pragma carries
+  PragFlg_NeedSchema (`sqlite_g_0000000000060000.go`:94609), so its prepare
+  reads the schema through `sqlite3BtreeBeginTrans` (sqlite_windows.go:83249).
+  `synchronous` finds the schema loaded, and `select 1` reads nothing.
+- `btreeBeginTrans` retries, through busy_timeout's handler, every code
+  whose low byte is 5 while no transaction is open (sqlite_windows.go:15542),
+  and `pager_wait_on_lock`, the pager's SHARED lock, retries a plain BUSY
+  through the same handler (sqlite.go:27020). The two share the handler's
+  5 s.
+- Contention on the WAL index, the -shm locks and the dead-man switch
+  included, comes back from `walTryBeginRead` as WAL_RETRY or BUSY_RECOVERY
+  (sqlite_windows.go:119963 to 119992), and a hundred WAL_RETRYs end as
+  SQLITE_PROTOCOL: never a plain 5.
+- `winLock` answers a plain 5 when `LockFileEx` refuses one of the
+  database file's own lock bytes (sqlite_windows.go:125567).
+
+So no path answers a new connection a plain 5 without the handler: the CI
+error came after the handler's 5 s had run out, most likely against the
+database file's own lock. The last connection to close a WAL database takes
+that lock EXCLUSIVE in `sqlite3WalClose` (`sqlite_g_0000000000060000.go`:114036)
+and keeps it through its checkpoint, the -shm purge and delete (under the
+VFS's process-wide mutex) and the -wal delete, until the pager unlocks.
+Windows retries each delete up to ten times on a sharing or access error,
+25·(n+1) ms apart (`winRetryIoerr`), about 1.4 s a file. That the hold
+reached 5 s on that runner is inferred, not measured. The failed run's
+duration in the CI log would show it (a run about five seconds longer than
+its passing peers); that log was not read here. The inference is why the
+budget runs from the first busy answer and not from the first try: a
+budget from the first try would be spent before the open could try again.
+The guess this work started from, a lock path on which SQLite does not
+call the busy handler (the shared-memory or dead-man-switch locks), does not
+hold in this version: those come back as WAL_RETRY or BUSY_RECOVERY, and
+are retried.
+
+**Red first**, on the seam alone (`openStorePing`, at the ping, before
+`OpenStore` called `openStoreDB`): `TestOpenStoreTriesABusyPingAgain`
+failed with CI's own message, `ping sqlite: database is locked (5)
+(SQLITE_BUSY)`; `TestOpenStoreGivesUpOnABusyPingPastItsBudget` failed with
+"pinged 1 times"; `TestOpenStoreFailsAtOnceOnAPingErrorThatIsNotBusy`
+passed, as it should. `TestOpenStoreTriesAgainAfterABusyAnswerSlowerThanItsBudget`
+was added after the fix, and pins where the budget starts. The tests answer
+the ping with the driver's own errors, made to happen on a scratch database
+(`makeDriverErrors`): SQLITE_BUSY from a write beside a held write lock
+with no busy wait, SQLITE_BUSY_SNAPSHOT from a write in a read snapshot
+another connection's commit made stale, and SQLITE_ERROR from a missing
+table.
+
+Controls on the committed tree, each restored from git:
+- The whole code compared with 5, without `& 0xff`: exactly
+  `TestOpenStoreTriesABusyPingAgain` failed, "database is locked (517)".
+- Every error taken for busy: exactly
+  `TestOpenStoreFailsAtOnceOnAPingErrorThatIsNotBusy` failed, with 50 and
+  51 pings where 1 was due, and the busy line logged.
+- The failed `*sql.DB` left open: the three tests that check it failed.
+- The budget counted from the first try: exactly
+  `TestOpenStoreTriesAgainAfterABusyAnswerSlowerThanItsBudget` failed.
+- The busy line logged at every retry: exactly
+  `TestOpenStoreTriesABusyPingAgain` failed.
+
+`TestConcurrentOpensOfAnOlderDatabaseAllSucceed` passed 200 runs of 200
+under `-race` on macOS 27 (arm64), four runs of `-count=50`; the failure
+was on Windows, and the windows-latest leg is the check there. `GOOS=windows
+go vet ./internal/manifest` is clean. `make fmt vet test` passed. No test
+that was already there meets the retry: in a verbose run of the package
+without `-race` (67 s), the busy line came only from the new tests.
+
+main took modernc v1.61.0 (SQLite 3.54.1) in #1306, after this branch
+forked. Read again there, what the reading above rests on is unchanged:
+the driver's open (extended codes on, `busy_timeout` first, `select 1`),
+`journal_mode`'s flags, `btreeBeginTrans`'s loop, `walTryBeginRead`'s
+conversion and `winLock`'s answer. With main's `go.mod` and `go.sum` the
+four busy tests and the concurrency test passed three runs each under
+`-race`, and `GOOS=windows go vet` was clean.
+
+**Review** (Codex, Low; the Claude API found none). The give-up test
+asserted only that the open tried for at least its budget, so nothing
+bounded the retry: on bbb367b7, with the deadline at
+`10 * openStoreBusyBudget`, all four busy tests passed, the give-up test in
+3.02 s against 0.31 s. A wall-clock upper bound would flake under load, so
+`openStoreDB` now runs its pauses and its budget on a clock seam,
+`openStoreNow` and `openStoreSleep` (`time.Now` and `time.Sleep`, set
+through `setOpenStoreClock` behind a mutex as the ping seam is, and read
+once as an open starts; there is no Store yet to put a seam on). The
+give-up test runs the open on a fake clock that moves only by the pauses it
+sleeps, at production's schedule, and requires it to stop no earlier than
+the budget and no later than one pause (`openStoreBusyPauseMax`) past it,
+counted from the first busy answer, after the 25 pings that schedule gives:
+the first try, then one after each pause of 10, 20, 40, 80 and 160 ms,
+eighteen of 250 ms, and the 190 ms left of the 5 s. It checks first that the
+schedule is that one, and past a thousand pings its script answers an error
+that is not busy, so an open with no limit fails the test instead of
+hanging it.
+
+Controls on 9ed70ceb, each restored from git:
+- The deadline at ten budgets: exactly the give-up test failed, "still
+  trying 50s after the first busy answer, past its 5s budget and one 250ms
+  pause" and "pinged 205 times, want 25".
+- The pauses tripling instead of doubling: only the count failed, 24 pings;
+  the open still stopped at 5 s.
+- A second's sleep before giving up: only the upper bound failed, 6 s.
+- A deadline taken again at every busy answer, so none: the test failed in
+  10 ms at the cap, 1,001 pings and 4m9.06s of fake time.
+- The last pause not cut to what is left, a positive control: green. The
+  open stops 60 ms past the budget, inside the pause the bound allows.
