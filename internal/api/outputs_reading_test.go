@@ -821,18 +821,23 @@ func TestReadingSettles(t *testing.T) {
 	cases := []struct {
 		name     string
 		statuses []mpd.Reply
+		current  string
 		codes    []string
 	}{
-		{"a song change mid-read", []mpd.Reply{at("13", "181.4"), at("14", "0.010")}, []string{signalpath.SongChanged}},
-		{"a song that has only started", []mpd.Reply{at("13", "0.20"), at("13", "0.21")}, []string{signalpath.SongStarting}},
-		{"a seek mid-read", []mpd.Reply{at("13", "4.722"), at("13", "64.722")}, []string{signalpath.Seeked}},
-		{"a pause mid-read", []mpd.Reply{at("13", "4.722"), withPair(at("13", "4.722"), "state", "pause")}, []string{signalpath.StateChanged}},
+		{"a song change mid-read", []mpd.Reply{at("13", "181.4"), at("14", "0.010")}, "13", []string{signalpath.SongChanged}},
+		// Two changes between the status reads, back to the song the first
+		// one named, leave only currentsong to say so.
+		{"currentsong on another song", []mpd.Reply{at("13", "4.722"), at("13", "4.725")}, "14", []string{signalpath.SongChanged}},
+		{"a song that has only started", []mpd.Reply{at("13", "0.20"), at("13", "0.21")}, "13", []string{signalpath.SongStarting}},
+		{"a seek mid-read", []mpd.Reply{at("13", "4.722"), at("13", "64.722")}, "13", []string{signalpath.Seeked}},
+		{"a pause mid-read", []mpd.Reply{at("13", "4.722"), withPair(at("13", "4.722"), "state", "pause")}, "13", []string{signalpath.StateChanged}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newReadingRig(t, c.name, c.file, c.track, captured)
 			hs, token, id := rig.serve()
 			rig.mpd.restart(tc.statuses...)
+			rig.mpd.set(func(m *scriptedMPD) { m.current = withPair(m.current, "Id", tc.current) })
 			_, got, raw := getReading(t, hs, token, id)
 			if got.State != "settling" || !slices.Equal(got.StateReasons, signalpath.Sorted(tc.codes)) {
 				t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
@@ -1004,9 +1009,16 @@ func TestAProcReadPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 		return read()
 	}
 	srv.localOutputs.limits.proc = 20 * time.Millisecond
+	// The whole reading's deadline is far off, so only the /proc read's own
+	// deadline can end this one in time.
+	srv.localOutputs.limits.build = 30 * time.Second
 	t.Cleanup(func() { close(stuck) })
 
+	start := time.Now()
 	_, got, raw := getReading(t, hs, token, id)
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("the reading waited %s for a /proc read with a 20ms deadline", took)
+	}
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ProcTimeout}) {
 		t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
 	}
@@ -1048,8 +1060,14 @@ func TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown(t *testing.T) {
 	rig.cfg.AfterFunc = clock.AfterFunc
 	srv, hs, token := newReadingServer(t, rig.cfg)
 	srv.localOutputs.limits.command = 100 * time.Millisecond
+	// Only the command's own deadline can end this reading in time.
+	srv.localOutputs.limits.build = 30 * time.Second
 	id := firstOutputID(t, hs, token)
+	start := time.Now()
 	_, got, raw := getReading(t, hs, token, id)
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("the reading waited %s for a command with a 100ms deadline", took)
+	}
 	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.MPDTimeout}) {
 		t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
 	}
