@@ -100,8 +100,7 @@ func (e *Engine) selectionDeleted(next uint32) {
 		o.state = Stopped
 		e.stopped(StopInfo{Reason: ReasonStopped, Detail: "the paused entry was deleted, and nothing follows it"})
 	case o.state == Releasing && next == 0 && o.then != IntentStop:
-		o.settleErr = refuse("play", ReasonStopped, "the entry to play was deleted")
-		e.setIntent(IntentStop)
+		e.setIntent(IntentStop, "the entry to play was deleted")
 	}
 }
 
@@ -130,7 +129,7 @@ func (e *Engine) deleteAll(c *command) {
 		o.state = Stopped
 		e.stopped(StopInfo{Reason: ReasonStopped, Detail: "the queue was emptied"})
 	case o.state == Releasing:
-		e.setIntent(IntentStop)
+		e.setIntent(IntentStop, "the queue was emptied")
 	}
 	e.answer(c, reply{})
 }
@@ -307,7 +306,7 @@ func (e *Engine) outputGone(why Reason, detail string) {
 		return
 	case o.state == Releasing && o.then != IntentStop:
 		o.settleErr = err
-		e.setIntent(IntentStop)
+		e.setIntent(IntentStop, detail)
 	case o.state == Paused:
 		o.state = Stopped
 		e.stopped(stop)

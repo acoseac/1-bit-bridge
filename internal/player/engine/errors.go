@@ -71,6 +71,11 @@ const (
 	ReasonBackend Reason = "backend_error"
 	// ReasonTimeout is a backend call that did not answer by its deadline.
 	ReasonTimeout Reason = "backend_timeout"
+	// ReasonSuperseded answers a command that asked for playback, which ran
+	// and whose playback a later command or edit replaced before it began:
+	// a Stop, a DeleteAll, a deletion of the entry to play. Whatever else
+	// the command did (a PlayID's selection) stands.
+	ReasonSuperseded Reason = "superseded"
 )
 
 // The reasons playback stops on its own, recorded in Snapshot.LastStop.

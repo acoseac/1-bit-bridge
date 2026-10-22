@@ -185,6 +185,62 @@ func TestDeleteAllStopsAndSelectsNothing(t *testing.T) {
 	}
 }
 
+// TestAPlayReplacedBeforePlaybackSaysSo pins what a Play answers when a
+// later command replaces its playback before it begins, as a pending intent
+// or while its session is still starting: ReasonSuperseded, never nil with
+// the transport stopped.
+func TestAPlayReplacedBeforePlaybackSaysSo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// starting holds the Play's own Start instead of a release.
+		starting bool
+		replace  func(h *harness) error
+	}{
+		{"a pending play, by delete all", false, func(h *harness) error { return h.eng.DeleteAll(bg) }},
+		{"a pending play, by stop", false, func(h *harness) error { return h.eng.Stop(bg) }},
+		{"a starting play, by delete all", true, func(h *harness) error { return h.eng.DeleteAll(bg) }},
+		{"a starting play, by stop", true, func(h *harness) error { return h.eng.Stop(bg) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			held := newGate()
+			var play, stop <-chan error
+			if tc.starting {
+				h.insert("a", "b")
+				h.available()
+				h.be.script(func() {
+					h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+						if err := held.wait(ctx, h.be, false); err != nil {
+							return err
+						}
+						return s.open()
+					}
+				})
+				play = async(func() error { return h.eng.Play(bg) })
+				h.be.nth(1)
+			} else {
+				h.playing(0, "a", "b")
+				held = holdReleases(h)
+				stop = async(func() error { return h.eng.Stop(bg) })
+				h.waitSnap("releasing", func(sn *Snapshot) bool { return sn.State() == Releasing })
+				play = async(func() error { return h.eng.Play(bg) })
+				h.waitSnap("play pending", func(sn *Snapshot) bool { return sn.Pending() == IntentPlay })
+			}
+			replaced := async(func() error { return tc.replace(h) })
+			h.waitSnap("the play replaced", func(sn *Snapshot) bool { return sn.State() == Releasing && sn.Pending() == IntentStop })
+			held.open()
+			h.must("the replacing command", h.result("the replacing command", replaced))
+			h.refused("the replaced play", h.result("play", play), ReasonSuperseded)
+			if stop != nil {
+				h.must("stop", h.result("stop", stop))
+			}
+			if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 1 {
+				t.Fatalf("%s with %d sessions", sn.State(), h.be.starts())
+			}
+		})
+	}
+}
+
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a
 // deletion and a skip set while playing: the new target as soon as the
 // owner has applied it, with nothing audible, before any backend event.

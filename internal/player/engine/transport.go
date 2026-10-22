@@ -286,7 +286,7 @@ func (e *Engine) transport(c *command) {
 		e.releaseSession(o.sess, r.then, stop)
 		e.wait(c, r.then == IntentPlay)
 	case actIntent:
-		e.setIntent(r.then)
+		e.setIntent(r.then, name)
 		e.wait(c, r.then == IntentPlay)
 	case actStop:
 		o.state = Stopped
@@ -319,15 +319,28 @@ func (e *Engine) selectEntry(id uint32) {
 	}
 }
 
-// setIntent replaces the pending intent: the latest command's wins.
-func (e *Engine) setIntent(then Intent) {
+// setIntent replaces the pending intent: the latest command's wins. A
+// pending play that by replaces is superseded.
+func (e *Engine) setIntent(then Intent, by string) {
 	o := &e.o
-	if then == IntentPlay {
+	switch {
+	case then == IntentPlay:
 		o.settleErr = nil
+	case o.then == IntentPlay:
+		e.superseded(by)
 	}
 	if o.then != then {
 		o.then = then
 		e.visible()
+	}
+}
+
+// superseded records why the commands waiting for playback get none: by,
+// a later command or edit, replaced it before it began. A reason already
+// recorded (the output, a fault, the backend's refusal) is kept.
+func (e *Engine) superseded(by string) {
+	if e.o.settleErr == nil {
+		e.o.settleErr = refuse("play", ReasonSuperseded, "replaced before playback began: "+by)
 	}
 }
 
@@ -370,13 +383,16 @@ func (e *Engine) startSession(target uint32) {
 }
 
 // releaseSession asks s to release; then is what follows the
-// acknowledgement, and why, when playback stops, is recorded.
+// acknowledgement, and why, when playback stops, is recorded. A session
+// still starting that is released to stop supersedes the play that started
+// it.
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
-		e.setIntent(then)
+		e.setIntent(then, why.Detail)
 		return
 	}
+	starting := s.phase == sessStarting
 	s.phase = sessReleasing
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
@@ -385,9 +401,13 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	}
 	s.transportCall = nil
 	o.then = then
-	if then == IntentPlay {
+	switch {
+	case then == IntentPlay:
 		o.settleErr = nil
-	} else if why.Reason != "" {
+	case starting:
+		e.superseded(why.Detail)
+	}
+	if then != IntentPlay && why.Reason != "" {
 		e.stopped(why)
 	}
 	if o.maint == nil {

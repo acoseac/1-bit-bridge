@@ -70,8 +70,10 @@
 // intent) answers when no start and no release is under way: nil, or, for
 // one that asked for playback that did not happen, why (the backend's
 // refusal, every entry unplayable, an unconfirmed release, the output, a
-// fault). Pause and a resume answer with the backend's answer; Stop and
-// EnterMaintenance once the release is confirmed or its deadline passed.
+// fault, or ReasonSuperseded: a later command or edit, a Stop, a DeleteAll,
+// a deletion of the entry to play, replaced it before it began). Pause and
+// a resume answer with the backend's answer; Stop and EnterMaintenance once
+// the release is confirmed or its deadline passed.
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;
