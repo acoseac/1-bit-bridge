@@ -3503,8 +3503,13 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // ResetTrackMissingCount.
 //
 // Since v32 the stamp ALSO carries the freshly-captured audio_md5, with
-// the OPPOSITE update semantics from the upserts: `COALESCE(NULLIF(?,”),
-// audio_md5)` keeps a stored value when the fresh one is empty. The
+// the OPPOSITE update semantics from the upserts, keeping a stored value
+// when the fresh one is empty:
+//
+//	audio_md5 = COALESCE(NULLIF(?, ''), audio_md5)
+//
+// (an indented block, because gofmt rewrites two single quotes in doc
+// text as a closing double quote, which this line read as for a while). The
 // asymmetry is load-bearing and reversing it fails silently — this leg
 // runs only when the row was PROVED byte-identical, so a fresh empty
 // (non-FLAC, the all-zero sentinel, or a truncated capture) must not

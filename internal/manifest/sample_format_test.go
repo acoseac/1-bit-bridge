@@ -276,7 +276,7 @@ func TestTheHeaderReadAgreesWithTheExtractor(t *testing.T) {
 				t.Fatalf("header read: %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("the header read says %q, the extractor %q", got, tc.want)
+				t.Errorf("the header read says %q, want %q, the extractor's answer (TestSampleFormatIsWhatTheHeaderStates)", got, tc.want)
 			}
 		})
 	}

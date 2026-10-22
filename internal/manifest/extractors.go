@@ -596,6 +596,16 @@ var Ext = map[string]bool{
 // the iOS delta. Every other row re-extracts byte-identical and rides the
 // version-stamp leg; SACD ISO virtual rows re-expand as on every bump.
 // ProtocolVersion stays 1.
+//
+// Not bumped for the sample kind (backlog B513, Track.SampleFormat), though
+// the WAV, AIFF, FLAC and ALAC reads record it since then. It lives in a
+// column of its own (tracks.sample_format), which the version-stale diff
+// does not compare, and its backfill reaches every row extracted before it
+// without re-reading the library: migrate decides each row its codec decides,
+// and BackfillSampleFormats reads only the headers of the WAV and AIFF rows,
+// the formats a file can hold either kind in, where a bump re-opens every
+// file once. A later change to what the kind reads is a bump like any other:
+// the stamp leg records the kind a re-read finds (writeSampleFormatTx).
 const ExtractorVersion = 27
 
 // Extract reads as much metadata as it can from the file at absPath and

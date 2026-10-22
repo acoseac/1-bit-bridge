@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B513: the manifest says whether a PCM track's samples are integer or float, and the rows indexed before it get the kind without a rescan](#2026-10-23--b513-the-manifest-says-whether-a-pcm-tracks-samples-are-integer-or-float-and-the-rows-indexed-before-it-get-the-kind-without-a-rescan)
 - [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
 - [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
@@ -53965,3 +53966,237 @@ linux/arm, windows and freebsd, and the Linux test binary built, clean.
 Not changed, for the owner: the stacks named above; a link or a mount
 another writer puts in place after the write's second check, or during its
 syncs, is not seen; shutdown's ReasonClosed, as in rounds 5 to 11.
+
+## 2026-10-23 — B513: the manifest says whether a PCM track's samples are integer or float, and the rows indexed before it get the kind without a rescan
+
+### The question
+
+The iOS app (its B498, #2294) keeps the sample kind a file describes
+(`Track.pcmSampleFormatRaw`: `integer` or `floatingPoint`), names float PCM
+as such, and checks a cast's rate, kind and depth against the renderer. It
+learns the kind only where it opens the file itself, and a bridge row carried
+none, so an unopened bridge track stayed unknown. The bridge read the kind and
+threw it away: `wavEncodingOf` grouped `WAVE_FORMAT_PCM` with
+`WAVE_FORMAT_IEEE_FLOAT` (both "WAV", both linear), and `aifcEncodingOf` put
+`fl32`/`fl64` beside the integer compression types.
+
+### The field
+
+`Track.sampleFormat`, `"integer"` or `"float"`, `omitempty`, absent wherever
+the header states neither (PROTOCOL.md, "Sample kind"). Set by the reads that
+see the header: `parseWAVFmtChunk` (`wavSampleFormat`: code 1 integer, code 3
+float, `WAVE_FORMAT_EXTENSIBLE` by its subformat GUID compared whole, 16
+bytes, against `KSDATAFORMAT_SUBTYPE_PCM` and `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`),
+`parseAIFFCOMMChunk` (`aifcEncoding.sampleFormat`: a plain AIFF and `NONE`,
+`twos`, `sowt`, `raw `, `in24`, `42ni`, `in32`, `23ni` integer; `fl32`,
+`FL32`, `fl64`, `FL64` float), `extractFLACFormatFromReader` (FLAC and Ogg
+FLAC, integer-only) and `extractMP4WithContext` (an `alac` sample entry). The
+codec walk still names a WAV by the GUID's first two bytes, so the Ambisonic
+B-format subformat (`00000001-0721-…`) is "WAV" with its depth and no kind:
+the kind is the stricter reading, as the brief asked. `codec` and
+`bitsPerSample` are unchanged (a float WAV is "WAV" at 32 or 64 bits).
+
+Never on a DSD row, at three places: the write stores none for `isDSD`
+(`sampleFormatColumn`), the splice serves none for it (`spliceSampleFormat`),
+and the open-time fill stamps no `is_dsd` row.
+
+### Where it lives: a column, as `firstIndexedAt` does
+
+The most recent additive manifest field, `firstIndexedAt` (#1158), is the
+precedent: a column (`tracks.first_indexed_at`), spliced by the readers
+(`GetTrack`, `scanListedTrack`), zeroed in `marshalForStorage`, filled at
+every open without moving `indexed_at`, and a health key a client's one-time
+paginated full sync keys on. `sample_format` (migration v59, with
+`idx_tracks_sample_format_null ON tracks(path) WHERE sample_format IS NULL`)
+follows it. NULL is a row nothing has decided; `''` is decided, no kind.
+
+The column, not `tags_json`, for two reasons measured in the negative
+controls. In `tags_json` the kind is part of what the version-stale diff
+(`markStampIfUnchanged`) compares, so a row gaining it takes the full upsert,
+which resets `enriched_at`: control 8 (the kind left in `tags_json`) turned
+`TestTheVersionStaleStampRecordsTheKindItReads` red on exactly that,
+"enriched_at = 0: the stamp leg must not re-queue enrichment". And a backfill
+that rewrites `tags_json` without advancing `indexed_at` breaks
+`Track.rowVersion`'s invariant (every `tags_json` write advances it), so an
+enricher stamp read before the backfill would write the old blob back.
+
+Writers: both upserts bind the column (`sampleFormatColumn`) and the
+conflict arm assigns it unconditionally (the row runs because the file
+changed). The version-stale stamp leg (`StampExtractorVersionBatch`) writes
+the kind the re-read found through `writeSampleFormatTx`, which advances
+`indexed_at` through `bumpIndexedAtByPathSQL` only when a client would see
+the change (NULL and `''` are both "absent"); a refused file keeps its row's
+kind as it keeps its lyrics. The three production upsert callers (the scan
+writer, `settleHeldReconciles`, the UPnP ingest) write fresh extractions or
+routed rows, so no caller writes back a Track read without the splice.
+
+### No ExtractorVersion bump, and why
+
+scanner.md says to bump on every extraction-logic change, so that the skip
+gate re-extracts rows whose stored answer is stale. A bump would re-open every
+file in the library once (the v3 and v11 records), the cost the brief ruled
+out ("bounded, without a full rescan"). The kind lives in a column the diff
+does not compare, and the backfill below reaches every row extracted before
+it. The deviation is recorded at the const (`ExtractorVersion`'s docblock)
+and in the rules text; a later change to what the kind reads is a bump like
+any other, and the stamp leg then records the new answer.
+
+### The backfill
+
+Two halves, both bounded.
+
+1. **The open-time fill** (`backfillSampleFormatByCodec`, at the end of every
+   `migrate`, after the first-indexed fill): `sampleFormatFillSQL`, a
+   2,000-row chunk per autocommit statement, decides each undecided row its
+   codec decides, reading no file: a FLAC or ALAC row read from a file, not
+   DSD, is `'integer'`; every other row it reaches (a lossy codec, DSD, a
+   compressed WAV or AIFF-C, an unread AIFF-C, no codec, any UPnP-routed row)
+   is `''`. A routed row's codec comes from its upstream's file name
+   (`codecFromExtension`) and the bridge never reads its header, so a routed
+   FLAC gets no kind, as the ingest's own writes give none. It assigns no
+   `indexed_at`.
+2. **The header pass** (`Store.BackfillSampleFormats`): the undecided WAV and
+   AIFF rows read from a file, a 200-row page at a time in path order
+   (`sampleFormatCandidatesSQL`, keyset on path so a row left undecided is not
+   read twice in a pass). For each: the API's resolver (`ResolveChecked`, the
+   file the API serves), the row's size and mtime compared with the file's
+   before and after the read (a changed file is left to the scan that will
+   re-read it), `openAudioFile` (the extractors' open, noting a read that did
+   not complete), and `readHeaderSampleFormat`, which walks the chunks as the
+   extractor does (the same `fmt `/`COMM` size bounds, now package consts the
+   walkers share, the first readable one wins) and seeks over everything
+   else. A page's answers are written in one transaction under `Store.mu`,
+   each only while the row is still undecided and still has that size and
+   mtime (`sampleFormatDecideSQL`); a row that gains a kind advances
+   `indexed_at` (`bumpIndexedAtByPathSQL`) and the commit notes the library
+   (`noteLibrary`), a row whose header states none does not move. Serve runs
+   a pass at once and after every successful scan (`runSampleFormatBackfill`
+   on a `postScanNudges` channel, joined through `bgWriters`, on `scanCtx`);
+   the pass at once covers a startup scan that ended before the post-scan
+   hook was registered. It logs one Info line with counts when it read a
+   header, nothing when it found nothing, and never a path.
+
+`TestTheHeaderReadAgreesWithTheExtractor` holds the header read to the
+extractor on all 45 WAV and AIFF shapes of the golden table's 56, and
+`TestTheHeaderReadStopsAtTheFormatChunk` to under 1 KiB of a 3 MiB file
+(1 MiB LIST and JUNK, or ID3, ahead of the format chunk).
+
+### Cost, measured
+
+On this Mac (Apple silicon, APFS SSD), a throwaway test not committed:
+
+| | |
+|---|---|
+| open-time fill, 50,000 rows (45,000 decided, 5,000 WAV left for headers) | 248 ms, once |
+| an open while those 5,000 WAV rows are still undecided | 5.9 ms |
+| `SampleFormatReady` count, same store | 5.9 ms (cached by the health counts, sticky once ready) |
+| header pass, 2,000 WAV files, warm cache | 113 ms, 57 µs a file |
+| a pass once nothing is undecided | 35 µs |
+
+A header read is an open, a 12-byte read, one 8-byte read per chunk ahead of
+the format chunk, and the format chunk (16 to 40 bytes for a WAV, 18 to 1,024
+for a COMM): about 60 bytes for afconvert's float WAV. On a network mount the
+cost per file is the open and two or three round trips, so a library of
+10,000 WAV and AIFF files over SMB is minutes once, against a bump's re-read
+of every file and every cover. The delta it causes: one row per WAV or AIFF
+file that gains a kind, once; FLAC and ALAC rows, usually the bulk of a
+library, move no cursor.
+
+### What a client sees meanwhile
+
+Absent, then the value. On the first start the fill decides the FLAC and
+ALAC rows before the API serves, and `/v1/health` advertises `sampleFormat`
+(`SampleFormatReady`: no NULL row the fill decides; the WAV and AIFF rows are
+not counted). A client that keys its one-time paginated full sync on the key,
+as the app does for `firstIndexedAt`, receives those values; a delta does not
+carry them. Each WAV or AIFF row is absent until the header pass reads it,
+then arrives by delta, whether the client's full sync came before or after.
+A file that could not be read stays absent and is tried after each successful
+scan.
+
+### Variants
+
+`Variant.sampleFormat` is derived from the rendition's format in
+`scanTrackVariants` (`variantSampleFormat`): the pool writes every rendition
+as FLAC (`Format: "flac"`, transcode's pool), so each says `"integer"`, a DSD
+source's renditions included; a format the bridge does not know says nothing.
+Nothing is stored. The `upscale.complete` event keeps its fields as they are.
+
+### Not done: CAF
+
+The brief asked for CAF by its format flags. The bridge does not index CAF:
+`.caf` is not in `Ext`, and there is no CAF extractor, so no bridge row can be
+CAF. Indexing CAF is a feature of its own (a codec name the app agrees on,
+the lossy and lossless sets, ALAC and AAC inside CAF, DLNA and sox tables), so
+this change does not add it; the report carries a backlog entry.
+
+### Red first
+
+`40072363` carried the tests over a scaffold that compiled and did nothing
+(the column existed; nothing wrote it). Red: all 12 new manifest tests (29 of
+the golden table's subtests, the 19 integer and 10 float shapes, with every
+absent shape already green), `TestHealthFeaturesCompleteSet` and
+`TestHealthOmitsSampleFormatUntilTheFillIsDone` in `internal/api`, and the
+three `cmd/bridge` tests (the loop and the boot test at their give-up, the
+wiring test on the missing lines). `4ae87be5` turned them green; the whole
+`internal/manifest` and `internal/api` suites stayed green.
+
+### Negative controls
+
+Each against the committed `4ae87be5`, restored with `git checkout` after:
+
+1. IEEE float mapped to integer in `wavSampleFormat`: six tests red (the
+   float WAV shapes in the golden table and the header read, the header pass,
+   the stamp leg, the manifest test, the header-only test).
+2. The extensible GUID compared by its first two bytes: the Ambisonic shape
+   red in both tables.
+3. `fl32`/`fl64` among the integer AIFF-C types: `TestAIFCEncodingOf` and
+   five more red.
+4. FLAC's integer stamp removed: FLAC and Ogg FLAC red, and the manifest test.
+5. ALAC's integer stamp removed: the ALAC shape red.
+6. `omitempty` dropped from Track's tag: both manifest bodies carry
+   `"sampleFormat": ""` on the A-law, MP3 and DSD rows, red; the header pass's
+   manifest check red.
+7. The write's DSD guard removed: "the write stored integer on a DSD row".
+   7b, the splice's guard: GetTrack and the list reader serve it. 7c, the
+   fill's `is_dsd` term: the fill stamps it.
+8. The kind left in `tags_json`: the column test, the manifest test and the
+   stamp test (enrichment re-queued) red.
+9. The fill advancing `indexed_at`: every decided row's cursor moves, red.
+10. The fill stamping routed rows: the routed FLAC becomes `integer`, red.
+11. The header pass not advancing a gained row: four "cursor did not
+    advance" lines.
+12. The stat comparison always true: the changed file is read and recorded,
+    red.
+13. The header read taking a `fmt ` chunk of any size: it disagrees with the
+    extractor on the too-short-first-chunk shape.
+14. The header read reading the chunks it passes: 2,097,208 bytes for a
+    header, red.
+15. The stamp leg not recording the kind: the stamp test red.
+16. Readiness counting the WAV rows too: "only a WAV row's header unread"
+    reads not ready, red.
+17. Variants with no kind: red.
+18. The health key without its readiness: the pending and no-query cases red.
+19. Serve not handing the pass the post-scan nudge: the wiring test red.
+20. The loop without its pass at once: "no pass ran at boot".
+21. Serve's pass not calling the backfill: the boot test red at its give-up.
+22. The candidate query's predicate disguised (`IS NULL OR = 'x'`): its plan
+    leaves the partial index, red.
+
+### Not covered
+
+A rolled-back binary that updates a row (a changed file) leaves its
+`sample_format` as it was, and both binaries stamp ExtractorVersion 27, so
+nothing re-reads it until the file changes again; a row it inserts is NULL and
+the next open of this binary decides it. The values the fill decides on such
+an open reach a client only through a full manifest, as `firstIndexedAt`'s do.
+
+### The iOS mirror
+
+The app reads `sampleFormat` into `Track.pcmSampleFormatRaw` for a bridge row
+(`"float"` as `floatingPoint`, `"integer"` as `integer`, absent as unknown,
+never as integer, an unknown value as unknown), in both upsert branches, and
+keeps a kind it read from the file itself over an absent one. Once per bridge,
+the first sync after `/v1/health` advertises `sampleFormat` is one paginated
+full sync, the `firstIndexedAt` machinery keyed on a second key. `BridgeVariant`
+gains the optional `sampleFormat`. PROTOCOL.md's section is the Mirror-PR text.

@@ -277,7 +277,10 @@ func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
 		if wantWire == "NULL" {
 			wantWire = ""
 		}
-		if (wantWire == "") == present || (present && got != wantWire) {
+		switch {
+		case wantWire == "" && present:
+			t.Errorf("the manifest serves %s with \"sampleFormat\" %#v, want the key absent", f.name, got)
+		case wantWire != "" && got != wantWire:
 			t.Errorf("the manifest serves %s with \"sampleFormat\" %#v (present %v), want %q", f.name, got, present, wantWire)
 		}
 	}
