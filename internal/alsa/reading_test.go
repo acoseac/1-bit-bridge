@@ -142,8 +142,11 @@ func TestAProcCardSaysWhenItsDevicesCannotAllBeListed(t *testing.T) {
 // was set in a deferred function on an unnamed result, after the result
 // was copied, so a stop anywhere but the last card returned the reading
 // whole; the old test stopped at card 5, the last, and its Partial came
-// from the USB listing the stop refused. The /proc reading returns the
-// context's error.
+// from the USB listing the stop refused. A stop before the last card also
+// leaves the reading's cards short of its listing, which CardsComplete says,
+// as a cut listing does; one in the USB loops has read every card (round 4:
+// the port-binding fix's CardsComplete stayed true on a stop at card 0). The
+// /proc reading returns the context's error.
 func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 	// card0Unit is a USB DAC on the Pi 5's second controller, put in for
 	// the first HDMI card as card 0, so the stop can land inside card 0.
@@ -151,19 +154,21 @@ func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// step changes the Pi 5's tree; the stop lands on the first open
-		// whose path begins with at; read says the reading stopped there.
+		// whose path begins with at; read says the reading stopped there,
+		// and complete whether it read every card its listing names.
 		step, at string
 		read     func(SysfsSnapshot) bool
+		complete bool
 	}{
 		{"card 0 of 0, 1 and 5", "usbdev " + card0Unit + " vendor=1234 product=0f05 devnum=2\nusbcard 0 " + card0Unit + "/3-1:1.0\n",
 			strings.TrimPrefix(card0Unit, "sys/") + "/",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 1 && s.Cards[0].Card == 0 }},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 1 && s.Cards[0].Card == 0 }, false},
 		{"a root hub before three more", "unplug " + goBarDevice + "\n",
 			strings.TrimPrefix(goBarHub, "sys/") + "/speed",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 2 && len(s.Controllers) == 0 }},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 2 && len(s.Controllers) == 0 }, true},
 		{"a USB device before another", "usbdev " + goBarHub + "/1-4 vendor=046d product=c31c devnum=7\n",
 			strings.TrimPrefix(goBarDevice, "sys/") + "/bDeviceClass",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 3 && len(s.Devices) == 1 }},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 3 && len(s.Devices) == 1 }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
@@ -191,6 +196,9 @@ func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 			if !tc.read(sys) {
 				t.Errorf("the reading did not stop where the case says: %d cards, controllers %q, %d devices",
 					len(sys.Cards), sys.Controllers, len(sys.Devices))
+			}
+			if sys.CardsComplete != tc.complete {
+				t.Errorf("the reading stopped at %s says its cards are complete: %v, with %d cards read", opened[stop], sys.CardsComplete, len(sys.Cards))
 			}
 		})
 	}

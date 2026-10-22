@@ -261,6 +261,10 @@ func (r SysfsReader) ReadContext(ctx context.Context) (snap SysfsSnapshot) {
 	sort.Ints(cards)
 	for _, n := range cards {
 		if t.stopped() {
+			// The cards after this one are not read: Cards no longer holds
+			// every card the listing names, as CardsComplete promises (B470
+			// PR 4a2 round 4).
+			snap.CardsComplete = false
 			return snap
 		}
 		snap.Cards = append(snap.Cards, t.card(n))
