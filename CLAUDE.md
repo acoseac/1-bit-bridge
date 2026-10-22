@@ -178,7 +178,7 @@ it.
 loads with its code, and the record in the log** — never only in the log, because
 nothing there reaches a session that has not gone looking for it.
 
-**Twenty-one claims in this list have been wrong and been corrected**: **Check the code before believing any doc about it, including this one** — and when you find a stale claim, correct it here rather than working around it. → History-Workflow.md
+**Twenty-three claims in this list have been wrong and been corrected**: **Check the code before believing any doc about it, including this one** — and when you find a stale claim, correct it here rather than working around it. → History-Workflow.md
 
 **The same rot reaches CODE COMMENTS, and there it is more dangerous**, because a comment is read as the reason for the code beside it: a false comment that explains a design choice is how the next change gets made on the same reasoning. → History-Workflow.md
 

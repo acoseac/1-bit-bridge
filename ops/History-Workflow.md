@@ -4,7 +4,7 @@
 
 ## Things that have bitten before
 
-**Twenty-one claims in this list have been wrong and been corrected** — the
+**Twenty-three claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -26,8 +26,11 @@ path list sidesteps the case-fold class entirely", (2026-10-15) "a
 cover the cap evicts does not come back, a `local-` cover included",
 (2026-10-16) "the two ID3v2 readers still differ on TXXX names (B126)",
 (2026-10-22) "`resolveOutput` resolves the block's merge keys as
-gopkg.in/yaml.v3 v3.0.1's decoder does", and (2026-10-22) "an output
-refusal names the setting, never its value". The first five cost a later session real
+gopkg.in/yaml.v3 v3.0.1's decoder does", (2026-10-22) "an output
+refusal names the setting, never its value", (2026-10-22) "a block
+yaml.v3 does not decode is one Load refuses", and (2026-10-22) "no
+refusal, warning or log line of the config path carries any part of a
+value or a key". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -87,6 +90,14 @@ and no more, and dropped what an alias key named twice. The twenty-first
 called a refusal value-free while the decoder's own error, printed by the
 same path, still quoted the value. Round 3 replaced the copy with the
 decoder, and made the whole path value-free.
+The twenty-second and the twenty-third were round 3's, by the same session,
+and round 4's review found both. The twenty-second took a block that does
+not decode on its own for one Load refuses, while yaml.v3 counts aliases
+across the whole document: a block it refused alone, Load took inside the
+file. The twenty-third promised more than the code did: an entry of a
+managed list this build does not know was printed whole by serve and init,
+and the filesystem's errors name configured paths, which the rule now
+leaves out by the orchestrator's decision.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
