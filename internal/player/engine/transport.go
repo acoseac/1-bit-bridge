@@ -740,6 +740,18 @@ type callCtx struct {
 // Deadline is the call's deadline.
 func (c callCtx) Deadline() (time.Time, bool) { return c.deadline, true }
 
+// Err is context.DeadlineExceeded once the call's deadline has ended it, as
+// context.Context's contract says of a context past its deadline (its cause
+// is errCallDeadline), and otherwise the error the context ended with:
+// Canceled when the engine's life ended, or the call was answered.
+func (c callCtx) Err() error {
+	err := c.Context.Err()
+	if err != nil && errors.Is(context.Cause(c.Context), errCallDeadline) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
 // call runs fn on a goroutine of its own under a context derived from the
 // engine's life that carries the call's deadline, timeout from now (none
 // for 0), and ends there; it hands the owner what fn returns and when. At

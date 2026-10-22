@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -229,28 +230,31 @@ func TestADeadlineQueuedBehindItsAcknowledgementChangesNothing(t *testing.T) {
 }
 
 // TestALateAnswerIsRefusedWhateverTheOrder pins a call's deadline: its
-// context carries the deadline, on the engine's clock, and an answer that
-// comes at or past it is late even when it reaches the owner before the
-// expiry does (the expiry's timer has not run yet): the call is treated as
-// failed, its session released with ReasonTimeout, and the command that
-// waited on it answers so. The session's own Prepare is taken before the
-// clock moves, so that only the held call answers late.
+// context carries the deadline, on the engine's clock, and once the call is
+// past it the context's Err is context.DeadlineExceeded, its cause the
+// deadline's, as context.Context's contract says. An answer that comes at
+// or past the deadline is late whichever reaches the owner first: the
+// answer, while the expiry's timer has not run ("answer first"), or the
+// expiry ("expiry first"). The call is treated as failed, its session
+// released with ReasonTimeout, and the command that waited on it answers
+// so. The session's own Prepare is taken before the clock moves, so that
+// only the held call answers late.
 func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		call    string
 		timeout time.Duration
 		// setup brings the engine to where cmd makes the call; hook holds
-		// the call on held and records its context's deadline.
+		// the call on held and hands the test its context.
 		setup func(h *harness)
-		hook  func(h *harness, held gate, deadline func(context.Context))
+		hook  func(h *harness, held gate, called func(context.Context))
 		cmd   func(h *harness) error
 	}{
 		{"start", "start", StartTimeout,
 			func(h *harness) { h.insert("a", "b"); h.available() },
-			func(h *harness, held gate, deadline func(context.Context)) {
+			func(h *harness, held gate, called func(context.Context)) {
 				h.be.onStart = func(ctx context.Context, s *fakeSession) error {
-					deadline(ctx)
+					called(ctx)
 					if err := held.wait(ctx, h.be, false); err != nil {
 						return err
 					}
@@ -260,9 +264,9 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 			func(h *harness) error { return h.eng.Play(bg) }},
 		{"pause", "pause", CallTimeout,
 			func(h *harness) { h.playing(0, "a", "b"); h.waitApplied("handled call prepare", 0) },
-			func(h *harness, held gate, deadline func(context.Context)) {
+			func(h *harness, held gate, called func(context.Context)) {
 				h.be.onPause = func(ctx context.Context, _ *fakeSession) error {
-					deadline(ctx)
+					called(ctx)
 					return held.wait(ctx, h.be, false)
 				}
 			},
@@ -273,9 +277,9 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 				h.waitApplied("handled call prepare", 0)
 				h.must("pause", h.eng.Pause(bg))
 			},
-			func(h *harness, held gate, deadline func(context.Context)) {
+			func(h *harness, held gate, called func(context.Context)) {
 				h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
-					deadline(ctx)
+					called(ctx)
 					if err := held.wait(ctx, h.be, false); err != nil {
 						return 0, err
 					}
@@ -284,43 +288,46 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 			},
 			func(h *harness) error { return h.eng.Play(bg) }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := startHarness(t)
-			tc.setup(h)
-			held := newGate()
-			deadlines := make(chan time.Time, 1)
-			h.be.script(func() {
-				tc.hook(h, held, func(ctx context.Context) {
-					d, ok := ctx.Deadline()
-					if !ok {
-						d = time.Time{}
-					}
-					deadlines <- d
-				})
+		for _, order := range []string{"answer first", "expiry first"} {
+			t.Run(tc.name+"/"+order, func(t *testing.T) {
+				h := startHarness(t)
+				tc.setup(h)
+				held := newGate()
+				ctxs := make(chan context.Context, 1)
+				h.be.script(func() { tc.hook(h, held, func(ctx context.Context) { ctxs <- ctx }) })
+				called := h.clk.Now()
+				done := async(func() error { return tc.cmd(h) })
+				var ctx context.Context
+				select {
+				case ctx = <-ctxs:
+				case <-time.After(*watchdog):
+					t.Fatalf("waited %v for the %s", *watchdog, tc.call)
+				}
+				if d, ok := ctx.Deadline(); !ok || !d.Equal(called.Add(tc.timeout)) {
+					t.Errorf("the %s's context has the deadline %v (%v), want %v, the engine's clock at the call plus %v", tc.call, d, ok, called.Add(tc.timeout), tc.timeout)
+				}
+				mark := h.appliedMark()
+				if order == "answer first" {
+					// The deadline passes; its timer's callback has not run.
+					h.clk.Skip(tc.timeout)
+					held.open()
+					h.waitApplied("handled call "+tc.call, mark)
+				} else {
+					h.clk.Advance(tc.timeout)
+					h.waitApplied("handled call "+tc.call+" expired", mark)
+					held.open()
+				}
+				if err := ctx.Err(); err != context.DeadlineExceeded || !errors.Is(context.Cause(ctx), errCallDeadline) {
+					t.Errorf("the %s's context past its deadline: Err %v, cause %v; want context.DeadlineExceeded, the deadline's cause", tc.call, err, context.Cause(ctx))
+				}
+				h.refused("the command whose call answered late", h.result(tc.name, done), ReasonTimeout)
+				h.clk.Advance(0)
+				sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+				if sn.LastStop().Reason != ReasonTimeout || h.be.starts() != 1 {
+					t.Fatalf("last stop %+v, %d sessions", sn.LastStop(), h.be.starts())
+				}
 			})
-			called := h.clk.Now()
-			done := async(func() error { return tc.cmd(h) })
-			var deadline time.Time
-			select {
-			case deadline = <-deadlines:
-			case <-time.After(*watchdog):
-				t.Fatalf("waited %v for the %s", *watchdog, tc.call)
-			}
-			if want := called.Add(tc.timeout); !deadline.Equal(want) {
-				t.Errorf("the %s's context has the deadline %v, want %v, the engine's clock at the call plus %v", tc.call, deadline, want, tc.timeout)
-			}
-			// The deadline passes; its timer's callback has not run.
-			h.clk.Skip(tc.timeout)
-			mark := h.appliedMark()
-			held.open()
-			h.waitApplied("handled call "+tc.call, mark)
-			h.refused("the command whose call answered late", h.result(tc.name, done), ReasonTimeout)
-			h.clk.Advance(0)
-			sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
-			if sn.LastStop().Reason != ReasonTimeout || h.be.starts() != 1 {
-				t.Fatalf("last stop %+v, %d sessions", sn.LastStop(), h.be.starts())
-			}
-		})
+		}
 	}
 }
 
