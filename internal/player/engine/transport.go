@@ -319,10 +319,7 @@ func (e *Engine) selectEntry(id uint32) {
 // pending play that by replaces is superseded.
 func (e *Engine) setIntent(then Intent, by string) {
 	o := &e.o
-	switch {
-	case then == IntentPlay:
-		o.settleErr = nil
-	case o.then == IntentPlay:
+	if then != IntentPlay && o.then == IntentPlay {
 		e.superseded(by)
 	}
 	if o.then != then {
@@ -331,13 +328,30 @@ func (e *Engine) setIntent(then Intent, by string) {
 	}
 }
 
-// superseded records why the commands waiting for playback get none: by,
-// a later command or edit, replaced it before it began. A reason already
-// recorded (the output, a fault, the backend's refusal) is kept.
-func (e *Engine) superseded(by string) {
-	if e.o.settleErr == nil {
-		e.o.settleErr = refuse("play", ReasonSuperseded, "replaced before playback began: "+by)
+// playFailed records why the playback the waiting play commands asked for
+// will not happen, on each that has no reason yet, and on a Play whose
+// Resume is under way. The first reason a command gets is its answer,
+// whatever later commands do: a later Play that plays never answers for an
+// earlier one whose playback was replaced or refused.
+func (e *Engine) playFailed(err error) {
+	o := &e.o
+	for i := range o.waiters {
+		if w := &o.waiters[i]; w.play && w.err == nil {
+			w.err = err
+		}
 	}
+	if s := o.sess; s != nil {
+		if tc := s.transportCall; tc != nil && tc.kind == callResume && tc.waiter != nil && tc.waitErr == nil {
+			tc.waitErr = err
+		}
+	}
+}
+
+// superseded records, on the waiting play commands, that by, a later
+// command or edit, replaced their playback before it began. A reason
+// already recorded (the output, a fault, the backend's refusal) stands.
+func (e *Engine) superseded(by string) {
+	e.playFailed(refuse("play", ReasonSuperseded, "replaced before playback began: "+by))
 }
 
 // stopped records why playback stopped.
@@ -366,7 +380,7 @@ func (e *Engine) startSession(target uint32) {
 	o.sess = s
 	o.sessions[s.id] = s
 	o.state, o.starting, o.then = Playing, true, IntentStop
-	o.audible, o.join, o.settleErr = Audible{}, nil, nil
+	o.audible, o.join = Audible{}, nil
 	e.selectEntry(target)
 	e.visible()
 	req := StartRequest{
@@ -379,24 +393,23 @@ func (e *Engine) startSession(target uint32) {
 }
 
 // releaseSession asks s to release; then is what follows the
-// acknowledgement, and why, when playback stops, is recorded. A session
-// still starting that is released to stop supersedes the play that started
-// it, and so does one whose Resume is under way: that Play is answered with
-// the reason already recorded (the output, a fault) or as superseded, a
-// Pause under way with nil.
+// acknowledgement, and why, when playback stops, is recorded. Released to
+// anything but play, a session still starting supersedes the plays waiting
+// for it, and so does one whose Resume is under way: that Play is answered
+// at once with the reason already recorded for it (the output, a fault) or
+// as superseded, a Pause under way with nil.
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
 		e.setIntent(then, why.Detail)
 		return
 	}
-	starting := s.phase == sessStarting
 	s.phase = sessReleasing
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
 		var err error
 		if tc.kind == callResume && then != IntentPlay {
-			if err = o.settleErr; err == nil {
+			if err = tc.waitErr; err == nil {
 				err = refuse(tc.waiter.op.String(), ReasonSuperseded, "replaced before playback resumed: "+why.Detail)
 			}
 		}
@@ -405,10 +418,7 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	}
 	s.transportCall = nil
 	o.then = then
-	switch {
-	case then == IntentPlay:
-		o.settleErr = nil
-	case starting:
+	if then != IntentPlay {
 		e.superseded(why.Detail)
 	}
 	if then != IntentPlay && why.Reason != "" {
@@ -444,7 +454,7 @@ func (e *Engine) releaseDeadline(s *session) {
 	o.unconfirmed = &ReleaseInfo{Session: s.id, Since: e.clk.Now()}
 	e.log.Warn("player: a session's release was not confirmed by its deadline; nothing opens the device until it is", "session", uint64(s.id), "deadline", ReleaseTimeout)
 	if o.then == IntentPlay {
-		o.settleErr = refuse("play", ReasonReleaseUnconfirmed, fmt.Sprintf("session %d's release is not confirmed", s.id))
+		e.playFailed(refuse("play", ReasonReleaseUnconfirmed, fmt.Sprintf("session %d's release is not confirmed", s.id)))
 	}
 	o.then = IntentStop
 	if o.maint == nil {
@@ -522,7 +532,8 @@ func (e *Engine) afterRelease() {
 		o.state = Stopped
 	case then == IntentPlay:
 		if why := e.outputRefusal("play"); why != nil {
-			o.settleErr, o.state = why, Stopped
+			e.playFailed(why)
+			o.state = Stopped
 			return
 		}
 		target := o.selected
@@ -530,7 +541,8 @@ func (e *Engine) afterRelease() {
 			target = o.q.first()
 		}
 		if target == 0 {
-			o.settleErr, o.state = refuse("play", ReasonEmptyQueue, "the queue is empty"), Stopped
+			e.playFailed(refuse("play", ReasonEmptyQueue, "the queue is empty"))
+			o.state = Stopped
 			return
 		}
 		e.startSession(target)
@@ -727,6 +739,9 @@ type call struct {
 	timer   timer
 	expired bool
 	waiter  *command
+	// waitErr is why a Resume's waiting Play will not get its playback,
+	// recorded as it was decided (playFailed); releaseSession answers it.
+	waitErr error
 	// deadline is the call's, on the engine's clock (zero: none): an answer
 	// returned at or past it is late, whichever of the answer and the
 	// expiry reaches the owner first.
@@ -904,7 +919,7 @@ func (e *Engine) startDone(s *session, r callResult) {
 		e.skipAtStart(s, *u)
 		return
 	}
-	o.settleErr = &Error{Reason: ReasonBackend, Op: "start", Detail: "the backend could not start the session", Err: r.err}
+	e.playFailed(&Error{Reason: ReasonBackend, Op: "start", Detail: "the backend could not start the session", Err: r.err})
 	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonBackend, Detail: r.err.Error()})
 }
 
@@ -912,17 +927,16 @@ func (e *Engine) startDone(s *session, r callResult) {
 // content played: the selection moves to the entry that follows and a new
 // session starts there, until every entry of the pass has been refused.
 func (e *Engine) skipAtStart(s *session, u Unplayable) {
-	o := &e.o
 	entry := s.chain[0].entry
 	e.skip(entry, u)
 	if e.allFailed() {
-		o.settleErr = refuse("play", ReasonAllUnplayable, "every entry was refused before any of its content played")
+		e.playFailed(refuse("play", ReasonAllUnplayable, "every entry was refused before any of its content played"))
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonAllUnplayable, Detail: "every entry was refused before any of its content played"})
 		return
 	}
 	next := e.following(entry)
 	if next == 0 {
-		o.settleErr = &Error{Reason: ReasonUnplayable, Op: "play", Detail: fmt.Sprintf("entry %d: %s", entry, u.Reason)}
+		e.playFailed(&Error{Reason: ReasonUnplayable, Op: "play", Detail: fmt.Sprintf("entry %d: %s", entry, u.Reason)})
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonUnplayable, Detail: fmt.Sprintf("entry %d, the last, was refused: %s", entry, u.Reason)})
 		return
 	}
@@ -1019,7 +1033,7 @@ func (e *Engine) callExpired(c *call) {
 		s.succCall = nil
 	}
 	if e.current(s.id) == s {
-		o.settleErr = refuse("play", ReasonTimeout, why)
+		e.playFailed(refuse("play", ReasonTimeout, why))
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonTimeout, Detail: why})
 	}
 }
@@ -1099,7 +1113,7 @@ func (e *Engine) onFault(id SessionID, f Fault) {
 		faults = faults[len(faults)-MaxFaults:]
 	}
 	o.faults = faults
-	o.settleErr = refuse("play", ReasonFault, string(f.Reason))
+	e.playFailed(refuse("play", ReasonFault, string(f.Reason)))
 	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonFault, Detail: string(f.Reason) + ": " + f.Detail})
 }
 

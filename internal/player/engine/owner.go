@@ -40,11 +40,10 @@ type owner struct {
 	maint       *maintHold
 	persist     PersistState
 
-	waiters   []waiter
-	settleErr error
-	outbox    []answered
-	notes     []note
-	parked    []*command
+	waiters []waiter
+	outbox  []answered
+	notes   []note
+	parked  []*command
 	// drainAt is where drainParked took the command it runs from, so a
 	// command parked again keeps its place in its lane; -1 otherwise.
 	drainAt  int
@@ -62,11 +61,14 @@ type owner struct {
 }
 
 // waiter is a command answered when the transport settles: no start and no
-// release under way. play is a command that asked for playback, answered
-// with what stopped it when it is not playing then.
+// release under way. play is a command that asked for playback; err is why
+// that playback did not happen, recorded as it was decided (playFailed) and
+// kept whatever later commands do, so a later Play that plays never answers
+// for an earlier one.
 type waiter struct {
 	c    *command
 	play bool
+	err  error
 }
 
 // shutdownPhase is how far shutdown has got.
@@ -539,8 +541,14 @@ func (e *Engine) settleWaiters() {
 	}
 	for _, w := range o.waiters {
 		var err error
-		if w.play && o.state != Playing {
-			err = o.settleErr
+		if w.play {
+			err = w.err
+			if err == nil && o.state != Playing {
+				// Every path that ends without the playback records why
+				// (playFailed); this keeps the answer from being nil if one
+				// is ever missed.
+				err = refuse(w.c.op.String(), ReasonSuperseded, "playback did not begin")
+			}
 		}
 		e.answer(w.c, reply{err: err})
 	}

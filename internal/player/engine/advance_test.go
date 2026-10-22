@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -266,6 +267,70 @@ func TestAPlayReplacedBeforePlaybackSaysSo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPlaysAnswerIsItsOwn pins what decides a Play's answer: what
+// happened to the playback it asked for, recorded as it happened, never
+// what a later command did. During a held release a Play, a Stop and a
+// Play: the Stop replaces the first Play's playback, so that Play answers
+// ReasonSuperseded although the second plays. And a Play whose start the
+// backend refused answers why, although a Play sent during the release
+// that followed plays.
+func TestAPlaysAnswerIsItsOwn(t *testing.T) {
+	t.Run("play, stop, play", func(t *testing.T) {
+		h := startHarness(t)
+		h.playing(0, "a", "b")
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		stopped := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		mark = h.appliedMark()
+		first := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		mark = h.appliedMark()
+		again := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		mark = h.appliedMark()
+		second := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		g.open()
+		h.refused("the play the stop replaced", h.result("the first play", first), ReasonSuperseded)
+		h.must("the play after the stop", h.result("the second play", second))
+		h.must("the stop that began the release", h.result("the first stop", stopped))
+		h.must("the stop between the plays", h.result("the second stop", again))
+		if sn := h.snap(); sn.State() != Playing || h.be.starts() != 2 {
+			t.Fatalf("%s with %d sessions, want the second play's session playing", sn.State(), h.be.starts())
+		}
+	})
+	t.Run("a refused start, then a play", func(t *testing.T) {
+		h := startHarness(t)
+		h.insert("a", "b")
+		h.available()
+		busy := errors.New("the device is busy")
+		h.be.script(func() {
+			h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+				if s.id == 1 {
+					return busy
+				}
+				return s.open()
+			}
+		})
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		first := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("handled call start", mark)
+		mark = h.appliedMark()
+		second := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		g.open()
+		if err := h.result("the first play", first); ReasonOf(err) != ReasonBackend || !errors.Is(err, busy) {
+			t.Fatalf("the play whose start was refused: %v, want %s with the backend's error", err, ReasonBackend)
+		}
+		h.must("the play after the refusal", h.result("the second play", second))
+		if sn := h.snap(); sn.State() != Playing || h.be.starts() != 2 {
+			t.Fatalf("%s with %d sessions, want the second play's session playing", sn.State(), h.be.starts())
+		}
+	})
 }
 
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a

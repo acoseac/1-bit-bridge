@@ -329,11 +329,11 @@ func (e *Engine) outputGone(why Reason, detail string) {
 	s := o.sess
 	switch {
 	case s != nil && (s.phase == sessStarting || s.phase == sessLive):
-		o.settleErr = err
+		e.playFailed(err)
 		e.releaseSession(s, IntentStop, stop)
 		return
 	case o.state == Releasing && o.then != IntentStop:
-		o.settleErr = err
+		e.playFailed(err)
 		e.setIntent(IntentStop, detail)
 	case o.state == Paused:
 		o.state = Stopped
