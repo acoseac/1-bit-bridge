@@ -56,7 +56,8 @@ func TestSinkCutDropsWhatHasNotReachedTheKernel(t *testing.T) {
 // TestSinkCutAnswersFalseOnceAFrameOfItIsTheKernels pins the cut that comes
 // too late: once a frame at or after the marker is in a write the writer has
 // under way, or in the kernel's buffer, the cut drops nothing and says so,
-// and every frame plays.
+// and every frame plays; with every frame in the kernel's buffer and no
+// write under way too.
 func TestSinkCutAnswersFalseOnceAFrameOfItIsTheKernels(t *testing.T) {
 	k := newModel(t)
 	s := openTestSink(t, k, sinkConfig())
@@ -75,6 +76,18 @@ func TestSinkCutAnswersFalseOnceAFrameOfItIsTheKernels(t *testing.T) {
 	k.free()
 	drain(t, s)
 	sameFrames(t, "what the DAC heard", heard(k), join(a, b))
+
+	// 2000 frames go in one write, short of the start threshold: the writer
+	// has nothing left to write, and the kernel holds every frame unplayed.
+	k = newModel(t)
+	s = openTestSink(t, k, sinkConfig())
+	c, d := content(2, 0, 1000), content(3, 0, 1000)
+	submit(t, s, join(c, d))
+	await(t, k.when(filledAndIdle(2000)), "the writer to hand the kernel every frame and watch the stream")
+	cut(t, s, 1000, false)
+	k.free()
+	drain(t, s)
+	sameFrames(t, "what the DAC heard", heard(k), join(c, d))
 }
 
 // TestSinkCutNeverDropsAWrittenFrameNorWritesADroppedOne pins the cut
