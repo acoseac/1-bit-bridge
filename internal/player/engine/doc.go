@@ -19,6 +19,16 @@
 // once. Slow work never runs on the owner: every backend call, reservation
 // write and queue file write runs on a goroutine of its own.
 //
+// A command that cannot run yet waits, and only behind the waiting commands
+// of its own kind: an insert, a delete or a DeleteAll for a reservation
+// write, at most reserveTimeout (5 s); Play and Pause for a Pause, a Resume
+// or a start under way, and the other transport commands but Stop behind
+// them. Stop, the output's reports, the maintenance commands and the modes
+// never wait. A Stop, or a report that stops playback, answers the
+// transport commands still waiting as it runs (a Pause nil, the rest
+// ReasonSuperseded or the output's reason), and EnterMaintenance refuses
+// every waiting command.
+//
 // After every change the owner publishes an immutable Snapshot, which reads
 // take without waiting on the owner; its accessors copy. The generation
 // (Generation) advances on every change of the transport state, the queue,
@@ -115,7 +125,9 @@
 // is a reservation not made, since its rename can roll back at a crash. The
 // next block is reserved in the background, so a command waits on a write
 // only when that write has not landed by the time the current block runs
-// out. A start begins one block past the larger of the saved reservations,
+// out, and at most reserveTimeout: past it the waiting edits are refused
+// with ReasonReservation, and so is every edit that needs a value until the
+// write lands. A start begins one block past the larger of the saved reservations,
 // the queue file's values and its largest ID, a margin for one reservation
 // that storage acknowledged and did not keep, and every start advances the
 // token once its own reservation is durable: until then the token is 0,

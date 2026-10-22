@@ -156,9 +156,9 @@ func (e *Engine) setShuffle(c *command) {
 
 // values reports whether c may take the next ID (when id is set) and the
 // next token now. Otherwise c is refused (a file that could not be moved
-// aside, values exhausted, a reservation that failed) or parked until a
-// reservation write lands; a write is started for it when none is under
-// way.
+// aside, values exhausted, a reservation that failed or has not landed
+// within reserveTimeout) or parked until a reservation write lands, at most
+// reserveTimeout; a write is started for it when none is under way.
 func (e *Engine) values(c *command, id bool) bool {
 	r := &e.o.res
 	name := c.op.String()
@@ -175,16 +175,38 @@ func (e *Engine) values(c *command, id bool) bool {
 		return false
 	}
 	if (id && r.ids.needs()) || r.tokens.needs() {
-		if r.refuseParked && r.failed != nil {
+		if r.overdue || (r.refuseParked && r.failed != nil) {
 			e.answer(c, reply{err: &Error{Reason: ReasonReservation, Op: name, Detail: "the reservation could not be written", Err: r.failed}})
 			return false
 		}
 		e.reserveWrite()
-		r.awaiting = true
+		if !r.awaiting {
+			r.awaiting = true
+			r.waits++
+			seq := r.waits
+			r.bound = e.clk.AfterFunc(reserveTimeout, func() { e.post(msgReserveOverdue{seq: seq}) })
+		}
 		e.park(c)
 		return false
 	}
 	return true
+}
+
+// reserveOverdue is the wait for a reservation write past reserveTimeout:
+// the edits parked on it are refused, and so is every edit that needs a
+// value until it lands, rather than waiting on a write that may never.
+func (e *Engine) reserveOverdue(seq uint64) {
+	r := &e.o.res
+	if !r.awaiting || seq != r.waits {
+		return
+	}
+	r.awaiting, r.overdue, r.refuseParked, r.bound = false, true, true, nil
+	if r.failed == nil {
+		r.failed = fmt.Errorf("the reservation write has not landed within %v", reserveTimeout)
+		e.log.Warn("player: the reservation write has not landed by its bound; inserts and the other edits that advance the token are refused until it does",
+			"path", e.cfg.ReservePath, "bound", reserveTimeout)
+	}
+	e.touched()
 }
 
 // unstick reports whether the bad files that could not be moved aside are
@@ -245,7 +267,11 @@ func (e *Engine) ahead() {
 // refuses the commands that waited on it.
 func (e *Engine) reserveDone(err error) {
 	r := &e.o.res
-	r.inflight, r.awaiting = false, false
+	r.inflight, r.awaiting, r.overdue = false, false, false
+	if r.bound != nil {
+		r.bound.Stop()
+		r.bound = nil
+	}
 	if err == nil {
 		r.ids.durable = max(r.ids.durable, r.ids.want)
 		r.tokens.durable = max(r.tokens.durable, r.tokens.want)
@@ -292,12 +318,14 @@ func (e *Engine) reportOutput(c *command) {
 	e.answer(c, reply{})
 }
 
-// outputGone stops what plays, drops a pending play, and asks the backend to
-// drop what it prepared when nothing played.
+// outputGone stops what plays, drops a pending play and the transport
+// commands parked before it, and asks the backend to drop what it prepared
+// when nothing played.
 func (e *Engine) outputGone(why Reason, detail string) {
 	o := &e.o
 	stop := StopInfo{Reason: why, Detail: detail}
 	err := refuse("play", why, detail)
+	e.supersedeParked(func(c *command) error { return refuse(c.op.String(), why, detail) })
 	s := o.sess
 	switch {
 	case s != nil && (s.phase == sessStarting || s.phase == sessLive):

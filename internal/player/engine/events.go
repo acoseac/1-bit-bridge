@@ -65,9 +65,10 @@ type (
 		s   *session
 		seq uint64
 	}
-	msgMaintExpiry struct{ seq uint64 }
-	msgReserveDone struct{ err error }
-	msgPersisted   struct {
+	msgMaintExpiry    struct{ seq uint64 }
+	msgReserveDone    struct{ err error }
+	msgReserveOverdue struct{ seq uint64 }
+	msgPersisted      struct {
 		written  uint64
 		err      error
 		failures int
@@ -143,6 +144,9 @@ func (e *Engine) handle(m any) {
 	case msgReserveDone:
 		what = "reservation"
 		e.reserveDone(m.err)
+	case msgReserveOverdue:
+		what = "reservation overdue"
+		e.reserveOverdue(m.seq)
 	case msgPersisted:
 		what = "persisted"
 		o.persist.Written = max(o.persist.Written, m.written)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"math"
 	"os"
 	"slices"
@@ -284,12 +283,7 @@ func TestACancelledInsertKeepsNoneOfTheCallersSlices(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := startHarness(t)
 			h.insert("a")
-			h.restartWith(func() { h.files.failReserve = errors.New("read-only file system") })
-			g := newGate()
-			h.files.mu.Lock()
-			h.files.failReserve, h.files.holdReserve = nil, g
-			calls := h.files.reserveCalls
-			h.files.mu.Unlock()
+			g, calls := h.hangReservations()
 
 			meta := []byte("the caller's metadata")
 			original := slices.Clone(meta)

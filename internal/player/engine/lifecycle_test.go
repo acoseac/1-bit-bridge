@@ -38,6 +38,153 @@ func TestACommandCancelledBeforeAdmissionDoesNotRun(t *testing.T) {
 	}
 }
 
+// TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt pins admission
+// while a reservation write hangs: the insert that needs it waits, and an
+// output report and a Stop are answered at once; past reserveTimeout the
+// waiting insert is refused with ReasonReservation, and so is the next one
+// at once, until the write lands.
+func TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt(t *testing.T) {
+	h := startHarness(t)
+	ids := h.insert("a", "b")
+	g, calls := h.hangReservations()
+	h.available()
+	h.must("play a", h.eng.PlayID(bg, ids[0]))
+	s := h.be.nth(1)
+	s.audible(s.first.ID)
+	h.waitSnap("a audible", func(sn *Snapshot) bool { _, ok := sn.Audible(); return ok })
+
+	mark := h.appliedMark()
+	insert := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); return err })
+	h.waitApplied("admitted insert", mark)
+	h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
+	h.outGen++
+	report := OutputReport{Generation: h.outGen, Available: true}
+	h.must("an output report", h.result("report", async(func() error { return h.eng.ReportOutput(bg, report) })))
+	h.must("stop", h.result("stop", async(func() error { return h.eng.Stop(bg) })))
+	if sn := h.snap(); sn.State() != Stopped {
+		t.Fatalf("after the stop: %s", sn.State())
+	}
+	select {
+	case err := <-insert:
+		t.Fatalf("the insert answered %v while its reservation write hangs", err)
+	default:
+	}
+
+	h.clk.Advance(reserveTimeout)
+	h.refused("the insert past the bound", h.result("insert", insert), ReasonReservation)
+	h.refused("an insert while the write still hangs", h.result("insert", async(func() error {
+		_, err := h.eng.InsertAfter(bg, 0, ref("y"), nil)
+		return err
+	})), ReasonReservation)
+
+	mark = h.appliedMark()
+	g.open()
+	h.waitApplied("handled reservation", mark)
+	if _, err := h.eng.InsertAfter(bg, 0, ref("z"), nil); err != nil {
+		t.Fatalf("an insert once the write landed: %v", err)
+	}
+	if got := h.snap().Len(); got != 3 {
+		t.Fatalf("the queue holds %d entries, want a, b and z", got)
+	}
+}
+
+// TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite pins the
+// maintenance commands' admission: they never wait behind a parked edit,
+// and the parked edit is refused with ReasonMaintenance as the hold begins.
+func TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite(t *testing.T) {
+	h := startHarness(t)
+	h.insert("a")
+	g, calls := h.hangReservations()
+	mark := h.appliedMark()
+	insert := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); return err })
+	h.waitApplied("admitted insert", mark)
+	h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
+	holds := make(chan Hold, 1)
+	enter := async(func() error {
+		hold, err := h.eng.EnterMaintenance(bg, h.snap().Generation(), "the test")
+		holds <- hold
+		return err
+	})
+	h.must("enter", h.result("enter", enter))
+	h.refused("the parked insert", h.result("insert", insert), ReasonMaintenance)
+	hold := <-holds
+	h.must("exit", h.result("exit", async(func() error { return h.eng.ExitMaintenance(bg, hold.Lease) })))
+	g.open()
+}
+
+// TestAStopDuringASlowOpenIsTakenAtOnce pins Stop's admission behind
+// transport commands that wait: a Pause waiting for a start still opening,
+// and a Play behind it, do not hold the Stop; they are answered as it runs
+// (the Pause with nil, playback being stopped as it asked; the Play
+// superseded), and the session is released while its Start still opens.
+func TestAStopDuringASlowOpenIsTakenAtOnce(t *testing.T) {
+	h := startHarness(t)
+	h.insert("a", "b")
+	h.available()
+	held := newGate()
+	h.be.script(func() {
+		h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+			if err := held.wait(ctx, h.be, false); err != nil {
+				return err
+			}
+			return s.open()
+		}
+	})
+	play := async(func() error { return h.eng.Play(bg) })
+	s := h.be.nth(1)
+	mark := h.appliedMark()
+	pause := async(func() error { return h.eng.Pause(bg) })
+	h.waitApplied("admitted pause", mark)
+	again := async(func() error { return h.eng.Play(bg) })
+	h.waitApplied("admitted play", mark)
+	mark = h.appliedMark()
+	stop := async(func() error { return h.eng.Stop(bg) })
+	h.waitApplied("stop", mark)
+	h.must("the pause the stop overtook", h.result("pause", pause))
+	h.refused("the play the stop overtook", h.result("play", again), ReasonSuperseded)
+	h.be.waitFor("the release", func() bool { return s.releaseAsked })
+	held.open()
+	h.must("stop", h.result("stop", stop))
+	h.refused("the play whose start the stop released", h.result("play", play), ReasonSuperseded)
+	if sn := h.snap(); sn.State() != Stopped || h.be.starts() != 1 || h.be.count("pause") != 0 {
+		t.Fatalf("%s with %d sessions and %d pauses", sn.State(), h.be.starts(), h.be.count("pause"))
+	}
+}
+
+// TestAnOutputReportOvertakesTheTransportCommandsWaiting pins a report
+// that stops playback while a Play waits behind a Resume under way: the
+// report is taken at once, and the waiting Play is answered with the
+// report's reason instead of running after it, which would start playback
+// on the unit that replaced the one it was sent for.
+func TestAnOutputReportOvertakesTheTransportCommandsWaiting(t *testing.T) {
+	h := startHarness(t)
+	h.playing(0, "a", "b")
+	h.must("pause", h.eng.Pause(bg))
+	held := newGate()
+	h.be.script(func() {
+		h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
+			if err := held.wait(ctx, h.be, false); err != nil {
+				return 0, err
+			}
+			return ResumeContinued, nil
+		}
+	})
+	resume := async(func() error { return h.eng.Play(bg) })
+	h.be.waitFor("the resume", func() bool { return h.be.countLocked("resume") == 1 })
+	mark := h.appliedMark()
+	again := async(func() error { return h.eng.Play(bg) })
+	h.waitApplied("admitted play", mark)
+	h.outGen++
+	report := OutputReport{Generation: h.outGen, Available: true, UnitChanged: true}
+	h.must("the unit change", h.result("report", async(func() error { return h.eng.ReportOutput(bg, report) })))
+	h.refused("the play waiting behind the resume", h.result("play", again), ReasonUnitChanged)
+	held.open()
+	_ = h.result("the resume", resume)
+	if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 1 {
+		t.Fatalf("%s with %d sessions: a play waiting before the unit changed started one after", sn.State(), h.be.starts())
+	}
+}
+
 // TestAReplyComesAfterItsSnapshot pins read-your-writes: when a command's
 // reply is sent, the snapshot published already holds what the command
 // did, so a caller that reads as soon as its command returns reads its own

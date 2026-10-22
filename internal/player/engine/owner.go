@@ -45,11 +45,13 @@ type owner struct {
 	outbox    []answered
 	notes     []note
 	parked    []*command
-	draining  bool
-	calls     map[uint64]*call
-	nextCall  uint64
-	nextSess  uint64
-	nextOcc   uint64
+	// drainAt is where drainParked took the command it runs from, so a
+	// command parked again keeps its place in its lane; -1 otherwise.
+	drainAt  int
+	calls    map[uint64]*call
+	nextCall uint64
+	nextSess uint64
+	nextOcc  uint64
 
 	closing    bool
 	phase      shutdownPhase
@@ -90,6 +92,7 @@ func (e *Engine) start() {
 	o.sessions = map[SessionID]*session{}
 	o.calls = map[uint64]*call{}
 	o.gen = 1
+	o.drainAt = -1
 
 	rf := e.loadReserve()
 	idsBase, tokBase := uint64(rf.IDs), uint64(rf.Tokens)
@@ -302,14 +305,46 @@ func (e *Engine) finish() {
 	for _, s := range o.sessions {
 		s.stopTimers()
 	}
+	if b := o.res.bound; b != nil {
+		b.Stop()
+	}
 	e.lifeCancel()
 	e.publishIfDirty()
 	e.sendReplies()
 	close(e.done)
 }
 
+// lane is which parked commands a command keeps its order among: a command
+// waits behind the parked commands of its lane, never another lane's.
+type lane int
+
+const (
+	// laneNone never waits: Stop, the output's reports, the maintenance
+	// commands and the modes.
+	laneNone lane = iota
+	// laneValues is the edits that take new IDs or tokens: they wait for a
+	// reservation write that has not landed, at most reserveTimeout.
+	laneValues
+	// laneTransport is the transport commands but Stop: Play and Pause wait
+	// for a Pause or a Resume under way, and Pause for a start.
+	laneTransport
+	lanes
+)
+
+// lane is o's lane.
+func (o op) lane() lane {
+	switch o {
+	case opInsert, opDelete, opDeleteAll:
+		return laneValues
+	case opPlay, opPause, opNext, opPrevious, opPlayID, opPlayIndex:
+		return laneTransport
+	}
+	return laneNone
+}
+
 // admit takes c from its caller: a context that has ended means it does
-// not run; behind a parked command, or blocked, it waits its turn.
+// not run; blocked, or behind a parked command of its lane, it waits its
+// turn.
 func (e *Engine) admit(c *command) {
 	if e.sm.admitted != nil {
 		e.sm.admitted(c)
@@ -318,57 +353,116 @@ func (e *Engine) admit(c *command) {
 		e.answer(c, reply{err: notAdmitted(c.op.String(), err)})
 		return
 	}
-	if !e.o.closing && (len(e.o.parked) > 0 || e.blocked(c)) {
+	if !e.o.closing && e.waits(c) {
 		e.o.parked = append(e.o.parked, c)
 		return
 	}
 	e.dispatch(c)
 }
 
-// blocked reports a command that must wait: every command while a
-// reservation write it may need is under way, and Play and Pause while a
-// pause or a resume is (or, for Pause, while the session is still
+// waits reports whether c must wait its turn: blocked, or behind a parked
+// command of its lane. A command of no lane never waits, and nothing waits
+// while maintenance is held, which refuses it at once.
+func (e *Engine) waits(c *command) bool {
+	l := c.op.lane()
+	if l == laneNone || e.o.maint != nil {
+		return false
+	}
+	for _, p := range e.o.parked {
+		if p.op.lane() == l {
+			return true
+		}
+	}
+	return e.blocked(c)
+}
+
+// blocked reports a command that must wait now: an edit that takes new
+// values while a reservation write is awaited, and Play and Pause while a
+// pause or a resume is under way (or, for Pause, while the session is still
 // starting).
 func (e *Engine) blocked(c *command) bool {
 	o := &e.o
-	if o.res.awaiting {
-		return true
-	}
-	if s := o.sess; s != nil && (c.op == opPlay || c.op == opPause) {
-		return s.transportCall != nil || (c.op == opPause && s.phase == sessStarting)
+	switch c.op.lane() {
+	case laneValues:
+		return o.res.awaiting
+	case laneTransport:
+		if s := o.sess; s != nil && (c.op == opPlay || c.op == opPause) {
+			return s.transportCall != nil || (c.op == opPause && s.phase == sessStarting)
+		}
 	}
 	return false
 }
 
-// park puts c back to wait: at the head when it was the one being run.
+// park puts c back to wait: where drainParked took it from when it was
+// being run from there, so it keeps its place in its lane.
 func (e *Engine) park(c *command) {
+	o := &e.o
 	c.parked = true
-	if e.o.draining {
-		e.o.parked = append([]*command{c}, e.o.parked...)
+	if i := o.drainAt; i >= 0 {
+		o.parked = slices.Insert(o.parked, i, c)
 		return
 	}
-	e.o.parked = append(e.o.parked, c)
+	o.parked = append(o.parked, c)
 }
 
-// drainParked runs parked commands, in order, while nothing blocks them.
+// drainParked runs the parked commands that nothing blocks now, in order
+// within each lane: a blocked command holds its lane, never another.
 func (e *Engine) drainParked() {
 	o := &e.o
-	o.draining = true
-	for len(o.parked) > 0 {
-		c := o.parked[0]
-		if !o.closing && e.blocked(c) {
+	for {
+		i := e.runnable()
+		if i < 0 {
 			break
 		}
-		o.parked = o.parked[1:]
+		c := o.parked[i]
+		o.parked = slices.Delete(o.parked, i, i+1)
+		o.drainAt = i
 		e.dispatch(c)
-		if c.parked {
-			break
-		}
+		o.drainAt = -1
 	}
-	o.draining = false
 	if !o.res.awaiting {
 		o.res.refuseParked = false
 	}
+}
+
+// runnable is the index of the first parked command that may run, nothing
+// blocking it nor any command of its lane before it, or -1.
+func (e *Engine) runnable() int {
+	o := &e.o
+	var stalled [lanes]bool
+	for i, c := range o.parked {
+		l := c.op.lane()
+		if stalled[l] {
+			continue
+		}
+		if !o.closing && e.blocked(c) {
+			stalled[l] = true
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// supersedeParked answers the parked transport commands that a command
+// run before them has overtaken (a Stop, the output going away): a Pause
+// with nil, playback being stopped as it asked, and the rest with why.
+func (e *Engine) supersedeParked(why func(c *command) error) {
+	o := &e.o
+	kept := o.parked[:0]
+	for _, p := range o.parked {
+		if p.op.lane() != laneTransport {
+			kept = append(kept, p)
+			continue
+		}
+		var err error
+		if p.op != opPause {
+			err = why(p)
+		}
+		e.answer(p, reply{err: err})
+	}
+	clear(o.parked[len(kept):])
+	o.parked = kept
 }
 
 // dispatch runs c.

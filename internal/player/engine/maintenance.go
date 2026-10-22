@@ -20,8 +20,8 @@ type maintHold struct {
 }
 
 // enterMaintenance is EnterMaintenance: the generation checked and every
-// mutation closed in this one step; then the session released and pending
-// backend work dropped.
+// mutation closed in this one step, those parked included; then the session
+// released and pending backend work dropped.
 func (e *Engine) enterMaintenance(c *command) {
 	o := &e.o
 	name := c.op.String()
@@ -49,6 +49,11 @@ func (e *Engine) enterMaintenance(c *command) {
 		e.answer(w.c, reply{err: err})
 	}
 	o.waiters = nil
+	for _, p := range o.parked {
+		e.answer(p, reply{err: refuse(p.op.String(), ReasonMaintenance, "maintenance began: "+c.reason)})
+	}
+	clear(o.parked)
+	o.parked = o.parked[:0]
 	o.then = IntentStop
 	o.state = Maintenance
 	e.visible()

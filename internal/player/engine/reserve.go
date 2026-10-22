@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"time"
 )
 
 // idBlock is how many IDs, and how many tokens, one reservation covers.
@@ -14,6 +15,10 @@ const (
 	reserveVersion = 1
 	// maxReserveFileBytes caps the reservation file read at a start.
 	maxReserveFileBytes = 4 << 10
+	// reserveTimeout bounds how long the edits that need a reservation wait
+	// for its write to land: past it they are refused (ReasonReservation),
+	// and so is every edit that needs one, until the write lands.
+	reserveTimeout = 5 * time.Second
 )
 
 // reserveFile is the reservation file: the highest ID and the highest
@@ -95,6 +100,12 @@ type reservation struct {
 	ids, tokens counter
 	// inflight is a write under way; awaiting, that commands wait on it.
 	inflight, awaiting bool
+	// bound ends the wait at reserveTimeout (msgReserveOverdue, numbered
+	// by waits); overdue is a write past it, which refuses every edit that
+	// needs a value until it lands.
+	bound   timer
+	waits   uint64
+	overdue bool
 	// failed is the last write's failure until one lands; refuseParked
 	// makes the commands that waited on a failed write refuse rather than
 	// write again.

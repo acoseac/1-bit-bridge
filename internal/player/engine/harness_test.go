@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -301,6 +302,7 @@ func (h *harness) config() Config {
 			writeReserve: h.files.writeReserve,
 			readFile:     h.files.readFile,
 			rename:       h.files.rename,
+			admitted:     func(c *command) { h.noteApplied("admitted " + c.op.String()) },
 			applied:      h.noteApplied,
 			handled:      func(what string) { h.noteApplied("handled " + what) },
 		},
@@ -448,7 +450,23 @@ func (h *harness) crash() {
 	h.boot()
 }
 
-// noteApplied records a command the owner has applied.
+// hangReservations restarts the engine with its start's reservation
+// failing, so the next edit that needs a value waits for a write, and holds
+// that write until the returned gate opens; calls is the number of writes
+// begun before it.
+func (h *harness) hangReservations() (g gate, calls int) {
+	h.t.Helper()
+	h.restartWith(func() { h.files.failReserve = errors.New("read-only file system") })
+	g = newGate()
+	h.files.mu.Lock()
+	defer h.files.mu.Unlock()
+	h.files.failReserve, h.files.holdReserve = nil, g
+	return g, h.files.reserveCalls
+}
+
+// noteApplied records a command the owner has applied, a message it has
+// handled ("handled " and its name) or a command it is admitting
+// ("admitted " and its op), as the owner reaches it.
 func (h *harness) noteApplied(op string) {
 	h.appliedMu.Lock()
 	defer h.appliedMu.Unlock()
