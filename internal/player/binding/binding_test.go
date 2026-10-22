@@ -764,6 +764,9 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 		// otherwise.
 		resolves [4]State
 		differs  [4]string
+		// partial says the row's reading is partial (Inventory.Partial), a
+		// premise the row checks.
+		partial bool
 	}{
 		{name: "the GO bar beside the two HDMI cards, which are not USB", resolves: every(available)},
 		{name: "a virtual card beside it", resolves: every(available), steps: []string{
@@ -825,6 +828,18 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 				plug(goBar+"/1-1.3", 5, "20b1:3009", goBarSerial)}},
 		{name: "card 5 without the bound playback stream", resolves: every(StateEndpointMissing), differs: byUnit(unitStream),
 			steps: []string{"remove proc/asound/card5/pcm0p\n"}},
+		// A reading partial elsewhere (B470 PR 4a2: Inventory.Partial) is one
+		// Resolve answers from, and the check with it: what a partial reading
+		// lacks it lacks, so it can hide no card at the bound port, and every
+		// piece the check's answer depends on (the card listing, /proc/asound's
+		// cards, the bound controller, the opened card's stream) is asked of
+		// it on its own (round 4: CodeRabbit asked the check to refuse any
+		// partial inventory, which would refuse card 5 where Resolve chooses
+		// it).
+		{name: "another card whose PCM directory cannot be listed", resolves: every(available), partial: true,
+			steps: []string{"remove proc/asound/card0/pcm0p\nlink proc/asound/card0/pcm0p !../../../outside\n"}},
+		{name: "a root hub of another controller that cannot be read in the USB listing", resolves: every(available), partial: true,
+			steps: []string{"link sys/bus/usb/devices/usb3 !../../../../outside\n"}},
 		{name: "another model in the port as card 5 without the bound playback stream",
 			resolves: [4]State{missing, missing, StateEndpointMissing, StateEndpointMissing}, steps: []string{"unplug " + goBar + "\n" +
 				"usbdev " + goBar + " vendor=1234 product=0c12 serial=HUGO2-UNIT-0000000042\nusbcard 5 " + goBar + "/1-1:1.1\n" +
@@ -850,6 +865,9 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 			inv := inventory(snap, reading)
 			if inv.CardsComplete != reading.CardsComplete {
 				t.Errorf("the inventory says its card listing is whole (%v), and the reading says %v", inv.CardsComplete, reading.CardsComplete)
+			}
+			if row.partial && !inv.Partial {
+				t.Fatalf("premise: the reading is not partial (problems %q)", inv.Problems)
 			}
 			for i, f := range forms {
 				r := Resolve(f.dev, inv)
