@@ -794,6 +794,101 @@ A kind `mpd` element has every key but the additive `mpd.loopbackBaseURL`. A lis
 
 **Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `localOutputs` feature flag.
 
+### `GET /v1/outputs/{id}/reading` (additive; `outputReading`)
+
+Gate on the **`outputReading`** feature flag. It sorts between `operatorDrivenUpscale` and `pairingEventsSupported`, and it is present exactly when `localOutputs` is: `output.mpd` resolves on and this bridge runs on Linux. A bridge that advertises `localOutputs` without `outputReading` has no such route. Without the flag the route answers `404` `local_outputs_not_supported`. `ProtocolVersion` stays `1`.
+
+The route is bearer-authenticated. `{id}` is an `id` from `GET /v1/outputs`. It returns what that output's DAC receives now, which the bridge reads from the kernel's `/proc/asound` and from the MPD beside it, and the bridge's verdict on it. It only reads. To MPD it sends `status`, `currentsong`, `replay_gain_status` and `outputs` (and `password`, when one is configured), never a command that changes playback, the queue, the database or MPD's configuration, and it reads `mpd.conf` and the ALSA configuration files without writing them.
+
+```json
+{
+  "outputId": "…",
+  "takenAt": "2026-10-22T12:00:00.123Z",
+  "ageMs": 120,
+  "state": "whole",
+  "stateReasons": [],
+  "mpd": {
+    "state": "play",
+    "songId": 12,
+    "elapsed": 4.997,
+    "audio": "dsd256:2",
+    "replayGainMode": "off",
+    "volume": null,
+    "xfade": 0,
+    "mixrampDb": 0,
+    "mixrampDelay": null,
+    "outputs": [
+      { "id": 0, "name": "alsa", "plugin": "alsa", "enabled": true,
+        "attributes": { "allowed_formats": "", "dop": "0" } }
+    ],
+    "config": {
+      "volumeNormalization": "no",
+      "audioOutputFormat": "",
+      "output": {
+        "name": "alsa", "device": "volumio", "chain": ["empty", "plug", "hw"],
+        "mixerType": "hardware", "mixerControl": "", "dop": false,
+        "format": "", "allowedFormats": "", "filters": ""
+      }
+    }
+  },
+  "song": {
+    "uri": "INTERNAL/Demo Library/Album/05.dsf",
+    "format": "dsd256:2",
+    "row": {
+      "path": "Album/05.dsf", "via": "path", "current": true, "codec": "DSF",
+      "sampleRate": 11289600, "bitsPerSample": 1, "channels": 2, "isDSD": true
+    }
+  },
+  "dac": {
+    "card": 5,
+    "id": "Audio",
+    "device": 0,
+    "subdevice": 0,
+    "state": "RUNNING",
+    "format": "DSD_U32_BE",
+    "rate": 352800,
+    "channels": 2,
+    "owner": { "tid": 6584, "thread": "output:alsa", "pid": 6551, "process": "mpd" },
+    "mixer": { "control": "PCM", "volume": null }
+  },
+  "verdict": { "value": "bit_exact", "reasons": [] }
+}
+```
+
+Every key is always present. A list is `[]`, `attributes` is `{}` when MPD sends none, and a value the reading could not establish is `null`.
+
+**The reading.** One reading is taken at a time and served to every call for 500 ms. `takenAt` is when it was taken, on the bridge's clock, and `ageMs` is how old it was when this answer was written. Nothing reads between calls. The bridge reads MPD's `status`, then `currentsong`, `replay_gain_status` and `outputs`, then every card in `/proc/asound`, then `status` again, so a change across the read shows. Every step has a deadline, and a reading that cannot be had is still an answer, never an error page. `state` is one of:
+
+- `whole`: every step answered, and the two status reads agree.
+- `settling`: the reading straddled a change. `stateReasons` holds one or more of `song_changed` (the song id differed between the two reads, or `currentsong` named another song), `state_changed` (play, pause or stop differed), `seeked` (elapsed moved by half a second more or less than the time between the reads, or went back) and `song_starting` (elapsed under half a second, or none while playing).
+- `unknown`: a step could not be had. `stateReasons` holds one or more of `mpd_unreachable` (no session: no endpoint, a refused dial, or a connection that closed or answered outside MPD's protocol), `mpd_timeout` (the dial or a command passed its deadline), `mpd_refused` (MPD answered a read with `ACK`, for one a password it requires), `proc_unreadable` (`/proc/asound` could not be read), `proc_timeout` (that read passed its deadline) and `no_card` (this output names no card, or the box has none).
+
+`mpd` is `null` when MPD could not be read, and `song` is `null` then and when MPD is on no song. `dac` is `null` when the output names no card or `/proc/asound` could not be read. What was read is reported in every state.
+
+**`mpd`** is MPD's status after the `/proc` read. `state`, `songId` and `elapsed` (seconds) are as MPD sends them. `audio` is MPD's `audio:` line, the format its decoder hands on: `44100:16:2`, `96000:24:2`, `44100:f:2` for floating point, `dsd64:2` for a DSD rate that is a multiple of 44100 (64 × 44,100 one-bit samples a second), and `384000:dsd:2` for one that is not (bytes a second: the one-bit rate is 8 times it). `replayGainMode` is `replay_gain_status`'s mode. `volume` is 0 to 100, `null` when MPD reports no mixer. `xfade` is seconds, `0` when MPD sends none, which it does at 0. `mixrampDb` and `mixrampDelay` are `null` when MPD sends none; MPD sends a delay only above 0. `outputs` is MPD's live `outputs` reply.
+
+`mpd.config` is what `mpd.conf` says that the verdict reads, read at this reading, and `null` when the file could not be read. `volumeNormalization` and `audioOutputFormat` are as written. `output` is the enabled `alsa` output whose device reaches this output's card, `null` when none does or more than one does: its `name` and `device` as written; `chain`, the plugin type of each stage from the device to the card, as the bridge resolves it through `/etc/alsa/conf.d/*.conf` and `/etc/asound.conf` (`["hw"]` for `hw:N`, `["plug", "hw"]` for `plughw:N`, an output with no device taking ALSA's `default`); `mixerType`, the mixer MPD gives the output (its `mixer_type`, else `none` when its `mixer_enabled` is false, else the top-level `mixer_type`, else `hardware`, and `""` for a value MPD does not name); `mixerControl` as written; `dop`, the live `dop` attribute, else the file's; `format` as written; `allowedFormats`, the live attribute, else the file's; and `filters` as written. The bridge never sends or logs `mpd.conf`'s password or its own `output.password`. A string MPD sends that contains one reads `[redacted]` where it was.
+
+**`song`** is the song MPD is on. `uri` is as MPD names it: a database path, or a URL with any user name and password left out. `format` is `currentsong`'s `Format:`, MPD's own reading of the file, `""` when it sends none. `row` is this bridge's own row for the file, `null` when the file is not one of its rows. Its `via` is `path` when a library root's path rule (as `GET /v1/outputs` computes it) takes MPD's database path and `os.SameFile` agrees that MPD's file and the root's are one file, or `loopback` when MPD fetches the file from this bridge's loopback track route (`http://127.0.0.1:<port>/dlna/file/<trackID>` on the route's port, `localhost` and `[::1]` included). `path` is the row's path as `/v1/manifest` sends it. `current` is whether the file on disk still has the size and modification time the scanner read. `codec`, `sampleRate` (for DSD, the one-bit rate), `bitsPerSample`, `channels` and `isDSD` are the row's, `null` where it has none.
+
+**`dac`** is the output's card and the playback substream read on it. `card`, `id` (the ALSA id) and `device` (the PCM device) name it. The substream is the one that is open: the only one, else the only one MPD holds. For it, `subdevice` is its number, `state` the kernel's (`RUNNING`, `PREPARED`, `XRUN`, …), `format`, `rate` and `channels` its `hw_params` (`rate` counts frames, so for a DSD format it counts the format's words: DSD256 in `DSD_U32_BE` is `352800`), and `owner` the thread that opened it and its process: `tid` is the substream's `owner_pid` (for MPD, its output thread), `thread` that thread's name, `pid` its process (the thread's `Tgid`) and `process` that process's name, each `null` when `/proc` does not show it. With no substream open these are `null`, and `state` and `format` are `""`. `mixer` is present only when that output's mixer is `hardware`: the DAC's own mixer as MPD drives it, with `control` (`PCM` unless `mixer_control` names another) and `volume` (MPD's 0 to 100, `null` when MPD reports none). It is information only: the DAC still receives the samples, and the verdict does not read it.
+
+**The verdict** is the bridge's. `bit_exact`: the DAC receives the file's samples, PCM or native DSD, unchanged. `bit_exact_dop`: it receives the file's DSD unchanged inside DoP frames; this says nothing about whether the DAC locked onto the DoP or decoded it. `withheld`: anything else, with a code in `reasons` for every condition that is not proven, in a fixed order. The verdict says what the DAC receives, never what it plays or does inside. It needs a `whole` reading: for a settling or unknown reading it is `withheld` with that state's codes. Each reading is judged on its own, so no verdict carries from one reading to the next. A client keeps a verdict only for the `songId` it names and drops it on a song change, a seek, a pause or a stop. A client may weaken the verdict, never strengthen it.
+
+The verdict is `bit_exact` (or `bit_exact_dop`) when all of these hold, and otherwise `withheld` with the code of each that does not:
+
+- **A stream to judge.** MPD plays (`not_playing`). One substream of the card's PCM device is open (`pcm_closed`; `pcm_ambiguous` when several are and not exactly one is MPD's), it is `RUNNING` (`pcm_not_running`), the process that holds it is `mpd` (`owner_not_mpd`; `owner_unknown` when `/proc` does not name it), and its `hw_params` give a format, a rate and channels (`hw_params_unknown`). A failure here is the only code given: nothing else is judged for a stream that is not MPD's running stream. The bridge cannot read another user's file descriptors, so it ties the stream to the MPD it dialled by the process name and by that MPD playing to an output whose device reaches this card.
+- **The file.** It is one of this bridge's rows (`source_unknown`), unchanged on disk since the scanner read it (`source_changed`), in a lossless codec: FLAC, ALAC, WAV, AIFF, WavPack, Monkey's Audio, DSF or DFF (`source_lossy` for a lossy codec, `source_codec_unknown` for any other). What MPD's decoder hands on agrees with it: DSD for DSD, the same rate, the same channels where the row has them, and for PCM at least the file's bits, since a decoder may widen a sample (FFmpeg hands 24-bit ALAC on as 32) and never narrows one (`source_mismatch`).
+- **MPD.** Its `audio:` line reads (`mpd_audio_unknown`). Replay gain is `off` (`mpd_replay_gain`). `xfade` is 0 (`mpd_crossfade`). MixRamp is off, with no `mixrampdelay` above 0 (`mpd_mixramp`). `mpd.conf` was read (`mpd_config_unread`), `volume_normalization` is off (`mpd_normalization`) and `audio_output_format` is unset (`mpd_format_override`).
+- **The output and its ALSA chain.** Exactly one enabled `alsa` output reaches the card (`mpd_output_ambiguous` for more than one), through a chain the bridge parses with no softvol, dmix, rate or route stage: a `hw` device, or `empty` and `plug` stages down to `hw` (`alsa_chain_unproven`). Its mixer is `hardware`, `null` or `none`, never MPD's software volume (`mpd_software_volume`), and it sets no `format` or `allowed_formats` (`mpd_format_override`) and no `filters` (`mpd_filters`).
+- **PCM.** MPD's stream is integer PCM (`stream_float`), the card's format is signed linear PCM (`format_mismatch`) at the stream's rate (`rate_mismatch`) and channels (`channels_mismatch`), holding at least the file's bits (`depth_reduced`; MPD's own padding to a wider format is lossless and allowed). Through a `plug` stage the card's format must hold exactly the stream's bits at its rate and channels, and a plug that would convert anything is `alsa_plug_converts`: Volumio's `empty`, `plug`, `hw` chain counts only while the plug has nothing to convert.
+- **Native DSD.** The card's format is DSD at the file's one-bit rate (the frame rate times the format's width: 32 for `DSD_U32_*`, 16 for `DSD_U16_*`, 8 for `DSD_U8`) and channels, and MPD's `audio:` agrees (`rate_mismatch`, `channels_mismatch`, `source_mismatch`; `format_mismatch` for a DSD format of another width).
+- **DoP.** The output's `dop` is on (`dsd_converted_to_pcm` when it is off and the DSD reaches the card as PCM), the card's rate is the one-bit rate over 16 (`rate_mismatch`), its format is signed PCM of at least 24 bits (`dop_container_too_narrow`), and through a plug exactly 24 bits (`alsa_plug_converts`).
+
+**Response** (`404 output_not_found`): `{id}` names no output of this bridge now. When `/proc/asound` cannot be read, an id of the right form (64 lower-case hex digits) is answered `200` with `state` `unknown`: the cards that would say which ids exist could not be read.
+
+**Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `outputReading` feature flag.
+
 ### DLNA listener: `GET /dlna/artwork/{key}` (additive; `dlnaArtwork`)
 
 The bridge's opt-in DLNA MediaServer (`dlnaServer`) runs on its own LAN-only HTTP listener, beside the bearer-authed `/v1` API. That listener has always served track bytes at `/dlna/file/{trackID}` **without authentication**, because a renderer cannot send a bearer token; reach is the gate. The listener binds the wildcard (`:7790` by default) but serves only the LAN-eligible interfaces' LAN addresses (RFC 1918, a ULA outside Tailscale's range, link-local), a public address the bridge itself advertises, and loopback. A connection accepted on any other local address (the tailnet's, a VPN's, another interface's) is closed before a byte is read, and SSDP answers an M-SEARCH sent to the multicast group or unicast to a served address, and no other. Public deployment mode refuses the listener outright (`ShouldEnableDLNA`). Cover art was the gap: `/v1/artwork/{key}` lives on the authed listener, so a DLNA renderer or third-party control point browsing the bridge's ContentDirectory had no cover it could fetch, and the CDS emitted no `<upnp:albumArtURI>` at all.
@@ -1806,7 +1901,8 @@ Errors are JSON, with the exceptions listed under the table:
 |    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
 |    404 | `events_not_supported`   | `GET /v1/events` on a demo bridge, or either event stream with no event broker running (`serve` always starts one); iOS falls back to polling |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (no `smartPlaylists` flag) — no `/v1/smart-playlists` |
-|    404 | `local_outputs_not_supported` | `GET /v1/outputs` when `localOutputs` is absent (`output.mpd` resolves off, or this host is not Linux) |
+|    404 | `local_outputs_not_supported` | `GET /v1/outputs` or `GET /v1/outputs/{id}/reading` when `localOutputs` is absent (`output.mpd` resolves off, or this host is not Linux) |
+|    404 | `output_not_found`       | `GET /v1/outputs/{id}/reading`: `{id}` names no output of this bridge now |
 |    404 | `playlist_files_not_supported` | No playlist-file index (no `playlistFiles` flag) — no `GET /v1/playlist-files`; `serve` wires it on every bridge |
 |    404 | `favorites_not_supported` | No favorites store, as on a demo bridge (no `favorites` flag) — no `/v1/favorites` |
 |    404 | `playlist_backup_not_supported` | No playlist store, as on a demo bridge (no `playlistBackup` flag) — no `/v1/playlists` route |

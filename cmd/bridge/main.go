@@ -3894,8 +3894,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// resolving on: at once for off, at the gate's next answer for auto. It
 	// is stopped before the store it reads closes (the store's close is
 	// deferred above, so it runs after this one).
+	//
+	// The reading (GET /v1/outputs/{id}/reading) names the song MPD is on
+	// as one of this bridge's rows through the same index, so a song MPD
+	// fetches from the route is the row the route serves.
+	loopLib := newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, logger)
 	outLoop := newOutputLoopback(outputLoopbackWiring{
-		Library: newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, logger),
+		Library: loopLib,
 		Roots:   apiSrv.Resolver().Roots,
 		Enabled: apiSrv.LocalOutputsActiveNow,
 		Port:    cfg.Output.EffectiveLoopbackPort(),
@@ -3914,6 +3919,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Cards:           hostTrees.cards,
 		LoopbackBaseURL: outLoop.BaseURL,
 		OnActive:        outLoop.ensureStarted,
+		Track:           outputTrackLookup(manifestStore),
+		LoopbackTrack:   loopbackTrackLookup(loopLib),
 	})
 	// The boot decision: asking the gate starts the route when it is on.
 	apiSrv.LocalOutputsActive(ctx)

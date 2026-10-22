@@ -391,6 +391,15 @@ func (f File) Redact(s string) string {
 	return redactText(s, f.redactionKeys())
 }
 
+// RedactSecrets returns s with each of passwords removed as a File removes
+// its own: the whole value and, for MPD's secret@permissions, the secret
+// before the '@', a value of fewer than four bytes only where it is a
+// whole token. It is for a password that came from somewhere other than
+// the file, such as the bridge's own output.password.
+func RedactSecrets(s string, passwords ...string) string {
+	return File{passwords: passwords}.Redact(s)
+}
+
 func redactText(s string, passwords []string) string {
 	for _, p := range passwords {
 		if p == "" || !strings.Contains(s, p) {

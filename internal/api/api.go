@@ -1942,13 +1942,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 36 covers the current maximum
+	// appends in lex order. Capacity 37 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
 	// loudness + lyrics +
-	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
+	// operatorDrivenUpscale + outputReading + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistFiles +
 	// playlistFilesPaged + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
@@ -1958,7 +1958,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 36)
+	feats := make([]string, 0, 37)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2067,8 +2067,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	// `localOutputs` advertises GET /v1/outputs. It is on only when
 	// output.mpd resolves on and this host is Linux. Alpha-sorted
-	// between `keyTempo` and `loudness`.
-	if s.localOutputs != nil && s.localOutputs.Active(r.Context()) {
+	// between `keyTempo` and `loudness`. `outputReading` (GET
+	// /v1/outputs/{id}/reading, below) rides the same gate, asked once.
+	localOutputsOn := s.localOutputs != nil && s.localOutputs.Active(r.Context())
+	if localOutputsOn {
 		feats = append(feats, "localOutputs")
 	}
 	if s.analysisActive() {
@@ -2091,6 +2093,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")
 		}
+	}
+	// `outputReading` advertises GET /v1/outputs/{id}/reading, the live
+	// reading of an output's DAC and the bridge's verdict on it (B473 B3).
+	// Its own key, on the localOutputs gate: a bridge built between B2 and
+	// B3 answers /v1/outputs and has no reading route, so a client keyed on
+	// localOutputs alone would ask it for one. Alpha-sorted between
+	// `operatorDrivenUpscale` and `pairingEventsSupported`.
+	if localOutputsOn {
+		feats = append(feats, "outputReading")
 	}
 	if s.eventBroker != nil && s.pairing != nil {
 		feats = append(feats, "pairingEventsSupported")

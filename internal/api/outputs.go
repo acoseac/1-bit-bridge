@@ -108,14 +108,87 @@ type OutputPathRule struct {
 	Found             int    `json:"found"`
 }
 
-// outputSession is the read-only MPD connection the route keeps. *mpd.Client
+// outputSession is the read-only MPD connection the routes keep. *mpd.Client
 // is one. A caller never supplies protocol text.
 type outputSession interface {
 	Status(ctx context.Context) (mpd.Reply, error)
 	Find(ctx context.Context, path string) (mpd.Reply, error)
+	CurrentSong(ctx context.Context) (mpd.Reply, error)
+	ReplayGainStatus(ctx context.Context) (mpd.Reply, error)
+	Outputs(ctx context.Context) (mpd.Reply, error)
 	Version() string
 	Close() error
 }
+
+// serialSession runs one command at a time on the session GET /v1/outputs
+// and the reading share. MPD answers one command at a time on a
+// connection, so two written together would each read the other's reply.
+// The wait for the turn ends with the caller's context, so a reading keeps
+// its own deadline behind the outputs body's finds. Close does not wait:
+// closing the connection is what ends a command that hangs.
+type serialSession struct {
+	turn  chan struct{}
+	inner outputSession
+}
+
+func newSerialSession(inner outputSession) *serialSession {
+	return &serialSession{turn: make(chan struct{}, 1), inner: inner}
+}
+
+func (s *serialSession) take(ctx context.Context) error {
+	select {
+	case s.turn <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *serialSession) give() { <-s.turn }
+
+func (s *serialSession) Status(ctx context.Context) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	return s.inner.Status(ctx)
+}
+
+func (s *serialSession) Find(ctx context.Context, path string) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	return s.inner.Find(ctx, path)
+}
+
+func (s *serialSession) CurrentSong(ctx context.Context) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	return s.inner.CurrentSong(ctx)
+}
+
+func (s *serialSession) ReplayGainStatus(ctx context.Context) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	return s.inner.ReplayGainStatus(ctx)
+}
+
+func (s *serialSession) Outputs(ctx context.Context) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	return s.inner.Outputs(ctx)
+}
+
+func (s *serialSession) Version() string { return s.inner.Version() }
+
+func (s *serialSession) Close() error { return s.inner.Close() }
 
 // LocalOutputsConfig is the injected half of GET /v1/outputs. A nil
 // function takes the production one. GOOS empty is this process.
@@ -143,6 +216,15 @@ type LocalOutputsConfig struct {
 	// route starts the first time output.mpd resolves on. It must be
 	// cheap and idempotent. Nil does nothing.
 	OnActive func()
+
+	// Track is this bridge's row at a manifest path, for the reading's
+	// song: ok is false when there is none. Nil is no lookup: no song is
+	// then one of this bridge's rows.
+	Track func(ctx context.Context, path string) (track OutputTrack, ok bool, err error)
+	// LoopbackTrack is the row a loopback track route id names (the DLNA
+	// track id) and the file it serves, for a song MPD fetches from that
+	// route. Nil is no lookup.
+	LoopbackTrack func(trackID string) (path, absPath string, ok bool)
 }
 
 type localOutputs struct {
@@ -162,6 +244,9 @@ type localOutputs struct {
 	buildLimit time.Duration
 	loopback   func() string
 	onActive   func()
+	track      func(context.Context, string) (OutputTrack, bool, error)
+	loopTrack  func(string) (string, string, bool)
+	limits     readingLimits
 
 	mu           sync.Mutex
 	client       outputSession
@@ -184,6 +269,10 @@ type localOutputs struct {
 	verdictSeq   uint64
 	probeFlights map[string]*probeFlight
 	paths        outputPathCache
+	// readings counts the readings taking place: the idle close waits them
+	// out as it waits out a build (outputs_reading.go).
+	readings int
+	reading  readingState
 	// joined, when set, runs after a caller has found a build in flight
 	// and before it waits. Production leaves it nil. Tests use it to
 	// release that build only once the second caller is waiting on it.
@@ -255,6 +344,9 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		buildLimit: cfg.BuildLimit,
 		loopback:   cfg.LoopbackBaseURL,
 		onActive:   cfg.OnActive,
+		track:      cfg.Track,
+		loopTrack:  cfg.LoopbackTrack,
+		limits:     defaultReadingLimits,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -513,7 +605,7 @@ func (o *localOutputs) armIdle() {
 
 func (o *localOutputs) idleClose() {
 	o.mu.Lock()
-	if o.flight != nil || o.now().Sub(o.last) < outputIdle {
+	if o.flight != nil || o.readings > 0 || o.now().Sub(o.last) < outputIdle {
 		o.mu.Unlock()
 		return
 	}
@@ -544,10 +636,14 @@ func (o *localOutputs) session(ctx context.Context, endpoint, password string) (
 	if old != nil {
 		_ = old.Close()
 	}
-	c, err := o.dial(ctx, endpoint, password)
+	dialled, err := o.dial(ctx, endpoint, password)
 	if err != nil {
 		return nil, err
 	}
+	if dialled == nil {
+		return nil, nil
+	}
+	var c outputSession = newSerialSession(dialled)
 	o.mu.Lock()
 	if o.client != nil {
 		o.mu.Unlock()
@@ -775,6 +871,30 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	if err != nil {
 		return nil
 	}
+	picks := dacsFrom(snap, rep)
+	if picks == nil {
+		return nil
+	}
+	out := make([]OutputDAC, len(picks))
+	for i, p := range picks {
+		out[i] = p.dac
+	}
+	return out
+}
+
+// dacPick is one card an outputs element names, and the PCM device on it:
+// the one MPD's device resolved to, or 0 for a candidate card.
+type dacPick struct {
+	dac OutputDAC
+	pcm int
+}
+
+// dacsFrom is the cards GET /v1/outputs lists for one reading of the cards,
+// in its order: the one card MPD's enabled alsa device resolves to, else
+// each card several devices resolve to, else every USB card. The reading
+// lists them from its own snapshot, so an id it matches is the one the
+// outputs route gives.
+func dacsFrom(snap alsa.Snapshot, rep mpd.Report) []dacPick {
 	cards := make([]alsa.Card, len(snap.Cards))
 	for i, c := range snap.Cards {
 		cards[i] = c.Card
@@ -795,25 +915,25 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	}
 	if len(hits) == 1 {
 		if dac, ok := dacAt(snap, hits[0].index, hits[0].pcm, true); ok {
-			return []OutputDAC{dac}
+			return []dacPick{{dac: dac, pcm: hits[0].pcm}}
 		}
 	}
 	if len(hits) > 1 {
-		var out []OutputDAC
+		var out []dacPick
 		for _, h := range hits {
 			if dac, ok := dacAt(snap, h.index, h.pcm, false); ok {
-				out = append(out, dac)
+				out = append(out, dacPick{dac: dac, pcm: h.pcm})
 			}
 		}
 		return out
 	}
-	var usb []OutputDAC
+	var usb []dacPick
 	for _, c := range snap.Cards {
 		if c.USBID == nil {
 			continue
 		}
 		if dac, ok := dacAt(snap, c.Index, 0, false); ok {
-			usb = append(usb, dac)
+			usb = append(usb, dacPick{dac: dac})
 		}
 	}
 	return usb

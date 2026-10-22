@@ -217,6 +217,25 @@ func TestTheVerdictsSettingsAreRead(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsIsTheFilesRule holds the helper for a password from
+// outside the file to the file's own redaction.
+func TestRedactSecretsIsTheFilesRule(t *testing.T) {
+	cases := []struct{ in, secret, want string }{
+		{"Album/long-secret-value.flac", "long-secret-value", "Album/[redacted].flac"},
+		{"Album/long-secret.flac", "long-secret@read,add", "Album/[redacted].flac"},
+		{"admin/a/b", "a", "admin/[redacted]/b"},
+		{"nothing here", "", "nothing here"},
+	}
+	for _, tc := range cases {
+		if got := RedactSecrets(tc.in, tc.secret); got != tc.want {
+			t.Errorf("RedactSecrets(%q, %q) = %q, want %q", tc.in, tc.secret, got, tc.want)
+		}
+	}
+	if got := RedactSecrets("one-secret two-secret", "one-secret", "two-secret"); strings.Contains(got, "secret") {
+		t.Errorf("two passwords: %q", got)
+	}
+}
+
 func TestPasswordIsRedacted(t *testing.T) {
 	const secret = "super-secret-mpd-password"
 	text := "password \"" + secret + "@read,control\"\nmusic_directory \"/m\"\npassword \"" + secret + "-2@admin\"\n"

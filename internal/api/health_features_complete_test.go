@@ -46,6 +46,7 @@ var wantAllHealthFeatures = []string{
 	"loudness",
 	"lyrics",
 	"operatorDrivenUpscale",
+	"outputReading",
 	"pairingEventsSupported",
 	"playbackHistory",
 	"playbackHistoryRead",

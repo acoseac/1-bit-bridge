@@ -24,7 +24,9 @@ import (
 // base URL serve reported once its boot decision was made, and the
 // channels that say serve exited.
 type loopbackServe struct {
-	base     string
+	base string
+	// api is the address of serve's /v1 listener (TLS).
+	api      string
 	exited   <-chan struct{}
 	exitCode <-chan int
 	stderr   *safeBuffer
@@ -66,7 +68,7 @@ func bootLoopbackServe(t *testing.T, music, dataDir string, output string) loopb
 	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
 	select {
 	case base := <-boot:
-		return loopbackServe{base: base, exited: exited, exitCode: exitCode, stderr: stderr, stop: cancel}
+		return loopbackServe{base: base, api: lan.addr, exited: exited, exitCode: exitCode, stderr: stderr, stop: cancel}
 	case <-exited:
 		t.Fatalf("serve exited with code %d before its loopback decision; stderr=%s", <-exitCode, stderr.String())
 		return loopbackServe{}
