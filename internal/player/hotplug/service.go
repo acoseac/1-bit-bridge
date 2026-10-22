@@ -77,9 +77,11 @@ type Stats struct {
 	// source reported (the kernel's ENOBUFS, or a watch behind), and
 	// ConfigChanges the changes of the config it took.
 	Events, Lost, ConfigChanges uint64
-	// Reconciles are the readings taken, Failures those that failed, and
-	// Discarded those a stopped watch finished and nothing published.
-	Reconciles, Failures, Discarded uint64
+	// Reconciles are the readings taken, Failures those that failed,
+	// Discarded those a stopped watch finished and nothing published, and
+	// SetAside those not published because a removal reaching a card had
+	// queued behind them (round 2).
+	Reconciles, Failures, Discarded, SetAside uint64
 	// Publishes are the snapshots published, a generation's republishing
 	// (its health changed) included.
 	Publishes uint64

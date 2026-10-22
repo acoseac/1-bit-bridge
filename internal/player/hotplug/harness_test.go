@@ -365,6 +365,56 @@ func (h *harness) send(evs ...Uevent) {
 	}
 }
 
+// queue puts events in the source's queue without waiting for the watcher
+// to take them, as the kernel's queue behind a reading that runs while it
+// sends them: the source never waits for the watcher.
+func (h *harness) queue(evs ...Uevent) {
+	h.t.Helper()
+	src := h.source()
+	for _, e := range evs {
+		src.events <- e
+	}
+	h.events += uint64(len(evs))
+}
+
+// parked is a reading held before it reads the tree (parkNextReading).
+type parked struct {
+	entered, released chan struct{}
+}
+
+// parkNextReading holds the watcher's next reading, before it reads the
+// tree, until release: a test changes the tree and queues the kernel's
+// events meanwhile. A stop ends the hold too.
+func (h *harness) parkNextReading() *parked {
+	p := &parked{entered: make(chan struct{}), released: make(chan struct{})}
+	var once sync.Once
+	h.setObserve(func(ctx context.Context, read func(context.Context) (binding.Inventory, error)) (binding.Inventory, error) {
+		first := false
+		once.Do(func() { first = true })
+		if first {
+			close(p.entered)
+			select {
+			case <-p.released:
+			case <-ctx.Done():
+			}
+		}
+		return read(ctx)
+	})
+	return p
+}
+
+// wait waits until the parked reading has begun.
+func (p *parked) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-p.entered:
+	case <-time.After(watchdog):
+		t.Fatal("the reading to park never began")
+	}
+}
+
+func (p *parked) release() { close(p.released) }
+
 // apply changes the fake tree.
 func (h *harness) apply(manifest string) {
 	h.t.Helper()

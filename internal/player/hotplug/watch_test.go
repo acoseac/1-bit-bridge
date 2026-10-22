@@ -188,6 +188,132 @@ func TestAnUnchangedInventoryLeavesTheGenerationAlone(t *testing.T) {
 	h.state(binding.StateAvailable, 5, 1)
 }
 
+// TestAReplugThatQueuedDuringAReadingIsOneGeneration: a fast replug of the
+// bound unit that finishes while a reading runs, the kernel's events
+// queued behind the reading, is one generation, the bound unit
+// re-enumerated. The reading takes those events before it publishes, and
+// as a removal among them reaches a card it is set aside for the window
+// they open. Until round 2 it published, its queued removals were taken
+// after it, and the window's reading marked the unchanged replacement
+// re-enumerated again at a second generation, which would stop a play 4b
+// started in between. The source never waits for the watcher, so on a box
+// the kernel's events queue behind whatever reading they come during.
+func TestAReplugThatQueuedDuringAReadingIsOneGeneration(t *testing.T) {
+	h := newHarness(t)
+	p := h.parkNextReading()
+	h.advance(periodic)
+	p.wait(t)
+	h.apply("unplug " + goBar + "\n" + plug(goBar, 5, "20b1:3009", goBarSerial, 3))
+	h.queue(append(unplugEvents(goBar, 5), plugEvents(goBar, 5)...)...)
+	p.release()
+	h.reconciles(2)
+	h.waitStats("the queued events taken", func(s Stats) bool { return s.Events == h.events })
+	h.advance(quiet)
+	h.reconciles(3)
+	s := h.state(binding.StateAvailable, 5, 2)
+	if c := s.Change(); !c.ReEnumerated || c.State || c.Unit || c.Swap {
+		t.Errorf("change %+v; want the bound unit re-enumerated and nothing else", c)
+	}
+	h.advance(periodic)
+	if st := h.reconciles(4); st.Publishes != 2 {
+		t.Errorf("one replug was published %d times: %+v", st.Publishes-1, st)
+	}
+	h.state(binding.StateAvailable, 5, 2)
+}
+
+// TestAnUnplugThatQueuedDuringAReadingIsOneGeneration: removals that queue
+// behind a reading which still shows the bound unit as it was are not that
+// reading's: it is set aside, and the window's reading finds the unit
+// gone, one generation, device_missing, never a re-enumeration of a unit
+// the reading showed unchanged, which taking the queued removals into the
+// reading's own publish would claim.
+func TestAnUnplugThatQueuedDuringAReadingIsOneGeneration(t *testing.T) {
+	h := newHarness(t)
+	p := h.parkNextReading()
+	h.advance(periodic)
+	p.wait(t)
+	h.queue(unplugEvents(goBar, 5)...)
+	p.release()
+	h.reconciles(2)
+	h.waitStats("the queued events taken", func(s Stats) bool { return s.Events == h.events })
+	h.apply("unplug " + goBar + "\n")
+	h.advance(quiet)
+	h.reconciles(3)
+	s := h.state(binding.StateDeviceMissing, -1, 2)
+	if c := s.Change(); c.ReEnumerated || !c.State {
+		t.Errorf("change %+v; want the state alone", c)
+	}
+	if st := h.svc.Status(); st.Stats.Publishes != 2 {
+		t.Errorf("one unplug was published %d times: %+v", st.Stats.Publishes-1, st.Stats)
+	}
+}
+
+// TestAReadingIsSetAsideOnceInARow: a reading that removals reaching a card
+// queued behind is set aside once; the window's reading is published
+// whatever queued behind it, the removals in it, so events that keep
+// coming during readings cannot hold a change back.
+func TestAReadingIsSetAsideOnceInARow(t *testing.T) {
+	h := newHarness(t)
+	first := h.parkNextReading()
+	h.advance(periodic)
+	first.wait(t)
+	h.apply("unplug " + goBar + "\n" + plug(goBar, 5, "20b1:3009", goBarSerial, 3))
+	h.queue(append(unplugEvents(goBar, 5), plugEvents(goBar, 5)...)...)
+	second := h.parkNextReading()
+	first.release()
+	h.reconciles(2)
+	h.waitStats("the queued events taken", func(s Stats) bool { return s.Events == h.events })
+	h.advance(quiet)
+	second.wait(t)
+	h.queue(unplugEvents(goBar, 5)[1])
+	second.release()
+	h.reconciles(3)
+	s := h.state(binding.StateAvailable, 5, 2)
+	if c := s.Change(); !c.ReEnumerated {
+		t.Errorf("change %+v; want the bound unit re-enumerated", c)
+	}
+	h.advance(quiet)
+	if st := h.reconciles(4); st.Publishes != 2 {
+		t.Errorf("the removal taken into the published reading was laid on the next: %+v", st)
+	}
+}
+
+// TestAReadingAtAHeldAnswersBoundIsNeverSetAside: the reading a held
+// answer's bound brings is published whatever queued behind it, a removal
+// reaching a card included, so setting a reading aside never moves the
+// hold's bound.
+func TestAReadingAtAHeldAnswersBoundIsNeverSetAside(t *testing.T) {
+	h := newHarness(t)
+	h.apply("remove sys/class/sound/card5\nremove sys/bus/usb/devices/1-1\nremove sys/bus/usb/devices/1-1:1.0\nremove " + goBar + "\n")
+	storm := Uevent{Action: "change", DevPath: devpath(usb1) + "/1-4", Subsystem: "usb"}
+	const every = 400 * time.Millisecond
+	held := h.clock.Now().Add(quiet)
+	deadline := held.Add(maxDelay + DefaultFollowUps*followUp)
+	reads := uint64(1)
+	at := h.clock.Now()
+	for ; at.Add(quiet).Before(deadline); at = at.Add(every) {
+		h.advance(at.Sub(h.clock.Now()))
+		h.send(storm)
+		h.advance(quiet)
+		reads++
+		h.reconciles(reads)
+	}
+	// The step whose window holds the bound: the reading the bound brings
+	// parks, and a removal reaching card 1 queues behind it.
+	h.advance(at.Sub(h.clock.Now()))
+	h.send(storm)
+	p := h.parkNextReading()
+	h.advance(deadline.Sub(h.clock.Now()))
+	p.wait(t)
+	h.queue(Uevent{Action: "remove", DevPath: "/devices/platform/axi/107c706400.hdmi/sound/card1", Subsystem: "sound"})
+	p.release()
+	reads++
+	h.reconciles(reads)
+	if s := h.state(binding.StateIdentityTransient, -1, 2); !s.Observed().Equal(deadline) {
+		t.Errorf("published %v after the first held reading; want at its bound, %v", s.Observed().Sub(held), deadline.Sub(held))
+	}
+}
+
 // TestAFastReplugOfTheBoundUnitIsAChange: the GO bar unplugged and plugged
 // back into its port within one window reads back the same unit at the
 // same card, yet a node opened before is dead: a new devnum, or a removal

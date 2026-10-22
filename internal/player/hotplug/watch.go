@@ -47,6 +47,9 @@ type watch struct {
 	// Timing.holdMax at the latest, and from then the answer is published
 	// as it stands, whatever renewed the follow-ups.
 	heldSince time.Time
+	// setAside says the last reading was not published: a removal reaching
+	// a card had queued behind it (takeQueued). The next is published.
+	setAside bool
 	// failures are the failed readings in a row, and retryAt the earliest
 	// the next may be taken.
 	failures int
@@ -155,34 +158,56 @@ func (w *watch) next() time.Time {
 }
 
 // onEvent opens or extends the burst's window. A pending reading folds into
-// the window: the window's reading reads everything.
-func (w *watch) onEvent(u Uevent) {
+// the window: the window's reading reads everything. It reports whether
+// the event was a removal that reached a card.
+func (w *watch) onEvent(u Uevent) bool {
 	now := w.clock.Now()
-	if u.removes() {
-		w.noteRemoval(u.DevPath)
-	}
+	reached := u.removes() && w.noteRemoval(u.DevPath)
 	if !w.window.open {
 		w.window = burst{open: true, first: now}
 		w.pending = nil
 	}
 	w.window.last = now
 	w.svc.update(func() { w.svc.stats.Events++ })
+	return reached
 }
 
 // noteRemoval records the card directories a removal reached: the card
 // itself, a node below it, or the interface, device, hub or controller
-// above it. The path is only compared, as a string, with directories the
-// readers found; nothing is opened by it.
-func (w *watch) noteRemoval(devpath string) {
+// above it, and reports whether it reached one. The path is only compared,
+// as a string, with directories the readers found; nothing is opened by it.
+func (w *watch) noteRemoval(devpath string) bool {
 	p := strings.TrimPrefix(devpath, "/")
+	reached := false
 	for _, d := range w.dirs {
 		if p == d || strings.HasPrefix(d, p+"/") || strings.HasPrefix(p, d+"/") {
 			if w.removed == nil {
 				w.removed = map[string]bool{}
 			}
-			w.removed[d] = true
+			w.removed[d], reached = true, true
 		}
 	}
+	return reached
+}
+
+// takeQueued takes the events that queued while the box was read, each as
+// the loop takes one (onEvent), and reports whether a removal among them
+// reached a card. It takes those queued when it starts and no more: what
+// comes after is the loop's.
+func (w *watch) takeQueued() bool {
+	ch := w.src.Events()
+	reached := false
+	for n := len(ch); n > 0; n-- {
+		if w.onEvent(<-ch) {
+			reached = true
+		}
+	}
+	return reached
+}
+
+// holdDue reports whether a held answer's bound has come.
+func (w *watch) holdDue(now time.Time) bool {
+	return !w.heldSince.IsZero() && !now.Before(w.heldSince.Add(w.timing.holdMax()))
 }
 
 // onNote takes the source's news: events lost (read everything, folded
@@ -234,7 +259,7 @@ func (w *watch) onTimer(ctx context.Context) {
 		w.pending = nil
 	case !w.followAt.IsZero() && !now.Before(w.followAt):
 		t = trigger{why: "follow-up"}
-	case !w.heldSince.IsZero() && !now.Before(w.heldSince.Add(w.timing.holdMax())):
+	case w.holdDue(now):
 		t = trigger{why: "hold"}
 	default:
 		t = trigger{why: "periodic"}
@@ -245,10 +270,11 @@ func (w *watch) onTimer(ctx context.Context) {
 // reconcile reads the box, resolves the binding, and publishes what
 // changed. A reading that fails, or is partial, publishes no answer: the
 // last snapshot stands, marked stale, and the next attempt backs off. A
-// transient card is followed up, and the binding's answer held back while
-// a transient card may be the bound unit, until the follow-ups run out or
-// Timing.holdMax has passed since the first reading that held it, which
-// events renewing the follow-ups do not move.
+// reading that a removal reaching a card queued behind is set aside, once
+// (takeQueued). A transient card is followed up, and the binding's answer
+// held back while a transient card may be the bound unit, until the
+// follow-ups run out or Timing.holdMax has passed since the first reading
+// that held it, which events renewing the follow-ups do not move.
 func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 	defer w.svc.update(func() { w.svc.stats.Reconciles++ })
 	w.nextPeriodic = now.Add(w.timing.Periodic)
@@ -275,6 +301,22 @@ func (w *watch) reconcile(ctx context.Context, now time.Time, t trigger) {
 		return
 	}
 	w.recovered()
+	// The events that queued while the box was read are taken now, before
+	// anything is published, so none is laid on a later publish. A removal
+	// among them that reaches a card may be one this reading already shows
+	// (a replug that finished while it ran) or one that came after it: the
+	// reading is set aside, and the window those events opened reads the
+	// box again once they are quiet (B470 PR 4a2 round 2: published, a
+	// replug's queued removals marked its unchanged replacement
+	// re-enumerated at the next generation too). Once in a row, and never
+	// at a held answer's bound, so events that keep coming hold nothing
+	// back: the reading after is published with the removals in it.
+	if w.takeQueued() && !w.setAside && !w.holdDue(now) {
+		w.setAside = true
+		w.svc.update(func() { w.svc.stats.SetAside++ })
+		return
+	}
+	w.setAside = false
 	res, settled := binding.Settled(set.Device, inv)
 	transient := transientCards(inv)
 	if t.renew || (t.why == "periodic" && !slices.Equal(transient, w.transient)) {
