@@ -2,6 +2,7 @@ package alsa
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -129,7 +130,16 @@ var (
 // cannot be read is a problem on its card, and the rest of the reading
 // stands.
 func (r Reader) Read() (Snapshot, error) {
-	return r.read(nil)
+	return r.read(context.Background(), nil)
+}
+
+// ReadContext is Read, stopping before the next card or file once ctx is
+// done, and then returning ctx's error with what it read: a reading cut
+// short would read a card's files as absent. A read already started is not
+// interrupted; a card's /proc/asound files take the card's locks, which a
+// driver disconnecting the card can hold.
+func (r Reader) ReadContext(ctx context.Context) (Snapshot, error) {
+	return r.read(ctx, nil)
 }
 
 // Raw reads what Read reads and returns the files themselves, in the
@@ -140,7 +150,7 @@ func (r Reader) Read() (Snapshot, error) {
 func (r Reader) Raw() ([]RawFile, error) {
 	var files []RawFile
 	seen := map[string]bool{}
-	_, err := r.read(func(path string, data []byte, err error) {
+	_, err := r.read(context.Background(), func(path string, data []byte, err error) {
 		if seen[path] {
 			return
 		}
@@ -166,10 +176,11 @@ func (r Reader) roots() (procRoot, asoundRoot string) {
 // read is Read, handing each file it reads to collect when collect is not
 // nil, and then also reading the files only a raw dump wants. It reads only
 // through the two roots, each opened once as a tree, so every file and
-// directory it reaches is inside its root when it is opened.
-func (r Reader) read(collect collector) (Snapshot, error) {
+// directory it reaches is inside its root when it is opened. Once ctx is
+// done it opens nothing more and returns ctx's error.
+func (r Reader) read(ctx context.Context, collect collector) (Snapshot, error) {
 	procRoot, asoundRoot := r.roots()
-	t := walk{collect: collect, raw: collect != nil, beforeOpen: r.beforeOpen}
+	t := walk{ctx: ctx, collect: collect, raw: collect != nil, beforeOpen: r.beforeOpen}
 	if t.collect == nil {
 		t.collect = func(string, []byte, error) {}
 	}
@@ -205,13 +216,21 @@ func (r Reader) read(collect collector) (Snapshot, error) {
 	cards, probs := ParseCards(b)
 	snap.Problems = prefixed("cards", probs)
 	for _, c := range cards {
+		if t.stopped() {
+			break
+		}
 		snap.Cards = append(snap.Cards, t.card(c))
+	}
+	if t.stopped() {
+		return snap, fmt.Errorf("read %s: the reading was stopped: %w", asoundRoot, ctx.Err())
 	}
 	return snap, nil
 }
 
 // walk is one reading in progress.
 type walk struct {
+	// ctx stops the reading before its next file once it is done.
+	ctx context.Context
 	// asound is the ALSA tree, and proc the tree an owner is looked up in;
 	// procErr is why proc could not be opened, and proc is nil then.
 	asound, proc *tree
@@ -220,6 +239,10 @@ type walk struct {
 	raw          bool
 	beforeOpen   func(path string)
 }
+
+// stopped reports whether the reading's context is done: nothing more is
+// opened, and read returns its error.
+func (t walk) stopped() bool { return t.ctx.Err() != nil }
 
 // hook is the Reader's beforeOpen for path, nil when there is none.
 func (t walk) hook(path string) func() {
@@ -236,6 +259,9 @@ func (t walk) card(c Card) CardReading {
 	// read reads a file under the card. A missing one is absent; any
 	// other failure is a problem, and the file is absent too.
 	read := func(rel string) ([]byte, bool) {
+		if t.stopped() {
+			return nil, false
+		}
 		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
@@ -249,7 +275,7 @@ func (t walk) card(c Card) CardReading {
 	}
 	// rawOnly reads a file only a raw dump wants.
 	rawOnly := func(rel string) {
-		if !t.raw {
+		if !t.raw || t.stopped() {
 			return
 		}
 		b, err := t.asound.readFile(dirName+"/"+rel, maxFileBytes, t.hook("asound/"+dirName+"/"+rel))
@@ -283,6 +309,9 @@ func (t walk) card(c Card) CardReading {
 		}
 	}
 
+	if t.stopped() {
+		return cr
+	}
 	entries, err := t.asound.readDir(dirName, t.hook("asound/"+dirName))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -320,6 +349,9 @@ func (t walk) card(c Card) CardReading {
 		}
 		pcmRel := "pcm" + strconv.Itoa(n) + "p"
 		rawOnly(pcmRel + "/info")
+		if t.stopped() {
+			return cr
+		}
 		subs, err := t.asound.readDir(dirName+"/"+pcmRel, t.hook("asound/"+dirName+"/"+pcmRel))
 		if err != nil {
 			cr.Problems = append(cr.Problems, dirName+"/"+pcmRel+": "+errText(err))
@@ -433,6 +465,9 @@ func (t walk) comm(id int) (string, bool) {
 // procFile reads a file under the proc root. A failure is never a
 // problem: it leaves the owner unknown.
 func (t walk) procFile(rel string) ([]byte, bool) {
+	if t.stopped() {
+		return nil, false
+	}
 	var b []byte
 	err := t.procErr
 	if t.proc != nil {

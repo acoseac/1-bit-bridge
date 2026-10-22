@@ -14,6 +14,7 @@
 package binding
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -99,6 +100,17 @@ type Card struct {
 	// Why says what makes the card transient or unreadable, or what it is
 	// when unsupported. It quotes no serial.
 	Why string
+	// Dir is the card's sysfs directory, its links resolved
+	// (alsa.Identity.Dir), "" for a card sysfs does not list: the kernel's
+	// events about the card and the device above it name it (the hotplug
+	// watcher matches a removal to the card by it).
+	Dir string
+	// ProcUSBID and SysfsUSB are what each tree said of a transient card's
+	// unit: /proc/asound's usbid, and the identity sysfs read, nil when that
+	// tree said nothing. Settled passes over a transient card only when
+	// they rule it out as the bound unit.
+	ProcUSBID *alsa.USBID
+	SysfsUSB  *alsa.USBIdentity
 }
 
 // has reports whether the card has the playback endpoint e.
@@ -124,6 +136,11 @@ type Inventory struct {
 	Devices     []alsa.USBDevice
 	// Problems are what the trees could not say beyond one card.
 	Problems []string
+	// Partial says sysfs was not read whole (alsa.SysfsSnapshot.Partial):
+	// what the reading lacks is not absent from the box. Resolve answers
+	// from what was read; the hotplug watcher publishes no answer from a
+	// partial reading.
+	Partial bool
 }
 
 // Card returns the card with index n.
@@ -157,14 +174,23 @@ const sndUSBAudio = "USB-Audio"
 // snd-usb-audio's own window, transient: it lists a card in
 // /proc/asound/cards before it writes the card's proc files, and its usbid
 // reads empty while it disconnects the card.
-func (o Observer) Observe() (Inventory, error) {
-	snap, err := o.Proc.Read()
+func (o Observer) Observe() (Inventory, error) { return o.ObserveContext(context.Background()) }
+
+// ObserveContext is Observe, with readers that stop before their next card
+// or file once ctx is done (alsa.Reader.ReadContext, alsa.SysfsReader.ReadContext).
+// A reading ctx stopped returns ctx's error: what it did not read is not
+// absent.
+func (o Observer) ObserveContext(ctx context.Context) (Inventory, error) {
+	snap, err := o.Proc.ReadContext(ctx)
 	if err != nil {
 		return Inventory{}, err
 	}
-	sys := o.Sysfs.Read()
+	sys := o.Sysfs.ReadContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, err
+	}
 	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, Controllers: sys.Controllers, Devices: sys.Devices,
-		Problems: append(append([]string{}, snap.Problems...), sys.Problems...)}
+		Problems: append(append([]string{}, snap.Problems...), sys.Problems...), Partial: sys.Partial}
 	ids := map[int]alsa.Identity{}
 	for _, id := range sys.Cards {
 		ids[id.Card] = id
@@ -179,6 +205,7 @@ func (o Observer) Observe() (Inventory, error) {
 			}
 		}
 		id, inSysfs := ids[cr.Index]
+		c.Dir = id.Dir
 		switch {
 		case !sys.Present:
 			c.State, c.Why = CardUnreadable, "sysfs cannot be read at "+sys.Root
@@ -197,11 +224,15 @@ func (o Observer) Observe() (Inventory, error) {
 		default:
 			c.State, c.USB = CardUSB, id.USB
 		}
+		if c.State == CardTransient {
+			c.ProcUSBID, c.SysfsUSB = cr.USBID, id.USB
+		}
 		inv.Cards = append(inv.Cards, c)
 	}
 	for _, id := range sys.Cards {
 		if !seen[id.Card] {
-			inv.Cards = append(inv.Cards, Card{Index: id.Card, State: CardTransient, Why: "in sysfs and not in /proc/asound: being added or removed"})
+			inv.Cards = append(inv.Cards, Card{Index: id.Card, State: CardTransient, Why: "in sysfs and not in /proc/asound: being added or removed",
+				Dir: id.Dir, SysfsUSB: id.USB})
 		}
 	}
 	sort.Slice(inv.Cards, func(i, j int) bool { return inv.Cards[i].Index < inv.Cards[j].Index })
@@ -311,6 +342,86 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	c, _ := inv.Card(r.Matches[0])
 	r.Matches = nil
 	return r.found(c, what)
+}
+
+// Settled resolves dev on inv as Resolve does, and reports whether the
+// answer is settled: whether no transient card can change it. Where Resolve
+// answers identity_transient for any transient card on the box, Settled
+// sets aside a transient card that what its trees did say rules out as the
+// bound unit (another model by its usbid or its sysfs identity, another
+// unit by its serial, another port), so a card being added or removed
+// elsewhere on the box never holds back the bound DAC's own answer: an
+// unplugged DAC is device_missing at once beside an unrelated card that
+// has not settled (B470 PR 4a2). The answer from the cards that are not
+// transient stands as settled when no transient card can change it: a
+// binding that does not resolve whatever the cards are (not_configured,
+// binding_invalid, identity_unsupported), an ambiguity, which another card
+// cannot undo, or a port binding whose port has its card, since one
+// interface is one card. Otherwise it is Resolve's identity_transient,
+// naming a card that may be the bound unit, and unsettled. It latches
+// nothing, as Resolve does: the caller resolves again.
+func Settled(dev config.PlayerDevice, inv Inventory) (Resolution, bool) {
+	r := Resolve(dev, inv)
+	if r.State != StateIdentityTransient {
+		return r, true
+	}
+	stable := inv
+	stable.Cards = nil
+	var transient []Card
+	for _, c := range inv.Cards {
+		if c.State == CardTransient {
+			transient = append(transient, c)
+		} else {
+			stable.Cards = append(stable.Cards, c)
+		}
+	}
+	r0 := Resolve(dev, stable)
+	switch r0.State {
+	case StateNotConfigured, StateBindingInvalid, StateIdentityUnsupported, StateDeviceAmbiguous:
+		return r0, true
+	}
+	for _, c := range transient {
+		if mayBeBound(dev, c, r0) {
+			r.Reason = fmt.Sprintf("card %d is %s, and may be the bound unit; resolve again", c.Index, c.Why)
+			return r, false
+		}
+	}
+	return r0, true
+}
+
+// mayBeBound reports whether the transient card c may be the unit dev
+// binds, given r0, the answer from the cards that are not transient: not
+// when what its trees said rules it out, and always when they said nothing
+// that does.
+func mayBeBound(dev config.PlayerDevice, c Card, r0 Resolution) bool {
+	switch dev.Binding {
+	case config.BindingSerial, config.BindingUniqueModel:
+		vendor, product, err := dev.IDs()
+		if err != nil {
+			return true
+		}
+		want := alsa.USBID{Vendor: vendor, Product: product}
+		known := false
+		if c.ProcUSBID != nil {
+			known = true
+			if *c.ProcUSBID == want {
+				return true
+			}
+		}
+		if c.SysfsUSB != nil {
+			known = true
+			if c.SysfsUSB.ID == want {
+				return dev.Binding == config.BindingUniqueModel || c.SysfsUSB.Serial.Equal(dev.Serial)
+			}
+		}
+		return !known
+	case config.BindingPort:
+		if r0.State == StateAvailable || r0.State == StateEndpointMissing {
+			return false
+		}
+		return c.SysfsUSB == nil || c.SysfsUSB.Port == "" || c.SysfsUSB.Port == dev.Port
+	}
+	return true
 }
 
 // found finishes a resolution on its one card.
