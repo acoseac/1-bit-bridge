@@ -563,8 +563,10 @@ func (o *localOutputs) lookUpSong(ctx context.Context, s *readingSnap) *songRow 
 
 // findRow is this bridge's row for the file MPD names, or nil. A URL of
 // this bridge's loopback track route names its row by the track id. A
-// database path is a row when a library root's prefix rule takes it and
-// os.SameFile agrees that MPD's file and the root's are one file.
+// database path is a row when a library root's prefix rule takes it, the
+// rest of the path stays under that root, and os.SameFile agrees that
+// MPD's file and the root's are one file: a path outside every root is
+// never looked up.
 func (o *localOutputs) findRow(ctx context.Context, uri, musicDir string, roots []string, base string) *songRow {
 	if id, ok := loopbackTrackID(uri, base); ok {
 		if o.loopTrack == nil {
