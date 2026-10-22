@@ -37,7 +37,9 @@
 // frames are in a sink the producer is writing to, which the producer makes
 // between two writes, ending the write under way; Pause and Resume hand the
 // sink its command on a goroutine of their own (call), so a sink the kernel
-// holds cannot hold the engine's call past its deadline.
+// holds cannot hold the engine's call past its deadline, and the producer
+// hands a sink its Drain the same way, so such a sink never holds the
+// producer past the session's release.
 //
 // Sessions own resources: each session has a life (its context) that every
 // goroutine it starts and every sink it opens ends with. A Release that
@@ -50,11 +52,15 @@
 //
 // Release is confirmed or it is not: Release ends the session's life, so
 // its sinks drop their streams and close their devices; a teardown joins
-// the session's goroutines, closes every sink and every decoder and
-// content, and lets go of the device; Release answers nil once that is
-// done, or its context's error at its deadline, and the teardown then calls
-// Events.Released once nothing is held. A sink the kernel holds in a call
-// that never returns keeps its teardown in Close, abandoned: its release is
+// the session's goroutines, closes every decoder and content and then every
+// sink, and lets go of the device; Release answers nil once that is done,
+// or its context's error at its deadline, and the teardown then calls
+// Events.Released once nothing is held. The join comes first: a producer
+// held in a read of its content that does not return (a file on a mount
+// that hangs) still holds its decoder, so nothing is closed under it, and
+// the release stays unconfirmed until the read returns. A sink the kernel
+// holds in a call that never returns keeps its teardown in Close,
+// abandoned, every decoder and content closed already: its release is
 // never acknowledged, which is the truth.
 //
 // Successors: Prepare opens next on a goroutine of its own, decodes its
@@ -70,8 +76,11 @@
 // Audible when the sink's Position.Played, content frames never silence,
 // passes its first frame in that sink, never at the decoder's end of file;
 // several boundaries crossed in one measurement each get theirs, in order.
-// Prepare answers engine.ErrSessionEnding once the producer plays out the
-// last content, and the session reports Finished once that drain ends.
+// The sink measures nothing while the kernel drains a sink's last hardware
+// buffer (alsapcm.Sink.Drain), so a boundary in a sink's last 200 ms or so
+// is reported when that drain ends. Prepare answers engine.ErrSessionEnding
+// once the producer plays out the last content, and the session reports
+// Finished once that drain ends.
 //
 // Edits after hand-off: Cut drops an occurrence and what follows it. With
 // no frames in a sink it goes at once; with frames there it is cut from the
