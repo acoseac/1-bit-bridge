@@ -119,8 +119,9 @@ func TestWriteBytesDurable_OnThisPlatform(t *testing.T) {
 // directories the strict writer creates for a destination whose parents
 // are missing: each is made durable in its parent, the deepest first,
 // before the file is written, so a crash cannot take a durable file's
-// directory with it; and a barrier that fails for one of them fails the
-// write before the file is written.
+// directory with it, and every entry from the file's up to the root is
+// synced again once the write lands; and a barrier that fails for one of
+// them fails the write before the file is written.
 func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 	synced := stubSyncDir(t, nil)
 	root := realTempDir(t)
@@ -128,8 +129,8 @@ func TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable(t *testing.T) {
 	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
 	}
-	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b")}; !slices.Equal(*synced, want) {
-		t.Fatalf("directories synced %v, want %v: b's entry in a, then a's in the root, then the file's in b", *synced, want)
+	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b"), filepath.Join(root, "a"), root}; !slices.Equal(*synced, want) {
+		t.Fatalf("directories synced %v, want %v: b's entry in a, then a's in the root, then once the write lands the file's in b and every entry above it", *synced, want)
 	}
 
 	syncErr := errors.New("fsync: input/output error")
@@ -197,8 +198,8 @@ func TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated(t *testing.T) 
 	if err := WriteBytesDurable(root, dst, []byte("again"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("the write after a's barrier succeeded: %v", err)
 	}
-	if want := []string{root, dir}; !slices.Equal(seen, want) {
-		t.Fatalf("the write after a's barrier succeeded fsynced %v, want %v: a's entry again, then the file's", seen, want)
+	if want := []string{root, dir, root}; !slices.Equal(seen, want) {
+		t.Fatalf("the write after a's barrier succeeded fsynced %v, want %v: a's entry again, then once the write lands the file's and a's", seen, want)
 	}
 	if got, err := os.ReadFile(dst); err != nil || string(got) != "again" {
 		t.Fatalf("destination %q, %v", got, err)
@@ -273,8 +274,63 @@ func TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft(t *testing.T
 	if err := WriteBytesDurable(root, filepath.Join(dir, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable: %v", err)
 	}
-	if want := []string{filepath.Join(root, "a"), root, dir}; !slices.Equal(*synced, want) {
-		t.Fatalf("a fresh writer fsynced %v, want %v: b's entry in a and a's in the root, which an earlier run left, then the file's", *synced, want)
+	if want := []string{filepath.Join(root, "a"), root, dir, filepath.Join(root, "a"), root}; !slices.Equal(*synced, want) {
+		t.Fatalf("a fresh writer fsynced %v, want %v: b's entry in a and a's in the root, which an earlier run left, then once the write lands the file's and every entry above it", *synced, want)
+	}
+}
+
+// TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands pins Codex's
+// round 9 finding. A write stages its file in the file's directory, and on an
+// overlay that is what copies a directory found only in the lower layer up
+// into the upper one, creating its entry, and those of the directories above
+// it up to the root, after the syncs that ran before the file was written:
+// overlayfs documents that a copy-up does not fsync the parents it creates.
+// Round 9 then synced the file's directory alone, so a crash could take a
+// copied-up entry, and the reservation below it with it. Once the write
+// lands, by its rename or by the fallback a failed rename takes for the same
+// bytes, every directory from the file's up to the root is synced again, the
+// deepest first and the root included. Here the directories exist before the
+// write, as lower-only ones would, so the writer creates none of them.
+func TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands(t *testing.T) {
+	root := realTempDir(t)
+	a := filepath.Join(root, "a")
+	b := filepath.Join(a, "b")
+	mkdirs(t, b)
+	dst := filepath.Join(b, "ids")
+	// log is every directory sync and every rename attempt, in order.
+	var log []string
+	prevDir := syncDir
+	t.Cleanup(func() { syncDir = prevDir })
+	syncDir = func(d *os.File) error {
+		log = append(log, d.Name())
+		return nil
+	}
+	var renameErr error
+	prev := SetRenameFuncForTest(func(src, dst string) error {
+		log = append(log, "rename")
+		if renameErr != nil {
+			return renameErr
+		}
+		return os.Rename(src, dst)
+	})
+	t.Cleanup(func() { SetRenameFuncForTest(prev) })
+
+	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable: %v", err)
+	}
+	if want := []string{a, root, "rename", b, a, root}; !slices.Equal(log, want) {
+		t.Errorf("the write synced %v, want %v: the entries above the file's directory, the rename, then every entry from the file's up to the root", log, want)
+	}
+
+	// The fallback: the rename fails while the destination holds the same
+	// bytes, and the write is taken once the chain is synced again.
+	log, renameErr = nil, syscall.EBUSY
+	if err := WriteBytesDurable(root, dst, []byte("reserved"), ".durable-*.tmp"); err != nil {
+		t.Fatalf("WriteBytesDurable over the same bytes with the rename failing: %v", err)
+	}
+	last := slices.Index(log, "rename") + len(renameBackoff)
+	if want := []string{b, a, root}; last > len(log) || !slices.Equal(log[last:], want) {
+		t.Errorf("the fallback synced %v, want every entry from the file's up to the root after the last rename attempt: %v", log, want)
 	}
 }
 
@@ -318,8 +374,8 @@ func TestWriteBytesDurable_RetriesThroughASymlinkedAlias(t *testing.T) {
 	if err := WriteBytesDurable(root, filepath.Join(real, "reserved.json"), []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("the retry by real's own path: %v", err)
 	}
-	if want := []string{b, root, real}; !slices.Equal(synced, want) {
-		t.Fatalf("the retry by real's own path fsynced %v, want %v: real's entry in b, b's in the root, then the file's", synced, want)
+	if want := []string{b, root, real, b, root}; !slices.Equal(synced, want) {
+		t.Fatalf("the retry by real's own path fsynced %v, want %v: real's entry in b, b's in the root, then once the write lands the file's and every entry above it", synced, want)
 	}
 }
 
@@ -344,8 +400,8 @@ func TestWriteBytesDurable_NeverSyncsAboveTheRoot(t *testing.T) {
 	if err := write(root, filepath.Join(root, "a", "b", "reserved.json")); err != nil {
 		t.Fatalf("a write below the root: %v", err)
 	}
-	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b")}; !slices.Equal(*synced, want) {
-		t.Fatalf("a write below the root fsynced %v, want %v: up to the root, and never its parent %s", *synced, want, base)
+	if want := []string{filepath.Join(root, "a"), root, filepath.Join(root, "a", "b"), filepath.Join(root, "a"), root}; !slices.Equal(*synced, want) {
+		t.Fatalf("a write below the root fsynced %v, want %v: up to the root, before the write and once it lands, and never its parent %s", *synced, want, base)
 	}
 	type refusal struct {
 		name, root, path, untouched string

@@ -209,8 +209,8 @@ func TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot(t *testing.T) {
 	if err := WriteBytesDurable(alias, path, []byte("reserved"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable below a root that is a link: %v", err)
 	}
-	if want := []string{real, filepath.Join(real, "sub")}; !slices.Equal(*synced, want) {
-		t.Fatalf("the write fsynced %v, want %v: sub's entry in the root, then the file's in sub, spelled from where the root resolves", *synced, want)
+	if want := []string{real, filepath.Join(real, "sub"), real}; !slices.Equal(*synced, want) {
+		t.Fatalf("the write fsynced %v, want %v: sub's entry in the root, then once the write lands the file's in sub and sub's again, spelled from where the root resolves", *synced, want)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "reserved" {
 		t.Fatalf("the file through the link: %q, %v", got, err)

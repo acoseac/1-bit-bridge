@@ -76,7 +76,7 @@ func TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice(t *testing.T) {
 	if err := WriteBytesDurable(root, dst, []byte("reserved again"), ".durable-*.tmp"); err != nil {
 		t.Fatalf("WriteBytesDurable over that destination = %v, want nil", err)
 	}
-	if want := []string{root, sub}; !slices.Equal(*synced, want) {
+	if want := []string{root, sub, root}; !slices.Equal(*synced, want) {
 		t.Errorf("the write synced %v, want %v", *synced, want)
 	}
 	if got, err := os.ReadFile(dst); err != nil || string(got) != "reserved again" {

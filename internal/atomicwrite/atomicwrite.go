@@ -280,7 +280,7 @@ var dirSyncWarnOnce sync.Once
 // than the pre-existing behaviour, which had no barrier at all. So the
 // error is swallowed, and surfaced once per process via `logger.Warn`.
 // WriteBytesDurable alone does not come here: its caller asked for the
-// failure (durableDirEntry).
+// failure (durableChain).
 func commitDirEntry(path string) {
 	if syncParentDir == nil {
 		return
@@ -373,8 +373,8 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 }
 
 // renameRetry is the rename and its retries, without the barrier: each
-// caller runs that in its own mode (commitDirEntry, or durableDirEntry
-// for WriteBytesDurable).
+// caller runs that in its own mode (commitDirEntry, or durableChain for
+// WriteBytesDurable).
 func renameRetry(ctx context.Context, src, dst string) error {
 	var err error
 	for _, d := range renameBackoff {
@@ -392,14 +392,24 @@ func renameRetry(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// durableDirEntry is the barrier WriteBytesDurable requires: unlike
-// commitDirEntry's, its failure is the write's, because the caller hands
-// out nothing the file covers until the directory entry naming it is
-// durable. A platform with no barrier is ErrNoDirectoryBarrier, never a
-// barrier that ran.
-func durableDirEntry(path string) error {
-	if err := syncDirAt(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("the write landed, but its directory entry is not durable: %w", err)
+// durableChain is the barrier WriteBytesDurable runs once its write has
+// landed, by its rename or by the fallback a failed rename takes for the same
+// bytes: every directory in chain, from the file's up to the root, the
+// deepest first (strictPath.chain). Unlike commitDirEntry's, its failure is
+// the write's, because the caller hands out nothing the file covers until
+// every entry naming it is durable. It syncs the whole chain, not the file's
+// directory alone, because staging the file is itself a write to the
+// directories above it on an overlay: a directory found only in the lower
+// layer is copied up, its entry created in its parent's upper directory, and
+// so on up to the root, after the syncs that ran before the file was staged,
+// and overlayfs fsyncs none of the parents a copy-up creates (Codex on round
+// 9). A platform with no barrier is ErrNoDirectoryBarrier, never a barrier
+// that ran.
+func durableChain(chain []string) error {
+	for _, d := range chain {
+		if err := syncDirAt(d); err != nil {
+			return fmt.Errorf("the write landed, but the directory entries between %s and %s are not durable: %w", chain[0], chain[len(chain)-1], err)
+		}
 	}
 	return nil
 }
@@ -780,7 +790,7 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return writeBytes(path, data, tmpPrefix, false)
+	return writeBytes(path, data, tmpPrefix, nil)
 }
 
 // WriteBytesDurable is WriteBytes for a caller that hands out nothing the
@@ -792,14 +802,18 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // whose directory's own entry is not. A failure may leave the new bytes in
 // place, so the caller counts the write as not made, never as undone. A
 // rename that fails while the destination already holds the same bytes is
-// taken as WriteBytes takes it, once the destination itself and then its
-// directory are synced.
+// taken as WriteBytes takes it, once the destination itself and then every
+// directory from its own up to root are synced.
 //
 // Every write syncs every entry from the file up to root, the directories
 // it creates for path included, the deepest first and before the file is
-// written, and the file's own entry once its rename lands (strictPath.chain):
-// root is fsynced, for the entry of the directory below it, and its own
-// entry never. The writer keeps nothing between writes. A directory whose
+// written, and then once the write has landed, by its rename or by that
+// fallback, every directory from the file's up to root again, the file's own
+// entry first (strictPath.chain, durableChain): staging the file on an
+// overlay copies a lower-only directory up, creating its entry and those
+// above it after the first syncs (Codex on round 9). root is fsynced, for
+// the entry of the directory below it, and its own entry never. The writer
+// keeps nothing between writes. A directory whose
 // entry an earlier write, or an earlier run, could not sync is synced again
 // by the next write that passes through it, whoever made it and whatever
 // happened since: process-local state would not survive the restart that
@@ -864,13 +878,15 @@ func WriteBytesDurable(root, path string, data []byte, tmpPrefix string) error {
 			return fmt.Errorf("the directory entries between %s and %s are not durable: %w", p.dir(), p.root, err)
 		}
 	}
-	return writeBytes(p.file, data, tmpPrefix, true)
+	return writeBytes(p.file, data, tmpPrefix, p.chain(len(p.dirs)))
 }
 
 // writeBytes stages data beside path and renames it into place: the file
-// half of WriteBytes, or of WriteBytesDurable when durable is set, whose
-// barrier then makes the file's own entry durable. path's directory exists.
-func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error {
+// half of WriteBytes, with chain nil, or of WriteBytesDurable, whose barrier
+// then syncs every directory in chain, from the file's up to the root
+// (durableChain), once the write has landed. path's directory exists.
+func writeBytes(path string, data []byte, tmpPrefix string, chain []string) error {
+	durable := chain != nil
 	dir := filepath.Dir(path)
 	// Same directory as `path` so the rename is a same-filesystem atomic op.
 	tmp, err := os.CreateTemp(dir, tmpPrefix)
@@ -934,7 +950,7 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 			case syncErr != nil:
 				return syncErr
 			case same:
-				return durableDirEntry(path)
+				return durableChain(chain)
 			}
 			return err
 		}
@@ -945,7 +961,7 @@ func writeBytes(path string, data []byte, tmpPrefix string, durable bool) error 
 	}
 	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	if durable {
-		return durableDirEntry(path)
+		return durableChain(chain)
 	}
 	commitDirEntry(path)
 	return nil
