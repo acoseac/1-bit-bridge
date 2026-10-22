@@ -323,6 +323,17 @@ func TestSysfsCapsTheCardsAndTheDevices(t *testing.T) {
 	if len(snap.Cards) > 4 || len(snap.Devices) > 4 || !strings.Contains(strings.Join(snap.Problems, "; "), "more than 4") {
 		t.Errorf("cards %d, devices %d, problems %q", len(snap.Cards), len(snap.Devices), snap.Problems)
 	}
+	// A listing cut at the cap is not the whole of the cards, and says so
+	// apart from its problems; so is a tree with no class/sound to list.
+	if !snap.Present || snap.CardsComplete {
+		t.Errorf("a cut listing: present %v, cards complete %v", snap.Present, snap.CardsComplete)
+	}
+	if whole := (SysfsReader{Root: filepath.Join(root, "sys")}).Read(); !whole.CardsComplete || len(whole.Cards) != 6 {
+		t.Errorf("the whole listing: cards complete %v, %d cards", whole.CardsComplete, len(whole.Cards))
+	}
+	if none := (SysfsReader{Root: t.TempDir()}).Read(); none.Present || none.CardsComplete {
+		t.Errorf("no class/sound: present %v, cards complete %v", none.Present, none.CardsComplete)
+	}
 }
 
 // TestSysfsCardReadsOneCardAgain: the check after open reads one card's

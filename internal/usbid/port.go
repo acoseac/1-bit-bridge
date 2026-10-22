@@ -41,21 +41,21 @@ func ParseHex16(s string) (uint16, error) {
 // sysfs's idVendor and idProduct print it.
 func Hex16(v uint16) string { return fmt.Sprintf("%04x", v) }
 
-// Port is the anchored path of the USB interface a sound card is: the
-// controller the bus hangs from, the root hub's USB generation, the chain
-// of ports from the root hub down to the unit, and the configuration and
-// interface the card sits on. It names a place on the box and never a
-// unit, so a port binding means "this port". The bus number, the device
-// number and a bus-relative "<bus>-<chain>" alone are never part of it:
-// the kernel numbers buses in the order controllers probe and devices in
-// the order they enumerate.
+// Port is an anchored place on the box's USB topology: the controller the
+// bus hangs from, the root hub's USB generation, and the chain of ports
+// from the root hub down to a unit; and, for one sound card, the
+// configuration and interface the card sits on. It names a place and never
+// a unit, so a port binding means "this port", whatever unit is in it. The
+// bus number, the device number and a bus-relative "<bus>-<chain>" alone
+// are never part of it: the kernel numbers buses in the order controllers
+// probe and devices in the order they enumerate.
 //
-// Its string form, the device.port a port binding stores, is
+// Its string form is
 //
-//	port      = anchor "/" usb
+//	port      = anchor "/" usb [ ":" config "." interface ]
 //	anchor    = segment *3( "/" segment )      ; outermost first
 //	segment   = "pci-" pciaddr / "platform-" name
-//	usb       = "usb" gen "-" chain ":" config "." interface
+//	usb       = "usb" gen "-" chain
 //	gen       = "1" / "2" / "3"                ; the root hub's speed: up to 12 Mbit/s, 480, 5000 and up
 //	chain     = number *6( "." number )        ; the root hub's port first, then each hub's
 //	config    = number
@@ -64,14 +64,27 @@ func Hex16(v uint16) string { return fmt.Sprintf("%04x", v) }
 //	pciaddr   = 4*8hex ":" 2hex ":" 2hex "." %x30-37   ; lowercase, as sysfs names a PCI device
 //	name      = 1*64( ALPHA / DIGIT / "." / "_" / "-" ) ; a platform device's sysfs name
 //
+// in two forms. Without the configuration and interface it is a port, what
+// a port binding names (device.port): bridge output dac bind writes this
+// form, and the unit in that port, whichever model it is, gives the card,
+// and so its interface. With them it is one card's port path, what sysfs
+// gives a card (alsa.USBIdentity.Port), and what bind wrote in B470 PR 4a,
+// which still reads. In a binding they are only a preference, never part of
+// the place: when the unit in the port carries more than one sound card (a
+// composite device), they choose the card on that configuration and
+// interface, and bind writes them for such a unit and for no other; a unit
+// with one card is the player's whatever interface its card sits on. Place
+// is the port alone.
+//
 // The anchor is what udev's path_id names a USB controller by: the
 // nearest PCI device, then the nearest platform device above that run, and
 // so on outward, each run of one kind named once by its innermost member.
-// A Raspberry Pi 5's first controller, port 1, interface 0, is
+// A Raspberry Pi 5's first controller, port 1, is platform-xhci-hcd.0/usb2-1,
+// and the card on interface 0 of the unit there
 // platform-xhci-hcd.0/usb2-1:1.0; a Pi 4's VL805, behind its internal hub,
-// port 3, is platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3:1.0. A
-// controller under anything else (ACPI, virtio, a name with a colon) has no
-// anchor this grammar names, and a card under it cannot be bound by port.
+// port 3, is platform-fd500000.pcie/pci-0000:01:00.0/usb2-1.3. A controller
+// under anything else (ACPI, virtio, a name with a colon) has no anchor this
+// grammar names, and a card under it cannot be bound by port.
 type Port struct {
 	// Segments are the anchor's segments, outermost first.
 	Segments []string
@@ -79,8 +92,10 @@ type Port struct {
 	Gen int
 	// Chain is the port numbers from the root hub down.
 	Chain []int
-	// Config and Interface are the configuration and interface number
-	// of the card's interface.
+	// Config and Interface are the configuration and interface number a
+	// card sits on, in a card's port path or as a binding's preference;
+	// both are 0 in a port alone, since the grammar's configurations start
+	// at 1 (HasInterface).
 	Config, Interface int
 }
 
@@ -94,14 +109,14 @@ const (
 var (
 	pciSegment      = regexp.MustCompile(`^pci-[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
 	platformSegment = regexp.MustCompile(`^platform-[A-Za-z0-9._-]{1,64}$`)
-	usbSegment      = regexp.MustCompile(`^usb([123])-([0-9.]+):([0-9]+)\.([0-9]+)$`)
+	usbSegment      = regexp.MustCompile(`^usb([123])-([0-9.]+)(?::([0-9]+)\.([0-9]+))?$`)
 )
 
 // errPort is every refusal of a port's form. It does not quote the value.
-var errPort = errors.New("not an anchored port path (controller segments, then usbG-CHAIN:CONFIG.INTERFACE, as bridge output dac bind writes it)")
+var errPort = errors.New("not an anchored port path (controller segments, then usbG-CHAIN, with :CONFIG.INTERFACE after it or not, as bridge output dac bind writes it)")
 
-// ParsePort reads a port's string form, refusing anything the grammar on
-// Port does not produce.
+// ParsePort reads either string form of a port, refusing anything the
+// grammar on Port does not produce.
 func ParsePort(s string) (Port, error) {
 	if len(s) == 0 || len(s) > maxPortLen {
 		return Port{}, errPort
@@ -132,6 +147,9 @@ func ParsePort(s string) (Port, error) {
 			return Port{}, errPort
 		}
 		p.Chain = append(p.Chain, n)
+	}
+	if m[3] == "" {
+		return p, nil
 	}
 	var ok bool
 	if p.Config, ok = portNumber(m[3], 1); !ok {
@@ -169,7 +187,28 @@ func (p Port) ChainString() string {
 	return strings.Join(links, ".")
 }
 
-// String is the port's canonical form, which ParsePort reads back.
+// HasInterface reports whether p carries a configuration and an
+// interface: a card's port path, or a binding's preference among the cards
+// of a unit that carries more than one.
+func (p Port) HasInterface() bool { return p.Config != 0 }
+
+// Place is the port alone: p without its configuration and interface,
+// what a port binding names.
+func (p Port) Place() Port {
+	p.Config, p.Interface = 0, 0
+	return p
+}
+
+// String is p's canonical form, which ParsePort reads back: the port, and
+// the configuration and interface after it when p has them. The zero Port
+// is no port, and prints as nothing.
 func (p Port) String() string {
-	return fmt.Sprintf("%s/usb%d-%s:%d.%d", p.Anchor(), p.Gen, p.ChainString(), p.Config, p.Interface)
+	if len(p.Segments) == 0 {
+		return ""
+	}
+	s := fmt.Sprintf("%s/usb%d-%s", p.Anchor(), p.Gen, p.ChainString())
+	if p.HasInterface() {
+		s += fmt.Sprintf(":%d.%d", p.Config, p.Interface)
+	}
+	return s
 }
