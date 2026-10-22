@@ -296,9 +296,9 @@ func (t walk) card(c Card) CardReading {
 		cr.Problems = append(cr.Problems, prefixed(dirName+"/"+rel, probs)...)
 	}
 	// unlisted records a listing, or an entry's type, that could not be
-	// read: the card's devices are not all known (Partial). One that is
-	// not there is the card or the device going, and is absent, as a
-	// missing file is.
+	// read, as a problem, and the card's devices as not all known
+	// (Partial), unless what could not be read was not there: the card or
+	// the device going, which is the box as it is, as a missing file is.
 	unlisted := func(rel string, err error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			cr.Partial = true
