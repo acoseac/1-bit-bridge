@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
 - [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
 - [2026-10-22 — B505: the player's identity in the backup, the output block across a rewrite, and the player-off warning once per reason](#2026-10-22--b505-the-players-identity-in-the-backup-the-output-block-across-a-rewrite-and-the-player-off-warning-once-per-reason)
@@ -52229,3 +52230,1738 @@ Linux-only tests are run on a Linux host: `TestErrnoValuesAreLinuxs`,
 `TestLinuxWaitEndsAtOnceWhenItsContextDoes`, unchanged since round 1, and
 `TestCaptureKernelUevents`, run by hand on the Pi. The round-4 rules text
 is a note, OLD/NEW against 9e6eea1c's `player.md`.
+
+## 2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown
+
+### What shipped
+
+- `internal/player/engine`, new and hardware-free: `Engine` (`New`, `Run`,
+  the commands, the reads), the immutable `Snapshot`, `Generation` and
+  `IfGeneration`, `Lease` and `Hold`, `OutputReport`, the queue's
+  `Reference` and `Entry` and their bounds, typed refusals (`Error`,
+  `Reason`), and the backend seam, `Backend` and `Events`, whose contract is
+  `Backend`'s doc. PR 4b2 implements the seam over `internal/player/decode`
+  and `alsapcm.Sink`; this PR's tests implement it with a fake.
+- The package doc's state × command table, which the `policy` function is.
+- The tests: a fake backend that enforces the contract's first term (a
+  Start while another session's release is unacknowledged is a violation
+  that fails the test), a fake clock, and a harness that requires, at every
+  test's end, every goroutine the engine started to have ended.
+- Rules text for `.claude/rules/output.md`, which the brief had this session
+  leave to the owner, went beside the branch (`/tmp/b470-4b1-rules.md`): a
+  new section after PR 2b's. The file's `paths:` already cover the package.
+  `CLAUDE.md`'s package table gained the engine's row.
+- Nothing outside the package changed: no serve wiring (4b2), and the
+  engine reads no configuration of its own (every configured value is a
+  `Config` field 4b2 fills).
+
+### The numbers
+
+- The queue: 1,000 entries; 64 KiB of metadata per entry and 16 MiB in all;
+  references of 1 to 128 printable ASCII bytes; a ReadList of at most 1,000
+  IDs.
+- The deadlines: `ReleaseTimeout` 2 s; `StartTimeout` 5 s; `CallTimeout`
+  2 s (Prepare, Cut, Pause, Resume, Discard); a paused session's own
+  release of the device, `PauseRelease` (30 s by default, 1 s to 10 min)
+  plus `ReleaseTimeout`; a maintenance hold, `MaintenanceTTL` (1 min by
+  default, 1 s to 1 h); `shutdownGrace` 1 s for calls still under way once
+  the release has settled and the queue file is flushed.
+- The reservations: blocks of 4,096 IDs or tokens. A start skips one block
+  past the larger saved value and reserves one, and a run's first edit
+  reserves the next ahead, so a start spends at most 12,288 values beyond
+  what it hands out: the 4,294,967,295 IDs last about 4.29 billion inserts,
+  or at least 349,525 starts (957 years at one a day).
+- The queue file: `writeCoalesce` 250 ms, `writeMaxAge` 2 s, a failed
+  write's backoff from 1 s doubling to 30 s. Its cap, 24 MiB (25,165,824
+  bytes), against a full queue's real encoding, measured at 22,595,456
+  bytes: 1,000 entries, 16,777,216 bytes of metadata split so base64 rounds
+  up on every entry, 128-byte references of `"\<&` (the encoder escapes the
+  first two).
+- The suite: 77 tests, the table's 49 cells as subtests; about 11 s a run
+  under `-race` on the dev Mac; green ten runs in a row, and three each at
+  GOMAXPROCS 1, 2 and 4.
+
+### Decisions
+
+- **One owner, one message at a time, and a reply after its step's
+  snapshot.** Commands, backend events, call results, timers and the file
+  results all reach the owner as messages; it publishes a snapshot after
+  each step that changed anything and only then sends the step's replies.
+  The first run of the implementation failed in nine tests for want of
+  that: the harness read the queue right after `InsertAfter` returned and
+  inserted after the wrong entry, because the reply had gone out during the
+  step, before its publish. The tests that read right after a command then
+  passed against replies sent first again (the window is microseconds), so
+  a seam sees the published snapshot as each reply goes, and
+  `TestAReplyComesAfterItsSnapshot` pins the order there.
+- **Every session ends with a Release the engine asks for, and every
+  backend call is its own goroutine under a deadline.** A refused Start, a
+  failed one, a fault and Finished each release, a trivial acknowledgement
+  when nothing is held, so one rule (a new session opens only once the last
+  release is acknowledged) covers every path, and the fake can enforce it.
+  A call that has not answered by its deadline is treated as failed and its
+  session released, rather than trusted half way; for Release the deadline
+  is the confirmed-release rule. Rejected: methods that return at once with
+  every result an event, since a backend blocking in one would stall the
+  owner, and one that never answers could not be abandoned.
+- **A Release can reach the backend before its own Start.** Found in the
+  first run, as a nil dereference in the fake: a Stop during a slow open
+  spawns the Release's goroutine after the Start's, and the two run in
+  either order. The contract says so, and the fake models it: that Start
+  acquires nothing.
+- **While releasing, a command moves the selection at once and sets the one
+  pending intent** (stop, pause or play), the latest winning, run once on
+  the acknowledgement. Three Nexts run once, for the last target.
+- **Paused with no session.** Next or Previous while paused, and a deletion
+  of the paused selection, leave the transport paused at the start of the
+  new selection with the paused content released, as the brief asks of the
+  deletion; Play then starts a session there.
+- **The policy** (for Next and Previous superseded by 228792a1 below: they
+  select and play in every state). Next and Previous keep the transport's state: they play on
+  while playing, stay paused while paused, and only select while stopped,
+  so a Next never starts sound on a stopped bridge; PlayID and PlayIndex
+  play in every state, as SeekId and SeekIndex are used; a Next past the end
+  follows the end of the queue (playback stops on the last entry);
+  maintenance refuses everything but Stop, which does nothing. Release 5a
+  may adjust it once named controllers are tested; it is one function.
+- **What a command answers.** A start, a release or a pending intent
+  answers once no start and no release is under way: nil, or for a command
+  that asked for playback that did not come, why (the backend's refusal,
+  every entry unplayable, an unconfirmed release, the output, a fault). A
+  skip chain answers when something plays or nothing can. Pause and a
+  resume answer with the backend's answer; Stop and EnterMaintenance once
+  the release is confirmed or past its deadline.
+- **A pass runs from a session's start or a queue change.** Resetting it at
+  every audible boundary made the engine re-prepare a successor it had just
+  prepared, since the pass changed under it: harmless, but work on every
+  lap. Within a session an entry refused is not offered again until the
+  queue changes or a session starts.
+- **At load, the queue file's counters are not checked against its
+  reservation; its entries are.** Found reviewing the code before the first
+  commit: a run whose reservation write fails still publishes its start
+  token and holds its counters past the durable reservation, and its next
+  queue write records them; the first validation called such a file invalid
+  and would have moved a good queue aside at the next start.
+  `TestAQueueSavedWithoutItsRunsReservationLoads` pins it.
+- **The reservation file is its own.** While a bad queue file stays (its
+  rename failed), the reservation is still written, so the start's token is
+  durable; while a bad reservation file stays, none is. Either refuses
+  every insert and token-advancing edit until the operator moves the file,
+  which the engine notices with one Lstat each refused edit (`unstick`, the
+  owner's one piece of I/O).
+- **The writer and the maintenance expiry arm absolute deadlines
+  (`clock.At`).** Found by a three-run stress: the writer read the clock,
+  then armed its timer, and a clock advance in between left the timer late,
+  so `TestAFailingWriteStaysDirtyAndRetries` waited for a write that never
+  came. A timer armed with `At` fires as soon as the clock has passed it.
+- **The token is 0 when the tokens are exhausted at a start**, never a value
+  handed out before. **The position is the backend's last measurement**,
+  frozen when playback stops; interpolation is 5a's or 7a's.
+
+### Red first
+
+- Against a skeleton whose every command answered "unimplemented", all 73
+  tests then written failed (the API, the types, the fakes and the harness
+  were real; New loaded nothing).
+- Four came later: `TestAQueueSavedWithoutItsRunsReservationLoads` with the
+  fix it pins, and three because a control stayed green (below), when a
+  fourth such test, `TestMaintenanceDiscardsEarlierSessionsEvents`, was
+  strengthened in place. Each was green on the code and red on its
+  control.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against its test with a
+3–5 s watchdog, then restored from git and the tree checked clean.
+
+| Control | Mutation | Red |
+|---|---|---|
+| NC1 | a start ignores the reservation file's IDs | `TestIDsAndTokensSurviveRepeatedCrashes` ("crash 1: ID 4097 handed out again") |
+| NC2 | events applied without the session check | `TestALateEventFromAnOldSessionIsDiscarded` |
+| NC3 | the unconfirmed-release refusal removed | `TestAStopThatNeverAnswersLeavesTheReleaseUnconfirmed`, and the fake's violation |
+| NC4 | autoplay when the output returns | `TestTheOutputComingBackPlaysNothing` |
+| NC5 | the selection moved on Submitted | `TestAdvanceFollowsAudibleReportsNotHandOff` |
+| NC6 | each write on its own goroutine | `TestAnOlderWriteNeverLandsAfterANewerOne` (revision 1 landed last) |
+| NC7 | the next session opened without waiting for the acknowledgement | the fake's violations in `TestNoOpenOverlapsAnUnacknowledgedRelease` and `TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget` |
+| NC8 | the pass forgets each refusal | `TestRepeatWithAllUnplayableStopsAfterOneLap`: Play never answered |
+| NC9 | a removed entry heard after a failed cut plays on | `TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible` (the deleted entry became the selection) |
+| NC10 | a position moves the generation | `TestAnExpectedGenerationHoldsThroughSteadyPlayback` |
+| NC11 | the owner's admission check removed | `TestACommandCancelledBeforeAdmissionDoesNotRun` |
+| NC12 | exit without the lease | `TestOnlyTheLeaseEndsAHold` |
+| NC13 | the lease in a snapshot field | first in the reason, red at the reason's own check; then in another field, red at the walk |
+| NC14 | the start's token not past the saved reservation | `TestTokensAdvanceOnEveryChangeAndAtEveryStart`, `TestIDsAndTokensSurviveRepeatedCrashes` |
+| NC15 | values handed out past the durable reservation | first run: nothing, the next block's background write always lands first; then `TestACommandWaitsForAReservationThatHasNotLanded`, which holds that write |
+| NC16 | a start ignores the queue file's IDs | `TestLoadStartsPastTheReservationAndTheLargestID` |
+| NC17 | a failed write counted as written | `TestAFailingWriteStaysDirtyAndRetries` |
+| NC18 | mutations taken during shutdown | `TestAMutationDuringTheShutdownFlushIsRefused` |
+| NC19 | a bad file deleted | `TestEachKindOfBadFileIsMovedAside`, every kind |
+| NC20 | a failed rename does not stop the writes | `TestAFailedMoveAsideKeepsTheOriginal` at its edit check; NC20b, the writer alone left on, at its overwrite check |
+| NC21 | shutdown waits for every call | `TestShutdownJoinsWithinItsBound`: Run never returned |
+| NC22 | a read hands out the queue's metadata | first run did not build (an unused import: invalid, not a pass); with `slices.Clip`, `TestSnapshotsAreImmutable` |
+| NC23 | no Discard when the output changes | `TestAUnitChangeWhileStoppedDiscardsPreparedWork` |
+| NC24 | a report at the same generation applied | `TestAStaleOutputReportIsDiscarded` |
+| NC25 | no deadline for a pause's own release | `TestAPausesReleaseThatNeverComesIsUnconfirmed` |
+| NC26 | a refused resume taken as playing | `TestARefusedReopenStaysPausedWithTheReason` |
+| NC27 | a successor not yet submitted cut | `TestAnEditBeforeSubmissionReplacesTheSuccessor` |
+| NC28 | deleting another entry restarts playback | `TestAnUnrelatedEditLeavesTheSessionAlone` |
+| NC29 | Next while releasing ignored | `TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget` |
+| NC30 | the counters checked against the reservation | `TestAQueueSavedWithoutItsRunsReservationLoads` (the queue lost) |
+| NC31 | a late Start's success taken | `TestALateOpenIsClosedAndNeverWrittenTo` |
+| NC32 | maintenance entered without the generation check | `TestAStaleGenerationEnterIsRefused` |
+| NC33 | a releasing session's events applied | first run: nothing, the test sent them after the acknowledgement; then `TestMaintenanceDiscardsEarlierSessionsEvents`, which holds the release |
+| NC34 | exit resumes | `TestExitLeavesTheTransportStopped` |
+| NC35 | a hold never expires | `TestAnExpiredHoldEndsByItself` |
+| NC36 | a renewal does not extend | `TestRenewalKeepsAHold` (the holder cut off) |
+| NC37 | the same run ID every run | `TestAGenerationFromBeforeARestartIsRefused` |
+| NC38 | replies before the step's snapshot | first run: nothing, the window is microseconds; then `TestAReplyComesAfterItsSnapshot` |
+| NC39 | a delete keeps the token | `TestTokensAdvanceOnEveryChangeAndAtEveryStart` |
+| NC40 | no bound on the queue's metadata | `TestTheQueueIsFullByCountAndByMetadata` |
+| NC42 | no coalescing | first run: nothing, the Mac's fsync coalesced the burst; then `TestTheWriterCoalescesAndBoundsTheDirtyAge` |
+| NC43 | no maximum dirty age | `TestTheWriterCoalescesAndBoundsTheDirtyAge` |
+| NC44 | deleting the paused selection plays | `TestDeletingTheSelection` |
+| NC45 | no skip reason | `TestAnUnplayableEntryIsSkippedWithItsReason`, both cases |
+| NC46 | a fault taken as a skip | `TestAFailureAfterContentPlayedIsAFault` |
+| NC47 | the first insert selects nothing | `TestTheFirstInsertIntoAnEmptyQueueSelectsIt` |
+| NC48 | Play taken while the output is unknown | `TestTheOutputStartsUnknownAndRefusesPlay` |
+| NC49 | the position reset when the output goes | `TestTheOutputGoingAwayStopsAndFreezes`, all three cases |
+| NC50 | ReadList in queue order | `TestReadListAnswersInTheOrderAskedAndIsBounded` |
+| NC51 | a command blocks after shutdown | `TestAfterRunReturnsEveryCommandIsClosed`, once it waited under the watchdog |
+| NC52 | Next while stopped starts | `TestTheStateCommandTable`, the stopped/next cell |
+| NC53 | the successor walk retries this pass's refusals | `TestOnePlayableAmongUnplayablePlaysWithoutSpinning` |
+
+(There is no NC41.) Four controls found weak tests, each fixed in its own
+commit before the control ran again: NC15, NC33, NC38 and NC42. Two tests
+that could only fail by hanging (the lap and the closed engine) were moved
+under the watchdog first, so their controls fail rather than hang.
+
+The tests never sleep. The clock is a fake the test advances; a test waits
+on a signal the owner or a fake publishes (`Changed`, the owner's notes of
+what it applied and handled, the writer's report that it waits, the fake
+backend's and files' own), under a one-minute watchdog flag. A GOMAXPROCS 1
+run found one race, in the fake: its late-acknowledgement goroutine was
+added to its WaitGroup while the test's cleanup already waited on it.
+
+### For 4b2
+
+The seam is `Backend`'s doc; 4b2 implements it on the decoder and the sink.
+Two pieces the sink lacks: a cut at a boundary (drop the frames the store
+holds that have not reached the device, from an occurrence's first frame
+on, and say whether any of them had), and a reopen that checks the opened
+unit is the bound one (4a) before any sample flows, keeping the retained
+frames: `Sink`'s own reopen opens the saved card number with no identity
+hook. 4b2's owner gate must cover, on the GO bar: autonomous two-track
+playback with the selection moving at the boundary; a bounded Stop that
+closes the device (`/proc/asound/.../status` closed) within ReleaseTimeout;
+pause, the device released after PauseRelease, resume reopening the same
+unit; a busy resume (MPD holding the device) refused and left paused with
+the reason; an unplug while playing and while paused, stopped with the
+position frozen, and no autoplay on replug; an edit after hand-off cut in
+time (no frame of the removed entry heard) and one too late (playback stops
+at the boundary); maintenance entered while playing, the device released;
+and shutdown with the device busy in a kernel call, bounded.
+
+### Not in this change
+
+- The real backend, `bridge output play`, the serve wiring and its
+  listening gate (4b2); OpenHome SOAP, GENA and URI confinement (5a); seek
+  within an entry and shuffle (7a); the admin page (6a); DSD playback.
+- The rules text is not in `.claude/rules/output.md` yet: the owner applies
+  it from beside the branch.
+
+### Round 2
+
+The Claude API and Codex reviewed round 1 (#1309): ten findings, all
+real, one of them (10) a policy the coordinator decided. One more of
+finding 9's class turned up while testing finding 8. Each was fixed
+red-first, with a negative control on the committed tree (restored from
+git each time), more than one where a fix has layers. Round 1's rules
+text had been applied from beside the branch (6379b262) before this
+round; this round's went beside it again (`/tmp/b470-4b1-rules-r2.md`).
+
+What changed:
+
+- 983fe411, 74f8d6ca. **An edit marks the occurrences it unwants in its
+  own step** (1): an occurrence was marked unwanted only once its Cut
+  answered false, and nothing was issued while a call was under way, so an
+  Audible for a deleted successor that beat the call's answer selected an
+  entry outside the queue (the next start moved the whole queue file
+  aside), and a Cut that then answered true emptied the chain and panicked
+  the owner (`index out of range [-1]` in `reconcile`). `reconcile` marks
+  and clears per pair before it looks at the call; a false Cut sets `late`;
+  `onAudible` stops on an unwanted occurrence crossed on the way and never
+  selects an entry outside the queue; no Cut or Prepare answer empties the
+  chain. A dangling selection at load is cleared and logged, not a bad file.
+- 3574cbb7. **An acknowledged session is finished** (2): a release deadline
+  queued behind its acknowledgement made the finished session unconfirmed
+  for good, and set Stopped under a newer playing session. `sessAcked`, and
+  `releaseDeadline` ignores a session no longer registered.
+- dbf79495. **A reservation is made only once its directory entry is
+  fsynced** (3): `atomicwrite.WriteBytesDurable` fails on the directory
+  fsync `WriteBytes` tolerates (every other caller unchanged;
+  `SetSyncParentDirForTest` for other packages' tests), and the engine's
+  reservation writes through it.
+- d37e12c9. **A start publishes its token only under a durable reservation**
+  (4): 0, none, until an edit's reservation lands.
+- 418efabd, 69410d40. **A bad file with no name to move to stays** (5): a
+  name is taken on ErrNotExist only, the next tried only when Lstat says
+  the name exists; any other error, or 100 names taken, leaves the file
+  stuck.
+- 1d109d5e. **Caller slices are copied before the owner sees them** (6):
+  `do` clones the conditions, `InsertAfter` the metadata.
+- 37b062ad. **A call's context carries its deadline, and a late answer is
+  late whatever the order** (7): `callCtx` reports the deadline (the
+  engine's clock) and its timer ends the context; answers are stamped as
+  they return and `callDone` expires one at or past it first. A Release
+  keeps its own rule, its late acknowledgement taken.
+- 54d7006d, 0d22046d. **A Play that does not happen says why** (9, and its
+  sibling): a pending play an intent replaces, a starting session released
+  to stop, and a Play whose Resume is under way when its session is
+  released answer `ReasonSuperseded`, or the reason already recorded.
+- b3a93deb, 8416723b, a3f486f5. **Commands wait only behind their own
+  lane** (8): inserts, deletes and DeleteAll wait for a reservation write,
+  at most `reserveTimeout` (5 s), then are refused, as is every edit that
+  needs one until it lands; Play and Pause wait for a transport call, the
+  other transport commands behind them; Stop, output reports, maintenance
+  and the modes never wait. A Stop, or a report that stops playback,
+  answers the parked transport commands as it runs (a Pause nil, the rest
+  superseded or the report's reason), and EnterMaintenance refuses every
+  parked command.
+- 228792a1. **Next and Previous select and play in every state** (10), as
+  ohPipeline's SourcePlaylist does; refused while the output is unknown or
+  unavailable and on an empty queue, like PlayID.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestAnEntryHeardWhileItsCallIsUnderWayStops` (8 cases) | "b was heard with its call under way: selected 4098 (b is 4098), playing" |
+| 1 | `TestACutAnsweredAfterItsEntryWasHeardStops`, `TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain` | owner panic, `index out of range [-1]` |
+| 1 | `TestADanglingSelectionIsClearedAtLoad` | the queue moved aside, loaded empty |
+| 2 | `TestADeadlineQueuedBehindItsAcknowledgementChangesNothing` | unconfirmed session 1; after a Next, Stopped under the new session |
+| 3 | `TestAReservationIsMadeOnlyWithItsDirectoryEntry` | ID 16385 taken without a durable entry; token 16385 published again after the rollback |
+| 4 | `TestAStartWithoutItsReservationPublishesNoToken` | tokens [16385 16385] and [12289 12289] |
+| 5 | `TestABadFileWithNoNameToMoveToStays` | New did not return (5 s watchdog), both cases |
+| 6 | `TestACancelledInsertKeepsNoneOfTheCallersSlices` | DATA RACE; the caller's reused buffer stored; the insert ran at a generation never sent |
+| 7 | `TestALateAnswerIsRefusedWhateverTheOrder` | no deadline on the context; the late Start, Pause and Resume answered nil |
+| 9 | `TestAPlayReplacedBeforePlaybackSaysSo` (6 cases) | nil, with the transport stopped |
+| 8 | `TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt`, `TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite`, `TestAStopDuringASlowOpenIsTakenAtOnce`, `TestAnOutputReportOvertakesTheTransportCommandsWaiting` | the report, the enter and the Stop waited past the watchdog |
+| 10 | `TestTheStateCommandTable` (8 cells), `TestTheTableEdges` | the old cells; Next of an empty queue and with no output answered nil |
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | no mark while a call is under way | the two Prepare cases (no longer next); the Cut cases mark before the Cut |
+| 1 | the mark ignored in `onAudible` | every no-longer-next case and the crossing test; the deleted ones stay green behind the queue check, red once it goes too |
+| 1 | only the reported occurrence checked | `TestAnUnwantedOccurrenceCrossedUnreportedStops` |
+| 1 | a Cut of the heard occurrence truncates | `TestACutAnsweredAfterItsEntryWasHeardStops` (no stop) |
+| 1 | a Prepare's refusal truncates at 0 | green: `reconcile`'s empty-chain guard covers; red (panic) with both gone |
+| 1 | a dangling selection refused | `TestADanglingSelectionIsClearedAtLoad` |
+| 2 | `sessAcked` and the registration check | red with both gone; each alone green, the other covering |
+| 3 | `WriteBytes` for the reservation; the strict barrier tolerated; the fallback unsynced | the engine test; and atomicwrite's strict tests |
+| 4 | the token taken without `needs` | both cases |
+| 5 | Lstat errors counted as taken; no name bound | the failing-Lstat case (once the test counted its asks: the bound alone also ends it); the taken-names case |
+| 6 | the metadata, or the conditions, not copied | each case |
+| 7 | lateness unchecked; no deadline on the context | all three cases |
+| 9 | `setIntent`, `releaseSession` of a starting session, a resuming Play: not superseded | the matching cases |
+| 8 | one queue stopping at its first blocked command; laneless commands parked; Stop or the report not superseding; maintenance not refusing; no bound; no refusal while overdue | each its test (parking laneless commands alone is green: `drainParked` runs them in the same step) |
+| 10 | Next and Previous only select while stopped | the stopped cells and both edges |
+
+Two controls found weak tests, each fixed before the control ran again:
+the bound on aside names also stopped the failing Lstat (5), and no test
+parked two lanes at once (8). The first red run hung below the watchdog:
+the test called the fake's `count` inside `waitFor`'s condition, which
+holds the fake's mutex (`countLocked` now).
+
+Not taken: a refusal of the pass reset's cut. Any queue change resets the
+pass, so an entry skipped as unplayable is offered again and a submitted
+successor past it is cut; if the cut is late, the successor's audible
+report stops playback (`removed_entry_audible`) on an edit that had
+nothing to do with it. Round 1 behaves so; round 2's mark only adds the
+Audible that beats the Cut's answer. Reported for the next round.
+
+A stress run at GOMAXPROCS 1, 2 and 4 found a flake round 1 already had:
+`TestAPausesReleaseThatNeverComesIsUnconfirmed` moved the clock past the
+deadline of a Prepare whose answer could still be on its way, and the
+answer that lost expired and released the paused session (5 failures in
+300 runs on round 1's code, 2 on round 2's). It, and the new late-answer
+test, wait for the owner to take that answer first (be003a08): 0 in 300.
+Every other test that moves the clock does so with no live session, or
+one already releasing.
+
+The suite: 94 tests, about 13 s a run under `-race`; ten runs in a row
+green, and twice each at GOMAXPROCS 1, 2 and 4.
+
+### Round 3
+
+The Claude API and Codex reviewed round 2 (#1309): ten findings, all
+real. Finding 4 was a policy the coordinator decided; finding 10, a test
+that passed with round 2's fix reverted, needed a behaviour change before
+the assertion it asked for could hold. One more of finding 7's class
+turned up in review. Each was fixed red-first, with a negative control on
+the committed tree, restored from git each time. Round 2's rules text had
+been applied from beside the branch (38d03bf1); this round's went beside
+it again (`/tmp/b470-4b1-rules-r3.md`).
+
+What changed:
+
+- 32e078c9. **The strict writer refuses a platform with no directory
+  barrier** (1, Codex): Windows' `fsutil.SyncParentDir` is a no-op that
+  answers nil, so `WriteBytesDurable` counted a write durable with no
+  barrier at all. The barrier seam is nil where the platform has none
+  (`fsutil.SyncsParentDir`), and the strict writer refuses there with
+  `ErrNoDirectoryBarrier`, an `errors.ErrUnsupported`, before it stages
+  anything; `WriteBytes` and the renames are unchanged. The engine's fake
+  reservation writer now writes through `WriteBytes`, which every platform
+  takes, and the two durability tests install their own barrier, so the
+  suite still runs on windows-latest. `SyncParentDir`'s doc said a missing
+  parent "is treated as success"; the open fails, and has since #395
+  (corrected, and again in ba44902d).
+- 93677c2f. **The directories the strict writer creates are durable** (2,
+  Codex): the parent of each is synced, the deepest first, before the file
+  is written. Taken over requiring the directory to exist, which would only
+  move the same creation and barrier into the engine.
+- 53531acb. **A winner's equal bytes are made durable by the strict writer
+  itself** (3, Codex): after a failed rename it reads the destination
+  through one open, fsyncs it there, then the directory. Taken over refusing
+  the fallback, which would fail a write another writer already made.
+- e64b0a1d. **New probes the barrier** (4, the Claude API, the
+  coordinator's decision): `atomicwrite.ProbeDurable` runs it on the
+  reservation file's directory, or the nearest one above that exists, and
+  writes nothing; New then fails, naming the directory and saying the data
+  directory must move to a filesystem that can sync a directory.
+- 8c212b5c. **A call's context says `context.DeadlineExceeded` at its
+  deadline** (8, the Claude API): `callCtx.Err`, when the cause is the
+  deadline. The late-answer test now runs both orders it is named for.
+- 72a5fb3d. **A late release acknowledgement takes the deadline's policy
+  first** (6, Codex): acknowledgements are stamped on the engine's clock
+  (the answer as it returns, `Events.Released` as the backend calls it),
+  and one at or past the deadline runs `releaseDeadline` first, so the
+  intent it drops never runs and the acknowledgement only clears it.
+- d8a6d22d, 810946ef. **A play command's answer is its own** (7, Codex):
+  the shared `settleErr`, which every later Play, start and release to
+  play cleared, is gone; each waiter keeps the first reason its playback
+  did not happen. The class, not the instance: a refused Start's reason was
+  erased the same way, and maintenance answered an already superseded Play
+  "maintenance" (810946ef, found in review).
+- 03e8419c. **A waiting command a Stop overtakes answers
+  `ReasonOvertaken`** (9, the Claude API): a distinct reason, of the three
+  offered. Applying its selection would run it half way, its IfGeneration
+  never checked; a narrower doc would leave a client unable to tell whether
+  the selection moved.
+- 7167433b, 1e732b75. **A hand-off made past a skipped entry keeps the
+  skip** (5, Codex; round 2's "not taken"): each occurrence keeps the
+  entries its hand-off passed over, and reconcile walks past them too, so
+  an edit that puts nothing between it and the occurrence before it neither
+  cuts nor stops it. An entry put between them still cuts (pinned).
+- 25beadb6. **A Prepare refused after its successor was heard is stale**
+  (10, the Claude API). The test was to count the Prepare named after b's
+  occurrence, but the refusal set `noMore` with the fix in place too, so
+  none was ever named, fix or no fix. Unless it is `ErrSessionEnding` the
+  engine now keeps what was heard and names its successor; with `i >= 0`
+  the chain empties and the test fails at that Prepare.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier` | nil with no barrier (the seam's nil first taken as the old no-op) |
+| 2 | `TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable` | only the file's directory synced |
+| 3 | `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier` | the destination never synced; one that cannot be synced answered nil |
+| 4 | `TestNewRefusesADirectoryThatCannotBeSynced` | New built an engine |
+| 8 | `TestALateAnswerIsRefusedWhateverTheOrder`, 6 cases | Err `context canceled`, its cause the deadline |
+| 6 | the same, Release and `Events.Released`, answer first | the late acknowledgement ran the Next's play |
+| 7 | `TestAPlaysAnswerIsItsOwn` | nil for the replaced Play and for the refused start; maintenance for the superseded Play |
+| 9 | `TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem` | superseded, for commands that never ran |
+| 5 | `TestAnUnrelatedEditLeavesTheSessionAlone`, 2 new cases | the append cut c; c heard with a Prepare out stopped playback |
+| 10 | `TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain` | no Prepare after b's occurrence |
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | a missing barrier taken as success | the platform-seam test |
+| 2 | the created directories' barrier skipped | the missing-parent test |
+| 3 | the destination's fsync dropped | three of the race-winner cases |
+| 4 | New's probe disabled; the probe's walk to the nearest existing directory disabled | the engine test; `TestProbeDurable` |
+| 8 | the Err override removed | all six cases |
+| 6 | deadline-first disabled; `Events.Released` unstamped | both answer-first release cases; its own case |
+| 7 | a reason kept only while nothing plays; a pending Play clearing them; a Resume's ignored; maintenance's ignored | both cases; both; the resuming play stopped by the output, and `TestAnOutputReportOvertakesTheTransportCommandsWaiting`; the maintenance case |
+| 9 | a Stop answering superseded; a parked PlayID's selection applied | both tests; the selection check |
+| 5 | reconcile without the hand-off's skips; a hand-off with skips never unwanted | both new cases; the boundary case |
+| 10 | `i >= 0`; the stale branch disabled | the test, at the Prepare after b |
+
+With the platform seam forced to no barrier for the whole package (not
+committed), the engine's 97 tests passed, and only the atomicwrite test
+that asserts the real platform by GOOS failed, as it must off Windows;
+`GOOS=windows go vet` and `go test -c` built both packages.
+
+Not changed, for the owner: when a release's deadline drops a pending play
+or pause, the transport stops and `Snapshot.LastStop` keeps the stop before
+it, since no stop reason names an unconfirmed release (a new one would be a
+design call); a paused session's `DeviceReleased` against its overdue timer
+is order-dependent too, but drops no intent, and both orders end the same;
+and `.claude/rules/config-lifecycle.md`, which loads with
+`internal/atomicwrite`, has no line on `WriteBytesDurable` or
+`ProbeDurable`, while output.md is at 99.5% of its budget after this
+round's text.
+
+The suite: 97 tests, about 13 s a run under `-race`; ten runs in a row
+green, and three each at GOMAXPROCS 1, 2 and 4; `make fmt vet test`,
+`make build-all` and `make docs-check` clean.
+
+### Round 4
+
+The Claude API and Codex reviewed round 3: four findings, all real, each
+fixed red-first with a negative control on the committed tree, restored
+from git. Round 3's rules text was applied from beside the branch
+(5ba2c4b4), and main's #1310, merged in 3bd98c1a, moved the player's
+sections to `.claude/rules/player.md`; this round's text went beside the
+branch again (`/tmp/b470-4b1-rules-r4.md`, against `player.md`).
+
+- d6633afd. **A strict write removes a directory it created whose entry
+  it could not make durable** (1, both): the next write found the
+  directory, synced only the file's entry and answered nil. Removing what
+  the call created, deepest first, on any failure after MkdirAll was taken
+  over barriering every directory entry on every write, which from the
+  file's directory alone misses a failed entry two levels up. Red: "the
+  next write ran the barrier for [root/a/reserved.json]: never for a's
+  entry in the root".
+- 196af21c. **The probe refuses what is not a directory** (2, Codex): the
+  barrier fsyncs whatever is there and answered nil for a regular file, so
+  New started an engine whose reservation could never be written. A
+  regular file is a PathError wrapping `syscall.ENOTDIR`, and New says the
+  directory is not one. Red: the probe and New both answered nil.
+- 59b44524. **A context derived from a call's context ends with DeadlineExceeded
+  too** (3, both): callCtx's Done was its base's, so `WithCancel` and
+  errgroup's `WithCancelCause` attached children to the base, which ended
+  them `Canceled`. callCtx now has a Done of its own, closed through
+  `context.AfterFunc`, on either clock: `WithDeadlineCause` on the real
+  clock was not taken, since the engine's own deadline handling would race
+  its timer, whichever ended the call first deciding the error, and the
+  tests, on the fake clock, would not run the production path. Red: both
+  derived contexts "context canceled" in all ten cases.
+- 996ba929. **Deleting the entry a waiting play command is to play
+  supersedes it** (4, Codex): with an entry after it the selection moved
+  on silently, and a PlayID behind a held release, or with its session
+  starting, answered nil once the next entry played. It now answers
+  `ReasonSuperseded`, and the next entry still plays. Red: nil in both.
+
+Controls, each red: the removal disabled; the probe's directory check
+disabled (both tests); `callCtx.Done` handing out the base's channel; the
+supersession call removed.
+
+The suite: 98 tests, about 14 s a run under `-race`; ten runs in a row
+green; `make fmt vet test`, `make build-all` and `make docs-check` clean.
+
+### Round 5
+
+Codex and the Claude API reviewed round 4 (#1309); Argon found nothing.
+Four findings, all real, each fixed red-first with negative controls on the
+committed tree, restored from git each time. Round 4's rules text was
+applied from beside the branch (4b3a4d79), and main's B470 PR 4a was merged
+in (00e1c9ba), which put 4a's "Player output binding" section ahead of this
+PR's in `player.md`. This round's text went beside the branch in two notes:
+`/tmp/b470-4b1-rules-r5.md` for `player.md`, and
+`/tmp/b470-4b1-rules-r5-config.md`, a new bullet on the strict writer for
+`.claude/rules/config-lifecycle.md`, which governs `internal/atomicwrite`
+and named neither `WriteBytesDurable` nor `ProbeDurable` (the owner's
+decision on round 4's gate).
+
+What changed:
+
+- c68f28ec. **A strict write removes nothing; the process keeps each
+  directory whose entry it could not sync** (1; Codex P1 twice, the Claude
+  API Low). Round 4's cleanup removed what `missing` had seen before
+  `MkdirAll`. On a barrier failure it so removed a directory another writer
+  made between the two, whose `CreateTemp` then failed; deleted a regular
+  file another writer put at the path, contents and all; and, where another
+  writer had filled a directory this write made, could not remove it
+  (ENOTEMPTY, unrecorded), so the next strict write took it as found and
+  skipped its barrier: round 3's defect again. Now `unconfirmed`, a
+  process-local set under a mutex, holds every directory a strict write
+  found missing until a barrier on it succeeds: every strict write runs the
+  barrier of each member on its path before it reports success, and drops a
+  member only when that barrier succeeds. Strict writes find, create and
+  confirm their directories one at a time under the set's lock, so a member
+  joins before its directory is created and leaves only by a barrier that
+  ran after it was; the lock is held across the barriers' I/O, which a
+  writer whose one caller makes one write at a time can afford. Taken over
+  a barrier on every ancestor up to a root on every write, which would need
+  no set: that syncs directories outside the caller's tree, which the
+  process may not be able to open (a parent searchable and not readable) or
+  whose filesystem cannot sync a directory, and so refuses writes that are
+  durable; a root to stop at would change the writer's API and need the
+  engine to be told its data directory. Process-local is enough across a
+  crash: a directory still present after one has a durable entry, and one
+  that is gone is created again, its barrier with it. Not closed, for the
+  owner: a process that exits cleanly while a member is unconfirmed leaves
+  the next process to take that directory as found, as it takes every
+  directory that was there already. That needs a barrier failure, a clean
+  exit before any later strict write succeeded, and a crash before the
+  filesystem committed the creation; and the engine creates no directory at
+  all where 4b2 puts its files in the data directory, which `bridge init`
+  makes.
+- b293b160. **New advises moving the data directory only for a barrier
+  that ran and failed** (4; the Claude API Low). Every probe error but
+  ENOTDIR and a missing barrier, a Stat's EACCES or EIO among them, got
+  "move the data directory to a filesystem that can sync a directory",
+  where nothing had failed to sync. `atomicwrite.ErrBarrierFailed` now
+  marks every barrier failure the strict writer and the probe return
+  (`barrierError`, which reads as the barrier's own error and wraps it), and
+  New gives the advice for it alone; any other error says the directory
+  cannot be read, with the error. The class: the barrier opens the
+  directory before it syncs it, so a directory that can be stat'ed and not
+  read (searchable, not readable) failed at the barrier's open and would
+  have been marked, and advised, as well. The probe now opens the directory
+  itself first, and that error is the open's, unmarked. The package doc's
+  line on the created directory's retry (finding 1) went in here too.
+- 6e3d9dbe, 92b52b2f. **A play command whose session was heard answers
+  nil** (2; Codex P2). `onAudible` cleared `starting` while the session
+  stayed starting until Start answered, so a Play still waited, and deleting
+  its entry, audible by then, answered it ReasonSuperseded although it had
+  played. The class, not the instance: a Stop, the output going away, a
+  fault and maintenance in that window answered it with their own reasons
+  too. Each waiting play command now keeps the first outcome recorded for
+  its playback, whichever of `playBegan` (the session's first Audible) and
+  `playFailed` (a reason) comes first, and the settle and maintenance read
+  it; a reason recorded before the session was heard still stands. Not
+  extended to a Play whose Resume is under way: an Audible while a session
+  is paused can be what a pause by zeros still plays out of the hardware
+  buffer, no evidence that the resume played, so that Play keeps the
+  Resume's answer. Not changed: shutdown still answers every waiting
+  command ReasonClosed.
+- 7037a75a. **Deleting the entry a waiting play command is to play, with
+  nothing after it, supersedes it too** (3; the Claude API Low; the
+  coordinator's recommendation, taken). The code already did, through
+  `selectionDeleted`'s own call and again through the stop that follows,
+  and no doc or test said so. ReasonSuperseded in both cases: the entry was
+  deleted before it played, and the first reason recorded is the
+  deletion's, which the stop after it does not replace. Pinned behind a held
+  release and with the session starting, the answer required to name the
+  deletion; `doc.go`, the code's docs and the rules note say so.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated` | write 2 answered nil, its barrier asked for the file's entry alone: never for a's, whose barrier had failed while another writer filled a |
+| 1 | `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`, both cases | the directory the other writer made, gone; the file it put at the path, deleted |
+| 4 | `TestBarrierFailuresAreMarked` | no barrier failure marked: the probe's, the write's entry's, a created directory's |
+| 4 | `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` | a directory searchable and not readable probed as nil |
+| 4 | `TestNewSaysWhenTheReservationDirectoryCannotBeRead`, EACCES and EIO | "move the data directory to a filesystem that can sync a directory" |
+| 2 | `TestAPlayWhosePlaybackBeganAnswersAsPlayed`, six cases | superseded (the deletion, with an entry after it and without, and the stop), output_unavailable, fault, maintenance |
+
+Finding 1's red run had `beforeMkdirAll`, the seam the test acts through in
+the window, added to round 4's code and nothing else; finding 4's had
+`ErrBarrierFailed` declared and marking nothing. The last case of
+`TestAPlayWhosePlaybackBeganAnswersAsPlayed`, a reason recorded before the
+session was heard, passed before the fix: it guards the fix (its control is
+below). Finding 3's tests pin what the code already did, so they passed
+from the start, and their controls are what shows they can fail.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | the set cleared at every write | the retry test, at write 2 |
+| 1 | a member dropped though its barrier failed | the retry test, at write 2 |
+| 1 | a member never dropped | the retry test: the write after a's barrier succeeded ran it again |
+| 1 | the directories found missing removed again on a failure | both cases of the removes-nothing test (the retry test stays green: the other writer's file keeps the directory, and the set its entry) |
+| 4 | a barrier failure not marked | `TestBarrierFailuresAreMarked`, all three; `TestNewRefusesADirectoryThatCannotBeSynced` (New said "cannot be read") |
+| 4 | the probe's own open removed | the unreadable-directory test, at the directory it can stat and not open |
+| 4 | New advises moving for every error | the cannot-be-read test, both errors |
+| 2 | `onAudible` without `playBegan` | all six cases |
+| 2 | `playFailed` records over an outcome already decided | five of the six (maintenance answers before `playFailed` runs; the row after next covers it), and round 3's refused-start case of `TestAPlaysAnswerIsItsOwn` |
+| 2 | the settle's backstop applied to a decided command | the four that end stopped |
+| 2 | maintenance refuses a command whose playback began | the maintenance case |
+| 2 | `playBegan` clears a reason recorded before | the guard case |
+| 3 | the deletion supersedes only when an entry follows | the starting form, at the answer's text: the stop's, not the deletion's (the held-release form stays green: there the deletion supersedes through `setIntent`, with the same text) |
+| 3 | no stop intent for a pending play whose entry, the last, was deleted | the held-release form: the first entry played |
+
+One control found a weak design, fixed before the controls ran again:
+finding 2's first version kept `played` beside `err`, and with
+`playFailed`'s played check removed the test stayed green, the readers' own
+check masking it. 92b52b2f made the outcome one flag, `decided`, set by
+whichever outcome comes first, so that check is the first-outcome rule
+itself and `playBegan` needs none.
+
+The suite: 100 tests in the engine, about 15 s a run under `-race`, and
+25 in `internal/atomicwrite`; ten runs in a row of each green
+(`-race -count=10`: 150.8 s and 56.9 s); `make fmt vet test` (72 packages
+ok), `make build-all` and `make docs-check` clean; `go vet` of both
+packages for windows/amd64, linux/amd64 and linux/arm64 clean. Both notes
+applied to a checkout copy of HEAD, `check-doc-budgets` ok after each:
+`player.md` 73,145 bytes and `config-lifecycle.md` 46,614, of 100,000
+each.
+
+Not changed, for the owner: finding 1's clean exit with a member
+unconfirmed (above); shutdown's ReasonClosed for a play command whose
+session was heard; and a Play whose Resume is under way, which keeps the
+Resume's answer.
+
+### Round 6
+
+Codex, the Claude API and Argon reviewed round 5 (#1309); Argon found
+nothing. Round 5's two rules notes were applied from beside the branch
+(0183b59b for `player.md`, cae43e68 for `config-lifecycle.md`); this
+round's went beside it again, `/tmp/b470-4b1-rules-r6.md` for `player.md`
+and `/tmp/b470-4b1-rules-r6-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. Each fix went red first, with negative controls on
+the committed tree, restored from git each time.
+
+What changed:
+
+- 24d9b857, 4f4ff044. **The strict writer syncs every entry up to a
+  durable root on every write, and keeps nothing between writes** (1;
+  Codex P1, with P2 and P3). Round 5's process-local set did not survive a
+  restart: a directory whose barrier failed stays in the kernel's cache, a
+  SIGKILL or a clean exit drops the set, and the next process took the
+  directory as found and could report a reservation durable that a power
+  loss would then drop, and an ID or token be handed out again. Round 5's
+  brief said a directory still present after a crash has a durable entry,
+  which holds for a machine crash and not for a process restart (the
+  coordinator's correction); and `ProbeDurable` syncs a directory's
+  contents, never its entry in its parent. `WriteBytesDurable(root, path)`
+  now walks from the file's directory up to `root`, along the path as
+  written (each symbolic link's own entry) and as it resolves (a linked
+  directory's entry in its real parent), each directory once, and syncs
+  every one, `root` included, `root`'s own entry never. It refuses, before
+  anything is created, a root that does not exist, a path not below `root`
+  as written, so a path or a root spelled through a link to the other is
+  refused rather than walked, and a link below `root` that leads out
+  (`ErrNotUnderRoot`). The cost is a directory fsync per level per
+  reservation write, one write per 4,096 values. With no state, the
+  symlinked alias the set's keys missed (P2) and the set's growth across
+  tests (P3) went with it. The root is a parameter, not a writer value the
+  engine holds: the engine keeps it in `Config.DataDir`, now required, and
+  passes it to every write and to the probe; a value would add a
+  constructor and a resolved root to keep current. **The root's own
+  requirement**: it must exist, and nothing syncs its entry; `bridge init`
+  creates the data directory, and serve creates it where it is missing
+  (`lockServeDataDir`), neither syncing it. The invariant does not rest on
+  that: the data directory holds `player-uuid`, so a crash that takes it
+  takes the player's identity with it, and the player that comes back is a
+  new device to every controller. 4b2 must pass the directory that holds
+  `player-uuid`. In 4f4ff044 the walk up from the path as written, which
+  ended only because `underRoot` had checked the path lexically, stops at
+  the top of the filesystem and refuses (a control that removed both looped
+  until its 30 s timeout), and `underRoot`'s Stat of the root went: it was
+  the second of two checks, `nearest` stopping at the root with Stat's own
+  error, and no control could see it.
+- 37a39401. **The strict writer and its probe open each directory once and
+  fsync that descriptor; only an fsync's failure is `ErrBarrierFailed`**
+  (2; Codex P3). The probe opened the directory, closed it, and let
+  `fsutil.SyncParentDir` open it again, so an EACCES, EIO or EMFILE from
+  that second open was marked as the filesystem refusing to sync; the
+  strict writer's barriers marked their own open's failure the same way.
+  `syncDirAt` opens once and fsyncs through the `syncDir` seam, nil where
+  the platform has no barrier. `WriteBytes` and the renames keep
+  `syncParentDir` and `commitDirEntry` unchanged. `SetSyncDirForTest`
+  replaces `SetSyncParentDirForTest`, whose only users were the engine's
+  tests.
+- 6616e09c. **Finding 3 (the Claude API, Medium) does not reproduce, and
+  is pinned.** `playBegan` decides every waiting play command, but only an
+  Audible from the current session reaches it: `onAudible` begins with
+  `current`, which drops a session released (`releaseSession` marks it in
+  the step that asks), its release unconfirmed (`releaseDeadline` clears
+  `o.sess`), finished, or replaced. And play commands wait only while a
+  session starts or releases (`settleWaiters` answers them all once neither
+  is under way), so every one `playBegan` decides is waiting for the
+  session heard. The three scenarios: the releasing session's successor
+  heard is dropped; a PlayID that replaced a Play whose Start is held
+  releases session 1 in its own step, so session 1's Audible after it is
+  dropped, and one before it decides the Play alone, whose session it is; a
+  pause by zeros playing out finds no play command waiting while its
+  session is live, and a resuming Play is the Resume's waiter, which
+  `playBegan` passes over. The two tests the brief named pass as the code
+  stands and are kept as pins, with `playBegan`'s doc saying why. The
+  waiter-to-session tie the brief proposed was not added: it could never
+  decide otherwise than `current` does, and no control could see it.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 2 | `TestProbeDurable_SyncsTheDirectoryItOpened` | the probe answered a second open's EMFILE, marked as a sync failure |
+| 2 | `TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure` | the barrier's own open, EACCES, marked `ErrBarrierFailed` |
+| 1 | `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft` | a fresh writer synced the file's entry alone, none of those an earlier run left |
+| 1 | `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated` | the write after a's barrier succeeded synced the file's entry alone |
+| 1 | `TestWriteBytesDurable_RetriesThroughASymlinkedAlias` | the retry through the alias never synced b, x or the root |
+| 1 | `TestWriteBytesDurable_NeverSyncsAboveTheRoot` | a missing root created and its parent synced; a path outside the root written; a link out of it followed |
+| 1 | `TestProbeDurable` | the probe synced the leaf alone, not the chain up to the root |
+
+Finding 2's red runs had the `syncDir` seam declared and unused. Finding
+1's had `WriteBytesDurable(root, …)` and `ProbeDurable(root, …)` shimmed
+onto round 5's logic, the root ignored, and `ErrNotUnderRoot` declared.
+Finding 3's pins passed from the start; their control is below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 3 | `onAudible` takes an Audible from any registered session | both pins: the PlayID answered nil; the selection moved back to the released session's entry |
+| 2 | the probe syncs through a second open again | the probe's tests and `TestBarrierFailuresAreMarked` |
+| 2 | `syncDirAt` marks an open that failed | both unreadable-directory tests |
+| 1 | no entry synced between the file's directory and the root | five tests |
+| 1 | the walk as the path resolves dropped | the alias test, at b |
+| 1 | the walk as the path is written dropped | the alias test, at x, and every test that names the directories synced |
+| 1 | the root's parent synced too | every test that lists the directories synced |
+| 1 | `underRoot`'s check of the path as written disabled | both mixed spellings: root/new created before the refusal |
+| 1 | and the walk's stop at the top of the filesystem removed | a hang, ended by the 30 s timeout |
+| 1 | `nearest`'s check of the resolved path disabled | the link out of the root: out/new created |
+| 1 | New's check that the data directory exists made a no-op | the missing data directory said "cannot be read", not "must exist" |
+| 1 | New's case for a reservation file outside the data directory dropped | both outside cases said "cannot be read" |
+
+The first try at the New control deleted the case, which left a variable
+unused, so the build failed; it was rerun with a mutation that builds
+before its result was counted.
+
+The suite: 102 tests in the engine and 30 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (137.5 s and 58.4 s, no skips);
+`make fmt vet test` (72 packages ok, cmd/bridge 545 s), `make build-all`
+and `make docs-check` clean, all through the build lock; `go vet` of both
+packages for windows/amd64, linux/amd64 and linux/arm64 clean. Both notes
+applied to a checkout copy of HEAD, `check-doc-budgets` ok after each:
+`player.md` 73,803 bytes and `config-lifecycle.md` 47,042, of 100,000
+each; every test name they cite is defined.
+
+Not changed, for the owner: 4b2 must pass the data directory that holds
+`player-uuid` as `Config.DataDir`, with the reservation file below it as
+written; a link reached only through another link is on neither walk, so its
+entry is the caller's, like the root's; shutdown's ReasonClosed and a
+resuming Play's own answer, as in round 5.
+
+### Round 7
+
+Codex, the Claude API and Argon reviewed round 6 (#1309). A new session
+took the round, round 6's worker having retired. Round 6's two rules notes
+were applied from beside the branch (8054995b for `player.md`, a15bd337 for
+`config-lifecycle.md`); this round's went beside it again,
+`/tmp/b470-4b1-rules-r7.md` for `player.md` and
+`/tmp/b470-4b1-rules-r7-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. Each finding was verified against the code, then
+fixed red first, with negative controls on the committed tree, restored
+from git each time.
+
+What changed:
+
+- 814320ea, 6e2335ad. **The strict writer refuses a path that does not lie
+  plainly below its root, and walks up from the file once** (A; Codex 3 P1,
+  the Claude API 2 Low, Argon P2: one family of holes in round 6's two
+  walks). A `..` element was cleaned lexically by `filepath.Abs`, so
+  `root/link/../ids`, with `link` a link to `root/real/sub`, was written and
+  fsynced as `root/ids` while a reader opens `root/real/ids`: a restart read
+  no reservation and handed its IDs and tokens out again, with no crash at
+  all. A link reached through another link (`root/a/l1` to `root/b/l2` to
+  `root/c/d`) left `root/b`, which holds `l2`'s entry, on neither walk; a
+  link out and back (`root/l` to `/out/m`, whose `y` leads to `root/c`)
+  passed the containment check, made only of the final directory, and had
+  the writer fsync `/out/m`, outside the root; and a bind mount below the
+  root kept its source's entries off both walks. Each answered nil. The
+  owner's choice, the Claude API's second option: simplify rather than walk
+  links. `checkPath` refuses a `..` element in the root or the path and a
+  path not below the root as written, and resolves the root once: every path
+  the write opens, creates and fsyncs is spelled from where it resolved, so
+  a link at or above the root, a data directory that is a link included,
+  stays the caller's. `plain` refuses, by `Lstat` from the root down, a
+  symbolic link strictly below the root, wherever it leads, and a directory
+  on another filesystem (its `st_dev` not the root's), before anything is
+  created and again once the missing directories are, for a link another
+  writer puts in place meanwhile (6e2335ad pins that second check, which no
+  test reached). `ProbeDurable` also refuses, on Linux, a mount point the
+  kernel lists strictly below the root: a bind mount of the root's own
+  filesystem shows the root's device, so only `/proc/self/mountinfo` names
+  it. The probe reads it once, at New, as the brief set it, and only when a
+  directory lies between the file and the root, and a table it cannot read
+  is `ErrMountsUnknown`, which New names as the mount table, never as a
+  directory. Then one walk from the file's directory up to the root reaches
+  every entry. Elsewhere no table is read: macOS and the BSDs refuse a mount
+  of another filesystem by its device, and do not see one that shows none of
+  its own (FreeBSD's nullfs); the player runs on Linux alone. Windows
+  refuses before it looks at a path (no barrier), and its `FileInfo`
+  carries no device, so a test that sets a barrier there compares none
+  (`devicesKnown`). **What it costs the real layouts: nothing.**
+  `config.ResolvePath` cleans every configured path, so a `..` never reaches
+  the writer from a config, and 4b2 builds the engine's paths with
+  `filepath.Join`; the data directory defaults to `<configDir>/data`, and
+  the Docker image's is `/data/data`, below the `/data` volume, a mount
+  point above the root, which is allowed, as is `BRIDGE_DATA_DIR=/data`, the
+  mount point as the root; a data directory that is a link is taken
+  (`TestADataDirectoryThatIsALinkIsTaken`, through the real writer and a
+  restart). Not taken: walking links and closing each hole by a rule of its
+  own, round 6's shape, which needed a rule per link shape and still missed
+  two. `TestWriteBytesDurable_RetriesThroughASymlinkedAlias` keeps its name,
+  which the rules cite, and now pins the retry through the alias refused.
+- 94995786, 22a0930f. **A play command is decided by the session started
+  for it, and a command that replaces that session before it is heard
+  supersedes it** (B; Codex P2). Round 6's disposition of its finding 3 did
+  not hold. Session 1's Start held, its Play replaced by a PlayID, session 2
+  started for the PlayID: the Play stayed waiting with no outcome, since a
+  release to play supersedes nothing, and session 2 decided it, its Audible
+  before its Start returned, or its Start's success at the settle, so the
+  Play answered nil although its own session was never heard. Round 6's
+  pin made session 2 fail and accepted any error from the Play, which masked
+  this. Each play waiter now records the session started for it
+  (`waiter.sess`, set in `startSession`; 0 while it waits behind a release
+  or a pending intent); `playBegan(s)` decides only `s`'s waiters; the
+  settle answers one nil only while its session plays; and a Next, Previous,
+  PlayID or PlayIndex that releases a session to play its own target
+  answers that session's undecided waiters `ReasonSuperseded`, naming itself
+  (`replaced`). The same class, found by the pattern: a Play whose Resume
+  was under way when such a command came was answered nil at the release,
+  and now answers `ReasonSuperseded` too (`releaseSession` answers what
+  `replaced` recorded, whatever the intent). The engine's own move past an
+  entry refused at its start carries the waiters on to the next session
+  (`carry`); 22a0930f removed the carry 94995786 had also put in
+  `onFinished`'s release to play on, which needs its session live, by when
+  the settle has answered every waiter: no control could see it. The
+  commands that waited behind a release or set the pending intent share the
+  session that follows, the latest intent's, as the brief set it
+  (`TestNextThreeTimesWhileReleasingRunsOnceForTheLastTarget`: three Nexts,
+  all nil). Round 6's pin with the second session refused now requires the
+  Play's `ReasonSuperseded`.
+- 9187d288. **New names the directory the probe refused** (C; Argon P3).
+  When the barrier failed on a directory above the reservation file's, the
+  refusal blamed the reservation file's own directory, which had synced;
+  so it did for a directory above it that could not be read, or was a file.
+  `notDurable` now names the directory the probe's `*fs.PathError` names,
+  and the reservation file's directory only when the error names none. The
+  strict barrier's failure is an `*fs.PathError` naming the directory it
+  fsynced, as `(*os.File).Sync`'s is, whatever barrier a test sets
+  (`syncDirAt`), and `ErrBarrierFailed`'s doc says so.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| B | `TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded`, three cases | the Play answered nil: the PlayID's session heard before its Start returned (Codex's sequence), and started and not yet heard (the settle); a resuming Play a Next replaced, nil |
+| C | `TestNewNamesTheDirectoryTheProbeRefused`, four cases | the reservation file's own directory named for a barrier that failed above it, for a directory above it that could not be read, and for one that is a file; the fourth, an error that names none, red at the wording alone |
+| C | `TestBarrierFailuresAreMarked` | no `*fs.PathError` naming the directory, all three, the barrier answering a bare error |
+| A | `TestWriteBytesDurable_RefusesADotDotElement` | `root/link/../ids` written and fsynced as `root/ids`, nil; the same with no link, and with a `..` in the root; the probe nil |
+| A | `TestWriteBytesDurable_RefusesALinkBelowTheRoot` | nil for a link to a directory below the root, with a directory to make below it too, a link to a link (`root/c/d/ids` written) and a link out and back (`root/l`, that is `/out/m`, fsynced) |
+| A | `TestWriteBytesDurable_RetriesThroughASymlinkedAlias`, as rewritten | the retry through the alias answered nil |
+| A | `TestWriteBytesDurable_RefusesAMountBelowTheRoot` | the write tried to make a directory in `/dev` (EPERM), and the probe fsynced `/dev` and `/` and answered nil |
+| A | `TestProbeDurable_RefusesAMountPointTheKernelLists` | a listed mount point probed nil, and so did a table that could not be read |
+| A | `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot` | the same directories fsynced, spelled through the alias, not from where the root resolves |
+| A | `TestNewRequiresADataDirectoryTheReservationLiesBelow`, three new cases, and `TestNewNamesTheDirectoryTheProbeRefused`'s mount-table case | New built an engine and wrote the reservation for a `..` and for a link inside the data directory, and built one for a link and back; the mount table named as "the directory /proc/self/mountinfo" that could not be read |
+
+Finding A's red runs had round 6's path logic with the mount-table seam,
+its platform files and `ErrMountsUnknown` declared beside it, and the
+engine's had round 6's writer and `notDurable` with that declaration. C's
+test was reworked after its first red run, to build its paths on the data
+directory as its links resolve, and run red again against the files before
+the fix. `TestADataDirectoryThatIsALinkIsTaken` passes before and after,
+as a guard; `TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites`
+pins a check that came with the fix, and its control is below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| B | `replaced` not called | four: round 6's pin (the backend's error), both PlayID cases at the detail ("playback did not begin", the settle's backstop), the resuming Play nil |
+| B | `playBegan` decides every play waiter, `replaced` kept | green: `replaced` has decided a replaced session's waiters before any other session can be heard, so this check is the second line, and no test can reach it alone |
+| B | the same, and `replaced` not called | Codex's sequence red at nil |
+| B | the settle's session check removed, and `replaced` not called | both PlayID cases nil |
+| B | no carry past an entry refused at its start | three tests, each a skip at a start: "playback did not begin" |
+| B | the start assigns no waiting command its session | 56 tests |
+| B | the session started before the command waits, the old order | 55 tests |
+| B | `replaced`'s half for a resuming Play removed | the resume case nil |
+| B | `releaseSession` ignoring a recorded reason on a release to play, the old answer | the resume case nil |
+| C | `notDurable` taking no directory from the `*fs.PathError` | the three cases above the reservation file's directory |
+| C | `syncDirAt` passing a bare error through | `TestBarrierFailuresAreMarked`, all three, and the engine's case through the real probe |
+| A | the `..` refusal disabled | the `..` test, and the engine's two `..` cases: New started on Codex's link and back |
+| A | the link refusal disabled, `Lstat` kept | four tests in `internal/atomicwrite`; the engine's two link cases, refused as ENOTDIR, the wrong kind |
+| A | `Lstat` made `Stat`, links followed | the same four; the engine built and wrote through both links |
+| A | the device comparison disabled | the `/dev` test: a directory tried in `/dev`, the probe fsyncing `/dev` and `/` |
+| A | the probe reading no mount table | the listed mount point and the unread table, nil |
+| A | a table that cannot be read taken for an empty one | the unread table, nil |
+| A | the root not resolved | the link-at-the-root test, fsynced through the alias; the engine's tests stay green, as they should |
+| A | no check after `MkdirAll` | the link-put-in-place test: nil, fsynced, the file written where the link leads |
+| A | the table read with nothing between the file and the root | one read where none is wanted |
+| A | the chain dropping the root | nine tests |
+| A | the engine's `ErrMountsUnknown` case dropped | the mount table named as a directory that cannot be read |
+| A | the table's mount points not unescaped | `TestParseMountInfo` |
+
+One control was replaced before it ran: removing `noMountsBelow`'s early
+return would have indexed an empty slice in its error, a panic rather than
+the assertion, so the control read the table first and then returned.
+
+The suite: 105 tests in the engine and 38 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (134.3 s and 57.8 s, no skips:
+the `/dev` test ran, this Mac mounting another filesystem there); `make fmt
+vet test` (72 packages ok, cmd/bridge 466 s, `go fmt` changing nothing),
+`make build-all` (six targets) and `make docs-check` clean, in one run
+through the build lock; `go vet` of both packages for windows/amd64,
+linux/amd64 and linux/arm64 clean. The Linux reader of the mount table and
+`TestPlatformMountTableReadsTheKernels` run on CI's Linux legs alone: this
+Mac has no Linux to run them on, and the parser runs everywhere, on
+captured tables. Both notes checked against HEAD, each OLD found once:
+`player.md` 73,803 to 75,104 bytes and `config-lifecycle.md` 47,042 to
+49,188, of 100,000 each; with both applied to the worktree's rules files,
+`check-doc-budgets` ok, the files restored from git after; every test name
+they cite is defined.
+
+Not changed, for the owner: the probe reads the mount table once, at New,
+as the brief set it, so a bind mount made below the data directory while
+the bridge runs is not seen by the writer, which checks links and devices
+on every write; a link another writer puts in place after the write's second
+check, or during its syncs, is not seen either: a check by path narrows that
+window and cannot close it, and the data directory is the bridge's own; off
+Linux a mount that shows no device of its own is not seen; the commands that
+wait behind a release share the session after it, whichever set the intent
+last, so a Next and then a PlayID, both sent while releasing, answer nil
+once the PlayID's entry is heard; shutdown's ReasonClosed, as in rounds 5
+and 6.
+
+### Round 8
+
+Codex and the Claude API reviewed round 7 (#1309); Argon was unavailable.
+Round 7's two rules notes were applied from beside the branch (8338c2f1 for
+`player.md`, dabd28d9 for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r8.md` for `player.md` and
+`/tmp/b470-4b1-rules-r8-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. All four findings were verified against the code and
+were real; none was rejected. Each was fixed red first, with negative
+controls on the committed tree, restored from git each time.
+
+What changed:
+
+- 53520045, f18c1814. **A Next, Previous, PlayID or PlayIndex sent while a
+  skip releases supersedes the play command the skip carried** (the Claude
+  API, Medium). A Play whose first entry was refused at its start was carried
+  on to the session after the skip's release with its session reset to 0,
+  among the commands that share that session, and a PlayID sent during that
+  release took the pending-intent path, where nothing superseded it: once the
+  PlayID's entry was heard, the Play answered nil, though the playback its
+  own session had moved on to never happened. Sent a step earlier, while the
+  first session started, the same PlayID superseded it (`replaced`), so the
+  answer hung on the PlayID's timing against the engine's own skip. `carry`
+  now marks the waiters it hands on (`waiter.carried`, cleared when the next
+  session starts), and one of the four commands on the pending-intent path
+  supersedes the carried ones, naming itself (`replacedCarry`, through
+  `supersedeWaiters`, which `replaced` shares). A Play sent then moves no
+  target and shares the session after the release with the carried Play, as
+  the commands that set the intent themselves do
+  (`TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt`).
+- c1cbbe49, 38f2497f. **A file path that ends in a separator, `.` or `..` is
+  refused, never cleaned into another file** (Codex 3, P2). `filepath.Abs`
+  cleaned `ReservePath` `data/ids/` and `data/ids/.` to `data/ids`, the
+  strict writer wrote the reservation there, and the engine read the path as
+  given, which a regular file answers ENOTDIR: measured through a restart,
+  every insert was then refused with `file_not_moved_aside`, the move aside
+  under that name failing too. A queue path so spelled made the queue writer
+  put a directory in the file's place, with the same end; a queue path
+  ending in `..` too, its reservation path `x/...ids` being a plain file's.
+  `atomicwrite.NamesDirectory` is the one definition (a last element that is
+  none, `.` or `..`); `WriteBytesDurable` and `ProbeDurable` refuse such a
+  path before cleaning it, an `*fs.PathError` wrapping `EISDIR`, a root
+  keeping its trailing separator, and New refuses such a queue or
+  reservation path, naming it, with nothing written.
+- dd202712, 57d5cf77, 3c1459be, 00a54fd0. **The strict writer tells a mount
+  by the ID the kernel gives it, on every write and at the destination too,
+  and takes a fallback's bytes only from a plain file** (Codex 1 and 2, P2).
+  Round 7's probe matched the mount table by spelling, so on a filesystem
+  that folds case `root/Player` reached a bind mount the table names
+  `root/player`, and passed; it looked for a bind mount at New alone; and it
+  never looked at the destination, so a file mounted at the reservation
+  path passed, the rename over it failed with EBUSY, and with matching bytes
+  the fallback fsynced the mounted file and the root and answered nil, the
+  mount source's entry never synced. On Linux `plain` now reads the mount ID
+  of each directory, and of the destination when it is there, with statx
+  (`STATX_MNT_ID`, Linux 5.8; `mountIDOf`), a link at the end not followed,
+  and refuses one not on the root's mount, whatever the spelling, on every
+  write and in the probe; `x/sys/unix` was already a direct dependency. Where
+  the kernel gives no IDs (older than 5.8, or a statx a seccomp policy
+  refuses) the probe falls back to round 7's mount table, the destination
+  included, and a kernel that gives the root's ID and not a directory's is
+  refused, `ErrMountsUnknown`; elsewhere than Linux the device alone. The
+  fallback after a failed rename takes matching bytes only from a regular
+  file on its directory's own device and mount, asked as it takes them
+  (`onItsDirectorysMount`): a file mounted there once the checks have
+  passed, or a symbolic link, leaves the rename's error. Kept rather than
+  removed: the mount table, as the fallback for kernels without IDs, which
+  keeps `TestParseMountInfo` and `TestPlatformMountTableReadsTheKernels`,
+  which the rules cite, meaningful; the fallback stays spelling-bound, an
+  owner item below.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| the Claude API | `TestAPlayWhosePlaybackAnotherCommandReplacedIsSuperseded`, the skip case | the carried Play answered nil |
+| Codex 3 | `TestWriteBytesDurable_RefusesAPathThatNamesADirectory` | `ids/`, `ids/.` and `sub/ids/` written at the cleaned path, nil; the probe nil |
+| Codex 3 | `TestNewRefusesAFilePathThatNamesADirectory`, four cases | New took each path; at the restart every insert was refused, `file_not_moved_aside` |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling` | the probe passed `root/Player/ids` with the table naming `root/player`; the write wrote through the mount |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountByItsMountID` | the write and the probe nil for a directory on a mount of its own by ID |
+| Codex 2 | `TestWriteBytesDurable_RefusesAMountedDestination` | the probe nil; the write nil over the mounted file |
+| Codex 2 | `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`, two cases | nil, after syncing the file mounted once the checks passed (or a link's target) and the root |
+
+The atomicwrite red runs had `mountIDOf`, `platformMountID` and their
+platform files declared beside round 7's logic, which used none of them.
+`TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt` is a guard and
+passes before and after; so does `TestPlatformMountIDReadsTheKernels` on
+this Mac, where the platform gives no IDs. The queue `..` case (38f2497f),
+the table-destination case (57d5cf77), the no-table-read case (3c1459be)
+and the root-ID-alone case (00a54fd0) were added when a control showed no
+test reached a piece of the fix; their controls are below.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| carry | `replacedCarry` not called | the skip case nil |
+| carry | `replacedCarry` on every intent to play, a Play's included | the guard: the carried Play superseded by a plain Play |
+| carry | `carry` not marking the waiter | the skip case nil |
+| carry | the start not clearing the mark | green: no waiter is undecided with a session started for it at a later release to play but through `carry`, which marks it again; the clear keeps the mark's meaning, "carried until the next session starts", and no test can reach it |
+| path | the writer's `NamesDirectory` refusal disabled | the writer's test; the engine's stays green, New refusing first |
+| path | New's check disabled | the engine's four first cases: the reservation paths refused by the writer with the wrong message ("cannot be read"), the queue paths taken and stuck at the restart |
+| path | `NamesDirectory` without `.` | the `.` cases in both packages |
+| path | `NamesDirectory` without `..` | the queue `..` case (the writer's stays green: `hasDotDot`) |
+| mounts | mount IDs ignored | three tests: by ID, by another spelling, the mounted destination |
+| mounts | the destination's check removed | the mounted-destination test |
+| mounts | the fallback asking nothing of the destination | both fallback cases |
+| mounts | the fallback without the mount-ID comparison | the mounted-after case |
+| mounts | the fallback without the regular-file check | the link case |
+| mounts | the probe reading the table with IDs to go by | first green, every case refusing before the table; 3c1459be added a passing case, then red |
+| mounts | the table fallback without the destination | the table-destination case (57d5cf77) |
+| mounts | a root ID alone taken as no mount | the root-ID-alone case (00a54fd0) |
+
+The suite: 107 tests in the engine and 44 in `internal/atomicwrite`; ten
+runs in a row of each green under `-race` (149.3 s and 74.1 s, no skips:
+the alternate-spelling test ran, this Mac's volume folding case); `make fmt
+vet test` (72 packages ok, cmd/bridge 470 s, `go fmt` changing nothing),
+`make build-all` (six targets, stamped f18c1814 with no `-dirty`: the
+committed tree) and `make docs-check` clean, in one run through the build
+lock; `go vet` of both packages for windows/amd64, linux/amd64 and
+linux/arm64 clean. The Linux statx reader and
+`TestPlatformMountIDReadsTheKernels` run on CI's Linux legs alone, as round
+7's table reader did: this Mac has no Linux. Both notes checked against
+HEAD, each OLD found once: `player.md` 75,104 to 76,167 bytes and
+`config-lifecycle.md` 49,188 to 50,603, of 100,000 each; with both applied
+to the worktree's rules files, `check-doc-budgets` ok, the files restored
+from git after; every test name they cite is defined.
+
+Not changed, for the owner: where the kernel gives no mount IDs (Linux
+older than 5.8, or statx refused by a seccomp policy) the probe falls back
+to the mount table, read at New and matched by its spelling, so Codex's
+spelling case stands there, and the writer then checks devices alone on
+each write; off Linux a mount that shows no device of its own is not seen;
+a link or a mount another writer puts in place after the write's second
+check, or during its syncs, is not seen either; the commands that set the
+pending intent share the session after the release, a carried one now
+superseded by a command that moves the target; shutdown's ReasonClosed, as
+in rounds 5 to 7.
+
+### Round 9
+
+Codex and the Claude API reviewed round 8 (#1309); Argon was unavailable.
+Round 8's two rules notes were applied from beside the branch (916f8903 for
+`player.md`, 9876527b for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r9.md` for `player.md` and
+`/tmp/b470-4b1-rules-r9-config.md` for the strict-writer bullet in
+`config-lifecycle.md`. All three findings were verified against the code
+and were real; none was rejected. Each was fixed red first, with negative
+controls on the committed tree, restored from git each time. The owner set
+the writer's bar for the round: no install the bridge supports may be
+refused for how its filesystem reports devices (overlayfs with xino off is
+the Raspberry Pi OS "Overlay File System" option, and the Pi is the
+player's main target), and where mount identity cannot be established the
+writer says so (`ErrMountsUnknown`) rather than assume two mounts are one.
+
+What changed:
+
+- b22208d3. **A command that names the entry already pending, sent while a
+  skip releases, leaves the play command the skip carried in the session
+  that plays it** (Codex 2, P2). Round 8 superseded the carried waiters for
+  every Next, Previous, PlayID or PlayIndex that took the pending-intent
+  path, whether it moved the target or not, so a PlayID or a PlayIndex of
+  the entry the skip had already moved on to answered the carried Play
+  `ReasonSuperseded`, though the session after the release played that very
+  entry; only a plain Play shared that session with it. The transport step
+  now compares the resolved target with the selection before the selection
+  moves (`moved`), and `replacedCarry` runs only for an intent to play that
+  moved it. `TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt` is a
+  table of three: a Play, a PlayID of the entry the skip moved on to, and a
+  PlayIndex of it, each answered nil with the carried Play once that entry
+  is heard.
+- bb750493, 7d03cc30. **The strict writer tells a mount by its identity
+  alone, never by device, and says so where it has none** (the Claude API,
+  High; Codex 1, P2). The Claude API: round 8 compared each entry's device
+  (`st_dev`) with the root's, the destination's included, and overlayfs
+  with its layers on different filesystems and xino off reports the
+  overlay's device for a directory and a pseudo device per layer for every
+  other entry (the kernel's `ovl_map_dev_ino`), so a reservation file there
+  was refused once it existed, and the restart's probe with it; btrfs gives
+  each subvolume a device of its own on one mount too. Codex: where the
+  kernel gave no mount IDs, round 8 compared no mount on a write, its probe
+  matched the mount table by spelling, and its fallback after a failed
+  rename took two unknown identities for one (`okA == okB && a == b`).
+  Mounts are now decided by identity alone (`mountIDOf`), on every write,
+  in the probe and in the fallback: on Linux the kernel's mount ID from
+  statx (`STATX_MNT_ID`, Linux 5.8) or, where statx gives none (an older
+  kernel, or a statx a seccomp policy refuses: ENOSYS, EPERM), the `mnt_id`
+  `/proc/self/fdinfo` lists for an `O_PATH` descriptor (Linux 3.15), in that
+  order (`mountIDFrom`, platform-neutral so that its order is tested here);
+  on macOS the mount's filesystem ID (statfs's `f_fsid`); on Windows none,
+  asked for by nothing, since the writer refuses there first for want of a
+  directory barrier (`mountIDsExpected` false). Where the platform gives no
+  identity for the root, or gives the root's and not that of an entry below
+  it, the write, the probe and the fallback answer `ErrMountsUnknown` (the
+  fallback beside the rename's error), never a match; the root's is asked
+  for on every call, a file directly in the root included, so that the
+  probe refuses at New what every write would. The mount table is no longer
+  read: `parseMountInfo` moved into the tests, as the oracle that
+  `TestPlatformMountTableReadsTheKernels` holds statx's and fdinfo's IDs to
+  on Linux, and `mountinfo.go`, `device_unix.go` and `device_other.go` are
+  gone. The writer sees each entry through an `lstat` seam, so that a test
+  can report the devices overlayfs and btrfs report
+  (`TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`); no decision
+  reads them. The engine's refusal for `ErrMountsUnknown` now says the
+  platform gives no mount identity (`notDurable`), no longer that the mount
+  table cannot be read.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| Codex 2 | `TestAPlaySentWhileASkipReleasesSharesTheSessionAfterIt`, the PlayID and PlayIndex cases | the carried Play answered `superseded: replaced before playback began: play id` (and `play index`); the Play case passed, round 8's guard |
+| the Claude API | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice` | the probe and the write refused a destination a stat put on another device, the mount IDs one: `not plainly below the durable root` |
+| Codex 1 | `TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad` | nil for `root/ids`, `sub/ids`, `sub/new/ids` and a destination already there, from the write and from the probe |
+| Codex 1 | `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`, the case whose mount cannot be told once the checks passed | nil, the bytes taken and synced |
+| Codex 1 | `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`, with no mount identity | nil |
+
+The writer's red runs were round 8's code with its three `os.Lstat` calls
+routed through an `lstat` seam that a temporary file beside it declared,
+with `mountIDsExpected`, and the tests in another temporary file; both were
+removed after.
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| same target | `replacedCarry` on every intent to play (`moved` always true) | all three sharing cases |
+| same target | `moved` read after the selection moves (always false) | round 8's skip case: the carried Play unsuperseded |
+| mounts | a root with no identity taken as nothing to compare | four tests: the no-identity cases of the say-so test, the probe test, the spelling test and the mounted destination |
+| mounts | the device comparison put back | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`: the probe refused |
+| mounts | the fdinfo fallback dropped | `TestMountIDFromFallsBackToFdinfoOnlyWhereStatxGivesNone` |
+| mounts | the destination's own check dropped | the mounted-destination test |
+| mounts | the fallback taking two unknown identities for one, round 8's comparison | the fallback's no-identity case: nil, the bytes synced |
+| mounts | the fallback's identity comparison dropped | the mounted-after case |
+| mounts | an entry below with no identity taken for the root's mount | the root-ID-alone case |
+| mounts | macOS's identity a constant | `TestPlatformMountIDReadsTheKernels`: `/dev` given `/`'s ID |
+| mounts | the root's identity asked for only with a directory below it | the say-so test's `root/ids` and the probe test's file in the root |
+| engine | `notDurable` without its `ErrMountsUnknown` case | `TestNewNamesTheDirectoryTheProbeRefused`: "cannot be read" |
+
+The first mutation of the fallback's comparison (`return true, nil`) did
+not build, `a` and `b` then unused; `a == b || true` built, and was red.
+
+The suite: 107 tests in the engine and 47 in `internal/atomicwrite` on this
+Mac (48 on Linux, with `TestPlatformMountTableReadsTheKernels`); ten runs
+in a row of each green under `-race` (142.4 s and 82.3 s, no skips);
+`make fmt vet test` (72 packages ok, cmd/bridge 472 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 7d03cc30 with no `-dirty`:
+the committed tree) and `make docs-check` clean, in one run through the build lock; `go vet` of both packages
+for darwin, linux and windows on amd64 and arm64, and of
+`internal/atomicwrite` for freebsd/amd64, clean. The Linux statx and
+fdinfo readers, `TestPlatformMountTableReadsTheKernels` and the Linux half
+of `TestPlatformMountIDReadsTheKernels` run on CI's Linux legs alone: this
+Mac has no Linux. Their order (`mountIDFrom`) runs here, and so does the
+macOS half of `TestPlatformMountIDReadsTheKernels`, against statfs, with
+`/` and `/dev` on mounts of their own, which
+`TestWriteBytesDurable_RefusesAMountBelowTheRoot` refuses here by that
+identity. Both notes checked against HEAD, each OLD found once: `player.md`
+76,167 to 76,597 bytes and `config-lifecycle.md` 50,603 to 52,089, of
+100,000 each; with both applied to the worktree's rules files,
+`check-doc-budgets` ok and `TestEveryCitedTestNameExists` green, the files
+restored from git after.
+
+Not changed, for the owner: the writer now refuses (`ErrMountsUnknown`)
+where round 8 checked devices alone: on Linux a kernel older than 3.15, or
+one whose statx gives no mount ID with no `/proc` mounted, and every
+platform but Linux, macOS and Windows, where the player does not run; a
+link or a mount another writer puts in place after the write's second
+check, or during its syncs, is not seen; shutdown's ReasonClosed, as in
+rounds 5 to 8.
+
+### Round 10
+
+Codex and the Claude API reviewed round 9 (#1309); Argon was unavailable.
+Round 9's two rules notes were applied from beside the branch (b463dbbf for
+`player.md`, 214f9b4b for `config-lifecycle.md`); this round's went beside
+it again, `/tmp/b470-4b1-rules-r10.md` for `player.md` and
+`/tmp/b470-4b1-rules-r10-config.md` for the strict-writer bullet in
+`config-lifecycle.md`, every block fenced. Round 9's Linux tests ran on a
+Linux host (kernel 7.0, ext4): both suites passed under `-race -count=3`,
+the mount-identity tests included, and
+`TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling` skipped there
+(no filesystem that folds case). All five findings were verified against
+the code and were real; none was rejected. Each was fixed red first, with
+negative controls on the committed tree, restored from git each time.
+
+**The decision on the Claude API's High is the orchestrator's: fail
+closed.** A data directory on storage that does not outlive a reboot
+(tmpfs, ramfs, an overlay whose upper layer is tmpfs, as Raspberry Pi OS's
+"Overlay File System" sets up) is refused at New, with an error the
+operator can act on: it names the data directory, says the player's IDs
+and tokens would repeat after a reboot, and says to put the data directory
+on persistent storage. The overlay's upper layer is decided by the mount
+the writer already identifies, never by spelling, and the writer reports
+durable only once every directory entry it created, or a copy-up created,
+is durable through the root, which closes Codex's copy-up window too.
+
+What changed:
+
+- 971fd479. **Once a strict write lands, by its rename or by the fallback a
+  failed rename takes for the same bytes, every directory from the file's up
+  to the root is synced again** (Codex, P2). The writer synced the entries
+  above the file's directory before it staged the file, and the file's
+  directory alone after the rename. On an overlay, staging the file in a
+  directory found in the lower layer alone copies that directory up,
+  creating its entry, and those of the directories above it up to the root,
+  after those syncs, and overlayfs documents that a copy-up fsyncs none of
+  the parents it creates, so a crash could take a copied-up entry and the
+  reservation below it while the player's identity stayed. `durableChain`
+  now syncs the whole chain, the deepest first and the root included, after
+  the rename and after the fallback; the syncs before the staging stay, so a
+  directory that cannot be synced still fails the write before anything is
+  written. Seven tests that listed the syncs in order were moved to the new
+  order: `TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable`,
+  `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
+  `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
+  `TestWriteBytesDurable_RetriesThroughASymlinkedAlias`,
+  `TestWriteBytesDurable_NeverSyncsAboveTheRoot`,
+  `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot` and
+  `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`.
+- 2ccaf8a2, 9cff0e8d. **A root on storage that does not keep what is
+  written to it through a reboot is refused, and New says so** (the Claude
+  API, High). Round 9 took any root its mounts allowed, so on the Raspberry
+  Pi OS option, an overlay whose upper layer is a tmpfs, every barrier
+  answered, the reservation landed in RAM, and a reboot took it and kept a
+  `player-uuid` written before the overlay was enabled: the player handed
+  out its IDs and tokens again with no crash at all. Round 8 had refused the
+  same setup by accident, at the second write, through the device
+  comparison round 9 removed. The writer and the probe now ask a medium
+  check after the mount checks (`strictPath.medium`, through the `mediumOf`
+  seam): on Linux tmpfs and ramfs by statfs's `f_type` (`ErrVolatile`), an
+  overlay mounted volatile (`volatile` or `fsync=volatile`), and an overlay
+  whose upper layer is any of those. The upper layer is the one the mount
+  table (`/proc/self/mountinfo`) names on the line of the root's own mount
+  ID, the one the writer already holds (`overlayLayer`), never a line picked
+  by its mount point's spelling; and since a path in the table is the
+  mounter's, the path must reach here the filesystem the overlay reports (a
+  statfs of an overlay gives its upper layer's totals: block size, blocks,
+  inodes). Where it reaches nothing or another filesystem, where the table
+  cannot be read or names the upper layer by a relative path, and past eight
+  overlays one over another (followed by each inner overlay's mount ID), the
+  writer fails closed (`ErrMediumUnknown`). A read-only overlay is taken: a
+  write there fails by itself. macOS takes every root (no tmpfs, no
+  overlayfs; a RAM disk is a volume statfs does not tell from a disk), and
+  Windows refuses before it asks. The engine's `notDurable` names the data
+  directory, says the player's IDs and tokens would repeat after a reboot,
+  and says to put the data directory on persistent storage, for both
+  sentinels; `Config.DataDir` and the package doc say the data directory must
+  be on such storage. `unescapeMountInfo` moved from the tests into the
+  package, which reads the table again, for this alone. The package's
+  `TestMain` takes every root for persistent storage, with a line on
+  stderr, where the system's temporary directory is itself tmpfs (Debian 13
+  and Fedora mount `/tmp` so), and the engine's tests that drive the real
+  writer take the medium as they take the barrier
+  (`atomicwrite.SetMediumForTest`).
+- 05bd32ed. **An fdinfo listing that cannot be read is the read's error,
+  unless it does not exist** (the Claude API, Low 4). `fdinfoMountID` turned
+  every failure to read `/proc/self/fdinfo/N` into no mount identity, so a
+  process one descriptor short of its limit, whose `O_PATH` open took the
+  last, read the listing with EMFILE and New told the operator the platform
+  gives no mount identity. The read is now `fdinfoMountIDFrom`, platform
+  neutral: no `/proc` (ErrNotExist) is no identity, anything else the
+  read's `*fs.PathError`.
+- 93bc0235. **`platformMountID` asks its two readers through seams**
+  (`statxMountIDOf`, `fdinfoMountIDOf`; the Claude API, Low 3), so
+  `TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` can stand for a kernel
+  whose statx gives no mount ID on one whose statx gives it, and hold the
+  wiring to the kernel's mount table: round 9 tested each reader and the
+  order, and a `platformMountID` that asked statx alone passed on every
+  kernel from 5.8 up.
+- 8fad98f3. **The fallback for the same bytes is held to mount identity
+  under faked devices too** (the Claude API, Low 2): round 8's device
+  comparison put back into `onItsDirectorysMount` passed the whole suite
+  (measured, before the case), and on an overlay with xino off it fails the
+  reservation write whenever another writer's rename wins.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| Codex | `TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands` | the rename case synced `a`, the root, the rename, then `a/b` alone; the fallback `a/b` alone after its five attempts |
+| the Claude API, High | `TestWriteBytesDurable_RefusesARootThatDoesNotOutliveAReboot` | the write and the probe answered nil with the medium refused, the medium never asked; the write created `sub/new` and both synced |
+| the Claude API, High | `TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot` | New built an engine over tmpfs, and over storage that cannot be told |
+| the Claude API, High | `TestMediumRefusesWhatDoesNotOutliveAReboot`, `TestOverlayLayerIsTheLineOfTheRootsMountID` | every refusal nil, every overlay's upper layer empty, against the API with no behaviour |
+| the Claude API, Low 2 | `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`, the fallback case | with round 8's device comparison in the fallback, the suite green before the case and the case red after (`resource busy`) |
+| the Claude API, Low 4 | `TestFdinfoMountIDSaysWhatFailedToRead` | EMFILE and EIO gave no identity and no error, against the read extracted with round 9's mapping |
+
+The High's red runs were round 9's writer with the new API declared beside
+it, with no behaviour: sentinels, seams, and stub bodies the writer did not
+call. Low 3's red is Linux's alone (below).
+
+Negative controls, each a mutation of the committed fix, all red:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| chain | the chain after the write cut to the file's directory | both cases of the chain test |
+| chain | the fallback's chain cut to the file's directory | the chain test's fallback case |
+| medium | the write without the medium check | the root test's write |
+| medium | the probe without the medium check | the root test's probe, and New's refusal test |
+| medium | tmpfs taken | tmpfs, the Raspberry Pi OS overlay, and the overlay over an overlay over tmpfs |
+| medium | the upper layer's path not held to the overlay's filesystem | the case whose upper layer names another filesystem here |
+| medium | the table's line not picked by the mount ID | the line test, and the overlay over a disk, the unlisted overlay and the nested one |
+| medium | volatile ignored | the line test's two volatile mounts, and the volatile overlay |
+| medium | an inner overlay not followed by its own mount ID | the overlay over an overlay over tmpfs (cannot be told, past the bound) |
+| medium | a relative upper layer taken as it reads here | the relative case |
+| medium | the medium asked of another mount ID | the root test (asked with 8, want 7) |
+| engine | New without its ErrVolatile refusal | New's refusal test: "cannot be read" |
+| engine | New without its ErrMediumUnknown refusal | the same test's second case |
+| fdinfo | every read error taken for no identity (round 9) | the fdinfo error test, EMFILE and EIO |
+| fallback | round 8's device comparison in `onItsDirectorysMount` | the device test's fallback case |
+
+Linux-only, for the Linux host, which this Mac cannot run:
+`TestPlatformMountTableReadsTheKernels`, the Linux half of
+`TestPlatformMountIDReadsTheKernels`,
+`TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` (its control: make
+`platformMountID` call `statxMountID` and `fdinfoMountID` directly, and the
+test goes red, fdinfo never asked), `TestMediumMagicsAreLinuxs`,
+`TestPlatformMediumReadsTheKernels` (`/dev/shm` refused as tmpfs, the
+temporary directory refused or taken by its `f_type`), and two that mount
+in a user and mount namespace of their own, through a child of the test
+binary (`TestOverlayNamespaceHelper`, which does nothing alone):
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`, the
+Raspberry Pi OS option against the real kernel, and
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated`, Codex's copy-up against
+the real kernel, both skipping where an unprivileged process gets no such
+namespace or no overlay in one (Linux 5.11), and the second also where the
+temporary directory is not on storage that outlives a reboot.
+
+The suite: 108 tests in the engine and 52 in `internal/atomicwrite` on this
+Mac (59 on Linux); ten runs in a row of each green under `-race` (150.2 s
+and 99.5 s, no skips); `make fmt vet test` (72 packages ok, cmd/bridge 466 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 9cff0e8d with no `-dirty`:
+the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of both packages for darwin, linux and windows on amd64 and arm64,
+and of `internal/atomicwrite` for linux/arm and freebsd/amd64, clean. Both
+notes checked against HEAD, each OLD found once: `player.md` 76,597 to
+77,788 bytes and `config-lifecycle.md` 52,089 to 54,964, of 100,000 each;
+with both applied to the worktree's rules files, `check-doc-budgets` ok and
+`TestEveryCitedTestNameExists` green, the files restored from git after.
+
+Not changed, for the owner: a root in an overlay's lower layer alone is
+copied up by the first write, and the entries that copy-up creates above
+the root are synced by nothing, as the root's own entry never is; with the
+data directory there and `player-uuid` with it, a crash could take the copy
+and keep the identity below it (on an ext4, xfs or btrfs upper layer a
+later fsync commits them; on one that needs each parent synced, not). A
+container whose data directory is in its own root overlay rather than a
+volume is refused as storage that cannot be told when the overlay's upper
+layer, a host path, is not visible inside it (the image's `/data` is a
+volume). Storage that is RAM under a disk filesystem (an ext4 zram device,
+a macOS RAM disk) is not told from a disk. A link or a mount another writer
+puts in place after the write's second check, or during its syncs, is not
+seen; shutdown's ReasonClosed, as in rounds 5 to 9.
+
+### Round 11
+
+Codex and the Claude API reviewed round 10 (#1309); Argon was unavailable.
+Round 10's two rules notes were applied from beside the branch (db1a52e3
+for `player.md`, 39ba660c for `config-lifecycle.md`); this round's went
+beside it again, `/tmp/b470-4b1-rules-r11.md` for `player.md` and
+`/tmp/b470-4b1-rules-r11-config.md` for the strict-writer bullet in
+`config-lifecycle.md`, every block fenced. Round 10's Linux tests ran on a
+Linux host (kernel 7.0, ext4): both suites passed under `-race -count=3`,
+the tmpfs refusal included, and
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs` skipped
+there (no root for an overlay mount).
+
+**The orchestrator, who made round 9's fail-closed call, set this round's
+scope:** proving from outside that any storage stack survives a reboot is
+open-ended, so the writer refuses what it can tell is volatile, and what it
+cannot read, and does not try to prove every stack persistent. Refused, as
+before: tmpfs and ramfs by `f_type`, an overlay mounted volatile, an
+overlay whose upper layer is tmpfs or ramfs (Raspberry Pi OS's "Overlay
+File System"), a root whose storage cannot be read (`ErrMediumUnknown`),
+and now a fuse-overlayfs root, whose upper layer the table cannot show.
+Fixed: totals that move with ordinary writes, the mount table's
+tokenizing, the copy-up above the data directory, and the two test-wiring
+Lows. Named, not chased: ext4 on zram or on a loop image kept in tmpfs, an
+NFS export written async, and a namespace that maps the upper path onto a
+filesystem with identical totals are stacks the writer cannot tell; the
+rules say the data directory must be on persistent storage and name these
+as the operator's to avoid.
+
+Rejected, with that reasoning: **Codex High 1** (the medium check fails open
+for ext4 on zram, ext4 on a loop image in tmpfs, overlays over either, and
+NFS with async exports) and **Codex High 3** (a namespace can map the
+recorded upper path onto another filesystem whose totals match a tmpfs
+upper's). Both are true of the code; neither is a stack the writer can
+tell from outside, recursing through loop and device-mapper backings would
+still stop at NFS and at a zram device that reads as any block device, and
+an independently verified backing identity for an overlay's upper layer is
+not something the kernel offers. They are named in the rules instead.
+
+What changed, all in 11993805:
+
+- **Totals that move with ordinary writes no longer refuse an overlay**
+  (both reviewers: Codex Medium 5, the Claude API Medium 1). XFS's `f_files`
+  counts the inodes it could still make from its free blocks and ZFS's
+  `f_blocks` is what is referenced plus what is available, so an overlay's
+  totals and its upper path's, read one after the other, differed with a
+  write between them, and round 10 refused the overlay with "another
+  filesystem", at New or at any reservation write. Where they differ the
+  overlay is now read again (the Claude API's approach): totals that moved
+  between the two reads are no tmpfs's or ramfs's, which no write moves, so
+  the upper layer is taken for what the path reaches, unless that is itself
+  tmpfs or ramfs; totals that held still while the path's differ still
+  name another filesystem (`ErrMediumUnknown`).
+- **The mount table is split on the ASCII space the kernel writes, and
+  nowhere else** (Codex High 2). The kernel escapes a space, a tab, a
+  newline and a backslash in a field and leaves Unicode white space as it
+  is, and `strings.Fields` split a lowerdir at a U+00A0, so the upperdir
+  and volatile after it were lost and the overlay read as read-only. The
+  record must now be whole (six fields, the optional ones, the `-`, then
+  exactly the type, the source and the super options, none empty:
+  `mountLine`), and only an overlay whose superblock is read-only (the `ro`
+  the kernel writes first among the super options) may name no upper layer.
+- **fuse-overlayfs is refused as storage that cannot be told** (the Claude
+  API Low 2): its `f_type` is FUSE's, so round 10 took it whatever its upper
+  layer was on, rootless Podman's writable layer among them. A FUSE root is
+  now read on its own mount ID's line, and `fuse.fuse-overlayfs` is
+  `ErrMediumUnknown`, as is a FUSE root whose line cannot be read; other
+  FUSE filesystems are taken.
+- **On an overlay, every directory above the root, up to the root of its
+  mount, is synced once the write lands and in the probe** (Codex High 4,
+  closed as the orchestrator chose, where round 10 left an owner item). A
+  data directory in the lower layer alone, `player-uuid` with it, is copied
+  up by the first write, and the entries that copy-up creates above the
+  data directory were synced by nothing, so a crash could take the copy and
+  the reservation and keep the identity below. `strictPath.storage` asks the
+  platform for those directories (`copyUpAncestorsOf`: on Linux, on an
+  overlay alone, every directory above the root while its mount ID is the
+  root's, `ancestorsOnMount`; none elsewhere), and the write syncs them
+  after the chain, as the probe does: New's probe, and New's first
+  reservation, which `start` writes inside New before anything is handed
+  out, so the window closes at New; each later write syncs them again,
+  which covers a run whose first write failed and keeps nothing between
+  writes. Off an overlay nothing copies up, and the root's own entry stays
+  the caller's. A directory there that cannot be opened fails the write and
+  the probe, so New refuses it, naming it.
+- **Both seams' production defaults are exercised** (the Claude API Lows 3
+  and 4). `TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` replaces
+  statx's seam alone, so the fallback answers through `fdinfoMountIDOf` as
+  the package initializes it. `TestMain` keeps the medium check it found
+  (`initialMediumOf`) and takes nothing in a namespace scenario's child,
+  whose helper no longer reassigns it, and
+  `TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck` holds that
+  default to the kernel on `/dev/shm`.
+
+Red first, against round 10's code with the new API declared beside it and
+unwired (FUSE's magic, the copy-up seam answering none, `ancestorsOnMount`
+answering none):
+
+| Finding | Test | Red |
+|---|---|---|
+| both reviewers | `TestMediumTakesTotalsThatMoveWithWhatIsWritten` | the XFS and the ZFS overlay refused, "another filesystem"; the tmpfs-under-moving-totals case refused without naming tmpfs |
+| Codex High 2 | `TestOverlayLayerIsTheLineOfTheRootsMountID` | the U+00A0 line read with no upper layer and no volatile; a U+2028 in the upperdir cut it to `/u`; a writable overlay with no upper layer, a line with a field too many and one with an empty field all taken |
+| Codex High 2 | `TestMediumRefusesWhatDoesNotOutliveAReboot`, the Unicode and writable cases | an overlay over tmpfs whose lowerdir holds U+00A0 taken; a writable overlay naming no upper layer taken |
+| the Claude API Low 2 | the same test's FUSE cases | fuse-overlayfs taken; a FUSE root whose table cannot be read taken |
+| Codex High 4 | `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`, `TestAncestorsOnMountStopAtTheRootOfTheirMount` | the write and the probe synced the root alone; a directory above that cannot be synced, and a walk the platform cannot make, changed nothing |
+
+The two test-wiring Lows are Linux's alone, below.
+
+Negative controls, each a mutation of 11993805, all red:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| totals | differing totals refused without the second read (round 10) | the XFS and ZFS cases |
+| totals | a path that reaches tmpfs taken while the overlay's totals move | that case |
+| totals | totals that held still taken as moving | the "another filesystem" cases of both tests |
+| table | the line split on any white space (round 10) | the line test's Unicode cases, and the Unicode overlay over tmpfs |
+| table | a record with a field too many taken | the line test |
+| table | a writable overlay with no upper layer taken for read-only | the line test, and the table test's writable case |
+| fuse | fuse-overlayfs taken | its case |
+| fuse | a FUSE root whose table cannot be read taken | its case |
+| copy-up | the write without the syncs above the root | the overlay test's write |
+| copy-up | the probe without them | the overlay test's probe |
+| copy-up | the walk not stopping at the mount's root | the walk test |
+| copy-up | an ancestor with no mount ID taken as on the mount | the walk test |
+
+Linux-only, for the Linux host, which this Mac cannot run:
+`TestPlatformMountTableReadsTheKernels`, the Linux half of
+`TestPlatformMountIDReadsTheKernels`,
+`TestPlatformMountIDAsksFdinfoWhereStatxGivesNone` (its control: make
+`fdinfoMountIDOf`'s default answer none, and it goes red),
+`TestMediumMagicsAreLinuxs` (FUSE's added),
+`TestPlatformMediumReadsTheKernels`,
+`TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck` (its
+control: make `mediumOf`'s default a no-op, and it goes red),
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated` (which now also wants the
+overlay's own root synced, the entry of the copied-up data directory; its
+control: make `platformCopyUps` answer none), and the child both mount
+through, `TestOverlayNamespaceHelper`.
+
+The suite: 108 tests in the engine and 55 in `internal/atomicwrite` on this Mac
+(63 on Linux); ten runs in a row of each green under `-race` (151.6 s and
+99.8 s, no skips); `make fmt vet test` (72 packages ok, cmd/bridge 467 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped 11993805 with no
+`-dirty`: the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of both packages for darwin, linux and windows on amd64 and arm64,
+and of `internal/atomicwrite` for linux/arm and freebsd/amd64, clean. Both
+notes checked against HEAD, each OLD found once: `player.md` 77,788 to
+78,594 bytes and `config-lifecycle.md` 54,964 to 57,383, of 100,000 each;
+with both applied to the worktree's rules files, `check-doc-budgets` ok and
+`TestEveryCitedTestNameExists` green, the files restored from git after.
+
+Not changed, for the owner: the stacks named above, by the orchestrator's
+scope; a link or a mount another writer puts in place after the write's
+second check, or during its syncs, is not seen; shutdown's ReasonClosed, as
+in rounds 5 to 10.
+
+### Round 12
+
+The last round: after it the PR merges unless a review finds a High. Codex
+and the Claude API reviewed round 11 (#1309); Argon was unavailable. Round
+11's two rules notes were applied from beside the branch (bd139896 for
+`player.md`, 51f2dc03 for `config-lifecycle.md`); 19b384ad merged
+main-62556b9b (#1311, #1312: the hotplug watcher's section now sits before
+this PR's in `player.md`), and 5581c719 moved two of 4a's long forms to
+`ops/History-rules-player.md`, which brought `player.md` from 103.5% of its
+budget to 96.0%. This round's notes went beside the branch,
+`/tmp/b470-4b1-rules-r12.md` for `player.md` (to 96.4%) and
+`/tmp/b470-4b1-rules-r12-config.md`, each OLD copied from 5581c719, every
+block fenced. Round 11's Linux tests ran on a Linux host (kernel 7.0, ext4,
+an unprivileged user): both suites passed under `-race -count=3`, and
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs` skipped
+there (no overlay mount for an unprivileged user).
+
+**The orchestrator's decisions on round 11's reviews**, all taken here:
+
+1. **A bind of an overlay subtree is refused** (Codex High 1, the Claude API
+   Medium 1). On an overlay whose mount's root field (mountinfo's fourth) is
+   not `/`, a bind of a directory inside it (an operator's systemd
+   `ProtectSystem=strict` with `ReadWritePaths`, a chroot, a container's bind
+   of an overlay host's directory), the directories a copy-up of a
+   lower-only data directory creates above it are out of that mount's
+   reach, so the walk round 11 added stopped at the bind's root and synced
+   none of them. Such a root is now refused as storage that cannot be told
+   (`ErrMediumUnknown`), naming the directory, the bind's root and the fix:
+   a data directory on a filesystem that is not an overlay, or on the
+   overlay's own mount. Syncing through another mount of the same
+   superblock, and syncfs, whose errors overlayfs reports only on recent
+   kernels, were rejected: neither is a barrier the writer can check. The
+   refusal applies wherever the overlay would otherwise be taken, so a bind
+   whose upper layer is tmpfs is refused for its storage first
+   (`ErrVolatile`): the overlay's own mount would not mend that. Our own
+   unit (`internal/packaging/systemd.service.tmpl`) adds no sandboxing, and
+   an overlay root's own mount with an upper layer on disk, Volumio's shape,
+   is still taken (a table case of each shape, and a namespace scenario of
+   the bind).
+2. **Totals that move and come back no longer refuse at random** (Codex
+   Medium 2, the Claude API Low 3). An XFS allocation freed again gave the
+   overlay A, the upper path B and the overlay A, which round 11 refused as
+   another filesystem. The overlay, the upper path and the overlay again
+   are read for up to three rounds (`upperAsReached`): the path is taken as
+   soon as it matches an overlay read beside it, an overlay seen to move is
+   no tmpfs or ramfs (round 11's rule), and only three rounds that each held
+   still while the path differed are refused. The test that encoded A, B, A
+   as a refusal now has A, B, A followed by a quiescent agreement taken, and
+   three held-still rounds refused.
+3. **An empty mount source is legitimate** (the Claude API Low 2): the
+   kernel writes it empty for a filesystem mounted with none, and round 11
+   refused the whole line. The source alone may be empty; every other field
+   must still be there.
+4. **The copy-up default is unit-tested** (the Claude API Low 4):
+   `copyUpsFrom(root, id, statfs, idOf)` carries it, platform-neutral as
+   `mediumFrom` is, and `platformCopyUps` is one line of wiring, so a
+   default answering none no longer passes where the namespace tests skip.
+5. **Cheap follow-ups:** the rule that the mount table is read only for an
+   overlay's upper layer now names what it is read for (an overlay's upper
+   layer and root field, a FUSE mount's type and source; Codex's
+   follow-up); fuse-overlayfs is told by its source too, for a build that
+   sets no subtype; a directory above the root that the service cannot open
+   for its sync is named, with what it was opened for and the fix (read
+   access for the service, or a data directory on a filesystem that is not
+   an overlay); and `append(p.chain(n), above...)` could not write into the
+   chain's backing array (`chain` makes a fresh slice of exactly its length,
+   so the append reallocated), and is gone: the directories above are
+   passed apart and synced by `syncAbove`.
+6. **Named, not chased:** an overlay nested in another's upper directory,
+   whose copy-ups above the outer upper directory are not synced, joins
+   zram, a loop image in tmpfs and an NFS export written async among the
+   stacks the operator must avoid.
+
+All of it is cc424012 (whose message misspells Volumio; commits are not
+amended here).
+
+Red first, against round 11's code, with `copyUpsFrom` declared beside it
+and answering none:
+
+| Decision | Test | Red |
+|---|---|---|
+| 1 | `TestMediumRefusesWhatDoesNotOutliveAReboot`, the bind of a directory inside an overlay over a disk | taken |
+| 2 | `TestMediumTakesTotalsThatMoveWithWhatIsWritten`, A, B, A then agreement | refused as another filesystem |
+| 3 | `TestOverlayLayerIsTheLineOfTheRootsMountID`, and the table's overlay and FUSE mounted with no source | the line "does not read as one", both refused |
+| 4 | `TestCopyUpsFromWalkOnlyOnAnOverlay` | no walk on an overlay; statfs's and the walk's errors lost |
+| 5 | the table's fuse-overlayfs with no subtype | taken |
+| 5 | `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`, the directory above that cannot be opened | the write and the probe gave the open's bare error |
+
+The bind over tmpfs (refused for its storage first) and the Volumio shape
+pass on round 11's code too: they pin the order and the shape that must
+keep working, and controls E2 and E3 hold them.
+
+Negative controls, each a mutation of cc424012, with the red set each
+predicted, all red and each hitting it:
+
+| | Mutation | Predicted red |
+|---|---|---|
+| E1 | the bind check dropped | the bind over a disk |
+| E2 | a bind refused before its storage is read | the bind over a disk (message), the bind over tmpfs (wants ErrVolatile) |
+| E3 | an overlay's own mount taken for a bind | Volumio's shape, an overlay over a disk, one with no source (and the read-only overlay) |
+| E4 | one round of totals only | A, B, A then agreement |
+| E5 | an empty source refused (round 11) | the line test, the overlay and the FUSE with no source |
+| E6 | fuse-overlayfs not told by its source | fuse-overlayfs with no subtype |
+| E7 | `copyUpsFrom` walking off an overlay | the copy-ups test |
+| E8 | `copyUpsFrom` answering none | the copy-ups test |
+| E9 | `copyUpsFrom` swallowing statfs's error | the copy-ups test |
+| E10 | an unopenable ancestor's bare error (round 11) | the overlay sync test |
+| E11 | the probe without the directories above | the overlay sync test |
+
+Linux-only, for the Linux host: `TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree`
+(new: a bind of a lower-only directory of an overlay, mounted in a
+namespace of the test's own; its control: drop the bind check, and it goes
+red), `TestWriteBytesDurable_SyncsWhatACopyUpCreated` (its control: make
+`platformCopyUps` answer none), and round 11's list. **Tests that skip
+without root**, or without an unprivileged user and mount namespace that
+may mount an overlay: `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
+`TestWriteBytesDurable_SyncsWhatACopyUpCreated` and
+`TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree` (the last two also
+where the temporary directory is on an overlay or on storage the writer
+refuses), through their child, `TestOverlayNamespaceHelper`, which does
+nothing alone. Two skip as root instead, which reads every directory:
+`TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` and
+`TestWriteBytesDurable_AnUnreadableDirectoryIsNoBarrierFailure`. The rest
+skip on their host's shape, not its privilege: a filesystem that folds case
+(`TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`), `/dev` on a
+mount of its own (`TestWriteBytesDurable_RefusesAMountBelowTheRoot`), a
+tmpfs at `/dev/shm`
+(`TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck`), and
+symbolic links or a directory barrier on Windows.
+
+The suite: 108 tests in the engine and 56 in `internal/atomicwrite` on this Mac
+(65 on Linux); ten runs in a row of each green under `-race` (152.2 s and
+99.8 s, no skips); `make fmt vet test` (73 packages ok, cmd/bridge 470 s, `go fmt` changing
+nothing), `make build-all` (six targets, stamped cc424012 with no
+`-dirty`: the committed code) and `make docs-check` clean, in one run through the build lock;
+`go vet` of `internal/atomicwrite` for darwin, linux/amd64, linux/arm64,
+linux/arm, windows and freebsd, and the Linux test binary built, clean.
+
+Not changed, for the owner: the stacks named above; a link or a mount
+another writer puts in place after the write's second check, or during its
+syncs, is not seen; shutdown's ReasonClosed, as in rounds 5 to 11.

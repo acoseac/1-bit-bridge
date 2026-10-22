@@ -346,6 +346,215 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `Chmod` / `Sync` / parent-dir fsync — **don't collapse them into a shared
   `WriteBytes`**, which silently drops e.g. the auth store's belt-and-braces
   `Chmod(0o600)`.
+- **`atomicwrite.WriteBytesDurable(root, path, …)` is the strict writer: nil
+  means the file's bytes and every directory entry between the file and
+  `root` were fsynced by that write, and a failed directory fsync is the
+  write's error, never tolerated as `WriteBytes` tolerates it once its
+  rename has landed** (B470 PR 4b1; its one caller is the player's ID and
+  token reservation, with the data directory as `root`: the "No ID and no
+  token is handed out twice" bullet in `player.md`). It keeps nothing
+  between writes: each syncs every entry from the file's directory up to
+  `root`, whoever made those directories, so one an earlier write or an
+  earlier run could not sync is synced by the next, across a restart too.
+  Round 5 kept a process-local set of such directories, which a SIGKILL or a
+  clean exit dropped while the directory sat in the kernel's cache, and
+  round 4 removed them, which raced every other writer. **The path must lie
+  plainly below `root`, so that one walk from the file's directory up to
+  `root` reaches every entry** (round 7): a `..` element in `root` or the
+  path is refused, since `filepath.Abs` cleans it lexically while a reader
+  resolves the link before it (round 6 wrote and fsynced `root/ids` for
+  `root/link/../ids`, which a reader opens below where the link points, so a
+  restart read no reservation, with no crash at all), and so is a path whose
+  last element names a directory, a trailing separator, `.` or `..`
+  (`NamesDirectory`, `EISDIR`: round 7 wrote `root/ids/` as `root/ids`,
+  which the engine's restart read as given and found stuck; Codex on round
+  7); so is a symbolic link strictly below `root`, whether it leads out or
+  stays inside, found by `Lstat` from `root` down; and so is any mount there
+  or at the file itself, a bind mount of `root`'s own filesystem included,
+  **told by the identity the platform gives each entry's mount, never by the
+  device (`st_dev`) a stat reports**, whatever the path's spelling, on every
+  write: on Linux the kernel's mount ID, from statx's `STATX_MNT_ID` (Linux
+  5.8) or, where statx gives none (an older kernel, or a statx a seccomp
+  policy refuses), the `mnt_id` `/proc/self/fdinfo` lists for an `O_PATH`
+  descriptor (Linux 3.15; `mountIDFrom`), whose listing gives none only
+  where it does not exist, with no `/proc`, any other failure to read it
+  being the read's error (the Claude API on round 9: an EMFILE read as no
+  identity); on macOS the mount's filesystem ID (statfs's `f_fsid`). Round
+  7's probe matched the mount table by spelling, which a filesystem that
+  folds case reaches a mount around, looked for a bind mount at New alone,
+  and never looked at the file (Codex on round 7); round 8 compared devices,
+  and overlayfs with its layers on different filesystems and xino off, the
+  Raspberry Pi OS "Overlay File System" option, reports the overlay's device
+  for a directory and a pseudo device per layer for every other entry, and
+  btrfs a device per subvolume, each on one mount, so round 8 refused the
+  reservation file there once it existed (the Claude API on round 8); an
+  overlay whose upper layer is a tmpfs, that option's own, is refused since
+  round 10 for another reason, its storage (below). The checks run before
+  anything is created and again once the missing directories are, for a link
+  another writer puts in place meanwhile. Round 6 walked the path as written
+  and as it resolved instead, and missed a link reached through another link
+  and synced outside `root` for a link out and back (Codex, the Claude API
+  and Argon on round 6). `root` is the caller's to vouch for: it must exist
+  (the writer never creates it), off an overlay its own entry is never
+  synced, and a link at or above it, a data directory that is a link
+  included, is the caller's too: `root` is resolved once, and every path the
+  write opens, creates and fsyncs, and every name its errors give, is
+  spelled from where it resolved. It refuses, before anything is created, a
+  platform with no directory barrier (`ErrNoDirectoryBarrier`), a root that
+  does not exist, and a path not plainly below `root` (`ErrNotUnderRoot`).
+  Each directory is opened once and that descriptor fsynced (`syncDirAt`),
+  so only an fsync's own failure is `ErrBarrierFailed`, an `*fs.PathError`
+  naming the directory that would not sync: an open that fails (EACCES,
+  EMFILE) is returned as it is. A rename that fails while the destination
+  holds the same bytes takes them only from a regular file on its
+  directory's own mount, by identity, asked as it takes them
+  (`onItsDirectorysMount`): a file mounted there after the checks, or a
+  symbolic link, leaves the rename's error, and a file or a directory the
+  platform gives no mount identity for leaves `ErrMountsUnknown` beside it.
+  **Once the write lands, by its rename or by that fallback, every directory
+  from the file's up to `root` is synced again** (`durableChain`): staging
+  the file on an overlay copies a directory found in the lower layer alone
+  up into the upper one, creating its entry, and those above it up to
+  `root`, after the syncs that ran before the file was staged, and overlayfs
+  fsyncs none of the parents a copy-up creates (Codex on round 9: round 9
+  then synced the file's directory alone). **On an overlay every directory
+  above `root`, up to the root of its mount, is synced too, once the write
+  lands and in the probe** (`copyUpAncestorsOf`, `ancestorsOnMount`, by
+  mount ID): a write below a root in the lower layer alone copies `root` up,
+  and every directory above it up to the overlay's own root, and those
+  entries are the copy-up's, which no caller could have synced; a crash that
+  took them would take the reservation and keep the identity below (Codex on
+  round 10, which round 10 left as an owner item; the orchestrator chose
+  this fix). A directory there the service cannot open is named, with the
+  fix: read access for the service, or a data directory on a filesystem that
+  is not an overlay (the Claude API on round 11). **A root on a bind of a
+  directory inside an overlay, its mount's root field another than `/`, is
+  refused** (`ErrMediumUnknown`, wherever the overlay would be taken, naming
+  the bind's root and the fix: a data directory on a filesystem that is not
+  an overlay, or on the overlay's own mount): the copy-ups above it are out
+  of that mount's reach. An operator's systemd `ProtectSystem=strict` with
+  `ReadWritePaths` on an overlay root makes such a bind of the data
+  directory, as do a chroot and a container's bind of an overlay host's
+  directory; our own unit adds no sandboxing, and an overlay root's own
+  mount, Volumio's shape, is taken (Codex and the Claude API on round 11;
+  the orchestrator's decision, which rejected syncing through another mount
+  of the superblock, and syncfs, whose errors overlayfs reports only on
+  recent kernels). **`root` must be on storage that keeps what is written to
+  it through a reboot** (`ErrVolatile`; the orchestrator's decision on round
+  9's review, to fail closed): on Linux tmpfs and ramfs, by statfs's
+  `f_type`, an overlay mounted volatile, and an overlay whose upper layer is
+  one of those, the Raspberry Pi OS "Overlay File System" option among them
+  (the Claude API on round 9: every barrier answered there, and a reboot
+  took the reservation and kept the identity, so IDs and tokens repeated
+  with no crash at all). An overlay's upper layer is the one the mount table
+  names on the line of `root`'s own mount ID (`mountLine`, `overlayLayer`),
+  never a line picked by its mount point's spelling, the line split on the
+  single ASCII space the kernel writes between fields and nowhere else
+  (Codex on round 10: `strings.Fields` split a lowerdir at a U+00A0 the
+  kernel leaves unescaped, and lost the upperdir and volatile after it),
+  whole (six fields, the optional ones, the `-`, then exactly the type, the
+  source and the super options, none empty but the source, which the kernel
+  writes empty for a filesystem mounted with none: the Claude API on round
+  11), and naming no upper layer only for an overlay that is read-only; and
+  the path that names it must reach here the filesystem the overlay reports
+  (statfs's totals, which an overlay takes from its upper layer), **read for
+  up to three rounds where they differ** (`upperAsReached`): the path is
+  taken as soon as it matches a read of the overlay beside it; totals that
+  moved between two reads of the overlay are no tmpfs's or ramfs's, which no
+  write moves, so the upper layer is taken for what the path reaches (both
+  reviewers on round 10: XFS's inode total and ZFS's block total move with
+  ordinary writes, and round 10 refused such overlays at random, at New and
+  mid-run); and only totals that held still in every round while the path's
+  differed name another filesystem (both reviewers on round 11: totals that
+  moved and came back, A, B, A, still refused at random). Where they do not,
+  where the table cannot be read or names the upper layer by a relative
+  path, past eight overlays one over another, and on fuse-overlayfs, told by
+  its type's subtype or, for a build that sets none, its source, whose upper
+  layer the table does not show (the Claude API on rounds 10 and 11), the
+  writer says it cannot tell (`ErrMediumUnknown`). **It refuses what it can
+  tell is volatile and what it cannot read, and does not try to prove every
+  stack persistent** (the orchestrator's scope on round 10's review, which
+  rejected Codex's Highs 1 and 3): the data directory must be on persistent
+  storage, and ext4 on a zram device or on a loop image kept in tmpfs, an
+  NFS export written async, a FUSE filesystem other than fuse-overlayfs
+  whose daemon writes to memory, an overlay nested in another's upper
+  directory, whose copy-ups above the outer upper directory are not synced
+  (the orchestrator on round 11), and a mount namespace that maps an
+  overlay's upper path onto a filesystem with the same totals are stacks it
+  cannot tell, the operator's to avoid. macOS takes every root, having
+  neither tmpfs nor overlayfs. `ProbeDurable(root, path)` runs the same
+  checks and barriers, without writing, on every directory a write would
+  fsync that exists now. **Where the platform gives no mount identity, for
+  `root` or for an entry below it, the write, the probe and the fallback say
+  so (`ErrMountsUnknown`) rather than take two mounts for one** (Codex on
+  round 8: where the kernel gave no mount IDs, round 8 compared no mount on
+  a write, its probe read the mount table, matched by spelling, and its
+  fallback took two unknown identities for one). `root`'s is asked for on
+  every call, a file directly in `root` included, so that the probe refuses
+  as its caller starts what every write would; the mount table is never read
+  for a mount's identity, and only for an overlay's upper layer and root
+  field and a FUSE mount's type and source, on the line of `root`'s mount ID
+  (Codex on round 11). On Linux that leaves a kernel older than 3.15, or one
+  whose statx gives none with no `/proc` mounted, and elsewhere every
+  platform but macOS and Windows, where the player does not run; Windows
+  gives none and asks for none, refusing first (`ErrNoDirectoryBarrier`).
+  **Don't count a write durable without every entry up to its root, don't
+  keep in memory which entries are durable, don't delete anything to recover
+  durability, don't sync above the root off an overlay, nor above the root
+  of its mount on one, don't walk a link or a mount below the root or at the
+  file, don't tell a mount by its spelling or its device, don't take two
+  mounts the platform gives no identity for as one, don't clean a `..` or a
+  trailing separator away, don't take a fallback's bytes from a file the
+  directory's entry does not name, don't count a write durable before the
+  chain is synced again once it lands, don't take a root on storage that
+  does not outlive a reboot, or that cannot be told to, don't pick an
+  overlay's line in the mount table by its spelling or split it on any white
+  space but the ASCII space, don't take a bind of a directory inside an
+  overlay, nor sync its copy-ups through another mount of the superblock,
+  don't refuse an overlay because totals that moved differ, and don't advise
+  moving to another filesystem for an error not marked `ErrBarrierFailed`,
+  but for the two overlay copy-up refusals (a bind of a directory inside an
+  overlay, a directory above the root its sync cannot open), where leaving
+  the overlay removes that sync.**
+  `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
+  `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
+  `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,
+  `TestWriteBytesDurable_RetriesThroughASymlinkedAlias`,
+  `TestWriteBytesDurable_NeverSyncsAboveTheRoot`,
+  `TestWriteBytesDurable_RemovesNothingAnotherWriterMade`,
+  `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier`,
+  `TestWriteBytesDurable_RefusesADotDotElement`,
+  `TestWriteBytesDurable_RefusesAPathThatNamesADirectory`,
+  `TestWriteBytesDurable_RefusesALinkBelowTheRoot`,
+  `TestWriteBytesDurable_RefusesALinkPutInPlaceWhileItWrites`,
+  `TestWriteBytesDurable_TakesALinkAtOrAboveTheRoot`,
+  `TestWriteBytesDurable_RefusesAMountBelowTheRoot`,
+  `TestWriteBytesDurable_RefusesABindMountByItsMountID`,
+  `TestWriteBytesDurable_RefusesABindMountWhateverItsSpelling`,
+  `TestWriteBytesDurable_RefusesAMountedDestination`,
+  `TestWriteBytesDurable_TakesTheFallbackOnlyFromAPlainFile`,
+  `TestWriteBytesDurable_DecidesAMountByItsIDNotItsDevice`,
+  `TestWriteBytesDurable_SaysSoWhereNoMountIDCanBeHad`,
+  `TestWriteBytesDurable_SyncsTheChainAgainOnceTheWriteLands`,
+  `TestWriteBytesDurable_SyncsWhatACopyUpCreated`,
+  `TestWriteBytesDurable_RefusesARootThatDoesNotOutliveAReboot`,
+  `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs`,
+  `TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`,
+  `TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree`,
+  `TestCopyUpsFromWalkOnlyOnAnOverlay`,
+  `TestAncestorsOnMountStopAtTheRootOfTheirMount`,
+  `TestMediumTakesTotalsThatMoveWithWhatIsWritten`,
+  `TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck`,
+  `TestOverlayLayerIsTheLineOfTheRootsMountID`,
+  `TestMediumRefusesWhatDoesNotOutliveAReboot`, `TestMediumMagicsAreLinuxs`,
+  `TestPlatformMediumReadsTheKernels`, `TestPlatformMountIDReadsTheKernels`,
+  `TestProbeDurable_RefusesAMountPointTheKernelLists`, `TestParseMountInfo`,
+  `TestPlatformMountTableReadsTheKernels`, `TestParseFdinfoMountID`,
+  `TestMountIDFromFallsBackToFdinfoOnlyWhereStatxGivesNone`,
+  `TestPlatformMountIDAsksFdinfoWhereStatxGivesNone`,
+  `TestFdinfoMountIDSaysWhatFailedToRead`, `TestBarrierFailuresAreMarked`,
+  `TestProbeDurable_SyncsTheDirectoryItOpened` and
+  `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.
