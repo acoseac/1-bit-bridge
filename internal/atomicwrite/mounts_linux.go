@@ -45,10 +45,22 @@ const mountIDsExpected = true
 // where a mount table names the mount by one spelling (Codex on round 7 and
 // round 8); and a bind mount of a filesystem onto itself has an ID of its
 // own, which its device does not show. ok is false where neither gives one;
-// any other error is the stat's or the open's.
+// any other error is the stat's or the open's. It asks the readers through
+// their seams (statxMountIDOf, fdinfoMountIDOf).
 func platformMountID(path string) (uint64, bool, error) {
-	return mountIDFrom(path, statxMountID, fdinfoMountID)
+	return mountIDFrom(path, statxMountIDOf, fdinfoMountIDOf)
 }
+
+// statxMountIDOf and fdinfoMountIDOf are the two readers platformMountID
+// asks, in that order: test seams, so that a test can stand for a kernel
+// whose statx gives no mount ID and hold the wiring to the fallback on a
+// kernel whose statx gives one (TestPlatformMountIDAsksFdinfoWhereStatxGivesNone).
+// Process-global like syncParentDir, with the same contract: in-package tests
+// override them with a `t.Cleanup` restore and never call `t.Parallel()`.
+var (
+	statxMountIDOf  = statxMountID
+	fdinfoMountIDOf = fdinfoMountID
+)
 
 // statxMountID is statx's mount ID for path, a link at the end not followed,
 // and false where the kernel gives none.
