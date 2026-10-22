@@ -28,18 +28,9 @@ func linuxStatfs(path string) (fsStat, error) {
 }
 
 // platformCopyUps is the directories above root a copy-up can create entries
-// in, on Linux: on an overlay, every one up to the root of root's mount, by the
-// mount IDs the kernel gives (ancestorsOnMount); elsewhere none, as nothing
-// copies up.
+// in, on Linux (copyUpsFrom, on the kernel's statfs and mount IDs).
 func platformCopyUps(root string, mountID uint64) ([]string, error) {
-	st, err := linuxStatfs(root)
-	if err != nil {
-		return nil, err
-	}
-	if st.Type != overlayfsMagic {
-		return nil, nil
-	}
-	return ancestorsOnMount(root, mountID, mountIDOf)
+	return copyUpsFrom(root, mountID, linuxStatfs, mountIDOf)
 }
 
 // readMountInfo is the kernel's mount table for this process's mount

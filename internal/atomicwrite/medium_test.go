@@ -85,7 +85,9 @@ const piMountInfo = `22 1 0:22 / / rw,noatime shared:1 - overlay overlayroot rw,
 // followed (Codex on round 10). A read-only overlay alone names no upper
 // layer. A mount that is not an overlay, one the table does not list, a line
 // cut short, one with a field too many or an empty one, and a writable
-// overlay that names no upper layer are errors.
+// overlay that names no upper layer are errors. The source alone may be
+// empty, as the kernel writes it for an overlay mounted with none (the Claude
+// API on round 11: round 11 refused that line as one with an empty field).
 func TestOverlayLayerIsTheLineOfTheRootsMountID(t *testing.T) {
 	const table = piMountInfo + `50 22 0:50 / /srv/a\040b rw - overlay overlay rw,lowerdir=/l,upperdir=/u\040p\054q\134r,workdir=/w,volatile
 51 22 0:51 / /srv/c rw shared:9 master:3 - overlay overlay rw,lowerdir=/l,upperdir=/u2,workdir=/w2,fsync=volatile
@@ -96,6 +98,7 @@ func TestOverlayLayerIsTheLineOfTheRootsMountID(t *testing.T) {
 		`62 22 0:62 / /srv/rw rw - overlay overlay rw,lowerdir=/l
 63 22 0:63 / /srv/x rw - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w more
 64 22 0:64 / /srv/y  rw - overlay overlay ro,lowerdir=/l
+65 22 0:65 / /srv/e rw - overlay  rw,lowerdir=/l,upperdir=/u3,workdir=/w3
 `
 	for _, tc := range []struct {
 		id       uint64
@@ -109,6 +112,7 @@ func TestOverlayLayerIsTheLineOfTheRootsMountID(t *testing.T) {
 		{52, "", false},
 		{60, "/ram/upper", true},
 		{61, "/u\u2028line", false},
+		{65, "/u3", false},
 	} {
 		m, err := overlayLayer([]byte(table), tc.id)
 		if err != nil || m.upper != tc.upper || m.volatile != tc.volatile {
@@ -194,6 +198,27 @@ func TestMediumRefusesWhatDoesNotOutliveAReboot(t *testing.T) {
 		{name: "a writable overlay whose line names no upper layer", id: 62,
 			table: "62 1 0:62 / / rw - overlay overlay rw,lowerdir=/l\n",
 			stats: map[string]fsStat{data: overlay(tmpfs)}, want: ErrMediumUnknown, says: "no upper layer"},
+		{name: "Volumio's shape: the root an overlay over a disk, its own mount", id: 90,
+			table: "90 1 0:90 / / rw,relatime shared:1 - overlay overlay rw,lowerdir=/static,upperdir=/data/dyn,workdir=/data/work\n",
+			stats: map[string]fsStat{data: overlay(ext4), "/data/dyn": ext4}},
+		{name: "a bind of a directory inside an overlay", id: 91,
+			table: "91 90 0:90 /home/pi/.local/share/1-bit-bridge /home/pi/.local/share/1-bit-bridge rw,relatime shared:1 - overlay overlay rw,lowerdir=/static,upperdir=/data/dyn,workdir=/data/work\n",
+			stats: map[string]fsStat{data: overlay(ext4), "/data/dyn": ext4},
+			want:  ErrMediumUnknown, says: "a bind of /home/pi/.local/share/1-bit-bridge, a directory inside an overlay, not the overlay's own mount: a copy-up the write makes creates entries above it that this mount cannot reach to sync: put the data directory on a filesystem that is not an overlay, or on the overlay's own mount"},
+		{name: "a bind of an overlay's directory whose upper layer is tmpfs, refused for its storage first", id: 92,
+			table: "92 22 0:22 /srv/data /srv/data rw - overlay overlayroot rw,lowerdir=/media/root-ro,upperdir=/media/root-rw/overlay,workdir=/media/root-rw/overlay-workdir/_\n",
+			stats: map[string]fsStat{data: overlay(tmpfs), "/media/root-rw/overlay": tmpfs},
+			want:  ErrVolatile, says: "/media/root-rw/overlay is on tmpfs"},
+		{name: "an overlay over a disk mounted with no source", id: 93,
+			table: "93 1 0:93 / / rw - overlay  rw,lowerdir=/l,upperdir=/srv/disk/upper,workdir=/srv/disk/work\n",
+			stats: map[string]fsStat{data: overlay(ext4), "/srv/disk/upper": ext4}},
+		{name: "fuse-overlayfs built with no subtype", id: 82,
+			table: "82 1 0:82 / / rw - fuse fuse-overlayfs rw,user_id=0,group_id=0\n",
+			stats: map[string]fsStat{data: {Type: fuseMagic, Bsize: 4096}},
+			want:  ErrMediumUnknown, says: "fuse-overlayfs"},
+		{name: "a FUSE filesystem mounted with no source", id: 83,
+			table: "83 1 0:83 / /home/pi rw - fuse.sshfs  rw,user_id=1000,group_id=1000\n",
+			stats: map[string]fsStat{data: {Type: fuseMagic, Bsize: 4096}}},
 		{name: "overlays nested past the bound", id: 70,
 			table: "70 1 0:70 / /d rw - overlay overlay rw,lowerdir=/l,upperdir=/loop/up,workdir=/loop/w\n",
 			stats: map[string]fsStat{data: overlay(ext4), "/loop/up": overlay(ext4)},
@@ -232,13 +257,17 @@ func TestMediumRefusesWhatDoesNotOutliveAReboot(t *testing.T) {
 // ZFS's f_blocks is what is referenced plus what is available), so an
 // overlay's totals and its upper layer's, read one after the other, differ
 // though they are one filesystem's, and round 10 refused such an overlay at
-// random, at New and at any reservation write. The overlay is read again
-// after its upper layer: totals that moved between those two reads are no
-// tmpfs's or ramfs's, which no write moves, and the upper layer the path
-// reaches is taken for what it is; totals that held still while the path's
-// differ still name another filesystem (ErrMediumUnknown), and so does a path
-// that reaches tmpfs while the overlay's totals move. Each statfs answer here
-// is the next of its path's, as a filesystem moves between calls.
+// random, at New and at any reservation write. The overlay, its upper path
+// and the overlay again are read for up to three rounds: the path is taken as
+// soon as it matches an overlay read beside it; totals that moved between
+// two reads of the overlay are no tmpfs's or ramfs's, which no write moves,
+// and the upper layer the path reaches is taken for what it is; and only
+// three rounds that each held still while the path differed name another
+// filesystem (ErrMediumUnknown), as does a path that reaches tmpfs while the
+// overlay's totals move. Totals that moved and came back (A, B, A) are no
+// longer refused at once (both reviewers on round 11: XFS moves and comes
+// back with an allocation freed again). Each statfs answer here is the next
+// of its path's, as a filesystem moves between calls.
 func TestMediumTakesTotalsThatMoveWithWhatIsWritten(t *testing.T) {
 	const data = "/var/lib/1-bit-bridge"
 	xfs := func(files uint64) fsStat { return fsStat{Type: 0x58465342, Bsize: 4096, Blocks: 2621440, Files: files} }
@@ -257,8 +286,10 @@ func TestMediumTakesTotalsThatMoveWithWhatIsWritten(t *testing.T) {
 			map[string][]fsStat{data: {overlay(xfs(1000)), overlay(xfs(998))}, "/srv/up": {xfs(999)}}, nil, ""},
 		{"ZFS whose block total moves with each write",
 			map[string][]fsStat{data: {overlay(zfs(5000)), overlay(zfs(5003))}, "/srv/up": {zfs(5001)}}, nil, ""},
-		{"totals that hold still while the path reaches another filesystem",
-			map[string][]fsStat{data: {overlay(xfs(1000)), overlay(xfs(1000))}, "/srv/up": {xfs(999)}}, ErrMediumUnknown, "another filesystem"},
+		{"totals that moved and came back, then agree",
+			map[string][]fsStat{data: {overlay(xfs(1000)), overlay(xfs(1000)), overlay(xfs(1000))}, "/srv/up": {xfs(999), xfs(1000)}}, nil, ""},
+		{"three rounds that held still while the path differed",
+			map[string][]fsStat{data: {overlay(xfs(1000)), overlay(xfs(1000)), overlay(xfs(1000)), overlay(xfs(1000))}, "/srv/up": {xfs(999), xfs(999), xfs(999)}}, ErrMediumUnknown, "another filesystem"},
 		{"a path that reaches tmpfs while the overlay's totals move",
 			map[string][]fsStat{data: {overlay(xfs(1000)), overlay(xfs(998))}, "/srv/up": {{Type: tmpfsMagic, Bsize: 4096, Blocks: 1000, Files: 1000}}}, ErrMediumUnknown, "tmpfs"},
 	} {
@@ -336,13 +367,18 @@ func TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay(t *testing.T) {
 	if want := []string{root + " 7", root + " 7"}; !slices.Equal(asked, want) {
 		t.Errorf("the directories above the root were asked for %v, want %v: by the write and the probe, with the root and its mount's ID", asked, want)
 	}
+	// A directory there the service cannot open is named, with what it was
+	// opened for and the fix (the Claude API on round 11: round 11 gave the
+	// open's bare error).
 	gone := filepath.Join(root, "gone")
 	stubCopyUps(t, func(string, uint64) ([]string, error) { return []string{gone}, nil })
-	if err := WriteBytesDurable(root, path, []byte("reserved again"), ".durable-*.tmp"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("WriteBytesDurable with a directory above the root that cannot be synced = %v, want its open's error", err)
-	}
-	if err := ProbeDurable(root, path); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("ProbeDurable with a directory above the root that cannot be synced = %v, want its open's error", err)
+	for what, err := range map[string]error{
+		"WriteBytesDurable": WriteBytesDurable(root, path, []byte("reserved again"), ".durable-*.tmp"),
+		"ProbeDurable":      ProbeDurable(root, path),
+	} {
+		if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), gone+", above the root on an overlay, could not be opened for its sync") || !strings.Contains(err.Error(), "a filesystem that is not an overlay") {
+			t.Errorf("%s with a directory above the root that cannot be opened = %v, want its open's error, naming it, what it was opened for and the fix", what, err)
+		}
 	}
 	stubCopyUps(t, func(string, uint64) ([]string, error) { return nil, fmt.Errorf("%w: the walk's own", ErrMountsUnknown) })
 	*synced = nil
@@ -384,6 +420,46 @@ func TestAncestorsOnMountStopAtTheRootOfTheirMount(t *testing.T) {
 	}
 	if got, err := ancestorsOnMount(p("/home/pi/unlisted/data"), 5, idOf); !errors.Is(err, ErrMountsUnknown) {
 		t.Errorf("ancestorsOnMount past a directory with no mount ID = %v, %v, want ErrMountsUnknown", got, err)
+	}
+}
+
+// TestCopyUpsFromWalkOnlyOnAnOverlay pins the platform's copy-up default
+// (copyUpsFrom, which platformCopyUps wires to statfs and the mount IDs), so
+// that it is held where the namespace tests skip (the Claude API on round 11:
+// a platformCopyUps answering none passed every test those tests did not
+// run): on an overlay, the walk above the root (ancestorsOnMount), by the
+// root's mount ID; on anything else, none, without a walk; and a statfs or a
+// walk that fails, its error.
+func TestCopyUpsFromWalkOnlyOnAnOverlay(t *testing.T) {
+	p := filepath.FromSlash
+	root := p("/home/pi/data")
+	ids := map[string]uint64{p("/home/pi"): 5, p("/home"): 5, p("/"): 1}
+	idOf := func(path string) (uint64, bool, error) {
+		id, ok := ids[path]
+		return id, ok, nil
+	}
+	statfsOf := func(st fsStat, err error) func(string) (fsStat, error) {
+		return func(path string) (fsStat, error) {
+			if path != root {
+				t.Errorf("copyUpsFrom asked statfs for %s, want the root", path)
+			}
+			return st, err
+		}
+	}
+	if got, err := copyUpsFrom(root, 5, statfsOf(fsStat{Type: overlayfsMagic}, nil), idOf); err != nil || !slices.Equal(got, []string{p("/home/pi"), p("/home")}) {
+		t.Errorf("copyUpsFrom on an overlay = %v, %v, want the walk to the root of its mount", got, err)
+	}
+	walked := false
+	if got, err := copyUpsFrom(root, 5, statfsOf(fsStat{Type: 0xef53}, nil), func(string) (uint64, bool, error) { walked = true; return 0, false, nil }); err != nil || got != nil || walked {
+		t.Errorf("copyUpsFrom on ext4 = %v, %v (walked: %v), want none and no walk", got, err, walked)
+	}
+	statErr := &fs.PathError{Op: "statfs", Path: root, Err: syscall.EIO}
+	if _, err := copyUpsFrom(root, 5, statfsOf(fsStat{}, statErr), idOf); !errors.Is(err, syscall.EIO) {
+		t.Errorf("copyUpsFrom with statfs failing = %v, want its error", err)
+	}
+	walkErr := errors.New("statx: input/output error")
+	if _, err := copyUpsFrom(root, 5, statfsOf(fsStat{Type: overlayfsMagic}, nil), func(string) (uint64, bool, error) { return 0, false, walkErr }); !errors.Is(err, walkErr) {
+		t.Errorf("copyUpsFrom with the walk failing = %v, want its error", err)
 	}
 }
 

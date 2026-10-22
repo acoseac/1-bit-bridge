@@ -144,6 +144,15 @@ func TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsTmpfs(t *testing.T) 
 // directory on storage that outlives a reboot, as the writer refuses an
 // overlay over anything else.
 func TestWriteBytesDurable_SyncsWhatACopyUpCreated(t *testing.T) {
+	inOverlayNamespace(t, "copy-up", persistentBase(t))
+}
+
+// persistentBase is a temporary directory for a namespace scenario whose
+// overlay's upper layer must be on storage the writer takes, or it skips: on
+// an overlay, whose own upper layer the namespace may not reach, or on
+// storage the medium check refuses.
+func persistentBase(t *testing.T) string {
+	t.Helper()
 	base := realTempDir(t)
 	id, ok, err := platformMountID(base)
 	if err != nil || !ok {
@@ -155,7 +164,7 @@ func TestWriteBytesDurable_SyncsWhatACopyUpCreated(t *testing.T) {
 	if err := platformMedium(base, id); err != nil {
 		t.Skipf("the temporary directory %s is not on storage that outlives a reboot: %v", base, err)
 	}
-	inOverlayNamespace(t, "copy-up", base)
+	return base
 }
 
 // TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck pins the
@@ -179,6 +188,19 @@ func TestProbeDurable_RefusesTmpfsThroughThePackagesOwnMediumCheck(t *testing.T)
 	if err := ProbeDurable(root, filepath.Join(root, "ids")); !errors.Is(err, ErrVolatile) || len(*synced) != 0 {
 		t.Errorf("ProbeDurable on /dev/shm through the package's own medium check = %v after syncing %v, want ErrVolatile and nothing synced", err, *synced)
 	}
+}
+
+// TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree pins the
+// orchestrator's decision on Codex's High and the Claude API's Medium on
+// round 11 against the real kernel: a bind of a directory inside an overlay,
+// as systemd makes of a data directory under ProtectSystem=strict with
+// ReadWritePaths, cannot reach the directories above it that a copy-up of a
+// lower-only data directory creates, so the probe and the write refuse it
+// (ErrMediumUnknown), naming the bind's root in the overlay and the fix,
+// with nothing copied up; the overlay's own mount, below it, is taken
+// (TestWriteBytesDurable_SyncsWhatACopyUpCreated).
+func TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree(t *testing.T) {
+	inOverlayNamespace(t, "bind", persistentBase(t))
 }
 
 // TestOverlayNamespaceHelper is the child inOverlayNamespace starts, root in
@@ -244,6 +266,25 @@ func TestOverlayNamespaceHelper(t *testing.T) {
 		merged := filepath.Dir(root)
 		if want := []string{root, "rename", player, root, merged}; !slices.Equal(log, want) {
 			t.Errorf("the write synced %v, want %v: the root while the player directory was in the lower layer alone, then once the write landed the player directory, the root, which holds its copied-up entry, and the overlay's own root, which holds the root's (Codex on round 10)", log, want)
+		}
+	case "bind":
+		merged := mountOverlay(t, base, lower, layer)
+		bound := filepath.Join(base, "bound")
+		mkdirs(t, bound)
+		if err := unix.Mount(filepath.Join(merged, "data"), bound, "", unix.MS_BIND, ""); err != nil {
+			t.Skipf("no bind mount can be made in the namespace: %v", err)
+		}
+		path := filepath.Join(bound, "player", "ids")
+		for what, err := range map[string]error{
+			"ProbeDurable":      ProbeDurable(bound, path),
+			"WriteBytesDurable": WriteBytesDurable(bound, path, []byte("reserved"), ".durable-*.tmp"),
+		} {
+			if !errors.Is(err, ErrMediumUnknown) || !strings.Contains(err.Error(), "a bind of /data") || !strings.Contains(err.Error(), "the overlay's own mount") {
+				t.Errorf("%s through a bind of the overlay's /data = %v, want ErrMediumUnknown naming the bind's root and the fix", what, err)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(layer, "upper", "data")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the refused write copied the data directory up (%v)", err)
 		}
 	default:
 		t.Fatalf("no scenario %q", scenario)
