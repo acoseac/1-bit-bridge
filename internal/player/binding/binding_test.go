@@ -392,8 +392,8 @@ func TestAHubOrAGoneControllerInvalidatesAPortBinding(t *testing.T) {
 			t.Errorf("%s: reason %s", port, r.Reason)
 		}
 	}
-	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2:1.0"), inv), StateDeviceMissing, -1)
 	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2"), inv), StateDeviceMissing, -1)
+	want(t, Resolve(byPort("platform-xhci-hcd.0/usb2-2:1.0"), inv), StateDeviceMissing, -1)
 }
 
 // TestTheCheckAfterOpenRefusesAnotherDACAtTheBoundCard: the check passes
