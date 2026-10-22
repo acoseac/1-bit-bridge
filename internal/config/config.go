@@ -158,16 +158,33 @@ func (o OutputConfig) Mode() string {
 	}
 }
 
-// Problem is the refusal Validate makes of the output block, or nil: an
-// output.mpd that is not auto, on or off, or an output.loopbackPort that is
-// not a port. The player block is never one (PlayerEnabled turns the
-// player off instead). bridge init's rewrite keeps no setting it refuses.
+// OutputProblem is the refusal Validate makes of one output setting
+// (OutputConfig.Problem): the setting, and why, in words that carry no
+// value. What is refused there is often something pasted onto the wrong
+// line (MPD's password or a DAC's serial on output.mpd's, a serial of digits
+// on output.loopbackPort's), and bridge serve, bridge doctor and init print
+// the refusal, so it is never quoted (B505's round-2 review).
+type OutputProblem struct {
+	// Setting is the setting's path, output.mpd or output.loopbackPort.
+	Setting string
+	// Why is the reason, with no value in it.
+	Why string
+}
+
+// Error is the setting and the reason.
+func (p *OutputProblem) Error() string { return p.Setting + ": " + p.Why }
+
+// Problem is the refusal Validate makes of the output block, an
+// *OutputProblem, or nil: an output.mpd that is not auto, on or off, or an
+// output.loopbackPort that is not a port. The player block is never one
+// (PlayerEnabled turns the player off instead). bridge init's rewrite keeps
+// no setting it refuses.
 func (o OutputConfig) Problem() error {
 	if o.Mode() == "" {
-		return fmt.Errorf("output.mpd: %q is not auto, on or off", o.MPD)
+		return &OutputProblem{Setting: "output.mpd", Why: "that value is not auto, on or off"}
 	}
 	if p := o.LoopbackPort; p != nil && (*p < 0 || *p > 65535) {
-		return fmt.Errorf("output.loopbackPort: %d is not a port (0 to 65535)", *p)
+		return &OutputProblem{Setting: "output.loopbackPort", Why: "that value is not a port (0 to 65535)"}
 	}
 	return nil
 }

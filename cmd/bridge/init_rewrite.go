@@ -509,8 +509,8 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 // at the top of this file), a setting at a time. One that does not read, or
 // that the config's own check refuses (config.OutputConfig.Problem), is one
 // the config did not load with either, often why init runs again: it is left
-// out and named, by its key and line and the check's own words, never by a
-// value that does not read. A player block never fails: one this release
+// out and named by its key, its line and the check's own words, never by its
+// value (outputRefusal). A player block never fails: one this release
 // cannot read is kept as the file holds it, as Load keeps it, and the player
 // stays off. A key output does not take is dropped, as a rewrite drops every
 // key a config does not have.
@@ -543,7 +543,7 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 			continue
 		}
 		if err := one.Problem(); err != nil {
-			notKept = append(notKept, err.Error())
+			notKept = append(notKept, outputRefusal(err, k))
 			continue
 		}
 		// The setting the pair holds, into what is kept.
@@ -555,6 +555,19 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 		}
 	}
 	return kept, notKept
+}
+
+// outputRefusal is the warning line for a setting the config's own check
+// refuses: the setting and its line, and the reason in config's words,
+// which carry no value (config.OutputProblem). Never the error's own text:
+// a refusal that ever quoted its value would put a password pasted onto the
+// wrong line on the terminal.
+func outputRefusal(err error, k *yaml.Node) string {
+	var p *config.OutputProblem
+	if errors.As(err, &p) {
+		return fmt.Sprintf("%s (line %d): %s", p.Setting, k.Line, p.Why)
+	}
+	return fmt.Sprintf("%s (line %d): the config's own check refuses it", outputKeyName(k), k.Line)
 }
 
 // outputKeyName names a key of the output block: output.<key> for one of

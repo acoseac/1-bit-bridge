@@ -111,6 +111,51 @@ func TestOutputModeRejectsAnythingElse(t *testing.T) {
 	}
 }
 
+// TestOutputRefusalsCarryNoValue: Validate's refusals of the output block
+// name the setting and never its value, since what is refused is often
+// something pasted onto the wrong line (MPD's password or a DAC's serial on
+// output.mpd's, a serial of digits on output.loopbackPort's), and bridge
+// serve, bridge doctor and init print the refusal; init's rewrite took its
+// warning from it (B505's round-2 review). Through Validate and through Load.
+func TestOutputRefusalsCarryNoValue(t *testing.T) {
+	digits, past, negative := 202311050044, 70000, -5
+	base := Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"}}
+	for _, tc := range []struct {
+		name            string
+		output          OutputConfig
+		setting, secret string
+	}{
+		{"MPD's password on mpd's line", OutputConfig{MPD: "mpd-kitchen-pw-8812"}, "output.mpd", "mpd-kitchen-pw-8812"},
+		{"a serial on mpd's line", OutputConfig{MPD: playerSerial}, "output.mpd", playerSerial},
+		{"a word mpd does not take", OutputConfig{MPD: "maybe"}, "output.mpd", "maybe"},
+		{"a serial of digits as the port", OutputConfig{LoopbackPort: &digits}, "output.loopbackPort", "202311050044"},
+		{"a port past 65535", OutputConfig{LoopbackPort: &past}, "output.loopbackPort", "70000"},
+		{"a negative port", OutputConfig{LoopbackPort: &negative}, "output.loopbackPort", "-5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Output = tc.output
+			err := cfg.Validate()
+			if err == nil || !strings.HasPrefix(err.Error(), tc.setting+": ") {
+				t.Fatalf("Validate = %v, want a refusal naming %s", err, tc.setting)
+			}
+			if strings.Contains(err.Error(), tc.secret) {
+				t.Errorf("the refusal carries the value: %v", err)
+			}
+		})
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge.yaml")
+	body := "listenAddress: \":7788\"\nscanIntervalSec: 3600\nlibraryRoots: [" + dir + "]\ndataDir: " + filepath.Join(dir, "data") +
+		"\noutput:\n  mpd: mpd-kitchen-pw-8812\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "output.mpd") || strings.Contains(err.Error(), "mpd-kitchen-pw-8812") {
+		t.Errorf("Load = %v, want a refusal naming output.mpd and not its value", err)
+	}
+}
+
 func TestAutoStillRequiresARoot(t *testing.T) {
 	cfg := &Config{ListenAddress: ":7788", ScanIntervalSec: 3600, Output: OutputConfig{MPD: "auto"}}
 	err := cfg.Validate()

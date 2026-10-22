@@ -148,21 +148,34 @@ func TestInitRewriteKeepsAPlayerBlockThatDoesNotReadAsWritten(t *testing.T) {
 // one the config did not load with either, which is often why init runs
 // again. The rewrite cannot keep it, so it writes the rest of the block,
 // the player's binding included, and says on its warning line which setting
-// it did not keep and why, never quoting a value the field does not know.
+// it did not keep, where and why, with no value in it: what is refused is
+// often something pasted onto the wrong line, MPD's password or the DAC's
+// serial on mpd's, a serial of digits on the port's (B505's round-2 review:
+// the warning quoted a refused mpd and printed a refused port). The value
+// reaches neither the run's output nor the saved config.
 func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 	const player = "    player:\n        enabled: true\n        device:\n            binding: uniqueModel\n" +
 		"            vendorId: \"20b1\"\n            productId: \"3009\"\n"
+	notAMode := []string{"output.mpd (line ", "): that value is not auto, on or off"}
+	notAPort := []string{"output.loopbackPort (line ", "): that value is not a port (0 to 65535)"}
 	for _, tc := range []struct {
-		name, block, says, absent string
-		keepsPlayer               bool
+		name, block, secret string
+		says                []string
+		keepsPlayer         bool
 	}{
-		{"mpd that is not a mode", "output:\n    mpd: maybe\n" + player, `output.mpd: "maybe" is not auto, on or off`, "maybe", true},
+		{"mpd that is not a mode", "output:\n    mpd: maybe\n" + player, "maybe", notAMode, true},
+		{"MPD's password on mpd's line", "output:\n    mpd: " + rewriteMPDPassword + "\n" + player, rewriteMPDPassword, notAMode, true},
+		{"the DAC's serial on mpd's line", "output:\n    mpd: \"" + rewriteSerial + "\"\n" + player, rewriteSerial[len(rewriteSerial)-6:], notAMode, true},
+		{"MPD's password on mpd's line in a merged block", "output:\n    <<: {mpd: " + rewriteMPDPassword + "}\n" + player,
+			rewriteMPDPassword, notAMode, true},
 		{"a loopback port that is not a number", "output:\n    loopbackPort: " + rewriteMPDPassword + "\n" + player,
-			"output.loopbackPort (line", rewriteMPDPassword, true},
-		{"a loopback port that is not a port", "output:\n    loopbackPort: 70000\n" + player,
-			"output.loopbackPort: 70000 is not a port", "70000", true},
-		{"a password that is not text", "output:\n    password: [a, b]\n" + player, "output.password (line", "password", true},
-		{"an output that is not a block", "output: \"off\"\n", "output (line", "output:", false},
+			rewriteMPDPassword, []string{"output.loopbackPort (line ", "): it does not read as that setting"}, true},
+		{"a serial of digits as the loopback port", "output:\n    loopbackPort: 202311050044\n" + player, "202311050044", notAPort, true},
+		{"a loopback port that is not a port", "output:\n    loopbackPort: 70000\n" + player, "70000", notAPort, true},
+		{"a password that is not text", "output:\n    password: [" + rewriteMPDPassword + "]\n" + player, rewriteMPDPassword,
+			[]string{"output.password (line ", "): it does not read as that setting"}, true},
+		{"an output that is not a block", "output: " + rewriteMPDPassword + "\n", rewriteMPDPassword,
+			[]string{"output (line ", "): it is not a block of output settings"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
@@ -182,15 +195,17 @@ func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 			if tc.keepsPlayer && (!saved.Output.Player.Enabled || saved.Output.Player.Device.Binding != config.BindingUniqueModel) {
 				t.Errorf("the rewrite dropped the player's binding beside a setting it could not keep: %+v", saved.Output.Player)
 			}
-			if file := readConfigFile(t, cfgDir); strings.Contains(file, tc.absent) {
-				t.Errorf("the saved config still holds %q:\n%s", tc.absent, file)
-			}
 			warning := outputNotKeptWarning(out)
-			if !strings.Contains(warning, tc.says) {
-				t.Errorf("the rewrite's warning does not say %q:\n%s", tc.says, warning)
+			for _, s := range tc.says {
+				if !strings.Contains(warning, s) {
+					t.Errorf("the rewrite's warning does not say %q:\n%s", s, warning)
+				}
 			}
-			if strings.Contains(warning, rewriteMPDPassword) {
-				t.Errorf("the warning quotes a value its field does not know:\n%s", warning)
+			if strings.Contains(out, tc.secret) {
+				t.Errorf("the run's output carries the value %q", tc.secret)
+			}
+			if file := readConfigFile(t, cfgDir); strings.Contains(file, tc.secret) {
+				t.Errorf("the saved config still holds %q:\n%s", tc.secret, file)
 			}
 		})
 	}
