@@ -69,17 +69,13 @@ func statxMountID(path string) (uint64, bool, error) {
 // fdinfoMountID is the mnt_id the kernel lists in /proc/self/fdinfo for a
 // descriptor opened on path with O_PATH, a link at the end not followed, an
 // open that asks nothing of path's own permissions, as a stat does not. ok is
-// false where the listing cannot be read (no /proc) or holds no mnt_id.
+// false where the listing does not exist (no /proc) or holds no mnt_id, and
+// any other failure to read it is the read's error (fdinfoMountIDFrom).
 func fdinfoMountID(path string) (uint64, bool, error) {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0, false, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	defer func() { _ = unix.Close(fd) }()
-	data, err := os.ReadFile("/proc/self/fdinfo/" + strconv.Itoa(fd))
-	if err != nil {
-		return 0, false, nil
-	}
-	id, ok := parseFdinfoMountID(data)
-	return id, ok, nil
+	return fdinfoMountIDFrom(os.ReadFile, "/proc/self/fdinfo/"+strconv.Itoa(fd))
 }
