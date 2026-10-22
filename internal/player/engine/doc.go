@@ -26,8 +26,8 @@
 // them. Stop, the output's reports, the maintenance commands and the modes
 // never wait. A Stop, or a report that stops playback, answers the
 // transport commands still waiting as it runs (a Pause nil, the rest
-// ReasonSuperseded or the output's reason), and EnterMaintenance refuses
-// every waiting command.
+// ReasonOvertaken or the output's reason: none of them ran, so none changed
+// anything), and EnterMaintenance refuses every waiting command.
 //
 // After every change the owner publishes an immutable Snapshot, which reads
 // take without waiting on the owner; its accessors copy. The generation

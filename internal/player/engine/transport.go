@@ -205,14 +205,14 @@ func policy(op op, st State, live, atEnd bool) rule {
 
 // transport runs a transport command by its rule. A Stop, which waits for
 // nothing, overtakes the transport commands parked before it, and answers
-// them (supersedeParked).
+// them (supersedeParked): none of them ran (ReasonOvertaken).
 func (e *Engine) transport(c *command) {
 	o := &e.o
 	name := c.op.String()
 	switch c.op {
 	case opStop:
 		e.supersedeParked(func(p *command) error {
-			return refuse(p.op.String(), ReasonSuperseded, "a stop ran before it")
+			return refuse(p.op.String(), ReasonOvertaken, "a stop ran before it, so it did not run")
 		})
 	case opPlay, opPlayID, opPlayIndex, opNext, opPrevious:
 		if u := o.unconfirmed; u != nil {

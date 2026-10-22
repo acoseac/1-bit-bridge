@@ -76,6 +76,12 @@ const (
 	// a Stop, a DeleteAll, a deletion of the entry to play. Whatever else
 	// the command did (a PlayID's selection) stands.
 	ReasonSuperseded Reason = "superseded"
+	// ReasonOvertaken answers a transport command still waiting its turn
+	// (behind a Pause or a Resume under way) when a Stop ran: the Stop
+	// overtook it, and it did not run and changed nothing, a PlayID's
+	// selection included. A Pause so overtaken is answered nil, playback
+	// being stopped as it asked.
+	ReasonOvertaken Reason = "overtaken"
 )
 
 // The reasons playback stops on its own, recorded in Snapshot.LastStop.

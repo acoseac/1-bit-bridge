@@ -448,7 +448,9 @@ func (e *Engine) runnable() int {
 
 // supersedeParked answers the parked transport commands that a command
 // run before them has overtaken (a Stop, the output going away): a Pause
-// with nil, playback being stopped as it asked, and the rest with why.
+// with nil, playback being stopped as it asked, and the rest with why
+// (ReasonOvertaken, or the output's reason). None of them ran, so none
+// changed anything.
 func (e *Engine) supersedeParked(why func(c *command) error) {
 	o := &e.o
 	kept := o.parked[:0]

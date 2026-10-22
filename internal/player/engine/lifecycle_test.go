@@ -162,7 +162,8 @@ func TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite(t *testing.T) {
 // transport commands that wait: a Pause waiting for a start still opening,
 // and a Play behind it, do not hold the Stop; they are answered as it runs
 // (the Pause with nil, playback being stopped as it asked; the Play
-// superseded), and the session is released while its Start still opens.
+// overtaken, never having run), and the session is released while its
+// Start still opens.
 func TestAStopDuringASlowOpenIsTakenAtOnce(t *testing.T) {
 	h := startHarness(t)
 	h.insert("a", "b")
@@ -187,7 +188,7 @@ func TestAStopDuringASlowOpenIsTakenAtOnce(t *testing.T) {
 	stop := async(func() error { return h.eng.Stop(bg) })
 	h.waitApplied("stop", mark)
 	h.must("the pause the stop overtook", h.result("pause", pause))
-	h.refused("the play the stop overtook", h.result("play", again), ReasonSuperseded)
+	h.refused("the play the stop overtook", h.result("play", again), ReasonOvertaken)
 	h.be.waitFor("the release", func() bool { return s.releaseAsked })
 	held.open()
 	h.must("stop", h.result("stop", stop))
@@ -195,6 +196,50 @@ func TestAStopDuringASlowOpenIsTakenAtOnce(t *testing.T) {
 	if sn := h.snap(); sn.State() != Stopped || h.be.starts() != 1 || h.be.count("pause") != 0 {
 		t.Fatalf("%s with %d sessions and %d pauses", sn.State(), h.be.starts(), h.be.count("pause"))
 	}
+}
+
+// TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem pins what
+// a Stop answers the transport commands waiting behind a Pause under way:
+// none of them ran, so each answers ReasonOvertaken and the selection is
+// the one before them, a PlayID's, a PlayIndex's, a Next's and a
+// Previous's included; the Pause answers nil.
+func TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem(t *testing.T) {
+	h := startHarness(t)
+	ids, _ := h.playing(1, "a", "b", "c", "d")
+	held := newGate()
+	h.be.script(func() {
+		h.be.onPause = func(ctx context.Context, _ *fakeSession) error { return held.wait(ctx, h.be, false) }
+	})
+	pause := async(func() error { return h.eng.Pause(bg) })
+	h.be.waitFor("the pause", func() bool { return h.be.countLocked("pause") == 1 })
+	waiting := map[string]<-chan error{}
+	for _, c := range []struct {
+		op  string
+		run func() error
+	}{
+		{"play", func() error { return h.eng.Play(bg) }},
+		{"play id", func() error { return h.eng.PlayID(bg, ids[3]) }},
+		{"play index", func() error { return h.eng.PlayIndex(bg, 0) }},
+		{"next", func() error { return h.eng.Next(bg) }},
+		{"previous", func() error { return h.eng.Previous(bg) }},
+	} {
+		mark := h.appliedMark()
+		waiting[c.op] = async(c.run)
+		h.waitApplied("admitted "+c.op, mark)
+	}
+	before := h.snap().Generation()
+	h.must("stop", h.eng.Stop(bg))
+	for op, done := range waiting {
+		h.refused("the "+op+" the stop overtook", h.result(op, done), ReasonOvertaken)
+	}
+	h.must("the pause the stop overtook", h.result("pause", pause))
+	if sn := h.snap(); sn.Selected() != ids[1] || sn.State() != Stopped {
+		t.Fatalf("after the stop: %s at %d, want stopped at b (%d), the selection before the commands that did not run", sn.State(), sn.Selected(), ids[1])
+	}
+	if h.snap().Generation() == before {
+		t.Fatal("the stop changed nothing visible")
+	}
+	held.open()
 }
 
 // TestAnOutputReportOvertakesTheTransportCommandsWaiting pins a report
