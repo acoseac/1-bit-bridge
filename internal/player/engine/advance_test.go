@@ -170,6 +170,52 @@ func TestDeletingTheSelection(t *testing.T) {
 			t.Fatalf("selected %d, want none", sel)
 		}
 	})
+	// The entry a waiting play command is to play, with an entry after it:
+	// the transport advances to that entry as for any deleted selection,
+	// and the play command answers ReasonSuperseded, the playback it asked
+	// for replaced before it began.
+	superseded := func(t *testing.T, h *harness, ids []uint32, play <-chan error) {
+		t.Helper()
+		h.refused("the play id whose entry was deleted", h.result("play id", play), ReasonSuperseded)
+		if s2 := h.be.nth(2); s2.first.Entry != ids[2] {
+			t.Fatalf("started %d after the deletion, want c", s2.first.Entry)
+		}
+		if sn := h.waitSnap("playing c", func(sn *Snapshot) bool { return sn.State() == Playing }); sn.Selected() != ids[2] {
+			t.Fatalf("selected %d, want c", sn.Selected())
+		}
+	}
+	t.Run("a pending play's entry, while its release is held", func(t *testing.T) {
+		h := startHarness(t)
+		ids, _ := h.playing(0, "a", "b", "c")
+		g := holdReleases(h)
+		mark := h.appliedMark()
+		play := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+		h.waitApplied("play id", mark)
+		h.must("delete b", h.eng.Delete(bg, ids[1]))
+		g.open()
+		superseded(t, h, ids, play)
+	})
+	t.Run("a play's entry, while its session starts", func(t *testing.T) {
+		h := startHarness(t)
+		ids := h.insert("a", "b", "c")
+		h.available()
+		held := newGate()
+		h.be.script(func() {
+			h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+				if s.id == 1 {
+					if err := held.wait(ctx, h.be, false); err != nil {
+						return err
+					}
+				}
+				return s.open()
+			}
+		})
+		play := async(func() error { return h.eng.PlayID(bg, ids[1]) })
+		h.be.nth(1)
+		h.must("delete b", h.eng.Delete(bg, ids[1]))
+		held.open()
+		superseded(t, h, ids, play)
+	})
 }
 
 // TestDeleteAllStopsAndSelectsNothing pins DeleteAll while playing.

@@ -96,15 +96,17 @@
 // that followed it: while playing it plays, while paused the transport
 // stays paused there with the paused content dropped, while stopped it is
 // only selected; with nothing after it, playback stops and nothing is
-// selected. An entry the backend refuses before any of its content played
-// is skipped with its reason (Snapshot.Skipped); a pass that refuses every
-// entry, counted from the last session start or queue change, stops with
-// ReasonAllUnplayable, so repeat on makes one lap, never a spin. A hand-off
-// made past a skipped entry keeps that skip when a queue change starts a
-// new pass: an edit that leaves the entries between it and the occurrence
-// before it as they were neither cuts it nor stops it. A failure after
-// content played is a fault: recorded (Snapshot.Faults), playback stopped,
-// never restarted.
+// selected. A command still waiting for the deleted entry's playback,
+// behind a release or while its session starts, answers ReasonSuperseded,
+// though the entry that followed plays. An entry the backend refuses before
+// any of its content played is skipped with its reason (Snapshot.Skipped);
+// a pass that refuses every entry, counted from the last session start or
+// queue change, stops with ReasonAllUnplayable, so repeat on makes one lap,
+// never a spin. A hand-off made past a skipped entry keeps that skip when a
+// queue change starts a new pass: an edit that leaves the entries between
+// it and the occurrence before it as they were neither cuts it nor stops
+// it. A failure after content played is a fault: recorded
+// (Snapshot.Faults), playback stopped, never restarted.
 //
 // The output's availability is an input (ReportOutput, OutputReport). It
 // starts unknown. Its going away, or the bound unit changing, stops

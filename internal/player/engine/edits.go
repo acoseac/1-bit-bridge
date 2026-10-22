@@ -43,7 +43,8 @@ func (e *Engine) insert(c *command) {
 // delete is Delete. Deleting the selection selects the entry that followed
 // it: while playing it plays, while paused the transport stays paused at
 // its start with the paused content dropped, and with nothing after it
-// playback stops and nothing is selected.
+// playback stops and nothing is selected. A command still waiting for the
+// deleted entry's playback answers ReasonSuperseded (selectionDeleted).
 func (e *Engine) delete(c *command) {
 	o := &e.o
 	if !o.q.has(c.id) {
@@ -77,9 +78,14 @@ func (e *Engine) delete(c *command) {
 }
 
 // selectionDeleted moves the selection to next, the entry that followed a
-// deleted selection, and the transport as delete says.
+// deleted selection, and the transport as delete says. A command still
+// waiting for the deleted entry's playback, behind a release or while its
+// session starts, answers ReasonSuperseded: the transport goes on to the
+// entry that followed, as for any deleted selection, but that is not the
+// playback the command asked for.
 func (e *Engine) selectionDeleted(next uint32) {
 	o := &e.o
+	e.superseded("the entry to play was deleted")
 	e.selectEntry(next)
 	s := o.sess
 	live := s != nil && (s.phase == sessStarting || s.phase == sessLive)
