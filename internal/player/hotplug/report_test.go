@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
 
 // idleBackend is a backend that plays nothing and counts the Starts: the
@@ -122,8 +123,11 @@ func output(t *testing.T, eng *engine.Engine, what string, cond func(engine.Outp
 }
 
 // TestTheReporterIsUnknownUntilTheFirstSnapshot pins the input's start: the
-// engine holds the output unknown, and refuses Play, until the watcher has
-// published, and its first snapshot is the first report.
+// reporter sends nothing until the watcher has published, so the engine
+// holds the output unknown, and refuses Play, until then; and the first
+// report is the first snapshot's, whatever it says: here the binding names a
+// unit the box does not have, so it is device_missing at generation 1, never
+// an availability no reading established.
 func TestTheReporterIsUnknownUntilTheFirstSnapshot(t *testing.T) {
 	h := newHarness(t, func(o *options) { o.enabled = false })
 	eng, _ := reporterEngine(t)
@@ -131,10 +135,12 @@ func TestTheReporterIsUnknownUntilTheFirstSnapshot(t *testing.T) {
 	if err := eng.Play(context.Background()); engine.ReasonOf(err) != engine.ReasonOutputUnknown {
 		t.Fatalf("Play before any snapshot: %v, want %s", err, engine.ReasonOutputUnknown)
 	}
-	h.settings.set(Settings{Enabled: true, Device: bySerial()})
+	other := bySerial()
+	other.Serial = usbid.New("OTHER-UNIT-SERIAL-0099")
+	h.settings.set(Settings{Enabled: true, Device: other})
 	o := output(t, eng, "the first report", func(o engine.OutputState) bool { return o.Known })
-	if !o.Available || o.Generation != 1 {
-		t.Errorf("the first report: %+v; want available, generation 1", o)
+	if o.Available || o.Reason != string(binding.StateDeviceMissing) || o.Generation != 1 {
+		t.Errorf("the first report: %+v; want the first snapshot's, device_missing at generation 1", o)
 	}
 }
 
