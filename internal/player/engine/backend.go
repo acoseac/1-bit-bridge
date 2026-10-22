@@ -150,8 +150,9 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 // owner's, under a context whose deadline is the call's (StartTimeout,
 // ReleaseTimeout, CallTimeout): ctx.Deadline reports it and the context ends
 // there with context.DeadlineExceeded, both on the engine's clock (it ends
-// with context.Canceled at shutdown). The engine takes what the call returns
-// as its result. A call that has not answered by its deadline is treated as
+// with context.Canceled at shutdown), and so does a context derived from
+// it, context.WithCancel's or an errgroup's. The engine takes what the call
+// returns as its result. A call that has not answered by its deadline is treated as
 // failed: for Release the release is unconfirmed (below); for any other call
 // the engine releases the session, playback stops with ReasonTimeout, and
 // the late answer is ignored, even when it reaches the engine before the

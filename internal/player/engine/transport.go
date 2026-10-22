@@ -780,24 +780,49 @@ type callResult struct {
 
 // callCtx is a backend call's context: the engine's life, ended at the
 // call's deadline, which Deadline reports, both on the engine's clock.
+//
+// Its Done is a channel of its own, closed once its base has ended, so a
+// context derived from it (context.WithCancel, an errgroup) cannot attach
+// to the base, which would end it with the base's context.Canceled: it
+// follows Done and takes its Err from callCtx, context.DeadlineExceeded
+// once the deadline has ended the call. The same on either clock: a
+// standard library deadline context would race the engine's own deadline
+// handling, whichever ended the call first deciding the error, and would
+// leave the tests, on the fake clock, a path production never takes.
 type callCtx struct {
-	context.Context
-	deadline time.Time
+	context.Context // the base, which the engine ends with a cause
+	deadline        time.Time
+	done            chan struct{}
+}
+
+// newCallCtx is a call's context over base, ended at deadline.
+func newCallCtx(base context.Context, deadline time.Time) *callCtx {
+	c := &callCtx{Context: base, deadline: deadline, done: make(chan struct{})}
+	context.AfterFunc(base, func() { close(c.done) })
+	return c
 }
 
 // Deadline is the call's deadline.
-func (c callCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+func (c *callCtx) Deadline() (time.Time, bool) { return c.deadline, true }
 
-// Err is context.DeadlineExceeded once the call's deadline has ended it, as
-// context.Context's contract says of a context past its deadline (its cause
-// is errCallDeadline), and otherwise the error the context ended with:
-// Canceled when the engine's life ended, or the call was answered.
-func (c callCtx) Err() error {
-	err := c.Context.Err()
-	if err != nil && errors.Is(context.Cause(c.Context), errCallDeadline) {
+// Done is closed once the base has ended.
+func (c *callCtx) Done() <-chan struct{} { return c.done }
+
+// Err is nil until Done is closed, then context.DeadlineExceeded when the
+// deadline ended the call (its cause is errCallDeadline), as
+// context.Context's contract says of a context past its deadline, and
+// otherwise the base's: Canceled when the engine's life ended, or the call
+// was answered.
+func (c *callCtx) Err() error {
+	select {
+	case <-c.done:
+	default:
+		return nil
+	}
+	if errors.Is(context.Cause(c.Context), errCallDeadline) {
 		return context.DeadlineExceeded
 	}
-	return err
+	return c.Context.Err()
 }
 
 // call runs fn on a goroutine of its own under a context derived from the
@@ -815,7 +840,7 @@ func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(
 	ctx := context.Context(base)
 	if timeout > 0 {
 		c.deadline = e.clk.Now().Add(timeout)
-		ctx = callCtx{Context: base, deadline: c.deadline}
+		ctx = newCallCtx(base, c.deadline)
 		expires := kind != callRelease
 		c.timer = e.clk.At(c.deadline, func() {
 			cancel(errCallDeadline)

@@ -341,6 +341,12 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 				if d, ok := ctx.Deadline(); !ok || !d.Equal(called.Add(tc.timeout)) {
 					t.Errorf("the %s's context has the deadline %v (%v), want %v, the engine's clock at the call plus %v", tc.call, d, ok, called.Add(tc.timeout), tc.timeout)
 				}
+				// Contexts a backend derives before the deadline, as
+				// context.WithCancel and errgroup (WithCancelCause) derive them.
+				child, cancelChild := context.WithCancel(ctx)
+				defer cancelChild()
+				causeChild, cancelCauseChild := context.WithCancelCause(ctx)
+				defer cancelCauseChild(nil)
 				mark := h.appliedMark()
 				if order == "answer first" {
 					// The deadline passes; its timers' callbacks have not run.
@@ -352,8 +358,18 @@ func TestALateAnswerIsRefusedWhateverTheOrder(t *testing.T) {
 					h.waitApplied(tc.expired, mark)
 					held.open()
 				}
-				if err := ctx.Err(); err != context.DeadlineExceeded || !errors.Is(context.Cause(ctx), errCallDeadline) {
-					t.Errorf("the %s's context past its deadline: Err %v, cause %v; want context.DeadlineExceeded, the deadline's cause", tc.call, err, context.Cause(ctx))
+				for _, c := range []struct {
+					name string
+					ctx  context.Context
+				}{{"the " + tc.call + "'s context", ctx}, {"a context derived from it", child}, {"a context errgroup would derive from it", causeChild}} {
+					select {
+					case <-c.ctx.Done():
+					case <-time.After(*watchdog):
+						t.Fatalf("waited %v for %s to end", *watchdog, c.name)
+					}
+					if err := c.ctx.Err(); err != context.DeadlineExceeded || !errors.Is(context.Cause(c.ctx), errCallDeadline) {
+						t.Errorf("%s, past the deadline: Err %v, cause %v; want context.DeadlineExceeded, the deadline's cause", c.name, err, context.Cause(c.ctx))
+					}
 				}
 				h.refused("the command whose call answered late", h.result(tc.name, done), tc.want)
 				h.clk.Advance(0)
