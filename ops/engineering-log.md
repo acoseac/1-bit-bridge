@@ -50763,3 +50763,121 @@ one already releasing.
 
 The suite: 94 tests, about 13 s a run under `-race`; ten runs in a row
 green, and twice each at GOMAXPROCS 1, 2 and 4.
+
+### Round 3
+
+The Claude API and Codex reviewed round 2 (#1309): ten findings, all
+real. Finding 4 was a policy the coordinator decided; finding 10, a test
+that passed with round 2's fix reverted, needed a behaviour change before
+the assertion it asked for could hold. One more of finding 7's class
+turned up in review. Each was fixed red-first, with a negative control on
+the committed tree, restored from git each time. Round 2's rules text had
+been applied from beside the branch (38d03bf1); this round's went beside
+it again (`/tmp/b470-4b1-rules-r3.md`).
+
+What changed:
+
+- 32e078c9. **The strict writer refuses a platform with no directory
+  barrier** (1, Codex): Windows' `fsutil.SyncParentDir` is a no-op that
+  answers nil, so `WriteBytesDurable` counted a write durable with no
+  barrier at all. The barrier seam is nil where the platform has none
+  (`fsutil.SyncsParentDir`), and the strict writer refuses there with
+  `ErrNoDirectoryBarrier`, an `errors.ErrUnsupported`, before it stages
+  anything; `WriteBytes` and the renames are unchanged. The engine's fake
+  reservation writer now writes through `WriteBytes`, which every platform
+  takes, and the two durability tests install their own barrier, so the
+  suite still runs on windows-latest. `SyncParentDir`'s doc said a missing
+  parent "is treated as success"; the open fails, and has since #395
+  (corrected, and again in ba44902d).
+- 93677c2f. **The directories the strict writer creates are durable** (2,
+  Codex): the parent of each is synced, the deepest first, before the file
+  is written. Taken over requiring the directory to exist, which would only
+  move the same creation and barrier into the engine.
+- 53531acb. **A winner's equal bytes are made durable by the strict writer
+  itself** (3, Codex): after a failed rename it reads the destination
+  through one open, fsyncs it there, then the directory. Taken over refusing
+  the fallback, which would fail a write another writer already made.
+- e64b0a1d. **New probes the barrier** (4, the Claude API, the
+  coordinator's decision): `atomicwrite.ProbeDurable` runs it on the
+  reservation file's directory, or the nearest one above that exists, and
+  writes nothing; New then fails, naming the directory and saying the data
+  directory must move to a filesystem that can sync a directory.
+- 8c212b5c. **A call's context says `context.DeadlineExceeded` at its
+  deadline** (8, the Claude API): `callCtx.Err`, when the cause is the
+  deadline. The late-answer test now runs both orders it is named for.
+- 72a5fb3d. **A late release acknowledgement takes the deadline's policy
+  first** (6, Codex): acknowledgements are stamped on the engine's clock
+  (the answer as it returns, `Events.Released` as the backend calls it),
+  and one at or past the deadline runs `releaseDeadline` first, so the
+  intent it drops never runs and the acknowledgement only clears it.
+- d8a6d22d, 810946ef. **A play command's answer is its own** (7, Codex):
+  the shared `settleErr`, which every later Play, start and release to
+  play cleared, is gone; each waiter keeps the first reason its playback
+  did not happen. The class, not the instance: a refused Start's reason was
+  erased the same way, and maintenance answered an already superseded Play
+  "maintenance" (810946ef, found in review).
+- 03e8419c. **A waiting command a Stop overtakes answers
+  `ReasonOvertaken`** (9, the Claude API): a distinct reason, of the three
+  offered. Applying its selection would run it half way, its IfGeneration
+  never checked; a narrower doc would leave a client unable to tell whether
+  the selection moved.
+- 7167433b, 1e732b75. **A hand-off made past a skipped entry keeps the
+  skip** (5, Codex; round 2's "not taken"): each occurrence keeps the
+  entries its hand-off passed over, and reconcile walks past them too, so
+  an edit that puts nothing between it and the occurrence before it neither
+  cuts nor stops it. An entry put between them still cuts (pinned).
+- 25beadb6. **A Prepare refused after its successor was heard is stale**
+  (10, the Claude API). The test was to count the Prepare named after b's
+  occurrence, but the refusal set `noMore` with the fix in place too, so
+  none was ever named, fix or no fix. Unless it is `ErrSessionEnding` the
+  engine now keeps what was heard and names its successor; with `i >= 0`
+  the chain empties and the test fails at that Prepare.
+
+Red first, each against the code before its fix:
+
+| Finding | Test | Red |
+|---|---|---|
+| 1 | `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier` | nil with no barrier (the seam's nil first taken as the old no-op) |
+| 2 | `TestWriteBytesDurable_MakesTheDirectoriesItCreatesDurable` | only the file's directory synced |
+| 3 | `TestWriteBytesDurable_RaceWinnerStillNeedsTheBarrier` | the destination never synced; one that cannot be synced answered nil |
+| 4 | `TestNewRefusesADirectoryThatCannotBeSynced` | New built an engine |
+| 8 | `TestALateAnswerIsRefusedWhateverTheOrder`, 6 cases | Err `context canceled`, its cause the deadline |
+| 6 | the same, Release and `Events.Released`, answer first | the late acknowledgement ran the Next's play |
+| 7 | `TestAPlaysAnswerIsItsOwn` | nil for the replaced Play and for the refused start; maintenance for the superseded Play |
+| 9 | `TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem` | superseded, for commands that never ran |
+| 5 | `TestAnUnrelatedEditLeavesTheSessionAlone`, 2 new cases | the append cut c; c heard with a Prepare out stopped playback |
+| 10 | `TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain` | no Prepare after b's occurrence |
+
+Negative controls, each a mutation of the committed fix:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| 1 | a missing barrier taken as success | the platform-seam test |
+| 2 | the created directories' barrier skipped | the missing-parent test |
+| 3 | the destination's fsync dropped | three of the race-winner cases |
+| 4 | New's probe disabled; the probe's walk to the nearest existing directory disabled | the engine test; `TestProbeDurable` |
+| 8 | the Err override removed | all six cases |
+| 6 | deadline-first disabled; `Events.Released` unstamped | both answer-first release cases; its own case |
+| 7 | a reason kept only while nothing plays; a pending Play clearing them; a Resume's ignored; maintenance's ignored | both cases; both; the resuming play stopped by the output, and `TestAnOutputReportOvertakesTheTransportCommandsWaiting`; the maintenance case |
+| 9 | a Stop answering superseded; a parked PlayID's selection applied | both tests; the selection check |
+| 5 | reconcile without the hand-off's skips; a hand-off with skips never unwanted | both new cases; the boundary case |
+| 10 | `i >= 0`; the stale branch disabled | the test, at the Prepare after b |
+
+With the platform seam forced to no barrier for the whole package (not
+committed), the engine's 97 tests passed, and only the atomicwrite test
+that asserts the real platform by GOOS failed, as it must off Windows;
+`GOOS=windows go vet` and `go test -c` built both packages.
+
+Not changed, for the owner: when a release's deadline drops a pending play
+or pause, the transport stops and `Snapshot.LastStop` keeps the stop before
+it, since no stop reason names an unconfirmed release (a new one would be a
+design call); a paused session's `DeviceReleased` against its overdue timer
+is order-dependent too, but drops no intent, and both orders end the same;
+and `.claude/rules/config-lifecycle.md`, which loads with
+`internal/atomicwrite`, has no line on `WriteBytesDurable` or
+`ProbeDurable`, while output.md is at 99.5% of its budget after this
+round's text.
+
+The suite: 97 tests, about 13 s a run under `-race`; ten runs in a row
+green, and three each at GOMAXPROCS 1, 2 and 4; `make fmt vet test`,
+`make build-all` and `make docs-check` clean.
