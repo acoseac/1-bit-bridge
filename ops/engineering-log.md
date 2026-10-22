@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
 - [2026-10-22 — B470 PR 4a: the player's output binding, the DAC's identity, the check after open, and bridge output dac inspect and bind](#2026-10-22--b470-pr-4a-the-players-output-binding-the-dacs-identity-the-check-after-open-and-bridge-output-dac-inspect-and-bind)
 - [2026-10-22 — OpenStore tries its open again while SQLite answers it SQLITE_BUSY](#2026-10-22--openstore-tries-its-open-again-while-sqlite-answers-it-sqlite_busy)
 - [2026-10-21 — B470 PR 2b round 4 and the hardware gate: the drain test's report barrier, and the sink on the GO bar](#2026-10-21--b470-pr-2b-round-4-and-the-hardware-gate-the-drain-tests-report-barrier-and-the-sink-on-the-go-bar)
@@ -50807,3 +50808,223 @@ proposed `strconv.Quote`): it is `strconv.Quote` with the 64-byte cut
 can be 4 KiB of attribute text; the garbled bold sentence in the
 check-after-open bullet, moved verbatim to `player.md`, is in the round's
 rules note.
+
+## 2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it
+
+### The question
+
+Option A's third bridge step (`~/onebit/briefs/bridge-as-output-plan.md`):
+the phone casts to the MPD beside the bridge, and the bridge tells it what
+the DAC actually receives, read from the kernel, and whether that is the
+file bit for bit. Decision 3 of the plan's DECIDED section (after the Argon
+consult) sets the verdict's rules, and decision 4 the mechanics: no
+background sampler, a read-through cache of 500 ms, and a lazy MPD
+connection that closes about 60 s after the last call. iOS I3 mirrors the
+route later in Signal Path's DAC block. The rules go to
+`.claude/rules/output.md` (the change's rules note), and the wire contract
+is the `GET /v1/outputs/{id}/reading` section of `PROTOCOL.md`.
+
+### What changed
+
+- **`GET /v1/outputs/{id}/reading`** (`internal/api/outputs_reading.go`),
+  bearer-authenticated, `boundedRoute`, `rateNone`, a 10 s context it never
+  reaches. One reading of the box is taken at a time and every output's
+  view is cut from it: MPD's `status`, then `currentsong`,
+  `replay_gain_status` and `outputs`, then every card in `/proc/asound`,
+  then `status` again; `mpd.conf` is read again at every reading.
+- **A flag of its own, `outputReading`**, on the localOutputs gate. Main
+  has carried B2's `/v1/outputs` since 2026-10-19, so a bridge built from
+  it advertises `localOutputs` and has no reading route; a client keyed on
+  `localOutputs` would ask it for a reading and get the mux's bare 404.
+  The gate is asked once per health answer for both keys (`localOutputsOn`
+  in api.go), and the feature list's capacity is 37.
+- **`internal/signalpath`**, a package with no I/O: `Judge` takes the
+  facts a whole reading established and returns `bit_exact`,
+  `bit_exact_dop` or `withheld` with a code for every condition not proven;
+  `Settling` reads the two status reads. Every case is a table row.
+- **`alsa.ResolveOutputChain`** returns the stages a device takes to its
+  card (`["empty", "plug", "hw"]` for Volumio's `volumio`), through the same
+  walk as `ResolveOutputDevice` (now `walkChain` under both). A `front` or
+  `plug` device string, at the start or as a slave, resolves to a card for
+  the outputs route and has no chain: what it names lives in alsa-lib's own
+  files, which the bridge does not read. `alsa.PCMFormatBits` is the
+  kernel's linear PCM formats by name and sample bits.
+- **`mpd.conf`'s `filters`, `mixer_enabled` and top-level `mixer_type`**
+  are read (`conf.AudioOutput`, `conf.File`), redacted like the rest, and
+  an include's `mixer_type` counts. `conf.RedactSecrets` redacts a password
+  from outside the file (the bridge's own `output.password`) by the file's
+  rule.
+- **The MPD session is shared, one command at a time.** `/v1/outputs` and
+  the reading share the lazy session; `serialSession` wraps every dialled
+  client, and the wait for the turn ends with the caller's context, so a
+  reading behind the outputs body's twenty `find`s keeps its own deadline.
+  The idle close waits out a reading as it waits out a build.
+- **Serve** gives the reading the manifest row lookup (`GetTrack` for the
+  format, `GetTrackStat` for the size and time the skip gate compares) and
+  the loopback route's own index for its track ids
+  (`cmd/bridge/output_reading.go`).
+
+### Decisions
+
+- **The reading's state and the verdict are two fields.** `state` says
+  whether the facts describe one steady moment (`whole`, `settling`,
+  `unknown`, with codes); the verdict needs a whole reading and is
+  otherwise `withheld` with the state's codes, so a client can switch on
+  the verdict alone. A reading that cannot be had is an answer: `mpd`,
+  `song` or `dac` is null, and what was read is reported.
+- **Settling** is the two status reads disagreeing on the state or the
+  song id, `currentsong` naming another song, elapsed under half a second
+  (or absent while playing), or elapsed moving half a second more or less
+  than the wall time between the reads (a seek, or a pause and resume
+  inside the bracket). MPD moves elapsed a chunk at a time, tens of
+  milliseconds at 44.1/16, so half a second is a jump, not a step.
+- **"The MPD the bridge dialled"** cannot be proven from file descriptors:
+  `/proc/<pid>/fd` is the owner's alone, and MPD runs as `mpd`. The verdict
+  ties the stream to the dialled MPD by the owner's process name (`mpd`,
+  through the thread's Tgid as B1 reads it) and by that MPD playing, both
+  reads, to an enabled alsa output whose device reaches this card, and
+  PROTOCOL.md says so. A second MPD holding the card while the dialled one
+  plays to another output of its own is the residual.
+- **The source is known only for the bridge's own rows.** The manifest's
+  codec comes from content inspection; a suffix does not (`.m4a` is ALAC or
+  AAC, a `.wv` may be hybrid-lossy, a `.wav` may hold MP3). A song another
+  bridge serves is `source_unknown`, and the reasons list is whole, so
+  `[source_unknown]` alone says every other condition held. A row counts
+  only while the file has the scanner's size and modification time
+  (`source_changed` otherwise), and a database path is a row only when a
+  root's prefix rule takes it, the rest of the path stays under the root
+  (`filepath.IsLocal`), and `os.SameFile` agrees on MPD's file and the
+  root's.
+- **"The plug has nothing to convert"** is read as the card holding exactly
+  the stream's bits at its rate and channels: a container repack (S24_LE to
+  S24_3LE) changes no sample, and is what the Pi measured for 96/24 through
+  Volumio's chain; a 16-bit stream padded to 24 by a plug is
+  `alsa_plug_converts`, while MPD's own padding straight to `hw` is allowed
+  (the PCM rule is "at least the file's bits"). The floor is the file's
+  bits, not the stream's: FFmpeg hands 24-bit ALAC on as 32.
+- **Software volume is withheld at any level**, `allowed_formats` counts as
+  a format override (it can force a conversion and `=dop`), and a mixer
+  type MPD does not name counts as software volume not ruled out.
+- **`dop` and `allowed_formats` are MPD's live attributes first**:
+  `outputset` changes them at run time without touching `mpd.conf`.
+- **The DAC's own mixer** is MPD's 0 to 100 for a `hardware` mixer, as
+  information. The level in dB would need the ALSA control interface, which
+  the bridge does not open.
+- **Deadlines**: the dial and each command 750 ms, the `/proc` read and the
+  row look 500 ms, the whole reading 3 s. A `/proc` read or a row look still
+  running from an earlier reading is not joined and not doubled: the next
+  reading is a timeout at once, so a hung `/proc` file or a dead mount holds
+  one goroutine, and a join would also hand a reading cards read before its
+  first status. A command that failed after it was written drops the
+  session (MPD may still answer it, and that reply would answer the next
+  command); one that never got its turn leaves it.
+- **No `/proc/asound` is no card** (`no_card`), not an unreadable `/proc`.
+  With no card, neither the device nor a chain is resolved, so a box
+  without ALSA reads no ALSA configuration.
+- **When `/proc/asound` cannot be read, any id of the right form is
+  answered** (`unknown`, `proc_unreadable` or `proc_timeout`): the cards
+  that would say which ids exist were not read. A malformed id is 404.
+
+### Red first
+
+Against a stub that answered every id with an empty `unknown` reading, 16
+of the route's 17 tests failed: every capture, the idle box, the JSON
+shape, MPD's settings, DoP, the bridge's row, settling, the cache, the lazy
+session, both deadlines, the foreign owner, the password, the commands,
+one command at a time and the ids. `TestHealthAdvertisesOutputReadingWithLocalOutputs`
+passed: the flag landed with the stub; its control is R25. The verdict's
+tests were written with `signalpath`; their bite is the controls V1 to V33.
+Two rules first went green under their control and were given a test of
+their own: the per-step deadlines (the whole reading's 3 s still produced
+`proc_timeout` and `mpd_timeout`, so both tests now raise it to 30 s and
+time the reading), and the containment of a database path (the row lookup
+missed a `../` path anyway, so the rig records the paths it is asked for).
+
+### Negative controls
+
+Sixty-six, each one anchor of production code (asserted to occur once),
+run against the named tests with the change committed, the file then
+written back byte for byte and checked against HEAD. Each went red.
+
+| Control | Rule | Red |
+|---|---|---|
+| V1 | lossless sources only (AAC, MP3 accepted) | `TestEveryWithheldReason` |
+| V2 | replay gain off | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V3 | xfade 0 | `TestEveryWithheldReason` |
+| V4 | no mixramp | `TestEveryWithheldReason` |
+| V5 | no normalization | `TestEveryWithheldReason` |
+| V6 | no `audio_output_format` | `TestEveryWithheldReason` |
+| V7 | `mpd.conf` must be read | `TestEveryWithheldReason` |
+| V8 | no software volume | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V9 | the DAC's own mixer is information only (`hardware` withheld) | `TestEveryWithheldReason`, `TestTheCapturedShapesAreBitExact`, `TestWhatDoesNotChangeTheSamplesIsNotAReason` |
+| V10 | no output `format` or `allowed_formats` | `TestEveryWithheldReason` |
+| V11 | no output filters | `TestEveryWithheldReason` |
+| V12 | the chain must be proven | `TestEveryWithheldReason` |
+| V13 | one output reaches the card | `TestEveryWithheldReason` |
+| V14 | a plug has nothing to convert | `TestEveryWithheldReason` |
+| V15 | the container holds the file's bits | `TestEveryWithheldReason` |
+| V16 | PCM rate matched | `TestEveryWithheldReason` |
+| V17 | native DSD at the file's rate | `TestEveryWithheldReason` |
+| V18 | DoP only with `dop` on | `TestEveryWithheldReason` |
+| V19 | DoP in at least 24 bits | `TestEveryWithheldReason` |
+| V20 | DoP at the DSD rate over 16 | `TestEveryWithheldReason` |
+| V21 | the owner is `mpd` | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V22 | an owner nobody names is unknown | `TestEveryWithheldReason` |
+| V23 | no verdict paused or stopped | `TestEveryWithheldReason` |
+| V24 | the substream runs | `TestEveryWithheldReason` |
+| V25 | a file not the bridge's has no verdict | `TestEveryWithheldReason` |
+| V26 | a changed file has no verdict | `TestEveryWithheldReason` |
+| V27 | MPD decodes the file | `TestEveryWithheldReason` |
+| V28 | no float stream | `TestEveryWithheldReason` |
+| V29 | signed linear PCM only | `TestEveryWithheldReason` |
+| V30 | settling: half a second in | `TestSettling` |
+| V31 | settling: a song change | `TestSettling` |
+| V32 | settling: a seek | `TestSettling` |
+| V33 | settling: a pause | `TestSettling` |
+| A1 | a chain names each stage | `TestResolveOutputChainOnTheVolumioCapture`, `TestResolveOutputChainNamesEachStage` |
+| A2 | `front` and `plug` have no known stages | `TestResolveOutputChainNamesEachStage` |
+| A3 | a format's sample bits | `TestPCMFormatBits` |
+| M1 | an output's `filters` are read | `TestTheVerdictsSettingsAreRead` |
+| M2 | an include's `mixer_type` counts | `TestTheVerdictsSettingsAreRead` |
+| M3 | a password from outside the file is redacted | `TestRedactSecretsIsTheFilesRule` |
+| R1 | the reading is served for 500 ms | `TestTheReadingIsReadThroughForHalfASecond` |
+| R2 | no idle close during a reading | `TestTheReadingsConnectionIsLazyAndShared` |
+| R3 | one command at a time on the shared session | `TestOneMPDCommandAtATime` |
+| R4 | a stuck `/proc` read is not doubled | `TestAProcReadPastItsDeadlineIsAnHonestUnknown` |
+| R5 | the `/proc` read's own deadline | `TestAProcReadPastItsDeadlineIsAnHonestUnknown` |
+| R6 | every MPD command's own deadline | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| R7 | a command that failed written drops its session | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| R8 | the bridge's password is redacted | `TestTheMPDPasswordReachesNoReadingAndNoLog` |
+| R9 | `mpd.conf`'s password is redacted | `TestTheMPDPasswordReachesNoReadingAndNoLog` |
+| R10 | a row is current only at the scanner's size and time | `TestReadingNamesTheBridgesOwnRow` |
+| R11 | a loopback URL on the route's port only | `TestReadingNamesTheBridgesOwnRow` |
+| R12 | a database path stays under its root | `TestReadingNamesTheBridgesOwnRow` |
+| R13 | an id names an output | `TestAReadingNamesItsOutputByID` |
+| R14 | only an id of the right form | `TestAReadingNamesItsOutputByID` |
+| R15 | the localOutputs gate | `TestAReadingNamesItsOutputByID` |
+| R16 | no `/proc/asound` is no card | `TestAReadingNamesItsOutputByID` |
+| R17 | `currentsong` naming another song settles | `TestReadingSettles` |
+| R18 | `dop` is the live attribute first | `TestReadingDoPIsBitExactDSDAsDoP` |
+| R19 | `allowed_formats` is the live attribute first | `TestTheVerdictReadsMPDsOwnSettings` |
+| R20 | the top-level `mixer_type` counts | `TestTheVerdictReadsMPDsOwnSettings` |
+| R21 | an output switched off live feeds nothing | `TestTheVerdictReadsMPDsOwnSettings` |
+| R22 | `status` is read again after `/proc` | `TestReadingSettles`, `TestTheReadingSendsOnlyReads` |
+| R23 | the card is read when MPD is not | `TestReadingJSONKeepsEveryKey` |
+| R24 | `mpd.conf` is read at every reading | `TestTheReadingReadsMPDConfAgain` |
+| R25 | `outputReading` rides the localOutputs gate | `TestHealthAdvertisesOutputReadingWithLocalOutputs`, `TestHealthFeaturesCompleteSet` |
+| S1 | serve wires the loopback lookup | `TestServeReadsTheOutputAndNamesItsOwnTrack` |
+| S2 | serve wires the row lookup | `TestServeReadsTheOutputAndNamesItsOwnTrack` |
+
+### Not in this change
+
+- **The hardware gate** on the Pi with the iFi GO bar is the owner's: PCM
+  44.1/16 and 96/24, DSD64 native, a DSD file the DAC refuses, Volumio's
+  own volume moved, and a song change mid-read. The captures already read
+  bit-exact through the route (`TestReadingTheGoBarOnEveryCapture`).
+- B2's `/v1/outputs` still reads the cards with no per-read deadline
+  (`dacs`), and its `sessionBroken` takes an `ACK` from `find` for a dead
+  session and dials again (found writing the deadline test, whose MPD
+  answered `find` with `ACK`). Neither is changed here.
+- A song another bridge serves stays `source_unknown`; letting the app
+  complete such a verdict from its own row would be a protocol change.
+- The DAC mixer's level in dB.
