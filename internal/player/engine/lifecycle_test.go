@@ -225,7 +225,7 @@ func TestAnOutputReportOvertakesTheTransportCommandsWaiting(t *testing.T) {
 	h.must("the unit change", h.result("report", async(func() error { return h.eng.ReportOutput(bg, report) })))
 	h.refused("the play waiting behind the resume", h.result("play", again), ReasonUnitChanged)
 	held.open()
-	_ = h.result("the resume", resume)
+	h.refused("the play whose resume was under way", h.result("the resume", resume), ReasonUnitChanged)
 	if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 1 {
 		t.Fatalf("%s with %d sessions: a play waiting before the unit changed started one after", sn.State(), h.be.starts())
 	}

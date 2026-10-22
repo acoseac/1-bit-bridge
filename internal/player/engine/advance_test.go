@@ -186,26 +186,39 @@ func TestDeleteAllStopsAndSelectsNothing(t *testing.T) {
 }
 
 // TestAPlayReplacedBeforePlaybackSaysSo pins what a Play answers when a
-// later command replaces its playback before it begins, as a pending intent
-// or while its session is still starting: ReasonSuperseded, never nil with
-// the transport stopped.
+// later command replaces its playback before it begins, as a pending intent,
+// while its session is still starting, or while its Resume is under way:
+// why (ReasonSuperseded, or the output's reason), never nil with the
+// transport stopped.
 func TestAPlayReplacedBeforePlaybackSaysSo(t *testing.T) {
+	deleteAll := func(h *harness) error { return h.eng.DeleteAll(bg) }
+	stop := func(h *harness) error { return h.eng.Stop(bg) }
+	gone := func(h *harness) error {
+		h.outGen++
+		return h.eng.ReportOutput(bg, OutputReport{Generation: h.outGen, Available: false, Reason: "device_missing"})
+	}
 	for _, tc := range []struct {
 		name string
-		// starting holds the Play's own Start instead of a release.
-		starting bool
-		replace  func(h *harness) error
+		// from is where the Play waits: "pending" behind a held release,
+		// "starting" in its held Start, "resuming" in its held Resume.
+		from    string
+		replace func(h *harness) error
+		op      string
+		want    Reason
 	}{
-		{"a pending play, by delete all", false, func(h *harness) error { return h.eng.DeleteAll(bg) }},
-		{"a pending play, by stop", false, func(h *harness) error { return h.eng.Stop(bg) }},
-		{"a starting play, by delete all", true, func(h *harness) error { return h.eng.DeleteAll(bg) }},
-		{"a starting play, by stop", true, func(h *harness) error { return h.eng.Stop(bg) }},
+		{"a pending play, by delete all", "pending", deleteAll, "delete all", ReasonSuperseded},
+		{"a pending play, by stop", "pending", stop, "stop", ReasonSuperseded},
+		{"a starting play, by delete all", "starting", deleteAll, "delete all", ReasonSuperseded},
+		{"a starting play, by stop", "starting", stop, "stop", ReasonSuperseded},
+		{"a resuming play, by stop", "resuming", stop, "stop", ReasonSuperseded},
+		{"a resuming play, by the output going away", "resuming", gone, "report output", ReasonOutputUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := startHarness(t)
 			held := newGate()
-			var play, stop <-chan error
-			if tc.starting {
+			var play, stopped <-chan error
+			switch tc.from {
+			case "starting":
 				h.insert("a", "b")
 				h.available()
 				h.be.script(func() {
@@ -218,21 +231,35 @@ func TestAPlayReplacedBeforePlaybackSaysSo(t *testing.T) {
 				})
 				play = async(func() error { return h.eng.Play(bg) })
 				h.be.nth(1)
-			} else {
+			case "pending":
 				h.playing(0, "a", "b")
 				held = holdReleases(h)
-				stop = async(func() error { return h.eng.Stop(bg) })
+				stopped = async(func() error { return h.eng.Stop(bg) })
 				h.waitSnap("releasing", func(sn *Snapshot) bool { return sn.State() == Releasing })
 				play = async(func() error { return h.eng.Play(bg) })
 				h.waitSnap("play pending", func(sn *Snapshot) bool { return sn.Pending() == IntentPlay })
+			case "resuming":
+				h.playing(0, "a", "b")
+				h.must("pause", h.eng.Pause(bg))
+				h.be.script(func() {
+					h.be.onResume = func(ctx context.Context, _ *fakeSession) (ResumeResult, error) {
+						if err := held.wait(ctx, h.be, false); err != nil {
+							return 0, err
+						}
+						return ResumeContinued, nil
+					}
+				})
+				play = async(func() error { return h.eng.Play(bg) })
+				h.be.waitFor("the resume", func() bool { return h.be.countLocked("resume") == 1 })
 			}
+			mark := h.appliedMark()
 			replaced := async(func() error { return tc.replace(h) })
-			h.waitSnap("the play replaced", func(sn *Snapshot) bool { return sn.State() == Releasing && sn.Pending() == IntentStop })
+			h.waitApplied(tc.op, mark)
 			held.open()
 			h.must("the replacing command", h.result("the replacing command", replaced))
-			h.refused("the replaced play", h.result("play", play), ReasonSuperseded)
-			if stop != nil {
-				h.must("stop", h.result("stop", stop))
+			h.refused("the replaced play", h.result("play", play), tc.want)
+			if stopped != nil {
+				h.must("stop", h.result("stop", stopped))
 			}
 			if sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped }); h.be.starts() != 1 {
 				t.Fatalf("%s with %d sessions", sn.State(), h.be.starts())

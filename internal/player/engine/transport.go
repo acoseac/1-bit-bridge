@@ -391,7 +391,9 @@ func (e *Engine) startSession(target uint32) {
 // releaseSession asks s to release; then is what follows the
 // acknowledgement, and why, when playback stops, is recorded. A session
 // still starting that is released to stop supersedes the play that started
-// it.
+// it, and so does one whose Resume is under way: that Play is answered with
+// the reason already recorded (the output, a fault) or as superseded, a
+// Pause under way with nil.
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
@@ -402,7 +404,13 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	s.phase = sessReleasing
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
-		e.answer(tc.waiter, reply{})
+		var err error
+		if tc.kind == callResume && then != IntentPlay {
+			if err = o.settleErr; err == nil {
+				err = refuse(tc.waiter.op.String(), ReasonSuperseded, "replaced before playback resumed: "+why.Detail)
+			}
+		}
+		e.answer(tc.waiter, reply{err: err})
 		tc.waiter = nil
 	}
 	s.transportCall = nil
