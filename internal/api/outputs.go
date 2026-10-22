@@ -129,6 +129,9 @@ type outputSession interface {
 type serialSession struct {
 	turn  chan struct{}
 	inner outputSession
+	// dropped closes the session and forgets it when it is still the one
+	// the routes share (localOutputs.dropSession); nil closes it alone.
+	dropped func()
 }
 
 func newSerialSession(inner outputSession) *serialSession {
@@ -146,44 +149,46 @@ func (s *serialSession) take(ctx context.Context) error {
 
 func (s *serialSession) give() { <-s.turn }
 
-func (s *serialSession) Status(ctx context.Context) (mpd.Reply, error) {
+// run runs one command in its turn. A command that panics may have written
+// its line and not read MPD's reply, which would then answer the next
+// command on the connection, so the session is dropped before the panic
+// goes on to whoever recovers it.
+func (s *serialSession) run(ctx context.Context, cmd func() (mpd.Reply, error)) (mpd.Reply, error) {
 	if err := s.take(ctx); err != nil {
 		return mpd.Reply{}, err
 	}
 	defer s.give()
-	return s.inner.Status(ctx)
+	defer func() {
+		if r := recover(); r != nil {
+			if s.dropped != nil {
+				s.dropped()
+			} else {
+				_ = s.inner.Close()
+			}
+			panic(r)
+		}
+	}()
+	return cmd()
+}
+
+func (s *serialSession) Status(ctx context.Context) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Status(ctx) })
 }
 
 func (s *serialSession) Find(ctx context.Context, path string) (mpd.Reply, error) {
-	if err := s.take(ctx); err != nil {
-		return mpd.Reply{}, err
-	}
-	defer s.give()
-	return s.inner.Find(ctx, path)
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Find(ctx, path) })
 }
 
 func (s *serialSession) CurrentSong(ctx context.Context) (mpd.Reply, error) {
-	if err := s.take(ctx); err != nil {
-		return mpd.Reply{}, err
-	}
-	defer s.give()
-	return s.inner.CurrentSong(ctx)
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.CurrentSong(ctx) })
 }
 
 func (s *serialSession) ReplayGainStatus(ctx context.Context) (mpd.Reply, error) {
-	if err := s.take(ctx); err != nil {
-		return mpd.Reply{}, err
-	}
-	defer s.give()
-	return s.inner.ReplayGainStatus(ctx)
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.ReplayGainStatus(ctx) })
 }
 
 func (s *serialSession) Outputs(ctx context.Context) (mpd.Reply, error) {
-	if err := s.take(ctx); err != nil {
-		return mpd.Reply{}, err
-	}
-	defer s.give()
-	return s.inner.Outputs(ctx)
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Outputs(ctx) })
 }
 
 func (s *serialSession) Version() string { return s.inner.Version() }
@@ -715,7 +720,9 @@ func (o *localOutputs) session(ctx context.Context, endpoint, password string) (
 	if dialled == nil {
 		return nil, nil
 	}
-	var c outputSession = newSerialSession(dialled)
+	serial := newSerialSession(dialled)
+	var c outputSession = serial
+	serial.dropped = func() { o.dropSession(c) }
 	o.mu.Lock()
 	if o.client != nil {
 		o.mu.Unlock()

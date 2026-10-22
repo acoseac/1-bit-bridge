@@ -519,6 +519,40 @@ func TestAPanickingStepLeavesTheNextReadingWhole(t *testing.T) {
 	}
 }
 
+// TestACommandThatPanicsDropsTheSession: a command that panics after it was
+// written may leave MPD's reply unread, and that reply would answer the next
+// command sent on the connection. So the shared session is closed and
+// forgotten before the panic goes on: the reading is reading_failed, and the
+// next one dials a session of its own.
+func TestACommandThatPanicsDropsTheSession(t *testing.T) {
+	c := piCaptures[0]
+	rig := newReadingRig(t, c.name, c.file, c.track, capturedStatus(t, c.name))
+	clock := &manualClock{now: rigNow()}
+	rig.cfg.Now, rig.cfg.AfterFunc = clock.Now, clock.AfterFunc
+	srv, hs, token := newReadingServer(t, rig.cfg)
+	id := firstOutputID(t, hs, token)
+	if n := rig.dials.Load(); n != 1 {
+		t.Fatalf("the outputs body dialled %d sessions", n)
+	}
+	rig.mpd.set(func(m *scriptedMPD) { m.panics = map[string]bool{"currentsong": true} })
+	got, _ := readingWithin(t, srv, id, 5*time.Second)
+	if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ReadingFailed}) {
+		t.Fatalf("a command that panicked: state %s %v", got.State, got.StateReasons)
+	}
+	if n := rig.mpd.closed.Load(); n != 1 {
+		t.Fatalf("the session a command panicked on was closed %d times, want once", n)
+	}
+	rig.mpd.set(func(m *scriptedMPD) { m.panics = nil })
+	clock.Advance(outputCacheTTL)
+	got, _ = readingWithin(t, srv, id, 5*time.Second)
+	if got.State != "whole" {
+		t.Fatalf("the reading after the panic: state %s %v", got.State, got.StateReasons)
+	}
+	if n := rig.dials.Load(); n != 2 {
+		t.Fatalf("%d dials: the reading after the panic used the session it panicked on", n)
+	}
+}
+
 // TestEveryMPDCommandIsHandedItsOwnDeadline: the dial and each command go
 // out with the deadline each has, not the whole reading's: what is left of
 // it when the command is sent is that limit, give or take the time to send.

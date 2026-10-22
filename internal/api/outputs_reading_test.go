@@ -183,9 +183,11 @@ func withPair(r mpd.Reply, key, value string) mpd.Reply {
 // scriptedMPD is the MPD the reading tests reach through the session
 // interface. status answers from a list whose last element repeats, and
 // the other commands from fixed replies, or from a list of their own when
-// one is set (outputsSeq, gainSeq). A command can be made to fail, or to
-// hold until released or until its context ends. Each command's remaining
-// time to its context's deadline when it was sent is recorded (left).
+// one is set (outputsSeq, gainSeq). A command can be made to fail, to hold
+// until released or until its context ends, or to panic once it is sent
+// (panics), as a client would that panicked between writing a command and
+// reading its reply. Each command's remaining time to its context's
+// deadline when it was sent is recorded (left).
 type scriptedMPD struct {
 	mu          sync.Mutex
 	statuses    []mpd.Reply
@@ -199,6 +201,7 @@ type scriptedMPD struct {
 	nOutputs    int
 	errs        map[string]error
 	hold        map[string]chan struct{}
+	panics      map[string]bool
 	calls       []string
 	left        map[string][]time.Duration
 	inFlight    int
@@ -230,13 +233,16 @@ func (m *scriptedMPD) run(ctx context.Context, name string, answer func() mpd.Re
 	if m.inFlight > m.maxInFlight {
 		m.maxInFlight = m.inFlight
 	}
-	hold, err := m.hold[name], m.errs[name]
+	hold, err, boom := m.hold[name], m.errs[name], m.panics[name]
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		m.inFlight--
 		m.mu.Unlock()
 	}()
+	if boom {
+		panic("a command that panicked once it was written")
+	}
 	if hold != nil {
 		select {
 		case <-hold:
