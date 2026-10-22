@@ -335,14 +335,16 @@ func (e *Engine) setIntent(then Intent, by string) {
 }
 
 // playFailed records why the playback the waiting play commands asked for
-// will not happen, on each that has no reason yet, and on a Play whose
-// Resume is under way. The first reason a command gets is its answer,
-// whatever later commands do: a later Play that plays never answers for an
-// earlier one whose playback was replaced or refused.
+// will not happen, on each that has no outcome yet, neither a reason nor a
+// playback that began (playBegan), and on a Play whose Resume is under way.
+// The first outcome a command gets is its answer, whatever later commands
+// do: a later Play that plays never answers for an earlier one whose
+// playback was replaced or refused, and nothing that stops a playback after
+// it began is the answer of the command that asked for it.
 func (e *Engine) playFailed(err error) {
 	o := &e.o
 	for i := range o.waiters {
-		if w := &o.waiters[i]; w.play && w.err == nil {
+		if w := &o.waiters[i]; w.play && w.err == nil && !w.played {
 			w.err = err
 		}
 	}
@@ -355,9 +357,25 @@ func (e *Engine) playFailed(err error) {
 
 // superseded records, on the waiting play commands, that by, a later
 // command or edit, replaced their playback before it began. A reason
-// already recorded (the output, a fault, the backend's refusal) stands.
+// already recorded (the output, a fault, the backend's refusal) stands, and
+// a command whose playback began is passed over (playFailed).
 func (e *Engine) superseded(by string) {
 	e.playFailed(refuse("play", ReasonSuperseded, "replaced before playback began: "+by))
+}
+
+// playBegan records, on the waiting play commands that have no outcome yet,
+// that their playback began: the session started for them was heard, which
+// is the only session they wait for while one is current. Each answers nil
+// from then on, whatever stops playback after (playFailed passes it over);
+// one already given a reason keeps it. A Play whose Resume is under way is
+// not one of them: an Audible while a session is paused can be content a
+// pause by zeros was still playing out, so the Resume's own answer stands.
+func (e *Engine) playBegan() {
+	for i := range e.o.waiters {
+		if w := &e.o.waiters[i]; w.play && w.err == nil {
+			w.played = true
+		}
+	}
 }
 
 // stopped records why playback stopped.
@@ -401,9 +419,10 @@ func (e *Engine) startSession(target uint32) {
 // releaseSession asks s to release; then is what follows the
 // acknowledgement, and why, when playback stops, is recorded. Released to
 // anything but play, a session still starting supersedes the plays waiting
-// for it, and so does one whose Resume is under way: that Play is answered
-// at once with the reason already recorded for it (the output, a fault) or
-// as superseded, a Pause under way with nil.
+// for it, but for those it was heard for (playBegan), and so does one whose
+// Resume is under way: that Play is answered at once with the reason
+// already recorded for it (the output, a fault) or as superseded, a Pause
+// under way with nil.
 func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	o := &e.o
 	if s == nil || s.phase == sessReleasing || s.phase == sessUnconfirmed {
@@ -1092,9 +1111,11 @@ func (e *Engine) callExpired(c *call) {
 }
 
 // onAudible is the played content crossing an occurrence's first frame:
-// the selection moves to its entry. An occurrence an edit removed, or made
-// no longer next, stops playback at once, and so does one crossed on the way
-// to it; the selection never moves to an entry the queue does not hold.
+// the selection moves to its entry, and the playback the waiting play
+// commands asked for has begun (playBegan). An occurrence an edit removed,
+// or made no longer next, stops playback at once, and so does one crossed on
+// the way to it; the selection never moves to an entry the queue does not
+// hold.
 func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	o := &e.o
 	s := e.current(id)
@@ -1122,6 +1143,7 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	o.audible = Audible{Occurrence: oc.id, Entry: oc.entry}
 	o.pos = Position{Occurrence: oc.id}
 	o.starting = false
+	e.playBegan()
 	if _, ok := o.skips[oc.entry]; ok {
 		e.setSkips(func(m map[uint32]Skip) { delete(m, oc.entry) })
 	}

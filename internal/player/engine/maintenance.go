@@ -43,8 +43,9 @@ func (e *Engine) enterMaintenance(c *command) {
 	e.armMaintenance()
 	for _, w := range o.waiters {
 		var err error
-		if w.play {
-			// A reason already recorded for its playback stands (playFailed).
+		if w.play && !w.played {
+			// A reason already recorded for its playback stands (playFailed);
+			// a playback that began answers nil (playBegan).
 			if err = w.err; err == nil {
 				err = refuse(w.c.op.String(), ReasonMaintenance, "maintenance began: "+c.reason)
 			}

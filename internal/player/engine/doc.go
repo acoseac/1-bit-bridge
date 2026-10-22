@@ -82,10 +82,13 @@
 // refusal, every entry unplayable, an unconfirmed release, the output, a
 // fault, or ReasonSuperseded: a later command or edit, a Stop, a DeleteAll,
 // a deletion of the entry to play, replaced it before it began). The answer
-// is the command's own: the first reason recorded for its playback stands,
-// so a later Play that plays never makes an earlier one's answer nil. Pause
-// and a resume answer with the backend's answer; Stop and EnterMaintenance
-// once the release is confirmed or its deadline passed.
+// is the command's own, the first outcome recorded for its playback: its
+// playback began once the session started for it is heard (its first
+// Audible), and from then on it answers nil, whatever stops playback after;
+// otherwise the first reason recorded for it stands, so a later Play that
+// plays never makes an earlier one's answer nil. Pause and a resume answer
+// with the backend's answer; Stop and EnterMaintenance once the release is
+// confirmed or its deadline passed.
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;

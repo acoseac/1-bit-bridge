@@ -402,6 +402,144 @@ func TestAPlaysAnswerIsItsOwn(t *testing.T) {
 	})
 }
 
+// TestAPlayWhosePlaybackBeganAnswersAsPlayed pins a play command whose
+// playback began while it waited: the session started for it was heard
+// (its first Audible) before Start answered, so the command still waited,
+// and then something stopped or replaced that playback, still before Start
+// answered. Its playback happened, so it answers nil, never the reason of
+// what came after: the deletion of its entry, whether the next entry plays
+// or nothing follows; a Stop; the output going away; a fault; maintenance.
+// A reason recorded for a waiting command before its session was heard
+// stands: during a held release a Play, a Stop and a Play, the second
+// Play's session then heard while it starts, answer the first
+// ReasonSuperseded and the second nil.
+func TestAPlayWhosePlaybackBeganAnswersAsPlayed(t *testing.T) {
+	stopped := func(why Reason) func(h *harness, ids []uint32) {
+		return func(h *harness, ids []uint32) {
+			h.t.Helper()
+			sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+			if sn.LastStop().Reason != why || h.be.starts() != 1 {
+				h.t.Fatalf("stopped with %+v after %d sessions, want %s after one", sn.LastStop(), h.be.starts(), why)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		refs []string
+		// play is the index of the entry PlayID plays; then is what comes
+		// once its session was heard, before Start answers, with the answer of
+		// a command that waits on the release, if one does; check is what the
+		// transport did.
+		play  int
+		then  func(h *harness, ids []uint32, s *fakeSession) <-chan error
+		check func(h *harness, ids []uint32)
+	}{
+		{"its entry deleted, the next plays", []string{"a", "b", "c"}, 1,
+			func(h *harness, ids []uint32, _ *fakeSession) <-chan error {
+				h.must("delete b", h.eng.Delete(bg, ids[1]))
+				return nil
+			},
+			func(h *harness, ids []uint32) {
+				if s2 := h.be.nth(2); s2.first.Entry != ids[2] {
+					h.t.Fatalf("started %d after the deletion, want c", s2.first.Entry)
+				}
+				if sn := h.waitSnap("playing c", func(sn *Snapshot) bool { return sn.State() == Playing }); sn.Selected() != ids[2] {
+					h.t.Fatalf("selected %d, want c", sn.Selected())
+				}
+			}},
+		{"its entry deleted, nothing follows", []string{"a", "b"}, 1,
+			func(h *harness, ids []uint32, _ *fakeSession) <-chan error {
+				h.must("delete b", h.eng.Delete(bg, ids[1]))
+				return nil
+			},
+			func(h *harness, ids []uint32) {
+				stopped(ReasonStopped)(h, ids)
+				if sel := h.snap().Selected(); sel != 0 {
+					h.t.Fatalf("selected %d, want none", sel)
+				}
+			}},
+		{"a stop", []string{"a", "b"}, 0,
+			func(h *harness, _ []uint32, _ *fakeSession) <-chan error {
+				mark := h.appliedMark()
+				stop := async(func() error { return h.eng.Stop(bg) })
+				h.waitApplied("stop", mark)
+				return stop
+			},
+			stopped(ReasonStopped)},
+		{"the output going away", []string{"a", "b"}, 0,
+			func(h *harness, _ []uint32, _ *fakeSession) <-chan error {
+				h.report(OutputReport{Available: false, Reason: "device_missing"})
+				return nil
+			},
+			stopped(ReasonOutputUnavailable)},
+		{"a fault", []string{"a", "b"}, 0,
+			func(h *harness, _ []uint32, s *fakeSession) <-chan error {
+				mark := h.appliedMark()
+				s.fault(Fault{Reason: ReasonXrun, Occurrence: s.first.ID})
+				h.waitApplied("handled fault", mark)
+				return nil
+			},
+			stopped(ReasonFault)},
+		{"maintenance", []string{"a", "b"}, 0,
+			func(h *harness, _ []uint32, _ *fakeSession) <-chan error {
+				mark := h.appliedMark()
+				enter := async(func() error {
+					_, err := h.eng.EnterMaintenance(bg, h.snap().Generation(), "the test")
+					return err
+				})
+				h.waitApplied("enter maintenance", mark)
+				return enter
+			},
+			func(h *harness, _ []uint32) {
+				if st := h.snap().State(); st != Maintenance {
+					h.t.Fatalf("%s after the enter, want maintenance", st)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			ids := h.insert(tc.refs...)
+			h.available()
+			held := holdStart(h, 1)
+			play := async(func() error { return h.eng.PlayID(bg, ids[tc.play]) })
+			s := h.be.nth(1)
+			heard(h, s)
+			after := tc.then(h, ids, s)
+			held.open()
+			h.must("the play whose session was heard", h.result("play id", play))
+			if after != nil {
+				h.must("what came after", h.result("what came after", after))
+			}
+			tc.check(h, ids)
+		})
+	}
+	t.Run("a reason recorded before it was heard stands", func(t *testing.T) {
+		h := startHarness(t)
+		h.playing(0, "a", "b")
+		g := holdReleases(h)
+		held := holdStart(h, 2)
+		mark := h.appliedMark()
+		stop := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		mark = h.appliedMark()
+		first := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		mark = h.appliedMark()
+		again := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
+		mark = h.appliedMark()
+		second := async(func() error { return h.eng.Play(bg) })
+		h.waitApplied("play", mark)
+		g.open()
+		heard(h, h.be.nth(2))
+		held.open()
+		h.refused("the play the stop replaced", h.result("the first play", first), ReasonSuperseded)
+		h.must("the play whose session was heard", h.result("the second play", second))
+		h.must("the stop that began the release", h.result("the first stop", stop))
+		h.must("the stop between the plays", h.result("the second stop", again))
+	})
+}
+
 // TestTheSelectionMovesAtOnceOnACommand pins the selection a command, a
 // deletion and a skip set while playing: the new target as soon as the
 // owner has applied it, with nothing audible, before any backend event.
@@ -468,6 +606,34 @@ func TestTheSelectionMovesAtOnceOnACommand(t *testing.T) {
 		if s := h.be.nth(3); s.first.Entry != ids[2] {
 			t.Fatalf("after the skip the session started %d, want c", s.first.Entry)
 		}
+	})
+}
+
+// holdStart makes session n's Start wait until the returned gate opens;
+// every other Start opens at once.
+func holdStart(h *harness, n SessionID) gate {
+	g := newGate()
+	h.be.script(func() {
+		h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+			if s.id == n {
+				if err := g.wait(ctx, h.be, false); err != nil {
+					return err
+				}
+			}
+			return s.open()
+		}
+	})
+	return g
+}
+
+// heard reports s's first occurrence audible and waits for the owner to
+// apply it.
+func heard(h *harness, s *fakeSession) {
+	h.t.Helper()
+	s.audible(s.first.ID)
+	h.waitSnap("the first occurrence heard", func(sn *Snapshot) bool {
+		a, ok := sn.Audible()
+		return ok && a.Occurrence == s.first.ID
 	})
 }
 
