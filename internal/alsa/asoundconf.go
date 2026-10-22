@@ -68,6 +68,61 @@ func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevic
 	return walkPCM(defs, device, cards, map[string]bool{}, 0)
 }
 
+// Chain is how an MPD alsa device reaches a card: the plugin type of each
+// stage from the device string to the hw stage that names the card, in
+// order. hw:N is ["hw"], plughw:N is ["plug", "hw"], and Volumio's
+// "volumio" PCM is ["empty", "plug", "hw"]. A chain resolves through
+// empty, plug and hw only, so a dmix, softvol, rate or route stage never
+// appears in one: such a device has no Chain.
+type Chain struct {
+	Card   int
+	Device int
+	Stages []string
+}
+
+// ResolveOutputChain is ResolveOutputDevice with the stages it followed.
+// It resolves only where ResolveOutputDevice does, to the same card and
+// PCM device, and not for a front or plug device string, at the start or
+// as a slave: what those name is defined in alsa-lib's own configuration
+// files (the card's front PCM, plug's slave argument), which this does not
+// read, so their stages are not known.
+func ResolveOutputChain(root, device string, cards []Card) (Chain, bool) {
+	if idx, pcm, found := ResolveALSADevice(device, cards); found {
+		stages, known := deviceStringStages(device)
+		if !known {
+			return Chain{}, false
+		}
+		return Chain{Card: idx, Device: pcm, Stages: stages}, true
+	}
+	device = strings.TrimSpace(device)
+	if device == "" || strings.Contains(device, ":") {
+		return Chain{}, false
+	}
+	defs, ok := loadPCMDefs(root)
+	if !ok {
+		return Chain{}, false
+	}
+	chain, ok, known := walkChain(defs, device, cards, map[string]bool{}, 0)
+	if !ok || !known {
+		return Chain{}, false
+	}
+	return chain, true
+}
+
+// deviceStringStages is the stages a device string names directly: hw is
+// the card itself and plughw a plug over it. front and plug are resolved
+// to a card by ResolveALSADevice, and their stages are not known here.
+func deviceStringStages(device string) ([]string, bool) {
+	plugin, _, _ := strings.Cut(strings.TrimSpace(device), ":")
+	switch plugin {
+	case "hw":
+		return []string{"hw"}, true
+	case "plughw":
+		return []string{"plug", "hw"}, true
+	}
+	return nil, false
+}
+
 type pcmDef struct {
 	typ         string
 	slave       string
@@ -80,15 +135,28 @@ type pcmDef struct {
 }
 
 func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
+	chain, ok, _ := walkChain(defs, name, cards, seen, hops)
+	return chain.Card, chain.Device, ok
+}
+
+// walkChain follows name to a card. ok is whether it reached one, and
+// known whether every stage on the way is one whose type it knows: a slave
+// that is a front or plug device string reaches a card without that.
+func walkChain(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (chain Chain, ok, known bool) {
 	if strings.Contains(name, ":") {
-		return ResolveALSADevice(name, cards)
+		idx, pcm, found := ResolveALSADevice(name, cards)
+		if !found {
+			return Chain{}, false, false
+		}
+		stages, known := deviceStringStages(name)
+		return Chain{Card: idx, Device: pcm, Stages: stages}, true, known
 	}
 	if hops > maxPCMHops || seen[name] {
-		return 0, 0, false
+		return Chain{}, false, false
 	}
-	def, ok := defs[name]
-	if !ok || def.opaque {
-		return 0, 0, false
+	def, found := defs[name]
+	if !found || def.opaque {
+		return Chain{}, false, false
 	}
 	seen[name] = true
 	switch def.typ {
@@ -99,25 +167,30 @@ func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]
 		}
 		if def.cardIsIndex {
 			if !cardIndexExists(cards, def.cardIndex) {
-				return 0, 0, false
+				return Chain{}, false, false
 			}
-			return def.cardIndex, pcm, true
+			return Chain{Card: def.cardIndex, Device: pcm, Stages: []string{"hw"}}, true, true
 		}
 		if def.card == "" {
-			return 0, 0, false
+			return Chain{}, false, false
 		}
-		idx, found := uniqueCardID(cards, def.card)
-		if !found {
-			return 0, 0, false
+		idx, unique := uniqueCardID(cards, def.card)
+		if !unique {
+			return Chain{}, false, false
 		}
-		return idx, pcm, true
+		return Chain{Card: idx, Device: pcm, Stages: []string{"hw"}}, true, true
 	case "empty", "plug":
 		if def.slave == "" {
-			return 0, 0, false
+			return Chain{}, false, false
 		}
-		return walkPCM(defs, def.slave, cards, seen, hops+1)
+		inner, ok, known := walkChain(defs, def.slave, cards, seen, hops+1)
+		if !ok {
+			return Chain{}, false, false
+		}
+		inner.Stages = append([]string{def.typ}, inner.Stages...)
+		return inner, true, known
 	default:
-		return 0, 0, false
+		return Chain{}, false, false
 	}
 }
 
