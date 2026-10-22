@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -206,6 +209,191 @@ func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 			}
 			if file := readConfigFile(t, cfgDir); strings.Contains(file, tc.secret) {
 				t.Errorf("the saved config still holds %q:\n%s", tc.secret, file)
+			}
+		})
+	}
+}
+
+// sameOutput fails unless got and want are one output block: the same YAML
+// written out, the serial whole included (config.PlayerConfig.MarshalYAML).
+func sameOutput(t *testing.T, got, want config.OutputConfig) {
+	t.Helper()
+	g, err := yaml.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := yaml.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(g) != string(w) {
+		t.Errorf("the output block after the rewrite:\n%s\nwant:\n%s", g, w)
+	}
+}
+
+// mergeTestPlayer is a player block bound by serial, and mergeOtherPlayer
+// one bound by port, for the merge cases.
+const (
+	mergeTestPlayer  = `{enabled: true, room: Kitchen, device: {binding: serial, vendorId: "20b1", productId: "3009", serial: "` + rewriteSerial + `"}}`
+	mergeOtherPlayer = `{enabled: true, room: Study, device: {binding: port, port: "platform-xhci-hcd.0/usb2-1:1.0"}}`
+)
+
+// TestInitRewriteKeepsWhatTheOutputBlockLoadedWith: a rewrite keeps every
+// output setting with the value Load gave it. A merge key (<<) yields to
+// the keys its block writes, before it or after it, and an explicit empty
+// or null value is a value: the rewrite processed the block's pairs in the
+// file's order and kept only values that were not zero, so a merge written
+// last overwrote the key beside it, the player's binding included, and an
+// explicit empty password let a merged one through (Codex on B505's round
+// 1). Each case's config loads, and the block after the rewrite is the
+// block Load read before it, with no warning.
+func TestInitRewriteKeepsWhatTheOutputBlockLoadedWith(t *testing.T) {
+	for _, tc := range []struct{ name, block string }{
+		{"a key written before a merge that sets it too", "output:\n    mpd: \"off\"\n    <<: {mpd: \"on\"}\n"},
+		{"a key written after a merge that sets it too", "output:\n    <<: {mpd: \"on\"}\n    mpd: \"off\"\n"},
+		{"an empty password after a merged one", "output:\n    <<: {password: merged-pw}\n    password: \"\"\n"},
+		{"an empty password before a merged one", "output:\n    password: \"\"\n    <<: {password: merged-pw}\n"},
+		{"a null port over a merged one", "output:\n    <<: {loopbackPort: 7795}\n    loopbackPort: ~\n"},
+		{"the first block of a merge sequence", "output:\n    <<: [{mpd: \"on\"}, {mpd: \"off\", password: listed-pw}]\n"},
+		{"a merged block's own merge after its keys", "output:\n    <<: {mpd: \"on\", <<: {mpd: \"off\", conf: /etc/deep.conf}}\n"},
+		{"an anchored block merged beside a key", "output:\n    <<: &base {mpd: \"on\", loopbackPort: 7799}\n    mpd: \"off\"\n"},
+		{"the player written beside a merged one", "output:\n    player: " + mergeTestPlayer + "\n    <<: {player: " + mergeOtherPlayer + "}\n"},
+		{"the player written after a merged one", "output:\n    <<: {player: " + mergeOtherPlayer + "}\n    player: " + mergeTestPlayer + "\n"},
+		{"a key written as an alias", "output:\n    conf: &k mpd\n    *k : \"off\"\n"},
+		{"an output block a top-level merge names", "<<: {output: {mpd: \"off\", password: top-pw}}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			rewrite := rewritePostures[0].setUp(t, cfgDir)
+			appendToConfig(t, cfgDir, tc.block)
+			before := loadInstallConfig(t, cfgDir).Output
+
+			code, out := rewrite()
+			defer logRunOnFailure(t, out)
+
+			if code != 0 {
+				t.Fatalf("the rewrite exited %d", code)
+			}
+			sameOutput(t, loadInstallConfig(t, cfgDir).Output, before)
+			if w := outputNotKeptWarning(out); w != "" {
+				t.Errorf("the rewrite of a block that loads warns:\n%s", w)
+			}
+		})
+	}
+}
+
+// TestPriorOutputResolvesMergeKeysAsLoadDoes holds resolveOutput to the
+// decoder it mirrors: for each block, a config that loads, what priorOutput
+// keeps is exactly the output block config.Load read from the same bytes,
+// with nothing left out. The shapes go past the rewrite tests': merges
+// inside a sequence's blocks, an alias inside a sequence, empty merges, null
+// values over merged ones, and a port of 0.
+func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
+	for _, block := range []string{
+		`{mpd: "off", <<: {mpd: "on"}}`,
+		`{<<: {mpd: "on"}, mpd: "off"}`,
+		`{<<: [{mpd: "on", conf: /a}, {mpd: "off", conf: /b, endpoint: "127.0.0.1:6601"}]}`,
+		`{<<: [{<<: {mpd: "off"}, conf: /a}, {mpd: "on", conf: /b}]}`,
+		`{<<: [&a {conf: /a, password: a-pw}, *a, {mpd: "on"}], mpd: "off"}`,
+		`{<<: {<<: {<<: {password: deep-pw, mpd: "on"}, mpd: "off"}, conf: /c}, conf: /top}`,
+		`{password: "", <<: {password: merged-pw}}`,
+		`{password: ~, <<: {password: merged-pw}}`,
+		`{loopbackPort: ~, <<: {loopbackPort: 7795}}`,
+		`{<<: {loopbackPort: 0}}`,
+		`{<<: {}, mpd: "on"}`,
+		`{<<: [], mpd: "on"}`,
+		`{player: {enabled: true}, <<: {player: {enabled: false, room: Study}}}`,
+		`{<<: {player: {enabled: true, room: Study}}, player: ~}`,
+		`{<<: {player: ` + mergeTestPlayer + `}, mpd: "off"}`,
+		`{endpoint: &e "127.0.0.1:6601", <<: {endpoint: other}, conf: *e}`,
+	} {
+		t.Run(block, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "bridge.yaml")
+			body := "libraryRoots:\n  - " + dir + "\ndataDir: " + filepath.Join(dir, "data") + "\noutput: " + block + "\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("the fixture's config does not load: %v", err)
+			}
+			kept, notKept := priorOutput([]byte(body))
+			if len(notKept) != 0 {
+				t.Errorf("priorOutput did not keep %q", notKept)
+			}
+			sameOutput(t, kept, loaded.Output)
+		})
+	}
+}
+
+// TestInitRewriteResolvesMergesBesideASettingItCannotKeep: when a setting
+// does not read, the rest of the block is still resolved as Load resolves
+// it. A key the block writes hides a merged value for its setting even when
+// the key is the one refused (the operator overrode the merged value, so
+// the rewrite keeps neither); a merged setting that is refused costs that
+// setting alone; and what makes Load refuse the whole block (a key written
+// twice in one block, two merge keys in one block, a merge key that names
+// no block) costs that key alone, named in the warning. kept is the block
+// the saved config must hold.
+func TestInitRewriteResolvesMergesBesideASettingItCannotKeep(t *testing.T) {
+	const player = "    player: " + mergeTestPlayer + "\n"
+	for _, tc := range []struct {
+		name, block, kept string
+		says              []string
+	}{
+		{"an empty password beside a refused mode",
+			"output:\n    mpd: maybe\n    <<: {password: merged-pw}\n    password: \"\"\n    endpoint: 127.0.0.1:6601\n" + player,
+			"output:\n    endpoint: 127.0.0.1:6601\n" + player, []string{"output.mpd (line "}},
+		{"a refused key hides the merged value it overrode",
+			"output:\n    <<: {mpd: \"on\", conf: /etc/merged.conf}\n    mpd: maybe\n" + player,
+			"output:\n    conf: /etc/merged.conf\n" + player, []string{"output.mpd (line ", "): that value is not auto, on or off"}},
+		{"a refused merged setting costs itself alone",
+			"output:\n    <<: {loopbackPort: 70000, conf: /etc/merged.conf}\n    mpd: \"off\"\n" + player,
+			"output:\n    mpd: \"off\"\n    conf: /etc/merged.conf\n" + player, []string{"output.loopbackPort (line ", "): that value is not a port"}},
+		{"a key written twice",
+			"output:\n    mpd: \"on\"\n    mpd: \"off\"\n" + player,
+			"output:\n" + player, []string{"output.mpd (line ", "): it is written twice in one block"}},
+		{"two merge keys in one block",
+			"output:\n    <<: {mpd: \"on\"}\n    <<: {conf: /etc/merged.conf}\n    password: kept-pw\n" + player,
+			"output:\n    password: kept-pw\n" + player, []string{"a merge key of output (line ", "): it is written twice in one block"}},
+		{"a merge key that names no block",
+			"output:\n    <<: 5\n    mpd: \"off\"\n" + player,
+			"output:\n    mpd: \"off\"\n" + player, []string{"a merge key of output (line ", "): it names no block of settings"}},
+		{"a merge sequence with something but blocks in it",
+			"output:\n    <<: [{conf: /etc/merged.conf}, 5]\n    mpd: \"off\"\n" + player,
+			"output:\n    mpd: \"off\"\n" + player, []string{"a merge key of output (line ", "): it names no block of settings"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantDir := filepath.Join(t.TempDir(), "want")
+			rewritePostures[0].setUp(t, wantDir)
+			appendToConfig(t, wantDir, tc.kept)
+			want := loadInstallConfig(t, wantDir).Output
+
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			rewrite := rewritePostures[0].setUp(t, cfgDir)
+			appendToConfig(t, cfgDir, tc.block)
+			if _, err := config.Load(filepath.Join(cfgDir, "bridge.yaml")); err == nil {
+				t.Fatal("the fixture's config loads")
+			}
+
+			code, out := rewrite()
+			defer logRunOnFailure(t, out)
+
+			if code != 0 {
+				t.Fatalf("the rewrite exited %d", code)
+			}
+			sameOutput(t, loadInstallConfig(t, cfgDir).Output, want)
+			warning := outputNotKeptWarning(out)
+			for _, s := range tc.says {
+				if !strings.Contains(warning, s) {
+					t.Errorf("the rewrite's warning does not say %q:\n%s", s, warning)
+				}
+			}
+			for _, secret := range []string{"maybe", "70000", "merged-pw", rewriteSerial[len(rewriteSerial)-6:]} {
+				if strings.Contains(warning, secret) {
+					t.Errorf("the warning carries %q:\n%s", secret, warning)
+				}
 			}
 		})
 	}

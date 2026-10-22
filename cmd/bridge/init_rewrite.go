@@ -505,15 +505,17 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 
 // priorOutput reads the output block of the config a rewrite replaces (raw,
 // the bytes the run read): what the rewrite keeps of it, and a line for each
-// setting it cannot keep. The block is kept as the file holds it (the list
-// at the top of this file), a setting at a time. One that does not read, or
-// that the config's own check refuses (config.OutputConfig.Problem), is one
-// the config did not load with either, often why init runs again: it is left
-// out and named by its key, its line and the check's own words, never by its
-// value (outputRefusal). A player block never fails: one this release
-// cannot read is kept as the file holds it, as Load keeps it, and the player
-// stays off. A key output does not take is dropped, as a rewrite drops every
-// key a config does not have.
+// setting it cannot keep. Every setting it keeps holds the value Load gave
+// it: the block's merge keys are resolved as the decoder resolves them
+// (resolveOutput), and each setting is then decoded on its own. One that
+// does not read, or that the config's own check refuses
+// (config.OutputConfig.Problem), is one the config did not load with
+// either, often why init runs again: it is left out and named by its key,
+// its line and the check's own words, never by its value (outputRefusal). A
+// player block never fails: one this release cannot read is kept as the
+// file holds it, as Load keeps it, and the player stays off. A key output
+// does not take is dropped, as a rewrite drops every key a config does not
+// have.
 //
 // Read on its own, never as a field of priorInstallFile: a type error in the
 // block fails that struct's whole decode, and refuseRewrite would then refuse
@@ -526,7 +528,7 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 		return config.OutputConfig{}, nil
 	}
 	n := &file.Output
-	for hops := 0; n.Kind == yaml.AliasNode && n.Alias != nil && hops < 16; hops++ {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
 		n = n.Alias
 	}
 	switch {
@@ -535,18 +537,20 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 	case n.Kind != yaml.MappingNode:
 		return config.OutputConfig{}, []string{fmt.Sprintf("output (line %d): it is not a block of output settings", n.Line)}
 	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := n.Content[i], n.Content[i+1]
+	settings, notKept := resolveOutput(n)
+	for _, s := range settings {
 		var one config.OutputConfig
-		if err := (&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{k, v}}).Decode(&one); err != nil {
-			notKept = append(notKept, fmt.Sprintf("%s (line %d): it does not read as that setting", outputKeyName(k), k.Line))
+		if err := (&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{s.key, s.value}}).Decode(&one); err != nil {
+			notKept = append(notKept, fmt.Sprintf("%s (line %d): it does not read as that setting", outputKeyName(s.key), s.key.Line))
 			continue
 		}
 		if err := one.Problem(); err != nil {
-			notKept = append(notKept, outputRefusal(err, k))
+			notKept = append(notKept, outputRefusal(err, s.key))
 			continue
 		}
-		// The setting the pair holds, into what is kept.
+		// The one setting the pair holds, into what is kept. Each setting
+		// comes once, so one left at its zero (an explicit "" or null) is the
+		// value Load gave it.
 		from, into := reflect.ValueOf(one), reflect.ValueOf(&kept).Elem()
 		for f := 0; f < from.NumField(); f++ {
 			if from.Type().Field(f).IsExported() && !from.Field(f).IsZero() {
@@ -555,6 +559,142 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 		}
 	}
 	return kept, notKept
+}
+
+// maxMergedBlocks bounds the blocks resolveOutput walks, the output block
+// and every block its merge keys name, nested or listed, so a merge key
+// that names its own block, or a bomb of them, ends.
+const maxMergedBlocks = 64
+
+// outputSetting is one setting of the output block as the decoder resolves
+// it for Load: its key, and the value Load decodes into it.
+type outputSetting struct{ key, value *yaml.Node }
+
+// resolveOutput lists the settings of the output block n, each once, as
+// gopkg.in/yaml.v3 v3.0.1's decoder resolves merge keys for Load
+// (decoder.mappingStruct and decoder.merge): first the keys n writes, in
+// order; then the keys of the block its merge key (<<) names, or of each
+// block of the sequence it names, in the sequence's order, each only where
+// nothing before it set that setting; and a merged block's own merge after
+// that block's keys. So a key a block writes wins over a merged one, whether
+// written before the merge or after it, and an explicit empty or null value
+// is the value. What makes Load refuse the whole block costs that much
+// alone, and is named in notKept: a key a block writes twice (neither value
+// is kept, and it still hides a merged one, as a key written once does), two
+// merge keys in one block, and a merge key that names anything but a block
+// or a sequence of blocks (neither is followed). A key output does not take
+// is listed, and decodes to nothing.
+func resolveOutput(n *yaml.Node) (settings []outputSetting, notKept []string) {
+	set := map[string]bool{}
+	blocks := 0
+	var walk func(m *yaml.Node)
+	walk = func(m *yaml.Node) {
+		blocks++
+		var mergeKeys, mergeValues []*yaml.Node
+		count := map[string]int{}
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			k := m.Content[i]
+			if isMergeKey(k) {
+				mergeKeys, mergeValues = append(mergeKeys, k), append(mergeValues, m.Content[i+1])
+				continue
+			}
+			if name, ok := outputKeyText(k); ok {
+				count[name]++
+			}
+		}
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			k, v := m.Content[i], m.Content[i+1]
+			if isMergeKey(k) {
+				continue
+			}
+			name, ok := outputKeyText(k)
+			if !ok || set[name] {
+				continue
+			}
+			set[name] = true
+			if count[name] > 1 {
+				if known := outputKeyName(k); known != unknownOutputKey {
+					notKept = append(notKept, fmt.Sprintf("%s (line %d): it is written twice in one block", known, k.Line))
+				}
+				continue
+			}
+			settings = append(settings, outputSetting{k, v})
+		}
+		switch len(mergeKeys) {
+		case 0:
+			return
+		case 1:
+		default:
+			notKept = append(notKept, fmt.Sprintf("a merge key of output (line %d): it is written twice in one block, so neither block it names is kept",
+				mergeKeys[1].Line))
+			return
+		}
+		named := mergedBlocks(mergeValues[0])
+		if named == nil {
+			notKept = append(notKept, fmt.Sprintf("a merge key of output (line %d): it names no block of settings", mergeKeys[0].Line))
+			return
+		}
+		for _, b := range named {
+			if blocks >= maxMergedBlocks {
+				notKept = append(notKept, fmt.Sprintf("a merge key of output (line %d): it names more blocks than a rewrite follows (%d)",
+					mergeKeys[0].Line, maxMergedBlocks))
+				return
+			}
+			walk(b)
+		}
+	}
+	walk(n)
+	return settings, notKept
+}
+
+// mergedBlocks is what the value v of a merge key names, as the decoder
+// takes it: a block, an alias to one, or a sequence of those, in order (an
+// empty sequence names none and is no refusal); nil for anything else,
+// which Load refuses.
+func mergedBlocks(v *yaml.Node) []*yaml.Node {
+	block := func(n *yaml.Node) *yaml.Node {
+		if n.Kind == yaml.AliasNode {
+			n = n.Alias
+		}
+		if n == nil || n.Kind != yaml.MappingNode {
+			return nil
+		}
+		return n
+	}
+	if b := block(v); b != nil {
+		return []*yaml.Node{b}
+	}
+	if v.Kind != yaml.SequenceNode {
+		return nil
+	}
+	named := []*yaml.Node{}
+	for _, e := range v.Content {
+		b := block(e)
+		if b == nil {
+			return nil
+		}
+		named = append(named, b)
+	}
+	return named
+}
+
+// isMergeKey is the decoder's own test for a merge key (isMerge in
+// gopkg.in/yaml.v3): a plain <<, or one tagged !!merge. A quoted "<<" is a
+// key like any other.
+func isMergeKey(k *yaml.Node) bool {
+	return k.Kind == yaml.ScalarNode && k.Value == "<<" && (k.Tag == "" || k.Tag == "!" || k.ShortTag() == "!!merge")
+}
+
+// outputKeyText is the text of a key of the output block, through an alias
+// as the decoder reads it, and false for a key that is not a word.
+func outputKeyText(k *yaml.Node) (string, bool) {
+	if k.Kind == yaml.AliasNode && k.Alias != nil {
+		k = k.Alias
+	}
+	if k.Kind != yaml.ScalarNode {
+		return "", false
+	}
+	return k.Value, true
 }
 
 // outputRefusal is the warning line for a setting the config's own check
@@ -570,17 +710,21 @@ func outputRefusal(err error, k *yaml.Node) string {
 	return fmt.Sprintf("%s (line %d): the config's own check refuses it", outputKeyName(k), k.Line)
 }
 
+// unknownOutputKey is how outputKeyName names a key output does not take.
+const unknownOutputKey = "a key of output"
+
 // outputKeyName names a key of the output block: output.<key> for one of
-// config.OutputConfig's own, and "a key of output" for any other, which is
+// config.OutputConfig's own, and unknownOutputKey for any other, which is
 // never quoted.
 func outputKeyName(k *yaml.Node) string {
+	text, _ := outputKeyText(k)
 	t := reflect.TypeOf(config.OutputConfig{})
 	for f := 0; f < t.NumField(); f++ {
-		if name, _, _ := strings.Cut(t.Field(f).Tag.Get("yaml"), ","); name != "" && name == k.Value {
+		if name, _, _ := strings.Cut(t.Field(f).Tag.Get("yaml"), ","); name != "" && name == text {
 			return "output." + name
 		}
 	}
-	return "a key of output"
+	return unknownOutputKey
 }
 
 // keptOutputLines lists, for printKept, the output settings a rewrite kept:
