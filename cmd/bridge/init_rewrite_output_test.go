@@ -361,6 +361,75 @@ func TestPriorOutputResolvesMergeKeysAsLoadDoes(t *testing.T) {
 	}
 }
 
+// aliasHeavyBlock is Codex's output block from B505's round 3: a password,
+// and a merge sequence of five maps, `&a {}` and each next one merging the
+// one before ten times. yaml.v3 refuses a document whose alias expansions
+// pass 99 in 100 decodes, so the block decodes beside 1,000 library roots
+// (wholeConfigShapes) and is refused with little else in the file to count
+// against it.
+func aliasHeavyBlock() string {
+	tenfold := func(anchor string) string {
+		return strings.TrimSuffix(strings.Repeat("*"+anchor+", ", 10), ", ")
+	}
+	return "{password: saved-pw, <<: [&a {}, &b {<<: [" + tenfold("a") + "]}, &c {<<: [" + tenfold("b") + "]}, " +
+		"&d {<<: [" + tenfold("c") + "]}, &e {<<: [" + tenfold("d") + "]}]}"
+}
+
+// TestPriorOutputOfAFileTheDecoderRefusesElsewhere: a file whose whole decode
+// fails over something outside the output block, here a misspelt top-level
+// key, is one Load refuses, and the rewrite reads its block on its own
+// (outputAsLoaded) before the certainty recovery. A merged block the decoder
+// takes alone is kept as Load decodes it once the typo is put right, which
+// is the config init is run again over; a block the decoder refuses on its
+// own, for the aliases its merges expand with little else in the file to
+// count against them, keeps nothing and says so. Every fixture of the
+// rewrite's tests decoded whole since round 4, so a priorOutput that dropped
+// that reading, or kept a block refused for its aliases, passed them all (the
+// Claude API on round 4).
+func TestPriorOutputOfAFileTheDecoderRefusesElsewhere(t *testing.T) {
+	dir := t.TempDir()
+	head := "libraryRoots:\n  - " + dir + "\ndataDir: " + filepath.Join(dir, "data") + "\n"
+	const typo = "libraryRoot: /x\n"
+	outputLine := strings.Count(head+typo, "\n") + 1
+	loadWithoutTheTypo := func(t *testing.T, block string) (*config.Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "bridge.yaml")
+		if err := os.WriteFile(path, []byte(head+block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return config.Load(path)
+	}
+
+	t.Run("a merged block the decoder takes alone", func(t *testing.T) {
+		block := "output: {password: saved-pw, <<: {mpd: \"off\"}}\n"
+		if _, ok := outputAsLoadDecodes([]byte(head + typo + block)); ok {
+			t.Fatal("the file with the misspelt key decodes whole, so it pins nothing")
+		}
+		loaded, err := loadWithoutTheTypo(t, block)
+		if err != nil || loaded.Output.Password != "saved-pw" || loaded.Output.Mode() != "off" {
+			t.Fatalf("without the misspelt key, Load = %v, %+v: the fixture's block is not the one meant", err, loaded)
+		}
+		kept, notKept := priorOutput([]byte(head + typo + block))
+		if len(notKept) != 0 {
+			t.Errorf("priorOutput did not keep %q", notKept)
+		}
+		sameOutput(t, kept, loaded.Output)
+	})
+
+	t.Run("a block the decoder refuses alone", func(t *testing.T) {
+		block := "output: " + aliasHeavyBlock() + "\n"
+		if _, err := loadWithoutTheTypo(t, block); err == nil || !strings.Contains(err.Error(), "excessive aliasing") {
+			t.Fatalf("without the misspelt key, Load = %v, want its refusal for the block's aliases", err)
+		}
+		kept, notKept := priorOutput([]byte(head + typo + block))
+		sameOutput(t, kept, config.OutputConfig{})
+		want := fmt.Sprintf("output (line %d): it does not load, and a key of it is a merge key (<<)", outputLine)
+		if len(notKept) != 1 || !strings.Contains(notKept[0], want) {
+			t.Errorf("priorOutput's lines = %q, want one saying %q", notKept, want)
+		}
+	})
+}
+
 // outputShape is an output block for TestPriorOutputResolvesMergeKeysAsLoadDoes
 // and what else its config holds: roots are list entries after the fixture's
 // own library root, others top-level keys before the block, and block the
@@ -376,9 +445,6 @@ func wholeConfigShapes() []outputShape {
 	for i := 1; i < 1000; i++ {
 		fmt.Fprintf(&roots, "  - /music/r%d\n", i)
 	}
-	tenfold := func(anchor string) string {
-		return strings.TrimSuffix(strings.Repeat("*"+anchor+", ", 10), ", ")
-	}
 	var endpoints, servers strings.Builder
 	endpoints.WriteString("customEndpoints:\n")
 	for i := 0; i < 200; i++ {
@@ -389,9 +455,7 @@ func wholeConfigShapes() []outputShape {
 		fmt.Fprintf(&servers, "    - {name: s%d, udn: \"uuid:%d\"}\n", i, i)
 	}
 	return []outputShape{
-		{"1,000 roots beside merges whose aliases expand tenfold a level (Codex)", roots.String(), "",
-			"{password: saved-pw, <<: [&a {}, &b {<<: [" + tenfold("a") + "]}, &c {<<: [" + tenfold("b") + "]}, " +
-				"&d {<<: [" + tenfold("c") + "]}, &e {<<: [" + tenfold("d") + "]}]}"},
+		{"1,000 roots beside merges whose aliases expand tenfold a level (Codex)", roots.String(), "", aliasHeavyBlock()},
 		{"1,000 roots beside a player and merged MPD settings", roots.String(), "",
 			"{<<: [{mpd: \"off\", conf: /etc/mpd-a.conf}, {password: listed-pw}], player: " + mergeTestPlayer + "}"},
 		{"a whole config whose anchors the block aliases",
