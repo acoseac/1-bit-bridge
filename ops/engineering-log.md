@@ -54289,7 +54289,9 @@ before anything changed. Every premise held.
   every kind: both upserts (the row's own `size` and `mtime_ns`, bound
   again), the stamp leg (which also rewrites a right kind recorded at another
   stat), the fill and the header pass. `TestEverySampleFormatWriteRecordsItsStat`
-  reads the package's SQL so a sixth writer cannot skip them.
+  reads the package's SQL so a sixth writer cannot skip them. (Round 4,
+  below, moved the columns to v60, since a build of v59's first form may
+  have opened a store, and made the stamp leg record the stat it read.)
 - **Every open clears a stale kind first** (`clearStaleSampleFormats`,
   before the fill): a row whose recorded stat is not its own was rewritten by
   a writer that does not know the column. A partial index on exactly that
@@ -54392,3 +54394,70 @@ waiting for a slot: `make fmt vet test` (71 packages ok, `cmd/bridge` 503 s,
 `internal/manifest` 1,121 s, `go fmt` changing nothing), `make build-all`
 (six targets, stamped `036a9ea0` with no `-dirty`) and `make docs-check`,
 clean.
+
+### Round 4: two reviews of `016faa18`
+
+A Codex review (one P2) and a Claude review (two Lows), each premise checked
+against the code before anything changed. All three held.
+
+1. **A delayed stamp certified a stale kind** (Codex, P2). The version-stale
+   leg builds its Track from the walk's stat (`scanner.go:1940`), the scan
+   writer holds stamp rows in its batch and writes them when the batch fills
+   (`scanner.go:2545–2598`), and `writeSampleFormatTx` paired the kind with
+   the row's stat as its write found it (`sample_format_size = size`). Scans
+   in one process take turns on the Scanner's mutex (`scanner.go:749`,
+   `:2639`), but `bridge scan` opens the store and scans with no lock beside
+   a running serve (`cmd/bridge/main.go:6110`). So a stamp that waited while
+   the other process's scan rewrote the row for a changed file wrote the old
+   file's kind at the new file's stat; the next open read it as current, and
+   a later scan, finding the file unchanged, did not read it again.
+   `TestADelayedStampLeavesTheKindOfARowAnotherScanRewrote` (A's
+   extraction, B's scan of the integer render that replaced the file, A's
+   stamp) was red on `016faa18` at three points: "float" after the stamp,
+   still after the next open and a later scan, and served. Fix:
+   `writeSampleFormatTx` takes the extraction's size and mtime, and
+   `sampleFormatStampSQL` writes the kind with them only `WHERE path = ? AND
+   size = ? AND mtime_ns = ?`, so the comparison is the write's own; the read
+   before it is filtered the same way.
+2. **A store round 2 took to v59 did not open** (Claude, low). Round 2's v59
+   (`03c0e60d`, `store.go:2570`) added the kind and its null index alone;
+   round 3 extended v59 in place, so a store at 59 skipped it, and the open's
+   clear (`store.go:2885`) failed with "no such column: sample_format_size".
+   `TestAStoreTheFirstV59LeftOpensAndDecidesItsKindsAgain` was red on that
+   error. Fix: v59's post() is its first form again, and the stat columns
+   and the stale-kind index are v60, idempotent like every step, so a store
+   round 3 took to 59 keeps them. A round-2 store's kinds carry no stat: they
+   read as stale and are decided again (its FLAC rows by the open's fill, its
+   WAV and AIFF rows by the header pass), never taken as current; it has no
+   completion mark, so the key waits for the boot pass. Round 3's "not
+   shipped" held for releases, not for every build that ran.
+3. **Nothing pinned the clear before the fill** (Claude, low). With the two
+   swapped every test stayed green (run before any change). The rollback
+   test's older binary now also rewrites a FLAC, to a new size and mtime,
+   and the test checks right after the open, before any header pass, that
+   it is `integer`, recorded at the new stat, with its cursor past the
+   clients'. Green on the code, whose order was right; red with the order
+   swapped (control 3).
+
+**Negative controls**, each against `990462df`, restored with `git checkout`:
+
+1. The stamp comparing nothing, in its read and its write, and recording
+   the row's stat (round 3's behaviour): the delayed-stamp test red at all
+   three points. 1b, the write's comparison alone removed, and 1c, the
+   read's filter alone removed: both green, since inside the stamp's
+   write-locked transaction either one refuses the other scan's row; only
+   removing both brings the defect back.
+2. Round 3's ladder, the stat columns in v59 and no v60: the first-v59 test
+   red ("no such column"), alone; every fresh-store and migration test
+   green.
+3. The fill before the clear: the rollback test red (the rewritten FLAC
+   NULL right after the open, its stat unrecorded and its cursor short, still
+   NULL at the end, and served with no kind), and the first-v59 test red too
+   (its FLAC row ends NULL).
+
+**Not done here.** The stamp leg's own `UPDATE` (`extractor_version`,
+`audio_md5`, `folder_art_key`, `extract_refused`) and its lyrics write take
+`WHERE path = ?` alone, so the same delayed stamp writes them onto a row the
+other scan rewrote: an old file's audio MD5 for the new file. That predates
+B513 and is not its fix; it is the owner's to file, since the backlog file
+is not on this machine.
