@@ -237,7 +237,7 @@ func (w *watch) onNote() {
 // once, or with the window when one is open.
 func (w *watch) onPoke() {
 	set := w.svc.cfg.Settings()
-	if set.Enabled && !sameDevice(set.Device, w.device) && !w.window.open && w.pending == nil {
+	if set.Enabled && !SameBinding(set.Device, w.device) && !w.window.open && w.pending == nil {
 		w.pending = &trigger{why: "binding", renew: true, at: w.clock.Now()}
 	}
 	w.svc.update(func() { w.svc.stats.ConfigChanges++ })

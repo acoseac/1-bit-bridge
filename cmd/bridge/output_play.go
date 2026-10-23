@@ -25,16 +25,18 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
-// The pause release bounds bridge output play takes: the engine's (1 s to
-// 10 min), narrower than output.player.pauseReleaseSeconds' 1 to 3600.
+// The pause release bounds the player's engine takes (1 s to 10 min),
+// narrower than output.player.pauseReleaseSeconds' 1 to 3600: bridge output
+// play's --pause-release, and serve's player (planServePlayer), which does
+// not start on a config past them.
 const (
 	playMinPauseRelease = time.Second
 	playMaxPauseRelease = 10 * time.Minute
 )
 
-// playBackend is what the harness plays through: the player's backend
-// (playback.Backend), or a test's stand-in, and the wait for its goroutines
-// the run's end joins.
+// playBackend is what the harness and serve's player play through: the
+// player's backend (playback.Backend), or a test's stand-in, and the wait
+// for its goroutines their stops join.
 type playBackend interface {
 	engine.Backend
 	Wait(ctx context.Context) error
@@ -725,13 +727,13 @@ func (r *playRun) shutdown(engineDone, watcherDone <-chan struct{}) {
 			return false
 		}
 	}
-	if !wait(engineDone, engine.ReleaseTimeout+5*time.Second) {
+	if !wait(engineDone, playerEngineStopBound) {
 		r.out.line("the engine did not shut down within its bound")
 	}
 	if !wait(watcherDone, hotplug.DefaultStopWait+time.Second) {
 		r.out.line("the hotplug watcher did not stop within its bound")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), playerBackendWaitBound)
 	defer cancel()
 	if err := r.be.Wait(ctx); err != nil {
 		r.out.line("%v: abandoned", err)
