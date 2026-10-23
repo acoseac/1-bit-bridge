@@ -57531,6 +57531,27 @@ sandbox refuses the listener binds. An initial disk-full failure was recovered
 by clearing disposable foreign object entries in this task's Go cache and
 retrying sequentially; those retries reach the socket restrictions.
 
+**Round 4 — deadline installation and cleanup's result.** Both regressions
+failed first on the committed round-3 tree with only the parking seam added.
+A withdrawal paused between reading and installing its deadline sent one
+byebye after Close began with an expired deadline, before its watcher ran;
+its sender's installed deadline was still later than Close's. A withdrawal
+parked in the listener's close returned nil after Close's deadline expired;
+its own deadline expiring there also returned nil. `ssdpOwnedSender` now
+clamps every deadline installation under `s.mu`, and Close clamps all current
+owned sender deadlines under that same lock when it publishes its deadline.
+A stale install cannot raise the cap, and changing the deadline cuts a write
+already in progress. Close snapshots its handles at that same beginning.
+`withdraw` decides its final expiry after all releases, under `s.mu` together
+with handle removal, so Close owns precisely the withdrawals it saw. The
+redundant final expiry check before `retire`'s cleanup is gone; the join and
+pre-write reads remain because they decide whether to skip and report a send.
+The new tests also keep the positive release-in-time and completed-before-Close
+cases. Withdraw and Close document this ownership boundary. The rule and its
+History carry both requirements. The round-4 scratch report records red/green
+runs, the nine standalone controls (seven carried forward with adaptations,
+one per new rule), and validation including sandbox-denied socket tests.
+
 ### Why
 
 B470 makes the bridge's player an OpenHome Source on the LAN (PR 5a2),

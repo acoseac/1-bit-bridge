@@ -19,7 +19,9 @@ release, under its one deadline** (round 2). It stores the earlier of the
 caller's deadline and five seconds from entry when it marks the subsystem
 closed. Register and Update rollbacks take that deadline. Every NOTIFY sender
 enters the subsystem's inventory before its first write, including a staged
-endpoint that has never appeared in the dispatch table. At Close's deadline,
+endpoint that has never appeared in the dispatch table. Close snapshots the
+handles under the lock when it begins, before waiting for in-flight operations.
+At Close's deadline,
 the subsystem closes those senders to interrupt writes; a sender acquired
 after that point is closed before it can send. The in-flight wait is bounded
 by the same deadline, followed by the interrupted operations' cleanup join.
@@ -35,17 +37,40 @@ fresh shutdown budget.** Cancellation stops answers and alive bursts; it does
 not cancel byebye. Retirement joins normal sends before best-effort byebye;
 expiry interrupts pending sends and releases everything, with
 `context.DeadlineExceeded`. A datagram handed to the kernel cannot be recalled.
-**Re-read Close's deadline before every byebye write and when reporting
-retirement expiry, even for a Withdraw that began first** (round 3). A
-retirement's entry-time deadline can predate Close. Each target takes the
-earlier of the current retirement deadline and the burst cap, sets it on the
-sender, and skips the write once it has passed. Both the join's expiry check
-and the final byebye expiry check use Close's current deadline, so a caller
-whose withdrawal was interrupted by Close gets `context.DeadlineExceeded`.
-`TestWithdrawalReportsAnEarlierCloseDeadline` starts a withdrawal first and
-parks its byebye until Close interrupts it. `TestByebyeRefreshesTheCloseDeadlineBetweenWrites`
-publishes Close's state between writes without running its watcher, pinning
-both the shortened write deadline and the refusal to start a late write.
+**Clamp every owned sender's installed and future write deadlines to Close's
+under the same lock** (round 4). Reading Close's state before a separate
+SetWriteDeadline left a window for a stale withdrawal deadline to overwrite
+Close's. `ssdpOwnedSender` now owns deadline installation under the subsystem's
+`mu`: every installation is capped at Close's deadline (zero, meaning no
+limit, is capped too). Close clamps each owned sender's current deadline under
+that same lock as it publishes its state; this changes a write already in
+progress too. A sender acquired during Close gets the clamp before it can
+write. Deadline installation is the only sender socket operation under this
+lock: no write or close waits there. The watcher still closes senders at expiry
+and joins cleanup. `TestCloseClampsAStaleWithdrawalDeadline` parks between the
+withdrawal's read and install, begins Close with an expired deadline, and holds
+Close before its watcher: the current deadline is already capped, the stale
+install yields a socket timeout, no byebye is recorded, and Withdraw reports
+`context.DeadlineExceeded`.
+
+**Re-read before byebye only to skip and report expiry; decide Withdraw's final
+budget result after release, atomically with handle removal, so Close owns
+exactly the handles it saw** (round 4). The join and pre-write reads still decide
+whether to skip a byebye and report expiry. They do not serialize deadline
+installation. The former final check inside `retire`, before releasing senders
+and listeners, missed expiry during release. `withdraw` now checks once after
+all cleanup, under `s.mu` together with removing its handle: the earlier of
+its own deadline and, if Close has begun, Close's. Close snapshots that list
+under the same lock. A Close that saw the handle owns the withdrawal through
+its release; one that did not cannot change its completed result.
+`TestWithdrawalBudgetIncludesListenerRelease` parks in `fakeListener.onClose`
+after all byebyes, lets Close's short deadline expire, then releases it:
+Withdraw reports `context.DeadlineExceeded`. The own-deadline variant also
+reports expiry; release within budget returns nil, as does a withdrawal
+completed before Close began. `TestWithdrawalReportsAnEarlierCloseDeadline`
+keeps the earlier blocked-byebye coverage, and
+`TestByebyeRefreshesTheCloseDeadlineBetweenWrites` pins pre-write skip/report
+and shortened deadlines without relying on the watcher.
 `TestCloseJoinsAWithdrawalAlreadySendingByeBye` parks a byebye, releases it or
 lets Close's deadline abandon it, and checks socket cleanup at Close's return.
 `TestCloseBudgetIncludesInflightWrites` parks Register and Update in initial
