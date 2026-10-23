@@ -57,11 +57,14 @@ func TestAnIdleConnectionAndAStalledHeaderAreClosed(t *testing.T) {
 	box.Set([]lan.Address{eth0})
 	s := startOn(t, box, 7792, Limits{Idle: 300 * time.Millisecond, ReadHeader: 300 * time.Millisecond}, nil)
 	at := listening(t, s, eth0)[eth0]
+	// Each is waited for 5 s, well inside the request's whole deadline
+	// (Limits.Read, 10 s), which net/http also takes for an idle one when
+	// none is set: the close is the idle and the header deadlines'.
 	closedByTheServer := func(name string, c io.Reader) {
 		t.Helper()
 		b, err := io.ReadAll(c)
 		if isTimeout(err) {
-			t.Errorf("%s: still open after 15 s (%d bytes)", name, len(b))
+			t.Errorf("%s: still open after 5 s (%d bytes)", name, len(b))
 		}
 	}
 	idle, err := box.Dial(at, phone)
@@ -73,7 +76,7 @@ func TestAnIdleConnectionAndAStalledHeaderAreClosed(t *testing.T) {
 	if code, err := get(idle, br, at.String()); code != 200 {
 		t.Fatalf("%d, %v", code, err)
 	}
-	_ = idle.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = idle.SetReadDeadline(time.Now().Add(5 * time.Second))
 	closedByTheServer("a kept-alive connection that sends nothing", br)
 	stalled, err := box.Dial(at, tablet)
 	if err != nil {
@@ -83,7 +86,7 @@ func TestAnIdleConnectionAndAStalledHeaderAreClosed(t *testing.T) {
 	if _, err := io.WriteString(stalled, "GET /openhome/description.xml HTTP/1.1\r\nHost: "); err != nil {
 		t.Fatal(err)
 	}
-	_ = stalled.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = stalled.SetReadDeadline(time.Now().Add(5 * time.Second))
 	closedByTheServer("a connection that stops in its headers", stalled)
 	awaitStatus(t, s, 15*time.Second, "neither connection counted", func(st Status) bool { return st.Open == 0 })
 }
