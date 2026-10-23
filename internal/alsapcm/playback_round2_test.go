@@ -247,6 +247,103 @@ func TestPlaybackContinuesTeardownAfterATimerStopPanic(t *testing.T) {
 	}
 }
 
+// TestPlaybackResumeKeepsAPausedSuccessorSilentAfterATimerStopPanic holds
+// the next transport's open until Pause arms the between-transports timer.
+// Making that sink current stops the timer and records its panic. Resume
+// must answer that fault and leave the sink paused, before any Release.
+func TestPlaybackResumeKeepsAPausedSuccessorSilentAfterATimerStopPanic(t *testing.T) {
+	for _, rollbackRefused := range []bool{false, true} {
+		name := "paused"
+		if rollbackRefused {
+			name = "pause-refused"
+		}
+		t.Run(name, func(t *testing.T) {
+			logs := &lines{}
+			opened := make(chan *alsapcm.Sink, 1)
+			gate, stopped := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			allowOpen := func() { once.Do(func() { close(gate) }) }
+			d := newDirectWith(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+				return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+					s, err := open(ctx, cfg)
+					if err == nil && cfg.Transport.RateHz == 48000 {
+						opened <- s
+						<-gate
+					}
+					return s, err
+				}
+			}, func(cfg *playback.Config) {
+				cfg.Log = slog.New(logs)
+				cfg.AfterFunc = func(time.Duration, func()) func() bool {
+					return func() bool { close(stopped); panic(panicValue) }
+				}
+			})
+			t.Cleanup(func() { d.release(1) })
+			t.Cleanup(allowOpen)
+			d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+			d.files.add("b", wav(48000, 24, pattern(2, 3000, 24)))
+			if err := d.start(1, "a"); err != nil {
+				t.Fatal(err)
+			}
+			next := occurrence(102, 2, "b")
+			if err := d.be.Prepare(bg, 1, 101, &next); err != nil {
+				t.Fatal(err)
+			}
+			d.k.Free()
+			sink := receiveIn(t, opened, "b's sink to open between transports")
+			if err := d.be.Pause(bg, 1); err != nil {
+				t.Fatal(err)
+			}
+			allowOpen()
+			receiveIn(t, stopped, "the paused successor to become current and stop the timer")
+			if rollbackRefused {
+				// Close after the writer takes Resume but before its caller reads
+				// the answer: Resume succeeds and the compensating Pause refuses.
+				d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
+					if op == "resume" {
+						_ = sink.Close()
+					}
+				})
+			}
+			before := d.k.View().GivenBytes
+			how, err := d.be.Resume(bg, 1)
+			var re *playback.ResumeError
+			if how != 0 || err == nil || errors.As(err, &re) {
+				t.Errorf("Resume = %v, %v; want the backend fault without success", how, err)
+			}
+			wantState := alsapcm.SinkPaused
+			if rollbackRefused {
+				wantState = alsapcm.SinkStopped
+			}
+			if st := sink.Position().State; st != wantState {
+				t.Errorf("Resume that meets the timer-stop fault left the sink %v; want %v before release", st, wantState)
+			}
+			if got := d.k.View().GivenBytes; got != before {
+				t.Errorf("gave the DAC %d bytes after the failed Resume; want %d", got, before)
+			}
+			waitOn(t, "the backend fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) == 1 })
+			for _, e := range d.rec.events() {
+				if e.kind == "fault" && (e.fault.Reason != playback.ReasonFailed || err == nil || !strings.Contains(err.Error(), e.fault.Detail)) {
+					t.Errorf("Resume answer %v, fault %+v; want the recorded backend failure", err, e.fault)
+				}
+			}
+			if rollbackRefused && alsapcm.ReasonOf(err) != alsapcm.ReasonClosed {
+				t.Errorf("Resume answer %v; want the refused Pause folded into the fault", err)
+			}
+			ctx, cancel := context.WithTimeout(bg, alsapcm.Watchdog())
+			defer cancel()
+			if err := d.be.Release(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.be.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			logs.panicLogged(t, backendPanicMessage, "the pause release timer's stop")
+			d.k.CheckClosedEach(t)
+		})
+	}
+}
+
 // TestPlaybackResumePanicIsTheBackendsFault checks the backend's direct
 // answer as well as the engine's fault: the dead writer cannot keep a
 // resumable paused session or blame the device.

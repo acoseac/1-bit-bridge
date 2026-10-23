@@ -106,13 +106,15 @@ func TestPlaybackFaultsOnAPanicInTheProducer(t *testing.T) {
 	logs := &lines{}
 	r := newRig(t, withLog(logs))
 	r.files.add("a", wav(48000, 24, pattern(1, 200000, 24)))
-	// The open decodes the first 4096 frames, bytes 44 to 24620 of the file;
-	// the producer's first read of its own panics.
-	r.files.mu.Lock()
-	r.files.panicRead["a"] = 30000
-	r.files.mu.Unlock()
 	ids := r.insert("a")
 	r.play()
+	// Three seconds is past the sink's two-second lookahead, hardware
+	// buffer and decoder chunk. No read reaches it until the DAC can play,
+	// so the panic cannot race Play's successful answer.
+	r.files.mu.Lock()
+	r.files.panicRead["a"] = 44 + 3*48000*2*3
+	r.files.mu.Unlock()
+	r.k.Free()
 	f, _ := r.faulted()
 	wantFailed(t, f, ids[0])
 	r.letGo()
@@ -184,11 +186,12 @@ func TestPlaybackFaultsOnAPanicInASuccessorsOpen(t *testing.T) {
 	r := newRig(t, withLog(logs))
 	r.files.add("a", wav(48000, 24, pattern(1, 100000, 24)))
 	r.files.add("b", wav(48000, 24, pattern(2, 100000, 24)))
+	ids := r.insert("a")
+	r.play()
 	r.files.mu.Lock()
 	r.files.panicOpen["b"] = true
 	r.files.mu.Unlock()
-	ids := r.insert("a", "b")
-	r.play()
+	r.insert("b")
 	f, _ := r.faulted()
 	wantFailed(t, f, ids[0])
 	r.letGo()

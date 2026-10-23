@@ -109,15 +109,19 @@ func (c *tracked) Close() error {
 // carry in the bridge, a library path, which no line of the log may show.
 const panicValue = "a value the panic carries: /srv/music/Secret/Track.flac"
 
-// panickyReader is a content whose reads past its byte panic: a decoder's
-// defect, or a reader's, on that content.
+// panickyReader checks the live panic setting, so a test can arm a read
+// failure after Play has answered, even on content already open.
 type panickyReader struct {
-	r  io.ReaderAt
-	at int64
+	r   io.ReaderAt
+	f   *files
+	ref string
 }
 
 func (p panickyReader) ReadAt(b []byte, off int64) (int, error) {
-	if off+int64(len(b)) > p.at {
+	p.f.mu.Lock()
+	at, armed := p.f.panicRead[p.ref]
+	p.f.mu.Unlock()
+	if armed && off+int64(len(b)) > at {
 		panic(panicValue)
 	}
 	return p.r.ReadAt(b, off)
@@ -222,7 +226,6 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	block := f.block[ref.String()]
 	st := f.stalls[ref.String()]
 	panicOpen, panicClose := f.panicOpen[ref.String()], f.panicClose[ref.String()]
-	panicAt, panicRead := f.panicRead[ref.String()]
 	f.mu.Unlock()
 	if panicOpen {
 		panic(panicValue)
@@ -248,9 +251,7 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	if st != nil {
 		data = stalledReader{r: data, st: st}
 	}
-	if panicRead {
-		data = panickyReader{r: data, at: panicAt}
-	}
+	data = panickyReader{r: data, f: f, ref: ref.String()}
 	return playback.Content{Data: data, Size: int64(len(b)), Closer: c}, nil
 }
 

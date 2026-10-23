@@ -911,7 +911,8 @@ func (s *session) stopReleaseLocked() (panicked bool) {
 
 // unpausedLocked records a resume.
 func (s *session) unpausedLocked() error {
-	if s.stopReleaseLocked() {
+	s.stopReleaseLocked()
+	if s.fault != nil {
 		return errors.New(s.fault.Detail)
 	}
 	s.paused = false
@@ -992,6 +993,14 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		if err == nil {
 			l.lock()
 			if err := s.unpausedLocked(); err != nil {
+				l.unlock()
+				// The sink has already resumed, but the session cannot. Put
+				// its pause back before answering the fault, retaining any
+				// failure alongside it. The reporter still delivers the fault
+				// so the engine releases the session.
+				if pauseErr := s.call(ctx, out.sink.Pause); pauseErr != nil {
+					return 0, errors.Join(err, pauseErr)
+				}
 				return 0, err
 			}
 			l.unlock()
