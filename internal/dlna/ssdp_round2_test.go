@@ -107,13 +107,16 @@ func TestCloseBudgetIncludesInflightWrites(t *testing.T) {
 			}
 			n.mu.Unlock()
 			done := make(chan error, 1)
+			results := make(chan SSDPResult, 1)
 			go func() {
 				ep := SSDPEndpoint{Interface: en1, Location: msOnEn1}
 				if update {
-					_, err := h.Update(context.Background(), []SSDPEndpoint{{Interface: en0, Location: msOnEn0}, ep})
+					res, err := h.Update(context.Background(), []SSDPEndpoint{{Interface: en0, Location: msOnEn0}, ep})
+					results <- res
 					done <- err
 				} else {
-					_, _, err := sub.Register(context.Background(), legacyReg(msUDN, fakeServed(), ep))
+					_, res, err := sub.Register(context.Background(), legacyReg(msUDN, fakeServed(), ep))
+					results <- res
 					done <- err
 				}
 			}()
@@ -133,6 +136,22 @@ func TestCloseBudgetIncludesInflightWrites(t *testing.T) {
 			}
 			if err := <-done; !errors.Is(err, ErrSSDPClosed) {
 				t.Errorf("inflight operation = %v", err)
+			}
+			// What Close rolled back is reported failed, as Register reports it;
+			// Update's kept endpoint (position 0) stays active until Close
+			// withdraws the handle (CodeRabbit's review of #1329).
+			res := <-results
+			addition := 0
+			if update {
+				addition = 1
+				if len(res.Active) != 1 || res.Active[0].Position != 0 || res.Active[0].Err != nil {
+					t.Errorf("Active = %+v, want only the kept endpoint at position 0", res.Active)
+				}
+			} else if len(res.Active) != 0 {
+				t.Errorf("Active = %+v, want none", res.Active)
+			}
+			if len(res.Failed) != 1 || res.Failed[0].Position != addition || !errors.Is(res.Failed[0].Err, ErrSSDPClosed) {
+				t.Errorf("Failed = %+v, want the rolled-back addition at position %d with ErrSSDPClosed", res.Failed, addition)
 			}
 		})
 	}

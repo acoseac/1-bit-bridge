@@ -57676,6 +57676,18 @@ round-5 scratch report records the red/green runs, independently applied
 controls (round 4's retained or re-cut, plus retirement and duplicate-reporting
 controls), exact commands and validation limits.
 
+**CodeRabbit's review of #1329.** An Update that Close overtook rolled back
+the endpoints it had added but still listed them in `Active` with no error,
+against `SSDPEndpointResult`'s contract (`Err` says why an endpoint is not
+active). They are now moved to `Failed` with `ErrSSDPClosed`, as Register's
+closed path reports its staged endpoints; the kept endpoints stay active
+until Close withdraws the handle. `TestCloseBudgetIncludesInflightWrites`
+now checks both operations' results, and failed on the earlier code (the
+addition listed active, nothing failed). Round 5's review also found that
+such an Update reports `DeadlineExceeded` once per retirement, twice in that
+race; each retirement did run out of time and `errors.Is` is unaffected, so
+that stays.
+
 ### Why
 
 B470 makes the bridge's player an OpenHome Source on the LAN (PR 5a2),

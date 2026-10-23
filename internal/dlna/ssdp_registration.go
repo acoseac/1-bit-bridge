@@ -954,8 +954,21 @@ func (h *SSDPHandle) Update(ctx context.Context, eps []SSDPEndpoint) (SSDPResult
 		deadline := s.closeDeadline
 		s.mu.Unlock()
 		// Close began while this ran; it withdraws what is published, so
-		// what was opened here is withdrawn here.
+		// what was opened here is withdrawn here, and reported failed as
+		// Register's closed path reports it. The kept endpoints stay active
+		// until Close withdraws the handle.
 		errs = append(errs, h.retire(deadline, fresh))
+		active := res.Active[:0]
+		for _, r := range res.Active {
+			if added[r.Position] != nil {
+				r.Err = ErrSSDPClosed
+				res.Failed = append(res.Failed, r)
+				continue
+			}
+			active = append(active, r)
+		}
+		res.Active = active
+		slices.SortFunc(res.Failed, func(a, b SSDPEndpointResult) int { return a.Position - b.Position })
 		return res, errors.Join(append(errs, ErrSSDPClosed)...)
 	}
 	h.active = next
