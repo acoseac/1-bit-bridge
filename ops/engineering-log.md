@@ -57643,4 +57643,10 @@ doc-tool self-tests). These pass. Native Linux/Windows
 execution, real cross-filesystem overlay mounts and crash/reboot behavior
 remain unverified here. No command was refused by the sandbox. Rules,
 their History entries and the earlier evidence descriptions are updated
-together. Changes are left uncommitted; no push or PR mutation.
+together. Round 3 is aa8dae9b (code) and 1638cc1e (docs), on PR #1328.
+
+Round 3's review (the Claude API; Codex found none): the test passed
+`upperMountID` to `mediumFrom` itself, so putting `mountIDOf` back in
+`platformMedium` failed nothing; both now run `mediumUpperMountID`. The
+strict reader's check is answered by a stub, so the records now say it
+shows the Go wrapper resolves nothing, not statx's no-follow flag.

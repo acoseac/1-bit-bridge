@@ -60,7 +60,7 @@ answers ErrMediumUnknown for A,B,A. Linux's adapter test uses only a temp
 directory and compares its stat device with linuxStatfs's output.
 TestMediumFollowsASymlinkedUpper uses a real symlink with fixture ext4 and
 target filesystem identities, covering XFS evidence, a nested overlay over
-tmpfs, and fuse-overlayfs; it also checks that mountIDOf still names the
-link's own mount. These fixtures run on macOS without real cross-filesystem
+tmpfs, and fuse-overlayfs; it also checks that mountIDOf's Go wrapper still
+names the link's own mount (through the stubbed platform reader). These fixtures run on macOS without real cross-filesystem
 mounts or host proc/sys reads, and skip Windows' privileged symlink creation.
 The engine state machine, wire, and macOS/Windows mount readers are unchanged.
