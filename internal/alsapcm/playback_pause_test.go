@@ -331,10 +331,15 @@ func TestPlaybackPausesTheTransportCurrentWhenItDecides(t *testing.T) {
 // in a call (here a STATUS), so it goes through call, never under the
 // session's lock: a Release then answers past its context at once, the
 // teardown closes every content while the kernel holds the call, and the
-// release is acknowledged once the kernel lets go.
+// release is acknowledged once the kernel lets go. The Release is sent only
+// once b's sink has been handed the pause (the fake's OnCommand), so its
+// sender waits on the writer the kernel holds: a sender under the session's
+// lock holds the Release out of it every time, where a Release sent at once
+// could take the lock first and miss the pause altogether (round 2).
 func TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock(t *testing.T) {
 	opening, opened := make(chan struct{}), make(chan struct{})
-	var heldOnce, goOnce sync.Once
+	pauseSent := make(chan struct{})
+	var heldOnce, goOnce, sentOnce sync.Once
 	d := newDirect(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 			s, err := open(ctx, cfg)
@@ -349,6 +354,11 @@ func TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock(t *testing.T) {
 	})
 	letOpen := func() { goOnce.Do(func() { close(opened) }) }
 	t.Cleanup(letOpen)
+	d.k.OnCommand(func(cfg alsapcm.SinkConfig, op string) {
+		if cfg.Transport.RateHz == 48000 && op == "pause" {
+			sentOnce.Do(func() { close(pauseSent) })
+		}
+	})
 	d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
 	d.files.add("b", wav(48000, 24, pattern(2, 48000, 24)))
 	if err := d.start(1, "a"); err != nil {
@@ -370,6 +380,7 @@ func TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock(t *testing.T) {
 	d.k.Grant(100 * time.Millisecond)
 	receiveIn(t, parked, "b's writer to be held in STATUS")
 	letOpen()
+	receiveIn(t, pauseSent, "b's sink to be handed the session's pause")
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
 	released := make(chan error, 1)

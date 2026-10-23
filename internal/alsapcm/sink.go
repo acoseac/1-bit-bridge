@@ -322,6 +322,7 @@ type Sink struct {
 	producerWaits     func()
 	producerPublishes func()
 	afterFunc         func(context.Context, func()) func() bool
+	commanded         func(op string)
 
 	// endpoint is the endpoint the device is, or was last, open on:
 	// cfg.Endpoint until a reopen opens the one Locate names. The writer
@@ -401,15 +402,18 @@ type sinkCmd struct {
 // sinkSeams is what openSink takes from its caller: the opener of a
 // device and the clock, and for the tests a hook called each time the
 // producer starts to wait for room, one called each time it has copied
-// frames into the store and is about to publish them, and how the sink
+// frames into the store and is about to publish them, how the sink
 // registers what the end of a Drain's context runs (context.AfterFunc
-// when nil), which a test can hold back.
+// when nil), which a test can hold back, and a hook called each time a
+// command has been handed to the writer, on the sender's goroutine as it
+// begins to wait for the answer, with the command's name.
 type sinkSeams struct {
 	open              func(Endpoint, Config) (*Device, error)
 	now               func() time.Time
 	producerWaits     func()
 	producerPublishes func()
 	afterFunc         func(context.Context, func()) func() bool
+	commanded         func(op string)
 }
 
 // OpenSink opens cfg.Endpoint for cfg.Transport and starts the sink's
@@ -491,7 +495,7 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	}
 	s := &Sink{
 		cfg: cfg, devCfg: devCfg, life: ctx,
-		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc,
+		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc, commanded: seams.commanded,
 		dev:     dev,
 		zeros:   make([]byte, p.PeriodFrames*fb),
 		ring:    newRing(frames, fb, keep),
@@ -751,6 +755,9 @@ func (s *Sink) command(op sinkOp, ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	poke(s.kick)
+	if s.commanded != nil {
+		s.commanded(name)
+	}
 	return <-c.reply
 }
 

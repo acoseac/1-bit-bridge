@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +19,12 @@ import (
 // FakeKernel is the fake kernel as an external test drives it: one PCM node
 // at card 5 device 0, the DAC that plays only the simulated time a test
 // grants (newModel).
-type FakeKernel struct{ k *fakeKernel }
+type FakeKernel struct {
+	k *fakeKernel
+
+	mu        sync.Mutex
+	commanded func(SinkConfig, string) // OnCommand's
+}
 
 // NewFakeKernel is a fake node with the playback model on and the kernel's
 // PAUSE offered, as USB audio does.
@@ -35,7 +41,28 @@ func Watchdog() time.Duration { return *watchdog }
 // player's backend takes as its Config.OpenSink.
 func (tk *FakeKernel) OpenSink(ctx context.Context, cfg SinkConfig) (*Sink, error) {
 	k := tk.k
-	return openSink(ctx, cfg, sinkSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) }, now: k.now})
+	return openSink(ctx, cfg, sinkSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) }, now: k.now,
+		commanded: func(op string) { tk.onCommand(cfg, op) }})
+}
+
+// OnCommand calls f each time a sink opened on the fake has handed its
+// writer a command (pause, resume, recover, drain or drop), on the sender's
+// goroutine as it begins to wait for the answer: a test learns that a
+// command was sent, and that its sender waits on the writer, which the
+// kernel may hold in a call. cfg is the sink's, as it was opened.
+func (tk *FakeKernel) OnCommand(f func(cfg SinkConfig, op string)) {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	tk.commanded = f
+}
+
+func (tk *FakeKernel) onCommand(cfg SinkConfig, op string) {
+	tk.mu.Lock()
+	f := tk.commanded
+	tk.mu.Unlock()
+	if f != nil {
+		f(cfg, op)
+	}
 }
 
 // Formats sets what the DAC takes, in place of S16_LE, S24_3LE and S32_LE.
