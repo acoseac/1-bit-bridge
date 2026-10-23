@@ -759,15 +759,21 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   interface**: both wirings start one client per LAN-eligible interface, and
   a route can be gone on one of them while the others send. `Start` calls
   `Reset`. Don't give a client its own copy of the policy: this is the send
-  side's one definition, as `HandleReadErr` is the read side's. **The SSDP
-  advertiser's NOTIFY bursts report through it too** (2026-09-28, backlog
+  side's one definition, as `HandleReadErr` is the read side's. **Each SSDP
+  endpoint's NOTIFY bursts report through it too** (2026-09-28, backlog
   B47): a failed write logged at Debug alone, so an advertiser whose
   interface lost its route announced nothing and said nothing at the default
-  level. It notes ONE result per burst (`announceAlive`, the first failure of
-  its five writes): noted per write, the Error lands inside the first burst
-  (escalation is at the second failure, ten minutes of a 14-minute cadence).
-  Start builds the log, so each run starts a fresh streak; the byebye burst
-  at Stop notes nothing, since the periodic goroutine may be mid-burst then.
+  level. It notes ONE result per burst (`SSDPHandle.noteAlive`, the first
+  failure of its writes): noted per write, the Error lands inside the first
+  burst (escalation is at the second failure, ten minutes of a 14-minute
+  cadence). The endpoint's start (Register, or an Update's addition) builds
+  the log, so each start is a fresh streak, and after it only the
+  endpoint's timer goroutine notes (an Update's repeat is a kick to that
+  goroutine, never a second writer); the byebye burst at a withdrawal notes
+  nothing, and a burst the withdrawal's cancellation cut short notes
+  nothing unless a write before the cut had failed for its own reason,
+  which is then its result (B470 PR 5a1,
+  `TestAFailureThatLandsDuringAWithdrawalIsStillReported`).
   `NewSendFailureLog` takes what it reports on ("M-SEARCH", "NOTIFY").
 - **…and a send Stop's close cut short is a STOP, not a failure**
   (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
@@ -784,10 +790,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   widened to `ctx.Err() != nil`. `HandleReadErr`'s ctx arm is no precedent: it
   decides whether the READ loop exits, not what a result means. The drop is in
   the shared log, so the upstream client has it too (its socket is likewise
-  its own, and only its Stop closes it). The server-side advertiser's NOTIFY
-  burst (`sendAliveAll`) ends on the same error rather than logging a Debug
-  line per target left, since only its Stop closes its sender, and returns
-  it, which the shared log drops; a write that fails for its own reason still
+  its own, and only its Stop closes it). An SSDP endpoint's alive burst
+  (`SSDPHandle.sendAliveAll`) ends on the same error rather than logging a
+  Debug line per target left, since only its withdrawal closes its sender,
+  and returns it, which the shared log drops; a write that fails for its own reason still
   logs one Debug line per target, and the burst's result reaches the
   default level through the log.
 - **A test that starts an SSDP advertiser binds it to the loopback
@@ -830,8 +836,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   move. The sender is unconnected since.
 - **Each SSDP advertiser hears only the multicast M-SEARCHes that arrive on
   its own interface, and announces from that interface's address** (2026-09-29,
-  backlog B71). The DLNA server runs one advertiser per LAN interface, each
-  with that interface's LOCATION (#328), and by the eligibility rule a Linux
+  backlog B71). The DLNA server runs one SSDP endpoint per LAN interface,
+  each with that interface's LOCATION (#328), on one listener per interface
+  that every device of the SSDP subsystem shares (B470 PR 5a1, the
+  subsystem's bullet below), and by the eligibility rule a Linux
   host running Docker is such a host: `docker0` and every user bridge carry
   a private IPv4.
   **The listener**: `net.ListenMulticastUDP` binds the wildcard address
@@ -880,9 +888,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestSSDPAdvertisersKeepToTheirOwnInterfaces`, the real server over veths
   in a network namespace of the test's own, with and without a route to the
   group (root, or a user namespace: dido, not CI). **Still open**: a unicast
-  M-SEARCH to port 1900 reaches ONE advertiser's socket (Linux: the last
-  bound; macOS, Windows: the first) and is answered with that advertiser's
-  LOCATION, whichever served address it was sent to (backlog B119; since
+  M-SEARCH to port 1900 reaches ONE listener's socket (Linux: the last
+  bound; macOS, Windows: the first) and the MediaServer answers it with its
+  endpoint on that listener, whichever served address it was sent to
+  (backlog B119, which B470 PR 5a1 keeps exactly; since
   B48 one sent to an address the server does not serve is not answered at
   all, the bullet after the Tailscale one below); on Windows the
   advertiser hears no search sent from its own host (B120); and a pinned
@@ -1024,7 +1033,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (2026-10-16, backlog B48; the owner's decision of 2026-10-15: DLNA is for
   the home network only). The rule above kept a tailnet interface out of the
   pickers only. The listener binds `dlna.listenAddress` (`:7790` by default)
-  and each advertiser's M-SEARCH listener `0.0.0.0:1900`, so both took a
+  and each SSDP listener `0.0.0.0:1900`, so both took a
   connection or a unicast datagram on every address of the host, and every
   tailnet peer, a node shared from another account included, reached the
   unauthenticated surface: measured from a peer in the B15 session, a GET of
@@ -1033,8 +1042,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `config_gate.go` said to reach DLNA over Tailscale. The sockets stay the
   wildcard ones. `servedOnlyListener` closes, before reading a byte, a
   connection whose LOCAL address is not served, so no handler (the Host
-  check included) sees it, and `SSDPAdvertiser.searchedFor` drops an
-  M-SEARCH whose DESTINATION is neither the SSDP group nor a served address.
+  check included) sees it, and the MediaServer's SSDP admission
+  (`ssdpServedAdmission.admits`, the advertiser's `searchedFor` until B470
+  PR 5a1) drops an M-SEARCH whose DESTINATION is neither the SSDP group nor
+  a served address.
   The destination is IP_PKTINFO on Linux and IP_RECVPKTINFO on macOS (x/net's
   `FlagDst`), and on Windows IP_PKTINFO through `WSARecvMsg` (`ReadMsgUDP`;
   x/net reads no control message there), decoded by `parseWSAPktinfo`, which
