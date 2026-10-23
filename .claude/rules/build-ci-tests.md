@@ -89,7 +89,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **Negative-control every load-bearing assertion**, and check what the mutation
   actually did. B514's filesystem tests use explicit mount tables and stat
   answers; unavailable Linux/Windows runtime checks are reported separately
-  from cross-compilation. A POSIX mode-0 permission fixture skips Windows
+  from cross-compilation. A real symlink with fixture filesystem identities
+  pins upper-target evidence and nested overlay/FUSE lookups while preserving
+  the strict reader's no-follow behavior. A POSIX mode-0 permission fixture skips Windows
   and root; its ENOENT sibling still runs. → History-rules-build-ci-tests.md.
   A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only

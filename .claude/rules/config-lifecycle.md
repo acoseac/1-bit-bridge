@@ -472,6 +472,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   filesystem: repeated A,B,A samples can come from legitimate XFS/ZFS.
   The upper path's own mount ID selects the line whose fstype is named
   (`upperMountEvidence`), never a line selected by spelling or device.
+  Upper-path mount IDs follow the final symlink as statfs/stat do
+  (`upperMountID`), for this evidence and nested overlay/FUSE lookups;
+  the strict writer's mount-boundary reader keeps its no-follow semantics.
   Device numbers are detail only: a btrfs subvolume's `st_dev` can differ
   from mountinfo's superblock device without invalidating that line.
   This establishes the filesystem visible at that path only,
@@ -526,7 +529,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   space but the ASCII space, don't take a bind of a directory inside an
   writable overlay, nor sync its copy-ups through another mount of the superblock,
   don't take a read-only overlay reached through a writable overlay's upper
-  path, don't reject mount-ID-selected evidence for a differing device,
+  path, don't read an upper link's mount ID instead of its target's,
+  don't reject mount-ID-selected evidence for a differing device,
   don't claim differing totals prove another filesystem, and don't advise
   moving to another filesystem for an error not marked `ErrBarrierFailed`,
   but for the two overlay copy-up refusals (a bind of a directory inside an

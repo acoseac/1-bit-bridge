@@ -12,8 +12,9 @@ service's mount namespace. This deliberately does not certify an XFS/ZFS
 path whose relationship to the overlay cannot be established.
 
 Linux reads st_dev with stat and renders its major:minor. The upper path's
-own mount ID authoritatively selects its mountinfo line and that line's
-fstype is named as evidence. A decoy mount-point spelling is ignored.
+own mount ID, following the final symlink as statfs/stat do, authoritatively
+selects its mountinfo line and that line's fstype is named as evidence.
+A decoy mount-point spelling is ignored.
 Device numbers are detail only, not a second identity gate: a btrfs
 subvolume's st_dev can be its anonymous device while the line names the
 superblock's device. A difference, or unavailable st_dev, does not make a
@@ -24,6 +25,17 @@ This evidence identifies the filesystem visible here; it cannot authenticate
 an upper backing hidden in another mount namespace. Existing agreement and
 moving-totals checks, volatile refusals and nested-overlay depth bound stay.
 The current inner mount's ID also selects nested overlay and FUSE lines.
+Round 3 fixes a follow/no-follow mismatch at both upper-path lookups:
+upperMountID resolves symlinks before asking mountIDOf, so an upperdir link
+on ext4 to an XFS directory names XFS, whose totals were sampled, rather
+than ext4. Resolution errors leave the evidence unavailable and retain their
+cause. The same reader follows symlinked uppers reaching nested overlays or
+FUSE, so their target's mountinfo line supplies the next upper or subtype.
+The strict writer's no-follow mount reader and its Linux statx/fdinfo
+implementations stay unchanged; only platformMedium selects the following
+reader. Resolving a path and reading its identity are separate observations,
+as are statfs/stat and the mount table; this does not authenticate backing
+storage across a concurrent mount or link replacement.
 
 ErrOverlayBind still matches ErrMediumUnknown, but describes unreachable
 copy-up parents on a writable overlay subtree bind: persistent storage alone
@@ -45,5 +57,10 @@ sequences without host proc/sys reads. TestMediumMismatchesNeedStableEvidence
 includes btrfs with differing device numbers: it names btrfs and both
 numbers, never claims a device mismatch defeats the mount ID, and still
 answers ErrMediumUnknown for A,B,A. Linux's adapter test uses only a temp
-directory and compares its stat device with linuxStatfs's output. The engine
-state machine, wire, and macOS/Windows mount readers are unchanged.
+directory and compares its stat device with linuxStatfs's output.
+TestMediumFollowsASymlinkedUpper uses a real symlink with fixture ext4 and
+target filesystem identities, covering XFS evidence, a nested overlay over
+tmpfs, and fuse-overlayfs; it also checks that mountIDOf still names the
+link's own mount. These fixtures run on macOS without real cross-filesystem
+mounts or host proc/sys reads, and skip Windows' privileged symlink creation.
+The engine state machine, wire, and macOS/Windows mount readers are unchanged.

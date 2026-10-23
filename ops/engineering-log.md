@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B514 round 3: symlinked upper-path mount evidence](#2026-10-23--b514-round-3-symlinked-upper-path-mount-evidence)
 - [2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence](#2026-10-23--b514-round-2-nested-read-only-overlays-windows-permission-fixtures-and-btrfs-evidence)
 - [2026-10-23 — B514: durable-writer evidence and refusal follow-ups](#2026-10-23--b514-durable-writer-evidence-and-refusal-follow-ups)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
@@ -56826,6 +56827,8 @@ an upper path reaches another filesystem. Linux supplies the path's
 st_dev; round 1 required it to match the mount-ID-selected line before
 naming its fstype. Round 2 below removes that erroneous requirement for
 btrfs subvolumes: mount ID selects the line and devices are detail only.
+Round 3 follows upper-path symlinks for that ID, consistently with statfs/stat;
+the strict writer's boundary reader continues to describe the link itself.
 Missing/unreadable mount identity and a missing/malformed line still leave
 the visible filesystem unconfirmed.
 
@@ -56907,7 +56910,9 @@ only this subtest needed the guard. This Windows failure is reasoned, not
 claimed as a native run on the macOS host.
 
 upperMountEvidence names the fstype of the upper path's own mount-ID-selected
-line without requiring st_dev to match mountinfo's device. A btrfs subvolume
+line without requiring st_dev to match mountinfo's device. Round 3 below
+corrects that lookup to follow a final symlink, as statfs/stat already do.
+A btrfs subvolume
 can have an anonymous st_dev distinct from the superblock device; both
 numbers are diagnostic detail. A missing st_dev likewise does not invalidate
 a valid mount-ID-selected line. Before the fix the btrfs fixture reported
@@ -56935,3 +56940,54 @@ obsolete device-equality control 02 is replaced by the btrfs mount-ID rule;
 restriction; 16 rejects unavailable st_dev despite an authoritative mount
 ID. The other controls retain their rules. Each mutation restores the exact
 saved file bytes, never HEAD, preserving the uncommitted round.
+
+
+## 2026-10-23 — B514 round 3: symlinked upper-path mount evidence
+
+Round 2's code c476cafc and docs 9ee5b002 are on PR #1328. Its review
+found that upperdir can retain a symlink's spelling in mountinfo: statfs
+and stat follow it, while the strict writer's mount-ID readers deliberately
+do not. An upperdir link on ext4 targeting an XFS directory therefore gave
+XFS totals but named ext4 in the exhausted-retry evidence. ErrMediumUnknown
+was still correct; its evidence was not.
+
+platformMedium now supplies upperMountID to mediumFrom. This reader resolves
+the upper path's symlinks before asking the unchanged mountIDOf reader.
+Both upperMountEvidence and the inner-overlay/FUSE lookup thus use the
+target's identity. linuxStatfs already uses following statfs and stat.
+The strict writer's boundary checks, platformMountID, statxMountID and
+fdinfoMountID retain their original no-follow code. Resolution failures
+preserve their underlying error and leave the medium unknown. Separate
+path, identity, statfs and table observations still do not prove backing
+across a concurrent replacement or a different mount namespace.
+
+Red first: TestMediumFollowsASymlinkedUpper uses a real symlink and explicit
+ext4/target mount IDs, statfs answers and mountinfo fixtures. With a new
+reader delegating unchanged to the old no-follow lookup, XFS_evidence names
+ext4 instead of XFS, nested_overlay reads ext4's line instead of the inner
+overlay and misses its tmpfs upper, and FUSE incorrectly returns nil because
+ext4's line hides fuse-overlayfs. All three assertion failures were observed
+on macOS before changing the reader to resolve links. All pass afterward,
+including the fixture check that the strict reader still names the link's
+own mount. The fixture skips Windows' privileged symlink creation, reads no
+host proc/sys and needs no actual cross-filesystem mounts.
+
+All 17 controls in scratch controls-r3 apply independently to the final
+tree. Fifteen execute here and fail every predicted assertion without build
+failures. Controls 04 and 15 compile for Linux and Windows respectively;
+their runtime failures remain predicted only. Control 17 restores no-follow
+upper lookup and fails all three new subtests. Control 15 keeps runtime's
+import, now used by the symlink fixture. All Go commands in the manifest
+name the absolute Go 1.27.2 toolchain; doc controls use Python. Exact file
+snapshots preserve uncommitted changes throughout each mutation.
+
+Validation uses the repository's Go 1.27.2 darwin/arm64 toolchain offline,
+GOTOOLCHAIN=local, GOPROXY=off and the scratch GOCACHE: go vet ./...;
+atomicwrite and engine tests normally and with -race; seven portable
+regression groups with -count=3; Linux atomicwrite vet and test compilation;
+Windows atomicwrite test compilation; make docs-check (budgets and all
+doc-tool self-tests). These pass. Native Linux/Windows
+execution, real cross-filesystem overlay mounts and crash/reboot behavior
+remain unverified here. No command was refused by the sandbox. Rules,
+their History entries and the earlier evidence descriptions are updated
+together. Changes are left uncommitted; no push or PR mutation.

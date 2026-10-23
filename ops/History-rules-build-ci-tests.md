@@ -1203,3 +1203,10 @@ The requested uncommitted tree is preserved using exact file snapshots for
 negative controls, never git restore or stash. Each patch applies alone to
 the final tree and each predicted failing assertion is named in the scratch
 manifest. Compile failures do not count as successful negative controls.
+Round 3's TestMediumFollowsASymlinkedUpper uses a real symlink with fixture
+mount IDs for ext4 and the target filesystem, and stubbed statfs/mountinfo.
+It covers XFS evidence, nested overlay traversal and FUSE classification on
+macOS without a real cross-filesystem mount or host proc/sys reads. The old
+no-follow behavior fails all three subtests; the following upper reader
+passes them while the fixture's strict reader still names the link's mount.
+Windows skips only this test's privileged symlink creation.
