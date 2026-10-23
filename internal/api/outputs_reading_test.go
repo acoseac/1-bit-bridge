@@ -1131,6 +1131,84 @@ func TestAReopenTheBridgeDidNotSeeEndsTheConfirmation(t *testing.T) {
 	}
 }
 
+// setPointers sets card 5's playback substream's hw_ptr and appl_ptr, the
+// frames its run has played and been written since its start, and returns
+// what puts the capture's back.
+func setPointers(t *testing.T, r *readingRig, hw, appl int64) (restore func()) {
+	t.Helper()
+	path := filepath.Join(r.procRoot, "asound", "card5", "pcm0p", "sub0", "status")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := regexp.MustCompile(`(?m)^hw_ptr( +): \d+$`).ReplaceAllString(string(b), "hw_ptr${1}: "+strconv.FormatInt(hw, 10))
+	text = regexp.MustCompile(`(?m)^appl_ptr( +): \d+$`).ReplaceAllString(text, "appl_ptr${1}: "+strconv.FormatInt(appl, 10))
+	if text == string(b) {
+		t.Fatalf("no pointers to set in %s", path)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestAReopenUnderTheSameStampIsNotTheSameRun: a coarse clocksource
+// (jiffies) stamps two starts within one tick with the same trigger_time,
+// so a reopen right after a start can keep the stamp. A reading tells a
+// run, and is kept as evidence of it, only once the run's own pointer shows
+// it past its first ticks: a later start then stamps a later time. A run
+// read younger is still watched opening, from the reading before, and
+// that reading stays the one the next is compared with. Here run A is read
+// 25 ms in and confirmed, MPD reopens within the tick under PCM settings
+// and restores them, and run B reads as A did: the closed reading is then
+// more than ten seconds old, and nothing else vouches for the open.
+func TestAReopenUnderTheSameStampIsNotTheSameRun(t *testing.T) {
+	t.Run("a run read in its first ticks, reopened under its stamp", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		reopen := closeStream(t, rig)
+		getReading(t, hs, token, id)
+		reopen()
+		// Run A, 25 ms in at 176.4 kHz.
+		youngA := setPointers(t, rig, 4410, 26460)
+		clock.Advance(openWatch - time.Second)
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		// Run B: opened within the tick of A's start, so the same
+		// trigger_time, and two seconds in by the next reading.
+		youngA()
+		clock.Advance(2 * time.Second)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+	t.Run("a run read in its first ticks, then past them", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		reopen := closeStream(t, rig)
+		getReading(t, hs, token, id)
+		reopen()
+		young := setPointers(t, rig, 4410, 26460)
+		for i, what := range []string{"25 ms in", "past its first ticks", "read again"} {
+			if i == 1 {
+				young()
+			}
+			clock.Advance(outputCacheTTL)
+			_, got, raw := getReading(t, hs, token, id)
+			if got.State != "whole" {
+				t.Fatalf("%s: state %s %v\n%s", what, got.State, got.StateReasons, raw)
+			}
+			wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		}
+	})
+}
+
 // partialCard makes card 5's reading partial as the reader marks one: its
 // sub0 entry a link that loops, so the running substream is not listed,
 // beside a closed sub1 the reading still shows. It returns what puts the

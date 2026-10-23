@@ -501,8 +501,9 @@ type outputSettings struct {
 
 // openRecord is what one reading found of one output's PCM device, kept for
 // the next reading: when, the stream on it, the start the kernel stamped on
-// its run (the substream's trigger_time as printed, "" with none open), what
-// MPD reported of every output's DoP settings, and whether the stream was
+// its run (the substream's trigger_time as printed, which a reading keeps
+// only for a run it can tell by it, streamOn; "" with none open), what MPD
+// reported of every output's DoP settings, and whether the stream was
 // watched opening with them.
 type openRecord struct {
 	at       time.Time
@@ -525,7 +526,11 @@ type openRecord struct {
 // device keeps no evidence of it and erases none: the card read in part, a
 // substream not read whole, or no ids at all (/proc not read, the ALSA
 // configuration not had, alsa_config_unread, the probe late with no
-// endpoint). The record before stands for the next reading to compare with,
+// endpoint). Nor does one that finds an open stream whose run it cannot
+// tell (streamOn: not running, never started, or not yet runFloor in),
+// though the stream may still be watched opening from the record before:
+// a later start could share that run's stamp. The record before stands for
+// the next reading to compare with,
 // while this reading read MPD's DoP settings and they are the record's; one
 // that could not read them (MPD not read, its outputs differing across the
 // /proc read) or read them changed ends it, since the open the record would
@@ -555,17 +560,21 @@ func (o *localOutputs) watchOpens(s *readingSnap) {
 		for i := range s.picks {
 			pick := &s.picks[i]
 			id := pickIDOf(pick)
-			stream, trigger, ok := streamOn(s.cards, pick)
+			stream, run, ok := streamOn(s.cards, pick)
 			if !ok || settings == nil {
 				keep(id)
 				continue
 			}
-			rec := openRecord{at: s.at, stream: stream, trigger: trigger, settings: settings}
+			rec := openRecord{at: s.at, stream: stream, trigger: run, settings: settings}
 			if stream.open {
 				rec.tied = watchedOpen(prev[id], rec, holderName(s, pick))
 			}
-			next[id] = rec
 			s.tied[id] = rec.tied
+			if stream.open && run == "" {
+				keep(id)
+				continue
+			}
+			next[id] = rec
 		}
 	}
 	o.reading.opens = next
@@ -599,9 +608,21 @@ func watchedOpen(prev, now openRecord, holder string) bool {
 	// the reading before saw: a runtime starts at zero when it is opened and
 	// is stamped at every start, stop and pause, so a reopen between the two
 	// readings (or a restart, which this does not tell from one) stamps
-	// another trigger_time. Both are starts (streamOn).
-	return prev.tied && prev.trigger == now.trigger
+	// another trigger_time, once the run before was past its first ticks
+	// (runFloor). Both are runs the readings could tell (streamOn).
+	return prev.tied && now.trigger != "" && prev.trigger == now.trigger
 }
+
+// runFloor is how far into a run, by its own pointer, a reading must find
+// it to tell it from a later run by its start. The kernel stamps a start
+// (trigger_time) from its clock, and a coarse clocksource (jiffies, a tick
+// of 1/HZ: 10 ms at HZ 100) stamps two starts within one tick alike. A
+// run's hw_ptr starts at zero (an open, a prepare) and counts the frames
+// the driver has taken, at most its look-ahead (snd-usb-audio queues about
+// 20 ms) past what has played, so a run this far in started well over a
+// tick before the reading, and any start after the reading stamps a later
+// time.
+const runFloor = 250 * time.Millisecond
 
 // started reports whether a trigger_time is a start stamped on the run: the
 // kernel prints zero for a stream opened and not started yet, and "" is one
@@ -627,17 +648,20 @@ func settingsOf(s *readingSnap) map[string]outputSettings {
 	return m
 }
 
-// streamOn is the stream a reading found on pick's PCM device, and the
-// start the kernel stamped on its run (trigger_time, "" with none open). ok
-// is false when the reading does not say which: the card read in part (a
-// substream it could not list may be the open one, and the rest would read
-// as closed), the device not read, a substream's files not read, several
-// open and not exactly one MPD's, the open one not set up whole (one with
-// no hw_params yet was opened, and MPD's open read its settings, before this
-// reading began), or not started (no start stamped: the run that follows
-// can be this open's or a later one's, which the same hw_params from the
-// same thread do not tell apart).
-func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
+// streamOn is the stream a reading found on pick's PCM device, and its run:
+// the start the kernel stamped on it (trigger_time) when the reading can
+// tell the run by it, "" otherwise and with none open. A run is told when
+// it is running, a start is stamped on it, and its own pointer finds it at
+// least runFloor in; a run not started may yet be another open's, and a
+// younger one may share its stamp with a start after this reading, which
+// the same hw_params from the same thread would not tell apart. ok is
+// false when the reading does not say which stream: the card read in part
+// (a substream it could not list may be the open one, and the rest would
+// read as closed), the device not read, a substream's files not read,
+// several open and not exactly one MPD's, or the open one not set up whole
+// (one with no hw_params yet was opened, and MPD's open read its settings,
+// before this reading began).
+func streamOn(snap alsa.Snapshot, pick *dacPick) (stream streamKey, run string, ok bool) {
 	if card := pickCard(snap, pick); card == nil || card.Partial {
 		return streamKey{}, "", false
 	}
@@ -659,15 +683,21 @@ func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
 	}
 	h := sub.HWParams
 	if h.Closed || h.NoSetup || h.Rate == nil || h.Channels == nil || h.PeriodSize == nil || h.BufferSize == nil ||
-		sub.Owner == nil || sub.Owner.PID == nil || !started(sub.Status.TriggerTime) {
+		sub.Owner == nil || sub.Owner.PID == nil {
 		return streamKey{}, "", false
 	}
-	return streamKey{
+	stream = streamKey{
 		open: true, subdevice: sub.Subdevice,
 		access: h.Access, format: h.Format, subformat: h.Subformat,
 		rate: *h.Rate, channels: *h.Channels, period: *h.PeriodSize, buffer: *h.BufferSize,
 		tid: sub.Owner.TID, pid: *sub.Owner.PID,
-	}, sub.Status.TriggerTime, true
+	}
+	st := sub.Status
+	if st.State == "RUNNING" && started(st.TriggerTime) && st.HWPtr != nil && *h.Rate > 0 &&
+		*st.HWPtr >= int64(*h.Rate)*int64(runFloor/time.Millisecond)/1000 {
+		run = st.TriggerTime
+	}
+	return stream, run, true
 }
 
 // holderName is the name of the one enabled output whose thread holds the
