@@ -57992,3 +57992,51 @@ failures in 10,000 runs. Formatting and documentation checks passed. The full
 serve race suite again could not bind IPv4 or IPv6 loopback listeners in the
 sandbox and aborted in `TestWriteGateRefusesWhileABridgeAnswers`; a host run
 is still required for that suite.
+
+
+### Round 5
+
+Resume now checks the recorded fault under the session lock, before asking
+its sink to resume, and returns the fault detail without touching the sink.
+The regression pauses with unplayed frames in the hardware buffer, records
+a reporter fault, and requires zero Resume commands at the writer and no
+additional kernel bytes or played frames. The paused-successor timer-stop
+case now also requires zero Resume commands. Both failed against round 4:
+the sink received one Resume before rollback.
+
+The compensating Pause remains for a fault encountered after the sink has
+successfully resumed, including a stop that panics inside `unpausedLocked`.
+Its context is detached from caller cancellation with `context.WithoutCancel`
+and bounded by `engine.CallTimeout` (two seconds). A held rollback reply
+with its caller cancelled now ends only at that independent deadline,
+retaining the original fault; round 4 returned `context.Canceled` instead.
+The `pause-refused` case now records its fault while Resume is in flight,
+through the existing reporter and command seams, so the entry guard cannot
+bypass the compensating path; the refused Pause must still be joined to
+the original fault. No new production test seam was added.
+
+**Known, bounded follow-up: Drop after a refused rollback Pause.** A pause
+release timer's stop that panics inside `unpausedLocked`, after a successful
+sink Resume while that sink drains its last frames, can still meet
+`finalDrain`: Pause refuses with `ReasonBadState` and buffered audio plays
+until the fault's release tears the sink down. This timer-stop case needs
+a panic that production's timer stop cannot raise. Falling back to Drop
+there is a further change, explicitly deferred from B523's final round;
+this round implements no Drop fallback.
+
+Round 5 validation used Go 1.27.2 offline: Darwin and Linux vet, Linux
+compilation of the requested test binaries, and the full player/sink/ALSA
+race suites passed. Both changed test functions, including all buffered
+subcases, passed twenty runs under the race detector. The focused serve
+wording and source checks passed five runs. Formatting and documentation
+checks passed. The full serve race suite again could not bind IPv4 or
+IPv6 loopback listeners in the sandbox and aborted in
+`TestWriteGateRefusesWhileABridgeAnswers`; it still needs a host run.
+
+All fourteen independent negative controls compiled and failed at every
+predicted runtime assertion. The earlier rollback control was recut for
+the moved late-fault cases; the two new controls independently remove the
+entry fault guard and restore caller cancellation to rollback. The retained
+missing-Wait control reproduced four failures in 10,000 runs. Every patch
+applies alone to the final tree, and each mutation was restored from saved
+bytes without committing or discarding the uncommitted changes.
