@@ -119,7 +119,7 @@ func TestFirstIndexedAtReadySticksOnceTrueAndRechecksAMiss(t *testing.T) {
 		t.Fatalf("calls %d, want 1 inside the ttl", got)
 	}
 	c.mu.Lock()
-	c.firstReadyAt = time.Now().Add(-healthCountsTTL - time.Second)
+	c.first.at = time.Now().Add(-healthCountsTTL - time.Second)
 	c.mu.Unlock()
 	f.ready.Store(true)
 	if !c.firstIndexedAtReady(context.Background(), f) {
@@ -142,5 +142,51 @@ func TestFirstIndexedAtReadySticksOnceTrueAndRechecksAMiss(t *testing.T) {
 	var none *healthCountsCache
 	if !none.firstIndexedAtReady(context.Background(), f) {
 		t.Fatal("a nil cache did not ask the manifest")
+	}
+}
+
+// bothReadinessFake answers the two readiness queries apart.
+type bothReadinessFake struct {
+	firstIndexedFake
+	sampleCalls atomic.Int64
+	sampleReady atomic.Bool
+}
+
+func (f *bothReadinessFake) SampleFormatReady(context.Context) bool {
+	f.sampleCalls.Add(1)
+	return f.sampleReady.Load()
+}
+
+// TestTheTwoReadinessKeysKeepTheirOwnAnswers: firstIndexedAt and sampleFormat
+// share the sticky cache's rules and not its answers. One key ready leaves the
+// other asking its own count, a miss of one is cached for that one alone, and
+// sampleFormat sticks once ready like firstIndexedAt.
+func TestTheTwoReadinessKeysKeepTheirOwnAnswers(t *testing.T) {
+	f := &bothReadinessFake{}
+	f.ready.Store(true)
+	c := newHealthCountsCache()
+	ctx := context.Background()
+	if !c.firstIndexedAtReady(ctx, f) {
+		t.Fatal("firstIndexedAt was not ready")
+	}
+	if c.sampleFormatReady(ctx, f) {
+		t.Fatal("sampleFormat took firstIndexedAt's answer")
+	}
+	if c.sampleFormatReady(ctx, f) || f.sampleCalls.Load() != 1 {
+		t.Fatalf("a sampleFormat miss was not cached: %d calls", f.sampleCalls.Load())
+	}
+	c.mu.Lock()
+	c.sampleFormat.at = time.Now().Add(-healthCountsTTL - time.Second)
+	c.mu.Unlock()
+	f.sampleReady.Store(true)
+	if !c.sampleFormatReady(ctx, f) {
+		t.Fatal("a recheck that found every row decided was not ready")
+	}
+	f.sampleReady.Store(false)
+	if !c.sampleFormatReady(ctx, f) || f.sampleCalls.Load() != 2 {
+		t.Fatalf("sampleFormat ready did not stick: %d calls", f.sampleCalls.Load())
+	}
+	if newHealthCountsCache().sampleFormatReady(ctx, &firstIndexedFake{}) {
+		t.Fatal("a manifest with no sample-format query was ready")
 	}
 }

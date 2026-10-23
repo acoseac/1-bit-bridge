@@ -55,6 +55,35 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `Some(false)`. Same trap with `omitempty time.Time`: Go does NOT drop a zero
   time, so it ships `"0001-01-01T00:00:00Z"` and the client parses a real,
   very-old date — use `*time.Time`.
+- **`sampleFormat` is `"integer"`, `"float"` or absent, and absent is unknown,
+  never integer** (2026-10-23, backlog B513; PROTOCOL.md "Sample kind").
+  A string with `omitempty`, so an unknown row carries no key, never `null`
+  or `""`; a client tolerates a value it does not know. `codec` and
+  `bitsPerSample` do not change with it. A variant carries its own,
+  derived from its `format` in `scanTrackVariants` (`variantSampleFormat`:
+  every rendition the bridge writes is FLAC, so `"integer"`), never stored.
+  **The health key `sampleFormat` means every row that can have a kind has
+  it** (round 3): `SampleFormatReady` is the backfill's completion mark,
+  which a header pass records when it has run to its end with every row the
+  open-time fill decides decided (scanner.md), and nothing the backfill
+  writes before the mark moves `indexed_at`, so a client's one-time
+  paginated full sync on seeing the key delivers every kind at once; a kind
+  recorded after it moves `indexed_at`, so a delta carries it. Until round 3
+  the key waited for the fill alone and every WAV or AIFF header read moved
+  its row, a second delivery the size of the library's WAV files. A file the
+  finishing pass could not read does not hold the key back, which would be
+  forever over one unreadable file. The mark survives a restart and is never
+  removed. The answer is cached with `firstIndexedAt`'s through one helper
+  (`healthCountsCache.stickyReady`): sticky once ready, a miss rechecked on
+  the TTL, a timeout not stored. **Don't emit the key on an unknown row,
+  don't advertise the key before the completion mark or without asking it,
+  and don't let one unreadable file hold it back.**
+  (`TestTheManifestCarriesSampleFormatOnlyWhereAHeaderStatesIt`, streamed and
+  paged, `TestAVariantCarriesTheKindItsFormatIs`,
+  `TestSampleFormatIsReadyOnlyOnceEveryRowTheFillDecidesIsDecided`,
+  `TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd`,
+  `TestHealthOmitsSampleFormatUntilTheBackfillIsDone`,
+  `TestTheTwoReadinessKeysKeepTheirOwnAnswers`.)
 - **An optional time on a wire DTO is a `*time.Time`, and a guard enforces it.**
   This rule was stated here, fixed correctly in three structs, and violated in
   TEN fields across five files — including the `/v1/health` DTO iOS decodes.

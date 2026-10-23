@@ -596,6 +596,16 @@ var Ext = map[string]bool{
 // the iOS delta. Every other row re-extracts byte-identical and rides the
 // version-stamp leg; SACD ISO virtual rows re-expand as on every bump.
 // ProtocolVersion stays 1.
+//
+// Not bumped for the sample kind (backlog B513, Track.SampleFormat), though
+// the WAV, AIFF, FLAC and ALAC reads record it since then. It lives in a
+// column of its own (tracks.sample_format), which the version-stale diff
+// does not compare, and its backfill reaches every row extracted before it
+// without re-reading the library: migrate decides each row its codec decides,
+// and BackfillSampleFormats reads only the headers of the WAV and AIFF rows,
+// the formats a file can hold either kind in, where a bump re-opens every
+// file once. A later change to what the kind reads is a bump like any other:
+// the stamp leg records the kind a re-read finds (writeSampleFormatTx).
 const ExtractorVersion = 27
 
 // Extract reads as much metadata as it can from the file at absPath and
@@ -764,6 +774,11 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 			"path", absPath, "err", err)
 	} else if codec != "" {
 		t.Codec = codec
+		if codec == "ALAC" {
+			// Apple Lossless is integer-only (backlog B513). AAC states no
+			// PCM kind.
+			t.SampleFormat = SampleFormatInteger
+		}
 	}
 	// When the codec walk identified ALAC, descend one level into
 	// the inner `alac` config atom to capture the source bit depth
@@ -2386,6 +2401,9 @@ func extractFLACFormatFromReader(r io.ReadSeeker, absPath string, t *Track) erro
 	// in `extractDSF` below.
 	isDSD := false
 	t.IsDSD = &isDSD
+	// And always integer PCM: FLAC has no floating-point samples (backlog
+	// B513). An Ogg FLAC stream reads its STREAMINFO here too.
+	t.SampleFormat = SampleFormatInteger
 	// Through plausibleDuration like every other derived duration (v12).
 	// STREAMINFO's totalSamples is a 36-bit field read straight out of an
 	// untrusted header, and the rate beside it is declared by the same

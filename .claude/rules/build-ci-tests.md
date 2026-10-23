@@ -146,3 +146,22 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **…and the TRACKED `.md` docs, with three exemptions and one hard constraint.** → History-rules-build-ci-tests.md
 - **…and every name `go test` runs, which is more than `Test` and an uppercase letter.** → History-rules-build-ci-tests.md
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through an invalid fallback:** **Never replace it with a real default.** → History-rules-build-ci-tests.md
+- **gofmt rewrites two single quotes in a Go doc comment as a closing double
+  quotation mark (`”`), inside backticks too**: SQL's empty string in a
+  docblock (`''`) is mangled on the first `make fmt`. Write it as words, or
+  put the SQL in an indented code block (a tab after `//`), which gofmt
+  keeps verbatim. Only the doc comment of a top-level declaration is
+  rewritten: a struct field's comment, a comment inside a function body and
+  SQL inside a string literal are left alone (each measured with go1.27.2's
+  gofmt, 2026-10-23).
+- **A plan cannot show a loop that reads the same rows again, so count the
+  pages a connection reads, against a twin store, never a duration**
+  (2026-10-23, backlog B513). Every chunk of the sample-format fill planned
+  as a range search on its partial index while every chunk read the header
+  pass's rows again from the front, and the plan test stayed green. Set the
+  store's pool to one connection (`SetMaxOpenConns(1)`) and read
+  `sqlite.DBStatus` cache hits plus misses through `Conn.Raw` before and
+  after (`pagesRead`); compare two stores that differ only in where the rows
+  the loop must pass sort, so the count calibrates itself
+  (`TestTheOpenFillVisitsEachUndecidedRowOnce`: 4,161 pages against 946
+  before the fix, 1,020 against 968 after).

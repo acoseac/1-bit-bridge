@@ -1942,7 +1942,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 36 covers the current maximum
+	// appends in lex order. Capacity 37 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
@@ -1952,13 +1952,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// playbackHistoryRead + playlistBackup + playlistFiles +
 	// playlistFilesPaged + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// search + smartPlaylists + spectrum + syncEvents + trackQuality +
-	// upscaleCompleteEvents + variantBumpsIndex + waveform).
+	// sampleFormat + search + smartPlaylists + spectrum + syncEvents +
+	// trackQuality + upscaleCompleteEvents + variantBumpsIndex + waveform).
 	// `trackQuality` was missing from this enumeration — and so from the
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 36)
+	feats := make([]string, 0, 37)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2149,6 +2149,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// `upscaleCompleteEvents` (p < r < u).
 	if s.dlnaEnabled && s.rendererDiscovery != nil {
 		feats = append(feats, "rendererDiscovery")
+	}
+	// sampleFormat is a library fact, like firstIndexedAt (backlog B513):
+	// the manifest serves Track.sampleFormat, and the backfill of the rows
+	// indexed before it is complete (a header pass ran to its end), so
+	// every row that can have a kind has it and a client's one-time full
+	// sync on seeing the key reads them all; a kind decided after that
+	// reaches it by a delta. Cached like firstIndexedAt. Alpha-sorted
+	// between rendererDiscovery and search (r < sa < se).
+	if s.healthCounts.sampleFormatReady(r.Context(), s.manifest) {
+		feats = append(feats, "sampleFormat")
 	}
 	// `search` advertises GET /v1/search. Gated on a RUNTIME fact, not a
 	// config toggle: FTS5 is compiled into the SQLite driver or it is
