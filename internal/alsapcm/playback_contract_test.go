@@ -299,6 +299,59 @@ func TestPlaybackRetiresWhatHasPlayed(t *testing.T) {
 	}
 }
 
+// TestPlaybackRetiresNothingAnOpenerStillHolds pins retirement beside an
+// open under way: b, a successor whose open is held in a read of its content
+// that no context ends (a file on a mount that hangs), is replaced by c, so
+// b is dropped and its open cancelled, which the held read does not notice.
+// c follows a in the sink and is heard while b's opener still holds b, and
+// the report step that hears c retires nothing: until an open ends, the
+// fields it sets are its opener's, written outside the session's lock, and
+// retirement reads them. b's read then returns while c plays, its opener
+// finishes and closes what it opened, and the next step retires a and b.
+func TestPlaybackRetiresNothingAnOpenerStillHolds(t *testing.T) {
+	d := newDirect(t, nil)
+	for i, ref := range []string{"a", "b", "c"} {
+		d.files.add(ref, wav(44100, 16, pattern(i+1, 22050, 16)))
+	}
+	parked, release := d.files.stall("b", 0)
+	t.Cleanup(release)
+	if err := d.start(1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	b, c := occurrence(102, 2, "b"), occurrence(103, 3, "c")
+	if err := d.be.Prepare(bg, 1, 101, &b); err != nil {
+		t.Fatal(err)
+	}
+	receiveIn(t, parked, "b's open to be held in a read of its content")
+	if err := d.be.Prepare(bg, 1, 101, &c); err != nil {
+		t.Fatalf("c in b's place: %v", err)
+	}
+	d.files.fed(t, "c")
+	d.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndWaiting)
+	// a's 0.5 s and a tenth of c's.
+	d.k.Play(t, 600*time.Millisecond)
+	d.tick()
+	if n := count(d.rec.events(), "audible", 103); n != 1 {
+		t.Fatalf("c audible %d times after a played out: %s", n, kinds(d.rec.events()))
+	}
+	if st := d.be.Stats(); st.Occurrences != 3 {
+		t.Fatalf("with b's open under way, the step that heard c left %d occurrences; want a, b and c: an occurrence whose open is under way is its opener's", st.Occurrences)
+	}
+	release()
+	waitOn(t, "b's opener to close what it opened", func() <-chan struct{} {
+		d.files.mu.Lock()
+		defer d.files.mu.Unlock()
+		return d.files.changed
+	}, func() bool { return d.files.isClosed("b") })
+	d.tick()
+	if st := d.be.Stats(); st.Occurrences != 1 {
+		t.Errorf("b's open ended, a step later the backend holds %d occurrences; want c alone", st.Occurrences)
+	}
+	d.release(1)
+	d.files.allClosed(t)
+	d.k.CheckClosedEach(t)
+}
+
 // TestPlaybackAnswersSessionEndingOncePlayingOutItsLastContent pins
 // ErrSessionEnding: once nothing follows the last occurrence and the
 // producer plays out what it gave the sink, a Prepare is answered

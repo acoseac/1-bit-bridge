@@ -625,14 +625,19 @@ func (s *session) dropLocked(o *occ) {
 // the last one the played content crossed, once every event of theirs is
 // reported, and the sinks closed that nothing left refers to, each holding
 // a ring of up to megabytes. Every occurrence before heard has played or
-// was dropped; a cut of one answers that it played (cut). s.mu is held.
+// was dropped; a cut of one answers that it played (cut). An occurrence
+// whose open is under way (a successor dropped while its opener still
+// reads) is its opener's until the open ends: the fields the open sets,
+// its refusal among them, are written outside the session's lock, and what
+// it opened is the opener's to close. Retirement waits for it, looking at
+// none of them before. s.mu is held.
 func (s *session) retireLocked(heard *occ) {
 	if heard == nil || heard.pos == 0 {
 		return
 	}
 	n := heard.pos
 	for _, o := range s.chain[:n] {
-		if o == s.writing || o == s.between || !(o.crossed || o.dropped) || (o.refused != nil && !o.repRefused) {
+		if !o.opened() || o == s.writing || o == s.between || !(o.crossed || o.dropped) || (o.refused != nil && !o.repRefused) {
 			return
 		}
 	}

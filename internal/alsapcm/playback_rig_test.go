@@ -519,6 +519,19 @@ func (d *direct) start(s engine.SessionID, ref string) error {
 		Options: engine.SessionOptions{PauseRelease: time.Second, DSD: "off"}, Events: &recEvents{r: d.rec, next: nopEvents{}}})
 }
 
+// tick has the session's reporter measure once, as rig.tick does: the
+// second send is the barrier.
+func (d *direct) tick() {
+	d.t.Helper()
+	for range 2 {
+		select {
+		case d.ticks <- time.Time{}:
+		case <-time.After(alsapcm.Watchdog()):
+			d.t.Fatalf("no reporter took a tick within %v", alsapcm.Watchdog())
+		}
+	}
+}
+
 // release releases s and fails the test unless it is confirmed.
 func (d *direct) release(s engine.SessionID) {
 	d.t.Helper()

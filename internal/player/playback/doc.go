@@ -117,8 +117,9 @@
 // Discard forgets the packings the bound unit took.
 //
 // What a session keeps: what it may still report. Once a report step has
-// sent every event of the occurrences before the one heard, they leave the
-// session, their decoders, content and first chunks let go (closeOcc), and
+// sent every event of the occurrences before the one heard, and the open of
+// each has ended (until then its opener owns it), they leave the session,
+// their decoders, content and first chunks let go (closeOcc), and
 // so does each sink closed that nothing left refers to, its store with it,
 // so a session that plays for hours holds a sink or two. A Cut of an
 // occurrence retired answers false: it has played. Stats.Sinks and
