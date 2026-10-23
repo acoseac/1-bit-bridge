@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
 - [2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy](#2026-10-23--b470-pr-5a0-round-3-one-complete-player-reset-remedy)
 - [2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file](#2026-10-23--b470-pr-5a0-a-restored-identity-raises-its-id-and-token-floors-before-any-identity-file)
 - [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
@@ -57522,10 +57523,12 @@ own fallback; serve's fixed-port admin probe remains an additional guard.
 error names the source: remove UUID and reservation from the snapshot to
 restore the rest while retaining the box's identity, or remove the box's
 `player-uuid`, `player-ids.json` and `player-queue.json` together with the service
-stopped AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
-before retrying a live-floor refusal. This makes a new identity, a new
-controller device with nothing to reuse; removing the box's files alone
-would reintroduce a lower floor from an older snapshot of the same UUID. About 120
+stopped. That reset gives up the identity for good: no snapshot taken on this
+box before the reset may restore its player identity. Remove `player-uuid`
+and `player-ids.json` from every such snapshot, or delete those snapshots.
+For this restore, remove those files from a copy of this snapshot as well,
+then restore that copy. B524 will enforce this operator rule before 5a ships.
+This makes a new identity, a new controller device with nothing to reuse. About 120
 worst-case restores consume the space, with at least 2^24 values left after
 an admitted largest jump.
 
@@ -57653,8 +57656,12 @@ queue together, with the service stopped. `playerResetAdvice` is the one
 message builder for an exhausted box mark and an unreadable live reservation
 in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
 `player-queue.json` together; the next start makes a new identity with no
-queue, a new device to controllers. If restoring, also remove `player-uuid`
-and `player-ids.json` from a copy of the snapshot, then restore that copy.
+queue, a new device to controllers. The reset gives up the identity for good:
+no snapshot taken on this box before the reset may restore its player identity.
+Remove `player-uuid` and `player-ids.json` from every such snapshot, or delete
+those snapshots. If restoring, also remove those files from a copy of this
+snapshot, then restore that copy. B524 will enforce this operator rule before
+5a ships.
 A snapshot's `player-ids.json` is never a valid repair. Keep the warning
 against deleting the reservation while keeping the player identity.
 
@@ -57702,3 +57709,34 @@ SQLite `database or disk is full`, followed by TempDir ENOSPC failures
 later store/TempDir fixtures failed for the same resource limit. Those
 unchanged packages are not claimed as passing; the focused suites and
 controls retain the separate results above.
+
+
+## 2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent
+
+**Rule.** With the service stopped, a player reset removes the box's
+`player-uuid`, `player-ids.json` and `player-queue.json` together and gives up
+the identity for good. No snapshot taken on this box before the reset may
+restore its player identity: remove `player-uuid` and `player-ids.json` from
+every such snapshot, or delete those snapshots. When restoring, also remove
+those files from a copy of this snapshot, then restore that copy. The next
+start makes a new identity with no queue, a new device to controllers.
+Never repair a reservation from a snapshot or delete it while keeping the
+identity. B524 will enforce this operator rule before 5a ships.
+
+**Evidence, red first.** The existing exhaustion, unreadable-reservation and
+snapshot-refusal tests failed the new every-snapshot advice assertions
+before the shared `playerResetAdvice` builder was extended. Separately,
+changing the unreadable restore branch to call `playerResetAdvice(false)`
+failed both restore subtests after `assertPlayerResetAdvice` learned the
+operation. It requires the copy-and-restore step for restore, its absence
+for backup, and the every-snapshot rule for both. The backup guide, both
+rules entries and their History long forms state the same operator rule.
+
+**Controls.** Scratch `controls-r4/` retains the previous rules, corrects
+control 28 to disable the lock refusal and both admin-port probes, and adds
+three independent controls: drop the restore-only step from the unreadable
+restore refusal, and drop the every-snapshot advice from each variant.
+Commands, full predicted test names, observed results and sandbox limits
+are in its manifest and scratch `report-r4.md`. Each patch applies alone;
+Go overlays preserve the uncommitted tree during execution. No commit,
+restore arithmetic or identity-file mutation policy is part of this round.
