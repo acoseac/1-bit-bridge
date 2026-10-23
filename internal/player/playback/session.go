@@ -652,7 +652,10 @@ func (s *session) retireLocked(heard *occ) {
 			return
 		}
 	}
-	s.retired = s.chain[n-1].id
+	// The watermark only rises: the last occurrence before heard can be one
+	// whose open is under way, passed over and kept, and a later step that
+	// hears the same occurrence passes over it again.
+	s.retired = max(s.retired, s.chain[n-1].id)
 	kept := 0
 	for i, o := range s.chain {
 		if i < n && o.opened() {

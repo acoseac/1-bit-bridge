@@ -368,6 +368,16 @@ func TestPlaybackRetiresNothingAnOpenerStillHolds(t *testing.T) {
 	heard(104)
 	heard(105)
 	holds("d and e heard, b's open still under way: c, d and the sink before d's let go", 2, 1)
+	// The next step hears e again and passes over b once more, the last
+	// occurrence before e: the watermark it leaves must stay at d, never fall
+	// back to b, or a cut of what already played would be answered as one
+	// that could still be made.
+	d.tick()
+	for _, o := range []engine.OccurrenceID{103, 104} {
+		if ok, err := d.be.Cut(bg, 1, o); ok || err != nil {
+			t.Errorf("a cut of %d, retired, answered %v, %v; want false, nil", o, ok, err)
+		}
+	}
 	release()
 	waitOn(t, "b's opener to close what it opened", func() <-chan struct{} {
 		d.files.mu.Lock()

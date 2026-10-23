@@ -55224,3 +55224,10 @@ than one foreground call, which the harness moved to the background at
 10 minutes and which was waited on before anything else ran; `make
 build-all` exit 0, the six targets; `make docs-check` ok, `CLAUDE.md`
 63.4% and `player.md` 92.2%.
+
+### Round 7 (2026-10-23): the retirement watermark only rises
+
+Codex's review of rounds 5 and 6 (the Claude API found nothing; Argon skipped) found that round 5 let the watermark fall. With b (102) dropped and its open still under way, retiring through d (104) left the chain as b and e (105) and set `retired = 104`. The next report step heard e again and passed over b, now the last occurrence before e. It set `retired = b`, so `Cut(103)` and `Cut(104)`, both already played, answered true: "nothing of it plays". `retireLocked` now takes `max(s.retired, s.chain[n-1].id)`. `TestPlaybackRetiresNothingAnOpenerStillHolds` takes one more report step after e is heard and asserts that cuts of 103 and 104 answer false.
+- Red first, against round 6's code: 3 of 3, both cuts true.
+- With the fix: 20 of 20 under `-race`, the sibling `TestPlaybackRetiresWhatHasPlayed` too. Every `internal/player` and `internal/alsapcm` package passes under `-race`.
+- The red-first run is also the negative control, since the fix is one expression.
