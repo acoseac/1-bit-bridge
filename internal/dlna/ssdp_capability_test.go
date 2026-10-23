@@ -184,7 +184,11 @@ func TestRegisterRefusesWhatItCannotAdvertise(t *testing.T) {
 		reg  SSDPRegistration
 	}{
 		{"no_admission", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Admission = nil; return r }()},
-		{"no_source_hook", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Admission = SSDPStrictAdmission{}; return r }()},
+		{"no_source_hook", func() SSDPRegistration {
+			r := strictReg(srcUDN, 4, upEn0)
+			r.Admission = SSDPStrictAdmission{}
+			return r
+		}()},
 		{"no_udn", strictReg("", 4, upEn0)},
 		{"no_targets", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Targets = nil; return r }()},
 		{"no_served_addresses", legacyReg(msUDN, nil, SSDPEndpoint{Interface: en0, Location: msOnEn0})},
