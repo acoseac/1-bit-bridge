@@ -595,12 +595,18 @@ func (h *SSDPHandle) noteAlive(ep *ssdpEndpoint, err error) {
 // what the burst returns: a withdrawal closed the sender under a burst, and
 // every target left would meet the same closed socket. Only a withdrawal
 // closes this socket, so that error names the stop exactly, and
-// discovery.SendFailureLog drops it.
+// discovery.SendFailureLog drops it. A burst the cancellation stops before a
+// write returns errSSDPSendCancelled, which is noted as nothing, unless a
+// write before it failed for its own reason: the error decides, never the
+// context, so that failure is the burst's result.
 func (h *SSDPHandle) sendAliveAll(ep *ssdpEndpoint) error {
 	_ = ep.sender.SetWriteDeadline(time.Now().Add(ssdpBurstDeadline))
 	var first error
 	for _, target := range h.targets {
 		if ep.ctx.Err() != nil {
+			if first != nil {
+				return first
+			}
 			return errSSDPSendCancelled
 		}
 		pkt := BuildNotifyAlive(ep.spec.Location, h.serverToken, target)

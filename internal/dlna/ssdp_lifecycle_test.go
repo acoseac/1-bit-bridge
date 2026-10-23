@@ -2,7 +2,9 @@ package dlna
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -245,6 +247,46 @@ func TestNoAliveFollowsAByebye(t *testing.T) {
 	}
 	if got := len(notifies(n, from, "ssdp:alive")); got != 2 {
 		t.Errorf("the cut burst wrote %d alives, want the two it had begun", got)
+	}
+}
+
+// TestAFailureThatLandsDuringAWithdrawalIsStillReported pins the NOTIFY
+// failure log's rule (the ERROR decides, never the run's context) on a burst
+// a withdrawal cuts short: a write that failed for its own reason before the
+// cut is the burst's result, and reaches the log, while a burst that only
+// stopped early reports nothing.
+func TestAFailureThatLandsDuringAWithdrawalIsStillReported(t *testing.T) {
+	n := newFakeNet()
+	sub := fakeSubsystem(t, n)
+	var log syncBuffer
+	reg := legacyReg(msUDN, fakeServed(), SSDPEndpoint{Interface: en0, Location: msOnEn0})
+	reg.Logger = slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	h, _ := mustRegister(t, sub, reg)
+	ep := h.endpoints[0]
+	parked, release := make(chan struct{}), make(chan struct{})
+	alives := 0
+	n.mu.Lock()
+	n.writeErr["en0"] = errInjected
+	n.onSenderWrite = func(_ *fakeSender, pkt string) {
+		if header(pkt, "NTS") != "ssdp:alive" {
+			return
+		}
+		alives++ // one goroutine writes alives: the endpoint's timer
+		if alives == 2 {
+			close(parked)
+			<-release
+		}
+	}
+	n.mu.Unlock()
+	ep.kick <- struct{}{}
+	<-parked
+	withdrawn := make(chan error, 1)
+	go func() { withdrawn <- h.Withdraw(context.Background()) }()
+	waitFor(t, "the withdrawal to cancel the endpoint", func() bool { return ep.ctx.Err() != nil })
+	close(release)
+	mustErr(t, "Withdraw with every write failing", <-withdrawn, errInjected)
+	if !strings.Contains(log.String(), "NOTIFY send failed") {
+		t.Errorf("a burst whose writes failed before the withdrawal cut it reported nothing:\n%s", log.String())
 	}
 }
 

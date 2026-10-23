@@ -608,8 +608,9 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 // withdrawSSDP withdraws the MediaServer's SSDP registration under ctx's
-// deadline (SSDPHandle.Withdraw: byebye first, ctx's cancellation does not
-// cut it), and closes a private subsystem Start built. A byebye that fails is
+// deadline (SSDPHandle.Withdraw: every send of its endpoints stopped and
+// joined, then their byebye, which ctx's cancellation does not cut), and
+// closes a private subsystem Start built. A byebye that fails is
 // best-effort, as it always was, and logged at Debug; a withdrawal that ran
 // out of time, which cut sends short, is a Warn.
 func (s *Server) withdrawSSDP(ctx context.Context) {
