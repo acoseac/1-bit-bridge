@@ -53519,3 +53519,138 @@ tests, about a second each) ran outside the lock by mistake while fixing
   2b). alsa-lib opens neither, since plug's one argument is SLAVE, a PCM
   name. The outputs route then lists a card as MPD's for a device MPD
   cannot open. Reported for the backlog with this round.
+
+### Round 7 (2026-10-23): the same run only from a reading past the run's first ticks, and a card read in part that no pick names
+
+Round 6 landed at 9c66936b with its note applied. Round 6's reviews: the
+Claude API found nothing; Codex, two Mediums. Each premise was checked
+against the code at 9c66936b. The kernel's timekeeping, snd-usb-audio and
+MPD's output were checked from the source as I know it: this host denies
+network access, so none was fetched. The rules are in the round's note,
+`/tmp/b473-b3-rules-r7.md`: five sections of `output.md`, each heading
+naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, equal timestamps do not establish the same run:
+   correct.** The kernel stamps `trigger_time` from the stream's clock
+   (`snd_pcm_gettime`; `ktime_get_ts64` for a monotonic stream). The
+   clock's resolution is the clocksource's, which for jiffies is one tick
+   of 1/HZ, so two starts within one tick get the same stamp.
+   `watchedOpen`'s carry (`internal/api/outputs_reading.go:603` at
+   9c66936b) needed only the same started stamp. `streamOn` (:640-671)
+   kept the stamp of any started run (:662), however young. So a run
+   confirmed by a reading in its first tick could be reopened in that tick
+   under PCM settings, have them restored, and keep its confirmation.
+   `output.md:61` said the same stamp rules out a reopen, with no
+   condition. The case needs the confirming reading and the reopen both
+   within a tick of the start, so it is narrow, but the claim was wrong as
+   written.
+2. **Codex Medium, a partial card can disappear before its record is
+   kept: correct.** The reader reads a card's usbid from its directory
+   first (`internal/alsa/reader.go:329-335`). So a directory it cannot
+   read leaves `USBID` nil, and marks the card `Partial` (:340-345). An
+   output whose device names no card lists every USB card as a candidate
+   (`dacsFrom`, `internal/api/outputs.go:1029-1037`), and skips a card
+   with no `USBID`. `watchOpens` kept a partial card's record only through
+   that card's pick (:555-569). The record was therefore erased at such a
+   reading, and the same run, read whole again, was `dop_unconfirmed`.
+
+**What the same run needs now, and why it holds**
+
+A reading tells a run only when the stream is running, a start is stamped
+on it, and its own `hw_ptr` shows it at least `runFloor` (250 ms) in. A
+run's `hw_ptr` starts at zero when the stream is opened or prepared, and
+counts the frames the driver has taken. That is at most the driver's
+look-ahead past what has played: snd-usb-audio aims its URB queue at 18 ms
+(`MAX_QUEUE`), and a DMA driver runs a FIFO ahead. So a run 250 ms in by
+its pointer started more than 200 ms before the reading's `/proc` read,
+well over a tick of the coarsest common clock (10 ms at HZ 100). Any start
+after the reading falls in a later tick and stamps a later time, so the
+same stamp at a later reading is the same run.
+
+For MPD the stamp of a running stream is its run's start. Its ALSA output
+does not pause: an output without a `Pause` of its own is closed when MPD
+pauses, and reopened on resume. A seek or an xrun prepares the stream,
+setting its pointers back to zero, before the next start stamps it.
+
+A reading that cannot tell the run (younger than the floor, not running,
+or never started) can still watch the stream open from the record before,
+since that evidence needs no stamp. But the reading is not kept, so the
+next reading compares with the record before it. That also covers round
+6's stream opened and not started.
+
+Not chosen:
+- **A lower pointer than the reading before's** (the brief's example). It
+  does mark a new run, but not this one. A run that shares the old run's
+  stamp started within a tick of it, so the old run had played less than
+  a tick when it was read, and the new run's pointer is past the old one's
+  by the next reading. Given the floor it adds nothing. On a 32-bit kernel
+  the pointer also wraps within a run, at a boundary of about 2^30 frames
+  (about 2.3 h at 176.4 kHz with MPD's 500 ms buffer), where it would end
+  a valid confirmation.
+- **The kernel's clock read beside the stamp** (the stamp before the clock
+  at the reading). This needs the stamp's clock to be the monotonic one
+  (MPD's alsa-lib asks for it; another client may not). It needs the
+  bridge's `CLOCK_MONOTONIC` to be the kernel's, which a time namespace
+  offsets. And it needs a platform clock read in the reading.
+- **Continuity by arithmetic** (the pointer moved by the rate times the
+  time between readings). Its tolerance must cover the pointer's own
+  granularity, and a DMA driver may move it a period at a time. The
+  shortfall of a same-tick reopen can fall inside that tolerance.
+
+The cost: a reading in a run's first quarter second, or of a stream not
+running, keeps nothing, though its own verdict can still confirm the open.
+On a 32-bit kernel, a reading in the quarter second after the pointer wraps
+cannot carry, so one reading every two hours or so of one continuous run
+can read `dop_unconfirmed`.
+
+**Fixes**
+
+- (1) 3aa20b0e: `runFloor`. `streamOn` returns the run only on those
+  terms. `watchOpens` gives a run it cannot tell its tie for this reading,
+  then keeps the record before (`keep`). `watchedOpen`'s carry needs a run
+  the reading could tell. PROTOCOL.md's DoP condition says so.
+- (2) d38b2270: after the picks, every record whose card this reading
+  found (by index and ALSA id) and read in part stands as a pick's would
+  (`cardReadInPart`, `keep`). The settings check applies as before, and
+  the window and the run are checked when the next reading compares with
+  it.
+
+**Red first**
+
+- (1) `TestAReopenUnderTheSameStampIsNotTheSameRun` at 9c66936b. Run A was
+  confirmed 25 ms in, and run B was reopened under A's stamp. Run B read
+  `format_preserved_dop`. "A run read in its first ticks, then past them"
+  was green there, as a pin: the young reading confirms the open, and the
+  run's later readings still do.
+- (2) "A candidate card whose directory cannot be read"
+  (`TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone`) at 3aa20b0e.
+  The run, read whole again, read `dop_unconfirmed`. The reading in between
+  answered 404, because the card was no candidate then. The test asserts
+  that 404, so that it keeps exercising the path where `dacsFrom` drops
+  the card.
+
+**Negative controls**, one at least per fix, each run with the fix
+committed. Each file was restored from git (`git checkout --`) and the tree
+was clean after each (`/tmp/b473-r4-controls/run_r7.py`). None failed to
+build.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | the floor dropped (any pointer tells a run) | the same-stamp reopen read `format_preserved_dop` |
+| C1b | a run the reading cannot tell kept as evidence | "first ticks, then past them": the reading past them compared with the young record, whose stamp does not count, and read `dop_unconfirmed` |
+| C2 | the keep after the picks never taken | the candidate card's run read `dop_unconfirmed` |
+
+**Residuals, named, not fixed here**
+
+- A reading that cannot tell the run still confirms through the evidence
+  of the open. The settings changing and changing back within the open's
+  interval stays the accepted residual, and that interval can now span
+  readings that could not tell the run.
+- While `dacsFrom` drops a card read in part, a reading of that output's id
+  (the id GET /v1/outputs gave) answers 404 `output_not_found`. Reported
+  for the backlog with this round.
+- The floor rests on two bounds. A driver whose pointer leads what has
+  played by more than about 240 ms, or a clock tick longer than that, would
+  let a reopen in the same tick keep the stamp.
