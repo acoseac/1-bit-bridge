@@ -273,7 +273,7 @@ func compare(prev, next *snapshot, removed map[string]bool) (Change, bool) {
 				removed[dirOf(prev.cards, pr.Card)] || removed[dirOf(next.cards, nr.Card)]
 		}
 	}
-	c.Binding = !sameDevice(prev.device, next.device)
+	c.Binding = !SameBinding(prev.device, next.device)
 	changed := c.Inventory || c.State || c.Unit || c.ReEnumerated || c.Binding || pr.Card != nr.Card ||
 		pr.Endpoint != nr.Endpoint || !slices.Equal(pr.Matches, nr.Matches)
 	return c, changed
@@ -295,9 +295,13 @@ func sameCards(a, b []Card) bool {
 	})
 }
 
-// sameDevice reports whether two bindings name the same thing: kind,
-// model, unit, port and endpoint, ids compared as numbers.
-func sameDevice(a, b config.PlayerDevice) bool {
+// SameBinding reports whether two bindings name the same thing: kind,
+// model, unit, port and endpoint, ids compared as numbers. It is the
+// watcher's one comparison of bindings (a changed binding is read at once,
+// and is a change a snapshot names), and serve's player asks it too: a
+// snapshot resolved from another binding than the one the player started
+// with says nothing about the player's DAC.
+func SameBinding(a, b config.PlayerDevice) bool {
 	sameID := func(x, y string) bool {
 		nx, ex := usbid.ParseHex16(x)
 		ny, ey := usbid.ParseHex16(y)
