@@ -129,9 +129,13 @@ type SSDPSubsystem struct {
 	// takes. nil in production; a test sets it before anything registers.
 	slotTaken func(ep *ssdpEndpoint)
 
+	// beforeByebyeDeadline parks a test between selecting and installing a
+	// byebye deadline. nil in production; set before registering anything.
+	beforeByebyeDeadline func()
+
 	// mu guards everything below, and the published endpoint list of every
-	// handle (SSDPHandle.active). It is never held across socket I/O, a
-	// sleep or a join.
+	// handle (SSDPHandle.active). Deadline installation holds it so Close's
+	// clamp is atomic with every install; writes, sleeps and joins do not.
 	mu            sync.Mutex
 	closed        bool
 	closeDeadline time.Time
@@ -202,6 +206,11 @@ func withdrawDeadline(ctx context.Context) time.Time {
 // goroutine it started has returned. It returns the withdrawals' errors,
 // joined; a second Close waits for the first under that first call's budget,
 // then returns nil.
+//
+// Close takes ownership of every handle still listed when it begins, including
+// a Withdraw in cleanup. That withdrawal's budget becomes the earlier of its
+// own deadline and Close's, through its last release and removal from the list.
+// A withdrawal already removed from the list is complete and is not owned.
 func (s *SSDPSubsystem) Close(ctx context.Context) error {
 	deadline := withdrawDeadline(ctx)
 	s.mu.Lock()
@@ -214,6 +223,10 @@ func (s *SSDPSubsystem) Close(ctx context.Context) error {
 	s.closed = true
 	s.closeDeadline = deadline
 	s.closeDone = make(chan struct{})
+	for sender := range s.senders {
+		_ = sender.setWriteDeadlineLocked(sender.deadline)
+	}
+	handles := append([]*SSDPHandle(nil), s.handles...)
 	s.mu.Unlock()
 	defer close(s.closeDone)
 	s.cancel()
@@ -243,9 +256,6 @@ func (s *SSDPSubsystem) Close(ctx context.Context) error {
 		<-joined // socket close wakes writes; join their rollback, too
 	}
 
-	s.mu.Lock()
-	handles := append([]*SSDPHandle(nil), s.handles...)
-	s.mu.Unlock()
 	var errs []error
 	for _, h := range handles {
 		if err := h.withdraw(deadline); err != nil {

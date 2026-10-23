@@ -48,18 +48,41 @@ type ssdpOwnedSender struct {
 	s    *SSDPSubsystem
 	once sync.Once
 	err  error
+	// deadline is guarded by s.mu, together with the subsystem's close
+	// deadline. Every installation, including Close's clamp, uses that lock.
+	deadline time.Time
 }
 
 func (s *SSDPSubsystem) ownSender(c ssdpSendConn) *ssdpOwnedSender {
 	sender := &ssdpOwnedSender{ssdpSendConn: c, s: s}
 	s.mu.Lock()
 	s.senders[sender] = struct{}{}
+	if s.closed {
+		_ = sender.setWriteDeadlineLocked(time.Time{})
+	}
 	expired := s.closed && !time.Now().Before(s.closeDeadline)
 	s.mu.Unlock()
 	if expired {
 		_ = sender.Close()
 	}
 	return sender
+}
+
+// SetWriteDeadline cannot extend a sender's writes past Close's budget.
+func (c *ssdpOwnedSender) SetWriteDeadline(deadline time.Time) error {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.setWriteDeadlineLocked(deadline)
+}
+
+// setWriteDeadlineLocked installs the effective deadline while s.mu is held.
+// Setting a socket deadline also cuts a write already in progress.
+func (c *ssdpOwnedSender) setWriteDeadlineLocked(deadline time.Time) error {
+	if c.s.closed && (deadline.IsZero() || c.s.closeDeadline.Before(deadline)) {
+		deadline = c.s.closeDeadline
+	}
+	c.deadline = deadline
+	return c.ssdpSendConn.SetWriteDeadline(deadline)
 }
 
 func (c *ssdpOwnedSender) Close() error {

@@ -668,6 +668,9 @@ func (h *SSDPHandle) sendByebyeAll(ep *ssdpEndpoint, deadline time.Time) error {
 			errs = append(errs, context.DeadlineExceeded)
 			break
 		}
+		if h.s.beforeByebyeDeadline != nil {
+			h.s.beforeByebyeDeadline()
+		}
 		_ = ep.sender.SetWriteDeadline(deadline)
 		pkt := BuildNotifyByeBye(ep.spec.Location, h.serverToken, target)
 		if _, err := ep.sender.WriteToUDP(pkt, h.s.notifyTo); err != nil {
@@ -698,6 +701,12 @@ func (h *SSDPHandle) sendByebyeAll(ep *ssdpEndpoint, deadline time.Time) error {
 // context.DeadlineExceeded, joined with any byebye that failed. Neither
 // undoes the withdrawal. A second Withdraw, or one of a nil handle, returns
 // nil.
+//
+// The budget includes releasing the sender and listener and joining its reader.
+// If Close begins before this handle is removed from the subsystem's list, its
+// earlier deadline also bounds this withdrawal. The final budget result and
+// removal are decided together; a Close that did not see the handle owns none
+// of this withdrawal.
 func (h *SSDPHandle) Withdraw(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -725,6 +734,12 @@ func (h *SSDPHandle) withdraw(deadline time.Time) error {
 	// Keep the handle visible while retire runs: Close serializes on opMu
 	// even when a caller has already started this withdrawal.
 	s.mu.Lock()
+	if s.closed && s.closeDeadline.Before(deadline) {
+		deadline = s.closeDeadline
+	}
+	if !time.Now().Before(deadline) {
+		err = errors.Join(err, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
+	}
 	if i := slices.Index(s.handles, h); i >= 0 {
 		s.handles = slices.Delete(s.handles, i, i+1)
 	}
@@ -783,10 +798,6 @@ func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 			if err := h.sendByebyeAll(ep, deadline); err != nil {
 				errs = append(errs, err)
 			}
-		}
-		deadline = h.s.retirementDeadline(deadline)
-		if !time.Now().Before(deadline) {
-			errs = append(errs, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
 		}
 	}
 	for _, ep := range eps {
