@@ -37,7 +37,7 @@ start makes a new identity with no queue, a new device to controllers.
 **A snapshot's `player-ids.json` is never a valid repair**. Do not delete the
 reservation while keeping the player identity.
 A reset gives up for good the identity it removes and any the box ran earlier
-that no other box took over (one an earlier restore replaced on this box).
+(one an earlier restore replaced on this box), unless another box took it over by a restore.
 Their values were held only by the floor the reset drops. No snapshot of a
 given-up identity taken before the reset, on this box or another, may restore
 its player identity again: remove `player-uuid` and `player-ids.json` from
@@ -63,8 +63,8 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 - For a destination mark, follow the player reset above, removing all three
   live files together while the service is stopped.
   A reset gives up for good the identity it removes and any the box ran
-  earlier that no other box took over (one an earlier restore replaced on this
-  box). Their values were held only by the floor the reset drops. No snapshot
+  earlier (one an earlier restore replaced on this box), unless another box took it
+  over by a restore. Their values were held only by the floor the reset drops. No snapshot
   of a given-up identity taken before the reset, on this box or another, may
   restore its player identity again: remove `player-uuid` and
   `player-ids.json` from every such snapshot, or delete those snapshots. An

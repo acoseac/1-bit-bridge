@@ -57525,8 +57525,8 @@ restore the rest while retaining the box's identity, or remove the box's
 `player-uuid`, `player-ids.json` and `player-queue.json` together with the service
 stopped.
 A reset gives up for good the identity it removes and any the box ran
-earlier that no other box took over (one an earlier restore replaced on this
-box). Their values were held only by the floor the reset drops. No snapshot
+earlier (one an earlier restore replaced on this box), unless another box took it
+over by a restore. Their values were held only by the floor the reset drops. No snapshot
 of a given-up identity taken before the reset, on this box or another, may
 restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. An identity
 another box took over by a restore is not given up: that box's floor holds
@@ -57666,8 +57666,8 @@ in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
 `player-queue.json` together; the next start makes a new identity with no
 queue, a new device to controllers.
 A reset gives up for good the identity it removes and any the box ran
-earlier that no other box took over (one an earlier restore replaced on this
-box). Their values were held only by the floor the reset drops. No snapshot
+earlier (one an earlier restore replaced on this box), unless another box took it
+over by a restore. Their values were held only by the floor the reset drops. No snapshot
 of a given-up identity taken before the reset, on this box or another, may
 restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. An identity
 another box took over by a restore is not given up: that box's floor holds
@@ -57729,8 +57729,8 @@ controls retain the separate results above.
 **Rule.** With the service stopped, a player reset removes the box's
 `player-uuid`, `player-ids.json` and `player-queue.json` together.
 A reset gives up for good the identity it removes and any the box ran
-earlier that no other box took over (one an earlier restore replaced on this
-box). Their values were held only by the floor the reset drops. No snapshot
+earlier (one an earlier restore replaced on this box), unless another box took it
+over by a restore. Their values were held only by the floor the reset drops. No snapshot
 of a given-up identity taken before the reset, on this box or another, may
 restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. An identity
 another box took over by a restore is not given up: that box's floor holds
@@ -57760,20 +57760,23 @@ are in its manifest and scratch `report-r4.md`. Each patch applies alone;
 Go overlays preserve the uncommitted tree during execution. No commit,
 restore arithmetic or identity-file mutation policy is part of this round.
 
-**Round 4's review (Claude; Codex found none).** The superseded rule
-scoped snapshots to the box that took them, missing snapshots taken elsewhere
-of an identity restored here. The first correction, also superseded, named
-every identity the box had run without preserving handoffs or limiting the
-snapshots to those taken before the reset. The restore-copy instruction was
-scoped to the refused restore, but one Rule paragraph still missed that scope.
+**Round 4's review (Claude; Codex found none).** The rule named snapshots
+taken on the box, but the floor a reset drops also covered identities a
+restore brought onto the box from another one: a snapshot of such an
+identity, taken elsewhere, would have been allowed. The rule now names
+identities, every one the box ran before the reset, whichever box took the
+snapshot. The guide's sentence about restoring after a reset is scoped to the
+restore whose refusal the reset answers, so a later snapshot of the new
+identity is never stripped by mistake. (Round 5 below supersedes that
+wording.)
 
 **Round 5.** The two review rounds found the snapshot-box scope (round 4),
 two surviving copies of it (round 5, Codex), and the correction's overreach
 into handed-off identities and later snapshots plus the unscoped restore-copy
 step in round 4's Rule paragraph (round 5, Claude). Every reset-rule copy now
 states the same rule: A reset gives up for good the identity it removes and
-any the box ran earlier that no other box took over (one an earlier restore
-replaced on this box). Their values were held only by the floor the reset
+any the box ran earlier (one an earlier restore replaced on this box), unless another
+box took it over by a restore. Their values were held only by the floor the reset
 drops. No snapshot of a given-up identity taken before the reset, on this
 box or another, may restore its player identity again: remove `player-uuid`
 and `player-ids.json` from every such snapshot, or delete those snapshots.
@@ -57790,3 +57793,10 @@ Validation: the backup and all player packages passed five runs under `-race`
 on cached Go 1.27.2, offline. Formatting and docs-check passed. All 49 refreshed
 controls apply independently; the five changed patches fail their predicted
 assertions, and the other 44 remain byte-identical to the prior set. No commit.
+
+**Round 5's review (Claude; Codex found none).** The exception for an
+identity another box took over by a restore covered only the identities the
+box ran earlier, so the one the reset removes read as given up even after a
+migration had moved it to another box, whose floor holds it. Every copy now
+applies the exception to both. The round-4 review paragraph above is restored
+to what that review found.
