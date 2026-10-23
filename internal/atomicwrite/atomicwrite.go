@@ -427,6 +427,11 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 // caller runs that in its own mode (commitDirEntry, or durableChain for
 // WriteBytesDurable).
 func renameRetry(ctx context.Context, src, dst string) error {
+	return retryIO(ctx, func() error { return renameFunc(src, dst) }, func(error) bool { return true })
+}
+
+// retryIO shares the bounded rename schedule with readers of renamed files.
+func retryIO(ctx context.Context, op func() error, retryable func(error) bool) error {
 	var err error
 	for _, d := range renameBackoff {
 		if d > 0 {
@@ -436,8 +441,8 @@ func renameRetry(ctx context.Context, src, dst string) error {
 			case <-time.After(d):
 			}
 		}
-		if err = renameFunc(src, dst); err == nil {
-			return nil
+		if err = op(); err == nil || !retryable(err) {
+			return err
 		}
 	}
 	return err

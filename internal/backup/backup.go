@@ -168,8 +168,8 @@ type Targets struct {
 // timestamped directory under `<src.DataDir>/backups/`. Returns the
 // absolute path of the created directory.
 //
-// `ctx` is forwarded to the SQLite VACUUM INTO step so the periodic
-// ticker can cancel an in-flight snapshot on bridge shutdown. Pass
+// `ctx` is forwarded to the SQLite VACUUM INTO step and read retries so the
+// periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
 func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	if src.DataDir == "" {
@@ -221,12 +221,16 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		if pair.src == "" {
 			continue
 		}
-		if _, err := os.Stat(pair.src); errors.Is(err, os.ErrNotExist) {
+		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+			_, err := os.Stat(pair.src)
+			return err
+		})
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return "", fmt.Errorf("stat %s: %w", pair.name, err)
 		}
-		if err := copyFile(pair.src, filepath.Join(dst, pair.name), 0o600); err != nil {
+		if err := copyFileCtx(ctx, pair.src, filepath.Join(dst, pair.name), 0o600); err != nil {
 			return "", fmt.Errorf("copy %s: %w", pair.name, err)
 		}
 		captured = append(captured, pair.name)
@@ -237,9 +241,22 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	// after the UUID and restamp the snapshot copy, including after a restore
 	// interrupted before its UUID landed and before any engine restarts.
 	if slices.Contains(captured, PlayerUUIDFileName) {
-		id, err := config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
+		var id string
+		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+			var err error
+			id, err = config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
+			return err
+		})
+		if err != nil && !errors.Is(err, config.ErrNotOnePlayerUUID) {
+			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, err)
+		}
 		if err == nil {
-			mark, err := engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
+			var mark engine.Reservation
+			err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+				var err error
+				mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
+				return err
+			})
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
 			}
@@ -729,7 +746,18 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 // then rename onto `dstPath`. The intermediate file is mode `mode`
 // so a power-loss after rename leaves the right perms.
 func copyFile(srcPath, dstPath string, mode os.FileMode) error {
-	in, err := os.Open(srcPath)
+	return copyFileCtx(context.Background(), srcPath, dstPath, mode)
+}
+
+// copyFileCtx lets a snapshot cancel a sharing-violation backoff. Only the
+// source open is retried; the copy and its commit still happen exactly once.
+func copyFileCtx(ctx context.Context, srcPath, dstPath string, mode os.FileMode) error {
+	var in *os.File
+	err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+		var err error
+		in, err = os.Open(srcPath)
+		return err
+	})
 	if err != nil {
 		return err
 	}
