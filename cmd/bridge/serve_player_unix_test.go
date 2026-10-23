@@ -74,11 +74,36 @@ func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 					}()
 				})
 			}
+			// The writer's goroutine is drained last: one the engine's read
+			// never met (a test that failed before the engine reached it) is
+			// met by a reader of the test's own, which opens without waiting
+			// and is held open until the writer's open has returned (macOS
+			// sends a writer back to sleep when the reader it woke for has
+			// gone), and closed by the cleanup registered before the drain's,
+			// which runs after it.
+			var meetMu sync.Mutex
+			var meet *os.File
+			t.Cleanup(func() {
+				meetMu.Lock()
+				defer meetMu.Unlock()
+				if meet != nil {
+					_ = meet.Close()
+				}
+			})
+			drainLoopOnCleanup(t, func() {
+				select {
+				case <-unstalled:
+					return
+				default:
+				}
+				if r, err := os.OpenFile(fifo, os.O_RDONLY|unix.O_NONBLOCK, 0); err == nil {
+					meetMu.Lock()
+					meet = r
+					meetMu.Unlock()
+				}
+			}, unstalled, "the writer that lets go of the stall")
 			// However the test ends, the stall is let go before its
-			// directories go, and the writer's goroutine ends: one the
-			// engine's read never met (a test that failed before the engine
-			// reached it) is met by a reader of the test's own, which opens
-			// without waiting.
+			// directories go.
 			t.Cleanup(func() {
 				letStart()
 				unstall()
@@ -86,19 +111,6 @@ func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 				case <-ps.player.settled:
 				case <-serveGiveUp(t):
 					t.Errorf("the player did not end once its stall was let go")
-				}
-				select {
-				case <-unstalled:
-					return
-				default:
-				}
-				if r, err := os.OpenFile(fifo, os.O_RDONLY|unix.O_NONBLOCK, 0); err == nil {
-					defer r.Close()
-				}
-				select {
-				case <-unstalled:
-				case <-serveDrainGiveUp(t):
-					t.Errorf("the writer that lets go of the stall still waits for a reader")
 				}
 			})
 			if code := ps.health(t); code != http.StatusOK {
