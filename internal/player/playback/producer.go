@@ -323,7 +323,7 @@ func (s *session) transition(o *occ) bool {
 			}
 		}
 	}
-	// The sink is the session's from here (s.outs: the teardown closes it,
+	// The sink is already the session's (s.outs: the teardown closes it,
 	// after every file), and it becomes the current one once it is in the
 	// session's pause state. A pause that came while it opened found no
 	// device to pause: the sink takes it before a frame is written to it, and
@@ -334,7 +334,6 @@ func (s *session) transition(o *occ) bool {
 	// current, a pause or a resume meanwhile is one with no device, which the
 	// next turn follows.
 	l.lock()
-	s.outs = append(s.outs, out)
 	sinkPaused := false
 	for {
 		switch {

@@ -133,7 +133,6 @@ func (s *session) reportStep() bool {
 		}
 	}
 	if s.fault != nil && !s.faultSent {
-		s.faultSent = true
 		f := *s.fault
 		switch {
 		case f.Occurrence != 0:
@@ -142,7 +141,19 @@ func (s *session) reportStep() bool {
 		default:
 			f.Occurrence = s.chain[0].id
 		}
-		evs = append(evs, func() { s.ev.Fault(id, f) })
+		evs = append(evs, func() {
+			// Queuing is not delivery: an earlier callback may panic. Mark
+			// the attempt here so recovery sends an unreached fault once,
+			// but never retries a Fault callback that itself panicked.
+			s.mu.Lock()
+			if s.releasing {
+				s.mu.Unlock()
+				return
+			}
+			s.faultSent = true
+			s.mu.Unlock()
+			s.ev.Fault(id, f)
+		})
 	}
 	// A pause's release of the device: the sink's own, or, holding no device,
 	// the pause release passed, once no sink is current. A sink that played
@@ -150,7 +161,7 @@ func (s *session) reportStep() bool {
 	// to the next transport (transition) and yet to record the occurrence it
 	// opens a sink for, so a resume told of the release then would find none
 	// to open; at the end of the session one is followed by Finished.
-	if s.paused && !s.relSent && !s.faultSent {
+	if s.paused && !s.relSent && s.fault == nil {
 		c := s.cur
 		switch {
 		case c != nil && !c.closed && !c.drained && posOf(c).State == alsapcm.SinkReleased:
@@ -165,7 +176,7 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { s.ev.DeviceReleased(id) })
 		}
 	}
-	done := s.faultSent
+	done := s.fault != nil
 	if s.drained && !s.finSent && s.fault == nil {
 		s.finSent, done = true, true
 		evs = append(evs, func() { s.ev.Finished(id) })

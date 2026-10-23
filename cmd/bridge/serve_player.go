@@ -426,7 +426,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-run.done:
-			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend lets go of the device")
+			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return
 		case snap := <-run.sub.C():
 			p.report(snap)

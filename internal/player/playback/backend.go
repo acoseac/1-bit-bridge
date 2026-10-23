@@ -211,9 +211,6 @@ func (b *Backend) Stats() Stats {
 	for _, s := range ss {
 		s.mu.Lock()
 		st.Sinks += len(s.outs)
-		if s.handed != nil {
-			st.Sinks++
-		}
 		st.Occurrences += len(s.chain)
 		s.mu.Unlock()
 	}

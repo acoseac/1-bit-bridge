@@ -396,6 +396,11 @@ func TestReleaseAllLetsGoOfEverySessionTheBackendHolds(t *testing.T) {
 		if v := d.k.View(); v.Open || v.Opens != 1 || v.Closes != 1 {
 			t.Errorf("after ReleaseAll the node is open %v after %d opens and %d closes; want closed once", v.Open, v.Opens, v.Closes)
 		}
+		// Release acknowledges that resources are closed; spawn's deferred
+		// counter decrement can still be pending. Join it before counting.
+		if err := d.be.Wait(ctx); err != nil {
+			t.Fatalf("after ReleaseAll: %v", err)
+		}
 		if st := d.be.Stats(); st.Sessions != 0 || st.Goroutines != 0 {
 			t.Errorf("after ReleaseAll the backend holds %+v; want no session and no goroutine", st)
 		}
