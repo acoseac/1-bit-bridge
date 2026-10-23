@@ -244,10 +244,9 @@ type playRun struct {
 	be   playBackend
 	hold *engine.Hold
 
-	mu     sync.Mutex
-	occs   map[engine.OccurrenceID]occName
-	opened alsapcm.Params // the device the backend opened last, for a busy resume's holder
-	seen   *playSeen      // what the run has printed of the engine's snapshots
+	mu   sync.Mutex
+	occs map[engine.OccurrenceID]occName
+	seen *playSeen // what the run has printed of the engine's snapshots
 }
 
 // occName is what an occurrence is, for a line: its entry and its file.
@@ -556,18 +555,20 @@ func (r *playRun) answer(what string, err error) {
 }
 
 // refused prints a command the engine refused, naming the holder of a busy
-// device.
+// device: the holder of the endpoint the kernel refused, which the refusal
+// names. The device the run opened last is not it: at the first open there
+// is none, and a resume reopens where the binding resolves now, which may be
+// another card.
 func (r *playRun) refused(what string, err error) {
 	r.out.line("%s: refused: %v", what, err)
-	if alsapcm.ReasonOf(err) == alsapcm.ReasonBusy {
-		r.mu.Lock()
-		ep := r.opened.Endpoint
-		r.mu.Unlock()
-		var b strings.Builder
-		pcmTestNameHolder(alsa.Reader{ProcRoot: r.env.trees.proc}, ep, &b)
-		for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n") {
-			r.out.line("%s", strings.TrimSpace(l))
-		}
+	var ae *alsapcm.Error
+	if !errors.As(err, &ae) || ae.Reason != alsapcm.ReasonBusy {
+		return
+	}
+	var b strings.Builder
+	pcmTestNameHolder(alsa.Reader{ProcRoot: r.env.trees.proc}, ae.Endpoint, &b)
+	for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		r.out.line("%s", strings.TrimSpace(l))
 	}
 }
 
@@ -664,9 +665,6 @@ func (r *playRun) note(n playback.Note) {
 	p := n.Params
 	switch n.Kind {
 	case playback.NoteOpened, playback.NoteReopened:
-		r.mu.Lock()
-		r.opened = p
-		r.mu.Unlock()
 		r.out.line("%s card %d device %d subdevice %d (%s): %s, %d channels, %d Hz, %d valid bits; buffer %d frames in %d periods; status: %s",
 			n.Kind, p.Endpoint.Card, p.Endpoint.Device, p.Subdevice, n.Unit, p.Format, p.Channels, p.RateHz, n.Transport.ValidBits,
 			p.BufferFrames, p.Periods, n.StatusPath())

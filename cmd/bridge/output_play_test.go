@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -75,6 +76,8 @@ type playStandIn struct {
 	notify func(playback.Note)
 	hold   bool
 	refuse map[string]bool
+	// busy, when set, is the refusal every Start's open meets.
+	busy error
 
 	mu    sync.Mutex
 	calls []string
@@ -97,6 +100,9 @@ func (b *playStandIn) Start(ctx context.Context, req engine.StartRequest) error 
 	b.record("start")
 	if b.refuse[req.First.Ref.String()] {
 		return &engine.Unplayable{Reason: playback.ReasonDSD, Detail: "the stand-in refuses " + req.First.Ref.String()}
+	}
+	if b.busy != nil {
+		return fmt.Errorf("player backend: the device could not be opened: %w", b.busy)
 	}
 	b.mu.Lock()
 	if b.evs == nil {
@@ -155,7 +161,13 @@ func (b *playStandIn) Resume(context.Context, engine.SessionID) (engine.ResumeRe
 
 func (b *playStandIn) Release(ctx context.Context, s engine.SessionID) error {
 	b.record("release")
-	b.notify(playback.Note{Session: s, Kind: playback.NoteClosed, Params: alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}}})
+	// A sink closes only where a Start opened one, as the backend's.
+	b.mu.Lock()
+	_, opened := b.evs[s]
+	b.mu.Unlock()
+	if opened {
+		b.notify(playback.Note{Session: s, Kind: playback.NoteClosed, Params: alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}}})
+	}
 	return nil
 }
 
@@ -305,6 +317,37 @@ func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 				t.Errorf("a refused run built a backend")
 			}
 		})
+	}
+}
+
+// TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy pins the busy
+// diagnostics: a DAC another process holds is refused at the run's first
+// open, before the backend has opened anything, and the holder named is the
+// one of the endpoint the kernel refused, which the refusal names (card 5,
+// the GO bar, held by MPD's output thread), never the device the run opened
+// last, which at a first open is none and read as card 0, the Pi 5's HDMI.
+func TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy(t *testing.T) {
+	c := newPlayCase(t, goBarPlayer)
+	// MPD's output thread holds card 5's substream, as the dsd256-native
+	// capture has it; card 0's stays closed.
+	sysfstest.Apply(t, filepath.Dir(c.trees.proc), `file proc/asound/card5/pcm0p/sub0/status "state: RUNNING\nowner_pid   : 6584\ntrigger_time: 3507.604528195\ntstamp      : 0.000000000\ndelay       : 172355\navail       : 7377\navail_max   : 132300\n-----\nhw_ptr      : 1418577\nappl_ptr    : 1587600\n"
+file proc/6584/status "Name:\toutput:alsa\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t6551\nNgid:\t0\nPid:\t6584\nPPid:\t1\n"
+file proc/6551/comm mpd
+`)
+	c.standIn.busy = &alsapcm.Error{Reason: alsapcm.ReasonBusy, Op: "open", Endpoint: alsapcm.Endpoint{Card: 5},
+		Detail: "another process has /dev/snd/pcmC5D0p open; the bridge never stops it"}
+	code, stdout, stderr := c.run(context.Background(), "linux")
+	out := stdout.String()
+	for _, want := range []string{"play: refused: ", "busy", `held by sub 0: thread 6584 "output:alsa", process 6551 "mpd"`, "does not stop MPD"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not named in /proc/asound") {
+		t.Errorf("the run looked for the holder on a card other than the one refused:\n%s", out)
+	}
+	if code != 1 {
+		t.Errorf("exit %d, want 1:\n%s\n%s", code, out, stderr.String())
 	}
 }
 
