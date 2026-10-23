@@ -361,6 +361,12 @@ func (s *SSDPSubsystem) Register(ctx context.Context, reg SSDPRegistration) (*SS
 	res, staged := h.stage(reg.Endpoints)
 	if len(staged) == 0 {
 		h.cancel()
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return nil, res, ErrSSDPClosed
+		}
 		return nil, res, ErrSSDPNoEndpoint
 	}
 	for _, ep := range staged {

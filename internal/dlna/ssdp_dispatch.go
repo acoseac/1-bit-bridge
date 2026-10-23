@@ -26,8 +26,18 @@ type ssdpTableEntry struct {
 // starts the reader of a listener it lists for the first time. The
 // subsystem's mu is held.
 func (s *SSDPSubsystem) publishLocked() {
+	t := buildTable(s.handles)
+	s.table.Store(t)
+	if !s.closed {
+		s.startReadersLocked(t)
+	}
+}
+
+// buildTable is the dispatch table of handles, each with its published
+// endpoints (SSDPHandle.active).
+func buildTable(handles []*SSDPHandle) *ssdpTable {
 	t := &ssdpTable{owners: map[int][]*SSDPHandle{}}
-	for _, h := range s.handles {
+	for _, h := range handles {
 		t.entries = append(t.entries, ssdpTableEntry{h: h, eps: h.active})
 		for _, ep := range h.active {
 			if idx := ep.key.index; idx > 0 && !containsHandle(t.owners[idx], h) {
@@ -35,10 +45,7 @@ func (s *SSDPSubsystem) publishLocked() {
 			}
 		}
 	}
-	s.table.Store(t)
-	if !s.closed {
-		s.startReadersLocked(t)
-	}
+	return t
 }
 
 func containsHandle(hs []*SSDPHandle, h *SSDPHandle) bool {
@@ -88,13 +95,32 @@ func kindOf(caps SSDPListenerCaps, d SSDPDatagram) ssdpSearchKind {
 // taken or the answer dropped, and the answer itself runs on a goroutine of
 // its own.
 func (s *SSDPSubsystem) dispatch(l *ssdpListener, pkt []byte, src netip.AddrPort, m datagramMeta) {
-	st := ParseMSearchST(pkt)
-	if st == "" {
-		return // not an M-SEARCH or missing ST — silently drop
-	}
 	t := s.table.Load()
 	if t == nil {
 		return
+	}
+	mx, plan := t.plan(l, pkt, src, m)
+	for _, p := range plan {
+		p.h.answerFrom(p.ep, p.targets, mx, src)
+	}
+}
+
+// ssdpPlanned is one answer a dispatch decided on: the registration, the one
+// endpoint it answers from, and the targets the search matched.
+type ssdpPlanned struct {
+	h       *SSDPHandle
+	ep      *ssdpEndpoint
+	targets []NotifyTarget
+}
+
+// plan decides, without sending or spawning anything, who answers one
+// datagram l read: at most one entry per registration, in registration
+// order, and the search's MX. A refusal the MediaServer's admission logs is
+// logged here.
+func (t *ssdpTable) plan(l *ssdpListener, pkt []byte, src netip.AddrPort, m datagramMeta) (int, []ssdpPlanned) {
+	st := ParseMSearchST(pkt)
+	if st == "" {
+		return 0, nil // not an M-SEARCH or missing ST — silently drop
 	}
 	mx := ParseMSearchMX(pkt)
 	d := SSDPDatagram{
@@ -107,6 +133,7 @@ func (s *SSDPSubsystem) dispatch(l *ssdpListener, pkt []byte, src netip.AddrPort
 		ListenerCaps:     l.setup.caps,
 	}
 	kind := kindOf(l.setup.caps, d)
+	var plan []ssdpPlanned
 	for _, e := range t.entries {
 		if len(e.eps) == 0 {
 			continue // parked by an Update that left it nothing
@@ -136,8 +163,9 @@ func (s *SSDPSubsystem) dispatch(l *ssdpListener, pkt []byte, src netip.AddrPort
 		default:
 			continue
 		}
-		e.h.answerFrom(ep, targets, mx, src)
+		plan = append(plan, ssdpPlanned{h: e.h, ep: ep, targets: targets})
 	}
+	return mx, plan
 }
 
 // firstOn is e's first active endpoint on l, in the caller's order, or nil.
@@ -263,6 +291,9 @@ func (h *SSDPHandle) answerFrom(ep *ssdpEndpoint, targets []NotifyTarget, mx int
 		h.log.Debug("M-SEARCH responder pool full; dropping",
 			slog.String("src", to.String()))
 		return
+	}
+	if hook := h.s.slotTaken; hook != nil {
+		hook(ep)
 	}
 	h.gate.Lock()
 	if ep.closing {

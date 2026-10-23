@@ -117,6 +117,9 @@ type socketTransport struct {
 	hostSSDPTransport
 	mu    sync.Mutex
 	socks map[string]*net.UDPConn
+	// armDstErr and armArrivalErr, when set, stand for a kernel that
+	// refuses that report: the socket is left unarmed for it.
+	armDstErr, armArrivalErr error
 }
 
 func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, _ *slog.Logger) (ssdpReadConn, ssdpListenerSetup, error) {
@@ -132,12 +135,18 @@ func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, _ *sl
 		return nil, ssdpListenerSetup{}, errors.New("the test opened no socket for this interface")
 	}
 	setup := ssdpListenerSetup{caps: SSDPListenerCaps{ReceiveConfined: true}}
-	if err := armDatagramDst(c); err != nil {
+	arm := func(refused error, arm func(*net.UDPConn) error) error {
+		if refused != nil {
+			return refused
+		}
+		return arm(c)
+	}
+	if err := arm(tr.armDstErr, armDatagramDst); err != nil {
 		setup.dstErr = err
 	} else {
 		setup.caps.DestinationReporting = true
 	}
-	if err := armDatagramArrival(c); err != nil {
+	if err := arm(tr.armArrivalErr, armDatagramArrival); err != nil {
 		setup.arrivalErr = err
 	} else {
 		setup.caps.ArrivalReporting = true
@@ -152,12 +161,24 @@ func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, _ *sl
 // and withdraws and closes everything at the test's end.
 func registerOnSocket(t *testing.T, l *net.UDPConn, reg SSDPRegistration) (*SSDPSubsystem, *SSDPHandle) {
 	t.Helper()
+	sub, h, res := registerOnTransport(t, &socketTransport{}, l, reg)
+	if !res.Active[0].Listener.DestinationReporting {
+		t.Fatal("the listener could not be armed")
+	}
+	return sub, h
+}
+
+// registerOnTransport is registerOnSocket over a socketTransport the test
+// set up (one that refuses a report, say), returning the result.
+func registerOnTransport(t *testing.T, tr *socketTransport, l *net.UDPConn, reg SSDPRegistration) (*SSDPSubsystem, *SSDPHandle, SSDPResult) {
+	t.Helper()
 	name := ""
 	if iface := reg.Endpoints[0].Interface; iface != nil {
 		name = iface.Name
 	}
+	tr.socks = map[string]*net.UDPConn{name: l}
 	sub := NewSSDPSubsystem(context.Background(), SSDPSubsystemOptions{Logger: reg.Logger})
-	sub.transport = &socketTransport{socks: map[string]*net.UDPConn{name: l}}
+	sub.transport = tr
 	sub.notifyTo = loopbackDiscard(t)
 	h, res, err := sub.Register(context.Background(), reg)
 	if err != nil {
@@ -168,8 +189,5 @@ func registerOnSocket(t *testing.T, l *net.UDPConn, reg SSDPRegistration) (*SSDP
 		_ = h.Withdraw(context.Background())
 		_ = sub.Close(context.Background())
 	})
-	if !res.Active[0].Listener.DestinationReporting {
-		t.Fatal("the listener could not be armed")
-	}
-	return sub, h
+	return sub, h, res
 }

@@ -125,6 +125,10 @@ type SSDPSubsystem struct {
 	// registers.
 	intervalFloor time.Duration
 
+	// slotTaken, when set, is told of every responder slot an answer
+	// takes. nil in production; a test sets it before anything registers.
+	slotTaken func(ep *ssdpEndpoint)
+
 	// mu guards everything below, and the published endpoint list of every
 	// handle (SSDPHandle.active). It is never held across socket I/O, a
 	// sleep or a join.
