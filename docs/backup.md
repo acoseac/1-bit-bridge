@@ -36,16 +36,18 @@ mark is the same player reset: **with the service stopped, remove the box's
 start makes a new identity with no queue, a new device to controllers.
 **A snapshot's `player-ids.json` is never a valid repair**. Do not delete the
 reservation while keeping the player identity.
-A reset gives up for good the identity it removes and any the box ran earlier
-(one an earlier restore replaced on this box), unless another box took it over by a restore.
-Their values were held only by the floor the reset drops. No snapshot of a
-given-up identity taken before the reset, on this box or another, may restore
-its player identity again: remove `player-uuid` and `player-ids.json` from
-every such snapshot, or delete those snapshots. An identity another box took
-over by a restore is not given up: that box's floor holds it, and its
-snapshots stay valid. If the reset answers a refused restore, remove
-`player-uuid` and `player-ids.json` from a copy of that snapshot, then restore
-that copy.
+A reset gives up for good the identity it removes and any the box ran
+earlier (one an earlier restore replaced on this box), unless another box
+took it over by a restore and still runs it. Their values were held only by
+the floor the reset drops. No snapshot of a given-up identity taken before
+the reset, on this box or another, may restore its player identity again:
+remove `player-uuid` and `player-ids.json` from every such snapshot, or
+delete those snapshots. Any other box that still holds a given-up identity's
+files (one powered off since a migration, say) must be reset too before it
+runs again. An identity another box took over by a restore, and still runs,
+is not given up: that box's floor holds it, and its snapshots stay valid.
+If the reset answers a refused restore, remove `player-uuid` and
+`player-ids.json` from a copy of that snapshot, then restore that copy.
 
 This margin assumes the source issued fewer than 2^24 IDs and fewer than
 2^24 tokens after the snapshot and before stopping. Two successive restores
@@ -63,15 +65,18 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 - For a destination mark, follow the player reset above, removing all three
   live files together while the service is stopped.
   A reset gives up for good the identity it removes and any the box ran
-  earlier (one an earlier restore replaced on this box), unless another box took it
-  over by a restore. Their values were held only by the floor the reset drops. No snapshot
-  of a given-up identity taken before the reset, on this box or another, may
-  restore its player identity again: remove `player-uuid` and
-  `player-ids.json` from every such snapshot, or delete those snapshots. An
-  identity another box took over by a restore is not given up: that box's
-  floor holds it, and its snapshots stay valid. If the reset answers a refused
-  restore, remove `player-uuid` and `player-ids.json` from a copy of that
-  snapshot, then restore that copy.
+  earlier (one an earlier restore replaced on this box), unless another box
+  took it over by a restore and still runs it. Their values were held only
+  by the floor the reset drops. No snapshot of a given-up identity taken
+  before the reset, on this box or another, may restore its player identity
+  again: remove `player-uuid` and `player-ids.json` from every such
+  snapshot, or delete those snapshots. Any other box that still holds a
+  given-up identity's files (one powered off since a migration, say) must be
+  reset too before it runs again. An identity another box took over by a
+  restore, and still runs, is not given up: that box's floor holds it, and
+  its snapshots stay valid. If the reset answers a refused restore, remove
+  `player-uuid` and `player-ids.json` from a copy of that snapshot, then
+  restore that copy.
 
 Each restore spends less than 2^25 values, so roughly 120 worst-case restores
 consume the available space. Ordinary engine starts spend much less.
