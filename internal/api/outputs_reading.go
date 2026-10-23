@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/mpd"
 	"github.com/acoseac/1-bit-bridge/internal/mpd/conf"
@@ -1040,11 +1041,19 @@ func (o *localOutputs) rowAt(ctx context.Context, path, abs, via string) *songRo
 		return nil
 	}
 	row := &songRow{path: path, via: via, track: track}
-	if fi, err := os.Stat(abs); err == nil && fi.Mode().IsRegular() &&
-		fi.Size() == track.Size && fi.ModTime().UnixNano() == track.MTimeNS {
+	if fi, err := os.Stat(abs); err == nil && stillTheScannedFile(fi, track.Size, track.MTimeNS) {
 		row.current = true
 	}
 	return row
+}
+
+// stillTheScannedFile reports whether fi is the file the scanner read: a
+// file by fsutil.NotAFile's list, the scanner's own, of the size and
+// modification time it stored. A Windows cloud placeholder (ModeIrregular)
+// opens as a file, so this is not IsRegular, which would take every
+// OneDrive file on demand for one that changed.
+func stillTheScannedFile(fi fs.FileInfo, size, mtimeNS int64) bool {
+	return fsutil.NotAFile(fi.Mode()) == "" && fi.Size() == size && fi.ModTime().UnixNano() == mtimeNS
 }
 
 // loopbackTrackID is the track id in a URL of this bridge's loopback

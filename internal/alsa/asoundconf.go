@@ -595,18 +595,29 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool, bool) {
 	}
 	// conf.d is listed here, not by filepath.Glob, which takes a directory
 	// it cannot stat, open or list for one with nothing in it: a conf.d
-	// that is there and cannot be listed is a configuration not read.
+	// that is there and cannot be listed is a configuration not read. It
+	// is stat'ed first, so that one that is there and is not a directory is
+	// that on every platform: Windows's os.ReadDir of a regular file
+	// answered an empty listing and no error (the windows-latest run on
+	// 1ab90068; os/dir_windows.go ends a listing at a no-more-files or a
+	// file-not-found answer without one).
 	confd := filepath.Join(root, "etc", "alsa", "conf.d")
-	switch entries, err := os.ReadDir(confd); {
-	case err == nil:
-		// ReadDir sorts by name.
-		for _, e := range entries {
-			if ok, _ := filepath.Match("*.conf", e.Name()); ok {
-				add(filepath.Join(confd, e.Name()))
-			}
-		}
-	case !errors.Is(err, fs.ErrNotExist):
+	switch fi, err := os.Stat(confd); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil || !fi.IsDir():
 		bad, unread = true, true
+	default:
+		switch entries, err := os.ReadDir(confd); {
+		case err == nil:
+			// ReadDir sorts by name.
+			for _, e := range entries {
+				if ok, _ := filepath.Match("*.conf", e.Name()); ok {
+					add(filepath.Join(confd, e.Name()))
+				}
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			bad, unread = true, true
+		}
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
 	if bad {

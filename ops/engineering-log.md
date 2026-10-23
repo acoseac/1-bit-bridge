@@ -55920,3 +55920,37 @@ build.
 - The floor rests on two bounds. A driver whose pointer leads what has
   played by more than about 240 ms, or a clock tick longer than that, would
   let a reopen in the same tick keep the stamp.
+
+### Round 8 (2026-10-23): the PR's Windows run and Gemini's review
+
+Round 7 landed and PR #1318 opened at 1ab90068, after main's merge (the
+health list's capacity, 38 keys with B513's `sampleFormat`). Its CI was
+green except `test (windows-latest)`, one case:
+
+- **`TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, "conf.d a file,
+  not a directory": unread false, ok true on Windows.** The premise holds
+  (a `conf.d` that is there and cannot be listed is a configuration not
+  read); the loader trusted `os.ReadDir`'s error to say so, and on Windows
+  a regular file's listing ends with no error and no entries
+  (`os/dir_windows.go` ends a listing at a no-more-files or a
+  file-not-found answer; only another answer becomes `ENOTDIR`). The loader
+  now stats `conf.d` first: absent is nothing, any other stat error or a
+  stat that is not a directory is unread, and only a directory is listed.
+  On macOS and Linux the case passed before and after (ReadDir's `ENOTDIR`),
+  so the red is the windows-latest run on 1ab90068 and the green is this
+  round's.
+- **Gemini (medium), `rowAt` judged the song's file with `IsRegular`.** The
+  bridge's own rule (`fsutil.NotAFile`: "the one list for both sides of the
+  library", and `output.md`'s `mpd.conf` candidate rule) is that a Windows
+  cloud placeholder is `ModeIrregular` and opens as a file, so `IsRegular`
+  took every OneDrive file on demand for one that changed and left its row
+  not current. `stillTheScannedFile` is now `fsutil.NotAFile`, size and
+  `mtime_ns`; `TestARowOnACloudPlaceholderIsCurrent` (8 rows) pins it, red
+  first with `IsRegular` (control below).
+
+**Negative control**, committed first, restored from git after, tree clean:
+`stillTheScannedFile` with `fi.Mode().IsRegular()` ANDed in (beside
+`NotAFile`, so the import stays used and the build is the mutated one)
+reddens exactly "a cloud placeholder: current false, want true"; the
+first try, `NotAFile` replaced, did not build (an unused import) and
+proves nothing.

@@ -2299,3 +2299,33 @@ func (m *tcpMPD) serve(conn net.Conn) {
 		}
 	}
 }
+
+// TestARowOnACloudPlaceholderIsCurrent: the song's row is current while its
+// file is a file by fsutil.NotAFile's list, the scanner's own, of the size
+// and modification time the scanner stored. A Windows cloud placeholder
+// (ModeIrregular) is such a file, where IsRegular took every OneDrive file
+// on demand for one that changed; a directory, a pipe, a socket or a
+// device, or another size or time, is not current.
+func TestARowOnACloudPlaceholderIsCurrent(t *testing.T) {
+	at := time.Unix(1_700_000_000, 123)
+	for name, tc := range map[string]struct {
+		mode  fs.FileMode
+		size  int64
+		mtime time.Time
+		want  bool
+	}{
+		"a regular file":      {mode: 0o644, size: 10, mtime: at, want: true},
+		"a cloud placeholder": {mode: fs.ModeIrregular | 0o644, size: 10, mtime: at, want: true},
+		"a directory":         {mode: fs.ModeDir | 0o755, size: 10, mtime: at},
+		"a named pipe":        {mode: fs.ModeNamedPipe | 0o644, size: 10, mtime: at},
+		"a socket":            {mode: fs.ModeSocket | 0o644, size: 10, mtime: at},
+		"a device":            {mode: fs.ModeDevice | 0o644, size: 10, mtime: at},
+		"another size":        {mode: 0o644, size: 11, mtime: at},
+		"another time":        {mode: 0o644, size: 10, mtime: at.Add(time.Nanosecond)},
+	} {
+		fi := entryInfo{name: "a.flac", size: tc.size, mode: tc.mode, mod: tc.mtime}
+		if got := stillTheScannedFile(fi, 10, at.UnixNano()); got != tc.want {
+			t.Errorf("%s: current %v, want %v", name, got, tc.want)
+		}
+	}
+}
