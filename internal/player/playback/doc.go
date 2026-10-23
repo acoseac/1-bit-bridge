@@ -38,8 +38,10 @@
 // between two writes, ending the write under way; Pause and Resume hand the
 // sink its command on a goroutine of their own (call), so a sink the kernel
 // holds cannot hold the engine's call past its deadline, and the producer
-// hands a sink its Drain the same way, so such a sink never holds the
-// producer past the session's release.
+// hands a sink its Drain, and a new transport's sink the session's pause,
+// the same way and outside the session's lock, so such a sink never holds
+// the producer, or a Release waiting for that lock, past the session's
+// release.
 //
 // Sessions own resources: each session has a life (its context) that every
 // goroutine it starts and every sink it opens ends with. A Release that
@@ -52,8 +54,10 @@
 //
 // Release is confirmed or it is not: Release ends the session's life, so
 // its sinks drop their streams and close their devices; a teardown joins
-// the session's goroutines, closes every decoder and content and then every
-// sink, and lets go of the device; Release answers nil once that is done,
+// the session's goroutines and a resume's open between two transports, whose
+// node no sink holds until the check after open has answered, closes every
+// decoder and content and then every sink, and lets go of the device;
+// Release answers nil once that is done,
 // or its context's error at its deadline, and the teardown then calls
 // Events.Released once nothing is held. The join comes first: a producer
 // held in a read of its content that does not return (a file on a mount
@@ -90,10 +94,14 @@
 //
 // Pause and resume: Pause is the sink's (the kernel's PAUSE, or zeros), and
 // after SessionOptions.PauseRelease the sink lets the device go itself,
-// which the reporter reports as DeviceReleased. A pause that finds a sink
-// playing out its last frames, or no sink (between two transports), pauses
+// which the reporter reports as DeviceReleased. A pause acts on the
+// transport current when it decides: a sink playing out its last frames
+// refuses it, and by then the producer may have opened the next transport's
+// sink and started it, which the pause then asks. With no sink (between two
+// transports), or the one that refused still current, the session pauses
 // after them with no device held, and reports the release once the pause
-// release has passed. Resume answers ResumeContinued for a sink that held
+// release has passed; a sink the producer opens after that takes the pause
+// before a frame. Resume answers ResumeContinued for a sink that held
 // the device, ResumeReopened for one the sink opened again at the endpoint
 // the binding resolves to now (SinkConfig.Locate), checked by the check
 // after open before a frame (SinkConfig.Admit), with the frames it kept, or
@@ -108,11 +116,20 @@
 //
 // Discard forgets the packings the bound unit took.
 //
+// What a session keeps: what it may still report. Once a report step has
+// sent every event of the occurrences before the one heard, they leave the
+// session, their decoders, content and first chunks let go (closeOcc), and
+// so does each sink closed that nothing left refers to, its store with it,
+// so a session that plays for hours holds a sink or two. A Cut of an
+// occurrence retired answers false: it has played. Stats.Sinks and
+// Stats.Occurrences count what the sessions hold.
+//
 // # Goroutines
 //
 // A session runs a producer (decode, pack, write, drain, transport
-// changes), a reporter (every event, in order) and an opener per successor
-// while it opens. The backend counts every goroutine it starts
+// changes), a reporter (every event, in order), an opener per successor
+// while it opens, and a resume's open between two transports while it
+// runs. The backend counts every goroutine it starts
 // (Stats.Goroutines, Wait), and the teardown joins a session's; the only
 // one that can outlive a release is the one in a sink's Close, or a call's
 // command, while the kernel holds the sink's writer in a call that never
