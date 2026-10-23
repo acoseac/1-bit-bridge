@@ -136,8 +136,7 @@ pcm.b { type empty
 // the same format, rate and channels. Such a plug is opaque in every form,
 // a dotted ttable entry, a ttable block, route_policy, so it has no chain,
 // and it is the route stage the reading warns of. A ttable entry whose
-// value is a float makes the file one this parser does not read, which
-// names no stage.
+// value is a real is consumed too, without losing the route stage.
 func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 	cards := []Card{{Index: 2, ID: "Audio"}}
 	hw := "pcm.hwcard {\n    type hw\n    card \"Audio\"\n}\n"
@@ -145,7 +144,7 @@ func TestAPlugThatRoutesHasNoChain(t *testing.T) {
 		"a dotted ttable entry": {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 1 }\n", "route"},
 		"a ttable block":        {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable { 0 { 0 0.5 } 1 { 1 0.5 } } }\n", "route"},
 		"a route policy":        {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    route_policy \"average\" }\n", "route"},
-		"a float ttable entry":  {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 0.5 }\n", ""},
+		"a float ttable entry":  {"pcm.out { type plug\n    slave.pcm \"hwcard\"\n    ttable.0.0 0.5 }\n", "route"},
 	} {
 		root := t.TempDir()
 		writeTree(t, root, map[string]string{"etc/asound.conf": hw + tc.plug})
@@ -183,7 +182,7 @@ func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
 		"more files than the read takes": {files: tooMany, unread: true},
 		"conf.d a file, not a directory": {files: map[string]string{"etc/asound.conf": plain, "etc/alsa/conf.d": plain}, unread: true},
 		"a top-level @hooks":             {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
-		"a value the parser refuses":     {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0 }\n"}},
+		"a value the parser refuses":     {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0garbage }\n"}},
 	} {
 		root := t.TempDir()
 		writeTree(t, root, tc.files)

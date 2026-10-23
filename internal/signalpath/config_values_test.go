@@ -1,0 +1,37 @@
+package signalpath
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
+)
+
+// Exercise the real loader through the verdict, with the same synthetic
+// files the ALSA package uses for resolution and stage assertions.
+func TestPCMValueFixturesKeepWarnings(t *testing.T) {
+	for _, name := range []string{"float", "negative-real", "negative-integer", "path", "word"} {
+		t.Run(name, func(t *testing.T) {
+			b, err := os.ReadFile(filepath.Join("..", "alsa", "testdata", "asound-values", name+".conf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "etc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c := alsa.LoadPCMConfig(root)
+			f := pcmOnTheGoBar()
+			f.MPD.Output.SampleStage = c.SampleStage("listen")
+			code := "alsa_softvol"
+			if name == "float" {
+				code = "alsa_route"
+			}
+			wantVerdict(t, name, Judge(f), FormatPreserved, nil, Warning{Code: code, Source: FromALSAConf})
+		})
+	}
+}

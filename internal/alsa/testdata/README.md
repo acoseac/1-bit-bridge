@@ -104,3 +104,13 @@ reading reads, each after a `==> path <==` line that names its place in a
 Commit a capture as it was read, and never edit a captured file: make a
 synthetic case instead, and list it here. `.gitattributes` keeps this tree
 LF on every checkout.
+
+## ALSA scalar configurations (`asound-values/`), all synthetic
+
+`float.conf` uses a plug's `ttable.0.0 0.5`; `negative-real.conf` a softvol's
+`min_dB -5.0`; `negative-integer.conf` its `max_dB -5`. `path.conf` models a
+pipewire PCM type's unquoted library path, and `word.conf` its unquoted
+dotted library filename in a dotted assignment. Every file has an
+independent `keep` PCM (empty → hw, card Audio, device 1) and a `listen`
+PCM leading to the sample-changing `effect`. The ALSA and signal-path
+tests share these files to pin resolution, stages and warnings together.

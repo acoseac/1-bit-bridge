@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings](#2026-10-23--b516-alsa-scalar-values-preserve-configuration-stages-and-warnings)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
 - [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
@@ -56814,3 +56815,34 @@ clients' per-request timeouts), and this change leaves them:
 - The read loops check their 2 s and 3 s deadlines after a line arrives,
   so a line that arrives late fails the test, while a stream that sends
   nothing waits for the 10 s connect context, as the 600 ms control did.
+
+
+## 2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings
+
+At 3f805199 the PCM lexer treated values like identifier fragments: `0.5`
+left a dot where the next field should start, a minus or slash stopped
+lexing, and a dotted unquoted word in a scalar assignment split into
+several tokens. One such file invalidated the whole loaded configuration,
+losing sample-stage warnings as well as every named PCM resolution.
+
+The value lexer now follows the known alsa-lib conf.c scalar convention
+(key/value token boundaries, integer then real for digit/minus candidates,
+strings for other words and quoted values). It keeps the kinds distinct
+and refuses malformed numeric candidates. Newly consumed opaque fields
+stay opaque; a real is never a card index or PCM reference. A softvol's
+presence and an attenuating plug's route stage still reach the verdict.
+Top-level hooks and includes still discard all definitions, and Volumio's
+captured empty → plug → hw chain is unchanged. The source was not fetched
+or run in this offline task; libc/locale edges are not independently
+verified. Full rule and grammar detail: `ops/History-rules-output.md`.
+
+Red first: all five shared synthetic fixtures fail
+`TestPCMValueFixturesKeepResolutionAndStages` on 3f805199's parser, and all
+five fail `TestPCMValueFixturesKeepWarnings` with empty warnings. The
+scratch harness on Go 1.27.1 passes both packages after the fix. The real
+repository test and vet commands refuse to start: go.mod requires 1.27.2,
+while GOTOOLCHAIN=local supplies 1.27.1. No toolchain download, dependency
+addition, commit or push was made. Scalar-kind, refusal, opacity and
+boundary tests and `FuzzPCMConfigValues` accompany the fixtures. Scratch
+negative-control patches and the task report record predicted failures
+and verification; these artifacts are deliberately outside the repository.
