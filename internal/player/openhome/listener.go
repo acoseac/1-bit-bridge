@@ -38,7 +38,8 @@ type Limits struct {
 }
 
 // DefaultLimits are production's. 1-bit opens a handful of connections to
-// a player (URLSession's six per host) and polls about once a second.
+// a player (URLSession's default is 4 per host on iOS, 6 on macOS, by
+// Apple's documentation) and polls about once a second.
 var DefaultLimits = Limits{
 	MaxConns: 32, MaxConnsPerSource: 8, Slots: 8,
 	ReadHeader: 5 * time.Second, BodyRead: 5 * time.Second, Read: 10 * time.Second,
