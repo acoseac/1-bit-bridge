@@ -237,9 +237,23 @@ type unit struct {
 	refuse  int // the next checks to refuse
 	checked []alsapcm.NodeInfo
 	located int
+	// holdIn and holdGate hold the next check (holdNextAdmit).
+	holdIn, holdGate chan struct{}
 }
 
 func newUnit() *unit { return &unit{at: alsapcm.FakeEndpoint()} }
+
+// holdNextAdmit holds the next check after open until release, as a check
+// that reads a slow sysfs does: the node is open, and no sink exists yet
+// whose writer would close it. held is closed once the check is held.
+func (u *unit) holdNextAdmit() (held <-chan struct{}, release func()) {
+	in, gate := make(chan struct{}), make(chan struct{})
+	u.mu.Lock()
+	u.holdIn, u.holdGate = in, gate
+	u.mu.Unlock()
+	var once sync.Once
+	return in, func() { once.Do(func() { close(gate) }) }
+}
 
 func (u *unit) Locate(context.Context) (playback.Unit, error) {
 	u.mu.Lock()
@@ -252,6 +266,14 @@ func (u *unit) Locate(context.Context) (playback.Unit, error) {
 }
 
 func (u *unit) admit(n alsapcm.NodeInfo) error {
+	u.mu.Lock()
+	in, gate := u.holdIn, u.holdGate
+	u.holdIn, u.holdGate = nil, nil
+	u.mu.Unlock()
+	if in != nil {
+		close(in)
+		<-gate
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.checked = append(u.checked, n)

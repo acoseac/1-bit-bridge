@@ -276,3 +276,53 @@ func TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld(t *testing.T) {
 		t.Errorf("b's open was given %d samples, not b's", len(got))
 	}
 }
+
+// TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports pins the release
+// of a session whose resume is opening the next transport's sink: paused
+// between two transports, the resume opens b's sink itself, and a Stop while
+// that open is under way (b's node open, its check after open held, as one
+// reading a slow sysfs is, so no sink exists yet to close the node with the
+// session's life) releases the session. The release is not acknowledged
+// while the node is open: it waits for the resume's open, which closes what
+// it opened, unwritten, before the session lets go.
+func TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports(t *testing.T) {
+	tm := &timers{}
+	r := newRig(t, func(o *rigOptions) { o.pauseRelease, o.afterFunc = time.Second, tm.afterFunc })
+	r.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	r.files.add("b", wav(48000, 24, pattern(2, 3000, 24)))
+	r.insert("a", "b")
+	r.play()
+	r.k.Await(t, "a's sink to play out its last frames", func(v alsapcm.KernelView) bool { return v.Drains == 1 && v.Starved })
+	if err := r.eng.Pause(bg); err != nil {
+		t.Fatalf("a pause during the last frames of a transport: %v", err)
+	}
+	r.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
+	r.k.Free()
+	r.k.Await(t, "a's sink to close", func(v alsapcm.KernelView) bool { return v.Closes == 1 && !v.Open })
+	held, letGo := r.unit.holdNextAdmit()
+	t.Cleanup(letGo)
+	resumed := make(chan error, 1)
+	go func() { resumed <- r.eng.Play(bg) }()
+	receiveIn(t, held, "the check after the resume's open of b's sink to hold, the node open")
+	if v := r.k.View(); !v.Open || v.Opens != 2 {
+		t.Fatalf("the resume's open: open %v after %d opens, want b's node open", v.Open, v.Opens)
+	}
+	if err := r.eng.Stop(bg); err != nil {
+		t.Fatal(err)
+	}
+	// Acknowledged, the session holds nothing; past its deadline the engine
+	// holds the release unconfirmed while the open goes on.
+	s := r.waitSnap("the release acknowledged, or past its deadline", func(s *engine.Snapshot) bool { return s.State() != engine.Releasing })
+	if _, unconfirmed := s.ReleaseUnconfirmed(); !unconfirmed && r.k.View().Open {
+		t.Fatal("the release was acknowledged while the resume's open held b's node open")
+	}
+	letGo()
+	receiveIn(t, resumed, "the resume's play command to be answered")
+	r.waitSnap("the release acknowledged", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return s.State() == engine.Stopped && !unconfirmed
+	})
+	if v := r.k.View(); v.Open || v.Closes != 2 || v.GivenBytes != 1000*2*2 {
+		t.Errorf("after the release: open %v, %d closes, %d bytes given; want b's node closed unwritten, a's frames alone given", v.Open, v.Closes, v.GivenBytes)
+	}
+}

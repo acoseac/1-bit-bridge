@@ -81,7 +81,7 @@ type session struct {
 	producerDone bool
 	wakeP, wakeR chan struct{}
 
-	wg sync.WaitGroup // the producer, the reporter and the openers
+	wg sync.WaitGroup // the producer, the reporter, the openers, and a resume's open between transports
 }
 
 // output is one sink a session opened, for one transport.
@@ -776,7 +776,18 @@ func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
 	}
 	// Paused between two transports: the resume opens the next one's sink
 	// itself, so a device another process took meanwhile refuses the resume
-	// and leaves the session paused.
+	// and leaves the session paused. The open is the session's while it
+	// runs (s.wg), joined by its release, which is never acknowledged while
+	// a node this open holds is open: until the check after open answers no
+	// sink exists to close the node with the session's life.
+	s.mu.Lock()
+	if err := s.callableLocked(); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	defer s.wg.Done()
 	cctx, stop := s.bound(ctx)
 	defer stop()
 	next, err := s.openOutput(cctx, between)
