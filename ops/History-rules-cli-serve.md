@@ -1318,7 +1318,8 @@ mentions across the four `ops/audit-*.md` files.
   other identity file, restore durably merges and raises both reservation
   marks; the reservation is never copied by the file loop. Every decodable
   live reservation travels in snapshots, restamped with the captured UUID;
-  unreadable reservations refuse backup, and only missing files omit the mark.
+  unreadable reservations refuse backup with the three-file player reset advice,
+  and only missing files omit the mark.
   An identity replacement also durably removes the destination queue before
   writing the UUID; restoring the same UUID keeps its queue; no UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
@@ -1985,3 +1986,7 @@ mentions across the four `ops/audit-*.md` files.
   to a log line, never a hung exit. A writer includes a goroutine whose CHILD
   PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
   unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
+
+## Player identity reset (B470 PR 5a0, round 3)
+
+- **Giving up a player's identity resets its UUID, reservation and queue together, with the service stopped.** **Never repair a reservation from a snapshot or delete it while keeping the identity.** Backup and restore use `playerResetAdvice` for an unreadable live reservation, as restore does for an exhausted box mark: stop the service and remove `player-uuid`, `player-ids.json` and `player-queue.json` together. The next start makes a new identity with no queue, a new device to controllers. If restoring, also remove the UUID and reservation from a copy of the snapshot before restoring that copy. A snapshot reservation is never a valid repair, even when stamped with the box's UUID; it can be older than the floor already used. Do not delete the reservation while keeping the identity. The reason, v1 queue reproduction and tests are in History-rules-player.md under the giving-up-identity rule.

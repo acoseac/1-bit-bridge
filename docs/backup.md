@@ -29,9 +29,16 @@ both ID and token counters beyond the larger of the snapshot and destination
 marks. Restore adds 2^24 plus a cryptographically random value below 2^24,
 then makes those marks durable before restoring any identity file. An
 interrupted restore may leave a raised reservation; retrying raises it again.
-A missing reservation is omitted. An unreadable reservation stops the backup
-with repair advice: stop the service and repair it from a known valid copy
-that preserves both floors. Do not delete it while keeping the identity.
+A missing reservation is omitted. An unreadable reservation stops backup or
+restore. The remedy for an unreadable reservation or an exhausted destination
+mark is the same player reset: **with the service stopped, remove the box's
+`player-uuid`, `player-ids.json` and `player-queue.json` together**. The next
+start makes a new identity with no queue, a new device to controllers.
+**A snapshot's `player-ids.json` is never a valid repair**: its correctly
+stamped marks can be older and lower than values already issued. Do not delete
+the reservation while keeping the player identity. If restoring after this
+reset, also remove `player-uuid` and `player-ids.json` from a copy of the
+snapshot, then restore that copy so it cannot bring the abandoned identity back.
 
 This margin assumes the source issued fewer than 2^24 IDs and fewer than
 2^24 tokens after the snapshot and before stopping. Two successive restores
@@ -46,12 +53,11 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 
 - For a snapshot mark, remove `player-uuid` and `player-ids.json` from a copy
   of the snapshot and restore the rest. The box keeps or makes its own identity.
-- For a destination mark, with the service stopped, remove that box's
-  `player-uuid` and `player-ids.json`, and remove `player-uuid` and
-  `player-ids.json` from a copy of the snapshot as well. Restore that copy.
-  The box makes a new identity and appears as a new device to controllers,
-  with no earlier IDs or tokens to reuse. Removing only the destination's
-  files is not a supported remedy.
+- For a destination mark, follow the player reset above, removing all three
+  live files together while the service is stopped. Remove `player-uuid` and
+  `player-ids.json` from a copy of the snapshot as well, then restore that
+  copy. Removing only the destination's files would restore the abandoned
+  identity from the snapshot.
 
 Each restore spends less than 2^25 values, so roughly 120 worst-case restores
 consume the available space. Ordinary engine starts spend much less.

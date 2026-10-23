@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy](#2026-10-23--b470-pr-5a0-round-3-one-complete-player-reset-remedy)
 - [2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file](#2026-10-23--b470-pr-5a0-a-restored-identity-raises-its-id-and-token-floors-before-any-identity-file)
 - [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
@@ -57493,7 +57494,7 @@ only the identity it just made, never the reservation.
 **Snapshot and restore.** Snapshot captures the UUID, then any decodable
 live reservation, restamped with that UUID. A v1 or foreign reservation is a
 conservative floor because every writer merges. Only a missing file omits
-the mark; an unreadable one refuses backup with repair advice. The reservation covers every
+the mark; an unreadable one refuses backup with the three-file player reset advice. The reservation covers every
 value issued before that read. The queue is not backed up. With a UUID to
 restore, one three-byte `crypto/rand` draw is shared by the two counters:
 `new = max(snapshot, live) + 2^24 + uniform[0,2^24)`. Tests inject a reader;
@@ -57520,7 +57521,8 @@ own fallback; serve's fixed-port admin probe remains an additional guard.
 `MaxUint32 - 2^25 - 2^24` refuses deterministically, for each counter. The
 error names the source: remove UUID and reservation from the snapshot to
 restore the rest while retaining the box's identity, or remove the box's
-pair AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
+`player-uuid`, `player-ids.json` and `player-queue.json` together with the service
+stopped AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
 before retrying a live-floor refusal. This makes a new identity, a new
 controller device with nothing to reuse; removing the box's files alone
 would reintroduce a lower floor from an older snapshot of the same UUID. About 120
@@ -57610,13 +57612,14 @@ left by an interrupted restore. The new no-start sequence independently puts
 then restores elsewhere: the captured and restored floors must pass both
 marks. The old omission test is now `TestSnapshotCarriesEveryDecodableLiveFloor`:
 v1 and foreign marks are carried and restamped, missing is omitted, and
-unreadable or malformed data fails with repair advice.
+unreadable or malformed data refuses (round 3 below replaces the repair advice).
 
 Finally, removing only the box's exhausted files before restoring its older
 same-UUID snapshot lowered its floor from 4,250,000,000 to about 3.02 billion.
 `TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` follows the error's
 advice for each counter: the fixed advice removes the snapshot copy's UUID
-and reservation too, and the next start has a new identity and empty queue.
+and reservation too. That test used only a v2 queue, whose UUID check made
+the next start empty; round 3 below adds the v1 case and the missing queue reset.
 The public guide and both History entries carry the corrected policy.
 
 All three defects failed against round 1 before production changes. The
@@ -57641,3 +57644,61 @@ buffer races after a denied bind; its player and backup packages passed.
 The manifest package completed in 1229.406 s. B520's specific-bound-IP test
 was explicitly run and skipped because its bind was denied, not claimed as
 a passing case. No full-suite or playback timeout occurred this round.
+
+
+## 2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy
+
+**Rule.** Giving up a player's identity resets its UUID, reservation and
+queue together, with the service stopped. `playerResetAdvice` is the one
+message builder for an exhausted box mark and an unreadable live reservation
+in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
+`player-queue.json` together; the next start makes a new identity with no
+queue, a new device to controllers. If restoring, also remove `player-uuid`
+and `player-ids.json` from a copy of the snapshot, then restore that copy.
+A snapshot's `player-ids.json` is never a valid repair. Keep the warning
+against deleting the reservation while keeping the player identity.
+
+**Evidence, red first.** Round 2's exhaustion remedy removed both identity
+pairs but left the live queue. With no snapshot UUID, restore preserves the
+queue, and a v1 queue has no stamp to reject at the new identity's start.
+Extending `TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` to both
+queue versions showed visible ID 4097 under the new UUID for each exhausted
+counter before the fix. The unreadable-floor advice recommended a known
+valid copy, but snapshots can predate a restore's raised floor even while
+carrying the box's UUID. Copying that reservation back can reissue values
+under the same identity. `TestUnreadableReservationAdviceResetsIdentityAndQueue`
+failed on the old advice for unreadable and malformed files in backup and
+restore; it pins the full reset, the snapshot prohibition and the warning,
+and checks refusal leaves live identity, queue and malformed bytes untouched.
+The existing snapshot refusal test checks that same advice. No restore
+arithmetic, file mutation policy, queue decoding or wire surface changed.
+
+**Negative controls and validation.** Scratch `controls-r3/manifest.json`
+refreshes the round 2 controls against this tree and adds one shared-advice
+control for this rule. It restores the unsafe repair wording and omits the
+queue from the common reset, so the v1 remedy test exposes its surviving
+entry and the unreadable-refusal advice assertions fail. Go overlays keep
+all uncommitted changes intact; no commits are made for controls, per the
+owner's stop instruction. Detailed commands, outcomes and sandbox limits
+are recorded in scratch `report-r3.md`.
+
+The full backup suite passed five race-enabled runs (217.610 s), as did the
+full engine suite (78.985 s). The CLI foreign-floor/queue regression,
+ephemeral-admin lock case and no-mark/schema-1 advice passed five runs;
+the cited-test guard passed. All 45 patches apply independently: 43 fail
+their predicted assertions and controls 28/29 stop on sandbox-denied
+listeners. Formatting, vet, all six cross-builds and docs-check pass on
+cached Go 1.27.2, offline. The broad player/backup/cmd race run passes player
+and backup but fails cmd on denied listeners. The full gate also encounters
+listener denials and the previously recorded doctor child-output buffer
+races after a denied bind; this is no green full-suite claim. B520's named
+specific-IP test skips on the denied bind, rather than passes. No hardware
+or network behavior was changed and no commit was made.
+
+The full gate completed with make exit 2. It also hit temporary disk
+exhaustion: manifest's 40,000-track deletion-journal fixture reported
+SQLite `database or disk is full`, followed by TempDir ENOSPC failures
+(manifest finished in 1213.642 s). Transcode's DSD disk-space checks and
+later store/TempDir fixtures failed for the same resource limit. Those
+unchanged packages are not claimed as passing; the focused suites and
+controls retain the separate results above.
