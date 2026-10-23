@@ -313,9 +313,10 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 			}
 			snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: idPath})
 			if kind == "unreadable" || kind == "invalid" {
-				if err == nil || !strings.Contains(err.Error(), "repair") || !strings.Contains(err.Error(), engine.ReservationFileName) {
-					t.Fatalf("backup must refuse an unreadable floor with a repair instruction: %v", err)
+				if err == nil {
+					t.Fatal("backup accepted an unreadable floor")
 				}
+				assertPlayerResetAdvice(t, err.Error())
 				return
 			}
 			if err != nil {
@@ -369,7 +370,7 @@ func TestExhaustingRestoreRefusesBeforeAnyWrite(t *testing.T) {
 					prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error { writes++; return os.Rename(a, b) })
 					err := fixedRestore(t, snap, dst, draw)
 					atomicwrite.SetRenameFuncForTest(prev)
-					if err == nil || !strings.Contains(err.Error(), cause+"'s player "+counter+" mark") || !strings.Contains(err.Error(), "remove") || !strings.Contains(err.Error(), "player-uuid and player-ids.json") {
+					if err == nil || !strings.Contains(err.Error(), cause+"'s player "+counter+" mark") || !strings.Contains(err.Error(), "remove") || (!strings.Contains(err.Error(), "player-uuid") || !strings.Contains(err.Error(), "player-ids.json")) {
 						t.Fatalf("refusal lacks cause/remedy: %v", err)
 					}
 					if writes != 0 || !bytes.Equal(beforeID, readBytes(t, filepath.Join(dst, config.PlayerUUIDFile))) || !bytes.Equal(beforeMark, readBytes(t, filepath.Join(dst, engine.ReservationFileName))) {

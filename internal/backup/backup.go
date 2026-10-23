@@ -241,7 +241,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		if err == nil {
 			mark, err := engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return "", fmt.Errorf("backup: read %s: %w; stop the service and repair the reservation from a known valid copy that preserves both floors, then retry; do not delete it while keeping the player identity", engine.ReservationFileName, err)
+				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
 			}
 			if err == nil {
 				mark.Version, mark.UUID = 2, id

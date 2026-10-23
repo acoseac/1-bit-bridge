@@ -228,56 +228,129 @@ func TestInterruptedRestoreBackupWithoutStartKeepsTheRaisedFloor(t *testing.T) {
 func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 	reservationStorage(t)
 	for _, counter := range []string{"IDs", "tokens"} {
-		t.Run(counter, func(t *testing.T) {
-			snap, dst := identitySnapshot(t, true), t.TempDir()
-			if err := config.WritePlayerUUIDFile(filepath.Join(dst, config.PlayerUUIDFile), snapshotPlayerUUID); err != nil {
-				t.Fatal(err)
-			}
-			putMark(t, snap, snapshotPlayerUUID, 3000000000, 3000000000)
-			ids, tokens := uint32(3000000000), uint32(3000000000)
-			if counter == "IDs" {
-				ids = 4250000000
-			} else {
-				tokens = 4250000000
-			}
-			putMark(t, dst, snapshotPlayerUUID, ids, tokens)
-			seedDestinationQueue(t, dst, snapshotPlayerUUID, 2)
-			err := fixedRestore(t, snap, dst, 0)
-			if err == nil {
-				t.Fatal("exhaustion accepted")
-			}
-			// Follow the actual error's advice. The obsolete advice removed only the
-			// live pair; this then reinstated the same UUID below its live floor.
-			for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
-				if err := os.Remove(filepath.Join(dst, name)); err != nil {
+		for _, version := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s/v%d", counter, version), func(t *testing.T) {
+				snap, dst := identitySnapshot(t, true), t.TempDir()
+				if err := config.WritePlayerUUIDFile(filepath.Join(dst, config.PlayerUUIDFile), snapshotPlayerUUID); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if strings.Contains(err.Error(), "from a copy of the snapshot as well") {
+				putMark(t, snap, snapshotPlayerUUID, 3000000000, 3000000000)
+				ids, tokens := uint32(3000000000), uint32(3000000000)
+				if counter == "IDs" {
+					ids = 4250000000
+				} else {
+					tokens = 4250000000
+				}
+				putMark(t, dst, snapshotPlayerUUID, ids, tokens)
+				seedDestinationQueue(t, dst, snapshotPlayerUUID, version)
+				err := fixedRestore(t, snap, dst, 0)
+				if err == nil {
+					t.Fatal("exhaustion accepted")
+				}
+				advice := err.Error()
+				// Follow the actual error's advice. A legacy queue has no UUID, so
+				// leaving it behind exposes its entries under the new identity.
 				for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
-					if err := os.Remove(filepath.Join(snap, name)); err != nil {
+					if err := os.Remove(filepath.Join(dst, name)); err != nil {
 						t.Fatal(err)
 					}
 				}
-			}
-			if err := backup.Restore(snap, backup.Targets{PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}); err != nil {
-				t.Fatal(err)
-			}
-			id, _, err := config.EnsurePlayerUUID(dst)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if id == snapshotPlayerUUID {
-				got := markAt(t, dst)
-				if got.IDs < ids || got.Tokens < tokens {
-					t.Fatalf("stated remedy revived the same UUID below its live floor: %+v, was %d/%d", got, ids, tokens)
+				if strings.Contains(err.Error(), "player-queue.json") {
+					if err := os.Remove(filepath.Join(dst, "player-queue.json")); err != nil {
+						t.Fatal(err)
+					}
 				}
-				t.Fatal("live exhaustion remedy did not make a new identity")
-			}
-			e := startRestoredPlayer(t, dst)
-			if e.Snapshot().Len() != 0 || e.Snapshot().Token() == 0 {
-				t.Fatal("new identity did not start empty")
-			}
-		})
+				if strings.Contains(err.Error(), "from a copy of the snapshot as well") {
+					for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
+						if err := os.Remove(filepath.Join(snap, name)); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if err := backup.Restore(snap, backup.Targets{PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}); err != nil {
+					t.Fatal(err)
+				}
+				id, _, err := config.EnsurePlayerUUID(dst)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if id == snapshotPlayerUUID {
+					got := markAt(t, dst)
+					if got.IDs < ids || got.Tokens < tokens {
+						t.Fatalf("stated remedy revived the same UUID below its live floor: %+v, was %d/%d", got, ids, tokens)
+					}
+					t.Fatal("live exhaustion remedy did not make a new identity")
+				}
+				e := startRestoredPlayer(t, dst)
+				if e.Snapshot().Len() != 0 || e.Snapshot().Token() == 0 {
+					t.Fatalf("new identity did not start empty: visible IDs %v", e.Snapshot().IDs())
+				}
+				assertPlayerResetAdvice(t, advice)
+			})
+		}
+	}
+}
+
+// assertPlayerResetAdvice pins the complete shared remedy independently of the
+// production builder: a snapshot may contain an older, correctly stamped floor.
+func assertPlayerResetAdvice(t *testing.T, advice string) {
+	t.Helper()
+	for _, required := range []string{
+		"with the service stopped, reset the player: remove the box's player-uuid, player-ids.json and player-queue.json together",
+		"the next start makes a new identity with no queue, a new device to controllers",
+		"a snapshot's player-ids.json is never a valid repair",
+		"do not delete the reservation while keeping the player identity",
+	} {
+		if !strings.Contains(advice, required) {
+			t.Errorf("refusal lacks %q: %s", required, advice)
+		}
+	}
+	for _, unsafe := range []string{"known valid copy", "repair the reservation from", "repair it from"} {
+		if strings.Contains(advice, unsafe) {
+			t.Errorf("unsafe repair advice %q: %s", unsafe, advice)
+		}
+	}
+}
+
+func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
+	reservationStorage(t)
+	for _, operation := range []string{"backup", "restore"} {
+		for _, kind := range []string{"unreadable", "invalid"} {
+			t.Run(operation+"/"+kind, func(t *testing.T) {
+				snap, dst := identitySnapshot(t, true), t.TempDir()
+				uuidPath := filepath.Join(dst, config.PlayerUUIDFile)
+				if err := config.WritePlayerUUIDFile(uuidPath, snapshotPlayerUUID); err != nil {
+					t.Fatal(err)
+				}
+				beforeQueue := seedDestinationQueue(t, dst, snapshotPlayerUUID, 1)
+				rp := filepath.Join(dst, engine.ReservationFileName)
+				if kind == "unreadable" {
+					if err := os.Mkdir(rp, 0700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(rp, []byte("broken"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if operation == "backup" {
+					_, err = backup.Snapshot(t.Context(), backup.Sources{DataDir: dst, PlayerUUID: uuidPath})
+				} else {
+					err = fixedRestore(t, snap, dst, 0)
+				}
+				if err == nil {
+					t.Fatal("unreadable reservation accepted")
+				}
+				assertPlayerResetAdvice(t, err.Error())
+				if id, err := config.ReadPlayerUUID(dst); err != nil || id != snapshotPlayerUUID {
+					t.Fatalf("refusal changed identity: %s, %v", id, err)
+				}
+				if !bytes.Equal(beforeQueue, readBytes(t, filepath.Join(dst, "player-queue.json"))) {
+					t.Fatal("refusal changed queue")
+				}
+				if kind == "invalid" && string(readBytes(t, rp)) != "broken" {
+					t.Fatal("refusal replaced unreadable reservation")
+				}
+			})
+		}
 	}
 }

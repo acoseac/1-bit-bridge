@@ -29,6 +29,17 @@ type RestoreOptions struct {
 // after the largest possible jump. The random part is uniform in [0, margin).
 const restoreMargin uint64 = 1 << 24
 
+// playerResetAdvice is the single remedy for giving up an exhausted or
+// unreadable live floor. Reset the queue too: a v1 queue has no identity stamp.
+// Restoring an older snapshot's identity after the reset would reuse its floor.
+func playerResetAdvice(restoring bool) string {
+	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
+	if restoring {
+		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
+	}
+	return advice + "; the next start makes a new identity with no queue, a new device to controllers; a snapshot's player-ids.json is never a valid repair; do not delete the reservation while keeping the player identity"
+}
+
 // matchingReservation reads the snapshot's already captured and restamped
 // mark. Live reservations must not go through this filter: every decodable
 // live floor covers the box, whatever UUID or supported version it names.
@@ -52,7 +63,7 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)
 	live, err := engine.ReadReservation(livePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("restore: read the box's player reservation: %w; nothing was restored", err)
+		return fmt.Errorf("restore: read the box's player reservation: %w; %s; nothing was restored", err, playerResetAdvice(true))
 	}
 	// Test each source separately so both remedies are named if both are
 	// exhausted. This bound is independent of the random draw.
@@ -68,7 +79,7 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 			exhausted = append(exhausted, fmt.Errorf("snapshot's player %s mark leaves no room for a restore: remove player-uuid and %s from the snapshot to restore the rest; the box keeps or makes its own identity", c.name, engine.ReservationFileName))
 		}
 		if uint64(c.live) > limit {
-			exhausted = append(exhausted, fmt.Errorf("box's player %s mark leaves no room for a restore: with the service stopped, remove the box's player-uuid and %s, and remove player-uuid and %s from a copy of the snapshot as well; restore that copy so the box makes a new identity, a new device to controllers with no values to reuse", c.name, engine.ReservationFileName, engine.ReservationFileName))
+			exhausted = append(exhausted, fmt.Errorf("box's player %s mark leaves no room for a restore: %s", c.name, playerResetAdvice(true)))
 		}
 	}
 	if err := errors.Join(exhausted...); err != nil {
