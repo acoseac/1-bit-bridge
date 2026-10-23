@@ -56,6 +56,8 @@ func TestPCMValuesStillRefuseUnsafeFiles(t *testing.T) {
 		"pcm.x { type = hw card = <x.conf> }", "pcm.x { values = [ <x.conf> ] }",
 		"pcm.x { type hw card = }", "pcm.x =", "pcm.x = = { type hw }",
 		"pcm.x { values [ = 2 ] }", `defaults.value "bad\nvalue"`,
+		"defaults.value .5", "defaults.value = .5", "x = .5",
+		"pcm.x { values [ .5 ] }", "pcm.x { values = [ .5 ] }",
 		`defaults.value "unterminated`, "defaults.value /path\x00tail",
 		"pcm.keep.card 2", "pcm { other { type hw card 2 } }",
 	} {
@@ -224,7 +226,7 @@ func FuzzPCMConfigValues(f *testing.F) {
 func TestPCMFailedNumbersAreOpaqueStrings(t *testing.T) {
 	for _, value := range []string{
 		"2chMaster", "2ch", "0.5garbage", "0.0garbage", "-5dB", "--5", "1e", "1_000",
-		"0x", "-", "1e9999", "1e-9999", ".5", "0b10", "0o10",
+		"0x", "-", "1e9999", "1e-9999", "0b10", "0o10",
 	} {
 		t.Run(value, func(t *testing.T) {
 			tokens, ok := lexPCM("defaults.value " + value)
@@ -291,7 +293,7 @@ func TestPCMOptionalEquals(t *testing.T) {
 			}
 		})
 	}
-	for _, field := range []string{"values = [ 0.5 -5 .5 ]", "control = { name = 2chMaster card = 2 }"} {
+	for _, field := range []string{"values = [ 0.5 -5 ]", "control = { name = 2chMaster card = 2 }"} {
 		t.Run(field, func(t *testing.T) {
 			defs, ok := parsePCMFile("pcm.effect = { type = softvol " + field + " }")
 			if !ok || (PCMConfig{defs: defs, ok: ok}).SampleStage("effect") != "softvol" {
@@ -299,6 +301,51 @@ func TestPCMOptionalEquals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// parse_def checks get_nonwhite's result for '.', so blanks and comments
+// between components do not end the key (alsa-lib v1.2.14 src/conf.c).
+func TestPCMSpacedDottedKeys(t *testing.T) {
+	t.Run("slave after blank", func(t *testing.T) {
+		defs, ok := parsePCMFile("pcm.direct { type hw card 2 } pcm.x { type plug slave .pcm direct }")
+		c := PCMConfig{defs: defs, ok: ok}
+		if !ok {
+			t.Fatal("spaced slave.pcm spoiled the file")
+		}
+		cards := []Card{{Index: 2}}
+		if card, dev, ok := c.ResolveOutputDevice("x", cards); !ok || card != 2 || dev != 0 {
+			t.Errorf("resolution = %d,%d,%v", card, dev, ok)
+		}
+		if chain, ok := c.ResolveOutputChain("x", cards); !ok || chain.Card != 2 || chain.Device != 0 || !slices.Equal(chain.Stages, []string{"plug", "hw"}) {
+			t.Errorf("chain = %+v,%v", chain, ok)
+		}
+	})
+	t.Run("ttable after blank", func(t *testing.T) {
+		defs, ok := parsePCMFile("pcm.direct { type hw card 2 } pcm.x { type plug slave.pcm direct ttable.0 .1 0.5 }")
+		c := PCMConfig{defs: defs, ok: ok}
+		if !ok || c.SampleStage("x") != "route" {
+			t.Fatalf("spaced ttable.0.1 lost route: ok=%v stage=%q", ok, c.SampleStage("x"))
+		}
+		if chain, ok := c.ResolveOutputChain("x", []Card{{Index: 2}}); ok {
+			t.Errorf("routing plug gained chain: %+v", chain)
+		}
+		if _, _, ok := c.ResolveOutputDevice("x", []Card{{Index: 2}}); ok {
+			t.Error("routing plug gained card")
+		}
+	})
+	t.Run("key after comment", func(t *testing.T) {
+		spaced := "pcm.x # c\n.y { type hw card 2 }"
+		got, ok := lexPCM(spaced)
+		want, wantOK := lexPCM("pcm.x.y { type hw card 2 }")
+		if !ok || !wantOK || !reflect.DeepEqual(got, want) {
+			t.Fatalf("tokens = %+v,%v, want %+v,%v", got, ok, want, wantOK)
+		}
+		// The lexer reads pcm.x.y, but the resolver still refuses PCM
+		// definitions with more than one component after pcm.
+		if _, ok := parsePCMFile(spaced); ok {
+			t.Error("unmodeled nested PCM definition admitted")
+		}
+	})
 }
 
 func TestPCMByteStringsAndComments(t *testing.T) {

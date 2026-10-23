@@ -35,3 +35,18 @@ func TestPCMValueFixturesKeepWarnings(t *testing.T) {
 		})
 	}
 }
+
+func TestPCMSpacedDottedRouteKeepsWarning(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "pcm.direct { type hw card 2 } pcm.x { type plug slave .pcm direct ttable.0 .1 0.5 }"
+	if err := os.WriteFile(filepath.Join(root, "etc", "asound.conf"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := alsa.LoadPCMConfig(root)
+	f := pcmOnTheGoBar()
+	f.MPD.Output.SampleStage = c.SampleStage("x")
+	wantVerdict(t, "spaced dotted route", Judge(f), FormatPreserved, nil, Warning{Code: "alsa_route", Source: FromALSAConf})
+}

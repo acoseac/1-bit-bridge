@@ -465,11 +465,12 @@ func (in *confInput) nonwhite() (byte, bool) {
 
 // token reads a string at the next byte, quoted (confQuoted) or bare: a
 // bare string runs to a blank, = , ; { } [ ] ' " \ or #, and a name to a
-// dot too. ok is false at a byte no string starts with (those but the
-// quotes and #, and a dot in a name) or an unsupported quoted escape.
+// dot too. As in alsa-lib v1.2.14 conf.c get_string, an initial dot is
+// refused for both names and values, before get_freestring/parse_value.
+// ok is also false at the other non-string starts or an unsupported escape.
 func (in *confInput) token(name bool) (s string, quoted, ok bool) {
 	rest := in.s[in.pos:]
-	if rest == "" || strings.IndexByte("=,;{}[]\\", rest[0]) >= 0 || (name && rest[0] == '.') {
+	if rest == "" || strings.IndexByte("=,;.{}[]\\", rest[0]) >= 0 {
 		return "", false, false
 	}
 	if rest[0] == '"' || rest[0] == '\'' {
@@ -1048,12 +1049,13 @@ func (p *pcmParser) parseValue() (string, bool) {
 	return "", false
 }
 
-// lexPCM distinguishes keys from values: dots split a key, never a
-// value. Basis: alsa-lib v1.2.14 src/conf.c get_freestring, parse_def and
+// lexPCM distinguishes keys from values: dots split a key, including
+// after blanks/comments; inside a value they are kept, but cannot start it.
+// Basis: alsa-lib v1.2.14 src/conf.c get_string, get_freestring, parse_def and
 // parse_value (https://github.com/alsa-project/alsa-lib/blob/v1.2.14/src/conf.c).
 // parse_def accepts an optional '=' before a scalar, compound or array.
 // parse_value tries a digit/'-' word as an integer, then a real; failed
-// conversions fall through to STRING, as do other free words (even .5).
+// conversions fall through to STRING, as do other admitted free words.
 // Strings and comments are byte-oriented, not restricted to UTF-8. NUL,
 // includes, mode syntax and escapes outside our existing subset remain
 // refused. Reading a scalar does not evaluate a plugin or extend routing.
@@ -1102,14 +1104,13 @@ func lexPCM(src string) ([]pcmTok, bool) {
 				if _, _, ok := in.token(true); !ok {
 					return nil, false
 				}
-				// Only an adjacent dot continues this key. After a
-				// blank, .5 is a free-string value, not a key suffix.
-				dotted := in.pos < len(src) && src[in.pos] == '.'
+				// parse_def tests get_nonwhite's result: blanks and
+				// comments before a dot still continue this key.
 				c, ok = in.nonwhite()
 				if !ok {
 					return nil, false
 				}
-				if !dotted {
+				if c != '.' {
 					break
 				}
 				in.pos++
