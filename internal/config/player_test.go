@@ -814,6 +814,45 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 	}
 }
 
+// TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven: the undo of a make, for
+// a player that then did not start, removes the identity file while it
+// holds the UUID it is given, and leaves alone one that holds another, a
+// data directory with none, and a file that does not read, whose error it
+// answers.
+func TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven(t *testing.T) {
+	dir := t.TempDir()
+	id, created, err := EnsurePlayerUUID(dir)
+	if err != nil || !created {
+		t.Fatalf("EnsurePlayerUUID = %q, %v, %v", id, created, err)
+	}
+	const other = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	if err := ForgetPlayerUUID(dir, other); err != nil {
+		t.Fatalf("ForgetPlayerUUID of another UUID: %v", err)
+	}
+	if got, err := ReadPlayerUUID(dir); err != nil || got != id {
+		t.Fatalf("after forgetting another UUID the file holds %q, %v; want %q kept", got, err, id)
+	}
+	if err := ForgetPlayerUUID(dir, id); err != nil {
+		t.Fatalf("ForgetPlayerUUID: %v", err)
+	}
+	if _, err := ReadPlayerUUID(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after forgetting its UUID the file reads %v, want gone", err)
+	}
+	if err := ForgetPlayerUUID(dir, id); err != nil {
+		t.Errorf("ForgetPlayerUUID with no file: %v, want nil", err)
+	}
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, PlayerUUIDFile), []byte("not-a-uuid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ForgetPlayerUUID(bad, id); err == nil {
+		t.Error("ForgetPlayerUUID over a file that does not read: nil, want its error")
+	}
+	if _, err := os.Stat(filepath.Join(bad, PlayerUUIDFile)); err != nil {
+		t.Errorf("a file that does not read was removed: %v", err)
+	}
+}
+
 // TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse: the identity file's
 // writer, which EnsurePlayerUUID makes the file with and a restore writes a
 // snapshot's UUID through, writes the UUID and a newline, 0600, over what

@@ -30,6 +30,14 @@ import (
 // availability never starts playback on its own. Until the first report
 // the engine holds the output unknown and refuses Play. The Reporter sends
 // nothing but reports: the output's return never plays anything.
+//
+// A caller that knows more than the snapshots say makes its reports through
+// Withhold and Restate (serve's player, from the live config, which the
+// watcher's readings may not have caught up with): they are numbered from
+// the same count, so the engine's input stays monotonic whichever source a
+// report comes from, and no generation carries two reports. Availability
+// comes from a snapshot alone: Withhold reports the output unavailable, and
+// Restate gives back the last snapshot's own verdict.
 type Reporter struct {
 	mu   sync.Mutex
 	gen  uint64
@@ -37,6 +45,10 @@ type Reporter struct {
 	last struct {
 		instance   string
 		generation uint64
+		// available and reason are the last snapshot's own verdict, which
+		// Restate gives back.
+		available bool
+		reason    string
 	}
 	// unit and card are what the binding last resolved to, nil before it
 	// ever did; left is a report since in which it resolved to no unit.
@@ -74,7 +86,40 @@ func (r *Reporter) Report(snap Snapshot) (engine.OutputReport, bool) {
 	} else if r.unit != nil {
 		r.left = true
 	}
+	r.last.available, r.last.reason = rep.Available, rep.Reason
 	return rep, true
+}
+
+// Withhold is a report the caller makes from what it knows beside the
+// snapshots: the output unavailable with reason, numbered one more from the
+// count Report numbers from. It is false, numbering nothing, until a
+// snapshot has been reported: until then the engine holds the output
+// unknown, which refuses Play. It changes nothing the Reporter tracks of the
+// unit.
+func (r *Reporter) Withhold(reason string) (engine.OutputReport, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.have {
+		return engine.OutputReport{}, false
+	}
+	r.gen++
+	return engine.OutputReport{Generation: r.gen, Reason: reason}, true
+}
+
+// Restate is the report of the last snapshot reported, its own verdict
+// (available, or unavailable with the binding's state), again, numbered one
+// more from the same count: how a caller that withheld the output gives it
+// back, and the one way it can. It sets no UnitChanged, since no snapshot
+// came between: the next one is flagged as Report flags it. False until a
+// snapshot has been reported.
+func (r *Reporter) Restate() (engine.OutputReport, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.have {
+		return engine.OutputReport{}, false
+	}
+	r.gen++
+	return engine.OutputReport{Generation: r.gen, Available: r.last.available, Reason: r.last.reason}, true
 }
 
 // Run reports each snapshot sub delivers through report (the engine's
