@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -269,12 +270,22 @@ func TestHostStrictReplyBindsAndPinsBeforeSending(t *testing.T) {
 			if c.pinned != 2 {
 				t.Error("strict reply did not pin the selected interface")
 			}
-			if _, err = conn.Write([]byte("reply")); err != nil {
-				t.Fatal(err)
-			}
+			_, err = conn.Write([]byte("reply"))
 			_ = conn.Close()
-			if c.writes != 1 || !c.closed {
-				t.Error("reply did not send and close")
+			switch runtime.GOOS {
+			case "linux", "darwin", "windows":
+				if err != nil || c.writes != 1 {
+					t.Errorf("supported reply = %v, %d writes; want one send", err, c.writes)
+				}
+			default:
+				// The pin seam above checks ordering on every platform; the
+				// real unsupported-platform write still must fail closed.
+				if !errors.Is(err, ErrSSDPStrictCapability) || c.writes != 0 {
+					t.Errorf("unsupported reply = %v, %d writes; want refusal", err, c.writes)
+				}
+			}
+			if !c.closed {
+				t.Error("reply did not close")
 			}
 		})
 	}

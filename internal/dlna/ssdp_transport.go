@@ -185,8 +185,8 @@ func (t hostSSDPTransport) dialReply(to netip.AddrPort, from *SSDPEndpointSnapsh
 	if from == nil {
 		return net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(to))
 	}
-	if from.Interface.Index <= 0 || !from.Local.IsValid() || !from.Local.Addr().Is4() || from.Local.Addr().IsUnspecified() {
-		return nil, fmt.Errorf("%w: reply needs an interface and local IPv4 address", ErrSSDPStrictCapability)
+	if err := checkStrictReplyAddress(from.Interface.Index, from.Local); err != nil {
+		return nil, err
 	}
 	open := t.openReply
 	if open == nil {
@@ -205,6 +205,15 @@ func (t hostSSDPTransport) dialReply(to netip.AddrPort, from *SSDPEndpointSnapsh
 		return nil, fmt.Errorf("%w: reply interface: %w", ErrSSDPStrictCapability, err)
 	}
 	return &ssdpStrictReply{ssdpUnicastSocket: c, to: net.UDPAddrFromAddrPort(to), from: *from}, nil
+}
+
+// checkStrictReplyAddress keeps endpoint startup and reply creation on the
+// same requirements, so an endpoint that cannot reply never announces itself.
+func checkStrictReplyAddress(index int, local netip.Prefix) error {
+	if index <= 0 || !local.IsValid() || !local.Addr().Is4() || local.Addr().IsUnspecified() {
+		return fmt.Errorf("%w: reply needs an interface and local IPv4 address", ErrSSDPStrictCapability)
+	}
+	return nil
 }
 
 // ssdpUnicastSocket is the unconnected host socket used only by strict replies.

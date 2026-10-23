@@ -44,7 +44,7 @@ type SSDPListenerCaps struct {
 type SSDPEndpoint struct {
 	// Interface is where the endpoint joins, announces and is answered.
 	// nil is the OS default interface, for the MediaServer alone; a strict
-	// registration's endpoint names one.
+	// registration's endpoint names one with a positive index.
 	Interface *net.Interface
 
 	// Incarnation tells one life of an interface from the next, for a
@@ -64,7 +64,8 @@ type SSDPEndpoint struct {
 	// otherwise. A strict registration answers a unicast search only on an
 	// endpoint whose Local address the search was sent to, and its source
 	// hook may judge a searcher by Local's prefix. Strict replies also bind
-	// this address: without a valid non-unspecified IPv4, no reply is sent.
+	// this address: without a valid, non-unspecified, non-mapped IPv4,
+	// Register and Update refuse the endpoint before opening any socket.
 	Local netip.Prefix
 }
 
@@ -112,10 +113,10 @@ type SSDPAdmission interface{ ssdpAdmission() }
 // that arrived on the interface of the endpoint it would be answered from;
 // and, unicast, was sent to that endpoint's Local address. Then Source
 // judges the searcher. Every endpoint of a strict registration needs those
-// capabilities and a pinned sender to start at all, and a strict
-// registration never takes the MediaServer's unarmed fallback. Its replies
-// use the selected endpoint's Local address and outgoing interface, or fail
-// closed with one warning per registration.
+// capabilities, a usable Local IPv4 and a pinned sender to start at all,
+// and a strict registration never takes the MediaServer's unarmed fallback.
+// Its replies use the selected endpoint's Local address and outgoing
+// interface, or fail closed with one warning per registration.
 type SSDPStrictAdmission struct {
 	// Source reports whether a search from s.Datagram.Source may be
 	// answered from s.Endpoint (PR 5a2: an on-link rule over the endpoint's
@@ -551,11 +552,11 @@ func (h *SSDPHandle) checkEndpoint(e SSDPEndpoint) error {
 	if e.Location == "" {
 		return errors.New("dlna: an SSDP endpoint needs a LOCATION")
 	}
+	if h.strict() {
+		return checkStrictReplyAddress(ssdpEndpointKeyOf(e).index, e.Local)
+	}
 	if e.Local.IsValid() && !e.Local.Addr().Unmap().Is4() {
 		return errors.New("dlna: an SSDP endpoint's local address is IPv4: SSDP here is IPv4 alone")
-	}
-	if h.strict() && (e.Interface == nil || e.Interface.Index <= 0) {
-		return fmt.Errorf("%w: it names no interface", ErrSSDPStrictCapability)
 	}
 	return nil
 }
@@ -659,9 +660,15 @@ func (h *SSDPHandle) sendByebyeAll(ep *ssdpEndpoint, deadline time.Time) error {
 	if d := time.Now().Add(ssdpBurstDeadline); d.Before(deadline) {
 		deadline = d
 	}
-	_ = ep.sender.SetWriteDeadline(deadline)
 	var errs []error
 	for _, target := range h.targets {
+		// Close may have started since retirement (or the previous write).
+		deadline = h.s.retirementDeadline(deadline)
+		if !time.Now().Before(deadline) {
+			errs = append(errs, context.DeadlineExceeded)
+			break
+		}
+		_ = ep.sender.SetWriteDeadline(deadline)
 		pkt := BuildNotifyByeBye(ep.spec.Location, h.serverToken, target)
 		if _, err := ep.sender.WriteToUDP(pkt, h.s.notifyTo); err != nil {
 			errs = append(errs, err)
@@ -758,6 +765,7 @@ func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 	expired := false
 	select {
 	case <-joined:
+		deadline = h.s.retirementDeadline(deadline)
 		expired = !time.Now().Before(deadline)
 	case <-timer.C:
 		expired = true
@@ -776,7 +784,8 @@ func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 				errs = append(errs, err)
 			}
 		}
-		if time.Now().After(deadline) {
+		deadline = h.s.retirementDeadline(deadline)
+		if !time.Now().Before(deadline) {
 			errs = append(errs, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
 		}
 	}
