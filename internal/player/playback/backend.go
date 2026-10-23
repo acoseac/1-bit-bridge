@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -237,7 +239,24 @@ func (b *Backend) Wait(ctx context.Context) error {
 	}
 }
 
-// spawn runs f on a goroutine the backend counts until it returns.
+// panicMessage is the line a panic the backend recovers is logged with.
+const panicMessage = "player: a panic was recovered in the backend; the session faults and lets go of the device"
+
+// logPanic logs a panic recovered on one of the backend's goroutines, once:
+// where, its stack, and its value only when it is the runtime's own error,
+// which carries nothing the backend was handed (a value code panics with
+// could quote a path).
+func (b *Backend) logPanic(where string, r any) {
+	attrs := []any{"where", where, "stack", string(debug.Stack())}
+	if rerr, ok := r.(runtime.Error); ok {
+		attrs = append(attrs, "error", rerr.Error())
+	}
+	b.log.Error(panicMessage, attrs...)
+}
+
+// spawn runs f on a goroutine the backend counts until it returns. Each f
+// recovers its own panic as the session's fault (session.recoverFault and
+// the rest).
 func (b *Backend) spawn(f func()) {
 	b.gmu.Lock()
 	if b.live == 0 {
@@ -382,6 +401,32 @@ func (b *Backend) Resume(ctx context.Context, id engine.SessionID) (engine.Resum
 // does.
 func (b *Backend) Release(ctx context.Context, id engine.SessionID) error {
 	return b.session(id).release(ctx)
+}
+
+// ReleaseAll releases every session the backend holds, as a Release of each
+// would, for an owner that can release none: serve's player calls it once
+// its engine's Run has ended in a panic, whose own shutdown, which releases
+// the session it plays, never ran. It answers nil once nothing is held, and
+// at ctx's end says how many sessions still hold something: their
+// teardowns go on, and let go of the device once the kernel lets go of
+// their sinks.
+func (b *Backend) ReleaseAll(ctx context.Context) error {
+	b.mu.Lock()
+	ss := make([]*session, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		ss = append(ss, s)
+	}
+	b.mu.Unlock()
+	held := 0
+	for _, s := range ss {
+		if err := s.release(ctx); err != nil {
+			held++
+		}
+	}
+	if held > 0 {
+		return fmt.Errorf("player backend: %d session(s) still hold something past the release's bound: %w", held, ctx.Err())
+	}
+	return nil
 }
 
 // Discard drops what the backend learnt of the bound unit outside a

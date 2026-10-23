@@ -3,8 +3,14 @@ package alsapcm
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"time"
 )
+
+// sinkPanicMessage is the line a panic the sink's writer recovers is logged
+// with.
+const sinkPanicMessage = "player: a panic was recovered in the sink's writer; the sink ends and closes its device"
 
 // How a pause pauses, as SinkStats.PausedBy names it.
 const (
@@ -24,16 +30,20 @@ var doneCtx = func() context.Context {
 
 // loop is the writer, the one goroutine that drives the device. It takes
 // one command at a time, and between commands feeds the device, holds a
-// pause, or waits.
+// pause, or waits. A panic on it ends the sink (recovered).
 func (s *Sink) loop() {
 	defer close(s.exited)
+	defer s.recovered()
 	for {
 		c, done := s.next()
 		if done {
 			return
 		}
 		if c != nil {
-			if reply, err := s.do(c); reply {
+			s.doing = c
+			reply, err := s.do(c)
+			s.doing = nil
+			if reply {
 				c.reply <- err
 			}
 			continue
@@ -53,10 +63,72 @@ func (s *Sink) loop() {
 	}
 }
 
+// lockW is the writer's hold of the sink's lock: every hold the writer
+// takes goes through it, so its recover can let go of one a panic left held
+// (wHeld is the writer's alone).
+func (s *Sink) lockW() {
+	s.mu.Lock()
+	s.wHeld = true
+}
+
+// unlockW lets go of the writer's hold of the sink's lock.
+func (s *Sink) unlockW() {
+	s.wHeld = false
+	s.mu.Unlock()
+}
+
+// recovered ends the sink when its writer panics: it recovers the panic,
+// lets go of the sink's lock if the writer held it, logs the panic once
+// (where, the endpoint, its stack, and its value only when it is the
+// runtime's own error, which carries nothing the sink was handed), closes
+// the device, and ends the sink typed ReasonPanicked, which answers the
+// command the writer was carrying out, a Drain under way and every command
+// waiting, and wakes a producer that waits for room. A writer that
+// returned finds nothing to recover.
+func (s *Sink) recovered() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if s.wHeld {
+		s.unlockW()
+	}
+	attrs := []any{"where", "the sink's writer", "endpoint", s.ep().String(), "stack", string(debug.Stack())}
+	if rerr, ok := r.(runtime.Error); ok {
+		attrs = append(attrs, "error", rerr.Error())
+	}
+	s.log.Error(sinkPanicMessage, attrs...)
+	s.closeAfterPanic()
+	err := &Error{Reason: ReasonPanicked, Op: "sink", Endpoint: s.ep(), Detail: "the sink's writer panicked: the sink ended and closed its device, and the log has why"}
+	drain := s.drainCmd
+	s.end(err, err)
+	if c := s.doing; c != nil && c != drain {
+		s.doing = nil
+		c.reply <- s.doneError(c.op)
+	}
+}
+
+// closeAfterPanic closes the device after the writer panicked. The panic
+// may have come from the device's own calls, so a second one from its close
+// is let go of, said, and the device left as it is: the sink still ends, and
+// what waits on the writer is answered.
+func (s *Sink) closeAfterPanic() {
+	defer func() {
+		if r := recover(); r != nil {
+			if s.wHeld {
+				s.unlockW()
+			}
+			s.dev = nil
+			s.log.Error("player: the sink's device could not be closed after its writer panicked: the close panicked too, and the device may still be open", "endpoint", s.ep().String())
+		}
+	}()
+	s.closeDevice()
+}
+
 // next takes the next command, and reports whether the sink is done.
 func (s *Sink) next() (*sinkCmd, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockW()
+	defer s.unlockW()
 	if s.state == SinkStopped || s.state == SinkEnded {
 		return nil, true
 	}
@@ -93,8 +165,8 @@ func (s *Sink) do(c *sinkCmd) (bool, error) {
 // looks under, so a cancel that came after the loop last looked at the
 // drain is seen here or cancels what this returns, never neither.
 func (s *Sink) waitContext() context.Context {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockW()
+	defer s.unlockW()
 	if len(s.cmds) > 0 || (s.drainCmd != nil && s.drainCmd.ctx.Err() != nil) {
 		return doneCtx
 	}
@@ -109,14 +181,14 @@ func (s *Sink) waitContext() context.Context {
 // command (watch), or, draining, has the kernel play out the buffer.
 func (s *Sink) feed() {
 	ctx := s.waitContext()
-	s.mu.Lock()
+	s.lockW()
 	chunk := s.ring.span(s.ring.wr, min(s.ring.pending(), int64(s.params.PeriodFrames)))
 	if len(chunk) > 0 {
 		// The chunk is the kernel's from here on, written or about to be: a
 		// Cut leaves it alone until wrote has accounted for it.
 		s.inflight = s.ring.wr + int64(len(chunk)/s.ring.frameBytes)
 	}
-	s.mu.Unlock()
+	s.unlockW()
 	if len(chunk) == 0 {
 		if s.state == SinkDraining {
 			s.finishDrain()
@@ -147,17 +219,17 @@ func (s *Sink) feed() {
 // frames while the writer watches ends the wait.
 func (s *Sink) watch() {
 	ctx := s.waitContext()
-	s.mu.Lock()
+	s.lockW()
 	if s.ring.pending() > 0 {
-		s.mu.Unlock()
+		s.unlockW()
 		return
 	}
 	s.watching = true
-	s.mu.Unlock()
+	s.unlockW()
 	rev, err := s.dev.wait(ctx, max(s.params.PeriodTime(), time.Millisecond))
-	s.mu.Lock()
+	s.lockW()
 	s.watching = false
-	s.mu.Unlock()
+	s.unlockW()
 	s.settle(ctx, rev, err, "wait")
 	if err == nil && rev == 0 {
 		if _, err := s.measure(); err != nil {
@@ -186,9 +258,9 @@ func (s *Sink) idle() {
 func (s *Sink) wrote(n int64, silence bool) bool {
 	if n <= 0 {
 		if !silence {
-			s.mu.Lock()
+			s.lockW()
 			s.inflight = 0
-			s.mu.Unlock()
+			s.unlockW()
 		}
 		return true
 	}
@@ -200,7 +272,7 @@ func (s *Sink) wrote(n int64, silence bool) bool {
 	}
 	s.unexplained = 0
 	c := s.dev.Counters()
-	s.mu.Lock()
+	s.lockW()
 	s.live = c
 	if silence {
 		s.silence += n
@@ -208,7 +280,7 @@ func (s *Sink) wrote(n int64, silence bool) bool {
 		s.ring.written(n)
 		s.inflight = 0
 	}
-	s.mu.Unlock()
+	s.unlockW()
 	if !silence {
 		poke(s.room)
 	}
@@ -273,10 +345,10 @@ func (s *Sink) establish(p int64, stream State, queued int64) {
 	s.run.fold(s.runPlayed)
 	played := s.run.base + s.run.contentAmong(s.runPlayed)
 	at := s.now()
-	s.mu.Lock()
+	s.lockW()
 	s.pos.Played = min(max(s.pos.Played, played), s.ring.wr)
 	s.pos.Stream, s.pos.Queued, s.pos.Measured = stream, queued, at
-	s.mu.Unlock()
+	s.unlockW()
 }
 
 // xrun stops the sink at an underrun. The kernel stops a stream once its
@@ -290,12 +362,12 @@ func (s *Sink) xrun(err error, op string) {
 	s.runPlayed = s.run.written
 	s.run.fold(s.run.written)
 	at := s.now()
-	s.mu.Lock()
+	s.lockW()
 	s.pos.Played, s.pos.Queued, s.pos.Stream, s.pos.Measured = s.ring.wr, 0, State(stateXrun), at
 	s.gaps[s.ngaps%maxGaps] = Gap{At: s.ring.wr, Lookahead: s.ring.pending(), Op: op, Noticed: at}
 	s.ngaps++
 	s.setStateLocked(SinkXrun, err)
-	s.mu.Unlock()
+	s.unlockW()
 	s.answerDrain(err)
 }
 
@@ -317,14 +389,14 @@ func (s *Sink) end(err, drainErr error) {
 	if err != nil {
 		st = SinkEnded
 	}
-	s.mu.Lock()
+	s.lockW()
 	s.setStateLocked(st, err)
 	cmds := s.cmds
 	s.cmds = nil
 	if s.wakeStop != nil {
 		s.wakeStop()
 	}
-	s.mu.Unlock()
+	s.unlockW()
 	s.answerDrain(drainErr)
 	for _, c := range cmds {
 		c.reply <- s.doneError(c.op)
@@ -353,10 +425,10 @@ func (s *Sink) closeDevice() {
 	c := s.dev.Counters()
 	_ = s.dev.Close()
 	s.dev = nil
-	s.mu.Lock()
+	s.lockW()
 	s.counters = addCounters(s.counters, c)
 	s.live = Counters{}
-	s.mu.Unlock()
+	s.unlockW()
 }
 
 // addCounters sums two devices' counters.
@@ -426,11 +498,11 @@ func (s *Sink) pause() error {
 	}
 	s.unexplained = 0
 	s.deadline = s.now().Add(s.cfg.ReleaseAfter)
-	s.mu.Lock()
+	s.lockW()
 	s.pausedBy = by
 	s.pauses++
 	s.setStateLocked(SinkPaused, nil)
-	s.mu.Unlock()
+	s.unlockW()
 	return nil
 }
 
@@ -508,9 +580,9 @@ func (s *Sink) release() {
 		return
 	}
 	unplayed := s.run.content - s.run.contentAmong(s.runPlayed)
-	s.mu.Lock()
+	s.lockW()
 	kept := s.ring.wr - s.ring.base
-	s.mu.Unlock()
+	s.unlockW()
 	if unplayed > kept {
 		err := &Error{Reason: ReasonBadState, Op: "release", Endpoint: s.ep(), Detail: fmt.Sprintf(
 			"the %d frames the DAC had not played are not all held (%d are): a release would skip them", unplayed, kept)}
@@ -518,12 +590,12 @@ func (s *Sink) release() {
 		return
 	}
 	s.closeDevice()
-	s.mu.Lock()
+	s.lockW()
 	s.ring.wr -= unplayed
 	s.pos.Played, s.pos.Queued = s.ring.wr, 0
 	s.releases++
 	s.setStateLocked(SinkReleased, nil)
-	s.mu.Unlock()
+	s.unlockW()
 }
 
 // playing is the state a sink plays on in: draining when a Drain waits.
@@ -555,9 +627,9 @@ func (s *Sink) resume() error {
 			return err
 		}
 	}
-	s.mu.Lock()
+	s.lockW()
 	s.setStateLocked(s.playing(), nil)
-	s.mu.Unlock()
+	s.unlockW()
 	return nil
 }
 
@@ -581,18 +653,24 @@ func (s *Sink) reopen() error {
 	if err != nil {
 		return err
 	}
+	// The device opened is closed on every way out but the one that adopts
+	// it: a refusal, and a panic in the check after open, which ends the sink
+	// (recovered).
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = dev.Close()
+		}
+	}()
 	p := dev.Params()
 	if err := checkSetup(s.cfg, p); err != nil {
-		_ = dev.Close()
 		return err
 	}
 	if int64(p.BufferFrames)+int64(p.PeriodFrames) > s.ring.frames {
-		_ = dev.Close()
 		return &Error{Reason: ReasonBadConfig, Op: "resume", Endpoint: ep, Detail: fmt.Sprintf(
 			"the device came back with a buffer of %d frames, which the store of %d cannot hold with a period more", p.BufferFrames, s.ring.frames)}
 	}
 	if err := admit(s.cfg.Admit, dev, ep, "resume"); err != nil {
-		_ = dev.Close()
 		return err
 	}
 	s.endpoint.Store(&ep)
@@ -601,16 +679,16 @@ func (s *Sink) reopen() error {
 	} else {
 		s.zeros = s.zeros[:need]
 	}
-	s.dev = dev
+	s.dev, adopted = dev, true
 	s.runPlayed = 0
-	s.mu.Lock()
+	s.lockW()
 	s.run = run{base: s.ring.wr}
 	s.params = p
 	s.ring.keep = int64(p.BufferFrames)
 	s.pos.Stream, s.pos.Queued = State(statePrepared), 0
 	s.reopens++
 	s.setStateLocked(s.playing(), nil)
-	s.mu.Unlock()
+	s.unlockW()
 	return nil
 }
 
@@ -629,7 +707,7 @@ func (s *Sink) recover() error {
 	}
 	at := s.now()
 	s.runPlayed = 0
-	s.mu.Lock()
+	s.lockW()
 	s.run = run{base: s.ring.wr}
 	s.gaps[(s.ngaps-1)%maxGaps].Recovered = at
 	s.pos.Stream, s.pos.Queued = State(statePrepared), 0
@@ -639,7 +717,7 @@ func (s *Sink) recover() error {
 	} else {
 		s.setStateLocked(SinkPlaying, nil)
 	}
-	s.mu.Unlock()
+	s.unlockW()
 	return nil
 }
 
@@ -655,12 +733,13 @@ func (s *Sink) startDrain(c *sinkCmd) (bool, error) {
 	if s.state != SinkPlaying {
 		return true, s.badState("drain")
 	}
-	s.mu.Lock()
+	s.lockW()
 	s.drainCmd = c
 	s.finishing = true
 	s.setStateLocked(SinkDraining, nil)
-	s.mu.Unlock()
+	s.unlockW()
 	s.drainStop = s.afterFunc(c.ctx, func() {
+		// The callback runs on a goroutine of its own, never the writer's.
 		s.mu.Lock()
 		if s.drainCmd == c && s.wakeStop != nil {
 			s.wakeStop()
@@ -680,12 +759,16 @@ func (s *Sink) answerDrain(err error) {
 	if c == nil {
 		return
 	}
-	s.drainStop()
-	s.drainStop = nil
-	s.mu.Lock()
+	// A Drain whose start a panic cut short has no stop, and a stop is
+	// called once, a panic in it included.
+	if stop := s.drainStop; stop != nil {
+		s.drainStop = nil
+		stop()
+	}
+	s.lockW()
 	s.drainCmd = nil
 	s.finishing, s.finalDrain = false, false
-	s.mu.Unlock()
+	s.unlockW()
 	c.reply <- err
 }
 
@@ -695,17 +778,17 @@ func (s *Sink) answerDrain(err error) {
 // kernel drains, the sender lets nothing but a Drop through, since an
 // interrupted Device.Drain drops the stream and cuts off its end.
 func (s *Sink) finishDrain() {
-	s.mu.Lock()
+	s.lockW()
 	if len(s.cmds) > 0 {
-		s.mu.Unlock()
+		s.unlockW()
 		return
 	}
 	s.finalDrain = true
-	s.mu.Unlock()
+	s.unlockW()
 	defer func() {
-		s.mu.Lock()
+		s.lockW()
 		s.finalDrain = false
-		s.mu.Unlock()
+		s.unlockW()
 	}()
 	dctx, cancel := context.WithCancel(s.waitContext())
 	defer cancel()
@@ -717,9 +800,9 @@ func (s *Sink) finishDrain() {
 	s.runPlayed = s.run.written
 	s.run.fold(s.run.written)
 	at := s.now()
-	s.mu.Lock()
+	s.lockW()
 	s.pos.Played, s.pos.Queued, s.pos.Stream, s.pos.Measured = s.ring.wr, 0, State(stateSetup), at
-	s.mu.Unlock()
+	s.unlockW()
 	s.end(nil, nil)
 }
 

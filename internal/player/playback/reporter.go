@@ -48,9 +48,11 @@ func (s *session) report() {
 // order; the decoder's end of an occurrence reports nothing.
 func (s *session) reportStep() bool {
 	var evs []func()
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	if s.releasing || len(s.chain) == 0 {
-		s.mu.Unlock()
+		l.unlock()
 		return true
 	}
 	id := s.id
@@ -171,9 +173,49 @@ func (s *session) reportStep() bool {
 	// What this step reported of the occurrences before the one heard was
 	// the last of them.
 	s.retireLocked(heard)
-	s.mu.Unlock()
+	l.unlock()
 	for _, e := range evs {
 		e()
 	}
 	return done
+}
+
+// recoverReporter is deferred last by the reporter: a panic on it is
+// recovered, logged once, and is the session's fault, which the reporter,
+// the one goroutine that sends the session's events, sends itself, since it
+// sends nothing after, unless a fault was sent already or the session is
+// being released. The fault names the occurrence last heard, with its
+// frames, or else the first.
+func (s *session) recoverReporter() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	const where = "the reporter"
+	s.b.logPanic(where, r)
+	s.faulted(where)
+	s.mu.Lock()
+	send := !s.faultSent && !s.releasing
+	var f engine.Fault
+	if send {
+		s.faultSent = true
+		f = *s.fault
+		if f.Occurrence == 0 {
+			f.Occurrence, f.Frames = s.posOcc, s.posFrames
+			if f.Occurrence == 0 && len(s.chain) > 0 {
+				f.Occurrence = s.chain[0].id
+			}
+		}
+	}
+	ev, id := s.ev, s.id
+	s.mu.Unlock()
+	if !send {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic("the reporter's report of its fault", r)
+		}
+	}()
+	ev.Fault(id, f)
 }

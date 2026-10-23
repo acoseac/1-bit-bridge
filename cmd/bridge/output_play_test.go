@@ -174,6 +174,10 @@ func (b *playStandIn) Release(ctx context.Context, s engine.SessionID) error {
 func (b *playStandIn) Discard(context.Context) error  { return nil }
 func (b *playStandIn) Wait(ctx context.Context) error { return nil }
 
+// ReleaseAll is never asked of the harness's backend: the harness does not
+// recover a panic in its engine's Run.
+func (b *playStandIn) ReleaseAll(context.Context) error { return nil }
+
 // playCase is one harness run's box: a config binding the Pi 5 tree's GO
 // bar, the tree, the files, and the stand-in.
 type playCase struct {

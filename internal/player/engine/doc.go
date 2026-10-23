@@ -19,6 +19,17 @@
 // once. Slow work never runs on the owner: every backend call, reservation
 // write and queue file write runs on a goroutine of its own.
 //
+// A panic on one of those goroutines is recovered there, logged once (where,
+// its stack, and its value only when it is the runtime's own error), and is
+// the failure of the work it ran, through the path an error of that work
+// takes: a backend call fails with ReasonBackend, a reservation write is one
+// that failed (the edits that need it refused until one lands), and a queue
+// file write is a failed write, the state dirty and the write retried; a
+// panic on the writer outside a write ends the writer, the state dirty from
+// then on. A panic on the owner itself is Run's caller's to recover: on its
+// way out the engine ends every backend call, has its writer write the
+// newest revision and exit, and closes Done, so nothing waits on it.
+//
 // A command that cannot run yet waits, and only behind the waiting commands
 // of its own kind: an insert, a delete or a DeleteAll for a reservation
 // write, at most reserveTimeout (5 s); Play and Pause for a Pause, a Resume
@@ -203,13 +214,16 @@
 // the last has returned, so an older revision never lands after a newer
 // one; it waits writeCoalesce after a change and at most writeMaxAge in
 // all, and a failed write keeps the state dirty, is logged once and is
-// retried with backoff. A queue file or reservation file that is
-// unreadable, past its cap (maxQueueFileBytes is sized for a full queue's
-// real encoding), of another version or invalid is logged and renamed
-// aside with a timestamp, never deleted, and the engine starts from what
-// remains; if the rename fails the file stays where it is, nothing is
-// written over it and every insert and every other token-advancing edit is
-// refused with ReasonFileStuck until the operator moves it.
+// retried with backoff. Both files are opened without waiting and read only
+// when they are files (fsutil.OpenAsFile), so a named pipe at either path is
+// refused at once rather than waited on. A queue file or reservation file
+// that is unreadable, no file (a named pipe, a directory, a device), past its
+// cap (maxQueueFileBytes is sized for a full queue's real encoding), of
+// another version or invalid is logged and renamed aside with a timestamp,
+// never deleted, and the engine starts from what remains; if the rename
+// fails the file stays where it is, nothing is written over it and every
+// insert and every other token-advancing edit is refused with
+// ReasonFileStuck until the operator moves it.
 //
 // # Maintenance
 //
