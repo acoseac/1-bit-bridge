@@ -171,6 +171,58 @@ func TestTheDestinationGuardHoldsWhenArrivalReportingFails(t *testing.T) {
 	}
 }
 
+// TestRegisterRefusesWhatItCannotAdvertise pins Register's checks, before any
+// socket opens: a registration needs an admission (a strict one, its source
+// hook), a UDN and targets; an endpoint needs a LOCATION and, when it gives
+// one, an IPv4 local address; and a strict endpoint names its interface, the
+// OS default being the MediaServer's fallback alone.
+func TestRegisterRefusesWhatItCannotAdvertise(t *testing.T) {
+	n := newFakeNet()
+	sub := fakeSubsystem(t, n)
+	for _, tc := range []struct {
+		name string
+		reg  SSDPRegistration
+	}{
+		{"no_admission", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Admission = nil; return r }()},
+		{"no_source_hook", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Admission = SSDPStrictAdmission{}; return r }()},
+		{"no_udn", strictReg("", 4, upEn0)},
+		{"no_targets", func() SSDPRegistration { r := strictReg(srcUDN, 4, upEn0); r.Targets = nil; return r }()},
+		{"no_served_addresses", legacyReg(msUDN, nil, SSDPEndpoint{Interface: en0, Location: msOnEn0})},
+	} {
+		if _, _, err := sub.Register(context.Background(), tc.reg); err == nil || errors.Is(err, ErrSSDPNoEndpoint) {
+			t.Errorf("%s: Register = %v, want a refusal of the registration itself", tc.name, err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		strict bool
+		ep     SSDPEndpoint
+		want   error
+	}{
+		{"strict_os_default", true, SSDPEndpoint{Location: srcOnEn0, Local: netip.MustParsePrefix("192.168.1.20/24")}, ErrSSDPStrictCapability},
+		{"strict_index_zero", true, SSDPEndpoint{Interface: synthIface(0, "en0"), Location: srcOnEn0}, ErrSSDPStrictCapability},
+		{"no_location", false, SSDPEndpoint{Interface: en0}, nil},
+		{"ipv6_local", false, SSDPEndpoint{Interface: en0, Location: msOnEn0, Local: netip.MustParsePrefix("fd12::20/64")}, nil},
+	} {
+		reg := legacyReg(msUDN, fakeServed(), tc.ep)
+		if tc.strict {
+			reg = strictReg(srcUDN, 4, tc.ep)
+		}
+		_, res, err := sub.Register(context.Background(), reg)
+		if !errors.Is(err, ErrSSDPNoEndpoint) || len(res.Failed) != 1 || (tc.want != nil && !errors.Is(res.Failed[0].Err, tc.want)) {
+			t.Errorf("%s: Register = %v with %+v, want the endpoint refused", tc.name, err, res)
+		}
+	}
+	if l, s, _ := n.openSockets(); l+s != 0 {
+		t.Errorf("refused registrations left %d listeners and %d senders open", l, s)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.listens != 0 {
+		t.Errorf("refused registrations opened %d listeners, want none: every check comes first", n.listens)
+	}
+}
+
 // TestRegisterBesideAnExistingDeviceSharesItsListener pins that a second
 // device on an interface takes a reference to the listener the first one
 // opened, never a second listener, and leaves the first one's endpoint as it
