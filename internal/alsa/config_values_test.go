@@ -56,7 +56,7 @@ func TestPCMValuesStillRefuseUnsafeFiles(t *testing.T) {
 		"pcm.x { type = hw card = <x.conf> }", "pcm.x { values = [ <x.conf> ] }",
 		"pcm.x { type hw card = }", "pcm.x =", "pcm.x = = { type hw }",
 		"pcm.x { values [ = 2 ] }", `defaults.value "bad\nvalue"`,
-		"defaults.value .5", "defaults.value = .5", "x = .5",
+		"defaults.value = .5", "x = .5",
 		"pcm.x { values [ .5 ] }", "pcm.x { values = [ .5 ] }",
 		`defaults.value "unterminated`, "defaults.value /path\x00tail",
 		"pcm.keep.card 2", "pcm { other { type hw card 2 } }",
@@ -344,6 +344,18 @@ func TestPCMSpacedDottedKeys(t *testing.T) {
 		// definitions with more than one component after pcm.
 		if _, ok := parsePCMFile(spaced); ok {
 			t.Error("unmodeled nested PCM definition admitted")
+		}
+	})
+	t.Run("dot after blank continues the key", func(t *testing.T) {
+		// With no = before it, the dot continues the key: defaults.value .5
+		// is the key defaults.value.5 with no value, and refused for that.
+		if _, ok := parsePCMFile("defaults.value .5"); ok {
+			t.Error("a key with no value admitted")
+		}
+		got, ok := lexPCM("defaults.value .5 x")
+		want, wantOK := lexPCM("defaults.value.5 x")
+		if !ok || !wantOK || !reflect.DeepEqual(got, want) {
+			t.Fatalf("tokens = %+v,%v, want %+v,%v", got, ok, want, wantOK)
 		}
 	})
 }
