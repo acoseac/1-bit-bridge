@@ -419,7 +419,7 @@ func (s *SSDPAdvertiser) searchedFor(dst netip.Addr, known bool, src *net.UDPAdd
 func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn, armed bool) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
-	oob := make([]byte, datagramDstSpace)
+	oob := make([]byte, datagramMetaSpace)
 	consecutiveReadErrs := 0
 	for {
 		select {
@@ -455,7 +455,7 @@ func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.U
 		}
 		consecutiveReadErrs = 0
 		if armed {
-			if dst, ok := parseDatagramDst(oob[:oobn]); !s.searchedFor(dst, ok, src) {
+			if m := parseDatagramMeta(oob[:oobn]); !s.searchedFor(m.dst, m.dstOK, src) {
 				continue
 			}
 		}
