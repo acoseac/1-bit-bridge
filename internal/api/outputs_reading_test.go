@@ -1167,11 +1167,12 @@ func partialCard(t *testing.T, r *readingRig) (whole func()) {
 // with only a closed substream. It keeps no evidence of the device: taken
 // for closed, it would let the next whole reading see a stream running
 // since before as one opened since, under its settings. Nor does it erase
-// what the readings before it kept, any more than a reading whose /proc read
-// fails does, so a confirmation of a run it could not see stands once the
-// run reads the same again. What such a reading does read still counts:
-// MPD's DoP settings changed, or moving across the /proc read, end the
-// record, since the open it would vouch for may have come in between.
+// what the readings before it kept, any more than a reading with no ids
+// does (/proc not read, the ALSA configuration not had), so a confirmation
+// of a run it could not see stands once the run reads the same again. What
+// such a reading does read still counts: MPD's DoP settings changed, or
+// moving across the /proc read, end the record, since the open it would
+// vouch for may have come in between.
 func TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs a privilege this test does not have")
@@ -1229,6 +1230,35 @@ func TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone(t *testing.T) {
 		_, got, raw = getReading(t, hs, token, id)
 		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
 	})
+	t.Run("a stream watched opening, the ALSA configuration not had", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		// asound.conf a directory: there, and no file the read can take.
+		asound := filepath.Join(filepath.Dir(rig.procRoot), "etc", "asound.conf")
+		if err := os.Rename(asound, asound+".aside"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(asound, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ALSAConfigUnread}) {
+			t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
+		}
+		if err := os.Remove(asound); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(asound+".aside", asound); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
 	t.Run("a reading in part that reads MPD's settings changed", func(t *testing.T) {
 		rig := doPRig(t, "1", "")
 		clock := manualClockOn(rig)
@@ -1271,7 +1301,10 @@ func TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone(t *testing.T) {
 // (other hw_params), with the same settings reported. The first reading of a
 // stream already playing has no such reading; a stream that replaced
 // another has one; and two readings more than ten seconds apart are no
-// watch.
+// watch. An ALSA configuration the bridge read and does not model is had,
+// and the stream beside it is watched the same. A reading of the stream
+// opened and not started yet tells no run, so the run after it is judged
+// against the reading before.
 func TestADoPVerdictNeedsTheStreamWatchedOpening(t *testing.T) {
 	t.Run("the first reading of a stream already playing", func(t *testing.T) {
 		rig := doPRig(t, "1", "")
@@ -1315,6 +1348,20 @@ func TestADoPVerdictNeedsTheStreamWatchedOpening(t *testing.T) {
 		clock.Advance(openWatch + time.Second)
 		_, got, raw := getReading(t, hs, token, id)
 		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+	t.Run("beside an ALSA configuration read and not modeled", func(t *testing.T) {
+		// Had, though the parser models none of it (a top-level @hooks): the
+		// device string still names the card, so the reading tells the
+		// stream and watches it open.
+		rig := doPRig(t, "1", "")
+		appendAsound(t, rig, "@hooks [ ]\n")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		if got.State != "whole" {
+			t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
+		}
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
 	})
 	t.Run("a stream read opened and not started yet", func(t *testing.T) {
 		rig := doPRig(t, "1", "")
