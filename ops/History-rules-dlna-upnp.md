@@ -58,11 +58,28 @@ budget result after release, atomically with handle removal, so Close owns
 exactly the handles it saw** (round 4). The join and pre-write reads still decide
 whether to skip a byebye and report expiry. They do not serialize deadline
 installation. The former final check inside `retire`, before releasing senders
-and listeners, missed expiry during release. `withdraw` now checks once after
-all cleanup, under `s.mu` together with removing its handle: the earlier of
-its own deadline and, if Close has begun, Close's. Close snapshots that list
-under the same lock. A Close that saw the handle owns the withdrawal through
-its release; one that did not cannot change its completed result.
+and listeners, missed expiry during release. Round 4 replaced it with the
+check in `withdraw`; round 5 restores it after cleanup because Register's
+rollback and Update's removal and rollback call `retire` directly.
+**Every retirement checks expiry after sender/listener release and reader join
+against the re-read deadline.** When the normal-send join did not already
+expire, `retire` re-reads the earlier of its original deadline and Close's after
+cleanup, and reports `context.DeadlineExceeded` if that budget has expired and
+the result does not already carry it. A byebye socket timeout alone does not
+match that context error. **Withdraw checks again atomically with handle
+removal, adding a deadline error only if absent.** Its final check stays under
+`s.mu` with removal, including time after `retire` returns and before removal.
+Close snapshots that list under the same lock. A Close that saw the handle owns
+the withdrawal through its release; one that did not cannot change its
+completed result.
+`TestRetirementReportsAByebyeTimeoutAsDeadlineExceeded` pins Update's removal
+and Withdraw's single expiry report after a blocked byebye;
+`TestRollbackReportsAByebyeTimeoutAsDeadlineExceeded` pins both Register and
+Update rollbacks through the existing fake network and cancellation seam.
+`TestUpdateRetirementBudgetIncludesListenerRelease` expires Update's original
+budget or Close's shorter budget during listener release, after all byebyes.
+`TestWithdrawalBudgetIncludesHandleRemoval` parks after retirement completes,
+then starts Close with an expired deadline before the handle can be removed.
 `TestWithdrawalBudgetIncludesListenerRelease` parks in `fakeListener.onClose`
 after all byebyes, lets Close's short deadline expire, then releases it:
 Withdraw reports `context.DeadlineExceeded`. The own-deadline variant also

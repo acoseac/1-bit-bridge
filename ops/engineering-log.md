@@ -57544,13 +57544,33 @@ A stale install cannot raise the cap, and changing the deadline cuts a write
 already in progress. Close snapshots its handles at that same beginning.
 `withdraw` decides its final expiry after all releases, under `s.mu` together
 with handle removal, so Close owns precisely the withdrawals it saw. The
-redundant final expiry check before `retire`'s cleanup is gone; the join and
+final expiry check before `retire`'s cleanup was removed in this round; round 5
+restores it after cleanup for callers that never enter `withdraw`. The join and
 pre-write reads remain because they decide whether to skip and report a send.
 The new tests also keep the positive release-in-time and completed-before-Close
 cases. Withdraw and Close document this ownership boundary. The rule and its
 History carry both requirements. The round-4 scratch report records red/green
 runs, the nine standalone controls (seven carried forward with adaptations,
 one per new rule), and validation including sandbox-denied socket tests.
+
+**Round 5 — every retirement reports expiry through cleanup.** Round 4's
+replacement check in `withdraw` missed Register's rollback and Update's removal
+and rollback, which call `retire` directly. Red-first tests on the committed
+round-4 code returned only the socket's `i/o timeout` after a byebye blocked
+until its deadline in all three paths. Update also returned nil (or just
+`ErrSSDPClosed`) after its listener release crossed its own deadline or Close's
+shorter one. `retire` now checks again after sender close, listener release and
+the reader join, re-reading the retirement deadline when the normal-send join
+did not already expire. It adds `context.DeadlineExceeded` if that result does
+not already carry it. `withdraw` retains its final check under `s.mu` with
+handle removal, adding the error only when absent; a blocked-byebye withdrawal
+asserts it reports expiry once. Another test parks after retirement completes
+and starts Close before removal, keeping that ownership boundary covered even
+with `retire`'s restored check. No new production seam, packet builder, golden
+or routing change. The rules and their History now state both checks. The
+round-5 scratch report records the red/green runs, independently applied
+controls (round 4's retained or re-cut, plus retirement and duplicate-reporting
+controls), exact commands and validation limits.
 
 ### Why
 
