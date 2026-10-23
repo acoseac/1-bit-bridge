@@ -2,7 +2,9 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/netip"
 	"time"
 )
@@ -335,16 +337,28 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 	// `ssdp:all` search matches every target; re-dialing the same source
 	// per match is pure socket churn. One datagram per target/USN is still
 	// correct UPnP — only the socket is shared.
-	conn, err := h.s.transport.dialReply(to)
+	var from *SSDPEndpointSnapshot
+	if h.strict() {
+		snapshot := ep.snapshot()
+		from = &snapshot
+	}
+	conn, err := h.s.transport.dialReply(to, from)
 	if err != nil {
+		if h.strict() {
+			h.noteReplyRefusal(ep, err)
+			return
+		}
 		h.log.Debug("M-SEARCH response dial failed",
 			slog.String("src", to.String()),
 			slog.String("err", err.Error()))
 		return
 	}
-	stop := context.AfterFunc(ep.ctx, func() { _ = conn.Close() })
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ep.ctx, func() { defer close(closed); _ = conn.Close() })
 	defer func() {
-		stop()
+		if !stop() {
+			<-closed
+		}
 		_ = conn.Close()
 	}()
 
@@ -356,10 +370,26 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 		}
 		response := BuildMSearchResponse(ep.spec.Location, h.serverToken, target.NT, target.USN, now)
 		if _, err := conn.Write(response); err != nil {
+			if h.strict() {
+				h.noteReplyRefusal(ep, err)
+				return
+			}
 			h.log.Debug("M-SEARCH response write failed",
 				slog.String("src", to.String()),
 				slog.String("nt", target.NT),
 				slog.String("err", err.Error()))
 		}
 	}
+}
+
+// noteReplyRefusal reports a strict reply's failure once per registration,
+// including a kernel that refuses per-packet interface selection at send time.
+func (h *SSDPHandle) noteReplyRefusal(ep *ssdpEndpoint, err error) {
+	if errors.Is(err, net.ErrClosed) {
+		return
+	}
+	h.replyRefusal.Do(func() {
+		h.log.Warn("SSDP strict reply refused: cannot send from its endpoint",
+			slog.String("registration", h.name), slog.String("interface", ep.key.name), slog.String("err", err.Error()))
+	})
 }

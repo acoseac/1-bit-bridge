@@ -132,10 +132,13 @@ type SSDPSubsystem struct {
 	// mu guards everything below, and the published endpoint list of every
 	// handle (SSDPHandle.active). It is never held across socket I/O, a
 	// sleep or a join.
-	mu        sync.Mutex
-	closed    bool
-	listeners map[ssdpListenerKey]*ssdpListener
-	handles   []*SSDPHandle // registered and not withdrawn, in registration order
+	mu            sync.Mutex
+	closed        bool
+	closeDeadline time.Time
+	closeDone     chan struct{}
+	senders       map[*ssdpOwnedSender]struct{} // includes staged and retiring endpoints
+	listeners     map[ssdpListenerKey]*ssdpListener
+	handles       []*SSDPHandle // includes withdrawals until their cleanup finishes
 
 	// table is what the readers dispatch by, rebuilt under mu on every
 	// change and read without it.
@@ -174,6 +177,7 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		notifyTo:      ssdpGroupUDPAddr,
 		intervalFloor: time.Minute,
 		listeners:     map[ssdpListenerKey]*ssdpListener{},
+		senders:       map[*ssdpOwnedSender]struct{}{},
 	}
 }
 
@@ -196,18 +200,48 @@ func withdrawDeadline(ctx context.Context) time.Time {
 // from entry, shared by them all (ctx's cancellation does not cut it short,
 // so a byebye goes out on a shutdown). On return no socket is open and every
 // goroutine it started has returned. It returns the withdrawals' errors,
-// joined; a second Close returns nil.
+// joined; a second Close waits for the first under that first call's budget,
+// then returns nil.
 func (s *SSDPSubsystem) Close(ctx context.Context) error {
 	deadline := withdrawDeadline(ctx)
 	s.mu.Lock()
 	if s.closed {
+		done := s.closeDone
 		s.mu.Unlock()
+		<-done
 		return nil
 	}
 	s.closed = true
+	s.closeDeadline = deadline
+	s.closeDone = make(chan struct{})
 	s.mu.Unlock()
+	defer close(s.closeDone)
 	s.cancel()
-	s.inflight.Wait()
+
+	// Also interrupt a Withdraw holding opMu, or an initial alive on an
+	// unpublished endpoint. Neither is reachable through the dispatch table.
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			s.interruptSenders()
+		case <-stop:
+		}
+	}()
+	defer func() { close(stop); <-stopped }()
+	joined := make(chan struct{})
+	go func() { s.inflight.Wait(); close(joined) }()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-joined:
+	case <-timer.C:
+		s.interruptSenders()
+		<-joined // socket close wakes writes; join their rollback, too
+	}
 
 	s.mu.Lock()
 	handles := append([]*SSDPHandle(nil), s.handles...)
@@ -219,7 +253,35 @@ func (s *SSDPSubsystem) Close(ctx context.Context) error {
 		}
 	}
 	s.readers.Wait()
+	if !time.Now().Before(deadline) {
+		errs = append(errs, context.DeadlineExceeded)
+	}
 	return errors.Join(errs...)
+}
+
+// interruptSenders closes even unpublished and retiring endpoints' senders.
+// No socket I/O runs under mu. A sender opened after the deadline is closed
+// by ownSender before the operation can send on it.
+func (s *SSDPSubsystem) interruptSenders() {
+	s.mu.Lock()
+	all := make([]*ssdpOwnedSender, 0, len(s.senders))
+	for sender := range s.senders {
+		all = append(all, sender)
+	}
+	s.mu.Unlock()
+	for _, sender := range all {
+		_ = sender.Close()
+	}
+}
+
+// retirementDeadline shares Close's budget with a rollback or withdrawal.
+func (s *SSDPSubsystem) retirementDeadline(deadline time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed && s.closeDeadline.Before(deadline) {
+		return s.closeDeadline
+	}
+	return deadline
 }
 
 // enter admits one Register or Update call, which Close waits for; done ends

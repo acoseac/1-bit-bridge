@@ -2,9 +2,12 @@ package dlna
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -38,8 +41,40 @@ type ssdpSendConn interface {
 	Close() error
 }
 
+// ssdpOwnedSender stays in the subsystem's shutdown inventory until its
+// socket is closed. Close is idempotent even when shutdown interrupts retire.
+type ssdpOwnedSender struct {
+	ssdpSendConn
+	s    *SSDPSubsystem
+	once sync.Once
+	err  error
+}
+
+func (s *SSDPSubsystem) ownSender(c ssdpSendConn) *ssdpOwnedSender {
+	sender := &ssdpOwnedSender{ssdpSendConn: c, s: s}
+	s.mu.Lock()
+	s.senders[sender] = struct{}{}
+	expired := s.closed && !time.Now().Before(s.closeDeadline)
+	s.mu.Unlock()
+	if expired {
+		_ = sender.Close()
+	}
+	return sender
+}
+
+func (c *ssdpOwnedSender) Close() error {
+	c.once.Do(func() {
+		c.err = c.ssdpSendConn.Close()
+		c.s.mu.Lock()
+		delete(c.s.senders, c)
+		c.s.mu.Unlock()
+	})
+	return c.err
+}
+
 // ssdpReplyConn is the transient socket one burst of M-SEARCH responses is
-// written from, connected to the searcher.
+// written through. The MediaServer connects to the searcher; strict replies
+// use an unconnected socket with an explicit source address and interface.
 type ssdpReplyConn interface {
 	Write(b []byte) (int, error)
 	SetWriteDeadline(t time.Time) error
@@ -61,7 +96,9 @@ type ssdpTransport interface {
 	openSender(iface *net.Interface) (conn ssdpSendConn, pinErr error, err error)
 	// dialReply opens the socket one burst of responses to to is written
 	// from.
-	dialReply(to netip.AddrPort) (ssdpReplyConn, error)
+	// from is nil for the MediaServer's ordinary routed reply. A strict
+	// reply must use both the address and interface in from, or fail closed.
+	dialReply(to netip.AddrPort, from *SSDPEndpointSnapshot) (ssdpReplyConn, error)
 }
 
 // hostSSDPTransport is the host's sockets. Each function field, nil in
@@ -71,6 +108,8 @@ type hostSSDPTransport struct {
 	armDst     func(*net.UDPConn) error
 	armArrival func(*net.UDPConn) error
 	pin        func(*net.UDPConn, *net.Interface) error
+	openReply  func(*net.UDPAddr) (ssdpUnicastSocket, error)
+	pinReply   func(ssdpUnicastSocket, int) error
 }
 
 // listen opens a listener with listenSSDP, and arms it to report each
@@ -139,11 +178,65 @@ func (t hostSSDPTransport) openSender(iface *net.Interface) (ssdpSendConn, error
 	return sender, pin(sender, iface), nil
 }
 
-// dialReply opens one transient UDP socket connected to the searcher, as
-// every advertiser did: the response leaves on the route to the searcher,
-// never from the :1900 listener.
-func (hostSSDPTransport) dialReply(to netip.AddrPort) (ssdpReplyConn, error) {
-	return net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(to))
+// dialReply preserves the MediaServer's connected, OS-routed socket. A
+// strict reply binds the selected local address and pins its interface
+// before sending anything; it never falls back to the default route.
+func (t hostSSDPTransport) dialReply(to netip.AddrPort, from *SSDPEndpointSnapshot) (ssdpReplyConn, error) {
+	if from == nil {
+		return net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(to))
+	}
+	if from.Interface.Index <= 0 || !from.Local.IsValid() || !from.Local.Addr().Is4() || from.Local.Addr().IsUnspecified() {
+		return nil, fmt.Errorf("%w: reply needs an interface and local IPv4 address", ErrSSDPStrictCapability)
+	}
+	open := t.openReply
+	if open == nil {
+		open = func(addr *net.UDPAddr) (ssdpUnicastSocket, error) { return net.ListenUDP("udp4", addr) }
+	}
+	c, err := open(net.UDPAddrFromAddrPort(netip.AddrPortFrom(from.Local.Addr(), 0)))
+	if err != nil {
+		return nil, err
+	}
+	pin := t.pinReply
+	if pin == nil {
+		pin = pinStrictReply
+	}
+	if err := pin(c, from.Interface.Index); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("%w: reply interface: %w", ErrSSDPStrictCapability, err)
+	}
+	return &ssdpStrictReply{ssdpUnicastSocket: c, to: net.UDPAddrFromAddrPort(to), from: *from}, nil
+}
+
+// ssdpUnicastSocket is the unconnected host socket used only by strict replies.
+// These seams let tests inspect the bind, pin and ancillary data without LAN I/O.
+type ssdpUnicastSocket interface {
+	ssdpSendConn
+	WriteMsgUDP([]byte, []byte, *net.UDPAddr) (int, int, error)
+	SyscallConn() (syscall.RawConn, error)
+}
+
+type ssdpStrictReply struct {
+	ssdpUnicastSocket
+	to   *net.UDPAddr
+	from SSDPEndpointSnapshot
+}
+
+func (c *ssdpStrictReply) Write(b []byte) (int, error) {
+	return writeStrictReply(c.ssdpUnicastSocket, b, c.to, c.from)
+}
+
+// setStrictReplyInterface propagates both RawConn.Control and setsockopt
+// failures; either means that a strict reply cannot safely be sent.
+func setStrictReplyInterface(c ssdpUnicastSocket, index int, set func(uintptr, int) error) error {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var optionErr error
+	if err := raw.Control(func(fd uintptr) { optionErr = set(fd, index) }); err != nil {
+		return err
+	}
+	return optionErr
 }
 
 // hostReadConn is a listener's socket on the host.

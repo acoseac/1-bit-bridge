@@ -38,7 +38,10 @@ type fakeNet struct {
 	blockSends map[string]bool // a sender's writes wait for its deadline or close
 	// blockReplies makes every answer socket dialled from now on wait, on
 	// each write, for its deadline or its close.
-	blockReplies bool
+	blockReplies   bool
+	replyRoute     SSDPEndpointSnapshot // default route, possibly through another NIC/VPN
+	strictReplyErr error                // pin failure at reply creation
+	strictWriteErr error                // per-packet interface selection failure
 
 	// listeners is every listener opened, in order.
 	listeners []*fakeListener
@@ -128,7 +131,7 @@ func (n *fakeNet) openSender(iface *net.Interface) (ssdpSendConn, error, error) 
 	return s, pinErr, nil
 }
 
-func (n *fakeNet) dialReply(to netip.AddrPort) (ssdpReplyConn, error) {
+func (n *fakeNet) dialReply(to netip.AddrPort, from *SSDPEndpointSnapshot) (ssdpReplyConn, error) {
 	n.mu.Lock()
 	hook := n.onDial
 	n.mu.Unlock()
@@ -137,7 +140,14 @@ func (n *fakeNet) dialReply(to netip.AddrPort) (ssdpReplyConn, error) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	r := &fakeReply{n: n, to: to.String(), closed: make(chan struct{}), block: n.blockReplies}
+	if from != nil && n.strictReplyErr != nil {
+		return nil, n.strictReplyErr
+	}
+	r := &fakeReply{n: n, to: to.String(), closed: make(chan struct{}), block: n.blockReplies, from: n.replyRoute}
+	if from != nil {
+		r.from = *from
+		r.writeErr = n.strictWriteErr
+	}
 	n.replies = append(n.replies, r)
 	return r, nil
 }
@@ -358,8 +368,10 @@ func waitForDeadlineOrClose(deadline time.Time, closed <-chan struct{}) error {
 
 // fakeReply is one answer burst's socket.
 type fakeReply struct {
-	n  *fakeNet
-	to string
+	n        *fakeNet
+	to       string
+	from     SSDPEndpointSnapshot // zero means the OS route selected the source/interface
+	writeErr error
 
 	mu       sync.Mutex
 	deadline time.Time
@@ -400,6 +412,9 @@ func (r *fakeReply) Write(b []byte) (int, error) {
 	}
 	if r.isClosed() {
 		return 0, net.ErrClosed
+	}
+	if r.writeErr != nil {
+		return 0, r.writeErr
 	}
 	if block {
 		return 0, waitForDeadlineOrClose(deadline, r.closed)

@@ -63,7 +63,8 @@ type SSDPEndpoint struct {
 	// when the caller knows it. Nothing infers it, from Location's host or
 	// otherwise. A strict registration answers a unicast search only on an
 	// endpoint whose Local address the search was sent to, and its source
-	// hook may judge a searcher by Local's prefix.
+	// hook may judge a searcher by Local's prefix. Strict replies also bind
+	// this address: without a valid non-unspecified IPv4, no reply is sent.
 	Local netip.Prefix
 }
 
@@ -112,7 +113,9 @@ type SSDPAdmission interface{ ssdpAdmission() }
 // and, unicast, was sent to that endpoint's Local address. Then Source
 // judges the searcher. Every endpoint of a strict registration needs those
 // capabilities and a pinned sender to start at all, and a strict
-// registration never takes the MediaServer's unarmed fallback.
+// registration never takes the MediaServer's unarmed fallback. Its replies
+// use the selected endpoint's Local address and outgoing interface, or fail
+// closed with one warning per registration.
 type SSDPStrictAdmission struct {
 	// Source reports whether a search from s.Datagram.Source may be
 	// answered from s.Endpoint (PR 5a2: an on-link rule over the endpoint's
@@ -165,7 +168,8 @@ type SSDPRegistration struct {
 	// Endpoints are tried in order, and announced in that order.
 	Endpoints []SSDPEndpoint
 
-	// Admission is required: SSDPStrictAdmission from outside the package.
+	// Admission is required: SSDPStrictAdmission from outside the package,
+	// as a value or non-nil pointer (copied at registration).
 	Admission SSDPAdmission
 
 	// ResponderSlots is how many answers each endpoint may have in flight
@@ -212,15 +216,16 @@ type SSDPResult struct {
 // SSDPHandle is one live registration: Update replaces its endpoints and
 // Withdraw ends it. Its methods serialize with each other.
 type SSDPHandle struct {
-	s           *SSDPSubsystem
-	name        string
-	udn         string
-	targets     []NotifyTarget
-	serverToken string
-	admission   SSDPAdmission
-	slots       int
-	interval    time.Duration
-	log         *slog.Logger
+	s            *SSDPSubsystem
+	name         string
+	udn          string
+	targets      []NotifyTarget
+	serverToken  string
+	admission    SSDPAdmission
+	slots        int
+	interval     time.Duration
+	log          *slog.Logger
+	replyRefusal sync.Once // at most one strict reply failure warning per registration
 
 	// ctx bounds the registration's work, under the subsystem's context
 	// and the one Register was given; cancel ends it.
@@ -325,6 +330,22 @@ func advertiseIntervalOf(d, floor time.Duration) time.Duration {
 // endpoint whose sender cannot be pinned starts anyway, sending on the OS
 // default interface; a strict one does not start, and sends nothing.
 func (s *SSDPSubsystem) Register(ctx context.Context, reg SSDPRegistration) (*SSDPHandle, SSDPResult, error) {
+	// Copy supported pointer forms before validation or any I/O. An unknown
+	// implementation (including one promoted through embedding) is refused.
+	switch a := reg.Admission.(type) {
+	case *SSDPStrictAdmission:
+		if a == nil {
+			reg.Admission = nil
+		} else {
+			reg.Admission = *a
+		}
+	case *ssdpServedAdmission:
+		if a == nil {
+			reg.Admission = nil
+		} else {
+			reg.Admission = *a
+		}
+	}
 	if err := checkRegistration(reg); err != nil {
 		return nil, SSDPResult{}, err
 	}
@@ -374,11 +395,12 @@ func (s *SSDPSubsystem) Register(ctx context.Context, reg SSDPRegistration) (*SS
 	}
 	s.mu.Lock()
 	if s.closed {
+		deadline := s.closeDeadline
 		s.mu.Unlock()
 		// Close began while this ran: what was announced is withdrawn
 		// rather than left registered, and Close is waiting for it.
 		h.withdrawn = true
-		err := h.retire(withdrawDeadline(context.Background()), staged)
+		err := h.retire(deadline, staged)
 		h.cancel()
 		for _, r := range res.Active {
 			r.Err = ErrSSDPClosed
@@ -411,6 +433,8 @@ func checkRegistration(reg SSDPRegistration) error {
 		if a.served == nil {
 			return errors.New("dlna: the MediaServer's SSDP admission needs its served addresses")
 		}
+	default:
+		return errors.New("dlna: unsupported SSDP admission")
 	}
 	if reg.UDN == "" || len(reg.Targets) == 0 {
 		return errors.New("dlna: an SSDP registration needs a UDN and its targets")
@@ -484,6 +508,7 @@ func (h *SSDPHandle) open(pos int, e SSDPEndpoint) (*ssdpEndpoint, SSDPEndpointR
 		r.Err = err
 		return nil, r
 	}
+	sender = h.s.ownSender(sender)
 	r.SenderPinned = e.Interface != nil && pinErr == nil
 	if pinErr != nil {
 		r.Problems = append(r.Problems, pinErr)
@@ -684,15 +709,20 @@ func (h *SSDPHandle) withdraw(deadline time.Time) error {
 	h.withdrawn = true
 	s := h.s
 	s.mu.Lock()
-	if i := slices.Index(s.handles, h); i >= 0 {
-		s.handles = slices.Delete(s.handles, i, i+1)
-	}
 	h.active = nil
 	s.publishLocked()
 	s.mu.Unlock()
 	err := h.retire(deadline, h.endpoints)
 	h.endpoints = nil
 	h.cancel()
+	// Keep the handle visible while retire runs: Close serializes on opMu
+	// even when a caller has already started this withdrawal.
+	s.mu.Lock()
+	if i := slices.Index(s.handles, h); i >= 0 {
+		s.handles = slices.Delete(s.handles, i, i+1)
+	}
+	s.publishLocked()
+	s.mu.Unlock()
 	return err
 }
 
@@ -703,6 +733,7 @@ func (h *SSDPHandle) withdraw(deadline time.Time) error {
 // cuts what is still sending and sends no byebye, and still joins and
 // releases everything.
 func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
+	deadline = h.s.retirementDeadline(deadline)
 	if len(eps) == 0 {
 		return nil
 	}
@@ -715,20 +746,29 @@ func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 		ep.cancel()
 	}
 	var errs []error
-	expired := !waitUntil(deadline, func() {
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
 		for _, ep := range eps {
 			ep.join()
 		}
-	})
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	expired := false
+	select {
+	case <-joined:
+		expired = !time.Now().Before(deadline)
+	case <-timer.C:
+		expired = true
+	}
 	if expired {
 		// The sends still in progress are cut: closing a socket fails a
 		// write blocked on it at once, so the join that follows settles.
 		for _, ep := range eps {
 			_ = ep.sender.Close()
 		}
-		for _, ep := range eps {
-			ep.join()
-		}
+		<-joined
 		errs = append(errs, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
 	} else {
 		for _, ep := range eps {
@@ -881,10 +921,11 @@ func (h *SSDPHandle) Update(ctx context.Context, eps []SSDPEndpoint) (SSDPResult
 	}
 	s.mu.Lock()
 	if s.closed {
+		deadline := s.closeDeadline
 		s.mu.Unlock()
 		// Close began while this ran; it withdraws what is published, so
 		// what was opened here is withdrawn here.
-		errs = append(errs, h.retire(withdrawDeadline(context.Background()), fresh))
+		errs = append(errs, h.retire(deadline, fresh))
 		return res, errors.Join(append(errs, ErrSSDPClosed)...)
 	}
 	h.active = next
