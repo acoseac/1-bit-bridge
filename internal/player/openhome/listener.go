@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"syscall"
@@ -285,9 +287,23 @@ func (s *Surface) publish() {
 	s.changed = make(chan struct{})
 }
 
-// loop follows the listing until Stop.
+// loop follows the listing until Stop. A panic in it (the address source's
+// or the listing's own) ends the following and nothing else: the surface
+// serves what it has bound and stops as before, and the line carries the
+// stack, and the value only when it is the runtime's own error, since a
+// value code panics with could quote what the listing read.
 func (s *Surface) loop() {
 	defer close(s.loopDone)
+	defer func() {
+		if r := recover(); r != nil {
+			attrs := []any{"stack", string(debug.Stack())}
+			if rerr, ok := r.(runtime.Error); ok {
+				attrs = append(attrs, "error", rerr.Error())
+			}
+			s.log.Error("player: the OpenHome surface's listing panicked: it serves the addresses it has bound, follows the interfaces no more, and stops as before", attrs...)
+			s.publish()
+		}
+	}()
 	t := time.NewTicker(s.lim.Rescan)
 	defer t.Stop()
 	for {

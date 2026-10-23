@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan/lantest"
 )
@@ -45,6 +47,59 @@ func TestAHeaderPastItsBoundIsRefused(t *testing.T) {
 		if res.StatusCode != tc.want {
 			t.Errorf("%s: %d, want %d", tc.name, res.StatusCode, tc.want)
 		}
+	}
+}
+
+// TestAPanicInTheListingStaysInTheSurface: a listing that panics ends the
+// surface's following of the interfaces, and nothing else: the process
+// lives, what is bound is served and then closed by the stop, and the line
+// carries the stack and never the panic's value, which could quote what the
+// listing read.
+func TestAPanicInTheListingStaysInTheSurface(t *testing.T) {
+	rec := loggingtest.Record(t)
+	box := lantest.New(t)
+	box.Set([]lan.Address{eth0})
+	var mu sync.Mutex
+	calls := 0
+	addresses := func() (lan.Inventory, error) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n > 1 {
+			panic("the listing read /secret/interface-name")
+		}
+		return box.Addresses()
+	}
+	s, err := Start(Config{Device: Device{UUID: testUUID}, Port: 7792, Addresses: addresses, Listen: box.Listen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := listening(t, s, eth0)[eth0]
+	s.Rescan()
+	const says = "player: the OpenHome surface's listing panicked: it serves the addresses it has bound, follows the interfaces no more, and stops as before"
+	give := within(t, 30*time.Second)
+	for {
+		ch := s.Changed()
+		if len(rec.Lines(says)) > 0 {
+			break
+		}
+		select {
+		case <-ch:
+		case <-give:
+			t.Fatalf("no line says the listing panicked:\n%s", strings.Join(rec.All(), "\n"))
+		}
+	}
+	if line := rec.Lines(says)[0]; strings.Contains(line, "/secret/") || !strings.Contains(line, "stack=") {
+		t.Errorf("the line %q quotes the panic's value or has no stack", line)
+	}
+	res, err := box.Client(phone).Get("http://" + at.String() + "/openhome/description.xml")
+	if err != nil {
+		t.Fatalf("a bound address after the panic: %v", err)
+	}
+	_ = res.Body.Close()
+	if rep := s.Stop(); rep.Abandoned != 0 || len(box.Open()) != 0 {
+		t.Errorf("the stop after the panic: %+v, open %v", rep, box.Open())
 	}
 }
 
