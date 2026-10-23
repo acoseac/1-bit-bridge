@@ -116,7 +116,13 @@ type File struct {
 	VolumeNormalization string `json:"volumeNormalization"`
 	// AudioOutputFormat is the audio_output_format setting.
 	AudioOutputFormat string `json:"audioOutputFormat"`
-	// Filters is every filter block, in order.
+	// MixerType is the top-level mixer_type setting, deprecated in MPD and
+	// still read: an output that sets neither mixer_type nor mixer_enabled
+	// takes it, and "hardware" when it is unset too (src/output/Init.cxx,
+	// audio_output_mixer_type).
+	MixerType string `json:"mixerType"`
+	// Filters is every filter block, in order. A block defines a filter;
+	// an output applies it only when its filters setting names it.
 	Filters []Filter `json:"filters"`
 	// ZeroconfEnabled is the zeroconf_enabled setting.
 	ZeroconfEnabled string   `json:"zeroconfEnabled"`
@@ -131,17 +137,24 @@ type File struct {
 // the output. The report layer applies that default; this struct does not,
 // so a reader can tell an explicit "yes" from a line that was not there.
 type AudioOutput struct {
-	Type           string `json:"type"`
-	Name           string `json:"name"`
-	Device         string `json:"device"`
-	Path           string `json:"path"`
-	DOP            string `json:"dop"`
-	MixerType      string `json:"mixerType"`
-	MixerControl   string `json:"mixerControl"`
-	MixerDevice    string `json:"mixerDevice"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	Device       string `json:"device"`
+	Path         string `json:"path"`
+	DOP          string `json:"dop"`
+	MixerType    string `json:"mixerType"`
+	MixerControl string `json:"mixerControl"`
+	MixerDevice  string `json:"mixerDevice"`
+	// MixerEnabled is the deprecated mixer_enabled setting, which MPD still
+	// reads after mixer_type: "no" there is no mixer.
+	MixerEnabled   string `json:"mixerEnabled"`
 	Enabled        string `json:"enabled"`
 	Format         string `json:"format"`
 	AllowedFormats string `json:"allowedFormats"`
+	// Filters is the output's filters setting as written: the names of the
+	// filter blocks this output applies, separated by commas
+	// (FilteredAudioOutput::Configure, filter_chain_parse).
+	Filters string `json:"filters"`
 }
 
 // Resampler is the resampler block: the plugin (soxr, libsamplerate) and
@@ -182,10 +195,11 @@ func (f File) String() string {
 	}
 	fmt.Fprintf(&b, "  password: %s\n", passwordPhrase(f.PasswordSet, f.PasswordCount))
 	for _, o := range f.Outputs {
-		fmt.Fprintf(&b, "  output %s: type %s, device %s, path %s, dop %s, mixer %s, enabled %s\n",
+		fmt.Fprintf(&b, "  output %s: type %s, device %s, path %s, dop %s, mixer %s, enabled %s, filters %s\n",
 			orUnset(o.Name), orUnset(o.Type), orUnset(o.Device), orUnset(o.Path),
-			orUnset(o.DOP), mixerPhrase(o), orUnset(o.Enabled))
+			orUnset(o.DOP), mixerPhrase(o), orUnset(o.Enabled), orUnset(o.Filters))
 	}
+	fmt.Fprintf(&b, "  mixer type: %s\n", orUnset(f.MixerType))
 	fmt.Fprintf(&b, "  replay gain: %s\n", orUnset(f.ReplayGain))
 	fmt.Fprintf(&b, "  volume normalization: %s\n", orUnset(f.VolumeNormalization))
 	if f.Resampler.Plugin == "" && f.Resampler.Quality == "" {
@@ -232,6 +246,7 @@ func (f File) MarshalJSON() ([]byte, error) {
 		ReplayGain          string        `json:"replayGain"`
 		VolumeNormalization string        `json:"volumeNormalization"`
 		AudioOutputFormat   string        `json:"audioOutputFormat"`
+		MixerType           string        `json:"mixerType"`
 		Filters             []Filter      `json:"filters"`
 		ZeroconfEnabled     string        `json:"zeroconfEnabled"`
 		Problems            []string      `json:"problems"`
@@ -241,7 +256,7 @@ func (f File) MarshalJSON() ([]byte, error) {
 		Port: shown.Port, PasswordSet: shown.PasswordSet, PasswordCount: shown.PasswordCount,
 		Outputs: shown.Outputs, Resampler: shown.Resampler, SamplerateConverter: shown.SamplerateConverter,
 		ReplayGain: shown.ReplayGain, VolumeNormalization: shown.VolumeNormalization,
-		AudioOutputFormat: shown.AudioOutputFormat, Filters: shown.Filters,
+		AudioOutputFormat: shown.AudioOutputFormat, MixerType: shown.MixerType, Filters: shown.Filters,
 		ZeroconfEnabled: shown.ZeroconfEnabled, Problems: shown.Problems,
 	})
 	if err != nil {
@@ -291,6 +306,7 @@ func (f File) display() File {
 	out.ReplayGain = redactText(out.ReplayGain, pw)
 	out.VolumeNormalization = redactText(out.VolumeNormalization, pw)
 	out.AudioOutputFormat = redactText(out.AudioOutputFormat, pw)
+	out.MixerType = redactText(out.MixerType, pw)
 	out.ZeroconfEnabled = redactText(out.ZeroconfEnabled, pw)
 	out.Resampler.Plugin = redactText(out.Resampler.Plugin, pw)
 	out.Resampler.Quality = redactText(out.Resampler.Quality, pw)
@@ -307,9 +323,11 @@ func (f File) display() File {
 		o.MixerType = redactText(o.MixerType, pw)
 		o.MixerControl = redactText(o.MixerControl, pw)
 		o.MixerDevice = redactText(o.MixerDevice, pw)
+		o.MixerEnabled = redactText(o.MixerEnabled, pw)
 		o.Enabled = redactText(o.Enabled, pw)
 		o.Format = redactText(o.Format, pw)
 		o.AllowedFormats = redactText(o.AllowedFormats, pw)
+		o.Filters = redactText(o.Filters, pw)
 	}
 	for i := range out.Filters {
 		out.Filters[i].Name = redactText(out.Filters[i].Name, pw)
@@ -371,6 +389,15 @@ func (f File) redactionKeys() []string {
 // that happens to contain the secret is not shown.
 func (f File) Redact(s string) string {
 	return redactText(s, f.redactionKeys())
+}
+
+// RedactSecrets returns s with each of passwords removed as a File removes
+// its own: the whole value and, for MPD's secret@permissions, the secret
+// before the '@', a value of fewer than four bytes only where it is a
+// whole token. It is for a password that came from somewhere other than
+// the file, such as the bridge's own output.password.
+func RedactSecrets(s string, passwords ...string) string {
+	return File{passwords: passwords}.Redact(s)
 }
 
 func redactText(s string, passwords []string) string {
@@ -473,10 +500,10 @@ func passwordPhrase(set bool, n int) string {
 }
 
 func mixerPhrase(o AudioOutput) string {
-	if o.MixerType == "" && o.MixerControl == "" && o.MixerDevice == "" {
+	if o.MixerType == "" && o.MixerControl == "" && o.MixerDevice == "" && o.MixerEnabled == "" {
 		return "unset"
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if o.MixerType != "" {
 		parts = append(parts, o.MixerType)
 	}
@@ -485,6 +512,9 @@ func mixerPhrase(o AudioOutput) string {
 	}
 	if o.MixerDevice != "" {
 		parts = append(parts, "device "+o.MixerDevice)
+	}
+	if o.MixerEnabled != "" {
+		parts = append(parts, "enabled "+o.MixerEnabled)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -582,7 +612,6 @@ type loader struct {
 	depth int
 	stack map[string]struct{}
 	files int
-	open  func(host string) (string, error)
 }
 
 func parseFile(text, name, dir string, load *loader) File {
@@ -778,6 +807,8 @@ func (p *prober) setScalar(line int, key, value string) {
 		p.file.VolumeNormalization = value
 	case "audio_output_format":
 		p.file.AudioOutputFormat = value
+	case "mixer_type":
+		p.file.MixerType = value
 	case "samplerate_converter":
 		p.file.SamplerateConverter = value
 	case "zeroconf_enabled":
@@ -830,12 +861,16 @@ func (b *blockState) set(line int, key, value string, p *prober) {
 			b.out.MixerControl = value
 		case "mixer_device":
 			b.out.MixerDevice = value
+		case "mixer_enabled":
+			b.out.MixerEnabled = value
 		case "enabled":
 			b.out.Enabled = value
 		case "format":
 			b.out.Format = value
 		case "allowed_formats":
 			b.out.AllowedFormats = value
+		case "filters":
+			b.out.Filters = value
 		}
 	case "resampler":
 		switch key {
@@ -877,6 +912,13 @@ func (p *prober) closeBlock(b *blockState) {
 }
 
 func (p *prober) include(line int, name string, optional bool) {
+	// MPD expands a pattern in either directive; this reader does not, so
+	// the files MPD reads through one are not read here, and a pattern is
+	// never a missing file include_optional may skip.
+	if strings.ContainsAny(name, "*?[") {
+		p.add(line, "include %s: a pattern is not followed", quotePath(name))
+		return
+	}
 	if p.load == nil {
 		if !optional {
 			p.add(line, "include %s: not followed", quotePath(name))
@@ -947,6 +989,9 @@ func mergeFile(dst *File, src File) {
 	}
 	if src.AudioOutputFormat != "" {
 		dst.AudioOutputFormat = src.AudioOutputFormat
+	}
+	if src.MixerType != "" {
+		dst.MixerType = src.MixerType
 	}
 	dst.Filters = append(dst.Filters, src.Filters...)
 	if src.ZeroconfEnabled != "" {

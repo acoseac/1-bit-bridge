@@ -75,6 +75,18 @@ func (f *fakeOutputSession) Find(_ context.Context, path string) (mpd.Reply, err
 	return mpd.Reply{}, nil
 }
 
+func (f *fakeOutputSession) CurrentSong(context.Context) (mpd.Reply, error) {
+	return mpd.Reply{Pairs: []mpd.Pair{}}, nil
+}
+
+func (f *fakeOutputSession) ReplayGainStatus(context.Context) (mpd.Reply, error) {
+	return mpd.Reply{Pairs: []mpd.Pair{{Key: "replay_gain_mode", Value: "off"}}}, nil
+}
+
+func (f *fakeOutputSession) Outputs(context.Context) (mpd.Reply, error) {
+	return mpd.Reply{Pairs: []mpd.Pair{}}, nil
+}
+
 func (f *fakeOutputSession) Version() string { return f.version }
 
 func (f *fakeOutputSession) Close() error {

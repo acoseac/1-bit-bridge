@@ -4449,6 +4449,32 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 	return &st, nil
 }
 
+// GetTrackWithStat is GetTrack and the `size` and `mtime_ns` columns
+// GetTrackStat reads, from one statement, so all three describe one version
+// of the row: two reads let a scan commit between them and pair the old
+// row's tags with the new file's size and time. (nil, 0, 0, nil) when
+// absent.
+func (s *Store) GetTrackWithStat(ctx context.Context, path string) (*Track, int64, int64, error) {
+	var raw []byte
+	var version, size, mtimeNS int64
+	var firstNS sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at, first_indexed_at, size, mtime_ns FROM tracks WHERE path = ?`, path).
+		Scan(&raw, &version, &firstNS, &size, &mtimeNS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, 0, nil
+	}
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	var t Track
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, 0, 0, err
+	}
+	t.rowVersion, t.hasRowVersion = version, true
+	spliceFirstIndexedAt(&t, firstNS)
+	return &t, size, mtimeNS, nil
+}
+
 // GetTrack fetches a single track by EXACT path match. Returns
 // (nil, nil) if absent.
 //

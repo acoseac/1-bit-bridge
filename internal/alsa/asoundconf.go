@@ -1,9 +1,11 @@
 package alsa
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -13,6 +15,72 @@ import (
 // maxPCMHops is how many slave.pcm follows a name may take. One more
 // leaves the device unresolved.
 const maxPCMHops = 8
+
+// PCMConfig is the ALSA configuration a resolution reads, loaded once: the
+// PCM definitions of etc/alsa/conf.d/*.conf and etc/asound.conf under a
+// config root. Resolving from it reads nothing, so a caller that bounds the
+// load bounds every resolution made from it.
+type PCMConfig struct {
+	defs map[string]pcmDef
+	// ok is false when a file that is present could not be used whole: no
+	// definition is then used.
+	ok bool
+	// unread is ok false because the read stopped at a file it could not
+	// read (Unread).
+	unread bool
+}
+
+// LoadPCMConfig reads the ALSA configuration under root once.
+func LoadPCMConfig(root string) PCMConfig {
+	defs, ok, unread := loadPCMDefs(root)
+	return PCMConfig{defs: defs, ok: ok, unread: unread}
+}
+
+// Unread reports whether the read of the configuration stopped at a file
+// that is there and could not be read (an open or read error, what opened
+// as no regular file, a file past the read's bounds, a conf.d it could not
+// list), rather than at a file
+// it read that holds what the parser does not model. Either way no
+// definition is used; but what an unread file says is not known, and it
+// can read the next time, while a file the parser does not model resolves
+// nothing the same way every time. The output reading takes an unread
+// configuration for one it did not have.
+func (c PCMConfig) Unread() bool { return c.unread }
+
+// ResolveOutputDevice is the package's ResolveOutputDevice from c.
+func (c PCMConfig) ResolveOutputDevice(device string, cards []Card) (cardIndex, pcmDevice int, ok bool) {
+	if idx, pcm, found := ResolveALSADevice(device, cards); found {
+		return idx, pcm, true
+	}
+	device = strings.TrimSpace(device)
+	if device == "" || strings.Contains(device, ":") || !c.ok {
+		return 0, 0, false
+	}
+	return walkPCM(c, device, cards, map[string]bool{}, 0)
+}
+
+// ResolveOutputChain is the package's ResolveOutputChain from c: a device
+// string's own stages, or the stages a PCM name's definitions take to a
+// card. It is the chain as the bridge follows it, information beside the
+// output reading's verdict, never a proof of what alsa-lib loaded.
+func (c PCMConfig) ResolveOutputChain(device string, cards []Card) (Chain, bool) {
+	if idx, pcm, found := ResolveALSADevice(device, cards); found {
+		stages, known := deviceStringStages(device)
+		if !known {
+			return Chain{}, false
+		}
+		return Chain{Card: idx, Device: pcm, Stages: stages}, true
+	}
+	device = strings.TrimSpace(device)
+	if device == "" || strings.Contains(device, ":") || !c.ok {
+		return Chain{}, false
+	}
+	chain, ok, known := walkChain(c, device, cards, map[string]bool{}, 0)
+	if !ok || !known {
+		return Chain{}, false
+	}
+	return chain, true
+}
 
 // maxAsoundFiles and maxAsoundBytes bound the configuration read for
 // one resolution. One file is also bounded by maxFileBytes.
@@ -61,11 +129,43 @@ func ResolveOutputDevice(root, device string, cards []Card) (cardIndex, pcmDevic
 	if device == "" || strings.Contains(device, ":") {
 		return 0, 0, false
 	}
-	defs, ok := loadPCMDefs(root)
-	if !ok {
-		return 0, 0, false
+	return LoadPCMConfig(root).ResolveOutputDevice(device, cards)
+}
+
+// Chain is how an MPD alsa device reaches a card: the plugin type of each
+// stage from the device string to the hw stage that names the card, in
+// order. hw:N is ["hw"], plughw:N is ["plug", "hw"], and Volumio's
+// "volumio" PCM is ["empty", "plug", "hw"]. A chain resolves through
+// empty, plug and hw only, so a dmix, softvol, rate or route stage never
+// appears in one: such a device has no Chain.
+type Chain struct {
+	Card   int
+	Device int
+	Stages []string
+}
+
+// ResolveOutputChain is ResolveOutputDevice with the stages it followed.
+// It resolves only where ResolveOutputDevice does, to the same card and
+// PCM device, and not for a front or plug device string, at the start or
+// as a slave: what those name is defined in alsa-lib's own configuration
+// files (the card's front PCM, plug's slave argument), which this does not
+// read, so their stages are not known.
+func ResolveOutputChain(root, device string, cards []Card) (Chain, bool) {
+	return LoadPCMConfig(root).ResolveOutputChain(device, cards)
+}
+
+// deviceStringStages is the stages a device string names directly: hw is
+// the card itself and plughw a plug over it. front and plug are resolved
+// to a card by ResolveALSADevice, and their stages are not known here.
+func deviceStringStages(device string) ([]string, bool) {
+	plugin, _, _ := strings.Cut(strings.TrimSpace(device), ":")
+	switch plugin {
+	case "hw":
+		return []string{"hw"}, true
+	case "plughw":
+		return []string{"plug", "hw"}, true
 	}
-	return walkPCM(defs, device, cards, map[string]bool{}, 0)
+	return nil, false
 }
 
 type pcmDef struct {
@@ -77,18 +177,341 @@ type pcmDef struct {
 	device      int
 	hasDevice   bool
 	opaque      bool
+	// typeUnsure is a definition whose type is not one value: a second
+	// type in its block, or its name defined more than once.
+	typeUnsure bool
+	// routes is a block with a transfer table or a route policy (ttable,
+	// route_policy), which a plug runs through the route plugin inside it.
+	// Such a field makes the definition opaque too: its chain is not known.
+	routes bool
 }
 
-func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
+// sampleStageTypes are the plugin types whose stage changes the samples it
+// passes on, whatever the format it hands its slave: software volume, a
+// rate converter, a mixer of several streams into one format and rate of
+// its own, a channel router, and a LADSPA filter.
+var sampleStageTypes = []string{"softvol", "rate", "dmix", "route", "ladspa"}
+
+// SampleStageTypes is every plugin type SampleStage can name.
+func SampleStageTypes() []string { return append([]string(nil), sampleStageTypes...) }
+
+// SampleStage is the plugin type of the first stage that changes the
+// samples (SampleStageTypes) the walk from device meets, through empty and
+// plug stages, as the configuration read defines them; "" when it meets
+// none before it reaches a card or stops. A plug with a transfer table or
+// a route policy is the route plugin inside it, a route stage, though it
+// has no chain. alsa-lib's own dmix is a dmix stage: a dmix: device string,
+// which names its plugin without the files, and the name dmix where the
+// files define none. alsa-lib's plug as a device string (plug:SLAVE) is a
+// plug stage over its slave, which is judged as a slave is. The walk does
+// not go through a stage that changes samples, so what lies past it is not
+// read, and any other device string names none. It is
+// what the files say, not what alsa-lib loaded for the process that opened
+// the card: information, not proof.
+func (c PCMConfig) SampleStage(device string) string {
+	device = strings.TrimSpace(device)
+	switch {
+	case device == "":
+		return ""
+	case strings.Contains(device, ":"):
+		return deviceStringStage(c, device, map[string]bool{}, 0)
+	case !c.ok:
+		return ""
+	}
+	return sampleStage(c, device, map[string]bool{}, 0)
+}
+
+func sampleStage(c PCMConfig, name string, seen map[string]bool, hops int) string {
 	if strings.Contains(name, ":") {
-		return ResolveALSADevice(name, cards)
+		return deviceStringStage(c, name, seen, hops)
 	}
 	if hops > maxPCMHops || seen[name] {
-		return 0, 0, false
+		return ""
 	}
-	def, ok := defs[name]
-	if !ok || def.opaque {
-		return 0, 0, false
+	def, found := c.defs[name]
+	switch {
+	case !found && name == "dmix":
+		return "dmix"
+	case !found || def.typeUnsure:
+		return ""
+	case slices.Contains(sampleStageTypes, def.typ):
+		return def.typ
+	case def.typ == "plug" && def.routes:
+		// The route plugin inside the plug can swap, mix or attenuate
+		// channels at the same format, rate and channels.
+		return "route"
+	case def.opaque || (def.typ != "empty" && def.typ != "plug") || def.slave == "":
+		return ""
+	}
+	seen[name] = true
+	return sampleStage(c, def.slave, seen, hops+1)
+}
+
+// deviceStringStage is the sample stage a device string names by its
+// plugin: alsa-lib's dmix (dmix:CARD=…,DEV=…), which mixes every stream
+// into a format and rate of its own; for alsa-lib's plug (plug:SLAVE), its
+// slave, judged as a slave is: a device string here, and a name walked in
+// the files, which needs them read whole; none for any other plugin.
+func deviceStringStage(c PCMConfig, device string, seen map[string]bool, hops int) string {
+	plugin, arg, _ := strings.Cut(device, ":")
+	switch plugin {
+	case "dmix":
+		return "dmix"
+	case "plug":
+		slave, ok := plugSlave(arg)
+		switch {
+		case !ok || hops > maxPCMHops:
+			return ""
+		case strings.Contains(slave, ":"):
+			return deviceStringStage(c, slave, seen, hops+1)
+		case !c.ok:
+			return ""
+		}
+		return sampleStage(c, slave, seen, hops+1)
+	}
+	return ""
+}
+
+// confBlank is what alsa-lib's configuration code skips between tokens
+// (skip_blank and get_nonwhite in conf.c).
+const confBlank = " \f\t\n\r"
+
+// plugSlave is the slave a plug: device string names, read as alsa-lib
+// reads the arguments of a PCM that takes them (parse_args in conf.c). plug
+// takes one, SLAVE (pcm.plug's @args in alsa.conf), given in a list
+// (plugList) or a compound (plugCompound). ok is false for what alsa-lib
+// would not open as a plug, and for a form this does not model, which
+// names nothing rather than a wrong name; so is a NUL, where alsa-lib's
+// string would end.
+func plugSlave(arg string) (string, bool) {
+	arg = strings.TrimLeft(arg, confBlank)
+	switch {
+	case strings.IndexByte(arg, 0) >= 0:
+		return "", false
+	case strings.HasPrefix(arg, "{"):
+		return plugCompound(arg)
+	}
+	return plugList(arg)
+}
+
+// plugList reads plug's arguments as a list, as parse_args does: arguments
+// one after another, a comma between them, each a value by position (plug's
+// first position is SLAVE) or SLAVE= and a value (parseArg), the last SLAVE
+// standing. Another position or another name is a parameter plug does not
+// take, and nothing but a comma or the end may follow a value, a blank
+// included.
+func plugList(s string) (string, bool) {
+	var slave string
+	for pos := 0; ; pos++ {
+		name, value, rest, ok := parseArg(s)
+		if !ok || (name == "" && pos > 0) || (name != "" && name != "SLAVE") {
+			return "", false
+		}
+		slave = value
+		switch {
+		case rest == "":
+			return slave, slave != ""
+		case rest[0] != ',':
+			return "", false
+		}
+		s = rest[1:]
+	}
+}
+
+// parseArg reads one argument as parse_arg does: blanks skipped, then a
+// quoted value (confQuoted), or an id that runs to a tab, a newline, a
+// carriage return, a form feed, a comma, an = or the end (a space does not
+// end it), which names the argument when an = follows it past blanks and is
+// its value otherwise. The value after an = is read the same way, past
+// blanks. rest is what follows the value.
+func parseArg(s string) (name, value, rest string, ok bool) {
+	s = strings.TrimLeft(s, confBlank)
+	switch {
+	case s == "":
+		return "", "", "", false
+	case s[0] == '"' || s[0] == '\'':
+		value, rest, ok = confQuoted(s)
+		return "", value, rest, ok
+	}
+	id, after := argID(s)
+	after = strings.TrimLeft(after, confBlank)
+	if !strings.HasPrefix(after, "=") {
+		return "", id, after, true
+	}
+	s = strings.TrimLeft(after[1:], confBlank)
+	switch {
+	case id == "" || s == "":
+		// alsa-lib reads an = with no name before it as a value by
+		// position, which this does not model; nothing after it is no value.
+		return "", "", "", false
+	case s[0] == '"' || s[0] == '\'':
+		value, rest, ok = confQuoted(s)
+		return id, value, rest, ok
+	}
+	value, rest = argID(s)
+	return id, value, rest, true
+}
+
+// argID is parse_id's id: s up to a tab, a newline, a carriage return, a
+// form feed, a comma or an =, and what follows it.
+func argID(s string) (id, rest string) {
+	if i := strings.IndexAny(s, "\f\t\n\r,="); i >= 0 {
+		return s[:i], s[i:]
+	}
+	return s, ""
+}
+
+// confQuoted reads a string quoted in ' or ", as alsa-lib's parse_string
+// and get_delimstring do for the escapes this models: \", \\ and \' are the
+// character escaped. Any other escape (a control character, an octal byte,
+// a letter alsa-lib reads as itself) and a string the end cuts short are
+// not read. rest is what follows the closing quote.
+func confQuoted(s string) (value, rest string, ok bool) {
+	var b strings.Builder
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == s[0]:
+			return b.String(), s[i+1:], true
+		case c != '\\':
+			b.WriteByte(c)
+		case i+1 < len(s) && strings.IndexByte(`"\'`, s[i+1]) >= 0:
+			i++
+			b.WriteByte(s[i])
+		default:
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+// plugCompound reads plug's arguments as a compound, { … }: parse_args
+// hands what lies between the braces to alsa-lib's configuration parser in
+// override mode, so it is definitions one after another, each SLAVE, then
+// an = or none, then a value quoted or bare, then a ; or a , or none, with
+// blanks and # comments between; the last SLAVE stands. A definition of
+// another name is a parameter plug does not take, which alsa-lib refuses,
+// and so is a compound with no value. What this does not model names
+// nothing: a mode prefix (+ - ? !) or a dotted name, a compound or array
+// value, an include (<…>), an escape confQuoted does not read, and a bare
+// value alsa-lib may read as a number.
+func plugCompound(s string) (string, bool) {
+	s = strings.TrimRight(s, confBlank)
+	if len(s) < 2 || s[len(s)-1] != '}' {
+		return "", false
+	}
+	in := confInput{s: s[1 : len(s)-1]}
+	var slave string
+	for {
+		c, ok := in.nonwhite()
+		switch {
+		case !ok:
+			return "", false
+		case c == 0:
+			return slave, slave != ""
+		}
+		if name, _, ok := in.token(true); !ok || name != "SLAVE" {
+			return "", false
+		}
+		if c, ok = in.nonwhite(); ok && c == '=' {
+			in.pos++
+			c, ok = in.nonwhite()
+		}
+		if !ok || c == '.' {
+			return "", false
+		}
+		value, quoted, ok := in.token(false)
+		if !ok || value == "" || (!quoted && strings.IndexByte("-0123456789", value[0]) >= 0) {
+			return "", false
+		}
+		slave = value
+		if c, ok = in.nonwhite(); !ok {
+			return "", false
+		} else if c == ';' || c == ',' {
+			in.pos++
+		}
+	}
+}
+
+// confInput reads a string as alsa-lib's configuration parser reads its
+// input (get_nonwhite, get_string, get_freestring and get_delimstring in
+// conf.c), as far as plugCompound needs.
+type confInput struct {
+	s   string
+	pos int
+}
+
+// nonwhite skips blanks and # comments, each to the end of its line, and
+// returns the next byte, 0 at the end. ok is false at an include (<…>),
+// which this does not read.
+func (in *confInput) nonwhite() (byte, bool) {
+	for in.pos < len(in.s) {
+		switch c := in.s[in.pos]; c {
+		case ' ', '\f', '\t', '\n', '\r':
+			in.pos++
+		case '#':
+			if i := strings.IndexByte(in.s[in.pos:], '\n'); i >= 0 {
+				in.pos += i + 1
+			} else {
+				in.pos = len(in.s)
+			}
+		case '<':
+			return 0, false
+		default:
+			return c, true
+		}
+	}
+	return 0, true
+}
+
+// token reads a string at the next byte, quoted (confQuoted) or bare: a
+// bare string runs to a blank, = , ; { } [ ] ' " \ or #, and a name to a
+// dot too. ok is false at a byte no string starts with (those but the
+// quotes and #, and a dot) and for a quoted string confQuoted does not read.
+func (in *confInput) token(name bool) (s string, quoted, ok bool) {
+	rest := in.s[in.pos:]
+	if rest == "" || strings.IndexByte("=,;.{}[]\\", rest[0]) >= 0 {
+		return "", false, false
+	}
+	if rest[0] == '"' || rest[0] == '\'' {
+		value, after, ok := confQuoted(rest)
+		in.pos = len(in.s) - len(after)
+		return value, true, ok
+	}
+	end := " \f\t\n\r=,;{}[]'\"\\#"
+	if name {
+		end += "."
+	}
+	i := strings.IndexAny(rest, end)
+	if i < 0 {
+		i = len(rest)
+	}
+	in.pos += i
+	return rest[:i], false, true
+}
+
+func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
+	chain, ok, _ := walkChain(c, name, cards, seen, hops)
+	return chain.Card, chain.Device, ok
+}
+
+// walkChain follows name to a card. ok is whether it reached one, and
+// known whether every stage on the way is one whose type it knows: a slave
+// that is a front or plug device string reaches a card without that.
+func walkChain(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (chain Chain, ok, known bool) {
+	if strings.Contains(name, ":") {
+		idx, pcm, found := ResolveALSADevice(name, cards)
+		if !found {
+			return Chain{}, false, false
+		}
+		stages, known := deviceStringStages(name)
+		return Chain{Card: idx, Device: pcm, Stages: stages}, true, known
+	}
+	if hops > maxPCMHops || seen[name] {
+		return Chain{}, false, false
+	}
+	def, found := c.defs[name]
+	if !found || def.opaque {
+		return Chain{}, false, false
 	}
 	seen[name] = true
 	switch def.typ {
@@ -99,37 +522,45 @@ func walkPCM(defs map[string]pcmDef, name string, cards []Card, seen map[string]
 		}
 		if def.cardIsIndex {
 			if !cardIndexExists(cards, def.cardIndex) {
-				return 0, 0, false
+				return Chain{}, false, false
 			}
-			return def.cardIndex, pcm, true
+			return Chain{Card: def.cardIndex, Device: pcm, Stages: []string{"hw"}}, true, true
 		}
 		if def.card == "" {
-			return 0, 0, false
+			return Chain{}, false, false
 		}
-		idx, found := uniqueCardID(cards, def.card)
-		if !found {
-			return 0, 0, false
+		idx, unique := uniqueCardID(cards, def.card)
+		if !unique {
+			return Chain{}, false, false
 		}
-		return idx, pcm, true
+		return Chain{Card: idx, Device: pcm, Stages: []string{"hw"}}, true, true
 	case "empty", "plug":
 		if def.slave == "" {
-			return 0, 0, false
+			return Chain{}, false, false
 		}
-		return walkPCM(defs, def.slave, cards, seen, hops+1)
+		inner, ok, known := walkChain(c, def.slave, cards, seen, hops+1)
+		if !ok {
+			return Chain{}, false, false
+		}
+		inner.Stages = append([]string{def.typ}, inner.Stages...)
+		return inner, true, known
 	default:
-		return 0, 0, false
+		return Chain{}, false, false
 	}
 }
 
-// loadPCMDefs reads conf.d and then asound.conf. ok is false when any
-// file that is present cannot be read, or parses as something this
-// reader does not fully model. A missing file is not that: the other
-// files still count. A false ok means no definition may be used.
-func loadPCMDefs(root string) (map[string]pcmDef, bool) {
+// loadPCMDefs reads conf.d and then asound.conf. The second result, ok, is
+// false when any file that is present cannot be read, or parses as
+// something this reader does not fully model, and the third, unread, is
+// true when the read stopped at the first of those; a conf.d that is there
+// and cannot be listed is a file that cannot be read. A missing file, or a
+// missing conf.d, is neither: the other files still count. A false ok
+// means no definition may be used.
+func loadPCMDefs(root string) (map[string]pcmDef, bool, bool) {
 	defs := map[string]pcmDef{}
 	var files int
 	var total int
-	bad := false
+	bad, unread := false, false
 	add := func(path string) {
 		if bad {
 			return
@@ -139,11 +570,11 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 			if os.IsNotExist(err) {
 				return
 			}
-			bad = true
+			bad, unread = true, true
 			return
 		}
 		if files >= maxAsoundFiles || total+len(b) > maxAsoundBytes {
-			bad = true
+			bad, unread = true, true
 			return
 		}
 		files++
@@ -155,23 +586,44 @@ func loadPCMDefs(root string) (map[string]pcmDef, bool) {
 		}
 		for name, def := range parsed {
 			if prev, exists := defs[name]; exists {
-				prev.opaque = true
+				prev.opaque, prev.typeUnsure = true, true
 				defs[name] = prev
 				continue
 			}
 			defs[name] = def
 		}
 	}
-	matches, _ := filepath.Glob(filepath.Join(root, "etc", "alsa", "conf.d", "*.conf"))
-	sort.Strings(matches)
-	for _, path := range matches {
-		add(path)
+	// conf.d is listed here, not by filepath.Glob, which takes a directory
+	// it cannot stat, open or list for one with nothing in it: a conf.d
+	// that is there and cannot be listed is a configuration not read. It
+	// is stat'ed first, so that one that is there and is not a directory is
+	// that on every platform: Windows's os.ReadDir of a regular file
+	// answered an empty listing and no error (the windows-latest run on
+	// 1ab90068; os/dir_windows.go ends a listing at a no-more-files or a
+	// file-not-found answer without one).
+	confd := filepath.Join(root, "etc", "alsa", "conf.d")
+	switch fi, err := os.Stat(confd); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil || !fi.IsDir():
+		bad, unread = true, true
+	default:
+		switch entries, err := os.ReadDir(confd); {
+		case err == nil:
+			// ReadDir sorts by name.
+			for _, e := range entries {
+				if ok, _ := filepath.Match("*.conf", e.Name()); ok {
+					add(filepath.Join(confd, e.Name()))
+				}
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			bad, unread = true, true
+		}
 	}
 	add(filepath.Join(root, "etc", "asound.conf"))
 	if bad {
-		return nil, false
+		return nil, false, unread
 	}
-	return defs, true
+	return defs, true, false
 }
 
 const (
@@ -225,7 +677,7 @@ func parsePCMFile(src string) (map[string]pcmDef, bool) {
 				return nil, false
 			}
 			if prev, exists := defs[name]; exists {
-				prev.opaque = true
+				prev.opaque, prev.typeUnsure = true, true
 				defs[name] = prev
 				continue
 			}
@@ -389,6 +841,9 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 	if !ok {
 		return false
 	}
+	if key == "ttable" || strings.HasPrefix(key, "ttable.") || key == "route_policy" {
+		def.routes = true
+	}
 	if p.peek().kind == tokLBrace {
 		if plain && key == "slave" {
 			inner, ok := p.parseSlaveBlock()
@@ -420,7 +875,7 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 	switch key {
 	case "type":
 		if *sawType {
-			def.opaque = true
+			def.opaque, def.typeUnsure = true, true
 		}
 		*sawType = true
 		def.typ = val

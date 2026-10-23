@@ -164,6 +164,78 @@ func TestParseBlocks(t *testing.T) {
 	}
 }
 
+// TestTheVerdictsSettingsAreRead pins the three settings the reading's
+// verdict needs beside the ones above: an output's filters and its
+// deprecated mixer_enabled, and the top-level mixer_type an output without
+// its own takes. Each is kept as written, the last top-level mixer_type
+// wins, an include sets it too, and none prints the password.
+func TestTheVerdictsSettingsAreRead(t *testing.T) {
+	const secret = "verdict-secret-value"
+	text := "" +
+		"password \"" + secret + "\"\n" +
+		"mixer_type \"hardware\"\n" +
+		"mixer_type \"software\"\n" +
+		"audio_output {\n" +
+		"  type \"alsa\"\n" +
+		"  name \"dac\"\n" +
+		"  filters \"eq," + secret + "\"\n" +
+		"  mixer_enabled \"no\"\n" +
+		"}\n"
+	f, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.MixerType != "software" {
+		t.Errorf("mixer_type %q; the last value is kept", f.MixerType)
+	}
+	if len(f.Outputs) != 1 || f.Outputs[0].Filters != "eq,"+secret || f.Outputs[0].MixerEnabled != "no" {
+		t.Fatalf("outputs %+v", f.Outputs)
+	}
+	shown := f.Display()
+	if shown.Outputs[0].Filters != "eq,[redacted]" {
+		t.Errorf("filters shown as %q", shown.Outputs[0].Filters)
+	}
+	assertNoSecret(t, secret, f)
+	for _, want := range []string{"filters eq,[redacted]", "mixer type: software", "enabled no"} {
+		if !strings.Contains(f.String(), want) {
+			t.Errorf("summary lacks %q:\n%s", want, f.String())
+		}
+	}
+	if !bytesContains(mustJSON(t, f), `"mixerType":"software"`) || !bytesContains(mustJSON(t, f), `"mixerEnabled":"no"`) {
+		t.Errorf("json %s", mustJSON(t, f))
+	}
+
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "mixer.conf"), "mixer_type \"null\"\n")
+	mustWrite(t, filepath.Join(root, "mpd.conf"), "mixer_type \"software\"\ninclude \"mixer.conf\"\n")
+	read, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.MixerType != "null" {
+		t.Errorf("mixer_type %q; the include came after the file's own line", read.MixerType)
+	}
+}
+
+// TestRedactSecretsIsTheFilesRule holds the helper for a password from
+// outside the file to the file's own redaction.
+func TestRedactSecretsIsTheFilesRule(t *testing.T) {
+	cases := []struct{ in, secret, want string }{
+		{"Album/long-secret-value.flac", "long-secret-value", "Album/[redacted].flac"},
+		{"Album/long-secret.flac", "long-secret@read,add", "Album/[redacted].flac"},
+		{"admin/a/b", "a", "admin/[redacted]/b"},
+		{"nothing here", "", "nothing here"},
+	}
+	for _, tc := range cases {
+		if got := RedactSecrets(tc.in, tc.secret); got != tc.want {
+			t.Errorf("RedactSecrets(%q, %q) = %q, want %q", tc.in, tc.secret, got, tc.want)
+		}
+	}
+	if got := RedactSecrets("one-secret two-secret", "one-secret", "two-secret"); strings.Contains(got, "secret") {
+		t.Errorf("two passwords: %q", got)
+	}
+}
+
 func TestPasswordIsRedacted(t *testing.T) {
 	const secret = "super-secret-mpd-password"
 	text := "password \"" + secret + "@read,control\"\nmusic_directory \"/m\"\npassword \"" + secret + "-2@admin\"\n"
@@ -551,6 +623,27 @@ func TestIncludeStaysInsideTheRoot(t *testing.T) {
 	assertNoSecret(t, secret, f)
 	if !strings.Contains(strings.Join(f.Problems, "\n"), "path leaves the root") {
 		t.Errorf("problems %q", f.Problems)
+	}
+}
+
+// TestAnIncludePatternIsNotFollowed: MPD expands a pattern in an include
+// and this reader does not, so the files MPD reads through one are not read
+// here: a pattern is the file's problem for both directives, even where
+// files match it, and never a missing file include_optional may skip.
+func TestAnIncludePatternIsNotFollowed(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "conf.d", "a.conf"), "mixer_type \"software\"\n")
+	for _, directive := range []string{"include", "include_optional"} {
+		for _, pattern := range []string{"conf.d/*.conf", "conf.d/?.conf", "conf.d/[a].conf"} {
+			mustWrite(t, filepath.Join(root, "mpd.conf"), directive+" \""+pattern+"\"\nmusic_directory \"/kept\"\n")
+			f, err := ReadFile(root, "/mpd.conf", filepath.Join(root, "mpd.conf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.MixerType != "" || f.MusicDirectory != "/kept" || !strings.Contains(strings.Join(f.Problems, "\n"), "a pattern is not followed") {
+				t.Errorf("%s %q: mixer %q music %q problems %q", directive, pattern, f.MixerType, f.MusicDirectory, f.Problems)
+			}
+		}
 	}
 }
 

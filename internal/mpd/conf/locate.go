@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // errOutside is a path that resolved outside the root it was read under.
@@ -164,33 +166,32 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	load := &loader{
-		root:  root,
-		stack: map[string]struct{}{host: {}},
-		open: func(path string) (string, error) {
-			if _, err := os.Lstat(path); err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					return "", errNotFound
-				}
-				return "", errUnreadable
-			}
-			if err := staysInRoot(root, path); err != nil {
-				return "", err
-			}
-			text, err := readCapped(path)
-			// Open's error names the host path. An include problem
-			// already quotes the name from the file, and that path
-			// can hold a password.
-			if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
-				return "", errUnreadable
-			}
-			return text, err
-		},
-	}
+	load := &loader{root: root, stack: map[string]struct{}{host: {}}}
 	f := parseFile(text, logical, filepath.Dir(host), load)
 	f.Path = logical
 	f.finish()
 	return f, nil
+}
+
+// open reads the include at path, a path resolve gave. A path that is not
+// there is errNotFound, and one that cannot be looked at or opened is
+// errUnreadable: the open's error names the host path, an include problem
+// already quotes the name from the file, and that path can hold a password.
+func (l *loader) open(path string) (string, error) {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", errNotFound
+		}
+		return "", errUnreadable
+	}
+	if err := staysInRoot(l.root, path); err != nil {
+		return "", err
+	}
+	text, err := readCapped(path)
+	if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
+		return "", errUnreadable
+	}
+	return text, err
 }
 
 // confCandidate reports whether a stat mode can be an mpd.conf.
@@ -339,7 +340,7 @@ func ReadLogical(root, logical string, limit int64) ([]byte, error) {
 	if err := staysInRoot(root, h); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(h)
+	f, _, err := fsutil.OpenAsFile(h)
 	if err != nil {
 		return nil, err
 	}
@@ -354,8 +355,12 @@ func ReadLogical(root, logical string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
+// readCapped reads the file at path whole, at most MaxConfBytes, opened as
+// a file (fsutil.OpenAsFile): a named pipe, a device or a directory is
+// refused at once and never waited on, since nothing cancels an open that
+// waits for a pipe's writer.
 func readCapped(path string) (string, error) {
-	f, err := os.Open(path)
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", errNotFound
