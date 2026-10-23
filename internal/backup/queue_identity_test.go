@@ -301,9 +301,10 @@ func assertPlayerResetAdvice(t *testing.T, advice, operation string) {
 	}
 	for _, required := range []string{
 		"with the service stopped, reset the player: remove the box's player-uuid, player-ids.json and player-queue.json together",
-		"this reset gives up for good every player identity the box ran before it, its own or one a restore gave it",
-		"no snapshot of one of them, whichever box took it, may restore its player identity again",
+		"this reset gives up for good the identity it removes and any the box ran earlier that no other box took over",
+		"no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again",
 		"remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots",
+		"an identity another box took over keeps its snapshots",
 		"the next start makes a new identity with no queue, a new device to controllers",
 		"a snapshot's player-ids.json is never a valid repair",
 		"do not delete the reservation while keeping the player identity",
