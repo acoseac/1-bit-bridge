@@ -156,9 +156,15 @@ func TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket(t *testing.T
 		t.Skipf("multicast unavailable on the loopback interface: %v", err)
 	}
 	t.Cleanup(a.Stop)
-	sender, ok := a.endpoint().sender.(*net.UDPConn)
+	// The subsystem wraps each sender to account for it at Close; the socket
+	// under the wrapper is the one this test pins.
+	conn := a.endpoint().sender
+	if owned, isOwned := conn.(*ssdpOwnedSender); isOwned {
+		conn = owned.ssdpSendConn
+	}
+	sender, ok := conn.(*net.UDPConn)
 	if !ok {
-		t.Fatalf("the NOTIFY sender is a %T, not the host's socket", a.endpoint().sender)
+		t.Fatalf("the NOTIFY sender is a %T, not the host's socket", conn)
 	}
 	if ra := sender.RemoteAddr(); ra != nil {
 		t.Errorf("the NOTIFY sender is connected to %v: its source address was fixed when it connected, "+
