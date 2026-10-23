@@ -10,23 +10,39 @@ import (
 	"testing"
 )
 
-// notifyAliveFailures runs one NOTIFY ssdp:alive burst for an advertiser at
+// burstEndpoint is a MediaServer-style handle with one endpoint whose sender
+// is sender, writing its NOTIFYs to "to" in place of the SSDP group, logging
+// to log; nothing is registered and no listener is open. White-box: the
+// alive burst is the endpoint's (sendAliveAll), driven by the test.
+func burstEndpoint(location string, sender ssdpSendConn, to *net.UDPAddr, log *slog.Logger) (*SSDPHandle, *ssdpEndpoint) {
+	h := &SSDPHandle{
+		s:           &SSDPSubsystem{notifyTo: to},
+		name:        "DLNA",
+		udn:         "uuid:test",
+		targets:     NotifyTargetsFor("uuid:test"),
+		serverToken: "test",
+		log:         log,
+		ctx:         context.Background(),
+	}
+	ep := &ssdpEndpoint{h: h, spec: SSDPEndpoint{Location: location}, sender: sender, ctx: context.Background()}
+	return h, ep
+}
+
+// notifyAliveFailures runs one NOTIFY ssdp:alive burst for an endpoint at
 // location through sender, written to "to" in place of the SSDP group, and
 // returns how many "NOTIFY alive send failed" lines it wrote at Debug, the
 // level it logs them at.
 func notifyAliveFailures(t *testing.T, location string, sender *net.UDPConn, to *net.UDPAddr) int {
 	t.Helper()
 	var buf bytes.Buffer
-	a := NewSSDPAdvertiser(SSDPConfig{UDN: "uuid:test", Location: location, ServerToken: "test"})
-	a.notifyTo = to
-	a.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	a.sendAliveAll(sender)
+	h, ep := burstEndpoint(location, sender, to, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	_ = h.sendAliveAll(ep)
 	return strings.Count(buf.String(), "NOTIFY alive send failed")
 }
 
-// loopbackSender is a sender like Start's (openNotifySender), and loopback's
-// discard port for it to write to in place of the SSDP group, so the test
-// needs no multicast.
+// loopbackSender is a sender like an endpoint's (openNotifySender), and
+// loopback's discard port for it to write to in place of the SSDP group, so
+// the test needs no multicast.
 func loopbackSender(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 	t.Helper()
 	sender, err := openNotifySender()
@@ -37,9 +53,10 @@ func loopbackSender(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 	return sender, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}
 }
 
-// loopbackSink is a sender like Start's, and the address of a UDP socket the
-// test holds open on loopback for it to write to. A write that fits goes out
-// there, whatever the host does with a datagram to a port nothing listens on.
+// loopbackSink is a sender like an endpoint's, and the address of a UDP
+// socket the test holds open on loopback for it to write to. A write that
+// fits goes out there, whatever the host does with a datagram to a port
+// nothing listens on.
 func loopbackSink(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 	t.Helper()
 	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -52,16 +69,16 @@ func loopbackSink(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 }
 
 // Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause pins
-// the periodic burst's side of the M-SEARCH rule: Stop closes the sender,
-// and a burst the periodic goroutine had begun then meets net.ErrClosed on
-// every target it has left. That is the stop, not a failure, so it logs
-// nothing and the burst ends. A write that fails for its own reason (here a
-// datagram past the maximum size, refused on every platform) is still
-// reported, one line per target, as before.
+// the periodic burst's side of the M-SEARCH rule: a withdrawal closes the
+// sender, and a burst the timer had begun then meets net.ErrClosed on every
+// target it has left. That is the stop, not a failure, so it logs nothing and
+// the burst ends. A write that fails for its own reason (here a datagram past
+// the maximum size, refused on every platform) is still reported, one line
+// per target, as before.
 func Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause(t *testing.T) {
 	const location = "http://127.0.0.1:7790/dlna/description.xml"
 	closed, to := loopbackSender(t)
-	_ = closed.Close() // Stop's close, landed before the burst's writes
+	_ = closed.Close() // the withdrawal's close, landed before the burst's writes
 	if got := notifyAliveFailures(t, location, closed, to); got != 0 {
 		t.Errorf("a burst Stop's close cut short logged %d NOTIFY send failures, want 0", got)
 	}
@@ -83,13 +100,13 @@ func Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause(t *tes
 // burst goes out again. Counted per write, the Error would land inside the
 // first burst.
 //
-// The first burst is Start's own, on the loopback interface, so the log
-// Start builds is the one under test; every write fails because the
+// The first burst is Register's own, on the loopback interface, so the log
+// Register builds is the one under test; every write fails because the
 // Location makes each NOTIFY larger than a datagram can be.
 func Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak(t *testing.T) {
 	const location = "http://127.0.0.1:7790/dlna/description.xml"
-	var buf bytes.Buffer
-	a := NewSSDPAdvertiser(SSDPConfig{
+	var buf syncBuffer
+	a := newTestAdvertiser(testAdvertiserConfig{
 		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 		Location:    location + "?" + strings.Repeat("x", 70_000),
 		ServerToken: "test",
@@ -99,28 +116,34 @@ func Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak(t *testin
 	if err := a.Start(context.Background()); err != nil {
 		t.Skipf("multicast unavailable on the loopback interface: %v", err)
 	}
-	a.Stop() // joins the periodic goroutine, so the test is the only one noting results now
+	ep := a.endpoint()
+	a.Stop() // joins the timer goroutine, so the test is the only one noting results now
 	if got := strings.Count(buf.String(), "NOTIFY send failed"); got != 1 {
-		t.Fatalf("Start's failed burst logged %d NOTIFY Warns at the default level, want 1:\n%s", got, buf.String())
+		t.Fatalf("Register's failed burst logged %d NOTIFY Warns at the default level, want 1:\n%s", got, buf.String())
 	}
 	if strings.Contains(buf.String(), "failing persistently") {
 		t.Fatalf("the streak escalated inside its first burst, which counted writes, not bursts:\n%s", buf.String())
 	}
 
-	// Stop joined the goroutines that read notifyTo, so the test may point
-	// the stopped advertiser's bursts at a socket of its own.
+	// The withdrawal joined the goroutines that read the endpoint, so the
+	// test may revive the withdrawn endpoint white-box and point its bursts
+	// at a socket of its own, noting each as its timer does.
 	sender, sink := loopbackSink(t)
-	a.notifyTo = sink
-	a.announceAlive(sender)
+	h := a.h
+	h.s.notifyTo = sink
+	ep.sender = sender
+	ep.ctx = context.Background()
+	announce := func() { h.noteAlive(ep, h.sendAliveAll(ep)) }
+	announce()
 	const escalation = "NOTIFY send failing persistently; DLNA advertising is degraded"
 	if got := strings.Count(buf.String(), escalation); got != 1 {
 		t.Fatalf("the second failed burst logged %d Errors, want 1:\n%s", got, buf.String())
 	}
 	for range 10 {
-		a.announceAlive(sender)
+		announce()
 	}
-	a.cfg.Location = location
-	a.announceAlive(sender)
+	ep.spec.Location = location
+	announce()
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	var reports []string

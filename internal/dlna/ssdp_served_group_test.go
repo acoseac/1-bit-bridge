@@ -3,7 +3,6 @@
 package dlna
 
 import (
-	"context"
 	"net"
 	"testing"
 	"time"
@@ -11,8 +10,8 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// TestTheSSDPAdvertiserAnswersASearchSentToTheGroup pins, through the
-// advertiser's real read loop, that a search sent to the SSDP group is still
+// TestTheSSDPAdvertiserAnswersASearchSentToTheGroup pins, through the SSDP
+// subsystem's real read loop, that a search sent to the SSDP group is still
 // answered now that every other search is judged by the address it was sent
 // to (backlog B48): every unicast is judged as the tailnet address here, and
 // refused, and the group search is answered all the same. Without the
@@ -37,25 +36,13 @@ func TestTheSSDPAdvertiserAnswersASearchSentToTheGroup(t *testing.T) {
 	judged.set("100.64.0.7")
 	sink := newLogSink()
 	const location = "http://192.168.1.20:7790/dlna/description.xml"
-	adv := NewSSDPAdvertiser(SSDPConfig{
+	registerOnSocket(t, l, testAdvertiserConfig{
 		UDN:         "uuid:b48b48b4-8b48-4b48-8b48-b48b48b48b48",
 		Location:    location,
 		ServerToken: "test",
+		Logger:      sink.logger(),
 		served:      macServedJudgedBy(&judged),
-	})
-	adv.log = sink.logger()
-	if !adv.armListener(l) {
-		_ = l.Close()
-		t.Fatal("the listener could not be armed")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	adv.wg.Add(1)
-	go adv.runMSearchListener(ctx, l, true)
-	t.Cleanup(func() {
-		cancel()
-		_ = l.Close()
-		adv.wg.Wait()
-	})
+	}.registration())
 
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {

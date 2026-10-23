@@ -13,7 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// listenSSDP opens an advertiser's M-SEARCH listener: a UDP socket on the
+// listenSSDP opens an SSDP listener (one per interface, shared by every
+// registration on it, SSDPSubsystem): a UDP socket on the
 // group's port, joined to group on iface (nil: the interface the kernel
 // routes the group through), that hears only the group's datagrams arriving
 // on iface (backlog B71).
@@ -34,8 +35,8 @@ import (
 // the memberships it holds itself, (group, interface) pairs, which is what
 // macOS and Windows do anyway (ssdp_listen_other.go). It does nothing to a
 // unicast datagram, which the kernel hands to one socket on the port, sent
-// to any address of the host; the read loop judges that address
-// (SSDPAdvertiser.searchedFor, backlog B48).
+// to any address of the host; the MediaServer judges that address
+// (ssdpServedAdmission.admits, backlog B48).
 //
 // The option is set in the ListenConfig's Control, BEFORE the bind: from the
 // bind on the socket receives other interfaces' group datagrams, so an option
@@ -53,8 +54,10 @@ import (
 // sandbox that emulates the socket API may not) leaves the listener as it
 // was, with a Warn: an advertiser that also answers the searches of other
 // interfaces is what every Linux bridge did before, and one that does not
-// start at all is worse.
-func listenSSDP(ctx context.Context, iface *net.Interface, group *net.UDPAddr, log *slog.Logger) (*net.UDPConn, error) {
+// start at all is worse. The refusal is returned beside the listener
+// (confineErr): the MediaServer answers on such a listener as before, and a
+// strict registration refuses an endpoint on it (B470 PR 5a1).
+func listenSSDP(ctx context.Context, iface *net.Interface, group *net.UDPAddr, log *slog.Logger) (conn *net.UDPConn, confineErr error, err error) {
 	return listenSSDPConfined(ctx, iface, group, log, multicastAllOff)
 }
 
@@ -66,23 +69,23 @@ func multicastAllOff(fd uintptr) error {
 // listenSSDPConfined is listenSSDP with the confining setsockopt as a
 // parameter, so a test can drive a kernel that refuses it.
 func listenSSDPConfined(ctx context.Context, iface *net.Interface, group *net.UDPAddr, log *slog.Logger,
-	confine func(fd uintptr) error) (*net.UDPConn, error) {
+	confine func(fd uintptr) error) (*net.UDPConn, error, error) {
 	var confineErr error
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		return c.Control(func(fd uintptr) { confineErr = confine(fd) })
 	}}
 	pc, err := lc.ListenPacket(ctx, "udp4", group.String())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	conn, ok := pc.(*net.UDPConn)
 	if !ok {
 		_ = pc.Close()
-		return nil, fmt.Errorf("dlna: SSDP listener is a %T, not a UDP socket", pc)
+		return nil, nil, fmt.Errorf("dlna: SSDP listener is a %T, not a UDP socket", pc)
 	}
 	if err := ipv4.NewPacketConn(conn).JoinGroup(iface, &net.UDPAddr{IP: group.IP}); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if confineErr != nil {
 		log.Warn("SSDP listener cannot be limited to its own interface: on a host with more than one "+
@@ -90,5 +93,5 @@ func listenSSDPConfined(ctx context.Context, iface *net.Interface, group *net.UD
 			slog.String("interface", interfaceName(iface)),
 			slog.String("err", confineErr.Error()))
 	}
-	return conn, nil
+	return conn, confineErr, nil
 }

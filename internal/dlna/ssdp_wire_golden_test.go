@@ -304,8 +304,8 @@ func TestTheMediaServerRepeatsItsAliveBurstUnchanged(t *testing.T) {
 	capture := ssdpGroupCapture(t, lo)
 	udn := goldenUDN(t)
 	location := "http://127.0.0.1:7790/" + testNonce(t) + "/description.xml"
-	a := NewSSDPAdvertiser(SSDPConfig{UDN: udn, Location: location, ServerToken: goldenServerToken, Interface: lo})
-	a.cfg.AdvertiseInterval = 50 * time.Millisecond
+	a := newTestAdvertiser(testAdvertiserConfig{UDN: udn, Location: location, ServerToken: goldenServerToken, Interface: lo,
+		AdvertiseInterval: 50 * time.Millisecond})
 	if err := a.Start(context.Background()); err != nil {
 		t.Skipf("multicast unavailable on the loopback interface: %v", err)
 	}

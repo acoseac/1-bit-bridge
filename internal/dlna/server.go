@@ -183,6 +183,15 @@ type ServerConfig struct {
 	// preserved for callers that pin a specific bind host.
 	AdvertiseEndpoints []AdvertiseEndpoint
 
+	// SSDP is the subsystem the MediaServer registers its SSDP device with
+	// (B470 PR 5a1). cmd/bridge's wiring MUST pass serve's own, the one
+	// every SSDP device of the process registers with: a second subsystem
+	// would bind a second set of listeners on port 1900, and a unicast
+	// M-SEARCH reaches only one of them. nil makes Start build a private
+	// one that Stop closes, for a server started on its own (tests, and a
+	// caller with no serve around it).
+	SSDP *SSDPSubsystem
+
 	// TelemetryStore receives per-request entries via the telemetry
 	// middleware. nil = telemetry disabled (middleware passes
 	// through). Bridge config (PR 1 task #12) maps
@@ -213,8 +222,17 @@ type Server struct {
 	cfg        ServerConfig
 	mux        *http.ServeMux
 	httpServer *http.Server
-	ssdps      []*SSDPAdvertiser // one per advertise endpoint (≥1 once started)
 	log        *slog.Logger
+
+	// ssdp is the subsystem the MediaServer is registered with: cfg.SSDP,
+	// or a private one Start built (ssdpOwned), which Stop closes.
+	// ssdpHandle is its registration, one SSDP endpoint per advertise
+	// endpoint that started (ssdpActive of them); nil before Start and
+	// after Stop.
+	ssdp       *SSDPSubsystem
+	ssdpOwned  bool
+	ssdpHandle *SSDPHandle
+	ssdpActive int
 
 	// GENA initial-NOTIFY lifecycle. `notifyCtx` is cancelled by Stop so
 	// an in-flight best-effort NOTIFY POST can't outlive the server;
@@ -398,9 +416,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// because httpSrv is written and read on this goroutine before the spawn.
 	//
 	// s.httpServer is the ONLY field Stop writes that a spawned goroutine
-	// could observe: s.ssdps is touched solely by Start/Stop on the caller's
-	// goroutine, and Stop never writes notifyCtx / notifyClient (it calls
-	// notifyCancel, it does not reassign the fields).
+	// could observe: the SSDP fields are touched solely by Start/Stop on the
+	// caller's goroutine, and Stop never writes notifyCtx / notifyClient (it
+	// calls notifyCancel, it does not reassign the fields).
 	httpSrv := s.httpServer
 	go func() {
 		if hook := serveGoroutineHookForTests; hook != nil {
@@ -413,31 +431,33 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Start one SSDP advertiser per advertise endpoint. On a
-	// multi-interface host each interface gets its own multicast
-	// listener + per-interface LOCATION; single-interface (or
-	// pinned-bind) hosts fall back to one advertiser.
+	// Register the MediaServer's SSDP device, one endpoint per advertise
+	// endpoint, now that the description's HTTP listener is bound. On a
+	// multi-interface host each interface gets its own listener membership
+	// + per-interface LOCATION; single-interface (or pinned-bind) hosts
+	// fall back to one endpoint.
 	//
 	// Failure policy: a per-interface bind failure (no multicast
 	// permission on that NIC, transient flap) is logged and skipped —
 	// the bridge keeps advertising on whatever interfaces DID bind. Only
-	// if EVERY advertiser fails do we treat SSDP as down: tear the HTTP
+	// if EVERY endpoint fails do we treat SSDP as down: tear the HTTP
 	// listener back down and return an error (preserves the
 	// single-interface "SSDP failed → Start fails" contract, since that
-	// case has exactly one endpoint).
+	// case has exactly one endpoint). The rollback touches only this
+	// registration: a subsystem the wiring passed in, and every other
+	// device on it, stays as it was.
 	endpoints := s.advertiseEndpoints()
-	s.startAdvertisers(ctx, endpoints)
-	if len(s.ssdps) == 0 {
+	if err := s.registerSSDP(ctx, endpoints); err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
-		return fmt.Errorf("dlna: SSDP start: no advertiser could bind (tried %d endpoint(s))", len(endpoints))
+		return err
 	}
 
 	s.log.Info("DLNA server started",
 		slog.String("listenAddress", s.cfg.ListenAddress),
 		slog.String("serverURL", s.cfg.ServerURL),
-		slog.Int("ssdpInterfaces", len(s.ssdps)),
+		slog.Int("ssdpInterfaces", s.ssdpActive),
 		slog.String("udn", s.cfg.UDN),
 		slog.String("friendlyName", s.cfg.FriendlyName),
 		slog.Bool("telemetryEnabled", s.cfg.TelemetryStore != nil),
@@ -446,35 +466,69 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// startAdvertisers starts one SSDP advertiser per endpoint and keeps those
-// that bind in s.ssdps. A per-interface bind failure (no multicast
-// permission on that NIC, a transient flap) is logged and skipped, so the
-// bridge advertises on whatever interfaces DID bind; Start treats SSDP as
-// down only when none did. Moved out of Start to keep it under the
-// cognitive-complexity limit; the behaviour is Start's, unchanged.
-func (s *Server) startAdvertisers(ctx context.Context, endpoints []AdvertiseEndpoint) {
-	for _, ep := range endpoints {
-		adv := NewSSDPAdvertiser(SSDPConfig{
-			UDN:         s.cfg.UDN,
-			Location:    ep.ServerURL + "/dlna/description.xml",
-			ServerToken: SSDPServerToken(s.cfg.ModelNumber),
-			Interface:   ep.Interface,
-			Logger:      s.log,
-			served:      s.served,
-		})
-		if err := adv.Start(ctx); err != nil {
-			ifaceName := "default"
-			if ep.Interface != nil {
-				ifaceName = ep.Interface.Name
-			}
-			s.log.Warn("DLNA SSDP advertiser failed on interface — skipping",
-				slog.String("interface", ifaceName),
-				slog.String("location", ep.ServerURL),
-				slog.String("err", err.Error()))
-			continue
-		}
-		s.ssdps = append(s.ssdps, adv)
+// registerSSDP registers the MediaServer with its SSDP subsystem (cfg.SSDP,
+// or a private one it builds) and keeps the registration. An endpoint that
+// fails (no multicast permission on that NIC, a transient flap) is logged
+// and skipped, so the bridge advertises on whatever interfaces DID bind;
+// with none, the private subsystem is closed again and the error is the one
+// the wiring reads as "DLNA disabled".
+func (s *Server) registerSSDP(ctx context.Context, endpoints []AdvertiseEndpoint) error {
+	s.ssdp, s.ssdpOwned = s.cfg.SSDP, false
+	if s.ssdp == nil {
+		s.ssdp, s.ssdpOwned = NewSSDPSubsystem(ctx, SSDPSubsystemOptions{Logger: s.log}), true
 	}
+	h, res, err := s.ssdp.Register(ctx, s.mediaServerRegistration(endpoints))
+	for _, f := range res.Failed {
+		ep := endpoints[f.Position]
+		ifaceName := "default"
+		if ep.Interface != nil {
+			ifaceName = ep.Interface.Name
+		}
+		s.log.Warn("DLNA SSDP advertiser failed on interface — skipping",
+			slog.String("interface", ifaceName),
+			slog.String("location", ep.ServerURL),
+			slog.String("err", f.Err.Error()))
+	}
+	if err != nil {
+		if s.ssdpOwned {
+			_ = s.ssdp.Close(context.Background())
+		}
+		s.ssdp, s.ssdpOwned = nil, false
+		if errors.Is(err, ErrSSDPNoEndpoint) {
+			return fmt.Errorf("dlna: SSDP start: no advertiser could bind (tried %d endpoint(s))", len(endpoints))
+		}
+		return fmt.Errorf("dlna: SSDP start: %w", err)
+	}
+	s.ssdpHandle, s.ssdpActive = h, len(res.Active)
+	return nil
+}
+
+// mediaServerRegistration is the MediaServer's SSDP registration: one
+// endpoint per advertise endpoint, in order, each announcing its ServerURL's
+// description as LOCATION, with the five targets NotifyTargetsFor gives,
+// 16 responder slots per endpoint, and admission by destination through the
+// served addresses the HTTP listener judges by (ssdpServedAdmission).
+func (s *Server) mediaServerRegistration(endpoints []AdvertiseEndpoint) SSDPRegistration {
+	eps := make([]SSDPEndpoint, len(endpoints))
+	for i, ep := range endpoints {
+		eps[i] = SSDPEndpoint{Interface: ep.Interface, Location: ep.ServerURL + "/dlna/description.xml"}
+	}
+	return SSDPRegistration{
+		Name:           "DLNA",
+		UDN:            s.cfg.UDN,
+		Targets:        NotifyTargetsFor(s.cfg.UDN),
+		ServerToken:    SSDPServerToken(s.cfg.ModelNumber),
+		Endpoints:      eps,
+		Admission:      ssdpServedAdmission{served: s.served},
+		ResponderSlots: maxConcurrentMSearchResponders,
+		Logger:         s.log,
+	}
+}
+
+// SSDP returns the subsystem the server is registered with while it runs,
+// cfg.SSDP when the wiring passed one, and nil before Start and after Stop.
+func (s *Server) SSDP() *SSDPSubsystem {
+	return s.ssdp
 }
 
 // warnIfPinnedOffTheLAN logs, once at Start, a listener whose
@@ -511,19 +565,17 @@ func (s *Server) advertiseEndpoints() []AdvertiseEndpoint {
 	return []AdvertiseEndpoint{{Interface: s.cfg.Interface, ServerURL: s.cfg.ServerURL}}
 }
 
-// Stop gracefully shuts down both subsystems. The SSDP advertiser
-// sends NOTIFY ssdp:byebye for every NotifyTarget so renderers
-// purge our entry immediately. The HTTP server is given `ctx`'s
-// deadline (or 5 seconds default if ctx has no deadline) to drain
-// in-flight requests before being force-closed.
+// Stop gracefully shuts down both subsystems. SSDP goes first: the
+// MediaServer's registration is withdrawn, which sends NOTIFY ssdp:byebye
+// for every NotifyTarget on every endpoint so renderers purge our entry
+// immediately, while the description it names is still served. The HTTP
+// server is then given `ctx`'s deadline (or 5 seconds default if ctx has no
+// deadline) to drain in-flight requests before being force-closed.
 //
 // Safe to call exactly once after Start(). Calling before Start()
 // or twice is a no-op (defensive — won't panic).
 func (s *Server) Stop(ctx context.Context) error {
-	for _, adv := range s.ssdps {
-		adv.Stop()
-	}
-	s.ssdps = nil
+	s.withdrawSSDP(ctx)
 	// Cancel any in-flight GENA initial-NOTIFY POSTs so they don't
 	// outlive the server.
 	if s.notifyCancel != nil {
@@ -553,6 +605,29 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.notifyWG.Wait()
 	s.log.Info("DLNA server stopped")
 	return err
+}
+
+// withdrawSSDP withdraws the MediaServer's SSDP registration under ctx's
+// deadline (SSDPHandle.Withdraw: byebye first, ctx's cancellation does not
+// cut it), and closes a private subsystem Start built. A byebye that fails is
+// best-effort, as it always was, and logged at Debug; a withdrawal that ran
+// out of time, which cut sends short, is a Warn.
+func (s *Server) withdrawSSDP(ctx context.Context) {
+	if s.ssdpHandle != nil {
+		if err := s.ssdpHandle.Withdraw(ctx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				s.log.Warn("DLNA SSDP withdrawal ran out of time; its byebye may not have gone out",
+					slog.String("err", err.Error()))
+			} else {
+				s.log.Debug("DLNA SSDP byebye failed", slog.String("err", err.Error()))
+			}
+		}
+		s.ssdpHandle = nil
+	}
+	if s.ssdpOwned && s.ssdp != nil {
+		_ = s.ssdp.Close(ctx)
+	}
+	s.ssdp, s.ssdpOwned, s.ssdpActive = nil, false, 0
 }
 
 // handler builds the handler tree Start serves: the route map
