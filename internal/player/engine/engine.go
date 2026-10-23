@@ -299,7 +299,9 @@ func New(cfg Config) (*Engine, error) {
 // on storage of which that cannot be told (atomicwrite.ErrMediumUnknown), is
 // named, with the IDs and tokens that would repeat after a reboot and the
 // remedy, persistent storage: the orchestrator's decision on round 9's
-// review, to fail closed.
+// review, to fail closed. An overlay subtree bind (ErrOverlayBind, also
+// ErrMediumUnknown) is instead a crash risk even on persistent storage: its
+// copy-up parents cannot be synced through that mount.
 func notDurable(path, dataDir string, err error) error {
 	dir := filepath.Dir(path)
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) {
@@ -312,6 +314,8 @@ func notDurable(path, dataDir string, err error) error {
 		return fmt.Errorf("player: the platform gives no mount identity for the data directory %s or an entry below it, so no mount point between it and the reservation file %s can be ruled out: %w", dataDir, path, err)
 	case errors.Is(err, atomicwrite.ErrVolatile):
 		return fmt.Errorf("player: the data directory %s is on storage that does not outlive a reboot, so the player's IDs and tokens would repeat after a reboot: put the data directory on persistent storage: %w", dataDir, err)
+	case errors.Is(err, atomicwrite.ErrOverlayBind):
+		return fmt.Errorf("player: the data directory %s is on an overlay bind whose copy-up parents cannot be synced, even on persistent storage, so a crash could lose the reservation and repeat the player's IDs and tokens: %w", dataDir, err)
 	case errors.Is(err, atomicwrite.ErrMediumUnknown):
 		return fmt.Errorf("player: whether the data directory %s outlives a reboot cannot be told, and on storage that does not, the player's IDs and tokens would repeat after a reboot: put the data directory on persistent storage: %w", dataDir, err)
 	case errors.Is(err, atomicwrite.ErrNoDirectoryBarrier):

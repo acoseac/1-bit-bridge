@@ -465,8 +465,9 @@ func (in *confInput) nonwhite() (byte, bool) {
 
 // token reads a string at the next byte, quoted (confQuoted) or bare: a
 // bare string runs to a blank, = , ; { } [ ] ' " \ or #, and a name to a
-// dot too. ok is false at a byte no string starts with (those but the
-// quotes and #, and a dot) and for a quoted string confQuoted does not read.
+// dot too. As in alsa-lib v1.2.14 conf.c get_string, an initial dot is
+// refused for both names and values, before get_freestring/parse_value.
+// ok is also false at the other non-string starts or an unsupported escape.
 func (in *confInput) token(name bool) (s string, quoted, ok bool) {
 	rest := in.s[in.pos:]
 	if rest == "" || strings.IndexByte("=,;.{}[]\\", rest[0]) >= 0 {
@@ -641,11 +642,15 @@ const (
 	tokLBrack
 	tokRBrack
 	tokColon
+	tokReal
 )
 
 type pcmTok struct {
 	kind int
 	val  string
+	// opaque is a string form the resolver did not model before value
+	// lexing was widened. Consuming it must not grant a new chain.
+	opaque bool
 }
 
 type pcmParser struct {
@@ -841,6 +846,12 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 	if !ok {
 		return false
 	}
+	if plain && key == "type" {
+		if *sawType {
+			def.opaque, def.typeUnsure = true, true
+		}
+		*sawType = true
+	}
 	if key == "ttable" || strings.HasPrefix(key, "ttable.") || key == "route_policy" {
 		def.routes = true
 	}
@@ -864,20 +875,20 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 		def.opaque = true
 		return p.skipBrackets()
 	}
-	val, plainVal, ok := p.readFieldValue()
+	value, plainVal, ok := p.readFieldValue()
 	if !ok {
 		return false
 	}
-	if !plain || !plainVal {
+	val := value.val
+	if !plain || !plainVal || ((key == "type" || key == "slave.pcm") && value.kind != tokString) {
 		def.opaque = true
+		if key == "type" {
+			def.typeUnsure = true
+		}
 		return true
 	}
 	switch key {
 	case "type":
-		if *sawType {
-			def.opaque, def.typeUnsure = true, true
-		}
-		*sawType = true
 		def.typ = val
 	case "slave.pcm":
 		if def.slave != "" {
@@ -890,6 +901,10 @@ func (p *pcmParser) parsePCMField(def *pcmDef, sawType, sawCard, sawDevice *bool
 			def.opaque = true
 		}
 		*sawCard = true
+		if value.kind == tokNumber && !cardNumber(val) {
+			def.opaque = true
+			return true
+		}
 		if n, err := strconv.Atoi(val); err == nil && cardNumber(val) {
 			def.cardIsIndex = true
 			def.cardIndex = n
@@ -954,30 +969,15 @@ func (p *pcmParser) readFieldKey() (string, bool, bool) {
 	return b.String(), plain, true
 }
 
-func (p *pcmParser) readFieldValue() (string, bool, bool) {
-	tok := p.next()
-	plain := true
-	var b strings.Builder
-	switch tok.kind {
-	case tokString, tokIdent, tokNumber:
-		b.WriteString(tok.val)
-	case tokVar:
-		plain = false
-		b.WriteString(tok.val)
-	default:
-		return "", false, false
+func (p *pcmParser) readFieldValue() (pcmTok, bool, bool) {
+	t := p.next()
+	switch t.kind {
+	case tokString, tokNumber:
+		return t, !t.opaque, true
+	case tokReal, tokVar:
+		return t, false, true
 	}
-	for p.peek().kind == tokColon {
-		p.next()
-		n := p.next()
-		if n.kind != tokIdent && n.kind != tokNumber && n.kind != tokString && n.kind != tokVar {
-			return "", false, false
-		}
-		plain = false
-		b.WriteByte(':')
-		b.WriteString(n.val)
-	}
-	return b.String(), plain, true
+	return pcmTok{}, false, false
 }
 
 func cardNumber(val string) bool {
@@ -1033,8 +1033,8 @@ func (p *pcmParser) parseSlaveBlock() (slaveBlock, bool) {
 		if !ok {
 			return slaveBlock{}, false
 		}
-		if plain && plainVal && key == "pcm" && b.pcm == "" {
-			b.pcm = val
+		if plain && plainVal && val.kind == tokString && key == "pcm" && b.pcm == "" {
+			b.pcm = val.val
 		} else {
 			b.unknown = true
 		}
@@ -1043,13 +1043,189 @@ func (p *pcmParser) parseSlaveBlock() (slaveBlock, bool) {
 
 func (p *pcmParser) parseValue() (string, bool) {
 	t := p.next()
-	if t.kind == tokString || t.kind == tokIdent || t.kind == tokNumber {
+	if t.kind == tokString || t.kind == tokNumber || t.kind == tokReal {
 		return t.val, true
 	}
 	return "", false
 }
 
+// lexPCM distinguishes keys from values: dots split a key, including
+// after blanks/comments; inside a value they are kept, but cannot start it.
+// Basis: alsa-lib v1.2.14 src/conf.c get_string, get_freestring, parse_def and
+// parse_value (https://github.com/alsa-project/alsa-lib/blob/v1.2.14/src/conf.c).
+// parse_def accepts an optional '=' before a scalar, compound or array.
+// parse_value tries a digit/'-' word as an integer, then a real; failed
+// conversions fall through to STRING, as do other admitted free words.
+// Strings and comments are byte-oriented, not restricted to UTF-8. NUL,
+// includes, mode syntax and escapes outside our existing subset remain
+// refused. Reading a scalar does not evaluate a plugin or extend routing.
 func lexPCM(src string) ([]pcmTok, bool) {
+	if strings.IndexByte(src, 0) >= 0 {
+		return nil, false
+	}
+	in := confInput{s: src}
+	var out []pcmTok
+	// A stack avoids recursion on arbitrary nesting. Braces contain
+	// definitions; brackets contain values without keys.
+	stack := []int{tokLBrace}
+	for {
+		c, ok := in.nonwhite()
+		if !ok {
+			return nil, false
+		}
+		if c == 0 {
+			return out, len(stack) == 1
+		}
+		if c == ';' || c == ',' {
+			kind := tokSemi
+			if c == ',' {
+				kind = tokComma
+			}
+			out = append(out, pcmTok{kind: kind})
+			in.pos++
+			continue
+		}
+		if c == '}' || c == ']' {
+			open, close := tokLBrace, tokRBrace
+			if c == ']' {
+				open, close = tokLBrack, tokRBrack
+			}
+			if len(stack) == 1 || stack[len(stack)-1] != open {
+				return nil, false
+			}
+			stack = stack[:len(stack)-1]
+			out = append(out, pcmTok{kind: close})
+			in.pos++
+			continue
+		}
+		if stack[len(stack)-1] == tokLBrace {
+			start := in.pos
+			for {
+				if _, _, ok := in.token(true); !ok {
+					return nil, false
+				}
+				// parse_def tests get_nonwhite's result: blanks and
+				// comments before a dot still continue this key.
+				c, ok = in.nonwhite()
+				if !ok {
+					return nil, false
+				}
+				if c != '.' {
+					break
+				}
+				in.pos++
+				if _, ok := in.nonwhite(); !ok {
+					return nil, false
+				}
+			}
+			key, ok := lexPCMKey(src[start:in.pos])
+			if !ok {
+				return nil, false
+			}
+			out = append(out, key...)
+			if c == '=' {
+				in.pos++
+				c, ok = in.nonwhite()
+				if !ok {
+					return nil, false
+				}
+			}
+		}
+		// get_char_skip_comments expands includes even at a value or
+		// array element start. Never consume one as an opaque string.
+		if c == '<' {
+			return nil, false
+		}
+		switch c {
+		case '{', '[':
+			kind := tokLBrace
+			if c == '[' {
+				kind = tokLBrack
+			}
+			out = append(out, pcmTok{kind: kind})
+			stack = append(stack, kind)
+			in.pos++
+		default:
+			value, ok := lexPCMValue(&in)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, value)
+		}
+	}
+}
+
+// lexPCMValue keeps ALSA's scalar kinds separate. Numeric conversions
+// must consume the whole word (safe_strtoll/safe_strtod in alsa-lib);
+// failure leaves an opaque string, never a refusal of the file.
+func lexPCMValue(in *confInput) (pcmTok, bool) {
+	if in.pos >= len(in.s) || in.s[in.pos] == '<' {
+		return pcmTok{}, false
+	}
+	if in.s[in.pos] == '"' || in.s[in.pos] == '\'' {
+		s, n, ok := lexPCMString(in.s[in.pos:])
+		in.pos += n
+		return pcmTok{kind: tokString, val: s}, ok
+	}
+	s, _, ok := in.token(false)
+	if !ok || s == "" {
+		return pcmTok{}, false
+	}
+	if strings.IndexByte("-0123456789", s[0]) >= 0 {
+		// strtod accepts these spellings without ERANGE. They are real
+		// values, never card numbers or PCM names (nor evaluated gains).
+		switch strings.ToLower(s) {
+		case "-inf", "-infinity", "-nan":
+			return pcmTok{kind: tokReal, val: s}, true
+		}
+		// Go accepts underscores and 0b/0o integer prefixes that the
+		// C conversions used here do not. Keep them as opaque strings.
+		unsigned := strings.TrimPrefix(s, "-")
+		if strings.ContainsRune(s, '_') || strings.HasPrefix(unsigned, "0b") || strings.HasPrefix(unsigned, "0B") || strings.HasPrefix(unsigned, "0o") || strings.HasPrefix(unsigned, "0O") {
+			return pcmTok{kind: tokString, val: s, opaque: true}, true
+		}
+		if n, err := strconv.ParseInt(s, 0, 64); err == nil {
+			return pcmTok{kind: tokNumber, val: strconv.FormatInt(n, 10)}, true
+		}
+		// C strtod accepts hex reals even without a binary exponent.
+		real := s
+		if (strings.HasPrefix(unsigned, "0x") || strings.HasPrefix(unsigned, "0X")) && !strings.ContainsAny(s, "pP") {
+			real += "p0"
+		}
+		n, err := strconv.ParseFloat(real, 64)
+		if err != nil || (n == 0 && nonzeroPCMMantissa(s)) {
+			return pcmTok{kind: tokString, val: s, opaque: true}, true
+		}
+		return pcmTok{kind: tokReal, val: s}, true
+	}
+	// Preserve the resolver's former subset of bare strings. Paths,
+	// dotted words and device arguments can be consumed, but cannot
+	// turn an otherwise opaque definition into a resolved chain.
+	plain := true
+	for i, r := range s {
+		if (i == 0 && !isPCMIdentStart(r)) || (i != 0 && !isPCMIdentCont(r)) {
+			plain = false
+		}
+	}
+	return pcmTok{kind: tokString, val: s, opaque: !plain}, true
+}
+
+// nonzeroPCMMantissa distinguishes underflow to zero from a written zero;
+// ParseFloat does not report the former as ERANGE as strtod does.
+func nonzeroPCMMantissa(s string) bool {
+	s = strings.TrimPrefix(s, "-")
+	end := "eE"
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s, end = s[2:], "pP"
+	}
+	if i := strings.IndexAny(s, end); i >= 0 {
+		s = s[:i]
+	}
+	return strings.ContainsAny(s, "123456789abcdefABCDEF")
+}
+
+// lexPCMKey retains the deliberately restricted identifier grammar.
+func lexPCMKey(src string) ([]pcmTok, bool) {
 	var out []pcmTok
 	for i := 0; i < len(src); {
 		r, size := utf8.DecodeRuneInString(src[i:])
@@ -1158,14 +1334,15 @@ func isPCMIdentCont(r rune) bool {
 }
 
 func lexPCMString(src string) (string, int, bool) {
-	if src == "" || src[0] != '"' {
+	if src == "" || (src[0] != '"' && src[0] != '\'') {
 		return "", 0, false
 	}
 	var b strings.Builder
 	for i := 1; i < len(src); i++ {
-		switch src[i] {
-		case '"':
+		if src[i] == src[0] {
 			return b.String(), i + 1, true
+		}
+		switch src[i] {
 		case '\\':
 			if i+1 >= len(src) {
 				return "", 0, false

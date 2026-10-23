@@ -126,10 +126,21 @@ var ErrVolatile = errors.New("atomicwrite: the root is on storage that does not 
 
 // ErrMediumUnknown is their refusal of a root on storage of which that cannot
 // be told: an overlay whose upper layer the mount table, unreadable, does not
-// name, or names by a path that reaches here nothing, or another filesystem
-// than the one the overlay writes to. They say so rather than take it for
-// storage that outlives a reboot.
+// name, or names by a path whose relationship to the backing storage cannot
+// be established here. Differing totals alone are inconclusive. They say so
+// rather than take it for storage that outlives a reboot.
 var ErrMediumUnknown = errors.New("atomicwrite: whether the root's storage keeps what is written to it through a reboot cannot be told")
+
+// ErrOverlayBind marks a bind of a writable overlay subtree whose copy-up
+// parents cannot be synced. It also matches ErrMediumUnknown.
+var ErrOverlayBind error = overlayBindError{}
+
+type overlayBindError struct{}
+
+func (overlayBindError) Error() string {
+	return "atomicwrite: an overlay bind leaves copy-up parents outside the sync's reach"
+}
+func (overlayBindError) Is(target error) bool { return target == ErrMediumUnknown }
 
 // renameFunc is the rename implementation called by RenameWithRetry.
 // Wrapped in a var so tests can inject a deterministic failure
@@ -902,8 +913,9 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // tell is volatile, and does not prove every stack persistent: storage that
 // keeps nothing under a filesystem that reads as a disk's is the caller's to
 // avoid. A root on a bind of a directory inside an overlay is refused too
-// (ErrMediumUnknown): the directories above it that a copy-up creates are out
-// of that mount's reach.
+// (ErrOverlayBind, also matching ErrMediumUnknown): the directories above
+// it that a copy-up creates are out of that mount's reach. A read-only
+// overlay with no upper layer is left to fail EROFS on the write.
 //
 // root is the caller's guarantee: it must exist (the writer never creates
 // it), and off an overlay its own entry, and those above it, must be durable

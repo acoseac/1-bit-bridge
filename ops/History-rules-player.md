@@ -99,3 +99,16 @@
 - **A persisted queue names its writer's UUID; a foreign queue is moved aside with `queue_identity_mismatch`, logged once and never served.** **Never replace an identity before durably discarding its live queue; keep the queue for the same UUID.** Queue version 2 adds `uuid` and requires one canonical lowercase UUID. Version 1 has none and belongs to the running identity, for development boxes only. `payload` captures the engine's UUID with each revision; load refuses foreign entries through `ReasonQueueIdentity` before exposing any. The usual move-aside path preserves the bytes, logs the typed error once, and refuses edits if it cannot move the file. Backups still carry no queue.
 
   Restore first raises the reservation. When the live UUID differs, is missing or cannot be read, it discards `player-queue.json` before writing the restored UUID. `atomicwrite.ProbeDurable` checks the storage and fsyncs the directory chain before unlink, then again after unlink; this second barrier makes absence durable, including when a previous failed attempt already unlinked the file. A removal or barrier failure leaves the old identity and a raised floor, never a new identity with the old queue. A crash before discard can start the old identity with its own entries; after discard it starts empty; after UUID replacement the new identity starts empty. Restoring the same UUID preserves the queue byte-for-byte. `TestQueueNamesItsWriterAndRejectsAnotherIdentity`, `TestRestoreDiscardsOnlyAReplacedIdentitysQueue` and `TestRestoreQueueDiscardIsDurableBeforeIdentity` pin the identity, legacy, failed-move, failed-unlink, failed-barrier, retry and crash-start cases.
+
+## B514 — durable-writer refusals (2026-10-23)
+
+New handles ErrOverlayBind before ErrMediumUnknown because errors.Is matches
+both. The bind can be on persistent storage; its inaccessible copy-up parents
+can lose the reservation at a crash while preserving the lower identity.
+Its message names that crash risk and retains the writer's remedy. It does
+not advise persistent storage as if the bind were a tmpfs. Volatile and
+unknown medium refusals retain their fail-closed policy; an inconclusive
+totals comparison carries the writer's retry and namespace advice.
+TestNewFramesAnOverlayBindAsACrashRisk exercises New through the real probe
+with the medium seam, checking both sentinels and the operator-facing text.
+No transition, generation, reservation ordering, wire or backend changed.
