@@ -26,6 +26,9 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting](#2026-10-23--b523-the-players-engine-backend-and-sink-recover-the-panics-on-the-goroutines-they-start-a-dead-engines-sessions-are-let-go-of-and-the-engine-opens-its-own-files-without-waiting)
+- [2026-10-23 — B516 round 3: restore ALSA dot rules](#2026-10-23--b516-round-3-restore-alsa-dot-rules)
+- [2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text](#2026-10-23--b516-round-2-alsa-string-fallback-assignments-and-byte-text)
+- [2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings](#2026-10-23--b516-alsa-scalar-values-preserve-configuration-stages-and-warnings)
 - [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
@@ -57468,6 +57471,102 @@ sleep between them, fails the test ("the abandonment logged [], want
 once"), restored from git. Runs on aa2b7038: `cmd/bridge` under `-race`
 (524 s) and the three `TestAPanic` tests 10 runs each under `-race`, all
 passing; `make docs-check` passed.
+
+## 2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings
+
+At 3f805199 the PCM lexer treated values like identifier fragments: `0.5`
+left a dot where the next field should start, a minus or slash stopped
+lexing, and a dotted unquoted word in a scalar assignment split into
+several tokens. One such file invalidated the whole loaded configuration,
+losing sample-stage warnings as well as every named PCM resolution.
+
+The value lexer now follows the known alsa-lib conf.c scalar convention
+(key/value token boundaries, integer then real for digit/minus candidates,
+strings for other words and quoted values). It keeps the kinds distinct
+and consumes failed numeric candidates as opaque strings (corrected in
+round 2; round 1 wrongly refused them). Newly consumed opaque fields
+stay opaque; a real is never a card index or PCM reference. A softvol's
+presence and an attenuating plug's route stage still reach the verdict.
+Top-level hooks and includes still discard all definitions, and Volumio's
+captured empty → plug → hw chain is unchanged. The source was not fetched
+or run in this offline task; libc/locale edges are not independently
+verified. Full rule and grammar detail: `ops/History-rules-output.md`.
+
+Red first: all five shared synthetic fixtures fail
+`TestPCMValueFixturesKeepResolutionAndStages` on 3f805199's parser, and all
+five fail `TestPCMValueFixturesKeepWarnings` with empty warnings. The
+scratch harness on Go 1.27.1 passes both packages after the fix. The real
+repository test and vet commands refuse to start: go.mod requires 1.27.2,
+while GOTOOLCHAIN=local supplies 1.27.1. No toolchain download, dependency
+addition, commit or push was made. Scalar-kind, refusal, opacity and
+boundary tests and `FuzzPCMConfigValues` accompany the fixtures. Scratch
+negative-control patches and the task report record predicted failures
+and verification; these artifacts are deliberately outside the repository.
+
+## 2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text
+
+Round 1's reviews found that alsa-lib's `parse_value` falls through to
+STRING on failed numeric conversions, `parse_def` takes optional `=`,
+and byte-oriented comments/strings do not require UTF-8. The lexer now
+consumes these forms without turning new strings into routing evidence.
+A `.5` after whitespace is a string value rather than a key continuation.
+The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
+`0.0garbage` refusal is replaced with an unterminated compound, which
+alsa-lib actually refuses. The rules and History correct round 1's false
+numeric-refusal and leading-dot claims beside the code.
+
+The include check already ran at every token start through
+`confInput.nonwhite`; explicit value and bracket-start guards now sit
+beside the lexer, with scalar and array refusal tests and fuzz seeds.
+Negative `device` already fails the sign check, and `subdevice` already
+makes its definition opaque; new tests and controls pin both without
+broadening the resolver. Top-level hooks still invalidate all files.
+
+Red-first scratch runs against round 1 fail for numeric strings,
+assignments (including PipeWire's path) and Latin-1 strings/comments,
+including lost `alsa_softvol` through the real loader and Judge. Each
+review finding has a negative control; applicable round 1 controls are
+retained, and its incorrect numeric-refusal control is replaced. The
+artifact report records runs and source locations. The alsa-lib behaviour
+is the reviews' reading of conf.c, checked by the session that ran the
+task; the task, offline, fetched and ran nothing of alsa-lib. Its sandbox
+had Go 1.27.1 while go.mod requires 1.27.2, so its own runs used a
+scratch harness. In the repository, on Go 1.27.2: `go vet`, `go test` and
+`-race` (3 runs) on `internal/alsa` and `internal/signalpath`, 20 s of
+`FuzzPCMConfigValues` (2.86 million executions) and `make docs-check`
+passed, and the 23 negative controls, replayed one at a time on the
+committed tree (ffdc7c11), each failed the tests it predicts.
+
+[Round 3 reversed this entry's two dot statements, the `.5` after whitespace
+and the leading-dot correction: see its entry.]
+
+## 2026-10-23 — B516 round 3: restore ALSA dot rules
+
+Round 2 followed the orchestrating session's incorrect instruction that
+`.5` was a string. Its reviews and the orchestrating session's check of
+alsa-lib v1.2.14 `src/conf.c` established that `get_string` refuses an
+initial dot before numeric conversion, while `parse_def` continues a key
+at the dot returned by `get_nonwhite`, after blanks or comments. Restore
+both round-1 rules; remove leading-dot success cases, retain the fuzz seed,
+and correct round 2's dot claims in comments and History. Numeric fallback,
+optional `=`, byte text, include guards and device refusals stand.
+
+Red first on round-2 code: the four leading-dot refusals (a value after
+`=`, an array element), the bare `defaults.value .5` (a key round 2 ended
+at the blank), the three spaced or commented key cases and the
+real-loader route-warning test failed. With the fix they pass three times. In-place cached Go
+1.27.2 runs, offline: vet, test and race on `internal/alsa/...` and
+`internal/signalpath/...`, 20 s of `FuzzPCMConfigValues` (1,638,000
+executions), and `make docs-check` pass. The scratch round-3 report and
+controls manifest hold the commands, exact failing subtest names and
+individual control results: all 23 patches applied independently, built,
+and failed every predicted test. No alsa-lib binary or hardware was run.
+
+Round 3's review (the Claude API): the bare `defaults.value .5` pins the
+key rule, not the value refusal (without `=` the dot continues the key,
+which then has no value), so it moved to the spaced-key test, which also
+checks that `defaults.value .5 x` lexes as `defaults.value.5 x`; and round
+2's entry keeps its own text, marked where round 3 reversed it.
 
 ## 2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting
 
