@@ -1316,6 +1316,49 @@ func TestADoPVerdictNeedsTheStreamWatchedOpening(t *testing.T) {
 		_, got, raw := getReading(t, hs, token, id)
 		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
 	})
+	t.Run("a stream read opened and not started yet", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		reopen := closeStream(t, rig)
+		getReading(t, hs, token, id)
+		reopen()
+		start := prepareStream(t, rig)
+		clock.Advance(outputCacheTTL)
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.PCMNotRunning)
+		start()
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
+}
+
+// prepareStream makes card 5's playback substream read as the kernel prints
+// one MPD has opened and set up and not started: PREPARED, under a
+// trigger_time no start has stamped. It returns what starts it, putting the
+// running stream back as it was.
+func prepareStream(t *testing.T, r *readingRig) (start func()) {
+	t.Helper()
+	path := filepath.Join(r.procRoot, "asound", "card5", "pcm0p", "sub0", "status")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(b), "state: RUNNING\n", "state: PREPARED\n", 1)
+	text = regexp.MustCompile(`(?m)^trigger_time: .*$`).ReplaceAllString(text, "trigger_time: 0.000000000")
+	if text == string(b) || !strings.Contains(text, "state: PREPARED\n") {
+		t.Fatalf("no running stream in %s", path)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // TestAWiderContainerHasTheFormatPreserved: PCM at the card holds the

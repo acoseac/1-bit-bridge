@@ -478,11 +478,11 @@ func pickIDOf(pick *dacPick) pickID {
 // open, or the open one by its subdevice, its hw_params and its owner. MPD
 // sets hw_params only when it opens the output (AlsaOutput::Open), the call
 // that reads its dop and allowed_formats, so two readings that find
-// different keys have an open between them. A seek, a change of song in the
-// same format or an xrun restarts the stream without one, and changes no
-// key, as trigger_time and hw_ptr, which they move, would. The same key is
-// not the same open, though: MPD can reopen with the same hw_params from the
-// same thread, which only the run's start (openRecord.trigger) tells apart.
+// different keys have an open between them. A seek or an xrun restarts the
+// stream without one, and changes no key, as trigger_time and hw_ptr, which
+// they move, would. The same key is not the same open, though: MPD can
+// reopen with the same hw_params from the same thread, which only the run's
+// start (openRecord.trigger) tells apart.
 type streamKey struct {
 	open                      bool
 	subdevice                 int
@@ -599,12 +599,13 @@ func watchedOpen(prev, now openRecord, holder string) bool {
 	// the reading before saw: a runtime starts at zero when it is opened and
 	// is stamped at every start, stop and pause, so a reopen between the two
 	// readings (or a restart, which this does not tell from one) stamps
-	// another trigger_time.
-	return prev.tied && started(now.trigger) && prev.trigger == now.trigger
+	// another trigger_time. Both are starts (streamOn).
+	return prev.tied && prev.trigger == now.trigger
 }
 
-// started reports whether a trigger_time is a start: the kernel prints zero
-// for a stream opened and not started yet.
+// started reports whether a trigger_time is a start stamped on the run: the
+// kernel prints zero for a stream opened and not started yet, and "" is one
+// the reading did not read.
 func started(trigger string) bool {
 	return strings.Trim(trigger, "-0.") != ""
 }
@@ -631,9 +632,11 @@ func settingsOf(s *readingSnap) map[string]outputSettings {
 // is false when the reading does not say which: the card read in part (a
 // substream it could not list may be the open one, and the rest would read
 // as closed), the device not read, a substream's files not read, several
-// open and not exactly one MPD's, or the open one not set up whole (one with
+// open and not exactly one MPD's, the open one not set up whole (one with
 // no hw_params yet was opened, and MPD's open read its settings, before this
-// reading began).
+// reading began), or not started (no start stamped: the run that follows
+// can be this open's or a later one's, which the same hw_params from the
+// same thread do not tell apart).
 func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
 	if card := pickCard(snap, pick); card == nil || card.Partial {
 		return streamKey{}, "", false
@@ -656,7 +659,7 @@ func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
 	}
 	h := sub.HWParams
 	if h.Closed || h.NoSetup || h.Rate == nil || h.Channels == nil || h.PeriodSize == nil || h.BufferSize == nil ||
-		sub.Owner == nil || sub.Owner.PID == nil {
+		sub.Owner == nil || sub.Owner.PID == nil || !started(sub.Status.TriggerTime) {
 		return streamKey{}, "", false
 	}
 	return streamKey{
