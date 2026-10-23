@@ -80,7 +80,16 @@ func TestAnUpdateKeepsWhatItKeeps(t *testing.T) {
 	if byebye == 0 || added == 0 || added < byebye {
 		t.Errorf("the removed endpoint's last byebye at %d, the added one's first alive at %d: want both, the byebye first", byebye, added)
 	}
-	waitFor(t, "the remaining endpoint's repeat", func() bool { return firstSeq(n, from, "ssdp:alive", upEn1.Location) != 0 })
+	repeated := func() int {
+		count := 0
+		for _, line := range notifies(n, from, "ssdp:alive") {
+			if strings.HasPrefix(line, upEn1.Location+" ") {
+				count++
+			}
+		}
+		return count
+	}
+	waitFor(t, "the remaining endpoint's whole repeat", func() bool { return repeated() == len(sourceTargets(srcUDN)) })
 	if repeat := firstSeq(n, from, "ssdp:alive", upEn1.Location); repeat < byebye {
 		t.Errorf("the remaining endpoint repeated its alive at %d, before the byebye at %d", repeat, byebye)
 	}
