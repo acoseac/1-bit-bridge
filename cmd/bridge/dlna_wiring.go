@@ -57,6 +57,12 @@ type dlnaWiring struct {
 	// leaving a moved sidecar as the 410 it was before.
 	VariantsDir func() string
 	Logger      *slog.Logger
+	// SSDP is serve's one SSDP subsystem (B470 PR 5a1), which the
+	// MediaServer MUST register with: every SSDP device of the process
+	// shares its listeners on port 1900, where a second set would take
+	// unicast M-SEARCHes meant for the first.
+	// TestServeGivesTheMediaServerItsOneSSDPSubsystem reads the wiring.
+	SSDP *dlna.SSDPSubsystem
 }
 
 // startDLNAIfEnabled is the single chokepoint for DLNA wiring. Routes
@@ -198,6 +204,7 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 		AdvertiseEndpoints: endpoints,
 		TelemetryStore:     telemetry,
 		Logger:             dlnaLog,
+		SSDP:               w.SSDP,
 	})
 	if err != nil {
 		dlnaLog.Warn("DLNA disabled — NewServer failed", slog.String("err", err.Error()))
@@ -227,6 +234,18 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 		slog.String("friendlyName", cfg.DLNA.EffectiveDLNAFriendlyName()))
 
 	return &dlnaLifecycle{server: srv, log: dlnaLog}, true
+}
+
+// newServeSSDP returns serve's one SSDP subsystem (B470 PR 5a1), with no
+// registration and no socket: the MediaServer registers with it
+// (dlnaWiring.SSDP), and so will every other SSDP device serve advertises.
+// ctx is serve's: its cancellation stops the subsystem's readers and every
+// device's announcements and answers; the subsystem's Close, which runServe
+// defers, withdraws them. It is the only place cmd/bridge builds one.
+func newServeSSDP(ctx context.Context, logger *slog.Logger) *dlna.SSDPSubsystem {
+	return dlna.NewSSDPSubsystem(ctx, dlna.SSDPSubsystemOptions{
+		Logger: logger.With(slog.String("component", "dlna")),
+	})
 }
 
 // Stop tears down the DLNA server with the given context deadline.

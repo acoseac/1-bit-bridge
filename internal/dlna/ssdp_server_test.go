@@ -26,6 +26,24 @@ func fakeServer(t *testing.T, sub *SSDPSubsystem) (*Server, string) {
 	return s, addr
 }
 
+// TestANewSubsystemHoldsNoSocket pins what serve's subsystem costs a bridge
+// with DLNA off (B470 PR 5a1): built on every serve, it opens no listener
+// and no sender and sends nothing until a device registers, and its Close
+// has nothing to withdraw.
+func TestANewSubsystemHoldsNoSocket(t *testing.T) {
+	n := newFakeNet()
+	sub := fakeSubsystem(t, n)
+	if err := sub.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.listens != 0 || len(n.senders) != 0 || len(n.writes) != 0 {
+		t.Errorf("a subsystem nothing registered with opened %d listeners and %d senders and wrote %d datagrams",
+			n.listens, len(n.senders), len(n.writes))
+	}
+}
+
 // TestTheServerRegistersWithTheSubsystemItIsGiven pins the injection
 // cmd/bridge relies on (B470 PR 5a1): a Server given a subsystem registers
 // its device there and builds none of its own; its Stop withdraws that

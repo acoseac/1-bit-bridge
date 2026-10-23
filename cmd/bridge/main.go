@@ -4124,6 +4124,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		liveInterval((*config.Config).ScanInterval), upnpIngestRearm)
 	defer upnpLC.Stop()
 
+	// The process's one SSDP subsystem (B470 PR 5a1): every SSDP device the
+	// bridge advertises registers with it (the DLNA MediaServer today, the
+	// player's OpenHome Source from PR 5a2), so they share the listeners on
+	// port 1900 and a unicast M-SEARCH reaches each of them. It opens no
+	// socket until a device registers, so with DLNA off nothing is bound and
+	// nothing sent. Its Close is deferred here, ahead of DLNA's Stop, so it
+	// runs after it: it withdraws whatever is still registered, byebye
+	// included (the serve context, cancelled first on a signal, does not
+	// cut a byebye short), and joins every goroutine it started.
+	ssdpSubsystem := newServeSSDP(ctx, logger)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if err := ssdpSubsystem.Close(closeCtx); err != nil {
+			logger.Warn("SSDP shutdown error", slog.String("err", err.Error()))
+		}
+	}()
+
 	// apiSrv doubles as the DLNA listener's ArtworkSource: its ServeArtwork
 	// IS /v1/artwork/{key}, so /dlna/artwork/{key} serves the same bytes by
 	// construction, and `dlnaArtwork` in /v1/health advertises exactly that.
@@ -4135,6 +4153,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		UPnP:        upnpLC,
 		VariantsDir: liveVariantsDir,
 		Logger:      logger,
+		SSDP:        ssdpSubsystem,
 	})
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
