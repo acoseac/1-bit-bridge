@@ -56879,4 +56879,5 @@ had Go 1.27.1 while go.mod requires 1.27.2, so its own runs used a
 scratch harness. In the repository, on Go 1.27.2: `go vet`, `go test` and
 `-race` (3 runs) on `internal/alsa` and `internal/signalpath`, 20 s of
 `FuzzPCMConfigValues` (2.86 million executions) and `make docs-check`
-passed.
+passed, and the 23 negative controls, replayed one at a time on the
+committed tree (ffdc7c11), each failed the tests it predicts.
