@@ -632,3 +632,79 @@ func TestMediumMismatchesNeedStableEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestMediumFollowsASymlinkedUpper uses a real link and fixture mount IDs:
+// the link is on ext4, its target on another filesystem. No host mount table
+// or real cross-filesystem mount is needed. The statfs fixture follows the
+// same link as Linux statfs/stat, and mount identity must describe its target.
+func TestMediumFollowsASymlinkedUpper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink requires privileges on Windows")
+	}
+	base := realTempDir(t)
+	target := filepath.Join(base, "target")
+	link := filepath.Join(base, "up")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	// mountIDOf deliberately describes the link itself, as the strict
+	// writer requires; following it must be the upper reader's decision.
+	stubMountIDs(t, func(p string) (uint64, bool, error) {
+		switch p {
+		case link:
+			return 41, true, nil
+		case target:
+			return 40, true, nil
+		default:
+			t.Fatalf("unexpected mount lookup %s", p)
+			return 0, false, nil
+		}
+	})
+	for _, tc := range []struct {
+		name, fstype, options, want string
+		typ                         uint32
+		mismatch                    bool
+		err                         error
+	}{
+		{"XFS evidence", "xfs", "rw", "visible here as xfs (mount 40, mount device 8:2, path device 8:2)", 0x58465342, true, ErrMediumUnknown},
+		{"nested overlay", "overlay", "rw,lowerdir=/l,upperdir=/ram,workdir=/w", "upper layer /ram is on tmpfs", overlayfsMagic, false, ErrVolatile},
+		{"FUSE", "fuse.fuse-overlayfs", "rw", "fuse-overlayfs", fuseMagic, false, ErrMediumUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			escaped := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`, ",", `\054`, "=", `\075`).Replace(filepath.ToSlash(link))
+			table := fmt.Sprintf("30 1 0:30 / / rw - overlay overlay rw,lowerdir=/l,upperdir=%s,workdir=/w\n"+
+				"40 1 8:2 / /target rw - %s disk %s\n"+
+				"41 1 8:1 / /links rw - ext4 disk rw\n", escaped, tc.fstype, tc.options)
+			statfs := func(p string) (fsStat, error) {
+				st := fsStat{Type: overlayfsMagic, Bsize: 4096, Blocks: 100, Files: 100}
+				switch p {
+				case "/data":
+				case link:
+					resolved, err := filepath.EvalSymlinks(p)
+					if err != nil || resolved != target {
+						t.Fatalf("statfs target = %q, %v; want %q", resolved, err, target)
+					}
+					st.Type, st.Device = tc.typ, "8:2"
+					if tc.mismatch {
+						st.Files--
+					}
+				case "/ram":
+					st.Type = tmpfsMagic
+				default:
+					t.Fatalf("unexpected statfs %s", p)
+				}
+				return st, nil
+			}
+			err := mediumFrom("/data", 30, statfs, func() ([]byte, error) { return []byte(table), nil }, upperMountID)
+			if !errors.Is(err, tc.err) || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "visible here as ext4") {
+				t.Fatalf("medium = %v; want %v naming %q", err, tc.err, tc.want)
+			}
+			if id, ok, err := mountIDOf(link); err != nil || !ok || id != 41 {
+				t.Fatalf("strict reader = %d, %v, %v; want link's mount 41", id, ok, err)
+			}
+		})
+	}
+}

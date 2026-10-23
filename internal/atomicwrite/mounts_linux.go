@@ -16,7 +16,7 @@ import (
 // of the root, and for an overlay the upper layer the kernel's mount table
 // (/proc/self/mountinfo) names on the line of the root's own mount ID.
 func platformMedium(root string, mountID uint64) error {
-	return mediumFrom(root, mountID, linuxStatfs, readMountInfo, mountIDOf)
+	return mediumFrom(root, mountID, linuxStatfs, readMountInfo, upperMountID)
 }
 
 // linuxStatfs reads the filesystem totals and path's st_dev. The latter is

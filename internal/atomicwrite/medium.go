@@ -47,6 +47,18 @@ const maxOverlayDepth = 8
 // Exhausting them is inconclusive, never proof of another filesystem.
 const totalsRounds = 3
 
+// upperMountID follows an overlay's upper path before reading its mount ID,
+// as statfs and stat do. mountIDOf deliberately does not follow a final link:
+// strictPath uses it to detect mounted entries without walking links. Resolve
+// here so its unchanged readers describe the upper target, not the link.
+func upperMountID(path string) (uint64, bool, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return 0, false, err
+	}
+	return mountIDOf(resolved)
+}
+
 // mediumFrom is the medium check on what statfs, the mount table and the
 // mount IDs answer: nil for a root on storage the check finds no volatile
 // layer in, ErrVolatile for one that does not keep what is written to it
@@ -58,8 +70,9 @@ const totalsRounds = 3
 // does (the orchestrator's scope on round 10's review); the data directory
 // must be on persistent storage, and those are the operator's to avoid.
 //
-// id is the root's mount ID, which the writer already holds. tmpfs and ramfs
-// are told by their f_type. An overlay keeps what is written to it in its
+// idOf must follow the final symlink, consistently with statfs (upperMountID
+// on Linux). id is the root's mount ID, which the writer already holds.
+// tmpfs and ramfs are told by their f_type. An overlay keeps what is written to it in its
 // upper layer: the one the mount table names on the line of the overlay's
 // own mount ID (overlayLayer), never on a line picked by its mount point's
 // spelling. The path the table gives is as the overlay's mounter named it, so
@@ -217,7 +230,8 @@ func upperAsReached(root, on, path, upper string, first fsStat, statfs func(stri
 }
 
 // upperMountEvidence names the filesystem visible at upper by its own mount
-// ID's line. Device numbers are detail only: a btrfs subvolume's st_dev can
+// ID's line. idOf follows the final symlink, just as the statfs evidence does.
+// Device numbers are detail only: a btrfs subvolume's st_dev can
 // differ from mountinfo's superblock device. A matching mount-point spelling
 // is not identity; neither is this evidence of the overlay's backing across
 // mount namespaces. Device numbers never decide strictPath's mount boundaries.
