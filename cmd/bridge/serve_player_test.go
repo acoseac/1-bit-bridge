@@ -8,10 +8,12 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -469,6 +471,72 @@ func (ps *playerServe) health(t *testing.T) int {
 	return resp.StatusCode
 }
 
+// logWatch is the default logger's handler while a test waits for a line
+// that a goroutine of the player's writes on its own time, after the
+// engine's snapshot the test saw (the supervisor logs each change once it
+// wakes): it keeps every record, rendered as loggingtest's Recorder renders
+// one, and wakes a waiter at each. Installed through loggingtest.SetDefault.
+type logWatch struct {
+	mu      sync.Mutex
+	lines   []string
+	changed chan struct{}
+}
+
+func watchLog(t *testing.T) *logWatch {
+	t.Helper()
+	w := &logWatch{changed: make(chan struct{})}
+	loggingtest.SetDefault(t, slog.New(w))
+	return w
+}
+
+func (w *logWatch) Enabled(context.Context, slog.Level) bool { return true }
+
+func (w *logWatch) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	b.WriteString(r.Level.String() + " " + r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Fprintf(&b, " %s=%s", a.Key, a.Value)
+		return true
+	})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, b.String())
+	close(w.changed)
+	w.changed = make(chan struct{})
+	return nil
+}
+
+func (w *logWatch) WithAttrs([]slog.Attr) slog.Handler { return w }
+func (w *logWatch) WithGroup(string) slog.Handler      { return w }
+
+// await waits until a line logged holds every one of says, until the test's
+// deadline, and returns it.
+func (w *logWatch) await(t *testing.T, says ...string) string {
+	t.Helper()
+	for {
+		w.mu.Lock()
+		lines, ch := slices.Clone(w.lines), w.changed
+		w.mu.Unlock()
+		for _, l := range lines {
+			if !slices.ContainsFunc(says, func(s string) bool { return !strings.Contains(l, s) }) {
+				return l
+			}
+		}
+		select {
+		case <-ch:
+		case <-serveGiveUp(t):
+			t.Fatalf("no line logged saying %q; the log:\n%s", says, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// all is every line logged so far.
+func (w *logWatch) all() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return strings.Join(w.lines, "\n")
+}
+
 // TestServeStartsThePlayerOnlyWhenEveryGateHolds pins serve's decision at
 // boot, from the boot snapshot. The player starts only on Linux, with the
 // player enabled in a block that reads, a DAC bound, and a pause release
@@ -594,7 +662,7 @@ func TestServeStartsNoPlayerWithoutTheDataDirLock(t *testing.T) {
 // logged, and the player stops with nothing playable.
 func TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen(t *testing.T) {
 	needsDirectorySync(t)
-	rec := loggingtest.Record(t)
+	logs := watchLog(t)
 	track := flactest.Stream(44100, 2, 16, 4096, 7)
 	standIn := newPlayerStandIn()
 	standIn.resolve = true
@@ -623,10 +691,8 @@ func TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen(t *testing.T) {
 	if sk, _ := s.Skipped(id); sk.Reason != engine.ReasonMissing {
 		t.Errorf("the entry skipped %+v, want missing_file", sk)
 	}
-	if lines := rec.Lines("player: an entry was skipped"); len(lines) == 0 || !strings.Contains(lines[len(lines)-1], "missing_file") {
-		t.Errorf("the skip logged %q", lines)
-	}
-	if all := strings.Join(rec.All(), "\n"); strings.Contains(all, ps.music) {
+	logs.await(t, "player: an entry was skipped", "reason=missing_file")
+	if all := logs.all(); strings.Contains(all, ps.music) {
 		t.Errorf("a line names the library's path:\n%s", all)
 	}
 	if code := ps.stopServe(t); code != 0 {
@@ -1009,7 +1075,7 @@ func TestAPanicInThePlayersResolverRefusesItsEntry(t *testing.T) {
 // while the library is served and serve exits 0.
 func TestAPlayerFaultStaysInsideThePlayer(t *testing.T) {
 	needsDirectorySync(t)
-	rec := loggingtest.Record(t)
+	logs := watchLog(t)
 	standIn := newPlayerStandIn()
 	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: standIn})
 	eng := ps.runningEngine(t)
@@ -1023,10 +1089,11 @@ func TestAPlayerFaultStaysInsideThePlayer(t *testing.T) {
 		return len(s.Faults()) == 1 && s.State() == engine.Stopped
 	})
 	standIn.await(t, "the DAC let go", func(b *playerStandIn) bool { return b.closed == 1 })
-	if lines := rec.Failures("player: a fault stopped playback"); len(lines) != 1 || !strings.Contains(lines[0], "disconnected") {
-		t.Errorf("the fault logged %q, want once with its reason", lines)
+	logs.await(t, "WARN player: a fault stopped playback", "reason=disconnected")
+	if n := strings.Count(logs.all(), "player: a fault stopped playback"); n != 1 {
+		t.Errorf("the fault logged %d times, want once", n)
 	}
-	if all := strings.Join(rec.All(), "\n"); strings.Contains(all, "GOBAR-7Q2X-91KZ-4471") {
+	if all := logs.all(); strings.Contains(all, "GOBAR-7Q2X-91KZ-4471") {
 		t.Errorf("a line carries the DAC's serial")
 	}
 	if code := ps.health(t); code != http.StatusOK {
