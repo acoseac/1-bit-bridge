@@ -460,10 +460,12 @@ func TestATrickledBodyMeetsItsDeadlineHoldingNoSlot(t *testing.T) {
 	if res.StatusCode != 500 || !strings.Contains(string(body), "<errorCode>602</errorCode>") {
 		t.Errorf("beside a trickler, with one slot: %d %s; want fault 602", res.StatusCode, body)
 	}
-	_ = tr.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// Well inside the request's whole deadline (Limits.Read, 10 s), so the
+	// answer is the body's own deadline's.
+	_ = tr.SetReadDeadline(time.Now().Add(5 * time.Second))
 	got, err := http.ReadResponse(bufio.NewReader(tr), nil)
 	if err != nil {
-		t.Fatalf("the trickler got no answer: %v", err)
+		t.Fatalf("the trickler got no answer within 5 s: %v", err)
 	}
 	if got.StatusCode != http.StatusRequestTimeout {
 		t.Errorf("the trickler got %d, want 408", got.StatusCode)

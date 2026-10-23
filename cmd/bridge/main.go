@@ -2668,6 +2668,10 @@ type serveOpts struct {
 	// production.
 	playerSeams  *servePlayerSeams
 	playerBounds servePlayerBounds
+	// playerOpenHome is a boot test's box for the player's OpenHome
+	// surface (its addresses and listeners) and its hold on it; the zero
+	// value is production's. Per invocation for tailscaleCLI's reason.
+	playerOpenHome openhomeWiring
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -4140,18 +4144,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the watcher's readings do. The player keeps the DAC it started with
 	// until serve next starts.
 	player := startServePlayer(playerPlan, servePlayerWiring{
-		Cfg:     cfg,
-		Hold:    dataDirLock,
-		Store:   manifestStore,
-		Paths:   apiSrv.Resolver(),
-		Feed:    playerFeed,
-		Live:    livePlayerSettings(cfgHolder, opts.playerGOOS),
-		Changed: cfgHolder.Changed,
-		Trees:   opts.playerTrees,
-		Backend: opts.playerBackend,
-		Boot:    opts.playerBoot,
-		Seams:   opts.playerSeams,
-		Bounds:  opts.playerBounds,
+		Cfg:      cfg,
+		Hold:     dataDirLock,
+		Store:    manifestStore,
+		Paths:    apiSrv.Resolver(),
+		Feed:     playerFeed,
+		Live:     livePlayerSettings(cfgHolder, opts.playerGOOS),
+		Changed:  cfgHolder.Changed,
+		Trees:    opts.playerTrees,
+		Backend:  opts.playerBackend,
+		Boot:     opts.playerBoot,
+		Seams:    opts.playerSeams,
+		Bounds:   opts.playerBounds,
+		OpenHome: opts.playerOpenHome,
 	})
 	defer player.stop()
 

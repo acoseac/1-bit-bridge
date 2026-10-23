@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 )
 
 // TestMain lowers the bcrypt work factor for this package's suite, guards
@@ -37,6 +38,11 @@ import (
 // alsapcm.Open, and the watch any read of the host's trees through the
 // alsa readers, and the binary fails on either, so a test that would play
 // on, or read, the box it runs on (the owner's Pi has a DAC) fails instead.
+//
+// Nor does a test bind the host's LAN addresses: hostLAN, the interfaces
+// serve's OpenHome surface serves, is a box with none here, so a serve test
+// that turns the surface on without its own box (playerOpenHome) binds
+// nothing.
 func TestMain(m *testing.M) {
 	// The fingerprint stand-in re-execs this binary as fpcalc. It must
 	// return before the suite starts, or the child runs every test.
@@ -50,6 +56,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	hostTrees = trees
+	hostLAN = func() ([]lan.Interface, error) { return nil, nil }
 	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
 	stopReads := alsa.WatchHostReads(recordHostRead)
 	code := m.Run()
