@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting](#2026-10-23--b523-the-players-engine-backend-and-sink-recover-the-panics-on-the-goroutines-they-start-a-dead-engines-sessions-are-let-go-of-and-the-engine-opens-its-own-files-without-waiting)
 - [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
@@ -57467,3 +57468,281 @@ sleep between them, fails the test ("the abandonment logged [], want
 once"), restored from git. Runs on aa2b7038: `cmd/bridge` under `-race`
 (524 s) and the three `TestAPanic` tests 10 runs each under `-race`, all
 passing; `make docs-check` passed.
+
+## 2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting
+
+B470 PR 4b3 had serve recover panics in the goroutines it owns (its
+supervisor, the goroutine running `eng.Run`, the resolver, the sink notes)
+and recorded the rest as a follow-up, backlog B523 (its "Faults and panics"
+section): the goroutines the engine, the backend and the sink start, an
+engine whose Run a panic ended, and the engine's open of its own files.
+This change closes them, before 5a gives the player a network surface.
+
+### What a panic becomes, goroutine by goroutine
+
+Every recovered panic is logged once, with where (and the endpoint, for a
+sink), its stack, and its value only when it is the runtime's own error, as
+serve's `logPlayerPanic` and the resolver's `logPanic` log theirs; each
+package has a small helper of its own, as those two do. No error a panic
+becomes carries its value: each says what panicked and that the bridge's
+log has why.
+
+The engine (`internal/player/engine`):
+
+- **A backend call** (`call`, `callBackend`): the call's failure, an
+  `*Error` typed `ReasonBackend` ("the backend's <kind> call panicked"),
+  handed to the owner as `msgCallDone`, so it takes the path an error the
+  call returned takes. Start stops playback (`ReasonBackend`) and releases
+  the session; Prepare leaves what follows to a session of its own
+  (`noMore`); Cut is a cut that could not cut, so playback stops when the
+  occurrence is heard; Pause and Resume answer their command; Release is
+  unacknowledged, the release unconfirmed until `Events.Released`; Discard
+  changes nothing. The engine plays on after each.
+- **A reservation write** (`reserve`, the start's in New and an edit's on
+  its goroutine): a write that failed (`res.failed`), so nothing it would
+  cover is handed out and the edits that need it are refused
+  `ReasonReservation` until a write lands; a start whose write panicked
+  publishes no token.
+- **The queue file's writer**: a panic in a write, its encoding or its file
+  write (`attempt`), is that write's failure, the state dirty, logged as any
+  failed write and retried after its backoff; one on the writer's goroutine
+  outside a write (`ended`) ends the writer, said as a failed write
+  (`msgPersisted`), the state dirty from then on, and `msgWriterExited`, so
+  shutdown waits for no flush.
+- **The owner**, Run's own goroutine: not recovered by the engine. The panic
+  goes on to Run's caller (serve recovers it and marks `playerRun.panicked`),
+  and on its way out the engine abandons (`loop`'s deferred `abandon`): its
+  life ends, so every backend call's context does; its writer writes the
+  newest revision the owner handed it, if that is not written yet, and
+  exits; and Done closes, once (`doneOnce`), so a command answers
+  `ReasonClosed` at once and a post (a backend's event, a timer, a write's
+  report) returns at once.
+  Done had to close: `post` waits on the message buffer (256) or on Done, so
+  with the owner gone and Done open the 257th post waits for ever, and the
+  backend's reporter posts a position at each measurement while it plays.
+  Within seconds of the owner's end it would wait in a post, the session's
+  teardown would wait for it (`wg.Wait`), and the release serve now asks for
+  could never finish. `TestAPanicOnTheOwnerLeavesNothingWaitingOnIt` posts
+  three buffers' worth of events after the panic.
+
+The backend (`internal/player/playback`):
+
+- **The producer, a successor's opener, a call to a sink (`call`), and each
+  call the engine makes into a session** (Start, Prepare, Cut, Pause, Resume:
+  `recoverCall`): the session's fault, `backend_failed`
+  (`playback.ReasonFailed`, a fault the backend itself caused, never the
+  device or the content), recorded under the session's lock (`faulted`),
+  the producer woken, which writes no more, and the reporter, which reports
+  it, so the engine stops playback and releases the session, and the device
+  is let go as after any fault. A call to a sink answers its caller with the
+  failure, and an engine call answers with it as its error, so the engine
+  takes both the call's failure and the fault. An opener whose open the
+  panic cut short is finished by its recover (`recoverOpener`): the
+  occurrence dropped, what the open had opened closed, its done closed, so
+  nothing waits on it.
+- **The reporter**: the same fault, which the reporter, the one goroutine
+  that sends the session's events, sends itself from its recover
+  (`recoverReporter`), naming the occurrence last heard with its frames, or
+  the first.
+- **The teardown** goes on past a panic. A file's close recovers its own and
+  closes the other file (`closeOcc`, now the session's: the decoder and the
+  content each, the occurrence holding neither after; a panic there is the
+  session's fault, recorded under the lock its caller holds); a sink whose
+  close, or the note of it, panicked is left to end with the session's
+  life, which its writer does on its own, and the teardown waits for it to
+  be done (`closeAtTeardown`) before it lets go of the device and
+  acknowledges; a panic past those (an owner's Events) is logged by the
+  teardown's last recover.
+- **A sink's writer**, through the reporter: `faultReason` maps
+  `alsapcm.ReasonPanicked` to `backend_failed`, never `device_error`.
+- **`ReleaseAll`**: every session the backend holds released as its Release
+  would, within its context, which says at its end how many still hold
+  something; their teardowns go on and let go of the device once the kernel
+  lets go of their sinks.
+
+The sink (`internal/alsapcm`):
+
+- **The writer** (`recovered`): the lock let go of if the writer held it
+  (every writer hold goes through `lockW`, `wHeld` the writer's alone), the
+  panic logged through `SinkConfig.Log`, which the backend sets to its own,
+  the device closed (a second panic from that close is let go of and said,
+  `closeAfterPanic`), and the sink ended typed `ReasonPanicked`: the command
+  the writer was carrying out (`doing`, cleared before a reply is sent so it
+  is never answered twice), a Drain under way and every command waiting
+  answered, and a producer waiting for room woken. `answerDrain` clears the
+  Drain's stop before calling it, so the recover never calls one twice.
+- **A node a panic comes to between its open and a sink taking it** is
+  closed: `openSink` (the check after open: the caller's panic to recover),
+  Device's `open` (the kernel's setup) and `reopen` (the check after a
+  reopen: the writer's, which then ends the sink), each by a deferred close
+  of a node not handed over, which replaced the explicit closes on the
+  refusals.
+
+Serve (`cmd/bridge`): `shutdown`, for a run that ended in a panic
+(`run.done` closed and `run.panicked`), has the backend release every
+session it holds (`releaseAll`, `playBackend.ReleaseAll`) within the
+backend's bound, before its goroutines are waited for, and says so: "the
+backend let go of every session it held: the device is free", or a Warn
+with the error once the bound passes. The data dir's lock rule stays as
+4b3 made it: the player keeps its share after a panic in Run.
+
+### The session's lock
+
+A recover in the backend records the fault under the session's lock, and
+the release after the fault takes it, so a panic that came while a
+goroutine held the lock would wedge the session: the release never
+finishes, the engine records it unconfirmed, and the DAC stays held. Each
+hold of the lock across work that can panic (a sink's command or cut, the
+pause's release timer `Config.AfterFunc`, the session's own bookkeeping in
+`reportStep` and `serveLocked`) goes through `lockHold`, a per-call hold
+whose deferred release unlocks only what is still held: `pause`, `resume`,
+`producerExit`, `writeAll`, `transition`, `reportStep` and the teardown.
+Holds that do field work alone stay plain locks. In the sink every writer
+hold goes through `lockW`, and the writer's recover lets go of one a panic
+left held.
+
+### The engine's own files
+
+`readLimited` opens through `fsutil.OpenAsFile`, the open the file routes
+and the player's library resolver use: without waiting, judged by the
+opened file's own stat, anything but a file refused (`NotAFileError`), the
+non-blocking flag cleared for the reads. A named
+pipe, a directory or a device at the queue or reservation path is the bad
+file it is ("cannot be read: open …: named pipe is not a file"), moved
+aside at once by the existing path, and the engine starts from what
+remains. `TestServeStopWithThePlayersStorageStalled` took a named pipe at
+the reservation's path for its stall; it now holds the start at the
+engine-config seam (`servePlayerSeams.engineConfig`), the second order it
+already had, and a pipe at each of the player's files is
+`TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart`'s.
+
+### Decided otherwise than the brief, and why
+
+- The recovers sit in each goroutine's work (`callBackend`, `reserve`,
+  `attempt` and `ended`; the backend's goroutine bodies) rather than in a
+  generic `spawn`: each panic is turned into its failure where that failure
+  is known, and posted through the path that already exists. `spawn` stays a
+  counter.
+- The start's own reservation write, in New on its caller's goroutine,
+  recovers too: it is the same write, and as a failed write the engine runs
+  and refuses edits rather than failing its caller.
+- The owner closes Done and ends its calls when it leaves by a panic, which
+  the brief does not name: without it the release of item 4 cannot finish
+  (above). Its writer writes the newest revision and exits; the lock rule is
+  unchanged.
+- The backend recovers a panic in each call the engine makes into a session
+  as the session's fault, besides the engine's recover of the call: a Pause
+  a panic cut short mid-change (its pause recorded, its release timer not
+  armed) otherwise left a session half paused that the engine took for
+  playing.
+- The sink's writer and the backend's goroutines let go of their locks on a
+  panic (`lockW`, `lockHold`), which the brief names for the engine alone:
+  a recover that takes a lock its own goroutine left held waits for ever.
+- A teardown that panicked acknowledges the release once every sink is done
+  (the device closed): a file whose close panicked holds nothing the
+  backend can still reach, and its Close was called.
+- `TestServeStopWithThePlayersStorageStalled` lost its named-pipe stall (it
+  no longer stalls) and holds the start at a seam instead.
+
+### Red first
+
+Against the tree before each rule, with only the test hooks it needs (a
+fake that panics; the message constants and `ReleaseAll` as a stub that
+does nothing):
+
+- engine: each backend call's case (start, prepare, cut, pause, resume,
+  release, discard), an edit's reservation write, a queue write and the
+  writer's loop ended the test binary ("panic: a value the panic carries:
+  …"); the start's reservation write panicked out of New into the test
+  ("[recovered, repanicked]"); the owner's panic left Done open ("Done did
+  not close within 5s of the owner's panic"); and New did not return within
+  the 5 s watchdog with a named pipe at either file.
+- sink: a panic carrying out a command, during a drain and with the
+  producer waiting for room ended the binary; a panic in the check after
+  open and in the kernel's setup left the node open ("open true, closed 0
+  times"); one in the check after a reopen ended the binary.
+- backend: a panic in the producer, a successor's opener, a content's close
+  in the teardown and a call to a sink ended the binary; ReleaseAll's stub
+  left the node open, two goroutines, a session and a content held, and
+  answered nil when a session's sink was held in the kernel. A panic on a
+  sink's writer through the backend was a `device_error` fault, its line not
+  in the backend's log (the sink's recover was in by then). Two first forms
+  were reworked, because they tested nothing: the reporter's panic on its
+  first position report came inside the test's own `k.Play`, which waits for
+  the writer to wait again, since the reporter reports whenever the producer
+  wakes it, so the test hung in its own setup; it now panics at the
+  reporter's start (`Config.Tick`) and in the sending of a successor's
+  Submitted. A teardown's panic in a sink's drop never came, since the
+  session's cancel ends the sink before the teardown closes it; it now
+  panics in the note of the close, after the device is closed.
+- written after their code, their red shown by their controls below: the
+  two reporter forms, a panic in a session's first open on the engine's
+  Start, the panic under the session's lock, serve's release after a panic
+  in Run and serve's named-pipe test.
+
+### Negative controls
+
+On the committed tree (c7874770, d0852201), one mutation at a time, the
+test run, the file restored from git and the tree checked clean.
+
+| NC | Mutation | Red |
+|---|---|---|
+| E1 | `callBackend` recovers nothing | the backend-call test: the binary ended |
+| E2 | `reserve` recovers nothing | the reservation test: the binary ended |
+| E3 | `attempt` recovers nothing | the queue-write test: "waited 5s for written" (the writer's backstop ended the writer) |
+| E4 | no `ended` on the writer | the writer-loop test: the binary ended |
+| E5 | no `abandon` | the owner test: "Done did not close within 5s" |
+| E5b | `abandon` without `lifeCancel` | the owner test: "1 still running" (the held Start) |
+| E5c | `abandon` without `stopWriting` | the owner test: "1 still running" (the writer) |
+| E6 | `readLimited` with `os.Open` | the pipe test: "New did not return within 5s", each file |
+| E7 | the panic's value logged | "a line of the log carries the panic's value" |
+| E8 | the runtime's error not logged | "the runtime's own error is not in the line" |
+| S1 | no `recovered` on the writer | the writer test: the binary ended |
+| S2 | the command being carried out not answered | the writer test: its Pause waited until the 30 s test timeout |
+| S3 | `openSink` keeps a node a check panicked on | "open true, closed 0 times" |
+| S4 | Device's `open` keeps a node its setup panicked on | "open true, closed 0 times" |
+| S5 | `reopen` keeps its node | "opened 2 times and closed 1" |
+| S6 | the sink logs the panic's value | "a line of the log carries the panic's value" |
+| B1 | no recover on the producer | the producer test: the binary ended |
+| B2 | no recover on the reporter | the reporter test: the binary ended |
+| B2b | the reporter's recover sends no fault | "waited 5s for playback to stop: fault" |
+| B3 | no recover on an opener | the opener test: the binary ended |
+| B4 | `closeOcc` recovers nothing | the teardown test: the release unconfirmed (the teardown's last recover caught it, with the device's release undone) |
+| B5 | the teardown closes its sinks unguarded | the teardown test: the release unconfirmed |
+| B6 | `call` recovers nothing | the call test: the binary ended |
+| B7 | no `ReasonPanicked` mapping | "fault {Reason:device_error …}" |
+| B8 | `ReleaseAll` releases nothing | the node open, the session held, "<nil>" for the held sink |
+| B9 | no `recoverCall` in start | "the panic logged []" (the engine's recover caught it instead) |
+| B10 | `lockHold.release` does nothing | the lock test: the binary timed out at 2 m, the session's lock held |
+| B11 | sinks opened without the backend's log | "the panic logged []" for the sink's writer |
+| B12 | the backend logs the panic's value | "a line of the log carries the panic's value" |
+| V1 | serve releases nothing after a panic in Run | "the DAC opened 1 times and closed 0, ReleaseAll asked 0 times" |
+| V2 | `readLimited` with `os.Open`, through serve | "the player neither ran nor failed" |
+
+Not controlled, no seam reaching them: the release of `wHeld` in the
+sink's recover (every clock read, callback and device call of the writer's
+is outside its locked sections), `closeAfterPanic`'s second-panic guard,
+the teardown's last recover and the reporter's guarded send of its own
+fault (an owner's Events that panics).
+
+### Runs
+
+Through the build lock, on d0852201: `make fmt` (go1.27.3's gofmt rewrote
+nothing; the pinned go1.27.2 is not in this host's module cache and
+GOPROXY is off, so its gofmt could not be run) and `make vet`, clean;
+`make test`, every package passing under `-race` (`cmd/bridge` in 516 s,
+`internal/alsapcm` and every `internal/player` package among them) but
+`internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`, which
+fails on this host apart from this change (backlog B520); `make build-all`,
+every target built; `make docs-check`, passing. The new tests 5 runs each
+under `-race`, all passing: the engine's, the sink's, the backend's, and
+serve's `TestAPanicOnTheEnginesGoroutineLetsGoOfTheDAC`,
+`TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart` and
+`TestServeStopWithThePlayersStorageStalled`, with
+`TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock` beside them. With
+this entry's sentence in the backend's package doc, `internal/player/...`
+and `internal/alsapcm` under `-race` again, passing.
+
+### Not in this change
+
+The restored identity (5a0), the LAN (5a2), the decoders' own recovers.

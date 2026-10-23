@@ -147,7 +147,11 @@
 // session's fault, typed backend_failed (ReasonFailed): the reporter
 // reports it, the reporter's own panic included, which it sends itself, so
 // the engine releases the session and the device is let go as for any
-// fault; a call's command answers its caller with it. A teardown goes on
+// fault; a call's command answers its caller with it. So is a panic in a
+// call the engine makes into a session (Start, Prepare, Cut, Pause,
+// Resume), on the engine's goroutine for that call, which answers with the
+// fault as its error, so a session a panic cut short mid-change never
+// plays on. A teardown goes on
 // past one: a file's close recovers its own and closes the other file, and
 // a sink whose close panicked ends with the session's life, which the
 // teardown waits for before it lets go of the device and acknowledges. Each
