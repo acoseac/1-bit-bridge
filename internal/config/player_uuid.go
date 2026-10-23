@@ -103,6 +103,29 @@ func EnsurePlayerUUID(dataDir string) (id string, created bool, err error) {
 	return id, true, nil
 }
 
+// ForgetPlayerUUID removes dataDir's player-uuid file while it holds id:
+// the undo of an EnsurePlayerUUID that made it (created) for a player that
+// then did not start, serve's whose engine refused the data directory's
+// storage, so the refusal leaves no identity behind on storage that may not
+// keep it. A file that holds another UUID, or that is not there, is left
+// alone; one that does not read is the reader's error. The caller holds the
+// data directory's lock, as it did for the make.
+func ForgetPlayerUUID(dataDir, id string) error {
+	got, err := ReadPlayerUUID(dataDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case got != id:
+		return nil
+	}
+	if err := os.Remove(filepath.Join(dataDir, PlayerUUIDFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // WritePlayerUUIDFile writes id and a newline to the player-uuid file at
 // path, replacing what is there: the identity file's one writer, which
 // EnsurePlayerUUID makes the file with and bridge restore writes a

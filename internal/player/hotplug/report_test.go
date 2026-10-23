@@ -226,6 +226,45 @@ func TestTheReporterFlagsAUnitThatChangedOrCameBack(t *testing.T) {
 	})
 }
 
+// TestTheReporterNumbersEveryReportFromOneCount pins the reports a caller
+// makes beside the snapshots (serve's player, from the live config): none
+// before the first snapshot; then a withheld output, unavailable with the
+// caller's reason, and the last snapshot's own verdict restated, each one
+// more from the count Report numbers from, so the engine's input stays
+// monotonic whichever source made a report, and no generation carries two.
+// A restatement names no unit change, and the snapshot after it is flagged
+// as Report flags it.
+func TestTheReporterNumbersEveryReportFromOneCount(t *testing.T) {
+	h := newHarness(t)
+	rep := &Reporter{}
+	if r, ok := rep.Withhold("binding_changed"); ok {
+		t.Fatalf("a withheld output before any snapshot: %+v", r)
+	}
+	if r, ok := rep.Restate(); ok {
+		t.Fatalf("a restatement before any snapshot: %+v", r)
+	}
+	want := func(what string, r engine.OutputReport, ok bool, gen uint64, available, unitChanged bool, reason string) {
+		t.Helper()
+		if !ok || r.Generation != gen || r.Available != available || r.UnitChanged != unitChanged || r.Reason != reason {
+			t.Errorf("%s: %+v %v; want generation %d, available %v, unit changed %v, reason %q", what, r, ok, gen, available, unitChanged, reason)
+		}
+	}
+	r, ok := rep.Report(h.latest())
+	want("the first snapshot", r, ok, 1, true, false, "")
+	r, ok = rep.Withhold("binding_changed")
+	want("the output withheld", r, ok, 2, false, false, "binding_changed")
+	r, ok = rep.Restate()
+	want("the first snapshot restated", r, ok, 3, true, false, "")
+	h.step("unplug "+goBar+"\n", unplugEvents(goBar, 5))
+	r, ok = rep.Report(h.state(binding.StateDeviceMissing, -1, 2))
+	want("the unplug", r, ok, 4, false, false, string(binding.StateDeviceMissing))
+	r, ok = rep.Restate()
+	want("the unplug restated", r, ok, 5, false, false, string(binding.StateDeviceMissing))
+	h.step(plug(goBar, 5, "20b1:3009", goBarSerial, 3), plugEvents(goBar, 5))
+	r, ok = rep.Report(h.state(binding.StateAvailable, 5, 3))
+	want("the replug", r, ok, 6, true, true, "")
+}
+
 // TestTheReporterSkipsARepublishedGeneration pins a snapshot republished at
 // its generation because only its health changed (a reading failed: stale):
 // no report, since it says nothing new about the unit.

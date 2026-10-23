@@ -59,7 +59,9 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
@@ -2640,11 +2642,32 @@ type serveOpts struct {
 	// playerHotplugWiring.Boot). Nil in production; a boot test waits on
 	// it instead of polling.
 	hotplugBoot func(*hotplug.Service, *config.RuntimeConfig, <-chan struct{})
+	// hotplugObserve and hotplugTiming are a boot test's hold on the
+	// watcher's readings of the box (playerHotplugWiring.Observe) and its
+	// timing: nil and production's in production.
+	hotplugObserve func(next func(context.Context) (binding.Inventory, error)) func(context.Context) (binding.Inventory, error)
+	hotplugTiming  hotplug.Timing
 	// sampleFormatPassed is told what each sample-format header pass did
 	// (manifest.Store.BackfillSampleFormats). Nil in production; a boot
 	// test waits on it instead of polling. Per invocation for
 	// tailscaleCLI's reason.
 	sampleFormatPassed func(manifest.SampleFormatBackfill)
+	// playerTrees are the trees the player's hotplug watcher and its
+	// binding locator read; the zero value is hostTrees. A boot test lays
+	// out a box of its own. Per invocation for tailscaleCLI's reason.
+	playerTrees outputTrees
+	// playerBackend builds serve's player's backend; nil is playback.New.
+	// A boot test passes a stand-in, since no test opens a PCM node.
+	playerBackend func(playback.Config) (playBackend, error)
+	// playerBoot is told serve's player as serve decides it, before
+	// anything of it starts. Nil in production; a boot test waits on it
+	// instead of polling.
+	playerBoot func(*bridgePlayer)
+	// playerSeams and playerBounds are a boot test's hold on serve's
+	// player and the bounds of its stop: nil and production's in
+	// production.
+	playerSeams  *servePlayerSeams
+	playerBounds servePlayerBounds
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -2955,7 +2978,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		fmt.Fprintf(stderr, "serve: could not lock %s (%v); serving without the check that no other "+
 			"bridge serve runs on this data dir\n", filepath.Join(cfg.DataDir, serveLockFileName), lockErr)
 	}
-	defer releaseDataDir()
+	// Shared with the player, which lets go of its share once nothing it
+	// started may still write the data dir: an engine's state write that
+	// outlived its stop keeps the lock past this return (dataDirHold).
+	dataDirLock := newDataDirHold(releaseDataDir)
+	defer dataDirLock.done()
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
 	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`
@@ -4074,20 +4101,59 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the next stamping pass.
 	lateCfgHolder.Store(cfgHolder)
 
+	// The bridge's own player (B470 PR 4b3), decided once, here, from the
+	// boot snapshot: it starts only when every gate holds
+	// (planServePlayer), and a change of output.player while serve runs
+	// applies when serve next starts. A player that does not start adds
+	// nothing: no goroutine, no file.
+	playerPlan := planServePlayer(cfg, opts.playerGOOS, lockErr == nil)
+	var playerFeed *hotplug.Feed
+	if playerPlan.start {
+		playerFeed = hotplug.NewFeed()
+	}
 	// The player's hotplug watcher (B470 PR 4a2), on Linux: it watches
 	// for DACs while the live config enables the player and does nothing
 	// while it does not, reading output.player from the holder on every
 	// reading and waking on its changes. No path changes output.player
 	// while serve runs today (bind refuses a data dir a serve holds); the
 	// console's DAC page will (PR 6a). Its stop, the teardown's, cancels
-	// and joins it; it writes nothing a later close waits for.
+	// and joins it; it writes nothing a later close waits for. It
+	// publishes to the player's feed when the player starts.
 	stopPlayerHotplug := startPlayerHotplug(ctx, playerHotplugWiring{
 		GOOS:       opts.playerGOOS,
 		Holder:     cfgHolder,
 		OpenSource: opts.hotplugSource,
 		Boot:       opts.hotplugBoot,
+		Feed:       playerFeed,
+		Trees:      opts.playerTrees,
+		Observe:    opts.hotplugObserve,
+		Timing:     opts.hotplugTiming,
 	})
 	defer stopPlayerHotplug()
+	// The player runs on a goroutine of its own, so the library is served
+	// whatever its storage or its DAC does, and its stop, deferred after the
+	// watcher's and the store's, so it runs before both, ends the engine and
+	// joins it, then the backend, each within its bound (bridgePlayer.stop).
+	// Its output reports are the watcher's, through a hotplug.Reporter, and
+	// the live config's own: a live disable, or a live binding other than
+	// the boot snapshot's, reports the output unavailable at once, whatever
+	// the watcher's readings do. The player keeps the DAC it started with
+	// until serve next starts.
+	player := startServePlayer(playerPlan, servePlayerWiring{
+		Cfg:     cfg,
+		Hold:    dataDirLock,
+		Store:   manifestStore,
+		Paths:   apiSrv.Resolver(),
+		Feed:    playerFeed,
+		Live:    livePlayerSettings(cfgHolder, opts.playerGOOS),
+		Changed: cfgHolder.Changed,
+		Trees:   opts.playerTrees,
+		Backend: opts.playerBackend,
+		Boot:    opts.playerBoot,
+		Seams:   opts.playerSeams,
+		Bounds:  opts.playerBounds,
+	})
+	defer player.stop()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA

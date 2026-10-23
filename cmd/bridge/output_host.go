@@ -1,6 +1,9 @@
 package main
 
-import "github.com/acoseac/1-bit-bridge/internal/alsa"
+import (
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+)
 
 // outputTrees are a /proc tree and a sysfs tree, the two the bridge's ALSA
 // readers read.
@@ -11,6 +14,20 @@ type outputTrees struct {
 // cards is one reading of the sound cards in t's /proc tree.
 func (t outputTrees) cards() (alsa.Snapshot, error) {
 	return alsa.Reader{ProcRoot: t.proc}.Read()
+}
+
+// or is t, or d when t is the zero value: a seam's trees, or the host's.
+func (t outputTrees) or(d outputTrees) outputTrees {
+	if t == (outputTrees{}) {
+		return d
+	}
+	return t
+}
+
+// observer reads the box through t's two trees: what the player's hotplug
+// watcher and its binding locator read.
+func (t outputTrees) observer() binding.Observer {
+	return binding.Observer{Proc: alsa.Reader{ProcRoot: t.proc}, Sysfs: alsa.SysfsReader{Root: t.sysfs}}
 }
 
 // hostTrees are the trees this package reads where nothing names another:

@@ -211,6 +211,13 @@ func runHook(hook func()) {
 	}
 }
 
+// SameFileInRoot is sameFileInRoot for a reader outside this package that
+// confines a library file as this route does: the bridge player's library
+// resolver (internal/player/library), so the two answer alike.
+func SameFileInRoot(opened fs.FileInfo, root, path string) bool {
+	return sameFileInRoot(opened, root, path)
+}
+
 // sameFileInRoot reports whether opened is the file at path, walked from
 // root with os.Root, which follows a link only while it stays inside root
 // and never an absolute one. path is a resolution under root, so a
