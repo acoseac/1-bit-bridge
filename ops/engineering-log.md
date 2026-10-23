@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration](#2026-10-23--b470-pr-5a1-one-ssdp-subsystem-for-several-devices-with-the-mediaserver-its-one-registration)
+- [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
 - [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
@@ -56815,6 +56816,658 @@ clients' per-request timeouts), and this change leaves them:
 - The read loops check their 2 s and 3 s deadlines after a line arrives,
   so a line that arrives late fails the test, while a stream that sends
   nothing waits for the 10 s connect context, as the 600 ms control did.
+
+## 2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop
+
+Until this change only `bridge output play` built an engine; serve ran the
+hotplug watcher (4a2) and nothing else of the player. Now serve runs the
+engine, the backend and a resolver over its own library, from the boot
+snapshot, with no network surface: OpenHome SOAP, GENA and discovery are
+5a's, and nothing inserts an entry from the network.
+
+### What shipped
+
+- `cmd/bridge/serve_player.go` (new): `planServePlayer` (the gates, from
+  the boot snapshot), `startServePlayer` and `bridgePlayer` (the
+  supervisor goroutine, the output reports, the journal lines, the bounded
+  stop), `servePlayerSeams` and `servePlayerBounds` (a boot test's).
+- `internal/player/library` (new): `Resolver`, the backend's
+  `playback.Resolver` over the library index and the filesystem;
+  `Reference`, a stored path's reference; the refusal reasons.
+- `cmd/bridge/main.go`: the plan, the player's feed, `startPlayerHotplug`
+  with `Feed` and `Trees`, `startServePlayer`, `defer player.stop()` after
+  the watcher's stop and the store's close (so it runs before both); the
+  data dir's lock taken through `dataDirHold`; five `serveOpts` seams
+  (`playerTrees`, `playerBackend`, `playerBoot`, `playerSeams`,
+  `playerBounds`).
+- `cmd/bridge/serve_lock.go`: `dataDirHold`, the lock shared by serve and
+  its player.
+- `cmd/bridge/output_hotplug.go`: `Feed` and `Trees` on the wiring, and
+  the service on a context of its own (`context.WithoutCancel(ctx)`, which
+  its stop alone cancels). `output_host.go`: `outputTrees.or` and
+  `observer`, so the watcher and the locator read one pair of trees.
+- `cmd/bridge/output_play.go`: the stop bounds named once
+  (`playerEngineStopBound`, `playerBackendWaitBound`), which the harness
+  and serve both wait by.
+- `internal/player/hotplug`: `sameDevice` exported as `SameBinding`, the
+  watcher's one comparison of bindings, which serve asks too.
+- `internal/dlna/loopback.go`: `SameFileInRoot`, an exported wrapper of the
+  loopback route's `sameFileInRoot`, so the resolver confines a file as the
+  route does with no second copy.
+- `CLAUDE.md`: the `internal/player/library` row and the `player.md` row.
+- Tests: 17 in `cmd/bridge` (`serve_player_test.go` 16,
+  `serve_player_unix_test.go` 1) and 12 in `internal/player/library`
+  (`library_test.go` 11, `library_unix_test.go` 1).
+
+### The start, once, from the boot snapshot
+
+`planServePlayer` reads only the config serve loaded, and the player
+starts only when every gate holds, in this order, each refusal a reason:
+`Config.PlayerEnabled(goos)` (enabled, a block that reads and is valid,
+Linux, not public: its refusal is the one `Validate` already logged at
+Load, `logPlayerOff`, so serve does not log it again); a DAC bound
+(`Device.Configured()`, which `PlayerEnabled` does not ask; the reason
+names `bridge output dac bind`); the data dir's lock held (`lockErr ==
+nil`: `runServe` goes on without the lock on any error but contention, and
+the player's identity and reservations are made only under it); and a pause
+release the engine takes, 1 s to 10 min (`playMinPauseRelease`,
+`playMaxPauseRelease`), of the config's 1 s to an hour: 601 to 3600 refuses
+with an actionable reason that quotes no value (the config path's rule on
+values), never clamped, never the default, never a serve failure. A player
+simply off (`enabled: false`) logs nothing. A refusal adds nothing: no
+goroutine, no backend built, no feed, no file. The boot snapshot maps
+explicitly: `PauseRelease()` (30 s when unset, never the engine's 0) and
+`EffectiveDSDMode()` (`off`).
+
+When it starts, its supervisor, on a goroutine of its own: makes the
+identity (`config.EnsurePlayerUUID`, under the lock serve holds and the
+player shares); builds the resolver, the backend (`playback.New`, with
+`playback.BindingLocator` over the trees the watcher reads) and the engine,
+whose files are `player-queue.json` and `player-ids.json` beside
+`player-uuid` in the data dir (`bridge output play` keeps `queue.json` and
+`queue.json.ids` in a directory of its own, never there); runs the engine on
+a context of the supervisor's; and reports the output from the watcher's
+feed through a `hotplug.Reporter` (`startPlayerHotplug` gained a `Feed`
+field, the smallest change that gives serve the snapshots, and its four
+tests are unchanged). **Asynchronous by decision**: the engine's `New`
+probes the storage, reads its files and fsyncs a reservation, and a
+Raspberry Pi's SD card takes its time; more to the point, a read that
+blocks (a named pipe at the reservation's path, a hung mount) would hold
+serve's whole start and the library with it. The library is served
+whatever the player's storage does (`TestServeStopWithThePlayersStorageStalled`
+asks `/v1/health` while the engine's start is held).
+
+### What an entry is: the local resolver
+
+The reference of an original is the existing DLNA id,
+`dlna.TrackID("", path)` (`library.Reference`), the id `/dlna/file/{id}`
+names, which hashes the stored path. It names a stored path, not content.
+`Resolver.Open`, at every open, never through the DLNA adapter's cached
+reverse lookup: finds the one row whose path hashes to the reference (the
+index's paths read and hashed; which path a reference names is all it keeps
+between opens, at most 2,000, since a hash makes that permanent; two rows
+sharing one is `ambiguous_reference`); asks the index for that row again
+(`not_indexed`); refuses a row an upstream server routes (`routed`); maps
+the path onto the roots configured now through serve's live path resolver
+(`outside_library`); and opens the file as the loopback route does:
+`fsutil.ResolveLinks` and `fsutil.IsUnderAny` before the open, so nothing
+outside a root is opened; `fsutil.OpenAsFile`, so a directory or a named
+pipe is `not_a_file` at once; resolved again after the open and still
+inside, and the opened file the one the root reaches (`dlna.SameFileInRoot`),
+so a link swapped in meanwhile is refused. A file not there is
+`missing_file`. Every refusal is an `*engine.Unplayable`, which the backend
+passes on and the engine records as the entry's skip, and its detail names
+no path, absolute or stored: the snapshot that carries it is what 5a's
+controllers will read. An index read that fails is `index_unreadable`,
+logged; one whose context ended (the occurrence released) is refused as
+cancelled and logs nothing. A panic in the resolver, a callback on the
+backend's goroutines, is `resolver_failed`, logged with its stack and never
+its value.
+
+**A file replaced in place is not detected**, by decision: comparing the
+row's size and `mtime_ns` with the file's would refuse a file retagged since
+its scan until the next scan (six hours by default), and the reference names
+the path, as the DLNA and loopback routes do. Within one occurrence the
+content is the file that opened: one descriptor, read to the size it had at
+the open.
+
+The resolver reads what a library of 100,000 tracks holds of paths on a
+miss, once per reference until the record of 2,000 starts again; a session's
+successor is opened while its predecessor plays, so only a start pays it.
+
+### The live configuration: the engine keeps the boot snapshot, and the output says so
+
+The watcher follows the live config (4a2); the engine keeps the boot
+snapshot until serve next starts. They are made to agree on the output's
+report, the one input that decides whether the engine opens the DAC: a
+snapshot resolved from another binding than the one the player started with
+is reported unavailable, `binding_changed` (`hotplug.SameBinding`), whatever
+the watcher found, and a player the live config turns off is reported as
+the watcher publishes it, unavailable, `disabled`. So a live disable or a
+change of `output.player.device` stops playback and refuses Play, and
+nothing plays on a DAC the live config no longer names; putting the boot
+binding back, or enabling the player again, brings the output back, which
+plays nothing until asked. Chosen over making the backend follow the live
+binding (the engine would no longer keep the boot snapshot, the rule
+player.md states) and over feeding the engine from a watcher of its own on
+the boot binding (a live disable would then play on). A change of a field
+the output does not depend on (the pause release, the room) waits for the
+next start without a word on the output. The Reporter tracks the unit of a
+foreign binding too, so the report that puts the boot binding back says
+`UnitChanged`: conservative, and harmless, since nothing plays then
+(`Discard`). Turning the player on while serve runs starts the watcher (as
+before) and never the engine, which waits for the next start.
+
+### Shutdown and restart: the order and its bounds
+
+`defer player.stop()` is registered after `defer stopPlayerHotplug()` and
+`defer manifestStore.Close()`, so on every exit, a stop (exit 0) and a
+restart request (exit 75) alike, it runs first:
+
+1. `bridgePlayer.stop` cancels the supervisor, which leaves its loop and
+   runs its shutdown:
+2. the engine's Run context cancelled, and `Run` waited for, at most
+   `playerEngineStopBound` (`engine.ReleaseTimeout` + 5 s, 7 s): its
+   release (`ReleaseTimeout`), its flush, its grace for calls;
+3. `Backend.Wait`, at most `playerBackendWaitBound` (5 s);
+4. what was left said: `ReleaseUnconfirmed` and survivors as "the device
+   may still be held until the process exits";
+5. the feed's subscription closed;
+6. then `stopPlayerHotplug`: the watcher now runs on a context of its own,
+   which its stop alone cancels, so it stops here, after the player, and not
+   when serve's context is cancelled as the shutdown begins (it did until
+   this change, before the HTTP drain; `TestServeStopReleasesThePlayersDACWithinItsBounds`
+   reads the order off the journal);
+7. the store closes, and the lock goes once serve and the player have both
+   let it go (`dataDirHold`).
+
+`stop` itself waits for the supervisor at most the two bounds and a second
+(13 s), which covers a start held in its storage too. A stop with a
+release the kernel holds took 8 s here: `Run` returned at its release
+deadline and grace (about 3 s), and the backend's wait gave up at its 5 s.
+A queue restored at the next start is stopped, and the output's first report
+plays nothing (`TestServeRestoresThePlayersQueueStopped`).
+
+### State storage: the one exception to the join
+
+`Run` can outlive its bound in a write that does not return: its flush is
+atomicwrite's, synchronous and fsynced (`engine.go`, Run's doc), and its
+shutdown waits for a reservation write in flight and for the queue writer
+(`owner.go` `shutdownStep`; `edits.go` `reserveOverdue`, `reserveWrite`).
+A timed-out wait is an abandonment, not a join. The policy:
+
+- The stop logs the abandonment and returns within its bound; serve exits.
+- **The data dir's lock outlives `runServe` while the player's goroutines
+  run**: `dataDirHold` counts serve and the player, and the player lets go
+  only once its supervisor and its engine's `Run` have both returned. On the
+  ordinary path both have, and the lock goes as `runServe` returns, as
+  before.
+- Production `main` exits when `runServe` returns:
+  `os.Exit(run(ctx, os.Args[1:], …))` (`main.go:2380`), `run` →
+  `serveCmd` (`:2412`) → `runServe` (`:2724`); a Windows service returns
+  from `main` once its handler does, and the player never runs there. So an
+  abandoned writer ends with the process, and the kernel releases the lock
+  with it: no other serve takes the data dir while that write may still
+  land, not even in the instant between the unlock and the exit, which the
+  hold closes.
+- A serve started again in the same process (the launcher menu, the tests)
+  is refused the lock, as another serve, until the write ends. The refusal
+  names another bridge serve, which is this process's abandoned writer: the
+  wording stays, since the case is a stalled filesystem under the menu.
+- The engine's own goroutines that outlive `Run` (a backend call held in the
+  kernel) hold the DAC, not the data dir, and keep no lock.
+
+`TestServeStopWithThePlayersStorageStalled` makes the stall real: the
+reservation's path is a named pipe, so the engine's start, a plain
+`os.Open` in `readLimited`, waits for a writer. Serve serves the library,
+its stop abandons the player at the test's bound, says so and returns, exit
+0; a second lock of the data dir is refused while the start is held; once a
+writer comes the engine's `New` finishes (it moves the bad file aside), the
+supervisor sees the stop and never runs it, and the lock goes. This change
+contains that start and does not fix it: a follow-up, backlog B523.
+
+### Faults and panics
+
+A playback fault (a sink error, the DAC gone, a backend error) and a
+resolver refusal stay in the player: the engine records a fault as a fault
+and a refusal before content plays as a skip (`engine.Unplayable`), serve
+logs each (a fault, a skip, a stop, each once, its detail cut to 256 bytes,
+never a serial or a library path), the exit code is unchanged and no
+request waits on it
+(`TestAPlayerFaultStaysInsideThePlayer`, `TestAPanicInServesPlayerStopsThePlayerAndKeepsTheLibrary`).
+
+Serve recovers panics in what it owns: the supervisor (its start, its
+reporting and logging loop, its shutdown, each recovered and the player
+stopped after), the goroutine that runs `eng.Run`, and the callbacks it hands
+the backend, the resolver (`resolver_failed`) and the sink notes. A panic is
+logged with where and its stack, and its value only when it is the runtime's
+own error. **Known limit**: a panic on a goroutine the engine, the backend
+or the sink starts is not recovered here: a follow-up, backlog B523.
+
+### Backup and restore: recorded for 5a, unchanged here
+
+Backups carry `player-uuid` (`backupSources`, `backupTargets` in
+`cmd/bridge/backup.go`) and not the queue or the reservation, and
+`bridge restore` gives the box the snapshot's identity
+(`internal/backup` `Restore`'s doc). The engine starts one block (4,096)
+past the larger of its reservation file, its queue file's counters and its
+largest ID (`owner.go` `start`, `reserve.go` `idBlock`, `startCounter`).
+So a restored identity can hand out again IDs and tokens its source handed
+out. Measured with a throwaway probe over the engine's API (never
+committed): a source data dir that inserted 10,000 entries handed out IDs
+4097 to 14096 and tokens 4098 to 14108, its reservation file
+`{"ids":20480,"tokens":20480}`; a data dir holding only the restored
+`player-uuid`, which is what a restore onto an empty data dir leaves, handed
+out IDs 4097 to 4099 and tokens 4098 to 4100, and so did a second restore of
+the same snapshot elsewhere. Carrying the reservation in the snapshot, or
+bumping it at a restore, cannot prevent this: the source may go on after the
+snapshot. Changing the UUID at a restore would break the snapshot-identity
+rule (the restored bridge is the device its controllers know). Nothing hands
+an ID or a token to a controller before 5a, so nothing changes here.
+
+The policy proposed for 5a:
+
+- **A high-water mark per identity that never rolls back**: the reservation
+  file names the UUID it belongs to; a mark for another UUID is not this
+  identity's.
+- **The larger mark kept**: a backup carries the mark; a restore writes, per
+  counter, IDs and tokens alike, the larger of the snapshot's and the live
+  one when both are this UUID's, through a writer that never lowers it.
+- **Allocation fails closed where safe continuation cannot be
+  established**: a mark the restore wrote, or a UUID a restore wrote with no
+  mark of its own (a legacy, UUID-only snapshot, every snapshot taken today),
+  is marked restored, and the engine refuses every ID- and token-advancing
+  edit, typed, until the operator says the source no longer runs (a CLI
+  verb, or the console); then it jumps past the mark by a margin far wider
+  than a block (2^24, say) and clears the flag. A restore of the box's own
+  snapshot onto the box keeps the box's live mark, which covers everything
+  it handed out, and needs no confirmation.
+- The cases: repeated restores re-apply the larger mark and never lower it,
+  and the same snapshot restored onto two boxes leaves both refusing until
+  confirmed; a restore onto an empty data dir has no live mark, so it
+  refuses until confirmed, with or without a snapshot mark; tokens follow
+  the same rules as IDs, on their own counter.
+
+### doctor stays passive
+
+`bridge doctor` and the console's doctor build no engine and open no DAC:
+`TestOnlyServeAndTheHarnessBuildThePlayer` sweeps `cmd/bridge` for
+`engine.New`, `playback.New` and `library.New` outside `serve_player.go`
+and `output_play.go`, and `TestBridgeDoctorMakesNoPlayerFile` runs the
+doctor over an enabled, bound player. The checklist has no place for the
+bridge's own player: its four lines are MPD's (Player names MPD and its
+port, DAC its candidate cards), so the running player's state and its
+output's availability are left to 6a's DAC page.
+
+### Red first
+
+Against skeletons with the rules absent:
+
+- `internal/player/library`, a skeleton that matched the reference by the
+  scan and opened with `os.Open`, nothing else: nine red. The row removed
+  after an open opened; a link out of the root, a link swapped in after the
+  check, a routed row and an ambiguous reference opened; a directory was
+  opened and read ("is a directory"); the panic crashed the binary; a
+  cancelled open was `index_unreadable`; the named pipe's open "did not
+  return within 10s". Three positives were green on it.
+- `cmd/bridge`, a skeleton with main's behaviour (no player, the seams
+  compiled in): every refusal row of the gate table had no reason, both start
+  rows and every test of a running player had no engine, the lock test no
+  lock reason, the build sweep found no `library.New`, and the stall test
+  found the player ready. Green on it: the "player off" row, the defer-order
+  sweep (the skeleton kept the new defer; on main there is none) and the
+  doctor test.
+
+### Negative controls
+
+Each one mutation on the committed tree, run against its tests, then
+restored from git and the tree checked clean.
+
+| NC | Mutation | Red |
+|---|---|---|
+| NC1 | the DAC-bound gate dropped | the gate table's "no DAC bound": "the player was started" |
+| NC2 | the lock gate dropped | `TestServeStartsNoPlayerWithoutTheDataDirLock`: "want it off for the lock" |
+| NC3 | the pause-release gate dropped | the 601 s and hour rows alone |
+| NC4 | `PauseRelease: 0` (the engine's default) | the 600 s row: "PauseRelease:30s, want 10m0s" |
+| NC4b | the raw `dsdMode` for `EffectiveDSDMode()` | both start rows: "DSD:, want … DSD off" |
+| NC5 | `EnsurePlayerUUID` in runServe before the plan | every refusal row and the lock test: "made [player-uuid]" |
+| NC6 | no boot-binding filter | `TestALiveBindingChangeReportsThePlayersOutputUnavailable`: playing, available |
+| NC7 | a disabled snapshot not reported | `TestALiveDisableReportsThePlayersOutputUnavailable`: playing, available |
+| NC8 | the resolver's row not asked again | `TestTheResolverChecksAfreshAtEveryOpen` |
+| NC9 | routed rows opened | `TestTheResolverRefusesARoutedTrack` |
+| NC10 | no containment check before the open | first run nothing (the check after the open caught the link out); the test gained a link out to a directory (ace6769f): "not_a_file, want outside_library" |
+| NC11 | no check after the open | `TestTheResolverRefusesALinkSwappedInAfterItsCheck` |
+| NC12 | `os.Open` for `fsutil.OpenAsFile` | the directory test, and the pipe test's watchdog |
+| NC13 | no recover in the resolver | the panic crashed the binary |
+| NC13b | the panic's value logged | "the log carries the panic's value" |
+| NC14 | a cancelled read taken for a failure | "index_unreadable, want missing_file" |
+| NC15 | the stop not waiting for `Run` | the stop test, 3 of 3: "shut down" logged before the DAC was let go |
+| NC16 | the watcher's stop deferred after the player's | the defer-order sweep and the stop test's journal order |
+| NC17 | the watcher back on serve's context | the stop test, 3 of 3: the watcher stopped first |
+| NC18 | the player shares no lock | the stall test: "a second serve's lock with the player stalled: <nil>" |
+| NC19 | serve waits for the player's start | the stall test: "no startup banner before the test's deadline" |
+| NC20 | no recover in the supervisor | the panic crashed the binary |
+| NC20b | no shutdown after a recovered panic | "the player stopped with its engine running" |
+| NC21 | no unconfirmed-release line | the held-call test: one line of two |
+| NC21b | the backend's wait unbounded | the held-call test: serve returned only at the stop's outer 13 s, its stop never recorded |
+| NC22 | the supervisor plays when the output comes | the restore test: "2 entries, playing", "started 1 sessions on its own" |
+| NC23 | `engine.New` called from `doctor.go` | the build sweep: "doctor.go … calls engine.New" |
+| NC24 | no skip line | the resolver-through-serve test |
+| NC25 | no fault line | the fault test |
+| NC26 | `stop` waits for the supervisor unbounded | the stall test: "serve did not return after a stop" |
+| NC27 | a refused player builds a backend | every refusal row: "a backend was built" |
+
+Not controlled, no seam reaching them: the recover around `eng.Run` (no
+test can make the engine's owner panic) and the sink note's recover.
+
+### Found by the stress runs
+
+`TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen` and
+`TestAPlayerFaultStaysInsideThePlayer` read the journal right after the
+engine's snapshot showed the skip or the fault: the supervisor logs a change
+once it wakes on that snapshot, on its own time, and each test read first in
+one run of 5 under `-race` (1c42e029). They now wait for the line until the test's
+deadline (`logWatch`, a handler installed through
+`loggingtest.SetDefault`); NC24 and NC25 were run again on them, red.
+Afterwards every serve test of the player passed 5 runs of 5 under `-race`
+(145 s) and the library's 20 of 20 (173 s).
+
+### The owner's gate on the Pi with the GO bar
+
+On the 64-bit Pi with the iFi GO bar and the bridge running as its
+service, with this branch's `dist/bridge-linux-arm64` installed as the
+service's binary. `UNIT` is the bridge's unit: `com.acoseac.1-bit-bridge`
+for a `bridge init` user install, driven by `systemctl --user` and read by
+`journalctl --user -u $UNIT`; for a system install, `1-bit-bridge` with
+`sudo systemctl` and `journalctl -u 1-bit-bridge`. `DATA` is the data dir
+`bridge.yaml` names, `CONF` that file, and `N` the GO bar's card as
+`./bridge output dac` lists it. The data dir must be on storage that
+outlives a reboot: on Raspberry Pi OS's "Overlay File System" the journal
+says "player: not started" with the engine's reason (the IDs and tokens
+would repeat after a reboot), which is a pass of the gate's refusal and a
+fail of the rest. Volumio, or any MPD, must not be playing to the GO bar.
+
+1. Bind and enable. `systemctl --user stop $UNIT`; `./bridge output dac
+   bind N --binding serial --config $CONF` (bind refuses while serve holds
+   the data dir); in `$CONF`, under `output: player:`, `enabled: true`;
+   `ls -l $DATA/player-*` (note what is there).
+2. Start. `systemctl --user start $UNIT`; then `journalctl --user -u $UNIT
+   --since -2min | grep -E 'player'`. Pass: "player: made the player's
+   identity uuid=…" when `player-uuid` was missing (none when it was
+   there), "player: started uuid=… entries=0 pauseRelease=30s", "player
+   DAC: available … card=N", "player: the output is available report=1",
+   "player: the transport is stopped". `cat $DATA/player-uuid`: one UUID;
+   `ls $DATA/player-ids.json` is there (`player-queue.json` appears only
+   once something is queued, which 5a brings).
+3. The library. In 1-bit, browse the bridge and play a track from it. Pass:
+   it browses and plays as before.
+4. Unplug the GO bar while serve runs; plug it back after ten seconds.
+   Pass, in the journal: "player DAC: device_missing", "player: the output
+   is unavailable reason=device_missing report=2", then "player DAC:
+   available", "player: the output is available report=3 unitChanged=true",
+   and no "player: the transport is playing" line: nothing plays. 1-bit
+   browses and plays from the library throughout.
+5. Restart and stop, bounded. `systemctl --user restart $UNIT`, then
+   `systemctl --user stop $UNIT`; `journalctl --user -u $UNIT --since
+   -5min -o short-precise | grep -E 'player: shut down|Stopping|Stopped|Started'`.
+   Pass: each stop's "player: shut down took=…" well under 13 s, and the
+   unit's stop, from "Stopping" to "Stopped", in seconds, far under
+   systemd's 90 s. After the stop, `cat /proc/asound/cardN/pcm0p/sub0/status`
+   reads `closed`.
+6. Off. Move the player's files aside to keep the identity
+   (`mkdir -p ~/b470-aside && mv $DATA/player-* ~/b470-aside/`), set
+   `enabled: false` in `$CONF`, `systemctl --user start $UNIT`, wait a
+   minute. Pass: `ls $DATA/player-* 2>/dev/null` lists nothing, and
+   `journalctl --user -u $UNIT --since -2min | grep -c 'component=player'`
+   is 0. Then `systemctl --user stop $UNIT`, `mv ~/b470-aside/player-*
+   $DATA/`, and set `enabled: true` again if the player is to stay.
+
+### Decided otherwise than the brief, and why
+
+- The player starts on a goroutine of its own rather than in `runServe`'s
+  line: the brief's "constructs the player once at boot" holds, and the
+  library no longer waits on the player's storage.
+- The watcher's context: it ran on serve's, so it stopped as the shutdown
+  began, before the engine; it now runs on one its stop alone cancels, so
+  the brief's order (the engine, the backend, then the feed and the
+  watcher) is the order things stop in.
+- The lock: the brief's policy (production exits with `runServe`;
+  in-process callers must not start another serve until the writer ends) is
+  enforced rather than stated: the player holds a share of the lock, so the
+  in-process case is refused, and the instant between the unlock and the
+  exit is closed.
+- `dlna.SameFileInRoot` and `hotplug.SameBinding` are exported rather than
+  copied: one definition each.
+
+### Not in this change
+
+OpenHome SOAP, GENA, discovery, a URI and its confinement (5a);
+`/v1/outputs` (5b); the DAC page (6a); seek, shuffle, DSD and DoP, the
+registry, hardware volume. The backup policy above (5a). Backlog B523.
+
+### Round 2: the review's eight findings
+
+Round 1's review of #1321 (Codex and the Claude API, both static, on
+16b8d3a5), each finding verified by the orchestrator against the code. Each
+was fixed red first: its test written, with only the test seams it needs,
+and run against 16b8d3a5's logic, then the fix; and each controlled on the
+committed tree.
+
+1. **High: a recovered panic in `eng.Run` let go of the player's share of
+   the data dir's lock while the engine's writers might still run.** The
+   recover ran before `defer close(run.done)`, so `settle` took a panic for
+   a return; a panic skips Run's own shutdown, which is what waits for a
+   reservation write in flight and the queue writer (`owner.go`
+   `shutdownStep`). Fix: the recover marks the run (`playerRun.panicked`,
+   set before `done` closes) and `settle` keeps the share for good, logging
+   "the engine's Run ended in a panic, before its own shutdown, which waits
+   for its state writes: they may still run, so the player keeps its share
+   of the data directory's lock until the process exits"; `settled` never
+   closes. Production releases the lock with the process (`os.Exit` after
+   `runServe`); in-process, a second serve of that data dir is refused for
+   the process's life. Test: `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock`,
+   through `servePlayerSeams.runs` (on Run's goroutine, before Run). Red on
+   16b8d3a5's logic: "a second lock of the data directory once serve
+   stopped …: <nil>, want it refused".
+   **Found while fixing it**: run after another serve test, the green test
+   hung. The panic leaves an engine whose owner never answers, and the
+   supervisor's next `ReportOutput` (the first snapshot's) waited for
+   serve's stop: the supervisor could not see `run.done`, log the engine's
+   end or shut the player down until then. Its calls to the engine now run
+   on `playerRun.calls`, which ends with serve's stop and with Run's
+   goroutine; the test makes that order certain (the seam's panic waits for
+   the first report to be on its way).
+2. **Medium: a live binding change waited for a hardware reading before
+   the engine heard of it.** The engine heard of a change only through a
+   watcher snapshot, and a reading that stalls (a USB device's lock held by
+   a disconnect) publishes none, while one that fails republishes the last
+   snapshot stale at its generation, which the Reporter skips; the same for
+   a live disable the watcher had not published (its stop waits up to
+   `StopWait` for a stuck reading). Fix: the supervisor reads the live
+   config itself (`servePlayerWiring.Live` and `Changed`; `Live` is
+   `livePlayerSettings`, the one reading of the holder's player block the
+   watcher makes too), at each change of the holder and before each
+   snapshot's report, and `playerOutput` decides: while the live config
+   turns the player off the output is `disabled`, and while it names
+   another binding, or the last snapshot is of another binding,
+   `binding_changed`; `disabled` outranks it. These go at once, without a
+   hardware read. The output comes back only from a snapshot of the boot
+   binding: the latest the watcher published (restated) once the live
+   config names that binding again and runs the player, or the next one.
+   Test: `TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox`,
+   whose watcher holds every reading after the boot one, whatever its
+   context (`serveOpts.hotplugObserve`), with its stop's wait an hour
+   (`hotplugTiming`), so the watcher published nothing after its first
+   snapshot (asserted): the change, a disable, an enable on the other
+   binding and the boot binding put back each reach the engine. Red on
+   16b8d3a5's logic, at the test's deadline: "binding_changed and playback
+   stopped …; it is playing, the output {Known:true Available:true …
+   Generation:1}".
+   **The generation scheme**: one count, the Reporter's. `Report` numbers a
+   report per new feed generation, as before; `Withhold(reason)` (the
+   output unavailable for the live config) and `Restate()` (the last
+   snapshot's own verdict again, no `UnitChanged`) number theirs from the
+   same count, under the same lock, and only once a snapshot has been
+   reported (the engine holds the output unknown until then, which refuses
+   Play). The supervisor alone makes and sends reports, on its goroutine,
+   in numbering order, so the engine's input is monotonic whichever source
+   made a report, and no generation carries two. Serve sends a config
+   report only when what the engine was last told differs, and still one
+   report per feed generation. `TestTheReporterNumbersEveryReportFromOneCount`.
+   **Why the latest snapshot is restated, rather than waiting for the
+   next**: A → B → A where B's reading failed leaves the feed at A's
+   generation (republished stale, then cleared at the same generation by
+   the next good reading), and a reading of A that finds nothing changed
+   publishes no generation, so "the next snapshot" would leave the output
+   unavailable until the box changed. The latest snapshot of the boot
+   binding is the watcher's last word on that DAC, the one the engine acted
+   on before the change, and a session's start resolves the binding itself
+   on a whole reading (`playback.BindingLocator`). Known effect: after a
+   disable and an enable faster than the watcher's stop (a stuck reading),
+   the watcher's disabled snapshot lands after the restatement and reports
+   the output disabled until its next reading; conservative, since it can
+   only stop playback.
+3. **Medium: a library file's read error carried its absolute path into the
+   logs.** `Open` returned the `*os.File` itself, so a failing `ReadAt` was
+   an `*fs.PathError` naming the path, which `refuseDecode` and
+   `failDecode` put in the skip's or the fault's detail, and serve logs.
+   Fix: `library.content`, a `ReadAt` and a `Close` whose `*fs.PathError` is
+   "the library file: <op>: <err>", still wrapping the error (io.EOF
+   unchanged). Test: `TestTheContentsErrorsNameNoPath`, on a file closed
+   under the content (a disk that goes away fails reads the same way): a
+   read, a second close, and the read's error `decode.Open` hands on, as
+   the backend's open does. Red: all three named the path.
+4. **Low: `indexError` logged `GetUPnPRouting`'s error, which quotes the
+   stored path.** Fix: the line names what was read (paths, track,
+   routing), `manifest.ErrorClass` (SQLite's primary code by name, an
+   extended code by its primary, a context's end, a closed connection,
+   `other`) and the entry's reference. Test:
+   `TestAnIndexThatCannotBeReadIsLoggedWithoutItsError`, a store closed
+   after the track's read, so the routing read fails with the store's own
+   error. Red: the line carried `err=manifest: GetUPnPRouting
+   "Artist/Album/01 a.flac": sql: database is closed`.
+   `TestErrorClassNamesAStoreErrorByItsKindAlone` uses the driver's own
+   errors (`makeDriverErrors`).
+5. **Low: a live disable logged that the boot binding was back.** The
+   binding's foreignness was false for a disabled snapshot, so A → B → off
+   logged "names the binding the player started with again" and on again
+   "changed" a second time. Fix: the lines follow the live config's binding
+   alone (`playerOutput.readLive`), once each way, whatever the player's
+   state, and nothing else logs them. Test:
+   `TestALiveBindingChangeIsLoggedOnceEachWayWhateverThePlayersState`
+   (A → B → disable → enable on B: binding_changed, disabled,
+   binding_changed). Red: "logged 2 times and its return 1".
+6. **Low: the player's identity was made before the engine's storage
+   check.** Fix, the engine's contract unchanged: a start refused after it
+   made the identity (`made`) removes it (`config.ForgetPlayerUUID`, which
+   removes the file only while it holds that UUID) before the refusal is
+   reported, and "made the player's identity" is logged only once the
+   engine took the storage. Test:
+   `TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade`, through
+   `servePlayerSeams.engineConfig`, which points the reservation below a
+   regular file, a directory on the way that is not one, refused by New's
+   probe; a second row has the identity there before (bind's), kept.
+   `TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven`. Red: "the identity
+   this start made is still there", and announced.
+7. **Low: `TestServeStartsNoPlayerWithoutTheDataDirLock` had no Windows
+   skip.** On Windows it was skipped late, by `sysfstest`'s own skip, once
+   it had laid out the directories and bound its listeners; it now skips
+   first, as its siblings do, and the skip's message names both reasons
+   (no directory fsync, no tree with colons). #1321's Windows legs could
+   not be read from here (the `gh` CLI was refused); the package's tests
+   cross-compile for Windows.
+8. **Low: the stall test's release raced its reader.** A writer opened
+   `O_WRONLY|O_NONBLOCK` fails (ENXIO) while no reader has the pipe open, so
+   a release before the engine's read reached its open was lost, and the
+   test failed at its deadline. Fix: a blocking writer on a goroutine of its
+   own, which meets the reader whenever it opens, drained last through
+   `drainLoopOnCleanup`, whose cancel meets a writer no reader came for with
+   a reader of the test's own, held open until the writer's open has
+   returned (macOS puts a writer back to sleep when the reader it woke for
+   has gone; a throwaway check with no reader at all drained at once), so no
+   goroutine outlives the test. The first form drained by hand, and `make
+   test` caught it: `TestEveryBackgroundGoroutineDrainsOnCleanup` requires
+   the function that launches such a goroutine to call one of the two drain
+   helpers. The test runs in both orders, the second holding the engine's
+   start (the `engineConfig` seam) until the release is under way. Red, that
+   second order with the old release: "the player did not end once its
+   stall was let go".
+
+### Round 2's negative controls
+
+On the committed tree (a222e196..5cf36036; R2-8 again on ad4c6f8d's drain),
+one mutation at a time, the test run, the file restored from git and the
+tree checked clean.
+
+| NC | Mutation | Red |
+|---|---|---|
+| R2-1 | `settle` ignores `panicked` | "a second lock …: <nil>, want it refused" |
+| R2-1b | Run's goroutine does not end `calls` | "the player did not stop after its engine's panic" at the deadline |
+| R2-2 | `follow` does nothing | the live-config test: "it is playing, the output {… Available:true … Generation:1}" |
+| R2-2b | no `Restate` | the live-config test's last step: "binding_changed Generation:4" |
+| R2-2c | `Withhold` does not count | the Reporter test: "the output withheld: {Generation:1 …}" |
+| R2-3 | the raw `*os.File` handed over | the content test: nine leaks (read, close, decoder) |
+| R2-4 | the index error's text logged | the index test: "the line carries the error's text" |
+| R2-4b | `ErrorClass` without `& 0xff` | "SQLITE_BUSY_SNAPSHOT: \"sqlite 517\", want \"busy\"" |
+| R2-5 | foreignness tied to the player's state | the logging test: "logged 2 times and its return 1" |
+| R2-5b | `binding_changed` ahead of `disabled` | the logging test: "the player off …: Reason:binding_changed" |
+| R2-6 | a refused start keeps its identity | the identity test: "still there" |
+| R2-6b | `ForgetPlayerUUID` ignores the UUID | "after forgetting another UUID the file holds \"\"" |
+| R2-6c | the identity announced before the engine's verdict | "serve announced an identity its refused player did not keep" |
+| R2-8 | the release opens without waiting | the stall test's second order: "the player did not end once its stall was let go" |
+
+Not controlled: finding 7 (a Windows skip, which this host cannot run), and
+`report`'s read of the live config before a snapshot's report (it keeps a
+snapshot that beats the holder's Changed from being judged on the verdict
+read before; no test separates the two orders).
+
+### Round 2's runs
+
+- Stress, under `-race`: every serve test of the player, 26 of them, 5 runs
+  each (217 s), all passing; after ad4c6f8d, the stall test and the drain
+  sweep 5 runs each; `internal/player/library` 10 runs (94 s); the
+  Reporter's, `ForgetPlayerUUID`'s and `ErrorClass`'s tests 5 runs each.
+- The gate, through the build lock: `make fmt` (go1.27.3's gofmt rewrote
+  nothing; the pinned go1.27.2 is not in this host's module cache and
+  GOPROXY is off) and `make vet`, clean. `make test`: 72 packages passed,
+  `internal/player/...` and `internal/config` among them, and two failed:
+  `cmd/bridge` on the stall test's hand-written drain
+  (`TestEveryBackgroundGoroutineDrainsOnCleanup`, fixed in ad4c6f8d, after
+  which the whole package passed again under `-race`), and
+  `internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`,
+  which fails on this host (backlog B520) and is not this change's.
+  `make build-all` (six targets) and `make docs-check` passed.
+
+### Rounds 3 and 4: the abandonment's log line, and when done closes
+
+Round 2's review of #1321 (Codex and the Claude API, both static, on
+16b8d3a5..95291918): the Claude API found nothing, and Codex one finding,
+verified against the code.
+
+1. **Low: the abandonment test could read the log before its line.**
+   `supervise` closed `done` and then called `settle`, which logs that a Run
+   a panic ended is abandoned, and
+   `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock` read the log as
+   soon as `done` closed. Red first, on 95291918: with a 2 s sleep between
+   `close(p.done)` and `p.settle()`, the test failed, "the abandonment
+   logged [], want once". Round 3 (852cb8b3) made the test park that log
+   call (`loggingtest.ParkOn`) and wait for it.
+
+Round 3's review (the same two, on 95291918..b90e5d90): the Claude API
+found nothing, and Codex that releasing the park does not join `settle`,
+so a later `settle` that logged and then let go of the lock could still
+pass, and that this record said more than the wait gave. Both held: `done`'s
+own doc says it closes once the supervisor has returned, and it closed
+before `settle`. Round 4 (aa2b7038) fixes the order instead of the test:
+the supervisor settles first and closes `done` last. `settle` never
+blocks (a Run still running is waited for on a goroutine of its own), so
+a Run still running does not hold `done` back, and a caller that sees it
+sees what `settle` did. The test went back to reading the log once `done` has
+closed. Control: `close(p.done)` put back before `p.settle()`, with the 2 s
+sleep between them, fails the test ("the abandonment logged [], want
+once"), restored from git. Runs on aa2b7038: `cmd/bridge` under `-race`
+(524 s) and the three `TestAPanic` tests 10 runs each under `-race`, all
+passing; `make docs-check` passed.
 
 ## 2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration
 
