@@ -57783,22 +57783,18 @@ snapshots valid after the taking box was reset, and the Round 5
 paragraph's quotation had been rewritten to the review fix's wording.
 The quotation above again records what round 5 shipped, with its
 superseding review noted; the Round 5's review paragraph is unchanged.
-Every current-rule copy (the advice and its comment, both rules lines,
-both History long forms and both backup-guide passages, excluding the
-superseded historical log paragraphs above) now states the following rule.
+Every current-rule copy now states the following rule.
 
 A reset gives up for good the identity it removes and any the box ran
 earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and has not reset it since, running or powered off.
-Their values were held only by the floor the reset drops. No snapshot of a
-given-up identity taken before the reset, on this box or another, may restore
-its player identity again:
+took it over by a restore and still runs it. Their values were held only by
+the floor the reset drops. No snapshot of a given-up identity taken before
+the reset, on this box or another, may restore its player identity again:
 remove `player-uuid` and `player-ids.json` from every such snapshot, or
 delete those snapshots. Any other box that still holds a given-up identity's
 files (one powered off since a migration, say) must be reset too before it
-runs again. An identity another box took over by a restore, and has not
-reset since, is not given up: that box's floor holds it, and its snapshots
-stay valid.
+runs again. An identity another box took over by a restore, and still runs,
+is not given up: that box's floor holds it, and its snapshots stay valid.
 If the reset answers a refused restore, remove `player-uuid` and
 `player-ids.json` from a copy of that snapshot, then restore that copy.
 Only the restore refusal carries this step; the backup refusal does not.
@@ -57807,7 +57803,7 @@ makes a new identity with no queue, a new device to controllers. A
 snapshot's `player-ids.json` is never a valid repair; never delete the
 reservation while keeping the identity. B524 will enforce this operator
 rule before 5a ships. The advice assertion independently requires the
-four rule clauses, including the takeover box not having reset the identity and
+four rule clauses, including the still-running takeover condition and
 the reset of any other box that retains a given-up identity's files.
 
 Validation: before the builder changed, the strengthened advice assertions
@@ -57820,7 +57816,7 @@ the other 44 patches remain byte-identical to `controls-r7/`. Control 50
 reverts the exception to round 5's review fix, without the still-running
 condition. The manifest and scratch `report-r6.md` carry the evidence.
 No requested check was refused by the sandbox. No commit.
-
+(Superseded by round 7 below.)
 
 **Round 7 (Claude's review of round 6; Codex found none).** The running-only
 condition gave up a valid identity when its takeover box was merely powered
@@ -57835,3 +57831,17 @@ independent assertions and every current documentation copy use the corrected
 condition. Scratch report-r7.md and controls-r9/manifest.json record validation
 and the eight changed controls, including 52's return to the running-only
 condition. No commit.
+(Superseded by round 7's review below.)
+
+**Round 7's review (Claude High and Medium; Codex P3).** "Took it over by a
+restore" named no direction, so it also kept an identity on the box it had
+migrated away from, when that box had itself got it by a restore: powered on
+again, or restored elsewhere from its migration snapshot, it would reissue
+values only the reset box's dropped floor held. The exception now names this
+box: a reset gives up for good the identity it removes and any the box ran
+earlier (one an earlier restore replaced on this box), unless another box took
+it over from this box, by restoring a snapshot this box made, and has not
+reset it since, running or powered off; an identity another box took over
+from this box, and has not reset since, keeps its snapshots. The rest of the
+rule is as round 7 states it. The review also found round 6's entry rewritten
+in place by round 7; it again says what round 6 shipped, marked superseded.

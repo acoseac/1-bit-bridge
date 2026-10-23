@@ -38,15 +38,15 @@ start makes a new identity with no queue, a new device to controllers.
 reservation while keeping the player identity.
 A reset gives up for good the identity it removes and any the box ran
 earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and has not reset it since, running or powered
-off. Their values were held only by the floor the reset drops. No snapshot
+took it over from this box, by restoring a snapshot this box made, and has
+not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot
 of a given-up identity taken before the reset, on this box or another, may
 restore its player identity again: remove `player-uuid` and
 `player-ids.json` from every such snapshot, or delete those snapshots. Any
 other box that still holds a given-up identity's files (one powered off
 since a migration, say) must be reset too before it runs again. An identity
-another box took over by a restore, and has not reset since, is not given
-up: that box's floor holds it, and its snapshots stay valid.
+another box took over from this box by a restore, and has not reset since,
+is not given up: that box's floor holds it, and its snapshots stay valid.
 If the reset answers a refused restore, remove `player-uuid` and
 `player-ids.json` from a copy of that snapshot, then restore that copy.
 
@@ -67,15 +67,15 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
   live files together while the service is stopped.
   A reset gives up for good the identity it removes and any the box ran
   earlier (one an earlier restore replaced on this box), unless another box
-  took it over by a restore and has not reset it since, running or powered
-  off. Their values were held only by the floor the reset drops. No snapshot
+  took it over from this box, by restoring a snapshot this box made, and has
+  not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot
   of a given-up identity taken before the reset, on this box or another, may
   restore its player identity again: remove `player-uuid` and
   `player-ids.json` from every such snapshot, or delete those snapshots. Any
   other box that still holds a given-up identity's files (one powered off
   since a migration, say) must be reset too before it runs again. An
-  identity another box took over by a restore, and has not reset since, is
-  not given up: that box's floor holds it, and its snapshots stay valid.
+  identity another box took over from this box by a restore, and has not
+  reset since, is not given up: that box's floor holds it, and its snapshots stay valid.
   If the reset answers a refused restore, remove
   `player-uuid` and `player-ids.json` from a copy of that snapshot, then
   restore that copy.
