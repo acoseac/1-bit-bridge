@@ -57607,7 +57607,7 @@ every action's behaviour 5a3's and 5a4's, and the restored identity's policy
   interface.
 - `.gitattributes`: the upstream files are never converted (two are CRLF).
   `CLAUDE.md`: the `openhome.md` row and the package rows.
-- Tests: 4 in `internal/config`, 3 in `internal/player/lan`, 27 and a fuzz
+- Tests: 4 in `internal/config`, 3 in `internal/player/lan`, 28 and a fuzz
   target in `internal/player/openhome` (the SOAP table's 109 rows among
   them), 1 in `cmd/bridge` (four cases) and a row of serve's gate table.
 
@@ -57717,6 +57717,13 @@ open is closed; the Serve goroutines and the handlers are joined within
 player stops the surface first in its shutdown, before the engine, so no
 request reaches the engine as it stops; `stop`'s outer bound gains the
 surface's (`Limits.StopBound`, 4 s).
+
+A panic in the listing loop (the address source's or the listing's own)
+is recovered there: the surface serves what it has bound, follows the
+interfaces no more, and stops as before; the line carries the stack, and
+the value only when it is the runtime's own error, as serve's player logs
+its own (`TestAPanicInTheListingStaysInTheSurface`, red first: the panic
+crashed the test binary). net/http recovers a handler's panic per request.
 
 ### The seams
 
@@ -57901,6 +57908,8 @@ restored from git and the tree checked clean.
 | 56 | no boot line for the opt-in with the player off | "boot said []" |
 | 57 | the surface stopped after the engine | the journal's order |
 | 58 | the suite's `hostLAN` given an interface (an address no host here holds) | "the suite's surface found the host's addresses" |
+| 59 | no recover in the listing loop | the panic crashed the test binary |
+| 59b | the panic's value logged | "the line … quotes the panic's value" |
 
 Three controls found rows that another check covered, and the table test
 was sharpened (bae85761): NC41 left "an ENTITY alone" green, since its
