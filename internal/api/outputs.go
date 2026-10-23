@@ -108,14 +108,92 @@ type OutputPathRule struct {
 	Found             int    `json:"found"`
 }
 
-// outputSession is the read-only MPD connection the route keeps. *mpd.Client
+// outputSession is the read-only MPD connection the routes keep. *mpd.Client
 // is one. A caller never supplies protocol text.
 type outputSession interface {
 	Status(ctx context.Context) (mpd.Reply, error)
 	Find(ctx context.Context, path string) (mpd.Reply, error)
+	CurrentSong(ctx context.Context) (mpd.Reply, error)
+	ReplayGainStatus(ctx context.Context) (mpd.Reply, error)
+	Outputs(ctx context.Context) (mpd.Reply, error)
 	Version() string
 	Close() error
 }
+
+// serialSession runs one command at a time on the session GET /v1/outputs
+// and the reading share. MPD answers one command at a time on a
+// connection, so two written together would each read the other's reply.
+// The wait for the turn ends with the caller's context, so a reading keeps
+// its own deadline behind the outputs body's finds. Close does not wait:
+// closing the connection is what ends a command that hangs.
+type serialSession struct {
+	turn  chan struct{}
+	inner outputSession
+	// dropped closes the session and forgets it when it is still the one
+	// the routes share (localOutputs.dropSession); nil closes it alone.
+	dropped func()
+}
+
+func newSerialSession(inner outputSession) *serialSession {
+	return &serialSession{turn: make(chan struct{}, 1), inner: inner}
+}
+
+func (s *serialSession) take(ctx context.Context) error {
+	select {
+	case s.turn <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *serialSession) give() { <-s.turn }
+
+// run runs one command in its turn. A command that panics may have written
+// its line and not read MPD's reply, which would then answer the next
+// command on the connection, so the session is dropped before the panic
+// goes on to whoever recovers it.
+func (s *serialSession) run(ctx context.Context, cmd func() (mpd.Reply, error)) (mpd.Reply, error) {
+	if err := s.take(ctx); err != nil {
+		return mpd.Reply{}, err
+	}
+	defer s.give()
+	defer func() {
+		if r := recover(); r != nil {
+			if s.dropped != nil {
+				s.dropped()
+			} else {
+				_ = s.inner.Close()
+			}
+			panic(r)
+		}
+	}()
+	return cmd()
+}
+
+func (s *serialSession) Status(ctx context.Context) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Status(ctx) })
+}
+
+func (s *serialSession) Find(ctx context.Context, path string) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Find(ctx, path) })
+}
+
+func (s *serialSession) CurrentSong(ctx context.Context) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.CurrentSong(ctx) })
+}
+
+func (s *serialSession) ReplayGainStatus(ctx context.Context) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.ReplayGainStatus(ctx) })
+}
+
+func (s *serialSession) Outputs(ctx context.Context) (mpd.Reply, error) {
+	return s.run(ctx, func() (mpd.Reply, error) { return s.inner.Outputs(ctx) })
+}
+
+func (s *serialSession) Version() string { return s.inner.Version() }
+
+func (s *serialSession) Close() error { return s.inner.Close() }
 
 // LocalOutputsConfig is the injected half of GET /v1/outputs. A nil
 // function takes the production one. GOOS empty is this process.
@@ -143,6 +221,15 @@ type LocalOutputsConfig struct {
 	// route starts the first time output.mpd resolves on. It must be
 	// cheap and idempotent. Nil does nothing.
 	OnActive func()
+
+	// Track is this bridge's row at a manifest path, for the reading's
+	// song: ok is false when there is none. Nil is no lookup: no song is
+	// then one of this bridge's rows.
+	Track func(ctx context.Context, path string) (track OutputTrack, ok bool, err error)
+	// LoopbackTrack is the row a loopback track route id names (the DLNA
+	// track id) and the file it serves, for a song MPD fetches from that
+	// route. Nil is no lookup.
+	LoopbackTrack func(trackID string) (path, absPath string, ok bool)
 }
 
 type localOutputs struct {
@@ -162,6 +249,14 @@ type localOutputs struct {
 	buildLimit time.Duration
 	loopback   func() string
 	onActive   func()
+	track      func(context.Context, string) (OutputTrack, bool, error)
+	loopTrack  func(string) (string, string, bool)
+	limits     readingLimits
+	// confFile and alsaConfig are the reading's mpd.conf and ALSA
+	// configuration reads: conf.ReadFile and alsa.LoadPCMConfig, which a
+	// test replaces with one that hangs or panics.
+	confFile   func(root, logical, host string) (conf.File, error)
+	alsaConfig func(root string) alsa.PCMConfig
 
 	mu           sync.Mutex
 	client       outputSession
@@ -172,6 +267,9 @@ type localOutputs struct {
 	flight       *outputFlight
 	cached       outputCache
 	probed       outputProbe
+	// inspecting is an inspection still running past its probe's deadline
+	// (inspectBounded): a probe does not start a second while it runs.
+	inspecting bool
 	// answered is auto's newest verdict that a caller of Active recorded,
 	// whichever way the gate reached it: a probe it stored, a probe past its
 	// own deadline it did not store, the cache, or another caller's probe
@@ -184,6 +282,10 @@ type localOutputs struct {
 	verdictSeq   uint64
 	probeFlights map[string]*probeFlight
 	paths        outputPathCache
+	// readings counts the readings taking place: the idle close waits them
+	// out as it waits out a build (outputs_reading.go).
+	readings int
+	reading  readingState
 	// joined, when set, runs after a caller has found a build in flight
 	// and before it waits. Production leaves it nil. Tests use it to
 	// release that build only once the second caller is waiting on it.
@@ -230,11 +332,12 @@ type outputProbe struct {
 // set under mu before done closes, so every waiter carries the number the
 // probe was given.
 type probeFlight struct {
-	done  chan struct{}
-	found bool
-	rep   mpd.Report
-	opt   mpd.Options
-	seq   uint64
+	done    chan struct{}
+	found   bool
+	rep     mpd.Report
+	opt     mpd.Options
+	seq     uint64
+	expired bool
 }
 
 func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
@@ -255,6 +358,11 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		buildLimit: cfg.BuildLimit,
 		loopback:   cfg.LoopbackBaseURL,
 		onActive:   cfg.OnActive,
+		track:      cfg.Track,
+		loopTrack:  cfg.LoopbackTrack,
+		limits:     defaultReadingLimits,
+		confFile:   conf.ReadFile,
+		alsaConfig: alsa.LoadPCMConfig,
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
@@ -335,7 +443,7 @@ func (o *localOutputs) Active(ctx context.Context) bool {
 // records nothing, so a request that ends while a probe runs cannot turn
 // the loopback route off.
 func (o *localOutputs) answerAuto(ctx context.Context) bool {
-	found, _, _, seq := o.probeVerdict(ctx)
+	found, _, _, seq, _ := o.probeVerdict(ctx)
 	if o.beforeRecord != nil {
 		o.beforeRecord(ctx)
 	}
@@ -371,16 +479,20 @@ func (o *localOutputs) activeNow() bool {
 }
 
 func (o *localOutputs) probe(ctx context.Context) (bool, mpd.Report, mpd.Options) {
-	found, rep, opt, _ := o.probeVerdict(ctx)
+	found, rep, opt, _, _ := o.probeVerdict(ctx)
 	return found, rep, opt
 }
 
-// probeVerdict is probe, and the number of its verdict. Every answer is a
-// verdict, numbered under mu as it is produced: a cache read when it is
-// read, a probe when it completes (stored or past its own deadline),
-// whichever caller ran it. The false of a caller that stopped waiting on
-// another caller's probe is none, and carries 0.
-func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64) {
+// probeVerdict is probe, the number of its verdict, and whether the
+// inspection it answers from ran past its deadline (expired), which a
+// caller that stopped waiting has not had either. An answer is a verdict,
+// numbered under mu as it is produced: a cache read when it is read, a
+// probe when its inspection returns (stored, or past its own deadline),
+// whichever caller ran it. Two answers are none and carry 0: the false of
+// a caller that stopped waiting on another caller's probe, and a probe
+// whose inspection never returned, was skipped because one still runs, or
+// panicked (inspectBounded's abandoned), which read nothing about MPD.
+func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.Options, uint64, bool) {
 	cfg := o.outputConfig()
 	key := probeKey(cfg)
 	o.mu.Lock()
@@ -388,7 +500,7 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		p := o.probed
 		seq := o.nextVerdictLocked()
 		o.mu.Unlock()
-		return p.found, p.rep, p.opt, seq
+		return p.found, p.rep, p.opt, seq, false
 	}
 	if f := o.probeFlights[key]; f != nil {
 		o.mu.Unlock()
@@ -397,9 +509,9 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		}
 		select {
 		case <-f.done:
-			return f.found, f.rep, f.opt, f.seq
+			return f.found, f.rep, f.opt, f.seq, f.expired
 		case <-ctx.Done():
-			return false, mpd.Report{}, mpd.Options{}, 0
+			return false, mpd.Report{}, mpd.Options{}, 0, true
 		}
 	}
 	f := &probeFlight{done: make(chan struct{})}
@@ -412,13 +524,12 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 	opt, refuse := mpd.OptionsForHost(o.goos, "", cfg.Conf, cfg.Endpoint, cfg.Password, o.getenv)
 	var rep mpd.Report
 	found := false
-	expired := false
+	expired, abandoned := false, false
 	if !refuse {
 		// Detached from the caller: a cancelled /v1/health must not
 		// store a miss that hides the output for the miss TTL.
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
-		rep = o.inspect(pctx, opt)
-		expired = pctx.Err() != nil
+		rep, expired, abandoned = o.inspectBounded(pctx, opt)
 		cancel()
 		found = rep.Found()
 	}
@@ -431,10 +542,68 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 		o.probed = outputProbe{at: o.now(), until: o.now().Add(ttl), key: key, found: found, rep: rep, opt: opt}
 	}
 	delete(o.probeFlights, key)
-	f.found, f.rep, f.opt, f.seq = found, rep, opt, o.nextVerdictLocked()
+	var seq uint64
+	if !abandoned {
+		seq = o.nextVerdictLocked()
+	}
+	f.found, f.rep, f.opt, f.seq, f.expired = found, rep, opt, seq, expired
 	close(f.done)
 	o.mu.Unlock()
-	return found, rep, opt, f.seq
+	return found, rep, opt, seq, expired
+}
+
+// outputProbeGrace is how long past its deadline a probe waits for its
+// inspection to return: the dial and the greeting end with the context, a
+// read of a file on a dead mount does not.
+const outputProbeGrace = 100 * time.Millisecond
+
+// inspectBounded runs the inspection on a goroutine of its own and waits for
+// it until ctx ends and outputProbeGrace more. One that has not returned by
+// then is abandoned, with no report, and while it still runs no probe starts
+// another, which is abandoned at once: a file that holds a read for good
+// holds one goroutine, not one per probe. A panic in it is abandoned too,
+// and logged. expired is whether ctx had ended when the report came, and an
+// abandoned inspection is expired; abandoned is no report at all, which
+// says nothing about MPD.
+func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep mpd.Report, expired, abandoned bool) {
+	o.mu.Lock()
+	if o.inspecting {
+		o.mu.Unlock()
+		return mpd.Report{}, true, true
+	}
+	o.inspecting = true
+	o.mu.Unlock()
+	done := make(chan struct{})
+	var out mpd.Report
+	var panicked bool
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				logOutputPanic("the probe", r)
+			}
+			o.mu.Lock()
+			o.inspecting = false
+			o.mu.Unlock()
+			close(done)
+		}()
+		out = o.inspect(ctx, opt)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		timer := time.NewTimer(outputProbeGrace)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			return mpd.Report{}, true, true
+		}
+	}
+	if panicked {
+		return mpd.Report{}, true, true
+	}
+	return out, ctx.Err() != nil, false
 }
 
 // nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.
@@ -456,18 +625,24 @@ func probeKey(cfg config.OutputConfig) string {
 	return strings.Join([]string{cfg.MPD, cfg.Endpoint, cfg.Conf, cfg.Password}, "\n")
 }
 
+// errOutputsBuildPanicked is a build of the outputs body that panicked.
+var errOutputsBuildPanicked = errors.New("api: the outputs body's build panicked")
+
 // Response builds the route body. One build runs at a time, on a context
 // detached from the caller with its own deadline. A success that finished
 // inside that deadline is reused for outputCacheTTL. The MPD connection
 // opens on the first build that can dial and closes outputIdle after the
-// last call.
-func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
+// last call. The build's flight completes however the build ends: one that
+// panics (a command that panicked has dropped its session) is an error,
+// logged without the panic's value and never cached, and the next call
+// builds afresh.
+func (o *localOutputs) Response(ctx context.Context) (body OutputsResponse, err error) {
 	o.armIdle()
 	o.mu.Lock()
 	if o.cached.ok && o.now().Sub(o.cached.at) < outputCacheTTL {
-		body := o.cached.body
+		cached := o.cached.body
 		o.mu.Unlock()
-		return body, nil
+		return cached, nil
 	}
 	if o.flight != nil {
 		f := o.flight
@@ -488,17 +663,26 @@ func (o *localOutputs) Response(ctx context.Context) (OutputsResponse, error) {
 
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.buildLimit)
 	defer cancel()
-	body, err := o.build(buildCtx)
-	o.mu.Lock()
-	if err == nil && buildCtx.Err() == nil {
-		o.cached = outputCache{at: o.now(), body: body, ok: true}
-	}
-	o.flight = nil
-	f.body, f.err = body, err
-	close(f.done)
-	o.mu.Unlock()
-	o.armIdle()
-	return body, err
+	// Deferred after cancel, so it runs first and reads the build's own
+	// deadline. A flight left open would hold every later call until its
+	// own context ends, and the idle close never runs while a build is in
+	// flight.
+	defer func() {
+		if r := recover(); r != nil {
+			logOutputPanic("the outputs body", r)
+			body, err = OutputsResponse{}, errOutputsBuildPanicked
+		}
+		o.mu.Lock()
+		if err == nil && buildCtx.Err() == nil {
+			o.cached = outputCache{at: o.now(), body: body, ok: true}
+		}
+		o.flight = nil
+		f.body, f.err = body, err
+		close(f.done)
+		o.mu.Unlock()
+		o.armIdle()
+	}()
+	return o.build(buildCtx)
 }
 
 func (o *localOutputs) armIdle() {
@@ -513,7 +697,7 @@ func (o *localOutputs) armIdle() {
 
 func (o *localOutputs) idleClose() {
 	o.mu.Lock()
-	if o.flight != nil || o.now().Sub(o.last) < outputIdle {
+	if o.flight != nil || o.readings > 0 || o.now().Sub(o.last) < outputIdle {
 		o.mu.Unlock()
 		return
 	}
@@ -544,10 +728,16 @@ func (o *localOutputs) session(ctx context.Context, endpoint, password string) (
 	if old != nil {
 		_ = old.Close()
 	}
-	c, err := o.dial(ctx, endpoint, password)
+	dialled, err := o.dial(ctx, endpoint, password)
 	if err != nil {
 		return nil, err
 	}
+	if dialled == nil {
+		return nil, nil
+	}
+	serial := newSerialSession(dialled)
+	var c outputSession = serial
+	serial.dropped = func() { o.dropSession(c) }
 	o.mu.Lock()
 	if o.client != nil {
 		o.mu.Unlock()
@@ -775,6 +965,35 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	if err != nil {
 		return nil
 	}
+	root := alsa.ConfigRoot(snap.ProcRoot)
+	picks := dacsFrom(snap, rep, func(device string, cards []alsa.Card) (int, int, bool) {
+		return alsa.ResolveOutputDevice(root, device, cards)
+	})
+	if picks == nil {
+		return nil
+	}
+	out := make([]OutputDAC, len(picks))
+	for i, p := range picks {
+		out[i] = p.dac
+	}
+	return out
+}
+
+// dacPick is one card an outputs element names, and the PCM device on it:
+// the one MPD's device resolved to, or 0 for a candidate card.
+type dacPick struct {
+	dac OutputDAC
+	pcm int
+}
+
+// dacsFrom is the cards GET /v1/outputs lists for one reading of the cards,
+// in its order: the one card MPD's enabled alsa device resolves to, else
+// each card several devices resolve to, else every USB card. The reading
+// lists them from its own snapshot, so an id it matches is the one the
+// outputs route gives. resolve maps a device to a card: the route's reads
+// the ALSA configuration for a PCM name, and the reading's resolves from
+// the configuration it read once, under its deadline.
+func dacsFrom(snap alsa.Snapshot, rep mpd.Report, resolve func(device string, cards []alsa.Card) (int, int, bool)) []dacPick {
 	cards := make([]alsa.Card, len(snap.Cards))
 	for i, c := range snap.Cards {
 		cards[i] = c.Card
@@ -786,7 +1005,7 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	var hits []hit
 	seen := map[int]bool{}
 	for _, device := range alsaDevices(rep) {
-		idx, pcm, ok := alsa.ResolveOutputDevice(alsa.ConfigRoot(snap.ProcRoot), device, cards)
+		idx, pcm, ok := resolve(device, cards)
 		if !ok || seen[idx] {
 			continue
 		}
@@ -795,25 +1014,25 @@ func (o *localOutputs) dacs(rep mpd.Report) []OutputDAC {
 	}
 	if len(hits) == 1 {
 		if dac, ok := dacAt(snap, hits[0].index, hits[0].pcm, true); ok {
-			return []OutputDAC{dac}
+			return []dacPick{{dac: dac, pcm: hits[0].pcm}}
 		}
 	}
 	if len(hits) > 1 {
-		var out []OutputDAC
+		var out []dacPick
 		for _, h := range hits {
 			if dac, ok := dacAt(snap, h.index, h.pcm, false); ok {
-				out = append(out, dac)
+				out = append(out, dacPick{dac: dac, pcm: h.pcm})
 			}
 		}
 		return out
 	}
-	var usb []OutputDAC
+	var usb []dacPick
 	for _, c := range snap.Cards {
 		if c.USBID == nil {
 			continue
 		}
 		if dac, ok := dacAt(snap, c.Index, 0, false); ok {
-			usb = append(usb, dac)
+			usb = append(usb, dacPick{dac: dac})
 		}
 	}
 	return usb

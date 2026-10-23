@@ -290,6 +290,11 @@ func (s *Server) routeRegistry() []route {
 		// than the 2s of a cache snapshot. The flag in /v1/health is
 		// what a client gates on; the route 404s when it is off.
 		{pattern: "GET /v1/outputs", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(15*time.Second, s.authed(s.outputs))},
+		// The live reading of one output's DAC. A miss of the reading's
+		// 500 ms cache dials MPD at most once and gives every /proc read
+		// and MPD command its own deadline, the whole under a few seconds;
+		// the route's 10 s is a ceiling the reading never reaches.
+		{pattern: "GET /v1/outputs/{id}/reading", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.outputReading))},
 
 		// Playlists — user-wide backup safe (any paired device can
 		// list / restore / update / delete). Small JSON on list /

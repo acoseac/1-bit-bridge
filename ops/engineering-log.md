@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
 - [2026-10-23 — B513: the manifest says whether a PCM track's samples are integer or float, and the rows indexed before it get the kind without a rescan](#2026-10-23--b513-the-manifest-says-whether-a-pcm-tracks-samples-are-integer-or-float-and-the-rows-indexed-before-it-get-the-kind-without-a-rescan)
 - [2026-10-23 — saprobe-alac v1.0.0-rc3 carries the over-read fix: the bridge drops its patched copy](#2026-10-23--saprobe-alac-v100-rc3-carries-the-over-read-fix-the-bridge-drops-its-patched-copy)
 - [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
@@ -54482,3 +54483,1474 @@ with no `-dirty`) and `make docs-check`, clean.
   `bumpIndexedAtByPathSQL` once on their transaction and close them before it
   ends, as `StampExtractorVersionBatch` does. Behaviour is unchanged; the
   backfill and stamp tests stay green.
+
+## 2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it
+
+### The question
+
+Option A's third bridge step (`~/onebit/briefs/bridge-as-output-plan.md`):
+the phone casts to the MPD beside the bridge, and the bridge tells it what
+the DAC actually receives, read from the kernel, and whether that is the
+file bit for bit. Decision 3 of the plan's DECIDED section (after the Argon
+consult) sets the verdict's rules, and decision 4 the mechanics: no
+background sampler, a read-through cache of 500 ms, and a lazy MPD
+connection that closes about 60 s after the last call. iOS I3 mirrors the
+route later in Signal Path's DAC block. The rules go to
+`.claude/rules/output.md` (the change's rules note), and the wire contract
+is the `GET /v1/outputs/{id}/reading` section of `PROTOCOL.md`.
+
+### What changed
+
+- **`GET /v1/outputs/{id}/reading`** (`internal/api/outputs_reading.go`),
+  bearer-authenticated, `boundedRoute`, `rateNone`, a 10 s context it never
+  reaches. One reading of the box is taken at a time and every output's
+  view is cut from it: MPD's `status`, then `currentsong`,
+  `replay_gain_status` and `outputs`, then every card in `/proc/asound`,
+  then `status` again; `mpd.conf` is read again at every reading.
+- **A flag of its own, `outputReading`**, on the localOutputs gate. Main
+  has carried B2's `/v1/outputs` since 2026-10-19, so a bridge built from
+  it advertises `localOutputs` and has no reading route; a client keyed on
+  `localOutputs` would ask it for a reading and get the mux's bare 404.
+  The gate is asked once per health answer for both keys (`localOutputsOn`
+  in api.go), and the feature list's capacity is 37.
+- **`internal/signalpath`**, a package with no I/O: `Judge` takes the
+  facts a whole reading established and returns `bit_exact`,
+  `bit_exact_dop` or `withheld` with a code for every condition not proven;
+  `Settling` reads the two status reads. Every case is a table row.
+- **`alsa.ResolveOutputChain`** returns the stages a device takes to its
+  card (`["empty", "plug", "hw"]` for Volumio's `volumio`), through the same
+  walk as `ResolveOutputDevice` (now `walkChain` under both). A `front` or
+  `plug` device string, at the start or as a slave, resolves to a card for
+  the outputs route and has no chain: what it names lives in alsa-lib's own
+  files, which the bridge does not read. `alsa.PCMFormatBits` is the
+  kernel's linear PCM formats by name and sample bits.
+- **`mpd.conf`'s `filters`, `mixer_enabled` and top-level `mixer_type`**
+  are read (`conf.AudioOutput`, `conf.File`), redacted like the rest, and
+  an include's `mixer_type` counts. `conf.RedactSecrets` redacts a password
+  from outside the file (the bridge's own `output.password`) by the file's
+  rule.
+- **The MPD session is shared, one command at a time.** `/v1/outputs` and
+  the reading share the lazy session; `serialSession` wraps every dialled
+  client, and the wait for the turn ends with the caller's context, so a
+  reading behind the outputs body's twenty `find`s keeps its own deadline.
+  The idle close waits out a reading as it waits out a build.
+- **Serve** gives the reading the manifest row lookup (`GetTrack` for the
+  format, `GetTrackStat` for the size and time the skip gate compares) and
+  the loopback route's own index for its track ids
+  (`cmd/bridge/output_reading.go`).
+
+### Decisions
+
+- **The reading's state and the verdict are two fields.** `state` says
+  whether the facts describe one steady moment (`whole`, `settling`,
+  `unknown`, with codes); the verdict needs a whole reading and is
+  otherwise `withheld` with the state's codes, so a client can switch on
+  the verdict alone. A reading that cannot be had is an answer: `mpd`,
+  `song` or `dac` is null, and what was read is reported.
+- **Settling** is the two status reads disagreeing on the state or the
+  song id, `currentsong` naming another song, elapsed under half a second
+  (or absent while playing), or elapsed moving half a second more or less
+  than the wall time between the reads (a seek, or a pause and resume
+  inside the bracket). MPD moves elapsed a chunk at a time, tens of
+  milliseconds at 44.1/16, so half a second is a jump, not a step.
+- **"The MPD the bridge dialled"** cannot be proven from file descriptors:
+  `/proc/<pid>/fd` is the owner's alone, and MPD runs as `mpd`. The verdict
+  ties the stream to the dialled MPD by the owner's process name (`mpd`,
+  through the thread's Tgid as B1 reads it) and by that MPD playing, both
+  reads, to an enabled alsa output whose device reaches this card, and
+  PROTOCOL.md says so. A second MPD holding the card while the dialled one
+  plays to another output of its own is the residual.
+- **The source is known only for the bridge's own rows.** The manifest's
+  codec comes from content inspection; a suffix does not (`.m4a` is ALAC or
+  AAC, a `.wv` may be hybrid-lossy, a `.wav` may hold MP3). A song another
+  bridge serves is `source_unknown`, and the reasons list is whole, so
+  `[source_unknown]` alone says every other condition held. A row counts
+  only while the file has the scanner's size and modification time
+  (`source_changed` otherwise), and a database path is a row only when a
+  root's prefix rule takes it, the rest of the path stays under the root
+  (`filepath.IsLocal`), and `os.SameFile` agrees on MPD's file and the
+  root's.
+- **"The plug has nothing to convert"** is read as the card holding exactly
+  the stream's bits at its rate and channels: a container repack (S24_LE to
+  S24_3LE) changes no sample, and is what the Pi measured for 96/24 through
+  Volumio's chain; a 16-bit stream padded to 24 by a plug is
+  `alsa_plug_converts`, while MPD's own padding straight to `hw` is allowed
+  (the PCM rule is "at least the file's bits"). The floor is the file's
+  bits, not the stream's: FFmpeg hands 24-bit ALAC on as 32.
+- **Software volume is withheld at any level**, `allowed_formats` counts as
+  a format override (it can force a conversion and `=dop`), and a mixer
+  type MPD does not name counts as software volume not ruled out.
+- **`dop` and `allowed_formats` are MPD's live attributes first**:
+  `outputset` changes them at run time without touching `mpd.conf`.
+- **The DAC's own mixer** is MPD's 0 to 100 for a `hardware` mixer, as
+  information. The level in dB would need the ALSA control interface, which
+  the bridge does not open.
+- **Deadlines**: the dial and each command 750 ms, the `/proc` read and the
+  row look 500 ms, the whole reading 3 s. A `/proc` read or a row look still
+  running from an earlier reading is not joined and not doubled: the next
+  reading is a timeout at once, so a hung `/proc` file or a dead mount holds
+  one goroutine, and a join would also hand a reading cards read before its
+  first status. A command that failed after it was written drops the
+  session (MPD may still answer it, and that reply would answer the next
+  command); one that never got its turn leaves it.
+- **No `/proc/asound` is no card** (`no_card`), not an unreadable `/proc`.
+  With no card, neither the device nor a chain is resolved, so a box
+  without ALSA reads no ALSA configuration.
+- **When `/proc/asound` cannot be read, any id of the right form is
+  answered** (`unknown`, `proc_unreadable` or `proc_timeout`): the cards
+  that would say which ids exist were not read. A malformed id is 404.
+- **`mpd.conf` is read under the volume its path names** (`confRoot`). The
+  probe's root is `/`, and the route's tests stand any OS in for Linux; on
+  GitHub's Windows runner `/` is the checkout's drive (D:) and a test's temp
+  directory is on C:, so every test that reads `mpd.conf` would have read
+  none there. A Linux path names no volume and keeps `/`
+  (`TestMPDConfIsReadUnderItsOwnVolume`; its Windows half runs on that leg
+  only, so no control on this Mac can turn it red).
+
+### Red first
+
+Against a stub that answered every id with an empty `unknown` reading, 16
+of the route's 17 tests failed: every capture, the idle box, the JSON
+shape, MPD's settings, DoP, the bridge's row, settling, the cache, the lazy
+session, both deadlines, the foreign owner, the password, the commands,
+one command at a time and the ids. `TestHealthAdvertisesOutputReadingWithLocalOutputs`
+passed: the flag landed with the stub; its control is R25. The verdict's
+tests were written with `signalpath`; their bite is the controls V1 to V33.
+Two rules first went green under their control and were given a test of
+their own: the per-step deadlines (the whole reading's 3 s still produced
+`proc_timeout` and `mpd_timeout`, so both tests now raise it to 30 s and
+time the reading), and the containment of a database path (the row lookup
+missed a `../` path anyway, so the rig records the paths it is asked for).
+
+### Negative controls
+
+Sixty-six, each one anchor of production code (asserted to occur once),
+run against the named tests with the change committed, the file then
+written back byte for byte and checked against HEAD. Each went red.
+
+| Control | Rule | Red |
+|---|---|---|
+| V1 | lossless sources only (AAC, MP3 accepted) | `TestEveryWithheldReason` |
+| V2 | replay gain off | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V3 | xfade 0 | `TestEveryWithheldReason` |
+| V4 | no mixramp | `TestEveryWithheldReason` |
+| V5 | no normalization | `TestEveryWithheldReason` |
+| V6 | no `audio_output_format` | `TestEveryWithheldReason` |
+| V7 | `mpd.conf` must be read | `TestEveryWithheldReason` |
+| V8 | no software volume | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V9 | the DAC's own mixer is information only (`hardware` withheld) | `TestEveryWithheldReason`, `TheCapturedShapesAreBitExact`, `TestWhatDoesNotChangeTheSamplesIsNotAReason` |
+| V10 | no output `format` or `allowed_formats` | `TestEveryWithheldReason` |
+| V11 | no output filters | `TestEveryWithheldReason` |
+| V12 | the chain must be proven | `TestEveryWithheldReason` |
+| V13 | one output reaches the card | `TestEveryWithheldReason` |
+| V14 | a plug has nothing to convert | `TestEveryWithheldReason` |
+| V15 | the container holds the file's bits | `TestEveryWithheldReason` |
+| V16 | PCM rate matched | `TestEveryWithheldReason` |
+| V17 | native DSD at the file's rate | `TestEveryWithheldReason` |
+| V18 | DoP only with `dop` on | `TestEveryWithheldReason` |
+| V19 | DoP in at least 24 bits | `TestEveryWithheldReason` |
+| V20 | DoP at the DSD rate over 16 | `TestEveryWithheldReason` |
+| V21 | the owner is `mpd` | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V22 | an owner nobody names is unknown | `TestEveryWithheldReason` |
+| V23 | no verdict paused or stopped | `TestEveryWithheldReason` |
+| V24 | the substream runs | `TestEveryWithheldReason` |
+| V25 | a file not the bridge's has no verdict | `TestEveryWithheldReason` |
+| V26 | a changed file has no verdict | `TestEveryWithheldReason` |
+| V27 | MPD decodes the file | `TestEveryWithheldReason` |
+| V28 | no float stream | `TestEveryWithheldReason` |
+| V29 | signed linear PCM only | `TestEveryWithheldReason` |
+| V30 | settling: half a second in | `TestSettling` |
+| V31 | settling: a song change | `TestSettling` |
+| V32 | settling: a seek | `TestSettling` |
+| V33 | settling: a pause | `TestSettling` |
+| A1 | a chain names each stage | `TestResolveOutputChainOnTheVolumioCapture`, `TestResolveOutputChainNamesEachStage` |
+| A2 | `front` and `plug` have no known stages | `TestResolveOutputChainNamesEachStage` |
+| A3 | a format's sample bits | `TestPCMFormatBits` |
+| M1 | an output's `filters` are read | `TestTheVerdictsSettingsAreRead` |
+| M2 | an include's `mixer_type` counts | `TestTheVerdictsSettingsAreRead` |
+| M3 | a password from outside the file is redacted | `TestRedactSecretsIsTheFilesRule` |
+| R1 | the reading is served for 500 ms | `TestTheReadingIsReadThroughForHalfASecond` |
+| R2 | no idle close during a reading | `TestTheReadingsConnectionIsLazyAndShared` |
+| R3 | one command at a time on the shared session | `TestOneMPDCommandAtATime` |
+| R4 | a stuck `/proc` read is not doubled | `TestAProcReadPastItsDeadlineIsAnHonestUnknown` |
+| R5 | the `/proc` read's own deadline | `TestAProcReadPastItsDeadlineIsAnHonestUnknown` |
+| R6 | every MPD command's own deadline | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| R7 | a command that failed written drops its session | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| R8 | the bridge's password is redacted | `TestTheMPDPasswordReachesNoReadingAndNoLog` |
+| R9 | `mpd.conf`'s password is redacted | `TestTheMPDPasswordReachesNoReadingAndNoLog` |
+| R10 | a row is current only at the scanner's size and time | `TestReadingNamesTheBridgesOwnRow` |
+| R11 | a loopback URL on the route's port only | `TestReadingNamesTheBridgesOwnRow` |
+| R12 | a database path stays under its root | `TestReadingNamesTheBridgesOwnRow` |
+| R13 | an id names an output | `TestAReadingNamesItsOutputByID` |
+| R14 | only an id of the right form | `TestAReadingNamesItsOutputByID` |
+| R15 | the localOutputs gate | `TestAReadingNamesItsOutputByID` |
+| R16 | no `/proc/asound` is no card | `TestAReadingNamesItsOutputByID` |
+| R17 | `currentsong` naming another song settles | `TestReadingSettles` |
+| R18 | `dop` is the live attribute first | `ReadingDoPIsBitExactDSDAsDoP` |
+| R19 | `allowed_formats` is the live attribute first | `TestTheVerdictReadsMPDsOwnSettings` |
+| R20 | the top-level `mixer_type` counts | `TestTheVerdictReadsMPDsOwnSettings` |
+| R21 | an output switched off live feeds nothing | `TestTheVerdictReadsMPDsOwnSettings` |
+| R22 | `status` is read again after `/proc` | `TestReadingSettles`, `TestTheReadingSendsOnlyReads` |
+| R23 | the card is read when MPD is not | `TestReadingJSONKeepsEveryKey` |
+| R24 | `mpd.conf` is read at every reading | `TestTheReadingReadsMPDConfAgain` |
+| R25 | `outputReading` rides the localOutputs gate | `TestHealthAdvertisesOutputReadingWithLocalOutputs`, `TestHealthFeaturesCompleteSet` |
+| S1 | serve wires the loopback lookup | `TestServeReadsTheOutputAndNamesItsOwnTrack` |
+| S2 | serve wires the row lookup | `TestServeReadsTheOutputAndNamesItsOwnTrack` |
+
+### Not in this change
+
+- **The hardware gate** on the Pi with the iFi GO bar is the owner's: PCM
+  44.1/16 and 96/24, DSD64 native, a DSD file the DAC refuses, Volumio's
+  own volume moved, and a song change mid-read. The captures already read
+  bit-exact through the route (`TestReadingTheGoBarOnEveryCapture`).
+- B2's `/v1/outputs` still reads the cards with no per-read deadline
+  (`dacs`), and its `sessionBroken` takes an `ACK` from `find` for a dead
+  session and dials again (found writing the deadline test, whose MPD
+  answered `find` with `ACK`). Neither is changed here.
+- A song another bridge serves stays `source_unknown`; letting the app
+  complete such a verdict from its own row would be a protocol change.
+- The DAC mixer's level in dB.
+
+### Round 2 (2026-10-22): what ties the verdict to the MPD and the output that holds the card
+
+Round 1's reviews (Codex, twelve findings; the Claude API, four) were each
+checked against the code. Fourteen were real, two were not. The bar, the
+owner's: `bit_exact` and `bit_exact_dop` are claims of proof, so a fact the
+reading did not read, read in part, read outside the bracket, or cannot tie
+to the daemon and the output that holds the substream withholds the verdict
+with a code that says which; and a reading ends within its deadlines
+whatever the filesystem does, without a stuck or panicking reading taking
+the shared session or later readings with it.
+
+**Round 1 decisions this round found wrong**, each replaced below:
+`mpd.conf` read fresh was taken for MPD's settings (Codex 1; MPD reads it
+once, at its start); the MPD the bridge dialled was tied to the stream by
+"an enabled alsa output whose device reaches this card", which a second
+output on the card hides behind (the Claude API); an output MPD did not
+report took the file's `enabled` (Codex 8); a `hw:` device's stages were
+trusted without the configuration that can redefine `hw` (Codex 4);
+elapsed "half a second more or less" let a small move back through
+(Codex 11), and two status reads with no song id matched (Codex 9); the row
+was two statements (Codex 7). Kept: `dop` and `allowed_formats` live first,
+the per-step deadlines, the single-outstanding `/proc` read, the session
+dropped once a written command fails, and the read-through cache.
+
+**What changed**
+
+- **The holder is the output whose thread holds the card.** MPD names each
+  output's thread `output:` and the output's name, formatted into 16 bytes
+  (`src/output/Thread.cxx`, `FmtThreadName("output:{}")`, so cut to 15), and
+  `/proc`'s status of `owner_pid` names that thread (`output:alsa` on the
+  Pi). The verdict judges the one enabled output MPD reports whose thread
+  name, as the status file shows it (backslash and newline escaped, white
+  space trimmed as the reader trims), is the owner thread's: no such output
+  is `owner_not_output` (early stop; another MPD, or an output switched off
+  that still holds the card), two whose names agree in 15 bytes are
+  `mpd_output_ambiguous`, an output of another plugin (`ao`, `oss`, which
+  open the card in MPD's process) and an alsa output whose chain is not
+  proven to this card and PCM device are `alsa_chain_unproven`. This
+  replaces counting the enabled alsa outputs whose chains resolve: a softvol
+  output on the same card that holds it is no longer hidden behind the one
+  whose chain resolves, and two outputs on one card no longer withhold when
+  the thread says which holds it.
+- **`mpd.conf` is shown to be what MPD runs with, four ways, before anything
+  only it says is judged.** Read (`mpd_config_unread`); whole, with no
+  problem (`mpd_config_incomplete`: an include not followed, an include
+  pattern, a line that does not parse); its `audio_output` blocks are the
+  outputs MPD reports, by name and plugin, in order (`mpd_config_mismatch`:
+  MPD numbers outputs in its file's order, and with no block makes one of
+  its own); and nothing the read depended on changed after the process
+  holding the card started (`mpd_config_changed`). From a file that fails
+  any, normalization, `audio_output_format`, the mixer, the output's format
+  and filters are not claimed and the chain is unproven; the live
+  `allowed_formats` still counts.
+- **The change time.** `conf.File.Changed` is the latest of each file read
+  (the later of its modification time and its inode change time, which a
+  write, a rename or a chmod moves and nobody sets back, read by fstat after
+  the read), each link a file was named by, and the nearest directory of an
+  `include_optional` not found. The process's start is the bridge's clock
+  just before the `/proc` read less the process's age (`/proc/uptime` less
+  field 22 of `/proc/<pid>/stat`, in USER_HZ, 100 on amd64 and arm64), so
+  its latest possible time, and the file must predate it by 100 ms
+  (`configSlack`: two clocks a tick apart). `mpd.conf` is now read after the
+  `/proc` read, so the fstat after the read comes after the start of the
+  process `/proc` found. A start `/proc` does not give is `owner_unknown`.
+- **Settings read on both sides of the `/proc` read.** `replay_gain_status`
+  and `outputs` are sent again after the second `status`, and the two
+  `outputs` replies, the two replay gain replies and the two statuses'
+  `audio`, `xfade` and `mixrampdelay` must agree, else the reading settles
+  with `settings_changed`.
+- **The ALSA chain.** A `hw:` or `plughw:` device, directly or as a slave,
+  has stages only from a configuration read whole (a top-level `@hooks`
+  makes even `hw:` unproven) that defines no PCM of that name (`pcm.!hw`,
+  `pcm.hw` with `@args`) and no `pcm_type` for a type the chain is made of
+  (`pcm_type.hw`, `pcm_type.!empty`; a `pcm_type { }` block is every type).
+  The configuration is loaded once a reading (`alsa.PCMConfig`) and
+  resolved from in memory. MPD's user's own files, which alsa-lib's
+  `alsa.conf` loads after `/etc` (`~/.asoundrc`,
+  `~/.config/alsa/asoundrc`), are looked for in the home `/etc/passwd`
+  gives the owner thread's uid (the `Uid:` line B1 now reads): either there,
+  or a home the bridge cannot tell about, is `alsa_chain_unproven`.
+- **Every step that reads files is bounded.** `boundedStep` runs the `/proc`
+  read, `mpd.conf` with its includes (`limits.conf`), the ALSA configuration
+  (`limits.alsa`) and the row look on a goroutine each, single-outstanding,
+  and turns a panic into the step's failure, logged with the step and the
+  stack and the value only when it is the runtime's own error.
+  `conf.ReadFile`, its includes and `ReadLogical` open through
+  `fsutil.OpenAsFile`, so a named pipe is refused at once, never waited on.
+  The probe's inspection (B2's, which the reading takes first) runs the
+  same way (`inspectBounded`: its deadline, 100 ms of grace for a dial
+  that ends with its context, and no second while one runs); a probe that
+  expired with no MPD endpoint leaves the output ids unknowable, and every
+  well-formed id is then answered `unknown` with `mpd_timeout`, as for an
+  unreadable `/proc`. The flight's completion is deferred, and a panic in
+  the reading's own code is `reading_failed`.
+- **Small ones.** DoP's rate is compared by division (`audio.Rate%16`, then
+  `/16`): a forged `/proc` rate of 2^60 + 176400 times 16 wraps to DSD64's
+  2822400 in an int (Codex 10). Any move back of elapsed is `seeked`, and
+  while MPD plays a status or `currentsong` that names no song id is
+  `song_changed`, as a missing elapsed is `song_starting` (Codex 11, 9). The
+  row's format and its size and time are one statement,
+  `Store.GetTrackWithStat` (Codex 7; red with a rescan parked between the
+  two old reads: "ALAC at size 2000").
+- **Found this round:** `readingCommand` called a command past its deadline
+  `mpd_unreachable` when the client's socket deadline (the context's own)
+  fired before the context's timer: the client returns "mpd: deadline
+  exceeded" while `cctx.Err()` is still nil. A failure once the deadline has
+  passed is now `mpd_timeout` (the `fileBudgetExpired` rule). The reorder
+  made `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` lose that race
+  every time on this Mac; its control is N57.
+- **Codex 12:** the deadline tests assert what each step is handed (the
+  dial's and every command's remaining time on its context, within 250 ms
+  of its own limit) and bound the reading at under a second with a 50 ms
+  `/proc` and a 300 ms command deadline, so a step deadline of a second
+  fails.
+
+**Rejected, with the evidence**
+
+- **Codex 6 (SameFile is not root confinement).** True of SameFile, and not
+  a gap in the verdict: the scanner indexes a file the walk reaches through
+  a link under its target's stat and its target's content (the
+  `walkedFileInfo` bullet, `scanner.md`), so a row named by a link to a file
+  outside the root describes that file, and SameFile plus the row's size and
+  time tie MPD's file to it. The reading serves no bytes, so the loopback
+  route's confinement, a serving boundary, does not apply; and a loopback
+  URL reaches `rowAt` only for a file MPD fetched from that route, which
+  refused one whose links leave the roots.
+- **The Claude API on `plug` with `ttable`.** The parser already makes any
+  field it does not model opaque (`parsePCMField`'s `default`, a dotted key,
+  a nested block), and a float value makes the file one it does not read.
+  The accurate half is taken: `TestAPlugThatRoutesHasNoChain` pins all four
+  forms (controls N23a to N23c).
+
+**Red first.** signalpath: the overflow row, a small seek back, no song id
+and an unreadable one, then twelve rows of the new model and
+`TestAStreamThatIsNotMPDsIsJudgedNoFurther`. conf: the named pipe (held
+5 s), patterns (`include` said "file not found", `include_optional` said
+nothing), `Changed` (zero). alsa: the owner's uid and start, against HEAD
+with stub fields; nine override cases and six home cases (the ttable test
+passed: rejected above). cmd/bridge: the row of two versions. The route's
+new tests, against HEAD's code with compile-only stubs: red for the changed
+file, the four mismatches, the three partial reads, the six settings, the
+softvol holder and the foreign thread, the home's asoundrc and the unknown
+uid, both seam deadlines, the hung probe (5 s), the command list, the
+named-pipe include (bit_exact there: the conf commit before had already
+refused the pipe without waiting) and the panic (the test binary panicked).
+Green at HEAD, as pins: the deadlines handed to commands, the tightened
+`/proc` test, and `pcm.!hw` (the ALSA commit before had already distrusted
+it). `TestEveryReadingCodeIsInTheProtocol` was red on the six new codes
+before PROTOCOL.md named them.
+
+**Negative controls.** Sixty-eight, each one anchor asserted to occur once,
+run against the named tests with the change committed and the file written
+back byte for byte and checked against HEAD; all went red. Three first
+failed to build (N5, N12a, N14) and were rerun with the variable kept in
+use; N23's first anchor did not occur, and it became N23a to N23c, one for
+each way the parser makes a plug opaque; N64 stayed green until
+`TestTheReadingShowsAnOutputMPDReportsEnabled` was added (5599073c).
+
+| Control | Rule | Red |
+|---|---|---|
+| N1, N2 | DoP's rate by division, with the divisibility half | `TestEveryWithheldReason` |
+| N3 | any move back is a seek | `TestSettling` |
+| N4 | a status with no song id while playing | `TestSettling` |
+| N5 | currentsong with no Id while playing | `TestReadingSettles` |
+| N6, N7 | mpd.conf and `ReadLogical` never wait on a pipe | `TestANamedPipeIsRefusedWithoutWaiting` |
+| N8 | an include pattern is a problem | `TestAnIncludePatternIsNotFollowed` |
+| N9 | a missing include_optional notes its directory | `ChangedIsTheLatestChangeOfWhatTheReadDependsOn` |
+| N10, N11 | an include's link, and mpd.conf's own | `ChangedCountsTheLinkAFileIsNamedBy` |
+| N12a, N12b | the main file's change, and an include's | `ChangedIsTheLatestChangeOfWhatTheReadDependsOn` |
+| N13 | the inode change time counts | `ChangedIsNotSetBackWithTheModificationTime` |
+| N14 to N17 | the owner's uid, stat counted after the last `)`, the uptime, no age before the start | `ReaderReadsWhoTheOwnerRunsAsAndWhenItsProcessStarted` |
+| N18 to N20 | a redefined PCM, a `pcm_type`, a configuration not read whole | `ADeviceStringHasAChainOnlyWhileNothingRedefinesIt` |
+| N21, N22 | a user's asoundrc, a home it cannot look in | `AUsersOwnALSAConfigurationIsLookedFor` |
+| N23a to N23c | an unmodeled field, a dotted ttable, a ttable block | `TestAPlugThatRoutesHasNoChain` |
+| N24 | the size and time are the columns | `TestGetTrackWithStatReadsTheColumnsTheSkipGateReads` |
+| N25 | one statement for the row | `TestOutputTrackLookupReadsOneVersionOfTheRow` |
+| N26 to N28 | `owner_not_output`, a thread or a start unknown | `TestEveryWithheldReason`, `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| N29 to N31 | incomplete, mismatch, changed | `TestEveryWithheldReason` |
+| N32 to N35 | nothing from an unproven file, no chain from one, a holder of another plugin, two holders | `TestEveryWithheldReason` |
+| N36 to N39 | complete, matching, current, the start before the read | `AConfigReadInPartIsNotJudged`, `AConfigWhoseOutputsAreNotMPDsIsNotJudged`, `AConfigChangedAfterMPDStartedIsNotJudged` |
+| N40 to N42 | settings compared, outputs and replay gain read again | `TestASettingThatChangesAcrossTheReadSettles`, `TestTheReadingSendsOnlyReads` |
+| N43 to N45 | only an enabled holder, cut to 15 bytes, trimmed | `TestTheVerdictReadsMPDsOwnSettings`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| N46, N47 | MPD's user's files, the chain to this card | `AChainNothingProvesIsNotJudgedProven`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| N48 to N50 | a step not doubled, mpd.conf and the ALSA configuration bounded | the three deadline tests |
+| N51 to N53 | a step's panic, the reading's panic, no value logged | `TestAPanickingStepLeavesTheNextReadingWhole` |
+| N54 to N56 | the probe not doubled, bounded, an unidentified id unknown | `TestAProbeThatHangsEndsTheReadingInTime` |
+| N57 | a command past its deadline is a timeout | `TestAnMPDCommandPastItsDeadlineIsAnHonestUnknown` |
+| N58, N59 | the dial's and each command's own deadline | `TestEveryMPDCommandIsHandedItsOwnDeadline` |
+| N60, N61 | outputs match by plugin and in number | `AConfigWhoseOutputsAreNotMPDsIsNotJudged` |
+| N62 | the owner's start from its age | `TestAForeignOwnerIsNotMPDs` |
+| N63 | each owner's uid is asked about | `TestReadingTheGoBarOnEveryCapture` |
+| N64 | the shown output is enabled as MPD reports | `TestTheReadingShowsAnOutputMPDReportsEnabled` |
+| N65 | PROTOCOL.md names every code | `TestEveryReadingCodeIsInTheProtocol` |
+
+**Residuals, named, not fixed here**
+
+- A second MPD with an output of the same name holding the card (as round
+  1). MPD's command line, which can name the file it read, is not read: a
+  file the bridge found other than MPD's, with the same outputs, passes the
+  structural tie.
+- The change time compares wall clocks: a forward clock step after a change
+  made after MPD started (a Pi with no RTC whose NTP sync lands late) makes
+  the change look older. A daemonizing MPD forks after reading its
+  configuration, so a change in that instant reads as before. A directory
+  above the files re-pointed or renamed is not looked at (`/etc` changes
+  with every DHCP lease).
+- MPD's own environment (`HOME`, `XDG_CONFIG_HOME`, `ALSA_CONFIG_PATH`) is
+  readable only by its user; the home is `/etc/passwd`'s. alsa-lib's
+  `/usr/etc/asound.conf`, which newer releases load when `/etc/asound.conf`
+  is absent, is not read.
+- An include relative to a `mpd.conf` named by a link is taken from the
+  link's target's directory, where MPD takes the named one (B2's
+  `ReadFile`).
+- On the Pi, a Volumio that rewrites `mpd.conf` after starting MPD without
+  restarting it would read `mpd_config_changed` until MPD restarts: the
+  hardware gate should look for it after a fresh boot.
+
+### Round 3 (2026-10-22): two levels, the format the kernel shows, and bit-exact for the bridge's own player alone
+
+**The owner's decision.** Round 2's reviews (Codex, eleven findings; the
+Claude API, nine) showed that "bit-exact" cannot be proven for a
+third-party MPD (Volumio, moOde) from outside it: which `mpd.conf` and ALSA
+files MPD loaded, a clock stepped on a Pi with no RTC, an environment only
+MPD's user can read. The owner decided two levels (the plan's last section,
+`~/onebit/briefs/bridge-as-output-plan.md`), replacing decision 3 for MPD
+outputs: the verdict claims only what the kernel proves, the format
+preserved at the DAC, and says that bit-exactness cannot be verified for
+that player; "bit-exact" is reserved for the bridge's own player (B470),
+which runs the whole path.
+
+**What changed**
+
+- **The verdict's values are `format_preserved`** (PCM at the file's rate
+  and channels in a signed integer format holding every bit of its depth,
+  or native DSD at its one-bit rate and channels) **and
+  `format_preserved_dop`** (PCM at the rate and in the format DoP of the
+  file's DSD rate takes, from an output MPD reports sending DoP: consistent
+  with DoP), beside `withheld`. The owner's names, kept: they say what is
+  claimed. **Every verdict carries `bitExactness: not_verifiable`**,
+  `withheld` included: a field and not a code, so a later player kind can
+  carry another word.
+- **A wider format is the file's depth preserved** (16 bits in `S24_3LE`):
+  the plan's decision (d), "at least the file's bit depth", with
+  `depth_reduced` the code for fewer bits. Equality would read every 16-bit
+  file as changed on a DAC that takes 24 or 32 bits only.
+- **The reasons that stay** are what the kernel shows against the file and
+  what ties the card's stream to it: the state's codes, `not_playing`,
+  `pcm_*`, `owner_unknown`, `owner_not_mpd`, `owner_not_output`,
+  `hw_params_unknown`, `source_*`, `mpd_audio_unknown`,
+  `mpd_output_ambiguous`, `stream_float`, `format_mismatch`,
+  `rate_mismatch`, `channels_mismatch`, `depth_reduced`,
+  `dsd_converted_to_pcm` and `dop_container_too_narrow`. Three of them read
+  what MPD reports, and each withholds on a report that the format changed,
+  never grants on one: `stream_float` and `source_mismatch` read MPD's
+  `audio:` (its decoder hands on another format than the file's), and
+  `dsd_converted_to_pcm` the output's `dop`, live else the file's (MPD's
+  own report that the PCM at the card is its conversion, which the kernel
+  cannot tell from DoP). A lossy file stays `source_lossy`: it has no
+  sample format of its own to preserve.
+- **What MPD reports, and what `mpd.conf` and the ALSA files say, of a
+  setting that would change the samples is a warning** beside the verdict,
+  `{code, source}`: `mpd_replay_gain`, `mpd_crossfade` and `mpd_mixramp`
+  from MPD (`mpd`); `mpd_software_volume` (the holder's mixer as the file
+  gives it, and a volume MPD reports below 100: at 100 MPD's software volume
+  returns its input), `mpd_normalization` and `mpd_filters` (`mpd_conf`);
+  `mpd_format_override` (`mpd` for the live `allowed_formats`, `mpd_conf`
+  for the rest); and five new codes, `alsa_softvol`, `alsa_rate`,
+  `alsa_dmix`, `alsa_route` and `alsa_ladspa` (`alsa_conf`), the first
+  stage of a plugin that changes samples the walk from the holder's device
+  meets through `empty` and `plug` stages (`alsa.PCMConfig.SampleStage`). A
+  setting is a warning only when it reads as on; one that does not read is
+  none, nothing comes from an `mpd.conf` not read or a block it does not
+  have, nor from an output two holders could be, and an early stop or a
+  reading not whole carries none. An empty list proves nothing, and
+  PROTOCOL.md says so.
+- **A format override beside `format_preserved_dop`.** MPD can convert a
+  DSD file to PCM at the rate and depth DoP of it takes (an
+  `allowed_formats` with no DSD), which the kernel does not tell from DoP.
+  The owner's list makes a format override a warning, so the verdict is
+  `format_preserved_dop` with `mpd_format_override` beside it, and
+  PROTOCOL.md says the frames may then not be DoP. Withholding the DoP
+  verdict there is the other choice, and it is the owner's.
+- **`alsa_config_unread`** is a new state code (Medium 5, below).
+- `mpd.conf` and the ALSA configuration are still read at every reading,
+  after the bracket, and shown (`mpd.config`, its output and its `chain`)
+  as information, the path as the bridge reads it; PROTOCOL.md says MPD may
+  run with another file.
+
+**Removed, the machinery that existed only to prove bit-exact**
+
+- The reasons `mpd_config_unread`, `mpd_config_incomplete`,
+  `mpd_config_mismatch`, `mpd_config_changed`, `alsa_chain_unproven` and
+  `alsa_plug_converts` (what a plug converts shows at the kernel as a rate,
+  channels or depth, or is a lossless pad or repack), with
+  `signalpath.Config` and `PCM.Started`.
+- `mpd.conf`'s change time (d26dffb3): `conf.File.Changed`, the inode
+  change time (`changetime_{linux,darwin,other}.go`), the notes on each file
+  read, each link a file was named by, and the directory of an
+  `include_optional` not found (`noteMissing`, which also made a directory
+  it could not stat a problem), and their tests. Kept: every file opened as
+  a file (`fsutil.OpenAsFile`, never waited on) and an include pattern as a
+  problem, which keep the read bounded and honest whatever it serves.
+- The owner's process start and the box's uptime (93246f95):
+  `alsa.Owner.StartTicks`, `Snapshot.Uptime`, `Snapshot.ProcessAge`,
+  `UserHZ`, and the owner's uid (`Owner.UID`), read only for the next item;
+  the reader is round 1's again (efe99d54 reverted), and `bridge output dac
+  --json` has no `uid`, `startTicks` or `uptime`. In the route, `procAt`,
+  `configSlack`, `configFacts` and `outputsMatch`.
+- The ALSA chain's "read whole" proof (93246f95): `alsa.UserConfig` (the
+  `/etc/passwd` home and its `~/.asoundrc`), the `pcm_type` tracking, the
+  redefinition checks on `hw:` and `plughw:` (`trustsType` and the method
+  `deviceStringStages`), and "a configuration not read whole knows no
+  chain, `hw:` included"; in the route, `ownerUIDs`, `alsaContext` and
+  `readALSAContext`. The chain is the stages the bridge follows, as round 1
+  had it. Kept: `PCMConfig` loaded once, which the reading bounds as one
+  step, and a configuration not read whole resolving no PCM name, for the
+  listing.
+
+**Round 2's findings fixed**, each checked against the code first:
+
+- **Medium 5 (the Claude API), 03d50b7c.** A late or failed ALSA step left
+  an empty `PCMConfig`, so `dacsFrom` fell back to every USB card and an
+  output only a PCM name reaches (an I2S HAT) answered `404
+  output_not_found`. A reading whose ALSA configuration was not had now
+  resolves nothing from it and answers every well-formed id `unknown`,
+  `alsa_config_unread`, `dac` null.
+  `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown` points the copied
+  `volumioHw` at the HDMI card (red first: "an output that is there: found
+  false", late and panicking alike).
+- **Medium 6 (the Claude API), a17f4355.** An inspection that never
+  returned, one skipped because it still ran, and one that panicked were
+  numbered verdicts of false, which turned the loopback route off. They are
+  abandoned (`inspectBounded`'s third value) and number nothing, as a
+  caller that stopped waiting does; the reading still hears that the probe
+  was late. An inspection that returns, past its deadline included, is
+  still a verdict (B2c's `TestTheRouteStopsOnAnExpiredMissAfterATrue`).
+  `TestAnInspectionThatNeverReturnsIsNoVerdict` (red first: "the gate said
+  off, and nothing said MPD had gone").
+- **Codex P2 11, 9405215d.** A command that panicked after its write left
+  the shared session cached, out of step. `serialSession.run` drops it
+  (`localOutputs.dropSession`: forgotten and closed) and the panic goes on,
+  for the outputs body's commands too, which share the session.
+  `TestACommandThatPanicsDropsTheSession` (red first: "closed 0 times").
+- **Low 8 (the Claude API), 15d2dd1d.**
+  `TestGetTrackWithStatIsOneStatement` counts the statements the store's
+  connections are handed, through a connector over modernc's driver: a pin,
+  green at HEAD, red with `GetTrackWithStat` as `GetTrack` then
+  `GetTrackStat` ("read in 2 statements"). Serve's lookup takes
+  `outputRowReader`, which has that read alone, and
+  `TestOutputTrackLookupReadsOneVersionOfTheRow` holds it to one call; the
+  `afterRead` seam is gone.
+- **Low 9 (the Claude API), 2d768424.** The chain shown is the way to this
+  card and PCM device, else `[]` (`reaches`), and PROTOCOL.md says the
+  output shown falls back "when no enabled output's thread holds the
+  card". `TestTheChainShownReachesThisCard` (red first: `[hw]` for `hw:0,0`
+  and for device 1).
+
+**Round 2's other findings, and what the redesign does to each**
+
+| Finding | Disposition |
+|---|---|
+| Codex 1, outputs that match do not identify MPD's file | removed: no verdict reads `mpd.conf`; what it says is a warning labelled `mpd_conf` |
+| Codex 2, thread names do not identify the dialled daemon | not removed: `format_preserved` still ties the card's stream to the dialled MPD by its process name, its output thread's and that MPD playing. A second MPD with an output of the same name holding the card can make a format claim false, never a sample claim. Residual |
+| Codex 3, a start time from the wall clock | removed, with the start time |
+| Codex 4, links and directories above the files | removed, with `Changed` |
+| Codex 5, includes relative to a linked `mpd.conf` | removed as a defect of the verdict; the reader still takes them from the link target's directory (B2's `ReadFile`), so the information can differ from what MPD read. Residual |
+| Codex 6, the ALSA load sources | removed: chain and stages are information, from files PROTOCOL.md says may not be all alsa-lib loaded |
+| Codex 7, `func` and hook redefinitions | removed, the same |
+| Codex 8, the passwd home | removed, with `UserConfig` |
+| Codex 9, today's ALSA files and an older open | removed: the stages are warnings, as the files define them |
+| Codex 10, the row of a file replaced while MPD decodes the old one | not removed: the verdict compares the card with the row at the path MPD names. Narrowed: MPD's own `audio:` still withholds (`stream_float`, `source_mismatch`) when its decoder hands on another format. Residual |
+| The Claude API 1, ALSA files not tied to MPD's open | removed |
+| The Claude API 2, the `mpd.conf` the bridge finds | removed as a defect of the verdict; PROTOCOL.md says the file may not be MPD's. Reading MPD's command line for the file it names would make the information truer: not done |
+| The Claude API 3, a container's uptime | removed, with the uptime |
+| The Claude API 4, a clock step | removed |
+| The Claude API 7, alsa-lib's load list | removed |
+
+**Red first**
+
+- signalpath: the eight new and rewritten tests against HEAD's `Judge`,
+  with compile-only stubs (the new constants and fields, no behaviour):
+  every one red, at first all at `owner_unknown` (HEAD's start-time tie).
+  With HEAD's shape supplied (a start, a proven `mpd.conf`, a proven
+  chain): the captured shapes `bit_exact` where `format_preserved` is
+  wanted, DSD64 as DoP `alsa_chain_unproven`, replay gain, software volume
+  and normalization reasons where warnings are, a softvol stage `bit_exact`
+  with no warning, and `bitExactness` empty throughout.
+- The route: the rewritten tests against HEAD's handler, with compile-only
+  stubs and the rig writing what HEAD's tie reads (a stat, an uptime, a
+  passwd): red throughout, `TestReadingTheGoBarOnEveryCapture` among them
+  as `withheld [mpd_config_changed alsa_chain_unproven]` (the files,
+  written after the rig's MPD started, read as changed),
+  `TestMPDConfIsInformationNotProof` as `[mpd_config_mismatch
+  mpd_config_changed alsa_chain_unproven]`, a conf read past its deadline
+  as `[mpd_config_unread alsa_chain_unproven]`, and
+  `TestEveryReadingCodeIsInTheProtocol` on `format_preserved`,
+  `format_preserved_dop`, `not_verifiable`, the five ALSA codes and two
+  sources, and on `bit_exact` still named.
+- Medium 5, Medium 6, Codex P2 11 and Low 9 as above; Low 8's manifest
+  test is a pin. `TestTheFirstStageThatChangesSamplesIsNamed` was written
+  with the walk: its bite is A1 to A5.
+
+**Negative controls.** Sixty, each one anchor (A4b two) asserted to occur
+once, run against the named tests with the change committed, a
+single-package `go test` each, the file then written back byte for byte
+and checked against HEAD. Fifty-nine went red. A4 stays green:
+`SampleStage`'s `!c.ok` and `loadPCMDefs`'s empty definitions for a
+configuration not read whole are two guards, and A4b, with both removed,
+is red; it was green too until the test's definitions sat in a file read
+whole beside the bad one (2fa7a482), since a top-level `@hooks` drops its
+own file's definitions first. Three first failed to build (A1, R9, G1: the
+mutation left a variable unused) and were rerun with it kept in use.
+
+| Control | Rule | Red |
+|---|---|---|
+| V1, V2 | the values are `format_preserved` and `format_preserved_dop` | `TestTheCapturedShapesHaveTheirFormatPreserved`, `TestNoVerdictIsBitExact`, `TestReadingTheGoBarOnEveryCapture`, `TestReadingDoPHasTheFormatDoPTakes` |
+| V3, V4 | `bitExactness: not_verifiable` on a judged and on a withheld verdict | `TestNoVerdictIsBitExact`, `TestTheCapturedShapesHaveTheirFormatPreserved`, `TestEveryWithheldReason`, `TestReadingJSONKeepsEveryKey` |
+| V5 | a setting is never a reason (replay gain withheld, as round 2 did) | `TestASettingThatChangesTheSamplesIsAWarning`, `TestTheVerdictReadsMPDsOwnSettings` |
+| V6 to V9 | replay gain (and off is none), crossfade and mixramp are MPD's warnings | `TestASettingThatChangesTheSamplesIsAWarning`, `TestTheCapturedShapesHaveTheirFormatPreserved`, `TestReadingTheGoBarOnEveryCapture`, `TestTheVerdictReadsMPDsOwnSettings` |
+| V10 to V13 | no warning from a value that does not read, from software volume at 100 or another mixer, or from normalization not on | `TestWhatDoesNotChangeTheSamplesIsNotAReason`, `TestTheVerdictReadsMPDsOwnSettings` |
+| V14 to V16 | nothing from an `mpd.conf` not read, a block it does not have, or two holders | `TestAWarningNeedsWhatItIsReadFrom` |
+| V17 to V20 | the live `allowed_formats` is MPD's; `audio_output_format`, the output's format and its filters are the file's | `TestASettingThatChangesTheSamplesIsAWarning`, `TestTheVerdictReadsMPDsOwnSettings` |
+| V21, V22 | a sample stage is the ALSA files' warning, each its own code | `TestASettingThatChangesTheSamplesIsAWarning`, `TestEveryStageTheALSAReaderNamesIsAWarning`, `TestTheVerdictReadsMPDsOwnSettings` |
+| V23 | warnings in their order | `TestASettingThatChangesTheSamplesIsAWarning` |
+| V24 | a stream that is not MPD's carries no warning | `TestAStreamThatIsNotMPDsIsJudgedNoFurther` |
+| V25 to V29 | `dsd_converted_to_pcm`, `mpd_output_ambiguous`, `stream_float`, `depth_reduced`, `rate_mismatch` | `TestEveryWithheldReason`, `TestReadingDoPHasTheFormatDoPTakes`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged`, `TestTheVerdictReadsMPDsOwnSettings` |
+| A1 to A3, A5 | a sample stage is named, not for a type that is not one value, not through an opaque plug, ladspa included | `TestTheFirstStageThatChangesSamplesIsNamed`, `TestTheVerdictReadsMPDsOwnSettings`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged` |
+| A4 (green), A4b | a configuration not read whole names no stage | A4 none (two guards); A4b `TestTheFirstStageThatChangesSamplesIsNamed` |
+| R1 to R4 | an ALSA configuration not had: nothing resolved, any id answered, `alsa_config_unread` (Medium 5) | `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown`, `TestAnALSAConfigurationReadPastItsDeadline` |
+| R5, R6 | the chain shown reaches this card and PCM device (Low 9) | `TestTheChainShownReachesThisCard` |
+| R7 to R11 | the live `allowed_formats`, the stage, the volume, whether `mpd.conf` was read, and every output's stage reach the verdict | `TestTheVerdictReadsMPDsOwnSettings`, `TestTheOutputWhoseThreadHoldsTheCardIsTheOneJudged`, `TestMPDConfIsInformationNotProof`, `TestTheReadingReadsMPDConfAgain` |
+| R12, R13 | the warnings and `bitExactness` reach the wire | `TestTheVerdictReadsMPDsOwnSettings`, `TestReadingJSONKeepsEveryKey`, `TestReadingTheGoBarOnEveryCapture` |
+| G1 to G4 | an abandoned inspection (none, busy, past its grace, panicked) is no verdict (Medium 6) | `TestAnInspectionThatNeverReturnsIsNoVerdict` |
+| S1 to S3 | a command that panics drops the session, forgotten as well as closed, wired at the dial (Codex P2 11) | `TestACommandThatPanicsDropsTheSession` |
+| M1, B1 | the row and its stat are one statement, read once (Low 8) | `TestGetTrackWithStatIsOneStatement`, `TestOutputTrackLookupReadsOneVersionOfTheRow` |
+| D1 to D3 | PROTOCOL.md names every warning code and `alsa_config_unread`, and no `bit_exact` | `TestEveryReadingCodeIsInTheProtocol` |
+
+**The rules.** `output.md`, `wire.md` and CLAUDE.md's `internal/alsa` and
+`internal/signalpath` rows change by the round's rules note, sixteen
+OLD/NEW sections against c25889fa. Until it is applied,
+`TestEveryCitedTestNameExists` fails on the twelve tests this round removed
+or renamed that `output.md` cites; this log cites them with their `Test`
+prefix elided (round 1's V9 and R18 rows, round 2's N9 to N22, N36 to N39,
+N46 and N60 rows), as it does a renamed test.
+
+**Gates**, through the build lock. `make fmt vet` clean, `go fmt`
+rewriting nothing; `make build-all` clean; `make docs-check` clean before
+and with the note applied (CLAUDE.md 61.2%, 61.6% with it). `make test` on
+the branch: 69 packages ok and `cmd/bridge` red on
+`TestEveryCitedTestNameExists` alone, the twelve `output.md` citations
+above (1638 s); with the note applied to the tree, then reverted, `make
+test` passed whole, saprobe-alac's own module included (1023 s).
+`internal/api`, `internal/signalpath`, `internal/alsa` and
+`internal/mpd/...` under `-race -count=10 -timeout 60m` passed (`api`
+865 s). `go vet` of the touched packages for windows and linux is clean,
+and the windows test binaries build.
+
+**Residuals, named, not fixed here**
+
+- Codex 2 and Codex 10, narrowed (the table above).
+- The `mpd.conf` and the ALSA files the bridge reads may not be MPD's:
+  information, labelled `mpd_conf` and `alsa_conf`, and an include relative
+  to a linked `mpd.conf` is taken from its target's directory (Codex 5).
+- A format override beside `format_preserved_dop` (above), for the owner.
+- `Response`, B2's outputs body, completes its flight only when `build`
+  returns. A command that panics there now drops the session, and the
+  flight is still left open, so every later call to `GET /v1/outputs`
+  waits out its own context. Found writing Codex P2 11's fix; not changed.
+
+### Round 4 (2026-10-22): DoP as MPD's ALSA output decides it, the outputs flight, an ALSA file that could not be read, the routing plug and alsa-lib's dmix, the volume at both reads
+
+Round 3's reviews (Codex, two P2s; the Claude API, a High, a Medium and
+two Lows) and its flag, decided by the owner. The scope is unchanged and
+binding: the bridge claims only what the kernel shows, `format_preserved`
+or `format_preserved_dop`, always with `bitExactness: not_verifiable` for
+an MPD output; settings that change samples are warnings labelled with
+where they were read; MPD-reported format changes withhold. The rules are
+in the round's note, eighteen OLD/NEW sections of `output.md` against
+7dca9400 (`/tmp/b473-b3-rules-r4.md`); `wire.md` and CLAUDE.md need none.
+
+**The owner's decisions, and what each changed**
+
+1. **A wider PCM container stays `format_preserved`** (16 bits in
+   `S24_3LE`): the plan's decision (d), "at least the file's bit depth".
+   PROTOCOL.md, the signalpath docs and the note now say "a signed integer
+   container of at least the file's bit depth" in those words.
+   `TestAWiderContainerHasTheFormatPreserved` pins it at the route; it was
+   green at HEAD (round 3 already preserved it), and its control is D1.
+2. **DoP is read from what MPD will send** (the Claude API's High). MPD
+   0.24's `AlsaOutput::Open` takes `dop = a.dop` from `BestMatch` (the
+   first entry of `allowed_formats` whose mask matches the stream,
+   `AudioFormat::MatchMask`, else the first entry) whenever its
+   `allowed_formats` is not empty, and reads the `dop` setting only when it
+   is. So `sendsDoP` (signalpath) reads the live `allowed_formats` while it
+   names a format: the first entry that matches the stream (its DSD rate in
+   MPD's bytes, dsd64 352800, and its channels, `*` any) sends DoP by its
+   `=dop`; an entry without it, no entry that matches (MPD then applies
+   the first entry: a PCM one is its conversion, which carries no `=dop`,
+   and a DSD one for another rate asks a DSD-to-DSD conversion MPD does not
+   make, so the output does not open), and a value the bridge does not read
+   send none, `dsd_converted_to_pcm`; while it names none, `dop` decides,
+   live first, else the file's, as before. `parseAllowedFormats` is MPD's
+   reading (`Alsa::AllowedFormat`, `ParseAudioFormat` with a mask): entries
+   split on single spaces, `=dop` only on a DSD entry, the 64-byte entry
+   buffer, dsdN from dsd32 to dsd4096 even, `_3` only after 24, channels to
+   MAX_CHANNELS 8, a rate below 1 << 30, and a whole value refused for one
+   entry MPD refuses. The owner's rows are
+   `TestReadingDoPHasTheFormatDoPTakes`'s: `dop=1` with
+   `allowed_formats=176400:24:2` and the card at `S24_3LE`/176400 is
+   `withheld [dsd_converted_to_pcm]`, and `dop=0` with the stream's `=dop`
+   entry is `format_preserved_dop`, each with the live override's
+   `mpd_format_override` beside it. On the owner's decision on round 3's
+   flag, a live override that turns DSD into PCM withholds the DoP claim
+   and is never a warning beside it; what only `mpd.conf` says (the
+   output's `format`, `audio_output_format`, the file's `allowed_formats`)
+   stays a warning, which beside `format_preserved_dop` says the frames may
+   not be DoP (PROTOCOL.md's `mpd_format_override`). `mpd.config.output.dop`
+   is still the setting, and PROTOCOL.md now says MPD does not read it while
+   `allowedFormats` names a format.
+3. **A panic inside the outputs build closes its flight** (the Claude API's
+   Medium, round 3's last residual). `Response` completes its flight in a
+   function deferred after the build context's cancel (so it runs first and
+   reads the build's own deadline) and recovers: the panic is logged with
+   `logOutputPanic` (step `the outputs body`, the stack, never the value,
+   the message now `local outputs: a step panicked` for both routes), the
+   result is `errOutputsBuildPanicked`, never cached, and the handler's 500.
+   `TestAPanicInTheOutputsBodyClosesItsFlight` sets `scriptedMPD.panics`
+   for `find`: the first `GET /v1/outputs` fails, and the second answers
+   within its deadline with a build of its own (it hung against round 3's
+   code until its 5 s context ended).
+4. **An ordinary ALSA configuration read failure is `unknown /
+   alsa_config_unread`, never a 404** (Codex P2 1). `PCMConfig.Unread` says
+   the loader's read stopped at a file that is there and could not be read
+   (an open or read error, what opened as no regular file, past the read's
+   bounds, more files or bytes than it takes), and `readALSAConfig` takes
+   such a configuration for one it did not have. The test goes past the
+   panic-only case: `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown`'s
+   `unreadable` case turns the asound.conf the listing read into a
+   directory, through the real loader. See the deviation below on the rest
+   of what `ok=false` covers.
+5. **A `plug` with a sample-changing setting warns** (Codex P2 2). A plug
+   whose block has a `ttable` (dotted or a block) or a `route_policy` stays
+   opaque, so it has no chain, and `SampleStage` names it a route stage
+   (`pcmDef.routes`), `alsa_route` from `alsa_conf`: its transfer table can
+   swap or attenuate channels at the same format, rate and channels.
+   `routingPlug` in `TestTheFirstStageThatChangesSamplesIsNamed` is now
+   `route`, with `policyPlug` and `tablePlug` beside it, and
+   `TestAPlugThatRoutesHasNoChain` checks the stage of its four forms (the
+   float entry still makes the file unread, which names none).
+6. **Software volume on both sides of the `/proc` read** (the Claude API
+   Low 3). `readingFacts` reads `volume` from both statuses
+   (`MPD.VolumeBefore`, `MPD.Volume`) and the warning takes either below
+   100; `sameSettings` still does not compare it, so a volume change does
+   not settle a reading. Route rows 60 then 100, and 100 then 60.
+7. **A `dmix:` device string is a dmix stage** (the Claude API Low 4).
+   `deviceStringStage` maps the prefix for the starting device (in
+   `SampleStage`, before the configuration's own check, since a device
+   string names its plugin without the files) and for a slave (in
+   `sampleStage`). Rows for `dmix:2,0`, a plug and an empty whose slave is
+   a `dmix:` string, and the route's `dmix:CARD=Audio,DEV=0` and a plug
+   over it.
+
+**Deviations from the brief, with why**
+
+- **Decision 4 is carried for a file that could not be read, not for every
+  `ok=false`.** The loader's `ok` is false for two causes: a file it could
+  not read, and a file it read that its parser does not model. Measured
+  with a scratch test (deleted), the second is the steady state of common,
+  readable configurations: a softvol with `max_dB 0.0` (the lexer stops at
+  the `.`; a negative `min_dB` at the `-`), and a pipewire-alsa
+  `pcm_type.pipewire { libs.native = /usr/lib/... ; }` (an unquoted path),
+  each `ok=false` with no definition used. Propagating that into `had`
+  would answer every reading on such a box `unknown / alsa_config_unread`
+  with `dac` null, a USB DAC played by `hw:` included, on every read,
+  where today the listing and the reading both resolve no PCM name and
+  agree on the USB candidates. A file that could not be read is the
+  ordinary read failure the decision and Codex name ("propagate loader read
+  errors"): what it says is not known, and it can read the next time, which
+  is the 404 Codex found. `TestAConfigurationNotReadWholeResolvesAsTheListingDoes`
+  pins the other half (a top-level `@hooks`: the listing names card 5 as a
+  candidate and its reading is whole and judged); control R2, the decision
+  read literally, turns it red. A truncated file read mid-write that no
+  longer parses still resolves no name, as a truncated file that parses
+  always did (a residual under either reading). Flipping to the literal
+  reading is one line in `readALSAConfig` and an accessor.
+- **The owner's row `allowed_formats=dsd64:=dop` is written as MPD writes
+  it, `dsd64:*=dop`.** MPD's `ParseChannelCount` refuses an empty channel
+  count, and MPD prints a mask's channels as `*`, so `dsd64:=dop` is no
+  value MPD runs with or reports; `TestAllowedFormatsAreReadAsMPDReadsThem`
+  lists it among the refused, and a refused value sends no DoP.
+- **The name `dmix` the files do not define is a dmix stage too**, beside
+  the `dmix:` prefix the decision names: it is the same alsa-lib PCM with
+  its default arguments, and `slave.pcm "dmix"` is the common form of a
+  plug over dmix. A name is looked up in the files first, so a `pcm.dmix`
+  they define is theirs, and a configuration not read whole names none for
+  it.
+- **Only the live `allowed_formats` decides DoP.** The file's, where MPD
+  reports none, is what the bridge found, which MPD may not run with: it
+  stays a `mpd_conf` warning, and `dop` decides there, as it did in round
+  3 for every output.
+
+**Red first**
+
+- signalpath, against compile-only stubs (`VolumeBefore`, the parser
+  returning nothing): the six new `TestEveryWithheldReason` rows
+  `format_preserved_dop` (round 3's answer) where `[dsd_converted_to_pcm]`
+  is wanted, the seven `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`
+  rows `withheld [dsd_converted_to_pcm]`, the volume row before the `/proc`
+  read with no warning, and the parser table. The rows for the file's
+  `allowed_formats` and an empty live one were green: pins.
+- alsa, against stubs (`Unread` false, `routes` unused): every routing and
+  dmix row `""`, and the unreadable rows `unread false`.
+- The route, against the tree with signalpath and alsa fixed and the
+  route's code not: the volume row 60 then 100 with no warning, the
+  `unreadable` case "an output that is there: found false", and the flight
+  test "context deadline exceeded" on its second call (5.04 s); with round
+  3's `signalpath.go` and `asoundconf.go` put back for one run, the owner's
+  two DoP rows (`format_preserved_dop` with the warning, and
+  `[dsd_converted_to_pcm]`) and the routing plug and both dmix rows with no
+  warning. Green at HEAD, as pins: the wider container and the
+  configuration read but not modeled.
+
+**Negative controls.** Thirty-seven, each one anchor asserted to occur
+once, run against the named tests with the change committed, one package
+at a time, the file then written back byte for byte and checked against
+HEAD with the tree clean (`/tmp/b473-r4-controls/run.py`). All went red,
+each on the row it predicts (read from the failure lines, not the test
+name alone); none failed to build. F1 showed why the flight test decodes
+its second answer: with the recover removed the deferred completion still
+ran during the panic and cached the panicked build's empty body, which a
+200 alone would have passed (c8bf9a19 added the check, and A12's bound its
+row).
+
+| Control | Rule | Red |
+|---|---|---|
+| S1 | DoP is not the `dop` setting alone while `allowed_formats` names a format | `TestEveryWithheldReason`, `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S2 | the first entry that matches decides, not any entry with `=dop` | `TestEveryWithheldReason` |
+| S3, S4 | an entry matches the stream's DSD rate, and its channels | `TestEveryWithheldReason` |
+| S5 | a DSD stream's rate is MPD's, in bytes | `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S6, S7 | a value this does not read, and no entry that matches, send no DoP | `TestEveryWithheldReason`, `TestReadingDoPHasTheFormatDoPTakes` |
+| S8 | only the live `allowed_formats` decides | `TestDoPIsReadFromTheAllowedFormatsMPDRunsWith` |
+| S9 to S14 | MPD's parse: a channel count, `=dop` only on DSD, the 64-byte entry, dsdN's bounds, `_3` only after 24, the rate's bound | `TestAllowedFormatsAreReadAsMPDReadsThem` |
+| S15, S16 | the volume before the `/proc` read counts, and the one after | `TestASettingThatChangesTheSamplesIsAWarning`, `TestTheVerdictReadsMPDsOwnSettings` |
+| D1 | a container of at least the file's bit depth | `TestWhatDoesNotChangeTheSamplesIsNotAReason`, `TestAWiderContainerHasTheFormatPreserved` |
+| A1 to A5 | a transfer table or a route policy is recognised (a ttable block, a dotted entry, a policy), and a routing plug is a route stage | `TestAPlugThatRoutesHasNoChain`, `TestTheFirstStageThatChangesSamplesIsNamed`, `TestTheVerdictReadsMPDsOwnSettings` |
+| A6, A7 | a `dmix:` slave, and a `dmix:` starting device, are dmix stages | `TestTheFirstStageThatChangesSamplesIsNamed`, `TestTheVerdictReadsMPDsOwnSettings` |
+| A8, A9 | the name `dmix` the files do not define, exactly | `TestTheFirstStageThatChangesSamplesIsNamed` |
+| A10 | a device string names its stage without the files | `TestTheFirstStageThatChangesSamplesIsNamed` |
+| A11, A12 | a file that cannot be read, and more than the read takes, are unread | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown` |
+| A13 | a file the parser does not model is not unread | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, `TestAConfigurationNotReadWholeResolvesAsTheListingDoes` |
+| R1 | an unread configuration is not had | `TestAnALSAConfigurationNotHadLeavesEveryIdUnknown` |
+| R2 | decision 4 read literally (every `ok=false` not had) | `TestAConfigurationNotReadWholeResolvesAsTheListingDoes`, `TestAFileOfTheConfigurationThatCannotBeReadIsUnread` |
+| R3 | the volume before the `/proc` read reaches the verdict | `TestTheVerdictReadsMPDsOwnSettings` |
+| R4 | the live `allowed_formats` reaches the verdict as live | `TestReadingDoPHasTheFormatDoPTakes`, `TestTheVerdictReadsMPDsOwnSettings` |
+| F1 to F3 | a build that panics is recovered, not cached, and logged | `TestAPanicInTheOutputsBodyClosesItsFlight` |
+
+**Gates**, through the build lock. `make fmt` rewrote nothing and `make
+vet` is clean; `make build-all` clean; `make docs-check` clean before and
+with the note applied (CLAUDE.md 62.3%; the worst load 45.2%, 45.9% with
+it). `make test` on the branch passed whole: 73 packages ok, saprobe-alac's
+own module included, `cmd/bridge` 473 s and `internal/api` 91 s (1125 s);
+with the note applied to the tree, then reverted, `make test` passed whole
+again, `cmd/bridge` re-run against it (1031 s). `internal/api`,
+`internal/signalpath` and `internal/alsa` under `-race -count=10 -timeout
+60m` passed (`api` 876 s). `go vet` of the touched packages and
+`cmd/bridge` for linux and windows is clean, and their linux and windows
+test binaries build.
+
+**Residuals, named, not fixed here**
+
+- **The ALSA parser refuses a float, a negative number and an unquoted
+  path**, which alsa-lib reads as values: one such file (a softvol's
+  `max_dB 0.0` or `min_dB -5.0`, a `ttable.0.0 0.5` gain, pipewire-alsa's
+  library path) leaves the whole configuration resolving no PCM name and
+  naming no stage, so its `alsa_*` warnings are lost with it. Proposed to
+  the owner for the backlog.
+- MPD matches `allowed_formats` against the format its output receives,
+  which `audio_output_format` and the output's `format` can change from the
+  decoder's; the bridge matches status `audio:`, the decoder's, and those
+  two settings are `mpd_conf` warnings.
+- Round 3's Codex 2 and Codex 10, narrowed, stand; and the two the owner
+  files (MPD's `/proc/<pid>/cmdline` for the file it started with, and an
+  include relative to a linked `mpd.conf`).
+
+### Round 5 (2026-10-23): DoP only for settings the bridge watched the stream open with, a conf.d that cannot be listed, alsa-lib's plug over dmix
+
+The owner accepted round 4's four deviations (D4 for a file that could not
+be read only, `dsd64:*=dop` as MPD writes it, the bare name `dmix`, only
+the live `allowed_formats` deciding DoP). Round 4's reviews: Codex, two
+Mediums; the Claude API, one Low and nothing else to report. Each premise
+was checked against the code, and the first against MPD 0.24's source. That
+check was from the source as I know it: this host denies network access, so
+the files Codex cites were not fetched. The rules are in the round's note,
+`/tmp/b473-b3-rules-r5.md`: nine sections of `output.md` and one of
+`wire.md`, each heading naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, reported settings need not describe the open stream:
+   correct.** `AudioOutputControl::SetAttribute` (MPD's
+   `src/output/Control.cxx`) passes an `outputset` to
+   `AlsaOutput::SetAttribute`. That stores `allowed_formats` or `dop` under
+   `attributes_mutex` and opens nothing again. `AlsaOutput::Open` reads both
+   under that mutex, the only place they are read. At round 4's head,
+   `sendsDoP` (`internal/signalpath/signalpath.go:729`) read the reported
+   attributes alone, and `sameSettings` compares only the two reads of one
+   reading. So a DSD64 stream MPD opened as PCM of DoP's shape, followed by
+   `outputset allowed_formats "dsd64:*=dop"`, read `format_preserved_dop`.
+   `TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP` reproduces it.
+2. **Codex Medium, an unreadable configuration directory reads as clean:
+   correct.** Go 1.27.2's `filepath.glob`
+   (`$GOROOT/src/path/filepath/match.go:322-335`) returns no error when the
+   directory cannot be stat'ed, is not a directory, cannot be opened, or
+   its `Readdirnames` fails (`names, _ :=`). The loader
+   (`internal/alsa/asoundconf.go:359` at 59d735ac) then read asound.conf
+   alone and returned `ok`, not unread.
+3. **The Claude API Low, `plug:dmix` gets no `alsa_dmix` warning:
+   correct.** `deviceStringStage` (`asoundconf.go:249-253` at 59d735ac) cut
+   at the first `:` and named `dmix` alone. It is reached from
+   `SampleStage` (:212-213) and from `sampleStage`'s first branch
+   (:221-222), so `plug:dmix`, `plug:'dmix:CARD=Audio,DEV=0'` and a slave
+   of either form named nothing.
+
+**The evidence chosen for (1), and why it holds**
+
+The bridge has watched the stream open. A reading at most `openWatch`
+(10 s) before found the output's PCM device with no stream open, or with
+another stream on it. It also found MPD reporting the same `dop` and
+`allowed_formats` for the output whose thread holds the stream now. A
+reading that found this same stream, itself marked, under the same
+settings carries the mark (`watchOpens`, `watchedOpen`). It holds because
+MPD sets `hw_params` only in `AlsaOutput::Open`, the call that reads the
+settings, and a substream exists only between open and close. So a stream
+key (subdevice, `hw_params`, owner thread and process) that differs from
+the one the reading before found puts an open after that reading's `/proc`
+read. The settings that open read are then the ones both readings report,
+unless they changed and changed back within the window. That is the class
+of change the bracket of one reading already accepts, here bounded at
+10 s. The kept state carries no verdict. A reading that cannot tell keeps
+nothing: the cards, the ALSA configuration or the stream not read whole,
+MPD not read, or its outputs differing across the read. A reading whose
+own code panics forgets everything (`forgetOpens`).
+
+The other two candidates in the brief do not hold:
+- **The substream's `trigger_time`** (and `hw_ptr`, which a prepare
+  zeroes) moves on every restart. A seek or a manual change of song in the
+  same format goes through MPD's `Cancel`, which drops the stream so that
+  the next write prepares and starts it again. An xrun goes through
+  `Recover`, which prepares it again. Neither reopens the output, so a
+  `trigger_time` after the bridge last saw the settings can belong to a
+  stream opened before an `outputset`. The captures show it is the box's
+  monotonic clock (3512.6 s on the Pi), which a reading could compare only
+  through the uptime.
+- **MPD 0.24's `audio:`** is the decoder's format: `PlayerControl`'s
+  `audio_format`, set from `DecoderControl::in_audio_format`, and the
+  protocol's own "the format emitted by the decoder plugin". It reads
+  `dsd64:2` whether the output sends DoP, sends native DSD or converts to
+  PCM, and MPD's protocol reports no output's format.
+
+What a client sees: the first reading of a stream already playing is
+`dop_unconfirmed`. A client that reads the output while playback starts,
+or across a change of format, sees the open and gets the DoP verdict.
+`dsd_converted_to_pcm` is unchanged: a report of conversion withholds
+whether or not the settings were watched. The other direction, a stream
+opened as DoP whose settings changed to PCM since, also withholds, and the
+safe direction needed no evidence.
+
+**Fixes**
+
+- (1) c40eaa0c. `signalpath.Output.DoPSettingsAtOpen`, the new reason
+  `dop_unconfirmed`, `watchOpens` at the end of `takeReading`, and
+  PROTOCOL.md's DoP condition and its note on what a reading keeps.
+- (2) f1af84e7. The loader lists conf.d with `os.ReadDir`. Every error but
+  absence is `Unread`, and a conf.d that is a regular file is ENOTDIR on
+  every OS (`dir_windows.go:147-148` on Windows).
+- (3) 727272c6. `deviceStringStage` judges plug's one argument, SLAVE, as a
+  slave (`plugSlave`, `argValue`). The argument may be positional or
+  `SLAVE=`, quoted or bare, or a `{ SLAVE … }` compound. A device string
+  goes back through `deviceStringStage`, and a name is walked in the files,
+  so only beside a configuration read whole; `plug:soft` names the
+  softvol. What alsa-lib would not open as a plug names nothing: a bare
+  value with a comma or an =, another argument's name. PROTOCOL.md's stage
+  bullet says so.
+
+**Red first**
+
+- (1) signalpath, against compile-only stubs (the field and the code): the
+  three new rows read `format_preserved_dop` (`dop_container_too_narrow`
+  alone for the 16-bit one), and the dop-off row was green as a pin. The
+  route, against the tree with signalpath fixed and the route not wired:
+  every row needing a watched open read `dop_unconfirmed`. Then against
+  round 4's `signalpath.go`, with only the code name added as a stub: the
+  transition row read `format_preserved_dop` with the live override's
+  warning, as did the first reading of a playing stream and the readings
+  11 s apart.
+- (2) conf.d as a file and conf.d that cannot be listed read `unread false
+  ok true`. A conf.d whose entries cannot be stat'ed was green before the
+  fix, a pin: `readCapped` already failed on the entry itself.
+- (3) Every `plug:` row read `""`, and the route's `device "plug:dmix"`
+  carried no warning.
+
+**Negative controls**, one per fix, run with the fix committed and the
+file restored from git (`git checkout --`) and the tree clean after each
+(`/tmp/b473-r4-controls/run_r5.py`). C1 first failed to build (the
+mutation left `was` and `is` unused) and was rerun with them kept in use.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | `watchedOpen` ignores a change of the settings since the reading before (`was != is` made `(was != is && false)`) | `TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP`: the reading after the `outputset` read `format_preserved_dop` |
+| C2 | the conf.d listing's error dropped (`bad, unread = true, true` removed from its case) | `TestAFileOfTheConfigurationThatCannotBeReadIsUnread` (conf.d a file), `TestAConfigurationDirectoryThatCannotBeListedIsUnread` (cannot be listed) |
+| C3 | the `plug` case never taken | `TestTheFirstStageThatChangesSamplesIsNamed` (every `plug:` row), `TestTheVerdictReadsMPDsOwnSettings/alsa-lib's_plug_over_dmix,_plug:dmix` |
+
+**Gates**, through the build lock. `make fmt vet test` passed whole, after
+881 s waiting for a slot: `make fmt` rewrote nothing, `go vet` was clean,
+and 73 packages were ok, saprobe-alac's own module included (`cmd/bridge`
+476 s, `internal/api` 91 s, no race). `make build-all` was clean, after
+1,096 s waiting for a slot. `make docs-check` was clean on the branch, and
+again with the round-5 note applied to the tree (worst load 45.9%, 46.4%
+with it); with the note applied, the whole `cmd/bridge` package, which
+holds the doc sweeps, passed. The note was then reverted.
+
+**Residuals, named, not fixed here**
+
+- A change of `dop` or `allowed_formats` and a change back between two
+  readings at most 10 s apart, across a reopen with the same `hw_params`,
+  passes as watched.
+- An `outputset` in the instant between MPD's `Open` reading its settings
+  and opening the PCM, while a reading's `/proc` read finds the device
+  closed, passes as watched.
+- `dop_unconfirmed` stays for the life of a stream the bridge did not see
+  open (a client that starts reading mid-track gets the DoP verdict at the
+  next open).
+
+### Round 6 (2026-10-23): a confirmation only across the same run, a reading that cannot tell keeps no evidence and erases none, plug's argument as alsa-lib reads it
+
+Round 5 landed at 637c57f4 with its note applied, and the owner accepted
+the 10 s `openWatch`. Round 5's reviews: Codex, three Mediums; the Claude
+API, one Low. Each premise was checked against the code at 637c57f4. The
+kernel's PCM core and alsa-lib's `conf.c` were checked from the source as
+I know it: this host denies network access, so neither was fetched. The
+rules are in the round's note, `/tmp/b473-b3-rules-r6.md`: seven sections
+of `output.md`, each heading naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, a confirmation survives a reopen the bridge did not
+   see: correct.** `watchedOpen` (`internal/api/outputs_reading.go:561-575`
+   at 637c57f4) carried `prev.tied` (:574) whenever the stream key and the
+   holder's settings read as before. The key (subdevice, `hw_params`, owner
+   thread and process) does not change when MPD reopens its output from the
+   same thread in the same format. So an `outputset` to PCM, a reopen (a
+   pause and a resume close and reopen the output) and an `outputset` back
+   read as the same confirmed stream. Every reading within 10 s of the one
+   before then kept the confirmation, for as long as the client polled.
+   `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation` reproduces it.
+2. **Codex Medium, an incomplete enumeration can manufacture an observed
+   open: correct.** `streamOn` (:599-605) read `pickDevice`'s substreams
+   and never `CardReading.Partial`. The reader sets that when the type of
+   a `pcmNp` or `subM` entry cannot be read for any reason but its absence
+   (`internal/alsa/reader.go:302-306`). A card whose running `sub0` could
+   not be listed showed a closed `sub1`, and `watchOpens` (:531-545)
+   recorded the device as closed. The next whole reading then saw the
+   stream that had run all along as one opened since, under the settings
+   reported then. Round 5 also erased every record at the other readings
+   that cannot tell: its gate (:531) left the map empty, which the brief's
+   "erase none" rules out.
+3. **Codex Medium, compound arguments lose the stage: correct**, as a
+   stage left unnamed, never a wrong one. `plugSlave`
+   (`internal/alsa/asoundconf.go:282-300` at 637c57f4) cut the compound by
+   hand. After `SLAVE` (:289), `argValue` (:304-317) took the rest. It
+   refused any value with a comma, an =, a quote, a brace or a blank in it
+   (:313), and decoded no escape. So `plug:{ SLAVE dmix; }` gave the slave
+   `dmix;`. A trailing comma, a newline after SLAVE, a comment and an
+   escaped quote named nothing either, where alsa-lib opens a dmix.
+4. **The Claude API Low, the text says "not read whole" and the code gates
+   on `alsaCode`: correct.** The comment (:519-521) and `output.md:60` said
+   a reading whose ALSA configuration was not read whole keeps nothing. The
+   gate (:531) is `s.alsaCode == ""`, and only a configuration not had sets
+   that code (`alsa_config_unread`). A configuration the bridge read and
+   does not model has been had since round 4, and its records were kept.
+   The text changed, not the code, as the brief says. The gate's branch
+   moved with fix 2, and still reads `alsaCode`.
+
+**The evidence chosen for (1), and why it holds**
+
+The substream's `trigger_time`, in `/proc/asound/cardN/pcmMp/subS/status`.
+The kernel allocates a substream's runtime zeroed when it is opened, so
+its trigger timestamp is zero until the first start. It stamps it, from
+the stream's own clock, at every start, stop, pause, suspend and resume,
+and the status file prints it as seconds and nanoseconds (the captures
+show 3517.637052632 on the Pi, its monotonic clock). So one started stamp
+seen at two readings rules out a reopen between them: a reopen's runtime
+starts again from zero, and its start stamps a later time. The carry now
+needs the same started stamp (`openRecord.trigger`, `watchedOpen`). The
+evidence of the open itself, an observed closed device or another key, is
+unchanged.
+
+The other candidates do not hold:
+- `owner_pid` is MPD's output thread, the same thread across its
+  reopens.
+- `hw_ptr` and `appl_ptr` restart at every prepare, so they tell a reopen
+  only by arithmetic on the rate, whose tolerance a quick reopen slips
+  under.
+- No line of the status, `hw_params` or `sw_params` file changes at every
+  open and at nothing else.
+
+The cost: a seek, an xrun or a manual change of song (MPD's `Cancel`, then
+a prepare and a start) moves the stamp as well, and cannot be told from a
+reopen. It ends the confirmation until the bridge watches the next open,
+which PROTOCOL.md's DoP condition says.
+
+**Found while fixing (1): a stream opened and not started**
+
+The round's own first commit had a regression. With aaa3b8ad's carry, a
+reading that found the stream opened and not started (PREPARED, its
+`trigger_time` zero) tied it. The next reading, of the running stream,
+then found another stamp and dropped the tie. A client whose reading
+landed between MPD's open and the stream's start got `dop_unconfirmed`
+for the whole run. PROTOCOL.md says a client reading while playback starts
+sees the open.
+
+A zero stamp does not rule out a reopen before the start, so such a
+reading cannot tell the run (`started` in `streamOn`). It is passed over as
+a partial card is. The running stream is then judged against the reading
+before it, which saw the device closed, under the same rule as when no
+reading falls in between. So no confirmation outlives a reading that cannot
+rule out a reopen.
+
+**Fixes**
+
+- (1) aaa3b8ad: `openRecord.trigger`, `watchedOpen`'s carry by the same
+  started `trigger_time`, and PROTOCOL.md's DoP condition. 7ce90195: the
+  stream opened and not started yet tells no run, and PROTOCOL.md names
+  the last reading that could tell and the readings passed over.
+- (2) 5fe129f0: `streamOn` takes a card read in part as a reading that
+  cannot tell its stream (`pickCard`). `watchOpens` keeps no evidence and
+  erases none at a reading that cannot tell the stream on a device, and at
+  one with no ids at all (`/proc` not read, the ALSA configuration not had,
+  the probe late with no endpoint). The record before stands while that
+  reading read every output's DoP settings and they are the record's
+  (`keep`). A reading that could not read them, or read them changed, ends
+  the record.
+- (3) e2c2b255: `plugSlave` reads the list as `parse_args`, `parse_arg` and
+  `parse_id` do (`plugList`, `parseArg`, `argID`). It reads the compound as
+  the configuration parser does in override mode (`plugCompound`,
+  `confInput`). A quoted value decodes `\"`, `\\` and `\'` (`confQuoted`).
+- (4) The `watchOpens` comment, in 5fe129f0. afc1019d adds two subtests
+  that pin what the corrected text says: asound.conf as a directory is a
+  configuration not had, a reading with no ids that erases nothing, and a
+  top-level `@hooks` is a configuration read and not modeled, whose stream
+  is watched opening as with none.
+
+**Decided differently from the brief**
+
+- **Erase none at every reading that cannot tell, not only at a card read
+  in part.** The rules' sentence groups all such readings. Splitting them
+  would leave a reading with `/proc` unreadable erasing what a partial card
+  keeps.
+- **A reading that cannot tell the stream still counts what it did read.**
+  My first cut kept the record whatever that reading read. Take a partial
+  reading under PCM settings between a reading that found the device closed
+  and a whole one under DoP. The first cut let the whole reading confirm an
+  open that may have happened under PCM. The subtest "a reading in part
+  that reads MPD's settings changed" is red against it (C2b below). The
+  record now stands only while that reading read every output's DoP
+  settings and they are the record's. A reading that could not read them,
+  or saw them move across its read, ends it. A change within the window
+  that no reading saw stays the accepted residual. A change a reading saw
+  is evidence.
+- **The not-started stream** (above) was not in the brief: a regression of
+  the round's own first commit.
+- **The forms the parser does not model name nothing**, though alsa-lib
+  opens some of them. These are a mode prefix (`+ - ? !`), a name `0=` or
+  an = with no name, a dotted name, a compound or array value, an include,
+  a NUL, a bare value alsa-lib may read as a number, and any escape but
+  `\"`, `\\` and `\'`, as the file parser's own string rule has it.
+
+**Red first**
+
+- (1) `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation`, against round
+  5's code: the reading after the reopen read `format_preserved_dop`, with
+  the live override's warning.
+- (1b) The not-started subtest of
+  `TestADoPVerdictNeedsTheStreamWatchedOpening` read `dop_unconfirmed` at
+  5fe129f0 and at aaa3b8ad. It was green at round 5, whose carry needed no
+  stamp.
+- (2) `TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone`, against
+  aaa3b8ad's code. "A stream running since before, read in part" read
+  `format_preserved_dop`: Codex's sequence. "/proc not read" and "the ALSA
+  configuration not had" read `dop_unconfirmed`: erased. "A stream watched
+  opening, read in part" was green there, through the manufactured open
+  itself. "A reading in part that reads MPD's settings changed" and "MPD's
+  settings moving across a reading" were green there, as pins. Both are red
+  against my first cut (C2b).
+- (3) Eleven rows of `TestTheFirstStageThatChangesSamplesIsNamed` read
+  `""` against round 5's parser:
+  - `plug:{ SLAVE dmix; }`, `plug:{ SLAVE dmix, }`, a newline after
+    SLAVE, a comment, two SLAVEs, and a quoted name;
+  - the escaped quote in both list forms and in the compound;
+  - `plug:SLAVE\t=dmix` and `plug:dmix,SLAVE=soft`.
+
+  Every row that names nothing was green before, as a pin, and so were the
+  compound over several lines and blanks after the =.
+- (4) "Beside an ALSA configuration read and not modeled" was green at
+  aaa3b8ad, a pin. "The ALSA configuration not had" was red there, as in
+  (2).
+
+**Negative controls**, one at least per fix, each run with the fix
+committed. Each file was restored from git (`git checkout --`) and the tree
+was clean after each (`/tmp/b473-r4-controls/run_r6.py`). None failed to
+build.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | `watchedOpen`'s carry ignores `trigger_time` (`return prev.tied`, round 5) | `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation`: `format_preserved_dop` after the reopen |
+| C1b | `streamOn` takes a stream not started yet as told (`!started(…)` removed) | `TestADoPVerdictNeedsTheStreamWatchedOpening/a_stream_read_opened_and_not_started_yet`: `dop_unconfirmed` |
+| C2 | `streamOn` ignores `CardReading.Partial` | "a stream running since before, read in part": `format_preserved_dop` |
+| C2b | `keep` ignores the settings (the first cut) | "a reading in part that reads MPD's settings changed" and "MPD's settings moving across a reading": `format_preserved_dop` |
+| C2c | the no-ids branch keeps no record (round 5) | "/proc not read": `dop_unconfirmed` |
+| C3 | the `;` or `,` after a compound's value not taken | `plug:{ SLAVE dmix; }`, `plug:{ SLAVE dmix, }`, `plug:{ SLAVE hw; SLAVE dmix }`: `""` |
+| C3b | the escape never decoded | the three escaped-quote rows: `""` |
+| C3c | any position taken as SLAVE | `plug:SLAVE=soft,dmix`: `dmix`, a wrong name |
+| C4 | `alsaCode` left out of the no-ids branch | "the ALSA configuration not had": `dop_unconfirmed` |
+
+**Gates**, through the build lock, at b32cc469:
+- `make fmt vet test` passed whole, 1,103 s with no wait for a slot.
+  `make fmt` rewrote nothing and `go vet` was clean. 73 packages were ok
+  under `-race`, saprobe-alac's own module included (`cmd/bridge` 477 s,
+  `internal/admin` 692 s, `internal/api` 92 s, `internal/alsa` 2.9 s).
+- `make build-all` was clean after 1,051 s waiting for a slot: the six
+  targets built.
+- `make docs-check` was clean after 1,306 s waiting for a slot (CLAUDE.md
+  62.3%, worst load 46.4%).
+- With the round-6 note applied to the tree, after 2,363 s waiting for a
+  slot, `make docs-check` was clean again (worst load 47.0%), and the whole
+  `cmd/bridge` package, which holds the doc sweeps, passed (117 s). The
+  note was then reverted.
+
+One two-package `go test` (`internal/api` and `internal/signalpath`'s stage
+tests, about a second each) ran outside the lock by mistake while fixing
+(3).
+
+**Residuals, named, not fixed here**
+
+- A change of `dop` or `allowed_formats` and a change back, across a
+  reopen, between the reading that found the device closed and the one
+  that found the stream (at most 10 s) passes as watched. It now carries
+  for that run, by its stamp. Round 5's residual is narrowed to the open's
+  own interval: a later interval can no longer confirm a reopen.
+- An `outputset` in the instant between MPD's `Open` reading its settings
+  and opening the PCM stands, as in round 5.
+- A seek, an xrun or a manual change of song ends the confirmation until
+  the next watched open: the cost of (1).
+- `SampleStage` trims the whole device string, and alsa-lib does not. A
+  bare value runs to the end, so `plug:dmix ` names the PCM `dmix `, which
+  alsa-lib does not find. The stage is then named for a device MPD could
+  not open, so no stream carries it.
+- `ResolveALSADevice` resolves `plug:N` and `plug:CARD=…` to a card (step
+  2b). alsa-lib opens neither, since plug's one argument is SLAVE, a PCM
+  name. The outputs route then lists a card as MPD's for a device MPD
+  cannot open. Reported for the backlog with this round.
+
+### Round 7 (2026-10-23): the same run only from a reading past the run's first ticks, and a card read in part that no pick names
+
+Round 6 landed at 9c66936b with its note applied. Round 6's reviews: the
+Claude API found nothing; Codex, two Mediums. Each premise was checked
+against the code at 9c66936b. The kernel's timekeeping, snd-usb-audio and
+MPD's output were checked from the source as I know it: this host denies
+network access, so none was fetched. The rules are in the round's note,
+`/tmp/b473-b3-rules-r7.md`: five sections of `output.md`, each heading
+naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, equal timestamps do not establish the same run:
+   correct.** The kernel stamps `trigger_time` from the stream's clock
+   (`snd_pcm_gettime`; `ktime_get_ts64` for a monotonic stream). The
+   clock's resolution is the clocksource's, which for jiffies is one tick
+   of 1/HZ, so two starts within one tick get the same stamp.
+   `watchedOpen`'s carry (`internal/api/outputs_reading.go:603` at
+   9c66936b) needed only the same started stamp. `streamOn` (:640-671)
+   kept the stamp of any started run (:662), however young. So a run
+   confirmed by a reading in its first tick could be reopened in that tick
+   under PCM settings, have them restored, and keep its confirmation.
+   `output.md:61` said the same stamp rules out a reopen, with no
+   condition. The case needs the confirming reading and the reopen both
+   within a tick of the start, so it is narrow, but the claim was wrong as
+   written.
+2. **Codex Medium, a partial card can disappear before its record is
+   kept: correct.** The reader reads a card's usbid from its directory
+   first (`internal/alsa/reader.go:329-335`). So a directory it cannot
+   read leaves `USBID` nil, and marks the card `Partial` (:340-345). An
+   output whose device names no card lists every USB card as a candidate
+   (`dacsFrom`, `internal/api/outputs.go:1029-1037`), and skips a card
+   with no `USBID`. `watchOpens` kept a partial card's record only through
+   that card's pick (:555-569). The record was therefore erased at such a
+   reading, and the same run, read whole again, was `dop_unconfirmed`.
+
+**What the same run needs now, and why it holds**
+
+A reading tells a run only when the stream is running, a start is stamped
+on it, and its own `hw_ptr` shows it at least `runFloor` (250 ms) in. A
+run's `hw_ptr` starts at zero when the stream is opened or prepared, and
+counts the frames the driver has taken. That is at most the driver's
+look-ahead past what has played: snd-usb-audio aims its URB queue at 18 ms
+(`MAX_QUEUE`), and a DMA driver runs a FIFO ahead. So a run 250 ms in by
+its pointer started more than 200 ms before the reading's `/proc` read,
+well over a tick of the coarsest common clock (10 ms at HZ 100). Any start
+after the reading falls in a later tick and stamps a later time, so the
+same stamp at a later reading is the same run.
+
+For MPD the stamp of a running stream is its run's start. Its ALSA output
+does not pause: an output without a `Pause` of its own is closed when MPD
+pauses, and reopened on resume. A seek or an xrun prepares the stream,
+setting its pointers back to zero, before the next start stamps it.
+
+A reading that cannot tell the run (younger than the floor, not running,
+or never started) can still watch the stream open from the record before,
+since that evidence needs no stamp. But the reading is not kept, so the
+next reading compares with the record before it. That also covers round
+6's stream opened and not started.
+
+Not chosen:
+- **A lower pointer than the reading before's** (the brief's example). It
+  does mark a new run, but not this one. A run that shares the old run's
+  stamp started within a tick of it, so the old run had played less than
+  a tick when it was read, and the new run's pointer is past the old one's
+  by the next reading. Given the floor it adds nothing. On a 32-bit kernel
+  the pointer also wraps within a run, at a boundary of about 2^30 frames
+  (about 2.3 h at 176.4 kHz with MPD's 500 ms buffer), where it would end
+  a valid confirmation.
+- **The kernel's clock read beside the stamp** (the stamp before the clock
+  at the reading). This needs the stamp's clock to be the monotonic one
+  (MPD's alsa-lib asks for it; another client may not). It needs the
+  bridge's `CLOCK_MONOTONIC` to be the kernel's, which a time namespace
+  offsets. And it needs a platform clock read in the reading.
+- **Continuity by arithmetic** (the pointer moved by the rate times the
+  time between readings). Its tolerance must cover the pointer's own
+  granularity, and a DMA driver may move it a period at a time. The
+  shortfall of a same-tick reopen can fall inside that tolerance.
+
+The cost: a reading in a run's first quarter second, or of a stream not
+running, keeps nothing, though its own verdict can still confirm the open.
+On a 32-bit kernel, a reading in the quarter second after the pointer wraps
+cannot carry, so one reading every two hours or so of one continuous run
+can read `dop_unconfirmed`.
+
+**Fixes**
+
+- (1) 3aa20b0e: `runFloor`. `streamOn` returns the run only on those
+  terms. `watchOpens` gives a run it cannot tell its tie for this reading,
+  then keeps the record before (`keep`). `watchedOpen`'s carry needs a run
+  the reading could tell. PROTOCOL.md's DoP condition says so.
+- (2) d38b2270: after the picks, every record whose card this reading
+  found (by index and ALSA id) and read in part stands as a pick's would
+  (`cardReadInPart`, `keep`). The settings check applies as before, and
+  the window and the run are checked when the next reading compares with
+  it.
+
+**Red first**
+
+- (1) `TestAReopenUnderTheSameStampIsNotTheSameRun` at 9c66936b. Run A was
+  confirmed 25 ms in, and run B was reopened under A's stamp. Run B read
+  `format_preserved_dop`. "A run read in its first ticks, then past them"
+  was green there, as a pin: the young reading confirms the open, and the
+  run's later readings still do.
+- (2) "A candidate card whose directory cannot be read"
+  (`TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone`) at 3aa20b0e.
+  The run, read whole again, read `dop_unconfirmed`. The reading in between
+  answered 404, because the card was no candidate then. The test asserts
+  that 404, so that it keeps exercising the path where `dacsFrom` drops
+  the card.
+
+**Negative controls**, one at least per fix, each run with the fix
+committed. Each file was restored from git (`git checkout --`) and the tree
+was clean after each (`/tmp/b473-r4-controls/run_r7.py`). None failed to
+build.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | the floor dropped (any pointer tells a run) | the same-stamp reopen read `format_preserved_dop` |
+| C1b | a run the reading cannot tell kept as evidence | "first ticks, then past them": the reading past them compared with the young record, whose stamp does not count, and read `dop_unconfirmed` |
+| C2 | the keep after the picks never taken | the candidate card's run read `dop_unconfirmed` |
+
+**Gates**, through the build lock, at c0d161b1:
+- `make fmt vet test` passed whole after 2,293 s waiting for a slot.
+  `make fmt` rewrote nothing and `go vet` was clean. 73 packages were ok
+  under `-race` (`cmd/bridge` 471 s, `internal/admin` 690 s,
+  `internal/api` 93 s).
+- `make build-all` was clean: the six targets built.
+- `make docs-check` was clean on the branch (CLAUDE.md 62.3%, worst load
+  47.0%).
+- With the round-7 note applied to the tree, `make docs-check` was clean
+  again (worst load 47.3%), and the whole `cmd/bridge` package, which holds
+  the doc sweeps, passed (117 s). The note was then reverted in the same
+  slot.
+
+**Residuals, named, not fixed here**
+
+- A reading that cannot tell the run still confirms through the evidence
+  of the open. The settings changing and changing back within the open's
+  interval stays the accepted residual, and that interval can now span
+  readings that could not tell the run.
+- While `dacsFrom` drops a card read in part, a reading of that output's id
+  (the id GET /v1/outputs gave) answers 404 `output_not_found`. Reported
+  for the backlog with this round.
+- The floor rests on two bounds. A driver whose pointer leads what has
+  played by more than about 240 ms, or a clock tick longer than that, would
+  let a reopen in the same tick keep the stamp.
+
+### Round 8 (2026-10-23): the PR's Windows run and Gemini's review
+
+Round 7 landed and PR #1318 opened at 1ab90068, after main's merge (the
+health list's capacity, 38 keys with B513's `sampleFormat`). Its CI was
+green except `test (windows-latest)`, one case:
+
+- **`TestAFileOfTheConfigurationThatCannotBeReadIsUnread`, "conf.d a file,
+  not a directory": unread false, ok true on Windows.** The premise holds
+  (a `conf.d` that is there and cannot be listed is a configuration not
+  read); the loader trusted `os.ReadDir`'s error to say so, and on Windows
+  a regular file's listing ends with no error and no entries
+  (`os/dir_windows.go` ends a listing at a no-more-files or a
+  file-not-found answer; only another answer becomes `ENOTDIR`). The loader
+  now stats `conf.d` first: absent is nothing, any other stat error or a
+  stat that is not a directory is unread, and only a directory is listed.
+  On macOS and Linux the case passed before and after (ReadDir's `ENOTDIR`),
+  so the red is the windows-latest run on 1ab90068 and the green is this
+  round's.
+- **Gemini (medium), `rowAt` judged the song's file with `IsRegular`.** The
+  bridge's own rule (`fsutil.NotAFile`: "the one list for both sides of the
+  library", and `output.md`'s `mpd.conf` candidate rule) is that a Windows
+  cloud placeholder is `ModeIrregular` and opens as a file, so `IsRegular`
+  took every OneDrive file on demand for one that changed and left its row
+  not current. `stillTheScannedFile` is now `fsutil.NotAFile`, size and
+  `mtime_ns`; `TestARowOnACloudPlaceholderIsCurrent` (8 rows) pins it, red
+  first with `IsRegular` (control below).
+
+**Negative control**, committed first, restored from git after, tree clean:
+`stillTheScannedFile` with `fi.Mode().IsRegular()` ANDed in (beside
+`NotAFile`, so the import stays used and the build is the mutated one)
+reddens exactly "a cloud placeholder: current false, want true"; the
+first try, `NotAFile` replaced, did not build (an unused import) and
+proves nothing.
