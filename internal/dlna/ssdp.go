@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/ipv4"
@@ -16,12 +17,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
-// maxConcurrentMSearchResponders bounds the number of in-flight M-SEARCH
-// responder goroutines. Each one may sleep up to `mxResponseCeilingSeconds`
-// (the spec-mandated randomized reply delay) before sending, so without a
-// cap a burst of `ssdp:all` searches — accidental or hostile — could spawn
-// unbounded goroutines. When the pool is full, additional searches are
-// dropped (the control point re-searches; SSDP discovery is best-effort).
+// maxConcurrentMSearchResponders is the MediaServer's responder slots per
+// advertise endpoint: how many M-SEARCH answers one endpoint may have in
+// flight. Each may sleep up to `mxResponseCeilingSeconds` (the spec-mandated
+// randomized reply delay) before sending, so without a cap a burst of
+// `ssdp:all` searches — accidental or hostile — could spawn unbounded
+// goroutines. When an endpoint's slots are full, its answer to another search
+// is dropped (the control point re-searches; SSDP discovery is best-effort).
+// Another registration sets its own (SSDPRegistration.ResponderSlots).
 const maxConcurrentMSearchResponders = 16
 
 // defaultMSearchJitter is the reply spread applied when an M-SEARCH omits
@@ -29,591 +32,475 @@ const maxConcurrentMSearchResponders = 16
 // reply in a synchronized burst.
 const defaultMSearchJitter = 100 * time.Millisecond
 
+// ssdpBurstDeadline bounds one burst of sends, all of its writes together: an
+// alive or byebye burst from its first write, and an answer from its first
+// response, after the MX delay, never from when the search arrived. A write
+// that cannot go out by then fails, so no burst outlives it, and a
+// withdrawal's join settles.
+const ssdpBurstDeadline = time.Second
+
+// ssdpWithdrawBudget is the most a withdrawal (SSDPHandle.Withdraw, an
+// Update's removals, SSDPSubsystem.Close) takes, from its entry, across every
+// endpoint and registration it withdraws: a caller's earlier deadline
+// shortens it, and a caller's cancellation does not.
+const ssdpWithdrawBudget = 5 * time.Second
+
 // ssdpLogger is the SSDP-specific package logger — distinct subcomponent
 // tag from `dlna` proper so operators grepping for the multicast /
 // NOTIFY path can filter narrowly. Per CodeRabbit Major on PR #303.
 var ssdpLogger = logging.Component("dlna-ssdp")
-
-// SSDPConfig configures the SSDP advertiser runtime — the goroutines
-// that send periodic NOTIFY ssdp:alive packets AND respond unicast to
-// incoming M-SEARCH requests on the SSDP multicast address.
-//
-// All fields except Logger are required. The advertiser does NOT
-// validate inputs; pass in well-formed values (Location must be an
-// absolute URL reachable by renderers on the local network; UDN must
-// have the `uuid:` prefix; ServerToken should come from
-// `SSDPServerToken(productVersion)`).
-type SSDPConfig struct {
-	// UDN is the device's stable unique identifier with the `uuid:`
-	// prefix (e.g. "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c").
-	// Determines the USN values across all NotifyTargets.
-	UDN string
-
-	// Location is the absolute URL of the bridge's DLNA device
-	// description XML, as reachable by renderers on the local
-	// network (e.g. "http://192.168.0.14:7790/dlna/description.xml").
-	Location string
-
-	// ServerToken is the SSDP SERVER header value. Build via
-	// `SSDPServerToken(productVersion)`.
-	ServerToken string
-
-	// Interface is the LAN-eligible interface to bind the multicast
-	// listener on. nil = the OS picks (Go default; works for most
-	// single-interface hosts). For multi-interface hosts (e.g., Mac
-	// with Ethernet + WiFi), pass the specific interface chosen via
-	// `IsLANEligibleInterface`.
-	Interface *net.Interface
-
-	// AdvertiseInterval controls how often the periodic NOTIFY
-	// ssdp:alive announcements fire. Default 14 minutes (slightly
-	// under SSDPMaxAge/2 = 15 min) to ensure we re-announce well
-	// before our previous entry would time out of renderer caches.
-	// Set to 0 to use the default; values < 1 minute are clamped up
-	// (defensive against test misconfig).
-	AdvertiseInterval time.Duration
-
-	// Logger is the structured logger for SSDP events. nil collapses
-	// to `logging.Component("dlna-ssdp")` at Start() time.
-	Logger *slog.Logger
-
-	// served is what the advertiser answers a unicast M-SEARCH on: the
-	// addresses its Server serves (servedAddrs), shared with the HTTP
-	// listener. nil is this host's, for an advertiser started without a
-	// Server.
-	served *servedAddrs
-}
 
 // defaultAdvertiseInterval is the canonical NOTIFY ssdp:alive cadence:
 // slightly under SSDPMaxAge/2 to ensure re-announcement before any
 // renderer would purge the prior entry.
 const defaultAdvertiseInterval = 14 * time.Minute
 
-// ssdpListenerReadDeadline bounds each blocking ReadMsgUDP in the
-// M-SEARCH listener so the loop wakes periodically to re-check
-// ctx.Done(). Without it, a bare parent-ctx cancel that does NOT go
-// through Stop() (which closes the listener to wake the read) would park
-// the goroutine — and its WaitGroup slot — inside ReadMsgUDP indefinitely
-// on a quiet network. Today Server.Stop always calls adv.Stop(), so this
-// is latent defense-in-depth. Mirrors the sibling discovery client's
-// runLoop (internal/dlna/discovery/client.go).
+// ssdpListenerReadDeadline bounds each blocking read of an SSDP listener so
+// its loop wakes periodically to re-check the subsystem's context. Without
+// it, a bare parent-ctx cancel that does not close the socket would park
+// the goroutine inside the read indefinitely on a quiet network. Mirrors the
+// sibling discovery client's runLoop (internal/dlna/discovery/client.go).
 const ssdpListenerReadDeadline = 500 * time.Millisecond
-
-// SSDPAdvertiser runs the SSDP NOTIFY + M-SEARCH response goroutines.
-// Use `NewSSDPAdvertiser` to create, `Start` to begin, `Stop` to
-// gracefully tear down (sends ssdp:byebye for every NotifyTarget on
-// the way out so renderers purge our entry from their discovery
-// tables immediately rather than waiting for SSDPMaxAge).
-//
-// Concurrent operation: Start spawns 2 goroutines (one for periodic
-// NOTIFY, one for M-SEARCH listen-and-respond). Both honor the
-// internal context for cancellation. Stop cancels the context and
-// blocks on the WaitGroup until both goroutines have exited.
-//
-// **Restart safety:** Stop() is NOT safe to call concurrently with
-// Start(), nor before Start() has returned. Stop() may be called once,
-// after which the advertiser is single-use — call NewSSDPAdvertiser
-// for a fresh lifecycle.
-type SSDPAdvertiser struct {
-	cfg     SSDPConfig
-	targets []NotifyTarget
-	log     *slog.Logger
-
-	// Lifecycle guards. `mu` serializes the Start / Stop pair so
-	// double-Start can't spawn duplicate goroutine pairs and so a
-	// concurrent Stop during a half-Start can't tear down state the
-	// other side hasn't published yet. `started` is the explicit
-	// state-machine flag (false → not running → Start allowed →
-	// true → running → Start refused). Stop clears it back to false.
-	// Per CodeRabbit Major on PR #303.
-	mu      sync.Mutex
-	started bool
-
-	// Runtime state — nil until Start() is called. `listener` / `sender`
-	// are accessed ONLY under `s.mu` (Start writes them; Stop closes +
-	// nils them). The background goroutines + send helpers receive their
-	// own captured copies as parameters and never read these fields, so
-	// Stop's nil-set races nothing. Do NOT reintroduce a struct-field
-	// read on `s.listener`/`s.sender` from any goroutine.
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	listener *net.UDPConn // multicast listener for incoming M-SEARCH (listenSSDP)
-	sender   *net.UDPConn // unconnected socket the NOTIFYs are written from (openNotifySender)
-
-	// notifyTo is where every NOTIFY is written: the SSDP group. The
-	// constructor sets it and nothing changes it after, so the goroutines
-	// read it without the lock. A test may point it at a socket of its own
-	// before it drives a burst.
-	notifyTo *net.UDPAddr
-
-	// searchSem bounds concurrent M-SEARCH responder goroutines (see
-	// `maxConcurrentMSearchResponders`). Allocated once in the
-	// constructor; immutable thereafter, so it's safe to read without
-	// the lock.
-	searchSem chan struct{}
-
-	// notifyErrs reports the NOTIFY ssdp:alive bursts that fail, one result
-	// per burst: discovery.SendFailureLog, the discovery clients' M-SEARCH
-	// policy (a Warn when a streak starts, one Error at its second failed
-	// burst at the default 14-minute cadence, a line on recovery). A burst
-	// is ticker-driven like an M-SEARCH, so its failure is persistent by
-	// nature: an interface that lost its address or route fails every
-	// burst until it comes back. Until 2026-09-28 each failed write logged
-	// at Debug alone, so an advertiser that could no longer announce was
-	// silent at the default level (backlog B47). Start builds it (so each
-	// run starts a fresh streak); Start's initial burst and the periodic
-	// goroutine note results, and nothing else touches it.
-	notifyErrs discovery.SendFailureLog
-}
-
-// NewSSDPAdvertiser constructs an advertiser with the given config.
-// Does NOT bind sockets or spawn goroutines — call Start() to begin.
-// Returned advertiser is safe to discard without calling Start() (no
-// resources acquired yet).
-func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
-	if cfg.AdvertiseInterval < time.Minute {
-		cfg.AdvertiseInterval = defaultAdvertiseInterval
-	}
-	if cfg.served == nil {
-		cfg.served = newServedAddrs(nil)
-	}
-	return &SSDPAdvertiser{
-		cfg:       cfg,
-		targets:   NotifyTargetsFor(cfg.UDN),
-		searchSem: make(chan struct{}, maxConcurrentMSearchResponders),
-		notifyTo:  net.UDPAddrFromAddrPort(netip.MustParseAddrPort(SSDPMulticastAddr)),
-	}
-}
-
-// Start binds the multicast listener and unicast sender, sends an
-// initial NOTIFY ssdp:alive burst (one packet per NotifyTarget), then
-// spawns the periodic NOTIFY and M-SEARCH-response goroutines.
-//
-// Returns an error if socket binding fails. On success, the
-// advertiser is running until Stop() is called.
-func (s *SSDPAdvertiser) Start(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Refuse double-Start. Without this guard, repeated calls would
-	// spawn additional listener / sender / goroutine pairs that
-	// each tried to bind the same multicast address — first call
-	// succeeds, subsequent calls error from socket binding, but the
-	// log line would be misleading ("SSDP advertiser started" with
-	// no indication that we're now on the second instance). Per
-	// CodeRabbit Major on PR #303.
-	if s.started {
-		return errors.New("dlna: SSDP advertiser already started")
-	}
-
-	if s.log == nil {
-		s.log = s.cfg.Logger
-		if s.log == nil {
-			s.log = ssdpLogger
-		}
-	}
-	s.notifyErrs = discovery.NewSendFailureLog(s.log, "NOTIFY", interfaceName(s.cfg.Interface),
-		"DLNA advertising", s.cfg.AdvertiseInterval)
-
-	addr, err := net.ResolveUDPAddr("udp4", SSDPMulticastAddr)
-	if err != nil {
-		return err
-	}
-
-	// M-SEARCH listener, joined to the SSDP group on this advertiser's
-	// interface. On Linux it hears only the datagrams that arrive on that
-	// interface; macOS and Windows deliver so anyway (listenSSDP).
-	listener, err := listenSSDP(ctx, s.cfg.Interface, addr, s.log)
-	if err != nil {
-		return err
-	}
-	armed := s.armListener(listener)
-
-	// NOTIFY sender: an unconnected socket, pinned to this advertiser's
-	// interface before anything is sent, that writes each NOTIFY to the
-	// group (openNotifySender says why it must not be connected).
-	sender, err := openNotifySender()
-	if err != nil {
-		listener.Close()
-		return err
-	}
-	if s.cfg.Interface != nil {
-		// Pin outgoing multicast to the operator-chosen interface, so the
-		// NOTIFY bursts land on the LAN where renderers live and leave
-		// from its address (Gemini Medium on PR #303 asked for the pin).
-		if err := pinMulticastInterface(sender, s.cfg.Interface); err != nil {
-			// Soft-fail: log + continue. A failure here means
-			// multicast goes via the OS default — degraded but
-			// not broken; renderers on that interface still
-			// discover us. Refusing to start over an unbindable
-			// multicast option would punish the typical happy
-			// path (single-NIC host where the OS default IS the
-			// LAN).
-			s.log.Warn("SSDP multicast interface bind failed (falling back to OS default)",
-				slog.String("interface", s.cfg.Interface.Name),
-				slog.String("err", err.Error()))
-		}
-	}
-
-	s.listener = listener
-	s.sender = sender
-
-	// Internal context layered on top of the caller's so Stop() can
-	// cancel even if the caller passed a long-lived context.
-	innerCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-
-	// Initial NOTIFY ssdp:alive burst. Pass the local `sender` (not
-	// `s.sender`) — the goroutines below capture their own socket
-	// copies too, so no background path reads the struct fields. This
-	// is what makes `Stop()` nil-ing `s.listener`/`s.sender` race-free:
-	// every concurrent reader holds a local copy, and the only struct-
-	// field access (Start write, Stop close+nil) is serialized under
-	// `s.mu`.
-	s.announceAlive(sender)
-
-	// Periodic NOTIFY goroutine — captures `sender` locally.
-	s.wg.Add(1)
-	go s.runPeriodicNotify(innerCtx, sender)
-
-	// M-SEARCH response goroutine — captures `listener` locally.
-	s.wg.Add(1)
-	go s.runMSearchListener(innerCtx, listener, armed)
-
-	// Flip the state-machine flag AFTER all socket binds + goroutine
-	// spawns succeed. Set on the happy path only; a partial-init
-	// failure above returns early WITHOUT flipping the flag, so a
-	// subsequent retry call sees `started == false` and is allowed.
-	s.started = true
-
-	s.log.Info("SSDP advertiser started",
-		slog.String("location", s.cfg.Location),
-		slog.String("interface", interfaceName(s.cfg.Interface)),
-		slog.Duration("advertiseInterval", s.cfg.AdvertiseInterval),
-		slog.Int("targetCount", len(s.targets)),
-	)
-	return nil
-}
-
-// Stop sends a final NOTIFY ssdp:byebye burst (one packet per target),
-// cancels the goroutine context, closes the listener (which unblocks
-// the M-SEARCH ReadMsgUDP), and waits for both goroutines to exit.
-//
-// Safe to call exactly once after Start(). Calling Stop() before Start()
-// or twice is a no-op (defensive — won't panic).
-func (s *SSDPAdvertiser) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.started {
-		return // never started, or already stopped
-	}
-	// Flip the flag early — even if subsequent teardown panics or
-	// hangs, a follow-up Start() call should see a fresh slate.
-	s.started = false
-
-	if s.cancel == nil {
-		return // defensive — shouldn't happen given the started flag
-	}
-
-	// Send byebye burst BEFORE cancelling so renderers see our farewell.
-	// Pass `s.sender` explicitly (we hold `s.mu` and `started == true`,
-	// so it's non-nil here). Best-effort cleanup.
-	s.sendByebyeAll(s.sender)
-
-	s.cancel()
-	s.cancel = nil
-
-	// Close the listener + sender to unblock the goroutines' reads
-	// (ReadMsgUDP / Write on a closed socket return an error, which
-	// the goroutines observe alongside the cancelled ctx and exit).
-	// Close errors are intentionally swallowed — we're tearing down.
-	//
-	// Nil-ing the struct fields here is race-free: the goroutines read
-	// their captured local copies, never `s.listener`/`s.sender`, so
-	// the only struct-field access is this lock-held Stop and the
-	// lock-held Start. We close-then-nil BEFORE `wg.Wait()` (closing
-	// is what unblocks the reads — waiting first would deadlock the
-	// M-SEARCH goroutine parked in `ReadMsgUDP`).
-	if s.listener != nil {
-		_ = s.listener.Close()
-		s.listener = nil
-	}
-	if s.sender != nil {
-		_ = s.sender.Close()
-		s.sender = nil
-	}
-
-	s.wg.Wait()
-	s.log.Info("SSDP advertiser stopped")
-}
-
-// runPeriodicNotify sends a NOTIFY ssdp:alive burst every
-// `cfg.AdvertiseInterval`, until context cancels. Takes the `sender`
-// socket as a parameter (the local copy captured at Start) so it never
-// reads `s.sender` — that's what keeps `Stop()`'s nil-set race-free.
-func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPConn) {
-	defer s.wg.Done()
-	ticker := time.NewTicker(s.cfg.AdvertiseInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.announceAlive(sender)
-		}
-	}
-}
-
-// armListener asks the kernel to report the destination of each datagram
-// listener takes (armDatagramDst), and reports whether it will. Start arms
-// its listener before anything is sent; a test arms one the same way. A
-// listener that cannot be armed answers as every listener did before B48,
-// and says so once here.
-func (s *SSDPAdvertiser) armListener(listener *net.UDPConn) bool {
-	if err := armDatagramDst(listener); err != nil {
-		s.log.Warn("SSDP listener cannot read the destination of each datagram: it answers a unicast M-SEARCH "+
-			"sent to any address of this host, whether or not the DLNA listener serves it",
-			slog.String("interface", interfaceName(s.cfg.Interface)),
-			slog.String("err", err.Error()))
-		return false
-	}
-	return true
-}
 
 // ssdpGroupAddr is the SSDP group's address, without its port.
 var ssdpGroupAddr = netip.MustParseAddrPort(SSDPMulticastAddr).Addr()
 
-// searchedFor reports whether this advertiser answers an M-SEARCH from src
-// that was sent to dst (known is false when the kernel reported no
-// destination), and logs a refusal (servedAddrs.admit). One sent to the SSDP
-// group is answered: a group datagram reaches this listener only on the
-// interface it joined (B71). Anything else is a unicast to an address of
-// this host, which the listener's wildcard bind takes on every address, and
-// is answered only when the server serves that address (backlog B48). One
-// whose destination was asked for and not reported is refused: the listener
-// cannot tell it from a unicast to the tailnet.
-func (s *SSDPAdvertiser) searchedFor(dst netip.Addr, known bool, src *net.UDPAddr) bool {
-	if known && dst == ssdpGroupAddr {
-		return true
-	}
-	if !known {
-		dst = netip.Addr{}
-	}
-	from := ""
-	if src != nil {
-		from = src.IP.String()
-	}
-	return s.cfg.served.admit(s.log, "an M-SEARCH", dst, from)
+// Errors the subsystem returns.
+var (
+	// ErrSSDPClosed is a Register or Update on a subsystem that is closed,
+	// or whose parent context is done.
+	ErrSSDPClosed = errors.New("dlna: the SSDP subsystem is closed")
+	// ErrSSDPWithdrawn is an Update of a registration that was withdrawn.
+	ErrSSDPWithdrawn = errors.New("dlna: the SSDP registration was withdrawn")
+	// ErrSSDPNoEndpoint is a Register none of whose endpoints started.
+	ErrSSDPNoEndpoint = errors.New("dlna: no SSDP endpoint started")
+	// ErrSSDPStrictCapability is a strict endpoint refused because its
+	// listener or its sender lacks what a strict registration needs.
+	ErrSSDPStrictCapability = errors.New("dlna: a strict SSDP endpoint needs destination and arrival " +
+		"reporting, receive confinement and a pinned sender")
+)
+
+// SSDPSubsystem is the process's one SSDP stack, which every SSDP device the
+// bridge advertises registers with (B470 PR 5a1): the DLNA MediaServer
+// today, and the player's OpenHome Source from PR 5a2. One device per
+// listener set would steal unicast M-SEARCHes from another: every listener
+// binds the wildcard on port 1900, and a unicast reaches one of them.
+//
+// It owns the listeners, one per interface identity (SSDPInterface) that a
+// registered endpoint uses, shared by every registration on that interface
+// and opened in endpoint order: the wildcard UDP4 bind on the group's port
+// with one membership on the interface (listenSSDP), armed to report each
+// datagram's destination and arrival interface. A listener is reference
+// counted by the endpoints that use it, and closed, with its reader joined,
+// when the last one goes; it is never closed while an endpoint holds it. Each
+// endpoint has its own unconnected NOTIFY sender (openNotifySender), and each
+// answer burst a transient socket of its own (dialReply). With no active
+// endpoint it holds no socket.
+//
+// Each datagram is parsed once, then matched and admitted by each
+// registration on its own (dispatch): see SSDPRegistration for what decides
+// which endpoint answers. Construct it with NewSSDPSubsystem; Close
+// withdraws every registration and closes it for good.
+type SSDPSubsystem struct {
+	log       *slog.Logger
+	transport ssdpTransport
+
+	// ctx is the subsystem's: derived from the parent NewSSDPSubsystem was
+	// given, and cancelled by Close. The readers and every registration's
+	// work run under it; a withdrawal's byebye does not.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// notifyTo is where every NOTIFY is written: the SSDP group. A test may
+	// point it at a socket of its own before anything registers.
+	notifyTo *net.UDPAddr
+
+	// replyDelay draws an answer's delay in [0, window]; nil is uniform
+	// random. A test sets its own before anything registers.
+	replyDelay func(window time.Duration) time.Duration
+
+	// intervalFloor is the shortest advertise interval a registration
+	// gets: a shorter one is replaced by defaultAdvertiseInterval. A minute
+	// in production; a test that watches repeats lowers it before anything
+	// registers.
+	intervalFloor time.Duration
+
+	// slotTaken, when set, is told of every responder slot an answer
+	// takes. nil in production; a test sets it before anything registers.
+	slotTaken func(ep *ssdpEndpoint)
+
+	// beforeByebyeDeadline parks a test between selecting and installing a
+	// byebye deadline. nil in production; set before registering anything.
+	beforeByebyeDeadline func()
+
+	// mu guards everything below, and the published endpoint list of every
+	// handle (SSDPHandle.active). Deadline installation holds it so Close's
+	// clamp is atomic with every install; writes, sleeps and joins do not.
+	mu            sync.Mutex
+	closed        bool
+	closeDeadline time.Time
+	closeDone     chan struct{}
+	senders       map[*ssdpOwnedSender]struct{} // includes staged and retiring endpoints
+	listeners     map[ssdpListenerKey]*ssdpListener
+	handles       []*SSDPHandle // includes withdrawals until their cleanup finishes
+
+	// table is what the readers dispatch by, rebuilt under mu on every
+	// change and read without it.
+	table atomic.Pointer[ssdpTable]
+
+	// inflight counts the Register and Update calls in progress, which
+	// Close waits for. An Add happens only under mu while !closed.
+	inflight sync.WaitGroup
+	// readers counts the listeners' read loops.
+	readers sync.WaitGroup
 }
 
-// runMSearchListener blocks on the multicast listener, parsing each
-// incoming packet for M-SEARCH and responding unicast if the ST
-// matches one of our NotifyTargets. Takes the `listener` socket as a
-// parameter (the local copy captured at Start) so it never reads
-// `s.listener` — that's what keeps `Stop()`'s nil-set race-free.
-// armed is armListener's answer for listener: when it is true, a search
-// is answered only when it was sent to an address the server serves
-// (searchedFor).
-func (s *SSDPAdvertiser) runMSearchListener(ctx context.Context, listener *net.UDPConn, armed bool) {
-	defer s.wg.Done()
-	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
-	oob := make([]byte, datagramDstSpace)
-	consecutiveReadErrs := 0
-	for {
+// SSDPSubsystemOptions configures NewSSDPSubsystem.
+type SSDPSubsystemOptions struct {
+	// Logger is the subsystem's logger, for what belongs to a listener (a
+	// read error, a listener that cannot report destinations). A
+	// registration logs its own on its own logger. nil is ssdpLogger.
+	Logger *slog.Logger
+}
+
+// NewSSDPSubsystem returns a subsystem with no registration and no socket.
+// ctx is its parent: its cancellation stops every listener's reader and every
+// registration's announcements and answers, as a serve shutdown does; it does
+// not withdraw them (Close does, with byebye, whether or not ctx is done).
+func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsystem {
+	log := opts.Logger
+	if log == nil {
+		log = ssdpLogger
+	}
+	inner, cancel := context.WithCancel(ctx)
+	return &SSDPSubsystem{
+		log:           log,
+		transport:     hostSSDPTransport{},
+		ctx:           inner,
+		cancel:        cancel,
+		notifyTo:      ssdpGroupUDPAddr,
+		intervalFloor: time.Minute,
+		listeners:     map[ssdpListenerKey]*ssdpListener{},
+		senders:       map[*ssdpOwnedSender]struct{}{},
+	}
+}
+
+// withdrawDeadline is the deadline of a withdrawal entered now: the earlier of
+// the caller's deadline and ssdpWithdrawBudget from now.
+func withdrawDeadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(ssdpWithdrawBudget)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	return deadline
+}
+
+// Close withdraws every registration and closes the subsystem for good: a
+// Register or Update after it returns ErrSSDPClosed, and one in progress
+// when it starts is waited for, and rolled back rather than committed. It
+// cancels the subsystem's context first, so readers stop and no answer or
+// alive is sent from then on, and then withdraws each registration with its
+// byebye, under one budget: the earlier of ctx's deadline and five seconds
+// from entry, shared by them all (ctx's cancellation does not cut it short,
+// so a byebye goes out on a shutdown). On return no socket is open and every
+// goroutine it started has returned. It returns the withdrawals' errors,
+// joined; a second Close waits for the first under that first call's budget,
+// then returns nil.
+//
+// Close takes ownership of every handle still listed when it begins, including
+// a Withdraw in cleanup. That withdrawal's budget becomes the earlier of its
+// own deadline and Close's, through its last release and removal from the list.
+// A withdrawal already removed from the list is complete and is not owned.
+func (s *SSDPSubsystem) Close(ctx context.Context) error {
+	deadline := withdrawDeadline(ctx)
+	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		return nil
+	}
+	s.closed = true
+	s.closeDeadline = deadline
+	s.closeDone = make(chan struct{})
+	for sender := range s.senders {
+		_ = sender.setWriteDeadlineLocked(sender.deadline)
+	}
+	handles := append([]*SSDPHandle(nil), s.handles...)
+	s.mu.Unlock()
+	defer close(s.closeDone)
+	s.cancel()
+
+	// Also interrupt a Withdraw holding opMu, or an initial alive on an
+	// unpublished endpoint. Neither is reachable through the dispatch table.
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
 		select {
-		case <-ctx.Done():
-			return
-		default:
+		case <-timer.C:
+			s.interruptSenders()
+		case <-stop:
 		}
-		// Short read deadline so the loop wakes periodically to re-check
-		// ctx.Done() above — without it, a bare parent-ctx cancel that
-		// doesn't go through Stop() (which closes the listener to wake the
-		// read) would park us inside the read indefinitely on a quiet
-		// network. Wall-clock (time.Now), never an injectable clock:
-		// net.Conn deadlines evaluate against the real OS clock.
-		_ = listener.SetReadDeadline(time.Now().Add(ssdpListenerReadDeadline))
-		// ReadMsgUDP blocks up to the deadline; the Stop() path also closes
-		// the listener to wake us up. Read errors are expected at teardown.
-		// The out-of-band data carries the datagram's destination, which
-		// armListener asked the kernel for.
-		n, oobn, _, src, err := listener.ReadMsgUDP(buf, oob)
+	}()
+	defer func() { close(stop); <-stopped }()
+	joined := make(chan struct{})
+	go func() { s.inflight.Wait(); close(joined) }()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-joined:
+	case <-timer.C:
+		s.interruptSenders()
+		<-joined // socket close wakes writes; join their rollback, too
+	}
+
+	var errs []error
+	for _, h := range handles {
+		if err := h.withdraw(deadline); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	s.readers.Wait()
+	if !time.Now().Before(deadline) {
+		errs = append(errs, context.DeadlineExceeded)
+	}
+	return errors.Join(errs...)
+}
+
+// interruptSenders closes even unpublished and retiring endpoints' senders.
+// No socket I/O runs under mu. A sender opened after the deadline is closed
+// by ownSender before the operation can send on it.
+func (s *SSDPSubsystem) interruptSenders() {
+	s.mu.Lock()
+	all := make([]*ssdpOwnedSender, 0, len(s.senders))
+	for sender := range s.senders {
+		all = append(all, sender)
+	}
+	s.mu.Unlock()
+	for _, sender := range all {
+		_ = sender.Close()
+	}
+}
+
+// retirementDeadline shares Close's budget with a rollback or withdrawal.
+func (s *SSDPSubsystem) retirementDeadline(deadline time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed && s.closeDeadline.Before(deadline) {
+		return s.closeDeadline
+	}
+	return deadline
+}
+
+// enter admits one Register or Update call, which Close waits for; done ends
+// it. It refuses once the subsystem is closed or its context is done.
+func (s *SSDPSubsystem) enter() (done func(), err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrSSDPClosed
+	}
+	if err := s.ctx.Err(); err != nil {
+		return nil, errors.Join(ErrSSDPClosed, err)
+	}
+	s.inflight.Add(1)
+	return s.inflight.Done, nil
+}
+
+// delay draws an answer's delay in [0, window].
+func (s *SSDPSubsystem) delay(window time.Duration) time.Duration {
+	if s.replyDelay != nil {
+		return s.replyDelay(window)
+	}
+	return time.Duration(rand.Int64N(int64(window) + 1))
+}
+
+// ssdpListenerKey is a listener's identity: its interface's index and name,
+// and the incarnation token the caller gave (SSDPEndpoint.Incarnation). A
+// new incarnation of an interface gets a listener and a membership of its
+// own, beside a listener of the old one that a registration still holds.
+type ssdpListenerKey struct {
+	index       int
+	name        string
+	incarnation uint64
+}
+
+// public is the key as SSDPInterface.
+func (k ssdpListenerKey) public() SSDPInterface {
+	return SSDPInterface{Index: k.index, Name: k.name, Incarnation: k.incarnation}
+}
+
+// ssdpListenerState is where a listener is in its life.
+type ssdpListenerState int
+
+const (
+	// listenerOpening is a listener one Register or Update is opening;
+	// another that needs it waits for ready.
+	listenerOpening ssdpListenerState = iota
+	// listenerLive is open, with its reader running.
+	listenerLive
+	// listenerClosing is closing: its socket is being closed and its
+	// reader joined. Another that needs it waits for gone, then opens a
+	// fresh one.
+	listenerClosing
+)
+
+// ssdpListener is one shared listener.
+type ssdpListener struct {
+	key   ssdpListenerKey
+	iface *net.Interface // a copy; nil for the OS default
+
+	// state and refs are guarded by the subsystem's mu.
+	state ssdpListenerState
+	refs  int
+
+	ready chan struct{} // closed when opening ends, either way
+	gone  chan struct{} // closed when closing ends
+
+	// Set before ready closes on a successful open, read-only after.
+	conn       ssdpReadConn
+	setup      ssdpListenerSetup
+	readerDone chan struct{}
+
+	// reading is set, under the subsystem's mu, when the dispatch table
+	// first lists an endpoint on the listener and its reader starts: until
+	// then the socket queues what arrives, as an advertiser's did until its
+	// first alive had gone out.
+	reading bool
+}
+
+// acquireListener returns the listener for key, taking a reference: the
+// live one, or one it opens. One being opened is waited for; one closing is
+// waited for, and then opened afresh, so two listeners for one identity are
+// never open at once.
+func (s *SSDPSubsystem) acquireListener(key ssdpListenerKey, iface *net.Interface) (*ssdpListener, error) {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, ErrSSDPClosed
+		}
+		l := s.listeners[key]
+		if l == nil {
+			l = &ssdpListener{key: key, iface: iface, state: listenerOpening, refs: 1,
+				ready: make(chan struct{}), gone: make(chan struct{})}
+			s.listeners[key] = l
+			s.mu.Unlock()
+			return s.openListener(l)
+		}
+		switch l.state {
+		case listenerLive:
+			l.refs++
+			s.mu.Unlock()
+			return l, nil
+		case listenerOpening:
+			ready := l.ready
+			s.mu.Unlock()
+			<-ready
+		default: // listenerClosing
+			gone := l.gone
+			s.mu.Unlock()
+			<-gone
+		}
+	}
+}
+
+// openListener opens l, which acquireListener entered as opening. Its reader
+// starts when the dispatch table first lists an endpoint on it
+// (startReadersLocked). A listener that fails to open, or opens once the
+// subsystem has closed, is removed again and its waiters look afresh.
+func (s *SSDPSubsystem) openListener(l *ssdpListener) (*ssdpListener, error) {
+	conn, setup, err := s.transport.listen(s.ctx, l.iface, s.log)
+	s.mu.Lock()
+	if err == nil && s.closed {
+		_ = conn.Close()
+		err = ErrSSDPClosed
+	}
+	if err != nil {
+		if s.listeners[l.key] == l {
+			delete(s.listeners, l.key)
+		}
+		close(l.ready)
+		close(l.gone)
+		s.mu.Unlock()
+		return nil, err
+	}
+	l.conn, l.setup = conn, setup
+	l.readerDone = make(chan struct{})
+	l.state = listenerLive
+	close(l.ready)
+	s.mu.Unlock()
+	return l, nil
+}
+
+// startReadersLocked starts the reader of each listener the table t lists
+// an endpoint on and that has none yet. The subsystem's mu is held, and it
+// is not closed (Close sets closed before it waits for the readers).
+func (s *SSDPSubsystem) startReadersLocked(t *ssdpTable) {
+	for _, e := range t.entries {
+		for _, ep := range e.eps {
+			if l := ep.listener; !l.reading {
+				l.reading = true
+				s.readers.Add(1)
+				go s.readLoop(l)
+			}
+		}
+	}
+}
+
+// releaseListener drops one reference to l, and closes l when it was the
+// last: the socket first, which wakes the reader, then the reader's join,
+// with l closing meanwhile so that one who needs it waits.
+func (s *SSDPSubsystem) releaseListener(l *ssdpListener) {
+	s.mu.Lock()
+	l.refs--
+	if l.refs > 0 {
+		s.mu.Unlock()
+		return
+	}
+	l.state = listenerClosing
+	reading := l.reading
+	s.mu.Unlock()
+	_ = l.conn.Close()
+	if reading {
+		<-l.readerDone
+	}
+	s.mu.Lock()
+	if s.listeners[l.key] == l {
+		delete(s.listeners, l.key)
+	}
+	close(l.gone)
+	s.mu.Unlock()
+}
+
+// readLoop reads l until its socket closes or the subsystem's context ends,
+// and dispatches each datagram. The shared SSDP read-error policy
+// (discovery.HandleReadErr, PR #469): a read-deadline timeout resets the
+// streak and continues (the idle tick that keeps a context cancel
+// responsive); a cancelled context or a closed socket exits; any other
+// persistent error logs, with a context-aware backoff so it cannot hot-spin
+// a core, and escalates to one Error once sustained.
+func (s *SSDPSubsystem) readLoop(l *ssdpListener) {
+	defer s.readers.Done()
+	defer close(l.readerDone)
+	buf := make([]byte, 2048) // SSDP packets are small; 2KB is plenty
+	oob := make([]byte, datagramMetaSpace)
+	streak := 0
+	for {
+		if s.ctx.Err() != nil {
+			return
+		}
+		n, src, m, err := l.conn.readDatagram(buf, oob, time.Now().Add(ssdpListenerReadDeadline))
 		if err != nil {
-			// Shared SSDP read-error policy (discovery.HandleReadErr, PR
-			// #469): a read-deadline timeout resets the streak + continues
-			// (the normal idle tick that keeps ctx-cancel responsive); a
-			// cancelled ctx OR a Stop()-closed socket (net.ErrClosed) exits;
-			// any other PERSISTENT error (interface down, hard socket fault)
-			// logs + a ctx-aware backoff so it can't hot-spin the CPU
-			// (Gemini HIGH on PR #521), escalating to one Error-level line
-			// once the streak is sustained.
-			if discovery.HandleReadErr(ctx, err, &consecutiveReadErrs, s.log) {
+			if discovery.HandleReadErr(s.ctx, err, &streak, s.log) {
 				return
 			}
 			continue
 		}
-		consecutiveReadErrs = 0
-		if armed {
-			if dst, ok := parseDatagramDst(oob[:oobn]); !s.searchedFor(dst, ok, src) {
-				continue
-			}
-		}
-		// Offload the response to a bounded worker goroutine so the
-		// listener returns to its read immediately — `handleMSearch`
-		// sleeps (the spec-mandated MX delay) and does blocking socket
-		// I/O, which must not stall the receive loop (a slow / full send
-		// buffer would otherwise drop concurrent searches from other
-		// renderers). `buf` is reused on the next iteration, so the
-		// packet MUST be copied before it crosses the goroutine boundary.
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		select {
-		case s.searchSem <- struct{}{}:
-			// This inner s.wg.Add(1) is safe to run concurrently with
-			// Stop()'s s.wg.Wait(), and does NOT risk the "WaitGroup
-			// misuse: Add called concurrently with Wait" panic. The panic
-			// only fires when a positive Add raises the counter UP FROM
-			// ZERO while a Wait is in progress. That can't happen here:
-			// this listener goroutine holds its OWN wg slot (the
-			// `defer s.wg.Done()` at the top of runMSearchListener) for
-			// its entire loop lifetime, so the counter is always ≥1 at
-			// this point — this Add takes it ≥1→≥2, never 0→1. And
-			// Stop()'s Wait() cannot return until this listener returns
-			// (after the socket is closed and the loop exits), by which
-			// time no further Adds are issued. Verified false-positive
-			// against an external review (2026-05-31); do not "fix" by
-			// moving the Add under s.mu or behind an atomic gate.
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				defer func() { <-s.searchSem }()
-				s.handleMSearch(ctx, pkt, src)
-			}()
-		default:
-			// Responder pool full — drop. The control point re-searches;
-			// SSDP discovery is best-effort by design.
-			s.log.Debug("M-SEARCH responder pool full; dropping",
-				slog.String("src", src.String()))
-		}
-	}
-}
-
-// handleMSearch parses an incoming packet for M-SEARCH, waits the
-// spec-mandated random [0, MX] delay, then sends one unicast response
-// per matching NotifyTarget back to the source over a SINGLE transient
-// socket. Runs on a bounded worker goroutine (see `runMSearchListener`).
-// Pure routing logic; the packet builders + target matcher + MX parser
-// are tested in isolation in ssdp_packet_test.go.
-func (s *SSDPAdvertiser) handleMSearch(ctx context.Context, packet []byte, src *net.UDPAddr) {
-	st := ParseMSearchST(packet)
-	if st == "" {
-		return // not an M-SEARCH or missing ST — silently drop
-	}
-	matches := MSearchTargets(st, s.targets)
-	if len(matches) == 0 {
-		return // ST didn't match anything we advertise
-	}
-
-	// Spec-mandated randomized reply delay in [0, MX]. Missing/zero MX
-	// falls back to a small fixed jitter so simultaneous searches still
-	// don't reply in a synchronized burst. The sleep is `select`-
-	// cancellable so `Stop()` unparks a sleeping responder instantly
-	// rather than leaking it for up to MX seconds.
-	var window time.Duration
-	if mx := ParseMSearchMX(packet); mx > 0 {
-		window = time.Duration(mx) * time.Second
-	} else {
-		window = defaultMSearchJitter
-	}
-	delay := time.Duration(rand.Int64N(int64(window) + 1))
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return
-	case <-timer.C:
-	}
-
-	// Dial the transient unicast socket ONCE (not per target). An
-	// `ssdp:all` search matches every NotifyTarget; re-dialing the same
-	// `src` per match is pure socket churn. One datagram per target/USN
-	// is still correct UPnP — only the socket is shared.
-	conn, err := net.DialUDP("udp4", nil, src)
-	if err != nil {
-		s.log.Debug("M-SEARCH response dial failed",
-			slog.String("src", src.String()),
-			slog.String("err", err.Error()))
-		return
-	}
-	defer conn.Close()
-
-	now := time.Now()
-	for _, target := range matches {
-		response := BuildMSearchResponse(s.cfg.Location, s.cfg.ServerToken, target.NT, target.USN, now)
-		if _, err := conn.Write(response); err != nil {
-			s.log.Debug("M-SEARCH response write failed",
-				slog.String("src", src.String()),
-				slog.String("nt", target.NT),
-				slog.String("err", err.Error()))
-		}
-	}
-}
-
-// announceAlive sends one NOTIFY ssdp:alive burst and reports its result to
-// notifyErrs: the initial burst Start sends and every periodic one.
-func (s *SSDPAdvertiser) announceAlive(sender *net.UDPConn) {
-	s.notifyErrs.Note(s.sendAliveAll(sender))
-}
-
-// sendAliveAll sends one NOTIFY ssdp:alive packet per NotifyTarget,
-// in order, and returns the burst's result: nil when every packet went
-// out, else the first failure. Takes the `sender` socket explicitly —
-// callers pass their thread-local copy so this never touches `s.sender`
-// (race-free with `Stop()`'s nil-set). Each failed write is also logged
-// at Debug, naming its target; the burst's result is what reaches the
-// default level, through notifyErrs. The nil guard is on the PARAMETER
-// (defensive — non-nil in practice on every live caller).
-//
-// A write that meets net.ErrClosed ends the burst without a line, and is
-// what the burst returns: Stop closed the sender under a burst the
-// periodic goroutine had begun, and every target left would meet the same
-// closed socket. Only Stop closes this socket, so that error names the
-// stop exactly, and discovery.SendFailureLog drops it, the rule it applies
-// to the discovery clients' M-SEARCH sends. Until 2026-09-28 such a burst
-// logged one line per remaining target.
-func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) error {
-	if sender == nil {
-		return nil
-	}
-	var first error
-	for _, target := range s.targets {
-		pkt := BuildNotifyAlive(s.cfg.Location, s.cfg.ServerToken, target)
-		if _, err := sender.WriteToUDP(pkt, s.notifyTo); err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			s.log.Debug("NOTIFY alive send failed",
-				slog.String("nt", target.NT),
-				slog.String("err", err.Error()))
-			if first == nil {
-				first = err
-			}
-		}
-	}
-	return first
-}
-
-// sendByebyeAll sends one NOTIFY ssdp:byebye packet per NotifyTarget.
-// Takes the `sender` socket explicitly (parameter nil guard is
-// defensive — Stop() passes a non-nil `s.sender` under the lock).
-func (s *SSDPAdvertiser) sendByebyeAll(sender *net.UDPConn) {
-	if sender == nil {
-		return
-	}
-	for _, target := range s.targets {
-		pkt := BuildNotifyByeBye(s.cfg.Location, s.cfg.ServerToken, target)
-		_, _ = sender.WriteToUDP(pkt, s.notifyTo) // best-effort; we're shutting down
+		streak = 0
+		s.dispatch(l, buf[:n], src, m)
 	}
 }
 
@@ -626,19 +513,20 @@ func interfaceName(iface *net.Interface) string {
 	return iface.Name
 }
 
-// pinMulticastInterface pins conn's outgoing multicast to iface. Start calls
-// it on each advertiser's sender and only warns when it fails, so that
-// advertiser's NOTIFYs take the OS default interface. The tests that start an
-// advertiser on the loopback interface make the same call on a socket of
-// their own first, and skip where it fails: on that fallback their NOTIFYs
-// would reach the LAN (loopbackInterface, backlog B38).
+// pinMulticastInterface pins conn's outgoing multicast to iface. Every
+// endpoint's sender is pinned so; the MediaServer only warns when it fails,
+// so that endpoint's NOTIFYs take the OS default interface, and a strict
+// registration refuses the endpoint. The tests that start an advertiser on
+// the loopback interface make the same call on a socket of their own first,
+// and skip where it fails: on that fallback their NOTIFYs would reach the
+// LAN (loopbackInterface, backlog B38).
 func pinMulticastInterface(conn *net.UDPConn, iface *net.Interface) error {
 	return ipv4.NewPacketConn(conn).SetMulticastInterface(iface)
 }
 
-// openNotifySender opens the socket an advertiser writes its NOTIFYs from:
+// openNotifySender opens the socket an endpoint writes its NOTIFYs from:
 // UNCONNECTED, on the wildcard address and a port of the kernel's choosing.
-// Start pins it to the advertiser's interface before anything is sent, and
+// It is pinned to the endpoint's interface before anything is sent, and
 // every NOTIFY is written to the group with WriteToUDP, so the kernel picks
 // the datagram's route and source address from the pinned interface on each
 // send, as the discovery clients' M-SEARCH sockets have always had it.

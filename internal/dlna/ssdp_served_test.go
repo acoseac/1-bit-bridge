@@ -3,7 +3,6 @@ package dlna
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"net"
 	"net/http"
 	"net/netip"
@@ -49,34 +48,23 @@ func firstAnswer(c *net.UDPConn, wait time.Duration) string {
 	}
 }
 
-// startArmedMSearchListener runs adv's M-SEARCH read loop on a loopback
-// socket of the test's own, armed as Start arms the real listener, until the
-// test ends, and returns the socket's address. A unicast to it reaches the
-// loop as a search sent to 127.0.0.1 would reach an advertiser's
-// 0.0.0.0:1900.
-func startArmedMSearchListener(t *testing.T, adv *SSDPAdvertiser) *net.UDPAddr {
+// startArmedMSearchListener registers the device cfg describes with the
+// subsystem's real read loop running on a loopback socket of the test's own,
+// armed as a listener is (registerOnSocket), until the test ends, and
+// returns the socket's address. A unicast to it reaches the loop as a search
+// sent to 127.0.0.1 would reach a listener's 0.0.0.0:1900.
+func startArmedMSearchListener(t *testing.T, cfg testAdvertiserConfig) *net.UDPAddr {
 	t.Helper()
 	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("bind a loopback listener: %v", err)
 	}
-	if !adv.armListener(l) {
-		_ = l.Close()
-		t.Fatal("the listener could not be armed")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	adv.wg.Add(1)
-	go adv.runMSearchListener(ctx, l, true)
-	t.Cleanup(func() {
-		cancel()
-		_ = l.Close()
-		adv.wg.Wait()
-	})
+	registerOnSocket(t, l, cfg.registration())
 	return l.LocalAddr().(*net.UDPAddr)
 }
 
 // TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes pins the
-// SSDP half of backlog B48 through the advertiser's real read loop. Its
+// SSDP half of backlog B48 through the SSDP subsystem's real read loop. A
 // listener is bound to 0.0.0.0:1900, so a unicast M-SEARCH sent to any
 // address of the host reached it: measured from a tailnet peer, one sent to
 // the host's tailnet address on 1900 was answered, with the LAN LOCATION.
@@ -102,15 +90,13 @@ func TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes(t *testing.T
 			judged.set(tc.as)
 			sink := newLogSink()
 			const location = "http://192.168.1.20:7790/dlna/description.xml"
-			adv := NewSSDPAdvertiser(SSDPConfig{
+			search := rootDeviceSearch(t, startArmedMSearchListener(t, testAdvertiserConfig{
 				UDN:         "uuid:b48b48b4-8b48-4b48-8b48-b48b48b48b48",
 				Location:    location,
 				ServerToken: "test",
 				Logger:      sink.logger(),
 				served:      macServedJudgedBy(&judged),
-			})
-			adv.log = sink.logger()
-			search := rootDeviceSearch(t, startArmedMSearchListener(t, adv))
+			}))
 			if tc.served {
 				if got := firstAnswer(search, 5*time.Second); got != location {
 					t.Errorf("a search judged as sent to %q was answered %q, want an answer naming %s", tc.as, got, location)
@@ -128,21 +114,19 @@ func TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes(t *testing.T
 }
 
 // TestEveryAdvertiserAnswersByTheServersServedAddrs pins the wiring: Start
-// hands each advertiser the servedAddrs its listener judges by, so the two
-// halves of B48 cannot disagree, and makes one from the configuration when
-// none was set.
+// registers the MediaServer with an admission that judges by the servedAddrs
+// its HTTP listener judges by, so the two halves of B48 cannot disagree, and
+// makes one from the configuration when none was set.
 func TestEveryAdvertiserAnswersByTheServersServedAddrs(t *testing.T) {
 	s := startLoopbackDLNA(t, ServerConfig{}, nil)
 	if s.served == nil {
 		t.Fatal("Start left the server with no servedAddrs")
 	}
-	if len(s.ssdps) == 0 {
+	if s.ssdpHandle == nil || s.ssdpActive == 0 {
 		t.Fatal("no advertiser started")
 	}
-	for i, adv := range s.ssdps {
-		if adv.cfg.served != s.served {
-			t.Errorf("advertiser %d answers by a servedAddrs of its own, not the server's", i)
-		}
+	if a, ok := s.ssdpHandle.admission.(ssdpServedAdmission); !ok || a.served != s.served {
+		t.Errorf("the MediaServer's SSDP registration answers by %#v, not the server's servedAddrs", s.ssdpHandle.admission)
 	}
 	if _, ok := s.served.advertised[netipAddrOfURL(t, s.cfg.ServerURL)]; !ok {
 		t.Errorf("the server's own address (%s) is not among what it advertises: %v", s.cfg.ServerURL, s.served.advertised)
@@ -164,22 +148,21 @@ func netipAddrOfURL(t *testing.T, raw string) netip.Addr {
 }
 
 // TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination pins what the
-// read loop decides each M-SEARCH by: one sent to the SSDP group is answered
-// without asking servedAddrs, since the group is no address of the host and
-// a group datagram reaches the listener only on the interface it joined
-// (B71). Every other destination is judged, and one whose destination was
-// asked for and not reported is refused, since it could be a unicast to the
-// tailnet.
+// MediaServer's admission (ssdpServedAdmission.admits, the advertiser's
+// searchedFor until B470 PR 5a1) decides each M-SEARCH by: one sent to the
+// SSDP group is answered without asking servedAddrs, since the group is no
+// address of the host and a group datagram reaches the listener only on the
+// interface it joined (B71). Every other destination is judged, and one
+// whose destination was asked for and not reported is refused, since it
+// could be a unicast to the tailnet.
 func TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination(t *testing.T) {
 	sink := newLogSink()
-	adv := NewSSDPAdvertiser(SSDPConfig{
-		UDN:         "uuid:b48b48b4-8b48-4b48-8b48-b48b48b48b48",
-		Location:    "http://192.168.1.20:7790/dlna/description.xml",
-		ServerToken: "test",
-		served:      newTestHost(macWithTailscale()...).served(nil),
-	})
-	adv.log = sink.logger()
-	src := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 30), Port: 50000}
+	adm := ssdpServedAdmission{served: newTestHost(macWithTailscale()...).served(nil)}
+	searchedFor := func(dst netip.Addr, known bool, src netip.AddrPort) bool {
+		d := SSDPDatagram{Source: src, Destination: dst, DestinationValid: known}
+		return adm.admits(sink.logger(), kindOf(SSDPListenerCaps{DestinationReporting: true}, d), d)
+	}
+	src := netip.MustParseAddrPort("192.168.1.30:50000")
 	cases := []struct {
 		name  string
 		dst   netip.Addr
@@ -195,7 +178,7 @@ func TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination(t *testing.T) 
 		{"the_group_not_reported", ssdpGroupAddr, false, false},
 	}
 	for _, tc := range cases {
-		if got := adv.searchedFor(tc.dst, tc.known, src); got != tc.want {
+		if got := searchedFor(tc.dst, tc.known, src); got != tc.want {
 			t.Errorf("%s: searchedFor(%v, known %v) = %v, want %v", tc.name, tc.dst, tc.known, got, tc.want)
 		}
 	}

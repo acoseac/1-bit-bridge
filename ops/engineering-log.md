@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration](#2026-10-23--b470-pr-5a1-one-ssdp-subsystem-for-several-devices-with-the-mediaserver-its-one-registration)
 - [2026-10-23 — B514 round 3: symlinked upper-path mount evidence](#2026-10-23--b514-round-3-symlinked-upper-path-mount-evidence)
 - [2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence](#2026-10-23--b514-round-2-nested-read-only-overlays-windows-permission-fixtures-and-btrfs-evidence)
 - [2026-10-23 — B514: durable-writer evidence and refusal follow-ups](#2026-10-23--b514-durable-writer-evidence-and-refusal-follow-ups)
@@ -57756,3 +57757,374 @@ check with `upperMountID` (a shared variable first, which a direct edit of
 `platformMedium`'s call still escaped, the fix's own review found). The
 strict reader's check is answered by a stub, so the records now say it
 shows the Go wrapper resolves nothing, not statx's no-follow flag.
+
+## 2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration
+
+**Round 2 — shutdown ownership, one deadline, strict reply routing and admission forms.**
+Four fake-network regressions failed before the fixes: Close returned while a
+withdrawal still held its sockets and byebye; a 100 ms Close racing Register or
+Update in a write took about two seconds; strict replies discarded the selected
+endpoint; and pointer admissions skipped strict validation or opened sockets
+with typed nils. Withdraw now keeps its handle listed through retirement. Close
+stores its original deadline, gives it to rollbacks, bounds its in-flight wait,
+and interrupts every owned NOTIFY sender at expiry, including unpublished and
+retiring endpoints, then joins cleanup. Strict replies bind their endpoint's
+local IPv4 and select its outgoing interface: Linux IP_PKTINFO on each send,
+macOS IP_BOUND_IF, Windows IP_UNICAST_IF in network byte order; a failed pin
+sends nothing and warns once per registration. The MediaServer retains its
+ordinary routed DialUDP path and the unchanged pre-extraction wire goldens.
+Register normalizes supported admission pointers into values and rejects typed
+nils and unknown implementations before opening sockets. The rule and its
+platform/lifecycle details live in `dlna-upnp.md` and
+`ops/History-rules-dlna-upnp.md`; the round-2 tests pin each finding through the
+fake network and host socket seams. Four standalone negative-control patches
+accompany the round-2 report outside the repository; all four compile and fail
+their predicted tests independently. The new tests and available SSDP suites
+pass with `-race -count=5`; a fake-network replay through the MediaServer's
+registration builder matches the original golden bytes. All six dlna fuzzers
+pass 20-second runs, vet and docs-check pass, and Linux/Windows vet and test
+compiles pass on amd64 and arm64. Full package test and race runs were attempted
+but the sandbox refuses loopback TCP/UDP and Unix-socket binds; the original
+real-network goldens skip there and still need an unrestricted runner.
+
+**Round 3 — strict endpoint startup, retirement's changing deadline, and the
+portable host test.** The Register and Update tables first failed on missing,
+unspecified and IPv4-mapped Local addresses: they opened sockets and announced
+endpoints the reply factory would refuse. IPv6 was already refused by the
+generic endpoint check, but did not report the strict capability error. Both
+entry points now use the reply factory's same address/index check before any
+socket opens (`checkStrictReplyAddress`); a retained Update endpoint continues
+to answer. A Withdraw parked in its first byebye before Close began originally
+returned only `net.ErrClosed` when Close's earlier deadline interrupted it.
+Retirement now re-reads Close's deadline before each byebye write, sets that
+write's deadline, skips a target after expiry, and uses the current deadline
+for its join and final expiry result. A second test publishes Close's state
+between writes with no watcher running: before the fix it kept the one-second
+write budget and attempted all remaining targets after expiry. Both tests now
+pass, with the withdrawal returning `context.DeadlineExceeded`.
+The host-factory test keeps bind/pin ordering checks on every platform and
+expects `ErrSSDPStrictCapability` with zero writes outside Linux/macOS/Windows.
+An overlay running the real unsupported-platform write stub reproduced the
+original test failure and passes the corrected expectation; this is a host
+simulation, not a native unsupported-platform runtime result. The new tests
+pass `-race -count=5`. Seven independently applied controls (four retained,
+three new) compile and fail every predicted test; patches, commands, full test
+names, red/green logs and validation details are in the round-3 scratch report.
+No golden packet or MediaServer routing policy changed. The rules and their
+History carry all three requirements beside the code. Validation on Go 1.27.2:
+the 76 available SSDP tests pass five race-enabled repetitions (14 socket
+tests skip each time); all six dlna fuzzers pass 20-second runs; whole-tree vet,
+Linux/Windows vet and test compiles on amd64/arm64, the doc/wiring sweeps and
+docs-check pass. Full package plain/race and SSDP runs were attempted; the
+sandbox refuses the listener binds. An initial disk-full failure was recovered
+by clearing disposable foreign object entries in this task's Go cache and
+retrying sequentially; those retries reach the socket restrictions.
+
+**Round 4 — deadline installation and cleanup's result.** Both regressions
+failed first on the committed round-3 tree with only the parking seam added.
+A withdrawal paused between reading and installing its deadline sent one
+byebye after Close began with an expired deadline, before its watcher ran;
+its sender's installed deadline was still later than Close's. A withdrawal
+parked in the listener's close returned nil after Close's deadline expired;
+its own deadline expiring there also returned nil. `ssdpOwnedSender` now
+clamps every deadline installation under `s.mu`, and Close clamps all current
+owned sender deadlines under that same lock when it publishes its deadline.
+A stale install cannot raise the cap, and changing the deadline cuts a write
+already in progress. Close snapshots its handles at that same beginning.
+`withdraw` decides its final expiry after all releases, under `s.mu` together
+with handle removal, so Close owns precisely the withdrawals it saw. The
+final expiry check before `retire`'s cleanup was removed in this round; round 5
+restores it after cleanup for callers that never enter `withdraw`. The join and
+pre-write reads remain because they decide whether to skip and report a send.
+The new tests also keep the positive release-in-time and completed-before-Close
+cases. Withdraw and Close document this ownership boundary. The rule and its
+History carry both requirements. The round-4 scratch report records red/green
+runs, the nine standalone controls (seven carried forward with adaptations,
+one per new rule), and validation including sandbox-denied socket tests.
+
+**Round 5 — every retirement reports expiry through cleanup.** Round 4's
+replacement check in `withdraw` missed Register's rollback and Update's removal
+and rollback, which call `retire` directly. Red-first tests on the committed
+round-4 code returned only the socket's `i/o timeout` after a byebye blocked
+until its deadline in all three paths. Update also returned nil (or just
+`ErrSSDPClosed`) after its listener release crossed its own deadline or Close's
+shorter one. `retire` now checks again after sender close, listener release and
+the reader join, re-reading the retirement deadline when the normal-send join
+did not already expire. It adds `context.DeadlineExceeded` if that result does
+not already carry it. `withdraw` retains its final check under `s.mu` with
+handle removal, adding the error only when absent; a blocked-byebye withdrawal
+asserts it reports expiry once. Another test parks after retirement completes
+and starts Close before removal, keeping that ownership boundary covered even
+with `retire`'s restored check. No new production seam, packet builder, golden
+or routing change. The rules and their History now state both checks. The
+round-5 scratch report records the red/green runs, independently applied
+controls (round 4's retained or re-cut, plus retirement and duplicate-reporting
+controls), exact commands and validation limits.
+
+**CodeRabbit's review of #1329.** An Update that Close overtook rolled back
+the endpoints it had added but still listed them in `Active` with no error,
+against `SSDPEndpointResult`'s contract (`Err` says why an endpoint is not
+active). They are now moved to `Failed` with `ErrSSDPClosed`, as Register's
+closed path reports its staged endpoints; the kept endpoints stay active
+until Close withdraws the handle. `TestCloseBudgetIncludesInflightWrites`
+now checks both operations' results, and failed on the earlier code (the
+addition listed active, nothing failed). Round 5's review also found that
+such an Update reports `DeadlineExceeded` once per retirement, twice in that
+race; each retirement did run out of time and `errors.Is` is unaffected, so
+that stays.
+
+### Why
+
+B470 makes the bridge's player an OpenHome Source on the LAN (PR 5a2),
+and it must be found by SSDP beside the DLNA MediaServer. Every SSDP
+listener binds the wildcard on port 1900, and the kernel hands a unicast
+M-SEARCH to ONE of them, so a second device with listeners of its own
+would take unicast searches meant for the first. The advertiser had one
+listener, one sender and one 16-slot responder pool per advertise
+endpoint (`server.go`'s `startAdvertisers`, `ssdp.go`'s
+`SSDPAdvertiser`). This PR extracts registrations over shared listeners
+and registers only the MediaServer; test-only devices prove the seam.
+
+### What it is
+
+- `dlna.SSDPSubsystem` (ssdp.go): `Register` returns a handle and
+  per-endpoint results (`SSDPResult`: Active and Failed, each with its
+  position, listener capabilities, pin, error and problems); the handle's
+  `Update` takes the caller's whole new endpoint snapshot and `Withdraw`
+  ends it; `Close` withdraws the rest and refuses every later call
+  (`ErrSSDPClosed`). A registration (`SSDPRegistration`) is a UDN,
+  ordered targets, a SERVER token, ordered `SSDPEndpoint`s (an interface,
+  an incarnation token, one complete LOCATION, an optional local
+  IPv4/prefix), an admission and responder slots per endpoint.
+- Listeners (ssdp.go) are interned by (index, name, incarnation) under
+  the subsystem's lock, in three states: opening (another acquirer waits
+  for it), live, closing (another acquirer waits for its join, then opens
+  a fresh one). They are reference counted by the endpoints that use
+  them; the last release closes the socket, then joins the reader. A
+  listener starts reading when the dispatch table first lists an endpoint
+  on it, so a search that reaches it before the endpoint's start burst
+  waits in the socket and is answered after it, as before. The lock is
+  never held across socket I/O, a sleep or a join.
+- Dispatch (ssdp_dispatch.go) parses a datagram once (`plan`), then each
+  registration matches and admits it on its own and picks one endpoint;
+  only then is one of that endpoint's responder slots taken.
+- Transport (ssdp_transport.go): the host's sockets behind a small
+  interface, so the tests drive the subsystem over a fake network.
+  `listenSSDP` returns its confinement result beside the socket;
+  `hostSSDPTransport.arm` arms destination and arrival reporting by a
+  call each.
+- Metadata (ssdp_dst*.go): `datagramMeta` carries the destination and the
+  arrival index, each with a valid flag: x/net's FlagDst and
+  FlagInterface over in_pktinfo on Linux and macOS (`ipi_addr`, never
+  `ipi_spec_dst`), and IN_PKTINFO's four-byte index after IN_ADDR through
+  WSARecvMsg on Windows (`parseWSAPktinfo`, both pointer sizes). Absent,
+  cut short or malformed control data reports neither field; an index of
+  0 or past an int32 is no interface.
+- Serve (cmd/bridge): `newServeSSDP` is the one place a subsystem is
+  built; runServe hands it to the MediaServer (`dlnaWiring.SSDP` →
+  `ServerConfig.SSDP`) and defers its Close ahead of DLNA's Stop, so it
+  runs after it. A `dlna.Server` given none builds a private one (tests).
+  With DLNA off nothing registers: nothing is bound, nothing sent.
+
+### The MediaServer, preserved
+
+Its registration is exactly `advertiseEndpoints()`: NotifyTargetsFor,
+SSDPServerToken, 16 slots per endpoint, 14-minute repeats, the single
+`Interface + ServerURL` fallback. Its admission is the advertiser's
+`searchedFor` moved verbatim (`ssdpServedAdmission.admits`): the group is
+admitted; any other reported destination by the server's own refreshing
+`servedAddrs`; an unreported one on an armed listener refused with its
+log line; every search on a listener that could not be armed, unchecked,
+as before B48. No arrival test and no source test. It answers a group
+search from its endpoint on the listener that read it (a listener that
+could not be confined keeps its fallback), and a unicast from its
+endpoint on that listener, or its first endpoint when the listener is
+another device's; never by the destination, so with the MediaServer
+alone B119 is exactly what it was.
+
+The evidence, before the extraction (`ee523ef0`): black-box goldens
+through the real `Server` on the loopback interface, every header
+written out, all green on the old advertiser: the start, repeat and stop
+bursts (five targets, rootdevice first, one burst per endpoint in order),
+the LOCATION of a pinned ServerURL as written (IPv4, bracketed IPv6, a
+name), the answers to a group search for each kind of ST with DATE
+checked and normalized (ssdp:all five in order, each with its own NT as
+ST; one for each target; none for another type or UUID; MX honoured),
+and Start's partial and all-failed outcomes (log lines, the
+`ssdpInterfaces` count, the error the wiring reads, the HTTP listener
+taken back down). They pass unchanged after it; only the repeat test's
+construction line changed (it builds through the new API with a 50 ms
+interval). cmd/bridge's endpoint gathering is tested on synthetic
+interfaces: one endpoint per member, its first IPv4 that is not loopback
+or unspecified (a 169.254 one included, which the caller's comment said
+was skipped: corrected), aliases adding nothing.
+
+### What changed for the MediaServer, deliberately
+
+- A responder slot is taken only after parsing, matching, admission and
+  the endpoint's choice: an unrelated datagram takes no slot and starts
+  no goroutine (the advertiser took a slot and a goroutine for every
+  datagram its admission passed, then parsed).
+- A withdrawal closes the registration's gate (no answer joins after),
+  cancels its delays, closes its answer sockets (one dialled meanwhile
+  included, through `context.AfterFunc`), joins every send, and only then
+  sends the byebye. The advertiser sent its byebye first and cancelled
+  after, so a burst in flight could follow it. A datagram already handed
+  to the kernel cannot be recalled: the guarantee is no normal send once
+  the byebye begins, and nothing once Withdraw returns.
+- Every burst is bounded to one second from its first write
+  (`ssdpBurstDeadline`), after any MX delay; the advertiser's writes had
+  no deadline.
+- A withdrawal (or Close) has five seconds from entry, shared across
+  every endpoint and registration, shortened by a caller's deadline and
+  never by its cancellation; past it the sends in progress are cut (their
+  sockets closed), no byebye is sent, and everything is still released
+  and joined, returning context.DeadlineExceeded.
+- With two MediaServer endpoints on one interface (no wiring produces
+  that), one answer set per search, from the first: the listener is
+  shared.
+- Stop still withdraws SSDP before GENA and HTTP, and now says so in the
+  log only when the withdrawal ran out of time (Warn) or a byebye failed
+  (Debug).
+
+### Strict registrations, for 5a2
+
+Every endpoint needs destination and arrival reporting, receive
+confinement and a pinned sender, or it does not start and sends
+nothing (`ErrSSDPStrictCapability`); a strict endpoint names its
+interface. A group search must arrive, by its reported index, on the
+interface of the listener that read it; a unicast needs that listener's
+two reports (not its confinement) and goes to the endpoint whose `Local`
+address it was sent to on the interface it arrived on. Then the pure,
+non-blocking `SSDPStrictAdmission.Source` hook judges the searcher; the
+test device's hook is 5a2's on-link rule. A listener's identity is never
+taken for an arrival index, and a strict refusal never closes a listener
+the MediaServer shares.
+
+### Updates, for 5a2
+
+An equal endpoint (index, name, incarnation, local address, LOCATION) is
+kept with its sender, timer, slots and membership. Additions are staged
+first without announcing; removals are withdrawn as above (byebye
+best-effort: an address already gone fails it and the removal stands);
+then additions announce. When a removal leaves endpoints, each repeats
+its alive at once through its own timer goroutine, so its failure log
+keeps one writer. A failed addition is reported and never substituted;
+an Update that leaves nothing parks the registration with no socket. A
+new incarnation gets its own listener beside one a non-reconciling
+registration still holds. The MediaServer never updates (incarnation 0,
+startup endpoints); 5a2 owns the watcher.
+
+### The independent review of the brief, finding by finding
+
+- **High, the one-second deadline drops answers.** Taken: the deadline
+  starts at the burst's first write, after the MX delay
+  (`TestABurstsWritesAreBoundedFromItsFirstWrite`: an MX 5 answer delayed
+  4 s writes all five; with the deadline taken at dispatch, 0 of 5).
+  Alive bursts have no inter-packet pause in this code, so their deadline
+  is from their first write too.
+- **Medium, shared listener table races.** Taken: opening, live and
+  closing states under one table lock with no I/O under it; a closing
+  listener is waited for, then opened afresh; Close sets a terminal state,
+  waits for in-flight Register and Update calls, and a Register that loses
+  the race returns ErrSSDPClosed holding nothing
+  (`TestAListenerClosingIsNeverOpenedTwice`,
+  `TestCloseWaitsForARegisterInFlight`).
+- **Medium, shutdown suppressing byebye.** Taken: the byebye asks no
+  context, the withdrawal's budget is detached from cancellation and
+  only a caller's deadline shortens it, and pre-send checks apply to alive
+  and answer sends only. Serve's context is cancelled before any teardown
+  runs on a signal, so the order the review asks for (withdraw before the
+  parent is cancelled) cannot hold there; with the byebye detached it does
+  not need to (`TestAByebyeGoesOutAfterTheParentContextIsCancelled`).
+- **Medium, partial removal's byebye drops the device.** Taken, as byebye
+  then an immediate alive on every remaining endpoint, the shape the brief
+  already gives a LOCATION change; an unconditional byebye only for the
+  last endpoint (`TestAnUpdateKeepsWhatItKeeps`).
+- **Medium, the incarnation token versus interning.** Taken: the key is
+  (index, name, incarnation); a new incarnation has its own listener and
+  membership beside a stale one still held; the caller mints the token
+  and the MediaServer's is 0 forever
+  (`TestANewIncarnationGetsAListenerOfItsOwn`).
+- **Medium, scope.** Not split: the brief puts the arrival index, the
+  strict contract and the update engine in 5a1, and its rule wins. The
+  history is split instead, so a reviewer can read the preservation apart
+  from the new mechanisms: goldens first, then the platform metadata,
+  then the extraction, then the tests, then serve.
+- **Low, the unconfined fallback grows with another registration.**
+  Taken: the MediaServer refuses a group search whose valid arrival index
+  names an interface only another registration joined; it cannot fire
+  with the MediaServer alone
+  (`TestTheMediaServerKeepsItsUnconfinedFallbackButNotForAnotherDevicesInterface`).
+  It is the one arrival test the MediaServer has, and only for group
+  datagrams; unicast admission is untouched.
+- **Low, strict unicast and the kernel's choice of socket.** Taken:
+  unicast needs the reading listener's destination and arrival reports,
+  not its confinement
+  (`TestAStrictUnicastNeedsReportingNotConfinementOfTheListenerThatReadIt`).
+- **Low, a private instance in production.** Taken: the wiring injects
+  serve's; a private one only when none is given;
+  `TestServeGivesTheMediaServerItsOneSSDPSubsystem` reads the wiring
+  (a serve test cannot start DLNA without advertising on the LAN).
+
+### Red first, and the controls
+
+Each new rule's test was shown red with the rule removed: 44 mutations
+of the committed code, one per rule, each restored by checking its file
+out again, the tree clean after every one; 44 went red, none by a build
+failure. Among them: the shared listener (two listens), the incarnation
+key, the closing and Close races, group and unicast dispatch, B119 by
+destination, the fallback refusal and the fallback itself, one answer
+set and the first alias, no arrival test, the server's own servedAddrs,
+each strict proof and the hook, confinement for unicast, each strict
+capability and the pin, the destination guard under an arrival failure
+(in the host transport's arm and in dispatch), slots after matching and
+per endpoint, the byebye order, both burst deadlines, the byebye's
+detachment, the budget's cut and the caller's deadline, the answer
+socket's close, every update rule, the endpoint generation, the last
+reference, the three wiring points, Stop's order, the reader's start,
+the injected subsystem's survival of a failed start, the strict
+interface check and the start burst's failure log. One test was red on
+the code before its fix: `TestAFailureThatLandsDuringAWithdrawalIsStillReported`
+(an alive burst a withdrawal cut short returned "cancelled" after a
+write had already failed, so the failure log heard nothing; the error
+decides, never the context). The metadata parsers' controls: a guessed
+index, and the WSA index read from IN_ADDR. FuzzSSDPDispatch (a pure
+`plan` over three listeners and two registrations) ran 2.9 million
+executions on this Mac; the two control-message fuzzers about a million
+each. `TestAnUpdateKeepsWhatItKeeps` failed once in a `-race -count=5`
+run, a race in the test (it resumed at a burst's first packet), fixed
+before the final runs.
+
+### Platform coverage
+
+Run here (macOS arm64): the whole dlna package, `-race -count=5` on the
+SSDP suites, `-count=20` on the fake-network tests, the live loopback
+tests (group and unicast arrival index, host arming). Linux and Windows
+were cross-compiled and vetted only: the Linux confinement tests, the
+netns test (which skips on CI too), the in_pktinfo parser test's Linux
+run and the Windows WSARecvMsg arrival test run on CI's legs.
+`TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` skips on this
+Mac after a 75 s connect timeout to its own LAN address (environment, no
+SSDP).
+
+### The gate
+
+Through the build lock, on go1.27.3 (GOTOOLCHAIN=local): `make fmt vet
+docs-check` clean, `go fmt` rewriting nothing; `make test`'s flags
+(`-race -timeout 30m`) over every package, split so each run fits a
+ten-minute call (the rest, `internal/manifest` whole in 1,045 s,
+`internal/admin` in CI's four shards, `internal/api`, `cmd/bridge` in
+three name shards, 857 names): green but for
+`TestAProbeOfASpecificBoundIPIsNotLogged` (internal/handshakelog), which
+fails on this Mac (B520, left as it is); `make build-all`, six targets;
+`go vet` of internal/dlna and cmd/bridge for linux and windows on amd64
+and arm64, and darwin/amd64.
+
+### Not here
+
+The Source, its HTTP listener, descriptions and SOAP, and automatic
+address reconciliation (5a2); MediaServer re-enumeration; IPv6 SSDP;
+B119, B120 and B121 (unchanged). The subsystem isolates responder
+capacity, not UDP delivery: a flood still shares the kernel's queues
+and a core.

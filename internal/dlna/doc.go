@@ -12,8 +12,9 @@
 // SSDP advertises and discovers ONLY on LAN-eligible interfaces (RFC1918,
 // IPv6 ULA other than Tailscale's, link-local; IsLANEligibleInterface).
 // The HTTP listener binds the address `dlna.listenAddress` names, a
-// wildcard by default, and each advertiser's M-SEARCH listener
-// 0.0.0.0:1900, and both serve only the LAN addresses of those interfaces
+// wildcard by default, and each SSDP listener (one per interface, shared
+// by every device of the SSDP subsystem, SSDPSubsystem) 0.0.0.0:1900, and
+// both serve the MediaServer only on the LAN addresses of those interfaces
 // (servedAddrs): a connection accepted on any other address of the host,
 // a tailnet's included, is closed unread, and a search sent to one is not
 // answered (backlog B48). The tsnet opt-in (EligibilityOpts.TsnetIfaceName,
