@@ -1181,3 +1181,16 @@
   **`docker.yml` runs only on tags and dispatch**, so a Dockerfile PR gets no
   CI build at all: verify on a real daemon under BOTH builders
   (`DOCKER_BUILDKIT=0` forces the legacy one). (#983)
+
+## B514 — deterministic medium evidence and controls (2026-10-23)
+
+Mount tables, device identities and statfs sequences are explicit fixtures.
+Repeated A,B,A and a third-read agreement exercise different outcomes:
+inconclusive after the retry bound, and accepted at the last permitted read.
+No new test reads the host's proc/sys. A Linux-only adapter assertion is
+cross-compiled and vetted on macOS, not claimed to have executed there.
+The mode-0 permission fixture skips as root; the ENOENT case remains runnable.
+The requested uncommitted tree is preserved using exact file snapshots for
+negative controls, never git restore or stash. Each patch applies alone to
+the final tree and each predicted failing assertion is named in the scratch
+manifest. Compile failures do not count as successful negative controls.

@@ -419,20 +419,25 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   fsyncs none of the parents a copy-up creates (Codex on round 9: round 9
   then synced the file's directory alone). **On an overlay every directory
   above `root`, up to the root of its mount, is synced too, once the write
-  lands and in the probe** (`copyUpAncestorsOf`, `ancestorsOnMount`, by
+  lands and in the probe** (`copyUpsFrom`, `ancestorsOnMount`, by
   mount ID): a write below a root in the lower layer alone copies `root` up,
   and every directory above it up to the overlay's own root, and those
   entries are the copy-up's, which no caller could have synced; a crash that
   took them would take the reservation and keep the identity below (Codex on
   round 10, which round 10 left as an owner item; the orchestrator chose
-  this fix). A directory there the service cannot open is named, with the
-  fix: read access for the service, or a data directory on a filesystem that
-  is not an overlay (the Claude API on round 11). **A root on a bind of a
+  this fix). A directory there the service cannot open is named; only
+  `fs.ErrPermission` advises read access for the service or leaving the
+  overlay. ENOENT and other open errors retain their cause without that
+  advice (`syncAbove`, B514). **A root on a bind of a
   directory inside an overlay, its mount's root field another than `/`, is
-  refused** (`ErrMediumUnknown`, wherever the overlay would be taken, naming
+  refused** (`ErrOverlayBind`, also matching `ErrMediumUnknown`, wherever a
+  writable overlay would be taken, naming
   the bind's root and the fix: a data directory on a filesystem that is not
   an overlay, or on the overlay's own mount): the copy-ups above it are out
-  of that mount's reach. An operator's systemd `ProtectSystem=strict` with
+  of that mount's reach: a crash risk even on persistent storage, not
+  evidence that the medium loses data at reboot. A read-only overlay with
+  no upper layer is taken, a bind included, so the write itself fails EROFS.
+  An operator's systemd `ProtectSystem=strict` with
   `ReadWritePaths` on an overlay root makes such a bind of the data
   directory, as do a chroot and a container's bind of an overlay host's
   directory; our own unit adds no sandboxing, and an overlay root's own
@@ -447,7 +452,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (the Claude API on round 9: every barrier answered there, and a reboot
   took the reservation and kept the identity, so IDs and tokens repeated
   with no crash at all). An overlay's upper layer is the one the mount table
-  names on the line of `root`'s own mount ID (`mountLine`, `overlayLayer`),
+  names on the current overlay's own mount-ID line (`mountLine`, `overlayLayer`),
   never a line picked by its mount point's spelling, the line split on the
   single ASCII space the kernel writes between fields and nowhere else
   (Codex on round 10: `strings.Fields` split a lowerdir at a U+00A0 the
@@ -456,17 +461,20 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   source and the super options, none empty but the source, which the kernel
   writes empty for a filesystem mounted with none: the Claude API on round
   11), and naming no upper layer only for an overlay that is read-only; and
-  the path that names it must reach here the filesystem the overlay reports
-  (statfs's totals, which an overlay takes from its upper layer), **read for
-  up to three rounds where they differ** (`upperAsReached`): the path is
-  taken as soon as it matches a read of the overlay beside it; totals that
-  moved between two reads of the overlay are no tmpfs's or ramfs's, which no
-  write moves, so the upper layer is taken for what the path reaches (both
-  reviewers on round 10: XFS's inode total and ZFS's block total move with
-  ordinary writes, and round 10 refused such overlays at random, at New and
-  mid-run); and only totals that held still in every round while the path's
-  differed name another filesystem (both reviewers on round 11: totals that
-  moved and came back, A, B, A, still refused at random). Where they do not,
+  the path that names it is compared with the overlay's statfs totals,
+  **read for up to three rounds where they differ** (`upperAsReached`).
+  Agreement, including on the third upper read, is taken; moving overlay
+  totals retain the existing check that rules out a tmpfs or ramfs path.
+  Exhausting the retries is **inconclusive**, never proof of another
+  filesystem: repeated A,B,A samples can come from legitimate XFS/ZFS.
+  The upper path's `st_dev` is matched to its own mount-ID line's
+  major:minor and fstype (`upperMountEvidence`), never a line selected by
+  spelling. This establishes the filesystem visible at that path only,
+  not the overlay's backing across mount namespaces. A persistent mismatch
+  stays `ErrMediumUnknown`, naming that evidence or why it was unavailable,
+  with advice to retry after filesystem activity settles and to check the
+  service's mount namespace. No missing evidence or mismatching memory
+  upper is taken for durable storage. Likewise,
   where the table cannot be read or names the upper layer by a relative
   path, past eight overlays one over another, and on fuse-overlayfs, told by
   its type's subtype or, for a build that sets none, its source, whose upper
@@ -493,8 +501,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   every call, a file directly in `root` included, so that the probe refuses
   as its caller starts what every write would; the mount table is never read
   for a mount's identity, and only for an overlay's upper layer and root
-  field and a FUSE mount's type and source, on the line of `root`'s mount ID
-  (Codex on round 11). On Linux that leaves a kernel older than 3.15, or one
+  field and a FUSE mount's type and source, on each current mount's own
+  ID line: the inner mount's for nested overlays and FUSE below an overlay.
+  B514 also reads the visible upper path's own device and fstype evidence. On Linux that leaves a kernel older than 3.15, or one
   whose statx gives none with no `/proc` mounted, and elsewhere every
   platform but macOS and Windows, where the player does not run; Windows
   gives none and asks for none, refusing first (`ErrNoDirectoryBarrier`).
@@ -510,12 +519,14 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   does not outlive a reboot, or that cannot be told to, don't pick an
   overlay's line in the mount table by its spelling or split it on any white
   space but the ASCII space, don't take a bind of a directory inside an
-  overlay, nor sync its copy-ups through another mount of the superblock,
-  don't refuse an overlay because totals that moved differ, and don't advise
+  writable overlay, nor sync its copy-ups through another mount of the superblock,
+  don't claim differing totals prove another filesystem, and don't advise
   moving to another filesystem for an error not marked `ErrBarrierFailed`,
   but for the two overlay copy-up refusals (a bind of a directory inside an
-  overlay, a directory above the root its sync cannot open), where leaving
+  overlay, a directory above the root its sync cannot open for lack of
+  permission), where leaving
   the overlay removes that sync.**
+  B514 evidence and refusal details → History-rules-config-lifecycle.md.
   `TestWriteBytesDurable_RefusesAPlatformWithNoDirectoryBarrier`,
   `TestWriteBytesDurable_RetriesTheBarrierOfADirectoryItCreated`,
   `TestWriteBytesDurable_AFreshWriterSyncsAnEntryAnEarlierRunLeft`,

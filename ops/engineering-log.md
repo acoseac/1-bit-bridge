@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B514: durable-writer evidence and refusal follow-ups](#2026-10-23--b514-durable-writer-evidence-and-refusal-follow-ups)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
 - [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
@@ -56814,3 +56815,64 @@ clients' per-request timeouts), and this change leaves them:
 - The read loops check their 2 s and 3 s deadlines after a line arrives,
   so a line that arrives late fails the test, while a stream that sends
   nothing waits for the 10 s connect context, as the 600 ms control did.
+
+## 2026-10-23 — B514: durable-writer evidence and refusal follow-ups
+
+The B470 PR 4b1 round-12 follow-ups are implemented on the uncommitted
+`fix/b514-durable-writer-followups` tree based on 3f805199. The storage
+check no longer presents three mismatching totals samples as proof that
+an upper path reaches another filesystem. Linux supplies the path's
+st_dev; its own mount ID selects a mountinfo line whose major:minor must
+match before its fstype is named as evidence. Missing identity, unreadable
+identity, a missing/malformed line and a device mismatch are inconclusive.
+
+**Conservative interpretation:** even a visible XFS/ZFS path is not proof
+of the overlay's backing across mount namespaces. Repeated A,B,A samples
+there remain ErrMediumUnknown, with retry and namespace advice; no new
+acceptance based on that evidence alone was introduced. This follows the
+backlog's inconclusive-result alternative. If “must not refuse” means nil
+for those repeated mismatches, that stronger acceptance remains unresolved;
+the visible device/type evidence alone cannot safely establish it while
+preserving refusals of an overlay whose upper path is mapped elsewhere.
+An agreement only on the third upper read is accepted. Existing moving-
+totals acceptance, tmpfs/ramfs/volatile refusals and depth bounds remain.
+
+ErrOverlayBind now marks a writable overlay subtree bind and still matches
+ErrMediumUnknown. New handles it first and describes loss of a reservation
+at a crash even on persistent storage; it no longer describes that bind as
+storage lost at reboot. A read-only overlay with no upper returns nil from
+the medium check, including a bind, leaving EROFS to the write as on the
+overlay's own mount. syncAbove advises read access or leaving the overlay
+only for fs.ErrPermission; ENOENT and other open errors are wrapped without
+that advice. The mode-0 permission fixture skips as root. Its comment names
+copyUpsFrom. The rules describe each current mount's line, including the
+inner mount's for nested overlays and FUSE below an overlay.
+
+Red first: on 3f805199's behavior, with only the new error/field declarations
+available to compile the new tests, the read-only bind was refused, the
+writable bind lacked its marker, New gave reboot/persistent-storage advice,
+ENOENT advised read access, and the repeated mismatch claimed “another
+filesystem” rather than inconclusive evidence. The permission fixture
+already passed. The third-read-agreement case also passes the original
+three-round code; it fails with two rounds, which the earlier fixture did
+not. Two scratch documentation assertions fail on the baseline's wording.
+Linux's new st_dev assertion would fail with the baseline adapter's empty
+Device; it was cross-compiled, not executed on this macOS host.
+
+Validation used the repository's Go 1.27.2 darwin/arm64 toolchain, with
+GOTOOLCHAIN=local, GOPROXY=off and a scratch GOCACHE, from this worktree:
+`go vet ./...`; both atomicwrite and engine suites, normally and under
+`-race`; the added/extended portable tests under `-count=3`; Linux
+`go vet ./internal/atomicwrite/...` and `go test -c -o /dev/null
+./internal/atomicwrite`; and `make docs-check` all passed. No command was
+refused by the sandbox. The rules remain within budget (player.md 93.8%);
+no text needed moving for a byte-budget overflow. No dependency, wire,
+engine transition, macOS/Windows mount reader, commit, push or PR changed.
+
+Thirteen independently applicable negative-control patches and a manifest
+live in the requested scratch controls folder: twelve executed and failed
+the predicted assertions; the Linux device-adapter control cross-compiled
+and its runtime failure is predicted only. The first advice control lost
+its sole io/fs import use and was rejected as invalid; the replacement
+compiles and fails the ENOENT assertion. The report records exact test
+names, logs, source lines and the unresolved acceptance interpretation.

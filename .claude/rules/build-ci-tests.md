@@ -87,7 +87,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   alongside the production line so the control compiles.
 - **...and once you HAVE committed, `git stash` is a no-op, which is the same trap inverted.** → History-rules-build-ci-tests.md
 - **Negative-control every load-bearing assertion**, and check what the mutation
-  actually did. A control that fails to BUILD reads as "control invalid", never
+  actually did. B514's filesystem tests use explicit mount tables and stat
+  answers; unavailable Linux runtime checks are reported separately from
+  cross-compilation. → History-rules-build-ci-tests.md.
+  A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only
   use. A control that mutates the *wrong occurrence* is worse, because it
   passes: identical blocks in two tests in one file, or a first-occurrence
