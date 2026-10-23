@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,7 @@ const (
 	maxPauseReleaseSeconds = 3600
 	maxRoomRunes           = 64
 	maxPlayerEndpoint      = 255
+	maxPort                = 65535
 )
 
 // playerOffMessage is the warning Validate logs when output.player asks for
@@ -113,6 +116,20 @@ type PlayerConfig struct {
 	// Mixer is the hardware volume control, and this release takes type
 	// none alone: the output is fixed.
 	Mixer PlayerMixer `yaml:"mixer,omitempty"`
+	// OpenHome turns on the player's OpenHome surface on the LAN (B470 PR
+	// 5a2a): a listener of its own on each of the box's LAN addresses, the
+	// device and service descriptions, and the SOAP layer. Off by default,
+	// and it stays off by default until the surface plays (PR 5a4): 1-bit
+	// never probes a host that advertises an OpenHome Source for MPD. Serve
+	// reads it from the boot snapshot, so a change applies at the next start,
+	// and nothing of the surface runs while the player does not.
+	OpenHome bool `yaml:"openhome,omitempty"`
+	// OpenHomePort is the surface's TCP port on each LAN address: nil for
+	// DefaultOpenHomePort, 0 for a port the kernel picks for each address,
+	// which every URL the surface hands out then carries. With the surface
+	// on, a port another listener of serve binds turns the player off
+	// (PlayerEnabled).
+	OpenHomePort *int `yaml:"openhomePort,omitempty"`
 
 	// written is the block as the file holds it (keepable), kept only when
 	// it did not read (unread says why): Save writes it back as it was, so
@@ -202,6 +219,21 @@ func (p PlayerConfig) EffectiveDSDMode() string {
 	return p.DSDMode
 }
 
+// DefaultOpenHomePort is the OpenHome surface's port when
+// output.player.openhomePort is not set: the next after the API (7788), the
+// console (7789), the DLNA listener (7790) and the loopback track route
+// (7791).
+const DefaultOpenHomePort = 7792
+
+// EffectiveOpenHomePort is openhomePort, or DefaultOpenHomePort when it is
+// not set.
+func (p PlayerConfig) EffectiveOpenHomePort() int {
+	if p.OpenHomePort == nil {
+		return DefaultOpenHomePort
+	}
+	return *p.OpenHomePort
+}
+
 // AllowsDoP reports allowDoP, false when it is not set.
 func (p PlayerConfig) AllowsDoP() bool { return p.AllowDoP != nil && *p.AllowDoP }
 
@@ -217,7 +249,7 @@ func (p PlayerConfig) EffectiveMixer() string {
 // yaml.v3's omitempty asks.
 func (p PlayerConfig) IsZero() bool {
 	return p.written == nil && !p.Enabled && p.Room == "" && p.PauseReleaseSeconds == nil && p.Device.empty() &&
-		p.DSDMode == "" && p.AllowDoP == nil && p.Mixer == PlayerMixer{}
+		p.DSDMode == "" && p.AllowDoP == nil && p.Mixer == PlayerMixer{} && !p.OpenHome && p.OpenHomePort == nil
 }
 
 // clone is a copy that shares no pointer with p but the never-changed
@@ -231,6 +263,10 @@ func (p PlayerConfig) clone() PlayerConfig {
 	if p.AllowDoP != nil {
 		v := *p.AllowDoP
 		out.AllowDoP = &v
+	}
+	if p.OpenHomePort != nil {
+		v := *p.OpenHomePort
+		out.OpenHomePort = &v
 	}
 	return out
 }
@@ -367,6 +403,9 @@ func (p PlayerConfig) Problem() error {
 	if n := p.PauseReleaseSeconds; n != nil && (*n < 1 || *n > maxPauseReleaseSeconds) {
 		return fmt.Errorf(at+"pauseReleaseSeconds: must be from 1 to %d (an hour)", maxPauseReleaseSeconds)
 	}
+	if n := p.OpenHomePort; n != nil && (*n < 0 || *n > maxPort) {
+		return fmt.Errorf(at+"openhomePort: must be a port, 0 to %d (0 is a port the kernel picks for each address)", maxPort)
+	}
 	switch {
 	case !utf8.ValidString(p.Room):
 		return errors.New(at + "room: must be UTF-8")
@@ -497,7 +536,67 @@ func (c *Config) PlayerEnabled(goos string) (bool, error) {
 	if c.IsPublic() {
 		return false, errors.New("output.player.enabled: a public bridge has no LAN to play for, and refuses every active output operation: the player stays off")
 	}
+	if p.OpenHome {
+		if err := c.openHomePortClash(); err != nil {
+			return false, err
+		}
+	}
 	return true, nil
+}
+
+// openHomePortClash refuses an OpenHome port another listener of serve
+// binds: the API's (listenAddress), the console's (adminAddress), the DLNA
+// listener's (dlna.listenAddress, its default included, whether or not
+// DLNA is on, since it can be turned on later) and the loopback track
+// route's (output.loopbackPort, which serve binds once output.mpd resolves
+// on, at any time). An empty address is its default, as applyDefaults
+// fills it. Port 0, a port the kernel picks, clashes with nothing. The
+// refusal names the other setting and never the port: a value a setting
+// holds is not printed (config-lifecycle.md).
+func (c *Config) openHomePortClash() error {
+	port := c.Output.Player.EffectiveOpenHomePort()
+	if port == 0 {
+		return nil
+	}
+	listen, admin := c.ListenAddress, c.AdminAddress
+	if listen == "" {
+		listen = DefaultListenAddress
+	}
+	if admin == "" {
+		admin = DefaultAdminAddress
+	}
+	clash := func(setting string) error {
+		return errors.New("output.player.openhomePort: bridge serve binds that port already, for " + setting +
+			": give the OpenHome surface a port of its own")
+	}
+	for _, other := range []struct{ setting, addr string }{
+		{"listenAddress", listen},
+		{"adminAddress", admin},
+		{"dlna.listenAddress", c.DLNA.EffectiveDLNAListenAddress()},
+	} {
+		if p, ok := namedPort(other.addr); ok && p == port {
+			return clash(other.setting)
+		}
+	}
+	if c.Output.EffectiveLoopbackPort() == port {
+		return clash("output.loopbackPort")
+	}
+	return nil
+}
+
+// namedPort is the port a host:port address names, false for none: one
+// that does not parse (Validate refuses it on its own), port 0, or one
+// outside the TCP range.
+func namedPort(addr string) (int, bool) {
+	_, ps, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	p, err := strconv.Atoi(ps)
+	if err != nil || p <= 0 || p > maxPort {
+		return 0, false
+	}
+	return p, true
 }
 
 // playerPlatform is the host Validate judges output.player for:
@@ -523,7 +622,7 @@ type playerSection struct {
 
 // The keys each section takes.
 var (
-	playerKeys = []string{"enabled", "room", "pauseReleaseSeconds", "device", "dsdMode", "allowDoP", "mixer"}
+	playerKeys = []string{"enabled", "room", "pauseReleaseSeconds", "device", "dsdMode", "allowDoP", "mixer", "openhome", "openhomePort"}
 	deviceKeys = []string{"transport", "binding", "vendorId", "productId", "serial", "port", "pcmDevice", "subdevice"}
 	mixerKeys  = []string{"type", "control"}
 )
@@ -726,6 +825,10 @@ func (r *playerReader) player(n *yaml.Node) PlayerConfig {
 			p.AllowDoP = r.optionalBool(v, at+".allowDoP")
 		case "mixer":
 			p.Mixer = r.mixer(v)
+		case "openhome":
+			r.boolean(v, at+".openhome", &p.OpenHome)
+		case "openhomePort":
+			p.OpenHomePort = r.optionalWhole(v, at+".openhomePort")
 		default:
 			return false
 		}
