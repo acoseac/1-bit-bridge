@@ -31,10 +31,10 @@ const restoreMargin uint64 = 1 << 24
 
 // playerResetAdvice is the single remedy for giving up an exhausted or
 // unreadable live floor. Reset the queue too: a v1 queue has no identity stamp.
-// No pre-reset snapshot from this box may restore its player identity afterward.
+// No pre-reset snapshot of an identity the box ran may restore that identity afterward.
 func playerResetAdvice(restoring bool) string {
 	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
-	advice += "; this reset gives up the identity for good; no snapshot taken on this box before the reset may restore its player identity; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots"
+	advice += "; this reset gives up for good every player identity the box ran before it, its own or one a restore gave it; no snapshot of one of them, whichever box took it, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots"
 	if restoring {
 		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
 	}
