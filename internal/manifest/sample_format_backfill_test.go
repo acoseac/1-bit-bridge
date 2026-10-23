@@ -2,12 +2,16 @@ package manifest
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	sqlite "modernc.org/sqlite"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 )
@@ -378,6 +382,287 @@ func TestTheVersionStaleStampRecordsTheKindItReads(t *testing.T) {
 	scanOnce(t, sc, "version-stale, kind already right")
 	if got := trackIndexedAt(t, store, floatRel); got != cursor {
 		t.Errorf("a stamp that left the kind as it was moved the cursor %d -> %d", cursor, got)
+	}
+}
+
+// openStoreAt opens the store at dbPath, as a restart of the bridge does, and
+// closes it when the test ends.
+func openStoreAt(t *testing.T, dbPath string) *Store {
+	t.Helper()
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd: the rows indexed
+// before the column get their kinds with no delta cursor moved, and the
+// health key (SampleFormatReady) appears only once a header pass has run to
+// its end, so the one full sync a client makes on seeing it carries every
+// kind the backfill recorded. The open-time fill alone is not enough, nor a
+// pass the shutdown stopped, nor a restart after one; once a pass has run to
+// its end, a restart keeps the answer. A file that pass could not read is not
+// waited for: when a later pass reads it, its cursor advances, since the
+// clients' full sync is past.
+func TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd(t *testing.T) {
+	ctx := context.Background()
+	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
+	root := t.TempDir()
+	floatRel := writeAlone(t, root, "float.wav", fx("wav/float.wav"))
+	aiffRel := writeAlone(t, root, "af_be16.aiff", fx("aifc/af_be16.aiff"))
+	flacRel := writeAlone(t, root, "lossless.flac", flacBytes(t, 44100, 16))
+	laterRel := writeAlone(t, root, "s24.wav", fx("wav/s24.wav"))
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	store := openStoreAt(t, dbPath)
+	scanOnce(t, NewScanner([]string{root}, store, ""), "scan")
+	const cursor = 42
+	rewindToBeforeSampleFormat(t, store, cursor)
+	ready := func(when string, s *Store, want bool) {
+		t.Helper()
+		if got, err := s.SampleFormatReady(ctx); err != nil || got != want {
+			t.Errorf("%s: SampleFormatReady = %v, %v; want %v", when, got, err, want)
+		}
+	}
+	unmoved := func(when string, rels ...string) {
+		t.Helper()
+		for _, rel := range rels {
+			if got := trackIndexedAt(t, store, rel); got != cursor {
+				t.Errorf("%s moved %s's cursor %d -> %d: the clients' one full sync carries it", when, rel, cursor, got)
+			}
+		}
+	}
+
+	if err := store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{flacRel: SampleFormatInteger, floatRel: "NULL", aiffRel: "NULL", laterRel: "NULL"})
+	ready("the open-time fill done, no header read yet", store, false)
+
+	resolver := bridgefs.New([]string{root})
+	stopCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	_, err := store.BackfillSampleFormats(stopCtx, func(rel string) (string, os.FileInfo, error) {
+		stop()
+		return resolver.ResolveChecked(rel)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a pass the shutdown stopped returned %v, want context.Canceled", err)
+	}
+	ready("a pass stopped before its end", store, false)
+	ready("a restart after that pass", openStoreAt(t, dbPath), false)
+
+	unreadable := func(rel string) (string, os.FileInfo, error) {
+		if rel == laterRel {
+			return "", nil, os.ErrPermission
+		}
+		return resolver.ResolveChecked(rel)
+	}
+	if _, err := store.BackfillSampleFormats(ctx, unreadable); err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{flacRel: SampleFormatInteger, floatRel: SampleFormatFloat, aiffRel: SampleFormatInteger, laterRel: "NULL"})
+	unmoved("the backfill", floatRel, aiffRel, flacRel, laterRel)
+	ready("a pass ran to its end", store, true)
+	ready("a restart after it", openStoreAt(t, dbPath), true)
+
+	if _, err := store.BackfillSampleFormats(ctx, resolver.ResolveChecked); err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{laterRel: SampleFormatInteger})
+	if got := trackIndexedAt(t, store, laterRel); got <= cursor {
+		t.Errorf("s24.wav got its kind after the clients' full sync and its cursor stayed at %d: no delta carries it", got)
+	}
+	unmoved("a pass after the backfill", floatRel, aiffRel, flacRel)
+}
+
+// pagesRead is how many pages s's one connection has asked its page cache
+// for so far, hit or missed (sqlite3_db_status). A test that reads it sets the
+// pool to one connection first, so the count is everything the store read.
+func pagesRead(t *testing.T, s *Store) int {
+	t.Helper()
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var n int
+	err = conn.Raw(func(dc any) error {
+		st, ok := dc.(sqlite.DBStatus)
+		if !ok {
+			return fmt.Errorf("the driver connection %T reports no status", dc)
+		}
+		hit, _, err := st.Status(sqlite.DBStatusCacheHit, false)
+		if err != nil {
+			return err
+		}
+		miss, _, err := st.Status(sqlite.DBStatusCacheMiss, false)
+		if err != nil {
+			return err
+		}
+		n = hit + miss
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestTheOpenFillVisitsEachUndecidedRowOnce: the open-time fill reads each
+// undecided row once, the WAV and AIFF rows it leaves to the header pass
+// included. Two stores hold the same 300 FLAC rows and 100 WAV rows, the WAV
+// paths sorting before every FLAC path in one and after them in the other.
+// Filled 10 rows a statement, both decide the same rows, and the pages the
+// fill reads where the WAV rows sort first are within half again of the pages
+// it reads where they sort last. A fill whose every statement starts again at
+// the first undecided row reads the 100 WAV rows once per statement, 30
+// times, about five times the pages.
+func TestTheOpenFillVisitsEachUndecidedRowOnce(t *testing.T) {
+	const flacs, wavs, chunk = 300, 100, 10
+	fill := func(wavDir, flacDir string) int {
+		t.Helper()
+		ctx := context.Background()
+		s := openTestStore(t)
+		at := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+		rows := make([]*Track, 0, flacs+wavs)
+		for i := range flacs {
+			rows = append(rows, &Track{Path: fmt.Sprintf("%s/%03d.flac", flacDir, i), Size: 1, ModTime: at, Codec: "FLAC"})
+		}
+		for i := range wavs {
+			rows = append(rows, &Track{Path: fmt.Sprintf("%s/%03d.wav", wavDir, i), Size: 1, ModTime: at, Codec: "WAV"})
+		}
+		if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL`); err != nil {
+			t.Fatal(err)
+		}
+		s.db.SetMaxOpenConns(1)
+		before := pagesRead(t, s)
+		if err := s.fillSampleFormatsByCodec(ctx, chunk); err != nil {
+			t.Fatal(err)
+		}
+		read := pagesRead(t, s) - before
+		var decided, left int
+		if err := s.db.QueryRow(`SELECT
+				COALESCE(SUM(sample_format = 'integer'), 0),
+				COALESCE(SUM(sample_format IS NULL), 0)
+			FROM tracks`).Scan(&decided, &left); err != nil {
+			t.Fatal(err)
+		}
+		if decided != flacs || left != wavs {
+			t.Fatalf("the fill decided %d rows and left %d, want %d and %d", decided, left, flacs, wavs)
+		}
+		return read
+	}
+	first := fill("a", "b")
+	last := fill("b", "a")
+	t.Logf("pages read by the fill: %d with the WAV rows sorting first, %d with them last", first, last)
+	if 2*first > 3*last {
+		t.Errorf("the fill read %d pages with the 100 WAV rows sorting first and %d with them last: it reads the rows it leaves to the header pass again in every statement", first, last)
+	}
+}
+
+// The header pass writes a row only from a read of the bytes the row
+// describes, and only while the row is still undecided. Each of the three
+// tests below puts one writer between the pass's page read and its write,
+// inside the resolver call, which comes after the page read and before the
+// file is opened.
+
+// headerPassRow is a store holding one float WAV row that predates the
+// column, opened again by this binary, and the resolver over its library.
+func headerPassRow(t *testing.T) (store *Store, root, rel string, resolver *bridgefs.Resolver) {
+	t.Helper()
+	root = t.TempDir()
+	rel = writeAlone(t, root, "float.wav", compressedPCMFixture(t, "wav/float.wav"))
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	rewindToBeforeSampleFormat(t, store, 42)
+	if err := store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	return store, root, rel, bridgefs.New([]string{root})
+}
+
+// TestTheHeaderPassLeavesTheKindAScanWroteMidPass: a scan that writes the row
+// after the pass read its page decides the row, and the pass's write
+// (sample_format IS NULL) does not land: the scan's kind stands. The scan
+// here writes "integer", which no header in the test states, so the two
+// writes can be told apart.
+func TestTheHeaderPassLeavesTheKindAScanWroteMidPass(t *testing.T) {
+	ctx := context.Background()
+	store, _, rel, resolver := headerPassRow(t)
+	res, err := store.BackfillSampleFormats(ctx, func(p string) (string, os.FileInfo, error) {
+		abs, info, err := resolver.ResolveChecked(p)
+		if err == nil {
+			if uerr := store.UpsertTrack(ctx, &Track{Path: p, Size: info.Size(), ModTime: info.ModTime(), Codec: "WAV", SampleFormat: SampleFormatInteger}); uerr != nil {
+				t.Error(uerr)
+			}
+		}
+		return abs, info, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{rel: SampleFormatInteger})
+	if res.Read != 1 || res.Gained != 0 {
+		t.Errorf("the pass did %+v, want one header read and no row gained", res)
+	}
+}
+
+// TestTheHeaderPassLeavesARowWhoseStatMovedMidPass: a writer that moves the
+// row to another size and mtime and leaves it undecided, as an older binary's
+// upsert of a changed file does, makes the bytes the pass read describe
+// another version of the row; the pass's write (the size and mtime it read
+// against) does not land, and the row stays undecided.
+func TestTheHeaderPassLeavesARowWhoseStatMovedMidPass(t *testing.T) {
+	ctx := context.Background()
+	store, _, rel, resolver := headerPassRow(t)
+	pcm := false
+	res, err := store.BackfillSampleFormats(ctx, func(p string) (string, os.FileInfo, error) {
+		abs, info, err := resolver.ResolveChecked(p)
+		if err == nil {
+			upsertAsTheRolledBackBinary(t, store, &Track{Path: p, Size: info.Size() + 1, ModTime: info.ModTime().Add(time.Hour), Codec: "WAV", IsDSD: &pcm})
+		}
+		return abs, info, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{rel: "NULL"})
+	if res.Gained != 0 {
+		t.Errorf("the pass did %+v, want no row gained", res)
+	}
+}
+
+// TestTheHeaderPassReadOfAFileReplacedAfterItsStatIsChanged: a file replaced
+// between the resolver's stat and the read is caught by the stat of the file
+// the read opened, so the replacement's header never lands on the row that
+// describes the file before it: the row stays undecided and counts as
+// Changed.
+func TestTheHeaderPassReadOfAFileReplacedAfterItsStatIsChanged(t *testing.T) {
+	ctx := context.Background()
+	store, _, rel, resolver := headerPassRow(t)
+	integer := compressedPCMFixture(t, "wav/af_i16.wav")
+	res, err := store.BackfillSampleFormats(ctx, func(p string) (string, os.FileInfo, error) {
+		abs, info, err := resolver.ResolveChecked(p)
+		if err == nil {
+			writeFixtureBytes(t, abs, integer)
+			later := info.ModTime().Add(time.Hour)
+			if cerr := os.Chtimes(abs, later, later); cerr != nil {
+				t.Error(cerr)
+			}
+		}
+		return abs, info, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{rel: "NULL"})
+	if res.Changed != 1 || res.Read != 0 {
+		t.Errorf("the pass did %+v, want the row counted Changed and no header read", res)
 	}
 }
 

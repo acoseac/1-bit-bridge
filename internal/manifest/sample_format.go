@@ -280,11 +280,16 @@ const sampleFormatPage = 200
 // sync the sampleFormat health key starts (SampleFormatReady, PROTOCOL.md),
 // and a delta of the whole library is what that avoids.
 func (s *Store) backfillSampleFormatByCodec(ctx context.Context) error {
+	return s.fillSampleFormatsByCodec(ctx, sampleFormatFillChunk)
+}
+
+// fillSampleFormatsByCodec is the open-time fill, chunk rows a statement.
+func (s *Store) fillSampleFormatsByCodec(ctx context.Context, chunk int) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res, err := s.db.ExecContext(ctx, sampleFormatFillSQL, sampleFormatFillChunk)
+		res, err := s.db.ExecContext(ctx, sampleFormatFillSQL, chunk)
 		if err != nil {
 			return err
 		}
