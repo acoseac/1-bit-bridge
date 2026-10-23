@@ -57065,8 +57065,8 @@ test can make the engine's owner panic) and the sink note's recover.
 `TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen` and
 `TestAPlayerFaultStaysInsideThePlayer` read the journal right after the
 engine's snapshot showed the skip or the fault: the supervisor logs a change
-once it wakes on that snapshot, on its own time, and 2 of 5 runs under
-`-race` read first (1c42e029). They now wait for the line until the test's
+once it wakes on that snapshot, on its own time, and each test read first in
+one run of 5 under `-race` (1c42e029). They now wait for the line until the test's
 deadline (`logWatch`, a handler installed through
 `loggingtest.SetDefault`); NC24 and NC25 were run again on them, red.
 Afterwards every serve test of the player passed 5 runs of 5 under `-race`
