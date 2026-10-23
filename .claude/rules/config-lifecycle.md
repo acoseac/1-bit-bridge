@@ -436,7 +436,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   an overlay, or on the overlay's own mount): the copy-ups above it are out
   of that mount's reach: a crash risk even on persistent storage, not
   evidence that the medium loses data at reboot. A read-only overlay with
-  no upper layer is taken, a bind included, so the write itself fails EROFS.
+  no upper layer is taken only at depth 0, the root's own mount, a bind
+  included, so the write itself fails EROFS. At greater depth it is
+  `ErrMediumUnknown`: the upper path reaches a read-only overlay, which
+  cannot be a writable overlay's upper layer (B514 round 2).
   An operator's systemd `ProtectSystem=strict` with
   `ReadWritePaths` on an overlay root makes such a bind of the data
   directory, as do a chroot and a container's bind of an overlay host's
@@ -467,9 +470,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   totals retain the existing check that rules out a tmpfs or ramfs path.
   Exhausting the retries is **inconclusive**, never proof of another
   filesystem: repeated A,B,A samples can come from legitimate XFS/ZFS.
-  The upper path's `st_dev` is matched to its own mount-ID line's
-  major:minor and fstype (`upperMountEvidence`), never a line selected by
-  spelling. This establishes the filesystem visible at that path only,
+  The upper path's own mount ID selects the line whose fstype is named
+  (`upperMountEvidence`), never a line selected by spelling or device.
+  Device numbers are detail only: a btrfs subvolume's `st_dev` can differ
+  from mountinfo's superblock device without invalidating that line.
+  This establishes the filesystem visible at that path only,
   not the overlay's backing across mount namespaces. A persistent mismatch
   stays `ErrMediumUnknown`, naming that evidence or why it was unavailable,
   with advice to retry after filesystem activity settles and to check the
@@ -520,6 +525,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   overlay's line in the mount table by its spelling or split it on any white
   space but the ASCII space, don't take a bind of a directory inside an
   writable overlay, nor sync its copy-ups through another mount of the superblock,
+  don't take a read-only overlay reached through a writable overlay's upper
+  path, don't reject mount-ID-selected evidence for a differing device,
   don't claim differing totals prove another filesystem, and don't advise
   moving to another filesystem for an error not marked `ErrBarrierFailed`,
   but for the two overlay copy-up refusals (a bind of a directory inside an

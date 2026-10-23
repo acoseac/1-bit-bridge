@@ -88,8 +88,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **...and once you HAVE committed, `git stash` is a no-op, which is the same trap inverted.** → History-rules-build-ci-tests.md
 - **Negative-control every load-bearing assertion**, and check what the mutation
   actually did. B514's filesystem tests use explicit mount tables and stat
-  answers; unavailable Linux runtime checks are reported separately from
-  cross-compilation. → History-rules-build-ci-tests.md.
+  answers; unavailable Linux/Windows runtime checks are reported separately
+  from cross-compilation. A POSIX mode-0 permission fixture skips Windows
+  and root; its ENOENT sibling still runs. → History-rules-build-ci-tests.md.
   A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only
   use. A control that mutates the *wrong occurrence* is worse, because it

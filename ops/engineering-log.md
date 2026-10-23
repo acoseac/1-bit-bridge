@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence](#2026-10-23--b514-round-2-nested-read-only-overlays-windows-permission-fixtures-and-btrfs-evidence)
 - [2026-10-23 — B514: durable-writer evidence and refusal follow-ups](#2026-10-23--b514-durable-writer-evidence-and-refusal-follow-ups)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
@@ -56822,18 +56823,19 @@ The B470 PR 4b1 round-12 follow-ups are implemented on the uncommitted
 `fix/b514-durable-writer-followups` tree based on 3f805199. The storage
 check no longer presents three mismatching totals samples as proof that
 an upper path reaches another filesystem. Linux supplies the path's
-st_dev; its own mount ID selects a mountinfo line whose major:minor must
-match before its fstype is named as evidence. Missing identity, unreadable
-identity, a missing/malformed line and a device mismatch are inconclusive.
+st_dev; round 1 required it to match the mount-ID-selected line before
+naming its fstype. Round 2 below removes that erroneous requirement for
+btrfs subvolumes: mount ID selects the line and devices are detail only.
+Missing/unreadable mount identity and a missing/malformed line still leave
+the visible filesystem unconfirmed.
 
 **Conservative interpretation:** even a visible XFS/ZFS path is not proof
 of the overlay's backing across mount namespaces. Repeated A,B,A samples
 there remain ErrMediumUnknown, with retry and namespace advice; no new
 acceptance based on that evidence alone was introduced. This follows the
-backlog's inconclusive-result alternative. If “must not refuse” means nil
-for those repeated mismatches, that stronger acceptance remains unresolved;
-the visible device/type evidence alone cannot safely establish it while
-preserving refusals of an overlay whose upper path is mapped elsewhere.
+backlog's inconclusive-result alternative, explicitly accepted for round 2:
+A,B,A remains ErrMediumUnknown, never a pass on evidence that cannot prove
+the overlay's backing.
 An agreement only on the third upper read is accepted. Existing moving-
 totals acceptance, tmpfs/ramfs/volatile refusals and depth bounds remain.
 
@@ -56841,10 +56843,12 @@ ErrOverlayBind now marks a writable overlay subtree bind and still matches
 ErrMediumUnknown. New handles it first and describes loss of a reservation
 at a crash even on persistent storage; it no longer describes that bind as
 storage lost at reboot. A read-only overlay with no upper returns nil from
-the medium check, including a bind, leaving EROFS to the write as on the
-overlay's own mount. syncAbove advises read access or leaving the overlay
+the medium check only at depth 0, including a bind, leaving EROFS to the
+write as on the overlay's own mount. Round 2 below corrects round 1's
+unconditional pass at greater depth. syncAbove advises read access or leaving the overlay
 only for fs.ErrPermission; ENOENT and other open errors are wrapped without
-that advice. The mode-0 permission fixture skips as root. Its comment names
+that advice. The mode-0 permission fixture skips Windows and root (the
+Windows guard was added in round 2). Its comment names
 copyUpsFrom. The rules describe each current mount's line, including the
 inner mount's for nested overlays and FUSE below an overlay.
 
@@ -56875,4 +56879,59 @@ the predicted assertions; the Linux device-adapter control cross-compiled
 and its runtime failure is predicted only. The first advice control lost
 its sole io/fs import use and was rejected as invalid; the replacement
 compiles and fails the ENOENT assertion. The report records exact test
-names, logs, source lines and the unresolved acceptance interpretation.
+names, logs, source lines and the then-unresolved acceptance interpretation;
+round 2 explicitly accepts that conservative interpretation.
+
+
+## 2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence
+
+Round 1 is committed as 47747499 (code/tests) and 1917e251 (docs). Its
+conservative interpretation is accepted: A,B,A remains ErrMediumUnknown;
+the visible upper path's filesystem cannot prove the overlay's backing.
+Round 2 fixes three reviewed findings, leaving these changes uncommitted.
+
+A read-only overlay with no upper is taken only at depth 0, where the
+root's own mount rejects writes with EROFS. Below a writable overlay it is
+ErrMediumUnknown, with an explanation that a read-only overlay cannot be
+that writable overlay's upper layer. This prevents a writable subtree bind
+from passing via a read-only overlay mounted over its visible upper path.
+The same refusal holds without a bind. Both explicit mount-table fixtures
+returned nil before the fix and now refuse with the required explanation.
+
+The mode-0 permission subtest skips Windows as well as root. Windows returns
+-1 for Geteuid and ignores Mkdir's mode, so before this fix the readable
+fixture and successful barrier stub made both the write and probe return
+nil, failing their fs.ErrPermission assertions. The ENOENT sibling remains
+enabled. Every round-1 test addition was audited for the same assumption;
+only this subtest needed the guard. This Windows failure is reasoned, not
+claimed as a native run on the macOS host.
+
+upperMountEvidence names the fstype of the upper path's own mount-ID-selected
+line without requiring st_dev to match mountinfo's device. A btrfs subvolume
+can have an anonymous st_dev distinct from the superblock device; both
+numbers are diagnostic detail. A missing st_dev likewise does not invalidate
+a valid mount-ID-selected line. Before the fix the btrfs fixture reported
+only device disagreement, never btrfs. It now names btrfs, keeps the A,B,A
+result ErrMediumUnknown, and does not describe the line as unconfirmed.
+The existing XFS differing-device and missing-device expectations now pin
+the same authority. Missing/failed mount IDs and missing/malformed lines
+still report unavailable evidence and preserve the original read error.
+
+Validation on the repository's Go 1.27.2 darwin/arm64 toolchain, offline
+with GOTOOLCHAIN=local and a scratch GOCACHE: go vet ./...; atomicwrite and
+engine tests normally and with -race; six added/extended test groups with
+-count=3; Linux atomicwrite vet and test compilation; Windows atomicwrite
+test compilation. All passed. No command was refused by the sandbox.
+Linux and Windows native runtime, real btrfs/overlay mounts and crash or
+reboot behavior were not verified here. The fixtures do not read host
+proc/sys. Rules, History and this entry record the corrected requirements.
+
+Sixteen patches in scratch controls-r2 each apply alone to the final tree.
+Fourteen ran and failed every predicted assertion without build failures;
+04 (Linux device adapter) and 15 (Windows permission guard) cross-compiled
+for their target OS and retain explicitly predicted runtime failures. The
+obsolete device-equality control 02 is replaced by the btrfs mount-ID rule;
+10 is regenerated for the depth-0 read-only branch; 14 removes the depth
+restriction; 16 rejects unavailable st_dev despite an authoritative mount
+ID. The other controls retain their rules. Each mutation restores the exact
+saved file bytes, never HEAD, preserving the uncommitted round.

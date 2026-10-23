@@ -1189,7 +1189,16 @@ Repeated A,B,A and a third-read agreement exercise different outcomes:
 inconclusive after the retry bound, and accepted at the last permitted read.
 No new test reads the host's proc/sys. A Linux-only adapter assertion is
 cross-compiled and vetted on macOS, not claimed to have executed there.
-The mode-0 permission fixture skips as root; the ENOENT case remains runnable.
+The mode-0 permission fixture skips Windows and root; the ENOENT case remains
+runnable on both. Windows returns -1 from os.Geteuid and ignores Mkdir's
+POSIX mode bits, so root's skip alone is insufficient. Round 2 audited every
+round-1 test addition: only this fixture needed that guard; the engine's
+new test already skips Windows because its probe refuses before the medium
+check. Its negative control removes only the Windows guard (and unused
+runtime import), predicting failures of the two permission assertions on
+Windows; cross-compilation on macOS is not evidence of those assertions
+running. The nested read-only-overlay and btrfs-device regressions run on
+macOS with fixtures, failing before their fixes and passing afterward.
 The requested uncommitted tree is preserved using exact file snapshots for
 negative controls, never git restore or stash. Each patch applies alone to
 the final tree and each predicted failing assertion is named in the scratch
