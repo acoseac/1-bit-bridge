@@ -46,6 +46,19 @@ func TestOnlyOpenHomePathsAreServed(t *testing.T) {
 	}
 }
 
+// TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply: the stop joins the
+// handlers, not net/http's goroutine per connection, so a request that
+// goroutine read just before the stop closed its connection can reach the
+// handler after the join: it is 503, and carries what every reply carries,
+// the EXT header among it.
+func TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply(t *testing.T) {
+	h := testHandler()
+	h.flight.close()
+	if got := serve(t, h, request(http.MethodGet, "/openhome/description.xml", nil)); got.status != http.StatusServiceUnavailable {
+		t.Errorf("a request after the stop's join: %v, want 503", got)
+	}
+}
+
 // TestGENAIsRefusedAndNoSubscriptionIsHeld: each service's eventSubURL
 // answers SUBSCRIBE (initial and renewal) and UNSUBSCRIBE 501 Not
 // Implemented, with no SID or TIMEOUT, so no controller holds a

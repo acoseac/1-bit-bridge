@@ -48,14 +48,17 @@ func newHandler(d Device, lim Limits, seams *Seams) *handler {
 
 // ServeHTTP is the surface's one handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Every reply carries UPnP's empty EXT header, in the case UDA writes
+	// it: a direct assignment, since Header.Set would write it Ext. It
+	// comes first, so the refusal of a request that arrives after the
+	// stop's join (one net/http read just before its connection closed)
+	// carries it too.
+	w.Header()["EXT"] = []string{""}
 	if !h.flight.enter() {
 		refuse(w, http.StatusServiceUnavailable, true)
 		return
 	}
 	defer h.flight.leave()
-	// Every reply carries UPnP's empty EXT header, in the case UDA writes
-	// it: a direct assignment, since Header.Set would write it Ext.
-	w.Header()["EXT"] = []string{""}
 	local, ok := arrivedOn(r)
 	if !ok || r.Host != local.String() {
 		refuse(w, http.StatusBadRequest, true)
