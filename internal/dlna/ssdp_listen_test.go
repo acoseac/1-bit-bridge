@@ -40,12 +40,12 @@ func TestAnSSDPListenerHearsOnlyTheInterfaceItJoined(t *testing.T) {
 	group := testMulticastGroup(t)
 	nonce := testNonce(t)
 
-	onLo, err := listenSSDP(context.Background(), lo, group, ssdpLogger)
+	onLo, _, err := listenSSDP(context.Background(), lo, group, ssdpLogger)
 	if err != nil {
 		t.Skipf("cannot join %s on %s: %v", group, lo.Name, err)
 	}
 	t.Cleanup(func() { _ = onLo.Close() })
-	onLAN, err := listenSSDP(context.Background(), lan, group, ssdpLogger)
+	onLAN, _, err := listenSSDP(context.Background(), lan, group, ssdpLogger)
 	if err != nil {
 		t.Skipf("cannot join %s on %s: %v", group, lan.Name, err)
 	}

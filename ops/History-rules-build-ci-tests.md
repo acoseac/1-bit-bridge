@@ -1181,3 +1181,38 @@
   **`docker.yml` runs only on tags and dispatch**, so a Dockerfile PR gets no
   CI build at all: verify on a real daemon under BOTH builders
   (`DOCKER_BUILDKIT=0` forces the legacy one). (#983)
+
+## B514 — deterministic medium evidence and controls (2026-10-23)
+
+Mount tables, device identities and statfs sequences are explicit fixtures.
+Repeated A,B,A and a third-read agreement exercise different outcomes:
+inconclusive after the retry bound, and accepted at the last permitted read.
+No new test reads the host's proc/sys. A Linux-only adapter assertion is
+cross-compiled and vetted on macOS, not claimed to have executed there.
+The mode-0 permission fixture skips Windows and root; the ENOENT case remains
+runnable on both. Windows returns -1 from os.Geteuid and ignores Mkdir's
+POSIX mode bits, so root's skip alone is insufficient. Round 2 audited every
+round-1 test addition: only this fixture needed that guard; the engine's
+new test already skips Windows because its probe refuses before the medium
+check. Its negative control removes only the Windows guard (and unused
+runtime import), predicting failures of the two permission assertions on
+Windows; cross-compilation on macOS is not evidence of those assertions
+running. The nested read-only-overlay and btrfs-device regressions run on
+macOS with fixtures, failing before their fixes and passing afterward.
+The requested uncommitted tree is preserved using exact file snapshots for
+negative controls, never git restore or stash. Each patch applies alone to
+the final tree and each predicted failing assertion is named in the scratch
+manifest. Compile failures do not count as successful negative controls.
+Round 3's TestMediumFollowsASymlinkedUpper uses a real symlink with fixture
+mount IDs for ext4 and the target filesystem, and stubbed statfs/mountinfo.
+It covers XFS evidence, nested overlay traversal and FUSE classification on
+macOS without a real cross-filesystem mount or host proc/sys reads. The old
+no-follow behavior fails all three subtests; the following upper reader
+passes them. The test calls `mediumOn`, the function Linux's
+`platformMedium` calls, so a change to the reader `mediumOn` runs with fails
+it (an edit that made `platformMedium` call `mediumFrom` with another reader
+would not: keep the one call).
+Its check that `mountIDOf` still names the link's mount goes through the
+stubbed platform reader, so it shows that the Go wrapper resolves nothing,
+not that statx keeps its no-follow flag.
+Windows skips only this test's privileged symlink creation.

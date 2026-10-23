@@ -41,7 +41,7 @@ func multicastAll(t *testing.T, l *net.UDPConn) int {
 // to the listener listenSSDP opens, and the network-namespace test pins what
 // the advertisers then answer.
 func TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface(t *testing.T) {
-	a := NewSSDPAdvertiser(SSDPConfig{
+	a := newTestAdvertiser(testAdvertiserConfig{
 		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 		Location:    "http://127.0.0.1:7790/dlna/description.xml",
 		ServerToken: "test",
@@ -51,10 +51,14 @@ func TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface(t *testing.T) {
 		t.Skipf("multicast unavailable on the loopback interface: %v", err)
 	}
 	t.Cleanup(a.Stop)
-	a.mu.Lock()
-	listener := a.listener
-	a.mu.Unlock()
-	if got := multicastAll(t, listener); got != 0 {
+	hc, ok := a.endpoint().listener.conn.(hostReadConn)
+	if !ok {
+		t.Fatalf("the listener is a %T, not the host's socket", a.endpoint().listener.conn)
+	}
+	if !a.endpoint().listener.setup.caps.ReceiveConfined {
+		t.Errorf("the listener's setup does not report itself confined: %+v", a.endpoint().listener.setup)
+	}
+	if got := multicastAll(t, hc.c); got != 0 {
 		t.Errorf("the advertiser's listener has IP_MULTICAST_ALL = %d: it hears the group's datagrams "+
 			"from every interface any socket on the host joined, and answers their M-SEARCHes", got)
 	}
@@ -81,13 +85,18 @@ func TestAListenerTheKernelWillNotConfineStillListensAndSaysSo(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			log := slog.New(slog.NewTextHandler(&buf, nil))
-			l, err := listenSSDPConfined(context.Background(), lo, group, log, tc.confine)
+			l, confineErr, err := listenSSDPConfined(context.Background(), lo, group, log, tc.confine)
 			if err != nil {
 				t.Fatalf("listenSSDPConfined: %v", err)
 			}
 			t.Cleanup(func() { _ = l.Close() })
 			if got := multicastAll(t, l); got != tc.wantAll {
 				t.Errorf("IP_MULTICAST_ALL = %d, want %d", got, tc.wantAll)
+			}
+			// The refusal is returned beside the listener, so the
+			// subsystem can refuse a strict endpoint on it (B470 PR 5a1).
+			if (confineErr != nil) != (tc.wantWarn > 0) {
+				t.Errorf("listenSSDPConfined returned confineErr %v, want one exactly when the kernel refuses", confineErr)
 			}
 			if got := strings.Count(buf.String(), "SSDP listener cannot be limited to its own interface"); got != tc.wantWarn {
 				t.Errorf("logged %d Warns about the listener, want %d:\n%s", got, tc.wantWarn, buf.String())

@@ -146,7 +146,7 @@ func heardCarrying(l *net.UDPConn, nonce string) []string {
 // where each platform lets a test see it: the loopback source test on macOS
 // and Windows, and the network-namespace test on Linux.
 func TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket(t *testing.T) {
-	a := NewSSDPAdvertiser(SSDPConfig{
+	a := newTestAdvertiser(testAdvertiserConfig{
 		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 		Location:    "http://127.0.0.1:7790/dlna/description.xml",
 		ServerToken: "test",
@@ -156,9 +156,16 @@ func TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket(t *testing.T
 		t.Skipf("multicast unavailable on the loopback interface: %v", err)
 	}
 	t.Cleanup(a.Stop)
-	a.mu.Lock()
-	sender := a.sender
-	a.mu.Unlock()
+	// The subsystem wraps each sender to account for it at Close; the socket
+	// under the wrapper is the one this test pins.
+	conn := a.endpoint().sender
+	if owned, isOwned := conn.(*ssdpOwnedSender); isOwned {
+		conn = owned.ssdpSendConn
+	}
+	sender, ok := conn.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("the NOTIFY sender is a %T, not the host's socket", conn)
+	}
 	if ra := sender.RemoteAddr(); ra != nil {
 		t.Errorf("the NOTIFY sender is connected to %v: its source address was fixed when it connected, "+
 			"along the group's route, whatever interface it is pinned to", ra)

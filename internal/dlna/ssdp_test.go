@@ -10,7 +10,9 @@ import (
 // Test_NewSSDPAdvertiser_DefaultsAdvertiseInterval pins the contract
 // that a zero / sub-minute AdvertiseInterval collapses to the
 // `defaultAdvertiseInterval` (14 min). Defensive against test config
-// mistakes that would otherwise spam NOTIFY traffic.
+// mistakes that would otherwise spam NOTIFY traffic. Since B470 PR 5a1 the
+// clamp is a registration's (advertiseIntervalOf, under the subsystem's
+// one-minute floor), and the name is the advertiser's it replaced.
 func Test_NewSSDPAdvertiser_DefaultsAdvertiseInterval(t *testing.T) {
 	cases := []struct {
 		name string
@@ -25,74 +27,68 @@ func Test_NewSSDPAdvertiser_DefaultsAdvertiseInterval(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := NewSSDPAdvertiser(SSDPConfig{
-				UDN:               "uuid:test",
-				Location:          "http://x",
-				ServerToken:       "test",
-				AdvertiseInterval: tc.in,
-			})
-			if a.cfg.AdvertiseInterval != tc.want {
-				t.Errorf("AdvertiseInterval=%v collapsed to %v, want %v",
-					tc.in, a.cfg.AdvertiseInterval, tc.want)
+			if got := advertiseIntervalOf(tc.in, NewSSDPSubsystem(context.Background(), SSDPSubsystemOptions{}).intervalFloor); got != tc.want {
+				t.Errorf("AdvertiseInterval=%v collapsed to %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-// Test_NewSSDPAdvertiser_PopulatesNotifyTargets pins that the
-// advertiser's internal `targets` slice is the canonical 5-tuple from
-// `NotifyTargetsFor(UDN)`. A future refactor that drops the targets
-// initialization would silently break SSDP advertisement.
+// Test_NewSSDPAdvertiser_PopulatesNotifyTargets pins that the MediaServer's
+// registration carries the canonical 5-tuple from `NotifyTargetsFor(UDN)`,
+// in order. A future refactor that drops the targets initialization would
+// silently break SSDP advertisement.
 func Test_NewSSDPAdvertiser_PopulatesNotifyTargets(t *testing.T) {
 	const udn = "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c"
-	a := NewSSDPAdvertiser(SSDPConfig{UDN: udn, Location: "http://x", ServerToken: "test"})
+	s := &Server{cfg: ServerConfig{UDN: udn}, served: newServedAddrs(nil)}
+	got := s.mediaServerRegistration(nil).Targets
 	want := NotifyTargetsFor(udn)
-	if len(a.targets) != len(want) {
-		t.Fatalf("targets length = %d, want %d", len(a.targets), len(want))
+	if len(got) != len(want) {
+		t.Fatalf("targets length = %d, want %d", len(got), len(want))
 	}
 	for i := range want {
-		if a.targets[i] != want[i] {
-			t.Errorf("targets[%d] = %+v, want %+v", i, a.targets[i], want[i])
+		if got[i] != want[i] {
+			t.Errorf("targets[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }
 
-// Test_SSDPAdvertiser_StopBeforeStartIsSafe pins that calling Stop()
-// on an advertiser that was never Start()-ed is a no-op (doesn't
-// panic). Defensive against shutdown-on-startup-failure paths in
-// `cmd/bridge/main.go` (e.g., if Start() returns an error early, the
-// shutdown sequence might still call Stop() on the unstarted
-// advertiser).
+// Test_SSDPAdvertiser_StopBeforeStartIsSafe pins that tearing down what was
+// never started is a no-op that doesn't panic: a nil registration handle
+// withdraws, a subsystem with nothing registered closes, both twice.
+// Defensive against shutdown-on-startup-failure paths in `cmd/bridge`
+// (e.g., if Start() returns an error early, the shutdown sequence still
+// stops what it holds).
 func Test_SSDPAdvertiser_StopBeforeStartIsSafe(t *testing.T) {
-	a := NewSSDPAdvertiser(SSDPConfig{UDN: "uuid:test", Location: "http://x", ServerToken: "test"})
-	// Should not panic
+	var h *SSDPHandle
+	for range 2 {
+		if err := h.Withdraw(context.Background()); err != nil {
+			t.Errorf("a nil handle's Withdraw = %v, want nil", err)
+		}
+	}
+	a := newTestAdvertiser(testAdvertiserConfig{UDN: "uuid:test", Location: "http://x", ServerToken: "test"})
 	a.Stop()
-	// Calling twice should also be safe
 	a.Stop()
+	sub := NewSSDPSubsystem(context.Background(), SSDPSubsystemOptions{})
+	for range 2 {
+		if err := sub.Close(context.Background()); err != nil {
+			t.Errorf("Close of a subsystem with nothing registered = %v, want nil", err)
+		}
+	}
 }
 
-// Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel pins B31: the
-// M-SEARCH listener loop must return promptly when its context is
-// cancelled WITHOUT Stop() closing the socket — the per-iteration read
+// Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel pins B31: a
+// listener's read loop must return promptly when the subsystem's context is
+// cancelled WITHOUT anything closing its socket — the per-iteration read
 // deadline is what lets a bare parent-ctx cancel unpark the goroutine (and
-// free its WaitGroup slot). Pre-fix the goroutine parked in ReadFromUDP
-// until a packet arrived, so the 3s bound below would fire and fail.
+// free its WaitGroup slot). Pre-fix the goroutine parked in the read until a
+// packet arrived, so the 3s bound below would fire and fail.
 //
-// Drives runMSearchListener directly against a plain loopback UDP socket
-// (no multicast permissions needed → runs in sandboxed CI). The listener
-// never receives a packet, so every read hits the deadline: exactly the
-// "quiet network" case the fix targets.
+// Drives the subsystem's read loop against a plain loopback UDP socket (no
+// multicast permissions needed → runs in sandboxed CI). The listener never
+// receives a packet, so every read hits the deadline: exactly the "quiet
+// network" case the fix targets.
 func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
-	a := NewSSDPAdvertiser(SSDPConfig{
-		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
-		Location:    "http://127.0.0.1:7790/dlna/description.xml",
-		ServerToken: "test",
-	})
-	// runMSearchListener reads s.log only on a NON-timeout read error; set
-	// it so a stray error can't nil-deref. Start() would set this, but we
-	// drive the listener directly (bypassing the multicast bind).
-	a.log = ssdpLogger
-
 	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("bind loopback UDP listener: %v", err)
@@ -100,38 +96,52 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 	defer listener.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	sub := NewSSDPSubsystem(ctx, SSDPSubsystemOptions{Logger: ssdpLogger})
+	sub.transport = &socketTransport{socks: map[string]*net.UDPConn{"": listener}}
+	sub.notifyTo = loopbackDiscard(t)
+	h, _, err := sub.Register(ctx, testAdvertiserConfig{
+		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
+		Location:    "http://127.0.0.1:7790/dlna/description.xml",
+		ServerToken: "test",
+	}.registration())
+	if err != nil {
+		t.Fatalf("register on the loopback socket: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = h.Withdraw(context.Background())
+		_ = sub.Close(context.Background())
+	})
+	sub.mu.Lock()
+	reading := h.active[0].listener.reading
+	sub.mu.Unlock()
+	if !reading {
+		t.Fatal("the registered endpoint's listener has no read loop running")
+	}
 
-	// Drive the listener exactly as Start() does: arm it, and hold a wg
-	// slot for its lifetime (the goroutine's `defer s.wg.Done()` releases
-	// it on return).
-	armed := a.armListener(listener)
-	a.wg.Add(1)
-	go a.runMSearchListener(ctx, listener, armed)
-
-	// Give the goroutine time to pass the top-of-loop ctx.Done() check and
-	// PARK inside ReadMsgUDP before cancelling. Without this, cancel()
-	// would usually land before the first read, so the loop would exit via
-	// the top-of-loop select — never exercising the read-deadline wake path
-	// this test guards. 50ms >> the microseconds the goroutine needs to
-	// reach the read, and << the 500ms deadline, so it's parked-in-read.
+	// Give the goroutine time to pass the top-of-loop context check and
+	// PARK inside the read before cancelling. Without this, cancel() would
+	// usually land before the first read, so the loop would exit via the
+	// top-of-loop check — never exercising the read-deadline wake path this
+	// test guards. 50ms >> the microseconds the goroutine needs to reach the
+	// read, and << the 500ms deadline, so it's parked-in-read.
 	time.Sleep(50 * time.Millisecond)
 
-	// Cancel the ctx WITHOUT closing the listener — the whole point of B31
-	// is a parent-ctx cancel that never reaches Stop()'s socket-close. The
-	// goroutine (parked in ReadMsgUDP) can only observe it after the read
+	// Cancel the context WITHOUT closing the listener — the whole point of
+	// B31 is a parent-ctx cancel that never reaches a socket close. The
+	// goroutine (parked in the read) can only observe it after the read
 	// deadline fires and loops back to the top; pre-fix it never would.
 	cancel()
 
 	done := make(chan struct{})
 	go func() {
-		a.wg.Wait()
+		sub.readers.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
-		// Listener returned — the read deadline let it observe ctx.Done().
+		// The loop returned — the read deadline let it observe the cancel.
 	case <-time.After(3 * time.Second):
-		t.Fatal("runMSearchListener did not return after ctx cancel — leaked, parked in ReadMsgUDP")
+		t.Fatal("the listener's read loop did not return after ctx cancel — leaked, parked in its read")
 	}
 }
 
@@ -145,12 +155,12 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 //
 // It skips where the host has no loopback interface that is up, which a test
 // that must not reach the LAN cannot replace with another interface, and
-// where multicast cannot be pinned to it. Start only warns when that pin
-// fails, and sends on the OS default interface instead, so a test whose
-// Start succeeded would multicast onto the LAN there; the skip decides with
-// the call Start makes (pinMulticastInterface), on a socket opened the way
-// Start opens its sender (openNotifySender), before any advertiser starts
-// (CodeRabbit on #1086).
+// where multicast cannot be pinned to it. A MediaServer endpoint only warns
+// when that pin fails, and sends on the OS default interface instead, so a
+// test whose Start succeeded would multicast onto the LAN there; the skip
+// decides with the call the endpoint makes (pinMulticastInterface), on a
+// socket opened the way its sender is (openNotifySender), before any
+// advertiser starts (CodeRabbit on #1086).
 func loopbackInterface(t *testing.T) *net.Interface {
 	t.Helper()
 	ifaces, err := net.Interfaces()
@@ -181,14 +191,14 @@ func skipUnlessMulticastPins(t *testing.T, iface *net.Interface) {
 	}
 }
 
-// Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
-// capture-local fix closes: with a short advertise interval the periodic
-// NOTIFY goroutine fires `sendAliveAll` rapidly while the M-SEARCH
-// goroutine is parked in `ReadMsgUDP`, and `Stop()` closes + nils the
-// socket fields concurrently. Run under `-race`, the OLD shape (helpers
-// reading `s.sender` / `s.listener` from the struct) trips the race
-// detector AND can nil-deref-panic; the fixed shape (goroutines hold
-// captured local copies) is clean.
+// Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race: with a
+// short advertise interval the endpoint's timer fires `sendAliveAll` rapidly
+// while the listener's read loop is parked in its read, and the withdrawal
+// closes the sockets concurrently. Run under `-race`, a shape where a
+// goroutine reads a socket field a withdrawal writes trips the race detector
+// AND can nil-deref-panic; the subsystem's goroutines hold their own
+// endpoint and listener, which only a withdrawal that has joined them
+// releases.
 //
 // The advertiser runs on the loopback interface (loopbackInterface), so
 // its NOTIFYs, one burst a millisecond, never leave this host. Skips when
@@ -197,16 +207,16 @@ func skipUnlessMulticastPins(t *testing.T, iface *net.Interface) {
 func Test_SSDPAdvertiser_StartStopRaceFree(t *testing.T) {
 	lo := loopbackInterface(t)
 	for i := 0; i < 5; i++ {
-		a := NewSSDPAdvertiser(SSDPConfig{
+		a := newTestAdvertiser(testAdvertiserConfig{
 			UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 			Location:    "http://127.0.0.1:7790/dlna/description.xml",
 			ServerToken: "test",
 			Interface:   lo,
+			// Past the one-minute floor, so the timer actually ticks during
+			// the test window, putting `sendAliveAll` in flight against the
+			// concurrent withdrawal.
+			AdvertiseInterval: time.Millisecond,
 		})
-		// White-box: bypass the >=1min constructor clamp so the periodic
-		// NOTIFY goroutine actually ticks during the test window, putting
-		// `sendAliveAll` in flight against the concurrent Stop.
-		a.cfg.AdvertiseInterval = time.Millisecond
 
 		if err := a.Start(context.Background()); err != nil {
 			// Skip ONLY if the very first Start fails (environment lacks

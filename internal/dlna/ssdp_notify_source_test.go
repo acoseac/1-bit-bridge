@@ -53,7 +53,7 @@ func TestAnAdvertiserOnLoopbackNotifiesFromALoopbackAddress(t *testing.T) {
 	}
 
 	location := "http://127.0.0.1:7790/" + testNonce(t) + "/description.xml"
-	a := NewSSDPAdvertiser(SSDPConfig{
+	a := newTestAdvertiser(testAdvertiserConfig{
 		UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 		Location:    location,
 		ServerToken: "test",
