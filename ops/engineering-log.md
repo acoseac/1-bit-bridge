@@ -54461,3 +54461,8 @@ against the code before anything changed. All three held.
 other scan rewrote: an old file's audio MD5 for the new file. That predates
 B513 and is not its fix; it is the owner's to file, since the backlog file
 is not on this machine.
+
+**The gate**, in one run through the build lock on `09f0eda7`: `make fmt vet
+test` (71 packages ok, `cmd/bridge` 506 s, `internal/manifest` 1,123 s, `go
+fmt` changing nothing), `make build-all` (six targets, stamped `09f0eda7`
+with no `-dirty`) and `make docs-check`, clean.
