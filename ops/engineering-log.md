@@ -57498,6 +57498,39 @@ compiles pass on amd64 and arm64. Full package test and race runs were attempted
 but the sandbox refuses loopback TCP/UDP and Unix-socket binds; the original
 real-network goldens skip there and still need an unrestricted runner.
 
+**Round 3 — strict endpoint startup, retirement's changing deadline, and the
+portable host test.** The Register and Update tables first failed on missing,
+unspecified and IPv4-mapped Local addresses: they opened sockets and announced
+endpoints the reply factory would refuse. IPv6 was already refused by the
+generic endpoint check, but did not report the strict capability error. Both
+entry points now use the reply factory's same address/index check before any
+socket opens (`checkStrictReplyAddress`); a retained Update endpoint continues
+to answer. A Withdraw parked in its first byebye before Close began originally
+returned only `net.ErrClosed` when Close's earlier deadline interrupted it.
+Retirement now re-reads Close's deadline before each byebye write, sets that
+write's deadline, skips a target after expiry, and uses the current deadline
+for its join and final expiry result. A second test publishes Close's state
+between writes with no watcher running: before the fix it kept the one-second
+write budget and attempted all remaining targets after expiry. Both tests now
+pass, with the withdrawal returning `context.DeadlineExceeded`.
+The host-factory test keeps bind/pin ordering checks on every platform and
+expects `ErrSSDPStrictCapability` with zero writes outside Linux/macOS/Windows.
+An overlay running the real unsupported-platform write stub reproduced the
+original test failure and passes the corrected expectation; this is a host
+simulation, not a native unsupported-platform runtime result. The new tests
+pass `-race -count=5`. Seven independently applied controls (four retained,
+three new) compile and fail every predicted test; patches, commands, full test
+names, red/green logs and validation details are in the round-3 scratch report.
+No golden packet or MediaServer routing policy changed. The rules and their
+History carry all three requirements beside the code. Validation on Go 1.27.2:
+the 76 available SSDP tests pass five race-enabled repetitions (14 socket
+tests skip each time); all six dlna fuzzers pass 20-second runs; whole-tree vet,
+Linux/Windows vet and test compiles on amd64/arm64, the doc/wiring sweeps and
+docs-check pass. Full package plain/race and SSDP runs were attempted; the
+sandbox refuses the listener binds. An initial disk-full failure was recovered
+by clearing disposable foreign object entries in this task's Go cache and
+retrying sequentially; those retries reach the socket restrictions.
+
 ### Why
 
 B470 makes the bridge's player an OpenHome Source on the LAN (PR 5a2),

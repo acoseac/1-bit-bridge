@@ -35,6 +35,17 @@ fresh shutdown budget.** Cancellation stops answers and alive bursts; it does
 not cancel byebye. Retirement joins normal sends before best-effort byebye;
 expiry interrupts pending sends and releases everything, with
 `context.DeadlineExceeded`. A datagram handed to the kernel cannot be recalled.
+**Re-read Close's deadline before every byebye write and when reporting
+retirement expiry, even for a Withdraw that began first** (round 3). A
+retirement's entry-time deadline can predate Close. Each target takes the
+earlier of the current retirement deadline and the burst cap, sets it on the
+sender, and skips the write once it has passed. Both the join's expiry check
+and the final byebye expiry check use Close's current deadline, so a caller
+whose withdrawal was interrupted by Close gets `context.DeadlineExceeded`.
+`TestWithdrawalReportsAnEarlierCloseDeadline` starts a withdrawal first and
+parks its byebye until Close interrupts it. `TestByebyeRefreshesTheCloseDeadlineBetweenWrites`
+publishes Close's state between writes without running its watcher, pinning
+both the shortened write deadline and the refusal to start a late write.
 `TestCloseJoinsAWithdrawalAlreadySendingByeBye` parks a byebye, releases it or
 lets Close's deadline abandon it, and checks socket cleanup at Close's return.
 `TestCloseBudgetIncludesInflightWrites` parks Register and Update in initial
@@ -45,7 +56,17 @@ interface, or send nothing and warn once. Don't use the MediaServer's routed
 reply path for a strict registration.** A source bind alone does not constrain
 the route on overlapping subnets or through a VPN. The strict socket binds the
 endpoint's `Local` IPv4 address on an ephemeral port, never the :1900 listener;
-it needs a valid non-unspecified IPv4 and a positive interface index. Linux
+it needs a valid non-unspecified IPv4 and a positive interface index.
+**Refuse strict endpoints without a valid non-unspecified, unmapped IPv4 Local
+and positive interface index before opening sockets** (round 3). Register and
+Update call the same `checkStrictReplyAddress` as the reply factory; failed
+endpoints carry `ErrSSDPStrictCapability`. A failed addition does not disturb
+an endpoint retained by Update. Missing, unspecified and IPv4-mapped locals
+previously announced successfully but could answer no search; IPv6 already
+failed the generic endpoint check. The Register and Update tables in
+`TestStrictRegisterRefusesAnUnusableReplyEndpointBeforeOpening` and
+`TestStrictUpdateRefusesAnUnusableReplyEndpointBeforeOpening` pin the refusal,
+zero new sockets, and the retained endpoint's replies. Linux
 sends unconnected with `IP_PKTINFO` carrying both `ipi_ifindex` and
 `ipi_spec_dst` on every packet. macOS sets `IP_BOUND_IF` before its first
 unconnected send. Windows sets `IP_UNICAST_IF` (31), whose IPv4 index is in
@@ -65,6 +86,11 @@ overlapping route), `TestStrictReplyPinFailureSendsNothingAndLogsOnce`,
 `TestLinuxStrictReplyCarriesItsInterfaceAndSource`, and the socket-control
 refusal tests on macOS and Windows. Linux/Windows runtime belongs to CI;
 cross-compilation alone does not establish behavior on a real multi-NIC host.
+**Keep bind/pin ordering tests portable and expect strict write refusal outside
+Linux/macOS/Windows** (round 3). The host-factory test replaces the pin to
+observe its ordering, but uses the platform's real write function: it must
+expect `ErrSSDPStrictCapability` and zero writes on unsupported platforms,
+while still requiring socket closure.
 
 **Normalize supported admission pointers before validation and refuse typed
 nils and unknown implementations before opening anything.** Both value and
