@@ -57452,20 +57452,33 @@ read before; no test separates the two orders).
   which fails on this host (backlog B520) and is not this change's.
   `make build-all` (six targets) and `make docs-check` passed.
 
-### Round 3: one finding
+### Rounds 3 and 4: the abandonment's log line, and when done closes
 
 Round 2's review of #1321 (Codex and the Claude API, both static, on
 16b8d3a5..95291918): the Claude API found nothing, and Codex one finding,
 verified against the code.
 
 1. **Low: the abandonment test could read the log before its line.**
-   `supervise` closes `done` and then calls `settle`, which logs that a Run
+   `supervise` closed `done` and then called `settle`, which logs that a Run
    a panic ended is abandoned, and
    `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock` read the log as
    soon as `done` closed. Red first, on 95291918: with a 2 s sleep between
    `close(p.done)` and `p.settle()`, the test failed, "the abandonment
-   logged [], want once". Fix (852cb8b3, the test only): it parks that log
-   call (`loggingtest.ParkOn`), waits for it and lets it go, and then reads
-   the log, so its `settled` check also runs once `settle` has. Under the
-   same sleep it passed (2.24 s). The three `TestAPanic` tests passed 10
-   runs each under `-race`.
+   logged [], want once". Round 3 (852cb8b3) made the test park that log
+   call (`loggingtest.ParkOn`) and wait for it.
+
+Round 3's review (the same two, on 95291918..b90e5d90): the Claude API
+found nothing, and Codex that releasing the park does not join `settle`,
+so a later `settle` that logged and then let go of the lock could still
+pass, and that this record said more than the wait gave. Both held: `done`'s
+own doc says it closes once the supervisor has returned, and it closed
+before `settle`. Round 4 (aa2b7038) fixes the order instead of the test:
+the supervisor settles first and closes `done` last. `settle` never
+blocks (a Run still running is waited for on a goroutine of its own), so
+a Run still running does not hold `done` back, and a caller that sees it
+sees what `settle` did. The test went back to reading the log once `done` has
+closed. Control: `close(p.done)` put back before `p.settle()`, with the 2 s
+sleep between them, fails the test ("the abandonment logged [], want
+once"), restored from git. Runs on aa2b7038: `cmd/bridge` under `-race`
+(524 s) and the three `TestAPanic` tests 10 runs each under `-race`, all
+passing; `make docs-check` passed.
