@@ -202,7 +202,9 @@
 // no UUID and remains a floor. A start whose first ID or token would exceed
 // uint32 refuses; edits refuse at the boundary rather than wrapping.
 //
-// A backup carries a reservation only when it matches the captured UUID.
+// A backup carries every decodable live reservation, restamped with its
+// captured UUID; only a missing reservation is omitted, and an unreadable
+// one refuses the backup with repair advice.
 // Restore writes max(snapshot, live) per counter plus 2^24 and one uniform
 // random 24-bit draw, before writing the UUID or any other identity file.
 // The live floor counts even under another UUID; an interrupted restore
@@ -216,8 +218,12 @@
 // # Persistence
 //
 // The queue file (Config.QueuePath) holds the entries, the counters'
-// values and reservations, the modes and the selection, never the
-// transport state: a start is stopped. One writer goroutine writes the
+// values and reservations, the writer's UUID (version 2), the modes and the selection, never the
+// transport state: a start is stopped. A foreign UUID is ReasonQueueIdentity,
+// logged once and moved aside without loading any entries. Version 1 has no
+// UUID and belongs to the running identity (development boxes only). Restore
+// durably removes the destination queue before replacing its identity; a
+// restore of the same identity keeps it. One writer goroutine writes the
 // newest revision through internal/atomicwrite, fsynced, each write after
 // the last has returned, so an older revision never lands after a newer
 // one; it waits writeCoalesce after a change and at most writeMaxAge in

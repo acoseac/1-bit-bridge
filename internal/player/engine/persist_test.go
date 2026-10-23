@@ -361,7 +361,7 @@ func TestEachKindOfBadFileIsMovedAside(t *testing.T) {
 			return []byte("{")
 		}},
 		{"another version", func(t *testing.T, h *harness, m map[string]any) []byte {
-			m["version"] = 2
+			m["version"] = 3
 			return writeJSON(t, h, m)
 		}},
 		{"a zero ID", func(t *testing.T, h *harness, m map[string]any) []byte {

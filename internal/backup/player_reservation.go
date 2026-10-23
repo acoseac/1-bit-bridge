@@ -11,6 +11,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
@@ -27,8 +29,9 @@ type RestoreOptions struct {
 // after the largest possible jump. The random part is uniform in [0, margin).
 const restoreMargin uint64 = 1 << 24
 
-// matchingReservation takes a snapshot mark only when it names its identity.
-// A missing, unreadable, v1 or foreign reservation is no snapshot mark.
+// matchingReservation reads the snapshot's already captured and restamped
+// mark. Live reservations must not go through this filter: every decodable
+// live floor covers the box, whatever UUID or supported version it names.
 func matchingReservation(path, id string) (engine.Reservation, bool) {
 	r, err := engine.ReadReservation(path)
 	if err != nil || r.UUID != id {
@@ -65,7 +68,7 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 			exhausted = append(exhausted, fmt.Errorf("snapshot's player %s mark leaves no room for a restore: remove player-uuid and %s from the snapshot to restore the rest; the box keeps or makes its own identity", c.name, engine.ReservationFileName))
 		}
 		if uint64(c.live) > limit {
-			exhausted = append(exhausted, fmt.Errorf("box's player %s mark leaves no room for a restore: remove the box's player-uuid and %s, then restore again; controllers see a new device when the box makes its own identity", c.name, engine.ReservationFileName))
+			exhausted = append(exhausted, fmt.Errorf("box's player %s mark leaves no room for a restore: with the service stopped, remove the box's player-uuid and %s, and remove player-uuid and %s from a copy of the snapshot as well; restore that copy so the box makes a new identity, a new device to controllers with no values to reuse", c.name, engine.ReservationFileName, engine.ReservationFileName))
 		}
 	}
 	if err := errors.Join(exhausted...); err != nil {
@@ -106,4 +109,28 @@ func (o RestoreOptions) randomSource() io.Reader {
 		return o.Random
 	}
 	return rand.Reader
+}
+
+// discardReplacedPlayerQueue removes the destination's queue only when its
+// identity changes. The caller holds the data-dir lock and has already made
+// the raised reservation durable. ProbeDurable actually fsyncs the directory
+// chain: the second call commits the unlink, even when a previous interrupted
+// attempt already removed the file. A failed barrier must stop before UUID.
+func discardReplacedPlayerQueue(target, id string) error {
+	old, err := config.ReadPlayerUUIDFile(target)
+	if err == nil && old == id {
+		return nil
+	}
+	dir := filepath.Dir(target)
+	path := filepath.Join(dir, "player-queue.json")
+	if err := atomicwrite.ProbeDurable(dir, path); err != nil {
+		return fmt.Errorf("restore: check player queue discard: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("restore: discard previous player's queue: %w", err)
+	}
+	if err := atomicwrite.ProbeDurable(dir, path); err != nil {
+		return fmt.Errorf("restore: make player queue discard durable: %w", err)
+	}
+	return nil
 }

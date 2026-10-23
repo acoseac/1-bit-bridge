@@ -160,3 +160,49 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 		t.Fatalf("legacy restore lowered marks: %+v -> %+v", before, after)
 	}
 }
+
+func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T) {
+	needsDirectorySync(t)
+	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
+	id, _, err := config.EnsurePlayerUUID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const other = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	// This is the state after another identity's restore landed its floor
+	// but failed before its UUID. No engine starts before this CLI backup.
+	live := engine.Reservation{Version: 2, UUID: other, IDs: 40000000, Tokens: 50000000}
+	raw, err := json.Marshal(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, playerReservationFile), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap := runBackup(t, cfg)
+	mark, err := engine.ReadReservation(filepath.Join(snap, playerReservationFile))
+	if err != nil || mark.UUID != id || mark.IDs != live.IDs || mark.Tokens != live.Tokens {
+		t.Fatalf("CLI backup lost the foreign floor: %+v %v", mark, err)
+	}
+	if err := config.WritePlayerUUIDFile(filepath.Join(dir, config.PlayerUUIDFile), other); err != nil {
+		t.Fatal(err)
+	}
+	const queue = `{"version":1,"revision":1,"ids":{"next":4098,"reserved":8192},"tokens":{"current":4098,"reserved":8192},"selected":4097,"entries":[{"id":4097,"ref":"destination-track"}]}`
+	if err := os.WriteFile(filepath.Join(dir, playerQueueFile), []byte(queue), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := runRestoreYes(t, cfg, snap)
+	if code != 0 {
+		t.Fatalf("CLI restore: %d %s %s", code, out, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, playerQueueFile)); !os.IsNotExist(err) {
+		t.Fatalf("CLI kept the destination queue: %v", err)
+	}
+	if got, err := config.ReadPlayerUUID(dir); err != nil || got != id {
+		t.Fatalf("restored UUID: %s %v", got, err)
+	}
+	mark, err = engine.ReadReservation(filepath.Join(dir, playerReservationFile))
+	if err != nil || mark.IDs < live.IDs+(1<<24) || mark.Tokens < live.Tokens+(1<<24) {
+		t.Fatalf("CLI restore lowered the floor: %+v %v", mark, err)
+	}
+}

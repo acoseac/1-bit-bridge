@@ -178,7 +178,7 @@ func (e *Engine) loadReserve() reserveFile {
 		f, err = decodeReserve(data)
 	}
 	if err != nil {
-		if !e.moveAside("reservation file", path, err.Error()) {
+		if !e.moveAside("reservation file", path, err) {
 			e.o.res.stuckReserve = path
 		}
 		return reserveFile{}
@@ -198,9 +198,14 @@ func (e *Engine) loadQueue() (*queueFile, []entry) {
 	var entries []entry
 	if err == nil {
 		f, entries, err = decodeQueue(data)
+		// Version 1 was written only on development boxes; its entries
+		// belong to the running identity. Version 2 names its writer.
+		if err == nil && f.Version == 2 && f.UUID != e.cfg.PlayerUUID {
+			err = refuse("load queue", ReasonQueueIdentity, "the queue belongs to another player identity")
+		}
 	}
 	if err != nil {
-		if !e.moveAside("queue file", path, err.Error()) {
+		if !e.moveAside("queue file", path, err) {
 			e.o.res.stuckQueue = path
 		}
 		return nil, nil
@@ -634,6 +639,7 @@ func (e *Engine) publishIfDirty() {
 func (e *Engine) payload() *payload {
 	o := &e.o
 	return &payload{
+		uuid:        e.cfg.PlayerUUID,
 		rev:         o.persist.Revision,
 		q:           o.q,
 		idsNext:     o.res.ids.next,

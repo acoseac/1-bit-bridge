@@ -8,7 +8,8 @@
 // when one exists), the Atlas harvest credential and sync cursor
 // (`atlas-harvest.json`, when one is stored), and the player's identity
 // (`player-uuid`, once the player has one: config.PlayerUUIDFile), plus
-// its matching durable reservation (`player-ids.json`, never the queue). The
+// its durable reservation floor (`player-ids.json`, restamped with the captured
+// UUID, never the queue). The
 // snapshot also writes a small `manifest.json`
 // describing the bridge version and protocol version that produced it
 // — Restore refuses incompatible snapshots so a future schema change
@@ -231,14 +232,19 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		captured = append(captured, pair.name)
 	}
 
-	// Read the reservation after the identity's copy. A backup racing the
-	// first mint, or an interrupted restore, carries no mark unless the
-	// last durable reservation names exactly the identity we captured.
+	// Every writer merges the live reservation, so even a foreign UUID or
+	// v1 file covers this box's identities. Capture that conservative floor
+	// after the UUID and restamp the snapshot copy, including after a restore
+	// interrupted before its UUID landed and before any engine restarts.
 	if slices.Contains(captured, PlayerUUIDFileName) {
 		id, err := config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
 		if err == nil {
-			mark, ok := matchingReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName), id)
-			if ok {
+			mark, err := engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("backup: read %s: %w; stop the service and repair the reservation from a known valid copy that preserves both floors, then retry; do not delete it while keeping the player identity", engine.ReservationFileName, err)
+			}
+			if err == nil {
+				mark.Version, mark.UUID = 2, id
 				data, err := json.Marshal(mark)
 				if err != nil {
 					return "", err
@@ -347,6 +353,11 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	}
 	if playerUUIDRead {
 		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
+			return err
+		}
+		// A replacement identity must never expose this box's old entries,
+		// including the UUID-less queue format on development boxes.
+		if err := discardReplacedPlayerQueue(dst.PlayerUUID, playerUUID); err != nil {
 			return err
 		}
 		// This comes after the reservation and before all other identity

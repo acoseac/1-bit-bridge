@@ -235,7 +235,16 @@ func TestRestoreRequiresTheReservationBarriersBeforeIdentity(t *testing.T) {
 			if barrier == "file" {
 				undo = atomicwrite.SetSyncFileForTest(func(*os.File) error { return broken })
 			} else {
-				undo = atomicwrite.SetSyncDirForTest(func(string) error { return broken })
+				// Fail the reservation's barrier only. A later queue-discard
+				// barrier must not mask a restore that ignored this failure.
+				failed := false
+				undo = atomicwrite.SetSyncDirForTest(func(string) error {
+					if !failed {
+						failed = true
+						return broken
+					}
+					return nil
+				})
 			}
 			err := fixedRestore(t, snap, dst, 1)
 			undo()
@@ -273,8 +282,8 @@ func TestTwoRestoresWithSeparatedDrawsDoNotReuseValues(t *testing.T) {
 	}
 }
 
-func TestSnapshotOmitsMarksItCannotAssociateWithItsIdentity(t *testing.T) {
-	for _, kind := range []string{"missing", "unreadable", "foreign", "v1", "no_identity"} {
+func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
+	for _, kind := range []string{"missing", "unreadable", "invalid", "foreign", "v1", "no_identity"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := t.TempDir()
 			idPath := filepath.Join(dir, config.PlayerUUIDFile)
@@ -289,6 +298,10 @@ func TestSnapshotOmitsMarksItCannotAssociateWithItsIdentity(t *testing.T) {
 				if err := os.Mkdir(rp, 0700); err != nil {
 					t.Fatal(err)
 				}
+			case "invalid":
+				if err := os.WriteFile(rp, []byte("broken"), 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "foreign":
 				putMark(t, dir, boxPlayerUUID, 100, 200)
 			case "v1":
@@ -299,8 +312,22 @@ func TestSnapshotOmitsMarksItCannotAssociateWithItsIdentity(t *testing.T) {
 				putMark(t, dir, snapshotPlayerUUID, 100, 200)
 			}
 			snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: idPath})
+			if kind == "unreadable" || kind == "invalid" {
+				if err == nil || !strings.Contains(err.Error(), "repair") || !strings.Contains(err.Error(), engine.ReservationFileName) {
+					t.Fatalf("backup must refuse an unreadable floor with a repair instruction: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
+			}
+
+			if kind == "foreign" || kind == "v1" {
+				got := markAt(t, snap)
+				if got.Version != 2 || got.UUID != snapshotPlayerUUID || got.IDs != 100 || got.Tokens != 200 {
+					t.Fatalf("backup lost/restamped the floor incorrectly: %+v", got)
+				}
+				return
 			}
 			if slices.Contains(snapshotFiles(t, snap), engine.ReservationFileName) {
 				t.Fatal("snapshot carried a mark without its identity")
