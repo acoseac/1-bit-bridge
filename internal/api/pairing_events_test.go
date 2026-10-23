@@ -22,7 +22,9 @@ import (
 // SSE event broker AND wires pairing.Store.OnStateChange to publish
 // to it — so a state transition (Approve, Decline) flows through the
 // broker to a `/v1/pairing/{id}/events` subscriber. Mirrors the
-// production wiring in cmd/bridge/main.go.
+// production wiring in cmd/bridge/main.go. A request lives for
+// pairingTestTTL: no test here is about expiry, and the approval tests
+// open a stream and drain it before they approve.
 //
 // Returns the test server, raw auth-store handle (so a test can mint
 // a bearer for non-pairing endpoints if needed), and the pairing
@@ -41,8 +43,8 @@ func pairingEventsTestSetup(t *testing.T) (*httptest.Server, *auth.Store, *pairi
 	}
 
 	pairingStore := pairing.NewStore(pairing.Options{
-		TTL:        500 * time.Millisecond, // long enough for the SSE-subscribe round-trip
-		Grace:      300 * time.Millisecond,
+		TTL:        pairingTestTTL,
+		Grace:      pairingTestTTL,
 		MaxPending: 4,
 		RevokeToken: func(id string) error {
 			return authStore.Revoke(id)
