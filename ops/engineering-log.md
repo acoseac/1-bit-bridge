@@ -54386,3 +54386,9 @@ rewritten with its size and mtime both kept is not seen as changed, here as by
 the skip gate. An older binary's scan run beside this serve leaves a stale
 kind served until this binary's next open. A file the finishing pass could
 not read (a mount down at the upgrade) arrives later, one delta row each.
+
+**The gate**, in one run through the build lock on `036a9ea0`, after 1,627 s
+waiting for a slot: `make fmt vet test` (71 packages ok, `cmd/bridge` 503 s,
+`internal/manifest` 1,121 s, `go fmt` changing nothing), `make build-all`
+(six targets, stamped `036a9ea0` with no `-dirty`) and `make docs-check`,
+clean.
