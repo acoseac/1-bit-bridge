@@ -277,6 +277,52 @@ func TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld(t *testing.T) {
 	}
 }
 
+// TestPlaybackPausesTheTransportCurrentWhenItDecides pins a pause that a
+// sink playing out its last frames refuses: by the time the pause decides,
+// the producer may have drained that sink, opened the next transport's and
+// started it, and the pause then acts on the sink current at its decision,
+// never on the one it found first. The seam holds the pause between the
+// refusal and its decision while a's drain ends and b's stream starts.
+func TestPlaybackPausesTheTransportCurrentWhenItDecides(t *testing.T) {
+	parked, letGo := make(chan struct{}), make(chan struct{})
+	var parkOnce, goOnce sync.Once
+	d := newDirectWith(t, nil, func(cfg *playback.Config) {
+		cfg.Seams = &playback.Seams{PauseRefused: func() {
+			parkOnce.Do(func() {
+				close(parked)
+				<-letGo
+			})
+		}}
+	})
+	release := func() { goOnce.Do(func() { close(letGo) }) }
+	t.Cleanup(release)
+	d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	d.files.add("b", wav(48000, 24, pattern(2, 480000, 24)))
+	if err := d.start(1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	next := occurrence(102, 2, "b")
+	if err := d.be.Prepare(bg, 1, 101, &next); err != nil {
+		t.Fatal(err)
+	}
+	d.k.Await(t, "a's sink to play out its last frames", func(v alsapcm.KernelView) bool { return v.Drains == 1 && v.Starved })
+	paused := make(chan error, 1)
+	go func() { paused <- d.be.Pause(bg, 1) }()
+	receiveIn(t, parked, "the pause, refused by a's sink, held before it decides")
+	// a's drain ends; the producer opens b's sink, fills it and starts it.
+	d.k.Grant(100 * time.Millisecond)
+	d.k.Await(t, "b's stream to start", func(v alsapcm.KernelView) bool { return v.Opens == 2 && v.State == "RUNNING" })
+	release()
+	if err := receiveIn(t, paused, "the pause"); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if v := d.k.View(); v.State != "PAUSED" {
+		t.Errorf("after the pause b's stream is %s, want PAUSED: the pause acted on a's sink, which was gone", v.State)
+	}
+	d.release(1)
+	d.k.CheckClosedEach(t)
+}
+
 // TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports pins the release
 // of a session whose resume is opening the next transport's sink: paused
 // between two transports, the resume opens b's sink itself, and a Stop while

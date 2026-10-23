@@ -41,6 +41,26 @@ type Config struct {
 	Notify func(Note)
 	// Log is where the backend logs; nil is the player component.
 	Log *slog.Logger
+	// Seams are where a test holds the backend between two of its steps,
+	// to reproduce an interleaving that timing alone reaches only rarely;
+	// nil in production.
+	Seams *Seams
+}
+
+// Seams are the backend's test seams (Config.Seams). Each runs on the
+// goroutine that reaches it, and may block to hold that goroutine there.
+type Seams struct {
+	// PauseRefused runs in Pause once a sink has refused it because it is
+	// playing out its last frames or has played them out, before Pause
+	// decides what the refusal means.
+	PauseRefused func()
+}
+
+// pauseRefused is the PauseRefused seam.
+func (b *Backend) pauseRefused() {
+	if sm := b.cfg.Seams; sm != nil && sm.PauseRefused != nil {
+		sm.PauseRefused()
+	}
 }
 
 // NoteKind is what a Note says happened to a sink.

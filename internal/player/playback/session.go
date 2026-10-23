@@ -613,19 +613,32 @@ func (s *session) dropLocked(o *occ) {
 	wake(s.wakeR)
 }
 
-// pause is Pause.
+// pause is Pause. It acts on the transport current when it decides. A sink
+// playing out its last frames takes no pause, and one that has played them
+// out holds no device; by the time it has refused, the producer may have
+// opened the next transport's sink and started it, which the next turn
+// pauses. With no sink to pause, or the one that refused still current, the
+// session pauses with no device, recorded in the critical section that read
+// the transport, so a sink the producer opens after it takes the pause
+// before a frame.
 func (s *session) pause(ctx context.Context) error {
-	s.mu.Lock()
-	if err := s.callableLocked(); err != nil {
+	var refused *output
+	for {
+		s.mu.Lock()
+		if err := s.callableLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		out := s.cur
+		if out != nil && (out.drained || out.closed) {
+			out = nil
+		}
+		if out == nil || out == refused {
+			s.pausedLocked(true)
+			s.mu.Unlock()
+			return nil
+		}
 		s.mu.Unlock()
-		return err
-	}
-	out := s.cur
-	if out != nil && (out.drained || out.closed) {
-		out = nil
-	}
-	s.mu.Unlock()
-	if out != nil {
 		err := s.call(ctx, out.sink.Pause)
 		if err == nil {
 			s.mu.Lock()
@@ -633,18 +646,15 @@ func (s *session) pause(ctx context.Context) error {
 			s.mu.Unlock()
 			return nil
 		}
-		// A sink playing out its last frames takes no pause, and one that has
-		// played them out holds no device: the session pauses after them, with
-		// the device let go. Anything else is the pause's refusal.
+		// Anything but a sink playing out its last frames or done with them is
+		// the pause's refusal.
 		st := out.sink.Position().State
 		if !(st == alsapcm.SinkDraining && alsapcm.ReasonOf(err) == alsapcm.ReasonBadState) && st != alsapcm.SinkStopped {
 			return err
 		}
+		s.b.pauseRefused()
+		refused = out
 	}
-	s.mu.Lock()
-	s.pausedLocked(true)
-	s.mu.Unlock()
-	return nil
 }
 
 // pausedLocked records a pause; one that holds no device arms the release

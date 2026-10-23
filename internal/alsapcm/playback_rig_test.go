@@ -473,13 +473,23 @@ type direct struct {
 
 func newDirect(t *testing.T, openSink func(func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) *direct {
 	t.Helper()
+	return newDirectWith(t, openSink, nil)
+}
+
+// newDirectWith is newDirect with edit applied to the backend's Config.
+func newDirectWith(t *testing.T, openSink func(func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error), edit func(*playback.Config)) *direct {
+	t.Helper()
 	d := &direct{t: t, k: alsapcm.NewFakeKernel(t), rec: newRecorder(), files: newFiles(), unit: newUnit(), ticks: make(chan time.Time)}
 	open := d.k.OpenSink
 	if openSink != nil {
 		open = openSink(open)
 	}
-	be, err := playback.New(playback.Config{Resolver: d.files, Locator: d.unit, OpenSink: open,
-		Tick: func() (<-chan time.Time, func()) { return d.ticks, func() {} }})
+	cfg := playback.Config{Resolver: d.files, Locator: d.unit, OpenSink: open,
+		Tick: func() (<-chan time.Time, func()) { return d.ticks, func() {} }}
+	if edit != nil {
+		edit(&cfg)
+	}
+	be, err := playback.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
