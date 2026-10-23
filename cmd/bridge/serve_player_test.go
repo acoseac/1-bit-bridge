@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/flactest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
@@ -260,13 +263,15 @@ func goBarTrees(t *testing.T) outputTrees {
 	return outputTrees{proc: filepath.Join(tree, "proc"), sysfs: filepath.Join(tree, "sys")}
 }
 
-// needsDirectorySync skips a test whose player must run: the engine keeps
-// its IDs durable with a directory fsync, which Windows has not, and
-// refuses to start there.
+// needsDirectorySync skips a serve test of the player on Windows, before
+// it does anything: the engine keeps its IDs durable with a directory
+// fsync, which Windows has not, and refuses to start there, and sysfstest
+// cannot lay out the GO bar's tree the watcher reads (its names hold
+// colons).
 func needsDirectorySync(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("the player's engine keeps its IDs durable with a directory fsync, which Windows has not")
+		t.Skip("the player's engine keeps its IDs durable with a directory fsync, which Windows has not, and the GO bar's sysfs tree cannot be laid out there")
 	}
 }
 
@@ -434,6 +439,23 @@ func (ps *playerServe) stopServe(t *testing.T) int {
 		return -1
 	}
 }
+
+// livePlayer changes output.player in the live config while serve runs,
+// through the holder its watcher and its player read, as the console's DAC
+// page will (6a).
+func (ps *playerServe) livePlayer(t *testing.T, change func(*config.PlayerConfig)) {
+	t.Helper()
+	if err := ps.holder.Update(ps.configPath, func(c *config.Config) error {
+		change(&c.Output.Player)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// goBarByModel is the GO bar bound by its model: another binding than
+// goBarPlayer's, which the watcher resolves to the same DAC.
+var goBarByModel = config.PlayerDevice{Binding: config.BindingUniqueModel, VendorID: "20b1", ProductID: "3009"}
 
 // playerFiles are the player's files the data directory holds.
 func playerFiles(t *testing.T, dataDir string) []string {
@@ -631,6 +653,7 @@ func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 // stays off with that reason, before its identity or any of the engine's
 // state is made: they are made only under that lock.
 func TestServeStartsNoPlayerWithoutTheDataDirLock(t *testing.T) {
+	needsDirectorySync(t)
 	rec := loggingtest.Record(t)
 	standIn := newPlayerStandIn()
 	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: standIn, before: func(dataDir string) {
@@ -652,6 +675,60 @@ func TestServeStartsNoPlayerWithoutTheDataDirLock(t *testing.T) {
 	}
 	if files := playerFiles(t, ps.dataDir); len(files) > 0 || standIn.built {
 		t.Errorf("the player made %v, or built a backend (%v), without the lock", files, standIn.built)
+	}
+}
+
+// TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade: the
+// player's identity is made under serve's lock before the engine is built,
+// and the engine is what refuses storage it cannot keep IDs on (here a
+// regular file where the reservation's directory goes, which New's probe
+// refuses as it refuses a directory that cannot be synced). A refused
+// player starts nothing: the identity this start made is removed before the
+// refusal is reported, and never announced; one the data directory held
+// already (bind's, a restore's) is left as it was.
+func TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade(t *testing.T) {
+	needsDirectorySync(t)
+	const before = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
+	for _, tc := range []struct {
+		name string
+		had  bool
+	}{{name: "made by this start"}, {name: "there before", had: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := loggingtest.Record(t)
+			ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(),
+				before: func(dataDir string) {
+					if err := os.WriteFile(filepath.Join(dataDir, "not-a-directory"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if tc.had {
+						if err := config.WritePlayerUUIDFile(filepath.Join(dataDir, config.PlayerUUIDFile), before); err != nil {
+							t.Fatal(err)
+						}
+					}
+				},
+				seams: &servePlayerSeams{engineConfig: func(c *engine.Config) {
+					c.ReservePath = filepath.Join(c.DataDir, "not-a-directory", playerReservationFile)
+				}}})
+			if eng := ps.engine(t); eng != nil || ps.player.failed == "" {
+				t.Fatalf("the player started (%v) on storage its engine refuses, or did not say why (%q)", eng != nil, ps.player.failed)
+			}
+			id, err := config.ReadPlayerUUID(ps.dataDir)
+			switch {
+			case tc.had && (err != nil || id != before):
+				t.Errorf("the identity the data directory held is %q (%v), want it kept as it was", id, err)
+			case !tc.had && !errors.Is(err, os.ErrNotExist):
+				t.Errorf("the identity this start made is still there (%q, %v) after its engine refused the storage", id, err)
+			}
+			if lines := rec.Lines("player: made the player's identity"); len(lines) > 0 {
+				t.Errorf("serve announced an identity its refused player did not keep: %q", lines)
+			}
+			if lines := rec.Lines("player: not started"); len(lines) != 1 {
+				t.Errorf("the refusal logged %q, want once", lines)
+			}
+			if code := ps.stopServe(t); code != 0 {
+				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+			}
+		})
 	}
 }
 
@@ -826,6 +903,130 @@ func TestALiveBindingChangeReportsThePlayersOutputUnavailable(t *testing.T) {
 	}
 	if err := eng.Play(context.Background()); err != nil {
 		t.Errorf("play on the boot binding again: %v", err)
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+}
+
+// TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox: the
+// watcher follows the live config only as fast as it reads the box, and a
+// reading can stall (a USB device's string attributes take its lock, which
+// a disconnect can hold) or fail, so serve's player reads the live config
+// itself. With every reading of the box after the boot one held, never
+// returning whatever its context says: a binding changed while the GO bar
+// plays is reported at once, binding_changed, playback stops and Play is
+// refused; a live disable is reported at once, disabled, while the
+// watcher's stop still waits on its held reading; the player on again,
+// still on the other binding, is binding_changed; and the boot binding put
+// back gives the output back from the watcher's last snapshot of it, which
+// plays nothing until asked. The watcher published nothing after its first
+// snapshot.
+func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.T) {
+	needsDirectorySync(t)
+	var held atomic.Bool
+	release, reading := make(chan struct{}), make(chan struct{}, 1)
+	standIn := newPlayerStandIn()
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: standIn, with: func(o *serveOpts) {
+		o.hotplugObserve = func(next func(context.Context) (binding.Inventory, error)) func(context.Context) (binding.Inventory, error) {
+			return func(ctx context.Context) (binding.Inventory, error) {
+				if held.Load() {
+					select {
+					case reading <- struct{}{}:
+					default:
+					}
+					<-release
+				}
+				return next(ctx)
+			}
+		}
+		// The watcher's stop waits for its held reading for as long as the
+		// test does: what a live disable reports here, the watcher never
+		// published.
+		timing := hotplug.DefaultTiming()
+		timing.StopWait = time.Hour
+		o.hotplugTiming = timing
+	}})
+	var once sync.Once
+	letGo := func() {
+		once.Do(func() {
+			held.Store(false)
+			close(release)
+		})
+	}
+	t.Cleanup(letGo)
+	eng := ps.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	publishes := ps.hotplug.Status().Stats.Publishes
+	boot := ps.holder.Load().Output.Player.Device
+	held.Store(true)
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Device = goBarByModel })
+	select {
+	case <-reading:
+	case <-serveGiveUp(t):
+		t.Fatal("the watcher took no reading of the changed binding")
+	}
+	awaitEngine(t, eng, "binding_changed and playback stopped, the watcher's reading held", func(s *engine.Snapshot) bool {
+		return s.Output().Known && !s.Output().Available && s.Output().Reason == reasonBindingChanged && s.State() == engine.Stopped
+	})
+	if err := eng.Play(context.Background()); engine.ReasonOf(err) != engine.ReasonOutputUnavailable {
+		t.Errorf("play on another binding: %v, want output_unavailable", err)
+	}
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Enabled = false })
+	awaitEngine(t, eng, "disabled, the watcher's stop held", func(s *engine.Snapshot) bool { return s.Output().Reason == "disabled" })
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Enabled = true })
+	awaitEngine(t, eng, "binding_changed, the player on again on the other binding", func(s *engine.Snapshot) bool {
+		return s.Output().Reason == reasonBindingChanged
+	})
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Device = boot })
+	s := awaitEngine(t, eng, "the output back from the watcher's snapshot of the boot binding", func(s *engine.Snapshot) bool { return s.Output().Available })
+	if _, _, starts := standIn.counts(); s.State() != engine.Stopped || starts != 1 {
+		t.Errorf("the boot binding put back: %s with %d starts, want stopped with the first start alone", s.State(), starts)
+	}
+	if got := ps.hotplug.Status().Stats.Publishes; got != publishes {
+		t.Errorf("the watcher published %d snapshots while its readings were held: the reports were theirs, not the live config's", got-publishes)
+	}
+	letGo()
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+}
+
+// TestALiveBindingChangeIsLoggedOnceEachWayWhateverThePlayersState: the
+// line that says output.player.device changed while serve runs follows the
+// binding alone. The binding changed (logged), then the player turned off
+// and on again in the live config, still on the other binding, logs nothing
+// more, since the config never named the boot binding again; and the
+// output says binding_changed, then disabled, then binding_changed: while
+// the player is off it is disabled, whatever it would bind.
+func TestALiveBindingChangeIsLoggedOnceEachWayWhateverThePlayersState(t *testing.T) {
+	needsDirectorySync(t)
+	logs := watchLog(t)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn()})
+	eng := ps.runningEngine(t)
+	availableOutput(t, eng)
+	unavailable := func(what, why string) {
+		t.Helper()
+		awaitEngine(t, eng, what, func(s *engine.Snapshot) bool {
+			o := s.Output()
+			return o.Known && !o.Available && o.Reason == why
+		})
+	}
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Device = goBarByModel })
+	unavailable("another binding", reasonBindingChanged)
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Enabled = false })
+	unavailable("the player off, on the other binding", "disabled")
+	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Enabled = true })
+	unavailable("the player on again, on the other binding", reasonBindingChanged)
+	all := logs.all()
+	changed := strings.Count(all, "player: output.player.device changed while serve runs")
+	again := strings.Count(all, "player: output.player.device names the binding the player started with again")
+	if changed != 1 || again != 0 {
+		t.Fatalf("the binding's change logged %d times and its return %d, want once and never: the config never named the boot binding again\n%s", changed, again, all)
 	}
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
@@ -1037,6 +1238,56 @@ func TestAPanicInServesPlayerStopsThePlayerAndKeepsTheLibrary(t *testing.T) {
 	}
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+}
+
+// TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock: a panic on the
+// goroutine that runs the engine's Run is recovered, but Run's shutdown,
+// which waits for the engine's reservation writes and its queue writer,
+// never runs, so what the engine started may still write in the data
+// directory: the player abandons the engine, says so, and keeps its share
+// of the data directory's lock until the process exits. Once serve has
+// stopped, exit 0, a second lock of the data directory is refused. The
+// panic comes as the first output report is on its way to the engine, whose
+// owner then answers nothing: the call ends with Run's goroutine, and the
+// player stops without waiting for serve's stop.
+func TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock(t *testing.T) {
+	needsDirectorySync(t)
+	rec := loggingtest.Record(t)
+	var once sync.Once
+	reported := make(chan struct{})
+	reports := func() { once.Do(func() { close(reported) }) }
+	t.Cleanup(reports)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(),
+		seams: &servePlayerSeams{
+			reports: func(engine.OutputReport) { reports() },
+			runs: func() {
+				<-reported
+				panic("on the engine's goroutine")
+			},
+		}})
+	select {
+	case <-ps.player.done:
+	case <-serveGiveUp(t):
+		t.Fatalf("the player did not stop after its engine's panic; stderr=%s\nserve's goroutines:\n%s", ps.stderr.String(), serveStacks())
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+	release, err := lockServeDataDir(ps.dataDir)
+	release()
+	var held *serveDataDirHeldError
+	if !errors.As(err, &held) {
+		t.Fatalf("a second lock of the data directory once serve stopped, its player's engine abandoned by a panic: %v, want it refused", err)
+	}
+	if closedNow(ps.player.settled) {
+		t.Error("the player settled, its engine's writers never joined")
+	}
+	if lines := rec.Lines("player: a panic was recovered; the library is served as before"); len(lines) != 1 || !strings.Contains(lines[0], "the player's engine") {
+		t.Errorf("the panic logged %q, want once, on the engine's goroutine", lines)
+	}
+	if lines := rec.Failures("player: the engine's Run ended in a panic, before its own shutdown, which waits for its state writes: they may still run, so the player keeps its share of the data directory's lock until the process exits"); len(lines) != 1 {
+		t.Errorf("the abandonment logged %q, want once", lines)
 	}
 }
 

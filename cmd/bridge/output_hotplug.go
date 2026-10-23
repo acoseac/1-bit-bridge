@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 )
 
@@ -31,6 +32,21 @@ type playerHotplugWiring struct {
 	// Trees are the trees the watcher reads; the zero value is hostTrees.
 	// A boot test lays out a box of its own here.
 	Trees outputTrees
+	// Observe, when set, wraps the watcher's reading of Trees: a boot
+	// test's hold on a reading. Timing is the watcher's; the zero value is
+	// hotplug.DefaultTiming. Both are production's when unset.
+	Observe func(next func(context.Context) (binding.Inventory, error)) func(context.Context) (binding.Inventory, error)
+	Timing  hotplug.Timing
+}
+
+// livePlayerSettings reads the live config's player block from holder as a
+// goos host runs it ("" is this host): what the watcher reads on every
+// reading, and serve's player at every change of the config.
+func livePlayerSettings(holder *config.RuntimeConfig, goos string) func() hotplug.Settings {
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	return func() hotplug.Settings { return hotplug.SettingsFrom(holder.Load(), goos) }
 }
 
 // startPlayerHotplug starts the player's hotplug watcher on Linux, where
@@ -59,11 +75,16 @@ func startPlayerHotplug(ctx context.Context, w playerHotplugWiring) (stop func()
 		}
 		return func() {}
 	}
+	observe := w.Trees.or(hostTrees).observer().ObserveContext
+	if w.Observe != nil {
+		observe = w.Observe(observe)
+	}
 	svc := hotplug.NewService(hotplug.Config{
-		Settings:   func() hotplug.Settings { return hotplug.SettingsFrom(w.Holder.Load(), goos) },
+		Settings:   livePlayerSettings(w.Holder, goos),
 		Changed:    w.Holder.Changed,
-		Observe:    w.Trees.or(hostTrees).observer().ObserveContext,
+		Observe:    observe,
 		OpenSource: w.OpenSource,
+		Timing:     w.Timing,
 		Feed:       w.Feed,
 	})
 	// A context of its own, which stop alone cancels: serve's is cancelled

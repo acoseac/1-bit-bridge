@@ -106,6 +106,14 @@ type servePlayerWiring struct {
 	// Feed is the hotplug watcher's (startPlayerHotplug), which the output
 	// reports are made from.
 	Feed *hotplug.Feed
+	// Live reads the live config's player block as the watcher does
+	// (livePlayerSettings), and Changed is the holder's channel closed at
+	// its next change: the player follows them itself, so the engine hears
+	// at once that the live config turned it off or names another DAC,
+	// whatever the watcher's readings of the box do. Nil Live is a config
+	// that never changes.
+	Live    func() hotplug.Settings
+	Changed func() <-chan struct{}
 	// Trees are what the binding locator reads; the zero value is hostTrees.
 	Trees outputTrees
 	// Backend builds the backend; nil is playback.New. A boot test passes a
@@ -128,6 +136,12 @@ type servePlayerSeams struct {
 	reports func(engine.OutputReport)
 	// opens runs as the resolver opens a reference (library.Seams.Opens).
 	opens func(engine.Reference)
+	// runs runs on the goroutine that runs the engine, before its Run: a
+	// panic there is one inside Run, which never reaches Run's shutdown.
+	runs func()
+	// engineConfig changes the engine's config before engine.New: a boot
+	// test's way to have New refuse the player's storage.
+	engineConfig func(*engine.Config)
 }
 
 // servePlayerBounds are the stop's bounds: how long it waits for the
@@ -165,7 +179,8 @@ type bridgePlayer struct {
 	cancel context.CancelFunc
 	// ready is closed once the player runs, or once it has failed to;
 	// done once its supervisor has returned; settled once nothing it
-	// started runs, its share of the data directory's lock let go.
+	// started runs, its share of the data directory's lock let go: never,
+	// for an engine whose Run a panic ended (settle).
 	ready, done, settled chan struct{}
 	readyOnce            sync.Once
 
@@ -175,9 +190,12 @@ type bridgePlayer struct {
 	be     playBackend
 	failed string
 
-	// The supervisor's alone.
+	// The supervisor's alone: the engine as it runs, the live config it
+	// follows, and what it tells the engine of the output.
 	run     *playerRun
-	foreign bool
+	live    func() hotplug.Settings
+	changed func() <-chan struct{}
+	out     playerOutput
 
 	mu      sync.Mutex
 	stopped time.Duration // how long its stop took, once it has
@@ -191,6 +209,13 @@ type playerRun struct {
 	done chan struct{}
 	stop context.CancelFunc
 	sub  *hotplug.Subscription
+	// calls is what the supervisor's calls to the engine run on: it ends with
+	// serve's stop and with the goroutine that runs the engine, so an engine
+	// whose Run a panic ended, whose owner answers nothing, never holds the
+	// supervisor in a call.
+	calls context.Context
+	// panicked is a Run a panic ended, set before done closes.
+	panicked bool
 }
 
 // startServePlayer starts the player plan allows, on a goroutine of its
@@ -213,6 +238,15 @@ func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 		return p
 	}
 	p.device = w.Cfg.Output.Player.Device
+	p.live, p.changed = w.Live, w.Changed
+	if p.live == nil {
+		boot := hotplug.Settings{Enabled: true, Device: p.device}
+		p.live = func() hotplug.Settings { return boot }
+	}
+	if p.changed == nil {
+		p.changed = func() <-chan struct{} { return nil }
+	}
+	p.out = playerOutput{rep: &hotplug.Reporter{}, boot: p.device}
 	w.Hold.acquire()
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -231,7 +265,8 @@ func (p *bridgePlayer) markReady() { p.readyOnce.Do(func() { close(p.ready) }) }
 // each within its bound, before serve's watcher and store close (the
 // caller's defer order). A player whose start or whose state storage is
 // stalled past the bounds is abandoned, said so, and keeps its share of the
-// data directory's lock until it ends.
+// data directory's lock until it ends; one whose engine's Run a panic ended
+// keeps it until the process exits (settle).
 func (p *bridgePlayer) stop() {
 	if p.cancel == nil {
 		return
@@ -280,7 +315,10 @@ func (p *bridgePlayer) fail(why string) bool {
 
 // start makes the player's identity under the data directory's lock, builds
 // the resolver, the backend and the engine, and runs the engine; it reports
-// whether the player runs.
+// whether the player runs. A player refused once its identity is made
+// leaves none this start made: the engine is what refuses storage it cannot
+// keep IDs on (an overlay that does not outlive a reboot, a directory that
+// cannot be synced), where an identity made now would outlive the refusal.
 func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	cfg, player := w.Cfg, w.Cfg.Output.Player
 	if w.Feed == nil {
@@ -290,8 +328,13 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if err != nil {
 		return p.fail("the player's identity: " + err.Error())
 	}
-	if made {
-		playerLog.Info("player: made the player's identity", "uuid", id)
+	refuse := func(why string) bool {
+		if made {
+			if err := config.ForgetPlayerUUID(cfg.DataDir, id); err != nil {
+				playerLog.Warn("player: the identity this start made, for a player that does not start, could not be removed", "err", err)
+			}
+		}
+		return p.fail(why)
 	}
 	var seams *library.Seams
 	if p.seams != nil && p.seams.opens != nil {
@@ -299,7 +342,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	}
 	res, err := library.New(library.Config{Store: w.Store, Paths: w.Paths, Seams: seams})
 	if err != nil {
-		return p.fail(err.Error())
+		return refuse(err.Error())
 	}
 	newBackend := w.Backend
 	if newBackend == nil {
@@ -311,18 +354,25 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		Notify:   p.note,
 	})
 	if err != nil {
-		return p.fail("the player's backend: " + err.Error())
+		return refuse("the player's backend: " + err.Error())
 	}
-	eng, err := engine.New(engine.Config{
+	ecfg := engine.Config{
 		Backend:      be,
 		QueuePath:    filepath.Join(cfg.DataDir, playerQueueFile),
 		ReservePath:  filepath.Join(cfg.DataDir, playerReservationFile),
 		DataDir:      cfg.DataDir,
 		PauseRelease: player.PauseRelease(),
 		DSD:          player.EffectiveDSDMode(),
-	})
+	}
+	if p.seams != nil && p.seams.engineConfig != nil {
+		p.seams.engineConfig(&ecfg)
+	}
+	eng, err := engine.New(ecfg)
 	if err != nil {
-		return p.fail(err.Error())
+		return refuse(err.Error())
+	}
+	if made {
+		playerLog.Info("player: made the player's identity", "uuid", id)
 	}
 	if ctx.Err() != nil {
 		// Serve stopped while the player started: the engine never runs, and
@@ -331,15 +381,21 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		return false
 	}
 	runCtx, stopRun := context.WithCancel(context.Background())
-	run := &playerRun{eng: eng, be: be, done: make(chan struct{}), stop: stopRun, sub: w.Feed.Subscribe()}
+	calls, endCalls := context.WithCancel(ctx)
+	run := &playerRun{eng: eng, be: be, done: make(chan struct{}), stop: stopRun, sub: w.Feed.Subscribe(), calls: calls}
 	p.run = run
 	go func() {
 		defer close(run.done)
+		defer endCalls()
 		defer func() {
 			if r := recover(); r != nil {
+				run.panicked = true
 				logPlayerPanic("the player's engine", r)
 			}
 		}()
+		if p.seams != nil && p.seams.runs != nil {
+			p.seams.runs()
+		}
 		_ = eng.Run(runCtx)
 	}()
 	p.eng, p.be = eng, be
@@ -348,12 +404,16 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	return true
 }
 
-// watch reports the output to the engine as the watcher publishes it, and
-// logs what the engine does, until ctx ends or the engine stops on its own,
-// which only a recovered panic in it makes it do.
+// watch reports the output to the engine as the watcher publishes it and as
+// the live config changes, and logs what the engine does, until ctx ends or
+// the engine stops on its own, which only a recovered panic in it makes it
+// do.
 func (p *bridgePlayer) watch(ctx context.Context) {
 	run := p.run
-	rep := &hotplug.Reporter{}
+	// The holder's channel is taken before the config is read, so a change
+	// in between still wakes the loop.
+	cfgChanged := p.changed()
+	p.follow()
 	var last *engine.Snapshot
 	for {
 		changed := run.eng.Changed()
@@ -367,43 +427,145 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the device may be held until then")
 			return
 		case snap := <-run.sub.C():
-			p.report(ctx, rep, snap)
+			p.report(snap)
+		case <-cfgChanged:
+			cfgChanged = p.changed()
+			p.follow()
 		case <-changed:
 		}
 	}
 }
 
-// report hands the engine the report snap makes. A snapshot resolved from
-// another binding than the one the player started with, the live config
-// changed, says nothing about the player's DAC: it is reported unavailable
-// (binding_changed) until the binding is put back or serve starts again,
-// and a player the live config turns off is unavailable as disabled.
-func (p *bridgePlayer) report(ctx context.Context, rep *hotplug.Reporter, snap hotplug.Snapshot) {
-	rp, ok := rep.Report(snap)
-	if !ok {
+// follow reads the live config and tells the engine what it calls for, at
+// once, whatever the watcher has read of the box (playerOutput).
+func (p *bridgePlayer) follow() {
+	p.out.readLive(p.live())
+	if rp, ok := p.out.fromConfig(); ok {
+		p.send(rp)
+	}
+}
+
+// report hands the engine the report snap makes, held to the live config,
+// read again first.
+func (p *bridgePlayer) report(snap hotplug.Snapshot) {
+	p.out.readLive(p.live())
+	if rp, ok := p.out.fromSnapshot(snap); ok {
+		p.send(rp)
+	}
+}
+
+// playerOutput is what serve's player tells its engine of the output. The
+// engine keeps the boot snapshot of output.player; the watcher follows the
+// live config, but only as fast as it reads the box, and a reading can stall
+// on a USB device's lock or fail, so the player reads the live config
+// itself, at each of its changes. While the live config turns the player off
+// (disabled), or names another binding than the one the player started with
+// (binding_changed), the output is reported unavailable, at once and
+// whatever the watcher found; so is a snapshot of another binding. A player
+// that is off is disabled, whatever it would bind. The output comes back
+// only from a snapshot of the boot binding: the latest the watcher
+// published, once the live config names that binding again and runs the
+// player, or the next one. Every report is numbered from the Reporter's one
+// count (Report for a snapshot, Withhold and Restate for the live config),
+// so the engine's input is monotonic whichever source made a report, and no
+// generation carries two. It is the supervisor's alone.
+type playerOutput struct {
+	rep  *hotplug.Reporter
+	boot config.PlayerDevice
+	// live is the live config's verdict as last read: the player turned off,
+	// and another binding named, which follows the binding alone, whatever
+	// the player's state.
+	live struct{ off, foreign bool }
+	// snap is the last snapshot reported: of the player turned off, or of
+	// another binding, and the Reporter's own report of it.
+	snap struct {
+		ok, off, foreign bool
+		own              engine.OutputReport
+	}
+	// sent is the last report the engine took, if told.
+	sent engine.OutputReport
+	told bool
+}
+
+// readLive takes the live config's verdict, set, and logs a change of the
+// binding, once each way: it follows the binding alone, so a player turned
+// off and on again on the other binding logs nothing more.
+func (o *playerOutput) readLive(set hotplug.Settings) {
+	o.live.off = !set.Enabled
+	foreign := !hotplug.SameBinding(set.Device, o.boot)
+	if foreign == o.live.foreign {
 		return
 	}
-	foreign := snap.Resolution().State != binding.StateDisabled && !hotplug.SameBinding(snap.Binding(), p.device)
+	o.live.foreign = foreign
 	if foreign {
-		rp.Available, rp.Reason = false, reasonBindingChanged
+		playerLog.Warn("player: output.player.device changed while serve runs: the player keeps the binding it started with until bridge serve next starts, and its output is unavailable until then, or until the binding is put back")
+		return
 	}
-	if foreign != p.foreign {
-		p.foreign = foreign
-		if foreign {
-			playerLog.Warn("player: output.player.device changed while serve runs: the player keeps the binding it started with until bridge serve next starts, and its output is unavailable until then, or until the binding is put back")
-		} else {
-			playerLog.Info("player: output.player.device names the binding the player started with again")
+	playerLog.Info("player: output.player.device names the binding the player started with again")
+}
+
+// withheld is why the output is unavailable whatever the last snapshot says
+// of it, "" when nothing withholds it.
+func (o *playerOutput) withheld() string {
+	switch {
+	case o.live.off:
+		return string(binding.StateDisabled)
+	case o.live.foreign, o.snap.foreign && !o.snap.off:
+		return reasonBindingChanged
+	}
+	return ""
+}
+
+// fromSnapshot is the report snap makes, held to the live config; false
+// for a generation reported already.
+func (o *playerOutput) fromSnapshot(snap hotplug.Snapshot) (engine.OutputReport, bool) {
+	rp, ok := o.rep.Report(snap)
+	if !ok {
+		return rp, false
+	}
+	o.snap.ok, o.snap.own = true, rp
+	o.snap.off = snap.Resolution().State == binding.StateDisabled
+	o.snap.foreign = !hotplug.SameBinding(snap.Binding(), o.boot)
+	if why := o.withheld(); why != "" {
+		rp.Available, rp.Reason = false, why
+	}
+	return rp, true
+}
+
+// fromConfig is the report the live config calls for now: the output
+// withheld, or the last snapshot's own report restated; false when the
+// engine has it already, or when no snapshot has been reported yet (the
+// engine holds the output unknown until then, which refuses Play).
+func (o *playerOutput) fromConfig() (engine.OutputReport, bool) {
+	if !o.snap.ok {
+		return engine.OutputReport{}, false
+	}
+	if why := o.withheld(); why != "" {
+		if o.told && !o.sent.Available && o.sent.Reason == why {
+			return engine.OutputReport{}, false
 		}
+		return o.rep.Withhold(why)
 	}
+	if o.told && o.sent.Available == o.snap.own.Available && o.sent.Reason == o.snap.own.Reason {
+		return engine.OutputReport{}, false
+	}
+	return o.rep.Restate()
+}
+
+// send hands the engine rp and logs what it says of the output. The call
+// ends with serve's stop and with the engine's Run (playerRun.calls).
+func (p *bridgePlayer) send(rp engine.OutputReport) {
 	if p.seams != nil && p.seams.reports != nil {
 		p.seams.reports(rp)
 	}
-	if err := p.run.eng.ReportOutput(ctx, rp); err != nil {
-		if ctx.Err() == nil && engine.ReasonOf(err) != engine.ReasonClosed {
+	calls := p.run.calls
+	if err := p.run.eng.ReportOutput(calls, rp); err != nil {
+		if calls.Err() == nil && engine.ReasonOf(err) != engine.ReasonClosed {
 			playerLog.Warn("player: the engine refused the output's report", "report", rp.Generation, "err", err)
 		}
 		return
 	}
+	p.out.sent, p.out.told = rp, true
 	attrs := []any{"report", rp.Generation}
 	if rp.UnitChanged {
 		attrs = append(attrs, "unitChanged", true)
@@ -458,9 +620,17 @@ func (p *bridgePlayer) shutdown() {
 
 // settle lets go of the player's share of the data directory's lock and
 // closes settled, once the engine's Run has returned too: at once when it
-// has, and when it does for one the stop abandoned.
+// has, and when it does for one the stop abandoned. A Run a panic ended is
+// abandoned for good: the panic skipped Run's own shutdown, which waits for
+// the engine's reservation writes and its queue writer, so they may still
+// write in the data directory, and the player keeps its share of the lock
+// until the process exits, saying so; settled never closes.
 func (p *bridgePlayer) settle() {
 	finish := func() {
+		if p.run != nil && p.run.panicked {
+			playerLog.Error("player: the engine's Run ended in a panic, before its own shutdown, which waits for its state writes: they may still run, so the player keeps its share of the data directory's lock until the process exits")
+			return
+		}
 		p.hold.done()
 		close(p.settled)
 	}

@@ -59,6 +59,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
@@ -2641,6 +2642,11 @@ type serveOpts struct {
 	// playerHotplugWiring.Boot). Nil in production; a boot test waits on
 	// it instead of polling.
 	hotplugBoot func(*hotplug.Service, *config.RuntimeConfig, <-chan struct{})
+	// hotplugObserve and hotplugTiming are a boot test's hold on the
+	// watcher's readings of the box (playerHotplugWiring.Observe) and its
+	// timing: nil and production's in production.
+	hotplugObserve func(next func(context.Context) (binding.Inventory, error)) func(context.Context) (binding.Inventory, error)
+	hotplugTiming  hotplug.Timing
 	// sampleFormatPassed is told what each sample-format header pass did
 	// (manifest.Store.BackfillSampleFormats). Nil in production; a boot
 	// test waits on it instead of polling. Per invocation for
@@ -4120,6 +4126,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Boot:       opts.hotplugBoot,
 		Feed:       playerFeed,
 		Trees:      opts.playerTrees,
+		Observe:    opts.hotplugObserve,
+		Timing:     opts.hotplugTiming,
 	})
 	defer stopPlayerHotplug()
 	// The player runs on a goroutine of its own, so the library is served
@@ -4127,15 +4135,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// watcher's and the store's, so it runs before both, ends the engine and
 	// joins it, then the backend, each within its bound (bridgePlayer.stop).
 	// Its output reports are the watcher's, through a hotplug.Reporter, and
-	// a live binding other than the boot snapshot's reports the output
-	// unavailable: the player keeps the DAC it started with until serve
-	// next starts.
+	// the live config's own: a live disable, or a live binding other than
+	// the boot snapshot's, reports the output unavailable at once, whatever
+	// the watcher's readings do. The player keeps the DAC it started with
+	// until serve next starts.
 	player := startServePlayer(playerPlan, servePlayerWiring{
 		Cfg:     cfg,
 		Hold:    dataDirLock,
 		Store:   manifestStore,
 		Paths:   apiSrv.Resolver(),
 		Feed:    playerFeed,
+		Live:    livePlayerSettings(cfgHolder, opts.playerGOOS),
+		Changed: cfgHolder.Changed,
 		Trees:   opts.playerTrees,
 		Backend: opts.playerBackend,
 		Boot:    opts.playerBoot,

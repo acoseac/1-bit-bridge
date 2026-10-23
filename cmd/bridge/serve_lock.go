@@ -101,11 +101,13 @@ func lockServeDataDir(dataDir string) (release func(), err error) {
 // returns, and its player (startServePlayer) for as long as anything the
 // player started still runs. The lock is released when the last holder lets
 // go. A player's engine whose state write outlived its stop bound, an fsync
-// that does not return, keeps it past runServe's return: in production
-// main's os.Exit follows that return, and the kernel releases the lock with
-// the process, so no other serve takes the data directory while the write
-// may still land; a serve started again in this process (the launcher menu,
-// the tests) is refused it until the write ends.
+// that does not return, keeps it past runServe's return, and so does, for
+// good, one whose Run a panic ended before its shutdown joined those writes
+// (bridgePlayer.settle): in production main's os.Exit follows that return,
+// and the kernel releases the lock with the process, so no other serve
+// takes the data directory while a write may still land; a serve started
+// again in this process (the launcher menu, the tests) is refused it until
+// the write ends, or for the life of the process after such a panic.
 type dataDirHold struct {
 	mu      sync.Mutex
 	holders int
