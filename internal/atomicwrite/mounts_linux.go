@@ -26,11 +26,14 @@ func linuxStatfs(path string) (fsStat, error) {
 	if err := unix.Statfs(path, &st); err != nil {
 		return fsStat{}, &fs.PathError{Op: "statfs", Path: path, Err: err}
 	}
+	// st_dev is evidence only (upperMountEvidence names it as detail), so a
+	// stat that fails after statfs succeeded leaves it empty rather than
+	// refusing what the totals can still judge.
+	device := ""
 	var info unix.Stat_t
-	if err := unix.Stat(path, &info); err != nil {
-		return fsStat{}, &fs.PathError{Op: "stat", Path: path, Err: err}
+	if err := unix.Stat(path, &info); err == nil {
+		device = fmt.Sprintf("%d:%d", unix.Major(uint64(info.Dev)), unix.Minor(uint64(info.Dev)))
 	}
-	device := fmt.Sprintf("%d:%d", unix.Major(uint64(info.Dev)), unix.Minor(uint64(info.Dev)))
 	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files), Device: device}, nil
 }
 
