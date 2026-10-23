@@ -3,6 +3,7 @@ package atomicwrite
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -13,15 +14,16 @@ import (
 // f_type (a Linux magic number, kept to 32 bits as 32-bit kernels give it),
 // and the totals a statfs reports, which an overlay takes from its upper
 // layer: the block size, the blocks and the inodes (f_bsize, f_blocks,
-// f_files).
+// f_files). Device is the path's st_dev, rendered as major:minor on Linux.
 type fsStat struct {
 	Type   uint32
 	Bsize  int64
 	Blocks uint64
 	Files  uint64
+	Device string // Linux st_dev as major:minor; empty where unavailable.
 }
 
-// sameTotals reports whether two statfs answers give one filesystem's totals.
+// sameTotals reports whether two statfs answers have equal totals.
 func (a fsStat) sameTotals(b fsStat) bool {
 	return a.Bsize == b.Bsize && a.Blocks == b.Blocks && a.Files == b.Files
 }
@@ -41,9 +43,8 @@ const (
 // before, the medium check follows before it says it cannot tell.
 const maxOverlayDepth = 8
 
-// totalsRounds is how many times the medium check reads an overlay, its upper
-// path and the overlay again before it takes totals that held still each time
-// while the path's differed for another filesystem (upperAsReached).
+// totalsRounds bounds retries for an agreement with a moving filesystem.
+// Exhausting them is inconclusive, never proof of another filesystem.
 const totalsRounds = 3
 
 // mediumFrom is the medium check on what statfs, the mount table and the
@@ -66,13 +67,13 @@ const totalsRounds = 3
 // an overlay gives its upper layer's totals; but some filesystems' totals
 // move with ordinary writes (XFS's inode total with its free blocks, ZFS's
 // block total with the pool's use), so where the two answers differ they are
-// read again, for up to three rounds (upperAsReached): totals that moved are
-// no tmpfs's or ramfs's, which no write moves, so the upper layer is taken
-// for what the path reaches, unless that is tmpfs or ramfs itself, and only
-// totals that held still in every round while the path's differed name
-// another filesystem, or none (ErrMediumUnknown; both reviewers on rounds 10
-// and 11: round 10 refused XFS and ZFS upper layers at random, and round 11
-// those that moved and came back). An overlay mounted volatile skips every
+// read again, for up to three rounds (upperAsReached). Totals that moved
+// are no tmpfs's or ramfs's, which no write moves. A sustained mismatch is
+// inconclusive: the upper path's st_dev, matched to its own mountinfo line,
+// identifies the filesystem visible here, not the overlay's backing in the
+// mounter's namespace. Even a confirmed XFS/ZFS may give repeated A,B,A
+// samples. The error describes that evidence and suggests a retry, never
+// claims another filesystem. An overlay mounted volatile skips every
 // sync of its upper layer, so nothing written there outlives a crash; an
 // overlay over an overlay is followed by the inner one's mount ID; and a
 // read-only overlay, with no upper layer, takes nothing, since a write there
@@ -81,8 +82,9 @@ const totalsRounds = 3
 // container's files to, the table does not show.
 //
 // A root whose mount is a bind of a directory inside an overlay, its line's
-// root field another than "/", is refused wherever the overlay would be taken
-// (ErrMediumUnknown): a write below a data directory in the lower layer alone
+// root field another than "/", is refused wherever a writable overlay would
+// be taken (ErrOverlayBind, also matching ErrMediumUnknown). A write below
+// a data directory in the lower layer alone
 // copies up the directories above it inside the overlay, which this mount
 // cannot reach to sync (strictPath.storage), and so would a crash take them.
 // An operator's systemd ProtectSystem=strict with ReadWritePaths makes such a
@@ -110,7 +112,7 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 		if bound == "" {
 			return nil
 		}
-		return fmt.Errorf("%w: %s is on a bind of %s, a directory inside an overlay, not the overlay's own mount: a copy-up the write makes creates entries above it that this mount cannot reach to sync: put the data directory on a filesystem that is not an overlay, or on the overlay's own mount", ErrMediumUnknown, root, bound)
+		return fmt.Errorf("%w: %s is on a bind of %s, a directory inside an overlay, not the overlay's own mount: a copy-up the write makes creates entries above it that this mount cannot reach to sync: put the data directory on a filesystem that is not an overlay, or on the overlay's own mount", ErrOverlayBind, root, bound)
 	}
 	for depth := 0; ; depth++ {
 		switch st.Type {
@@ -145,14 +147,16 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 		}
 		switch {
 		case layer.upper == "":
-			return taken()
+			return nil
 		case !strings.HasPrefix(layer.upper, "/"):
 			// The mount table is Linux's, so a path in it is absolute by its
 			// leading slash, never by what filepath says on the system the
 			// tests run on (on Windows it wants a drive).
 			return fmt.Errorf("%w: %s is on %san overlay whose upper layer the mount table names by a relative path, %s, which reaches nothing certain here", ErrMediumUnknown, root, on, layer.upper)
 		}
-		upper, err := upperAsReached(root, on, path, layer.upper, st, statfs)
+		upper, err := upperAsReached(root, on, path, layer.upper, st, statfs, func(u fsStat) (string, error) {
+			return upperMountEvidence(layer.upper, u.Device, table, idOf)
+		})
 		if err != nil {
 			return err
 		}
@@ -171,20 +175,12 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 	}
 }
 
-// upperAsReached is the statfs answer of an overlay's upper layer, as the
-// mount table names it (upper), once it is known to be the filesystem the
-// overlay at path writes to, or to be no tmpfs or ramfs: first is the
-// overlay's first answer. The overlay, the upper path and the overlay again
-// are read for up to totalsRounds rounds. The upper path's answer is taken as
-// soon as its totals match an overlay answer beside it; an overlay whose
-// totals moved between two answers is on no tmpfs or ramfs, which no write
-// moves, so the upper path's answer is taken for what it is, unless that is
-// tmpfs or ramfs itself; and only totals that held still in every round while
-// the upper path's differed are another filesystem (ErrMediumUnknown). Round
-// 11 decided on one round, so totals that moved and came back (an XFS
-// allocation freed again, A, B, A) refused a legitimate overlay at random
-// (both reviewers on round 11).
-func upperAsReached(root, on, path, upper string, first fsStat, statfs func(string) (fsStat, error)) (fsStat, error) {
+// upperAsReached reads an overlay's upper path and retries differing totals.
+// Agreement or movement of the overlay's totals keeps the existing bounded
+// medium check; a tmpfs/ramfs path cannot explain moving overlay totals.
+// Exhausted retries remain ErrMediumUnknown. Evidence identifies only the
+// filesystem visible at upper, not an otherwise unreachable backing layer.
+func upperAsReached(root, on, path, upper string, first fsStat, statfs func(string) (fsStat, error), evidence func(fsStat) (string, error)) (fsStat, error) {
 	o := first
 	for round := 1; ; round++ {
 		u, err := statfs(upper)
@@ -205,10 +201,40 @@ func upperAsReached(root, on, path, upper string, first fsStat, statfs func(stri
 		case !again.sameTotals(o):
 			return u, nil
 		case round == totalsRounds:
-			return fsStat{}, fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, reaches another filesystem here than the one the overlay writes to", ErrMediumUnknown, root, on, upper)
+			detail, evidenceErr := evidence(u)
+			if evidenceErr != nil {
+				return fsStat{}, fmt.Errorf("%w: %s is on %san overlay whose upper layer %s has differing totals after %d reads; the result is inconclusive and its visible filesystem cannot be confirmed: %w; retry when filesystem activity has settled, and check that the upper path is visible in the service's mount namespace", ErrMediumUnknown, root, on, upper, totalsRounds, evidenceErr)
+			}
+			return fsStat{}, fmt.Errorf("%w: %s is on %san overlay whose upper layer %s is visible here as %s, but its totals differ after %d reads; the result is inconclusive, since totals may change between reads: retry when filesystem activity has settled, and check that the upper path is visible in the service's mount namespace", ErrMediumUnknown, root, on, upper, detail, totalsRounds)
 		}
 		o = again
 	}
+}
+
+// upperMountEvidence names the filesystem visible at upper only when its
+// st_dev agrees with its own mount ID's line. A matching mount-point spelling
+// is not identity; neither is this evidence of the overlay's backing across
+// mount namespaces. Device numbers are used for this filesystem evidence,
+// never for strictPath's mount-boundary checks.
+func upperMountEvidence(upper, device string, table []byte, idOf func(string) (uint64, bool, error)) (string, error) {
+	if device == "" {
+		return "", fmt.Errorf("no device identity for %s", upper)
+	}
+	id, ok, err := idOf(upper)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no mount ID for %s", upper)
+	}
+	rec, err := mountLine(table, id)
+	if err != nil {
+		return "", err
+	}
+	if rec.device != device {
+		return "", fmt.Errorf("%s's device %s does not match mount %d's device %s", upper, device, id, rec.device)
+	}
+	return fmt.Sprintf("%s (device %s, mount %d)", rec.fstype, device, id), nil
 }
 
 // fuseMedium is the medium check of a FUSE filesystem, the mount id: taken,
@@ -235,9 +261,10 @@ func fuseMedium(root, on string, id uint64, mountinfo func() ([]byte, error)) er
 // mountRecord is one line of a mountinfo table, as the medium check reads it:
 // the directory of its filesystem the mount shows as its own root ("/" for
 // the filesystem's root, another for a bind of a directory inside it), its
-// filesystem type, its source, both unescaped, and its super options, split
+// device (major:minor), filesystem type, source, and super options, split
 // on their commas, each still escaped as the filesystem wrote it.
 type mountRecord struct {
+	device string
 	root   string
 	fstype string
 	source string
@@ -275,6 +302,7 @@ func mountLine(table []byte, id uint64) (mountRecord, error) {
 			return mountRecord{}, fmt.Errorf("the mount table's line for mount %d does not read as one", id)
 		}
 		return mountRecord{
+			device: fields[2],
 			root:   unescapeMountInfo(fields[3]),
 			fstype: fields[sep+1],
 			source: unescapeMountInfo(fields[sep+2]),
@@ -395,19 +423,20 @@ func copyUpsFrom(root string, id uint64, statfs func(string) (fsStat, error), id
 }
 
 // syncAbove syncs the directories above the root a copy-up can create entries
-// in (copyUpAncestorsOf), after the chain, in a write that landed and in the
-// probe. One the service cannot open is named, with what it was opened for
-// and the fix (the Claude API on round 11: round 11 gave the open's bare
-// error, an EACCES on a home directory of mode 0711, say); one that will not
-// sync is the barrier's failure, marked as ever.
+// in (copyUpsFrom), after the chain, in a write that landed and in the
+// probe. A permission error names the directory and advises read access;
+// other open errors are wrapped without that advice. A directory that will
+// not sync is the barrier's failure, marked as ever.
 func syncAbove(above []string) error {
 	for _, d := range above {
 		switch err := syncDirAt(d); {
 		case err == nil:
 		case errors.Is(err, ErrBarrierFailed):
 			return fmt.Errorf("the directory %s, above the root on an overlay, cannot be synced: %w", d, err)
-		default:
+		case errors.Is(err, fs.ErrPermission):
 			return fmt.Errorf("the directory %s, above the root on an overlay, could not be opened for its sync, which a copy-up below it needs: give the service read access to it, or put the data directory on a filesystem that is not an overlay: %w", d, err)
+		default:
+			return fmt.Errorf("the directory %s, above the root on an overlay, could not be opened for its sync, which a copy-up below it needs: %w", d, err)
 		}
 	}
 	return nil

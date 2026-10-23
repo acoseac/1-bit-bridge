@@ -638,3 +638,34 @@ func (h *harness) restartWith(f func()) {
 	h.files.mu.Unlock()
 	h.boot()
 }
+
+// TestNewFramesAnOverlayBindAsACrashRisk pins New's refusal through its real
+// probe: persistent storage does not fix a bind's unreachable copy-ups.
+func TestNewFramesAnOverlayBindAsACrashRisk(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses before the medium check")
+	}
+	h := newHarness(t)
+	data, err := filepath.EvalSymlinks(h.dir)
+	h.must("resolve", err)
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error {
+		return fmt.Errorf("%w: use the overlay's own mount", atomicwrite.ErrOverlayBind)
+	}))
+	h.be = newFakeBackend(t)
+	cfg := h.config()
+	cfg.DataDir, cfg.ReservePath = data, filepath.Join(data, "reserve.json")
+	cfg.seams.probe = nil
+	_, err = New(cfg)
+	if !errors.Is(err, atomicwrite.ErrOverlayBind) || !errors.Is(err, atomicwrite.ErrMediumUnknown) {
+		t.Fatalf("New = %v, want both bind and medium markers", err)
+	}
+	for _, want := range []string{data, "crash", "persistent storage", "IDs and tokens", "overlay's own mount"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("New = %v, missing %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "reboot") || strings.Contains(err.Error(), "put the data directory on persistent storage") {
+		t.Errorf("New = %v, wrongly frames the bind as volatile storage", err)
+	}
+}

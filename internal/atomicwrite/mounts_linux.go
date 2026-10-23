@@ -4,6 +4,7 @@ package atomicwrite
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strconv"
@@ -18,13 +19,19 @@ func platformMedium(root string, mountID uint64) error {
 	return mediumFrom(root, mountID, linuxStatfs, readMountInfo, mountIDOf)
 }
 
-// linuxStatfs is what the medium check reads of the filesystem path is on.
+// linuxStatfs reads the filesystem totals and path's st_dev. The latter is
+// evidence for the visible upper filesystem, never a mount-boundary test.
 func linuxStatfs(path string) (fsStat, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
 		return fsStat{}, &fs.PathError{Op: "statfs", Path: path, Err: err}
 	}
-	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files)}, nil
+	var info unix.Stat_t
+	if err := unix.Stat(path, &info); err != nil {
+		return fsStat{}, &fs.PathError{Op: "stat", Path: path, Err: err}
+	}
+	device := fmt.Sprintf("%d:%d", unix.Major(uint64(info.Dev)), unix.Minor(uint64(info.Dev)))
+	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files), Device: device}, nil
 }
 
 // platformCopyUps is the directories above root a copy-up can create entries
