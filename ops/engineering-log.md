@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file](#2026-10-23--b470-pr-5a0-a-restored-identity-raises-its-id-and-token-floors-before-any-identity-file)
 - [2026-10-23 — B470 PR 4b3: the player inside bridge serve, its library resolver, the live binding, and a joined, bounded stop](#2026-10-23--b470-pr-4b3-the-player-inside-bridge-serve-its-library-resolver-the-live-binding-and-a-joined-bounded-stop)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
@@ -40032,7 +40033,8 @@ while restore waited at `Type 'yes' to continue:`.
 
 ### Fallback
 
-`TestALockThatCannotBeTakenFallsBackToTheProbe` was already green on
+`TestRestoreRequiresAnExclusiveDataDirLock` (renamed and changed by B470
+5a0; this record describes its earlier fallback policy) was already green on
 main and stays green. A directory standing where `server.lock` goes is
 the case serve already uses for a lock that cannot be taken. An answering
 admin keeps `a bridge is answering on`. Nothing listening lets restore
@@ -57467,3 +57469,120 @@ sleep between them, fails the test ("the abandonment logged [], want
 once"), restored from git. Runs on aa2b7038: `cmd/bridge` under `-race`
 (524 s) and the three `TestAPanic` tests 10 runs each under `-race`, all
 passing; `make docs-check` passed.
+
+
+## 2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file
+
+**Problem and decision.** 4b3 measured the collision left by B505's identity
+backup: source IDs 4097–14096, followed by 4097–4099 under the same UUID at
+each of two restores. Its queue and reservation stayed behind. The proposed
+flag and operator confirmation were rejected as fragile. Every restored
+identity now starts normally, above a durable jump of both counters.
+
+**Reservation v2.** `player-ids.json` is
+`{"version":2,"uuid":"<canonical lowercase UUID>","ids":<uint32>,"tokens":<uint32>}`.
+Engine construction and subsequent reservations, and restore, share the
+strict durable merge path. It keeps the larger value of each counter from
+the live file, whatever UUID it names, and stamps the writer's UUID. The
+engine consumes any UUID's floor, reserves before publishing its construction
+token, and refuses an exhausted start or edit rather than wrapping. Missing
+and v1 files retain their old floor behavior (development boxes only; no
+released bridge wrote these files). A refused start's mint undo still removes
+only the identity it just made, never the reservation.
+
+**Snapshot and restore.** Snapshot captures the UUID, then its matching
+reservation. A missing, unreadable, v1 or foreign reservation contributes no
+mark; a backup racing the first mint is safe. The reservation covers every
+value issued before that read. The queue is not backed up. With a UUID to
+restore, one three-byte `crypto/rand` draw is shared by the two counters:
+`new = max(snapshot, live) + 2^24 + uniform[0,2^24)`. Tests inject a reader;
+the production default is pinned to `crypto/rand.Reader` without a flaky
+assertion that two random results differ. A foreign live UUID still supplies
+its floor. A missing live file means zero; an unreadable live file refuses
+instead of silently dropping an unknown floor.
+
+The reservation is written once, merged and made durable, before the UUID
+and every other identity file, irrespective of manifest order. The loop
+never copies it. Without a snapshot UUID, both live files remain untouched.
+Every rerun raises the floors again. A crash between reservation and UUID
+leaves the old identity above the new floor; starting it stamps that floor
+with its own UUID, and a subsequent backup and restore preserve it. Failure
+never rolls a floor back. The CLI holds the data directory's kernel lock
+throughout. Its former non-contention lock-error fallback is now a refusal:
+the merge requires exclusive ownership. `manifest clear-missing` retains its
+own fallback; serve's fixed-port admin probe remains an additional guard.
+
+**Limits and assumptions.** Before drawing or writing, either source above
+`MaxUint32 - 2^25 - 2^24` refuses deterministically, for each counter. The
+error names the source: remove UUID and reservation from the snapshot to
+restore the rest while retaining the box's identity, or remove the box's
+pair before retrying a live-floor refusal. The snapshot's UUID still wins
+if present; a newly minted identity is a new controller device. About 120
+worst-case restores consume the space, with at least 2^24 values left after
+an admitted largest jump.
+
+The operating assumptions are deliberately not claimed as tested guarantees:
+the source issued fewer than 2^24 IDs and fewer than 2^24 tokens between the
+snapshot and stopping. Independent restores of one old snapshot onto B then C
+after B dies rely on the random gap exceeding B's usage; a collision requires
+usage greater than the gap between draws. This is probabilistic, not globally
+unique allocation. Restore the box's newest snapshot to avoid that second
+case. The CLI prints one advice line if the manifest's creation time is older
+than a day on the restoring clock, or there is no matching reservation mark.
+Two boxes running one bridge identity at once are unsupported, for its player,
+TLS pair and pairing tokens alike. The backup guide states these constraints.
+
+**Older restores, measured before implementation.** The `Restore` bodies at
+tag v0.2.1 and main 71af3f26 were read and captured in
+`internal/backup/legacy_restore_test.go`, with the schema constant frozen at
+1. Both skip unknown file entries. v0.2.1 does not know `player-uuid` at all;
+B505 main writes it but ignores `player-ids.json`, so a schema-1 5a0 bundle
+would silently revive the reuse bug. All new snapshots therefore use schema
+2: both older bodies refuse before writing anything. The new restore reads
+schemas 1 and 2 and jumps for both. **Release checklist: B505 and 5a0 must
+ship in the same release**, since a released B505-only binary could restore
+its own schema-1 identities unsafely. No network or wire schema changed.
+
+**Evidence.** Baseline red tests observed a schema-1 snapshot with no
+reservation, restore without a reservation, and both exhausted constructor
+counters accepting a start. The final tests cover independently sized ID and
+token floors on empty, own, foreign and v1 state; no mark and no identity;
+repeated restores; separated fixed draws with the first box stopped;
+construction's first ID and token; snapshot omission; age/no-mark advice;
+every atomicwrite file-sync, rename and directory-sync seam; failed barriers;
+interrupted restore → old-identity start → live backup → restore elsewhere;
+both exhaustion causes and both counters at and beyond the bound; and the
+captured older restores. The serve harness covers a backup's coverage, restore
+refusal while serve owns the lock, the next start after restore, and the
+mint undo that leaves a reservation. API tests use the engine's existing
+fakes and temp directories; no new test reads host /proc or /sys.
+
+**Validation environment.** Go 1.27.2 darwin/arm64 from the repository's
+cached toolchain, `GOTOOLCHAIN=local`, `GOPROXY=off`, and a scratch GOCACHE.
+Engine and backup suites passed `-race -count=5`; new CLI warning/schema-1
+and unavailable-lock cases pass five race-enabled runs using an ephemeral
+admin setting without opening a listener. The sandbox refuses loopback
+listeners, so the serve harness and many existing full-suite tests require
+host validation. This is not a green full-suite claim. `make vet`, all six
+`make build-all` targets, formatting and docs-check pass; build commands emit
+a nonfatal denial writing module VCS metadata outside the sandbox. The
+scratch report and independent negative-control patches record the precise
+commands, failures and test names; no commit or PR was made in this session.
+Twenty-eight controls failed in their predicted assertions; the two serve
+controls were stopped before assertions by the listener restriction. All
+new engine and backup tests passed five race-enabled runs after the controls.
+The full-suite `TestPlaybackStopsAtTheBoundaryOfAnEntryCutTooLate` timed out
+waiting for a reporter tick once; five isolated race-enabled reruns passed,
+and playback code was not changed. B520's named handshake test was skipped
+because its specific-IP listener was denied, not treated as a passing case.
+The complete gate also found `internal/doctor` test-helper buffer races when
+its listening child exited on a denied bind (`startListeningChild`,
+`listening_child_test.go:80` versus the subprocess output-copy goroutine).
+Those files were not changed; the failure and stacks are retained for host
+verification. The cited-test guard caught the lock test's old name in an
+earlier log entry; its reference was updated to the renamed test.
+
+**Follow-up for 5a2.** Detect another LAN device advertising our UDN. This
+change adds no LAN behavior and no new identity-minting verb. 5a3's read
+actions may now build on the restored-identity policy, subject to the host
+validation above.

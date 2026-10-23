@@ -77,6 +77,13 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 **Metrics** — the admin listener also serves Prometheus text at [http://127.0.0.1:7789/metrics](http://127.0.0.1:7789/metrics): SQLite lock waits, enrichment cache hit rates, conversion-job durations, log-event counts. Always on, and loopback-only like the rest of the console; on a public-mode bridge a signed-in session reads it, and a scraper needs its address in `metrics.allowCidrs` and a direct connection (loopback is not implied there, since a proxy on the same host connects from it too). The Diagnostics page shows the current values; point a scraper at `/metrics` if you want history.
 
+## Backup and restore
+
+`bridge backup` captures the bridge identity and library state while it runs.
+Stop the service before `bridge restore`. When moving to another box, stop
+the source too: two boxes running one identity at once are unsupported.
+Prefer the newest snapshot; see the [backup guide](docs/backup.md).
+
 ## Build from source
 
 Requires Go 1.27.2+.

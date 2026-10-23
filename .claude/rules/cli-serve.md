@@ -66,9 +66,9 @@ The largest package in the repo (`main.go` alone 4,698 lines) had **no section h
 
 - **One `bridge serve` per data dir, decided before its first write: runServe takes an exclusive kernel lock on `<dataDir>/server.lock` (`lockServeDataDir`, over `fsutil.TryLock`) right after the read-only config checks, ahead of the TLS mint, the token store, `server.pid`, the migrations, the updater's boot marker and every sweeper** (2026-10-02, backlog B208) → History-rules-cli-serve.md
 - **A lock file is opened through `fsutil.OpenLockFile`, which asks again when its create loses a race** (2026-10-14, backlog B185) **Don't open a lock file with a bare `os.Root.OpenFile(name, O_CREATE)`** → History-rules-cli-serve.md
-- **`bridge restore` and `bridge manifest clear-missing` hold the data-dir lock for the whole run.** → History-rules-cli-serve.md
+- **`bridge restore` and `bridge manifest clear-missing` hold the data-dir lock for the whole run; restore refuses if the lock cannot be taken.** → History-rules-cli-serve.md
 - **A snapshot captures the console account and the harvest state, and restore brings the account back signed out** (2026-10-13, backlog B200) → History-rules-cli-serve.md
-- **A snapshot captures the player's identity, and restore gives the box the snapshot's: read by the player's rule before any file is written, and written by the identity file's own writer** (2026-10-22, backlog B505) **Don't restore `player-uuid` as bytes, and don't let a copy that does not hold one UUID reach the loop.** → History-rules-cli-serve.md
+- **A snapshot captures the player's identity, and restore gives the box the snapshot's: read by the player's rule before any file is written, and written by the identity file's own writer after a durable jump of both reservation marks** (B505, B470 5a0) **Don't restore `player-uuid` as bytes, and don't let a copy that does not hold one UUID reach the loop.** → History-rules-cli-serve.md
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.** → History-rules-cli-serve.md
 - **`flag.Parse` stops at the first non-flag argument, so an unguarded
   subcommand silently WIDENS its scope.** `bridge enrichment retry

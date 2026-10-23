@@ -1215,8 +1215,10 @@ mentions across the four `ops/audit-*.md` files.
   the refusal, and the message is the lock's own, which names the pid
   `server.pid` records when it records one. Any other error from the lock
   means it could not be taken (a filesystem that keeps no locks, a
-  permissions error, a directory where the lock file goes); those commands
-  then keep the admin-port probe, both times, and its message. The lock
+  permissions error, a directory where the lock file goes). Since B470 5a0,
+  restore refuses that case too: its reservation merge requires an exclusive
+  lock, not a best-effort probe (`TestRestoreRequiresAnExclusiveDataDirLock`).
+  `clear-missing` still falls back to the admin-port probe and its message. The lock
   is the guarantee between these commands and a serve. The probe stays as
   a second guard against a serve that continued after a lock error other
   than contention and therefore holds none: when the lock was taken and
@@ -1311,7 +1313,15 @@ mentions across the four `ops/audit-*.md` files.
   restore writes, passed tests that restored no database (round 2,
   Codex). The UUID is written by `config.WritePlayerUUIDFile`, the writer
   `EnsurePlayerUUID` uses: the UUID and a newline, 0600 whatever the
-  copy's mode, one `KeepOwner`. Schema stays 1. **Don't restore
+  copy's mode, one `KeepOwner`. B470 5a0 writes schema 2: older restores refuse it,
+  while the new restore also reads schema 1. Before this UUID and every
+  other identity file, restore durably merges and raises both reservation
+  marks; the reservation is never copied by the file loop. A matching
+  reservation travels in snapshots; no UUID leaves the live reservation
+  alone too. The full arithmetic, assumptions, exhaustion remedies, crash
+  order and release coupling are in History-rules-player.md under the
+  restored-identity rule. Two boxes running one identity at once are
+  unsupported; use the newest snapshot when moving to another box. **Don't restore
   `player-uuid` as bytes, and don't let a copy that does not hold one UUID
   reach the loop.**
   (`TestBackupAndRestoreGiveThePlayerTheIdentityItHad`,
