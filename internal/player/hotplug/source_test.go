@@ -111,6 +111,8 @@ func waitFor(t *testing.T, events <-chan Uevent, devpath string) []Uevent {
 // credentials at all), a malformed message and a truncated one are each
 // dropped and counted, a message of another subsystem is counted and
 // ignored, and only the kernel's sound and usb events reach the watcher.
+// The source counts a wake after the watcher has the event, so the counts
+// are read once the source has ended, not the moment the sentinel arrives.
 func TestTheSourceDropsAndCountsWhatTheKernelDidNotSend(t *testing.T) {
 	sock := newFakeSocket()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -130,6 +132,14 @@ func TestTheSourceDropsAndCountsWhatTheKernelDidNotSend(t *testing.T) {
 	got := waitFor(t, src.Events(), "/devices/sentinel/usb9/9-9")
 	if len(got) != 1 || got[0].DevPath != "/devices/platform/x/usb1/1-1" || got[0].Seqnum != 10 {
 		t.Fatalf("the watcher was woken by %+v, want the kernel's usb add alone", got)
+	}
+	cancel()
+	ended := time.NewTimer(time.Minute)
+	defer ended.Stop()
+	select {
+	case <-src.Done():
+	case <-ended.C:
+		t.Fatal("the source did not end within a minute of its context")
 	}
 	c := src.Status().Counts
 	want := Counts{Messages: 8, Woke: 2, Foreign: 3, Malformed: 1, Truncated: 1, Ignored: 1}
