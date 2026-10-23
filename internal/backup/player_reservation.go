@@ -33,9 +33,9 @@ const restoreMargin uint64 = 1 << 24
 // unreadable live floor. With the service stopped, remove player-uuid,
 // player-ids.json and player-queue.json together; the next start makes a new
 // identity with no queue (a v1 queue has no identity stamp). The reset gives up
-// for good the identity it removes and any the box ran earlier that no other
-// box took over, including one an earlier restore replaced here: only the
-// dropped floor held their values. No snapshot of a given-up identity taken
+// for good the identity it removes and any the box ran earlier, including one
+// an earlier restore replaced here, unless another box took it over by a
+// restore: only the dropped floor held their values. No snapshot of a given-up identity taken
 // before the reset, here or elsewhere, may restore its player identity again:
 // remove player-uuid and player-ids.json from every such snapshot, or delete it.
 // An identity another box took over by restore keeps its floor there and its
@@ -45,7 +45,7 @@ const restoreMargin uint64 = 1 << 24
 // identity. B524 will enforce this operator rule before 5a ships.
 func playerResetAdvice(restoring bool) string {
 	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
-	advice += "; this reset gives up for good the identity it removes and any the box ran earlier that no other box took over; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; an identity another box took over keeps its snapshots"
+	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless another box took it over by a restore; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; an identity another box took over keeps its snapshots"
 	if restoring {
 		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
 	}
