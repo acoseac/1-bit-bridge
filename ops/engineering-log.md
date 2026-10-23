@@ -57451,3 +57451,21 @@ read before; no test separates the two orders).
   `internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`,
   which fails on this host (backlog B520) and is not this change's.
   `make build-all` (six targets) and `make docs-check` passed.
+
+### Round 3: one finding
+
+Round 2's review of #1321 (Codex and the Claude API, both static, on
+16b8d3a5..95291918): the Claude API found nothing, and Codex one finding,
+verified against the code.
+
+1. **Low: the abandonment test could read the log before its line.**
+   `supervise` closes `done` and then calls `settle`, which logs that a Run
+   a panic ended is abandoned, and
+   `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock` read the log as
+   soon as `done` closed. Red first, on 95291918: with a 2 s sleep between
+   `close(p.done)` and `p.settle()`, the test failed, "the abandonment
+   logged [], want once". Fix (852cb8b3, the test only): it parks that log
+   call (`loggingtest.ParkOn`), waits for it and lets it go, and then reads
+   the log, so its `settled` check also runs once `settle` has. Under the
+   same sleep it passed (2.24 s). The three `TestAPanic` tests passed 10
+   runs each under `-race`.
