@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -513,33 +514,52 @@ type openRecord struct {
 
 // watchOpens keeps what this reading found of each output's PCM device for
 // the next reading, and marks each stream the bridge watched open with the
-// DoP settings MPD reports now (readingSnap.tied): the reading before, at
+// DoP settings MPD reports now (readingSnap.tied): the record before, at
 // most openWatch earlier, found the device with no stream open or another
 // stream on it, and MPD reported the same dop and allowed_formats then for
 // the output whose thread holds the stream now; or it found this same
-// stream, already marked, under the same settings. Between those two
-// readings MPD opened the stream, and the settings it read in the open were
-// the ones both readings report, unless they changed and changed back
-// within openWatch. What a reading cannot tell (the cards, the ALSA
-// configuration or the stream not read whole, MPD not read or its outputs
-// differing across the /proc read) keeps nothing, so the next reading
-// starts unwatched. Only a DoP claim reads the mark; no verdict carries from
-// one reading to the next.
+// stream, already marked, under the same settings and in the same run.
+// Between those two readings MPD opened the stream, and the settings it read
+// in the open were the ones both readings report, unless they changed and
+// changed back within openWatch. A reading that cannot tell the stream on a
+// device keeps no evidence of it and erases none: the card read in part, a
+// substream not read whole, or no ids at all (/proc not read, the ALSA
+// configuration not had, alsa_config_unread, the probe late with no
+// endpoint). The record before stands for the next reading to compare with,
+// while this reading read MPD's DoP settings and they are the record's; one
+// that could not read them (MPD not read, its outputs differing across the
+// /proc read) or read them changed ends it, since the open the record would
+// vouch for may have come in between. A device a reading's ids no longer
+// name keeps nothing. Only a DoP claim reads the mark; no verdict carries
+// from one reading to the next.
 func (o *localOutputs) watchOpens(s *readingSnap) {
 	settings := settingsOf(s)
-	next := map[pickID]openRecord{}
 	s.tied = map[pickID]bool{}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	prev := o.reading.opens
-	if s.procCode == "" && s.alsaCode == "" && !s.failed && !s.unidentified {
+	next := map[pickID]openRecord{}
+	keep := func(id pickID) {
+		if rec, had := prev[id]; had && settings != nil && maps.Equal(rec.settings, settings) {
+			next[id] = rec
+		}
+	}
+	switch {
+	case s.failed:
+		// Nothing is kept (forgetOpens).
+	case s.procCode != "" || s.alsaCode != "" || s.unidentified:
+		for id := range prev {
+			keep(id)
+		}
+	default:
 		for i := range s.picks {
 			pick := &s.picks[i]
+			id := pickIDOf(pick)
 			stream, trigger, ok := streamOn(s.cards, pick)
-			if !ok {
+			if !ok || settings == nil {
+				keep(id)
 				continue
 			}
-			id := pickIDOf(pick)
 			rec := openRecord{at: s.at, stream: stream, trigger: trigger, settings: settings}
 			if stream.open {
 				rec.tied = watchedOpen(prev[id], rec, holderName(s, pick))
@@ -608,11 +628,16 @@ func settingsOf(s *readingSnap) map[string]outputSettings {
 
 // streamOn is the stream a reading found on pick's PCM device, and the
 // start the kernel stamped on its run (trigger_time, "" with none open). ok
-// is false when the reading does not say which: the device not read, a
-// substream's files not read, several open and not exactly one MPD's, or the
-// open one not set up whole (one with no hw_params yet was opened, and MPD's
-// open read its settings, before this reading began).
+// is false when the reading does not say which: the card read in part (a
+// substream it could not list may be the open one, and the rest would read
+// as closed), the device not read, a substream's files not read, several
+// open and not exactly one MPD's, or the open one not set up whole (one with
+// no hw_params yet was opened, and MPD's open read its settings, before this
+// reading began).
 func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
+	if card := pickCard(snap, pick); card == nil || card.Partial {
+		return streamKey{}, "", false
+	}
 	dev := pickDevice(snap, pick)
 	if dev == nil || len(dev.Substreams) == 0 {
 		return streamKey{}, "", false
@@ -1455,6 +1480,20 @@ func pickSubstream(snap alsa.Snapshot, pick *dacPick) (*alsa.Substream, bool) {
 		return mpds[0], false
 	}
 	return nil, true
+}
+
+// pickCard is pick's card in a reading of the cards, nil when the reading
+// has none.
+func pickCard(snap alsa.Snapshot, pick *dacPick) *alsa.CardReading {
+	if pick == nil {
+		return nil
+	}
+	for i := range snap.Cards {
+		if snap.Cards[i].Index == pick.dac.Card {
+			return &snap.Cards[i]
+		}
+	}
+	return nil
 }
 
 // pickDevice is pick's PCM device in a reading of the cards, nil when the

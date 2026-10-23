@@ -1131,6 +1131,140 @@ func TestAReopenTheBridgeDidNotSeeEndsTheConfirmation(t *testing.T) {
 	}
 }
 
+// partialCard makes card 5's reading partial as the reader marks one: its
+// sub0 entry a link that loops, so the running substream is not listed,
+// beside a closed sub1 the reading still shows. It returns what puts the
+// card back whole.
+func partialCard(t *testing.T, r *readingRig) (whole func()) {
+	t.Helper()
+	pcm := filepath.Join(r.procRoot, "asound", "card5", "pcm0p")
+	sub0, aside := filepath.Join(pcm, "sub0"), filepath.Join(pcm, "aside")
+	if err := os.Rename(sub0, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub0", sub0); err != nil {
+		t.Fatal(err)
+	}
+	writeRigFile(t, pcm, "sub1/hw_params", "closed\n")
+	writeRigFile(t, pcm, "sub1/status", "closed\n")
+	return func() {
+		t.Helper()
+		if err := os.Remove(sub0); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, sub0); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(pcm, "sub1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone: the reader marks a
+// card partial when it cannot list every substream (an entry whose link
+// loops, here MPD's running sub0), and such a reading can show the device
+// with only a closed substream. It keeps no evidence of the device: taken
+// for closed, it would let the next whole reading see a stream running
+// since before as one opened since, under its settings. Nor does it erase
+// what the readings before it kept, any more than a reading whose /proc read
+// fails does, so a confirmation of a run it could not see stands once the
+// run reads the same again. What such a reading does read still counts:
+// MPD's DoP settings changed, or moving across the /proc read, end the
+// record, since the open it would vouch for may have come in between.
+func TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege this test does not have")
+	}
+	t.Run("a stream running since before, read in part", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+		whole := partialCard(t, rig)
+		clock.Advance(outputCacheTTL)
+		getReading(t, hs, token, id)
+		whole()
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+	t.Run("a stream watched opening, read in part", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		whole := partialCard(t, rig)
+		clock.Advance(outputCacheTTL)
+		getReading(t, hs, token, id)
+		whole()
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
+	t.Run("a stream watched opening, /proc not read", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		var unreadable atomic.Bool
+		read := rig.cards
+		rig.cards = func() (alsa.Snapshot, error) {
+			if unreadable.Load() {
+				return alsa.Snapshot{}, fs.ErrPermission
+			}
+			return read()
+		}
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		unreadable.Store(true)
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		if got.State != "unknown" || !slices.Equal(got.StateReasons, []string{signalpath.ProcUnreadable}) {
+			t.Fatalf("state %s %v\n%s", got.State, got.StateReasons, raw)
+		}
+		unreadable.Store(false)
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
+	t.Run("a reading in part that reads MPD's settings changed", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		reopen := closeStream(t, rig)
+		getReading(t, hs, token, id)
+		reopen()
+		// The stream opens unseen while MPD reports dop off, and the
+		// settings come back before the next whole reading.
+		rig.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("1", "allowed_formats=", "dop=0") })
+		whole := partialCard(t, rig)
+		clock.Advance(outputCacheTTL)
+		getReading(t, hs, token, id)
+		whole()
+		rig.mpd.set(func(m *scriptedMPD) { m.outputs = volumioOutputs("1", "allowed_formats=", "dop=1") })
+		clock.Advance(outputCacheTTL)
+		_, got, raw := getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+	t.Run("a stream watched opening, MPD's settings moving across a reading", func(t *testing.T) {
+		rig := doPRig(t, "1", "")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		dop, other := volumioOutputs("1", "allowed_formats=", "dop=1"), volumioOutputs("1", "allowed_formats=", "dop=0")
+		rig.mpd.set(func(m *scriptedMPD) { m.outputsSeq, m.nOutputs = []mpd.Reply{dop, other, dop}, 0 })
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.SettingsChanged)
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+	})
+}
+
 // TestADoPVerdictNeedsTheStreamWatchedOpening: DoP is claimed for settings
 // the bridge watched the stream open with, that is a reading at most ten
 // seconds before found the PCM device closed, or with another stream on it
