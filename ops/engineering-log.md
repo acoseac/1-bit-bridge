@@ -53482,6 +53482,24 @@ build.
 | C3c | any position taken as SLAVE | `plug:SLAVE=soft,dmix`: `dmix`, a wrong name |
 | C4 | `alsaCode` left out of the no-ids branch | "the ALSA configuration not had": `dop_unconfirmed` |
 
+**Gates**, through the build lock, at b32cc469:
+- `make fmt vet test` passed whole, 1,103 s with no wait for a slot.
+  `make fmt` rewrote nothing and `go vet` was clean. 73 packages were ok
+  under `-race`, saprobe-alac's own module included (`cmd/bridge` 477 s,
+  `internal/admin` 692 s, `internal/api` 92 s, `internal/alsa` 2.9 s).
+- `make build-all` was clean after 1,051 s waiting for a slot: the six
+  targets built.
+- `make docs-check` was clean after 1,306 s waiting for a slot (CLAUDE.md
+  62.3%, worst load 46.4%).
+- With the round-6 note applied to the tree, after 2,363 s waiting for a
+  slot, `make docs-check` was clean again (worst load 47.0%), and the whole
+  `cmd/bridge` package, which holds the doc sweeps, passed (117 s). The
+  note was then reverted.
+
+One two-package `go test` (`internal/api` and `internal/signalpath`'s stage
+tests, about a second each) ran outside the lock by mistake while fixing
+(3).
+
 **Residuals, named, not fixed here**
 
 - A change of `dop` or `allowed_formats` and a change back, across a
