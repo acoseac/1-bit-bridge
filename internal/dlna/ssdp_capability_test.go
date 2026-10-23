@@ -132,10 +132,11 @@ func TestASenderThatCannotBePinned(t *testing.T) {
 }
 
 // TestTheDestinationGuardHoldsWhenArrivalReportingFails pins on the host's
-// own sockets what TestEachListenerCapabilityFailsOnItsOwn pins on the fake:
-// a listener whose arrival report the kernel refuses is still armed for the
-// destination, and the MediaServer's B48 guard on it still refuses a search
-// sent to the tailnet and answers one sent to the LAN.
+// own sockets, armed by the host transport's own arm, what
+// TestEachListenerCapabilityFailsOnItsOwn pins on the fake: a listener whose
+// arrival report the kernel refuses is still armed for the destination, and
+// the MediaServer's B48 guard on it still refuses a search sent to the
+// tailnet and answers one sent to the LAN.
 func TestTheDestinationGuardHoldsWhenArrivalReportingFails(t *testing.T) {
 	var judged judgedAs
 	sink := newLogSink()
@@ -144,7 +145,8 @@ func TestTheDestinationGuardHoldsWhenArrivalReportingFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind a loopback listener: %v", err)
 	}
-	_, _, res := registerOnTransport(t, &socketTransport{armArrivalErr: errInjected}, l, testAdvertiserConfig{
+	refuseArrival := hostSSDPTransport{armArrival: func(*net.UDPConn) error { return errInjected }}
+	_, _, res := registerOnTransport(t, &socketTransport{hostSSDPTransport: refuseArrival}, l, testAdvertiserConfig{
 		UDN:         "uuid:b48b48b4-8b48-4b48-8b48-b48b48b48b48",
 		Location:    location,
 		ServerToken: "test",

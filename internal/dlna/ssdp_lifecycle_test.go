@@ -194,6 +194,93 @@ func TestNoSendFollowsAByebyeOrWithdraw(t *testing.T) {
 	}
 }
 
+// TestNoAliveFollowsAByebye pins the order B470 PR 5a1 makes deliberate,
+// deterministically: an alive burst caught between two writes when the
+// withdrawal starts finishes the write it is in, sends nothing more, and is
+// joined before the byebye begins, where the advertiser it replaced sent its
+// byebye first and cancelled after, so a burst in flight could follow it.
+func TestNoAliveFollowsAByebye(t *testing.T) {
+	n := newFakeNet()
+	sub := fakeSubsystem(t, n)
+	h, _ := mustRegister(t, sub, legacyReg(msUDN, fakeServed(), SSDPEndpoint{Interface: en0, Location: msOnEn0}))
+	ep := h.endpoints[0]
+	parked, release := make(chan struct{}), make(chan struct{})
+	alives := 0
+	n.mu.Lock()
+	n.onSenderWrite = func(_ *fakeSender, pkt string) {
+		if header(pkt, "NTS") != "ssdp:alive" {
+			return
+		}
+		alives++ // one goroutine writes alives: the endpoint's timer
+		if alives == 2 {
+			close(parked)
+			<-release
+		}
+	}
+	n.mu.Unlock()
+	from := len(n.snapshot())
+	ep.kick <- struct{}{}
+	<-parked
+	withdrawn := make(chan error, 1)
+	go func() { withdrawn <- h.Withdraw(context.Background()) }()
+	waitFor(t, "the withdrawal to cancel the endpoint", func() bool { return ep.ctx.Err() != nil })
+	time.Sleep(20 * time.Millisecond) // a byebye sent ahead of the join would be written by now
+	close(release)
+	if err := <-withdrawn; err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	firstByebye, lastAlive := 0, 0
+	for _, w := range n.snapshot()[from:] {
+		switch header(w.pkt, "NTS") {
+		case "ssdp:byebye":
+			if firstByebye == 0 {
+				firstByebye = w.seq
+			}
+		case "ssdp:alive":
+			lastAlive = w.seq
+		}
+	}
+	if firstByebye == 0 || lastAlive > firstByebye {
+		t.Errorf("the last alive at %d, the first byebye at %d: an alive followed the byebye", lastAlive, firstByebye)
+	}
+	if got := len(notifies(n, from, "ssdp:alive")); got != 2 {
+		t.Errorf("the cut burst wrote %d alives, want the two it had begun", got)
+	}
+}
+
+// TestASearchArrivingBeforeTheFirstAliveIsAnsweredAfterIt pins when a
+// listener starts reading: once its first endpoint is published, after that
+// endpoint's start burst. A search that reaches the socket earlier waits in
+// it, as it waited in an advertiser's socket until the advertiser's first
+// alive had gone out, and is answered then, not read and dropped by a
+// dispatch that does not list the endpoint yet.
+func TestASearchArrivingBeforeTheFirstAliveIsAnsweredAfterIt(t *testing.T) {
+	n := newFakeNet()
+	sub := fakeSubsystem(t, n)
+	var once sync.Once
+	n.onSenderWrite = func(_ *fakeSender, pkt string) {
+		if header(pkt, "NTS") == "ssdp:alive" {
+			once.Do(func() {
+				n.openListener(t, "en0").deliver(search("upnp:rootdevice"), netip.MustParseAddrPort(searchSrc), groupMeta(2))
+			})
+		}
+	}
+	mustRegister(t, sub, legacyReg(msUDN, fakeServed(), SSDPEndpoint{Interface: en0, Location: msOnEn0}))
+	settle(t, sub, n)
+	lastAlive, reply := 0, 0
+	for _, w := range n.snapshot() {
+		switch {
+		case w.kind == "reply":
+			reply = w.seq
+		case header(w.pkt, "NTS") == "ssdp:alive":
+			lastAlive = w.seq
+		}
+	}
+	if reply == 0 || reply < lastAlive {
+		t.Errorf("the search that arrived during the start burst was answered at %d, the burst ended at %d: want it answered, after", reply, lastAlive)
+	}
+}
+
 // TestAByebyeThatFailsStillReleasesTheEndpoint pins that a byebye is
 // best-effort: its failure is returned, joined, and the endpoint is released
 // and the registration withdrawn all the same; a second Withdraw returns

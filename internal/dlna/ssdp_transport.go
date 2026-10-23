@@ -84,8 +84,17 @@ func (t hostSSDPTransport) listen(ctx context.Context, iface *net.Interface, log
 	if err != nil {
 		return nil, ssdpListenerSetup{}, err
 	}
-	setup := ssdpListenerSetup{confineErr: confineErr}
+	setup := t.arm(conn, iface, log)
+	setup.confineErr = confineErr
 	setup.caps.ReceiveConfined = confineErr == nil
+	return hostReadConn{conn}, setup, nil
+}
+
+// arm asks the kernel to report each datagram's destination and arrival
+// interface on conn, the listener for iface, each by a call of its own, and
+// returns what it obtained (confinement aside, which is listenSSDP's).
+func (t hostSSDPTransport) arm(conn *net.UDPConn, iface *net.Interface, log *slog.Logger) ssdpListenerSetup {
+	var setup ssdpListenerSetup
 	armDst, armArrival := armDatagramDst, armDatagramArrival
 	if t.armDst != nil {
 		armDst = t.armDst
@@ -110,7 +119,7 @@ func (t hostSSDPTransport) listen(ctx context.Context, iface *net.Interface, log
 	} else {
 		setup.caps.ArrivalReporting = true
 	}
-	return hostReadConn{conn}, setup, nil
+	return setup
 }
 
 // openSender opens an unconnected sender (openNotifySender) and pins it to

@@ -110,19 +110,17 @@ func loopbackDiscard(t *testing.T) *net.UDPAddr {
 
 // socketTransport is the host's transport but for its listeners: listen
 // hands the subsystem the socket the test opened for that interface (by
-// name, "" for the OS default), armed as the host's own are, so the
-// subsystem's real read loop runs on a socket of the test's choosing, a
-// plain loopback one with no multicast at all. Its senders are the host's.
+// name, "" for the OS default), armed by the host transport's own arm (whose
+// seams can refuse a report), so the subsystem's real read loop runs on a
+// socket of the test's choosing, a plain loopback one with no multicast at
+// all. Its senders are the host's.
 type socketTransport struct {
 	hostSSDPTransport
 	mu    sync.Mutex
 	socks map[string]*net.UDPConn
-	// armDstErr and armArrivalErr, when set, stand for a kernel that
-	// refuses that report: the socket is left unarmed for it.
-	armDstErr, armArrivalErr error
 }
 
-func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, _ *slog.Logger) (ssdpReadConn, ssdpListenerSetup, error) {
+func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, log *slog.Logger) (ssdpReadConn, ssdpListenerSetup, error) {
 	name := ""
 	if iface != nil {
 		name = iface.Name
@@ -134,23 +132,8 @@ func (tr *socketTransport) listen(_ context.Context, iface *net.Interface, _ *sl
 	if c == nil {
 		return nil, ssdpListenerSetup{}, errors.New("the test opened no socket for this interface")
 	}
-	setup := ssdpListenerSetup{caps: SSDPListenerCaps{ReceiveConfined: true}}
-	arm := func(refused error, arm func(*net.UDPConn) error) error {
-		if refused != nil {
-			return refused
-		}
-		return arm(c)
-	}
-	if err := arm(tr.armDstErr, armDatagramDst); err != nil {
-		setup.dstErr = err
-	} else {
-		setup.caps.DestinationReporting = true
-	}
-	if err := arm(tr.armArrivalErr, armDatagramArrival); err != nil {
-		setup.arrivalErr = err
-	} else {
-		setup.caps.ArrivalReporting = true
-	}
+	setup := tr.hostSSDPTransport.arm(c, iface, log)
+	setup.caps.ReceiveConfined = true
 	return hostReadConn{c}, setup, nil
 }
 
