@@ -311,9 +311,33 @@ pcm.dup { type plug
 		"plug:SLAVE=dmix": "dmix", `plug:SLAVE="dmix:2,0"`: "dmix",
 		"plug:{ SLAVE dmix }": "dmix", `plug:{SLAVE = "dmix:CARD=Audio"}`: "dmix",
 		"plug:soft": "softvol", "plug:'plug:dmix'": "dmix", "emptyOverPlugDmix": "dmix",
+		// The compound as alsa-lib's configuration parser loads it: a ; or a
+		// , after the value, blanks and newlines between, a # comment, a
+		// quoted name, the last SLAVE standing.
+		"plug:{ SLAVE dmix; }": "dmix", "plug:{ SLAVE dmix, }": "dmix", "plug:{ SLAVE\n    dmix }": "dmix",
+		"plug:{\n    SLAVE = 'soft'\n}": "softvol", "plug:{ SLAVE dmix # alsa-lib's comment\n}": "dmix",
+		"plug:{ SLAVE hw; SLAVE dmix }": "dmix", `plug:{ "SLAVE" dmix }`: "dmix",
+		// A quoted value's escaped quote, in either form.
+		`plug:"dmix:CARD=\"Audio\""`: "dmix", `plug:'dmix:CARD=\'Audio\''`: "dmix",
+		`plug:{ SLAVE "dmix:CARD=\"Audio\",DEV=0" }`: "dmix",
+		// The list as parse_args reads it: blanks after the =, a tab ending
+		// the name, the last SLAVE standing.
+		"plug:SLAVE= dmix": "dmix", "plug:SLAVE=\t'dmix'": "dmix", "plug:SLAVE\t=dmix": "dmix",
+		"plug:dmix,SLAVE=soft": "softvol",
 		// What alsa-lib would not open as a plug: a bare value with a comma
-		// or an =, another argument's name.
+		// or an =, another argument's name, a second position, a space
+		// inside the name (a space does not end it), anything but a comma
+		// after a value, a parameter plug does not take in the compound, no
+		// value, a bare value the = ends, a brace too many.
 		"plug:hw:2,0": "", "plug:dmix:CARD=Audio": "", "plug:OTHER=dmix": "", "plug:": "",
+		"plug:SLAVE=soft,dmix": "", "plug:SLAVE = dmix": "", "plug:'dmix' ,x": "", "plug:SLAVE=": "",
+		"plug:{ SLAVE dmix; FOO bar }": "", "plug:{ }": "", "plug:{ SLAVE }": "",
+		"plug:{ SLAVE dmix:CARD=Audio }": "", "plug:{ SLAVE dmix } x": "", "plug:{ SLAVE dmix }}": "",
+		// What the bridge does not model names nothing, never a wrong name: a
+		// mode prefix, a dotted name, a compound value, an include, an escape
+		// other than \" \\ \', a bare number, a NUL.
+		"plug:{ !SLAVE dmix }": "", "plug:{ SLAVE.x dmix }": "", "plug:{ SLAVE { pcm dmix } }": "",
+		"plug:{ <more.conf> SLAVE dmix }": "", `plug:"dm\ix"`: "", "plug:{ SLAVE 0 }": "", "plug:dmix\x00soft": "",
 		"passthrough": "", "hwcard": "", "hw:2,0": "", "plughw:2,0": "", "front:2": "", "dmixer": "",
 		"twice": "", "a": "", "dup": "", "nothing": "", "": "",
 	} {

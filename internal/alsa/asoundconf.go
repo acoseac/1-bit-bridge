@@ -272,48 +272,221 @@ func deviceStringStage(c PCMConfig, device string, seen map[string]bool, hops in
 	return ""
 }
 
-// plugSlave is the slave a plug: device string names. alsa-lib's plug PCM
-// takes one argument, SLAVE: given by position or as SLAVE=, its value
-// quoted in '…' or "…" or bare, or in the compound { SLAVE value }, with an
-// = between them or none, as alsa's configuration has it. ok is false for
-// what alsa-lib would not open as a plug: a bare value with a comma (a
-// second argument) or an = (an argument of another name), another
-// argument's name, or nothing.
+// confBlank is what alsa-lib's configuration code skips between tokens
+// (skip_blank and get_nonwhite in conf.c).
+const confBlank = " \f\t\n\r"
+
+// plugSlave is the slave a plug: device string names, read as alsa-lib
+// reads the arguments of a PCM that takes them (parse_args in conf.c). plug
+// takes one, SLAVE (pcm.plug's @args in alsa.conf), given in a list
+// (plugList) or a compound (plugCompound). ok is false for what alsa-lib
+// would not open as a plug, and for a form this does not model, which
+// names nothing rather than a wrong name; so is a NUL, where alsa-lib's
+// string would end.
 func plugSlave(arg string) (string, bool) {
-	arg = strings.TrimSpace(arg)
-	if inner, ok := strings.CutPrefix(arg, "{"); ok {
-		inner, ok = strings.CutSuffix(inner, "}")
-		if !ok {
-			return "", false
-		}
-		rest, ok := strings.CutPrefix(strings.TrimSpace(inner), "SLAVE")
-		value := strings.TrimLeft(rest, " \t")
-		if !ok || (value == rest && !strings.HasPrefix(rest, "=")) {
-			return "", false
-		}
-		return argValue(strings.TrimPrefix(value, "="))
+	arg = strings.TrimLeft(arg, confBlank)
+	switch {
+	case strings.IndexByte(arg, 0) >= 0:
+		return "", false
+	case strings.HasPrefix(arg, "{"):
+		return plugCompound(arg)
 	}
-	if name, value, found := strings.Cut(arg, "="); found && name == "SLAVE" {
-		arg = value
-	}
-	return argValue(arg)
+	return plugList(arg)
 }
 
-// argValue is one argument's value: quoted in '…' or "…", the quote closing
-// it at its end, or bare, with no comma, =, quote, brace or space in it.
-func argValue(s string) (string, bool) {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') {
-		inner := s[1:]
-		if strings.IndexByte(inner, s[0]) != len(inner)-1 || len(inner) == 1 {
+// plugList reads plug's arguments as a list, as parse_args does: arguments
+// one after another, a comma between them, each a value by position (plug's
+// first position is SLAVE) or SLAVE= and a value (parseArg), the last SLAVE
+// standing. Another position or another name is a parameter plug does not
+// take, and nothing but a comma or the end may follow a value, a blank
+// included.
+func plugList(s string) (string, bool) {
+	var slave string
+	for pos := 0; ; pos++ {
+		name, value, rest, ok := parseArg(s)
+		if !ok || (name == "" && pos > 0) || (name != "" && name != "SLAVE") {
 			return "", false
 		}
-		return inner[:len(inner)-1], true
+		slave = value
+		switch {
+		case rest == "":
+			return slave, slave != ""
+		case rest[0] != ',':
+			return "", false
+		}
+		s = rest[1:]
 	}
-	if s == "" || strings.ContainsAny(s, ",=\"'{} \t") {
+}
+
+// parseArg reads one argument as parse_arg does: blanks skipped, then a
+// quoted value (confQuoted), or an id that runs to a tab, a newline, a
+// carriage return, a form feed, a comma, an = or the end (a space does not
+// end it), which names the argument when an = follows it past blanks and is
+// its value otherwise. The value after an = is read the same way, past
+// blanks. rest is what follows the value.
+func parseArg(s string) (name, value, rest string, ok bool) {
+	s = strings.TrimLeft(s, confBlank)
+	switch {
+	case s == "":
+		return "", "", "", false
+	case s[0] == '"' || s[0] == '\'':
+		value, rest, ok = confQuoted(s)
+		return "", value, rest, ok
+	}
+	id, after := argID(s)
+	after = strings.TrimLeft(after, confBlank)
+	if !strings.HasPrefix(after, "=") {
+		return "", id, after, true
+	}
+	s = strings.TrimLeft(after[1:], confBlank)
+	switch {
+	case id == "" || s == "":
+		// alsa-lib reads an = with no name before it as a value by
+		// position, which this does not model; nothing after it is no value.
+		return "", "", "", false
+	case s[0] == '"' || s[0] == '\'':
+		value, rest, ok = confQuoted(s)
+		return id, value, rest, ok
+	}
+	value, rest = argID(s)
+	return id, value, rest, true
+}
+
+// argID is parse_id's id: s up to a tab, a newline, a carriage return, a
+// form feed, a comma or an =, and what follows it.
+func argID(s string) (id, rest string) {
+	if i := strings.IndexAny(s, "\f\t\n\r,="); i >= 0 {
+		return s[:i], s[i:]
+	}
+	return s, ""
+}
+
+// confQuoted reads a string quoted in ' or ", as alsa-lib's parse_string
+// and get_delimstring do for the escapes this models: \", \\ and \' are the
+// character escaped. Any other escape (a control character, an octal byte,
+// a letter alsa-lib reads as itself) and a string the end cuts short are
+// not read. rest is what follows the closing quote.
+func confQuoted(s string) (value, rest string, ok bool) {
+	var b strings.Builder
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == s[0]:
+			return b.String(), s[i+1:], true
+		case c != '\\':
+			b.WriteByte(c)
+		case i+1 < len(s) && strings.IndexByte(`"\'`, s[i+1]) >= 0:
+			i++
+			b.WriteByte(s[i])
+		default:
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+// plugCompound reads plug's arguments as a compound, { … }: parse_args
+// hands what lies between the braces to alsa-lib's configuration parser in
+// override mode, so it is definitions one after another, each SLAVE, then
+// an = or none, then a value quoted or bare, then a ; or a , or none, with
+// blanks and # comments between; the last SLAVE stands. A definition of
+// another name is a parameter plug does not take, which alsa-lib refuses,
+// and so is a compound with no value. What this does not model names
+// nothing: a mode prefix (+ - ? !) or a dotted name, a compound or array
+// value, an include (<…>), an escape confQuoted does not read, and a bare
+// value alsa-lib may read as a number.
+func plugCompound(s string) (string, bool) {
+	s = strings.TrimRight(s, confBlank)
+	if len(s) < 2 || s[len(s)-1] != '}' {
 		return "", false
 	}
-	return s, true
+	in := confInput{s: s[1 : len(s)-1]}
+	var slave string
+	for {
+		c, ok := in.nonwhite()
+		switch {
+		case !ok:
+			return "", false
+		case c == 0:
+			return slave, slave != ""
+		}
+		if name, _, ok := in.token(true); !ok || name != "SLAVE" {
+			return "", false
+		}
+		if c, ok = in.nonwhite(); ok && c == '=' {
+			in.pos++
+			c, ok = in.nonwhite()
+		}
+		if !ok || c == '.' {
+			return "", false
+		}
+		value, quoted, ok := in.token(false)
+		if !ok || value == "" || (!quoted && strings.IndexByte("-0123456789", value[0]) >= 0) {
+			return "", false
+		}
+		slave = value
+		if c, ok = in.nonwhite(); !ok {
+			return "", false
+		} else if c == ';' || c == ',' {
+			in.pos++
+		}
+	}
+}
+
+// confInput reads a string as alsa-lib's configuration parser reads its
+// input (get_nonwhite, get_string, get_freestring and get_delimstring in
+// conf.c), as far as plugCompound needs.
+type confInput struct {
+	s   string
+	pos int
+}
+
+// nonwhite skips blanks and # comments, each to the end of its line, and
+// returns the next byte, 0 at the end. ok is false at an include (<…>),
+// which this does not read.
+func (in *confInput) nonwhite() (byte, bool) {
+	for in.pos < len(in.s) {
+		switch c := in.s[in.pos]; c {
+		case ' ', '\f', '\t', '\n', '\r':
+			in.pos++
+		case '#':
+			if i := strings.IndexByte(in.s[in.pos:], '\n'); i >= 0 {
+				in.pos += i + 1
+			} else {
+				in.pos = len(in.s)
+			}
+		case '<':
+			return 0, false
+		default:
+			return c, true
+		}
+	}
+	return 0, true
+}
+
+// token reads a string at the next byte, quoted (confQuoted) or bare: a
+// bare string runs to a blank, = , ; { } [ ] ' " \ or #, and a name to a
+// dot too. ok is false at a byte no string starts with (those but the
+// quotes and #, and a dot) and for a quoted string confQuoted does not read.
+func (in *confInput) token(name bool) (s string, quoted, ok bool) {
+	rest := in.s[in.pos:]
+	if rest == "" || strings.IndexByte("=,;.{}[]\\", rest[0]) >= 0 {
+		return "", false, false
+	}
+	if rest[0] == '"' || rest[0] == '\'' {
+		value, after, ok := confQuoted(rest)
+		in.pos = len(in.s) - len(after)
+		return value, true, ok
+	}
+	end := " \f\t\n\r=,;{}[]'\"\\#"
+	if name {
+		end += "."
+	}
+	i := strings.IndexAny(rest, end)
+	if i < 0 {
+		i = len(rest)
+	}
+	in.pos += i
+	return rest[:i], false, true
 }
 
 func walkPCM(c PCMConfig, name string, cards []Card, seen map[string]bool, hops int) (int, int, bool) {
