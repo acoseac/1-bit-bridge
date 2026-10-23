@@ -447,6 +447,88 @@ func TestOutputPlayKeepsItsFilesInTheStateDir(t *testing.T) {
 	}
 }
 
+// TestOutputPlayNeverKeepsItsFilesInServesDataDir pins the state
+// directory's refusal: a --state-dir that is serve's data directory, lies
+// inside it or holds it, however it is spelled (a link to it, a path below a
+// link, a ".." after a link, which goes up from where the link points, a
+// relative path), is a usage error (2); a user's cache directory inside
+// serve's data directory, where a run without --state-dir would make its
+// own, refuses the run (1). Each is refused before anything is made: no
+// backend is built and serve's data directory stays as it was. A sibling
+// whose name begins with the data directory's is apart from it, and plays.
+func TestOutputPlayNeverKeepsItsFilesInServesDataDir(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// state is the --state-dir ("" passes none), from the case's root,
+		// its data directory and a directory of links: alias to the data
+		// directory, music to the root's Music beside it.
+		state func(root, data, links string) string
+		// parent, when set, is the user's cache directory.
+		parent func(data string) string
+		// chdir, when set, is the run's working directory.
+		chdir func(root string) string
+		code  int
+		says  string
+	}{
+		{name: "serve's data directory", state: func(_, data, _ string) string { return data }, code: 2, says: "is serve's data directory"},
+		{name: "a directory inside it, not made yet", state: func(_, data, _ string) string { return filepath.Join(data, "state", "new") }, code: 2, says: "is serve's data directory"},
+		{name: "a link to it", state: func(_, _, links string) string { return filepath.Join(links, "alias") }, code: 2, says: "is serve's data directory"},
+		{name: "a directory below a link to it, not made yet", state: func(_, _, links string) string { return filepath.Join(links, "alias", "new") }, code: 2, says: "is serve's data directory"},
+		// links/music/.. is the root, where the link points up from; read
+		// lexically it is the links directory, apart from serve's.
+		{name: "a .. after a link", state: func(_, _, links string) string { return links + "/music/../data/new" }, code: 2, says: "is serve's data directory"},
+		{name: "a relative path inside it", state: func(string, string, string) string { return "data/new" }, chdir: func(root string) string { return root }, code: 2, says: "is serve's data directory"},
+		{name: "a directory that holds it", state: func(root, _, _ string) string { return root }, code: 2, says: "holds serve's data directory"},
+		{name: "a user's cache directory inside it", parent: func(data string) string { return filepath.Join(data, "cache") }, code: 1, says: "lies in serve's data directory"},
+		{name: "a sibling whose name begins with it", state: func(root, _, _ string) string { return filepath.Join(root, "data-state") }, code: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newPlayCase(t, goBarPlayer)
+			root, links := filepath.Dir(c.dataDir), t.TempDir()
+			for name, target := range map[string]string{"alias": c.dataDir, "music": filepath.Join(root, "Music")} {
+				if err := os.Symlink(target, filepath.Join(links, name)); err != nil {
+					t.Skipf("no symlinks here: %v", err)
+				}
+			}
+			if tc.chdir != nil {
+				t.Chdir(tc.chdir(root))
+			}
+			var args []string
+			state := ""
+			if tc.state != nil {
+				state = tc.state(root, c.dataDir, links)
+				args = []string{"--state-dir", state}
+			}
+			env := c.env("linux")
+			if tc.parent != nil {
+				env.stateParent = func() (string, error) { return tc.parent(c.dataDir), nil }
+			}
+			built := false
+			backend := env.backend
+			env.backend = func(cfg playback.Config) (playBackend, error) {
+				built = true
+				return backend(cfg)
+			}
+			stdout, stderr := newPlayBuf(), newPlayBuf()
+			code := runOutputPlay(context.Background(), append(append([]string{"--config", c.configPath}, args...), c.files...), env, stdout, stderr)
+			if code != tc.code || !strings.Contains(stderr.String(), tc.says) {
+				t.Errorf("exit %d, want %d saying %q:\n%s\n%s", code, tc.code, tc.says, stderr.String(), stdout.String())
+			}
+			if built != (tc.code == 0) {
+				t.Errorf("a backend built: %v, for exit %d", built, code)
+			}
+			if left, _ := os.ReadDir(c.dataDir); len(left) != 0 {
+				t.Errorf("the run made %v in serve's data directory", left)
+			}
+			if tc.code == 0 {
+				if _, err := os.Stat(filepath.Join(state, "queue.json")); err != nil {
+					t.Errorf("the engine's queue file is not in the sibling: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // TestOutputPlayKeysDriveTheEngine pins --keys: each single key is its
 // engine command, and each answer is printed: space pauses and resumes, n
 // next, p previous, d deletes the entry after the playing one (a cut of

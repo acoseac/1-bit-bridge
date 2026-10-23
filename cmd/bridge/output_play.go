@@ -18,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
@@ -107,7 +108,9 @@ leaves maintenance, q quits (a bounded shutdown). Ctrl-C quits too.
 
 It never touches bridge serve's data directory: the engine's queue and
 reservation files go in --state-dir, or in a new directory of its own under
-the user's cache directory, removed at exit. A device another process holds
+the user's cache directory, removed at exit, and a --state-dir that is
+serve's data directory, lies inside it or holds it, through a link or
+not, is refused. A device another process holds
 (MPD playing) is refused as busy, naming the holder; the bridge never stops
 MPD or changes its configuration.
 
@@ -123,9 +126,10 @@ Flags:
 //
 // Exit codes: 0 the queue played to its end, or q or Ctrl-C ended the run
 // and it shut down; 1 refused (off Linux, a config the player cannot run, no
-// binding, a file that is not there, the DAC not available, nothing
-// playable) or playback stopped short of the end of the queue (a fault, an
-// output gone); 2 usage error.
+// binding, a file that is not there, a user's cache directory in serve's
+// data directory, the DAC not available, nothing playable) or playback
+// stopped short of the end of the queue (a fault, an output gone); 2 usage
+// error, a --state-dir that meets serve's data directory among them.
 func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("output play", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -189,7 +193,18 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 			return 1
 		}
 	}
-	dir, cleanup, err := playStateDir(*stateDir, env.stateParent)
+	if *stateDir != "" {
+		apart, err := playStateApart(*stateDir, cfg.DataDir)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "output play: --state-dir %s: %v\n", *stateDir, err)
+			return 1
+		case apart != "":
+			fmt.Fprintf(stderr, "output play: --state-dir %s %s: the harness never writes into serve's data directory, so name a directory apart from it\n", *stateDir, apart)
+			return 2
+		}
+	}
+	dir, cleanup, err := playStateDir(*stateDir, cfg.DataDir, env.stateParent)
 	if err != nil {
 		fmt.Fprintf(stderr, "output play: %v\n", err)
 		return 1
@@ -207,8 +222,10 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 
 // playStateDir is the directory the engine's files go in: dir, made if it
 // is missing and left at exit, or a new one under parent's answer, removed
-// at exit.
-func playStateDir(dir string, parent func() (string, error)) (string, func(), error) {
+// at exit, which is refused when that answer lies in dataDir, serve's data
+// directory. A dir the caller has not checked with playStateApart is never
+// passed.
+func playStateDir(dir, dataDir string, parent func() (string, error)) (string, func(), error) {
 	if dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", nil, fmt.Errorf("the state directory: %w", err)
@@ -219,6 +236,12 @@ func playStateDir(dir string, parent func() (string, error)) (string, func(), er
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
+	switch in, err := playWithin(base, dataDir); {
+	case err != nil:
+		return "", nil, fmt.Errorf("the state directory's parent %s: %w", base, err)
+	case in:
+		return "", nil, fmt.Errorf("the user's cache directory %s lies in serve's data directory %s, where the harness never writes: pass --state-dir with a directory apart from it", base, dataDir)
+	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return "", nil, fmt.Errorf("the state directory's parent %s: %w", base, err)
 	}
@@ -227,6 +250,66 @@ func playStateDir(dir string, parent func() (string, error)) (string, func(), er
 		return "", nil, fmt.Errorf("a state directory: %w", err)
 	}
 	return d, func() { _ = os.RemoveAll(d) }, nil
+}
+
+// playStateApart says how dir, a --state-dir, meets dataDir, serve's data
+// directory, when it is that directory, lies inside it or holds it, and
+// answers "" when the two are apart.
+func playStateApart(dir, dataDir string) (string, error) {
+	for _, c := range []struct{ p, in, says string }{
+		{dir, dataDir, "is serve's data directory %s, or lies inside it"},
+		{dataDir, dir, "holds serve's data directory %s"},
+	} {
+		in, err := playWithin(c.p, c.in)
+		if err != nil {
+			return "", err
+		}
+		if in {
+			return fmt.Sprintf(c.says, dataDir), nil
+		}
+	}
+	return "", nil
+}
+
+// playWithin reports whether p is dir or lies inside it: the two compared
+// with their links resolved as the kernel resolves them (playResolve), in the
+// case sensitivity of dir's volume (fsutil.IsUnderAny), either of them there
+// or not yet. A bind mount is not a link, and an alias it makes is not found.
+func playWithin(p, dir string) (bool, error) {
+	rp, err := playResolve(p)
+	if err != nil {
+		return false, err
+	}
+	rd, err := playResolve(dir)
+	if err != nil {
+		return false, err
+	}
+	return fsutil.IsUnderAny(rp, []string{rd}) != "", nil
+}
+
+// playResolve is p, made absolute, with its links resolved as the kernel
+// resolves them: the longest leading run of p's elements that is there,
+// resolved as written, so that a ".." after a link goes up from where the
+// link points (filepath.Abs and Clean take it from the link's own place),
+// then the elements that are not there yet, which a MkdirAll makes as
+// directories.
+func playResolve(p string) (string, error) {
+	sep := string(filepath.Separator)
+	if !filepath.IsAbs(p) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		p = wd + sep + p
+	}
+	vol := filepath.VolumeName(p)
+	elems := strings.Split(p[len(vol):], sep)
+	for n := len(elems); n > 1; n-- {
+		if r, err := fsutil.ResolveLinks(vol + strings.Join(elems[:n], sep)); err == nil {
+			return filepath.Join(append([]string{r}, elems[n:]...)...), nil
+		}
+	}
+	return filepath.Clean(p), nil
 }
 
 // playRun is one run of the harness.
