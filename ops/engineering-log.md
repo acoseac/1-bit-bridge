@@ -57845,3 +57845,64 @@ and `internal/alsapcm` under `-race` again, passing.
 ### Not in this change
 
 The restored identity (5a0), the LAN (5a2), the decoders' own recovers.
+
+### Round 2
+
+The six review findings are fixed together, with no change to playback
+when no panic occurs:
+
+1. An opened sink now enters `s.outs` immediately after `OpenSink` succeeds,
+   before the opened note. Start, the producer and a Resume between
+   transports share that ownership list; the handed sink is neither
+   counted nor closed a second time. A panic in the first or a successor's
+   opened note cannot acknowledge release while its writer still holds
+   the device. `TestPlaybackOwnsASinkBeforeItsOpenedNote` parks that writer
+   in STATUS and checks the release stays unacknowledged until it leaves.
+2. `faultSent` now means delivery attempted, set immediately before the
+   `Events.Fault` call. A panic in an earlier Prepared, Submitted, Audible
+   or Position callback leaves the queued fault for `recoverReporter` to
+   deliver once; a Fault callback that panics is never retried. Recovery
+   still sends no fault during release.
+   `TestPlaybackDeliversAFaultQueuedBehindAPanickingEvent` checks the four preceding
+   callback positions through the engine and real sink.
+   `TestReporterNeverRetriesAPanickingFaultDelivery` checks the Fault
+   callback synchronously through the step and its recovery, and
+   `TestPlaybackReporterRecoverySendsNoFaultDuringRelease` checks release.
+3. `stopReleaseLocked` clears the stored timer stop before invoking it,
+   recovers its panic locally and records the backend fault under the
+   session's lock. Pause, Resume and teardown use it, so a stop is never
+   retried after its panic and teardown still closes the sinks, lets go
+   of the device and acknowledges.
+   `TestPlaybackContinuesTeardownAfterATimerStopPanic` drives all three
+   sites through the rig's `afterFunc` seam.
+4. A Resume that meets `alsapcm.ReasonPanicked` returns the session's
+   `faulted` error before the recoverable device-refusal mapping. It is
+   never a `ResumeError` coded `device_error`, and the reporter records
+   `backend_failed`. `TestPlaybackResumePanicIsTheBackendsFault` panics in
+   Admit on the reopen after a pause release, checks the backend's answer
+   directly, then checks the engine's fault and the closed device.
+5. `TestReleaseAllLetsGoOfEverySessionTheBackendHolds` calls bounded
+   `Backend.Wait` before asserting zero goroutines. The resource
+   acknowledgement closes `down` before `spawn` decrements its count.
+   The original assertion reproduced under `-race -count=10000`, observing
+   one goroutine with zero sessions and closed resources. Other panic
+   tests that count backend goroutines already join first.
+6. Serve's watch line says the backend is asked to let go of the device.
+   Only `releaseAll`'s own success or warning line states the outcome of
+   that bounded attempt.
+   `TestPlayerWatchRequestsReleaseWithoutPromisingItsOutcome` exercises
+   the `run.done` arm without opening listeners.
+
+Round 2 validation used the repository's Go 1.27.2 toolchain, offline:
+Darwin and Linux `go vet ./...`, Linux test compilation of the player,
+sink, ALSA and serve packages, and the full race suites for
+`internal/player/...`, `internal/alsapcm/...` and `internal/alsa/...`
+passed. Every new test and the repaired ReleaseAll test passed five runs
+under `-race`. All nine negative controls compiled and failed on their
+intended assertions, including the synchronous Fault-delivery test;
+removing the goroutine join reproduced eight failures in 10,000 runs.
+`make fmt` and `make docs-check` passed. The full `cmd/bridge` race run
+was attempted but its listener tests were refused by the sandbox
+(`bind: operation not permitted`), ending in httptest's panic in
+`TestWriteGateRefusesWhileABridgeAnswers`; a host run is still required.
+The new watch test passed without listeners.
