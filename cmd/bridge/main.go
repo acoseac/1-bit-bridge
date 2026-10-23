@@ -2951,15 +2951,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			return 2
 		}
 	}
+	// Load reported the configured player's refusal, if any. An override
+	// can introduce a different refusal which still needs its boot warning.
+	var configuredPlayerPlan servePlayerPlan
 	if *addrOverride != "" {
 		// Validate the override the same way config.Validate validates
 		// ListenAddress — otherwise an invalid value like "notaport"
 		// slips through and only surfaces much later as a net.Listen
 		// failure with an opaque error.
-		if _, _, err := net.SplitHostPort(*addrOverride); err != nil {
-			fmt.Fprintf(stderr, "invalid --addr %q: %v\n", *addrOverride, err)
+		if err := config.ValidateBindAddress("--addr", *addrOverride); err != nil {
+			fmt.Fprintf(stderr, "invalid --addr: %v\n", err)
 			return 2
 		}
+		configuredPlayerPlan = planServePlayer(cfg, opts.playerGOOS, true)
 		cfg.ListenAddress = *addrOverride
 	}
 
@@ -4111,6 +4115,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// applies when serve next starts. A player that does not start adds
 	// nothing: no goroutine, no file.
 	playerPlan := planServePlayer(cfg, opts.playerGOOS, lockErr == nil)
+	if *addrOverride != "" {
+		playerPlan.told = playerPlan.told && playerPlan.off == configuredPlayerPlan.off
+	}
 	var playerFeed *hotplug.Feed
 	if playerPlan.start {
 		playerFeed = hotplug.NewFeed()

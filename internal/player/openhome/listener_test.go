@@ -724,3 +724,104 @@ func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
 }
+
+// TestIdleSocketsNeverMakeACleanStopForced: repeated stops with completed
+// requests must not mistake an already-closed listener for an expired grace.
+func TestIdleSocketsNeverMakeACleanStopForced(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			box := lantest.New(t)
+			box.Set([]lan.Address{eth0, eth0b})
+			forced := false
+			s := startOn(t, box, 0, Limits{}, &Seams{Forcing: func() { forced = true }})
+			bound := listening(t, s, eth0, eth0b)
+			for _, peer := range []struct {
+				address lan.Address
+				source  netip.Addr
+			}{
+				{eth0, phone}, {eth0b, netip.MustParseAddr("10.0.0.9")},
+			} {
+				c, err := box.Dial(bound[peer.address], peer.source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer c.Close()
+				if code, err := get(c, bufio.NewReader(c), bound[peer.address].String()); code != 200 || err != nil {
+					t.Fatalf("idle connection: %d, %v", code, err)
+				}
+			}
+			if rep := s.Stop(); rep.Forced || rep.Abandoned != 0 || forced {
+				t.Fatalf("clean stop reported %+v; forcing hook=%v", rep, forced)
+			}
+		})
+		if t.Failed() {
+			return
+		}
+	}
+}
+
+// TestOptionsStarPassesThroughTheSurface: net/http must apply the surface's
+// Host check, routes, stop refusal and EXT header even to OPTIONS *.
+func TestOptionsStarPassesThroughTheSurface(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		foreign, stopping bool
+		want              int
+	}{
+		{"own Host", false, false, 404},
+		{"foreign Host", true, false, 400},
+		{"stopping own Host", false, true, 503},
+		{"stopping foreign Host", true, true, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			box := lantest.New(t)
+			box.Set([]lan.Address{eth0})
+			seams := &Seams{}
+			s := startOn(t, box, 0, Limits{}, seams)
+			at := listening(t, s, eth0)[eth0]
+			c, err := box.Dial(at, phone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			br := bufio.NewReader(c)
+			if code, err := get(c, br, at.String()); code != 200 || err != nil {
+				t.Fatalf("kept connection: %d, %v", code, err)
+			}
+			host := at.String()
+			if tc.foreign {
+				host = "foreign.invalid:7792"
+			}
+			var res *http.Response
+			exchange := func() {
+				_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+				_, err = io.WriteString(c, "OPTIONS * HTTP/1.1\r\nHost: "+host+"\r\n\r\n")
+				if err == nil {
+					res, err = http.ReadResponse(br, nil)
+				}
+				if err == nil {
+					_, err = io.Copy(io.Discard, res.Body)
+					_ = res.Body.Close()
+				}
+			}
+			if tc.stopping {
+				seams.Stopping = exchange
+				s.Stop()
+			} else {
+				exchange()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.StatusCode != tc.want {
+				t.Errorf("OPTIONS *: %d, want %d", res.StatusCode, tc.want)
+			}
+			if ext, ok := res.Header["Ext"]; !ok || len(ext) != 1 || ext[0] != "" {
+				t.Errorf("OPTIONS * lost EXT: %v", res.Header)
+			}
+			if tc.stopping && !res.Close {
+				t.Error("stop refusal kept the connection alive")
+			}
+		})
+	}
+}

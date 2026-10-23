@@ -414,13 +414,15 @@ func (s *Surface) bind(a lan.Address) {
 		bound = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 	}
 	srv := &http.Server{
-		Handler:           s.h,
-		ReadHeaderTimeout: s.lim.ReadHeader,
-		ReadTimeout:       s.lim.Read,
-		WriteTimeout:      s.lim.Write,
-		IdleTimeout:       s.lim.Idle,
-		MaxHeaderBytes:    maxHeaderRead - 4096,
-		ErrorLog:          handshakelog.ErrorLog(),
+		Handler: s.h,
+		// OPTIONS * must pass the same Host and stop checks as every request.
+		DisableGeneralOptionsHandler: true,
+		ReadHeaderTimeout:            s.lim.ReadHeader,
+		ReadTimeout:                  s.lim.Read,
+		WriteTimeout:                 s.lim.Write,
+		IdleTimeout:                  s.lim.Idle,
+		MaxHeaderBytes:               maxHeaderRead - 4096,
+		ErrorLog:                     handshakelog.ErrorLog(),
 	}
 	admit := &admitting{Listener: ln, key: a, gate: s.gate}
 	k := &socket{key: a, srv: srv, ln: admit, bound: bound, restr: restr}
@@ -485,7 +487,11 @@ func (s *Surface) stop() StopReport {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			late[i] = k.srv.Shutdown(ctx) != nil
+			err := k.srv.Shutdown(ctx)
+			// We closed the listener before Shutdown. If Serve has not
+			// untracked it yet, Shutdown can return net.ErrClosed after a
+			// clean drain. Only the grace expiring calls for a forced close.
+			late[i] = errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 		}()
 	}
 	wg.Wait()

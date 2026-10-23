@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan/lantest"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
@@ -85,11 +90,23 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		}
 	})
 	t.Run("on", func(t *testing.T) {
-		logs := watchLog(t)
 		box := newOpenHomeBox(t)
+		var run *playerRun
+		stoppedWhileRunning := make(chan bool, 1)
 		ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    room: Study\n    openhome: true\n", standIn: newPlayerStandIn(),
-			with: func(o *serveOpts) { o.playerOpenHome = box.wiring() }})
-		ps.runningEngine(t)
+			with: func(o *serveOpts) {
+				o.playerOpenHome = box.wiring()
+				o.playerOpenHome.Seams = &openhome.Seams{Stopping: func() {
+					select {
+					case <-run.done:
+						stoppedWhileRunning <- false
+					default:
+						stoppedWhileRunning <- true
+					}
+				}}
+			}})
+		eng := ps.runningEngine(t)
+		run = ps.player.run
 		s, at := box.surface(t)
 		if listens := box.Listens(); !slices.Equal(listens, []netip.AddrPort{netip.MustParseAddrPort("192.168.1.20:7792")}) {
 			t.Errorf("the surface asked for %v, want 192.168.1.20:7792 alone", listens)
@@ -118,13 +135,33 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		if doc.Device.UDN != "uuid:"+uuid || doc.Device.FriendlyName != "Study" || doc.Device.DeviceType != openhome.DeviceType {
 			t.Errorf("the description names %+v, want the player's uuid:%s, Study, a Source", doc.Device, uuid)
 		}
+		// Positive control: the same Insert forwarded to the engine changes
+		// the queue. Restore it before checking the surface's refusal.
+		ref, err := engine.NewReference("library-track")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if _, err := eng.InsertAfter(ctx, 0, ref, []byte("metadata")); err != nil {
+			t.Fatal(err)
+		}
+		if eng.Snapshot().Len() != 1 {
+			t.Fatal("a forwarded Insert was not observable")
+		}
+		if err := eng.DeleteAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if eng.Snapshot().Len() != 0 {
+			t.Fatal("positive control did not restore an empty queue")
+		}
 		req, err := http.NewRequest(http.MethodPost, "http://"+at.String()+"/openhome/playlist/control",
-			strings.NewReader(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Play xmlns:u="urn:av-openhome-org:service:Playlist:1"/></s:Body></s:Envelope>`))
+			strings.NewReader(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Insert xmlns:u="urn:av-openhome-org:service:Playlist:1"><AfterId>0</AfterId><Uri>library-track</Uri><Metadata>metadata</Metadata></u:Insert></s:Body></s:Envelope>`))
 		if err != nil {
 			t.Fatal(err)
 		}
 		req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
-		req.Header.Set("SOAPAction", `"urn:av-openhome-org:service:Playlist:1#Play"`)
+		req.Header.Set("SOAPAction", `"urn:av-openhome-org:service:Playlist:1#Insert"`)
 		res, err = client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -132,10 +169,10 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		raw, _ = io.ReadAll(res.Body)
 		_ = res.Body.Close()
 		if res.StatusCode != 500 || !strings.Contains(string(raw), "<errorCode>602</errorCode>") {
-			t.Errorf("Play: %d %s; want fault 602", res.StatusCode, raw)
+			t.Errorf("Insert: %d %s; want fault 602", res.StatusCode, raw)
 		}
 		if st := ps.runningEngine(t).Snapshot(); st.Len() != 0 || st.State().String() != "stopped" {
-			t.Errorf("a refused Play reached the engine: %d entries, %s", st.Len(), st.State())
+			t.Errorf("a refused Insert reached the engine: %d entries, %s", st.Len(), st.State())
 		}
 		if code := ps.stopServe(t); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
@@ -146,12 +183,13 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		if open := box.Open(); len(open) != 0 {
 			t.Errorf("sockets open after serve's stop: %v", open)
 		}
-		logs.await(t, "player: shut down")
-		all := logs.all()
-		surfaceStopped := strings.Index(all, "player: the OpenHome surface stopped")
-		engineDown := strings.Index(all, "player: shut down")
-		if surfaceStopped < 0 || surfaceStopped > engineDown {
-			t.Errorf("the surface stopped at %d and the player shut down at %d: want the surface first\n%s", surfaceStopped, engineDown, all)
+		select {
+		case live := <-stoppedWhileRunning:
+			if !live {
+				t.Error("the engine's Run ended before the surface began stopping")
+			}
+		default:
+			t.Error("the surface's stopping hook never ran")
 		}
 	})
 	t.Run("on, with no box of the test's", func(t *testing.T) {
@@ -206,4 +244,86 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 			t.Errorf("a listener was asked for: %v", box.Listens())
 		}
 	})
+}
+
+// TestServeRefusesANonnumericAddressOverrideBeforePlanning: the override
+// follows file validation, before the data-dir lock or any listener opens.
+func TestServeRefusesANonnumericAddressOverrideBeforePlanning(t *testing.T) {
+	for _, addr := range []string{":postgresql", ":http", ":", ":65536", ":-1"} {
+		t.Run(addr, func(t *testing.T) {
+			cfgPath := writeValidConfig(t)
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dataDir := filepath.Join(filepath.Dir(cfgPath), "data")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			raw = append(raw, []byte("dataDir: "+dataDir+"\noutput:\n  player:\n"+goBarPlayer+"    openhome: true\n    openhomePort: 5432\n")...)
+			if err := os.WriteFile(cfgPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// A bad override must be refused before this lock is even tried;
+			// it also keeps the negative control from binding a service port.
+			unlock, err := lockServeDataDir(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			_, stderr, code := runCapture(t, "serve", "--config", cfgPath, "--addr", addr)
+			if code != 2 || !strings.Contains(stderr, "invalid --addr") {
+				t.Errorf("override was not refused before the lock: exit %d, %s", code, stderr)
+			}
+			if len(addr) > 1 && strings.Contains(stderr, addr) {
+				t.Errorf("refusal quoted the override: %s", stderr)
+			}
+		})
+	}
+}
+
+// TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome: file settings
+// pass, but the effective API port conflicts; the player stays off and says
+// why once without printing the port, while serve still starts.
+func TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome(t *testing.T) {
+	needsDirectorySync(t)
+	rec := loggingtest.Record(t)
+	var port int
+	box := newOpenHomeBox(t)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    openhome: true\n", standIn: newPlayerStandIn(),
+		with: func(o *serveOpts) {
+			o.playerOpenHome = box.wiring()
+			at := netip.MustParseAddrPort(o.addrOverride)
+			port = int(at.Port())
+			raw, err := os.ReadFile(o.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = append(raw, []byte(fmt.Sprintf("    openhomePort: %d\n", port))...)
+			if err := os.WriteFile(o.configPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(o.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
+				t.Fatalf("file settings must enable the player before --addr: %v", why)
+			}
+		}})
+	if ps.player.plan.start || ps.engine(t) != nil || ps.player.surface != nil || len(box.Listens()) != 0 {
+		t.Error("the conflicting player or its surface started")
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d: %s", code, ps.stderr.String())
+	}
+	lines := rec.Lines("player: not started")
+	if len(lines) != 1 || !strings.Contains(lines[0], "output.player.openhomePort") || !strings.Contains(lines[0], "listenAddress") {
+		t.Errorf("override refusal: %q; want one line naming the clashing settings", lines)
+	}
+	for _, line := range lines {
+		if strings.Contains(line, fmt.Sprint(port)) {
+			t.Errorf("refusal quoted the port: %s", line)
+		}
+	}
 }
