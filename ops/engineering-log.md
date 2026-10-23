@@ -53290,3 +53290,214 @@ holds the doc sweeps, passed. The note was then reverted.
 - `dop_unconfirmed` stays for the life of a stream the bridge did not see
   open (a client that starts reading mid-track gets the DoP verdict at the
   next open).
+
+### Round 6 (2026-10-23): a confirmation only across the same run, a reading that cannot tell keeps no evidence and erases none, plug's argument as alsa-lib reads it
+
+Round 5 landed at 637c57f4 with its note applied, and the owner accepted
+the 10 s `openWatch`. Round 5's reviews: Codex, three Mediums; the Claude
+API, one Low. Each premise was checked against the code at 637c57f4. The
+kernel's PCM core and alsa-lib's `conf.c` were checked from the source as
+I know it: this host denies network access, so neither was fetched. The
+rules are in the round's note, `/tmp/b473-b3-rules-r6.md`: seven sections
+of `output.md`, each heading naming its file.
+
+**Verdicts**
+
+1. **Codex Medium, a confirmation survives a reopen the bridge did not
+   see: correct.** `watchedOpen` (`internal/api/outputs_reading.go:561-575`
+   at 637c57f4) carried `prev.tied` (:574) whenever the stream key and the
+   holder's settings read as before. The key (subdevice, `hw_params`, owner
+   thread and process) does not change when MPD reopens its output from the
+   same thread in the same format. So an `outputset` to PCM, a reopen (a
+   pause and a resume close and reopen the output) and an `outputset` back
+   read as the same confirmed stream. Every reading within 10 s of the one
+   before then kept the confirmation, for as long as the client polled.
+   `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation` reproduces it.
+2. **Codex Medium, an incomplete enumeration can manufacture an observed
+   open: correct.** `streamOn` (:599-605) read `pickDevice`'s substreams
+   and never `CardReading.Partial`. The reader sets that when the type of
+   a `pcmNp` or `subM` entry cannot be read for any reason but its absence
+   (`internal/alsa/reader.go:302-306`). A card whose running `sub0` could
+   not be listed showed a closed `sub1`, and `watchOpens` (:531-545)
+   recorded the device as closed. The next whole reading then saw the
+   stream that had run all along as one opened since, under the settings
+   reported then. Round 5 also erased every record at the other readings
+   that cannot tell: its gate (:531) left the map empty, which the brief's
+   "erase none" rules out.
+3. **Codex Medium, compound arguments lose the stage: correct**, as a
+   stage left unnamed, never a wrong one. `plugSlave`
+   (`internal/alsa/asoundconf.go:282-300` at 637c57f4) cut the compound by
+   hand. After `SLAVE` (:289), `argValue` (:304-317) took the rest. It
+   refused any value with a comma, an =, a quote, a brace or a blank in it
+   (:313), and decoded no escape. So `plug:{ SLAVE dmix; }` gave the slave
+   `dmix;`. A trailing comma, a newline after SLAVE, a comment and an
+   escaped quote named nothing either, where alsa-lib opens a dmix.
+4. **The Claude API Low, the text says "not read whole" and the code gates
+   on `alsaCode`: correct.** The comment (:519-521) and `output.md:60` said
+   a reading whose ALSA configuration was not read whole keeps nothing. The
+   gate (:531) is `s.alsaCode == ""`, and only a configuration not had sets
+   that code (`alsa_config_unread`). A configuration the bridge read and
+   does not model has been had since round 4, and its records were kept.
+   The text changed, not the code, as the brief says. The gate's branch
+   moved with fix 2, and still reads `alsaCode`.
+
+**The evidence chosen for (1), and why it holds**
+
+The substream's `trigger_time`, in `/proc/asound/cardN/pcmMp/subS/status`.
+The kernel allocates a substream's runtime zeroed when it is opened, so
+its trigger timestamp is zero until the first start. It stamps it, from
+the stream's own clock, at every start, stop, pause, suspend and resume,
+and the status file prints it as seconds and nanoseconds (the captures
+show 3517.637052632 on the Pi, its monotonic clock). So one started stamp
+seen at two readings rules out a reopen between them: a reopen's runtime
+starts again from zero, and its start stamps a later time. The carry now
+needs the same started stamp (`openRecord.trigger`, `watchedOpen`). The
+evidence of the open itself, an observed closed device or another key, is
+unchanged.
+
+The other candidates do not hold:
+- `owner_pid` is MPD's output thread, the same thread across its
+  reopens.
+- `hw_ptr` and `appl_ptr` restart at every prepare, so they tell a reopen
+  only by arithmetic on the rate, whose tolerance a quick reopen slips
+  under.
+- No line of the status, `hw_params` or `sw_params` file changes at every
+  open and at nothing else.
+
+The cost: a seek, an xrun or a manual change of song (MPD's `Cancel`, then
+a prepare and a start) moves the stamp as well, and cannot be told from a
+reopen. It ends the confirmation until the bridge watches the next open,
+which PROTOCOL.md's DoP condition says.
+
+**Found while fixing (1): a stream opened and not started**
+
+The round's own first commit had a regression. With aaa3b8ad's carry, a
+reading that found the stream opened and not started (PREPARED, its
+`trigger_time` zero) tied it. The next reading, of the running stream,
+then found another stamp and dropped the tie. A client whose reading
+landed between MPD's open and the stream's start got `dop_unconfirmed`
+for the whole run. PROTOCOL.md says a client reading while playback starts
+sees the open.
+
+A zero stamp does not rule out a reopen before the start, so such a
+reading cannot tell the run (`started` in `streamOn`). It is passed over as
+a partial card is. The running stream is then judged against the reading
+before it, which saw the device closed, under the same rule as when no
+reading falls in between. So no confirmation outlives a reading that cannot
+rule out a reopen.
+
+**Fixes**
+
+- (1) aaa3b8ad: `openRecord.trigger`, `watchedOpen`'s carry by the same
+  started `trigger_time`, and PROTOCOL.md's DoP condition. 7ce90195: the
+  stream opened and not started yet tells no run, and PROTOCOL.md names
+  the last reading that could tell and the readings passed over.
+- (2) 5fe129f0: `streamOn` takes a card read in part as a reading that
+  cannot tell its stream (`pickCard`). `watchOpens` keeps no evidence and
+  erases none at a reading that cannot tell the stream on a device, and at
+  one with no ids at all (`/proc` not read, the ALSA configuration not had,
+  the probe late with no endpoint). The record before stands while that
+  reading read every output's DoP settings and they are the record's
+  (`keep`). A reading that could not read them, or read them changed, ends
+  the record.
+- (3) e2c2b255: `plugSlave` reads the list as `parse_args`, `parse_arg` and
+  `parse_id` do (`plugList`, `parseArg`, `argID`). It reads the compound as
+  the configuration parser does in override mode (`plugCompound`,
+  `confInput`). A quoted value decodes `\"`, `\\` and `\'` (`confQuoted`).
+- (4) The `watchOpens` comment, in 5fe129f0. afc1019d adds two subtests
+  that pin what the corrected text says: asound.conf as a directory is a
+  configuration not had, a reading with no ids that erases nothing, and a
+  top-level `@hooks` is a configuration read and not modeled, whose stream
+  is watched opening as with none.
+
+**Decided differently from the brief**
+
+- **Erase none at every reading that cannot tell, not only at a card read
+  in part.** The rules' sentence groups all such readings. Splitting them
+  would leave a reading with `/proc` unreadable erasing what a partial card
+  keeps.
+- **A reading that cannot tell the stream still counts what it did read.**
+  My first cut kept the record whatever that reading read. Take a partial
+  reading under PCM settings between a reading that found the device closed
+  and a whole one under DoP. The first cut let the whole reading confirm an
+  open that may have happened under PCM. The subtest "a reading in part
+  that reads MPD's settings changed" is red against it (C2b below). The
+  record now stands only while that reading read every output's DoP
+  settings and they are the record's. A reading that could not read them,
+  or saw them move across its read, ends it. A change within the window
+  that no reading saw stays the accepted residual. A change a reading saw
+  is evidence.
+- **The not-started stream** (above) was not in the brief: a regression of
+  the round's own first commit.
+- **The forms the parser does not model name nothing**, though alsa-lib
+  opens some of them. These are a mode prefix (`+ - ? !`), a name `0=` or
+  an = with no name, a dotted name, a compound or array value, an include,
+  a NUL, a bare value alsa-lib may read as a number, and any escape but
+  `\"`, `\\` and `\'`, as the file parser's own string rule has it.
+
+**Red first**
+
+- (1) `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation`, against round
+  5's code: the reading after the reopen read `format_preserved_dop`, with
+  the live override's warning.
+- (1b) The not-started subtest of
+  `TestADoPVerdictNeedsTheStreamWatchedOpening` read `dop_unconfirmed` at
+  5fe129f0 and at aaa3b8ad. It was green at round 5, whose carry needed no
+  stamp.
+- (2) `TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone`, against
+  aaa3b8ad's code. "A stream running since before, read in part" read
+  `format_preserved_dop`: Codex's sequence. "/proc not read" and "the ALSA
+  configuration not had" read `dop_unconfirmed`: erased. "A stream watched
+  opening, read in part" was green there, through the manufactured open
+  itself. "A reading in part that reads MPD's settings changed" and "MPD's
+  settings moving across a reading" were green there, as pins. Both are red
+  against my first cut (C2b).
+- (3) Eleven rows of `TestTheFirstStageThatChangesSamplesIsNamed` read
+  `""` against round 5's parser:
+  - `plug:{ SLAVE dmix; }`, `plug:{ SLAVE dmix, }`, a newline after
+    SLAVE, a comment, two SLAVEs, and a quoted name;
+  - the escaped quote in both list forms and in the compound;
+  - `plug:SLAVE\t=dmix` and `plug:dmix,SLAVE=soft`.
+
+  Every row that names nothing was green before, as a pin, and so were the
+  compound over several lines and blanks after the =.
+- (4) "Beside an ALSA configuration read and not modeled" was green at
+  aaa3b8ad, a pin. "The ALSA configuration not had" was red there, as in
+  (2).
+
+**Negative controls**, one at least per fix, each run with the fix
+committed. Each file was restored from git (`git checkout --`) and the tree
+was clean after each (`/tmp/b473-r4-controls/run_r6.py`). None failed to
+build.
+
+| Control | Mutation | Red |
+|---|---|---|
+| C1 | `watchedOpen`'s carry ignores `trigger_time` (`return prev.tied`, round 5) | `TestAReopenTheBridgeDidNotSeeEndsTheConfirmation`: `format_preserved_dop` after the reopen |
+| C1b | `streamOn` takes a stream not started yet as told (`!started(…)` removed) | `TestADoPVerdictNeedsTheStreamWatchedOpening/a_stream_read_opened_and_not_started_yet`: `dop_unconfirmed` |
+| C2 | `streamOn` ignores `CardReading.Partial` | "a stream running since before, read in part": `format_preserved_dop` |
+| C2b | `keep` ignores the settings (the first cut) | "a reading in part that reads MPD's settings changed" and "MPD's settings moving across a reading": `format_preserved_dop` |
+| C2c | the no-ids branch keeps no record (round 5) | "/proc not read": `dop_unconfirmed` |
+| C3 | the `;` or `,` after a compound's value not taken | `plug:{ SLAVE dmix; }`, `plug:{ SLAVE dmix, }`, `plug:{ SLAVE hw; SLAVE dmix }`: `""` |
+| C3b | the escape never decoded | the three escaped-quote rows: `""` |
+| C3c | any position taken as SLAVE | `plug:SLAVE=soft,dmix`: `dmix`, a wrong name |
+| C4 | `alsaCode` left out of the no-ids branch | "the ALSA configuration not had": `dop_unconfirmed` |
+
+**Residuals, named, not fixed here**
+
+- A change of `dop` or `allowed_formats` and a change back, across a
+  reopen, between the reading that found the device closed and the one
+  that found the stream (at most 10 s) passes as watched. It now carries
+  for that run, by its stamp. Round 5's residual is narrowed to the open's
+  own interval: a later interval can no longer confirm a reopen.
+- An `outputset` in the instant between MPD's `Open` reading its settings
+  and opening the PCM stands, as in round 5.
+- A seek, an xrun or a manual change of song ends the confirmation until
+  the next watched open: the cost of (1).
+- `SampleStage` trims the whole device string, and alsa-lib does not. A
+  bare value runs to the end, so `plug:dmix ` names the PCM `dmix `, which
+  alsa-lib does not find. The stage is then named for a device MPD could
+  not open, so no stream carries it.
+- `ResolveALSADevice` resolves `plug:N` and `plug:CARD=…` to a card (step
+  2b). alsa-lib opens neither, since plug's one argument is SLAVE, a PCM
+  name. The outputs route then lists a card as MPD's for a device MPD
+  cannot open. Reported for the backlog with this round.
