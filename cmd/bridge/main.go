@@ -4117,6 +4117,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	playerPlan := planServePlayer(cfg, opts.playerGOOS, lockErr == nil)
 	if *addrOverride != "" {
 		playerPlan.told = playerPlan.told && playerPlan.off == configuredPlayerPlan.off
+		// A new API-port clash comes from the override, not the address
+		// still written in the file. Name its source without quoting it.
+		if !playerPlan.told {
+			playerPlan.off = strings.Replace(playerPlan.off, "for listenAddress:", "for listenAddress, set by --addr:", 1)
+		}
 	}
 	var playerFeed *hotplug.Feed
 	if playerPlan.start {

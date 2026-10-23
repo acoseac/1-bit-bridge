@@ -300,6 +300,7 @@ func TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			raw = append(raw, []byte(fmt.Sprintf("    openhomePort: %d\n", port))...)
+			raw = append([]byte("listenAddress: :8080\n"), raw...)
 			if err := os.WriteFile(o.configPath, raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -318,12 +319,53 @@ func TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, ps.stderr.String())
 	}
 	lines := rec.Lines("player: not started")
-	if len(lines) != 1 || !strings.Contains(lines[0], "output.player.openhomePort") || !strings.Contains(lines[0], "listenAddress") {
-		t.Errorf("override refusal: %q; want one line naming the clashing settings", lines)
+	const want = "WARN player: not started reason=output.player.openhomePort: bridge serve binds that port already, for listenAddress, set by --addr: give the OpenHome surface a port of its own"
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("override refusal: %q; want exactly %q", lines, want)
 	}
 	for _, line := range lines {
 		if strings.Contains(line, fmt.Sprint(port)) {
 			t.Errorf("refusal quoted the port: %s", line)
 		}
+	}
+}
+
+// TestServeDoesNotRepeatAnUnchangedRefusalUnderAnAddressOverride: Load
+// already reports an invalid player block. A valid, non-clashing numeric
+// override must leave that refusal told, so only Validate's line is logged.
+func TestServeDoesNotRepeatAnUnchangedRefusalUnderAnAddressOverride(t *testing.T) {
+	needsDirectorySync(t)
+	// Validate remembers the last refusal process-wide. A valid config with
+	// the player off clears it now and at cleanup, also under -count.
+	clear, err := config.Load(writeValidConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := clear.Validate(); err != nil {
+			t.Error(err)
+		}
+	})
+	rec := loggingtest.Record(t)
+	box := newOpenHomeBox(t)
+	ps := bootPlayerServe(t, playerServeCase{
+		// This refusal precedes the platform gate, so Load reports the same
+		// reason on macOS and Linux without changing the host's platform.
+		player:  goBarPlayer + "    openhome: true\n    openhomePort: 0\n    pauseReleaseSeconds: 3601\n",
+		standIn: newPlayerStandIn(),
+		with:    func(o *serveOpts) { o.playerOpenHome = box.wiring() },
+	})
+	if ps.player.plan.start || ps.engine(t) != nil || ps.player.surface != nil || len(box.Listens()) != 0 {
+		t.Error("the refused player or its surface started")
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d: %s", code, ps.stderr.String())
+	}
+	lines := rec.Lines("output.player: the player is off")
+	if len(lines) != 1 || !strings.Contains(lines[0], "output.player.pauseReleaseSeconds") {
+		t.Errorf("Load refusal: %q; want one Validate line naming output.player.pauseReleaseSeconds", lines)
+	}
+	if lines := rec.Lines("player: not started"); len(lines) != 0 {
+		t.Errorf("serve repeated Load's unchanged refusal: %q", lines)
 	}
 }
