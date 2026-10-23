@@ -145,12 +145,15 @@ func maxIndexedAt(t *testing.T, s *Store) int64 {
 // TestARollbackLeavesNoKindItsHeaderDoesNotState runs a rollback through the
 // rolled-back binary's own upsert. This binary records replaced.wav as float
 // and finishes its backfill, so the clients have made their one full sync.
-// The operator rolls back; replaced.wav is replaced by an integer render, and
-// the older binary's scan rewrites its row, keeping the kind; it also indexes
-// a new FLAC and a new float WAV, whose kinds it leaves NULL; the clients sync
-// all of it. This binary is reinstalled: it opens the store, runs its boot
-// pass and a scan. Each row then carries the kind its header states, and each
-// row whose kind no client holds yet has advanced its delta cursor past the
+// The operator rolls back; replaced.wav is replaced by an integer render and
+// rewritten.flac by another FLAC, and the older binary's scan rewrites both
+// rows, keeping their kinds; it also indexes a new FLAC and a new float WAV,
+// whose kinds it leaves NULL; the clients sync all of it. This binary is
+// reinstalled. Its open alone, before any header pass, decides the rewritten
+// FLAC again: the clear runs before the fill, so the kind it clears is the
+// fill's to decide, and the header pass never reads a FLAC. Then the boot
+// pass and a scan. Each row carries the kind its header states, and each row
+// whose kind no client holds yet has advanced its delta cursor past the
 // clients', so their next delta carries it. A row the rollback left alone
 // keeps its cursor.
 func TestARollbackLeavesNoKindItsHeaderDoesNotState(t *testing.T) {
@@ -158,6 +161,7 @@ func TestARollbackLeavesNoKindItsHeaderDoesNotState(t *testing.T) {
 	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
 	root := t.TempDir()
 	replacedRel := writeAlone(t, root, "replaced.wav", fx("wav/float.wav"))
+	rewrittenFLAC := writeAlone(t, root, "rewritten.flac", flacBytes(t, 44100, 16))
 	keptRel := writeAlone(t, root, "kept.flac", flacBytes(t, 44100, 16))
 	store, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "this binary's scan")
@@ -165,46 +169,64 @@ func TestARollbackLeavesNoKindItsHeaderDoesNotState(t *testing.T) {
 	if _, err := store.BackfillSampleFormats(ctx, resolve); err != nil {
 		t.Fatal(err)
 	}
-	requireSampleFormats(t, store, map[string]string{replacedRel: SampleFormatFloat, keptRel: SampleFormatInteger})
+	requireSampleFormats(t, store, map[string]string{replacedRel: SampleFormatFloat, rewrittenFLAC: SampleFormatInteger, keptRel: SampleFormatInteger})
 	keptCursor := trackIndexedAt(t, store, keptRel)
 
-	// The rollback: replaced.wav becomes an integer render, a FLAC and a
-	// float WAV arrive, and the older binary's scan writes all three.
-	abs := filepath.Join(root, filepath.FromSlash(replacedRel))
-	before, err := os.Stat(abs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFixtureBytes(t, abs, fx("wav/af_i16.wav"))
-	later := before.ModTime().Add(time.Hour)
-	if err := os.Chtimes(abs, later, later); err != nil {
-		t.Fatal(err)
+	// The rollback: replaced.wav becomes an integer render and rewritten.flac
+	// another FLAC, a FLAC and a float WAV arrive, and the older binary's scan
+	// writes all four.
+	for _, r := range []struct {
+		rel  string
+		data []byte
+	}{{replacedRel, fx("wav/af_i16.wav")}, {rewrittenFLAC, flacBytes(t, 96000, 24)}} {
+		abs := filepath.Join(root, filepath.FromSlash(r.rel))
+		before, err := os.Stat(abs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureBytes(t, abs, r.data)
+		later := before.ModTime().Add(time.Hour)
+		if err := os.Chtimes(abs, later, later); err != nil {
+			t.Fatal(err)
+		}
 	}
 	addedFLAC := writeAlone(t, root, "added.flac", flacBytes(t, 48000, 24))
 	addedWAV := writeAlone(t, root, "added.wav", fx("wav/af_f64.wav"))
-	for _, w := range []struct{ rel, codec string }{{replacedRel, "WAV"}, {addedFLAC, "FLAC"}, {addedWAV, "WAV"}} {
+	for _, w := range []struct{ rel, codec string }{{replacedRel, "WAV"}, {rewrittenFLAC, "FLAC"}, {addedFLAC, "FLAC"}, {addedWAV, "WAV"}} {
 		upsertAsTheRolledBackBinary(t, store, rolledBackTrack(t, root, w.rel, w.codec))
 	}
-	requireSampleFormats(t, store, map[string]string{replacedRel: SampleFormatFloat, addedFLAC: "NULL", addedWAV: "NULL"})
+	requireSampleFormats(t, store, map[string]string{replacedRel: SampleFormatFloat, rewrittenFLAC: SampleFormatInteger, addedFLAC: "NULL", addedWAV: "NULL"})
 	cursor := maxIndexedAt(t, store)
 
-	// This binary again: the open, the boot pass, and a scan.
+	// This binary again. Its open decides the rewritten FLAC by itself.
 	if err := store.migrate(); err != nil {
 		t.Fatal(err)
 	}
+	requireSampleFormats(t, store, map[string]string{rewrittenFLAC: SampleFormatInteger})
+	var recorded bool
+	if err := store.db.QueryRow(`SELECT sample_format_size IS size AND sample_format_mtime_ns IS mtime_ns
+		FROM tracks WHERE path = ?`, rewrittenFLAC).Scan(&recorded); err != nil || !recorded {
+		t.Errorf("after the open, %s's kind is not recorded with the stat of the file the older binary wrote: %v, %v", rewrittenFLAC, recorded, err)
+	}
+	if got := trackIndexedAt(t, store, rewrittenFLAC); got <= cursor {
+		t.Errorf("after the open, %s's cursor is %d, not past the clients' %d: the open did not decide it again", rewrittenFLAC, got, cursor)
+	}
+
+	// The boot pass and a scan.
 	if _, err := store.BackfillSampleFormats(ctx, resolve); err != nil {
 		t.Fatal(err)
 	}
 	scanOnce(t, sc, "the reinstalled binary's scan")
 
 	want := map[string]string{
-		replacedRel: SampleFormatInteger,
-		addedFLAC:   SampleFormatInteger,
-		addedWAV:    SampleFormatFloat,
-		keptRel:     SampleFormatInteger,
+		replacedRel:   SampleFormatInteger,
+		rewrittenFLAC: SampleFormatInteger,
+		addedFLAC:     SampleFormatInteger,
+		addedWAV:      SampleFormatFloat,
+		keptRel:       SampleFormatInteger,
 	}
 	requireSampleFormats(t, store, want)
-	for _, rel := range []string{replacedRel, addedFLAC, addedWAV} {
+	for _, rel := range []string{replacedRel, rewrittenFLAC, addedFLAC, addedWAV} {
 		if got := trackIndexedAt(t, store, rel); got <= cursor {
 			t.Errorf("%s got its kind after the clients' full sync and its cursor is %d, not past the clients' %d: no delta carries it", rel, got, cursor)
 		}

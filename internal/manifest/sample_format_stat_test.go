@@ -88,6 +88,120 @@ func TestEveryWriteOfAKindRecordsTheStatItWasReadAt(t *testing.T) {
 	}
 }
 
+// TestADelayedStampLeavesTheKindOfARowAnotherScanRewrote: a stamp certifies
+// only the stat its extraction read, compared with the row's in its write. A
+// version-stale scan (A) reads float.wav, and its stamp waits in the scan
+// writer's batch; before it lands, another scan (B, a `bridge scan` beside
+// serve, which opens the store and scans with no lock) indexes the integer
+// render that replaced the file. A's stamp then leaves B's row as B wrote it,
+// B's kind at B's stat, which the next open keeps and a later scan, finding
+// the file unchanged, does not read again.
+func TestADelayedStampLeavesTheKindOfARowAnotherScanRewrote(t *testing.T) {
+	ctx := context.Background()
+	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
+	root := t.TempDir()
+	rel := writeAlone(t, root, "replaced.wav", fx("wav/float.wav"))
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "the first scan")
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A: what reExtractUnchanged hands the stamp leg for an unchanged file,
+	// the walk's stat and the extraction, with the row's folder-art key.
+	a := &Track{Path: rel, Size: info.Size(), ModTime: info.ModTime().UTC()}
+	if err := ExtractWithContext(abs, a, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COALESCE(folder_art_key, '') FROM tracks WHERE path = ?`, rel).Scan(&a.folderArtKey); err != nil {
+		t.Fatal(err)
+	}
+	a.versionStampOnly = true
+	if a.SampleFormat != SampleFormatFloat {
+		t.Fatalf("A read the kind %q, want %q", a.SampleFormat, SampleFormatFloat)
+	}
+
+	// B: the file is replaced by an integer render, and another scan writes
+	// its row.
+	writeFixtureBytes(t, abs, fx("wav/af_i16.wav"))
+	later := info.ModTime().Add(time.Hour)
+	if err := os.Chtimes(abs, later, later); err != nil {
+		t.Fatal(err)
+	}
+	scanOnce(t, NewScanner([]string{root}, store, ""), "scan B")
+	requireSampleFormats(t, store, map[string]string{rel: SampleFormatInteger})
+
+	// A's stamp lands, then the next open and a later scan.
+	if err := store.StampExtractorVersionBatch(ctx, []*Track{a}); err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{rel: SampleFormatInteger})
+	if err := store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	scanOnce(t, sc, "a later scan")
+	requireSampleFormats(t, store, map[string]string{rel: SampleFormatInteger})
+	if got := servedTracksByPath(t, store, root)[rel]["sampleFormat"]; got != SampleFormatInteger {
+		t.Errorf("the manifest serves %s with sampleFormat %#v, want %q", rel, got, SampleFormatInteger)
+	}
+}
+
+// TestAStoreTheFirstV59LeftOpensAndDecidesItsKindsAgain: the first form of
+// v59 (round 2 of B513) added sample_format and idx_tracks_sample_format_null
+// and nothing else, and a store a build of it opened stays at that v59. The
+// stat columns and the stale-kind index are v60's, so such a store opens and
+// gains them, and every kind it holds, recorded at no stat, is decided again
+// rather than taken as current: the FLAC row by the open's fill, the WAV row
+// left to the header pass.
+func TestAStoreTheFirstV59LeftOpensAndDecidesItsKindsAgain(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	first := openStoreAt(t, dbPath)
+	at := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := first.UpsertTrackBatch(ctx, []*Track{
+		{Path: "a/one.flac", Size: 1, ModTime: at, Codec: "FLAC", SampleFormat: SampleFormatInteger},
+		{Path: "a/two.wav", Size: 1, ModTime: at, Codec: "WAV", SampleFormat: SampleFormatFloat},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`DROP INDEX idx_tracks_sample_format_stale`,
+		`ALTER TABLE tracks DROP COLUMN sample_format_mtime_ns`,
+		`ALTER TABLE tracks DROP COLUMN sample_format_size`,
+		`PRAGMA user_version = 59`,
+	} {
+		if _, err := first.db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("a store the first v59 left does not open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, col := range []string{"sample_format_size", "sample_format_mtime_ns"} {
+		if ok, err := atlasColumnExists(s.db, "tracks", col); err != nil || !ok {
+			t.Errorf("tracks.%s after the open: %v, %v", col, ok, err)
+		}
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_tracks_sample_format_stale'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("idx_tracks_sample_format_stale after the open: %d, %v", n, err)
+	}
+	requireSampleFormats(t, s, map[string]string{"a/one.flac": SampleFormatInteger, "a/two.wav": "NULL"})
+	var recorded bool
+	if err := s.db.QueryRow(`SELECT sample_format_size IS size AND sample_format_mtime_ns IS mtime_ns
+		FROM tracks WHERE path = 'a/one.flac'`).Scan(&recorded); err != nil || !recorded {
+		t.Errorf("the FLAC row's kind is not recorded with its stat: %v, %v", recorded, err)
+	}
+}
+
 // kindAssignment is a write of tracks.sample_format in a SET clause:
 // sample_format_size and sample_format_mtime_ns do not match it.
 var kindAssignment = regexp.MustCompile(`\bsample_format\s*=`)
