@@ -58543,7 +58543,9 @@ implementing an action or advertising the Source:
    race-enabled repetitions pass. Restoring SplitHostPort-only validation
    fails at the intended assertion again.
 3. Serve records the player plan before a validated address override, then
-   calls a refusal already reported only when its reason is unchanged.
+   calls a refusal already reported only when its reason is unchanged
+   (the stored reasons are strings). Round 2's regression exercises only
+   the new-reason path; the unchanged path gains its test in Round 3.
    A new override clash is one value-free "player: not started" warning.
    `TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome` gives serve
    an already-bound ephemeral API listener, uses that port for OpenHome,
@@ -58585,3 +58587,32 @@ refusals before their assertions. Their behavioral red/green runs remain
 for a host that permits binds; a sandbox failure is not evidence that a
 control detects its intended regression. No commit was made. The rules
 and their long forms were updated with these changes.
+
+
+### Round 3 — unchanged refusal coverage and the source of an override clash
+
+2026-10-24. The unchanged-refusal comparison already compares text:
+`servePlayerPlan.off` is a string. It needs no equality fix.
+`TestServeDoesNotRepeatAnUnchangedRefusalUnderAnAddressOverride` now boots
+serve with a player Load refuses (pauseReleaseSeconds outside its range,
+which precedes the platform gate) and a valid non-clashing numeric API
+override. It clears Validate's process-wide last reason through a valid
+config with the player off before and after the test, requires exactly one
+Validate refusal and no additional serve refusal, and keeps the player and
+surface off. Its independent control forces `told` false under an override.
+
+A new API-port clash now names `listenAddress, set by --addr` in its one
+warning, without printing any supplied value. The existing clash test sets
+`:8080` in the file, moves the API to an already-bound ephemeral port also
+configured for OpenHome, and requires the entire value-free warning. Its
+independent control removes only the source annotation. The reason-text
+comparison still runs before that annotation, so an unchanged refusal
+remains already reported. The rules and their History entries name both
+regressions; Round 2's paragraph now states its narrower test coverage.
+
+Red-first and repeated race runs of both boot tests compile but meet this
+sandbox's loopback bind denial before their assertions. The two controls
+also compile and meet that denial, so their intended behavioral failures
+remain unverified here; their independent patches and commands accompany
+the Round 3 report outside the repository. No equality defect or successful
+behavioral red/green run is claimed.
