@@ -57607,7 +57607,7 @@ every action's behaviour 5a3's and 5a4's, and the restored identity's policy
   interface.
 - `.gitattributes`: the upstream files are never converted (two are CRLF).
   `CLAUDE.md`: the `openhome.md` row and the package rows.
-- Tests: 4 in `internal/config`, 3 in `internal/player/lan`, 28 and a fuzz
+- Tests: 4 in `internal/config`, 3 in `internal/player/lan`, 29 and a fuzz
   target in `internal/player/openhome` (the SOAP table's 109 rows among
   them), 1 in `cmd/bridge` (four cases) and a row of serve's gate table.
 
@@ -57716,7 +57716,13 @@ open is closed; the Serve goroutines and the handlers are joined within
 `Limits.Join` (1 s), what is left counted abandoned and said. Serve's
 player stops the surface first in its shutdown, before the engine, so no
 request reaches the engine as it stops; `stop`'s outer bound gains the
-surface's (`Limits.StopBound`, 4 s).
+surface's (`Limits.StopBound`, 4 s). The join covers the Serve goroutines
+and the handlers, not net/http's goroutine per connection, so a request
+that goroutine read just before the stop closed its connection can still
+reach the handler after the join: it is refused 503 with the EXT header
+every reply carries, onto a connection already closed
+(`TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply`, found reviewing the
+handler before the last gate run).
 
 A panic in the listing loop (the address source's or the listing's own)
 is recovered there: the surface serves what it has bound, follows the
@@ -57791,8 +57797,10 @@ A fault is HTTP 500 with `s:Client`, `UPnPError` and the code's description
 `s:MustUnderstand` with no detail (SOAP 1.1, §4.4, keeps the detail for the
 Body). No other code is defined. Every reply of the surface carries an
 empty `EXT` header, written as UDA writes it (a direct map assignment;
-`Header.Set` would write `Ext`). A request refused before its body is read
-asks for its connection to be closed, so net/http reads none of it. Nothing
+`Header.Set` would write `Ext`). A control request refused before its body
+is read asks for its connection to be closed, so net/http reads none of it
+(a description's 405 and a 404 leave that to net/http, which reads at most
+256 KiB of what is left to keep the connection, or closes it). Nothing
 is trimmed: " 1" is no boolean. The text bound counts decoded character
 data; 64 KiB is the engine's metadata bound per entry. The Header's bounds
 are 400, as row 7's bounds are, the brief leaving them open.
@@ -57842,6 +57850,10 @@ Against skeletons with the rules absent:
 - `cmd/bridge`, the wiring without the surface's start and the boot line:
   the "on" case "the player never started its OpenHome surface", the "no
   box" case and the "player off" case red; "off" green.
+- The handler after the stop's join, on the committed tree before 63d546ba:
+  `TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply` red, "the reply's
+  EXT header is [] (false), want one, empty" (the status already 503); the
+  header set first, green.
 
 ### Negative controls
 
@@ -57910,6 +57922,7 @@ restored from git and the tree checked clean.
 | 58 | the suite's `hostLAN` given an interface (an address no host here holds) | "the suite's surface found the host's addresses" |
 | 59 | no recover in the listing loop | the panic crashed the test binary |
 | 59b | the panic's value logged | "the line … quotes the panic's value" |
+| 60 | the EXT header set after the handler's count is entered | the stop-join test alone (the routes and the table green) |
 
 Three controls found rows that another check covered, and the table test
 was sharpened (bae85761): NC41 left "an ENTITY alone" green, since its
