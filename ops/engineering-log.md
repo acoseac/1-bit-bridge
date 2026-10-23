@@ -57656,8 +57656,10 @@ queue together, with the service stopped. `playerResetAdvice` is the one
 message builder for an exhausted box mark and an unreadable live reservation
 in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
 `player-queue.json` together; the next start makes a new identity with no
-queue, a new device to controllers. The reset gives up the identity for good:
-no snapshot taken on this box before the reset may restore its player identity.
+queue, a new device to controllers. The reset gives up for good every player
+identity the box ran before it, its own and any a restore gave it: no snapshot
+of one of those identities, whichever box took it, may restore its player
+identity again.
 Remove `player-uuid` and `player-ids.json` from every such snapshot, or delete
 those snapshots. If restoring, also remove those files from a copy of this
 snapshot, then restore that copy. B524 will enforce this operator rule before
@@ -57715,8 +57717,9 @@ controls retain the separate results above.
 
 **Rule.** With the service stopped, a player reset removes the box's
 `player-uuid`, `player-ids.json` and `player-queue.json` together and gives up
-the identity for good. No snapshot taken on this box before the reset may
-restore its player identity: remove `player-uuid` and `player-ids.json` from
+for good every player identity the box ran before it, its own and any a restore
+gave it. No snapshot of one of those identities, whichever box took it, may
+restore its player identity again: remove `player-uuid` and `player-ids.json` from
 every such snapshot, or delete those snapshots. When restoring, also remove
 those files from a copy of this snapshot, then restore that copy. The next
 start makes a new identity with no queue, a new device to controllers.
@@ -57740,3 +57743,12 @@ Commands, full predicted test names, observed results and sandbox limits
 are in its manifest and scratch `report-r4.md`. Each patch applies alone;
 Go overlays preserve the uncommitted tree during execution. No commit,
 restore arithmetic or identity-file mutation policy is part of this round.
+
+**Round 4's review (Claude; Codex found none).** The rule named snapshots
+taken on the box, but the floor a reset drops also covered identities a
+restore brought onto the box from another one: a snapshot of such an
+identity, taken elsewhere, would have been allowed. The rule now names
+identities, every one the box ran before the reset, whichever box took the
+snapshot. The guide's sentence about restoring after a reset is scoped to the
+restore whose refusal the reset answers, so a later snapshot of the new
+identity is never stripped by mistake.
