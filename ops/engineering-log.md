@@ -57258,3 +57258,196 @@ registry, hardware volume. The backup policy above (5a). A panic recovery
 inside the engine, the backend and the sink (the proposal above). The
 engine's `readLimited` opening a named pipe with a plain open (a follow-up
 for the backlog).
+
+### Round 2: the review's eight findings
+
+Round 1's review of #1321 (Codex and the Claude API, both static, on
+16b8d3a5), each finding verified by the orchestrator against the code. Each
+was fixed red first: its test written, with only the test seams it needs,
+and run against 16b8d3a5's logic, then the fix; and each controlled on the
+committed tree.
+
+1. **High: a recovered panic in `eng.Run` let go of the player's share of
+   the data dir's lock while the engine's writers might still run.** The
+   recover ran before `defer close(run.done)`, so `settle` took a panic for
+   a return; a panic skips Run's own shutdown, which is what waits for a
+   reservation write in flight and the queue writer (`owner.go`
+   `shutdownStep`). Fix: the recover marks the run (`playerRun.panicked`,
+   set before `done` closes) and `settle` keeps the share for good, logging
+   "the engine's Run ended in a panic, before its own shutdown, which waits
+   for its state writes: they may still run, so the player keeps its share
+   of the data directory's lock until the process exits"; `settled` never
+   closes. Production releases the lock with the process (`os.Exit` after
+   `runServe`); in-process, a second serve of that data dir is refused for
+   the process's life. Test: `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock`,
+   through `servePlayerSeams.runs` (on Run's goroutine, before Run). Red on
+   16b8d3a5's logic: "a second lock of the data directory once serve
+   stopped …: <nil>, want it refused".
+   **Found while fixing it**: run after another serve test, the green test
+   hung. The panic leaves an engine whose owner never answers, and the
+   supervisor's next `ReportOutput` (the first snapshot's) waited for
+   serve's stop: the supervisor could not see `run.done`, log the engine's
+   end or shut the player down until then. Its calls to the engine now run
+   on `playerRun.calls`, which ends with serve's stop and with Run's
+   goroutine; the test makes that order certain (the seam's panic waits for
+   the first report to be on its way).
+2. **Medium: a live binding change waited for a hardware reading before
+   the engine heard of it.** The engine heard of a change only through a
+   watcher snapshot, and a reading that stalls (a USB device's lock held by
+   a disconnect) publishes none, while one that fails republishes the last
+   snapshot stale at its generation, which the Reporter skips; the same for
+   a live disable the watcher had not published (its stop waits up to
+   `StopWait` for a stuck reading). Fix: the supervisor reads the live
+   config itself (`servePlayerWiring.Live` and `Changed`; `Live` is
+   `livePlayerSettings`, the one reading of the holder's player block the
+   watcher makes too), at each change of the holder and before each
+   snapshot's report, and `playerOutput` decides: while the live config
+   turns the player off the output is `disabled`, and while it names
+   another binding, or the last snapshot is of another binding,
+   `binding_changed`; `disabled` outranks it. These go at once, without a
+   hardware read. The output comes back only from a snapshot of the boot
+   binding: the latest the watcher published (restated) once the live
+   config names that binding again and runs the player, or the next one.
+   Test: `TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox`,
+   whose watcher holds every reading after the boot one, whatever its
+   context (`serveOpts.hotplugObserve`), with its stop's wait an hour
+   (`hotplugTiming`), so the watcher published nothing after its first
+   snapshot (asserted): the change, a disable, an enable on the other
+   binding and the boot binding put back each reach the engine. Red on
+   16b8d3a5's logic, at the test's deadline: "binding_changed and playback
+   stopped …; it is playing, the output {Known:true Available:true …
+   Generation:1}".
+   **The generation scheme**: one count, the Reporter's. `Report` numbers a
+   report per new feed generation, as before; `Withhold(reason)` (the
+   output unavailable for the live config) and `Restate()` (the last
+   snapshot's own verdict again, no `UnitChanged`) number theirs from the
+   same count, under the same lock, and only once a snapshot has been
+   reported (the engine holds the output unknown until then, which refuses
+   Play). The supervisor alone makes and sends reports, on its goroutine,
+   in numbering order, so the engine's input is monotonic whichever source
+   made a report, and no generation carries two. Serve sends a config
+   report only when what the engine was last told differs, and still one
+   report per feed generation. `TestTheReporterNumbersEveryReportFromOneCount`.
+   **Why the latest snapshot is restated, rather than waiting for the
+   next**: A → B → A where B's reading failed leaves the feed at A's
+   generation (republished stale, then cleared at the same generation by
+   the next good reading), and a reading of A that finds nothing changed
+   publishes no generation, so "the next snapshot" would leave the output
+   unavailable until the box changed. The latest snapshot of the boot
+   binding is the watcher's last word on that DAC, the one the engine acted
+   on before the change, and a session's start resolves the binding itself
+   on a whole reading (`playback.BindingLocator`). Known effect: after a
+   disable and an enable faster than the watcher's stop (a stuck reading),
+   the watcher's disabled snapshot lands after the restatement and reports
+   the output disabled until its next reading; conservative, since it can
+   only stop playback.
+3. **Medium: a library file's read error carried its absolute path into the
+   logs.** `Open` returned the `*os.File` itself, so a failing `ReadAt` was
+   an `*fs.PathError` naming the path, which `refuseDecode` and
+   `failDecode` put in the skip's or the fault's detail, and serve logs.
+   Fix: `library.content`, a `ReadAt` and a `Close` whose `*fs.PathError` is
+   "the library file: <op>: <err>", still wrapping the error (io.EOF
+   unchanged). Test: `TestTheContentsErrorsNameNoPath`, on a file closed
+   under the content (a disk that goes away fails reads the same way): a
+   read, a second close, and the read's error `decode.Open` hands on, as
+   the backend's open does. Red: all three named the path.
+4. **Low: `indexError` logged `GetUPnPRouting`'s error, which quotes the
+   stored path.** Fix: the line names what was read (paths, track,
+   routing), `manifest.ErrorClass` (SQLite's primary code by name, an
+   extended code by its primary, a context's end, a closed connection,
+   `other`) and the entry's reference. Test:
+   `TestAnIndexThatCannotBeReadIsLoggedWithoutItsError`, a store closed
+   after the track's read, so the routing read fails with the store's own
+   error. Red: the line carried `err=manifest: GetUPnPRouting
+   "Artist/Album/01 a.flac": sql: database is closed`.
+   `TestErrorClassNamesAStoreErrorByItsKindAlone` uses the driver's own
+   errors (`makeDriverErrors`).
+5. **Low: a live disable logged that the boot binding was back.** The
+   binding's foreignness was false for a disabled snapshot, so A → B → off
+   logged "names the binding the player started with again" and on again
+   "changed" a second time. Fix: the lines follow the live config's binding
+   alone (`playerOutput.readLive`), once each way, whatever the player's
+   state, and nothing else logs them. Test:
+   `TestALiveBindingChangeIsLoggedOnceEachWayWhateverThePlayersState`
+   (A → B → disable → enable on B: binding_changed, disabled,
+   binding_changed). Red: "logged 2 times and its return 1".
+6. **Low: the player's identity was made before the engine's storage
+   check.** Fix, the engine's contract unchanged: a start refused after it
+   made the identity (`made`) removes it (`config.ForgetPlayerUUID`, which
+   removes the file only while it holds that UUID) before the refusal is
+   reported, and "made the player's identity" is logged only once the
+   engine took the storage. Test:
+   `TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade`, through
+   `servePlayerSeams.engineConfig`, which points the reservation below a
+   regular file, a directory on the way that is not one, refused by New's
+   probe; a second row has the identity there before (bind's), kept.
+   `TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven`. Red: "the identity
+   this start made is still there", and announced.
+7. **Low: `TestServeStartsNoPlayerWithoutTheDataDirLock` had no Windows
+   skip.** On Windows it was skipped late, by `sysfstest`'s own skip, once
+   it had laid out the directories and bound its listeners; it now skips
+   first, as its siblings do, and the skip's message names both reasons
+   (no directory fsync, no tree with colons). #1321's Windows legs could
+   not be read from here (the `gh` CLI was refused); the package's tests
+   cross-compile for Windows.
+8. **Low: the stall test's release raced its reader.** A writer opened
+   `O_WRONLY|O_NONBLOCK` fails (ENXIO) while no reader has the pipe open, so
+   a release before the engine's read reached its open was lost, and the
+   test failed at its deadline. Fix: a blocking writer on a goroutine of its
+   own, which meets the reader whenever it opens, drained last through
+   `drainLoopOnCleanup`, whose cancel meets a writer no reader came for with
+   a reader of the test's own, held open until the writer's open has
+   returned (macOS puts a writer back to sleep when the reader it woke for
+   has gone; a throwaway check with no reader at all drained at once), so no
+   goroutine outlives the test. The first form drained by hand, and `make
+   test` caught it: `TestEveryBackgroundGoroutineDrainsOnCleanup` requires
+   the function that launches such a goroutine to call one of the two drain
+   helpers. The test runs in both orders, the second holding the engine's
+   start (the `engineConfig` seam) until the release is under way. Red, that
+   second order with the old release: "the player did not end once its
+   stall was let go".
+
+### Round 2's negative controls
+
+On the committed tree (a222e196..5cf36036; R2-8 again on ad4c6f8d's drain),
+one mutation at a time, the test run, the file restored from git and the
+tree checked clean.
+
+| NC | Mutation | Red |
+|---|---|---|
+| R2-1 | `settle` ignores `panicked` | "a second lock …: <nil>, want it refused" |
+| R2-1b | Run's goroutine does not end `calls` | "the player did not stop after its engine's panic" at the deadline |
+| R2-2 | `follow` does nothing | the live-config test: "it is playing, the output {… Available:true … Generation:1}" |
+| R2-2b | no `Restate` | the live-config test's last step: "binding_changed Generation:4" |
+| R2-2c | `Withhold` does not count | the Reporter test: "the output withheld: {Generation:1 …}" |
+| R2-3 | the raw `*os.File` handed over | the content test: nine leaks (read, close, decoder) |
+| R2-4 | the index error's text logged | the index test: "the line carries the error's text" |
+| R2-4b | `ErrorClass` without `& 0xff` | "SQLITE_BUSY_SNAPSHOT: \"sqlite 517\", want \"busy\"" |
+| R2-5 | foreignness tied to the player's state | the logging test: "logged 2 times and its return 1" |
+| R2-5b | `binding_changed` ahead of `disabled` | the logging test: "the player off …: Reason:binding_changed" |
+| R2-6 | a refused start keeps its identity | the identity test: "still there" |
+| R2-6b | `ForgetPlayerUUID` ignores the UUID | "after forgetting another UUID the file holds \"\"" |
+| R2-6c | the identity announced before the engine's verdict | "serve announced an identity its refused player did not keep" |
+| R2-8 | the release opens without waiting | the stall test's second order: "the player did not end once its stall was let go" |
+
+Not controlled: finding 7 (a Windows skip, which this host cannot run), and
+`report`'s read of the live config before a snapshot's report (it keeps a
+snapshot that beats the holder's Changed from being judged on the verdict
+read before; no test separates the two orders).
+
+### Round 2's runs
+
+- Stress, under `-race`: every serve test of the player, 26 of them, 5 runs
+  each (217 s), all passing; after ad4c6f8d, the stall test and the drain
+  sweep 5 runs each; `internal/player/library` 10 runs (94 s); the
+  Reporter's, `ForgetPlayerUUID`'s and `ErrorClass`'s tests 5 runs each.
+- The gate, through the build lock: `make fmt` (go1.27.3's gofmt rewrote
+  nothing; the pinned go1.27.2 is not in this host's module cache and
+  GOPROXY is off) and `make vet`, clean. `make test`: 72 packages passed,
+  `internal/player/...` and `internal/config` among them, and two failed:
+  `cmd/bridge` on the stall test's hand-written drain
+  (`TestEveryBackgroundGoroutineDrainsOnCleanup`, fixed in ad4c6f8d, after
+  which the whole package passed again under `-race`), and
+  `internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`,
+  which fails on this host (backlog B520) and is not this change's.
+  `make build-all` (six targets) and `make docs-check` passed.
