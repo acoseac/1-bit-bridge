@@ -165,9 +165,10 @@ func refuseDecode(o *occ, err error) {
 	o.refused = &engine.Unplayable{Reason: ReasonUnreadable, Detail: err.Error()}
 }
 
-// closeOcc closes o's decoder and content, once. The caller owns them: the
-// opener, the producer writing o, or a session that holds no other owner of
-// them (an occurrence opened and not taken, the teardown).
+// closeOcc closes o's decoder and content, once, and lets go of them and of
+// the buffers they hold. The caller owns them: the opener, the producer
+// writing o, or a session that holds no other owner of them (an occurrence
+// opened and not taken, the teardown).
 func closeOcc(o *occ) {
 	if o.closed {
 		return
@@ -179,5 +180,5 @@ func closeOcc(o *occ) {
 	if o.content.Closer != nil {
 		_ = o.content.Closer.Close()
 	}
-	o.first = nil
+	o.dec, o.content, o.first = nil, Content{}, nil
 }

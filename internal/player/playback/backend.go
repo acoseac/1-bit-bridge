@@ -178,13 +178,31 @@ type Stats struct {
 	// Overlaps is the Starts refused because another session still held the
 	// device (ErrOverlap): always 0 under the engine's contract.
 	Overlaps int
+	// Sinks is the sinks the sessions hold, open or closed, and Occurrences
+	// the occurrences they hold.
+	Sinks, Occurrences int
 }
 
 // Stats is the backend now.
 func (b *Backend) Stats() Stats {
 	b.mu.Lock()
 	st := Stats{Sessions: len(b.sessions), Overlaps: b.overlaps}
+	ss := make([]*session, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		ss = append(ss, s)
+	}
 	b.mu.Unlock()
+	// A session's lock is taken after the backend's is let go: a session
+	// takes the backend's under its own.
+	for _, s := range ss {
+		s.mu.Lock()
+		st.Sinks += len(s.outs)
+		if s.handed != nil {
+			st.Sinks++
+		}
+		st.Occurrences += len(s.chain)
+		s.mu.Unlock()
+	}
 	b.gmu.Lock()
 	st.Goroutines = b.live
 	b.gmu.Unlock()

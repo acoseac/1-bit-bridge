@@ -262,6 +262,43 @@ func TestPlaybackRepeatsAOneEntryQueueAsTwoOccurrences(t *testing.T) {
 	}
 }
 
+// TestPlaybackRetiresWhatHasPlayed pins what a session keeps as it plays: a
+// queue of two entries of different transports on repeat changes transport
+// at every entry, and every change opens a sink, whose ring is megabytes at
+// high rates. The sinks closed and the occurrences played, their events
+// reported, are let go, so however long the session plays it holds the
+// sink that plays and the one before it at most, and the occurrences from
+// the one heard on.
+func TestPlaybackRetiresWhatHasPlayed(t *testing.T) {
+	r := newRig(t, func(o *rigOptions) { o.realTick = true })
+	r.k.Free()
+	r.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	r.files.add("b", wav(48000, 24, pattern(2, 1000, 24)))
+	r.insert("a", "b")
+	if err := r.eng.SetRepeat(bg, true); err != nil {
+		t.Fatal(err)
+	}
+	r.play()
+	evs := r.waitEvents("ten boundaries, each a change of transport", func(evs []event) bool { return count(evs, "audible", 0) >= 10 })
+	if st := r.be.Stats(); st.Sinks > 2 || st.Occurrences > 3 {
+		t.Errorf("ten entries in, the backend holds %d sinks and %d occurrences; want the sink that plays and the one before it at most, and the occurrences from the one heard on", st.Sinks, st.Occurrences)
+	}
+	// The first occurrence is retired: a cut of it is too late, never in time.
+	var first event
+	for _, e := range evs {
+		if e.kind == "audible" {
+			first = e
+			break
+		}
+	}
+	if ok, err := r.be.Cut(bg, first.s, first.o); ok || err != nil {
+		t.Errorf("a cut of the retired occurrence %d: %v, %v; want false: it played", first.o, ok, err)
+	}
+	if err := r.eng.Stop(bg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestPlaybackAnswersSessionEndingOncePlayingOutItsLastContent pins
 // ErrSessionEnding: once nothing follows the last occurrence and the
 // producer plays out what it gave the sink, a Prepare is answered

@@ -77,6 +77,9 @@ type session struct {
 
 	posOcc    engine.OccurrenceID
 	posFrames int64
+	// retired is the last occurrence retireLocked let go of: it and every
+	// one before it played or was dropped (IDs grow in play order).
+	retired engine.OccurrenceID
 
 	producerDone bool
 	wakeP, wakeR chan struct{}
@@ -520,7 +523,11 @@ func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (bool, erro
 		return false, err
 	}
 	o := s.find(from)
-	if o == nil {
+	switch {
+	case o == nil && from <= s.retired:
+		// Retired: played, its frames long past cutting.
+		return false, nil
+	case o == nil:
 		// Never handed to this session: nothing of it plays.
 		return true, nil
 	}
@@ -611,6 +618,50 @@ func (s *session) dropLocked(o *occ) {
 	}
 	wake(s.wakeP)
 	wake(s.wakeR)
+}
+
+// retireLocked lets go of what has played, so a session that plays for
+// hours holds only what it still reports: the occurrences before heard,
+// the last one the played content crossed, once every event of theirs is
+// reported, and the sinks closed that nothing left refers to, each holding
+// a ring of up to megabytes. Every occurrence before heard has played or
+// was dropped; a cut of one answers that it played (cut). s.mu is held.
+func (s *session) retireLocked(heard *occ) {
+	if heard == nil || heard.pos == 0 {
+		return
+	}
+	n := heard.pos
+	for _, o := range s.chain[:n] {
+		if o == s.writing || o == s.between || !(o.crossed || o.dropped) || (o.refused != nil && !o.repRefused) {
+			return
+		}
+	}
+	s.retired = s.chain[n-1].id
+	rest := copy(s.chain, s.chain[n:])
+	clear(s.chain[rest:])
+	s.chain = s.chain[:rest]
+	for i, o := range s.chain {
+		o.pos = i
+	}
+	keep := s.outs[:0]
+	for _, out := range s.outs {
+		if !out.closed || out == s.cur || out == s.handed || s.refersLocked(out) {
+			keep = append(keep, out)
+		}
+	}
+	clear(s.outs[len(keep):])
+	s.outs = keep
+}
+
+// refersLocked reports whether an occurrence the session holds wrote to
+// out. s.mu is held.
+func (s *session) refersLocked(out *output) bool {
+	for _, o := range s.chain {
+		if o.out == out {
+			return true
+		}
+	}
+	return false
 }
 
 // pause is Pause. It acts on the transport current when it decides. A sink

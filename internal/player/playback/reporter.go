@@ -164,6 +164,9 @@ func (s *session) reportStep() bool {
 		s.finSent, done = true, true
 		evs = append(evs, func() { s.ev.Finished(id) })
 	}
+	// What this step reported of the occurrences before the one heard was
+	// the last of them.
+	s.retireLocked(heard)
 	s.mu.Unlock()
 	for _, e := range evs {
 		e()
