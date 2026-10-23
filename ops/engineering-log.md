@@ -57848,8 +57848,11 @@ The restored identity (5a0), the LAN (5a2), the decoders' own recovers.
 
 ### Round 2
 
-The six review findings are fixed together, with no change to playback
-when no panic occurs:
+The six review findings were addressed together. Round 3 corrected two
+regressions in these fixes: a timer-stop panic still answered success, and
+a normal queued fault was suppressed if release began before delivery.
+The latter changed behavior even without a panic; the earlier claim that
+round 2 changed nothing without a panic was incorrect:
 
 1. An opened sink now enters `s.outs` immediately after `OpenSink` succeeds,
    before the opened note. Start, the producer and a Resume between
@@ -57906,3 +57909,45 @@ was attempted but its listener tests were refused by the sandbox
 (`bind: operation not permitted`), ending in httptest's panic in
 `TestWriteGateRefusesWhileABridgeAnswers`; a host run is still required.
 The new watch test passed without listeners.
+
+### Round 3
+
+The two review findings are fixed, with failing tests recorded before the
+production changes:
+
+1. `stopReleaseLocked` reports whether it recovered a panic. The pause and
+   resume state helpers return the session's recorded fault as an error,
+   without logging twice. Pause and every Resume branch propagate it,
+   returning no resume success, arming no replacement timer and handing no
+   sink to the producer. Teardown ignores the result and continues. An
+   ordinary refused reopen still keeps the existing pause and its timer:
+   Resume commits its state only after the open succeeds. A sink opened
+   before a timer-stop panic remains owned for teardown and receives no
+   frames. `TestPlaybackContinuesTeardownAfterATimerStopPanic` now requires
+   backend failure, one timer, one stop attempt and one panic log, keeps the
+   teardown case, and covers Resume both before and after the device release.
+2. A normal reporter step delivers its queued fault even if release begins
+   before the fault closure runs. Only `recoverReporter` suppresses its own
+   delivery during release. `TestReporterDeliversAQueuedFaultAfterReleaseBegins`
+   begins release from the preceding Prepared callback, with no panic, and
+   checks one delivery with the original reason, detail and occurrence.
+
+`TestReporterNeverRetriesAPanickingFaultDelivery` now observes the boundary
+from both sides: Prepared must see the fault still unsent, and Fault must
+see its attempt recorded. Marking it at queue time or after delivery both
+fail. `TestPlaybackReporterRecoverySendsNoFaultDuringRelease` now queues a
+real sink xrun behind an audible callback held until release begins; that
+callback panics, recovery logs once, sends no fault, and teardown closes
+the device and acknowledges. It retains the pre-existing recovery policy;
+its negative control removes that recovery guard specifically.
+
+Round 3 validation used the repository's Go 1.27.2 toolchain offline.
+Darwin and Linux vet, Linux compilation of the player/sink/ALSA/serve test
+binaries, and the full player, sink and ALSA race suites passed. All round 2
+and round 3 regression tests passed five runs under the race detector, as
+did the serve watch wording and source checks. Eleven independent negative
+controls compiled and failed at every predicted assertion; the retained
+missing-Wait control reproduced 29 failures in 10,000 runs. Formatting and
+doc checks passed. The full serve race suite was attempted, but the sandbox
+refused IPv4 and IPv6 loopback listeners and the package aborted in
+`TestWriteGateRefusesWhileABridgeAnswers`; that suite still needs a host run.
