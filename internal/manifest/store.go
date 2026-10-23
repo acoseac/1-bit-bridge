@@ -178,14 +178,15 @@ const indexedAtAdvanceSQL = nextDeltaStampSQL
 // ONLY job is the bump (UpsertVariant / deleteVariantRow, the body of
 // DeleteVariant and DeleteVariantIfUnchanged / UpsertAnalysis /
 // DeleteAnalysis / writeLyricsRowTx / UpsertAtlasLyrics / writeSampleFormatTx /
-// decideSampleFormats) — one const, eight callers, so those eight cannot
-// drift from each other at all. Binds: (clock, path).
+// advanceGainedSampleFormatsTx) — one const, eight callers, so those eight
+// cannot drift from each other at all. Binds: (clock, path).
 //
 // Said FIVE until 2026-09-23, having missed UpsertAtlasLyrics
 // (atlas_lyrics.go), which uses the const correctly. The rule held; the
 // count did not — an enumeration in a docblock is a claim like any other.
 // The two sample-format writers (sample_format.go, backlog B513) made it
-// eight.
+// eight; the second is the backfill's, which the open-time fill and the
+// header pass share.
 const bumpIndexedAtByPathSQL = `
 		UPDATE tracks
 		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1)
@@ -2562,23 +2563,34 @@ var migrations = []migration{
 		// (Track.SampleFormat, backlog B513): "integer", "float", or ''
 		// for a row whose header states none. NULL is a row nothing has
 		// decided yet: every row this column finds, and any a rolled-back
-		// binary inserts. Store.migrate decides on every open what a row's
-		// codec decides (backfillSampleFormatByCodec), without reading a
-		// file or assigning indexed_at, and BackfillSampleFormats reads the
-		// header of each WAV and AIFF row left. The partial index serves
-		// both, and the readiness count.
+		// binary inserts. sample_format_size and sample_format_mtime_ns
+		// are the stat of the file the kind was decided from, written with
+		// every kind, so a kind a rolled-back binary left on a row it
+		// rewrote for a changed file reads as stale: its stat is not the
+		// row's. Store.migrate clears those on every open
+		// (clearStaleSampleFormats, through idx_tracks_sample_format_stale)
+		// and decides what a row's codec decides (backfillSampleFormatByCodec),
+		// without reading a file, and BackfillSampleFormats reads the
+		// header of each WAV and AIFF row left. idx_tracks_sample_format_null
+		// serves the fill, the header pass and the completion mark.
 		version: 59,
 		name:    "tracks.sample_format (the sample kind a PCM header states)",
-		sql:     `-- the column and its index are added in post()`,
+		sql:     `-- the columns and their indexes are added in post()`,
 		post: func(db *sql.DB) error {
-			if err := addColumnsIfMissing(db, "tracks", tableColumn{
-				name: "sample_format",
-				ddl:  `ALTER TABLE tracks ADD COLUMN sample_format TEXT`,
-			}); err != nil {
+			if err := addColumnsIfMissing(db, "tracks",
+				tableColumn{name: "sample_format", ddl: `ALTER TABLE tracks ADD COLUMN sample_format TEXT`},
+				tableColumn{name: "sample_format_size", ddl: `ALTER TABLE tracks ADD COLUMN sample_format_size INTEGER`},
+				tableColumn{name: "sample_format_mtime_ns", ddl: `ALTER TABLE tracks ADD COLUMN sample_format_mtime_ns INTEGER`},
+			); err != nil {
 				return err
 			}
-			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_null
-				ON tracks(path) WHERE sample_format IS NULL`)
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_null
+				ON tracks(path) WHERE sample_format IS NULL`); err != nil {
+				return err
+			}
+			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_stale
+				ON tracks(path) WHERE sample_format IS NOT NULL
+				  AND (sample_format_size IS NOT size OR sample_format_mtime_ns IS NOT mtime_ns)`)
 			return err
 		},
 	},
@@ -2864,10 +2876,15 @@ func (s *Store) migrate() error {
 	if err := s.backfillFirstIndexedAt(ctx); err != nil {
 		return fmt.Errorf("first_indexed_at backfill: %w", err)
 	}
-	// And decides the sample kind of every undecided row its codec
-	// decides (v59): a row from before the column, or one a rolled-back
-	// binary inserted. It reads no file and assigns no indexed_at; the WAV
-	// and AIFF rows are BackfillSampleFormats'.
+	// And clears every sample kind a rolled-back binary left on a row it
+	// rewrote for a changed file (v59), then decides the kind of every
+	// undecided row its codec decides: a row from before the column, one a
+	// rolled-back binary inserted, or one just cleared. It reads no file;
+	// the WAV and AIFF rows are BackfillSampleFormats'. Before the
+	// backfill's completion mark it assigns no indexed_at.
+	if err := s.clearStaleSampleFormats(ctx); err != nil {
+		return fmt.Errorf("sample_format stale kinds: %w", err)
+	}
 	if err := s.backfillSampleFormatByCodec(ctx); err != nil {
 		return fmt.Errorf("sample_format backfill: %w", err)
 	}
@@ -3530,11 +3547,12 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // other row is stamped as not refused, so a file that reads again clears
 // the mark.
 //
-// Every row read whole also records its sample kind (writeSampleFormatTx,
-// v59): it lives in its own column, which the byte-identical tags_json
-// cannot carry, and indexed_at advances only when a client would see the
-// kind change, like the lyrics tag's bump. The two bumps are the only
-// indexed_at writes the stamp leg makes, each through bumpIndexedAtByPathSQL.
+// Every row read whole also records its sample kind, with the stat it was
+// read at (writeSampleFormatTx, v59): it lives in its own column, which the
+// byte-identical tags_json cannot carry, and indexed_at advances only when a
+// client would see the kind change, like the lyrics tag's bump. The two
+// bumps are the only indexed_at writes the stamp leg makes, each through
+// bumpIndexedAtByPathSQL.
 //
 // Holds `s.mu` per the writer contract on Store; one transaction with a
 // prepared statement (the applyReconciledTracks template).
@@ -3771,8 +3789,8 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
 		                   folder_art_key, extract_refused, first_indexed_at,
-		                   sample_format)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_format, sample_format_size, sample_format_mtime_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3842,8 +3860,12 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 			-- v59: the sample kind this extraction read (Track.SampleFormat
 			-- through sampleFormatColumn, '' for none), unconditional like
 			-- the format facts: this row runs because the file changed, so
-			-- a kept kind could describe the old bytes.
-			sample_format = excluded.sample_format
+			-- a kept kind could describe the old bytes. With it, the stat it
+			-- was read at, which is the row's own (size and mtime_ns, bound
+			-- again): a kind is never written apart from it.
+			sample_format = excluded.sample_format,
+			sample_format_size = excluded.sample_format_size,
+			sample_format_mtime_ns = excluded.sample_format_mtime_ns
 			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
 	`)
 }
@@ -3897,7 +3919,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, stamp,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
 		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now),
-		sampleFormatColumn(t))
+		sampleFormatColumn(t), t.Size, t.ModTime.UnixNano())
 	if err != nil {
 		return err
 	}
@@ -4025,7 +4047,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, stamp,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
-			r.refused, firstIndexedInsertNS(r.firstNS, now), r.sampleFmt); err != nil {
+			r.refused, firstIndexedInsertNS(r.firstNS, now), r.sampleFmt, r.size, r.mtime); err != nil {
 			return err
 		}
 	}

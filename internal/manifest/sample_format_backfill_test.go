@@ -21,12 +21,16 @@ import (
 // header read for each WAV and AIFF row, the formats a header must tell.
 
 // rewindToBeforeSampleFormat makes s's rows what a store from before the
-// column holds: every row undecided (NULL), every row at the delta cursor
-// cursor, enriched (enriched_at 7), and the ladder at v58, so the next
-// migrate runs v59 and the open-time fill.
+// column holds: every row undecided (NULL, no stat recorded), every row at the
+// delta cursor cursor, enriched (enriched_at 7), no backfill completion mark,
+// and the ladder at v58, so the next migrate runs v59 and the open-time fill.
 func rewindToBeforeSampleFormat(t *testing.T, s *Store, cursor int64) {
 	t.Helper()
-	if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL, indexed_at = ?, enriched_at = 7`, cursor); err != nil {
+	if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL, sample_format_size = NULL,
+		sample_format_mtime_ns = NULL, indexed_at = ?, enriched_at = 7`, cursor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM scan_state WHERE k = ?`, sampleFormatBackfillKey); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`PRAGMA user_version = 58`); err != nil {
@@ -120,21 +124,22 @@ func TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor(t *testing.T) {
 	}
 }
 
-// TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind: the health
-// key waits for rows a codec decides (a FLAC row an older binary inserted is
-// one, until the next open fills it), never for a WAV or AIFF row whose header
-// is unread, which reaches clients through a delta when it is read.
-func TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind(t *testing.T) {
+// TestSampleFormatIsReadyOnlyOnceEveryRowTheFillDecidesIsDecided: a header
+// pass that runs to its end marks the backfill complete only while every row
+// the open-time fill decides is decided. A FLAC row a rolled-back binary
+// inserted after this open (its upsert leaves the kind NULL) holds the mark
+// back until the next open's fill decides it; then a pass marks it, once, and
+// the Provider answers what the store does. A store that cannot be read is
+// not ready.
+func TestSampleFormatIsReadyOnlyOnceEveryRowTheFillDecidesIsDecided(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	at := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
-	rows := []*Track{
-		{Path: "a/one.flac", Size: 1, ModTime: at, Codec: "FLAC", SampleFormat: SampleFormatInteger},
-		{Path: "a/two.wav", Size: 1, ModTime: at, Codec: "WAV", SampleFormat: SampleFormatFloat},
-	}
-	if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+	if err := s.UpsertTrack(ctx, &Track{Path: "a/two.wav", Size: 1, ModTime: at, Codec: "WAV", SampleFormat: SampleFormatFloat}); err != nil {
 		t.Fatal(err)
 	}
+	pcm := false
+	upsertAsTheRolledBackBinary(t, s, &Track{Path: "a/one.flac", Size: 1, ModTime: at, Codec: "FLAC", IsDSD: &pcm})
 	ready := func(when string, want bool) {
 		t.Helper()
 		got, err := s.SampleFormatReady(ctx)
@@ -145,23 +150,34 @@ func TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind(t *testing.T) 
 			t.Fatalf("%s: Provider.SampleFormatReady = %v, want %v", when, p, want)
 		}
 	}
-	ready("every row decided", true)
-	if _, err := s.db.Exec(`UPDATE tracks SET sample_format = NULL`); err != nil {
-		t.Fatal(err)
+	pass := func(when string, completes bool) {
+		t.Helper()
+		res, err := s.BackfillSampleFormats(ctx, func(string) (string, os.FileInfo, error) {
+			t.Fatalf("%s: the pass asked for a file, and no WAV or AIFF row is undecided", when)
+			return "", nil, nil
+		})
+		if err != nil || res.Completed != completes {
+			t.Fatalf("%s: the pass did %+v, %v; want Completed %v", when, res, err, completes)
+		}
 	}
+	pass("a FLAC row undecided", false)
 	ready("a FLAC row undecided", false)
 	if err := s.migrate(); err != nil {
 		t.Fatal(err)
 	}
-	requireSampleFormats(t, s, map[string]string{"a/one.flac": SampleFormatInteger, "a/two.wav": "NULL"})
-	ready("only a WAV row's header unread", true)
+	requireSampleFormats(t, s, map[string]string{"a/one.flac": SampleFormatInteger, "a/two.wav": SampleFormatFloat})
+	ready("the fill done, no pass since", false)
+	pass("every row decided", true)
+	ready("a pass ran to its end", true)
+	pass("a pass after the mark", false)
+	ready("a pass after the mark", true)
 
 	closed := openTestStore(t)
 	if err := closed.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if NewProvider(closed, nil).SampleFormatReady(ctx) {
-		t.Fatal("a store whose count cannot be read answered ready")
+		t.Fatal("a store that cannot be read answered ready")
 	}
 }
 
@@ -170,11 +186,12 @@ func TestSampleFormatIsReadyOnceEveryRowItsCodecDecidesHasItsKind(t *testing.T) 
 // the column; the open fill decides the FLAC and the A-law WAV, and
 // BackfillSampleFormats asks the resolver for exactly the WAV and AIFF rows
 // still undecided, reads their headers, and stores what each states. A row
-// that gains a kind advances its delta cursor, so a client's next delta
-// carries it; a row whose header states none ("") does not move. A row whose
-// file has changed since it was written, and one whose file is gone, are left
-// undecided for a later pass. Enrichment and tags_json are untouched. A
-// second pass asks only for those two and changes nothing.
+// whose file has changed since it was written, and one whose file is gone,
+// are left undecided for a later pass. The pass runs to its end and marks the
+// backfill complete; no row's delta cursor moves, since the one full sync a
+// client makes when the health key appears carries every kind. Enrichment
+// and tags_json are untouched. A second pass asks only for the two rows left
+// and changes nothing.
 func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
 	ctx := context.Background()
 	fx := func(rel string) []byte { return compressedPCMFixture(t, rel) }
@@ -182,17 +199,16 @@ func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
 		name string
 		data []byte
 		want string // the column after the passes, "NULL" for undecided
-		gain bool   // the row's cursor advances
 	}{
-		{"float.wav", fx("wav/float.wav"), SampleFormatFloat, true},
-		{"s24.wav", fx("wav/s24.wav"), SampleFormatInteger, true},
-		{"af_fl64.aifc", fx("aifc/af_fl64.aifc"), SampleFormatFloat, true},
-		{"af_be16.aiff", fx("aifc/af_be16.aiff"), SampleFormatInteger, true},
-		{"g726.wav", fx("wav/g726.wav"), "", false},
-		{"alaw.wav", fx("wav/alaw.wav"), "", false},
-		{"lossless.flac", flacBytes(t, 44100, 16), SampleFormatInteger, false},
-		{"changed.wav", fx("wav/af_f64.wav"), "NULL", false},
-		{"gone.wav", fx("wav/af_i16.wav"), "NULL", false},
+		{"float.wav", fx("wav/float.wav"), SampleFormatFloat},
+		{"s24.wav", fx("wav/s24.wav"), SampleFormatInteger},
+		{"af_fl64.aifc", fx("aifc/af_fl64.aifc"), SampleFormatFloat},
+		{"af_be16.aiff", fx("aifc/af_be16.aiff"), SampleFormatInteger},
+		{"g726.wav", fx("wav/g726.wav"), ""},
+		{"alaw.wav", fx("wav/alaw.wav"), ""},
+		{"lossless.flac", flacBytes(t, 44100, 16), SampleFormatInteger},
+		{"changed.wav", fx("wav/af_f64.wav"), "NULL"},
+		{"gone.wav", fx("wav/af_i16.wav"), "NULL"},
 	}
 	root := t.TempDir()
 	rels := map[string]string{}
@@ -248,7 +264,7 @@ func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
 		}
 	}
 	requireAsked("the first pass", "float.wav", "s24.wav", "af_fl64.aifc", "af_be16.aiff", "g726.wav", "changed.wav", "gone.wav")
-	if want := (SampleFormatBackfill{Read: 5, Gained: 4, None: 1, Changed: 1, Unreadable: 1}); res != want {
+	if want := (SampleFormatBackfill{Read: 5, Gained: 4, None: 1, Changed: 1, Unreadable: 1, Completed: true}); res != want {
 		t.Errorf("the first pass did %+v, want %+v", res, want)
 	}
 	wantCols := map[string]string{}
@@ -261,11 +277,8 @@ func TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows(t *testing.T) {
 		rel := rels[f.name]
 		got := trackIndexedAt(t, store, rel)
 		cursors[rel] = got
-		switch {
-		case f.gain && got <= cursor:
-			t.Errorf("%s gained %q and its cursor did not advance (%d): a client's delta would never carry it", f.name, f.want, got)
-		case !f.gain && got != cursor:
-			t.Errorf("%s: cursor moved %d -> %d for a row a client sees no change in", f.name, cursor, got)
+		if got != cursor {
+			t.Errorf("%s: the backfill moved its cursor %d -> %d; the clients' one full sync carries it", f.name, cursor, got)
 		}
 		if e := trackColumn(t, store, rel, "enriched_at"); e != 7 {
 			t.Errorf("%s: enriched_at = %d, want 7: the backfill does not re-queue enrichment", f.name, e)
@@ -667,29 +680,36 @@ func TestTheHeaderPassReadOfAFileReplacedAfterItsStatIsChanged(t *testing.T) {
 }
 
 // TestTheSampleFormatQueriesUseThePartialIndex: the open-time fill, the
-// header pass's candidate read and the readiness count each contain the
-// partial index's predicate (sample_format IS NULL), so each reads only the
-// undecided rows, which are none once the backfill is done.
+// header pass's candidate read and the completion mark read the undecided rows
+// through idx_tracks_sample_format_null, the fill and the header pass as a
+// range from the path their last chunk or page ended on, in the index's own
+// order, with no sort; so each reads only undecided rows, which are none once
+// the backfill is done. The open-time clear reads the stale kinds through
+// idx_tracks_sample_format_stale, which on a store this binary alone has
+// written holds none.
 func TestTheSampleFormatQueriesUseThePartialIndex(t *testing.T) {
-	if strings.Contains(sampleFormatUndecidedRowidsSQL, "ORDER BY") {
-		t.Fatal("ordering the fill's select makes SQLite skip the partial index")
-	}
 	fill := strings.Join(strings.Fields(sampleFormatFillSQL), " ")
-	inner := strings.Join(strings.Fields(sampleFormatUndecidedRowidsSQL), " ")
+	inner := strings.Join(strings.Fields(sampleFormatFillRowidsSQL), " ")
 	if !strings.Contains(fill, inner) {
 		t.Fatal("the fill no longer selects the statement this test explains")
 	}
 	s := openTestStore(t)
 	for _, q := range []struct {
-		name, sql string
-		args      []any
+		name, sql, want string
+		args            []any
 	}{
-		{"the open-time fill", sampleFormatUndecidedRowidsSQL, []any{1}},
-		{"the header pass", sampleFormatCandidatesSQL, []any{"", 1}},
-		{"the readiness count", sampleFormatReadySQL, nil},
+		{"the open-time fill", sampleFormatFillRowidsSQL, "SEARCH tracks USING INDEX idx_tracks_sample_format_null (path>?)", []any{"", 1}},
+		{"the header pass", sampleFormatCandidatesSQL, "SEARCH tracks USING INDEX idx_tracks_sample_format_null (path>?)", []any{"", 1}},
+		{"the completion mark", sampleFormatMarkCompleteSQL, "USING INDEX idx_tracks_sample_format_null", []any{sampleFormatBackfillKey, "1"}},
+		{"the open-time clear", sampleFormatClearStaleSQL, "USING INDEX idx_tracks_sample_format_stale", []any{1}},
 	} {
-		if plan := explainPlan(t, s, q.sql, q.args...); !strings.Contains(plan, "idx_tracks_sample_format_null") {
-			t.Errorf("%s: plan %q does not use idx_tracks_sample_format_null", q.name, plan)
+		plan := explainPlan(t, s, q.sql, q.args...)
+		t.Logf("%s: %s", q.name, plan)
+		if !strings.Contains(plan, q.want) {
+			t.Errorf("%s: plan %q does not read %q", q.name, plan, q.want)
+		}
+		if strings.Contains(plan, "TEMP B-TREE") {
+			t.Errorf("%s: plan %q sorts the rows it reads", q.name, plan)
 		}
 	}
 }

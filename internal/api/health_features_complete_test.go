@@ -175,16 +175,17 @@ func (firstIndexedReadyManifest) FirstIndexedAtReady(context.Context) bool { ret
 func (firstIndexedReadyManifest) SampleFormatReady(context.Context) bool { return true }
 
 // sampleFormatPendingManifest implements the sample-format readiness query
-// and answers that the open-time fill has not finished, so a builder that
+// and answers that the backfill has not completed, so a builder that
 // advertises the key whenever the method exists fails the test below.
 type sampleFormatPendingManifest struct{ fakeManifestProvider }
 
 func (sampleFormatPendingManifest) SampleFormatReady(context.Context) bool { return false }
 
-// TestHealthOmitsSampleFormatUntilTheFillIsDone: `sampleFormat` is advertised
-// only once the store says every row its codec decides carries its kind, so a
-// client's one-time full sync on seeing the key reads them all.
-func TestHealthOmitsSampleFormatUntilTheFillIsDone(t *testing.T) {
+// TestHealthOmitsSampleFormatUntilTheBackfillIsDone: `sampleFormat` is
+// advertised only once the store says its backfill is complete, every row
+// that can have a kind having it, so a client's one-time full sync on seeing
+// the key reads them all.
+func TestHealthOmitsSampleFormatUntilTheBackfillIsDone(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		manifest ManifestProvider

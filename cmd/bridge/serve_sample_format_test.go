@@ -19,11 +19,12 @@ import (
 // TestServeGivesARowIndexedBeforeSampleFormatItsKind boots the real serve
 // over a store whose rows predate tracks.sample_format (backlog B513). The
 // store's open-time fill gives the ALAC row its kind from its codec; the
-// header pass serve runs reads the float WAV's header through the API's own
-// resolver, with no rescan of the file. The paired phone's manifest then
-// carries both, and /v1/health advertises sampleFormat. The package tests
-// pin the fill and the pass over a store; only a boot sees serve start the
-// pass and hand it the resolver.
+// header pass serve runs at once reads the float WAV's header through the
+// API's own resolver, with no rescan of the file, and, run to its end,
+// completes the backfill. The paired phone's manifest then carries both, and
+// /v1/health advertises sampleFormat. The package tests pin the fill and the
+// pass over a store; only a boot sees serve start the pass and hand it the
+// resolver.
 func TestServeGivesARowIndexedBeforeSampleFormatItsKind(t *testing.T) {
 	const floatRel, alacRel = "Artist/Album/01 Float.wav", "Artist/Album/02 Lossless.m4a"
 	passed := make(chan manifest.SampleFormatBackfill, 8)
@@ -155,10 +156,10 @@ func copySampleFormatFixture(t *testing.T, rel, dst string) {
 
 // indexBeforeSampleFormat indexes lib into the store serve opens in dataDir,
 // then rewinds every row to what a store from before tracks.sample_format
-// holds, the column NULL. The edit is made with serve not running, on a
-// connection of the test's own with the store's pragmas, the
-// local-test-fixture skill's route: internal/manifest, imported here,
-// registers unicode_lower.
+// holds: the kind NULL, and no stat recorded for it. The edit is made with
+// serve not running, on a connection of the test's own with the store's
+// pragmas, the local-test-fixture skill's route: internal/manifest, imported
+// here, registers unicode_lower.
 func indexBeforeSampleFormat(t *testing.T, lib, dataDir string) {
 	t.Helper()
 	dbPath := manifest.DefaultDBPath(dataDir)
@@ -177,7 +178,7 @@ func indexBeforeSampleFormat(t *testing.T, lib, dataDir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := db.Exec(`UPDATE tracks SET sample_format = NULL`)
+	res, err := db.Exec(`UPDATE tracks SET sample_format = NULL, sample_format_size = NULL, sample_format_mtime_ns = NULL`)
 	var n int64
 	if err == nil {
 		n, err = res.RowsAffected()
@@ -190,18 +191,19 @@ func indexBeforeSampleFormat(t *testing.T, lib, dataDir string) {
 	}
 }
 
-// waitForSampleFormatGain waits for a header pass that gave a row its kind.
+// waitForSampleFormatGain waits for a header pass that gave a row its kind and
+// completed the backfill, which on a first start is the pass at once.
 func waitForSampleFormatGain(t *testing.T, passed <-chan manifest.SampleFormatBackfill, stderr *safeBuffer) {
 	t.Helper()
 	giveUp := serveGiveUp(t)
 	for {
 		select {
 		case r := <-passed:
-			if r.Gained > 0 {
+			if r.Gained > 0 && r.Completed {
 				return
 			}
 		case <-giveUp:
-			t.Fatalf("no header pass gave a row its kind before the test's deadline; stderr=%s", stderr.String())
+			t.Fatalf("no header pass gave a row its kind and completed the backfill before the test's deadline; stderr=%s", stderr.String())
 		}
 	}
 }

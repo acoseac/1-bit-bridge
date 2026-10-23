@@ -150,11 +150,11 @@ func (c *healthCountsCache) firstIndexedAtReady(ctx context.Context, manifest an
 	return c.stickyReady(ctx, "firstIndexed", &c.first, src.FirstIndexedAtReady)
 }
 
-// sampleFormatReady reports whether every row whose sample kind its codec
-// decides carries it (manifest.Store.SampleFormatReady, backlog B513), with
-// firstIndexedAtReady's caching: ready sticks for this process, since every
-// track write records a kind; a miss is rechecked on the health-count TTL;
-// a timeout is not stored.
+// sampleFormatReady reports whether the store's sample-format backfill is
+// complete (manifest.Store.SampleFormatReady, backlog B513), with
+// firstIndexedAtReady's caching: ready sticks for this process, since the
+// store's completion mark is never removed; a miss is rechecked on the
+// health-count TTL; a timeout is not stored.
 func (c *healthCountsCache) sampleFormatReady(ctx context.Context, manifest any) bool {
 	src, ok := manifest.(interface{ SampleFormatReady(context.Context) bool })
 	if !ok {

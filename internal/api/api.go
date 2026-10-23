@@ -2151,11 +2151,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "rendererDiscovery")
 	}
 	// sampleFormat is a library fact, like firstIndexedAt (backlog B513):
-	// the manifest serves Track.sampleFormat, and every row whose kind its
-	// codec decides carries it, so a client's one-time full sync on seeing
-	// the key reads them all; a WAV or AIFF row whose header is read later
-	// reaches it by a delta. Cached like firstIndexedAt. Alpha-sorted between
-	// rendererDiscovery and search (r < sa < se).
+	// the manifest serves Track.sampleFormat, and the backfill of the rows
+	// indexed before it is complete (a header pass ran to its end), so
+	// every row that can have a kind has it and a client's one-time full
+	// sync on seeing the key reads them all; a kind decided after that
+	// reaches it by a delta. Cached like firstIndexedAt. Alpha-sorted
+	// between rendererDiscovery and search (r < sa < se).
 	if s.healthCounts.sampleFormatReady(r.Context(), s.manifest) {
 		feats = append(feats, "sampleFormat")
 	}
