@@ -57951,3 +57951,44 @@ missing-Wait control reproduced 29 failures in 10,000 runs. Formatting and
 doc checks passed. The full serve race suite was attempted, but the sandbox
 refused IPv4 and IPv6 loopback listeners and the package aborted in
 `TestWriteGateRefusesWhileABridgeAnswers`; that suite still needs a host run.
+
+### Round 4
+
+Resume now puts a successfully resumed sink back into pause before answering
+an error from `unpausedLocked`, joining a failed compensating Pause to that
+answer while retaining the recorded fault and its reporter's delivery. An
+ordinary refused resume still leaves its existing pause release report and
+timer alone. The regression also exposed an earlier point in the same path:
+`currentLocked` stops the between-transports timer when the producer makes
+the paused successor current, so its stop can already have panicked before
+Resume. `unpausedLocked` now preserves that recorded fault as well as one
+recorded by its own timer stop. The new
+`TestPlaybackResumeKeepsAPausedSuccessorSilentAfterATimerStopPanic` holds the
+successor open until Pause arms the timer, then requires the fault answer,
+a paused sink and unchanged kernel bytes before Release. Its second case
+closes the sink after the writer takes Resume but before its caller gets the
+answer, and checks that the refused compensating Pause is retained too.
+Against round 3, the first case returned `continued, nil` and left the sink
+playing. The independent rollback-removal control distinguishes the
+re-pause from preserving the fault alone.
+
+The producer panic test now arms its live reader only after Play returns,
+at three seconds into the content, beyond lookahead, the hardware buffer
+and a decoder chunk, then lets the fake DAC play far enough to trigger it.
+The successor-open panic test had the same race and now inserts the armed
+successor after Play returns. Both still require one recovery log,
+`backend_failed`, the device let go and a later successful play. The other
+new panic tests either arm after the successful operation, gate the panic
+behind a later operation, assert that operation's failure, or deliberately
+accept either ordering (the reporter-start cases).
+
+Round 4 validation used Go 1.27.2 offline: Darwin and Linux vet, Linux
+compilation of the requested test binaries, the full player/sink/ALSA race
+suites, and each changed or new test twenty times under the race detector
+passed. The earlier B523 regressions and focused serve/source checks passed
+five runs. All twelve independent negative controls compiled and failed at
+every predicted runtime assertion; the missing-Wait control reproduced 24
+failures in 10,000 runs. Formatting and documentation checks passed. The full
+serve race suite again could not bind IPv4 or IPv6 loopback listeners in the
+sandbox and aborted in `TestWriteGateRefusesWhileABridgeAnswers`; a host run
+is still required for that suite.
