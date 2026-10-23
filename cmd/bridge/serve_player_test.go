@@ -1251,13 +1251,10 @@ func TestAPanicInServesPlayerStopsThePlayerAndKeepsTheLibrary(t *testing.T) {
 // panic comes as the first output report is on its way to the engine, whose
 // owner then answers nothing: the call ends with Run's goroutine, and the
 // player stops without waiting for serve's stop. The player says so as it
-// settles, after done closes, so the test parks that log call and waits for
-// it before it reads the log.
+// settles, before done closes, so the log holds the line once done has.
 func TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock(t *testing.T) {
 	needsDirectorySync(t)
-	const abandoned = "player: the engine's Run ended in a panic, before its own shutdown, which waits for its state writes: they may still run, so the player keeps its share of the data directory's lock until the process exits"
-	park := loggingtest.ParkOn(t, abandoned)
-	defer park.Release()
+	rec := loggingtest.Record(t)
 	var once sync.Once
 	reported := make(chan struct{})
 	reports := func() { once.Do(func() { close(reported) }) }
@@ -1275,8 +1272,6 @@ func TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock(t *testing.T) {
 	case <-serveGiveUp(t):
 		t.Fatalf("the player did not stop after its engine's panic; stderr=%s\nserve's goroutines:\n%s", ps.stderr.String(), serveStacks())
 	}
-	park.Wait(t)
-	park.Release()
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}
@@ -1289,10 +1284,10 @@ func TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock(t *testing.T) {
 	if closedNow(ps.player.settled) {
 		t.Error("the player settled, its engine's writers never joined")
 	}
-	if lines := park.Lines("player: a panic was recovered; the library is served as before"); len(lines) != 1 || !strings.Contains(lines[0], "the player's engine") {
+	if lines := rec.Lines("player: a panic was recovered; the library is served as before"); len(lines) != 1 || !strings.Contains(lines[0], "the player's engine") {
 		t.Errorf("the panic logged %q, want once, on the engine's goroutine", lines)
 	}
-	if lines := park.Failures(abandoned); len(lines) != 1 {
+	if lines := rec.Failures("player: the engine's Run ended in a panic, before its own shutdown, which waits for its state writes: they may still run, so the player keeps its share of the data directory's lock until the process exits"); len(lines) != 1 {
 		t.Errorf("the abandonment logged %q, want once", lines)
 	}
 }

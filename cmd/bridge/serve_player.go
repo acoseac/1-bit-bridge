@@ -295,8 +295,10 @@ func (p *bridgePlayer) supervise(ctx context.Context, w servePlayerWiring) {
 		if p.run != nil {
 			p.shutdown()
 		}
-		close(p.done)
+		// done closes last, so a caller that sees it sees what settle
+		// did: the lock's share let go, or why it is kept.
 		p.settle()
+		close(p.done)
 	}()
 	if !p.start(ctx, w) {
 		return
