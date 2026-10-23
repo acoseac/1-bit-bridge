@@ -59,6 +59,11 @@ func upperMountID(path string) (uint64, bool, error) {
 	return mountIDOf(resolved)
 }
 
+// mediumUpperMountID is the upper path's mount-ID reader the medium check
+// runs with: platformMedium on Linux, and the tests, so that putting the
+// strict writer's mountIDOf back in its place fails them.
+var mediumUpperMountID = upperMountID
+
 // mediumFrom is the medium check on what statfs, the mount table and the
 // mount IDs answer: nil for a root on storage the check finds no volatile
 // layer in, ErrVolatile for one that does not keep what is written to it

@@ -698,7 +698,7 @@ func TestMediumFollowsASymlinkedUpper(t *testing.T) {
 				}
 				return st, nil
 			}
-			err := mediumFrom("/data", 30, statfs, func() ([]byte, error) { return []byte(table), nil }, upperMountID)
+			err := mediumFrom("/data", 30, statfs, func() ([]byte, error) { return []byte(table), nil }, mediumUpperMountID)
 			if !errors.Is(err, tc.err) || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "visible here as ext4") {
 				t.Fatalf("medium = %v; want %v naming %q", err, tc.err, tc.want)
 			}
