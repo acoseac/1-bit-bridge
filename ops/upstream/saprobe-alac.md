@@ -191,7 +191,21 @@ Only the second channel's last code can do this: the first channel's
 `DynDecomp` advances the bit buffer past the packet, and the second's then
 refuses at its start.
 
-## The bridge's patch
+## Resolved upstream (2026-10-22)
+
+Upstream published GHSA-g66f-c97f-q276 ("DecodePacket panics on a short
+crafted packet", medium, acoseac credited as reporter) and tagged v1.0.0-rc3
+(9c424f2e, PR #64): 3087cde0 makes `DynDecomp` check every code against the
+packet (an escape's value before reading it, a normal code's length before
+taking it, the zero-run count before and after `dynGet`), grows the bit
+buffer's padding to 16 bytes, stops the predictor's warm-up at the frame and
+has `NewPacketDecoder` refuse a cookie of 0 or more than 8 channels, a frame
+length of 0 or over 65536 and a sample rate of 0; 2478d2f2 bounds the
+container's tables by the file. The bridge moved to v1.0.0-rc3 on 2026-10-23
+and deleted its copy and the `replace` in the same change. The section below
+records the patch it carried until then.
+
+## The bridge's patch (carried until v1.0.0-rc3)
 
 The bridge builds this module from a copy of 1b6eb83 with one change
 (`third_party/saprobe-alac`, which a `replace` in its `go.mod` names), and

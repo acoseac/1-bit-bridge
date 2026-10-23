@@ -14,10 +14,11 @@ import (
 // Packets that saprobe-alac 1b6eb83 decoded wrongly and without an error,
 // from Codex's review of #1300 and built beside them. Each is a compressed
 // channel pair with the partial flag, so stts can give it the few frames it
-// holds, under Apple's 16-bit cookie (pb 40, mb 10, kb 14). The copy of the
-// library in third_party/saprobe-alac checks every code against the packet's
-// own length (ops/upstream/saprobe-alac.patch); the shifted bytes are refused
-// before the library sees the packet.
+// holds, under Apple's 16-bit cookie (pb 40, mb 10, kb 14). saprobe-alac
+// v1.0.0-rc3 checks every code against the packet's own length (its fix for
+// GHSA-g66f-c97f-q276; ops/upstream/saprobe-alac.patch was the bridge's own,
+// carried until then); the shifted bytes are refused before the library sees
+// the packet.
 var (
 	// One frame of zero residuals with one shifted byte a sample, 0x12 and
 	// 0x34. 1b6eb83 read the shifted bytes and its 16-bit output dropped
