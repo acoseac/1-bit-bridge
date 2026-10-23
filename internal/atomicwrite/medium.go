@@ -59,10 +59,12 @@ func upperMountID(path string) (uint64, bool, error) {
 	return mountIDOf(resolved)
 }
 
-// mediumUpperMountID is the upper path's mount-ID reader the medium check
-// runs with: platformMedium on Linux, and the tests, so that putting the
-// strict writer's mountIDOf back in its place fails them.
-var mediumUpperMountID = upperMountID
+// mediumOn is the medium check as Linux runs it (platformMedium), with the
+// upper path's mount ID read through its symlinks (upperMountID). The tests
+// call it too, so a change to the reader it runs with fails them.
+func mediumOn(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error)) error {
+	return mediumFrom(root, id, statfs, mountinfo, upperMountID)
+}
 
 // mediumFrom is the medium check on what statfs, the mount table and the
 // mount IDs answer: nil for a root on storage the check finds no volatile
