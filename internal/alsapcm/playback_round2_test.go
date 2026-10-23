@@ -165,16 +165,27 @@ func TestPlaybackDeliversAFaultQueuedBehindAPanickingEvent(t *testing.T) {
 
 // TestPlaybackContinuesTeardownAfterATimerStopPanic drives the timer seam
 // while paused between transports. Each stored stop is called at most once,
-// and a panic in it cannot interrupt Pause, Resume or the release.
+// and its panic fails Pause or Resume without abandoning the release.
 func TestPlaybackContinuesTeardownAfterATimerStopPanic(t *testing.T) {
-	for _, action := range []string{"teardown", "pause", "resume"} {
+	for _, action := range []string{"teardown", "pause", "resume", "resume-reopened"} {
 		t.Run(action, func(t *testing.T) {
 			logs := &lines{}
-			var stops atomic.Int32
+			var stops, arms atomic.Int32
+			tm := &timers{}
 			r := newRig(t, withLog(logs), func(o *rigOptions) {
 				o.pauseRelease = time.Second
-				o.afterFunc = func(time.Duration, func()) func() bool {
+				o.afterFunc = func(d time.Duration, f func()) func() bool {
+					arms.Add(1)
+					tm.afterFunc(d, f)
 					return func() bool { stops.Add(1); panic(panicValue) }
+				}
+				o.openSink = func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+					return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+						if stops.Load() != 0 {
+							t.Error("opened a sink after the timer-stop panic")
+						}
+						return open(ctx, cfg)
+					}
 				}
 			})
 			r.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
@@ -186,14 +197,30 @@ func TestPlaybackContinuesTeardownAfterATimerStopPanic(t *testing.T) {
 				t.Fatal(err)
 			}
 			start := r.waitCall("the session", func(c call) bool { return c.kind == "start" })
+			if action == "resume-reopened" {
+				r.k.Free()
+				tm.fire(t)
+				r.waitSnap("the device released between transports", func(s *engine.Snapshot) bool { return s.DeviceReleased() })
+			}
+			var answer error
 			switch action {
 			case "pause":
-				if err := r.be.Pause(bg, start.s); err != nil {
-					t.Errorf("second Pause: %v", err)
+				answer = r.be.Pause(bg, start.s)
+			case "resume", "resume-reopened":
+				var how engine.ResumeResult
+				how, answer = r.be.Resume(bg, start.s)
+				if how != 0 {
+					t.Errorf("Resume after a timer-stop panic answered %v; want no success", how)
 				}
-			case "resume":
-				if _, err := r.be.Resume(bg, start.s); err != nil {
-					t.Errorf("Resume: %v", err)
+			}
+			if action != "teardown" {
+				var re *playback.ResumeError
+				if answer == nil || errors.As(answer, &re) {
+					t.Errorf("%s answered %v; want the backend fault", action, answer)
+				}
+				f, _ := r.faulted()
+				if f.Reason != playback.ReasonFailed || answer != nil && answer.Error() != f.Detail {
+					t.Errorf("%s answer %v, fault %+v; want the same backend failure", action, answer, f)
 				}
 			}
 			if err := r.eng.Stop(bg); err != nil {
@@ -206,13 +233,16 @@ func TestPlaybackContinuesTeardownAfterATimerStopPanic(t *testing.T) {
 			if st := r.be.Stats(); st.Sessions != 0 {
 				t.Errorf("device ownership retained: %+v", st)
 			}
-			want := int32(1)
-			if action == "pause" {
-				want = 2
-			} // second Pause arms a new timer
-			if n := stops.Load(); n != want {
-				t.Errorf("stops called %d times; want %d", n, want)
+			if n := arms.Load(); n != 1 {
+				t.Errorf("release timer armed %d times; want once", n)
 			}
+			if n := stops.Load(); n != 1 {
+				t.Errorf("stops called %d times; want once", n)
+			}
+			if v := r.k.View(); action == "resume-reopened" && v.GivenBytes != 1000*2*2 {
+				t.Errorf("gave the DAC %d bytes; want only a's frames", v.GivenBytes)
+			}
+			logs.panicLogged(t, backendPanicMessage, "the pause release timer's stop")
 		})
 	}
 }
@@ -254,27 +284,49 @@ func TestPlaybackResumePanicIsTheBackendsFault(t *testing.T) {
 	logs.panicLogged(t, sinkPanicMessage, "the sink's writer")
 }
 
-// TestPlaybackReporterRecoverySendsNoFaultDuringRelease holds the reporter
-// before a panic until Release has ended the session's life. Its recovery
-// must leave that release alone, without sending a late fault.
+// TestPlaybackReporterRecoverySendsNoFaultDuringRelease queues an xrun behind
+// an audible callback, then begins release before that callback panics.
+// Recovery must suppress the queued fault, without abandoning the release.
 func TestPlaybackReporterRecoverySendsNoFaultDuringRelease(t *testing.T) {
-	entered, gate := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	step, entered, gate := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var stepOnce, once sync.Once
+	allowStep := func() { stepOnce.Do(func() { close(step) }) }
 	release := func() { once.Do(func() { close(gate) }) }
-	d := newDirectWith(t, nil, func(cfg *playback.Config) {
-		cfg.Log = slog.New(&lines{})
+	opened := make(chan *alsapcm.Sink, 1)
+	logs := &lines{}
+	d := newDirectWith(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+			s, err := open(ctx, cfg)
+			opened <- s
+			return s, err
+		}
+	}, func(cfg *playback.Config) {
+		cfg.Log = slog.New(logs)
 		cfg.Tick = func() (<-chan time.Time, func()) {
-			close(entered)
-			<-gate
-			panic(panicValue)
+			<-step
+			return nil, func() {}
 		}
 	})
 	t.Cleanup(release)
+	t.Cleanup(allowStep)
+	d.rec.panicOn = func(e event) bool {
+		if e.kind != "audible" {
+			return false
+		}
+		close(entered)
+		<-gate
+		return true
+	}
 	d.files.add("a", wav(48000, 24, pattern(1, 100000, 24)))
+	d.k.XrunAt(30000)
+	d.k.Free()
 	if err := d.start(1, "a"); err != nil {
 		t.Fatal(err)
 	}
-	receiveIn(t, entered, "the reporter to start")
+	sink := receiveIn(t, opened, "the sink")
+	waitOn(t, "the sink to detect the xrun", sink.Changed, func() bool { return sink.Position().State == alsapcm.SinkXrun })
+	allowStep()
+	receiveIn(t, entered, "the event ahead of the queued fault")
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
 	if err := d.be.Release(ctx, 1); !errors.Is(err, context.Canceled) {
@@ -292,5 +344,6 @@ func TestPlaybackReporterRecoverySendsNoFaultDuringRelease(t *testing.T) {
 	if n := count(d.rec.events(), "released", 0); n != 1 {
 		t.Errorf("%d release acknowledgements, want one", n)
 	}
+	logs.panicLogged(t, backendPanicMessage, "the reporter")
 	d.k.CheckClosedEach(t)
 }

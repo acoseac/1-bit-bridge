@@ -838,17 +838,17 @@ func (s *session) pause(ctx context.Context) (err error) {
 			out = nil
 		}
 		if out == nil || out == refused {
-			s.pausedLocked(true)
+			err := s.pausedLocked(true)
 			l.unlock()
-			return nil
+			return err
 		}
 		l.unlock()
 		err := s.call(ctx, out.sink.Pause)
 		if err == nil {
 			l.lock()
-			s.pausedLocked(false)
+			err := s.pausedLocked(false)
 			l.unlock()
-			return nil
+			return err
 		}
 		// Anything but a sink playing out its last frames or done with them is
 		// the pause's refusal.
@@ -863,11 +863,13 @@ func (s *session) pause(ctx context.Context) (err error) {
 
 // pausedLocked records a pause; one that holds no device arms the release
 // it reports once the pause release has passed, as a sink's own would.
-func (s *session) pausedLocked(noDevice bool) {
+func (s *session) pausedLocked(noDevice bool) error {
+	if s.stopReleaseLocked() {
+		return errors.New(s.fault.Detail)
+	}
 	s.paused = true
 	s.pauseSeq++
 	s.relSent, s.relFired = false, false
-	s.stopReleaseLocked()
 	if noDevice {
 		seq := s.pauseSeq
 		s.relStop = s.b.cfg.AfterFunc(s.opts.PauseRelease, func() {
@@ -879,19 +881,22 @@ func (s *session) pausedLocked(noDevice bool) {
 			wake(s.wakeR)
 		})
 	}
+	return nil
 }
 
 // stopReleaseLocked forgets the timer's stop before calling it. Its panic
-// is recovered here, under the session's lock, so neither a state change
-// nor teardown can be abandoned or try that same stop again.
-func (s *session) stopReleaseLocked() {
+// is recovered here, under the session's lock. It reports that panic so a
+// command returns the recorded fault; teardown ignores it and goes on.
+// No caller can try that same stop again.
+func (s *session) stopReleaseLocked() (panicked bool) {
 	stop := s.relStop
 	s.relStop = nil
 	if stop == nil {
-		return
+		return false
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			panicked = true
 			s.b.logPanic("the pause release timer's stop", r)
 			if s.fault == nil {
 				s.fault = &engine.Fault{Reason: ReasonFailed, Detail: "player backend: the pause release timer's stop panicked; the bridge's log has why"}
@@ -901,13 +906,17 @@ func (s *session) stopReleaseLocked() {
 		}
 	}()
 	stop()
+	return false
 }
 
 // unpausedLocked records a resume.
-func (s *session) unpausedLocked() {
+func (s *session) unpausedLocked() error {
+	if s.stopReleaseLocked() {
+		return errors.New(s.fault.Detail)
+	}
 	s.paused = false
 	s.relSent, s.relFired = false, false
-	s.stopReleaseLocked()
+	return nil
 }
 
 // ResumeError is a resume the backend refused: the session stays paused,
@@ -982,7 +991,9 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		err := s.call(ctx, out.sink.Resume)
 		if err == nil {
 			l.lock()
-			s.unpausedLocked()
+			if err := s.unpausedLocked(); err != nil {
+				return 0, err
+			}
 			l.unlock()
 			wake(s.wakeR)
 			if released {
@@ -1004,7 +1015,9 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	}
 	if between == nil {
 		l.lock()
-		s.unpausedLocked()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
 		l.unlock()
 		wake(s.wakeP)
 		wake(s.wakeR)
@@ -1038,7 +1051,9 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 			between.dropped = true
 			s.closeOcc(between)
 		}
-		s.unpausedLocked()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
 		l.unlock()
 		wake(s.wakeP)
 		wake(s.wakeR)
@@ -1049,13 +1064,17 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		l.unlock()
 		s.closeOutput(next)
 		l.lock()
-		s.unpausedLocked()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
 		l.unlock()
 		wake(s.wakeP)
 		return engine.ResumeContinued, nil
 	}
+	if err := s.unpausedLocked(); err != nil {
+		return 0, err
+	}
 	s.handed = next
-	s.unpausedLocked()
 	l.unlock()
 	wake(s.wakeP)
 	wake(s.wakeR)

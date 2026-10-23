@@ -146,10 +146,6 @@ func (s *session) reportStep() bool {
 			// the attempt here so recovery sends an unreached fault once,
 			// but never retries a Fault callback that itself panicked.
 			s.mu.Lock()
-			if s.releasing {
-				s.mu.Unlock()
-				return
-			}
 			s.faultSent = true
 			s.mu.Unlock()
 			s.ev.Fault(id, f)
