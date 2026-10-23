@@ -23,6 +23,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 ## DLNA, UPnP and discovery
 
+- **Every advertised device registers with serve's one SSDP subsystem (B470 PR 5a1). Close owns staged endpoints and withdrawals through their last socket release, under its one deadline; strict replies use their selected endpoint's local address AND outgoing interface, or send nothing and warn once. Normalize supported admission pointers before validation and refuse typed nils and unknown implementations before opening anything. Don't unlist a withdrawal before retirement finishes, give a rollback a fresh shutdown budget, or use the MediaServer's routed reply path for a strict registration.** → History-rules-dlna-upnp.md
 - **The three spec-mandatory ContentDirectory introspection actions
   (`GetSearchCapabilities` / `GetSortCapabilities` / `GetSystemUpdateID`) must
   stay declared.** Strict control points poll `GetSystemUpdateID` between

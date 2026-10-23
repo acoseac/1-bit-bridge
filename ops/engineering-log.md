@@ -57471,6 +57471,33 @@ passing; `make docs-check` passed.
 
 ## 2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration
 
+**Round 2 — shutdown ownership, one deadline, strict reply routing and admission forms.**
+Four fake-network regressions failed before the fixes: Close returned while a
+withdrawal still held its sockets and byebye; a 100 ms Close racing Register or
+Update in a write took about two seconds; strict replies discarded the selected
+endpoint; and pointer admissions skipped strict validation or opened sockets
+with typed nils. Withdraw now keeps its handle listed through retirement. Close
+stores its original deadline, gives it to rollbacks, bounds its in-flight wait,
+and interrupts every owned NOTIFY sender at expiry, including unpublished and
+retiring endpoints, then joins cleanup. Strict replies bind their endpoint's
+local IPv4 and select its outgoing interface: Linux IP_PKTINFO on each send,
+macOS IP_BOUND_IF, Windows IP_UNICAST_IF in network byte order; a failed pin
+sends nothing and warns once per registration. The MediaServer retains its
+ordinary routed DialUDP path and the unchanged pre-extraction wire goldens.
+Register normalizes supported admission pointers into values and rejects typed
+nils and unknown implementations before opening sockets. The rule and its
+platform/lifecycle details live in `dlna-upnp.md` and
+`ops/History-rules-dlna-upnp.md`; the round-2 tests pin each finding through the
+fake network and host socket seams. Four standalone negative-control patches
+accompany the round-2 report outside the repository; all four compile and fail
+their predicted tests independently. The new tests and available SSDP suites
+pass with `-race -count=5`; a fake-network replay through the MediaServer's
+registration builder matches the original golden bytes. All six dlna fuzzers
+pass 20-second runs, vet and docs-check pass, and Linux/Windows vet and test
+compiles pass on amd64 and arm64. Full package test and race runs were attempted
+but the sandbox refuses loopback TCP/UDP and Unix-socket binds; the original
+real-network goldens skip there and still need an unrestricted runner.
+
 ### Why
 
 B470 makes the bridge's player an OpenHome Source on the LAN (PR 5a2),
