@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
 - [2026-10-22 — B470 PR 4b1: the player's state owner and queue, its backend seam, crash-proof IDs and tokens, the queue file, maintenance and a bounded shutdown](#2026-10-22--b470-pr-4b1-the-players-state-owner-and-queue-its-backend-seam-crash-proof-ids-and-tokens-the-queue-file-maintenance-and-a-bounded-shutdown)
 - [2026-10-22 — B470 PR 4a2: the hotplug watcher, its netlink source, settled resolution, and a serve-wide inventory generation](#2026-10-22--b470-pr-4a2-the-hotplug-watcher-its-netlink-source-settled-resolution-and-a-serve-wide-inventory-generation)
 - [2026-10-22 — B470 PR 4a's hardware gate: a port binding names the port, whatever model is in it](#2026-10-22--b470-pr-4as-hardware-gate-a-port-binding-names-the-port-whatever-model-is-in-it)
@@ -53965,3 +53966,381 @@ linux/arm, windows and freebsd, and the Linux test binary built, clean.
 Not changed, for the owner: the stacks named above; a link or a mount
 another writer puts in place after the write's second check, or during its
 syncs, is not seen; shutdown's ReasonClosed, as in rounds 5 to 11.
+
+## 2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play
+
+### What shipped
+
+- `internal/player/playback`, new: `Backend` (`New`, `Config`, `Stats`,
+  `Wait`, the `Note`s a sink's open, close, release and reopen make), which
+  implements `engine.Backend` over `internal/player/decode` and
+  `alsapcm.Sink`, PCM only; the `Resolver` and `Locator` seams;
+  `BindingLocator`, the locator over the box's trees; the refusal reasons;
+  the packing table; `ResumeError`. The package doc states how each term of
+  `engine.Backend`'s doc is met.
+- `internal/alsapcm`: `Sink.Cut`, `SinkConfig.Locate`, `Sink.Endpoint` and
+  `ReasonNotLocated`. The fake kernel is exported to the backend's tests
+  (`export_test.go`'s `FakeKernel`), with a write or a drain held inside the
+  kernel call, a card renumbered, a node busy, an unplug, an xrun and a
+  failing STATUS at a frame.
+- `internal/player/hotplug`: `Reporter`, from the watcher's snapshots to the
+  engine's output reports.
+- `cmd/bridge`: `bridge output play`, the hardware harness, unlisted.
+- `internal/player/engine`: two doc comments corrected (the DSD decision
+  below); no code.
+- `CLAUDE.md`'s package table: the backend's row, and the `alsapcm` and
+  `hotplug` rows extended. The rules text went beside the branch
+  (`/tmp/b470-4b2-rules.md`): a section for `.claude/rules/player.md`, which
+  is at 99,049 of its 100,000 bytes and the brief left untouched, with a
+  `paths:` glob for `cmd/bridge/output_play*.go`; the sink's two additions
+  for `.claude/rules/output.md`; and "Where things live".
+- Tests: 55, in `internal/alsapcm` (`sink_cut_test.go` 5,
+  `sink_locate_test.go` 2, and the backend's: `playback_bitexact_test.go`
+  4, `playback_contract_test.go` 14, `playback_cut_test.go` 2,
+  `playback_fault_test.go` 6, `playback_pause_test.go` 6, over
+  `playback_rig_test.go`), `internal/player/playback` (5),
+  `internal/player/hotplug` (`report_test.go`, 5) and `cmd/bridge`
+  (`output_play_test.go`, 6).
+
+### The seams
+
+- **Resolver**: `Open(ctx, engine.Reference) (Content, error)`. `Content`
+  is `Data io.ReaderAt`, read through an `io.SectionReader` of `Size`, and
+  the `Closer` that releases it once the occurrence is done with it. An
+  `*engine.Unplayable` is passed on as it is, any other error is
+  `missing_file`; either way the occurrence is refused before any of it
+  played. `ctx` ends at the occurrence's release or replacement, or at the
+  call's deadline. The harness's resolver opens the files it was given, by
+  references `file:N`; 5a's will open the library's tracks.
+- **Locator**: `Locate(ctx) (Unit, error)`; a `Unit` is the `Endpoint` to
+  open, the check after open (`Admit`, which the sink runs on each node it
+  opens) and a `Label`. `BindingLocator{Device, Observer}` reads the box
+  once, resolves with `binding.Settled`, refuses a reading that failed or is
+  not whole and every state but available (`UnitError{State, Reason, Err}`),
+  and gives `binding.Checker{Proc, Sysfs, Want}.Check` over its own trees as
+  `Admit`. The backend asks it at every open of the device: a session's
+  start, a change of transport, and each reopen after a release.
+- **The sink's cut**: `Sink.Cut(at int64) (bool, error)` drops what the
+  producer submitted from content frame `at` on, if none of it is the
+  kernel's or in the write under way (`max(Written, inflight)`), and
+  answers false otherwise, dropping nothing.
+- **The reopen hook**: `SinkConfig.Locate func(ctx) (Endpoint, error)`,
+  asked at every reopen with the sink's life context; its error leaves the
+  sink released, `not_located`, its frames kept; `Admit` still checks the
+  node opened there. The backend's `Locate` resolves the binding again and
+  keeps the unit it found, which its `Admit` checks against.
+- **The adapter**: `hotplug.Reporter`, in the watcher's package, beside the
+  `Feed` and `Snapshot` it reads, so its tests drive the real watcher's
+  harness into a real engine. `Report(Snapshot) (engine.OutputReport,
+  bool)` is the pure step, and `Run(ctx, sub, report)` loops it into the
+  engine's `ReportOutput` until ctx ends or the engine has closed. Its
+  generation is its own, one more at each report.
+
+### The contract, term by term
+
+- Calls: each honours its context. Start's work is bound to its deadline and
+  to the session's release. Prepare and Cut answer at once, but for a cut of
+  frames the producer is writing, which it makes between two writes. Pause,
+  Resume and the producer's drain reach the sink through `call`, a
+  goroutine of their own.
+- Sessions own resources: each has a life (its context) that its goroutines
+  and its sinks end with; a Start beside another session's device is refused
+  (`ErrOverlap`).
+- Release before or during Start: before, the Start opens nothing; during,
+  what Start opened ends with the session's life, closed unwritten.
+- Release confirmed or not: the teardown joins, closes the files, then the
+  sinks, then acknowledges; past its deadline Release answers its context's
+  error, and `Events.Released` comes once nothing is held, or never, while
+  the kernel holds a sink.
+- Successors and stages: Prepare opens the successor on a goroutine of its
+  own and decides its join. Prepared, Submitted and Audible come once each,
+  in order, from one reporter, Audible on the played content alone.
+  `ErrSessionEnding` comes once the last content plays out.
+- Edits after hand-off: Cut drops at once what has no frames in a sink, cuts
+  the rest from the sink, and answers false once a frame is the kernel's.
+- Pause and resume: the sink's pause and its own release after
+  `PauseRelease` (`DeviceReleased`); the resume continued, or reopened where
+  the binding resolves now and checked, or a typed `ResumeError` with the
+  session left paused.
+- Faults: an xrun, a disconnect, a suspend and a device error are faults
+  with the occurrence heard and its frames, never recovered; a decode failure
+  after content played plays out, then faults.
+- Finished: once the last content has drained.
+- Discard: the packings the unit took are forgotten.
+
+### Packing, per device format
+
+The table is B470's §1 and the format package packs it:
+16 bits as S16_LE; 24 bits as S24_3LE, then S24_LE (four bytes, the low 24
+significant), then S32_LE (shifted left eight, the low byte zero); 32 bits
+as S32_LE. The backend offers a depth's packings in that order and keeps the
+first the DAC accepts, per rate and depth, until `Discard`; an open the
+hardware refuses (`parameters_not_supported`, `parameters_mismatch`) is
+closed unwritten and the next is offered. So a DAC that takes S24_3LE, as
+the GO bar does at 96 kHz/24, plays 24-bit content in it; one that takes
+only S32_LE plays it shifted (two refused offers on a session's first open
+of that rate and depth, none after). A successor at the rate and depth of
+the sink before it takes that sink's packing, so its join is a question of
+the transport alone.
+
+### The numbers
+
+- The producer decodes 4,096 frames a chunk; each occurrence's first chunk
+  is decoded at its open. The reporter measures every 50 ms
+  (`MeasureEvery`). The sink: a 2 s lookahead and a 200 ms hardware buffer
+  in four periods. The engine's deadlines: `ReleaseTimeout` 2 s,
+  `StartTimeout` 5 s, `CallTimeout` 2 s.
+- `bridge output play --pause-release` takes 1 to 600 s, the engine's
+  bounds.
+- The suite: the `internal/alsapcm` package, the backend's tests included,
+  takes about 12 s a run under `-race`. Green three runs each at
+  GOMAXPROCS 1 and 4 under `-race` after the last test change; the harness's
+  tests 60 runs, and 15 under `-race`; the join test 24 runs under `-race`.
+
+### Decisions
+
+- **The backend's tests live in `internal/alsapcm`**, as `alsapcm_test`:
+  only a test package in that directory can reach the fake kernel, so the
+  engine's real `Run` plays through the real `Sink` there, and
+  `internal/player/playback` keeps its unit tests (the locator, the table,
+  New's seams). The rig runs on the real clock and sends the reporter's tick
+  by hand, twice for a barrier, and never sleeps.
+- **DSD is refused in every mode, off included, as
+  `dsd_not_in_this_release`**, as the brief asks. The engine's doc said the
+  mode off refuses DSD as `dsd_off`; no setting turns DSD on in this release
+  (the config takes `dsdMode: off` alone), so that reason would tell a user
+  to change a setting that cannot change. The engine's two comments now say
+  so, and `ReasonDSDOff` is kept for the release that plays DSD.
+  `TestPlaybackRefusesDSDInEveryMode` starts DSD under off, native, dop and
+  auto.
+- **A decode failure after content played plays out what was decoded
+  before it, then faults** `decode_failed`, with the frames: the DAC hears
+  every frame the file held, as the decoder's `n > 0` with an error allows.
+- **A pause that finds no device to pause pauses with none.** A sink
+  playing out its last frames (the kernel's drain, which only a drop
+  interrupts) takes no pause, and between two transports there is no sink:
+  the session pauses after them, arms its own release timer, reports
+  `DeviceReleased` when it fires, and the resume opens the next sink
+  itself, so MPD taking the device meanwhile refuses the resume.
+- **The producer hands its drain to the sink through `call`** (d91a44c9): a
+  sink whose writer the kernel holds answers no command, and a producer
+  blocked in Drain held the teardown's join, and with it every file. **The
+  teardown closes the files before the sinks** for the same reason: a
+  sink's Close waits for its writer.
+- **The sink measures nothing during the kernel's drain of its last
+  buffer**, so a boundary in a sink's last 200 ms or so is reported when
+  that drain ends. A test of the boundary uses a long second track. A
+  measurement during the drain is a sink change, left for later.
+- **`BindingLocator` refuses a partial reading** (`Inventory.Partial`),
+  though 4a's check after open answers on one: the hotplug watcher publishes
+  no answer from a partial reading either, so a session never starts on a
+  reading the watcher would not publish.
+- **The Reporter skips a snapshot republished at its generation** (its
+  health alone changed: stale, the source's mode). It says nothing new about
+  the unit, and a session's start resolves the binding again on a whole
+  reading, so a stale availability never starts playback.
+- **`bridge output play`'s state directory** is `--state-dir` or a new
+  directory under the user's cache directory, removed at exit: the engine
+  refuses volatile storage, and `/tmp` may be a tmpfs. It plays under
+  `output.player.enabled: false`, with a note, and refuses a block the
+  player cannot run. Its `--pause-release` is the engine's 1 to 600 s,
+  narrower than the config's 1 to 3600: a config past 600 is refused with
+  a pointer to the flag.
+- **Kept though its control survives**: Start's check, after its open, for
+  a release that came meanwhile. The sink opened then already ends with the
+  session's life (the control on that, an open on a context the release does
+  not end, is red), so the check only closes it sooner and answers
+  `errReleased`.
+
+### Red first
+
+- The sink's seven tests were red against stubs of `Cut` and `Locate`
+  before either was written.
+- Against a skeleton of the backend, the locator, the table, the status
+  path, the Reporter and the harness, every test of the backend's then
+  written (30) failed; four of the five playback unit tests (the fifth,
+  `TestNewRequiresItsSeams`, tests what the skeleton kept); the Reporter's
+  five; the harness's six. The skeleton was taken back from git.
+- Written after the controls showed what was not pinned, each green on the
+  code and red on its control: `TestPlaybackReleaseWaitsForTheProducerToLeaveItsDecoder`,
+  `TestPlaybackRefusesDSDInEveryMode`, the shutdown test's case of a drain
+  held for the next entry's transport, the locator's partial reading, the
+  Reporter's first report made a snapshot the Reporter could not invent, the
+  harness's refusal off Linux before any config is read, and the cut with
+  every frame in the kernel and no write under way.
+
+### Negative controls
+
+Each was one mutation on the committed tree, run against its test under
+`-race` with a 20 s watchdog, then restored from git, the tree checked
+clean.
+
+| Control | Mutation | Red |
+|---|---|---|
+| NC1 | the teardown does not join the session's goroutines | `TestPlaybackReleaseWaitsForTheProducerToLeaveItsDecoder` ("the release closed the content while the producer was in a read of it"), three runs in three |
+| NC2 | a frame of silence before a gapless successor | `TestPlaybackJoinsOneTransportWithNothingBetween` (5,122 samples heard, want 5,120) |
+| NC3 | Audible once the predecessor's decoder reached its end | `TestPlaybackReportsAudibleWhenThePlayedContentCrosses` ("b reported audible while the DAC still played a") |
+| NC4 | Cut ignores the write under way | `TestSinkCutDropsWhatHasNotReachedTheKernel`, `TestSinkCutAnswersFalseOnceAFrameOfItIsTheKernels`, and `TestSinkCutNeverDropsAWrittenFrameNorWritesADroppedOne` (Cut(100) answered true, then the writer panicked writing the frames the cut dropped) |
+| NC5 | Cut ignores the frames written | first run: nothing, both of the test's cuts landed with a write under way; then the case with every frame in the kernel and none (Cut(1000) true, Submitted 1,000 below Written 2,000) |
+| NC6 | the reopen skips `Locate` | `TestSinkReopenOpensTheEndpointLocateNamesNow`, `TestSinkReopenWhoseLocateFailsStaysReleased`, `TestPlaybackReopensOnARenumberedCard` |
+| NC7 | the reopen skips `Admit` | `TestTheSinkAdmitsEachNodeBeforeAFrame`, `TestPlaybackRefusesAReopenTheCheckRefusesAndKeepsItsFrames` |
+| NC8 | the backend's `Locate` keeps the old unit for the check | `TestPlaybackReopensOnARenumberedCard` (wrong_device: "the binding resolved to card 5") |
+| NC9 | Recover after an xrun | `TestPlaybackFaultsOnAnXrunAndNeverRecovers` (stopped at the end of the queue, no fault) |
+| NC10 | the Reporter passes the feed's generation | `TestTheReporterIsMonotonicAcrossAReplacedWatcher` (frozen at the first watcher's device_missing) |
+| NC11 | no overlap guard | `TestPlaybackRefusesAStartBesideAnotherSession` |
+| NC12 | Start ignores a release during its open | nothing: the sink ends with the session's life (kept, above) |
+| NC12b | the sink opened on a context the release does not end | `TestPlaybackReleaseDuringStartsOpenClosesItUnwritten` |
+| NC13 | Start ignores a release that came first | `TestPlaybackReleaseBeforeItsStartOpensNothing` (a content opened, a session left) |
+| NC14 | no late `Released` | `TestPlaybackReleaseThatCannotFinishAcknowledgesLater` |
+| NC15 | Prepare ignores the last content's playing out | `TestPlaybackAnswersSessionEndingOncePlayingOutItsLastContent` |
+| NC16 | every decoder refusal as `refused_content` | `TestPlaybackRefusesBeforeAnyContentPlays`, `TestPlaybackSkipsASuccessorRefusedBeforeAnyOfItPlayed`, five kinds each |
+| NC17 | DSD refused as `dsd_off` | `TestPlaybackRefusesDSDInEveryMode`, every mode |
+| NC18 | a decode failure taken for the end of the file | `TestPlaybackFaultsOnADecodeFailureAfterContentPlayed` |
+| NC19 | the 24-bit packings offered in reverse | `TestThePackingsAreTheDesignsTable`, `TestPlaybackIsBitExactThroughTheEngine` (the opens) |
+| NC20 | Discard keeps the packings | `TestPlaybackDiscardForgetsThePackingTheUnitTook` |
+| NC21 | a cut drops the occurrence, its frames left in the sink | `TestPlaybackCutsARemovedEntryInTime` (478,192 samples heard, want 460,000), `TestPlaybackStopsAtTheBoundaryOfAnEntryCutTooLate` |
+| NC22 | a reopened resume answered continued | `TestPlaybackReleasesAPausedDeviceAndReopensIt` |
+| NC23 | a busy reopen typed `device_error` | `TestPlaybackRefusesABusyResumeAndStaysPaused` |
+| NC24 | a pause during a sink's last frames refused | `TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld` |
+| NC25 | a pause with no device arms no release | `TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld` |
+| NC26 | a resume between transports leaves the open to the producer | `TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld` (continued, want reopened) |
+| NC27 | the producer calls Drain itself | first run: nothing, at the last drain every content is closed already; then the drain held for the next entry's transport ("the content of b was never closed") |
+| NC28 | the teardown closes the sinks before the files | `TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInTheKernel`, two cases |
+| NC29 | `UnitChanged` never set | `TestTheReporterFlagsAUnitThatChangedOrCameBack`, three cases |
+| NC30 | a republished generation reported | `TestTheReporterSkipsARepublishedGeneration` |
+| NC31 | an availability reported before any snapshot | first run: nothing, the invented report looked like the first snapshot's; then the test with a binding the box does not have |
+| NC32 | the locator answers from a partial reading | `TestBindingLocatorRefusesWhatDoesNotResolve` (card 5 answered) |
+| NC33 | `play` in `bridge output`'s usage | `TestOutputPlayIsHidden` |
+| NC34 | the engine's files in serve's data directory | `TestOutputPlayKeepsItsFilesInTheStateDir` (queue.json and queue.json.ids there) |
+| NC35 | no level warning | `TestOutputPlayPlaysTheQueueOnceAndSaysSo` |
+| NC36 | no refusal off Linux | first run: nothing, `PlayerEnabled` refuses off Linux in the same words; then the run with no config |
+| NC37 | the open's line without the status file | `TestOutputPlayPlaysTheQueueOnceAndSaysSo` |
+| NC38 | the first chunk, decoded at the open, never written | `TestPlaybackPausesAndResumesContinued` (87,808 samples heard, want 96,000); `TestPlaybackIsBitExactThroughTheEngine` hung, a short golden's Start waiting out its deadline, and was stopped |
+| NC39 | a disconnect typed `device_error` | `TestPlaybackFaultsOnADisconnect`, `TestPlaybackFaultsOnAnUnplugWhilePaused` |
+| NC40 | Prepared gapless whatever the transport | `TestPlaybackReopensForAnotherTransport` |
+
+Five controls found tests that could not see their mutation, each fixed in
+its own commit before the control ran again: NC5, NC12 (the guard moved to
+NC12b), NC27, NC31 and NC36.
+
+### Found by the stress runs
+
+- **The harness's stand-in reported out of order.** It sent the first
+  occurrence's Audible from a goroutine of its own, so its Prepare's events
+  could come first, and the engine stopped with `removed_entry_audible`:
+  `TestOutputPlayPlaysTheQueueOnceAndSaysSo` failed 1 run in about 30. It
+  now sends it before Start answers, in order, as the backend's one reporter
+  does.
+- **The keys test raced the engine's cut.** After `d`, the engine cuts the
+  deleted entry once the Prepare under way for its successor answers, and the
+  test's next key could release the session first; it waits for the cut's
+  line now.
+- **The join test took one acknowledgement for the only one.** When the
+  teardown finishes as Release gives up its wait, Release answers nil after
+  the deadline, and the engine takes that answer as the late
+  acknowledgement, with no `Events.Released`. Either is the contract's.
+
+### The owner's gate on the GO bar
+
+On the Pi (64-bit, the iFi GO bar, card 5 here; N is the card
+`./bridge output dac` lists) as a user in the `audio` group, with
+`dist/bridge-linux-arm64` from `make build-all` as `./bridge`, and a config
+whose `output.player` binds the GO bar
+(`./bridge output dac bind 5 --binding serial --config ~/b470/bridge.yaml`,
+4a). `P` below is
+`./bridge output play --config ~/b470/bridge.yaml --state-dir ~/b470-play`,
+on storage that outlives a reboot: if the engine refuses the directory, it
+names it, and one on the persistent data partition will do. Stop Volumio
+before each run but the contention one. Listen on headphones with the
+volume low: files play at their own level. `cat
+/proc/asound/card5/pcm0p/sub0/status` in a second shell reads the kernel.
+The files: A1 and A2, consecutive tracks of a gapless album in one format;
+F44 and F96, a 44.1 kHz/16 and a 96 kHz/24 file; L, a few minutes long; S,
+about 2 s; X, the highest rate at hand.
+
+1. Two tracks, the selection at the boundary: `$P A1.flac A2.flac`. Pass:
+   "output report 1: available (…)", "session 1: start with occurrence 1
+   (entry E1, A1.flac)", one "opened card 5 device 0 subdevice 0 (…)" line
+   with the file's format, rate and depth and "status:
+   /proc/asound/card5/pcm0p/sub0/status", "boundary: occurrence 1 … is
+   audible"; then "occurrence 2 (entry E2, A2.flac) prepared, gapless: its
+   frames follow with nothing between" and "submitted" with no "selected
+   entry E2" line yet; at A1's length "boundary: occurrence 2 … is audible",
+   and beside it "engine: playing, generation …, selected entry E2"; no
+   second "opened" line; nothing heard at the join; at the end "session 1:
+   finished", "engine: playback stopped: end_of_queue …", "closed card 5 …
+   (/proc/asound/card5/pcm0p/sub0/status reads closed)", "session 1:
+   released", "shut down", and `echo $?` 0.
+2. The honest gap: `$P F44.flac F96.flac`. Pass: "occurrence 2 … prepared,
+   another transport (rate 44100 → 96000 Hz, format S16_LE → S24_3LE, valid
+   bits 16 → 24): drain, reopen and refill, an honest gap", a "closed card 5
+   …" line, then a second "opened card 5 …" at 96000 Hz, 24 valid bits, F96
+   audible after it, the GO bar's light following the rate, exit 0.
+3. A bounded Stop: `$P --keys L.flac`, `s` after a few seconds. Pass: "s:
+   stop: done", then "closed card 5 … reads closed" and "session 1:
+   released" stamped within 2 s of it (ReleaseTimeout), the status file
+   `closed`; `q`, "shut down", exit 0.
+4. Pause, the release, the reopen: `$P --keys --pause-release 5 L.flac`,
+   space after about 10 s. Pass: "space: pause: done"; about 5 s later
+   "released card 5 … reads closed", "session 1: the pause let the device
+   go", "engine: paused, the device released", the status file `closed`;
+   space: "reopened card 5 device 0 subdevice 0 (…)", "engine: resumed:
+   reopened", "space: play: done", the music on from where it paused,
+   nothing skipped or repeated. `q`.
+5. A busy resume: `$P --keys --pause-release 5 L.flac`, space, and once
+   "the pause let the device go", start Volumio playing; space. Pass:
+   "space: play: refused: …" naming busy, the holder named (MPD's
+   "output:alsa" thread and the "mpd" process), "engine: the resume was
+   refused, still paused: …", still paused, MPD playing on. Stop Volumio;
+   space: "reopened …", "engine: resumed: reopened", L on from where it
+   paused. `q`.
+6. Unplugs: `$P --keys L.flac`, the GO bar unplugged mid-track. Pass, within
+   a second or two: "session 1: fault: disconnected at occurrence 1 (…), F
+   frames in" or the output's report first ("output report K: unavailable:
+   device_missing (…)"), "engine: playback stopped: …, the position at T s
+   (F frames)", "closed card 5 …", no hang. Plugged in again: a later
+   "output report: available, the bound unit changed or re-enumerated (…)",
+   "engine: the output is available (report …)", and no "session 2" line:
+   nothing plays.
+   Then the same paused (space first): within the pause release a
+   disconnected fault or the output's stop, the stop line's position the
+   paused one; past it (the device let go) the output's report stops
+   playback; on replug nothing plays. `q`.
+7. Edits after hand-off: `$P --keys A.flac B.flac C.flac` (one format, each
+   at least 10 s), `d` a few seconds into A. Pass: "d: delete entry EB,
+   after the playing entry EA: done", "session 1: cut at occurrence 2
+   (entry EB, B.flac) in time: none of its frames reaches the DAC", C
+   audible at A's end, nothing of B heard. Too late: `$P --keys S.flac
+   B.flac C.flac`, `d` about 1.85 s after "boundary: occurrence 1 (…
+   S.flac) is audible", in S's last 200 ms, when B's first frames are in
+   the kernel's buffer. Pass: "cut at occurrence 2 (…) too late: its frames
+   are the kernel's, and playback stops when it is heard", then at S's end
+   "engine: playback stopped: removed_entry_audible …", "closed …". A press
+   earlier says in time, and a later one deletes C: repeat until a run says
+   too late.
+8. Maintenance while playing: `$P --keys L.flac`, `m` mid-track. Pass: "m:
+   maintenance entered, the release confirmed", "closed card 5 … reads
+   closed", "engine: in maintenance (bridge output play), the release
+   confirmed", the status file `closed`; `m`: "m: leave maintenance: done",
+   "engine: maintenance ended: stopped", nothing plays. `q`.
+9. Shutdown, bounded: `$P --keys X.flac`, `q` mid-track. Pass: "q: quit",
+   "closed …", "session 1: released", "shut down" within ReleaseTimeout and
+   5 s of the q line, exit 0, the status file `closed`; Ctrl-C mid-track and
+   while paused: "stopped by signal", the same. A kernel call that never
+   returns cannot be made to order on the box:
+   `TestPlaybackShutsDownWithinItsBoundWithTheDeviceHeldInTheKernel` holds a
+   write and a drain inside the fake kernel, and the engine's Run returns
+   within its bound, the release unconfirmed, every file closed.
+
+### Not in this change
+
+- The serve wiring of the engine, the backend and the Reporter (4b1's note
+  for 4b2 named it; this brief did not), OpenHome SOAP and GENA, and the
+  library resolver with its URI confinement (5a); DSD and DoP playback;
+  seek within an entry (7a); cushions of silence (7b).
+- The rules text is not in `.claude/rules/player.md` or `output.md` yet:
+  the owner applies it from beside the branch.
+- For later: a position measured during the kernel's drain of a sink's last
+  buffer; the config's `pauseReleaseSeconds` (1 to 3600) against the
+  engine's 1 s to 10 min; a harness key that cuts too late on purpose,
+  since the by-hand timing in step 7 is a 200 ms target.
