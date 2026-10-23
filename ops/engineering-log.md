@@ -54466,3 +54466,19 @@ is not on this machine.
 test` (71 packages ok, `cmd/bridge` 506 s, `internal/manifest` 1,123 s, `go
 fmt` changing nothing), `make build-all` (six targets, stamped `09f0eda7`
 with no `-dirty`) and `make docs-check`, clean.
+
+### Round 5: the PR's bot comments (Gemini on #1317)
+
+- **A resolver that answers no stat** (High). `readRowSampleFormat` checked
+  only the resolver's error before handing its `FileInfo` to `describes`, so
+  a resolver that answered `(path, nil, nil)` panicked on a nil dereference.
+  `SampleFormatResolver` is the caller's function; the API's
+  `ResolveChecked` never answers that. Such a row is now counted Unreadable
+  and nothing is read. `TestAResolverThatAnswersNoStatLeavesTheRowUnreadable`
+  panicked on `25223ce7` (in `describes`, reached from `readRowSampleFormat`)
+  and passes.
+- **Statements compiled once per row** (Medium, twice). `decideSampleFormats`
+  and `advanceGainedSampleFormatsTx` now prepare `sampleFormatDecideSQL` and
+  `bumpIndexedAtByPathSQL` once on their transaction and close them before it
+  ends, as `StampExtractorVersionBatch` does. Behaviour is unchanged; the
+  backfill and stamp tests stay green.

@@ -458,8 +458,13 @@ func advanceGainedSampleFormatsTx(ctx context.Context, tx dbTx, paths []string, 
 	if err != nil || !complete {
 		return false, err
 	}
+	stmt, err := tx.PrepareContext(ctx, bumpIndexedAtByPathSQL)
+	if err != nil {
+		return false, err
+	}
+	defer stmt.Close()
 	for _, p := range paths {
-		if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, p); err != nil {
+		if _, err := stmt.ExecContext(ctx, now, p); err != nil {
 			return false, err
 		}
 	}
@@ -608,12 +613,12 @@ func (s *Store) sampleFormatCandidates(ctx context.Context, after string) ([]sam
 
 // readRowSampleFormat reads r's header through resolve, and answers its kind
 // when the file read is the one r describes. A path the resolver cannot map
-// or stat, a file that would not open or read whole, and a file that is not
-// the one the row describes are counted, and their rows left for a later
-// pass.
+// or stat (an error, or no stat), a file that would not open or read whole,
+// and a file that is not the one the row describes are counted, and their
+// rows left for a later pass.
 func readRowSampleFormat(r sampleFormatRow, resolve SampleFormatResolver, res *SampleFormatBackfill) (string, bool) {
 	abs, info, err := resolve(r.path)
-	if err != nil {
+	if err != nil || info == nil {
 		res.Unreadable++
 		return "", false
 	}
@@ -686,10 +691,15 @@ func (s *Store) decideSampleFormats(ctx context.Context, rows []sampleFormatRow,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, sampleFormatDecideSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
 	var gained []string
 	var none int
 	for _, r := range rows {
-		out, err := tx.ExecContext(ctx, sampleFormatDecideSQL, r.kind, r.path, r.size, r.mtimeNS)
+		out, err := stmt.ExecContext(ctx, r.kind, r.path, r.size, r.mtimeNS)
 		if err != nil {
 			return err
 		}

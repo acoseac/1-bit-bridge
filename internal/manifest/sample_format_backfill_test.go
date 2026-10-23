@@ -599,6 +599,25 @@ func headerPassRow(t *testing.T) (store *Store, root, rel string, resolver *brid
 	return store, root, rel, bridgefs.New([]string{root})
 }
 
+// TestAResolverThatAnswersNoStatLeavesTheRowUnreadable: a resolver that maps
+// a path and answers no stat and no error (SampleFormatResolver is the
+// caller's function) leaves the row undecided and counted Unreadable: the
+// pass has no stat to compare the row's with, and reads nothing.
+func TestAResolverThatAnswersNoStatLeavesTheRowUnreadable(t *testing.T) {
+	store, _, rel, resolver := headerPassRow(t)
+	res, err := store.BackfillSampleFormats(context.Background(), func(p string) (string, os.FileInfo, error) {
+		abs, _, err := resolver.ResolveChecked(p)
+		return abs, nil, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSampleFormats(t, store, map[string]string{rel: "NULL"})
+	if res.Unreadable != 1 || res.Read != 0 || res.Changed != 0 {
+		t.Errorf("the pass did %+v, want the row counted Unreadable and nothing read", res)
+	}
+}
+
 // TestTheHeaderPassLeavesTheKindAScanWroteMidPass: a scan that writes the row
 // after the pass read its page decides the row, and the pass's write
 // (sample_format IS NULL) does not land: the scan's kind stands. The scan
