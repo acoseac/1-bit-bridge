@@ -57523,25 +57523,12 @@ own fallback; serve's fixed-port admin probe remains an additional guard.
 error names the source: remove UUID and reservation from the snapshot to
 restore the rest while retaining the box's identity, or remove the box's
 `player-uuid`, `player-ids.json` and `player-queue.json` together with the service
-stopped.
-A reset gives up for good the identity it removes and any the box ran
-earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and still runs it. Their values were held only by
-the floor the reset drops. No snapshot of a given-up identity taken before
-the reset, on this box or another, may restore its player identity again:
-remove `player-uuid` and `player-ids.json` from every such snapshot, or
-delete those snapshots. Any other box that still holds a given-up identity's
-files (one powered off since a migration, say) must be reset too before it
-runs again. An identity another box took over by a restore, and still runs,
-is not given up: that box's floor holds it, and its snapshots stay valid.
-If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy.
-Only the restore refusal carries this step; the backup refusal does not.
-B524 will enforce this operator rule before 5a ships.
-The next start makes a new identity with no queue, a new device to controllers.
-A snapshot reservation is never a valid repair; never delete it while keeping
-the identity. About 120
+stopped AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
+before retrying a live-floor refusal. This makes a new identity, a new
+controller device with nothing to reuse; removing the box's files alone
+would reintroduce a lower floor from an older snapshot of the same UUID. About 120
 worst-case restores consume the space, with at least 2^24 values left after
-an admitted largest jump.
+an admitted largest jump. (Superseded by round 4 below.)
 
 The operating assumptions are deliberately not claimed as tested guarantees:
 the source issued fewer than 2^24 IDs and fewer than 2^24 tokens between the
@@ -57667,22 +57654,10 @@ queue together, with the service stopped. `playerResetAdvice` is the one
 message builder for an exhausted box mark and an unreadable live reservation
 in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
 `player-queue.json` together; the next start makes a new identity with no
-queue, a new device to controllers.
-A reset gives up for good the identity it removes and any the box ran
-earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and still runs it. Their values were held only by
-the floor the reset drops. No snapshot of a given-up identity taken before
-the reset, on this box or another, may restore its player identity again:
-remove `player-uuid` and `player-ids.json` from every such snapshot, or
-delete those snapshots. Any other box that still holds a given-up identity's
-files (one powered off since a migration, say) must be reset too before it
-runs again. An identity another box took over by a restore, and still runs,
-is not given up: that box's floor holds it, and its snapshots stay valid.
-If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy.
-Only the restore refusal carries this step; the backup refusal does not.
-B524 will enforce this operator rule before 5a ships.
+queue, a new device to controllers. If restoring, also remove `player-uuid`
+and `player-ids.json` from a copy of the snapshot, then restore that copy.
 A snapshot's `player-ids.json` is never a valid repair. Keep the warning
-against deleting the reservation while keeping the player identity.
+against deleting the reservation while keeping the player identity. (Superseded by round 4 below.)
 
 **Evidence, red first.** Round 2's exhaustion remedy removed both identity
 pairs but left the live queue. With no snapshot UUID, restore preserves the
@@ -57733,23 +57708,14 @@ controls retain the separate results above.
 ## 2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent
 
 **Rule.** With the service stopped, a player reset removes the box's
-`player-uuid`, `player-ids.json` and `player-queue.json` together.
-A reset gives up for good the identity it removes and any the box ran
-earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and still runs it. Their values were held only by
-the floor the reset drops. No snapshot of a given-up identity taken before
-the reset, on this box or another, may restore its player identity again:
-remove `player-uuid` and `player-ids.json` from every such snapshot, or
-delete those snapshots. Any other box that still holds a given-up identity's
-files (one powered off since a migration, say) must be reset too before it
-runs again. An identity another box took over by a restore, and still runs,
-is not given up: that box's floor holds it, and its snapshots stay valid.
-If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy.
-Only the restore refusal carries this step; the backup refusal does not.
-The next start makes a new identity with no queue, a new device to controllers.
-A snapshot's `player-ids.json` is never a valid repair; never delete the
-reservation while keeping the identity. B524 will enforce this operator rule
-before 5a ships.
+`player-uuid`, `player-ids.json` and `player-queue.json` together and gives up
+the identity for good. No snapshot taken on this box before the reset may
+restore its player identity: remove `player-uuid` and `player-ids.json` from
+every such snapshot, or delete those snapshots. When restoring, also remove
+those files from a copy of this snapshot, then restore that copy. The next
+start makes a new identity with no queue, a new device to controllers.
+Never repair a reservation from a snapshot or delete it while keeping the
+identity. B524 will enforce this operator rule before 5a ships. (Superseded by round 4's review below.)
 
 **Evidence, red first.** The existing exhaustion, unreadable-reservation and
 snapshot-refusal tests failed the new every-snapshot advice assertions
@@ -57817,18 +57783,22 @@ snapshots valid after the taking box was reset, and the Round 5
 paragraph's quotation had been rewritten to the review fix's wording.
 The quotation above again records what round 5 shipped, with its
 superseding review noted; the Round 5's review paragraph is unchanged.
-Every current-rule copy now states the following rule.
+Every current-rule copy (the advice and its comment, both rules lines,
+both History long forms and both backup-guide passages, excluding the
+superseded historical log paragraphs above) now states the following rule.
 
 A reset gives up for good the identity it removes and any the box ran
 earlier (one an earlier restore replaced on this box), unless another box
-took it over by a restore and still runs it. Their values were held only by
-the floor the reset drops. No snapshot of a given-up identity taken before
-the reset, on this box or another, may restore its player identity again:
+took it over by a restore and has not reset it since, running or powered off.
+Their values were held only by the floor the reset drops. No snapshot of a
+given-up identity taken before the reset, on this box or another, may restore
+its player identity again:
 remove `player-uuid` and `player-ids.json` from every such snapshot, or
 delete those snapshots. Any other box that still holds a given-up identity's
 files (one powered off since a migration, say) must be reset too before it
-runs again. An identity another box took over by a restore, and still runs,
-is not given up: that box's floor holds it, and its snapshots stay valid.
+runs again. An identity another box took over by a restore, and has not
+reset since, is not given up: that box's floor holds it, and its snapshots
+stay valid.
 If the reset answers a refused restore, remove `player-uuid` and
 `player-ids.json` from a copy of that snapshot, then restore that copy.
 Only the restore refusal carries this step; the backup refusal does not.
@@ -57837,7 +57807,7 @@ makes a new identity with no queue, a new device to controllers. A
 snapshot's `player-ids.json` is never a valid repair; never delete the
 reservation while keeping the identity. B524 will enforce this operator
 rule before 5a ships. The advice assertion independently requires the
-four rule clauses, including the still-running takeover condition and
+four rule clauses, including the takeover box not having reset the identity and
 the reset of any other box that retains a given-up identity's files.
 
 Validation: before the builder changed, the strengthened advice assertions
@@ -57850,3 +57820,18 @@ the other 44 patches remain byte-identical to `controls-r7/`. Control 50
 reverts the exception to round 5's review fix, without the still-running
 condition. The manifest and scratch `report-r6.md` carry the evidence.
 No requested check was refused by the sandbox. No commit.
+
+
+**Round 7 (Claude's review of round 6; Codex found none).** The running-only
+condition gave up a valid identity when its takeover box was merely powered
+off. The exception now requires that box to have taken it over by restore
+and not reset it since, running or powered off; its snapshots remain valid.
+The requirement to reset any other box still holding a given-up identity's
+files before it runs again remains. The review also found three earlier log
+paragraphs rewritten to a later round's rule. Their original text is restored
+from the round's docs commits with explicit superseding notes; round 6's
+current-copy list excludes historical log paragraphs. The advice, its two
+independent assertions and every current documentation copy use the corrected
+condition. Scratch report-r7.md and controls-r9/manifest.json record validation
+and the eight changed controls, including 52's return to the running-only
+condition. No commit.
