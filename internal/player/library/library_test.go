@@ -260,7 +260,8 @@ func TestTheResolverChecksAfreshAtEveryOpen(t *testing.T) {
 
 // TestTheResolverRefusesAFileOutsideTheRoots: a row whose file, its links
 // resolved, lies outside every root is outside_library, and so is a row
-// whose path climbs out of the root; neither is opened.
+// whose path climbs out of the root; neither is opened, a directory outside
+// the root included, which an open would refuse as no file.
 func TestTheResolverRefusesAFileOutsideTheRoots(t *testing.T) {
 	f := newLibraryFixture(t)
 	outside := filepath.Join(t.TempDir(), "secret.flac")
@@ -277,6 +278,13 @@ func TestTheResolverRefusesAFileOutsideTheRoots(t *testing.T) {
 	}
 	c, err = f.open(f.index("out.flac"))
 	f.refusedWith("a link out of the root", c, err, ReasonOutsideLibrary)
+	// Refused before it is opened: a directory outside the root, opened,
+	// would be refused as no file instead.
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(f.root, "outdir.flac")); err != nil {
+		t.Fatal(err)
+	}
+	c, err = f.open(f.index("outdir.flac"))
+	f.refusedWith("a link out of the root to a directory", c, err, ReasonOutsideLibrary)
 	// A link that stays inside is the library's.
 	if err := os.WriteFile(filepath.Join(f.root, "real.flac"), []byte("inside"), 0o644); err != nil {
 		t.Fatal(err)
