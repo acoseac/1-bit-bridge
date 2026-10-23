@@ -54026,11 +54026,24 @@ results are in the PR.
 - `internal/player/engine`: two doc comments corrected (the DSD decision
   below); no code.
 - `CLAUDE.md`'s package table: the backend's row, and the `alsapcm` and
-  `hotplug` rows extended. The rules text went beside the branch
-  (`/tmp/b470-4b2-rules.md`): a section for `.claude/rules/player.md`, which
-  is at 99,049 of its 100,000 bytes and the brief left untouched, with a
-  `paths:` glob for `cmd/bridge/output_play*.go`; the sink's two additions
-  for `.claude/rules/output.md`; and "Where things live".
+  `hotplug` rows extended.
+- The rules, in the tree since the landing pass (757e9ba9; the PR's own
+  commits left them beside the branch, in `/tmp/b470-4b2-rules.md`, with
+  `.claude/rules/player.md` at 99,049 of its 100,000 bytes). To make room
+  first, eleven long forms of `player.md` moved verbatim to
+  `ops/History-rules-player.md` with `move_entry.py`: 2a's backend
+  internals (the pinned UAPI, the endpoint, exact parameters, the write, the
+  cancel, stopping, the portable seam, pcm-test) and 2b's sink internals
+  (the one writer and its store, the watch, PAUSE's argument), each leaving
+  its bold title and bolded "Don't" sentences in `player.md` (84,135 to
+  74,932 bytes; `verify_moves.py --base cfb1c1df` passes). A reader looking
+  for one of those entries' test lists and specifics reads it there: it no
+  longer loads with the code. Then `player.md` gained the "Player backend
+  (B470 PR 4b2)" section and a `paths:` glob for `cmd/bridge/output_play*.go`
+  (91,188 bytes), `.claude/rules/output.md` the section on the sink's cut at
+  a track boundary and its reopen where the binding resolves now, and
+  `CLAUDE.md` its two "Where things live" rows. Round 1 below adds to the
+  backend's section (93,931 bytes).
 - Tests: 55, in `internal/alsapcm` (`sink_cut_test.go` 5,
   `sink_locate_test.go` 2, and the backend's: `playback_bitexact_test.go`
   4, `playback_contract_test.go` 14, `playback_cut_test.go` 2,
@@ -54375,9 +54388,117 @@ about 2 s; X, the highest rate at hand.
   for 4b2 named it; this brief did not), OpenHome SOAP and GENA, and the
   library resolver with its URI confinement (5a); DSD and DoP playback;
   seek within an entry (7a); cushions of silence (7b).
-- The rules text is not in `.claude/rules/player.md` or `output.md` yet:
-  the owner applies it from beside the branch.
 - For later: a position measured during the kernel's drain of a sink's last
   buffer; the config's `pauseReleaseSeconds` (1 to 3600) against the
   engine's 1 s to 10 min; a harness key that cuts too late on purpose,
   since the by-hand timing in step 7 is a 200 ms target.
+
+### Round 1 of the reviews
+
+Codex (two P1, three P2, one P3) and the Claude API (one High, four Low)
+reviewed the landing (757e9ba9): eleven findings, seven defects, since
+Codex's first P1 and the Claude API's High are one, and the Claude API's
+Lows 2, 3 and 4 are Codex's P2 on `transition`, its P3 and its P2 on the
+state directory. All seven are real, each verified against the code at
+757e9ba9 before it was fixed:
+
+| Finding | Verdict | Evidence at 757e9ba9 |
+|---|---|---|
+| A. Codex P1, the Claude API's High: a Release acknowledged while a resume's open between transports runs | Confirmed | `resume` opened the next transport's sink outside `s.wg` (`session.go:782`); the teardown waited on `startDone` and `s.wg` (`:868`), closed `s.outs` and `s.handed`, neither of which held that sink, and closed `s.down` (`:888`) with the node open, since no sink exists to close it while the check after open runs. The second half of the Claude API's fix, a context check before each `OpenSink`, was there already: `openOutput`'s (`session.go:350`) and `openSink`'s own (`sink.go:462`) |
+| B. Codex P1: a Pause leaves the replacement transport playing | Confirmed | `pause` asked the sink it had read, unlocked; refused by a sink playing out its last frames or done with them, it took the lock again (`session.go:644`) and paused with no device, never looking at `s.cur`, which the producer may have replaced meanwhile with the next transport's sink, playing, with no release timer |
+| C. Codex P2, the Claude API's Low 2: a sink command under the session's lock | Confirmed | `transition` paused a new transport's sink under `s.mu` (`producer.go:332`), and `release` takes `s.mu` first (`session.go:820`), unbounded by its context |
+| D. Codex P2: finished transports keep their buffers | Confirmed | `s.outs` was appended to (`producer.go:324`, and in `start`) and never pruned, the chain never shrank, and `closeOcc` let go of the first chunk alone (`open.go:182`), so every sink's store and every closed decoder and content stayed reachable |
+| E. Codex P2, the Claude API's Low 4: serve's data directory taken as the harness's state directory | Confirmed | `--state-dir` went to `playStateDir` with no comparison to `cfg.DataDir` (`output_play.go:192`), and `play` empties a queue it finds there (`:403`) |
+| F. Codex P3, the Claude API's Low 3: the holder of the wrong endpoint named | Confirmed | `refused` read `r.opened.Endpoint` (`output_play.go:564`), set only at a sink's open or reopen (`:668`): card 0 at the first open, the old card after a renumbered reopen |
+| G. the Claude API's Low 5: the log's stale sentences | Confirmed | the entry said the rules were beside the branch and not in the rules files; 757e9ba9 had put them there, eleven long forms moved out first |
+
+The Claude API's fallback for F, to `r.opened` when the error carries no
+endpoint, was not taken: every busy refusal is `openError`'s, which sets the
+endpoint (`device.go:278` to `288`), and card 0 is an endpoint, so "none"
+cannot be told from it. The run keeps no last device now.
+
+Checked and not a defect: a Pause during a Start's open, before the session
+has a sink, would pause with no device while the Start went on to play; the
+engine parks a Pause while its session starts (`owner.go:413`), so the
+backend never gets one.
+
+What changed:
+
+- 641e123b. **The teardown joins a resume's open between transports** (A):
+  `resume` takes `s.wg` under the session's lock once `callableLocked`
+  passes, so a release either refuses the resume or waits for its open,
+  which closes its sink itself on finding the session releasing.
+- 655d4828. **A pause acts on the transport current when it decides** (B):
+  refused by a sink playing out its last frames or done with them, it looks
+  again. A sink the producer made current meanwhile is asked; with none, or
+  the refusing one still current, the session pauses with no device, in the
+  critical section that read the transport. `Config.Seams.PauseRefused` is
+  the window's seam, nil in production.
+- 1856cecc. **The producer hands a new transport's sink the session's pause
+  through `call`, outside the lock** (C): `transition` puts the sink in
+  `s.outs` first, so the teardown closes it, brings it to the session's
+  pause state one command at a time with the lock released for each, and
+  makes it current only in that state; a session released meanwhile leaves
+  it to the teardown.
+- fa12a1c9. **A session retires what has played** (D): `retireLocked`, at
+  the end of each report step, drops the occurrences before the one heard,
+  once each is crossed or dropped, its refusal reported, and none is the one
+  written or the one paused between transports, and every closed sink
+  nothing left refers to; `retired` is the watermark by which a Cut of one
+  answers false; `closeOcc` lets go of the decoder and the content too.
+  `Stats.Sinks` and `Stats.Occurrences` count what the sessions hold.
+- 5f153e98. **A busy refusal names the holder of the endpoint it names**
+  (F). The stand-in reports a close only for a session whose Start opened
+  one, as the backend does.
+- b8d19a3e. **A `--state-dir` that meets serve's data directory is refused
+  before anything is made** (E): the two compared both ways, with their
+  links resolved as the kernel resolves them (`playResolve`: the longest
+  leading run of the path's elements that is there, resolved as written, so
+  a `..` after a link goes up from where the link points, where
+  `filepath.Abs` and `Clean` take it from the link's own place) and in the
+  case sensitivity of the data directory's volume (`fsutil.IsUnderAny`);
+  an overlap is a usage error (2). A run without `--state-dir` refuses (1)
+  when the user's cache directory, where it would make its own, lies in
+  serve's. Not found: a bind mount, which is not a link, and which an
+  identity walk would find but no test here can make without root.
+- f9dee31f, the package doc; a715ccba, the rules (`player.md` 93.9%); and
+  this record, with the two stale sentences corrected (G).
+
+Red first, each against the code before its fix:
+
+| Fix | Test | Red |
+|---|---|---|
+| A | `TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports` | "the release was acknowledged while the resume's open held b's node open" |
+| B | `TestPlaybackPausesTheTransportCurrentWhenItDecides` | "b's stream is RUNNING, want PAUSED" |
+| C | `TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock` | "waited 10s for Release to answer past its context" |
+| D | `TestPlaybackRetiresWhatHasPlayed` | "10 sinks and 11 occurrences" after ten boundaries |
+| E | `TestOutputPlayNeverKeepsItsFilesInServesDataDir` (9 rows) | every refusal row ran, leaving `queue.json` and `queue.json.ids`, or a new directory, in serve's data directory; the sibling row green |
+| F | `TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy` | "held by: not named in /proc/asound": card 0 was read |
+
+Negative controls, each a mutation of the committed fix, restored from git:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| A | no `wg.Add` and `Done` around the resume's open | 2 runs of 2 |
+| B | the pause gives the transport up at the first refusal, as before | 2 runs of 2 |
+| C | the pause sent under the lock (`err := cmd()`) | the test |
+| D | no `retireLocked` call | the counts |
+| D | no watermark | "a cut of the retired occurrence 1: true, <nil>; want false" |
+| E | no `--state-dir` check | the seven `--state-dir` rows |
+| E | `filepath.Abs` in place of `playResolve` | the `..` after a link, alone |
+| E | no check of the cache directory | its row, alone |
+| E | no "holds" direction | its row, alone |
+| F | the zero endpoint, the first open's `r.opened` | both assertions |
+
+The tests' new seams are the fake kernel's `ParkNextStatus`, the rig's
+`holdNextAdmit`, and `newDirectWith`, a backend with an edited `Config`.
+`holdNextAdmit` holds the check after open, where the node is open and no
+writer exists yet: A's first test held the open itself and passed on the
+old code, because a sink's writer closes its node when the life context
+ends.
+
+The gates, through the build lock, on a715ccba's tree with this record:
+`make fmt vet test` exit 0, 72 packages ok and nothing rewritten by
+`go fmt` (`internal/alsapcm` 16.0 s and `internal/player/playback` 1.4 s
+under `-race`); `make build-all` exit 0, the six targets; `make
+docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 93.9%.
