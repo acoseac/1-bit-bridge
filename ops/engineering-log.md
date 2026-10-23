@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text](#2026-10-23--b516-round-2-alsa-string-fallback-assignments-and-byte-text)
 - [2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings](#2026-10-23--b516-alsa-scalar-values-preserve-configuration-stages-and-warnings)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
@@ -56816,7 +56817,6 @@ clients' per-request timeouts), and this change leaves them:
   so a line that arrives late fails the test, while a stream that sends
   nothing waits for the 10 s connect context, as the 600 ms control did.
 
-
 ## 2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings
 
 At 3f805199 the PCM lexer treated values like identifier fragments: `0.5`
@@ -56828,7 +56828,8 @@ losing sample-stage warnings as well as every named PCM resolution.
 The value lexer now follows the known alsa-lib conf.c scalar convention
 (key/value token boundaries, integer then real for digit/minus candidates,
 strings for other words and quoted values). It keeps the kinds distinct
-and refuses malformed numeric candidates. Newly consumed opaque fields
+and consumes failed numeric candidates as opaque strings (corrected in
+round 2; round 1 wrongly refused them). Newly consumed opaque fields
 stay opaque; a real is never a card index or PCM reference. A softvol's
 presence and an attenuating plug's route stage still reach the verdict.
 Top-level hooks and includes still discard all definitions, and Volumio's
@@ -56846,3 +56847,36 @@ addition, commit or push was made. Scalar-kind, refusal, opacity and
 boundary tests and `FuzzPCMConfigValues` accompany the fixtures. Scratch
 negative-control patches and the task report record predicted failures
 and verification; these artifacts are deliberately outside the repository.
+
+## 2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text
+
+Round 1's reviews found that alsa-lib's `parse_value` falls through to
+STRING on failed numeric conversions, `parse_def` takes optional `=`,
+and byte-oriented comments/strings do not require UTF-8. The lexer now
+consumes these forms without turning new strings into routing evidence.
+A `.5` after whitespace is a string value rather than a key continuation.
+The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
+`0.0garbage` refusal is replaced with an unterminated compound, which
+alsa-lib actually refuses. The rules and History correct round 1's false
+numeric-refusal and leading-dot claims beside the code.
+
+The include check already ran at every token start through
+`confInput.nonwhite`; explicit value and bracket-start guards now sit
+beside the lexer, with scalar and array refusal tests and fuzz seeds.
+Negative `device` already fails the sign check, and `subdevice` already
+makes its definition opaque; new tests and controls pin both without
+broadening the resolver. Top-level hooks still invalidate all files.
+
+Red-first scratch runs against round 1 fail for numeric strings,
+assignments (including PipeWire's path) and Latin-1 strings/comments,
+including lost `alsa_softvol` through the real loader and Judge. Each
+review finding has a negative control; applicable round 1 controls are
+retained, and its incorrect numeric-refusal control is replaced. The
+artifact report records runs and source locations. The alsa-lib behaviour
+is the reviews' reading of conf.c, checked by the session that ran the
+task; the task, offline, fetched and ran nothing of alsa-lib. Its sandbox
+had Go 1.27.1 while go.mod requires 1.27.2, so its own runs used a
+scratch harness. In the repository, on Go 1.27.2: `go vet`, `go test` and
+`-race` (3 runs) on `internal/alsa` and `internal/signalpath`, 20 s of
+`FuzzPCMConfigValues` (2.86 million executions) and `make docs-check`
+passed.
