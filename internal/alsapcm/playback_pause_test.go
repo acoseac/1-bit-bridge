@@ -434,12 +434,17 @@ func TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock(t *testing.T) {
 
 // TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports pins the release
 // of a session whose resume is opening the next transport's sink: paused
-// between two transports, the resume opens b's sink itself, and a Stop while
-// that open is under way (b's node open, its check after open held, as one
-// reading a slow sysfs is, so no sink exists yet to close the node with the
-// session's life) releases the session. The release is not acknowledged
-// while the node is open: it waits for the resume's open, which closes what
-// it opened, unwritten, before the session lets go.
+// between two transports, the device let go, the resume opens b's sink
+// itself, and a Stop while that open is under way (b's node open, its check
+// after open held, as one reading a slow sysfs is, so no sink exists yet to
+// close the node with the session's life) releases the session. The release
+// is not acknowledged while the node is open: it waits for the resume's
+// open, which closes what it opened, unwritten, before the session lets go.
+// The resume comes once the release of the device is reported, which is
+// once the producer waits between the two transports: one sent as a's node
+// closed could find no occurrence to open a sink for, answer continued and
+// leave the open the test holds to the producer, and the test passed that
+// way too (round 4).
 func TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports(t *testing.T) {
 	tm := &timers{}
 	r := newRig(t, func(o *rigOptions) { o.pauseRelease, o.afterFunc = time.Second, tm.afterFunc })
@@ -454,6 +459,8 @@ func TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports(t *testing.T) {
 	r.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
 	r.k.Free()
 	r.k.Await(t, "a's sink to close", func(v alsapcm.KernelView) bool { return v.Closes == 1 && !v.Open })
+	tm.fire(t)
+	r.waitSnap("the device released", func(s *engine.Snapshot) bool { return s.DeviceReleased() })
 	held, letGo := r.unit.holdNextAdmit()
 	t.Cleanup(letGo)
 	resumed := make(chan error, 1)
