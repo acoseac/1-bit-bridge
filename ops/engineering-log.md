@@ -53642,6 +53642,19 @@ build.
 | C1b | a run the reading cannot tell kept as evidence | "first ticks, then past them": the reading past them compared with the young record, whose stamp does not count, and read `dop_unconfirmed` |
 | C2 | the keep after the picks never taken | the candidate card's run read `dop_unconfirmed` |
 
+**Gates**, through the build lock, at c0d161b1:
+- `make fmt vet test` passed whole after 2,293 s waiting for a slot.
+  `make fmt` rewrote nothing and `go vet` was clean. 73 packages were ok
+  under `-race` (`cmd/bridge` 471 s, `internal/admin` 690 s,
+  `internal/api` 93 s).
+- `make build-all` was clean: the six targets built.
+- `make docs-check` was clean on the branch (CLAUDE.md 62.3%, worst load
+  47.0%).
+- With the round-7 note applied to the tree, `make docs-check` was clean
+  again (worst load 47.3%), and the whole `cmd/bridge` package, which holds
+  the doc sweeps, passed (117 s). The note was then reverted in the same
+  slot.
+
 **Residuals, named, not fixed here**
 
 - A reading that cannot tell the run still confirms through the evidence
