@@ -252,93 +252,201 @@ func TestPlaybackContinuesTeardownAfterATimerStopPanic(t *testing.T) {
 // Making that sink current stops the timer and records its panic. Resume
 // must answer that fault and leave the sink paused, before any Release.
 func TestPlaybackResumeKeepsAPausedSuccessorSilentAfterATimerStopPanic(t *testing.T) {
-	for _, rollbackRefused := range []bool{false, true} {
-		name := "paused"
-		if rollbackRefused {
-			name = "pause-refused"
+	logs := &lines{}
+	opened := make(chan *alsapcm.Sink, 1)
+	gate, stopped := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	allowOpen := func() { once.Do(func() { close(gate) }) }
+	d := newDirectWith(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+			s, err := open(ctx, cfg)
+			if err == nil && cfg.Transport.RateHz == 48000 {
+				opened <- s
+				<-gate
+			}
+			return s, err
 		}
-		t.Run(name, func(t *testing.T) {
+	}, func(cfg *playback.Config) {
+		cfg.Log = slog.New(logs)
+		cfg.AfterFunc = func(time.Duration, func()) func() bool {
+			return func() bool { close(stopped); panic(panicValue) }
+		}
+	})
+	t.Cleanup(func() { d.release(1) })
+	t.Cleanup(allowOpen)
+	d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	d.files.add("b", wav(48000, 24, pattern(2, 3000, 24)))
+	if err := d.start(1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	next := occurrence(102, 2, "b")
+	if err := d.be.Prepare(bg, 1, 101, &next); err != nil {
+		t.Fatal(err)
+	}
+	d.k.Free()
+	sink := receiveIn(t, opened, "b's sink to open between transports")
+	if err := d.be.Pause(bg, 1); err != nil {
+		t.Fatal(err)
+	}
+	allowOpen()
+	receiveIn(t, stopped, "the paused successor to become current and stop the timer")
+	var resumes atomic.Int32
+	d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
+		if op == "resume" {
+			resumes.Add(1)
+		}
+	})
+	before := d.k.View().GivenBytes
+	how, err := d.be.Resume(bg, 1)
+	var re *playback.ResumeError
+	if how != 0 || err == nil || errors.As(err, &re) {
+		t.Errorf("Resume = %v, %v; want the backend fault without success", how, err)
+	}
+	wantState := alsapcm.SinkPaused
+	if st := sink.Position().State; st != wantState {
+		t.Errorf("Resume that meets the timer-stop fault left the sink %v; want %v before release", st, wantState)
+	}
+	if got := d.k.View().GivenBytes; got != before {
+		t.Errorf("gave the DAC %d bytes after the failed Resume; want %d", got, before)
+	}
+	waitOn(t, "the backend fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) == 1 })
+	for _, e := range d.rec.events() {
+		if e.kind == "fault" && (e.fault.Reason != playback.ReasonFailed || err == nil || !strings.Contains(err.Error(), e.fault.Detail)) {
+			t.Errorf("Resume answer %v, fault %+v; want the recorded backend failure", err, e.fault)
+		}
+	}
+	if n := resumes.Load(); n != 0 {
+		t.Errorf("sent %d Resume commands for a recorded fault; want none", n)
+	}
+	ctx, cancel := context.WithTimeout(bg, alsapcm.Watchdog())
+	defer cancel()
+	if err := d.be.Release(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.be.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	logs.panicLogged(t, backendPanicMessage, "the pause release timer's stop")
+	d.k.CheckClosedEach(t)
+}
+
+// TestPlaybackResumeFaultWithBufferedFrames parks the reporter until the
+// stream is paused with unplayed hardware frames. A fault known at entry
+// must send no Resume; one recorded while Resume is in flight exercises
+// the compensating Pause, including its refusal and independent deadline.
+func TestPlaybackResumeFaultWithBufferedFrames(t *testing.T) {
+	for _, action := range []string{"recorded", "paused", "pause-refused", "pause-cancelled"} {
+		t.Run(action, func(t *testing.T) {
 			logs := &lines{}
-			opened := make(chan *alsapcm.Sink, 1)
-			gate, stopped := make(chan struct{}), make(chan struct{})
+			gate := make(chan struct{})
 			var once sync.Once
-			allowOpen := func() { once.Do(func() { close(gate) }) }
+			fault := func() { once.Do(func() { close(gate) }) }
+			opened := make(chan *alsapcm.Sink, 1)
 			d := newDirectWith(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 				return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 					s, err := open(ctx, cfg)
-					if err == nil && cfg.Transport.RateHz == 48000 {
-						opened <- s
-						<-gate
-					}
+					opened <- s
 					return s, err
 				}
 			}, func(cfg *playback.Config) {
 				cfg.Log = slog.New(logs)
-				cfg.AfterFunc = func(time.Duration, func()) func() bool {
-					return func() bool { close(stopped); panic(panicValue) }
+				cfg.Tick = func() (<-chan time.Time, func()) {
+					<-gate
+					panic(panicValue)
 				}
 			})
 			t.Cleanup(func() { d.release(1) })
-			t.Cleanup(allowOpen)
-			d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
-			d.files.add("b", wav(48000, 24, pattern(2, 3000, 24)))
+			t.Cleanup(fault)
+			d.files.add("a", wav(48000, 24, pattern(1, 200000, 24)))
 			if err := d.start(1, "a"); err != nil {
 				t.Fatal(err)
 			}
-			next := occurrence(102, 2, "b")
-			if err := d.be.Prepare(bg, 1, 101, &next); err != nil {
-				t.Fatal(err)
-			}
-			d.k.Free()
-			sink := receiveIn(t, opened, "b's sink to open between transports")
+			sink := receiveIn(t, opened, "the sink")
+			d.k.Await(t, "the hardware buffer to fill", runningAndWaiting)
 			if err := d.be.Pause(bg, 1); err != nil {
 				t.Fatal(err)
 			}
-			allowOpen()
-			receiveIn(t, stopped, "the paused successor to become current and stop the timer")
-			if rollbackRefused {
-				// Close after the writer takes Resume but before its caller reads
-				// the answer: Resume succeeds and the compensating Pause refuses.
-				d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
-					if op == "resume" {
+			before := d.k.View()
+			if before.State != "PAUSED" || before.Appl <= before.Consumed {
+				t.Fatalf("need a kernel pause holding buffered frames: %+v", before)
+			}
+			waitFault := func() {
+				fault()
+				waitOn(t, "the recorded fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) == 1 })
+			}
+			if action == "recorded" {
+				waitFault()
+			}
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			pauseGate := make(chan struct{})
+			var pauseOnce sync.Once
+			allowPause := func() { pauseOnce.Do(func() { close(pauseGate) }) }
+			t.Cleanup(allowPause)
+			var resumes, pauses atomic.Int32
+			d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
+				switch op {
+				case "resume":
+					resumes.Add(1)
+					waitFault()
+					if action == "pause-refused" {
+						// Resume's successful reply is already queued when Close
+						// returns, and rollback must retain the resulting refusal.
 						_ = sink.Close()
 					}
-				})
-			}
-			before := d.k.View().GivenBytes
-			how, err := d.be.Resume(bg, 1)
+				case "pause":
+					pauses.Add(1)
+					if action == "pause-cancelled" {
+						// Hold the reply beyond the caller's cancellation. Only
+						// rollback's own bound may end the backend's wait.
+						cancel()
+						<-pauseGate
+					}
+				}
+			})
+			how, err := d.be.Resume(ctx, 1)
+			allowPause()
 			var re *playback.ResumeError
 			if how != 0 || err == nil || errors.As(err, &re) {
-				t.Errorf("Resume = %v, %v; want the backend fault without success", how, err)
+				t.Errorf("Resume = %v, %v; want the backend fault", how, err)
 			}
-			wantState := alsapcm.SinkPaused
-			if rollbackRefused {
-				wantState = alsapcm.SinkStopped
-			}
-			if st := sink.Position().State; st != wantState {
-				t.Errorf("Resume that meets the timer-stop fault left the sink %v; want %v before release", st, wantState)
-			}
-			if got := d.k.View().GivenBytes; got != before {
-				t.Errorf("gave the DAC %d bytes after the failed Resume; want %d", got, before)
-			}
-			waitOn(t, "the backend fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) == 1 })
 			for _, e := range d.rec.events() {
 				if e.kind == "fault" && (e.fault.Reason != playback.ReasonFailed || err == nil || !strings.Contains(err.Error(), e.fault.Detail)) {
 					t.Errorf("Resume answer %v, fault %+v; want the recorded backend failure", err, e.fault)
 				}
 			}
-			if rollbackRefused && alsapcm.ReasonOf(err) != alsapcm.ReasonClosed {
-				t.Errorf("Resume answer %v; want the refused Pause folded into the fault", err)
+			if action == "recorded" {
+				if n := resumes.Load(); n != 0 {
+					t.Errorf("sent %d Resume commands for a recorded fault; want none", n)
+				}
+			} else if n := resumes.Load(); n != 1 {
+				t.Errorf("sent %d Resume commands; want one before the fault", n)
 			}
-			ctx, cancel := context.WithTimeout(bg, alsapcm.Watchdog())
-			defer cancel()
-			if err := d.be.Release(ctx, 1); err != nil {
+			if action == "pause-refused" {
+				if alsapcm.ReasonOf(err) != alsapcm.ReasonClosed {
+					t.Errorf("Resume answer %v; want the refused Pause folded into the fault", err)
+				}
+			} else {
+				if action == "pause-cancelled" && (!errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+					t.Errorf("rollback answer %v; want its own deadline, never the caller's cancellation", err)
+				}
+				if action != "recorded" && pauses.Load() != 1 {
+					t.Errorf("sent %d compensating Pauses; want one", pauses.Load())
+				}
+				if st := sink.Position().State; st != alsapcm.SinkPaused {
+					t.Errorf("failed Resume left the sink %v; want paused before release", st)
+				}
+				if after := d.k.View(); after.GivenBytes != before.GivenBytes || after.Consumed != before.Consumed {
+					t.Errorf("failed Resume changed kernel bytes/played frames from %d/%d to %d/%d", before.GivenBytes, before.Consumed, after.GivenBytes, after.Consumed)
+				}
+			}
+			d.release(1)
+			join, stop := context.WithTimeout(bg, alsapcm.Watchdog())
+			defer stop()
+			if err := d.be.Wait(join); err != nil {
 				t.Fatal(err)
 			}
-			if err := d.be.Wait(ctx); err != nil {
-				t.Fatal(err)
-			}
-			logs.panicLogged(t, backendPanicMessage, "the pause release timer's stop")
+			logs.panicLogged(t, backendPanicMessage, "the reporter")
 			d.k.CheckClosedEach(t)
 		})
 	}

@@ -982,6 +982,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		l.unlock()
 		return 0, err
 	}
+	// A known fault must never release the sink's pause, even briefly:
+	// buffered frames may play, and a draining sink can refuse re-pause.
+	if s.fault != nil {
+		return 0, errors.New(s.fault.Detail)
+	}
 	out, between := s.cur, s.between
 	if out != nil && (out.drained || out.closed) {
 		out = nil
@@ -997,8 +1002,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				// The sink has already resumed, but the session cannot. Put
 				// its pause back before answering the fault, retaining any
 				// failure alongside it. The reporter still delivers the fault
-				// so the engine releases the session.
-				if pauseErr := s.call(ctx, out.sink.Pause); pauseErr != nil {
+				// so the engine releases the session. Caller cancellation must
+				// not abandon rollback; give it the usual call bound of its own.
+				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
+				defer stop()
+				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
 					return 0, errors.Join(err, pauseErr)
 				}
 				return 0, err
