@@ -56855,10 +56855,12 @@ Round 1's reviews found that alsa-lib's `parse_value` falls through to
 STRING on failed numeric conversions, `parse_def` takes optional `=`,
 and byte-oriented comments/strings do not require UTF-8. The lexer now
 consumes these forms without turning new strings into routing evidence.
-The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
+A `.5` after whitespace is a string value rather than a key continuation
+(reversed in round 3). The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
 `0.0garbage` refusal is replaced with an unterminated compound, which
 alsa-lib actually refuses. The rules and History correct round 1's false
-numeric-refusal claim beside the code.
+numeric-refusal and leading-dot claims beside the code (the leading-dot
+correction reversed in round 3).
 
 The include check already ran at every token start through
 `confInput.nonwhite`; explicit value and bracket-start guards now sit
@@ -56893,12 +56895,19 @@ both round-1 rules; remove leading-dot success cases, retain the fuzz seed,
 and correct round 2's dot claims in comments and History. Numeric fallback,
 optional `=`, byte text, include guards and device refusals stand.
 
-Red first on round-2 code: all five scalar/array leading-dot refusals,
-all three spaced/commented key cases and the real-loader route-warning
-test failed. With the fix they pass three times. In-place cached Go
+Red first on round-2 code: the four leading-dot refusals (a value after
+`=`, an array element), the bare `defaults.value .5` (a key round 2 ended
+at the blank), the three spaced or commented key cases and the
+real-loader route-warning test failed. With the fix they pass three times. In-place cached Go
 1.27.2 runs, offline: vet, test and race on `internal/alsa/...` and
 `internal/signalpath/...`, 20 s of `FuzzPCMConfigValues` (1,638,000
 executions), and `make docs-check` pass. The scratch round-3 report and
 controls manifest hold the commands, exact failing subtest names and
 individual control results: all 23 patches applied independently, built,
 and failed every predicted test. No alsa-lib binary or hardware was run.
+
+Round 3's review (the Claude API): the bare `defaults.value .5` pins the
+key rule, not the value refusal (without `=` the dot continues the key,
+which then has no value), so it moved to the spaced-key test, which also
+checks that `defaults.value .5 x` lexes as `defaults.value.5 x`; and round
+2's entry keeps its own text, marked where round 3 reversed it.

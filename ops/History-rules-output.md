@@ -16,7 +16,9 @@ separates components even after blanks or `#` comments: `slave .pcm`,
 `pcm.x.y`. `parse_def` decides on the character `get_nonwhite` returns.
 Within values dots belong to the scalar (`0.5`, a library filename), but
 `get_string` refuses a leading dot before `get_freestring` or `parse_value`
-runs, in values and array elements, with or without `=`. Braces hold
+runs: in a value after `=` and in an array element. After a key with no
+`=`, a dot continues the key: `defaults.value .5 x` is the key
+`defaults.value.5` with the value `x`. Braces hold
 definitions and brackets hold values; an iterative stack bounds nesting
 by the input, without recursion.
 The key grammar stays restricted. Value tokens stop at ALSA's blanks or
