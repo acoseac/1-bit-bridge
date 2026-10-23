@@ -2563,29 +2563,48 @@ var migrations = []migration{
 		// (Track.SampleFormat, backlog B513): "integer", "float", or ''
 		// for a row whose header states none. NULL is a row nothing has
 		// decided yet: every row this column finds, and any a rolled-back
-		// binary inserts. sample_format_size and sample_format_mtime_ns
-		// are the stat of the file the kind was decided from, written with
-		// every kind, so a kind a rolled-back binary left on a row it
-		// rewrote for a changed file reads as stale: its stat is not the
-		// row's. Store.migrate clears those on every open
-		// (clearStaleSampleFormats, through idx_tracks_sample_format_stale)
-		// and decides what a row's codec decides (backfillSampleFormatByCodec),
-		// without reading a file, and BackfillSampleFormats reads the
-		// header of each WAV and AIFF row left. idx_tracks_sample_format_null
-		// serves the fill, the header pass and the completion mark.
+		// binary inserts. Store.migrate decides on every open what a row's
+		// codec decides (backfillSampleFormatByCodec), without reading a
+		// file, and BackfillSampleFormats reads the header of each WAV and
+		// AIFF row left; idx_tracks_sample_format_null serves the fill, the
+		// header pass and the completion mark. Its post() is the one its
+		// first build shipped, and a store such a build opened is at this
+		// version, so what came after it is v60, never this step's.
 		version: 59,
 		name:    "tracks.sample_format (the sample kind a PCM header states)",
-		sql:     `-- the columns and their indexes are added in post()`,
+		sql:     `-- the column and its index are added in post()`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "tracks", tableColumn{
+				name: "sample_format",
+				ddl:  `ALTER TABLE tracks ADD COLUMN sample_format TEXT`,
+			}); err != nil {
+				return err
+			}
+			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_null
+				ON tracks(path) WHERE sample_format IS NULL`)
+			return err
+		},
+	},
+	{
+		// v60 is the stat each sample kind was decided at (backlog B513):
+		// sample_format_size and sample_format_mtime_ns, written with
+		// every kind, so a kind a rolled-back binary left on a row it
+		// rewrote for a changed file reads as stale, its stat not the
+		// row's. Store.migrate clears those on every open
+		// (clearStaleSampleFormats, through idx_tracks_sample_format_stale)
+		// before the fill. A store at v59 that holds kinds and no stat
+		// (one a build of v59's first form opened) reads every kind as
+		// stale, and the open decides each again. Idempotent, like every
+		// step: a store that has the columns and the index already keeps
+		// them.
+		version: 60,
+		name:    "tracks.sample_format_size and sample_format_mtime_ns (the stat a sample kind was read at)",
+		sql:     `-- the columns and their index are added in post()`,
 		post: func(db *sql.DB) error {
 			if err := addColumnsIfMissing(db, "tracks",
-				tableColumn{name: "sample_format", ddl: `ALTER TABLE tracks ADD COLUMN sample_format TEXT`},
 				tableColumn{name: "sample_format_size", ddl: `ALTER TABLE tracks ADD COLUMN sample_format_size INTEGER`},
 				tableColumn{name: "sample_format_mtime_ns", ddl: `ALTER TABLE tracks ADD COLUMN sample_format_mtime_ns INTEGER`},
 			); err != nil {
-				return err
-			}
-			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_null
-				ON tracks(path) WHERE sample_format IS NULL`); err != nil {
 				return err
 			}
 			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_sample_format_stale
@@ -3608,8 +3627,10 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		// tags_json, and so the diff that sent the row here, does not hold:
 		// a row from before the column gains it, a kind an older extractor
 		// got wrong is replaced, and indexed_at bumps only when a client
-		// would see the change.
-		kindBumped, err := writeSampleFormatTx(ctx, tx, t.Path, sampleFormatColumn(t), now)
+		// would see the change. It is certified at the stat this read was
+		// made at (t's, the walk's) and written only while the row still
+		// has it: another scan may have rewritten the row since.
+		kindBumped, err := writeSampleFormatTx(ctx, tx, t.Path, sampleFormatColumn(t), t.Size, t.ModTime.UnixNano(), now)
 		if err != nil {
 			return err
 		}

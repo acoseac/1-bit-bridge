@@ -722,22 +722,36 @@ func (s *Store) decideSampleFormats(ctx context.Context, rows []sampleFormatRow,
 	return nil
 }
 
+// sampleFormatStampSQL records the kind the stamp leg read, at the stat it was
+// read at, only while the row still has that stat: the comparison is the
+// statement's own, so no other write can come between it and the kind. Binds
+// (kind, size, mtime_ns, path, size, mtime_ns).
+const sampleFormatStampSQL = `UPDATE tracks
+	SET sample_format = ?, sample_format_size = ?, sample_format_mtime_ns = ?
+	WHERE path = ? AND size = ? AND mtime_ns = ?`
+
 // writeSampleFormatTx records value as path's sample kind on the
-// version-stale stamp leg (StampExtractorVersionBatch), where the file read
-// is the one the row describes, with the row's size and mtime as the stat it
-// was read at: when the row holds another value, or the same one recorded at
-// another stat, it takes this one, and when a client would see the change
-// (no kind to a kind, a kind to another or to none) the row's indexed_at
-// advances, through bumpIndexedAtByPathSQL. NULL and "" both serve as no
-// kind, so deciding an undecided row whose header states none moves nothing.
-// A path with no row writes nothing. It reports whether it advanced
-// indexed_at.
-func writeSampleFormatTx(ctx context.Context, tx dbTx, path, value string, now int64) (bool, error) {
+// version-stale stamp leg (StampExtractorVersionBatch), certified at the stat
+// the extraction read (size, mtimeNS) and only while the row still has it
+// (sampleFormatStampSQL). The stamp waits in the scan writer's batch after
+// its file was read, and another writer can rewrite the row meanwhile, for a
+// file that changed (a `bridge scan` beside serve opens the store and scans
+// with no lock): that row keeps the kind its own writer read, at its stat,
+// and this one writes nothing. Paired with the row's stat as the write found
+// it, the stamp certified the old file's kind for the new file, which the next
+// open could not tell from a current one and no later scan read again. When
+// the row holds another value, or the same one recorded at another stat, it
+// takes this one, and when a client would see the change (no kind to a kind,
+// a kind to another or to none) the row's indexed_at advances, through
+// bumpIndexedAtByPathSQL. NULL and "" both serve as no kind, so deciding an
+// undecided row whose header states none moves nothing. A path with no row
+// at that stat writes nothing. It reports whether it advanced indexed_at.
+func writeSampleFormatTx(ctx context.Context, tx dbTx, path, value string, size, mtimeNS, now int64) (bool, error) {
 	var stored sql.NullString
 	var current bool
 	err := tx.QueryRowContext(ctx, `SELECT sample_format,
 			COALESCE(sample_format_size = size AND sample_format_mtime_ns = mtime_ns, 0)
-		FROM tracks WHERE path = ?`, path).Scan(&stored, &current)
+		FROM tracks WHERE path = ? AND size = ? AND mtime_ns = ?`, path, size, mtimeNS).Scan(&stored, &current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -747,9 +761,11 @@ func writeSampleFormatTx(ctx context.Context, tx dbTx, path, value string, now i
 	if stored.Valid && stored.String == value && current {
 		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tracks
-		SET sample_format = ?, sample_format_size = size, sample_format_mtime_ns = mtime_ns
-		WHERE path = ?`, value, path); err != nil {
+	out, err := tx.ExecContext(ctx, sampleFormatStampSQL, value, size, mtimeNS, path, size, mtimeNS)
+	if err != nil {
+		return false, err
+	}
+	if n, err := out.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
 	if knownSampleFormat(stored.String) == knownSampleFormat(value) {
