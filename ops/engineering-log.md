@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — the hotplug counts test reads the counts once the source has ended (CI run 40009970933)](#2026-10-23--the-hotplug-counts-test-reads-the-counts-once-the-source-has-ended-ci-run-40009970933)
 - [2026-10-23 — B516 round 3: restore ALSA dot rules](#2026-10-23--b516-round-3-restore-alsa-dot-rules)
 - [2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text](#2026-10-23--b516-round-2-alsa-string-fallback-assignments-and-byte-text)
 - [2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings](#2026-10-23--b516-alsa-scalar-values-preserve-configuration-stages-and-warnings)
@@ -57566,3 +57567,7 @@ key rule, not the value refusal (without `=` the dot continues the key,
 which then has no value), so it moved to the spaced-key test, which also
 checks that `defaults.value .5 x` lexes as `defaults.value.5 x`; and round
 2's entry keeps its own text, marked where round 3 reversed it.
+
+## 2026-10-23 — the hotplug counts test reads the counts once the source has ended (CI run 40009970933)
+
+`TestTheSourceDropsAndCountsWhatTheKernelDidNotSend` (`internal/player/hotplug`, B470 PR 4a2) failed once under `-race` on CI (run 40009970933, PR #1328, which does not touch the package): `Woke:1`, want 2. The source counts a wake after the send to the watcher has succeeded (`case s.events <- u:` then `Woke++`), and the test read `Status().Counts` as soon as it received the sentinel, so a source descheduled between the send and the count left the last wake uncounted. Red first: a 50 ms sleep between the send and the count failed the test three runs of three, with CI's counts. The test now cancels the source and waits for `Done()` (bounded at a minute) before it reads the counts; under the same sleep it passed, and it passed 20 runs under `-race`. The source's order is unchanged: counting before the send would count a wake the default branch then has to take back.
