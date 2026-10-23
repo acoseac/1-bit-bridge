@@ -2093,25 +2093,42 @@
   `TestTheVersionStaleStampRecordsTheKindItReads`.)
 
 - **…and a kind carries the stat it was read at, so an older binary's
-  rewrite leaves a kind every open clears** (2026-10-23, backlog B513, round
-  3). `sample_format_size` and `sample_format_mtime_ns` (v59) are the size
-  and mtime of the file the kind was decided from, written with every kind:
-  both upserts bind the row's own `size` and `mtime_ns` again, the stamp leg
-  writes them (and rewrites a right kind recorded at another stat), and the
-  fill and the header pass copy the row's. A writer that does not know the
-  columns, the upsert of a binary from before them run after a rollback,
-  rewrites `size`, `mtime_ns` and `tags_json` for a changed file and keeps
-  the kind, which then describes the bytes before; both binaries stamp
-  `ExtractorVersion` 27, so the skip gate never read such a file again (both
-  round-3 reviews, reproduced with main's upsert captured in
+  rewrite leaves a kind every open clears** (2026-10-23, backlog B513, rounds
+  3 and 4). `sample_format_size` and `sample_format_mtime_ns` (v60) are the
+  size and mtime of the file the kind was decided from, written with every
+  kind: both upserts bind the extraction's `size` and `mtime_ns` again (the
+  row's own, which they write), the fill copies the row's, the header pass
+  copies them only while the row still has the stat it read, and the stamp
+  leg records the stat its extraction read, only while the row still has it,
+  compared in its own `UPDATE` (`sampleFormatStampSQL`). A stamp waits in the
+  scan writer's batch after its file was read, and `bridge scan` opens the
+  store and scans beside a running serve with no lock, so another scan can
+  rewrite the row for a changed file before the stamp lands: until round 4
+  the stamp paired its old kind with the new row's stat, which the next open
+  read as current and no later scan read again (Codex on round 3). A writer
+  that does not know the columns, the upsert of a binary from before them run
+  after a rollback, rewrites `size`, `mtime_ns` and `tags_json` for a changed
+  file and keeps the kind, which then describes the bytes before; both
+  binaries stamp `ExtractorVersion` 27, so the skip gate never read such a
+  file again (both round-3 reviews, reproduced with main's upsert captured in
   `rolledBackUpsertSQL`). `clearStaleSampleFormats` runs at the end of every
   `migrate`, before the fill: a row whose recorded stat is not its own is
   undecided again, read through `idx_tracks_sample_format_stale` (its
   predicate, verbatim), which holds no row on a store this binary alone has
-  written (57 µs at 50,000 rows). **Never write `sample_format` without
-  `sample_format_size` and `sample_format_mtime_ns`, and don't let the fill
-  run before the open's clear.**
-  (`TestARollbackLeavesNoKindItsHeaderDoesNotState`,
+  written (57 µs at 50,000 rows). In the other order a FLAC row an older
+  binary rewrote is cleared after the fill has run, and the header pass never
+  reads a FLAC. The columns and the index are v60's, apart from v59: v59's
+  first form had the kind alone, a build of it may have opened a store that
+  stays at 59, and round 3's extension of v59 in place left such a store
+  unable to open (the Claude API on round 3). **Never write `sample_format`
+  without `sample_format_size` and `sample_format_mtime_ns`, nor at a stat
+  its write did not compare with the row's; don't let the fill run before
+  the open's clear; and don't move the stat columns into v59, which a build
+  shipped without them.**
+  (`TestARollbackLeavesNoKindItsHeaderDoesNotState`, whose older binary also
+  rewrites a FLAC, checked right after the open,
+  `TestADelayedStampLeavesTheKindOfARowAnotherScanRewrote`,
+  `TestAStoreTheFirstV59LeftOpensAndDecidesItsKindsAgain`,
   `TestEveryWriteOfAKindRecordsTheStatItWasReadAt`,
   `TestEverySampleFormatWriteRecordsItsStat`, which reads the package's SQL.)
 
