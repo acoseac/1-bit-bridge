@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B516 round 3: restore ALSA dot rules](#2026-10-23--b516-round-3-restore-alsa-dot-rules)
 - [2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text](#2026-10-23--b516-round-2-alsa-string-fallback-assignments-and-byte-text)
 - [2026-10-23 — B516: ALSA scalar values preserve configuration stages and warnings](#2026-10-23--b516-alsa-scalar-values-preserve-configuration-stages-and-warnings)
 - [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
@@ -56854,11 +56855,10 @@ Round 1's reviews found that alsa-lib's `parse_value` falls through to
 STRING on failed numeric conversions, `parse_def` takes optional `=`,
 and byte-oriented comments/strings do not require UTF-8. The lexer now
 consumes these forms without turning new strings into routing evidence.
-A `.5` after whitespace is a string value rather than a key continuation.
 The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
 `0.0garbage` refusal is replaced with an unterminated compound, which
 alsa-lib actually refuses. The rules and History correct round 1's false
-numeric-refusal and leading-dot claims beside the code.
+numeric-refusal claim beside the code.
 
 The include check already ran at every token start through
 `confInput.nonwhite`; explicit value and bracket-start guards now sit
@@ -56881,3 +56881,24 @@ scratch harness. In the repository, on Go 1.27.2: `go vet`, `go test` and
 `FuzzPCMConfigValues` (2.86 million executions) and `make docs-check`
 passed, and the 23 negative controls, replayed one at a time on the
 committed tree (ffdc7c11), each failed the tests it predicts.
+
+## 2026-10-23 — B516 round 3: restore ALSA dot rules
+
+Round 2 followed the orchestrating session's incorrect instruction that
+`.5` was a string. Its reviews and the orchestrating session's check of
+alsa-lib v1.2.14 `src/conf.c` established that `get_string` refuses an
+initial dot before numeric conversion, while `parse_def` continues a key
+at the dot returned by `get_nonwhite`, after blanks or comments. Restore
+both round-1 rules; remove leading-dot success cases, retain the fuzz seed,
+and correct round 2's dot claims in comments and History. Numeric fallback,
+optional `=`, byte text, include guards and device refusals stand.
+
+Red first on round-2 code: all five scalar/array leading-dot refusals,
+all three spaced/commented key cases and the real-loader route-warning
+test failed. With the fix they pass three times. In-place cached Go
+1.27.2 runs, offline: vet, test and race on `internal/alsa/...` and
+`internal/signalpath/...`, 20 s of `FuzzPCMConfigValues` (1,638,000
+executions), and `make docs-check` pass. The scratch round-3 report and
+controls manifest hold the commands, exact failing subtest names and
+individual control results: all 23 patches applied independently, built,
+and failed every predicted test. No alsa-lib binary or hardware was run.

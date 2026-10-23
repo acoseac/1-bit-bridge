@@ -6,14 +6,19 @@
 
 **Keep integers, reals and strings distinct; failed numeric conversions are
 opaque strings, optional `=` is accepted, and comments/strings are bytes.
+Refuse a leading-dot value; continue a key at a dot after blanks/comments.
 Never turn an unmodeled value into a resolved chain, lose a known softvol
 or route warning, or weaken hooks/include guards at any token start.**
 
-`lexPCM` distinguishes a definition's key from its value. In keys an
-adjacent dot separates components (`ttable.0.0`); after whitespace a dot
-starts a free-string value (`.5`). Within values dots belong to the scalar
-(`0.5`, a library filename). Braces hold definitions and brackets hold
-values; an iterative stack bounds nesting by the input, without recursion.
+`lexPCM` distinguishes a definition's key from its value. In keys a dot
+separates components even after blanks or `#` comments: `slave .pcm`,
+`ttable.0 .1` and `pcm.x # c\n.y` are `slave.pcm`, `ttable.0.1` and
+`pcm.x.y`. `parse_def` decides on the character `get_nonwhite` returns.
+Within values dots belong to the scalar (`0.5`, a library filename), but
+`get_string` refuses a leading dot before `get_freestring` or `parse_value`
+runs, in values and array elements, with or without `=`. Braces hold
+definitions and brackets hold values; an iterative stack bounds nesting
+by the input, without recursion.
 The key grammar stays restricted. Value tokens stop at ALSA's blanks or
 `= , ; { } [ ] ' " \ #`. One optional `=` after a key precedes a scalar,
 compound or array, including `pcm.x = { type = hw card = 2 }` and
@@ -24,14 +29,14 @@ with either quote character delimiting a value. Comments and string values
 are byte-oriented: Latin-1 text does not invalidate the file. NUL still
 refuses it, and keys retain their restricted grammar.
 
-The basis is alsa-lib v1.2.14 `src/conf.c`'s `get_freestring`, `parse_def`
-and `parse_value`, with `safe_strtoll`/`safe_strtod`: a bare token beginning
+The basis is alsa-lib v1.2.14 `src/conf.c`'s `get_string`, `get_freestring`,
+`parse_def` and `parse_value`, with `safe_strtoll`/`safe_strtod`: a bare token beginning
 with a digit or minus is tried as a base-zero signed integer, then a real,
 consuming the entire token. **If both conversions fail, parse_value falls
 through to STRING, never a parse error.** This corrects round 1's false
 claim and refusal tests. `2chMaster`, `0.5garbage`, `-5dB`, `--5`, `1e`,
 `1_000`, `0x`, `-`, `1e9999` and `1e-9999` are consumed as opaque strings.
-Other bare words, including `.5`, paths and leading-plus words, are
+Other admitted bare words, including paths and leading-plus words, are
 strings; quoted numbers stay strings. Go-only numeric underscores and
 binary/octal prefixes stay strings too. Hex and octal integers retain
 their C numeric value; reals have their own token kind. Overflow and
@@ -62,6 +67,7 @@ and exact chain and keeps the sample stage while refusing its chain;
 verdict. `TestPCMScalarKindsFollowALSA`,
 `TestPCMValueKindsDoNotGrantResolution`, `TestPCMFailedNumbersAreOpaqueStrings`,
 `TestPCMOptionalEquals`, `TestPCMByteStringsAndComments`,
+`TestPCMSpacedDottedKeys`, `TestPCMSpacedDottedRouteKeepsWarning`,
 `TestPCMValuesStillRefuseUnsafeFiles` and `TestPCMValueDelimiters` pin kinds,
 opacity, assignments, byte strings, refusals and boundaries.
 `FuzzPCMConfigValues` covers the tokens plus hooks and includes in key,
