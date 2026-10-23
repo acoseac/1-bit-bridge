@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -153,20 +154,31 @@ type SinkConfig struct {
 	// (internal/player/binding) goes here, so a DAC swapped in while the
 	// device was free is refused like one swapped in before the open.
 	Admit func(NodeInfo) error
+	// Locate, when set, is asked at every reopen after a release, with the
+	// sink's life context, for the endpoint to open: the one the caller's
+	// binding resolves to now (B470 PR 4b2). A card renumbered while the
+	// device was free (unplugged and plugged in again, or another card
+	// enumerated first) is no longer at the endpoint the sink opened, and a
+	// node there may be another card's. Admit still checks the node opened. A
+	// Locate error refuses the resume as ReasonNotLocated, carrying it, and
+	// the sink stays released with what it kept, as after any refused
+	// reopen. The open itself asks no Locate: it opens Endpoint. Unset, a
+	// reopen opens the endpoint the sink last had open.
+	Locate func(ctx context.Context) (Endpoint, error)
 }
 
-// admit asks cfg.Admit about the node dev has open; op is the open or the
-// resume it decides.
-func admit(cfg SinkConfig, dev *Device, op string) error {
-	if cfg.Admit == nil {
+// admit asks admit about the node dev has open at ep; op is the open or
+// the resume it decides.
+func admit(admit func(NodeInfo) error, dev *Device, ep Endpoint, op string) error {
+	if admit == nil {
 		return nil
 	}
 	n, err := dev.Node()
 	if err != nil {
 		return err
 	}
-	if err := cfg.Admit(n); err != nil {
-		return &Error{Reason: ReasonWrongDevice, Op: op, Endpoint: cfg.Endpoint, Detail: "the check after open refused the node", Err: err}
+	if err := admit(n); err != nil {
+		return &Error{Reason: ReasonWrongDevice, Op: op, Endpoint: ep, Detail: "the check after open refused the node", Err: err}
 	}
 	return nil
 }
@@ -210,7 +222,8 @@ func (s SinkState) String() string {
 
 // Position is a sink's account of the content it has played, for a later
 // OpenHome Time to read. Content frames are the frames the producer wrote,
-// counted from the sink's open; silence is never content.
+// counted from the sink's open, less those a Cut dropped; silence is never
+// content.
 type Position struct {
 	State SinkState
 	// Stream is the kernel's state of the stream at the last measurement.
@@ -225,7 +238,9 @@ type Position struct {
 	// Written is the content frames handed to the kernel, and Submitted the
 	// content frames the producer handed the sink: Written plus the
 	// lookahead. A release takes back from Written the frames the DAC had
-	// not played: they are written again after the reopen.
+	// not played: they are written again after the reopen. A Cut takes back
+	// from Submitted the frames it dropped, and the producer's next frames
+	// are submitted from the marker on.
 	Written, Submitted int64
 	// Queued is the frames, content and silence, the kernel held at the
 	// last measurement.
@@ -296,8 +311,8 @@ type SinkStats struct {
 // writer goroutine owns the device and moves them into it with
 // Device.Write, continuing partial writes. Pause, Resume, Recover, Drain
 // and Drop are commands to that goroutine, safe from any goroutine; Write
-// is for one producer at a time. A sink is done once dropped, drained or
-// ended, and Close must be called to stop its goroutine.
+// and Cut are for one producer at a time. A sink is done once dropped,
+// drained or ended, and Close must be called to stop its goroutine.
 type Sink struct {
 	cfg               SinkConfig
 	devCfg            Config
@@ -307,6 +322,12 @@ type Sink struct {
 	producerWaits     func()
 	producerPublishes func()
 	afterFunc         func(context.Context, func()) func() bool
+	commanded         func(op string)
+
+	// endpoint is the endpoint the device is, or was last, open on:
+	// cfg.Endpoint until a reopen opens the one Locate names. The writer
+	// stores it; every error names it.
+	endpoint atomic.Pointer[Endpoint]
 
 	// The writer's own: nothing else reads or writes them.
 	dev         *Device
@@ -322,8 +343,12 @@ type Sink struct {
 
 	// Under mu. The writer is the only one that changes state, err,
 	// pausedBy, params and drainCmd, so it reads them without the lock.
-	mu       sync.Mutex
-	ring     ring
+	mu   sync.Mutex
+	ring ring
+	// inflight is the end of the frames the writer has taken from the store
+	// for the write under way, 0 between writes: a frame below it is the
+	// kernel's, or is being handed to it, and a Cut leaves it alone.
+	inflight int64
 	state    SinkState
 	err      error
 	pausedBy string
@@ -377,15 +402,18 @@ type sinkCmd struct {
 // sinkSeams is what openSink takes from its caller: the opener of a
 // device and the clock, and for the tests a hook called each time the
 // producer starts to wait for room, one called each time it has copied
-// frames into the store and is about to publish them, and how the sink
+// frames into the store and is about to publish them, how the sink
 // registers what the end of a Drain's context runs (context.AfterFunc
-// when nil), which a test can hold back.
+// when nil), which a test can hold back, and a hook called each time a
+// command has been handed to the writer, on the sender's goroutine as it
+// begins to wait for the answer, with the command's name.
 type sinkSeams struct {
 	open              func(Endpoint, Config) (*Device, error)
 	now               func() time.Time
 	producerWaits     func()
 	producerPublishes func()
 	afterFunc         func(context.Context, func()) func() bool
+	commanded         func(op string)
 }
 
 // OpenSink opens cfg.Endpoint for cfg.Transport and starts the sink's
@@ -448,7 +476,7 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 		_ = dev.Close()
 		return nil, err
 	}
-	if err := admit(cfg, dev, "open"); err != nil {
+	if err := admit(cfg.Admit, dev, cfg.Endpoint, "open"); err != nil {
 		_ = dev.Close()
 		return nil, err
 	}
@@ -467,7 +495,7 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	}
 	s := &Sink{
 		cfg: cfg, devCfg: devCfg, life: ctx,
-		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc,
+		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc, commanded: seams.commanded,
 		dev:     dev,
 		zeros:   make([]byte, p.PeriodFrames*fb),
 		ring:    newRing(frames, fb, keep),
@@ -477,10 +505,19 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 		room:    make(chan struct{}, 1),
 		exited:  make(chan struct{}),
 	}
+	ep := cfg.Endpoint
+	s.endpoint.Store(&ep)
 	s.pos.Stream = State(statePrepared)
 	go s.loop()
 	return s, nil
 }
+
+// ep is the endpoint the device is, or was last, open on.
+func (s *Sink) ep() Endpoint { return *s.endpoint.Load() }
+
+// Endpoint is the endpoint the sink has, or last had, open: the one it was
+// opened on, or the one Locate named for its last reopen.
+func (s *Sink) Endpoint() Endpoint { return s.ep() }
 
 // checkSetup refuses a device the sink cannot use as configured: one
 // without PAUSE when only PAUSE may pause.
@@ -529,13 +566,13 @@ func (s *Sink) Write(ctx context.Context, frames []byte) (int, error) {
 	defer s.wmu.Unlock()
 	fb := int64(s.ring.frameBytes)
 	if int64(len(frames))%fb != 0 {
-		return 0, &Error{Reason: ReasonBadConfig, Op: "sink write", Endpoint: s.cfg.Endpoint,
+		return 0, &Error{Reason: ReasonBadConfig, Op: "sink write", Endpoint: s.ep(),
 			Detail: fmt.Sprintf("%d bytes is not whole frames of %d bytes", len(frames), fb)}
 	}
 	total, done := int64(len(frames))/fb, int64(0)
 	for done < total {
 		if err := ctx.Err(); err != nil {
-			return int(done), &Error{Reason: ReasonCancelled, Op: "sink write", Endpoint: s.cfg.Endpoint, Err: err}
+			return int(done), &Error{Reason: ReasonCancelled, Op: "sink write", Endpoint: s.ep(), Err: err}
 		}
 		s.mu.Lock()
 		if err := s.acceptLocked(); err != nil {
@@ -591,16 +628,49 @@ func (s *Sink) acceptLocked() error {
 	case s.state == SinkStopped:
 		return s.stoppedError("sink write")
 	case s.state == SinkXrun || s.state == SinkEnded:
-		return &Error{Reason: ReasonOf(s.err), Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink has stopped: " + s.state.String(), Err: s.err}
+		return &Error{Reason: ReasonOf(s.err), Op: "sink write", Endpoint: s.ep(), Detail: "the sink has stopped: " + s.state.String(), Err: s.err}
 	case s.finishing:
-		return &Error{Reason: ReasonBadState, Op: "sink write", Endpoint: s.cfg.Endpoint, Detail: "the sink is draining and takes no more frames"}
+		return &Error{Reason: ReasonBadState, Op: "sink write", Endpoint: s.ep(), Detail: "the sink is draining and takes no more frames"}
 	}
 	return nil
 }
 
+// Cut drops the frames the store holds from content frame at on, the tail
+// of what the producer submitted that has not reached the kernel, and
+// reports whether it could: false, dropping nothing, once a frame at or
+// after at is the kernel's or is being handed to it (the write under way),
+// since a frame in the kernel's buffer plays and is never withdrawn. at
+// counts content frames as Position's Written and Submitted do: a producer
+// marks where a track starts by Submitted before its first frame. What the
+// producer submits next is stored from at on, so no dropped frame is ever
+// written, and a released sink's reopen writes again only the frames before
+// at. It is the producer's, as Write is, and waits for a Write under way to
+// return. A marker outside the frames submitted is refused, and so is any
+// cut of a sink that is done.
+func (s *Sink) Cut(at int64) (bool, error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.state == SinkStopped:
+		return false, s.stoppedError("cut")
+	case s.state == SinkEnded:
+		return false, &Error{Reason: ReasonOf(s.err), Op: "cut", Endpoint: s.ep(), Detail: "the sink has ended", Err: s.err}
+	case at < 0 || at > s.ring.sub:
+		return false, &Error{Reason: ReasonBadConfig, Op: "cut", Endpoint: s.ep(),
+			Detail: fmt.Sprintf("frame %d is not among the %d frames submitted", at, s.ring.sub)}
+	case at < max(s.ring.wr, s.inflight):
+		return false, nil
+	}
+	s.ring.sub = at
+	poke(s.room)
+	return true, nil
+}
+
 // stoppedError is an operation on a sink that was dropped or drained.
 func (s *Sink) stoppedError(op string) error {
-	return &Error{Reason: ReasonClosed, Op: op, Endpoint: s.cfg.Endpoint, Detail: "the sink has stopped"}
+	return &Error{Reason: ReasonClosed, Op: op, Endpoint: s.ep(), Detail: "the sink has stopped"}
 }
 
 // Pause pauses playback: with the kernel's PAUSE when the hardware offers
@@ -670,13 +740,13 @@ func (s *Sink) command(op sinkOp, ctx context.Context) error {
 		if op == opDrop {
 			return nil
 		}
-		return &Error{Reason: ReasonOf(err), Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink has ended", Err: err}
+		return &Error{Reason: ReasonOf(err), Op: name, Endpoint: s.ep(), Detail: "the sink has ended", Err: err}
 	case s.finalDrain && op != opDrop:
 		s.mu.Unlock()
-		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink is playing out its last frames: only a drop stops it"}
+		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.ep(), Detail: "the sink is playing out its last frames: only a drop stops it"}
 	case s.finishing && op == opDrain:
 		s.mu.Unlock()
-		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.cfg.Endpoint, Detail: "the sink is draining already"}
+		return &Error{Reason: ReasonBadState, Op: name, Endpoint: s.ep(), Detail: "the sink is draining already"}
 	}
 	c := &sinkCmd{op: op, ctx: ctx, reply: make(chan error, 1)}
 	s.cmds = append(s.cmds, c)
@@ -685,6 +755,9 @@ func (s *Sink) command(op sinkOp, ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	poke(s.kick)
+	if s.commanded != nil {
+		s.commanded(name)
+	}
 	return <-c.reply
 }
 

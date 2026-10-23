@@ -43,8 +43,11 @@ type SessionOptions struct {
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it (pauseReleaseSeconds).
 	PauseRelease time.Duration
-	// DSD is the configured DSD mode; "off" refuses DSD content as
-	// ReasonDSDOff. This release plays PCM only.
+	// DSD is the configured DSD mode. This release plays PCM only: its
+	// backend refuses DSD content in every mode, off included, before any of
+	// it plays, as dsd_not_in_this_release (playback.ReasonDSD), since no
+	// setting turns DSD on yet; ReasonDSDOff is for the release that plays
+	// it, under mode off.
 	DSD string
 }
 

@@ -111,6 +111,11 @@ func (s *Sink) feed() {
 	ctx := s.waitContext()
 	s.mu.Lock()
 	chunk := s.ring.span(s.ring.wr, min(s.ring.pending(), int64(s.params.PeriodFrames)))
+	if len(chunk) > 0 {
+		// The chunk is the kernel's from here on, written or about to be: a
+		// Cut leaves it alone until wrote has accounted for it.
+		s.inflight = s.ring.wr + int64(len(chunk)/s.ring.frameBytes)
+	}
 	s.mu.Unlock()
 	if len(chunk) == 0 {
 		if s.state == SinkDraining {
@@ -167,7 +172,7 @@ func (s *Sink) idle() {
 	select {
 	case <-s.kick:
 	case <-s.life.Done():
-		err := &Error{Reason: ReasonCancelled, Op: "sink", Endpoint: s.cfg.Endpoint, Detail: "the sink's context ended", Err: s.life.Err()}
+		err := &Error{Reason: ReasonCancelled, Op: "sink", Endpoint: s.ep(), Detail: "the sink's context ended", Err: s.life.Err()}
 		s.end(err, err)
 	}
 }
@@ -175,13 +180,20 @@ func (s *Sink) idle() {
 // wrote records n frames written to the kernel, content or silence. It
 // reports false, having ended the sink, when the run's record has no room
 // for them: a pause by zeros reserves the segments it needs, so that is a
-// defect, and a position kept without the record would lie.
+// defect, and a position kept without the record would lie. Content ends
+// the write under way (inflight) in the step that moves wr past what it
+// wrote, so a Cut never finds those frames neither in flight nor written.
 func (s *Sink) wrote(n int64, silence bool) bool {
 	if n <= 0 {
+		if !silence {
+			s.mu.Lock()
+			s.inflight = 0
+			s.mu.Unlock()
+		}
 		return true
 	}
 	if !s.run.add(n, silence) {
-		err := &Error{Reason: ReasonBadState, Op: "write", Endpoint: s.cfg.Endpoint,
+		err := &Error{Reason: ReasonBadState, Op: "write", Endpoint: s.ep(),
 			Detail: "the record of content and silence written is full: the position could not be kept"}
 		s.end(err, err)
 		return false
@@ -194,6 +206,7 @@ func (s *Sink) wrote(n int64, silence bool) bool {
 		s.silence += n
 	} else {
 		s.ring.written(n)
+		s.inflight = 0
 	}
 	s.mu.Unlock()
 	if !silence {
@@ -327,7 +340,7 @@ func (s *Sink) doneError(op sinkOp) error {
 	case s.state == SinkStopped:
 		return s.stoppedError(sinkOpNames[op])
 	}
-	return &Error{Reason: ReasonOf(s.err), Op: sinkOpNames[op], Endpoint: s.cfg.Endpoint, Detail: "the sink has ended", Err: s.err}
+	return &Error{Reason: ReasonOf(s.err), Op: sinkOpNames[op], Endpoint: s.ep(), Detail: "the sink has ended", Err: s.err}
 }
 
 // closeDevice closes the device, which drops the stream and frees its
@@ -358,13 +371,13 @@ func (s *Sink) badState(op string) error {
 	detail := "the sink is " + s.state.String()
 	switch s.state {
 	case SinkXrun:
-		return &Error{Reason: ReasonOf(s.err), Op: op, Endpoint: s.cfg.Endpoint, Detail: "the sink stopped at an xrun: recover or drop it", Err: s.err}
+		return &Error{Reason: ReasonOf(s.err), Op: op, Endpoint: s.ep(), Detail: "the sink stopped at an xrun: recover or drop it", Err: s.err}
 	case SinkPaused, SinkReleased:
 		detail = "the sink is " + s.state.String() + ": resume or drop it"
 	case SinkPlaying, SinkDraining:
 		detail = "the sink is " + s.state.String() + ": nothing stopped it"
 	}
-	return &Error{Reason: ReasonBadState, Op: op, Endpoint: s.cfg.Endpoint, Detail: detail}
+	return &Error{Reason: ReasonBadState, Op: op, Endpoint: s.ep(), Detail: detail}
 }
 
 // pause pauses: a stream that has not started by writing nothing more; one
@@ -408,7 +421,7 @@ func (s *Sink) pause() error {
 		}
 	}
 	if by == pausedZeros && s.run.room() < 2 {
-		return &Error{Reason: ReasonBadState, Op: "pause", Endpoint: s.cfg.Endpoint,
+		return &Error{Reason: ReasonBadState, Op: "pause", Endpoint: s.ep(),
 			Detail: "too many pauses by zeros within one hardware buffer: pause again once it has played"}
 	}
 	s.unexplained = 0
@@ -463,13 +476,13 @@ func (s *Sink) settle(ctx context.Context, rev int16, err error, op string) {
 			kerr := s.dev.kernelError("poll", err)
 			s.end(kerr, kerr)
 		} else if s.life.Err() != nil {
-			cerr := &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.cfg.Endpoint, Err: s.life.Err()}
+			cerr := &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.ep(), Err: s.life.Err()}
 			s.end(cerr, cerr)
 		}
 	case rev == 0:
 		s.unexplained = 0
 	case rev&(pollHup|pollNval) != 0:
-		derr := &Error{Reason: ReasonDisconnected, Op: op, Endpoint: s.cfg.Endpoint, Detail: "the device went away", Err: pollEvents(rev)}
+		derr := &Error{Reason: ReasonDisconnected, Op: op, Endpoint: s.ep(), Detail: "the device went away", Err: pollEvents(rev)}
 		s.end(derr, derr)
 	case rev&pollErr != 0:
 		if err := s.dev.explain(op); err != nil {
@@ -477,7 +490,7 @@ func (s *Sink) settle(ctx context.Context, rev int16, err error, op string) {
 			return
 		}
 		if s.unexplained++; s.unexplained > 1 {
-			kerr := &Error{Reason: ReasonKernel, Op: op, Endpoint: s.cfg.Endpoint,
+			kerr := &Error{Reason: ReasonKernel, Op: op, Endpoint: s.ep(),
 				Detail: "poll keeps reporting an error the stream's state does not explain"}
 			s.end(kerr, kerr)
 		}
@@ -499,7 +512,7 @@ func (s *Sink) release() {
 	kept := s.ring.wr - s.ring.base
 	s.mu.Unlock()
 	if unplayed > kept {
-		err := &Error{Reason: ReasonBadState, Op: "release", Endpoint: s.cfg.Endpoint, Detail: fmt.Sprintf(
+		err := &Error{Reason: ReasonBadState, Op: "release", Endpoint: s.ep(), Detail: fmt.Sprintf(
 			"the %d frames the DAC had not played are not all held (%d are): a release would skip them", unplayed, kept)}
 		s.end(err, err)
 		return
@@ -548,12 +561,23 @@ func (s *Sink) resume() error {
 	return nil
 }
 
-// reopen opens the device again for a released sink, for the same
-// endpoint and parameters, which the kernel commits exactly or refuses. A
-// refusal, busy above all, leaves the sink released. A new run starts at
-// the first content frame the DAC had not played.
+// reopen opens the device again for a released sink, with the same
+// parameters, which the kernel commits exactly or refuses, at the endpoint
+// Locate names now, or the one the sink had open when there is no Locate:
+// a card renumbered while the device was free is opened where it is, and
+// Admit checks the node opened. A refusal, busy above all, leaves the sink
+// released, the frames it kept untouched. A new run starts at the first
+// content frame the DAC had not played.
 func (s *Sink) reopen() error {
-	dev, err := s.open(s.cfg.Endpoint, s.devCfg)
+	ep := s.ep()
+	if s.cfg.Locate != nil {
+		at, err := s.cfg.Locate(s.life)
+		if err != nil {
+			return &Error{Reason: ReasonNotLocated, Op: "resume", Endpoint: ep, Detail: "no endpoint could be located for the reopen", Err: err}
+		}
+		ep = at
+	}
+	dev, err := s.open(ep, s.devCfg)
 	if err != nil {
 		return err
 	}
@@ -564,13 +588,14 @@ func (s *Sink) reopen() error {
 	}
 	if int64(p.BufferFrames)+int64(p.PeriodFrames) > s.ring.frames {
 		_ = dev.Close()
-		return &Error{Reason: ReasonBadConfig, Op: "resume", Endpoint: s.cfg.Endpoint, Detail: fmt.Sprintf(
+		return &Error{Reason: ReasonBadConfig, Op: "resume", Endpoint: ep, Detail: fmt.Sprintf(
 			"the device came back with a buffer of %d frames, which the store of %d cannot hold with a period more", p.BufferFrames, s.ring.frames)}
 	}
-	if err := admit(s.cfg, dev, "resume"); err != nil {
+	if err := admit(s.cfg.Admit, dev, ep, "resume"); err != nil {
 		_ = dev.Close()
 		return err
 	}
+	s.endpoint.Store(&ep)
 	if need := p.PeriodFrames * p.FrameBytes(); need > cap(s.zeros) {
 		s.zeros = make([]byte, need)
 	} else {
@@ -722,7 +747,7 @@ func (s *Sink) drainFailed(err error) {
 // abandonDrain stops a sink whose Drain's context ended before the drain
 // did: the stream is dropped, and the Drain is answered with the cancel.
 func (s *Sink) abandonDrain() {
-	err := &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.cfg.Endpoint, Detail: "the drain's context ended: dropped", Err: s.drainCmd.ctx.Err()}
+	err := &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.ep(), Detail: "the drain's context ended: dropped", Err: s.drainCmd.ctx.Err()}
 	if s.dev != nil && s.state != SinkXrun {
 		_, _ = s.measure()
 	}
@@ -736,6 +761,6 @@ func (s *Sink) drop() error {
 	if s.dev != nil && (s.state == SinkPlaying || s.state == SinkPaused || s.state == SinkDraining) {
 		_, _ = s.measure()
 	}
-	s.end(nil, &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.cfg.Endpoint, Detail: "dropped while draining"})
+	s.end(nil, &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: s.ep(), Detail: "dropped while draining"})
 	return nil
 }

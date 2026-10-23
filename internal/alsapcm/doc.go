@@ -7,7 +7,10 @@
 // kernel establishes, pause and resume by the kernel's PAUSE or by zeros
 // with the device released after a long pause, xruns reported and
 // recovered only when asked, drop and drain, and the gapless decision
-// between tracks. DSD and DoP are later layers.
+// between tracks. PR 4b2 gave the sink a cut at a track boundary (Cut: the
+// store's tail the kernel has not taken, dropped and never written) and a
+// reopen at the endpoint the binding resolves to now (SinkConfig.Locate),
+// checked by Admit like the open. DSD and DoP are later layers.
 //
 // What it will do, and what it refuses:
 //
