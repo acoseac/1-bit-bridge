@@ -479,7 +479,9 @@ func pickIDOf(pick *dacPick) pickID {
 // that reads its dop and allowed_formats, so two readings that find
 // different keys have an open between them. A seek, a change of song in the
 // same format or an xrun restarts the stream without one, and changes no
-// key, as trigger_time and hw_ptr, which they move, would.
+// key, as trigger_time and hw_ptr, which they move, would. The same key is
+// not the same open, though: MPD can reopen with the same hw_params from the
+// same thread, which only the run's start (openRecord.trigger) tells apart.
 type streamKey struct {
 	open                      bool
 	subdevice                 int
@@ -497,12 +499,14 @@ type outputSettings struct {
 }
 
 // openRecord is what one reading found of one output's PCM device, kept for
-// the next reading: when, the stream on it, what MPD reported of every
-// output's DoP settings (nil when the reading could not say), and whether
-// the stream was watched opening with them.
+// the next reading: when, the stream on it, the start the kernel stamped on
+// its run (the substream's trigger_time as printed, "" with none open), what
+// MPD reported of every output's DoP settings, and whether the stream was
+// watched opening with them.
 type openRecord struct {
 	at       time.Time
 	stream   streamKey
+	trigger  string
 	settings map[string]outputSettings
 	tied     bool
 }
@@ -531,12 +535,12 @@ func (o *localOutputs) watchOpens(s *readingSnap) {
 	if s.procCode == "" && s.alsaCode == "" && !s.failed && !s.unidentified {
 		for i := range s.picks {
 			pick := &s.picks[i]
-			stream, ok := streamOn(s.cards, pick)
+			stream, trigger, ok := streamOn(s.cards, pick)
 			if !ok {
 				continue
 			}
 			id := pickIDOf(pick)
-			rec := openRecord{at: s.at, stream: stream, settings: settings}
+			rec := openRecord{at: s.at, stream: stream, trigger: trigger, settings: settings}
 			if stream.open {
 				rec.tied = watchedOpen(prev[id], rec, holderName(s, pick))
 			}
@@ -571,7 +575,18 @@ func watchedOpen(prev, now openRecord, holder string) bool {
 		// Opened since the reading before, while MPD reported these settings.
 		return true
 	}
-	return prev.tied
+	// The same key, and the same open only while the kernel shows the run
+	// the reading before saw: a runtime starts at zero when it is opened and
+	// is stamped at every start, stop and pause, so a reopen between the two
+	// readings (or a restart, which this does not tell from one) stamps
+	// another trigger_time.
+	return prev.tied && started(now.trigger) && prev.trigger == now.trigger
+}
+
+// started reports whether a trigger_time is a start: the kernel prints zero
+// for a stream opened and not started yet.
+func started(trigger string) bool {
+	return strings.Trim(trigger, "-0.") != ""
 }
 
 // settingsOf is what MPD reported of every output's DoP settings at this
@@ -591,39 +606,40 @@ func settingsOf(s *readingSnap) map[string]outputSettings {
 	return m
 }
 
-// streamOn is the stream a reading found on pick's PCM device. ok is false
-// when the reading does not say which: the device not read, a substream's
-// files not read, several open and not exactly one MPD's, or the open one
-// not set up whole (one with no hw_params yet was opened, and MPD's open
-// read its settings, before this reading began).
-func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, bool) {
+// streamOn is the stream a reading found on pick's PCM device, and the
+// start the kernel stamped on its run (trigger_time, "" with none open). ok
+// is false when the reading does not say which: the device not read, a
+// substream's files not read, several open and not exactly one MPD's, or the
+// open one not set up whole (one with no hw_params yet was opened, and MPD's
+// open read its settings, before this reading began).
+func streamOn(snap alsa.Snapshot, pick *dacPick) (streamKey, string, bool) {
 	dev := pickDevice(snap, pick)
 	if dev == nil || len(dev.Substreams) == 0 {
-		return streamKey{}, false
+		return streamKey{}, "", false
 	}
 	for _, sub := range dev.Substreams {
 		if sub.HWParams == nil || sub.Status == nil {
-			return streamKey{}, false
+			return streamKey{}, "", false
 		}
 	}
 	sub, ambiguous := pickSubstream(snap, pick)
 	switch {
 	case ambiguous:
-		return streamKey{}, false
+		return streamKey{}, "", false
 	case sub == nil:
-		return streamKey{}, true
+		return streamKey{}, "", true
 	}
 	h := sub.HWParams
 	if h.Closed || h.NoSetup || h.Rate == nil || h.Channels == nil || h.PeriodSize == nil || h.BufferSize == nil ||
 		sub.Owner == nil || sub.Owner.PID == nil {
-		return streamKey{}, false
+		return streamKey{}, "", false
 	}
 	return streamKey{
 		open: true, subdevice: sub.Subdevice,
 		access: h.Access, format: h.Format, subformat: h.Subformat,
 		rate: *h.Rate, channels: *h.Channels, period: *h.PeriodSize, buffer: *h.BufferSize,
 		tid: sub.Owner.TID, pid: *sub.Owner.PID,
-	}, true
+	}, sub.Status.TriggerTime, true
 }
 
 // holderName is the name of the one enabled output whose thread holds the

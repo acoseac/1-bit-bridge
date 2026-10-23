@@ -1074,6 +1074,63 @@ func TestDoPSettingsChangedOnAnOpenStreamAreNotItsDoP(t *testing.T) {
 	reading("the stream watched opening, read again", signalpath.FormatPreservedDoP)
 }
 
+// restartStream stamps card 5's playback substream with a later
+// trigger_time, as the kernel stamps every start: a reopen of the output and
+// a restart of the same open (a seek, an xrun) read alike.
+func restartStream(t *testing.T, r *readingRig) {
+	t.Helper()
+	path := filepath.Join(r.procRoot, "asound", "card5", "pcm0p", "sub0", "status")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := regexp.MustCompile(`(?m)^trigger_time: (\d+)\.(\d{9})$`)
+	m := trigger.FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatalf("no trigger_time in %s", path)
+	}
+	secs, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := trigger.ReplaceAllString(string(b), "trigger_time: "+strconv.Itoa(secs+2)+"."+m[2])
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAReopenTheBridgeDidNotSeeEndsTheConfirmation: between two readings of
+// a stream confirmed as opened with its DoP settings, the settings can go to
+// PCM, MPD reopen the output with the same hw_params from the same thread,
+// reading PCM, and the settings come back to DoP. The key and the settings
+// then read as before; the start the kernel stamps on the run (trigger_time)
+// is the one fact that tells the new run from the old, so the confirmation
+// carries only while it is the same. Here it ends, dop_unconfirmed, and
+// stays ended for that run. A seek or an xrun, which restarts the stream
+// without reopening it, reads the same and ends it too.
+func TestAReopenTheBridgeDidNotSeeEndsTheConfirmation(t *testing.T) {
+	override := warning(signalpath.MPDFormatOverride, signalpath.FromMPD)
+	rig := doPRig(t, "0", "dsd64:*=dop")
+	clock := manualClockOn(rig)
+	hs, token, id := rig.serve()
+	got, raw := watchOpen(t, rig, clock, hs, token, id)
+	wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+
+	// outputset to 176400:24:2, a pause and a resume (MPD reopens with the
+	// same hw_params from its output thread, reading PCM), outputset back to
+	// dsd64:*=dop: only the stream's start differs.
+	restartStream(t, rig)
+	for _, what := range []string{"the reading after the reopen", "the next reading of that run"} {
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		if got.State != "whole" {
+			t.Fatalf("%s: state %s %v\n%s", what, got.State, got.StateReasons, raw)
+		}
+		wantVerdict(t, got, raw, signalpath.Withheld, signalpath.DoPUnconfirmed)
+		wantWarnings(t, got, raw, override)
+	}
+}
+
 // TestADoPVerdictNeedsTheStreamWatchedOpening: DoP is claimed for settings
 // the bridge watched the stream open with, that is a reading at most ten
 // seconds before found the PCM device closed, or with another stream on it
