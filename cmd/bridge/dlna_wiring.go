@@ -139,7 +139,7 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
 	// then a pinned bind host, then the picked interface's IPv4 as a last
 	// resort. DLNA disables only when NONE yield a dialable host.
-	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface)
+	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface, (*net.Interface).Addrs)
 	if urlErr != nil {
 		dlnaLog.Warn("DLNA disabled — couldn't resolve a dialable server URL",
 			slog.String("iface", iface.Name),
@@ -250,16 +250,28 @@ func (d *dlnaLifecycle) Stop(ctx context.Context) {
 // a single interface by definition, so it returns nil and the server
 // falls back to its single-advertiser path (Interface + ServerURL).
 //
-// Interfaces that are LAN-eligible but carry no usable unicast IPv4
-// (IPv6-only, or link-local-only at this instant) are skipped rather than
-// advertised with an unreachable "http://<nil>:port" LOCATION.
+// One endpoint per member of the multicast set, in the set's order, on the
+// member's FIRST IPv4 address that is neither loopback nor unspecified
+// (firstIPv4OnInterface): a member with aliases is advertised once, on the first, and
+// a self-assigned 169.254 address counts like any other (this said
+// "link-local-only" members were skipped, which the code never did). A member
+// with no such address (IPv6-only) is skipped rather than advertised with an
+// unreachable "http://<nil>:port" LOCATION.
 func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
 	if !bindWildcard {
 		return nil
 	}
+	return advertiseEndpointsOf(dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}), (*net.Interface).Addrs, port, log)
+}
+
+// advertiseEndpointsOf is gatherAdvertiseEndpoints over a given multicast set,
+// whose members' addresses addrsOf reads, so a test can hand it interfaces of
+// its own instead of the host's.
+func advertiseEndpointsOf(members []*net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error),
+	port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
 	var endpoints []dlna.AdvertiseEndpoint
-	for _, ai := range dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}) {
-		ip, ipErr := firstIPv4OnInterface(ai)
+	for _, ai := range members {
+		ip, ipErr := firstIPv4OnInterface(ai, addrsOf)
 		if ipErr != nil {
 			log.Debug("DLNA SSDP: skipping interface with no usable IPv4",
 				slog.String("iface", ai.Name),
@@ -284,7 +296,11 @@ func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []d
 //     FIRST interface not block startup — CodeRabbit on PR #328).
 //  3. Wildcard bind, no endpoints → the picked interface's IPv4 as a last
 //     resort; errors only when even that has no usable IPv4.
-func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface) (string, error) {
+//
+// addrsOf reads an interface's addresses: (*net.Interface).Addrs, or a
+// test's own.
+func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface,
+	addrsOf func(*net.Interface) ([]net.Addr, error)) (string, error) {
 	if !bindWildcard {
 		// JoinHostPort brackets an IPv6 literal. Plain Sprintf yields
 		// "http://2001:db8::1:7790", which is not a parseable URL — a
@@ -296,22 +312,23 @@ func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dl
 	if len(endpoints) > 0 {
 		return endpoints[0].ServerURL, nil
 	}
-	ip, err := firstIPv4OnInterface(iface)
+	ip, err := firstIPv4OnInterface(iface, addrsOf)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("http://%s:%d", ip.String(), port), nil
 }
 
-// firstIPv4OnInterface returns the first IPv4 address bound to iface
-// that is NOT loopback / unspecified. Returns an error when no
-// suitable address is found — caller treats that as "DLNA can't
-// advertise a usable URL, skip startup".
-func firstIPv4OnInterface(iface *net.Interface) (net.IP, error) {
+// firstIPv4OnInterface returns the first IPv4 address bound to iface, as
+// addrsOf lists them, that is NOT loopback / unspecified: a link-local
+// 169.254 address qualifies. Returns an error when no suitable address is
+// found — caller treats that as "DLNA can't advertise a usable URL, skip
+// startup".
+func firstIPv4OnInterface(iface *net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error)) (net.IP, error) {
 	if iface == nil {
 		return nil, errors.New("nil interface")
 	}
-	addrs, err := iface.Addrs()
+	addrs, err := addrsOf(iface)
 	if err != nil {
 		return nil, err
 	}
