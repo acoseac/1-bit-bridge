@@ -56855,12 +56855,11 @@ Round 1's reviews found that alsa-lib's `parse_value` falls through to
 STRING on failed numeric conversions, `parse_def` takes optional `=`,
 and byte-oriented comments/strings do not require UTF-8. The lexer now
 consumes these forms without turning new strings into routing evidence.
-A `.5` after whitespace is a string value rather than a key continuation
-(reversed in round 3). The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
+A `.5` after whitespace is a string value rather than a key continuation.
+The PipeWire fixture now uses `libs.native = … ;`. The old chain test's
 `0.0garbage` refusal is replaced with an unterminated compound, which
 alsa-lib actually refuses. The rules and History correct round 1's false
-numeric-refusal and leading-dot claims beside the code (the leading-dot
-correction reversed in round 3).
+numeric-refusal and leading-dot claims beside the code.
 
 The include check already ran at every token start through
 `confInput.nonwhite`; explicit value and bracket-start guards now sit
@@ -56883,6 +56882,9 @@ scratch harness. In the repository, on Go 1.27.2: `go vet`, `go test` and
 `FuzzPCMConfigValues` (2.86 million executions) and `make docs-check`
 passed, and the 23 negative controls, replayed one at a time on the
 committed tree (ffdc7c11), each failed the tests it predicts.
+
+[Round 3 reversed this entry's two dot statements, the `.5` after whitespace
+and the leading-dot correction: see its entry.]
 
 ## 2026-10-23 — B516 round 3: restore ALSA dot rules
 
