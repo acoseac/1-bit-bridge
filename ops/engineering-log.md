@@ -54173,7 +54173,8 @@ this change does not add it; the report carries a backlog entry.
 (the column existed; nothing wrote it). Red: all 12 new manifest tests (29 of
 the golden table's subtests, the 19 integer and 10 float shapes, with every
 absent shape already green), `TestHealthFeaturesCompleteSet` and
-`TestHealthOmitsSampleFormatUntilTheFillIsDone` in `internal/api`, and the
+`TestHealthOmitsSampleFormatUntilTheBackfillIsDone` (named
+`…UntilTheFillIsDone` until round 3) in `internal/api`, and the
 three `cmd/bridge` tests (the loop and the boot test at their give-up, the
 wiring test on the missing lines). `4ae87be5` turned them green; the whole
 `internal/manifest` and `internal/api` suites stayed green.
@@ -54237,6 +54238,7 @@ A rolled-back binary that updates a row (a changed file) leaves its
 nothing re-reads it until the file changes again; a row it inserts is NULL and
 the next open of this binary decides it. The values the fill decides on such
 an open reach a client only through a full manifest, as `firstIndexedAt`'s do.
+Round 3, below, closes both.
 
 ### The iOS mirror
 
@@ -54247,3 +54249,140 @@ keeps a kind it read from the file itself over an absent one. Once per bridge,
 the first sync after `/v1/health` advertises `sampleFormat` is one paginated
 full sync, the `firstIndexedAt` machinery keyed on a second key. `BridgeVariant`
 gains the optional `sampleFormat`. PROTOCOL.md's section is the Mirror-PR text.
+
+### Round 3: two reviews of `03c0e60d`
+
+A Codex review and a Claude review, each finding checked against the code
+before anything changed. Every premise held.
+
+1. **A rollback leaves a kind the header does not state, forever** (both
+   reviews). Main's track upsert (`prepareTrackUpsert` at `b6dd72d7`) names no
+   `sample_format`: its conflict arm rewrites `size`, `mtime_ns` and
+   `tags_json` for a changed file and keeps whatever kind the row held. The
+   fill and the header pass read only NULL rows, both binaries stamp
+   `ExtractorVersion` 27 (`extractors.go:609` here, `:599` on main), and the
+   skip gate (`scanner.go:2130`) passes over a row whose stat and version are
+   current, so nothing read the file again. Reproduced with main's upsert
+   captured byte for byte in the test (`rolledBackUpsertSQL`): a float WAV
+   replaced by an integer render under the older binary still said "float"
+   after the reinstalled binary's open, boot pass and scan. The Claude review's
+   second effect held too: a FLAC row the older binary inserted was filled at
+   the next open with no `indexed_at` advance, after the clients' one full
+   sync, so no client received it.
+2. **The header pass advanced `indexed_at`** (Codex): `sample_format.go:511`
+   bumped every row it gave a kind, so a WAV-heavy library sent a delta the
+   size of its WAV files on top of the one full sync.
+3. **The fill re-read the header pass's rows in every chunk** (Codex): its
+   inner select (`:212`, inlined at `:232`) started each 2,000-row chunk at
+   the front of `idx_tracks_sample_format_null`, where the undecided WAV and
+   AIFF rows stay, so the work was W × ceil(F / 2,000) when they sort first.
+4. **The header pass's race guards were not pinned** (Claude, low): with
+   `sample_format IS NULL`, the `size`/`mtime_ns` terms of
+   `sampleFormatDecideSQL`, or the post-read stat check of
+   `readFileSampleFormat` removed, every test stayed green, because the one
+   changed-file case is caught first by the resolver-time check.
+
+**What changed.**
+
+- **A kind carries the stat it was read at.** v59 (not shipped; extended in
+  place) adds `sample_format_size` and `sample_format_mtime_ns`, written with
+  every kind: both upserts (the row's own `size` and `mtime_ns`, bound
+  again), the stamp leg (which also rewrites a right kind recorded at another
+  stat), the fill and the header pass. `TestEverySampleFormatWriteRecordsItsStat`
+  reads the package's SQL so a sixth writer cannot skip them.
+- **Every open clears a stale kind first** (`clearStaleSampleFormats`,
+  before the fill): a row whose recorded stat is not its own was rewritten by
+  a writer that does not know the column. A partial index on exactly that
+  predicate (`idx_tracks_sample_format_stale`) keeps the check free on a store
+  this binary alone has written. The row is undecided again, and the fill or
+  the header pass decides it.
+- **The backfill is delivered once.** Nothing the fill or the header pass
+  writes advances `indexed_at` until a header pass runs to its end with every
+  row the fill decides decided, which records `sample_format_backfill_complete_ns`
+  in `scan_state` (never removed). `SampleFormatReady` is that row, so
+  `/v1/health` advertises `sampleFormat` only then and the clients' one full
+  sync carries every kind. A pass a shutdown stops, or one that fails, writes
+  no mark and the next starts again; the rows it decided stay decided, so the
+  progress is in the rows themselves and the mark is the only other state. A
+  file the finishing pass could not read does not hold the mark back, as
+  before.
+- **After the mark, a kind the backfill gives a row advances `indexed_at`**
+  (`advanceGainedSampleFormatsTx`, shared by the fill and the header pass, in
+  the transaction that writes the kind): a file that could not be read, and a
+  rollback's rows, cleared or inserted. That is what makes the older binary's
+  leftovers reach a client. A row decided as having no kind never moves.
+- **The fill pages by path** (`UPDATE … RETURNING path, sample_format`, the
+  next chunk starting after the last path it decided), past the rows it
+  decides and the rows it leaves alike, so a fill reads each undecided row
+  once.
+
+**Red first** (`35ce2edf`, the fill's chunk made a parameter so a test can run
+30 chunks over 400 rows): `TestARollbackLeavesNoKindItsHeaderDoesNotState`
+red on the replaced WAV ("float", served, cursor short of the clients') and
+the added FLAC (cursor short); `TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd`
+red seven ways (ready after the fill alone, after a stopped pass and after a
+restart; two cursors moved by the finishing pass and still moved after it);
+`TestTheOpenFillVisitsEachUndecidedRowOnce` red at 4,161 pages read with the
+100 WAV rows sorting first against 946 with them last (page requests on one
+connection, `sqlite3_db_status` cache hits plus misses). The three race-guard
+tests passed there, as tests of guards that exist do. `1edb5e0c` turned the
+three red tests green (1,020 pages against 968) along with the rest.
+
+**Negative controls**, each against `1edb5e0c`, restored with `git checkout`:
+
+1. No open-time clear: the rollback test red (the replaced WAV stays "float").
+2. The upsert's conflict arm without the stat: the stat test red at a scan's
+   rewrite of a changed file.
+3. The stamp leg ignoring the stat when the kind already matches: the stat
+   test red at the stamp leg.
+4. The header pass writing the kind without its stat: the SQL sweep names
+   `sample_format.go:321`; the stat test red, and the next open clears the
+   kind; the one-delivery test red, since the cleared rows are decided again
+   after the mark and move.
+5. Nothing advanced after the mark: the one-delivery test (the late WAV) and
+   the rollback test (all three rows) red.
+6. Everything advanced, mark or not: four tests red (the fill's rows, every
+   header row, the stat test's next open).
+7. Readiness as round 2's count of fill rows: ready after the fill alone,
+   after a stopped pass, after a restart; the readiness test red.
+8. The mark written when a pass starts: a stopped pass reads complete, and
+   every row decided after the early mark moves; four tests red.
+9. The mark without its NOT EXISTS: complete with a FLAC row undecided, and
+   the plan test sees SQLite fold the guard away (`SCAN CONSTANT ROW`).
+10. The fill's cursor never advancing: only the visit test red, 4,183 pages
+    against 968; the plan test stays green, which is why the visit test exists.
+11. The header pass's `sample_format IS NULL` dropped: the scan's kind is
+    overwritten, red.
+12. Its `size`/`mtime_ns` terms made true: a row whose stat moved gets a
+    kind, red.
+13. The post-read stat check off: a file replaced after its stat has its
+    header land on the old row, red.
+
+**Measured** (this Mac, a throwaway test, no race detector):
+
+| | |
+|---|---|
+| fill, 50,000 rows, 10,000 WAV sorting first | round 2's 249 and 252 ms, this one 211 and 202 ms |
+| fill, 80,000 rows, 40,000 WAV sorting first | round 2's 525 ms, this one 218 ms |
+| the open's clear, nothing stale | 57 µs |
+| an open's fill while 10,000 (40,000) WAV rows are undecided | 4.4 to 4.7 ms (17.7 ms) |
+| the completion mark, same | 3.8 ms (17.5 ms) |
+| `SampleFormatReady` (a `scan_state` lookup) | 14 µs, against round 2's 5.9 ms count |
+
+**Decided differently from the brief.** The brief preferred that neither
+the fill nor the header pass advance anything. They advance nothing until the
+mark; after it, a kind they record advances `indexed_at`, because the full
+sync is once per bridge (PROTOCOL.md: the first sync after the key appears),
+and a key that comes back after a rollback starts none. The brief's "the
+ordinary delta of the scan that rewrote them" is, for a rollback's rows, the
+older binary's delta, which carried them with no kind; the delta that carries
+the kind has to be this binary's.
+
+**Still not covered.** A snapshot from before the field, restored: it holds
+no mark, so the backfill runs again without advancing, and a client whose one
+full sync came before the restore does not receive those kinds (its picture
+of a restored library is behind in every field, not this one alone). A file
+rewritten with its size and mtime both kept is not seen as changed, here as by
+the skip gate. An older binary's scan run beside this serve leaves a stale
+kind served until this binary's next open. A file the finishing pass could
+not read (a mount down at the upgrade) arrives later, one delta row each.
