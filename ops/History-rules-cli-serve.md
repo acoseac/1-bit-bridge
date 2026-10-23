@@ -1316,8 +1316,11 @@ mentions across the four `ops/audit-*.md` files.
   copy's mode, one `KeepOwner`. B470 5a0 writes schema 2: older restores refuse it,
   while the new restore also reads schema 1. Before this UUID and every
   other identity file, restore durably merges and raises both reservation
-  marks; the reservation is never copied by the file loop. A matching
-  reservation travels in snapshots; no UUID leaves the live reservation
+  marks; the reservation is never copied by the file loop. Every decodable
+  live reservation travels in snapshots, restamped with the captured UUID;
+  unreadable reservations refuse backup, and only missing files omit the mark.
+  An identity replacement also durably removes the destination queue before
+  writing the UUID; restoring the same UUID keeps its queue; no UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
   order and release coupling are in History-rules-player.md under the
   restored-identity rule. Two boxes running one identity at once are

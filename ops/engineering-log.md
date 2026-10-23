@@ -57490,9 +57490,10 @@ and v1 files retain their old floor behavior (development boxes only; no
 released bridge wrote these files). A refused start's mint undo still removes
 only the identity it just made, never the reservation.
 
-**Snapshot and restore.** Snapshot captures the UUID, then its matching
-reservation. A missing, unreadable, v1 or foreign reservation contributes no
-mark; a backup racing the first mint is safe. The reservation covers every
+**Snapshot and restore.** Snapshot captures the UUID, then any decodable
+live reservation, restamped with that UUID. A v1 or foreign reservation is a
+conservative floor because every writer merges. Only a missing file omits
+the mark; an unreadable one refuses backup with repair advice. The reservation covers every
 value issued before that read. The queue is not backed up. With a UUID to
 restore, one three-byte `crypto/rand` draw is shared by the two counters:
 `new = max(snapshot, live) + 2^24 + uniform[0,2^24)`. Tests inject a reader;
@@ -57506,7 +57507,10 @@ and every other identity file, irrespective of manifest order. The loop
 never copies it. Without a snapshot UUID, both live files remain untouched.
 Every rerun raises the floors again. A crash between reservation and UUID
 leaves the old identity above the new floor; starting it stamps that floor
-with its own UUID, and a subsequent backup and restore preserve it. Failure
+with its own UUID, and a backup before or after that start preserves it.
+An identity replacement durably discards the destination queue before writing
+its UUID; a same-UUID restore keeps the queue. Queue v2 names its writer,
+and an engine moves a foreign queue aside with a typed error logged once. Failure
 never rolls a floor back. The CLI holds the data directory's kernel lock
 throughout. Its former non-contention lock-error fallback is now a refusal:
 the merge requires exclusive ownership. `manifest clear-missing` retains its
@@ -57516,8 +57520,10 @@ own fallback; serve's fixed-port admin probe remains an additional guard.
 `MaxUint32 - 2^25 - 2^24` refuses deterministically, for each counter. The
 error names the source: remove UUID and reservation from the snapshot to
 restore the rest while retaining the box's identity, or remove the box's
-pair before retrying a live-floor refusal. The snapshot's UUID still wins
-if present; a newly minted identity is a new controller device. About 120
+pair AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
+before retrying a live-floor refusal. This makes a new identity, a new
+controller device with nothing to reuse; removing the box's files alone
+would reintroduce a lower floor from an older snapshot of the same UUID. About 120
 worst-case restores consume the space, with at least 2^24 values left after
 an admitted largest jump.
 
@@ -57548,7 +57554,7 @@ reservation, restore without a reservation, and both exhausted constructor
 counters accepting a start. The final tests cover independently sized ID and
 token floors on empty, own, foreign and v1 state; no mark and no identity;
 repeated restores; separated fixed draws with the first box stopped;
-construction's first ID and token; snapshot omission; age/no-mark advice;
+construction's first ID and token; snapshot floor capture; age/no-mark advice;
 every atomicwrite file-sync, rename and directory-sync seam; failed barriers;
 interrupted restore → old-identity start → live backup → restore elsewhere;
 both exhaustion causes and both counters at and beyond the bound; and the
@@ -57586,3 +57592,52 @@ earlier log entry; its reference was updated to the renamed test.
 change adds no LAN behavior and no new identity-minting verb. 5a3's read
 actions may now build on the restored-identity policy, subject to the host
 validation above.
+
+**Round 2 — three reviewed defects, red first.** Raising counters did not
+remove the destination's queue: a restore of A over B still exposed B's
+4097 under A. Queue v2 now names its writer; load rejects a foreign UUID
+with `ReasonQueueIdentity`, preserves the file aside and logs once. Restore
+raises the reservation, then durably removes the old queue, then writes the
+UUID. The pre/post-unlink directory barriers use `ProbeDurable`, including
+when a retry finds the queue already absent. Own-UUID restores keep the queue.
+Tests start after each crash seam, fail removal and its durability barrier,
+exercise the v1 development format and failed move-aside, and drive the CLI's
+real queue path (`TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue`).
+
+A backup before the old engine restarted also dropped a foreign reservation
+left by an interrupted restore. The new no-start sequence independently puts
+40,000,000 in each counter, interrupts restore before UUID, takes a backup,
+then restores elsewhere: the captured and restored floors must pass both
+marks. The old omission test is now `TestSnapshotCarriesEveryDecodableLiveFloor`:
+v1 and foreign marks are carried and restamped, missing is omitted, and
+unreadable or malformed data fails with repair advice.
+
+Finally, removing only the box's exhausted files before restoring its older
+same-UUID snapshot lowered its floor from 4,250,000,000 to about 3.02 billion.
+`TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` follows the error's
+advice for each counter: the fixed advice removes the snapshot copy's UUID
+and reservation too, and the next start has a new identity and empty queue.
+The public guide and both History entries carry the corrected policy.
+
+All three defects failed against round 1 before production changes. The
+refreshed scratch `controls-r2/manifest.json` contains 44 independent patches:
+42 fail their predicted assertions, and the two serve controls are blocked
+before assertions by the sandbox's listener restriction. Control 08 replaces
+the obsolete foreign-floor omission rule. The new queue barrier initially
+masked control 30's ignored reservation failure, so that test now fails only
+the reservation's directory barrier; the control is red again. No control
+mutates the working tree; Go overlays preserve the uncommitted fixes. Detailed
+commands, case rows, results and sandbox denials are in scratch `report-r2.md`.
+
+
+**Round 2 validation.** The full engine and backup suites passed five runs
+under the race detector, as did the new CLI regression and the existing
+no-mark/schema-1 and ephemeral-admin lock cases. The cited-test-name guard,
+formatting, vet, all six cross-builds, and docs-check passed. The required
+player/backup/cmd race run passed the player and backup packages; cmd failed
+on sandbox-denied listeners. The full gate completed with the same listener
+restrictions, including Unix sockets, and the existing doctor child-output
+buffer races after a denied bind; its player and backup packages passed.
+The manifest package completed in 1229.406 s. B520's specific-bound-IP test
+was explicitly run and skipped because its bind was denied, not claimed as
+a passing case. No full-suite or playback timeout occurred this round.

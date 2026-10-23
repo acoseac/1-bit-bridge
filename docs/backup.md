@@ -17,11 +17,21 @@ the device controllers already know. A snapshot without a player UUID leaves
 the destination's player identity and reservation unchanged.
 
 Use the box's newest snapshot whenever possible. The player queue is not
-backed up. The matching player reservation is backed up and used to move
+backed up. Restoring a different player identity durably discards the
+existing queue before replacing the UUID; restoring the same UUID keeps it.
+Queue files name their player identity, and a queue from another identity is
+moved aside at startup with a warning. Older development queue files without
+an identity are read as the running player's queue.
+
+Any readable, valid player reservation is backed up under the captured UUID,
+including one left by an interrupted restore, and used to move
 both ID and token counters beyond the larger of the snapshot and destination
 marks. Restore adds 2^24 plus a cryptographically random value below 2^24,
 then makes those marks durable before restoring any identity file. An
 interrupted restore may leave a raised reservation; retrying raises it again.
+A missing reservation is omitted. An unreadable reservation stops the backup
+with repair advice: stop the service and repair it from a known valid copy
+that preserves both floors. Do not delete it while keeping the identity.
 
 This margin assumes the source issued fewer than 2^24 IDs and fewer than
 2^24 tokens after the snapshot and before stopping. Two successive restores
@@ -37,9 +47,11 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 - For a snapshot mark, remove `player-uuid` and `player-ids.json` from a copy
   of the snapshot and restore the rest. The box keeps or makes its own identity.
 - For a destination mark, with the service stopped, remove that box's
-  `player-uuid` and `player-ids.json`, then restore again. The snapshot's UUID
-  still wins when present. A box that makes a new identity appears as a new
-  device to controllers.
+  `player-uuid` and `player-ids.json`, and remove `player-uuid` and
+  `player-ids.json` from a copy of the snapshot as well. Restore that copy.
+  The box makes a new identity and appears as a new device to controllers,
+  with no earlier IDs or tokens to reuse. Removing only the destination's
+  files is not a supported remedy.
 
 Each restore spends less than 2^25 values, so roughly 120 worst-case restores
 consume the available space. Ordinary engine starts spend much less.
