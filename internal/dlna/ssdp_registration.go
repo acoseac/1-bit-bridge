@@ -737,7 +737,7 @@ func (h *SSDPHandle) withdraw(deadline time.Time) error {
 	if s.closed && s.closeDeadline.Before(deadline) {
 		deadline = s.closeDeadline
 	}
-	if !time.Now().Before(deadline) {
+	if !time.Now().Before(deadline) && !errors.Is(err, context.DeadlineExceeded) {
 		err = errors.Join(err, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
 	}
 	if i := slices.Index(s.handles, h); i >= 0 {
@@ -753,7 +753,8 @@ func (h *SSDPHandle) withdraw(deadline time.Time) error {
 // waits for its answers and its timer, then sends each one's byebye and
 // releases its sender and listener, all by deadline. Past the deadline it
 // cuts what is still sending and sends no byebye, and still joins and
-// releases everything.
+// releases everything. Its expiry result includes cleanup for every caller,
+// including Register and Update rollbacks that never call withdraw.
 func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 	deadline = h.s.retirementDeadline(deadline)
 	if len(eps) == 0 {
@@ -807,7 +808,16 @@ func (h *SSDPHandle) retire(deadline time.Time, eps []*ssdpEndpoint) error {
 			slog.String("location", ep.spec.Location),
 			slog.String("interface", interfaceName(ep.spec.Interface)))
 	}
-	return errors.Join(errs...)
+	err := errors.Join(errs...)
+	if !expired {
+		// Cleanup can exhaust the budget, and Close can shorten it while
+		// the sender/listener closes and the listener's reader is joined.
+		deadline = h.s.retirementDeadline(deadline)
+		if !time.Now().Before(deadline) && !errors.Is(err, context.DeadlineExceeded) {
+			err = errors.Join(err, fmt.Errorf("dlna: SSDP withdrawal of %s: %w", h.udn, context.DeadlineExceeded))
+		}
+	}
+	return err
 }
 
 // join waits for ep's answers and its timer goroutine.
