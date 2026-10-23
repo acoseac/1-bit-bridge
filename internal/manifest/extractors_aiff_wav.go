@@ -162,10 +162,9 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 			// TagLib reads the first too): parsed on top of the first,
 			// a second one's codec landed beside the first one's depth
 			// or rate wherever it lacked its own (backlog B124,
-			// CodeRabbit on #1122).
-			const minCOMMSize = 18
-			const maxCOMMSize = 1 << 10
-			if commSeen || size < minCOMMSize || size > maxCOMMSize {
+			// CodeRabbit on #1122). The sizes are the header read's too
+			// (readHeaderSampleFormat), which must pick the same chunk.
+			if commSeen || size < aiffCOMMChunkMin || size > aiffCOMMChunkMax {
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -255,12 +254,16 @@ func aiffDurationSeconds(numSampleFrames uint64, sampleRate *float64) float64 {
 // linear flag, since a COMPRESSED variant's COMM.sampleSize describes the
 // pre-compression source, not the stored signal (the AIFF analog of the
 // iOS PR #371 "lossy source reports a container bit depth" regression).
+// SampleFormat is the kind the encoding states (backlog B513): integer for
+// a plain AIFF and the linear integer types, float for fl32 and fl64,
+// none for the rest.
 func parseAIFFCOMMChunk(body []byte, t *Track, formType string) (frames uint64) {
 	if len(body) < 18 {
 		return 0
 	}
 	enc := aifcEncodingOf(body, formType)
 	t.Codec = enc.codec
+	t.SampleFormat = enc.sampleFormat
 	numSampleFrames := binary.BigEndian.Uint32(body[2:6])
 	sampleSize := int16(binary.BigEndian.Uint16(body[6:8]))
 	sampleRate := parseAIFFExtended(body[8:18])
@@ -276,12 +279,15 @@ func parseAIFFCOMMChunk(body []byte, t *Track, formType string) (frames uint64) 
 
 // aifcEncoding is what an AIFF or AIFF-C COMM chunk says about the samples:
 // the codec the row is named by, whether they are linear PCM (so the COMM's
-// sampleSize is their depth), and how many frames numSampleFrames counts
-// each unit as (0: no duration can be derived).
+// sampleSize is their depth), how many frames numSampleFrames counts each
+// unit as (0: no duration can be derived), and the kind of the samples
+// (Track.SampleFormat: SampleFormatInteger or SampleFormatFloat for a linear
+// type, "" for the rest).
 type aifcEncoding struct {
 	codec          string
 	linear         bool
 	framesPerCount uint32
+	sampleFormat   string
 }
 
 // aifcEncodingOf names an AIFF-C's encoding by its COMM compression type, as
@@ -293,16 +299,24 @@ type aifcEncoding struct {
 // "AIFC": neither lossless nor lossy anywhere, with no depth and no duration.
 // Upper- and lower-case spellings of the compressed three are both written
 // (Apple's are lower case, SGI's audiofile writes upper).
+//
+// The linear types are integer but for the floating-point four, fl32 and
+// fl64 in either case (backlog B513): a plain AIFF is integer by definition,
+// and NONE, twos, sowt, raw (unsigned 8-bit), in24, 42ni, in32 and 23ni are
+// integers of their width and byte order. A compressed or unknown type states
+// no kind.
 func aifcEncodingOf(body []byte, formType string) aifcEncoding {
 	if formType == "AIFF" {
-		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1}
+		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1, sampleFormat: SampleFormatInteger}
 	}
 	if len(body) < 22 {
 		return aifcEncoding{codec: "AIFC"}
 	}
 	switch string(body[18:22]) {
-	case "NONE", "twos", "sowt", "raw ", "in24", "42ni", "in32", "23ni", "fl32", "FL32", "fl64", "FL64":
-		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1}
+	case "NONE", "twos", "sowt", "raw ", "in24", "42ni", "in32", "23ni":
+		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1, sampleFormat: SampleFormatInteger}
+	case "fl32", "FL32", "fl64", "FL64":
+		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1, sampleFormat: SampleFormatFloat}
 	case "ulaw", "ULAW":
 		return aifcEncoding{codec: "ULAW", framesPerCount: 1}
 	case "alaw", "ALAW":
@@ -502,10 +516,9 @@ chunkLoop:
 			// (the spec allows one): parsed on top of the first, a second
 			// one of a code the bridge does not name kept the first one's
 			// rate and depth under its own name (backlog B124, CodeRabbit
-			// on #1122).
-			const minFmtSize = 16
-			const maxFmtSize = 1 << 10
-			if fmtSeen || size < minFmtSize || size > maxFmtSize {
+			// on #1122). The sizes are the header read's too
+			// (readHeaderSampleFormat), which must pick the same chunk.
+			if fmtSeen || size < wavFmtChunkMin || size > wavFmtChunkMax {
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -905,6 +918,11 @@ func wavEncodingOf(code uint16) (codec string, linear, known bool) {
 // as a fallback for a PCM-like file whose writer left the field 0
 // (widened to 64 bits so a forged rate × block-align cannot wrap into a
 // small, plausible-looking number). 0 means "cannot derive".
+//
+// SampleFormat is the kind the chunk states (wavSampleFormat, backlog B513):
+// the format code, or an extensible header's whole subformat GUID. The codec
+// and the depth do not move with it: a float WAV is "WAV" with its 32 or 64
+// bits.
 func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 	if len(body) < 16 {
 		return 0
@@ -925,6 +943,7 @@ func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 		codec = wavMPEGCodec(body)
 	}
 	t.Codec = codec
+	t.SampleFormat = wavSampleFormat(body)
 	if known && sampleRate > 0 {
 		sr := float64(sampleRate)
 		t.SampleRate = &sr

@@ -397,3 +397,15 @@ func (p *Provider) FirstIndexedAtReady(ctx context.Context) bool {
 	ok, err := p.store.FirstIndexedAtReady(ctx)
 	return err == nil && ok
 }
+
+// SampleFormatReady reports whether the store's sample-format backfill is
+// complete (Store.SampleFormatReady): every row that can have a kind has it,
+// which is when /v1/health may advertise the key. A nil store or a query
+// error answers false.
+func (p *Provider) SampleFormatReady(ctx context.Context) bool {
+	if p == nil || p.store == nil {
+		return false
+	}
+	ok, err := p.store.SampleFormatReady(ctx)
+	return err == nil && ok
+}

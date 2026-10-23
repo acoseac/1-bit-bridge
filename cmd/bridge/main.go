@@ -2640,6 +2640,11 @@ type serveOpts struct {
 	// playerHotplugWiring.Boot). Nil in production; a boot test waits on
 	// it instead of polling.
 	hotplugBoot func(*hotplug.Service, *config.RuntimeConfig, <-chan struct{})
+	// sampleFormatPassed is told what each sample-format header pass did
+	// (manifest.Store.BackfillSampleFormats). Nil in production; a boot
+	// test waits on it instead of polling. Per invocation for
+	// tailscaleCLI's reason.
+	sampleFormatPassed func(manifest.SampleFormatBackfill)
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -4261,6 +4266,26 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// fired in the gap between here and there.
 	catalogNudge := make(chan struct{}, 1)
 	postScanNudges = append(postScanNudges, catalogNudge)
+
+	// The sample kind of the WAV and AIFF rows indexed before
+	// tracks.sample_format (backlog B513): a header pass at once and one
+	// after every successful scan, each reading only the rows still
+	// undecided, through the resolver the API serves files with (hot on a
+	// root change). The store's open already decided every other row by its
+	// codec. Joined through bgWriters: a pass writes the store.
+	sampleFormatNudge := make(chan struct{}, 1)
+	postScanNudges = append(postScanNudges, sampleFormatNudge)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runSampleFormatBackfill(scanCtx, sampleFormatNudge, func(ctx context.Context) {
+			res, err := manifestStore.BackfillSampleFormats(ctx, apiSrv.Resolver().ResolveChecked)
+			logSampleFormatPass(ctx, res, err)
+			if opts.sampleFormatPassed != nil {
+				opts.sampleFormatPassed(res)
+			}
+		})
+	}()
 
 	// Auto-analysis: a long-lived analyze pool + a background sweeper that
 	// enqueues tracks missing a fresh waveform on a settle-delay-then-

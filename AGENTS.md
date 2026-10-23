@@ -50,7 +50,7 @@ request instead of walking an SMB tree.
 - Pure-Go, CGO-free stack (`modernc.org/sqlite`, `mewkiz/flac`, `dhowden/tag`,
   `hashicorp/mdns`, `quic-go`, `tailscale.com/tsnet`, and
   `mycophonic/saprobe-alac`, Apache-2.0, for the player's ALAC packets, built
-  from the patched copy in `third_party/saprobe-alac`) — one static binary, no
+  at v1.0.0-rc3) — one static binary, no
   runtime deps.
 - Target platforms: macOS / Linux / Windows × amd64 / arm64. Tested primarily
   on macOS. Current release line: v0.1.9; wire protocol: **v1** (additive only).

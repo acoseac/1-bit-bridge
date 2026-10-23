@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -57,6 +58,7 @@ var wantAllHealthFeatures = []string{
 	"playlistsCrossDevice",
 	"pushEventsSupported",
 	"rendererDiscovery",
+	"sampleFormat",
 	"smartPlaylists",
 	"spectrum",
 	"syncEvents",
@@ -164,12 +166,58 @@ func TestHealthFeaturesCompleteSet(t *testing.T) {
 	assertAlphaSorted(t, got.Features)
 }
 
-// firstIndexedReadyManifest answers the optional readiness query without
-// implementing search, so the complete set gains firstIndexedAt and
-// nothing else.
+// firstIndexedReadyManifest answers the two optional readiness queries
+// without implementing search, so the complete set gains firstIndexedAt and
+// sampleFormat and nothing else.
 type firstIndexedReadyManifest struct{ fakeManifestProvider }
 
 func (firstIndexedReadyManifest) FirstIndexedAtReady(context.Context) bool { return true }
+
+func (firstIndexedReadyManifest) SampleFormatReady(context.Context) bool { return true }
+
+// sampleFormatPendingManifest implements the sample-format readiness query
+// and answers that the backfill has not completed, so a builder that
+// advertises the key whenever the method exists fails the test below.
+type sampleFormatPendingManifest struct{ fakeManifestProvider }
+
+func (sampleFormatPendingManifest) SampleFormatReady(context.Context) bool { return false }
+
+// TestHealthOmitsSampleFormatUntilTheBackfillIsDone: `sampleFormat` is
+// advertised only once the store says its backfill is complete, every row
+// that can have a kind having it, so a client's one-time full sync on seeing
+// the key reads them all.
+func TestHealthOmitsSampleFormatUntilTheBackfillIsDone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		manifest ManifestProvider
+		want     bool
+	}{
+		{"pending", &sampleFormatPendingManifest{}, false},
+		{"ready", &firstIndexedReadyManifest{}, true},
+		{"a manifest with no readiness query", &fakeManifestProvider{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+			authStore, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hs := httptest.NewServer(New(cfg, authStore, tc.manifest, "fp").Handler())
+			t.Cleanup(hs.Close)
+			resp := authGet(t, hs, "/v1/health", "")
+			body := readAllOrFail(t, resp)
+			resp.Body.Close()
+			var got HealthResponse
+			if err := jsonUnmarshalForTest(body, &got); err != nil {
+				t.Fatal(err)
+			}
+			if has := slices.Contains(got.Features, "sampleFormat"); has != tc.want {
+				t.Fatalf("sampleFormat advertised = %v, want %v: %v", has, tc.want, got.Features)
+			}
+		})
+	}
+}
 
 // firstIndexedPendingManifest implements the optional readiness query and
 // answers that the backfill has not finished. Embedding the ordinary fake

@@ -8,14 +8,20 @@ import (
 	"path/filepath"
 )
 
+// SyncsParentDir reports whether SyncParentDir is a barrier on this
+// platform: true here, false on Windows, where it is a no-op. A caller
+// that must not count a write as durable without the barrier
+// (atomicwrite.WriteBytesDurable) asks it rather than GOOS.
+const SyncsParentDir = true
+
 // SyncParentDir opens the parent directory of `filePath` and Syncs the
 // handle. On ext4 / XFS / APFS a fresh rename(2) can leave the
 // directory entry in the journal but not yet on disk; syncing the
 // directory handle commits the entry update so a power-loss between
 // the file fsync and the entry flush can't resurrect the file at its
-// old path (or lose it). A missing parent is treated as success — the
-// caller's file fsync would already have failed if the path didn't
-// exist.
+// old path (or lose it). A missing parent is an error (the open
+// fails), and so is a directory this process may write into but not
+// open for reading.
 //
 // Exported so `internal/atomicwrite` can run the same barrier after
 // its tmp-file rename without duplicating the per-platform split.

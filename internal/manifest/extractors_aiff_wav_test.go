@@ -823,7 +823,9 @@ func TestExtractAIFC_LossyCompressionKeepsBitsNil(t *testing.T) {
 // IMA4 are named, carry no depth, and IMA4 counts 64-frame packets; anything
 // else, a COMM too short to hold the type included, is "AIFC" with no depth and
 // no frame count. The linear set is the app's ProgressivePCMLayout set, which
-// the old depth list lacked three of (42ni, FL32, FL64).
+// the old depth list lacked three of (42ni, FL32, FL64). The sample kind
+// (backlog B513): integer for a plain AIFF and the integer types, float for
+// fl32 and fl64 in either case, none for the rest.
 func TestAIFCEncodingOf(t *testing.T) {
 	commWith := func(comp string) []byte {
 		b := make([]byte, 22)
@@ -836,26 +838,30 @@ func TestAIFCEncodingOf(t *testing.T) {
 		form string
 		want aifcEncoding
 	}{
-		{"plain AIFF, whatever its COMM", commWith("ulaw"), "AIFF", aifcEncoding{"AIFF", true, 1}},
-		{"plain AIFF, short COMM", make([]byte, 18), "AIFF", aifcEncoding{"AIFF", true, 1}},
-		{"AIFC too short for a type", make([]byte, 18), "AIFC", aifcEncoding{"AIFC", false, 0}},
-		{"AIFC unknown type", commWith("QDMC"), "AIFC", aifcEncoding{"AIFC", false, 0}},
-		{"AIFC MACE", commWith("MAC3"), "AIFC", aifcEncoding{"AIFC", false, 0}},
-		{"AIFC GSM", commWith("agsm"), "AIFC", aifcEncoding{"AIFC", false, 0}},
-		{"AIFC ulaw", commWith("ulaw"), "AIFC", aifcEncoding{"ULAW", false, 1}},
-		{"AIFC ULAW", commWith("ULAW"), "AIFC", aifcEncoding{"ULAW", false, 1}},
-		{"AIFC alaw", commWith("alaw"), "AIFC", aifcEncoding{"ALAW", false, 1}},
-		{"AIFC ALAW", commWith("ALAW"), "AIFC", aifcEncoding{"ALAW", false, 1}},
-		{"AIFC ima4", commWith("ima4"), "AIFC", aifcEncoding{"IMA4", false, 64}},
-		{"AIFC IMA4", commWith("IMA4"), "AIFC", aifcEncoding{"IMA4", false, 64}},
+		{"plain AIFF, whatever its COMM", commWith("ulaw"), "AIFF", aifcEncoding{"AIFF", true, 1, SampleFormatInteger}},
+		{"plain AIFF, short COMM", make([]byte, 18), "AIFF", aifcEncoding{"AIFF", true, 1, SampleFormatInteger}},
+		{"AIFC too short for a type", make([]byte, 18), "AIFC", aifcEncoding{"AIFC", false, 0, ""}},
+		{"AIFC unknown type", commWith("QDMC"), "AIFC", aifcEncoding{"AIFC", false, 0, ""}},
+		{"AIFC MACE", commWith("MAC3"), "AIFC", aifcEncoding{"AIFC", false, 0, ""}},
+		{"AIFC GSM", commWith("agsm"), "AIFC", aifcEncoding{"AIFC", false, 0, ""}},
+		{"AIFC ulaw", commWith("ulaw"), "AIFC", aifcEncoding{"ULAW", false, 1, ""}},
+		{"AIFC ULAW", commWith("ULAW"), "AIFC", aifcEncoding{"ULAW", false, 1, ""}},
+		{"AIFC alaw", commWith("alaw"), "AIFC", aifcEncoding{"ALAW", false, 1, ""}},
+		{"AIFC ALAW", commWith("ALAW"), "AIFC", aifcEncoding{"ALAW", false, 1, ""}},
+		{"AIFC ima4", commWith("ima4"), "AIFC", aifcEncoding{"IMA4", false, 64, ""}},
+		{"AIFC IMA4", commWith("IMA4"), "AIFC", aifcEncoding{"IMA4", false, 64, ""}},
 	}
 	for _, linear := range []string{"NONE", "twos", "sowt", "raw ", "in24", "42ni", "in32", "23ni", "fl32", "FL32", "fl64", "FL64"} {
+		kind := SampleFormatInteger
+		if strings.EqualFold(linear[:2], "fl") {
+			kind = SampleFormatFloat
+		}
 		cases = append(cases, struct {
 			name string
 			body []byte
 			form string
 			want aifcEncoding
-		}{"AIFC " + linear, commWith(linear), "AIFC", aifcEncoding{"AIFF", true, 1}})
+		}{"AIFC " + linear, commWith(linear), "AIFC", aifcEncoding{"AIFF", true, 1, kind}})
 	}
 	for _, tc := range cases {
 		if got := aifcEncodingOf(tc.body, tc.form); got != tc.want {

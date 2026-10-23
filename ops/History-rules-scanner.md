@@ -2042,6 +2042,177 @@
   SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
   stays 1.
 
+- **A PCM track's sample kind (`Track.SampleFormat`) is what its header
+  states, and nothing else** (2026-10-23, backlog B513). `"integer"` or
+  `"float"`, set by the reads that see the header: `parseWAVFmtChunk`
+  (`wavSampleFormat`: `WAVE_FORMAT_PCM` integer, `WAVE_FORMAT_IEEE_FLOAT`
+  float, `WAVE_FORMAT_EXTENSIBLE` by its subformat GUID compared whole, 16
+  bytes, against `KSDATAFORMAT_SUBTYPE_PCM` and
+  `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`, anything else none),
+  `parseAIFFCOMMChunk` (`aifcEncoding.sampleFormat`: a plain AIFF and `NONE`,
+  `twos`, `sowt`, `raw `, `in24`, `42ni`, `in32`, `23ni` integer; `fl32`,
+  `FL32`, `fl64`, `FL64` float; compressed and unknown types none),
+  `extractFLACFormatFromReader` (FLAC and Ogg FLAC, integer-only) and
+  `extractMP4WithContext` (an `alac` sample entry, integer-only). Every other
+  format, a header that could not be read, and a UPnP-routed row carry none.
+  The codec walk names a WAV by the GUID's first two bytes (`wavEncodingOf`,
+  TagLib's reading); the kind is the stricter reading, so the Ambisonic
+  B-format subformat (first two bytes PCM's) is "WAV" with a depth and no
+  kind. **Don't read an extensible WAV's kind from the GUID's first two bytes,
+  don't default an unknown to integer** (absent is unknown on the wire),
+  **don't change `codec` or `bitsPerSample` with it** (a float WAV is "WAV" at
+  32 or 64 bits, clients match the codec by equality), **and never put a kind
+  on an isDSD row**: three guards, the write (`sampleFormatColumn`), the
+  splice (`spliceSampleFormat`) and the open-time fill (`COALESCE(is_dsd, 0) =
+  0`). (`TestSampleFormatIsWhatTheHeaderStates`, 56 shapes, the captured
+  ffmpeg and afconvert headers among them; `TestAIFCEncodingOf`;
+  `TestADSDRowNeverCarriesASampleFormat`, whose three halves each went red
+  with its guard removed.)
+
+- **…and it lives in `tracks.sample_format` (v59), spliced by the readers and
+  never in `tags_json`** (2026-10-23, backlog B513). The `firstIndexedAt`
+  shape: `GetTrack` and `scanListedTrack` splice the column,
+  `marshalForStorage` zeroes the field, both upserts bind
+  `sampleFormatColumn(t)` and the conflict arm assigns it unconditionally (the
+  row runs because the file changed), and the version-stale stamp leg records
+  the kind its re-read found (`writeSampleFormatTx`), advancing `indexed_at`
+  through `bumpIndexedAtByPathSQL` only when a client would see the change
+  (NULL and `''` both read as absent). A refused file keeps its kind, as it
+  keeps its lyrics. NULL is a row nothing has decided; `''` is decided, no
+  kind. **Don't move it into `tags_json`**: the version-stale diff
+  (`markStampIfUnchanged`) compares `tags_json`, so every row gaining a kind
+  would take the full upsert and re-queue its enrichment (the control that
+  left it there turned the stamp test red on exactly that), and a backfill
+  writing `tags_json` without advancing `indexed_at` breaks `rowVersion` (an
+  enricher stamp read before it writes the old blob back). **Don't leave it
+  out of a track write or the stamp leg**: the three production upsert
+  callers (the scan writer, `settleHeldReconciles`, the UPnP ingest) write
+  fresh extractions or routed rows, and a new caller that writes back a Track
+  read without the splice would clear the kind.
+  (`TestSampleFormatRidesItsColumnAndNeverTagsJSON`,
+  `TestTheVersionStaleStampRecordsTheKindItReads`.)
+
+- **…and a kind carries the stat it was read at, so an older binary's
+  rewrite leaves a kind every open clears** (2026-10-23, backlog B513, rounds
+  3 and 4). `sample_format_size` and `sample_format_mtime_ns` (v60) are the
+  size and mtime of the file the kind was decided from, written with every
+  kind: both upserts bind the extraction's `size` and `mtime_ns` again (the
+  row's own, which they write), the fill copies the row's, the header pass
+  copies them only while the row still has the stat it read, and the stamp
+  leg records the stat its extraction read, only while the row still has it,
+  compared in its own `UPDATE` (`sampleFormatStampSQL`). A stamp waits in the
+  scan writer's batch after its file was read, and `bridge scan` opens the
+  store and scans beside a running serve with no lock, so another scan can
+  rewrite the row for a changed file before the stamp lands: until round 4
+  the stamp paired its old kind with the new row's stat, which the next open
+  read as current and no later scan read again (Codex on round 3). A writer
+  that does not know the columns, the upsert of a binary from before them run
+  after a rollback, rewrites `size`, `mtime_ns` and `tags_json` for a changed
+  file and keeps the kind, which then describes the bytes before; both
+  binaries stamp `ExtractorVersion` 27, so the skip gate never read such a
+  file again (both round-3 reviews, reproduced with main's upsert captured in
+  `rolledBackUpsertSQL`). `clearStaleSampleFormats` runs at the end of every
+  `migrate`, before the fill: a row whose recorded stat is not its own is
+  undecided again, read through `idx_tracks_sample_format_stale` (its
+  predicate, verbatim), which holds no row on a store this binary alone has
+  written (57 µs at 50,000 rows). In the other order a FLAC row an older
+  binary rewrote is cleared after the fill has run, and the header pass never
+  reads a FLAC. The columns and the index are v60's, apart from v59: v59's
+  first form had the kind alone, a build of it may have opened a store that
+  stays at 59, and round 3's extension of v59 in place left such a store
+  unable to open (the Claude API on round 3). **Never write `sample_format`
+  without `sample_format_size` and `sample_format_mtime_ns`, nor at a stat
+  its write did not compare with the row's; don't let the fill run before
+  the open's clear; and don't move the stat columns into v59, which a build
+  shipped without them.**
+  (`TestARollbackLeavesNoKindItsHeaderDoesNotState`, whose older binary also
+  rewrites a FLAC, checked right after the open,
+  `TestADelayedStampLeavesTheKindOfARowAnotherScanRewrote`,
+  `TestAStoreTheFirstV59LeftOpensAndDecidesItsKindsAgain`,
+  `TestEveryWriteOfAKindRecordsTheStatItWasReadAt`,
+  `TestEverySampleFormatWriteRecordsItsStat`, which reads the package's SQL.)
+
+- **…and the rows extracted before it get it without a rescan: every open
+  decides what a codec decides, and the header pass reads each WAV and AIFF
+  row's format chunk** (2026-10-23, backlog B513; the fill's paging, round
+  3). `backfillSampleFormatByCodec` runs at the end of every `migrate`, after
+  the open's clear (`sampleFormatFillSQL`, 2,000 rows a transaction): a FLAC
+  or ALAC row read from a file and not DSD is `'integer'`, every other row it
+  reaches `''`; it reads no file. Each chunk starts after the last path the
+  one before decided (`UPDATE … RETURNING path, sample_format`), so a fill
+  reads each undecided row once: until round 3 every chunk started again at
+  the front of the partial index, where the header pass's rows stay, and read
+  them again (W × ceil(F / 2,000); 80,000 rows half of them WAV, 525 ms
+  against 218 ms). `Store.BackfillSampleFormats` reads the undecided WAV and
+  AIFF rows read from a file, 200 a page in path order: the API's resolver,
+  the row's size and mtime against the file's before and after the read,
+  `openAudioFile`, and `readHeaderSampleFormat`, which walks the chunks with
+  the walkers' own `fmt `/`COMM` size bounds (`wavFmtChunkMin`… package consts
+  both share) and seeks over the rest; it writes a page in one transaction
+  under `Store.mu`, each row only while it is still undecided and still has
+  that stat (`sampleFormatDecideSQL`). When either moves `indexed_at` is the
+  next bullet's. Measured: the fill over 50,000 rows about 205 ms, once;
+  2,000 WAV headers 113 ms on an SSD; a pass with nothing to read 35 µs (the
+  record, 2026-10-23). **Don't stamp a routed row by its codec** (its codec is
+  its upstream's file name and no header is read), **don't read past the
+  format chunk** (a header pass that read the chunks it passed read 2 MiB for
+  a header), **don't record a kind from a file whose size and mtime are not
+  the row's** (the scan that re-reads it writes the kind), **don't let the
+  header read and the walkers disagree on which chunk names the file**
+  (`TestTheHeaderReadAgreesWithTheExtractor` runs all 45 WAV and AIFF shapes
+  through both), **and don't start a fill chunk anywhere but past the path
+  the last one ended on.**
+  (`TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor`,
+  `TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows`,
+  `TestTheHeaderReadStopsAtTheFormatChunk`,
+  `TestTheSampleFormatQueriesUseThePartialIndex`,
+  `TestTheOpenFillVisitsEachUndecidedRowOnce`, and one test per guard of the
+  header pass's write: `TestTheHeaderPassLeavesTheKindAScanWroteMidPass`,
+  `TestTheHeaderPassLeavesARowWhoseStatMovedMidPass` and
+  `TestTheHeaderPassReadOfAFileReplacedAfterItsStatIsChanged`.)
+
+- **…and the backfill is delivered once: nothing it writes moves
+  `indexed_at` before a header pass has run to its end, which records the
+  completion mark the health key reads, and every kind it records after the
+  mark moves it** (2026-10-23, backlog B513, round 3). Round 2's header pass
+  advanced every row it gave a kind, so a library of WAV files sent a delta
+  that size beside the one full sync (the Codex review). Now a pass that
+  reads its last page records `sample_format_backfill_complete_ns` in
+  `scan_state` (`markSampleFormatBackfillComplete`, an `INSERT OR IGNORE`
+  only while no row the fill decides is undecided), and `SampleFormatReady`
+  is that row: the health key appears only then, and the clients' one full
+  sync carries every kind recorded before it (wire.md). A pass a shutdown
+  stops, or one that fails, records nothing, and the next pass starts again;
+  the rows it decided stay decided, so the rows hold the progress and the
+  mark is the only other state, and it survives a restart. A file the
+  finishing pass could not read does not hold the mark back. After the mark,
+  a kind the fill or the header pass gives a row moves its `indexed_at`
+  (`advanceGainedSampleFormatsTx`, through `bumpIndexedAtByPathSQL`, in the
+  transaction that writes the kind): the full sync is once per bridge, and a
+  key that comes back after a rollback starts none, so a rollback's rows
+  (cleared or inserted) and a file read late reach a client only by a delta.
+  A row decided as having none never moves. **Don't let the fill or the
+  header pass move `indexed_at` before the mark, don't leave a kind they give
+  a row after it unmoved, don't record the mark from a pass that did not
+  reach its last page or while a row the fill decides is undecided, and never
+  remove it.**
+  (`TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd`,
+  `TestSampleFormatIsReadyOnlyOnceEveryRowTheFillDecidesIsDecided`,
+  `TestARollbackLeavesNoKindItsHeaderDoesNotState`.)
+
+- **B513 changed extraction without an `ExtractorVersion` bump, and that is the
+  bounded exception, not a precedent for a `tags_json` field** (2026-10-23).
+  The bump rule exists so the skip gate re-extracts rows whose stored answer
+  is stale, at the cost of re-opening every file once. The sample kind lives
+  in a column the version-stale diff does not compare, and its own backfill
+  (the bullet above) reaches every row extracted before it, reading only the
+  WAV and AIFF headers, so the bump would have bought nothing but that cost,
+  which the owner's brief ruled out. A later change to what the kind reads IS
+  a bump: the stamp leg then records the new answer for every unchanged file.
+  `ExtractorVersion`'s docblock says the same at the const. **Don't skip a
+  bump for a field the version-stale diff compares**: such a field has no
+  backfill but the bump.
+
 - **A repeated Vorbis comment for GENRE, ALBUM, COMPOSER, CONDUCTOR or
   WORK is joined with `"; "`** (ExtractorVersion 24, backlog B328).
   dhowden's map keeps the last value, so a FLAC the app reads as
