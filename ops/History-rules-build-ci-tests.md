@@ -1208,8 +1208,10 @@ mount IDs for ext4 and the target filesystem, and stubbed statfs/mountinfo.
 It covers XFS evidence, nested overlay traversal and FUSE classification on
 macOS without a real cross-filesystem mount or host proc/sys reads. The old
 no-follow behavior fails all three subtests; the following upper reader
-passes them. The test runs `mediumUpperMountID`, the reader Linux's
-`platformMedium` runs with, so putting `mountIDOf` back there fails it too.
+passes them. The test calls `mediumOn`, the function Linux's
+`platformMedium` calls, so a change to the reader `mediumOn` runs with fails
+it (an edit that made `platformMedium` call `mediumFrom` with another reader
+would not: keep the one call).
 Its check that `mountIDOf` still names the link's mount goes through the
 stubbed platform reader, so it shows that the Go wrapper resolves nothing,
 not that statx keeps its no-follow flag.

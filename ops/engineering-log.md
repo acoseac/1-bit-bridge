@@ -57647,6 +57647,8 @@ together. Round 3 is aa8dae9b (code) and 1638cc1e (docs), on PR #1328.
 
 Round 3's review (the Claude API; Codex found none): the test passed
 `upperMountID` to `mediumFrom` itself, so putting `mountIDOf` back in
-`platformMedium` failed nothing; both now run `mediumUpperMountID`. The
+`platformMedium` failed nothing; both now call `mediumOn`, which runs the
+check with `upperMountID` (a shared variable first, which a direct edit of
+`platformMedium`'s call still escaped, the fix's own review found). The
 strict reader's check is answered by a stub, so the records now say it
 shows the Go wrapper resolves nothing, not statx's no-follow flag.
