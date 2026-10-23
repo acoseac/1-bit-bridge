@@ -55109,3 +55109,118 @@ The gates, through the build lock, on d3d75aa2's tree with this record:
 `go fmt` (`internal/alsapcm` 16.9 s and `internal/player/playback` 1.4 s
 under `-race`); `make build-all` exit 0, the six targets; `make
 docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 94.8%.
+
+### Round 4: CI's flake in the pause between two transports
+
+PR #1319's CI at 91d3ef54 failed one case in `test -race (rest)`, on
+Linux: `TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld`, "the
+resume went on continued, want reopened" (`playback_pause_test.go:266`).
+On macOS it failed about once in 100 runs under `-race` at two procs,
+also at line 262: "resume: player: play: superseded: replaced before
+playback resumed: the last entry played out". Round 3's retirement fix
+did not touch it: at 56f2684b it failed 2 runs in 100 at `-cpu 2`, both
+at line 262.
+
+Two interleavings, two verdicts. A throwaway trace (each step of the
+producer, the reporter, the resume and the engine's owner, with the time
+and the goroutine; never committed) caught line 262's in 18 failures of
+300 at `-cpu 2`, every one in the same order; line 266's was caught once
+the trace parked the producer 5 ms after `producer.go:274`, which made
+it fail 20 runs of 20. File and line are 56f2684b's.
+
+| Failure | The interleaving | Verdict |
+|---|---|---|
+| Line 266, "continued, want reopened" (CI's) | the test fires the pause release as a's node closes, and a's drain ends; the producer marks a's sink drained (`producer.go:272`) and wakes the reporter (`:274`), which reports `DeviceReleased` at once, a's sink current and drained (`reporter.go:157`); the engine takes it, the test resumes, and the resume reads `cur` drained and `between` nil (`session.go:836`) and answers continued (`:863`); only then does the producer, out of `closeOutput(old)` (`producer.go:276`), reach its loop, find the session unpaused, and open b's sink itself (`:310`) | The code. The backend told the engine the device was let go, then answered continued, which `engine.ResumeContinued` means for a session that held the device, and left b's open to the producer: a device another process took meanwhile would have faulted the session where the design refuses the resume and keeps it paused |
+| Line 262, "superseded" (macOS) | the resume reads `between` b, opens and hands b's sink (`session.go:915`), and the backend's Resume returns; b, 3,000 frames, plays out at once on the fake's free DAC, since the test's `Free()` came before the resume; b's Submitted, the engine's Prepare with nothing after b, the drain, b's Audible and Finished reach the owner before the engine's call goroutine posts the resume's answer (`transport.go:954`), so `onFinished` releases the session and answers the Play waiting on the resume superseded (`:1248`, `:516`) | The test, racing its own steps. The engine's `Backend` doc orders events within a session only (`backend.go:163` to `165`), nothing orders a call's answer before them, and on a DAC b takes its length to play |
+
+Neither of the brief's suspicions held: b's sink was not open at the
+pause (one open until the resume), and the session did not take a's last
+frames for the end of the queue (its Prepare of b came before the pause).
+
+What changed:
+
+- 93df1c93. **A pause that holds no device reports its release once no
+  sink is current**: `reportStep` reports that `DeviceReleased` only with
+  `cur` nil, and the producer wakes the reporter when its transition loop
+  lets go of the current sink (its paused and dropped branches), since
+  nothing else wakes it then (the rig's ticks are sent by hand).
+  `Config.Seams.TransportDrained`, nil in production, holds the producer
+  once it has marked the sink it drained for a change of transport,
+  before it closes it. The test holds the producer there, fires the pause
+  release, sends the reporter a tick (the barrier) and requires no
+  release reported, then lets the producer go; and it grants a's last
+  frames, takes back what is left, and frees the DAC only once Play has
+  answered. The package doc says the release's new condition.
+- 6a0a9d66. **The release test of a resume's open between transports
+  resumes once the release is reported**:
+  `TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports` resumed as
+  a's node closed, which can land in the same window, and passed when it
+  did. Made with the producer held at the seam, its resume answered
+  continued, the producer's open was the one the test's check held, and
+  the test was green 3 runs of 3: it pinned the producer's open, never
+  round 1's join of the resume's. It never failed (0 of 1,500 before).
+- 1102c1a5, the rules (below); and this record.
+
+Loops, through the build lock, `go test -race -count=500 -cpu 1,2,4`,
+before at 56f2684b and after at 6a0a9d66. The seven fast TestPlayback
+cases with Pause or Resume in their names ran 500 times at each proc
+count, and the slow one, which waits out the engine's 2 s
+`ReleaseTimeout` every run, 250 twice at each:
+
+| Run | Before | After |
+|---|---|---|
+| The test, the brief's command | 10 of 1,500 (9 at line 262, 1 at line 266) | 0 of 1,500 |
+| The same with `-v`, by procs | 12 of 1,500: 0, 12 and 0 at 1, 2 and 4, all line 262 | 0 of 1,500 |
+| The seven fast cases, this test among them | this test 2 of 1,500 (at 2 procs, line 262), the other six 0 of 1,500 each | 0 of 1,500 each |
+| `TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports` | 0 of 1,500 | 0 of 1,500 |
+
+Negative controls, each on the committed tree, restored from git:
+
+| Mutation | Red |
+|---|---|
+| The release reported while a drained or closed sink is current, as before | the test's loop, 1,500 of 1,500, at its check that no release is reported while the producer holds a's sink |
+| No wake when the producer waits between transports | 3 of 3, "waited 5s for the device released" (`-watchdog=5s`) |
+| The test frees the DAC before the resume, as before | 9 of 1,500, all at 2 procs, line 262's superseded: the code's fix does not reach it |
+| Round 1's `wg.Add` and `Done` around the resume's open removed | the release test 3 of 3; in its old order a run whose resume landed in the window passed it |
+
+The rules: before adding text to `player.md` (94,757 bytes),
+`move_entry.py` moved the hotplug source entry's long form (2,795 bytes)
+to `ops/History-rules-player.md`, leaving `player.md` at 92,207 bytes
+(`verify_moves.py` passes).
+The two larger entries could not move: the reservation rule's pointer
+would be 655 bytes, over the 600 a line may hold, and the check after
+open's bolded "Don't" is longer than the 600 characters the condenser
+reads, so its pointer would have dropped it. The Edit tool refused
+`.claude/rules/player.md` as a sensitive file in this session, so round
+4's two edits to the backend's section are an OLD/NEW note handed to the
+owner, which applies once each and leaves `player.md` at 93,150 bytes
+(93.2%): the release once no sink is current, with a "Don't" against a
+release while a played-out sink is current; and the seam, with the rule
+that a test lets the fake DAC play what follows a call only once the call
+is answered. Until it lands, the package doc and the reporter's comment
+say the release's rule.
+
+Not changed, for later:
+
+- The engine answers a Play whose resume is under way superseded when
+  the session finishes before the resume's answer reaches the owner,
+  though it resumed and played out (`releaseSession`, 4b1's policy): on
+  a DAC only a resume in the session's last milliseconds meets it.
+- A resume made after a sink played out and before the producer lets go
+  of it, with no release reported, still answers continued and leaves
+  the open to the producer, as a resume made while that sink drains does:
+  the engine was told of no release.
+- The no-device release can still be reported while the producer opens a
+  sink itself, for a pause recorded during that open whose release passes
+  before the open ends: an open longer than the pause release, a second
+  at the least.
+
+The gates, through the build lock, on 1102c1a5's tree with this record:
+`make fmt vet test` exit 0, 72 packages ok and nothing rewritten by
+`go fmt` (`internal/alsapcm` 16.5 s, `internal/player/playback` 1.4 s and
+`cmd/bridge` 500 s under `-race`, and, not cached either,
+`internal/manifest` 1,135 s and `internal/admin` 731 s), a run longer
+than one foreground call, which the harness moved to the background at
+10 minutes and which was waited on before anything else ran; `make
+build-all` exit 0, the six targets; `make docs-check` ok, `CLAUDE.md`
+63.4% and `player.md` 92.2%.
