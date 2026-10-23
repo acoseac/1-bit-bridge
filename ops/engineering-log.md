@@ -57053,6 +57053,19 @@ run and the Windows WSARecvMsg arrival test run on CI's legs.
 Mac after a 75 s connect timeout to its own LAN address (environment, no
 SSDP).
 
+### The gate
+
+Through the build lock, on go1.27.3 (GOTOOLCHAIN=local): `make fmt vet
+docs-check` clean, `go fmt` rewriting nothing; `make test`'s flags
+(`-race -timeout 30m`) over every package, split so each run fits a
+ten-minute call (the rest, `internal/manifest` whole in 1,045 s,
+`internal/admin` in CI's four shards, `internal/api`, `cmd/bridge` in
+three name shards, 857 names): green but for
+`TestAProbeOfASpecificBoundIPIsNotLogged` (internal/handshakelog), which
+fails on this Mac (B520, left as it is); `make build-all`, six targets;
+`go vet` of internal/dlna and cmd/bridge for linux and windows on amd64
+and arm64, and darwin/amd64.
+
 ### Not here
 
 The Source, its HTTP listener, descriptions and SOAP, and automatic
