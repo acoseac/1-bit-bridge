@@ -55000,7 +55000,9 @@ What changed:
 - d6f269b4. **Retirement waits for an open under way** (H):
   `retireLocked` stops at an occurrence whose open has not ended, as the
   reporter does, looking at none of the fields the open sets before, and
-  retires it once the opener has closed what it opened.
+  retires it once the opener has closed what it opened (round 3 below: it
+  now passes over that occurrence, and the opener takes it out of the
+  chain).
 - 8bb155d6. **The pause-cleanup test sends its Release after the pause**
   (I): the sink calls a test hook once a command is handed to its writer,
   on the sender's goroutine as it waits for the answer
@@ -55045,3 +55047,65 @@ The gates, through the build lock, on f424b55f's tree with this record:
 `go fmt` (`internal/alsapcm` 16.0 s and `internal/player/playback` 1.4 s
 under `-race`); `make build-all` exit 0, the six targets; `make
 docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 94.5%.
+
+### Round 3 of the reviews
+
+Codex found nothing in round 2 (9f3983e5); the Claude API found one Low,
+verified against the code at 91d3ef54, the branch with main merged:
+
+| Finding | Verdict | Evidence at 91d3ef54 |
+|---|---|---|
+| J. the Claude API's Low: one open that never ends stops all retirement | Confirmed, but for what is held | `retireLocked` returned at the first occurrence before the one heard that could not retire (`session.go:639` to `642`), an occurrence still opening among them (`:640`), and a read on a mount that hangs ends no open: `dropLocked` cancels the open's context (`:610`), which such a read does not notice. From then on no occurrence before the one heard retired, so the chain kept a record of every occurrence, and each closed sink one of them referred to stayed (`refersLocked`, `:663` to `670`), its ring with it. The claim that each kept occurrence holds its decoder, its open file and its first chunks does not hold: `closeOcc` lets go of all three at an occurrence's end of file (`producer.go:182`) and at its drop (`session.go:613`), so descriptors do not grow; the rings and the records do |
+
+What changed:
+
+- ebed0f70. **Retirement passes over an occurrence still opening, and
+  retires the rest** (J): `retireLocked` skips an occurrence whose open is
+  under way, reading none of its fields, keeps it in the chain, and
+  retires the others before the one heard; the watermark is the
+  occurrence before the one heard, as before. The opener, as it closes
+  `done` under the session's lock, takes an occurrence dropped while it
+  opened out of the chain (`removeLocked`): nothing of it plays or is
+  reported. Left to a later step, a refusal its cancelled open set would
+  have to be reported before it could retire, and the reporter skips the
+  chain's first occurrence (the Start's, whose stages are its answer),
+  which retirement can make it, so it would have stopped retirement again.
+- d3d75aa2, the rules (`player.md` 94.8%, under its 95%, so no long form
+  moved); and this record.
+
+Red first:
+
+| Fix | Test | Red |
+|---|---|---|
+| J | `TestPlaybackRetiresNothingAnOpenerStillHolds`, b held while c, then d and e after a change of transport, are heard, on round 2's code | "c heard, b's open under way: … the backend holds 3 occurrences and 1 sinks; want 2 and 1" and "d and e heard, b's open still under way: … 5 occurrences and 2 sinks; want 2 and 1", 2 runs of 2 |
+
+The test replaces round 2's, which asserted that the step hearing c retired
+nothing, the behaviour this round removes. Its last check, b gone once its
+open ends, passed on round 2's code too, where the reporter's next step
+retires everything once that open has ended.
+
+Negative control, on the committed tree, restored from git:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| J | the all-or-nothing return restored for an occurrence still opening | both checks above, 3 runs of 3 |
+
+Green with the fix, under `-race`: the test and
+`TestPlaybackRetiresWhatHasPlayed` 10 runs of 10, and the `alsapcm` and
+`playback` packages whole.
+
+A first version of the test's second step granted 1.2 s, then 1 s, and
+waited for d's sink to run with its writer waiting on the DAC: c's playout
+used up the grant before d's sink played anything, so the wait timed out
+on round 2's code and on the fix alike, a flaw in the test and in neither
+version. The step now plays with the fake's `Free` (the DAC plays as fast
+as the writer's waits need, and stops while it only watches) and waits for
+every frame of e to be in the sink. A throwaway copy that showed it hung
+once at its end, releasing the session while b's read was held, which the
+teardown waits for, as the rule on a read that does not return says.
+
+The gates, through the build lock, on d3d75aa2's tree with this record:
+`make fmt vet test` exit 0, 72 packages ok and nothing rewritten by
+`go fmt` (`internal/alsapcm` 16.9 s and `internal/player/playback` 1.4 s
+under `-race`); `make build-all` exit 0, the six targets; `make
+docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 94.8%.
