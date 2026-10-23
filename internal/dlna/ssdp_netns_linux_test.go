@@ -181,7 +181,7 @@ func startServerOnEverySide(t *testing.T) []AdvertiseEndpoint {
 		t.Fatalf("the DLNA server did not start: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Stop(context.Background()) })
-	if got := len(s.ssdps); got != len(netnsSides) {
+	if got := s.ssdpActive; got != len(netnsSides) {
 		t.Fatalf("%d advertisers started, want one per interface, %d", got, len(netnsSides))
 	}
 	return endpoints
