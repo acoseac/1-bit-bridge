@@ -1239,6 +1239,31 @@ func partialCard(t *testing.T, r *readingRig) (whole func()) {
 	}
 }
 
+// unreadableCard makes card 5's whole directory one a reading finds there
+// and cannot read: a link that loops in its place. The card is still listed
+// (asound/cards) and is read in part, its usbid among what is not read. It
+// returns what puts the directory back.
+func unreadableCard(t *testing.T, r *readingRig) (whole func()) {
+	t.Helper()
+	card := filepath.Join(r.procRoot, "asound", "card5")
+	aside := filepath.Join(r.procRoot, "asound", "card5.aside")
+	if err := os.Rename(card, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("card5", card); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.Remove(card); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, card); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone: the reader marks a
 // card partial when it cannot list every substream (an entry whose link
 // loops, here MPD's running sub0), and such a reading can show the device
@@ -1278,6 +1303,33 @@ func TestAReadingThatCannotTellKeepsNoEvidenceAndErasesNone(t *testing.T) {
 		whole := partialCard(t, rig)
 		clock.Advance(outputCacheTTL)
 		getReading(t, hs, token, id)
+		whole()
+		clock.Advance(outputCacheTTL)
+		_, got, raw = getReading(t, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+	})
+	t.Run("a candidate card whose directory cannot be read", func(t *testing.T) {
+		// MPD's device is the volumio PCM, beside an ALSA configuration read
+		// and not modeled (a top-level @hooks): it names no card, so every
+		// USB card is a candidate, and a card is USB by the usbid in its
+		// directory. Read in part, the card is no candidate, and no pick
+		// names it.
+		rig := doPRig(t, "1", "")
+		rig.writeConf(volumioConf(t, rig.music))
+		appendAsound(t, rig, "@hooks [ ]\n")
+		clock := manualClockOn(rig)
+		hs, token, id := rig.serve()
+		body, listing := decodeOutputs(t, outputsGet(t, hs, token, "/v1/outputs"))
+		if len(body.Outputs) != 1 || body.Outputs[0].ID != id || body.Outputs[0].DAC == nil || body.Outputs[0].DAC.IsMPDsOutput != nil {
+			t.Fatalf("card 5 is not the one candidate:\n%s", listing)
+		}
+		got, raw := watchOpen(t, rig, clock, hs, token, id)
+		wantVerdict(t, got, raw, signalpath.FormatPreservedDoP)
+		whole := unreadableCard(t, rig)
+		clock.Advance(outputCacheTTL)
+		if code, _, raw := getReading(t, hs, token, id); code != http.StatusNotFound {
+			t.Fatalf("a candidate card whose usbid cannot be read: status %d\n%s", code, raw)
+		}
 		whole()
 		clock.Advance(outputCacheTTL)
 		_, got, raw = getReading(t, hs, token, id)

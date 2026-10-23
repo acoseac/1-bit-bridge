@@ -523,9 +523,11 @@ type openRecord struct {
 // Between those two readings MPD opened the stream, and the settings it read
 // in the open were the ones both readings report, unless they changed and
 // changed back within openWatch. A reading that cannot tell the stream on a
-// device keeps no evidence of it and erases none: the card read in part, a
-// substream not read whole, or no ids at all (/proc not read, the ALSA
-// configuration not had, alsa_config_unread, the probe late with no
+// device keeps no evidence of it and erases none: the card read in part,
+// whether or not the reading's ids still name it (a candidate card is a USB
+// card by the usbid in its directory, so one read in part can drop out of
+// them), a substream not read whole, or no ids at all (/proc not read, the
+// ALSA configuration not had, alsa_config_unread, the probe late with no
 // endpoint). Nor does one that finds an open stream whose run it cannot
 // tell (streamOn: not running, never started, or not yet runFloor in),
 // though the stream may still be watched opening from the record before:
@@ -535,8 +537,8 @@ type openRecord struct {
 // that could not read them (MPD not read, its outputs differing across the
 // /proc read) or read them changed ends it, since the open the record would
 // vouch for may have come in between. A device a reading's ids no longer
-// name keeps nothing. Only a DoP claim reads the mark; no verdict carries
-// from one reading to the next.
+// name keeps nothing, unless the reading read its card in part. Only a DoP
+// claim reads the mark; no verdict carries from one reading to the next.
 func (o *localOutputs) watchOpens(s *readingSnap) {
 	settings := settingsOf(s)
 	s.tied = map[pickID]bool{}
@@ -576,8 +578,24 @@ func (o *localOutputs) watchOpens(s *readingSnap) {
 			}
 			next[id] = rec
 		}
+		for id := range prev {
+			if _, done := next[id]; !done && cardReadInPart(s.cards, id) {
+				keep(id)
+			}
+		}
 	}
 	o.reading.opens = next
+}
+
+// cardReadInPart reports whether a reading found id's card, by its index and
+// ALSA id, and read it in part.
+func cardReadInPart(snap alsa.Snapshot, id pickID) bool {
+	for i := range snap.Cards {
+		if c := &snap.Cards[i]; c.Index == id.card && c.ID == id.id {
+			return c.Partial
+		}
+	}
+	return false
 }
 
 // forgetOpens drops what the readings watched: a reading that failed cannot
