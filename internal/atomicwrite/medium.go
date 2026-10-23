@@ -69,15 +69,17 @@ const totalsRounds = 3
 // block total with the pool's use), so where the two answers differ they are
 // read again, for up to three rounds (upperAsReached). Totals that moved
 // are no tmpfs's or ramfs's, which no write moves. A sustained mismatch is
-// inconclusive: the upper path's st_dev, matched to its own mountinfo line,
-// identifies the filesystem visible here, not the overlay's backing in the
+// inconclusive: the upper path's mount ID selects its own mountinfo line,
+// identifying the filesystem visible here, not the overlay's backing in the
 // mounter's namespace. Even a confirmed XFS/ZFS may give repeated A,B,A
 // samples. The error describes that evidence and suggests a retry, never
 // claims another filesystem. An overlay mounted volatile skips every
 // sync of its upper layer, so nothing written there outlives a crash; an
 // overlay over an overlay is followed by the inner one's mount ID; and a
-// read-only overlay, with no upper layer, takes nothing, since a write there
-// fails by itself (EROFS). FUSE is taken but for fuse-overlayfs (the Claude
+// root on a read-only overlay, with no upper layer, takes nothing, since a
+// write there fails by itself (EROFS). A read-only overlay reached below
+// that root cannot be a writable overlay's upper layer and stays unknown.
+// FUSE is taken but for fuse-overlayfs (the Claude
 // API on round 10), whose upper layer, what rootless Podman writes a
 // container's files to, the table does not show.
 //
@@ -147,7 +149,10 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 		}
 		switch {
 		case layer.upper == "":
-			return nil
+			if depth == 0 {
+				return nil // The root's own mount is read-only; a write fails EROFS.
+			}
+			return fmt.Errorf("%w: %s is on %sa read-only overlay: the upper path reaches a read-only overlay, which cannot be a writable overlay's upper layer", ErrMediumUnknown, root, on)
 		case !strings.HasPrefix(layer.upper, "/"):
 			// The mount table is Linux's, so a path in it is absolute by its
 			// leading slash, never by what filepath says on the system the
@@ -211,15 +216,12 @@ func upperAsReached(root, on, path, upper string, first fsStat, statfs func(stri
 	}
 }
 
-// upperMountEvidence names the filesystem visible at upper only when its
-// st_dev agrees with its own mount ID's line. A matching mount-point spelling
+// upperMountEvidence names the filesystem visible at upper by its own mount
+// ID's line. Device numbers are detail only: a btrfs subvolume's st_dev can
+// differ from mountinfo's superblock device. A matching mount-point spelling
 // is not identity; neither is this evidence of the overlay's backing across
-// mount namespaces. Device numbers are used for this filesystem evidence,
-// never for strictPath's mount-boundary checks.
+// mount namespaces. Device numbers never decide strictPath's mount boundaries.
 func upperMountEvidence(upper, device string, table []byte, idOf func(string) (uint64, bool, error)) (string, error) {
-	if device == "" {
-		return "", fmt.Errorf("no device identity for %s", upper)
-	}
 	id, ok, err := idOf(upper)
 	if err != nil {
 		return "", err
@@ -231,10 +233,10 @@ func upperMountEvidence(upper, device string, table []byte, idOf func(string) (u
 	if err != nil {
 		return "", err
 	}
-	if rec.device != device {
-		return "", fmt.Errorf("%s's device %s does not match mount %d's device %s", upper, device, id, rec.device)
+	if device == "" {
+		return fmt.Sprintf("%s (mount %d, mount device %s)", rec.fstype, id, rec.device), nil
 	}
-	return fmt.Sprintf("%s (device %s, mount %d)", rec.fstype, device, id), nil
+	return fmt.Sprintf("%s (mount %d, mount device %s, path device %s)", rec.fstype, id, rec.device, device), nil
 }
 
 // fuseMedium is the medium check of a FUSE filesystem, the mount id: taken,

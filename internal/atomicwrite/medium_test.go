@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -170,6 +171,16 @@ func TestMediumRefusesWhatDoesNotOutliveAReboot(t *testing.T) {
 			stats: map[string]fsStat{data: overlay(ext4)}},
 		{name: "a read-only overlay", id: 8, table: "8 1 0:8 / /d ro - overlay overlay ro,lowerdir=/l1:/l2\n",
 			stats: map[string]fsStat{data: overlay(ext4)}},
+		{name: "a writable bind whose upper path reaches a read-only overlay", id: 60,
+			table: "60 1 0:60 /srv/data /d rw - overlay overlay rw,lowerdir=/l,upperdir=/outer/up,workdir=/outer/w\n61 1 0:61 / /outer/up ro - overlay overlay ro,lowerdir=/l1:/l2\n",
+			stats: map[string]fsStat{data: overlay(ext4), "/outer/up": overlay(ext4)},
+			ids:   map[string]uint64{"/outer/up": 61},
+			want:  ErrMediumUnknown, says: "upper path reaches a read-only overlay, which cannot be a writable overlay's upper layer"},
+		{name: "a writable overlay whose upper path reaches a read-only overlay", id: 60,
+			table: "60 1 0:60 / /d rw - overlay overlay rw,lowerdir=/l,upperdir=/outer/up,workdir=/outer/w\n61 1 0:61 / /outer/up ro - overlay overlay ro,lowerdir=/l1:/l2\n",
+			stats: map[string]fsStat{data: overlay(ext4), "/outer/up": overlay(ext4)},
+			ids:   map[string]uint64{"/outer/up": 61},
+			want:  ErrMediumUnknown, says: "upper path reaches a read-only overlay, which cannot be a writable overlay's upper layer"},
 		{name: "an overlay whose upper layer cannot be read here", id: 22, table: piMountInfo,
 			stats: map[string]fsStat{data: overlay(tmpfs)}, want: ErrMediumUnknown, says: "/media/root-rw/overlay"},
 		{name: "an overlay whose upper layer names another filesystem here", id: 22, table: piMountInfo,
@@ -376,6 +387,9 @@ func TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay(t *testing.T) {
 		t.Errorf("the directories above the root were asked for %v, want %v: by the write and the probe, with the root and its mount's ID", asked, want)
 	}
 	t.Run("permission", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX permission bits")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("root can read a mode-0 directory")
 		}
@@ -547,7 +561,7 @@ func TestOverlayBindStillMatchesMediumUnknown(t *testing.T) {
 
 // TestMediumMismatchesNeedStableEvidence keeps repeated A,B,A sampling
 // inconclusive, even when the visible upper path is independently XFS/ZFS.
-// Its own mount ID and device select the evidence, never a path spelling.
+// Its own mount ID selects the evidence, never a path spelling or device.
 func TestMediumMismatchesNeedStableEvidence(t *testing.T) {
 	const root = "/data"
 	const table = "30 1 0:30 / / rw - overlay overlay rw,lowerdir=/l,upperdir=/up,workdir=/w\n" +
@@ -563,8 +577,9 @@ func TestMediumMismatchesNeedStableEvidence(t *testing.T) {
 		{"ZFS repeated ABA", "zfs", "8:1", 40, nil, "zfs"},
 		{"tmpfs path still cannot pass", "tmpfs", "8:1", 40, nil, "tmpfs"},
 		{"ramfs path still cannot pass", "ramfs", "8:1", 40, nil, "ramfs"},
-		{"device differs", "xfs", "8:2", 40, nil, "does not match"},
-		{"no device", "xfs", "", 40, nil, "device"},
+		{"device differs", "xfs", "8:2", 40, nil, "xfs"},
+		{"btrfs subvolume device differs", "btrfs", "0:45", 40, nil, "btrfs"},
+		{"no device", "xfs", "", 40, nil, "xfs"},
 		{"no mount ID", "xfs", "8:1", 0, nil, "mount ID"},
 		{"mount ID read failed", "xfs", "8:1", 0, syscall.EIO, "input/output error"},
 		{"missing mount line", "xfs", "8:1", 99, nil, "99"},
@@ -579,6 +594,8 @@ func TestMediumMismatchesNeedStableEvidence(t *testing.T) {
 				calls++
 				typ := uint32(0x58465342)
 				switch tc.fstype {
+				case "btrfs":
+					typ = 0x9123683e
 				case "zfs":
 					typ = 0x2fc12fc1
 				case "tmpfs":
@@ -600,6 +617,14 @@ func TestMediumMismatchesNeedStableEvidence(t *testing.T) {
 			}
 			if tc.idErr != nil && !errors.Is(err, tc.idErr) {
 				t.Errorf("lost read error: %v", err)
+			}
+			if tc.id == 40 && tc.fstype != "" {
+				if !strings.Contains(err.Error(), "mount 40") || strings.Contains(err.Error(), "cannot be confirmed") || strings.Contains(err.Error(), "does not match") {
+					t.Errorf("mount ID selected a valid line, want its filesystem named without a device disagreement failure: %v", err)
+				}
+				if tc.device != "" && (!strings.Contains(err.Error(), tc.device) || !strings.Contains(err.Error(), "8:1")) {
+					t.Errorf("want both device numbers as detail: %v", err)
+				}
 			}
 			if calls != 3 {
 				t.Errorf("upper read %d times, want 3", calls)
