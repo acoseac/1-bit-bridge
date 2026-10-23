@@ -58015,14 +58015,16 @@ through the existing reporter and command seams, so the entry guard cannot
 bypass the compensating path; the refused Pause must still be joined to
 the original fault. No new production test seam was added.
 
-**Known, bounded follow-up: Drop after a refused rollback Pause.** A pause
-release timer's stop that panics inside `unpausedLocked`, after a successful
-sink Resume while that sink drains its last frames, can still meet
-`finalDrain`: Pause refuses with `ReasonBadState` and buffered audio plays
-until the fault's release tears the sink down. This timer-stop case needs
-a panic that production's timer stop cannot raise. Falling back to Drop
-there is a further change, explicitly deferred from B523's final round;
-this round implements no Drop fallback.
+**Known, bounded follow-up: Drop after a refused rollback Pause (backlog
+B529).** Any fault recorded while a Resume's sink command is in flight (a
+reporter, producer or opener panic, or a pause release timer's stop that
+panics inside `unpausedLocked`) takes the compensating Pause; when that sink
+is draining its last frames, the Pause meets `finalDrain` and refuses with
+`ReasonBadState`, and the track's last buffered frames play until the fault's
+release tears the sink down. Falling back to Drop there is a further change,
+explicitly deferred from B523's final round (its final review found the
+earlier wording of this paragraph understated the reach); this round
+implements no Drop fallback.
 
 Round 5 validation used Go 1.27.2 offline: Darwin and Linux vet, Linux
 compilation of the requested test binaries, and the full player/sink/ALSA
