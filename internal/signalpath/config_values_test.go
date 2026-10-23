@@ -11,7 +11,7 @@ import (
 // Exercise the real loader through the verdict, with the same synthetic
 // files the ALSA package uses for resolution and stage assertions.
 func TestPCMValueFixturesKeepWarnings(t *testing.T) {
-	for _, name := range []string{"float", "negative-real", "negative-integer", "path", "word"} {
+	for _, name := range []string{"float", "negative-real", "negative-integer", "path", "word", "numeric-strings", "byte-strings"} {
 		t.Run(name, func(t *testing.T) {
 			b, err := os.ReadFile(filepath.Join("..", "alsa", "testdata", "asound-values", name+".conf"))
 			if err != nil {

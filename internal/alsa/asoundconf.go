@@ -466,10 +466,10 @@ func (in *confInput) nonwhite() (byte, bool) {
 // token reads a string at the next byte, quoted (confQuoted) or bare: a
 // bare string runs to a blank, = , ; { } [ ] ' " \ or #, and a name to a
 // dot too. ok is false at a byte no string starts with (those but the
-// quotes and #, and a dot) and for a quoted string confQuoted does not read.
+// quotes and #, and a dot in a name) or an unsupported quoted escape.
 func (in *confInput) token(name bool) (s string, quoted, ok bool) {
 	rest := in.s[in.pos:]
-	if rest == "" || strings.IndexByte("=,;.{}[]\\", rest[0]) >= 0 {
+	if rest == "" || strings.IndexByte("=,;{}[]\\", rest[0]) >= 0 || (name && rest[0] == '.') {
 		return "", false, false
 	}
 	if rest[0] == '"' || rest[0] == '\'' {
@@ -1049,16 +1049,16 @@ func (p *pcmParser) parseValue() (string, bool) {
 }
 
 // lexPCM distinguishes keys from values: dots split a key, never a
-// value. Basis: alsa-lib src/conf.c get_string/get_freestring and parse_def
-// (also confInput below plugCompound). An unquoted value beginning with
-// a digit or '-' is tried as an integer, then a real; failed numeric
-// conversion is an error, not a string. Other free words are strings;
-// quoted numbers stay strings. The source could not be fetched for B516;
-// these are the known grammar rules, not a claim of full alsa-lib support.
-// Includes, mode syntax, and escapes outside our existing subset remain
-// refused. In particular, reading a scalar does not evaluate a plugin.
+// value. Basis: alsa-lib v1.2.14 src/conf.c get_freestring, parse_def and
+// parse_value (https://github.com/alsa-project/alsa-lib/blob/v1.2.14/src/conf.c).
+// parse_def accepts an optional '=' before a scalar, compound or array.
+// parse_value tries a digit/'-' word as an integer, then a real; failed
+// conversions fall through to STRING, as do other free words (even .5).
+// Strings and comments are byte-oriented, not restricted to UTF-8. NUL,
+// includes, mode syntax and escapes outside our existing subset remain
+// refused. Reading a scalar does not evaluate a plugin or extend routing.
 func lexPCM(src string) ([]pcmTok, bool) {
-	if !utf8.ValidString(src) || strings.IndexByte(src, 0) >= 0 {
+	if strings.IndexByte(src, 0) >= 0 {
 		return nil, false
 	}
 	in := confInput{s: src}
@@ -1102,11 +1102,14 @@ func lexPCM(src string) ([]pcmTok, bool) {
 				if _, _, ok := in.token(true); !ok {
 					return nil, false
 				}
+				// Only an adjacent dot continues this key. After a
+				// blank, .5 is a free-string value, not a key suffix.
+				dotted := in.pos < len(src) && src[in.pos] == '.'
 				c, ok = in.nonwhite()
 				if !ok {
 					return nil, false
 				}
-				if c != '.' {
+				if !dotted {
 					break
 				}
 				in.pos++
@@ -1119,6 +1122,18 @@ func lexPCM(src string) ([]pcmTok, bool) {
 				return nil, false
 			}
 			out = append(out, key...)
+			if c == '=' {
+				in.pos++
+				c, ok = in.nonwhite()
+				if !ok {
+					return nil, false
+				}
+			}
+		}
+		// get_char_skip_comments expands includes even at a value or
+		// array element start. Never consume one as an opaque string.
+		if c == '<' {
+			return nil, false
 		}
 		switch c {
 		case '{', '[':
@@ -1140,9 +1155,10 @@ func lexPCM(src string) ([]pcmTok, bool) {
 }
 
 // lexPCMValue keeps ALSA's scalar kinds separate. Numeric conversions
-// must consume the whole word (safe_strtoll/safe_strtod in alsa-lib).
+// must consume the whole word (safe_strtoll/safe_strtod in alsa-lib);
+// failure leaves an opaque string, never a refusal of the file.
 func lexPCMValue(in *confInput) (pcmTok, bool) {
-	if in.pos >= len(in.s) {
+	if in.pos >= len(in.s) || in.s[in.pos] == '<' {
 		return pcmTok{}, false
 	}
 	if in.s[in.pos] == '"' || in.s[in.pos] == '\'' {
@@ -1162,10 +1178,10 @@ func lexPCMValue(in *confInput) (pcmTok, bool) {
 			return pcmTok{kind: tokReal, val: s}, true
 		}
 		// Go accepts underscores and 0b/0o integer prefixes that the
-		// C conversions used here do not. Do not accidentally admit them.
+		// C conversions used here do not. Keep them as opaque strings.
 		unsigned := strings.TrimPrefix(s, "-")
 		if strings.ContainsRune(s, '_') || strings.HasPrefix(unsigned, "0b") || strings.HasPrefix(unsigned, "0B") || strings.HasPrefix(unsigned, "0o") || strings.HasPrefix(unsigned, "0O") {
-			return pcmTok{}, false
+			return pcmTok{kind: tokString, val: s, opaque: true}, true
 		}
 		if n, err := strconv.ParseInt(s, 0, 64); err == nil {
 			return pcmTok{kind: tokNumber, val: strconv.FormatInt(n, 10)}, true
@@ -1177,7 +1193,7 @@ func lexPCMValue(in *confInput) (pcmTok, bool) {
 		}
 		n, err := strconv.ParseFloat(real, 64)
 		if err != nil || (n == 0 && nonzeroPCMMantissa(s)) {
-			return pcmTok{}, false
+			return pcmTok{kind: tokString, val: s, opaque: true}, true
 		}
 		return pcmTok{kind: tokReal, val: s}, true
 	}

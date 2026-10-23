@@ -182,7 +182,7 @@ func TestAFileOfTheConfigurationThatCannotBeReadIsUnread(t *testing.T) {
 		"more files than the read takes": {files: tooMany, unread: true},
 		"conf.d a file, not a directory": {files: map[string]string{"etc/asound.conf": plain, "etc/alsa/conf.d": plain}, unread: true},
 		"a top-level @hooks":             {files: map[string]string{"etc/asound.conf": plain + "@hooks [ ]\n"}},
-		"a value the parser refuses":     {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0garbage }\n"}},
+		"an unterminated compound":       {files: map[string]string{"etc/asound.conf": "pcm.soft { type softvol\n    max_dB 0.0\n"}},
 	} {
 		root := t.TempDir()
 		writeTree(t, root, tc.files)
