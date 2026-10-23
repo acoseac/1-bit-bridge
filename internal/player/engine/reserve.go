@@ -2,9 +2,15 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // idBlock is how many IDs, and how many tokens, one reservation covers.
@@ -12,7 +18,7 @@ const idBlock = 4096
 
 const (
 	// reserveVersion is the reservation file's format.
-	reserveVersion = 1
+	reserveVersion = 2
 	// maxReserveFileBytes caps the reservation file read at a start.
 	maxReserveFileBytes = 4 << 10
 	// reserveTimeout bounds how long the edits that need a reservation wait
@@ -25,15 +31,24 @@ const (
 // token any run may hand out without writing the file again. It is written,
 // and it and its directory entry fsynced, before any ID or token it covers
 // is handed out.
-type reserveFile struct {
+type reserveFile = Reservation
+
+// ReservationFileName is serve's reservation beside player-uuid. Backups
+// carry it as an input to a restore, never as a file to copy back.
+const ReservationFileName = "player-ids.json"
+
+// Reservation holds the highest ID and token reserved by UUID. Version 1
+// has no UUID and remains a floor; every writer writes version 2.
+type Reservation struct {
 	Version int    `json:"version"`
+	UUID    string `json:"uuid,omitempty"`
 	IDs     uint32 `json:"ids"`
 	Tokens  uint32 `json:"tokens"`
 }
 
 // encodeReserve is the file for the given reservations.
-func encodeReserve(ids, tokens uint64) []byte {
-	data, err := json.Marshal(reserveFile{Version: reserveVersion, IDs: uint32(ids), Tokens: uint32(tokens)})
+func encodeReserve(id string, ids, tokens uint64) []byte {
+	data, err := json.Marshal(reserveFile{Version: reserveVersion, UUID: id, IDs: uint32(ids), Tokens: uint32(tokens)})
 	if err != nil {
 		panic(err) // three integers always encode
 	}
@@ -50,10 +65,63 @@ func decodeReserve(data []byte) (reserveFile, error) {
 	if err := strictJSON(data, &f); err != nil {
 		return f, err
 	}
-	if f.Version != reserveVersion {
+	if f.Version != 1 && f.Version != reserveVersion {
 		return f, fmt.Errorf("version %d, not %d", f.Version, reserveVersion)
 	}
+	if f.Version == 2 && !validPlayerUUID(f.UUID) || f.Version == 1 && f.UUID != "" {
+		return f, errors.New("reservation does not name one lowercase UUID for its version")
+	}
 	return f, nil
+}
+
+// validPlayerUUID accepts the same canonical lowercase form as player-uuid.
+func validPlayerUUID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
+
+// ReadReservation reads one bounded reservation. A missing file is an error
+// wrapping os.ErrNotExist; callers decide whether absence means no floor.
+func ReadReservation(path string) (Reservation, error) {
+	b, err := readLimited(path, maxReserveFileBytes)
+	if err != nil {
+		return Reservation{}, err
+	}
+	return decodeReserve(b)
+}
+
+// WriteReservation merges each mark with the live file, whatever UUID it
+// names, then durably writes version 2 with the writer's UUID. The caller
+// must hold the data directory's exclusive lock and serialize its writes.
+// An unreadable live file refuses the write; it is never silently lowered.
+func WriteReservation(dataDir, path string, want Reservation) error {
+	return mergeReservation(path, want, readLimited, func(path string, b []byte) error {
+		return atomicwrite.WriteBytesDurable(dataDir, path, b, ".player-ids-*.tmp")
+	})
+}
+
+// mergeReservation is shared by restore and the engine's injectable writer.
+func mergeReservation(path string, want Reservation, read func(string, int64) ([]byte, error), write func(string, []byte) error) error {
+	if !validPlayerUUID(want.UUID) {
+		return errors.New("reservation writer requires one lowercase player UUID")
+	}
+	b, err := read(path, maxReserveFileBytes)
+	if err == nil {
+		old, err := decodeReserve(b)
+		if err != nil {
+			return err
+		}
+		want.IDs = max(want.IDs, old.IDs)
+		want.Tokens = max(want.Tokens, old.Tokens)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return write(path, encodeReserve(want.UUID, uint64(want.IDs), uint64(want.Tokens)))
+}
+
+// writeReservation uses the engine's UUID for its first and every later write.
+func (e *Engine) writeReservation(ids, tokens uint64) error {
+	return mergeReservation(e.cfg.ReservePath, Reservation{UUID: e.cfg.PlayerUUID, IDs: uint32(ids), Tokens: uint32(tokens)}, e.sm.readFile, e.sm.writeReserve)
 }
 
 // counter hands out IDs, or tokens: never 0 and never a value any run has

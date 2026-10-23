@@ -216,7 +216,7 @@ func TestAServeStartedWhileRestoreHoldsTheLockRefuses(t *testing.T) {
 	}
 }
 
-func TestALockThatCannotBeTakenFallsBackToTheProbe(t *testing.T) {
+func TestRestoreRequiresAnExclusiveDataDirLock(t *testing.T) {
 	t.Run("answering admin", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -229,8 +229,8 @@ func TestALockThatCannotBeTakenFallsBackToTheProbe(t *testing.T) {
 		cfgPath, dataDir, snap := seedRestorableInstall(t, u.Host)
 		blockDataDirLock(t, dataDir)
 		code, _, stderr := runRestoreYes(t, cfgPath, snap)
-		if code == 0 || !strings.Contains(stderr, "a bridge is answering on "+u.Host) {
-			t.Fatalf("fallback did not keep the probe refusal, exit %d\nstderr:\n%s", code, stderr)
+		if code == 0 || !strings.Contains(stderr, "exclusive lock could not be taken") {
+			t.Fatalf("restore did not require its lock, exit %d\nstderr:\n%s", code, stderr)
 		}
 		if strings.Contains(stderr, "already running") {
 			t.Fatalf("a lock that could not be taken was reported as held\nstderr:\n%s", stderr)
@@ -240,14 +240,18 @@ func TestALockThatCannotBeTakenFallsBackToTheProbe(t *testing.T) {
 		cfgPath, dataDir, snap := seedRestorableInstall(t, closedAdminAddr(t))
 		blockDataDirLock(t, dataDir)
 		code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
-		if code != 0 || !strings.Contains(stdout, "Restore complete") {
-			t.Fatalf("fallback refused a stopped bridge, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		if code == 0 || !strings.Contains(stderr, "exclusive lock could not be taken") || strings.Contains(stdout, "Restore complete") {
+			t.Fatalf("restore ran without its lock, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		}
 	})
 	t.Run("ephemeral admin port", func(t *testing.T) {
-		cfgPath, dataDir, _ := seedRestorableInstall(t, "127.0.0.1:0")
+		cfgPath, dataDir, snap := seedRestorableInstall(t, "127.0.0.1:0")
 		blockDataDirLock(t, dataDir)
-		code, _, stderr := runClearMissingYes(t, cfgPath)
+		code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
+		if code == 0 || !strings.Contains(stderr, "exclusive lock could not be taken") || strings.Contains(stdout, "Restore complete") {
+			t.Fatalf("restore ran without its lock, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		code, _, stderr = runClearMissingYes(t, cfgPath)
 		if code == 0 || !strings.Contains(stderr, "no fixed port") {
 			t.Fatalf("fallback did not keep the ephemeral-port refusal, exit %d\nstderr:\n%s", code, stderr)
 		}

@@ -42,6 +42,9 @@ const (
 // parameter here: 4b2 wires them from the bridge's configuration, and the
 // engine reads no configuration of its own.
 type Config struct {
+	// PlayerUUID is the identity this engine runs. Required, in canonical
+	// lowercase UUID form; serve passes the player-uuid it holds under lock.
+	PlayerUUID string
 	// Backend plays. Required.
 	Backend Backend
 	// QueuePath is the queue file. Required.
@@ -178,6 +181,8 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("player: a QueuePath is required")
 	case cfg.DataDir == "":
 		return nil, errors.New("player: a DataDir is required")
+	case !validPlayerUUID(cfg.PlayerUUID):
+		return nil, errors.New("player: a canonical lowercase PlayerUUID is required")
 	}
 	if cfg.ReservePath == "" {
 		cfg.ReservePath = cfg.QueuePath + ".ids"
@@ -268,7 +273,10 @@ func New(cfg Config) (*Engine, error) {
 		e.run = binary.BigEndian.Uint64(b[:])
 	}
 	e.w = newWriter(e)
-	e.start()
+	if err := e.start(); err != nil {
+		e.lifeCancel()
+		return nil, err
+	}
 	return e, nil
 }
 

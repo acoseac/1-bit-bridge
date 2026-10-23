@@ -257,8 +257,8 @@ func (e *Engine) reserveWrite() {
 		r.tokens.want = r.tokens.target()
 	}
 	r.inflight = true
-	data := encodeReserve(r.ids.want, r.tokens.want)
-	e.spawn(func() { e.post(msgReserveDone{err: e.sm.writeReserve(e.cfg.ReservePath, data)}) })
+	ids, tokens := r.ids.want, r.tokens.want
+	e.spawn(func() { e.post(msgReserveDone{err: e.writeReservation(ids, tokens)}) })
 }
 
 // ahead reserves the next block in the background once less than a block

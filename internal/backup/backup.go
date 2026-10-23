@@ -7,7 +7,8 @@
 // (`bridge.yaml`), the public-mode console account (`adminauth.json`,
 // when one exists), the Atlas harvest credential and sync cursor
 // (`atlas-harvest.json`, when one is stored), and the player's identity
-// (`player-uuid`, once the player has one: config.PlayerUUIDFile). The
+// (`player-uuid`, once the player has one: config.PlayerUUIDFile), plus
+// its matching durable reservation (`player-ids.json`, never the queue). The
 // snapshot also writes a small `manifest.json`
 // describing the bridge version and protocol version that produced it
 // — Restore refuses incompatible snapshots so a future schema change
@@ -23,7 +24,8 @@
 // clean, atomic copy of a WAL-mode database without locking out the
 // running bridge. Restoring the manifest db while the bridge is
 // running is unsafe (the WAL would be inconsistent with the new
-// main file), so `bridge restore` warns + requires `--yes`.
+// main file), so `bridge restore` holds the exclusive data-dir lock and
+// refuses a running serve. The confirmation prompt also accepts `--yes`.
 //
 // Run as root over an install another user owns (`sudo bridge backup`,
 // and `sudo bridge restore`, the usual form with the service stopped),
@@ -61,13 +63,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // Snapshot schema version. Bump on incompatible layout changes
 // (e.g. new mandatory file, restructured manifest). Restore refuses
-// snapshots whose `SchemaVersion` doesn't match this constant.
-const SchemaVersion = 1
+// snapshots newer than this constant. Version 1 remains readable. Version 2
+// makes older restores refuse before they could restore a UUID without a jump.
+const SchemaVersion = 2
 
 // ManifestFile is the metadata file written into every snapshot dir.
 const ManifestFile = "manifest.json"
@@ -227,6 +231,26 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		captured = append(captured, pair.name)
 	}
 
+	// Read the reservation after the identity's copy. A backup racing the
+	// first mint, or an interrupted restore, carries no mark unless the
+	// last durable reservation names exactly the identity we captured.
+	if slices.Contains(captured, PlayerUUIDFileName) {
+		id, err := config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
+		if err == nil {
+			mark, ok := matchingReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName), id)
+			if ok {
+				data, err := json.Marshal(mark)
+				if err != nil {
+					return "", err
+				}
+				if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
+					return "", err
+				}
+				captured = append(captured, engine.ReservationFileName)
+			}
+		}
+	}
+
 	m := Manifest{
 		SchemaVersion:   SchemaVersion,
 		BridgeVersion:   version.ServerVersion,
@@ -264,12 +288,21 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // beside a restored bridge. A snapshot that holds none (taken before the
 // file was in the bundle, or of a box whose player had none) leaves the
 // box's identity as it is.
+// A restored identity first gets a merged, durable reservation, past both
+// the snapshot's and the live counters by 2^24 plus one random 24-bit draw.
+// The snapshot reservation is only an input, never copied to the live path.
 func Restore(snapshotDir string, dst Targets) error {
+	return RestoreWithOptions(snapshotDir, dst, RestoreOptions{})
+}
+
+// RestoreWithOptions restores with an optional warning sink and random source.
+// Like Restore, its caller must hold the data directory's exclusive lock.
+func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
 		return fmt.Errorf("read snapshot manifest: %w", err)
 	}
-	if m.SchemaVersion != SchemaVersion {
+	if m.SchemaVersion != 1 && m.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
 	}
@@ -312,7 +345,22 @@ func Restore(snapshotDir string, dst Targets) error {
 			return err
 		}
 	}
+	if playerUUIDRead {
+		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
+			return err
+		}
+		// This comes after the reservation and before all other identity
+		// files, regardless of their order in the manifest. A failed restore
+		// may leave a raised floor; nothing rolls it back.
+		if err := config.WritePlayerUUIDFile(dst.PlayerUUID, playerUUID); err != nil {
+			return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
+		}
+	}
 	for _, name := range m.Files {
+		// The reservation is an input only, never a copied snapshot file.
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName {
+			continue
+		}
 		target, ok := mapping[name]
 		if !ok || target == "" {
 			continue
@@ -348,17 +396,6 @@ func Restore(snapshotDir string, dst Targets) error {
 			}
 			if err := writeFrom(target, bytes.NewReader(account), 0o600); err != nil {
 				return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
-			}
-			continue
-		}
-		if name == PlayerUUIDFileName {
-			// The UUID read before the loop, written the way the player
-			// writes its own file, never a copy of the snapshot's bytes.
-			if !playerUUIDRead {
-				return fmt.Errorf("restore %s: the snapshot changed during the restore", PlayerUUIDFileName)
-			}
-			if err := config.WritePlayerUUIDFile(target, playerUUID); err != nil {
-				return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 			}
 			continue
 		}

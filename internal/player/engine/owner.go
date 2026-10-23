@@ -109,7 +109,7 @@ const (
 
 // start loads what the files hold and publishes the first snapshot. It
 // runs in New: the owner has not started, so it may wait on the files.
-func (e *Engine) start() {
+func (e *Engine) start() error {
 	o := &e.o
 	o.q = emptyQueue
 	o.sessions = map[SessionID]*session{}
@@ -136,9 +136,12 @@ func (e *Engine) start() {
 		}
 	}
 	o.res.ids, o.res.tokens = startCounter(idsBase), startCounter(tokBase)
+	if o.res.ids.exhausted() || o.res.tokens.exhausted() {
+		return refuse("start", ReasonIDsExhausted, "the player's ID or token space is exhausted; no value can be handed out without reuse")
+	}
 	if o.res.stuckReserve == "" {
 		ids, tokens := o.res.ids.target(), o.res.tokens.target()
-		if err := e.sm.writeReserve(e.cfg.ReservePath, encodeReserve(ids, tokens)); err != nil {
+		if err := e.writeReservation(ids, tokens); err != nil {
 			o.res.failed = err
 			e.log.Warn("player: the reservation of this run could not be written; inserts and the other edits that advance the token are refused until one is",
 				"path", e.cfg.ReservePath, "err", err)
@@ -159,6 +162,7 @@ func (e *Engine) start() {
 	o.state = Stopped
 	o.dirty = true
 	e.publishIfDirty()
+	return nil
 }
 
 // loadReserve reads the reservation file: none is a reservation of

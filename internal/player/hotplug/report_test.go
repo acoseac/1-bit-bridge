@@ -61,7 +61,7 @@ func reporterEngine(t *testing.T) (*engine.Engine, *idleBackend) {
 	if err := os.Mkdir(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.New(engine.Config{Backend: be, QueuePath: filepath.Join(data, "queue.json"), DataDir: data})
+	eng, err := engine.New(engine.Config{PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", Backend: be, QueuePath: filepath.Join(data, "queue.json"), DataDir: data})
 	if err != nil {
 		t.Skipf("the engine does not start on this test's data directory: %v", err)
 	}

@@ -53,6 +53,7 @@ func snapshotFiles(t *testing.T, snap string) []string {
 // space followed it in the snapshot and whatever mode the snapshot's copy
 // has, over the identity the box has now.
 func TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile(t *testing.T) {
+	reservationStorage(t)
 	if backup.PlayerUUIDFileName != config.PlayerUUIDFile {
 		t.Fatalf("the snapshot names %q, the player names %q", backup.PlayerUUIDFileName, config.PlayerUUIDFile)
 	}
@@ -295,6 +296,7 @@ func TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile(t *testin
 // install another user owns, the snapshot's copy of the player's UUID and
 // the identity file a restore writes each take the install's owner, once.
 func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
+	reservationStorage(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
@@ -324,5 +326,9 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 	if err := backup.Restore(snap, backup.Targets{PlayerUUID: src.PlayerUUID}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	assertGivenAway(t, changes()[before:], []string{src.PlayerUUID})
+	realDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
 }

@@ -193,6 +193,15 @@ var syncParentDir = platformBarrier()
 // `t.Parallel()`.
 var syncFile = (*os.File).Sync
 
+// SetSyncFileForTest replaces the staged-file barrier for a failure test.
+// Like SetSyncDirForTest it is process-global: do not use t.Parallel, and
+// restore it only after every writer using it has stopped.
+func SetSyncFileForTest(fn func(*os.File) error) (restore func()) {
+	prev := syncFile
+	syncFile = fn
+	return func() { syncFile = prev }
+}
+
 // syncDir is the strict writer's and the probe's directory barrier: the
 // fsync of a directory they opened themselves, so that its failure, and
 // only its failure, is ErrBarrierFailed. It is (*os.File).Sync where the

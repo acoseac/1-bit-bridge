@@ -302,10 +302,11 @@ func (h *harness) reservePath() string { return h.queuePath() + ".ids" }
 // config is the engine's Config over the harness's fakes.
 func (h *harness) config() Config {
 	cfg := Config{
-		Backend:   h.be,
-		QueuePath: h.queuePath(),
-		DataDir:   h.dir,
-		Log:       slog.New(h.logs),
+		PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e",
+		Backend:    h.be,
+		QueuePath:  h.queuePath(),
+		DataDir:    h.dir,
+		Log:        slog.New(h.logs),
 		seams: seams{
 			clock:        h.clk,
 			writeQueue:   h.files.writeQueue,
