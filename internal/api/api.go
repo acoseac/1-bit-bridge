@@ -1942,7 +1942,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 37 covers the current maximum
+	// appends in lex order. Capacity 38 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
@@ -1958,7 +1958,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 37)
+	feats := make([]string, 0, 38)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
