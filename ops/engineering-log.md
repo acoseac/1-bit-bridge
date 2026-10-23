@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)](#2026-10-23--the-pairing-test-fixtures-requests-outlive-the-test-binary-ci-run-39930976048)
 - [2026-10-23 — B470 PR 4b2: the player's backend over the decoders and the sink, the sink's cut and reopen locator, the output reports, and bridge output play](#2026-10-23--b470-pr-4b2-the-players-backend-over-the-decoders-and-the-sink-the-sinks-cut-and-reopen-locator-the-output-reports-and-bridge-output-play)
 - [2026-10-22 — B473 B3: the live reading of an output's DAC, and the bridge's verdict on it](#2026-10-22--b473-b3-the-live-reading-of-an-outputs-dac-and-the-bridges-verdict-on-it)
 - [2026-10-23 — B513: the manifest says whether a PCM track's samples are integer or float, and the rows indexed before it get the kind without a rescan](#2026-10-23--b513-the-manifest-says-whether-a-pcm-tracks-samples-are-integer-or-float-and-the-rows-indexed-before-it-get-the-kind-without-a-rescan)
@@ -56703,3 +56704,113 @@ Codex's review of rounds 5 and 6 (the Claude API found nothing; Argon skipped) f
 - Red first, against round 6's code: 3 of 3, both cuts true.
 - With the fix: 20 of 20 under `-race`, the sibling `TestPlaybackRetiresWhatHasPlayed` too. Every `internal/player` and `internal/alsapcm` package passes under `-race`.
 - The red-first run is also the negative control, since the fix is one expression.
+
+## 2026-10-23 — the pairing test fixtures' requests outlive the test binary (CI run 39930976048)
+
+### The failure
+
+`test (windows-latest)` on CI run 39930976048 failed one case, and a
+re-run passed:
+
+    --- FAIL: TestPairingApprovalSharedBusRedactsSecrets (1.71s)
+        pairing_events_test.go:433: Approve: pairing: request not found
+
+`pairingEventsTestSetup` built its store with a 500 ms TTL and a 300 ms
+grace ("long enough for the SSE-subscribe round-trip"). Between
+`createPendingRequest` and `Approve` that test mints a bearer (a
+`tokens.json` write), opens the shared bus and the dedicated stream, and
+drains the first event. The store expires a pending request on a real
+`time.AfterFunc` armed at `CreateRequest` and deletes it a grace later, so
+on a runner that spent more than 800 ms there Approve found no row; past
+500 ms it would already have refused one (`ErrAlreadyDecided`). The
+store's injectable clock does not move that timer. No test in the file is
+about expiry, and none on `pairingTestSetup` either, whose default was
+100 ms "so timer-driven cases don't make the test slow": the store's own
+timer tests are in `internal/pairing`.
+
+### The fix
+
+`pairingTestTTL` (internal/api/pairing_test.go) is an hour, longer than a
+test binary may run (`-timeout 30m` in the Makefile, in
+`.github/scripts/test-shard.sh` and in the `test (…)` legs' `go test`).
+`pairingEventsTestSetup` takes it for its TTL and its grace, and
+`pairingTestSetup` for its default TTL (the grace stays three times the
+TTL). `pairingTestSetupTTL` still takes a caller's TTL, which is how a
+test about expiry gets a short one; `TestPairingCreateQueueFull` keeps its
+minute from #674. No assertion and no wait changed: `go test -run Pairing
+./internal/api/` took 1.26 s before and 1.31 s after.
+
+### Red first, and the controls
+
+Every scratch line was removed before the commit.
+
+- **The two approval tests.** A one-second sleep just before `Approve` in
+  `TestPairingApprovalSharedBusRedactsSecrets` and
+  `TestPairingEventsPushesApprovalWithToken`: on main's fixture both fail
+  with "Approve: pairing: request not found", the CI message; with the
+  fix and the same sleep both pass.
+- **Every test on the two fixtures.** A one-second sleep after each
+  create POST returns (`createPendingRequest`, `postPairing`), then every
+  test `-run Pairing` selects: on main's TTL values 11 fail, exactly the
+  set a reading of the handler and the store predicted, and with
+  `pairingTestTTL` all 38 pass.
+  - On `pairingEventsTestSetup`: `TestPairingEventsAuthRejectsWrongSecret`
+    (404 for 401: `Poll` looks the row up before it compares a secret
+    that is not empty), `TestPairingEventsSendsInitialState` (404),
+    `TestPairingEventsInitialEventCarriesIDZero` (a JSON 404 carries no
+    `id: 0`), `TestPairingEventsPushesApprovalWithToken` and
+    `TestPairingApprovalSharedBusRedactsSecrets` ("request not found"),
+    and `TestPairingEventsResponseIsNotGzipped` (the 404's JSON
+    Content-Type).
+  - On `pairingTestSetup`'s 100 ms: `TestPairingCreatePollDelete` (404),
+    `TestPairingApprovedTokenDeliveryReadMany` ("request not found"),
+    `TestPairingPollUnauthorized` (the wrong bearer: 404 for 401),
+    `TestPairingDeleteUnauthorizedStaysAuthorized` (the DELETE of a
+    missing row answers 204, not 401) and
+    `TestPairingCertRotationSurfacesViaPoll` (404).
+  - Not exposed, and green under the sleep:
+    `TestPairingEventsAuthRejectsMissingSecret` (an empty secret is
+    refused before the lookup), `TestPairingEventsUnknownRequestReturns404`,
+    `TestPairingPollUnknownReturns404`, `TestPairingCreateBadHash` and
+    `TestPairingCreateMissingDeviceName` (no request),
+    `TestPairingDeleteIdempotent` (both DELETEs answer 204 whether the row
+    is there or not), `TestPairingCreateQueueFull` (its minute), and the
+    stores below.
+- **The TTL, not the grace, is the window.** A 600 ms sleep after the
+  create on main's events fixture: the two approval tests fail with
+  "request already decided" (Approve's wall-clock guard), and
+  `TestPairingEventsSendsInitialState` finds no `pending` event and waits
+  out its 10 s connect context (10.6 s).
+
+### The other pairing stores in internal/api
+
+- `TestPairingEventsBrokerNotWiredReturns404` builds its own (1 s, and a
+  1 s grace). The handler answers `events_not_supported` before it reads
+  the request, so the row cannot change the answer, and the test passed
+  under the sleep. Its comment says the real request keeps the answer off
+  the unknown-request branch, which holds only for a handler that reads
+  the row first.
+- `demoEventsServer` (30 s, and a 1 s grace): one connect after the
+  create, under that connect's own 10 s context.
+- `newPairingStoreForFeaturesTest` (500 ms, and 300 ms): its three tests,
+  `TestHealthAdvertisesPairingEventsSupportedWhenBrokerAndPairingWired`,
+  `TestHealthFeaturesAlphaSortedAcrossAllConditionals` and
+  `TestHealthFeaturesCompleteSet` (through `newAllFeaturesServer`), create
+  no request; health reads only whether a store is wired.
+- Outside the package, `internal/admin`'s `newPairingTestServer` went to
+  5 s and a 5 s grace on PR #104 for the same reason (Qodo), and
+  `TestPairingCreateQueueFull` to a minute on #674, so this is the third
+  time the class has bitten.
+
+### Not in this change
+
+Two other bounds in these tests depend on the runner's speed. They are of
+the class backlog B107 holds (the in-process tests' fixed bounds and
+clients' per-request timeouts), and this change leaves them:
+
+- `TestPairingEventsResponseIsNotGzipped` reads the headers through
+  clients with a 200 ms and then a 500 ms timeout, and its sibling
+  `TestEventsResponseIsNotGzipped` with 200 ms and then 100 ms.
+- The read loops check their 2 s and 3 s deadlines after a line arrives,
+  so a line that arrives late fails the test, while a stream that sends
+  nothing waits for the 10 s connect context, as the 600 ms control did.

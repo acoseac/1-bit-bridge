@@ -18,31 +18,42 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
 )
 
+// pairingTestTTL is the request lifetime of a pairing store in a test
+// whose subject is not expiry: an hour, longer than a test binary may run
+// (`go test -timeout 30m` in the Makefile and in CI), so no runner is slow
+// enough to expire a request before the test acts on it.
+//
+// The store's sweeper takes part in every test that creates a request. A
+// pending row expires on a REAL time.AfterFunc armed at CreateRequest:
+// from then on Approve and Decline refuse it, a poll or a pairing stream
+// reads it as expired, and it no longer counts toward MaxPending; once
+// the grace has passed the row is deleted, and a poll, a stream, a DELETE
+// and Approve find nothing. A TTL that a test's own HTTP round trips can
+// outrun makes the test a race with that timer: at the 500 ms TTL and
+// 300 ms grace pairingEventsTestSetup had,
+// TestPairingApprovalSharedBusRedactsSecrets minted a bearer, opened two
+// streams and drained one before it approved, and on a loaded
+// windows-latest runner (CI run 39930976048, 2026-10-23) Approve found
+// the row deleted. A test whose subject IS the timer passes a short TTL
+// to pairingTestSetupTTL or builds a store of its own.
+//
+// The store's injectable clock (pairing.Options.Now) does NOT help: the
+// expiry timer is a real AfterFunc on s.ttl and onTimer's Pending branch
+// transitions unconditionally, without consulting s.now. Freezing the
+// clock leaves the sweeper firing on wall time exactly as before. The TTL
+// is the only knob that moves it.
+const pairingTestTTL = time.Hour
+
 // pairingTestSetup wires a Server with a real auth.Store + pairing.Store
-// (short TTL so timer-driven cases don't make the test slow) and returns
-// an httptest.Server. The fingerprint matches what the cert-rotation
-// guard tests need.
+// whose requests live for pairingTestTTL, and returns an httptest.Server.
+// The fingerprint matches what the cert-rotation guard tests need.
 func pairingTestSetup(t *testing.T) (*httptest.Server, *auth.Store, *pairing.Store) {
 	t.Helper()
-	return pairingTestSetupTTL(t, 100*time.Millisecond)
+	return pairingTestSetupTTL(t, pairingTestTTL)
 }
 
 // pairingTestSetupTTL is pairingTestSetup with the request TTL chosen by
-// the caller.
-//
-// The default 100 ms exists so timer-driven cases don't make the suite
-// slow, but it makes the store's own sweeper a participant in every
-// test: pending rows expire on a REAL time.AfterFunc armed at
-// CreateRequest, and an expired row no longer counts toward MaxPending.
-// Any test whose subject is the cap rather than the timer has to opt out
-// of that, or it silently becomes a race between the test's HTTP round
-// trips and the sweeper.
-//
-// Note the store's injectable clock (pairing.Options.Now) does NOT help
-// here: the expiry timer is a real AfterFunc on s.ttl and onTimer's
-// Pending branch transitions unconditionally, without consulting s.now.
-// Freezing the clock leaves the sweeper firing on wall time exactly as
-// before. The TTL is the only knob that moves it.
+// the caller, and a grace of three times that.
 func pairingTestSetupTTL(t *testing.T, ttl time.Duration) (*httptest.Server, *auth.Store, *pairing.Store) {
 	t.Helper()
 	dir := t.TempDir()

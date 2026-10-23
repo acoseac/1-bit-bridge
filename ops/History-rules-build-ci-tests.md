@@ -952,6 +952,26 @@
   the class on any Mac**: `hdiutil create -fs MS-DOS` keeps 2 s mtimes, and
   `TMPDIR` on it puts every `t.TempDir()` there.
 
+- **A real timer a test fixture arms outlasts the test binary, unless the
+  test is about that timer** (2026-10-23, the pairing fixtures). A pairing
+  store expires a request on a real `time.AfterFunc` armed at
+  `CreateRequest`, which its injectable clock does not move, so a fixture's
+  TTL takes part in every test that creates a request and races the test's
+  own round trips: past the TTL, Approve and Decline refuse the request and
+  a poll or a stream reads it as expired; past the grace, the row is gone.
+  `pairingEventsTestSetup` had 500 ms and a 300 ms grace, and
+  `TestPairingApprovalSharedBusRedactsSecrets`, which opens two streams and
+  drains one before it approves, failed on a loaded windows-latest runner
+  ("Approve: pairing: request not found", CI run 39930976048);
+  `pairingTestSetup` defaulted to 100 ms with no test on it about the timer.
+  With a second's delay after each create, 11 tests on the two fixtures
+  failed on those values and none on `pairingTestTTL`, an hour, past the
+  30-minute `-timeout` every test binary here runs under. The third time
+  the class bit: `internal/admin`'s fixture went to 5 s on PR #104, and
+  `TestPairingCreateQueueFull` to a minute on #674. **Don't shorten a shared
+  fixture's timer to keep the suite fast: a test about expiry passes a
+  short one of its own** (`pairingTestSetupTTL`, or a store of its own; the
+  store's timer tests are in `internal/pairing`).
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `drawLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP
