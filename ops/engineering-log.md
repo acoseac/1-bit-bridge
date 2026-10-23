@@ -58521,3 +58521,67 @@ identity's policy (5a0); a second device with our UDN; GENA; Volume;
 take a fraction as its whole part (yaml.v3); the iOS renderer profiles'
 substrings against modelDescription, which this session could not read;
 `SO_BINDTOIFINDEX`'s behaviour measured on a Linux box.
+
+### Round 2 — shutdown reporting, address overrides and observable surface tests
+
+2026-10-24. Six findings corrected, without changing the SOAP action table,
+implementing an action or advertising the Source:
+
+1. Stop still closes listeners before Shutdown, including sockets Serve has
+   not tracked yet. Only a Shutdown result matching DeadlineExceeded or
+   Canceled now marks the grace expired. A second close's net.ErrClosed is
+   not a forced stop. `TestIdleSocketsNeverMakeACleanStopForced` repeats 200
+   stops with two sockets and completed requests, requiring a clean report
+   and no forcing hook. Its control restores the any-error classification.
+2. Serve validates `--addr` with `config.ValidateBindAddress` before either
+   player plan and before the data-directory lock. Named services, empty
+   ports and ports outside the TCP range are refused without quoting the
+   value. `TestServeRefusesANonnumericAddressOverrideBeforePlanning` uses
+   `:postgresql` beside openhomePort 5432, plus four other invalid forms,
+   and holds the data-directory lock so a bypass cannot bind any service
+   port. Red first: all five reached the lock and exited 1. Green: 20
+   race-enabled repetitions pass. Restoring SplitHostPort-only validation
+   fails at the intended assertion again.
+3. Serve records the player plan before a validated address override, then
+   calls a refusal already reported only when its reason is unchanged.
+   A new override clash is one value-free "player: not started" warning.
+   `TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome` gives serve
+   an already-bound ephemeral API listener, uses that port for OpenHome,
+   checks the file alone enables the player, and requires the player and
+   surface off with one warning while serve still runs. The control keeps
+   the old already-reported flag. The History entry's claim that this
+   clash merely fails the surface's bind was corrected.
+4. DisableGeneralOptionsHandler is true on every surface server.
+   `TestOptionsStarPassesThroughTheSurface` sends raw OPTIONS * through a
+   real listener for own/foreign Hosts, running/stopping: 404/400 and
+   503/400, respectively, with empty EXT and a closed connection on a stop
+   refusal. Host remains before the stop check. The control restores Go's
+   general OPTIONS interception.
+5. `TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer/on` sends
+   valid Insert arguments, receives 602 and requires the queue to stay
+   empty. Its positive control inserts the same reference and metadata
+   directly, observes one entry and deletes it before the request. The
+   negative control uses the existing Handling seam to forward that
+   Insert to the real engine, synchronously, while still returning 602;
+   the unchanged empty-queue assertion must then fail.
+6. That test observes Run's done channel at Seams.Stopping, rather than
+   comparing two journal lines printed after teardown. The control moves
+   stopOpenHome after the engine/backend joins and before "player: shut
+   down", which the old journal assertion accepted.
+
+Validation: the pinned Go 1.27.2 toolchain, offline. `go vet ./...` passes
+for darwin, linux and windows. `make fmt` and `make docs-check` pass. The
+requested race suite passes binding, decode, engine, format, hotplug, lan,
+library, playback and config; socket-based OpenHome and cmd/bridge tests
+are refused by this sandbox (`bind: operation not permitted`), including
+httptest's panic in `TestWriteGateRefusesWhileABridgeAnswers`. OpenHome's
+existing `TestStopRefusesThenShutsDownThenCloses` also aborts its binary:
+after its denied bind, its cleanup uses a connection never initialized.
+Tests later in those binaries did not run. Every new regression and the strengthened serve case was invoked with `-race
+-count 20 -failfast`; only the address-override regression can complete in
+this sandbox. Controls 01 through 06 each apply alone and compile; 02
+fails at its intended assertion, and the other five stop at listener bind
+refusals before their assertions. Their behavioral red/green runs remain
+for a host that permits binds; a sandbox failure is not evidence that a
+control detects its intended regression. No commit was made. The rules
+and their long forms were updated with these changes.
