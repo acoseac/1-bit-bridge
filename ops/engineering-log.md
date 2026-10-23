@@ -57022,17 +57022,17 @@ reservation's path is a named pipe, so the engine's start, a plain
 its stop abandons the player at the test's bound, says so and returns, exit
 0; a second lock of the data dir is refused while the start is held; once a
 writer comes the engine's `New` finishes (it moves the bad file aside), the
-supervisor sees the stop and never runs it, and the lock goes. (The
-engine's `readLimited` opening its own files with a plain open, which waits
-on a named pipe, is a follow-up for the backlog: this change contains it,
-and does not fix it.)
+supervisor sees the stop and never runs it, and the lock goes. This change
+contains that start and does not fix it: a follow-up, backlog B523.
 
 ### Faults and panics
 
-A playback fault (a sink error, the DAC gone, a resolver refusal, a backend
-error) stays in the player: the engine records it, serve logs it (a fault,
-a skip, a stop, each once, its detail cut to 256 bytes, never a serial or a
-library path), the exit code is unchanged and no request waits on it
+A playback fault (a sink error, the DAC gone, a backend error) and a
+resolver refusal stay in the player: the engine records a fault as a fault
+and a refusal before content plays as a skip (`engine.Unplayable`), serve
+logs each (a fault, a skip, a stop, each once, its detail cut to 256 bytes,
+never a serial or a library path), the exit code is unchanged and no
+request waits on it
 (`TestAPlayerFaultStaysInsideThePlayer`, `TestAPanicInServesPlayerStopsThePlayerAndKeepsTheLibrary`).
 
 Serve recovers panics in what it owns: the supervisor (its start, its
@@ -57041,19 +57041,7 @@ stopped after), the goroutine that runs `eng.Run`, and the callbacks it hands
 the backend, the resolver (`resolver_failed`) and the sink notes. A panic is
 logged with where and its stack, and its value only when it is the runtime's
 own error. **Known limit**: a panic on a goroutine the engine, the backend
-or the sink starts is not recovered, and ends the process: the engine's
-`spawn` (backend calls and reservation writes, `engine.go`) and its queue
-writer (`owner.go`'s `loop`), the backend's `spawn` (`playback/backend.go`:
-producer, reporter, openers, teardown), and the sink's writer
-(`alsapcm/sink.go`). A panic on `Run`'s own goroutine is recovered, but the
-engine is then dead: its `done` never closes, and a session the backend
-holds keeps the DAC until the process exits, since nothing releases it. The
-proposal, for the PR that takes it: a recover in each `spawn`, turning a
-panic into that call's failure (a backend call `ReasonBackend`, a
-reservation write a failed one, the queue writer a failed write that stays
-dirty), in the backend's turning it into the session's fault, and in the
-sink's writer ending the sink typed (`SinkEnded`), each logged without its
-value; and a release-all on the backend for a supervisor whose engine died.
+or the sink starts is not recovered here: a follow-up, backlog B523.
 
 ### Backup and restore: recorded for 5a, unchanged here
 
@@ -57254,10 +57242,7 @@ fail of the rest. Volumio, or any MPD, must not be playing to the GO bar.
 
 OpenHome SOAP, GENA, discovery, a URI and its confinement (5a);
 `/v1/outputs` (5b); the DAC page (6a); seek, shuffle, DSD and DoP, the
-registry, hardware volume. The backup policy above (5a). A panic recovery
-inside the engine, the backend and the sink (the proposal above). The
-engine's `readLimited` opening a named pipe with a plain open (a follow-up
-for the backlog).
+registry, hardware volume. The backup policy above (5a). Backlog B523.
 
 ### Round 2: the review's eight findings
 
