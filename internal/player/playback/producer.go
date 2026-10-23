@@ -312,28 +312,65 @@ func (s *session) transition(o *occ) bool {
 			}
 		}
 	}
+	// The sink is the session's from here (s.outs: the teardown closes it,
+	// after every file), and it becomes the current one once it is in the
+	// session's pause state. A pause that came while it opened found no
+	// device to pause: the sink takes it before a frame is written to it, and
+	// holds its device paused from then on, letting it go after the pause
+	// release as any paused sink does. The command goes through call, never
+	// under the session's lock: a sink whose writer the kernel holds answers
+	// no command, and a Release must not wait on it. Until the sink is
+	// current, a pause or a resume meanwhile is one with no device, which the
+	// next turn follows.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if o.dropped || s.ctx.Err() != nil {
-		s.mu.Unlock()
-		s.closeOutput(out)
-		s.mu.Lock()
-		return s.ctx.Err() == nil
-	}
-	s.cur = out
 	s.outs = append(s.outs, out)
+	sinkPaused := false
+	for {
+		switch {
+		case s.ctx.Err() != nil:
+			s.mu.Unlock()
+			return false
+		case o.dropped:
+			s.mu.Unlock()
+			s.closeOutput(out)
+			return true
+		case s.paused == sinkPaused:
+			s.currentLocked(o, out, sinkPaused)
+			s.mu.Unlock()
+			return true
+		}
+		cmd := out.sink.Pause
+		if sinkPaused {
+			cmd = out.sink.Resume
+		}
+		s.mu.Unlock()
+		err := s.call(s.ctx, cmd)
+		s.mu.Lock()
+		switch {
+		case s.ctx.Err() != nil:
+			s.mu.Unlock()
+			return false
+		case err != nil:
+			// The sink took neither (it ended: the reporter reads why from its
+			// state). It is current as it is.
+			s.currentLocked(o, out, false)
+			s.mu.Unlock()
+			return true
+		}
+		sinkPaused = !sinkPaused
+	}
+}
+
+// currentLocked makes out, the sink just opened for o, the current one,
+// and o the occurrence the producer writes; paused says the sink holds the
+// session's pause. s.mu is held.
+func (s *session) currentLocked(o *occ, out *output, paused bool) {
+	s.cur = out
 	o.out, o.start, o.transport = out, 0, out.transport
 	s.writing = o
-	if s.paused {
-		// A pause came while the sink opened, with no device to pause: the
-		// sink holds its device paused from now on, nothing written to it
-		// yet, and lets it go after the pause release as any paused sink
-		// does. Under the lock, so a resume finds it paused.
-		if err := out.sink.Pause(); err == nil {
-			s.pausedLocked(false)
-		}
+	if paused {
+		s.pausedLocked(false)
 	}
-	return true
 }
 
 // openFailed settles a transport's sink that did not open: a DAC that takes

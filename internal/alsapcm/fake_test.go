@@ -127,8 +127,10 @@ type fakeKernel struct {
 	// (parkNextWrite).
 	writeGate, writeParked chan struct{}
 	// drainGate and drainParked are the same for the next DRAIN
-	// (parkNextDrain).
-	drainGate, drainParked chan struct{}
+	// (parkNextDrain), and statusGate and statusParked for the next STATUS
+	// (parkNextStatus).
+	drainGate, drainParked   chan struct{}
+	statusGate, statusParked chan struct{}
 
 	// The record.
 	opened     []string
@@ -628,6 +630,15 @@ func (k *fakeKernel) parkNextDrain() (parked <-chan struct{}, release func()) {
 	return in, func() { once.Do(func() { close(gate) }) }
 }
 
+// parkNextStatus parks the next STATUS inside the call, as parkNextWrite
+// parks a write.
+func (k *fakeKernel) parkNextStatus() (parked <-chan struct{}, release func()) {
+	gate, in := make(chan struct{}), make(chan struct{})
+	k.inspect(func(k *fakeKernel) { k.statusGate, k.statusParked = gate, in })
+	var once sync.Once
+	return in, func() { once.Do(func() { close(gate) }) }
+}
+
 // inspect runs f with k.mu held, for a test that reads the fake while a
 // sink's writer may be calling it.
 func (k *fakeKernel) inspect(f func(k *fakeKernel)) {
@@ -747,6 +758,14 @@ func (k *fakeKernel) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 		}
 		return errnoEAGAIN
 	case ioctlStatus:
+		if g := k.statusGate; g != nil {
+			parked := k.statusParked
+			k.statusGate, k.statusParked = nil, nil
+			k.mu.Unlock()
+			close(parked)
+			<-g
+			k.mu.Lock()
+		}
 		if len(k.states) > 0 {
 			k.state, k.states = k.states[0], k.states[1:]
 		}

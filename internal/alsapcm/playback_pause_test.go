@@ -1,6 +1,7 @@
 package alsapcm_test
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,75 @@ func TestPlaybackPausesTheTransportCurrentWhenItDecides(t *testing.T) {
 		t.Errorf("after the pause b's stream is %s, want PAUSED: the pause acted on a's sink, which was gone", v.State)
 	}
 	d.release(1)
+	d.k.CheckClosedEach(t)
+}
+
+// TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock pins the pause
+// a sink takes as it opens: a pause that came while the next transport's
+// sink opened found no device to pause, and the sink takes it before a
+// frame. That command waits on the sink's writer, which the kernel can hold
+// in a call (here a STATUS), so it goes through call, never under the
+// session's lock: a Release then answers past its context at once, the
+// teardown closes every content while the kernel holds the call, and the
+// release is acknowledged once the kernel lets go.
+func TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock(t *testing.T) {
+	opening, opened := make(chan struct{}), make(chan struct{})
+	var heldOnce, goOnce sync.Once
+	d := newDirect(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+			s, err := open(ctx, cfg)
+			if err == nil && cfg.Transport.RateHz == 48000 {
+				heldOnce.Do(func() {
+					close(opening)
+					<-opened
+				})
+			}
+			return s, err
+		}
+	})
+	letOpen := func() { goOnce.Do(func() { close(opened) }) }
+	t.Cleanup(letOpen)
+	d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	d.files.add("b", wav(48000, 24, pattern(2, 48000, 24)))
+	if err := d.start(1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	next := occurrence(102, 2, "b")
+	if err := d.be.Prepare(bg, 1, 101, &next); err != nil {
+		t.Fatal(err)
+	}
+	d.k.Free()
+	receiveIn(t, opening, "b's sink to open, a's drained and closed")
+	if err := d.be.Pause(bg, 1); err != nil {
+		t.Fatalf("a pause while b's sink opens: %v", err)
+	}
+	// b's writer, watching with nothing to write, measures at its first
+	// timeout: that STATUS stays in the kernel.
+	parked, unpark := d.k.ParkNextStatus()
+	t.Cleanup(unpark)
+	d.k.Grant(100 * time.Millisecond)
+	receiveIn(t, parked, "b's writer to be held in STATUS")
+	letOpen()
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	released := make(chan error, 1)
+	go func() { released <- d.be.Release(ctx, 1) }()
+	if err := receiveIn(t, released, "Release to answer past its context"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Release past its context: %v, want its context's error", err)
+	}
+	waitOn(t, "every content closed while the kernel holds b's writer", func() <-chan struct{} {
+		d.files.mu.Lock()
+		defer d.files.mu.Unlock()
+		return d.files.changed
+	}, func() bool { return d.files.isClosed("a") && d.files.isClosed("b") })
+	if n := count(d.rec.events(), "released", 0); n != 0 {
+		t.Fatalf("Released while the kernel held b's writer")
+	}
+	unpark()
+	waitOn(t, "the late acknowledgement", d.rec.ch, func() bool { return count(d.rec.events(), "released", 0) == 1 })
+	if v := d.k.View(); v.Open {
+		t.Errorf("b's node is open after the late acknowledgement")
+	}
 	d.k.CheckClosedEach(t)
 }
 

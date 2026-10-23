@@ -194,6 +194,12 @@ func (tk *FakeKernel) ParkNextDrain() (parked <-chan struct{}, release func()) {
 	return tk.k.parkNextDrain()
 }
 
+// ParkNextStatus parks the next STATUS inside the kernel call until release,
+// as ParkNextWrite parks a write.
+func (tk *FakeKernel) ParkNextStatus() (parked <-chan struct{}, release func()) {
+	return tk.k.parkNextStatus()
+}
+
 // CheckClosedEach fails the test unless every open of the node was closed
 // once and nothing reached it while closed.
 func (tk *FakeKernel) CheckClosedEach(t *testing.T) { tk.k.checkClosedEach(t) }
