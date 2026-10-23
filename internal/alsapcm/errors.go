@@ -35,6 +35,10 @@ const (
 	// the binding resolved, renumbered or swapped between the resolve and
 	// the open. Nothing was written to it.
 	ReasonWrongDevice Reason = "wrong_device"
+	// ReasonNotLocated is a reopen whose SinkConfig.Locate named no
+	// endpoint: the binding resolves to no unit now (missing, ambiguous, the
+	// box not read). Nothing was opened.
+	ReasonNotLocated Reason = "not_located"
 	// ReasonProtocol is a kernel PCM protocol this backend does not open.
 	ReasonProtocol Reason = "unsupported_protocol"
 	// ReasonNotSupported is a rate, channel count or format the hardware
