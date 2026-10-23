@@ -77,8 +77,10 @@ type session struct {
 
 	posOcc    engine.OccurrenceID
 	posFrames int64
-	// retired is the last occurrence retireLocked let go of: it and every
-	// one before it played or was dropped (IDs grow in play order).
+	// retired is retirement's watermark: every occurrence up to it played or
+	// was dropped (IDs grow in play order), and a cut of one the chain no
+	// longer holds answers that it played. One of them still opening stays
+	// in the chain until its opener ends.
 	retired engine.OccurrenceID
 
 	producerDone bool
@@ -490,7 +492,11 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeR)
 	}()
 	if o.dropped {
+		// Dropped while it opened: nothing of it plays or is reported, and
+		// it leaves the chain with its opener, which retirement passed over
+		// while the open was under way.
 		closeOcc(o)
+		s.removeLocked(o)
 		return
 	}
 	if o.refused != nil {
@@ -627,27 +633,37 @@ func (s *session) dropLocked(o *occ) {
 // a ring of up to megabytes. Every occurrence before heard has played or
 // was dropped; a cut of one answers that it played (cut). An occurrence
 // whose open is under way (a successor dropped while its opener still
-// reads) is its opener's until the open ends: the fields the open sets,
-// its refusal among them, are written outside the session's lock, and what
-// it opened is the opener's to close. Retirement waits for it, looking at
-// none of them before. s.mu is held.
+// reads, which a read on a mount that hangs may do for the session's life)
+// is its opener's until the open ends: the fields the open sets, its
+// refusal among them, are written outside the session's lock, and what it
+// opened is the opener's to close. Retirement passes over it, reading none
+// of them, and retires the others, so it holds back nothing else; it
+// leaves the chain with its opener (openSuccessor). s.mu is held.
 func (s *session) retireLocked(heard *occ) {
 	if heard == nil || heard.pos == 0 {
 		return
 	}
 	n := heard.pos
 	for _, o := range s.chain[:n] {
-		if !o.opened() || o == s.writing || o == s.between || !(o.crossed || o.dropped) || (o.refused != nil && !o.repRefused) {
+		if !o.opened() {
+			continue
+		}
+		if o == s.writing || o == s.between || !(o.crossed || o.dropped) || (o.refused != nil && !o.repRefused) {
 			return
 		}
 	}
 	s.retired = s.chain[n-1].id
-	rest := copy(s.chain, s.chain[n:])
-	clear(s.chain[rest:])
-	s.chain = s.chain[:rest]
+	kept := 0
 	for i, o := range s.chain {
-		o.pos = i
+		if i < n && o.opened() {
+			continue
+		}
+		o.pos = kept
+		s.chain[kept] = o
+		kept++
 	}
+	clear(s.chain[kept:])
+	s.chain = s.chain[:kept]
 	keep := s.outs[:0]
 	for _, out := range s.outs {
 		if !out.closed || out == s.cur || out == s.handed || s.refersLocked(out) {
@@ -656,6 +672,18 @@ func (s *session) retireLocked(heard *occ) {
 	}
 	clear(s.outs[len(keep):])
 	s.outs = keep
+}
+
+// removeLocked takes o, which nothing plays or reports, out of the chain.
+// s.mu is held.
+func (s *session) removeLocked(o *occ) {
+	if o.pos >= len(s.chain) || s.chain[o.pos] != o {
+		return
+	}
+	s.chain = slices.Delete(s.chain, o.pos, o.pos+1)
+	for i := o.pos; i < len(s.chain); i++ {
+		s.chain[i].pos = i
+	}
 }
 
 // refersLocked reports whether an occurrence the session holds wrote to

@@ -300,30 +300,49 @@ func TestPlaybackRetiresWhatHasPlayed(t *testing.T) {
 }
 
 // TestPlaybackRetiresNothingAnOpenerStillHolds pins retirement beside an
-// open under way: b, a successor whose open is held in a read of its content
-// that no context ends (a file on a mount that hangs), is replaced by c, so
-// b is dropped and its open cancelled, which the held read does not notice.
-// c follows a in the sink and is heard while b's opener still holds b, and
-// the report step that hears c retires nothing: until an open ends, the
-// fields it sets are its opener's, written outside the session's lock, and
-// retirement reads them. b's read then returns while c plays, its opener
-// finishes and closes what it opened, and the next step retires a and b.
+// open that does not end: b, a successor whose open is held in a read of its
+// content that no context ends (a file on a mount that hangs), is replaced by
+// c, so b is dropped and its open cancelled, which the held read does not
+// notice. c, then d and e after a change of transport, are heard while b's
+// opener still holds b, and each step that hears one retires everything
+// before it but b: until an open ends the fields it sets are its opener's,
+// written outside the session's lock, and retirement reads none of them. So
+// an open that never ends holds back nothing else: the session holds b and
+// what plays, and lets go of the sink a and c played through once d's
+// plays. b's read then returns while e plays, and b leaves the session with
+// its opener.
 func TestPlaybackRetiresNothingAnOpenerStillHolds(t *testing.T) {
 	d := newDirect(t, nil)
 	for i, ref := range []string{"a", "b", "c"} {
 		d.files.add(ref, wav(44100, 16, pattern(i+1, 22050, 16)))
 	}
+	// After c, a transport of its own: d's half second, then e, long enough
+	// to play on while the test looks.
+	d.files.add("d", wav(48000, 24, pattern(4, 24000, 24)))
+	d.files.add("e", wav(48000, 24, pattern(5, 480000, 24)))
 	parked, release := d.files.stall("b", 0)
 	t.Cleanup(release)
+	holds := func(when string, occurrences, sinks int) {
+		t.Helper()
+		if st := d.be.Stats(); st.Occurrences != occurrences || st.Sinks != sinks {
+			t.Errorf("%s: the backend holds %d occurrences and %d sinks; want %d and %d", when, st.Occurrences, st.Sinks, occurrences, sinks)
+		}
+	}
+	heard := func(o engine.OccurrenceID) {
+		t.Helper()
+		if n := count(d.rec.events(), "audible", o); n != 1 {
+			t.Fatalf("occurrence %d audible %d times: %s", o, n, kinds(d.rec.events()))
+		}
+	}
 	if err := d.start(1, "a"); err != nil {
 		t.Fatal(err)
 	}
-	b, c := occurrence(102, 2, "b"), occurrence(103, 3, "c")
-	if err := d.be.Prepare(bg, 1, 101, &b); err != nil {
+	ob, oc := occurrence(102, 2, "b"), occurrence(103, 3, "c")
+	if err := d.be.Prepare(bg, 1, 101, &ob); err != nil {
 		t.Fatal(err)
 	}
 	receiveIn(t, parked, "b's open to be held in a read of its content")
-	if err := d.be.Prepare(bg, 1, 101, &c); err != nil {
+	if err := d.be.Prepare(bg, 1, 101, &oc); err != nil {
 		t.Fatalf("c in b's place: %v", err)
 	}
 	d.files.fed(t, "c")
@@ -331,22 +350,31 @@ func TestPlaybackRetiresNothingAnOpenerStillHolds(t *testing.T) {
 	// a's 0.5 s and a tenth of c's.
 	d.k.Play(t, 600*time.Millisecond)
 	d.tick()
-	if n := count(d.rec.events(), "audible", 103); n != 1 {
-		t.Fatalf("c audible %d times after a played out: %s", n, kinds(d.rec.events()))
+	heard(103)
+	holds("c heard, b's open under way: a retired, b its opener's, c playing", 2, 1)
+	od, oe := occurrence(104, 4, "d"), occurrence(105, 5, "e")
+	if err := d.be.Prepare(bg, 1, 103, &od); err != nil {
+		t.Fatal(err)
 	}
-	if st := d.be.Stats(); st.Occurrences != 3 {
-		t.Fatalf("with b's open under way, the step that heard c left %d occurrences; want a, b and c: an occurrence whose open is under way is its opener's", st.Occurrences)
+	if err := d.be.Prepare(bg, 1, 104, &oe); err != nil {
+		t.Fatal(err)
 	}
+	// c plays out for d's transport, then d and e play on d's sink, as fast
+	// as the writer's waits need: once every frame of e is in the sink, the
+	// played content is past d's.
+	d.k.Free()
+	d.files.fed(t, "e")
+	d.tick()
+	heard(104)
+	heard(105)
+	holds("d and e heard, b's open still under way: c, d and the sink before d's let go", 2, 1)
 	release()
 	waitOn(t, "b's opener to close what it opened", func() <-chan struct{} {
 		d.files.mu.Lock()
 		defer d.files.mu.Unlock()
 		return d.files.changed
 	}, func() bool { return d.files.isClosed("b") })
-	d.tick()
-	if st := d.be.Stats(); st.Occurrences != 1 {
-		t.Errorf("b's open ended, a step later the backend holds %d occurrences; want c alone", st.Occurrences)
-	}
+	holds("b's open ended while e plays: b gone with its opener", 1, 1)
 	d.release(1)
 	d.files.allClosed(t)
 	d.k.CheckClosedEach(t)
