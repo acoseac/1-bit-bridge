@@ -285,7 +285,7 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 				if e.Snapshot().Len() != 0 || e.Snapshot().Token() == 0 {
 					t.Fatalf("new identity did not start empty: visible IDs %v", e.Snapshot().IDs())
 				}
-				assertPlayerResetAdvice(t, advice)
+				assertPlayerResetAdvice(t, advice, "restore")
 			})
 		}
 	}
@@ -293,10 +293,17 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 
 // assertPlayerResetAdvice pins the complete shared remedy independently of the
 // production builder: a snapshot may contain an older, correctly stamped floor.
-func assertPlayerResetAdvice(t *testing.T, advice string) {
+func assertPlayerResetAdvice(t *testing.T, advice, operation string) {
 	t.Helper()
+	const restoreStep = "remove player-uuid and player-ids.json from a copy of the snapshot as well, then restore that copy"
+	if got, want := strings.Contains(advice, restoreStep), operation == "restore"; got != want {
+		t.Errorf("%s refusal restore step present = %t, want %t: %s", operation, got, want, advice)
+	}
 	for _, required := range []string{
 		"with the service stopped, reset the player: remove the box's player-uuid, player-ids.json and player-queue.json together",
+		"this reset gives up the identity for good",
+		"no snapshot taken on this box before the reset may restore its player identity",
+		"remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots",
 		"the next start makes a new identity with no queue, a new device to controllers",
 		"a snapshot's player-ids.json is never a valid repair",
 		"do not delete the reservation while keeping the player identity",
@@ -340,7 +347,7 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 				if err == nil {
 					t.Fatal("unreadable reservation accepted")
 				}
-				assertPlayerResetAdvice(t, err.Error())
+				assertPlayerResetAdvice(t, err.Error(), operation)
 				if id, err := config.ReadPlayerUUID(dst); err != nil || id != snapshotPlayerUUID {
 					t.Fatalf("refusal changed identity: %s, %v", id, err)
 				}
