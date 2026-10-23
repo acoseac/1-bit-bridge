@@ -2092,37 +2092,96 @@
   (`TestSampleFormatRidesItsColumnAndNeverTagsJSON`,
   `TestTheVersionStaleStampRecordsTheKindItReads`.)
 
+- **…and a kind carries the stat it was read at, so an older binary's
+  rewrite leaves a kind every open clears** (2026-10-23, backlog B513, round
+  3). `sample_format_size` and `sample_format_mtime_ns` (v59) are the size
+  and mtime of the file the kind was decided from, written with every kind:
+  both upserts bind the row's own `size` and `mtime_ns` again, the stamp leg
+  writes them (and rewrites a right kind recorded at another stat), and the
+  fill and the header pass copy the row's. A writer that does not know the
+  columns, the upsert of a binary from before them run after a rollback,
+  rewrites `size`, `mtime_ns` and `tags_json` for a changed file and keeps
+  the kind, which then describes the bytes before; both binaries stamp
+  `ExtractorVersion` 27, so the skip gate never read such a file again (both
+  round-3 reviews, reproduced with main's upsert captured in
+  `rolledBackUpsertSQL`). `clearStaleSampleFormats` runs at the end of every
+  `migrate`, before the fill: a row whose recorded stat is not its own is
+  undecided again, read through `idx_tracks_sample_format_stale` (its
+  predicate, verbatim), which holds no row on a store this binary alone has
+  written (57 µs at 50,000 rows). **Never write `sample_format` without
+  `sample_format_size` and `sample_format_mtime_ns`, and don't let the fill
+  run before the open's clear.**
+  (`TestARollbackLeavesNoKindItsHeaderDoesNotState`,
+  `TestEveryWriteOfAKindRecordsTheStatItWasReadAt`,
+  `TestEverySampleFormatWriteRecordsItsStat`, which reads the package's SQL.)
+
 - **…and the rows extracted before it get it without a rescan: every open
   decides what a codec decides, and the header pass reads each WAV and AIFF
-  row's format chunk** (2026-10-23, backlog B513). `backfillSampleFormatByCodec`
-  runs at the end of every `migrate` (`sampleFormatFillSQL`, 2,000 rows a
-  statement): a FLAC or ALAC row read from a file and not DSD is `'integer'`,
-  every other row it reaches `''`; it reads no file and assigns no
-  `indexed_at`, and a client receives these values through the one-time full
-  sync the `sampleFormat` health key starts (wire.md). `Store.BackfillSampleFormats`
-  reads the undecided WAV and AIFF rows read from a file, 200 a page in path
-  order: the API's resolver, the row's size and mtime against the file's
-  before and after the read, `openAudioFile`, and `readHeaderSampleFormat`,
-  which walks the chunks with the walkers' own `fmt `/`COMM` size bounds
-  (`wavFmtChunkMin`… package consts both share) and seeks over the rest; it
-  writes a page in one transaction under `Store.mu`, each row only while it
-  is still undecided and still has that stat (`sampleFormatDecideSQL`), and a
-  row that gains a kind advances `indexed_at`. Measured: the fill over 50,000
-  rows 248 ms, once; 2,000 WAV headers 113 ms on an SSD; a pass with nothing
-  to read 35 µs (the record, 2026-10-23). **Don't let the open-time fill move
-  `indexed_at`** (it decides most of a library; a delta of the whole library
-  is what the key's full sync replaces), **don't stamp a routed row by its
-  codec** (its codec is its upstream's file name and no header is read),
-  **don't read past the format chunk** (a header pass that read the chunks it
-  passed read 2 MiB for a header), **don't record a kind from a file whose
-  size and mtime are not the row's** (the scan that re-reads it writes the
-  kind), **and don't let the header read and the walkers disagree on which
-  chunk names the file** (`TestTheHeaderReadAgreesWithTheExtractor` runs all
-  45 WAV and AIFF shapes through both).
+  row's format chunk** (2026-10-23, backlog B513; the fill's paging, round
+  3). `backfillSampleFormatByCodec` runs at the end of every `migrate`, after
+  the open's clear (`sampleFormatFillSQL`, 2,000 rows a transaction): a FLAC
+  or ALAC row read from a file and not DSD is `'integer'`, every other row it
+  reaches `''`; it reads no file. Each chunk starts after the last path the
+  one before decided (`UPDATE … RETURNING path, sample_format`), so a fill
+  reads each undecided row once: until round 3 every chunk started again at
+  the front of the partial index, where the header pass's rows stay, and read
+  them again (W × ceil(F / 2,000); 80,000 rows half of them WAV, 525 ms
+  against 218 ms). `Store.BackfillSampleFormats` reads the undecided WAV and
+  AIFF rows read from a file, 200 a page in path order: the API's resolver,
+  the row's size and mtime against the file's before and after the read,
+  `openAudioFile`, and `readHeaderSampleFormat`, which walks the chunks with
+  the walkers' own `fmt `/`COMM` size bounds (`wavFmtChunkMin`… package consts
+  both share) and seeks over the rest; it writes a page in one transaction
+  under `Store.mu`, each row only while it is still undecided and still has
+  that stat (`sampleFormatDecideSQL`). When either moves `indexed_at` is the
+  next bullet's. Measured: the fill over 50,000 rows about 205 ms, once;
+  2,000 WAV headers 113 ms on an SSD; a pass with nothing to read 35 µs (the
+  record, 2026-10-23). **Don't stamp a routed row by its codec** (its codec is
+  its upstream's file name and no header is read), **don't read past the
+  format chunk** (a header pass that read the chunks it passed read 2 MiB for
+  a header), **don't record a kind from a file whose size and mtime are not
+  the row's** (the scan that re-reads it writes the kind), **don't let the
+  header read and the walkers disagree on which chunk names the file**
+  (`TestTheHeaderReadAgreesWithTheExtractor` runs all 45 WAV and AIFF shapes
+  through both), **and don't start a fill chunk anywhere but past the path
+  the last one ended on.**
   (`TestTheOpenFillDecidesWhatACodecDecidesAndLeavesTheCursor`,
   `TestTheHeaderBackfillReadsOnlyTheUnreadWAVAndAIFFRows`,
   `TestTheHeaderReadStopsAtTheFormatChunk`,
-  `TestTheSampleFormatQueriesUseThePartialIndex`.)
+  `TestTheSampleFormatQueriesUseThePartialIndex`,
+  `TestTheOpenFillVisitsEachUndecidedRowOnce`, and one test per guard of the
+  header pass's write: `TestTheHeaderPassLeavesTheKindAScanWroteMidPass`,
+  `TestTheHeaderPassLeavesARowWhoseStatMovedMidPass` and
+  `TestTheHeaderPassReadOfAFileReplacedAfterItsStatIsChanged`.)
+
+- **…and the backfill is delivered once: nothing it writes moves
+  `indexed_at` before a header pass has run to its end, which records the
+  completion mark the health key reads, and every kind it records after the
+  mark moves it** (2026-10-23, backlog B513, round 3). Round 2's header pass
+  advanced every row it gave a kind, so a library of WAV files sent a delta
+  that size beside the one full sync (the Codex review). Now a pass that
+  reads its last page records `sample_format_backfill_complete_ns` in
+  `scan_state` (`markSampleFormatBackfillComplete`, an `INSERT OR IGNORE`
+  only while no row the fill decides is undecided), and `SampleFormatReady`
+  is that row: the health key appears only then, and the clients' one full
+  sync carries every kind recorded before it (wire.md). A pass a shutdown
+  stops, or one that fails, records nothing, and the next pass starts again;
+  the rows it decided stay decided, so the rows hold the progress and the
+  mark is the only other state, and it survives a restart. A file the
+  finishing pass could not read does not hold the mark back. After the mark,
+  a kind the fill or the header pass gives a row moves its `indexed_at`
+  (`advanceGainedSampleFormatsTx`, through `bumpIndexedAtByPathSQL`, in the
+  transaction that writes the kind): the full sync is once per bridge, and a
+  key that comes back after a rollback starts none, so a rollback's rows
+  (cleared or inserted) and a file read late reach a client only by a delta.
+  A row decided as having none never moves. **Don't let the fill or the
+  header pass move `indexed_at` before the mark, don't leave a kind they give
+  a row after it unmoved, don't record the mark from a pass that did not
+  reach its last page or while a row the fill decides is undecided, and never
+  remove it.**
+  (`TestTheBackfillMovesNoCursorAndTheKeyWaitsForAPassToItsEnd`,
+  `TestSampleFormatIsReadyOnlyOnceEveryRowTheFillDecidesIsDecided`,
+  `TestARollbackLeavesNoKindItsHeaderDoesNotState`.)
 
 - **B513 changed extraction without an `ExtractorVersion` bump, and that is the
   bounded exception, not a precedent for a `tags_json` field** (2026-10-23).
