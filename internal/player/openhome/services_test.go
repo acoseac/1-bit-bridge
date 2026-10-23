@@ -86,7 +86,7 @@ func TestTheUpstreamFilesAreTheirPinnedBytes(t *testing.T) {
 	}
 	pinned := 0
 	for _, line := range strings.Split(string(readme), "\n") {
-		sum, name, ok := strings.Cut(line, "  ")
+		sum, name, ok := strings.Cut(strings.TrimRight(line, "\r"), "  ")
 		if !ok || len(sum) != 64 {
 			continue
 		}

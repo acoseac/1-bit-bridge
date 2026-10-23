@@ -17,3 +17,6 @@ internal/player/decode/testdata/alac-goldens/*.m4a binary
 # hashes; two of them are CRLF, which no checkout may convert.
 internal/player/openhome/testdata/upstream/*.xml -text
 internal/player/openhome/testdata/upstream/License.txt -text
+# OpenHome's upstream service files are pinned by their bytes (CRLF and all,
+# testdata/upstream/README.md lists the sums): no checkout may convert them.
+internal/player/openhome/testdata/upstream/** -text
