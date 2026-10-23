@@ -143,7 +143,11 @@ func (s *session) reportStep() bool {
 		evs = append(evs, func() { s.ev.Fault(id, f) })
 	}
 	// A pause's release of the device: the sink's own, or, holding no device,
-	// the pause release passed.
+	// the pause release passed, once no sink is current. A sink that played
+	// out its last frames and is still current is the producer's, on its way
+	// to the next transport (transition) and yet to record the occurrence it
+	// opens a sink for, so a resume told of the release then would find none
+	// to open; at the end of the session one is followed by Finished.
 	if s.paused && !s.relSent && !s.faultSent {
 		c := s.cur
 		switch {
@@ -154,7 +158,7 @@ func (s *session) reportStep() bool {
 				s.b.notify(n)
 				s.ev.DeviceReleased(id)
 			})
-		case s.relFired && (c == nil || c.closed || c.drained):
+		case s.relFired && c == nil:
 			s.relSent = true
 			evs = append(evs, func() { s.ev.DeviceReleased(id) })
 		}

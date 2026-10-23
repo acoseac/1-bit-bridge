@@ -272,6 +272,7 @@ func (s *session) transition(o *occ) bool {
 			old.drained = true
 			s.mu.Unlock()
 			wake(s.wakeR)
+			s.b.transportDrained()
 		}
 		s.closeOutput(old)
 	}
@@ -282,6 +283,8 @@ func (s *session) transition(o *occ) bool {
 		if s.cur == old {
 			s.cur = nil
 		}
+		// With no sink current, the reporter looks again: a pause that holds
+		// no device reports its release only then (reportStep).
 		switch {
 		case s.ctx.Err() != nil:
 			s.mu.Unlock()
@@ -290,6 +293,7 @@ func (s *session) transition(o *occ) bool {
 			stale := s.handed
 			s.between, s.handed = nil, nil
 			s.mu.Unlock()
+			wake(s.wakeR)
 			if stale != nil {
 				s.closeOutput(stale)
 			}
@@ -300,6 +304,7 @@ func (s *session) transition(o *occ) bool {
 		case s.paused:
 			s.between = o
 			s.mu.Unlock()
+			wake(s.wakeR)
 			if !s.waitWake(nil) {
 				return false
 			}

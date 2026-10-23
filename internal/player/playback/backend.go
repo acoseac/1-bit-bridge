@@ -54,12 +54,24 @@ type Seams struct {
 	// playing out its last frames or has played them out, before Pause
 	// decides what the refusal means.
 	PauseRefused func()
+	// TransportDrained runs in the producer once the sink it drained for a
+	// change of transport has played out its last frames, still the current
+	// one, before the producer closes it and records the occurrence it opens
+	// a sink for next.
+	TransportDrained func()
 }
 
 // pauseRefused is the PauseRefused seam.
 func (b *Backend) pauseRefused() {
 	if sm := b.cfg.Seams; sm != nil && sm.PauseRefused != nil {
 		sm.PauseRefused()
+	}
+}
+
+// transportDrained is the TransportDrained seam.
+func (b *Backend) transportDrained() {
+	if sm := b.cfg.Seams; sm != nil && sm.TransportDrained != nil {
+		sm.TransportDrained()
 	}
 }
 

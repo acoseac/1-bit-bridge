@@ -234,11 +234,29 @@ func (tm *timers) fire(t *testing.T) {
 // finds no device to pause: a's sink plays out its last frames for the
 // change to b's transport, which no pause interrupts, so the session pauses
 // after them with the device let go; it reports the release once the pause
-// release passes; and the resume opens b's sink itself, answered reopened,
-// and b plays: the DAC heard a in one open and b in the next.
+// release has passed and no sink is current, never while a's played-out sink
+// still is (the seam holds the producer there, before it closes that sink and
+// records b as the occurrence it opens one for, where a resume finds none to
+// open and answers continued: round 4); and the resume opens b's sink
+// itself, answered reopened, and b plays: the DAC heard a in one open and b
+// in the next. Nothing plays b until the resume is answered: played at once,
+// b could end the session before the engine took the resume's answer, which
+// nothing orders before the session's events.
 func TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld(t *testing.T) {
 	tm := &timers{}
-	r := newRig(t, func(o *rigOptions) { o.pauseRelease, o.afterFunc = time.Second, tm.afterFunc })
+	drained, letGo := make(chan struct{}), make(chan struct{})
+	var heldOnce, goOnce sync.Once
+	r := newRig(t, func(o *rigOptions) {
+		o.pauseRelease, o.afterFunc = time.Second, tm.afterFunc
+		o.seams = &playback.Seams{TransportDrained: func() {
+			heldOnce.Do(func() {
+				close(drained)
+				<-letGo
+			})
+		}}
+	})
+	release := func() { goOnce.Do(func() { close(letGo) }) }
+	t.Cleanup(release)
 	a, b := pattern(1, 1000, 16), pattern(2, 3000, 24)
 	r.files.add("a", wav(44100, 16, a))
 	r.files.add("b", wav(48000, 24, b))
@@ -251,9 +269,18 @@ func TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld(t *testing.T) {
 		t.Fatalf("a pause during the last frames of a transport: %v", err)
 	}
 	r.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
-	r.k.Free()
+	// The grant plays out a's last frames, and what is left of it is taken
+	// back: no sink plays until the test lets it.
+	r.k.Grant(time.Second)
 	r.k.Await(t, "a's sink to close", func(v alsapcm.KernelView) bool { return v.Closes == 1 && !v.Open })
+	r.k.Revoke()
+	receiveIn(t, drained, "the producer to hold a's played-out sink, still the current one")
 	tm.fire(t)
+	r.tick()
+	if n := count(r.rec.events(), "device released", 0); n != 0 {
+		t.Fatal("the release was reported while a's played-out sink was still current, before the producer recorded b")
+	}
+	release()
 	r.waitSnap("the device released", func(s *engine.Snapshot) bool { return s.DeviceReleased() })
 	if v := r.k.View(); v.Opens != 1 {
 		t.Fatalf("b's sink opened during the pause (%d opens)", v.Opens)
@@ -261,6 +288,7 @@ func TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld(t *testing.T) {
 	if err := r.eng.Play(bg); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
+	r.k.Free()
 	s := r.waitStopped(engine.ReasonEndOfQueue)
 	if how, _ := s.LastResume(); how != engine.ResumeReopened {
 		t.Errorf("the resume went on %s, want reopened", how)

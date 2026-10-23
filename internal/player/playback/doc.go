@@ -100,8 +100,12 @@
 // sink and started it, which the pause then asks. With no sink (between two
 // transports), or the one that refused still current, the session pauses
 // after them with no device held, and reports the release once the pause
-// release has passed; a sink the producer opens after that takes the pause
-// before a frame. Resume answers ResumeContinued for a sink that held
+// release has passed and no sink is current: until the producer has closed
+// the sink that played out and recorded the occurrence it opens one for
+// next, a resume told of the release would find none to open, and between
+// two transports the resume opens the next one's sink itself. A sink the
+// producer opens after the pause takes it before a frame. Resume answers
+// ResumeContinued for a sink that held
 // the device, ResumeReopened for one the sink opened again at the endpoint
 // the binding resolves to now (SinkConfig.Locate), checked by the check
 // after open before a frame (SinkConfig.Admit), with the frames it kept, or

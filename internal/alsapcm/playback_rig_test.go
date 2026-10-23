@@ -564,6 +564,7 @@ type rigOptions struct {
 	openSink     func(func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)
 	afterFunc    func(time.Duration, func()) func() bool
 	realTick     bool
+	seams        *playback.Seams
 }
 
 // newRig starts an engine with the backend over a fresh fake kernel, and
@@ -591,7 +592,7 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		open = o.openSink(open)
 	}
 	cfg := playback.Config{
-		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc,
+		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: o.seams,
 		Notify: func(n playback.Note) {
 			select {
 			case r.notes <- n:
