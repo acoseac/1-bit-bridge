@@ -25,6 +25,9 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B514 round 3: symlinked upper-path mount evidence](#2026-10-23--b514-round-3-symlinked-upper-path-mount-evidence)
+- [2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence](#2026-10-23--b514-round-2-nested-read-only-overlays-windows-permission-fixtures-and-btrfs-evidence)
+- [2026-10-23 — B514: durable-writer evidence and refusal follow-ups](#2026-10-23--b514-durable-writer-evidence-and-refusal-follow-ups)
 - [2026-10-23 — the hotplug counts test reads the counts once the source has ended (CI run 40009970933)](#2026-10-23--the-hotplug-counts-test-reads-the-counts-once-the-source-has-ended-ci-run-40009970933)
 - [2026-10-23 — B516 round 3: restore ALSA dot rules](#2026-10-23--b516-round-3-restore-alsa-dot-rules)
 - [2026-10-23 — B516 round 2: ALSA string fallback, assignments and byte text](#2026-10-23--b516-round-2-alsa-string-fallback-assignments-and-byte-text)
@@ -57571,3 +57574,185 @@ checks that `defaults.value .5 x` lexes as `defaults.value.5 x`; and round
 ## 2026-10-23 — the hotplug counts test reads the counts once the source has ended (CI run 40009970933)
 
 `TestTheSourceDropsAndCountsWhatTheKernelDidNotSend` (`internal/player/hotplug`, B470 PR 4a2) failed once under `-race` on CI (run 40009970933, PR #1328, which does not touch the package): `Woke:1`, want 2. The source counts a wake after the send to the watcher has succeeded (`case s.events <- u:` then `Woke++`), and the test read `Status().Counts` as soon as it received the sentinel, so a source descheduled between the send and the count left the last wake uncounted. Red first: a 50 ms sleep between the send and the count failed the test three runs of three, with CI's counts. The test now cancels the source and waits for `Done()` (bounded at a minute) before it reads the counts; under the same sleep it passed, and it passed 20 runs under `-race`. The source's order is unchanged: counting before the send would count a wake the default branch then has to take back.
+
+## 2026-10-23 — B514: durable-writer evidence and refusal follow-ups
+
+The B470 PR 4b1 round-12 follow-ups are implemented on the uncommitted
+`fix/b514-durable-writer-followups` tree based on 3f805199. The storage
+check no longer presents three mismatching totals samples as proof that
+an upper path reaches another filesystem. Linux supplies the path's
+st_dev; round 1 required it to match the mount-ID-selected line before
+naming its fstype. Round 2 below removes that erroneous requirement for
+btrfs subvolumes: mount ID selects the line and devices are detail only.
+Round 3 follows upper-path symlinks for that ID, consistently with statfs/stat;
+the strict writer's boundary reader continues to describe the link itself.
+Missing/unreadable mount identity and a missing/malformed line still leave
+the visible filesystem unconfirmed.
+
+**Conservative interpretation:** even a visible XFS/ZFS path is not proof
+of the overlay's backing across mount namespaces. Repeated A,B,A samples
+there remain ErrMediumUnknown, with retry and namespace advice; no new
+acceptance based on that evidence alone was introduced. This follows the
+backlog's inconclusive-result alternative, explicitly accepted for round 2:
+A,B,A remains ErrMediumUnknown, never a pass on evidence that cannot prove
+the overlay's backing.
+An agreement only on the third upper read is accepted. Existing moving-
+totals acceptance, tmpfs/ramfs/volatile refusals and depth bounds remain.
+
+ErrOverlayBind now marks a writable overlay subtree bind and still matches
+ErrMediumUnknown. New handles it first and describes loss of a reservation
+at a crash even on persistent storage; it no longer describes that bind as
+storage lost at reboot. A read-only overlay with no upper returns nil from
+the medium check only at depth 0, including a bind, leaving EROFS to the
+write as on the overlay's own mount. Round 2 below corrects round 1's
+unconditional pass at greater depth. syncAbove advises read access or leaving the overlay
+only for fs.ErrPermission; ENOENT and other open errors are wrapped without
+that advice. The mode-0 permission fixture skips Windows and root (the
+Windows guard was added in round 2). Its comment names
+copyUpsFrom. The rules describe each current mount's line, including the
+inner mount's for nested overlays and FUSE below an overlay.
+
+Red first: on 3f805199's behavior, with only the new error/field declarations
+available to compile the new tests, the read-only bind was refused, the
+writable bind lacked its marker, New gave reboot/persistent-storage advice,
+ENOENT advised read access, and the repeated mismatch claimed “another
+filesystem” rather than inconclusive evidence. The permission fixture
+already passed. The third-read-agreement case also passes the original
+three-round code; it fails with two rounds, which the earlier fixture did
+not. Two scratch documentation assertions fail on the baseline's wording.
+Linux's new st_dev assertion would fail with the baseline adapter's empty
+Device; it was cross-compiled, not executed on this macOS host.
+
+Validation used the repository's Go 1.27.2 darwin/arm64 toolchain, with
+GOTOOLCHAIN=local, GOPROXY=off and a scratch GOCACHE, from this worktree:
+`go vet ./...`; both atomicwrite and engine suites, normally and under
+`-race`; the added/extended portable tests under `-count=3`; Linux
+`go vet ./internal/atomicwrite/...` and `go test -c -o /dev/null
+./internal/atomicwrite`; and `make docs-check` all passed. No command was
+refused by the sandbox. The rules remain within budget (player.md 93.8%);
+no text needed moving for a byte-budget overflow. No dependency, wire,
+engine transition, macOS/Windows mount reader, commit, push or PR changed.
+
+Thirteen independently applicable negative-control patches and a manifest
+live in the requested scratch controls folder: twelve executed and failed
+the predicted assertions; the Linux device-adapter control cross-compiled
+and its runtime failure is predicted only. The first advice control lost
+its sole io/fs import use and was rejected as invalid; the replacement
+compiles and fails the ENOENT assertion. The report records exact test
+names, logs, source lines and the then-unresolved acceptance interpretation;
+round 2 explicitly accepts that conservative interpretation.
+
+
+## 2026-10-23 — B514 round 2: nested read-only overlays, Windows permission fixtures and btrfs evidence
+
+Round 1 is committed as 47747499 (code/tests) and 1917e251 (docs). Its
+conservative interpretation is accepted: A,B,A remains ErrMediumUnknown;
+the visible upper path's filesystem cannot prove the overlay's backing.
+Round 2 fixes three reviewed findings, leaving these changes uncommitted.
+
+A read-only overlay with no upper is taken only at depth 0, where the
+root's own mount rejects writes with EROFS. Below a writable overlay it is
+ErrMediumUnknown, with an explanation that a read-only overlay cannot be
+that writable overlay's upper layer. This prevents a writable subtree bind
+from passing via a read-only overlay mounted over its visible upper path.
+The same refusal holds without a bind. Both explicit mount-table fixtures
+returned nil before the fix and now refuse with the required explanation.
+
+The mode-0 permission subtest skips Windows as well as root. Windows returns
+-1 for Geteuid and ignores Mkdir's mode, so before this fix the readable
+fixture and successful barrier stub made both the write and probe return
+nil, failing their fs.ErrPermission assertions. The ENOENT sibling remains
+enabled. Every round-1 test addition was audited for the same assumption;
+only this subtest needed the guard. This Windows failure is reasoned, not
+claimed as a native run on the macOS host.
+
+upperMountEvidence names the fstype of the upper path's own mount-ID-selected
+line without requiring st_dev to match mountinfo's device. Round 3 below
+corrects that lookup to follow a final symlink, as statfs/stat already do.
+A btrfs subvolume
+can have an anonymous st_dev distinct from the superblock device; both
+numbers are diagnostic detail. A missing st_dev likewise does not invalidate
+a valid mount-ID-selected line. Before the fix the btrfs fixture reported
+only device disagreement, never btrfs. It now names btrfs, keeps the A,B,A
+result ErrMediumUnknown, and does not describe the line as unconfirmed.
+The existing XFS differing-device and missing-device expectations now pin
+the same authority. Missing/failed mount IDs and missing/malformed lines
+still report unavailable evidence and preserve the original read error.
+
+Validation on the repository's Go 1.27.2 darwin/arm64 toolchain, offline
+with GOTOOLCHAIN=local and a scratch GOCACHE: go vet ./...; atomicwrite and
+engine tests normally and with -race; six added/extended test groups with
+-count=3; Linux atomicwrite vet and test compilation; Windows atomicwrite
+test compilation. All passed. No command was refused by the sandbox.
+Linux and Windows native runtime, real btrfs/overlay mounts and crash or
+reboot behavior were not verified here. The fixtures do not read host
+proc/sys. Rules, History and this entry record the corrected requirements.
+
+Sixteen patches in scratch controls-r2 each apply alone to the final tree.
+Fourteen ran and failed every predicted assertion without build failures;
+04 (Linux device adapter) and 15 (Windows permission guard) cross-compiled
+for their target OS and retain explicitly predicted runtime failures. The
+obsolete device-equality control 02 is replaced by the btrfs mount-ID rule;
+10 is regenerated for the depth-0 read-only branch; 14 removes the depth
+restriction; 16 rejects unavailable st_dev despite an authoritative mount
+ID. The other controls retain their rules. Each mutation restores the exact
+saved file bytes, never HEAD, preserving the uncommitted round.
+
+
+## 2026-10-23 — B514 round 3: symlinked upper-path mount evidence
+
+Round 2's code c476cafc and docs 9ee5b002 are on PR #1328. Its review
+found that upperdir can retain a symlink's spelling in mountinfo: statfs
+and stat follow it, while the strict writer's mount-ID readers deliberately
+do not. An upperdir link on ext4 targeting an XFS directory therefore gave
+XFS totals but named ext4 in the exhausted-retry evidence. ErrMediumUnknown
+was still correct; its evidence was not.
+
+platformMedium now supplies upperMountID to mediumFrom. This reader resolves
+the upper path's symlinks before asking the unchanged mountIDOf reader.
+Both upperMountEvidence and the inner-overlay/FUSE lookup thus use the
+target's identity. linuxStatfs already uses following statfs and stat.
+The strict writer's boundary checks, platformMountID, statxMountID and
+fdinfoMountID retain their original no-follow code. Resolution failures
+preserve their underlying error and leave the medium unknown. Separate
+path, identity, statfs and table observations still do not prove backing
+across a concurrent replacement or a different mount namespace.
+
+Red first: TestMediumFollowsASymlinkedUpper uses a real symlink and explicit
+ext4/target mount IDs, statfs answers and mountinfo fixtures. With a new
+reader delegating unchanged to the old no-follow lookup, XFS_evidence names
+ext4 instead of XFS, nested_overlay reads ext4's line instead of the inner
+overlay and misses its tmpfs upper, and FUSE incorrectly returns nil because
+ext4's line hides fuse-overlayfs. All three assertion failures were observed
+on macOS before changing the reader to resolve links. All pass afterward,
+including the fixture check that the strict reader still names the link's
+own mount. The fixture skips Windows' privileged symlink creation, reads no
+host proc/sys and needs no actual cross-filesystem mounts.
+
+All 17 controls in scratch controls-r3 apply independently to the final
+tree. Fifteen execute here and fail every predicted assertion without build
+failures. Controls 04 and 15 compile for Linux and Windows respectively;
+their runtime failures remain predicted only. Control 17 restores no-follow
+upper lookup and fails all three new subtests. Control 15 keeps runtime's
+import, now used by the symlink fixture. All Go commands in the manifest
+name the absolute Go 1.27.2 toolchain; doc controls use Python. Exact file
+snapshots preserve uncommitted changes throughout each mutation.
+
+Validation uses the repository's Go 1.27.2 darwin/arm64 toolchain offline,
+GOTOOLCHAIN=local, GOPROXY=off and the scratch GOCACHE: go vet ./...;
+atomicwrite and engine tests normally and with -race; seven portable
+regression groups with -count=3; Linux atomicwrite vet and test compilation;
+Windows atomicwrite test compilation; make docs-check (budgets and all
+doc-tool self-tests). These pass. Native Linux/Windows
+execution, real cross-filesystem overlay mounts and crash/reboot behavior
+remain unverified here. No command was refused by the sandbox. Rules,
+their History entries and the earlier evidence descriptions are updated
+together. Round 3 is aa8dae9b (code) and 1638cc1e (docs), on PR #1328.
+
+Round 3's review (the Claude API; Codex found none): the test passed
+`upperMountID` to `mediumFrom` itself, so putting `mountIDOf` back in
+`platformMedium` failed nothing; both now call `mediumOn`, which runs the
+check with `upperMountID` (a shared variable first, which a direct edit of
+`platformMedium`'s call still escaped, the fix's own review found). The
+strict reader's check is answered by a stub, so the records now say it
+shows the Go wrapper resolves nothing, not statx's no-follow flag.

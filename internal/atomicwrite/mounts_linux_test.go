@@ -3,7 +3,10 @@
 package atomicwrite
 
 import (
+	"fmt"
 	"os"
+
+	"golang.org/x/sys/unix"
 	"slices"
 	"testing"
 )
@@ -82,5 +85,20 @@ func TestPlatformMountIDAsksFdinfoWhereStatxGivesNone(t *testing.T) {
 	}
 	if !slices.Equal(statxAsked, paths) {
 		t.Errorf("platformMountID asked statx for %v, want %v", statxAsked, paths)
+	}
+}
+
+// TestLinuxStatfsIncludesThePathsDevice reads only a temporary directory,
+// never the host's proc/sys trees, and pins the kernel adapter's st_dev.
+func TestLinuxStatfsIncludesThePathsDevice(t *testing.T) {
+	path := t.TempDir()
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := linuxStatfs(path)
+	want := fmt.Sprintf("%d:%d", unix.Major(uint64(st.Dev)), unix.Minor(uint64(st.Dev)))
+	if err != nil || got.Device != want {
+		t.Fatalf("linuxStatfs device = %q, %v; want %q", got.Device, err, want)
 	}
 }

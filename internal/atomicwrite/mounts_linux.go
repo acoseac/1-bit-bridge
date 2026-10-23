@@ -4,6 +4,7 @@ package atomicwrite
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strconv"
@@ -15,16 +16,25 @@ import (
 // of the root, and for an overlay the upper layer the kernel's mount table
 // (/proc/self/mountinfo) names on the line of the root's own mount ID.
 func platformMedium(root string, mountID uint64) error {
-	return mediumFrom(root, mountID, linuxStatfs, readMountInfo, mountIDOf)
+	return mediumOn(root, mountID, linuxStatfs, readMountInfo)
 }
 
-// linuxStatfs is what the medium check reads of the filesystem path is on.
+// linuxStatfs reads the filesystem totals and path's st_dev. The latter is
+// evidence for the visible upper filesystem, never a mount-boundary test.
 func linuxStatfs(path string) (fsStat, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
 		return fsStat{}, &fs.PathError{Op: "statfs", Path: path, Err: err}
 	}
-	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files)}, nil
+	// st_dev is evidence only (upperMountEvidence names it as detail), so a
+	// stat that fails after statfs succeeded leaves it empty rather than
+	// refusing what the totals can still judge.
+	device := ""
+	var info unix.Stat_t
+	if err := unix.Stat(path, &info); err == nil {
+		device = fmt.Sprintf("%d:%d", unix.Major(uint64(info.Dev)), unix.Minor(uint64(info.Dev)))
+	}
+	return fsStat{Type: uint32(st.Type), Bsize: int64(st.Bsize), Blocks: uint64(st.Blocks), Files: uint64(st.Files), Device: device}, nil
 }
 
 // platformCopyUps is the directories above root a copy-up can create entries
