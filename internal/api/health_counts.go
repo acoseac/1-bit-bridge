@@ -44,13 +44,22 @@ type healthCountsSnapshot struct {
 // caller's ctx (context.WithoutCancel) so a client hang-up mid-count can't
 // cache a synthesized-zero for the callers that joined the flight.
 type healthCountsCache struct {
-	mu              sync.Mutex
-	snap            healthCountsSnapshot
-	hasSnap         bool
-	firstReady      bool
-	firstReadyAt    time.Time
-	firstReadyKnown bool
-	group           singleflight.Group
+	mu      sync.Mutex
+	snap    healthCountsSnapshot
+	hasSnap bool
+	// first and sampleFormat are the two library-fact keys whose readiness
+	// a count decides (stickyReady): firstIndexedAt and sampleFormat.
+	first        readyFlag
+	sampleFormat readyFlag
+	group        singleflight.Group
+}
+
+// readyFlag is one readiness answer: ready once a count said so, and
+// otherwise the time of the last miss, which stands for healthCountsTTL.
+type readyFlag struct {
+	ready bool
+	at    time.Time
+	known bool
 }
 
 func newHealthCountsCache() *healthCountsCache { return &healthCountsCache{} }
@@ -138,24 +147,49 @@ func (c *healthCountsCache) firstIndexedAtReady(ctx context.Context, manifest an
 	if c == nil {
 		return src.FirstIndexedAtReady(ctx)
 	}
+	return c.stickyReady(ctx, "firstIndexed", &c.first, src.FirstIndexedAtReady)
+}
+
+// sampleFormatReady reports whether the store's sample-format backfill is
+// complete (manifest.Store.SampleFormatReady, backlog B513), with
+// firstIndexedAtReady's caching: ready sticks for this process, since the
+// store's completion mark is never removed; a miss is rechecked on the
+// health-count TTL; a timeout is not stored.
+func (c *healthCountsCache) sampleFormatReady(ctx context.Context, manifest any) bool {
+	src, ok := manifest.(interface{ SampleFormatReady(context.Context) bool })
+	if !ok {
+		return false
+	}
+	if c == nil {
+		return src.SampleFormatReady(ctx)
+	}
+	return c.stickyReady(ctx, "sampleFormat", &c.sampleFormat, src.SampleFormatReady)
+}
+
+// stickyReady answers flag from probe: true for good once probe says so, a
+// miss reused for healthCountsTTL, and a probe that timed out not stored.
+// Concurrent callers share one probe (key names it in the singleflight
+// group), and the probe detaches from the caller's context so one client
+// hanging up cannot store a miss for the rest.
+func (c *healthCountsCache) stickyReady(ctx context.Context, key string, flag *readyFlag, probe func(context.Context) bool) bool {
 	c.mu.Lock()
-	if c.firstReady {
+	if flag.ready {
 		c.mu.Unlock()
 		return true
 	}
-	if c.firstReadyKnown && time.Since(c.firstReadyAt) < healthCountsTTL {
+	if flag.known && time.Since(flag.at) < healthCountsTTL {
 		c.mu.Unlock()
 		return false
 	}
 	c.mu.Unlock()
 
-	v, _, _ := c.group.Do("firstIndexed", func() (any, error) {
+	v, _, _ := c.group.Do(key, func() (any, error) {
 		c.mu.Lock()
-		if c.firstReady {
+		if flag.ready {
 			c.mu.Unlock()
 			return true, nil
 		}
-		if c.firstReadyKnown && time.Since(c.firstReadyAt) < healthCountsTTL {
+		if flag.known && time.Since(flag.at) < healthCountsTTL {
 			c.mu.Unlock()
 			return false, nil
 		}
@@ -163,10 +197,10 @@ func (c *healthCountsCache) firstIndexedAtReady(ctx context.Context, manifest an
 
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthCountsFetchTimeout)
 		defer cancel()
-		ready := src.FirstIndexedAtReady(fetchCtx)
+		ready := probe(fetchCtx)
 		if ready {
 			c.mu.Lock()
-			c.firstReady = true
+			flag.ready = true
 			c.mu.Unlock()
 			return true, nil
 		}
@@ -174,8 +208,8 @@ func (c *healthCountsCache) firstIndexedAtReady(ctx context.Context, manifest an
 			return false, nil
 		}
 		c.mu.Lock()
-		c.firstReadyKnown = true
-		c.firstReadyAt = time.Now()
+		flag.known = true
+		flag.at = time.Now()
 		c.mu.Unlock()
 		return false, nil
 	})

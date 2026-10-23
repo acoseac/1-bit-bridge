@@ -61,8 +61,25 @@ type Track struct {
 	// `canSetBitsPerSample(t.Codec)`, an allowlist of the lossless
 	// names (FLAC, ALAC, DSF, DFF, WAV, AIFF), and the WAV and AIFF
 	// walkers write it only for linear PCM.
-	BitsPerSample      *int     `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
-	IsDSD              *bool    `json:"isDSD,omitempty"`
+	BitsPerSample *int  `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
+	IsDSD         *bool `json:"isDSD,omitempty"`
+	// SampleFormat says whether a PCM track's samples are integers
+	// (SampleFormatInteger) or floating point (SampleFormatFloat), as the
+	// file's own header states it: a WAV's format code, or its extensible
+	// header's subformat GUID; an AIFF, which is integer; an AIFF-C's
+	// compression type; and FLAC and ALAC, which are integer-only. Empty, so
+	// absent on the wire, wherever the header states neither: a DSD row, a
+	// lossy codec, a compressed WAV or AIFF-C, a code or GUID the bridge
+	// does not know, a header it could not read, a UPnP-routed row (no
+	// header is read), and a row whose header the backfill has not read yet
+	// (BackfillSampleFormats). Absent is unknown, never integer.
+	//
+	// Spliced from tracks.sample_format at read time and never stored inside
+	// tags_json (marshalForStorage zeroes it), like FirstIndexedAt. Codec and
+	// BitsPerSample do not change with it: a float WAV is still "WAV", its
+	// depth 32 or 64 (backlog B513). Additive + omitempty; ProtocolVersion
+	// stays 1.
+	SampleFormat       string   `json:"sampleFormat,omitempty"`
 	ReplayGainTrackDB  *float64 `json:"replayGainTrackDB,omitempty"`
 	ReplayGainAlbumDB  *float64 `json:"replayGainAlbumDB,omitempty"`
 	MusicBrainzTrackID string   `json:"musicBrainzTrackID,omitempty"`
@@ -490,11 +507,19 @@ type Track struct {
 // (e.g. "Upscaled FLAC 24/176.4"). Server-side construction so the
 // label can grow richer (target-rate-aware copy, source format hint)
 // without an iOS-side update.
+//
+// `SampleFormat` is the kind of samples the rendition holds, read from its
+// `Format` (variantSampleFormat): every variant the bridge writes is FLAC,
+// which is integer-only, so "integer", the PCM renditions of a DSD source
+// included; a format the bridge does not know leaves it empty, so absent
+// (backlog B513). Set where the store reads the variants (scanTrackVariants),
+// never stored. Additive + omitempty.
 type Variant struct {
 	ID            string   `json:"id"`
 	Format        string   `json:"format"`
 	SampleRate    float64  `json:"sampleRate"`
 	BitsPerSample int      `json:"bitsPerSample"`
+	SampleFormat  string   `json:"sampleFormat,omitempty"`
 	SizeBytes     int64    `json:"sizeBytes"`
 	AppliedGainDB *float64 `json:"appliedGainDB,omitempty"`
 	Label         string   `json:"label"`

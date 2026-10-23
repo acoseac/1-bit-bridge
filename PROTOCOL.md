@@ -307,6 +307,7 @@ Pagination semantics:
       "sampleRate":     96000,
       "bitsPerSample":  24,
       "isDSD":          false,
+      "sampleFormat":   "integer",
       "replayGainTrackDB":  -7.2,
       "replayGainAlbumDB":  -7.0,
       "musicBrainzTrackID": "...",
@@ -430,6 +431,28 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - **A clean answer from a partial read is not a "no".** In the iOS app, only an explicit verdict is written from a read that did not cover the whole tag: a clean field found before a cut says nothing about a field past it. For a file AVFoundation refuses, the app reads the parsed `TIT2` (the raw ID3, or the WAV/AIFF chunk) before the filename stem.
 - **The iOS app applies it on every path:** SMB and on-device rows in its enrich (tags plus the raw title); bridge rows as `explicit == true || titleMarker(raw wire title)`, in both upsert branches, with the raw filename stem when the wire title is empty; UPnP and MPD-library rows as `titleMarker(raw title)`. Both sync paths store the raw title, so a one-shot pass on the device marks the rows synced before the verdict existed, with no network. It shows an Explicit badge beside the title in its track rows and Now Playing, and sets CarPlay's own indicator.
 - A bridge at ExtractorVersion 23 re-extracts every file once. Tracks that a signal now marks explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`. The widened rule (any signal, the title markers, a marker on the filename stem, and the first value of a FLAC or Ogg FLAC Vorbis comment) is part of that same version: nothing shipped at 23 before it. An app that predates the field consumes that delta without it, so the iOS app reaches back to a second fixed date (2026-10-07), once per bridge, as for `compilation`.
+
+#### Sample kind — `sampleFormat` (additive; health key `sampleFormat`)
+
+```json
+{ "path": "Music/Artist/Album/01.wav", "codec": "WAV", "sampleRate": 96000, "bitsPerSample": 32, "isDSD": false, "sampleFormat": "float" }
+```
+
+`sampleFormat` (string, `omitempty`) says whether a PCM track's samples are integers or floating point, as the file's own header states it:
+
+| Value | The header says |
+|---|---|
+| `"integer"` | a WAV whose format code is `WAVE_FORMAT_PCM`, or `WAVE_FORMAT_EXTENSIBLE` with the subformat GUID `KSDATAFORMAT_SUBTYPE_PCM`; an AIFF; an AIFF-C whose compression type is `NONE`, `twos`, `sowt`, `in24`, `42ni`, `in32`, `23ni` or `raw `; FLAC (an Ogg FLAC stream included) and ALAC, which are integer-only |
+| `"float"` | a WAV whose format code is `WAVE_FORMAT_IEEE_FLOAT`, or `WAVE_FORMAT_EXTENSIBLE` with `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`; an AIFF-C whose compression type is `fl32`, `FL32`, `fl64` or `FL64` |
+
+- **Absent means unknown, never integer.** The key is absent on every `isDSD: true` row (no PCM kind on a DSD row; a DSD source's PCM renditions carry their own, under Upscaling), on the lossy codecs (MP3, AAC, Vorbis, Opus), on a compressed WAV or AIFF-C (A-law, µ-law, ADPCM, GSM, IMA4, MPEG audio), on a WAV format code, an extensible subformat GUID or an AIFF-C compression type the bridge does not know (an extensible GUID is compared whole, so a subformat whose first two bytes are PCM's code, such as the Ambisonic B-format one, carries none), on a header the bridge could not read, on a UPnP-routed row (the bridge never reads its header), and on a row whose header the bridge has not read yet (below). A key the bridge does not send is never `null` or `""`.
+- **A client must tolerate a value it does not know**: read it as unknown, and never refuse the row for it.
+- **The other fields do not change.** `codec` stays `"WAV"` for a float WAV and `"AIFF"` for an `fl32` or `fl64` AIFF-C (clients match `codec` by equality), and `bitsPerSample` keeps the header's sample width, 32 or 64 for float.
+- **Rows indexed before the field get it without a rescan, in one delivery.** Every start of a bridge that carries the field decides, without reading a file, each row its codec decides: a FLAC or ALAC row read from a file is `"integer"`, and a row whose codec holds no PCM kind is recorded as having none. The bridge then reads the header of each remaining WAV and AIFF row, the `fmt ` or `COMM` chunk and nothing past it, once at startup and again after each successful scan. None of this advances `indexed_at` before the health key appears (below), so the full sync a client makes then carries every kind it recorded. A kind the bridge records for a row after the key has appeared advances `indexed_at`, so a delta sync carries it: a file it could not read before, or a row an older bridge version wrote after a rollback (a kind that older version left on a row it rewrote for a changed file is cleared at the next start, and the row read again). A row whose header states none does not move. A row whose file has changed since its row was written stays absent until the scan that re-reads the file, whose delta carries it. A track indexed or re-read after the field exists carries its kind from that scan.
+- **The health key `sampleFormat`** in `/v1/health.features` is advertised once every row that can have a kind has it: the bridge has decided each row its codec decides, and a header pass has gone through every WAV and AIFF row still undecided, to the end of the list. The bridge records that, so the key appears only after such a pass and stays from then on, across restarts; a pass a shutdown stops does not count. A file that pass could not read does not hold the key back: its kind reaches a client by a delta when a later pass reads it. The answer is cached like `firstIndexedAt`'s: once ready it stays for the process, a miss is rechecked, and a timeout is not stored as ready.
+- `ProtocolVersion` stays `1`. Old apps ignore the field.
+
+**What a client does with it**: it reads `sampleFormat` as a bridge row's sample kind (`"float"` as floating point, `"integer"` as integer, absent as unknown), and, once per bridge, makes the first sync after the key appears one paginated full sync (`limit` / `cursor`), so the rows it already holds receive the kinds the bridge recorded without advancing `indexed_at`; every kind after that arrives by a delta. A client that updates after the bridge, or a bridge that updates after the client, meets the key on that first sync either way.
 
 #### DSD specifics
 
@@ -980,6 +1003,7 @@ When the feature is enabled AND the bridge has cached at least one variant for a
       "format": "flac",
       "sampleRate": 176400,
       "bitsPerSample": 24,
+      "sampleFormat": "integer",
       "sizeBytes": 87654321,
       "label": "Upscaled FLAC 24/176.4"
     }
@@ -988,6 +1012,8 @@ When the feature is enabled AND the bridge has cached at least one variant for a
 ```
 
 `variants` is `omitempty` — pre-v1.2 bridges, disabled bridges, and tracks with no cached variants emit no field. iOS clients unaware of the field decode cleanly via the lenient default JSONDecoder (no protocol version bump).
+
+Each variant's `sampleFormat` (additive, `omitempty`) is the kind of samples the rendition holds, read from its `format`, as the track's own `sampleFormat` is read from its header: every rendition the bridge writes is FLAC, which is integer-only, so `"integer"`, a DSD source's renditions included; a rendition format the bridge does not know carries none. A client checking a rendition against a renderer reads the rendition's own fields, never the source track's.
 
 A DSD source carries its renditions in the same array, each with the additive **`appliedGainDB`** field:
 
@@ -1004,6 +1030,7 @@ A DSD source carries its renditions in the same array, each with the additive **
       "format": "flac",
       "sampleRate": 44100,
       "bitsPerSample": 16,
+      "sampleFormat": "integer",
       "sizeBytes": 6800000,
       "label": "Optimized FLAC 16/44.1",
       "appliedGainDB": 6
@@ -1013,6 +1040,7 @@ A DSD source carries its renditions in the same array, each with the additive **
       "format": "flac",
       "sampleRate": 176400,
       "bitsPerSample": 24,
+      "sampleFormat": "integer",
       "sizeBytes": 168000000,
       "label": "PCM FLAC 24/176.4",
       "appliedGainDB": 3.2
