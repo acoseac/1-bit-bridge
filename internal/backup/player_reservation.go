@@ -31,25 +31,27 @@ const restoreMargin uint64 = 1 << 24
 
 // playerResetAdvice is the single remedy for giving up an exhausted or
 // unreadable live floor. With the service stopped, remove player-uuid,
-// player-ids.json and player-queue.json together; the next start makes a new
-// identity with no queue (a v1 queue has no identity stamp). A reset gives up
-// for good the identity it removes and any the box ran earlier (one an earlier
-// restore replaced on this box), unless another box took it over by a restore
-// and still runs it. Their values were held only by the floor the reset drops.
-// No snapshot of a given-up identity taken before the reset, on this box or
-// another, may restore its player identity again: remove player-uuid and
-// player-ids.json from every such snapshot, or delete it. Any other box that
-// still holds a given-up identity's files (one powered off since a migration,
-// say) must be reset too before it runs again. An identity another box took
-// over by a restore, and still runs, is not given up: that box's floor holds it,
-// and its snapshots stay valid. If the reset answers a refused restore, remove
-// the two files from a copy of that snapshot, then restore that copy. Only the
-// restore refusal carries this step. A snapshot's player-ids.json is never a
-// repair; never delete the reservation while keeping the identity. B524 will
-// enforce this operator rule before 5a ships.
+// player-ids.json and player-queue.json together; the next start makes a
+// new identity with no queue (a v1 queue has no identity stamp). A reset
+// gives up for good the identity it removes and any the box ran earlier
+// (one an earlier restore replaced on this box), unless another box took it
+// over by a restore and has not reset it since, running or powered off.
+// Their values were held only by the floor the reset drops. No snapshot of
+// a given-up identity taken before the reset, on this box or another, may
+// restore its player identity again: remove player-uuid and player-ids.json
+// from every such snapshot, or delete it. Any other box that still holds a
+// given-up identity's files (one powered off since a migration, say) must
+// be reset too before it runs again. An identity another box took over by a
+// restore, and has not reset since, is not given up: that box's floor holds
+// it, and its snapshots stay valid. If the reset answers a refused restore,
+// remove the two files from a copy of that snapshot, then restore that
+// copy. Only the restore refusal carries this step. A snapshot's
+// player-ids.json is never a repair; never delete the reservation while
+// keeping the identity. B524 will enforce this operator rule before 5a
+// ships.
 func playerResetAdvice(restoring bool) string {
 	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
-	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless another box took it over by a restore and still runs it; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; reset any other box that still holds one of them before it runs again; an identity another box took over and still runs keeps its snapshots"
+	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless another box took it over by a restore and has not reset it since, running or powered off; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; reset any other box that still holds one of them before it runs again; an identity another box took over, and has not reset since, keeps its snapshots"
 	if restoring {
 		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
 	}
