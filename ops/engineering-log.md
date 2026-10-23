@@ -58520,3 +58520,57 @@ another box took it over from this box, by restoring a snapshot this box
 made, and has not reset it since, running or powered off. The closing clause
 and the advice's last clause say the same, and the advice assertions require
 the new words.
+
+
+**Round 9 (Windows CI, PR #1331 at 9633014f).**
+`TestInterruptedRestoreThenStartBackupAndRestoreKeepsTheRaisedFloor` failed
+opening `player-ids.json` with a sharing violation. This is case (b):
+`firstValues` leaves its engine running intentionally, and an insert's
+`ahead` → `reserveWrite` spawns a refill through `writeReservation` →
+`mergeReservation` → `atomicwrite.WriteBytesDurable` → `writeBytes` →
+`renameRetry`. Beside it, `Snapshot` → `engine.ReadReservation` →
+`readLimited` used one `os.Open`. `readLimited` closes its handle, and
+`writeBytes` closes the staged descriptor before rename; there is no leaked
+reservation handle to close in the test. The race is a live-backup condition,
+not an invalid test lifetime. The Windows test enables the otherwise-refused
+directory barrier through its existing seam; the production player is not
+currently enabled on Windows, but the backup's other renamed files are live
+there too. The other new tests were checked: same-box restart/restore sequences
+join the prior engine through nested-subtest cleanup.
+
+`ReadWithRetryCtx` now shares atomicwrite's five-attempt rename schedule,
+750 ms total backoff, interruptible by the snapshot's context. Only Windows
+sharing/access-denied codes retry, including wrapped errors. Snapshot uses
+it for the reservation, the freshly renamed UUID copy it rereads, and its
+source stats/opens, so UUID and other files replaced by rename are covered too; copy commits once and streams as before.
+Missing and malformed data retain their old policy, and exhausted or
+cancelled reads still fail the snapshot and reap its partial directory.
+
+The Windows regression holds a real staged-file handle through the existing
+rename seam, allows delete sharing so rename lands, and denies read sharing.
+A raw open proves the exact error before the snapshot's read. The snapshot's context
+releases it only on entry to retry backoff, giving deterministic recovery
+without a timed release. Reservation, source/captured UUID and token copies
+are covered. An unreadable captured UUID refuses rather than dropping its
+reservation mark; malformed contents retain the existing no-mark policy.
+Additional tests pin exhaustion, cancellation and partial-snapshot cleanup;
+portable tests pin the shared bounds and immediate permanent-error handling.
+Validation and negative-control evidence are recorded in scratch report-r9.md;
+Windows runtime results are separate from cross-compilation results.
+
+
+Round 9 validation: cached Go 1.27.2, offline, shared GOCACHE. Atomicwrite,
+backup and all player packages passed five race-enabled runs; after the
+captured-UUID read was covered, backup passed another five in 145.316 s.
+Both Windows architectures passed vet and test compilation for atomicwrite
+and backup, including the real-handle tests; Windows execution was unavailable,
+so no Windows runtime red/green is claimed. Three portable negative controls
+built and failed their predicted assertions; four Windows controls compiled,
+and all seven patches apply independently. Formatting, vet, docs-check, the
+cited-test/docblock/owner guards and all six cross-builds passed. The full
+race suite completed with denied TCP/Unix listener failures and the previously
+recorded doctor child-output buffer races after a denied bind; the changed
+packages and all player packages passed. Manifest's 1209.751 s run failed
+its socket fixtures on denied Unix binds, without a timeout. B520's named
+test was explicitly run and skipped for its denied listener. The B523
+stalled-storage test was not changed. Changes remain uncommitted.
