@@ -54481,7 +54481,7 @@ Negative controls, each a mutation of the committed fix, restored from git:
 |---|---|---|
 | A | no `wg.Add` and `Done` around the resume's open | 2 runs of 2 |
 | B | the pause gives the transport up at the first refusal, as before | 2 runs of 2 |
-| C | the pause sent under the lock (`err := cmd()`) | the test |
+| C | the pause sent under the lock (`err := cmd()`) | the test, but only when the producer took the lock before the Release: 4 runs in 10 under `-race` (round 2) |
 | D | no `retireLocked` call | the counts |
 | D | no watermark | "a cut of the retired occurrence 1: true, <nil>; want false" |
 | E | no `--state-dir` check | the seven `--state-dir` rows |
@@ -54502,3 +54502,66 @@ The gates, through the build lock, on a715ccba's tree with this record:
 `go fmt` (`internal/alsapcm` 16.0 s and `internal/player/playback` 1.4 s
 under `-race`); `make build-all` exit 0, the six targets; `make
 docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 93.9%.
+
+### Round 2 of the reviews
+
+Codex (two P2) and the Claude API (one Medium) reviewed round 1
+(51f351b1): three findings, two defects, since Codex's second P2 and the
+Claude API's Medium are one. Each was verified against the code at
+51f351b1:
+
+| Finding | Verdict | Evidence at 51f351b1 |
+|---|---|---|
+| H. Codex P2: the retirement of a dropped successor races an unfinished opener | Confirmed | `retireLocked` read the refusal (`o.refused`, `session.go:635`) of every occurrence before the one heard. A successor dropped while its opener still reads (`dropLocked` cancels the open's context, which a read on a mount that hangs does not notice) has that field written by `b.open` (`open.go:95` to `165`) outside the session's lock, before the opener takes the lock and closes `done` (`session.go:485` to `491`). The reporter looks at `o.opened()` first (`reporter.go:60`); retirement did not, and took the occurrence its opener still owned |
+| I. Codex P2, the Claude API's Medium: the pause-cleanup test passes with the locking bug | Confirmed in part | Nothing ordered the producer's pause before the test's Release (`playback_pause_test.go:372` to `376`). The claim that round 1's `transition` restored passes does not hold: with the Release first, round 1's producer closes b's sink on the cancel, the Close waits on the writer the kernel holds, and b's content stays open past the test's wait (red 2 runs of 2, in an experiment that held the producer until the Release had cancelled the session, not committed). Round 1's own control, the pause sent under the lock inside the new loop, whose cancelled path leaves the sink to the teardown, does pass that way (3 of 3), and the unchanged test caught it 4 runs in 10 under `-race`: the row above now says so |
+
+What changed:
+
+- d6f269b4. **Retirement waits for an open under way** (H):
+  `retireLocked` stops at an occurrence whose open has not ended, as the
+  reporter does, looking at none of the fields the open sets before, and
+  retires it once the opener has closed what it opened.
+- 8bb155d6. **The pause-cleanup test sends its Release after the pause**
+  (I): the sink calls a test hook once a command is handed to its writer,
+  on the sender's goroutine as it waits for the answer
+  (`sinkSeams.commanded`, the fake's `OnCommand`), and the test sends its
+  Release only once b's sink has been handed the pause. A sender under the
+  session's lock then holds the Release out of it every time, and the
+  fix's path through `call` is the one the test runs.
+- f424b55f, the rules (`player.md` 94.5%); and this record.
+
+Red first:
+
+| Fix | Test | Red |
+|---|---|---|
+| H | `TestPlaybackRetiresNothingAnOpenerStillHolds` | "with b's open under way, the step that heard c left 1 occurrences; want a, b and c", 2 runs of 2 |
+| I | `TestPlaybackPausesANewTransportsSinkOutsideTheSessionsLock`, its Release after the barrier, on round 1's `transition` restored verbatim | "waited 10s for Release to answer past its context", 5 runs of 5 |
+
+The race detector reports nothing in H's red runs: the test's own channels
+order retirement's read before the opener's write, since it waits for c's
+Audible, sent after the step, before it lets b's read return. What it
+asserts, that the step retired nothing while b's opener held b, is what
+goes red.
+
+Negative controls, each a mutation of the committed tree, restored from
+git:
+
+| Fix | Mutation | Red |
+|---|---|---|
+| H | no look at an open under way | 3 runs of 3 |
+| I | round 1's `transition`, verbatim | 5 runs of 5 |
+| I | round 1's control, the pause sent under the lock in the new loop | 5 runs of 5 (the test before the barrier: 4 of 10) |
+
+Green with the fixes, under `-race`: H's test and
+`TestPlaybackRetiresWhatHasPlayed` 10 runs of 10, the barriered test 30 of
+30.
+
+One two-package `go test` (`internal/alsapcm` and
+`internal/player/playback`, 16 s) ran outside the build lock, against the
+brief; the gates and every other multi-package run went through it.
+
+The gates, through the build lock, on f424b55f's tree with this record:
+`make fmt vet test` exit 0, 72 packages ok and nothing rewritten by
+`go fmt` (`internal/alsapcm` 16.0 s and `internal/player/playback` 1.4 s
+under `-race`); `make build-all` exit 0, the six targets; `make
+docs-check` ok, `CLAUDE.md` 63.4% and `player.md` 94.5%.
