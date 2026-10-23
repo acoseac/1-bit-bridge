@@ -58134,3 +58134,17 @@ reset it since, running or powered off; an identity another box took over
 from this box, and has not reset since, keeps its snapshots. The rest of the
 rule is as round 7 states it. The review also found round 6's entry rewritten
 in place by round 7; it again says what round 6 shipped, marked superseded.
+(Superseded by round 8 below.)
+
+**Round 8 (both reviews of round 7's review fix: Claude High, Codex P2).**
+The exception asked only whether another box had ever taken the identity over
+from this box, not whether this box had run it again since: an identity
+migrated to another box and back, then run further here, kept the old
+takeover, whose box holds a floor below what this box issued afterwards. A
+takeover now counts only after this box last ran the identity: a reset gives
+up for good the identity it removes and any the box ran earlier (one an
+earlier restore replaced on this box), unless, after this box last ran it,
+another box took it over from this box, by restoring a snapshot this box
+made, and has not reset it since, running or powered off. The closing clause
+and the advice's last clause say the same, and the advice assertions require
+the new words.
