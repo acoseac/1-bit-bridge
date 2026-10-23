@@ -15,6 +15,7 @@ import (
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
@@ -400,6 +401,90 @@ func TestTheResolverRecoversAPanic(t *testing.T) {
 		t.Fatalf("the open after the panic: %v", err)
 	}
 	read(t, c)
+}
+
+// TestTheContentsErrorsNameNoPath: a library file whose reads fail after it
+// opened (its descriptor closed under the backend here; a disk that goes
+// away fails them the same way) fails them with errors that say what failed
+// and name no path, through every method the backend calls: a read, a close,
+// and the decoder's open, which hands a read's error on. The backend puts
+// that error in the entry's skip or fault, which serve logs and 5a's
+// controllers will read. The end of the file is still io.EOF, which the
+// readers compare.
+func TestTheContentsErrorsNameNoPath(t *testing.T) {
+	f := newLibraryFixture(t)
+	data := []byte("the samples of a track, as the file holds them")
+	c, err := f.open(f.add("Artist/Album/01 a.flac", data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(data)+1)
+	if n, err := c.Data.ReadAt(buf, 0); n != len(data) || err != io.EOF {
+		t.Fatalf("a read past the end: %d bytes, %v; want the file's %d and io.EOF itself", n, err, len(data))
+	}
+	if err := c.Closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, read := c.Data.ReadAt(buf[:1], 0)
+	closeAgain := c.Closer.Close()
+	_, open := decode.Open(io.NewSectionReader(c.Data, 0, c.Size))
+	for what, err := range map[string]error{"a read": read, "a second close": closeAgain, "the decoder's open": open} {
+		if err == nil {
+			t.Errorf("%s of a closed file succeeded", what)
+			continue
+		}
+		for _, p := range []string{f.root, filepath.ToSlash(f.root), "Album"} {
+			if strings.Contains(err.Error(), p) {
+				t.Errorf("%s fails naming a path (%q): %v", what, p, err)
+			}
+		}
+	}
+	if !errors.Is(read, os.ErrClosed) || !strings.Contains(read.Error(), "read") {
+		t.Errorf("a read's error %q no longer says what failed", read)
+	}
+}
+
+// closingStore is a library index that closes under the resolver once the
+// track's row is read, so the read of its routing fails as a closed
+// database does, with the store's own error, which quotes the stored path.
+type closingStore struct{ *manifest.Store }
+
+func (s closingStore) GetTrack(ctx context.Context, path string) (*manifest.Track, error) {
+	t, err := s.Store.GetTrack(ctx, path)
+	_ = s.Store.Close()
+	return t, err
+}
+
+// TestAnIndexThatCannotBeReadIsLoggedWithoutItsError: a read of the index
+// that fails is logged with what was read, a classification of the error
+// and the entry's reference, and never the error's text, which can quote the
+// stored path (GetUPnPRouting's does); the entry is refused
+// index_unreadable.
+func TestAnIndexThatCannotBeReadIsLoggedWithoutItsError(t *testing.T) {
+	f := newLibraryFixture(t)
+	ref := f.add("Artist/Album/01 a.flac", []byte("a"))
+	rec := loggingtest.Record(t)
+	r, err := New(Config{Store: closingStore{f.store}, Paths: f.paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.r = r
+	c, err := f.open(ref)
+	f.refusedWith("a routing read that failed", c, err, ReasonIndexUnreadable)
+	lines := rec.Lines("player: the library index could not be read for an entry; it is skipped")
+	if len(lines) != 1 {
+		t.Fatalf("the failure logged %q, want once", lines)
+	}
+	for _, want := range []string{"read=routing", "class=", "reference=" + ref.String()} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the line %q does not say %q", lines[0], want)
+		}
+	}
+	for _, p := range []string{"Artist/Album", "01 a.flac", f.root, "database is closed"} {
+		if strings.Contains(lines[0], p) {
+			t.Errorf("the line carries the error's text (%q): %s", p, lines[0])
+		}
+	}
 }
 
 // TestTheResolverStopsAtItsContext: an open whose context has ended, the

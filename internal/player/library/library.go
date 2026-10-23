@@ -35,7 +35,9 @@
 // indexed it would then be refused until the next scan, six hours by
 // default, and the reference names the path, not those bytes. Within one
 // occurrence the content is the file that opened: one descriptor, read up
-// to the size it had at the open.
+// to the size it had at the open. Its reads and its close fail with errors
+// that name no path, and a read of the index that fails is logged by its
+// class, never its text, which can quote the stored path.
 //
 // A panic in the resolver is recovered as the entry's refusal
 // (resolver_failed), logged with its stack and never its value: the
@@ -198,14 +200,14 @@ func (r *Resolver) Open(ctx context.Context, ref engine.Reference) (c playback.C
 	t, err := r.cfg.Store.GetTrack(ctx, path)
 	switch {
 	case err != nil:
-		return playback.Content{}, r.indexError(ctx, err)
+		return playback.Content{}, r.indexError(ctx, err, ref, "track")
 	case t == nil:
 		return playback.Content{}, refuse(ReasonNotIndexed, "the library index no longer holds the track this reference names")
 	}
 	rt, err := r.cfg.Store.GetUPnPRouting(ctx, path)
 	switch {
 	case err != nil:
-		return playback.Content{}, r.indexError(ctx, err)
+		return playback.Content{}, r.indexError(ctx, err, ref, "routing")
 	case rt != nil:
 		return playback.Content{}, refuse(ReasonRouted, "the track is an upstream server's, and the player plays the bridge's own files")
 	}
@@ -217,8 +219,43 @@ func (r *Resolver) Open(ctx context.Context, ref engine.Reference) (c playback.C
 	if err != nil {
 		return playback.Content{}, err
 	}
-	return playback.Content{Data: f, Size: info.Size(), Closer: f}, nil
+	fc := content{f: f}
+	return playback.Content{Data: fc, Size: info.Size(), Closer: fc}, nil
 }
+
+// content is a library file as the backend reads it, through the two methods
+// it calls, whose errors name no path: an *os.File's are *fs.PathErrors
+// naming the file's absolute path, and the backend puts a read's error in
+// the entry's skip or fault, which serve logs and 5a's controllers will
+// read. io.EOF stays io.EOF, which the readers compare.
+type content struct{ f *os.File }
+
+func (c content) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.f.ReadAt(p, off)
+	return n, pathless(err)
+}
+
+func (c content) Close() error { return pathless(c.f.Close()) }
+
+// pathless is err without the path an *fs.PathError in it names: the
+// operation, and the error under it, which it still wraps.
+func pathless(err error) error {
+	var pe *fs.PathError
+	if err == nil || !errors.As(err, &pe) {
+		return err
+	}
+	return &fileError{op: pe.Op, err: pe.Err}
+}
+
+// fileError is a library file's operation that failed, naming no path.
+type fileError struct {
+	op  string
+	err error
+}
+
+func (e *fileError) Error() string { return "the library file: " + e.op + ": " + e.err.Error() }
+
+func (e *fileError) Unwrap() error { return e.err }
 
 // pathOf is the stored path ref names: one the resolver has matched it to
 // before, or the one row of the index whose path hashes to it now.
@@ -235,7 +272,7 @@ func (r *Resolver) pathOf(ctx context.Context, ref engine.Reference) (string, er
 	}
 	all, err := r.cfg.Store.TrackPaths(ctx)
 	if err != nil {
-		return "", r.indexError(ctx, err)
+		return "", r.indexError(ctx, err, ref, "paths")
 	}
 	var found []string
 	for _, q := range all {
@@ -312,13 +349,17 @@ func openRefusal(err error) *engine.Unplayable {
 
 // indexError is the refusal of a read of the index that failed: an open
 // whose context ended (its occurrence released or replaced) is refused
-// as cancelled and logs nothing, and any other failure is logged.
-func (r *Resolver) indexError(ctx context.Context, err error) *engine.Unplayable {
+// as cancelled and logs nothing, and any other failure is logged by what was
+// read (the paths, the track's row, its routing), the error's class
+// (manifest.ErrorClass) and the entry's reference, never the error's text,
+// which can quote the stored path (GetUPnPRouting's does).
+func (r *Resolver) indexError(ctx context.Context, err error, ref engine.Reference, read string) *engine.Unplayable {
 	if ctxerr.WithoutCancellation(ctx, err) == nil {
 		return refuse(engine.ReasonMissing, "the open was cancelled")
 	}
-	r.log.Warn("player: the library index could not be read for an entry; it is skipped", "err", err)
-	return refuse(ReasonIndexUnreadable, "the library index could not be read; the bridge's log has why")
+	r.log.Warn("player: the library index could not be read for an entry; it is skipped",
+		"read", read, "class", manifest.ErrorClass(err), "reference", ref.String())
+	return refuse(ReasonIndexUnreadable, "the library index could not be read; the bridge's log says which read failed, and how")
 }
 
 // panicMessage is the line a recovered panic logs.
