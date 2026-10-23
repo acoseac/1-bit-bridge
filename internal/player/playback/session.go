@@ -220,6 +220,20 @@ func (s *session) recoverFault(where string) {
 	}
 }
 
+// recoverCall is deferred first by each call the engine makes into a
+// session (Start, Prepare, Cut, Pause, Resume), on the engine's goroutine
+// for it: a panic there is recovered, logged once, and is the session's
+// fault, and the call answers with it, so the engine takes the call's
+// failure and releases the session for the fault, rather than leave a
+// session the panic cut short mid-change playing on.
+func (s *session) recoverCall(call string, err *error) {
+	if r := recover(); r != nil {
+		where := "the backend's " + call
+		s.b.logPanic(where, r)
+		*err = s.faulted(where)
+	}
+}
+
 // bound is ctx ended also by the session's release.
 func (s *session) bound(ctx context.Context) (context.Context, func()) {
 	c, cancel := context.WithCancel(ctx)
@@ -304,7 +318,8 @@ func (s *session) tailLocked() *occ {
 }
 
 // start is Start.
-func (s *session) start(ctx context.Context, req engine.StartRequest) error {
+func (s *session) start(ctx context.Context, req engine.StartRequest) (err error) {
+	defer s.recoverCall("start", &err)
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -493,7 +508,8 @@ func (s *session) drainOutput(out *output) error {
 }
 
 // prepare is Prepare.
-func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *engine.Occurrence) error {
+func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *engine.Occurrence) (err error) {
+	defer s.recoverCall("prepare", &err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.callableLocked(); err != nil {
@@ -615,7 +631,8 @@ func (s *session) recoverOpener(o *occ) {
 }
 
 // cut is Cut.
-func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (bool, error) {
+func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (ok bool, err error) {
+	defer s.recoverCall("cut", &err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.callableLocked(); err != nil {
@@ -801,7 +818,8 @@ func (s *session) refersLocked(out *output) bool {
 // session pauses with no device, recorded in the critical section that read
 // the transport, so a sink the producer opens after it takes the pause
 // before a frame.
-func (s *session) pause(ctx context.Context) error {
+func (s *session) pause(ctx context.Context) (err error) {
+	defer s.recoverCall("pause", &err)
 	l := s.hold()
 	defer l.release()
 	var refused *output
@@ -925,7 +943,8 @@ func resumeError(err error) error {
 }
 
 // resume is Resume.
-func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
+func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err error) {
+	defer s.recoverCall("resume", &err)
 	l := s.hold()
 	defer l.release()
 	l.lock()

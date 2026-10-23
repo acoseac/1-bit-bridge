@@ -282,6 +282,75 @@ func TestPlaybackFaultsOnAPanicInACallToASink(t *testing.T) {
 	r.playsOn("b")
 }
 
+// TestPlaybackFailsAStartWhoseOpenPanics pins a panic in the open of a
+// session's first occurrence, here in a read of its content as it is opened,
+// on the engine's call: recovered by the backend and logged once, and the
+// session's fault, which the Start answers with, so the engine stops playback
+// with the backend's failure and releases the session. The device is never
+// opened, and the engine plays on.
+func TestPlaybackFailsAStartWhoseOpenPanics(t *testing.T) {
+	logs := &lines{}
+	r := newRig(t, withLog(logs))
+	r.files.add("a", wav(48000, 24, pattern(1, 100000, 24)))
+	r.files.mu.Lock()
+	r.files.panicRead["a"] = 100
+	r.files.mu.Unlock()
+	r.insert("a")
+	if err := r.eng.Play(bg); engine.ReasonOf(err) != engine.ReasonBackend || strings.Contains(err.Error(), panicValue) {
+		t.Fatalf("the play whose start panicked answered %v, want %s naming no value", err, engine.ReasonBackend)
+	}
+	r.waitStopped(engine.ReasonBackend)
+	if v := r.k.View(); v.Opens != 0 {
+		t.Errorf("the device was opened %d times for a start whose content's open panicked, want never", v.Opens)
+	}
+	logs.panicLogged(t, backendPanicMessage, "the backend's start")
+	r.files.mu.Lock()
+	delete(r.files.panicRead, "a")
+	r.files.mu.Unlock()
+	r.playsOn("b")
+}
+
+// TestPlaybackLetsGoOfTheSessionsLockWhenAPanicComesUnderIt pins a panic
+// while a goroutine holds the session's lock: here the engine's Pause, which
+// finds no device to pause (a's sink playing out its last frames for b's
+// transport) and arms the pause's own release (Config.AfterFunc) under the
+// lock. The hold is let go of as the panic goes, so the call's recover
+// records the session's fault, the engine releases the session, the release
+// is confirmed and the device let go.
+func TestPlaybackLetsGoOfTheSessionsLockWhenAPanicComesUnderIt(t *testing.T) {
+	logs := &lines{}
+	var once atomic.Bool
+	r := newRig(t, withLog(logs), func(o *rigOptions) {
+		o.pauseRelease = time.Second
+		o.afterFunc = func(d time.Duration, f func()) func() bool {
+			if once.CompareAndSwap(false, true) {
+				panic(panicValue)
+			}
+			return time.AfterFunc(d, f).Stop
+		}
+	})
+	r.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
+	r.files.add("b", wav(48000, 24, pattern(2, 3000, 24)))
+	ids := r.insert("a", "b")
+	r.play()
+	// a, 1000 frames, is shorter than the hardware buffer: the change of
+	// transport drains it, and the kernel's drain waits for time.
+	r.k.Await(t, "a's sink to play out its last frames", func(v alsapcm.KernelView) bool { return v.Drains == 1 && v.Starved })
+	// The pause answers with the call's failure, or, when the fault is taken
+	// first, as one the session's release overtook.
+	if err := r.eng.Pause(bg); err != nil && engine.ReasonOf(err) != engine.ReasonBackend {
+		t.Errorf("the pause that panicked answered %v, want nil or %s", err, engine.ReasonBackend)
+	}
+	f, s := r.faulted()
+	wantFailed(t, f, ids[0])
+	if _, unconfirmed := s.ReleaseUnconfirmed(); unconfirmed {
+		t.Error("the release of the session a panic under its lock faulted is not confirmed")
+	}
+	r.letGo()
+	logs.panicLogged(t, backendPanicMessage, "the backend's pause")
+	r.playsOn("c")
+}
+
 // TestPlaybackFaultsWhenItsSinksWriterPanics pins a panic on a sink's
 // writer, through the backend: the sink ends typed (alsapcm.ReasonPanicked)
 // with its device closed, the panic logged once, by the sink, and the
