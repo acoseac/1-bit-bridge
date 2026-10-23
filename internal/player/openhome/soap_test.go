@@ -275,6 +275,7 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"5: unquoted", soap(playlist.serviceType()+"#Play", ct, play), fault(602)},
 		{"5: a quote on one side", soap(`"`+playlist.serviceType()+"#Play", ct, play), fault(401)},
 		{"5: another service's type", soap(header(product, "Standby"), ct, play), fault(401)},
+		{"5: another service's type with this service's action", soap(`"`+product.serviceType()+`#Play"`, ct, play), fault(401)},
 		{"5: another version", soap(`"urn:av-openhome-org:service:Playlist:2#Play"`, ct, play), fault(401)},
 		{"5: an action the service has not", soap(header(playlist, "Volume"), ct, play), fault(401)},
 		{"5: an action's name in another case", soap(header(playlist, "play"), ct, play), fault(401)},
@@ -293,7 +294,7 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 
 		// Row 7: the XML.
 		{"7: a DOCTYPE", soap(header(playlist, "Play"), ct, `<?xml version="1.0"?><!DOCTYPE s:Envelope [<!ENTITY x "y">]>`+strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), status(400)},
-		{"7: an ENTITY alone", soap(header(playlist, "Play"), ct, `<!ENTITY x "y">`+play), status(400)},
+		{"7: an ENTITY after the declaration", soap(header(playlist, "Play"), ct, `<?xml version="1.0"?><!ENTITY x "y">`+strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), status(400)},
 		{"7: an entity it does not know", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><Uri>&x;</Uri><Metadata></Metadata>")), status(400)},
 		{"7: a processing instruction beside the declaration", soap(header(playlist, "Play"), ct, strings.Replace(play, "?>", "?><?note x?>", 1)), fault(602)},
 		{"7: the declaration not at the start", soap(header(playlist, "Play"), ct, " "+play), status(400)},
@@ -312,6 +313,9 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 
 		// Row 8: the envelope.
 		{"8: SOAP 1.2's envelope", soap(header(playlist, "Play"), ct, strings.Replace(play, "http://schemas.xmlsoap.org/soap/envelope/", "http://www.w3.org/2003/05/soap-envelope", 1)), fault(401)},
+		{"8: another namespace's Envelope around a SOAP 1.1 Body", soap(header(playlist, "Play"), ct,
+			`<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>`+
+				call(playlist, "Play", "")+`</s:Body></e:Envelope>`), fault(401)},
 		{"8: another prefix", soap(header(playlist, "Play"), ct, `<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body>`+call(playlist, "Play", "")+`</SOAP-ENV:Body></SOAP-ENV:Envelope>`), fault(602)},
 		{"8: no prefix at all", soap(header(playlist, "Play"), ct, `<Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/"><Body><Play xmlns="`+playlist.serviceType()+`"/></Body></Envelope>`), fault(602)},
 		{"8: no Body", soap(header(playlist, "Play"), ct, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"></s:Envelope>`), fault(401)},
