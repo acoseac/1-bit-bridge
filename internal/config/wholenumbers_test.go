@@ -247,3 +247,42 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestTheShadowNeedsNoEmbeddedField: CheckWholeNumbers' shadow (buildShadow)
+// rebuilds each struct of Config field by field with reflect.StructOf and
+// does not carry a field's Anonymous flag, which StructOf does not support for
+// every embedded type. yaml.v3 inlines a struct by its ",inline" tag, which
+// the shadow keeps, not by Anonymous; Anonymous only changes how yaml.v3
+// treats an unexported embedded type, which the shadow would skip. So the
+// shadow decodes as Config does only while Config embeds nothing: this fails
+// the day a struct Config reaches gains an embedded field, before the shadow
+// can silently map a value to another setting (Gemini on #1339).
+func TestTheShadowNeedsNoEmbeddedField(t *testing.T) {
+	seen := map[reflect.Type]bool{}
+	var walk func(reflect.Type, string)
+	walk = func(rt reflect.Type, path string) {
+		switch rt.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			walk(rt.Elem(), path)
+			return
+		case reflect.Struct:
+		default:
+			return
+		}
+		if seen[rt] {
+			return
+		}
+		seen[rt] = true
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			if f.Anonymous {
+				t.Errorf("%s embeds %s: give it a name, or make buildShadow handle embedded fields before CheckWholeNumbers relies on them", path, f.Type)
+			}
+			walk(f.Type, path+"."+f.Name)
+		}
+	}
+	walk(reflect.TypeOf(Config{}), "Config")
+	if len(seen) < 2 {
+		t.Fatalf("the walk reached %d struct types; it is not reading Config", len(seen))
+	}
+}
