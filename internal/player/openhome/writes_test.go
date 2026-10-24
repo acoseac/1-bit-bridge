@@ -349,6 +349,96 @@ func TestEachWriteIsItsEngineCommand(t *testing.T) {
 	}
 }
 
+// commandless is the test player's engine for the writes that make no engine
+// command: its snapshot and Done are the engine's, and every command it is
+// asked fails the test.
+type commandless struct {
+	Engine
+	tb testing.TB
+}
+
+func (e commandless) called(op string) error {
+	e.tb.Errorf("%s reached the engine", op)
+	return nil
+}
+func (e commandless) Play(context.Context, ...engine.Cond) error     { return e.called("Play") }
+func (e commandless) Pause(context.Context, ...engine.Cond) error    { return e.called("Pause") }
+func (e commandless) Stop(context.Context, ...engine.Cond) error     { return e.called("Stop") }
+func (e commandless) Next(context.Context, ...engine.Cond) error     { return e.called("Next") }
+func (e commandless) Previous(context.Context, ...engine.Cond) error { return e.called("Previous") }
+func (e commandless) PlayID(context.Context, uint32, ...engine.Cond) error {
+	return e.called("PlayID")
+}
+func (e commandless) PlayIndex(context.Context, int, ...engine.Cond) error {
+	return e.called("PlayIndex")
+}
+func (e commandless) InsertAfter(context.Context, uint32, engine.Reference, []byte, ...engine.Cond) (uint32, error) {
+	return 0, e.called("InsertAfter")
+}
+func (e commandless) Delete(context.Context, uint32, ...engine.Cond) error {
+	return e.called("Delete")
+}
+func (e commandless) DeleteAll(context.Context, ...engine.Cond) error { return e.called("DeleteAll") }
+func (e commandless) SetRepeat(context.Context, bool, ...engine.Cond) error {
+	return e.called("SetRepeat")
+}
+func (e commandless) SetShuffle(context.Context, bool, ...engine.Cond) error {
+	return e.called("SetShuffle")
+}
+
+// TestTheWritesThatNeedNoCommandMakeNone pins the writes the engine is not
+// asked for: SetShuffle(1), 804; the seeks within a track, 803; and Product's
+// writes, SetStandby(0) and (1), SetSourceIndex and SetSourceIndexByName, a
+// success or their fault, answered without a command, so no budget applies
+// and nothing of the engine moves; and an Insert refused by its confinement
+// or its metadata never reaches it either.
+func TestTheWritesThatNeedNoCommandMakeNone(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handlerWith("", commandless{Engine: p.eng, tb: t}, DefaultLimits.orDefaults())
+	for _, c := range []struct {
+		s     *service
+		args  []string
+		fault int
+	}{
+		{playlist, []string{"SetShuffle", "Value", "1"}, 804},
+		{playlist, []string{"SeekSecondAbsolute", "Value", "10"}, 803},
+		{playlist, []string{"SeekSecondRelative", "Value", "-10"}, 803},
+		{product, []string{"SetStandby", "Value", "0"}, 0},
+		{product, []string{"SetStandby", "Value", "1"}, 899},
+		{product, []string{"SetSourceIndex", "Value", "0"}, 0},
+		{product, []string{"SetSourceIndex", "Value", "2"}, 801},
+		{product, []string{"SetSourceIndexByName", "Value", "Playlist"}, 0},
+		{product, []string{"SetSourceIndexByName", "Value", "Radio"}, 801},
+		{playlist, []string{"Insert", "AfterId", "0", "Uri", "http://127.0.0.1:7790/dlna/file/" + goldenID, "Metadata", ""}, 600},
+		{playlist, []string{"Insert", "AfterId", "0", "Uri", uriOf(goldenID), "Metadata", strings.Repeat("m", engine.MaxMetadataBytes+1)}, 605},
+	} {
+		r := invoke(t, h, c.s, c.args[0], c.args[1:]...)
+		if r.fault != c.fault || (c.fault == 0) != (r.status == http.StatusOK) {
+			t.Errorf("%s#%s(%v): %d, fault %d, want fault %d", c.s.name, c.args[0], c.args[1:], r.status, r.fault, c.fault)
+		}
+	}
+}
+
+// zeroID is the test player's engine with an InsertAfter that answers no ID
+// and no error, which the engine never does.
+type zeroID struct{ Engine }
+
+func (zeroID) InsertAfter(context.Context, uint32, engine.Reference, []byte, ...engine.Cond) (uint32, error) {
+	return 0, nil
+}
+
+// TestAnInsertIsNeverAnsweredWithoutAnID pins that an Insert answers success
+// only with a NewId above 0: an engine answer of no ID and no error, which
+// the engine never gives, is 501, so a controller never reads 0, which 1-bit
+// takes for no insert, as an entry.
+func TestAnInsertIsNeverAnsweredWithoutAnID(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handlerWith("", zeroID{p.eng}, DefaultLimits.orDefaults())
+	if r := soapFault(t, h, playlist, "Insert", "AfterId", "0", "Uri", uriOf(goldenID), "Metadata", ""); r.fault != errActionFailed {
+		t.Errorf("an Insert the engine answered with no ID: fault %d, want 501", r.fault)
+	}
+}
+
 // TestTheEnginesCapacityIsPlaylistFull is a synthetic test of the engine's
 // capacity, which 1-bit never reaches (it holds at most 500 entries on a
 // player): the 1000th entry is taken, and an Insert past it is 801, "Playlist
