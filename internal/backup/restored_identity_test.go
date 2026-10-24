@@ -296,6 +296,7 @@ func TestTwoRestoresWithSeparatedDrawsDoNotReuseValues(t *testing.T) {
 }
 
 func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
+	reservationStorage(t)
 	for _, kind := range []string{"missing", "unreadable", "invalid", "foreign", "v1", "no_identity"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := t.TempDir()
@@ -326,8 +327,11 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 			}
 			snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: idPath})
 			if kind == "missing" {
-				if err == nil {
-					t.Fatal("backup accepted missing floor")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r := markAt(t, snap); r.UUID != snapshotPlayerUUID || r.IDs != 0 || r.Tokens != 0 {
+					t.Fatalf("bind-only upgrade: %+v", r)
 				}
 				return
 			}
@@ -342,17 +346,16 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				}
 				return
 			}
+			if kind == "foreign" || kind == "v1" {
+				if err == nil || !strings.Contains(err.Error(), "bridge reset-player") {
+					t.Fatalf("unpaired floor captured: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if kind == "foreign" || kind == "v1" {
-				got := markAt(t, snap)
-				if got.Version != 2 || got.UUID != snapshotPlayerUUID || got.IDs != 100 || got.Tokens != 200 {
-					t.Fatalf("backup lost/restamped the floor incorrectly: %+v", got)
-				}
-				return
-			}
 			if slices.Contains(snapshotFiles(t, snap), engine.ReservationFileName) {
 				t.Fatal("snapshot carried a mark without its identity")
 			}

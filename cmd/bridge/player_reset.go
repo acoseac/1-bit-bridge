@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
@@ -67,6 +69,12 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, action, stderr) {
 		return 1
 	}
+	var removed []string
+	for _, name := range []string{"player-uuid", "player-queue.json"} {
+		if _, statErr := os.Lstat(filepath.Join(cfg.DataDir, name)); statErr == nil {
+			removed = append(removed, name)
+		}
+	}
 	var changed bool
 	if *discard {
 		changed, err = backup.DiscardPlayerFloor(cfg.DataDir)
@@ -81,10 +89,14 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 		fmt.Fprintln(stdout, "The box has no player identity; nothing changed.")
 		return 0
 	}
+	fmt.Fprint(stdout, "Player reset complete")
+	if len(removed) != 0 {
+		fmt.Fprintf(stdout, ": removed %s", strings.Join(removed, " and "))
+	}
 	if *discard {
-		fmt.Fprintln(stdout, "Player reset complete: removed the UUID and queue and set the floor aside. Player identity restores are permanently sealed on this box.")
+		fmt.Fprintln(stdout, ". Player identity restores are permanently sealed on this box.")
 	} else {
-		fmt.Fprintln(stdout, "Player reset complete: removed the UUID and queue. The counter floor is retained.")
+		fmt.Fprintln(stdout, ". The counter floor is retained.")
 	}
 	fmt.Fprintln(stdout, "The next start makes a new identity with no queue, a new device to controllers.")
 	return 0

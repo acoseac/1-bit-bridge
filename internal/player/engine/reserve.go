@@ -46,6 +46,13 @@ type Reservation struct {
 	Tokens  uint32 `json:"tokens"`
 }
 
+// Exhausted reports whether either counter cannot start another run, using
+// the same skipped block as the engine's startCounter.
+func (r Reservation) Exhausted() bool {
+	ids, tokens := startCounter(uint64(r.IDs)), startCounter(uint64(r.Tokens))
+	return ids.exhausted() || tokens.exhausted()
+}
+
 // encodeReserve is the file for the given reservations.
 func encodeReserve(id string, ids, tokens uint64) []byte {
 	data, err := json.Marshal(reserveFile{Version: reserveVersion, UUID: id, IDs: uint32(ids), Tokens: uint32(tokens)})

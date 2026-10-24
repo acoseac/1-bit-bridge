@@ -94,16 +94,16 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	}
 	dataDir := filepath.Dir(target)
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)
-	sealed, sealErr := readPlayerMarker(dataDir, playerFloorDiscarded)
+	sealed, sealErr := playerRestoresSealed(dataDir)
 	if sealed || sealErr != nil {
-		return fmt.Errorf("restore: player identity restores are sealed by player-floor-discarded.json; nothing was restored; %s", snapshotIdentityRemedy())
+		return fmt.Errorf("restore: player identity restores are sealed by the local discard records; nothing was restored; %s", snapshotIdentityRemedy())
 	}
 	live, present, err := readPlayerFloor(dataDir)
 	if err != nil {
 		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))
 	}
 	if err := checkPlayerFloorLoss(dataDir, present); err != nil {
-		return fmt.Errorf("restore: %w; nothing was restored", err)
+		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))
 	}
 	// Test each source separately so both remedies are named if both are
 	// exhausted. This bound is independent of the random draw.

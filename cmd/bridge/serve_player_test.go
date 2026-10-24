@@ -1619,7 +1619,7 @@ func TestBridgeDoctorMakesNoPlayerFile(t *testing.T) {
 func TestServePlayerChecksTheFloorBeforeStarting(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
-	for _, phase := range []string{"uuid_without_floor", "marker_without_floor", "bad_floor", "orphan_queue", "orphan_queue_with_floor", "orphan_reservation", "pristine", "existing"} {
+	for _, phase := range []string{"uuid_without_floor", "marker_without_floor", "bad_floor", "orphan_queue", "orphan_queue_with_floor", "orphan_reservation", "pristine", "existing", "upgrade"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			const id = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
@@ -1632,7 +1632,10 @@ func TestServePlayerChecksTheFloorBeforeStarting(t *testing.T) {
 			if phase == "marker_without_floor" {
 				write("player-initialized", `{"version":1}`)
 			}
-			if phase == "uuid_without_floor" || phase == "existing" {
+			if phase == "uuid_without_floor" {
+				write("player-initialized", `{"version":1}`)
+			}
+			if phase == "uuid_without_floor" || phase == "existing" || phase == "upgrade" {
 				write(config.PlayerUUIDFile, id)
 			}
 			if phase == "bad_floor" {
@@ -1672,7 +1675,7 @@ func TestServePlayerChecksTheFloorBeforeStarting(t *testing.T) {
 			case <-serveGiveUp(t):
 				t.Fatal("player did not decide its start")
 			}
-			if phase == "pristine" || phase == "orphan_reservation" || phase == "existing" {
+			if phase == "pristine" || phase == "orphan_reservation" || phase == "existing" || phase == "upgrade" {
 				if p.eng == nil || p.failed != "" {
 					t.Fatalf("normal start refused: %s", p.failed)
 				}

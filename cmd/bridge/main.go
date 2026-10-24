@@ -2551,10 +2551,10 @@ Subcommands:
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.
   reset-player
-           Give up the bridge player's identity and clear its queue with the
-           service stopped: bridge reset-player [--config X] [--yes].
-           Records identities that restore must refuse; the next start makes
-           a new device to controllers.
+           Rotate the player's identity and clear its queue, keeping the counter
+           floor. With the service stopped:
+           bridge reset-player [--config X] [--yes] [--discard-floor].
+           --discard-floor drops the floor and permanently seals identity restores.
   token    Manage paired tokens (list / rotate / expire / revoke).
   cert     Inspect or rotate the TLS cert (info / rotate).
   tsnet    Embedded tailnet node management (auth | status | logout).

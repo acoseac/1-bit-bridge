@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
 func resetInstall(t *testing.T, adminAddr string) (string, string) {
@@ -37,6 +38,17 @@ func TestPlayerResetCommandDispatchAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshotID, err := config.ReadPlayerUUID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.WriteReservation(dir, filepath.Join(dir, engine.ReservationFileName), engine.Reservation{UUID: snapshotID, IDs: 2000000000, Tokens: 2000000001}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var out, errs bytes.Buffer
 	if code := run(t.Context(), []string{"reset-player", "--config", cfg, "--yes"}, &out, &errs); code != 0 {
 		t.Fatalf("reset exit %d: %s", code, &errs)
@@ -55,8 +67,12 @@ func TestPlayerResetCommandDispatchAndRestore(t *testing.T) {
 	if code := restoreCmd(t.Context(), []string{"--config", cfg, "--yes", snap}, strings.NewReader(""), &out, &errs); code != 0 {
 		t.Fatalf("restore exit %d: %s", code, &errs)
 	}
-	if got, _ := config.ReadPlayerUUID(dir); got == "" {
-		t.Fatal("restore did not install identity")
+	if got, _ := config.ReadPlayerUUID(dir); got != snapshotID {
+		t.Fatalf("restore identity %s want %s", got, snapshotID)
+	}
+	after, err := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
+	if err != nil || after.IDs <= before.IDs || after.Tokens <= before.Tokens {
+		t.Fatalf("restored floor %+v, before %+v: %v", after, before, err)
 	}
 }
 
@@ -141,6 +157,19 @@ func TestPlayerResetCommandNoIdentityAndHelp(t *testing.T) {
 	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &out, &errs); code != 0 || !strings.Contains(out.String(), "reset complete") {
 		t.Fatalf("exit %d: %s / %s", code, &out, &errs)
 	}
+	if strings.Contains(out.String(), "removed") {
+		t.Fatalf("claimed removal of absent files: %s", &out)
+	}
+	for _, name := range []string{"player-ids.json", "player-initialized"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out.Reset()
+	errs.Reset()
+	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &out, &errs); code != 0 || out.String() != "The box has no player identity; nothing changed.\n" {
+		t.Fatalf("empty reset exit %d: %s / %s", code, &out, &errs)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); !os.IsNotExist(err) {
 		t.Fatal("empty reset wrote a discard seal")
 	}
@@ -223,9 +252,18 @@ func TestResetPlayerIsATopLevelCommand(t *testing.T) {
 	}
 	out.Reset()
 	usage(&out)
-	if !strings.Contains(out.String(), "\n  reset-player") || !strings.Contains(out.String(), "bridge reset-player [--config X] [--yes]") {
-		t.Error("top-level help omits reset-player")
+	const want = `  reset-player
+           Rotate the player's identity and clear its queue, keeping the counter
+           floor. With the service stopped:
+           bridge reset-player [--config X] [--yes] [--discard-floor].
+           --discard-floor drops the floor and permanently seals identity restores.
+`
+	start := strings.Index(out.String(), "  reset-player\n")
+	end := strings.Index(out.String(), "  token ")
+	if start < 0 || end < start || out.String()[start:end] != want {
+		t.Error("reset-player usage differs from its contract")
 	}
+
 	out.Reset()
 	outputUsage(&out)
 	if strings.Contains(out.String(), "player reset") || strings.Contains(out.String(), "reset-player") {

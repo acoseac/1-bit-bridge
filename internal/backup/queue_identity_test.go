@@ -207,12 +207,25 @@ func TestInterruptedRestoreBackupWithoutStartKeepsTheRaisedFloor(t *testing.T) {
 				t.Fatal("restore did not stop")
 			}
 			raised := markAt(t, dst)
+			if _, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dst, PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}); err == nil {
+				t.Fatal("backup paired a floor with the pre-restore UUID")
+			}
+			if err := backup.CheckPlayerStart(dst); err == nil {
+				t.Fatal("start accepted the pre-restore UUID")
+			}
+			if _, err := backup.ResetPlayer(dst); err != nil {
+				t.Fatal(err)
+			}
+			id, _, err := backup.EnsurePlayerUUID(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
 			newSnap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dst, PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)})
 			if err != nil {
 				t.Fatal(err)
 			}
 			carried := markAt(t, newSnap)
-			if carried.UUID != boxPlayerUUID || carried.IDs != raised.IDs || carried.Tokens != raised.Tokens {
+			if carried.UUID != id || carried.IDs != raised.IDs || carried.Tokens != raised.Tokens {
 				t.Fatalf("snapshot dropped the interrupted restore floor: %+v versus %+v", carried, raised)
 			}
 			elsewhere := t.TempDir()

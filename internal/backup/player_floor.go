@@ -28,34 +28,61 @@ func playerEntry(dir, name string) (bool, error) {
 	return err == nil, err
 }
 
-// readPlayerMarker is the single strict reader of the two local lifecycle markers.
-func readPlayerMarker(dir, name string) (bool, error) {
-	present, err := playerEntry(dir, name)
-	if err != nil || !present {
-		return present, err
+// playerMarker treats damaged entries conservatively as present. Only a whole,
+// newer version can require a newer bridge. A discard is recorded independently
+// in both local markers before any allocation state is removed.
+type playerMarker struct {
+	Version int  `json:"version"`
+	Sealed  bool `json:"sealed,omitempty"`
+}
+
+func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, err error) {
+	st, err := os.Lstat(filepath.Join(dir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false, m, nil
+	}
+	if err != nil {
+		return false, false, m, err
+	}
+	if !st.Mode().IsRegular() {
+		return true, false, m, nil
 	}
 	f, _, err := fsutil.OpenAsFile(filepath.Join(dir, name))
 	if err != nil {
-		return true, err
+		return true, false, m, err
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 129))
 	if err != nil {
-		return true, err
-	}
-	var m struct {
-		Version int `json:"version"`
+		return true, false, m, err
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if len(b) > 128 || d.Decode(&m) != nil || m.Version != 1 || d.Decode(new(any)) != io.EOF {
-		return true, fmt.Errorf("%s is not a supported player marker; restore the original marker or use a newer bridge", name)
+	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
+		return true, false, playerMarker{}, nil
 	}
-	return true, nil
+	if m.Version > 1 {
+		return true, false, m, fmt.Errorf("%s has a newer version; use a newer bridge", name)
+	}
+	return true, m.Version == 1, m, nil
 }
 
-// ensurePlayerMarker writes each local marker once and reestablishes its barrier
-// on retry. The caller holds the exclusive data-directory lock.
+func readPlayerMarker(dir, name string) (bool, error) {
+	present, _, _, err := playerMarkerState(dir, name)
+	return present, err
+}
+
+// playerRestoresSealed reads independent evidence; a damaged seal is still a
+// seal. The initialized marker's sealed bit survives loss of the seal file.
+func playerRestoresSealed(dir string) (bool, error) {
+	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
+	if sealed || err != nil {
+		return sealed, err
+	}
+	_, _, m, err := playerMarkerState(dir, playerInitialized)
+	return m.Sealed, err
+}
+
+// ensurePlayerMarker preserves existing bytes and reestablishes their barrier.
 func ensurePlayerMarker(dir, name string) error {
 	present, err := readPlayerMarker(dir, name)
 	if err != nil {
@@ -63,9 +90,61 @@ func ensurePlayerMarker(dir, name string) error {
 	}
 	path := filepath.Join(dir, name)
 	if present {
+		st, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file: move it aside and run bridge reset-player --discard-floor", name)
+		}
 		return atomicwrite.ProbeDurable(dir, path)
 	}
 	return atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp")
+}
+
+// sealPlayerMarker repairs damaged markers only in explicit discard. Renaming
+// a bad entry preserves it for inspection and never opens a FIFO or symlink.
+func sealPlayerMarker(dir, name string) error {
+	present, valid, m, err := playerMarkerState(dir, name)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, name)
+	if present && !valid {
+		suffix, err := uuid.NewRandom()
+		if err != nil {
+			return err
+		}
+		if err := atomicwrite.RenameWithRetry(path, path+".discarded-"+suffix.String()); err != nil {
+			return err
+		}
+	}
+	if valid && (name == playerFloorDiscarded || m.Sealed) {
+		return ensurePlayerMarker(dir, name)
+	}
+	return atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1,\"sealed\":true}\n"), ".player-marker-*.tmp")
+}
+
+// unstartedPlayer is exactly main's bind-only state: UUID, no allocation state.
+func unstartedPlayer(dir string) (bool, error) {
+	for _, name := range []string{engine.ReservationFileName, playerInitialized, "player-queue.json", playerFloorDiscarded} {
+		present, err := playerEntry(dir, name)
+		if err != nil || present {
+			return false, err
+		}
+	}
+	st, err := os.Lstat(filepath.Join(dir, config.PlayerUUIDFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !st.Mode().IsRegular() {
+		return false, nil
+	}
+	_, err = config.ReadPlayerUUID(dir)
+	return err == nil, nil
 }
 
 func readPlayerFloor(dir string) (engine.Reservation, bool, error) {
@@ -107,6 +186,10 @@ func checkPlayerFloorLoss(dir string, present bool) error {
 	if err != nil {
 		return err
 	}
+	sealed, err := playerRestoresSealed(dir)
+	if err != nil {
+		return err
+	}
 	if present {
 		return nil
 	}
@@ -118,9 +201,14 @@ func checkPlayerFloorLoss(dir string, present bool) error {
 	if err != nil {
 		return err
 	}
-	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
-	if err != nil {
-		return err
+	if id && !queue && !marked && !sealed {
+		unstarted, err := unstartedPlayer(dir)
+		if err != nil {
+			return err
+		}
+		if unstarted {
+			return nil
+		}
 	}
 	if id || queue || marked && !sealed {
 		return errors.New("player floor is missing; with the service stopped, run bridge reset-player --discard-floor")
@@ -130,7 +218,7 @@ func checkPlayerFloorLoss(dir string, present bool) error {
 
 // CheckPlayerStart performs the read-only preflight shared by serve and bind.
 func CheckPlayerStart(dir string) error {
-	_, present, err := readPlayerFloor(dir)
+	floor, present, err := readPlayerFloor(dir)
 	if err != nil {
 		return err
 	}
@@ -152,17 +240,45 @@ func CheckPlayerStart(dir string) error {
 		}
 		_ = f.Close()
 	}
-	if !idPresent && queue {
-		return errors.New("player-uuid is missing beside a queue; run bridge reset-player")
-	}
 	if idPresent {
-		_, err := config.ReadPlayerUUID(dir)
+		st, err := os.Lstat(filepath.Join(dir, config.PlayerUUIDFile))
 		if err != nil {
 			return playerUUIDReadError(err)
+		}
+		if !st.Mode().IsRegular() {
+			kind := fsutil.NotAFile(st.Mode())
+			if kind == "" {
+				kind = "symbolic link or non-regular entry"
+			}
+			advice := "bridge reset-player"
+			if !present {
+				advice = "bridge reset-player --discard-floor"
+			}
+			return fmt.Errorf("player-uuid: %s is not a file: move it aside, then run %s", kind, advice)
 		}
 	}
 	if err := checkPlayerFloorLoss(dir, present); err != nil {
 		return err
+	}
+	if st, err := os.Lstat(filepath.Join(dir, playerInitialized)); err == nil && !st.Mode().IsRegular() {
+		return errors.New("player-initialized is not a regular file: move it aside and run bridge reset-player --discard-floor")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if floor.Exhausted() {
+		return fmt.Errorf("player counter floor is exhausted; %s", playerResetAdvice(false))
+	}
+	if !idPresent && queue {
+		return errors.New("player-uuid is missing beside a queue; run bridge reset-player")
+	}
+	if idPresent {
+		id, err := config.ReadPlayerUUID(dir)
+		if err != nil {
+			return playerUUIDReadError(err)
+		}
+		if present && floor.UUID != id {
+			return errors.New("player-ids.json does not name the current player-uuid; run bridge reset-player (the counter floor is kept)")
+		}
 	}
 	return nil
 }
@@ -175,6 +291,13 @@ func EnsurePlayerUUID(dir string) (string, bool, error) {
 	}
 	id, readErr := config.ReadPlayerUUID(dir)
 	if readErr == nil {
+		if unstarted, err := unstartedPlayer(dir); err != nil {
+			return "", false, err
+		} else if unstarted {
+			if err := engine.WriteReservation(dir, filepath.Join(dir, engine.ReservationFileName), engine.Reservation{UUID: id}); err != nil {
+				return "", false, err
+			}
+		}
 		if err := ensurePlayerMarker(dir, playerInitialized); err != nil {
 			return "", false, err
 		}
@@ -226,6 +349,16 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		if err := checkPlayerFloorLoss(dir, present); err != nil {
 			return false, err
 		}
+		if !present {
+			if unstarted, err := unstartedPlayer(dir); err != nil {
+				return false, err
+			} else if unstarted {
+				if _, _, err := EnsurePlayerUUID(dir); err != nil {
+					return false, err
+				}
+				present = true
+			}
+		}
 		floorPresent = present
 	}
 	// A UUID directory is never removed, even when empty. Reset does not read UUID bytes.
@@ -242,7 +375,10 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		if err := fsutil.MkdirAll(dir, 0700); err != nil {
 			return false, err
 		}
-		if err := ensurePlayerMarker(dir, playerFloorDiscarded); err != nil {
+		if err := sealPlayerMarker(dir, playerFloorDiscarded); err != nil {
+			return false, err
+		}
+		if err := sealPlayerMarker(dir, playerInitialized); err != nil {
 			return false, err
 		}
 		if err := step(playerFloorDiscarded); err != nil {
@@ -295,4 +431,28 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		}
 	}
 	return true, nil
+}
+
+// upgradeCapturedPlayer initializes a bind-only identity under the same lock
+// serve, bind and reset hold. The caller rereads the floor through its retry.
+func upgradeCapturedPlayer(dir, captured string) error {
+	unstarted, err := unstartedPlayer(dir)
+	if err != nil || !unstarted {
+		return err
+	}
+	f, err := fsutil.OpenLockFile(dir, "server.lock")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := fsutil.TryLock(f); err != nil {
+		return fmt.Errorf("player initialization is busy; retry the backup: %w", err)
+	}
+	defer fsutil.Unlock(f)
+	id, err := config.ReadPlayerUUID(dir)
+	if err != nil || id != captured {
+		return errors.New("player identity changed during backup; run the backup again")
+	}
+	_, _, err = EnsurePlayerUUID(dir)
+	return err
 }

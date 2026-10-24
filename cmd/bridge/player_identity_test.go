@@ -109,6 +109,7 @@ func TestDACBindRefusesUnsafePlayerIdentity(t *testing.T) {
 				put("player-queue.json", `{"version":1}`)
 			case "uuid_without_floor":
 				put("player-uuid", id)
+				put("player-initialized", `{"version":1}`)
 			case "marker_without_floor":
 				put("player-initialized", `{"version":1}`)
 			case "bad_floor":
@@ -133,7 +134,7 @@ func TestDACBindRefusesUnsafePlayerIdentity(t *testing.T) {
 }
 
 func TestDACBindKeepsOrRestampsTheBoxFloor(t *testing.T) {
-	for _, kind := range []string{"pristine", "existing", "reset"} {
+	for _, kind := range []string{"pristine", "existing", "reset", "upgrade"} {
 		t.Run(kind, func(t *testing.T) {
 			root := dacTree(t)
 			cfgPath := dacConfig(t, "  player:\n    enabled: true\n")
@@ -145,12 +146,12 @@ func TestDACBindKeepsOrRestampsTheBoxFloor(t *testing.T) {
 				t.Fatal(err)
 			}
 			const old = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-			if kind != "pristine" {
+			if kind != "pristine" && kind != "upgrade" {
 				if err := os.WriteFile(filepath.Join(cfg.DataDir, "player-ids.json"), []byte(`{"version":2,"uuid":"`+old+`","ids":2000000000,"tokens":2000000001}`), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if kind == "existing" {
+			if kind == "existing" || kind == "upgrade" {
 				if err := os.WriteFile(filepath.Join(cfg.DataDir, "player-uuid"), []byte(old), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -163,14 +164,14 @@ func TestDACBindKeepsOrRestampsTheBoxFloor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if kind == "existing" && id != old || kind == "reset" && id == old {
+			if (kind == "existing" || kind == "upgrade") && id != old || kind == "reset" && id == old {
 				t.Fatalf("identity: %s", id)
 			}
 			r, err := engine.ReadReservation(filepath.Join(cfg.DataDir, "player-ids.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r.UUID != id || kind != "pristine" && (r.IDs != 2000000000 || r.Tokens != 2000000001) {
+			if r.UUID != id || kind != "pristine" && kind != "upgrade" && (r.IDs != 2000000000 || r.Tokens != 2000000001) {
 				t.Fatalf("floor changed: %+v", r)
 			}
 			if _, err := os.Stat(filepath.Join(cfg.DataDir, "player-initialized")); err != nil {

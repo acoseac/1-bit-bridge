@@ -195,6 +195,18 @@ func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T
 	if err := os.WriteFile(filepath.Join(dir, playerReservationFile), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+	var outBefore, errBefore bytes.Buffer
+	if code := backupCmd([]string{"--config", cfg}, &outBefore, &errBefore); code == 0 || !strings.Contains(errBefore.String(), "bridge reset-player") {
+		t.Fatalf("backup accepted mismatched identity: %d %s", code, &errBefore)
+	}
+	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &outBefore, &errBefore); code != 0 {
+		t.Fatalf("reset remedy: %s", &errBefore)
+	}
+	id, _, err = backup.EnsurePlayerUUID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	snap := runBackup(t, cfg)
 	mark, err := engine.ReadReservation(filepath.Join(snap, playerReservationFile))
 	if err != nil || mark.UUID != id || mark.IDs != live.IDs || mark.Tokens != live.Tokens {

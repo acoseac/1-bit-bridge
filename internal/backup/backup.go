@@ -235,10 +235,8 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		captured = append(captured, pair.name)
 	}
 
-	// Every writer merges the live reservation, so even a foreign UUID or
-	// v1 file covers this box's identities. Capture that conservative floor
-	// after the UUID and restamp the snapshot copy, including after a restore
-	// interrupted before its UUID landed and before any engine restarts.
+	// Capture the UUID before its floor and require the same named identity.
+	// A discard and mint between these reads must not pair old UUID/new floor.
 	if slices.Contains(captured, PlayerUUIDFileName) {
 		var id string
 		idErr := atomicwrite.ReadWithRetryCtx(ctx, func() error {
@@ -250,13 +248,29 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, idErr)
 		}
 		var mark engine.Reservation
-		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
-			var err error
-			mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
-			return err
-		})
+		readFloor := func() error {
+			return atomicwrite.ReadWithRetryCtx(ctx, func() error {
+				var err error
+				mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
+				return err
+			})
+		}
+		err := readFloor()
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("backup: player UUID was captured without a readable floor; run the backup again: %w", err)
+			if idErr == nil {
+				if upgradeErr := upgradeCapturedPlayer(filepath.Dir(src.PlayerUUID), id); upgradeErr != nil {
+					return "", fmt.Errorf("backup: %w", upgradeErr)
+				}
+				err = readFloor()
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				if _, statErr := os.Lstat(src.PlayerUUID); errors.Is(statErr, os.ErrNotExist) {
+					return "", fmt.Errorf("backup: player UUID vanished during capture; run the backup again: %w", err)
+				} else if statErr != nil {
+					return "", fmt.Errorf("backup: check player-uuid: %w", statErr)
+				}
+				return "", fmt.Errorf("backup: player floor is missing; %s", playerResetAdvice(false))
+			}
 		}
 		if err != nil {
 			if errors.Is(err, atomicwrite.ErrReadBusy) {
@@ -271,6 +285,9 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 			return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
 		}
 		if idErr == nil {
+			if mark.UUID != id {
+				return "", errors.New("backup: player identity changed or the floor does not name the captured UUID; run bridge reset-player before backing up again")
+			}
 			mark.Version, mark.UUID = 2, id
 			data, err := json.Marshal(mark)
 			if err != nil {

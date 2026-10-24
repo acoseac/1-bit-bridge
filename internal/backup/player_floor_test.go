@@ -68,7 +68,10 @@ func TestBackupUUIDWithoutFloorRefuses(t *testing.T) {
 	if err := config.WritePlayerUUIDFile(path, boxPlayerUUID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: path}); err == nil || !strings.Contains(err.Error(), "again") {
+	if err := os.WriteFile(filepath.Join(dir, "player-initialized"), []byte(`{"version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: path}); err == nil || !strings.Contains(err.Error(), "--discard-floor") {
 		t.Fatalf("missing floor accepted: %v", err)
 	}
 }
@@ -101,6 +104,15 @@ func TestEveryOldIdentityRestoresAboveTheBoxFloor(t *testing.T) {
 					atomicwrite.SetRenameFuncForTest(prev)
 					if !errors.Is(err, stop) {
 						t.Fatalf("interruption: %v", err)
+					}
+					if err := backup.CheckPlayerStart(dir); err == nil {
+						t.Fatal("start accepted an interrupted identity replacement")
+					}
+					if _, err := backup.ResetPlayer(dir); err != nil {
+						t.Fatal(err)
+					}
+					if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
+						t.Fatal(err)
 					}
 					t.Run("restart", func(t *testing.T) { firstValues(t, dir, markAt(t, dir)) })
 				} else if err := fixedRestore(t, oldY, dir, 0); err != nil {
@@ -343,7 +355,7 @@ func TestOrdinaryResetCommitsQueueBeforeUUIDAndNeverChangesFloor(t *testing.T) {
 
 func TestLocalPlayerMarkersAreStrictAndNeverRewritten(t *testing.T) {
 	reservationStorage(t)
-	for _, body := range []string{`{"version":2}`, `{"version":1,"other":true}`, `{"version":1} {}`, `{`, strings.Repeat("x", 129)} {
+	for _, body := range []string{`{"version":2}`} {
 		dir := t.TempDir()
 		putMark(t, dir, boxPlayerUUID, 2000000000, 2000000001)
 		if err := config.WritePlayerUUIDFile(filepath.Join(dir, "player-uuid"), boxPlayerUUID); err != nil {
@@ -438,7 +450,8 @@ func TestBackupReadsFloorAfterUUIDCapture(t *testing.T) {
 	for _, change := range []string{"raised", "discarded"} {
 		t.Run(change, func(t *testing.T) {
 			dir := t.TempDir()
-			if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
+			id, _, err := backup.EnsurePlayerUUID(dir)
+			if err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, "player-ids.json")
@@ -452,7 +465,7 @@ func TestBackupReadsFloorAfterUUIDCapture(t *testing.T) {
 					if change == "discarded" {
 						return os.Remove(path)
 					}
-					putMark(t, dir, boxPlayerUUID, 2000000000, 2000000001)
+					putMark(t, dir, id, 2000000000, 2000000001)
 				}
 				return nil
 			})
@@ -462,7 +475,7 @@ func TestBackupReadsFloorAfterUUIDCapture(t *testing.T) {
 				t.Fatal("did not observe UUID capture")
 			}
 			if change == "discarded" {
-				if err == nil || !strings.Contains(err.Error(), "again") {
+				if err == nil || !strings.Contains(err.Error(), "--discard-floor") {
 					t.Fatalf("lost floor at capture: %v", err)
 				}
 				return

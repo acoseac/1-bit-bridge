@@ -33,7 +33,15 @@ func withPlayerUUID(t *testing.T, src *backup.Sources, body string, perm os.File
 	}
 	floor := filepath.Join(src.DataDir, "player-ids.json")
 	if _, err := os.Lstat(floor); os.IsNotExist(err) {
-		if err := os.WriteFile(floor, []byte(`{"version":1,"ids":0,"tokens":0}`), 0600); err != nil {
+		id := strings.TrimSpace(body)
+		if _, err := config.ReadPlayerUUID(src.DataDir); err != nil {
+			id = snapshotPlayerUUID
+		}
+		data, err := json.Marshal(map[string]any{"version": 2, "uuid": id, "ids": 0, "tokens": 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(floor, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
