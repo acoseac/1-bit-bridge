@@ -46,6 +46,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -3007,6 +3008,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// outlived its stop keeps the lock past this return (dataDirHold).
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
+	// Adopt pre-floor identities before any live backup can run, even with
+	// playback disabled. A pristine box still gets no player identity here.
+	if lockErr == nil {
+		if err := backup.AdoptPlayerState(cfg.DataDir); err != nil {
+			fmt.Fprintf(stderr, "serve: player state: %v\n", err)
+			return 1
+		}
+	}
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
 	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`

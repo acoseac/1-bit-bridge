@@ -330,7 +330,7 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if r := markAt(t, snap); r.UUID != snapshotPlayerUUID || r.IDs != 0 || r.Tokens != 0 {
+				if r := markAt(t, snap); r.UUID != snapshotPlayerUUID || r.IDs < 1<<24 || r.Tokens < 1<<24 {
 					t.Fatalf("bind-only upgrade: %+v", r)
 				}
 				return

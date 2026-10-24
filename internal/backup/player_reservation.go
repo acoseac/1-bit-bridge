@@ -125,14 +125,9 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	if err := errors.Join(exhausted...); err != nil {
 		return fmt.Errorf("%w; nothing was restored", err)
 	}
-	var draw [3]byte
-	if _, err := io.ReadFull(opts.randomSource(), draw[:]); err != nil {
+	want, err := jumpedPlayerReservation(id, snap, live, opts.randomSource())
+	if err != nil {
 		return fmt.Errorf("restore: draw the player reservation jump: %w; nothing was restored", err)
-	}
-	jump := restoreMargin + (uint64(draw[0])<<16 | uint64(draw[1])<<8 | uint64(draw[2]))
-	want := engine.Reservation{UUID: id,
-		IDs:    uint32(uint64(max(snap.IDs, live.IDs)) + jump),
-		Tokens: uint32(uint64(max(snap.Tokens, live.Tokens)) + jump),
 	}
 	if opts.Warn != nil && (!marked || time.Since(m.CreatedAt) > 24*time.Hour) {
 		reason := "is older than a day"
@@ -151,6 +146,20 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 		return fmt.Errorf("restore player reservation: %w", err)
 	}
 	return ensurePlayerMarker(dataDir, playerInitialized)
+}
+
+// jumpedPlayerReservation applies restore's migration margin to both counters.
+// Callers must first check that their floors leave room for the largest jump.
+func jumpedPlayerReservation(id string, snap, live engine.Reservation, random io.Reader) (engine.Reservation, error) {
+	var draw [3]byte
+	if _, err := io.ReadFull(random, draw[:]); err != nil {
+		return engine.Reservation{}, err
+	}
+	jump := restoreMargin + (uint64(draw[0])<<16 | uint64(draw[1])<<8 | uint64(draw[2]))
+	return engine.Reservation{UUID: id,
+		IDs:    uint32(uint64(max(snap.IDs, live.IDs)) + jump),
+		Tokens: uint32(uint64(max(snap.Tokens, live.Tokens)) + jump),
+	}, nil
 }
 
 // randomSource keeps the production default explicit and testable without a

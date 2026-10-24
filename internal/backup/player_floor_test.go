@@ -290,6 +290,11 @@ func TestRestoreFloorPreflightWritesNothing(t *testing.T) {
 					t.Skip(err)
 				}
 			}
+			if kind == "seal" {
+				if err := os.WriteFile(filepath.Join(dir, "player-initialized"), []byte(`{"version":1,"sealed":true}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			writes := 0
 			prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error { writes++; return os.Rename(a, b) })
 			err := fixedRestore(t, snap, dir, 0)

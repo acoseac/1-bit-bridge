@@ -161,7 +161,7 @@ func TestDiscardSurvivesAnyOneLocalFileLoss(t *testing.T) {
 
 func TestUUIDOnlyUpgradeAndFloorLossBoundary(t *testing.T) {
 	reservationStorage(t)
-	for _, extra := range []string{"", "player-initialized", "player-floor-discarded.json", "player-queue.json"} {
+	for _, extra := range []string{"", "player-initialized", "player-floor-discarded.json", "player-queue.json", "invalid_uuid"} {
 		for _, op := range []string{"start", "backup"} {
 			t.Run(op+"/"+extra, func(t *testing.T) {
 				dir := t.TempDir()
@@ -169,7 +169,11 @@ func TestUUIDOnlyUpgradeAndFloorLossBoundary(t *testing.T) {
 				if err := config.WritePlayerUUIDFile(path, boxPlayerUUID); err != nil {
 					t.Fatal(err)
 				}
-				if extra != "" {
+				if extra == "invalid_uuid" {
+					if err := os.WriteFile(path, []byte("invalid"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				} else if extra != "" {
 					if err := os.WriteFile(filepath.Join(dir, extra), []byte(`{"version":1}`), 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -193,7 +197,7 @@ func TestUUIDOnlyUpgradeAndFloorLossBoundary(t *testing.T) {
 					t.Fatalf("upgrade rotated UUID: %s %v", id, err)
 				}
 				r := markAt(t, dir)
-				if r.UUID != boxPlayerUUID || r.IDs != 0 || r.Tokens != 0 {
+				if r.UUID != boxPlayerUUID || r.IDs < 1<<24 || r.Tokens < 1<<24 {
 					t.Fatalf("upgrade floor: %+v", r)
 				}
 				if _, err := os.Stat(filepath.Join(dir, "player-initialized")); err != nil {

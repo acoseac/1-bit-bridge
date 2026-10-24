@@ -34,6 +34,7 @@ func playerEntry(dir, name string) (bool, error) {
 type playerMarker struct {
 	Version int  `json:"version"`
 	Sealed  bool `json:"sealed,omitempty"`
+	Minted  bool `json:"minted,omitempty"`
 }
 
 func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, err error) {
@@ -125,7 +126,97 @@ func sealPlayerMarker(dir, name string) error {
 	return atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1,\"sealed\":true}\n"), ".player-marker-*.tmp")
 }
 
-// unstartedPlayer is exactly main's bind-only state: UUID, no allocation state.
+// completePlayerSeal closes an interrupted or older discard's second record.
+// The caller holds server.lock. Recheck the first record's durability before
+// adding independent evidence; never turn a consumed exemption back on.
+func completePlayerSeal(dir string) error {
+	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
+	if err != nil || !sealed {
+		return err
+	}
+	present, valid, m, err := playerMarkerState(dir, playerInitialized)
+	if err != nil || m.Sealed {
+		return err
+	}
+	if err := ensurePlayerMarker(dir, playerFloorDiscarded); err != nil {
+		return err
+	}
+	if present && !valid {
+		return errors.New("player-initialized is damaged: move it aside and run bridge reset-player --discard-floor")
+	}
+	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "player-queue.json"} {
+		present, err := playerEntry(dir, name)
+		if err != nil {
+			return err
+		}
+		m.Minted = m.Minted || present
+	}
+	m.Version, m.Sealed = 1, true
+	return writePlayerMarker(dir, m)
+}
+
+func writePlayerMarker(dir string, m playerMarker) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp")
+}
+
+// markPlayerMinted consumes a discard's exemption after the floor is durable
+// and before the UUID is published. Ordinary initialization preserves bytes.
+func markPlayerMinted(dir string) error {
+	_, _, m, err := playerMarkerState(dir, playerInitialized)
+	if err != nil {
+		return err
+	}
+	if m.Sealed && !m.Minted {
+		m.Minted = true
+		return writePlayerMarker(dir, m)
+	}
+	return ensurePlayerMarker(dir, playerInitialized)
+}
+
+// AdoptPlayerState completes local discard evidence and adopts a UUID-only
+// upgrade, without minting an identity on a pristine box. The caller holds the
+// exclusive server.lock, even when the player is disabled.
+func AdoptPlayerState(dir string) error {
+	if err := completePlayerSeal(dir); err != nil {
+		return err
+	}
+	adopt, err := unstartedPlayer(dir)
+	if err != nil || !adopt {
+		return err
+	}
+	_, _, err = EnsurePlayerUUID(dir)
+	return err
+}
+
+// completeCapturedPlayerSeal serializes a backup's local marker upgrade with
+// every lifecycle writer. A normal live backup needs no exclusive lock.
+func completeCapturedPlayerSeal(dir string) error {
+	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
+	if err != nil || !sealed {
+		return err
+	}
+	_, _, m, err := playerMarkerState(dir, playerInitialized)
+	if err != nil || m.Sealed {
+		return err
+	}
+	f, err := fsutil.OpenLockFile(dir, "server.lock")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := fsutil.TryLock(f); err != nil {
+		return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
+	}
+	defer fsutil.Unlock(f)
+	return completePlayerSeal(dir)
+}
+
+// unstartedPlayer recognizes a UUID-only upgrade, which can also be a
+// main-era engine whose floor alone was lost. Adoption must jump, never zero.
 func unstartedPlayer(dir string) (bool, error) {
 	for _, name := range []string{engine.ReservationFileName, playerInitialized, "player-queue.json", playerFloorDiscarded} {
 		present, err := playerEntry(dir, name)
@@ -180,9 +271,9 @@ func playerUUIDReadError(err error) error {
 }
 
 // checkPlayerFloorLoss distinguishes a new box from lost local allocation state.
-// A valid discard seal permits a fresh floor only after UUID and queue are gone.
+// A valid, unconsumed discard permits one fresh floor after UUID and queue are gone.
 func checkPlayerFloorLoss(dir string, present bool) error {
-	marked, err := readPlayerMarker(dir, playerInitialized)
+	marked, valid, marker, err := playerMarkerState(dir, playerInitialized)
 	if err != nil {
 		return err
 	}
@@ -210,7 +301,7 @@ func checkPlayerFloorLoss(dir string, present bool) error {
 			return nil
 		}
 	}
-	if id || queue || marked && !sealed {
+	if id || queue || marked && !(valid && sealed && !marker.Minted) {
 		return errors.New("player floor is missing; with the service stopped, run bridge reset-player --discard-floor")
 	}
 	return nil
@@ -286,6 +377,9 @@ func CheckPlayerStart(dir string) error {
 // EnsurePlayerUUID is the sole production minter. Floor, marker and UUID commit
 // in that order, with the retained floor merged across every UUID the box runs.
 func EnsurePlayerUUID(dir string) (string, bool, error) {
+	if err := completePlayerSeal(dir); err != nil {
+		return "", false, err
+	}
 	if err := CheckPlayerStart(dir); err != nil {
 		return "", false, err
 	}
@@ -294,11 +388,15 @@ func EnsurePlayerUUID(dir string) (string, bool, error) {
 		if unstarted, err := unstartedPlayer(dir); err != nil {
 			return "", false, err
 		} else if unstarted {
-			if err := engine.WriteReservation(dir, filepath.Join(dir, engine.ReservationFileName), engine.Reservation{UUID: id}); err != nil {
+			want, err := jumpedPlayerReservation(id, engine.Reservation{}, engine.Reservation{}, (RestoreOptions{}).randomSource())
+			if err != nil {
+				return "", false, err
+			}
+			if err := engine.WriteReservation(dir, filepath.Join(dir, engine.ReservationFileName), want); err != nil {
 				return "", false, err
 			}
 		}
-		if err := ensurePlayerMarker(dir, playerInitialized); err != nil {
+		if err := markPlayerMinted(dir); err != nil {
 			return "", false, err
 		}
 		return id, false, nil
@@ -316,7 +414,7 @@ func EnsurePlayerUUID(dir string) (string, bool, error) {
 	if err := engine.WriteReservation(dir, filepath.Join(dir, engine.ReservationFileName), engine.Reservation{UUID: u.String()}); err != nil {
 		return "", false, err
 	}
-	if err := ensurePlayerMarker(dir, playerInitialized); err != nil {
+	if err := markPlayerMinted(dir); err != nil {
 		return "", false, err
 	}
 	if err := config.WritePlayerUUIDFile(filepath.Join(dir, config.PlayerUUIDFile), u.String()); err != nil {
@@ -342,6 +440,12 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 	}
 	var floorPresent bool
 	if !discard {
+		if err := completePlayerSeal(dir); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return false, fmt.Errorf("%w; restore read access to player state; or run bridge reset-player --discard-floor", err)
+			}
+			return false, err
+		}
 		_, present, err := readPlayerFloor(dir)
 		if err != nil {
 			return false, err
@@ -426,6 +530,10 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		if err := atomicwrite.ProbeDurable(dir, filepath.Join(dir, ".player-reset-barrier")); err != nil {
 			return false, err
 		}
+		// Only a completed explicit discard opens the next one-shot exemption.
+		if err := writePlayerMarker(dir, playerMarker{Version: 1, Sealed: true}); err != nil {
+			return false, err
+		}
 		if err := step(engine.ReservationFileName); err != nil {
 			return false, err
 		}
@@ -433,7 +541,7 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 	return true, nil
 }
 
-// upgradeCapturedPlayer initializes a bind-only identity under the same lock
+// upgradeCapturedPlayer adopts a UUID-only upgrade under the same lock
 // serve, bind and reset hold. The caller rereads the floor through its retry.
 func upgradeCapturedPlayer(dir, captured string) error {
 	unstarted, err := unstartedPlayer(dir)
@@ -446,7 +554,7 @@ func upgradeCapturedPlayer(dir, captured string) error {
 	}
 	defer f.Close()
 	if err := fsutil.TryLock(f); err != nil {
-		return fmt.Errorf("player initialization is busy; retry the backup: %w", err)
+		return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
 	}
 	defer fsutil.Unlock(f)
 	id, err := config.ReadPlayerUUID(dir)

@@ -172,6 +172,11 @@ type Targets struct {
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
 func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
+	if src.PlayerUUID != "" {
+		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
+			return "", err
+		}
+	}
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -347,6 +352,11 @@ func Restore(snapshotDir string, dst Targets) error {
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
+	if dst.PlayerUUID != "" {
+		if err := completePlayerSeal(filepath.Dir(dst.PlayerUUID)); err != nil {
+			return err
+		}
+	}
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
 		return fmt.Errorf("read snapshot manifest: %w", err)
