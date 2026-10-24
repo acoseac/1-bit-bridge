@@ -998,13 +998,14 @@ func TestALiveBindingChangeReportsThePlayersOutputUnavailable(t *testing.T) {
 // counted: a count read then missed it (B536, CI's "published 1 snapshots").
 // The count is read while that first publish is still held at its log
 // line, so it is exact: only the watcher's goroutine publishes here (the
-// service's disabled publish comes only after a stop, which the held reading
-// holds back), every publish before the held one is counted by then, and
-// nothing else can publish until the test lets it go. The test then expects
-// that one publish and no other, so a publish the watcher makes for the
-// changed binding before it reads the box is counted against it too
-// (B536; the second review: a count read once the held reading has arrived
-// would already include such a publish).
+// service's disabled publish waits for the watch to stop, which the parked
+// publish holds back, and once it is let go the held reading), every publish
+// before the parked one is counted by then, and nothing else can publish
+// until the test lets it go. The test then expects that one publish and no
+// other, so a publish the watcher makes for the changed binding before it
+// reads the box is counted against it too (B536; the second review: a count
+// read once the held reading has arrived would already include such a
+// publish).
 func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.T) {
 	needsDirectorySync(t)
 	first := parkFirstLog(t, "player DAC: available")
