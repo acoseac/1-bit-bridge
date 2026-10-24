@@ -401,6 +401,56 @@ package outside OpenHome, plus ALSA, passes. The full gate is not claimed
 passed. Controls use test-file overlays, leaving production and fixed
 source bytes intact; every busy loop is stopped and reaped.
 
+Round 7 fixes the gapless-live-reporter cancellation watchdog. CI's dump
+has only the engine owner and persistence writer left: the producer and
+sink writer have already exited. A natural twelve-spinner diagnostic
+reproduces the missing answer as plain context.Canceled from session.call,
+not the sink's typed ReasonCancelled. After rollback Drops the final
+buffer, the live reporter sends its measured events and Fault; the real
+engine releases that session. Its context can win session.call's select
+before Drop's typed Drain answer is taken. The old result hook filtered
+out plain context.Canceled, so its buffered channel would never receive;
+the observer was already registered, and Drain neither completed normally
+nor remained blocked. This is permitted production behavior. The test now
+captures the producer's context before Prepare(nil), records every Drain
+answer, holds the initial paused refusal at SinkCall until Resume is
+queued, and waits for accepted SinkDraining before any draining case gets
+fake time. Its final answer assertion accepts either Drop's typed
+cancellation or the session's context cancellation. The new
+gapless-session-cancel case parks the retried Drain's sender until the engine
+release cancels the wrapper, requires plain context.Canceled, then frees
+and joins the sender. Completed drains still require success; rollback's
+error joins, call/deadline and Drop counts, measured event sequence, engine
+Play/selection/fault, and complete cleanup assertions remain. Every other
+receiveIn and waitOn in playback_rollback_test.go was audited for transient
+states and filtered outcomes; no other wait needs a change. The B526 rule
+and its long form record this case. No production code, sleep, timeout
+increase, commit or push.
+
+Round 7 Go 1.27.3 offline validation: the fixed gapless case passes under
+race 300 times isolated and 300 times with twelve busy loops; the forced
+session-cancellation case also passes 300 times with twelve loops. All
+eight rollback cases pass 100 times with twelve loops. The original
+isolated 300-run check passes; its initial stressed peer has two minute-
+watchdog cancellation hangs (briefly overlapping another twelve-loop
+control), while a later exact-twelve-loop 300-run check passes. The old
+test with result logging alone gives one plain-context-cancellation hang
+in 300 runs with exactly twelve loops and a one-second diagnostic
+watchdog. The forced old ordering fails 3/3 under twelve loops; restoring
+the old plain-cancellation filter on the fixed deterministic schedule
+also fails 3/3. Every control compiles, exits at its intended watchdog,
+cleans up and avoids a package timeout or data race. Darwin and Linux vet,
+make fmt and make docs-check pass. The fresh all-player/ALSA race gate
+passes every package outside OpenHome and fails there on sandbox-denied
+loopback binds: TestAHeaderPastItsBoundIsRefused,
+TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem; later waits fail at the
+package cap and TestStopRefusesThenShutsDownThenCloses panics in cleanup
+without a listener. The full gate is not claimed passed. All final stress
+proofs use separate sets of exactly twelve spinners, all stopped and
+reaped; controls use test overlays and preserve the worktree's fixed bytes.
+
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
 The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Track.bandwidthHz`; `GET /v1/spectrum`; `spectrum` health flag) answers "is this file an upsampled CD rip?". Five bridge PRs, each finding a defect only REAL data exposed — every synthetic fixture agreed with every other synthetic fixture and they were all wrong together. Invariants:
