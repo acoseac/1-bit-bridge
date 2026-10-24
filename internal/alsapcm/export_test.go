@@ -89,6 +89,11 @@ func (tk *FakeKernel) Grant(d time.Duration) { tk.k.grant(d) }
 
 func (tk *FakeKernel) Revoke() { tk.k.revoke() }
 
+// Hold stops the DAC: what is left of a grant is taken back and Free ends,
+// so no wait plays on, one for room or for a drain's end included, until the
+// next Grant.
+func (tk *FakeKernel) Hold() { tk.k.hold() }
+
 // Play lets the DAC play d and returns once the writer has used it all and
 // waits on the DAC for more.
 func (tk *FakeKernel) Play(t *testing.T, d time.Duration) { tk.k.play(t, d) }
