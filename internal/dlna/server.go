@@ -191,6 +191,12 @@ type ServerConfig struct {
 	// one that Stop closes, for a server started on its own (tests, and a
 	// caller with no serve around it).
 	SSDP *SSDPSubsystem
+	// Listener is an already-bound HTTP listener; nil binds ListenAddress.
+	Listener net.Listener
+	// Interfaces and InterfaceAddresses replace this server's host inventory
+	// in isolated tests; nil retains the host's enumeration.
+	Interfaces         func() ([]net.Interface, error)
+	InterfaceAddresses func(*net.Interface) ([]net.Addr, error)
 
 	// TelemetryStore receives per-request entries via the telemetry
 	// middleware. nil = telemetry disabled (middleware passes
@@ -342,6 +348,8 @@ func (s *Server) Start(ctx context.Context) error {
 	s.notifyClient = newNotifyClient()
 	if s.served == nil {
 		s.served = newServedAddrs(s.knownOwnHosts().addrs)
+		s.served.interfaces = s.cfg.Interfaces
+		s.served.addrsOf = s.cfg.InterfaceAddresses
 	}
 
 	// On any error return BEFORE the happy tail hands ownership of the
@@ -383,7 +391,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// Eagerly bind the listener so config errors (e.g. port already
 	// in use) surface as a Start() error rather than as a silent
 	// goroutine crash later.
-	bound, err := net.Listen("tcp", s.cfg.ListenAddress)
+	bound := s.cfg.Listener
+	var err error
+	if bound == nil {
+		bound, err = net.Listen("tcp", s.cfg.ListenAddress)
+	}
 	if err != nil {
 		return fmt.Errorf("dlna: bind %s: %w", s.cfg.ListenAddress, err)
 	}
@@ -606,6 +618,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.log.Info("DLNA server stopped")
 	return err
 }
+
+// WithdrawSSDP retires discovery while HTTP remains bound. Serve uses the
+// same absolute deadline for both device owners and the subsystem's Close.
+// Like Stop, this is called by the lifecycle owner, never concurrently.
+func (s *Server) WithdrawSSDP(ctx context.Context) { s.withdrawSSDP(ctx) }
 
 // withdrawSSDP withdraws the MediaServer's SSDP registration under ctx's
 // deadline (SSDPHandle.Withdraw: every send of its endpoints stopped and

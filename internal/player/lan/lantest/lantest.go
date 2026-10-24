@@ -41,6 +41,8 @@ type Box struct {
 	sourced    chan struct{}
 	sndBuf     int
 	rcvBuf     int
+	memory     bool
+	pipes      []*pipeListener
 }
 
 // New is an empty LAN: no address, so a surface on it binds nothing until
@@ -117,6 +119,9 @@ func (b *Box) Listen(ctx context.Context, at netip.AddrPort, _ lan.Address) (net
 	if err != nil {
 		return nil, "", err
 	}
+	if b.memory {
+		return b.listenPipe(at)
+	}
 	var lc net.ListenConfig
 	real, err := lc.Listen(ctx, "tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -143,6 +148,11 @@ func (b *Box) Open() []netip.AddrPort {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []netip.AddrPort
+	for _, l := range b.pipes {
+		if !l.isClosed() {
+			out = append(out, l.at)
+		}
+	}
 	for _, l := range b.listeners {
 		if !l.isClosed() {
 			out = append(out, l.lan)
@@ -154,6 +164,9 @@ func (b *Box) Open() []netip.AddrPort {
 // Dial connects to the box's listener that stands for to, a connection
 // that arrives from the source from.
 func (b *Box) Dial(to netip.AddrPort, from netip.Addr) (net.Conn, error) {
+	if b.memory {
+		return b.dialPipe(to, from)
+	}
 	b.mu.Lock()
 	var l *listener
 	for _, c := range b.listeners {

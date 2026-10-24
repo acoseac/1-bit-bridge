@@ -144,3 +144,62 @@ marker alone does not establish a supported policy. Dispatch and startup
 capability checks must see the same policy. This is pinned by
 `TestAdmissionFormsAreValidatedBeforeOpening` through Register, the fake
 network, dispatch and sender-pin refusal.
+
+## Strict aliases and cross-package transport (B470 PR 5a2b)
+
+Strict multicast used to select firstOn and only then ask Source, losing a
+searcher on the second alias's disjoint prefix. It now establishes every
+metadata/capability proof first, then walks active endpoints on the receiving
+listener and picks the first Source admits. Overlapping prefixes still produce
+one target set. Unicast preserves exact Local and reported arrival index;
+Source refusal there never falls through to another destination. Legacy
+MediaServer selection, fallback and B119/B120/B121 are unchanged.
+`TestStrictMulticastChoosesAnAdmittedAlias` failed first against the previous
+dispatcher. FuzzSSDPDispatch adds a disjoint alias, reversed order, and a
+completeness assertion beside its existing soundness/refusal properties.
+
+`SSDPSubsystemOptions.Network` is an instance socket seam: explicit datagram
+metadata/capabilities, sender/reply deadlines and Close; nil is the host
+transport. `ssdptest` exposes the 5a1 fake socket model to Source and serve
+tests, retaining packet ordering, source/interface selection, failures,
+parking and socket counts. No global transport swap. `ServerConfig` can adopt
+a test's held HTTP listener and inventory functions without changing normal
+selection. Serve's shared deadline still reaches Close's existing ownership,
+clamp and join machinery; this change does not weaken it or alter the goldens.
+
+### Round 2: optional timing override
+
+`configureNetwork`, called by the constructor, replaces replyDelay only when
+Network.Delay is non-nil, matching IntervalFloor's positive-value guard.
+Production still starts with nil replyDelay and `delay`'s random fallback;
+this is preventive hardening, not a live timing defect.
+`TestSSDPNetworkTimingOverridesPreserveDefaults` seeds a distinct default and
+checks nil network, nil delay, an explicit override and the constructor's
+wiring. The nil-delay case failed before the guard; removing it fails that
+same case. No guard was added to the MediaServer's interfaces/addrsOf seams:
+their readers already fall back to the host when nil.
+
+### Round 3: a registration's normal-write barrier
+
+`SSDPRegistration.SendBarrier` is optional and copied into the handle before
+staging/initial alive. A zero-value SSDPSendBarrier permits normal writes;
+Invalidate permanently ends that lifetime and joins writes under its read lock.
+`sendNormal` holds that lock across both the cancellation/barrier check and the
+actual alive or reply write. The caller installs the one-second burst deadline
+before entry. Invalidation holds no surface/publication lock while waiting,
+and overlapping normal writes have concurrent read locks, not serial bounds.
+Byebye never enters the barrier; withdrawal still joins normal work before
+sending it. No socket is closed merely by barrier invalidation. MediaServer
+supplies no barrier and retains its context cancellation, packets and routing.
+Do not reuse a barrier for a replacement registration.
+
+`TestSSDPSendBarrierJoinsRepliesAndLeavesByebyeAndMediaServer` parks a reply
+inside its write until release or its installed deadline, keeps its registration
+context live and invalidates the barrier. It requires the write to have left
+before invalidation returns and no recorded reply afterwards, then requires
+later alive/reply attempts to send nothing. The same test withdraws and checks
+every byebye, then sends alive and replies through the MediaServer sharing its
+listener. The Source's HTTP-exit regression covers an initial alive before
+Register returns the handle. Removing only sendNormal's barrier protection
+makes both regressions fail behavioral assertions; compilation still passes.
+Kernel-queued packets remain outside this guarantee.

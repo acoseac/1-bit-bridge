@@ -161,6 +161,8 @@ type SSDPSubsystemOptions struct {
 	// read error, a listener that cannot report destinations). A
 	// registration logs its own on its own logger. nil is ssdpLogger.
 	Logger *slog.Logger
+	// Network replaces only this instance's transport; nil is the host's.
+	Network *SSDPNetwork
 }
 
 // NewSSDPSubsystem returns a subsystem with no registration and no socket.
@@ -173,7 +175,7 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		log = ssdpLogger
 	}
 	inner, cancel := context.WithCancel(ctx)
-	return &SSDPSubsystem{
+	s := &SSDPSubsystem{
 		log:           log,
 		transport:     hostSSDPTransport{},
 		ctx:           inner,
@@ -182,6 +184,21 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		intervalFloor: time.Minute,
 		listeners:     map[ssdpListenerKey]*ssdpListener{},
 		senders:       map[*ssdpOwnedSender]struct{}{},
+	}
+	s.configureNetwork(opts.Network)
+	return s
+}
+
+// configureNetwork installs optional overrides without clearing defaults.
+func (s *SSDPSubsystem) configureNetwork(network *SSDPNetwork) {
+	if network != nil {
+		s.transport = injectedSSDPNetwork{*network}
+		if network.Delay != nil {
+			s.replyDelay = network.Delay
+		}
+		if network.IntervalFloor > 0 {
+			s.intervalFloor = network.IntervalFloor
+		}
 	}
 }
 
