@@ -36,7 +36,9 @@ type handler struct {
 	seams   *Seams
 
 	// slots are the requests answered at once, taken once a request's body
-	// is read; a request past them is 503 at once.
+	// is read; a request past them is 503 at once. A Stop gives its slot back
+	// once the engine has admitted it, and waits for its release holding its
+	// connection alone (playlistStop).
 	slots chan struct{}
 	// writes are the write actions but Stop answered at once, each holding a
 	// slot too, and bySource the ones each source holds (Limits.WriteSlots,
@@ -207,7 +209,8 @@ func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service, ar
 		refuse(w, http.StatusServiceUnavailable, false)
 		return
 	}
-	defer h.releaseSlot()
+	slot := h.held()
+	defer slot()
 	if pooled(s, a) {
 		src := sourceOf(r)
 		if !h.takeWrite(src) {
@@ -235,12 +238,13 @@ func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service, ar
 		writeFault(w, faultReply{code: errInvalidArgs}, false)
 		return
 	}
-	h.act(w, r, s, a, env.action, arrived)
+	h.act(w, r, s, a, env.action, arrived, slot)
 }
 
 // pooled reports whether a is a write that holds a slot of the write pool:
 // every write but Stop, which waits on the engine at most its release, so a
-// controller can always stop.
+// controller can always stop. A Stop holds its request's slot only until the
+// engine admits it (playlistStop).
 func pooled(s *service, a *action) bool {
 	return reads[s.name][a.name] == nil && !(s.name == "Playlist" && a.name == "Stop")
 }
@@ -305,6 +309,14 @@ func (h *handler) handling(r *http.Request) {
 	}
 }
 
+// stopWaiting runs the test's seam, once a Stop the engine has admitted has
+// given its request's slot back.
+func (h *handler) stopWaiting(r *http.Request) {
+	if h.seams != nil && h.seams.StopWaiting != nil {
+		h.seams.StopWaiting(r)
+	}
+}
+
 func (h *handler) takeSlot() bool {
 	select {
 	case h.slots <- struct{}{}:
@@ -315,6 +327,13 @@ func (h *handler) takeSlot() bool {
 }
 
 func (h *handler) releaseSlot() { <-h.slots }
+
+// held is a slot the request has taken, given back once, by whichever asks
+// first: the request as it leaves, or a Stop once the engine has admitted it.
+func (h *handler) held() func() {
+	var once sync.Once
+	return func() { once.Do(h.releaseSlot) }
+}
 
 // refuse answers status with its text and nothing of the request's;
 // closing asks for the connection to be closed after it, for a request

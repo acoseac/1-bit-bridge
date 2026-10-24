@@ -175,7 +175,7 @@ var reads = map[string]map[string]reader{
 // act answers an action that passed every row of the table, 501 while no
 // engine runs, asked first: a read from one snapshot of the engine; a write
 // by its writer (writes.go), within its budget, which runs from arrived.
-func (h *handler) act(w http.ResponseWriter, r *http.Request, s *service, a *action, call *xmlNode, arrived time.Time) {
+func (h *handler) act(w http.ResponseWriter, r *http.Request, s *service, a *action, call *xmlNode, arrived time.Time, slot func()) {
 	snap := h.snapshot()
 	if snap == nil {
 		writeFault(w, faultReply{code: errActionFailed}, false)
@@ -191,7 +191,7 @@ func (h *handler) act(w http.ResponseWriter, r *http.Request, s *service, a *act
 		values, f = read(readRequest{snap: snap, device: h.device, args: args})
 	} else if write := writes[s.name][a.name]; write != nil {
 		ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(h.lim.writeBudget()))
-		values, f = write(writeRequest{ctx: ctx, h: h, action: a, args: args})
+		values, f = write(writeRequest{ctx: ctx, h: h, r: r, action: a, args: args, slot: slot})
 		cancel()
 	} else {
 		// An action with no answer is a defect, never a malformed reply.

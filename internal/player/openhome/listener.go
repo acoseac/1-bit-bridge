@@ -26,7 +26,10 @@ type Limits struct {
 	// MaxConns and MaxConnsPerSource cap the connections open at once, all
 	// of them and from one source, counted once a connection is admitted.
 	MaxConns, MaxConnsPerSource int
-	// Slots are the requests answered at once.
+	// Slots are the requests answered at once. A Stop holds one only until
+	// the engine admits it (engine.WithAdmission), then waits for its release
+	// holding its connection alone, so the Stops that wait are bounded by
+	// MaxConns and MaxConnsPerSource, never by Slots (B470 PR 5a4, round 2).
 	Slots int
 	// WriteSlots are the write actions but Stop answered at once, each
 	// holding a slot of Slots too, and WritesPerSource the ones of them one
@@ -130,6 +133,10 @@ type Seams struct {
 	AdvertiseInterval time.Duration
 	// Handling runs once a request holds its slot, before it is answered.
 	Handling func(*http.Request)
+	// StopWaiting runs once a Stop the engine has admitted has given its
+	// request's slot back, before it waits for the engine's answer (B470 PR
+	// 5a4, round 2).
+	StopWaiting func(*http.Request)
 	// Stopping runs once Stop refuses requests, before it shuts the
 	// listeners down.
 	Stopping func()

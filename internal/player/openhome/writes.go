@@ -3,6 +3,7 @@ package openhome
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -91,13 +92,17 @@ type Hosts interface {
 type writer func(wr writeRequest) ([][]byte, *faultReply)
 
 // writeRequest is what a write is answered from: the context of its budget
-// (the request's, ended at the budget's deadline), the handler, the action
-// and its in-arguments' text, in the SCPD's order, as row 9 passed it.
+// (the request's, ended at the budget's deadline), the handler and the
+// request, the action and its in-arguments' text, in the SCPD's order, as row
+// 9 passed it, and what gives the request's slot back (once, whoever asks
+// first: a Stop asks once the engine has admitted it).
 type writeRequest struct {
 	ctx    context.Context
 	h      *handler
+	r      *http.Request
 	action *action
 	args   []string
+	slot   func()
 }
 
 // writes are the write actions, by service and action: every action of the
@@ -111,7 +116,7 @@ var writes = map[string]map[string]writer{
 	"Playlist": {
 		"Play":     transport(func(ctx context.Context, e Engine, _ []string) error { return e.Play(ctx) }),
 		"Pause":    transport(func(ctx context.Context, e Engine, _ []string) error { return e.Pause(ctx) }),
-		"Stop":     transport(func(ctx context.Context, e Engine, _ []string) error { return e.Stop(ctx) }),
+		"Stop":     playlistStop,
 		"Next":     transport(func(ctx context.Context, e Engine, _ []string) error { return e.Next(ctx) }),
 		"Previous": transport(func(ctx context.Context, e Engine, _ []string) error { return e.Previous(ctx) }),
 		"SeekId": transport(func(ctx context.Context, e Engine, args []string) error {
@@ -150,6 +155,32 @@ func transport(do func(ctx context.Context, e Engine, args []string) error) writ
 	return func(wr writeRequest) ([][]byte, *faultReply) {
 		return nil, transportFault(wr.action, do(wr.ctx, wr.h.engine, wr.args))
 	}
+}
+
+// playlistStop is Playlist's Stop: the engine's Stop, answered as a transport
+// write, for every Stop a controller sends, none joined to another's wait, so
+// each one's effect on the pending intent holds (a Play between two Stops is
+// stopped by the second). It holds no slot of the write pool, so a
+// controller can always stop, and gives its request's slot back once the
+// engine has admitted it (engine.WithAdmission): it then waits for the
+// release holding its connection alone, so the Stops that wait are bounded by
+// the listener's connection caps, in all and from one source, never by the
+// slots (B470 PR 5a4, round 2: eight Stops on one source's eight connections
+// held every slot while a release was pending, and every other source's
+// reads, descriptions and Stops were 503).
+func playlistStop(wr writeRequest) ([][]byte, *faultReply) {
+	ctx, admitted := engine.WithAdmission(wr.ctx)
+	answer := make(chan error, 1)
+	go func() { answer <- wr.h.engine.Stop(ctx) }()
+	var err error
+	select {
+	case <-admitted:
+		wr.slot()
+		wr.h.stopWaiting(wr.r)
+		err = <-answer
+	case err = <-answer:
+	}
+	return nil, transportFault(wr.action, err)
 }
 
 // transportFault is what a transport write answers for the engine's answer
