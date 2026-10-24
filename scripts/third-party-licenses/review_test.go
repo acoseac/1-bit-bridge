@@ -62,7 +62,7 @@ func TestNewBuildSitesRefused(t *testing.T) {
 			if err := checkBuildTags(root); err != nil {
 				t.Fatalf("invalid baseline: %v", err)
 			}
-			for _, executable := range []string{"go", "go.exe", "$(GO)", "${GO}", "$GO"} {
+			for _, executable := range []string{"go", "go.exe", "$(GO)", "${GO}", "$GO", `"$GO"`, `"${GO}"`, `"/usr/local/go/bin/go"`} {
 				for _, flags := range []string{"", " -C .", " -modfile=other.mod", " -C 'some dir' -modfile=other.mod"} {
 					for _, verb := range []string{"build", "install", "run", "test", "vet"} {
 						t.Run(executable+flags+"/"+verb, func(t *testing.T) {
@@ -84,7 +84,7 @@ func TestNewBuildSitesRefused(t *testing.T) {
 
 func TestMarkdownBuildSites(t *testing.T) {
 	for _, name := range []string{"ops/new.md", "README.md"} {
-		for _, fence := range []string{"```sh", "   ```bash", "~~~shell", "````zsh", "```powershell", "```console"} {
+		for _, fence := range []string{"```sh", "   ```bash", "~~~shell", "````zsh", "```powershell", "```console", "```", "~~~"} {
 			t.Run(name+"/"+fence, func(t *testing.T) {
 				root := buildSiteFixture(t)
 				if err := checkBuildTags(root); err != nil {
@@ -102,6 +102,30 @@ func TestMarkdownBuildSites(t *testing.T) {
 	if err := checkBuildTags(root); err != nil {
 		t.Fatalf("prose, non-shell blocks or comments entered census: %v", err)
 	}
+}
+
+// TestMarkdownRecordsAreNotBuildSites: the engineering log, the History
+// files, plans and release-note drafts quote commands as they were run, so
+// their fences stay outside the census; the same fences in any other ops
+// document are build sites.
+func TestMarkdownRecordsAreNotBuildSites(t *testing.T) {
+	const fences = "```sh\ngo build ./cmd/bridge\n```\n```\ngo test ./...\n```\n"
+	for _, name := range []string{"ops/engineering-log.md", "ops/History-new.md", "ops/plan-new.md", "ops/release-notes-new.md"} {
+		t.Run(name, func(t *testing.T) {
+			root := buildSiteFixture(t)
+			put(t, root, name, fences)
+			if err := checkBuildTags(root); err != nil {
+				t.Fatalf("a record entered the census: %v", err)
+			}
+		})
+	}
+	t.Run("ops/new-runbook.md", func(t *testing.T) {
+		root := buildSiteFixture(t)
+		put(t, root, "ops/new-runbook.md", fences)
+		if err := checkBuildTags(root); err == nil {
+			t.Fatal("a runbook's build stayed outside the census")
+		}
+	})
 }
 
 func TestYAMLTypedTagsRefused(t *testing.T) {
