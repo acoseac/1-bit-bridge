@@ -772,12 +772,14 @@
   and `refuseRewrite` refuses the rewrite about a data dir and a pair it
   could read. **Every setting it keeps holds the value Load gave it, and a
   file Load's decoder takes whole gives up Load's own block** (rounds 2 to
-  4). `priorOutput` decodes the unchanged bytes as Load does, the same
-  decoder set the same way (`KnownFields`) into `config.Config`, before
-  Load's defaults, its BRIDGE_* overrides, its paths and its checks, and
-  keeps that decode's output block (`outputAsLoadDecodes`; the
-  orchestrator's decision on round 4). So nothing the decoder reads or
-  counts differs from Load's. Round 1 decoded the block's pairs in the
+  4). `priorOutput` decodes the unchanged bytes with Load's own decode,
+  `config.DecodeFile` (the same decoder set the same way, `KnownFields`,
+  and since backlog B528 a whole number written as a fraction refused, as
+  a word there is), into `config.Config`, before Load's defaults, its
+  BRIDGE_* overrides, its paths and its checks, and keeps that decode's
+  output block (`outputAsLoadDecodes`; the orchestrator's decision on
+  round 4). So nothing the decoder reads or counts differs from Load's.
+  Round 1 decoded the block's pairs in the
   file's order and kept each value that was not zero: a merge written after
   a key overwrote it (`mpd: off` was saved `on`, a serial binding replaced
   by a merged port binding), and an explicit empty or null value let a
@@ -809,7 +811,12 @@
   (`outputAsLoaded`; what the decoder counts outside the block can only make
   it refuse more, never read a value otherwise); else, when every key is
   text with no tag (`plainKey`), each setting a key names once, decoded on
-  its own, unless refused (`outputRecovered`); a key written more than once
+  its own, unless refused (`outputRecovered`). A block or a setting that
+  writes a whole number as a fraction decodes there as its whole part, so
+  each is also asked `config.CheckWholeNumbers`, Load's check, and does not
+  decode when it says no (B528: until then Load took a file holding
+  `loopbackPort: 7795.5`, and the rewrite kept the 7795 it read); a key
+  written more than once
   and a key output does not take are left out and named by their lines (an
   unknown key went without a word until round 3). A merge key, an alias or
   a tag among the keys, or a block that is not a mapping, keeps nothing,
@@ -846,7 +853,10 @@
   kept as Load decodes it once the typo is put right, and beside Codex's
   alias-heavy block, of which nothing is kept: since round 4 gave every
   file that decodes Load's own block, its fixtures are the only ones that
-  reach that reading (the Claude API on round 4; the test, round 5).)
+  reach that reading (the Claude API on round 4; the test, round 5); and,
+  since B528, a fraction in `scanIntervalSec` beside a block kept whole,
+  and the fraction rows of the rewrite tables, a `loopbackPort: 7795.5`
+  not kept and a fraction in a merged block, which keeps nothing.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.
@@ -1300,8 +1310,10 @@ mentions across the four `ops/audit-*.md` files.
   snapshot without the file, taken before B505 or of a box whose player
   had none, leaves the box's identity as it is and makes none. `Restore`
   reads the copy before its loop, by the player's own rule
-  (`config.ReadPlayerUUIDFile`: one lowercase UUID, white space after it
-  and nothing else, 128 bytes at most), for the console account's
+  (`config.ReadPlayerUUIDFile`: a file, opened without waiting, so a
+  named pipe, a directory or a device in its place fails the restore at
+  once, before any file is written, B525; one lowercase UUID, white space
+  after it and nothing else, 128 bytes at most), for the console account's
   reason: the manifest lists the file last, and a check at its turn would
   come after every other file was replaced. A copy that does not hold one
   UUID fails the restore before any file is written; the refusal names
@@ -1322,7 +1334,9 @@ mentions across the four `ops/audit-*.md` files.
   cancellation and file-access errors refuse backup without it,
   and only missing files omit the mark.
   An identity replacement also durably removes the destination queue before
-  writing the UUID; restoring the same UUID keeps its queue; no UUID leaves the live reservation
+  writing the UUID; restoring the same UUID keeps its queue, and a box
+  whose own `player-uuid` the rule cannot read, a named pipe there included
+  (read at once, B525), keeps none; no UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
   order and release coupling are in History-rules-player.md under the
   restored-identity rule. Two boxes running one identity at once are
@@ -1335,6 +1349,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`,
   `TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`,
   `TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce`,
+  `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`,
   `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`,
   `TestBuildBackupSourcesNamesThePlayerUUID`.)
 
@@ -2073,3 +2089,25 @@ refusal policy is unchanged. `TestReadRetryWindowsErrors` requires the busy
 marker on exhaustion of either code and its absence on cancellation/expiry.
 Windows tests are cross-compiled here; their native execution remains a
 Windows-runner check, distinct from portable race-test results.
+
+## Backup source opens (B525 round 2, 2026-10-24)
+
+- **Every backup source copied by `copyFileCtx` opens through
+  `fsutil.OpenAsFile` inside the sharing-violation retry: a named pipe is
+  refused at once, naming the file without its value, and the partial
+  snapshot is removed. Don't replace this with a plain open; keep missing
+  optional sources skipped.** The live capture of `player-uuid` did not
+  use `ReadPlayerUUIDFile`: it copied bytes first and parsed the snapshot
+  copy afterward. Round 1 guarded only the parser's open. The copy now
+  refuses a FIFO at the live identity, tokens, certificate, key, YAML,
+  console account or Atlas state through the same open inside
+  `atomicwrite.ReadWithRetryCtx`. The opened descriptor decides its kind;
+  the earlier stat remains only the optional-source skip. The existing
+  snapshot cleanup removes the partial directory on refusal. Restore uses
+  the same helper for ordinary snapshot files and still round-trips them.
+  `TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+  `TestSnapshotRefusesALiveTokensPipeAtOnce` pin prompt refusal, the
+  `*fs.PathError` around `*fsutil.NotAFileError`, the exact value-free
+  message, the unchanged source pipe and the absence of a snapshot directory.
+  With the plain open restored both tests fail after five seconds; the
+  fixture then releases and joins the blocked snapshot.

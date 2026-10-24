@@ -26,6 +26,9 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format](#2026-10-24--b470-pr-5a3-the-players-openhome-read-actions-each-answered-from-one-engine-snapshot-and-the-backends-report-of-the-decoders-length-and-format)
+- [2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config](#2026-10-24--b528-a-whole-number-setting-refuses-a-fraction-rather-than-load-its-whole-part-in-the-player-block-and-across-the-config)
+- [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
+- [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
@@ -59832,6 +59835,454 @@ The separate B520 host-address check skips at its denied bind. Exact commands,
 failed test names, cached outcomes, logs and the verified control are in the
 external round-3 report. Linux/Windows execution and the manual owner gate
 remain unrun. No commit was made.
+
+## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
+
+`config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
+(the live backup capture is a separate byte reader, fixed in round 2 below):
+`ReadPlayerUUID`, `EnsurePlayerUUID` and `ForgetPlayerUUID` call it, and so
+does a restore, for a snapshot's copy and for the box's own. It opened the
+file with `os.Open`, and on a named pipe `open(2)` waits for a writer, which
+nothing cancels: the class B523 closed for the engine's own files
+(`readLimited`). It now opens through `fsutil.OpenAsFile`, as `readLimited`
+does: a nonblocking open, a refusal of anything the opened file's stat says
+is not a file (an `*fsutil.NotAFileError` inside an `*fs.PathError`), and the
+nonblocking flag cleared before the read, which keeps its bound (129 bytes,
+`maxPlayerUUIDFile` plus one). A missing file still answers the open's own
+`fs.ErrNotExist`, and a file that is not one UUID `ErrNotOnePlayerUUID`.
+
+### What each reader does with it
+
+The refusal is neither `fs.ErrNotExist` nor `ErrNotOnePlayerUUID`, so every
+reader takes the branch it already had for a file it cannot read, and none
+takes it for an identity not made yet:
+
+- Serve's player start (`bridgePlayer.start`, `EnsurePlayerUUID` on the
+  supervisor's goroutine): "the player's identity: open …/player-uuid: named
+  pipe is not a file", before the resolver, the backend or the engine. No
+  identity is made (`EnsurePlayerUUID` makes one only on `fs.ErrNotExist`),
+  the pipe stays, and serve serves on.
+- `bridge output dac bind`, which makes the UUID after it writes the binding:
+  "output dac bind: the player's UUID: open …: named pipe is not a file",
+  exit 1, as for any identity it cannot read; the binding it wrote stays, as
+  before.
+- `bridge output dac inspect`: its `player uuid:` line is the error; "not
+  made yet" is the `fs.ErrNotExist` branch alone.
+- A restore's read of a snapshot's copy (`snapshotPlayerUUID`): its generic
+  case, "restore player-uuid: open …: named pipe is not a file; nothing was
+  restored", before any file is written.
+- A restore's read of the box's own copy (`discardReplacedPlayerQueue`),
+  which keeps the box's queue only for the identity it restores: any error is
+  an identity whose queue it does not keep, so the queue is discarded and the
+  snapshot's identity renamed over the pipe (`WritePlayerUUIDFile`), as for a
+  file that does not hold one UUID.
+- `ForgetPlayerUUID`: the reader's error, the entry left.
+- `Snapshot`'s read of the copy it captured: the copy is the file `Snapshot`
+  wrote, so nothing changes in practice.
+
+A link to a character device read before as a file that does not hold one
+UUID (`ErrNotOnePlayerUUID`, so a restore's refusal said to remove the copy
+from the snapshot), and a directory failed in its read ("read …: is a
+directory"); both are now `NotAFileError` refusals down the same branches.
+
+### Red first
+
+The tests, against the tree before the change:
+
+- `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` (`internal/config`; a
+  named pipe, a link to one, a link to `/dev/null` and a directory at
+  `player-uuid`, each through `ReadPlayerUUIDFile`, `ReadPlayerUUID`,
+  `EnsurePlayerUUID` and `ForgetPlayerUUID`): both pipe cases "still running
+  after 5s, waiting to open a named pipe" in all four readers, then, once the
+  writer was played, "does not hold one UUID (refused as \"\")"; the device
+  "does not hold one UUID"; the directory "read …: is a directory".
+- `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` (`cmd/bridge`): "the
+  player's start: still running after 5s", then the start refused "…
+  does not hold one UUID: remove it, and the next start makes a new one, …",
+  its log line the same.
+- `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce`: "bridge output
+  dac bind: still running after 5s", then exit 1 with "does not hold one
+  UUID".
+- `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile`: "bridge
+  output dac inspect: still running after 5s", then the UUID line "… does
+  not hold one UUID: …".
+- `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` (`internal/backup`):
+  "Restore: still running after 5s", then "restore player-uuid: … does not
+  hold one UUID, so the player cannot have the identity it had; nothing was
+  restored: remove it from the snapshot …".
+- `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`: "Restore: still
+  running after 5s", with the reservation already raised.
+
+### Decided otherwise than the brief, and why
+
+- The brief named three readers. Inspect, the restore's read of the box's own
+  copy and `ForgetPlayerUUID` read through the same function, so the change
+  covers them too; inspect and the box's copy have tests of their own, and the
+  config package a test of the reader itself over each kind of entry.
+- The serve test turns backups off (`playerServeCase.top`, a field added for
+  config written after the output block), so the player's start is what reads
+  `player-uuid` at boot.
+- The identity rule in `player.md` was a 1.6 KB bullet with no long form, in a
+  file at 97.9% of its budget. It moved verbatim to `History-rules-player.md`
+  first (its own commit, through `move_entry.py`, with `verify_moves.py`
+  passing), and B525's text went to the long form, its Don't to the line.
+
+### Negative controls
+
+On the committed tree (ac6ed516; the two that go through the bind tests'
+helper again on cac7518a), one control per reader: `ReadPlayerUUIDFile`
+opening with `os.Open` again, applied as a one-line edit checked to match
+once, that reader's test run, the file restored from git and the tree
+checked clean, then the tests run green again.
+
+| NC | Reader | Test | Red |
+|---|---|---|---|
+| 1 | serve's player start | `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` | "the player's start: still running after 5s, waiting to open a named pipe"; refused "the player's identity: … does not hold one UUID: remove it, …", and its log line the same |
+| 2 | bind | `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce` | "bridge output dac bind: still running after 5s, …"; exit 1, "the player's UUID: … does not hold one UUID: …" |
+| 3 | a restore's read of a snapshot's copy | `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` | "Restore: still running after 5s, …"; "restore player-uuid: … does not hold one UUID, so the player cannot have the identity it had; …" (refused as "") |
+| 4 | inspect | `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile` | "bridge output dac inspect: still running after 5s, …"; the UUID line "… does not hold one UUID: …" |
+| 5 | a restore's read of the box's own copy | `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait` | "Restore: still running after 5s, …" |
+| 6 | the reader itself | `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` | every subtest: both pipes 5 s in each of the four readers, then refused as ""; the device and the directory refused as "" |
+
+### Runs
+
+Through the build lock: `make fmt`, which rewrote nothing (go1.27.3's
+gofmt: `go.mod`'s go1.27.2 is not in this host's module cache and GOPROXY is
+off); `make vet`, `GOOS=linux go vet ./...` and `GOOS=windows go vet ./...`,
+clean; `make build-all`, every target built; `make docs-check`, passing,
+`player.md` at 97.0%. `go test -race -timeout 30m`: `internal/config`
+(2.956 s) and `internal/backup` (31.434 s) passing; `cmd/bridge` failed its
+first run on `TestEveryBackgroundGoroutineDrainsOnCleanup` alone, since the
+bind tests' helper (`runDACWithin`) started the command's goroutine without
+draining it on cleanup; it now registers `drainLoopOnCleanup` (cac7518a),
+and `cmd/bridge` passed (499.109 s). The six new tests under `-race -count
+20`: 20 of 20 each, every subtest included.
+
+### Round 2 — live backup capture and the loaded refusal clause
+
+The live capture was missed in round 1: `Snapshot` called `copyFileCtx`
+with a plain `os.Open` before its later parse of the captured UUID.
+A FIFO at the live identity therefore still held manual and scheduled
+backups. The same open served tokens, the certificate, key, YAML, console
+account and Atlas state. `copyFileCtx` now opens through
+`fsutil.OpenAsFile` inside its existing `atomicwrite.ReadWithRetryCtx`:
+the Windows sharing retry remains, while a FIFO is refused at once as a
+`*fsutil.NotAFileError` inside a `*fs.PathError`. The source loop names
+the file without a value and its existing error cleanup removes the partial
+snapshot directory. The optional-source stat/ErrNotExist skip is unchanged.
+Restore's ordinary file copies use the same helper.
+
+Two Unix tests create real FIFOs with `syscall.Mkfifo`:
+`TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+`TestSnapshotRefusesALiveTokensPipeAtOnce`. Both ran red before the fix:
+“Snapshot: still running after 5s, waiting to open a named pipe”; once the
+fixture released the open, the backup succeeded with an empty copy and left
+a snapshot. That holds for `player-uuid` too: `Snapshot` keeps a captured
+copy that does not hold one UUID (`config.ErrNotOnePlayerUUID` is not a
+backup failure; restore refuses such a copy later), so the empty copy did
+not fail the backup (`red-r2.log`: `Snapshot error = <nil>` for both). They require prompt typed refusal, the exact file-and-kind-only
+message, no returned or remaining snapshot directory, and the source pipe
+left intact. The negative control restores the plain open in `copyFileCtx`
+and runs both tests again.
+
+The identity pointer lost “is refused, never replaced” when the long form
+moved. Its loaded bold Don't sentence now includes “replace one that does
+not hold one UUID”; the existing History bullet remains unchanged.
+A separate History follow-up records this correction and the live capture.
+The backup open rule is loaded with backup code through `cli-serve.md`.
+
+Round 2 validation used Go 1.27.2 offline. Host, Linux and Windows
+`go vet ./...` passed; `make fmt` changed nothing and `make docs-check`
+passed (`player.md` 97,039 bytes, 97.0% of budget).
+The full race suites passed for `internal/backup` (37.291 s) and
+`internal/config` (4.046 s), including regular-file restore and missing
+optional sources. Each new test passed 20 race-enabled runs (40 total).
+The plain-open control compiled and failed both tests with the same
+five-second wait and accepted empty copy as the red-first run; the loaded
+clause's removal failed a separate documentation assertion. Both mutations
+were restored from saved bytes without a commit.
+
+The focused `cmd/bridge` race run passed the bind and inspect FIFO tests,
+`TestEveryBackgroundGoroutineDrainsOnCleanup`,
+`TestEveryCitedTestNameExists` and `TestJobWritersKeepTheInstallOwner`.
+`TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` could not reach its
+assertion in the sandbox, which refused `listen tcp 127.0.0.1:0` with
+“bind: operation not permitted”; run again on the host outside it, all six
+passed under `-race` (the serve start 1.08 s, `cmd/bridge` 13.902 s).
+Linux and Windows were vetted here and run by CI.
+
+## 2026-10-24 — B526: three ALSA playback hangs are test sequencing defects
+
+Forced each ordering using events and captured goroutine stacks at the watchdog before cleanup. The producer-panic test had already played the replacement: two device opens, two closes, and no backend goroutines remained. Its Open predicate missed a completed open, so playsOn now compares the monotonic open count captured before PlayID. The regression forces the replacement to finish before checking.
+
+The successor-opener test could decode its entire first track into lookahead plus hardware buffers before inserting the successor. Waiting for the sink's drain command before insertion reproduced the fault wait every time: producer in finish/drainOutput, sink writer waiting for fake DAC time, reporter and engine awaiting events. No opener panicked: Prepare refused the new successor with ErrSessionEnding. The test now parks a read before EOF until the successor's Prepare has succeeded, then releases the read and checks the recovered panic, fault, release and subsequent playback.
+
+The cut-too-late test's tick could report the removed entry audible and end the session before the second (barrier) send. Joining the backend after the first tick made that second send fail every time with no reporter alive. The first race repetition exposed the same terminal ordering at FakeKernel.Play: its grant caused the boundary stop before its waiter could observe a starved writer. Its watchdog dump again held no backend goroutines. The test now grants time directly and offers ticks while waiting on engine snapshot changes until the specified stop, and exercises the same wait after the backend is fully joined. A fourth control waits for a writer after that join and fails deterministically.
+
+The fake kernel's `when` (under `FakeKernel.Await`) checks and registers under the kernel mutex; the engine wait helper subscribes before reading its snapshot. Neither loses a wakeup. No production code, wire contract, or timeout changed. The player rules and History record the ordering requirements. Each ordering has a negative control; focused race repetition, package stress loops and validation results are recorded with the task's report.
+
+## 2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config
+
+B470 PR 5a2a recorded a follow-up (its "Not in this change"): the player
+block's whole-number lines took a fraction as its whole part. Backlog B528
+took it, and the same pattern across the rest of the config.
+
+### What yaml.v3 did
+
+yaml.v3 v3.0.1 decodes a `!!float` into an int kind by dropping what
+follows the point: `decode.go`'s `scalar` sets `int64(resolved)` once the
+float is no more than `math.MaxInt64` and fits the field, and the uint kinds
+the same way. Go's conversion of a float the integer cannot hold is the
+platform's: measured on darwin/arm64, `-.inf` loaded as the smallest int64
+and 2^63 (`9223372036854775808.0`) as the largest. Measured on main
+(e263ee86) through `Load`:
+
+- The player block: `openhomePort: 7792.9` bound 7792 and the player ran;
+  `pauseReleaseSeconds: 45.75` held the DAC for 45 s, and `0.5` and `-.inf`
+  reached `Problem` as 0 and the smallest int64, refused there as out of
+  range rather than as what they were; `device.pcmDevice: 1.5` read as 1 and
+  `device.subdevice: 0.25` as 0.
+- The rest of the config: of its 44 whole-number settings (`envBindings`'
+  integer leaves outside `output.player`), 42 loaded `2.75` as 2, and
+  `enrich.coverSize` and `retention.playbackHistoryDays` refused it only
+  because 2 is outside what they take: `250.4375` loaded as 250 in both.
+  `limits.manifest.requestsPerMinute: 0.5` loaded as 0, which with the
+  default burst turns the manifest limit off, `-.inf` as the smallest int64,
+  `6.000001` as 6, and 2^63 as the largest int64. `.inf`, `.nan` and `1e19`
+  were refused already, by yaml.v3 itself, as out of range.
+- `Load` took a file holding `output.loopbackPort: 7795.5`, so `bridge
+  init`'s rewrite, which keeps the block Load's decode reads when that
+  decode takes the whole file, kept the port as the 7795 it read (from the
+  code: the new init rows failed on main at their check that `Load` refuses
+  the fixture).
+
+### The rule
+
+A whole-number setting takes no value yaml.v3 would change on the way in.
+`exactInteger` is the one test: anything but a `!!float` passes (an integer,
+a null, or a value the decoder refuses itself), and a `!!float` passes when
+its value is whole and inside the integer's range, the bounds powers of two
+(`math.Ldexp`), which a float64 holds exactly. So `30.0`, `3e1`, `-0.0`,
+`!!float 6` and `08` (which yaml.v3 resolves as a float, being no octal)
+load as written, and no value a file holds changes. Refusing every
+`!!float`, the simpler rule, was rejected: it would stop a file loading over
+values that lose nothing. A round trip through the integer as the range test
+was rejected too: arm64 saturates 2^63 to the largest int64, which converts
+back to 2^63.
+
+Each refusal follows its neighbours. The player block's reader
+(`playerReader.whole`) refuses as it refuses a word there: the block is
+unread, kept as the file holds it, the player off with
+`output.player.<setting> (line N): must be a whole number`, and the load
+goes on. The rest of the config is refused by `Load`, as a word on that
+line is, in the words `ValueFreeYAMLError` gives the out-of-range float
+yaml.v3 refuses itself: `line N: cannot unmarshal a !!float value into int`
+(or `int64`): the line, the tag and the Go type, and nothing of the value.
+`ValueFreeYAMLError` keeps such a line as it is (`valueFreeTagged`: yaml.v3's
+own lines always start with the tag), so the check's lines pass through it.
+
+### How Load finds them: a shadow the decoder maps itself
+
+`config.DecodeFile` is Load's decode: yaml.v3's decoder with `KnownFields`,
+and, once that decode succeeds, `CheckWholeNumbers` over the same bytes,
+which decodes them a second time into a shadow of `Config` (`shadowOf`):
+each integer field replaced by an `integerCheck` of its type, whose
+`UnmarshalYAML` decodes nothing and answers a `*yaml.TypeError` that the
+decoder adds to its own and goes on past, so every such value is named.
+Every struct it rebuilds keeps its fields' names and tags (`reflect.StructOf`)
+and every type that holds no integer is kept as it is, so yaml.v3 maps the
+file onto the shadow as onto `Config`: merge keys, aliases (named at the line
+of the node an alias names, once for each setting it reaches), inline fields
+and encoded keys reach the setting they reach in the decode, and the
+decoder visits the same nodes in the same order, so its alias limit judges
+the two decodes alike. A type that reads its own YAML (`PlayerConfig` among
+them) is not looked into; `time.Duration` decodes from text alone; no map
+in the config is keyed by a number, and a map's keys are not looked at.
+
+Rejected: a resolver of the config's own over the node tree, which would
+copy the decoder's merge and key rules, the copy B505's round 2 found
+disagreeing with the decoder three ways (the rewrite's rule in cli-serve.md);
+a type of its own for every whole-number field, which every consumer's
+arithmetic would have to convert, and whose `UnmarshalYAML` decodes with a
+fresh decoder, dropping `KnownFields`; and running the check when the first
+decode fails, which would mix the shadow's own mismatches into the refusal.
+So a file with a word and a fraction in it is refused for the word first,
+and for the fraction once the word is put right.
+
+`bridge init`'s rewrite reads the file through `DecodeFile`
+(`outputAsLoadDecodes`), so a file holding a fraction anywhere decodes whole
+there no more than in `Load`, and asks `CheckWholeNumbers` of the block it
+decodes on its own (`outputAsLoaded`) and of each setting it recovers
+(`outputRecovered`): a fraction there is "it does not read as that setting",
+as a word is, and one in a merged block keeps nothing, as a word there does.
+
+What changes for an operator: a config that holds a fraction in a
+whole-number setting no longer loads, where it loaded the whole part:
+`bridge serve` does not start, and serve, `bridge doctor` and init name the
+line. A release note should say so.
+
+### Red first
+
+On main with the tests in place: in `internal/config`, 62 subtests failed
+(every fraction of `TestAWholeNumberSettingTakesNoFraction`'s 44 settings,
+the four player settings' nine refused values, the edges of
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged` that loaded, its merge,
+alias and three-fraction cases, and the new row of
+`TestAnOpenHomeSettingIsValidatedLikeItsNeighbours`), each because the value
+loaded truncated ("a fraction loaded, as 7", "Load took it, as a limit of
+0", "PlayerEnabled = true, <nil>"); 34 passed: every integer, whole float,
+null and absent case, `.inf`, `.nan` and `1e19`, which yaml.v3 refused in
+the same words already, and the OpenHome rows that were there before. The
+player block's values were measured through main's own decode
+(`Node.Decode` into an int, as its `whole` made it): 7792.9 as 7792, 45.75
+as 45, 0.5 as 0, `-.inf` as the smallest int64, 1.5 as 1, 0.25 as 0. In
+`cmd/bridge`, the three new init cases failed, each on its fixture loading.
+
+### Negative controls
+
+Against the committed change, each restored with `git checkout --` and the
+tests passing again after it:
+
+- **One per setting, 48 in all.** A temporary line in `buildShadow` kept the
+  original type for the one struct field `B528_SKIP` named, so that setting
+  decoded truncating again, and one in `playerReader.whole` ran main's
+  decode for the one path it named. A driver ran `go test -count=1 -run
+  '^TestAWholeNumberSettingTakesNoFraction$' -v ./internal/config/` with
+  `B528_SKIP=<struct>.<field>` for each of the 44 settings, and `-run
+  '^(TestAWholeNumberOfThePlayerTakesNoFraction|TestAnOpenHomeSettingIsValidatedLikeItsNeighbours)$'`
+  with `B528_SKIP=output.player.<setting>` for the player's four, and
+  required each run to fail that setting's refusal subtests and nothing
+  else. All 48 did. Each config setting failed
+  `TestAWholeNumberSettingTakesNoFraction/<path>` alone, "a fraction loaded,
+  as 7" (as 250 for `enrich.coverSize` and `retention.playbackHistoryDays`).
+  The player's failed `TestAWholeNumberOfThePlayerTakesNoFraction/<setting>/not_whole_N`:
+  `pauseReleaseSeconds`' three ("PlayerEnabled = true" for 45.75, and
+  `Problem`'s range refusal for 0.5 and `-.inf`), `openhomePort`'s two and
+  the OpenHome row `a_fraction_for_the_port`, and `device.pcmDevice`'s and
+  `device.subdevice`'s two each, "PlayerEnabled = true". With `B528_SKIP`
+  unset, the mutated tree passed all four tests.
+- **`outputAsLoadDecodes` back to the bare decoder** (KnownFields alone): the
+  three init rows failed, `a_loopback_port_written_as_a_fraction` (its
+  warning did not say the port does not read: the 7795 was kept),
+  `a_block_beside_a_fraction_elsewhere` ("a file Load refuses for its
+  fraction decodes whole") and `a_fraction_in_a_merged_block` (the block
+  kept).
+- **`outputAsLoaded` without `CheckWholeNumbers`**: the in-block and merged
+  rows failed, and the row with the fraction outside the block passed.
+- **`outputRecovered` without `CheckWholeNumbers`**: the in-block row alone
+  failed; the merged row stops at its merge key before a setting is read.
+- **`valueFreeTagged` without the branch that keeps a value-free line**: 52
+  subtests failed, the 44 settings, the five edges the check refuses and
+  the merge, alias and three-fraction cases, each refusal reading "cannot
+  unmarshal that value into int"; `.inf`, `.nan` and `1e19`, which yaml.v3
+  refuses itself, passed.
+- **`exactInteger` without its range bound**: `minus_infinity` and
+  `two_to_the_63rd` failed (the limit loaded as the smallest and the largest
+  int64), and so did the player's `pauseReleaseSeconds/not_whole_3`
+  (`-.inf` reaching `Problem`'s range refusal).
+
+### Runs
+
+On darwin/arm64 with Go 1.27.3 (go.mod's 1.27.2 toolchain is not in this
+host's module cache, and it is offline): `make fmt` rewrote nothing, and
+`gofmt -l internal/config cmd/bridge` lists nothing; `make vet`, and `go vet
+./...` with `GOOS=linux` and with `GOOS=windows`, clean; `make build-all`,
+the six targets built; `make docs-check`, ok; `go test -p 4 -race -timeout
+30m ./internal/config/ ./cmd/bridge/`, ok (3.4 s and 497.7 s); the four
+config tests and the three new init subtests at `-race -count 20`, every
+run passed.
+
+### Where the rule is
+
+Its lines: a new bullet in `config-lifecycle.md`, a clause in `player.md`'s
+binding bullet and in `openhome.md`'s opt-in bullet. The session that made
+this change could not write `.claude/rules`, so those three edits went to
+the owner as a patch beside the commit. Its long forms: the new entry in
+`ops/History-rules-config-lifecycle.md`, the opt-in entry in
+`ops/History-rules-openhome.md`, and the rewrite's entry in
+`ops/History-rules-cli-serve.md`, whose line, keep Load's own decode, holds
+as written.
+
+### After review: the value the text writes
+
+CodeRabbit on PR #1339 found a fraction the test let through:
+`pauseReleaseSeconds: 30.0000000000000001` loaded as 30. yaml.v3 reads a
+float through `strconv.ParseFloat`, which rounds to the nearest float64,
+and `exactInteger` weighed that float64, which is whole. Measured on the
+branch before the fix: `limits.manifest.requestsPerMinute: 6.0000000000000001`
+loaded as 6, `1e-400` and `1e-1000000000` as 0 (the limit off), and
+`9007199254740993.0` as 9007199254740992; in the player block,
+`pauseReleaseSeconds: 45.0000000000000001`, `openhomePort:
+7793.0000000000001` and `device.pcmDevice: 1e-400` each read. The round
+made a `!!float` pass only when its text, read exactly (`big.Rat`, its
+underscores dropped as yaml.v3 drops them), wrote the float64 yaml.v3
+decodes; `9007199254740992.0`, which a float64 holds, still loads.
+
+Red first: seven of the eight new cases failed on the test commit, every
+refusal (four in `TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three
+in `TestAWholeNumberOfThePlayerTakesNoFraction`), and nothing else did; the
+eighth, `9007199254740992.0`, loads on both sides by design. Negative control, on the committed fix: weighing only
+whether the text is whole (`written.IsInt()`) in place of comparing it with
+the float64 turned exactly one case red, `a whole number ParseFloat rounds
+to another`, as predicted.
+
+### After review, again: the text as yaml.v3 reads it
+
+Codex and Claude, reviewing that round, each found `big.Rat` reading the
+text otherwise than yaml.v3 does. yaml.v3's resolve tries
+`strconv.ParseInt` with base 0 before any float, so `!!float 036` decodes
+as 30, octal, as `036` untagged does, while `big.Rat` read 36 and the load
+refused it; the player block left `device.pcmDevice: !!float 010` unread.
+`big.Rat` also refused texts that write a whole number,
+`0e99999999999999999999` (its exponent overflows) and `30.` with a million
+and one zeros after its point (an exponent past a million), and reads a long
+mantissa in time quadratic in its digits, measured on this host: a hundred
+thousand digits in 6.7 ms, a million in 517 ms, where `strconv.ParseFloat`,
+which yaml.v3 runs first, takes 1.4 ms.
+
+`writtenInteger` now reads the text as resolve does: its underscores
+dropped, `strconv.ParseInt` with base 0 first (`!!float 0x20000000000001`
+writes 2^53+1, which the float64 rounds to 2^53, and is refused), then a
+decimal float digit by digit, in time linear in the text (a million digits
+in 0.74 ms). Zero is zero whatever its exponent. Refused unread: a whole
+number of more than 20 digits, which no 64-bit integer holds, and a number
+other than zero with an exponent of a million or more, which yaml.v3 never
+decodes unchanged (strconv stops reading an exponent once it reaches 10000,
+so such a text overflows, and resolves as a string, or decodes to another
+value: `0.` and 9,998 zeros then `3e10000000` decodes as 30).
+
+Red first, on a stand-in with round 9's reading: four of the new behaviour
+cases (the tagged octal in both tests, the million zeros, the overflowing
+exponent of zero) and nine rows of the new
+`TestWrittenIntegerReadsTheTextAsYAMLDoes`; the tagged 2^53+1 was refused
+on both sides. Negative controls on the committed fix, each red as
+predicted and nothing else: without `ParseInt` first, the two tagged octals
+and five of the unit test's integer spellings; with the exponent bound
+raised from six digits to eighteen, the one row whose exponent is a million
+or more; with 21 digits allowed, the two 21-digit rows.
+
+Codex, reviewing that round, found one more of resolve's readings: once
+base 0 refuses a text, a binary or octal prefix followed by a sign
+(`!!float 0b+11110`, `!!float 0o-36`) is read by `strconv.ParseInt` of
+what follows the prefix, in its base, so yaml.v3 decodes 30 and -30
+where the round refused the file. `writtenInteger` now runs the same fallback, its
+`0b`, `-0b`, `0o` and `-0o` branches as resolve writes them. Red first:
+that behaviour case and four rows of the unit test, and nothing else; the
+same five went red with the fallback disabled on the committed fix.
+Claude's review corrected the reason given for the large-exponent refusal
+(it is no trade-off: yaml.v3 never decodes such a text unchanged) and the
+round-9 case's count (a million and one zeros). `0.` and 9,998 zeros then
+`3e10000000`, which yaml.v3 decodes as 30, is now a refused row; it was
+refused before this round too.
+
+### Not in this change
+
+yaml.v3 reads an integer written with a leading zero as YAML 1.1's octal:
+`output.loopbackPort: 010` loads as 8, and `0777` as 511 (measured). It is a
+value nobody wrote, but no fraction: a follow-up. The `BRIDGE_*` overrides
+parse with `strconv.ParseInt`, which refuses a fraction (warned and
+ignored), and the console's settings PATCH decodes JSON into `*int`, which
+`encoding/json` refuses with a fraction in it (400): neither truncates.
 
 ## 2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format
 

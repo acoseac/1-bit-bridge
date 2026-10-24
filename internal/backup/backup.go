@@ -760,11 +760,12 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 
 // copyFileCtx lets a snapshot cancel a sharing-violation backoff. Only the
 // source open is retried; the copy and its commit still happen exactly once.
+// OpenAsFile refuses a named pipe without waiting for a writer.
 func copyFileCtx(ctx context.Context, srcPath, dstPath string, mode os.FileMode) error {
 	var in *os.File
 	err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
 		var err error
-		in, err = os.Open(srcPath)
+		in, _, err = fsutil.OpenAsFile(srcPath)
 		return err
 	})
 	if err != nil {

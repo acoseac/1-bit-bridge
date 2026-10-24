@@ -80,12 +80,23 @@ func (r *rig) letGo() {
 // go on, and the device opens again.
 func (r *rig) playsOn(ref string) {
 	r.t.Helper()
+	r.playsOnAfter(ref, nil)
+}
+
+// playsOnAfter optionally lets the new playback settle before observing its
+// open. With a free-running fake DAC it can have closed again by then.
+func (r *rig) playsOnAfter(ref string, settle func()) {
+	r.t.Helper()
 	r.files.add(ref, wav(48000, 24, pattern(9, 20000, 24)))
 	ids := r.insert(ref)
+	opens := r.k.View().Opens
 	if err := r.eng.PlayID(bg, ids[0]); err != nil {
 		r.t.Fatalf("a play after the fault: %v", err)
 	}
-	r.k.Await(r.t, "the device to open again", func(v alsapcm.KernelView) bool { return v.Open })
+	if settle != nil {
+		settle()
+	}
+	r.k.Await(r.t, "the device to open again", func(v alsapcm.KernelView) bool { return v.Opens > opens })
 }
 
 // wantFailed requires f to be the backend's own fault, naming no value.
@@ -119,7 +130,12 @@ func TestPlaybackFaultsOnAPanicInTheProducer(t *testing.T) {
 	wantFailed(t, f, ids[0])
 	r.letGo()
 	logs.panicLogged(t, backendPanicMessage, "the producer")
-	r.playsOn("b")
+	// Free still applies to the next session. Force its entire playback
+	// before the observation, the scheduling window that used to lose it.
+	r.playsOnAfter("b", func() {
+		r.waitStopped(engine.ReasonEndOfQueue)
+		r.letGo()
+	})
 }
 
 // TestPlaybackFaultsOnAPanicInTheReporter pins a panic on a session's
@@ -186,12 +202,26 @@ func TestPlaybackFaultsOnAPanicInASuccessorsOpen(t *testing.T) {
 	r := newRig(t, withLog(logs))
 	r.files.add("a", wav(48000, 24, pattern(1, 100000, 24)))
 	r.files.add("b", wav(48000, 24, pattern(2, 100000, 24)))
+	// Hold a read past Start's first chunk, before EOF. Without this,
+	// a fits in the lookahead plus hardware buffer and can enter its final
+	// drain before b is inserted; Prepare then answers ErrSessionEnding
+	// and no successor ever opens (so no panic can happen).
+	parked, release := r.files.stall("a", 44+48000*2*3)
+	t.Cleanup(release)
 	ids := r.insert("a")
 	r.play()
+	receiveIn(t, parked, "the producer to wait before EOF")
 	r.files.mu.Lock()
 	r.files.panicOpen["b"] = true
 	r.files.mu.Unlock()
-	r.insert("b")
+	next := r.insert("b")
+	prepared := r.waitCall("b to be handed to the opener", func(c call) bool {
+		return c.kind == "prepare" && c.next != nil && c.next.Entry == next[0]
+	})
+	if prepared.err != nil {
+		t.Fatalf("prepare b: %v", prepared.err)
+	}
+	release()
 	f, _ := r.faulted()
 	wantFailed(t, f, ids[0])
 	r.letGo()

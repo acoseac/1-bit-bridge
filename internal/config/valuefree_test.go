@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,10 +36,18 @@ func carriesPartOf(out, secret string) bool {
 // refusalText is Load's refusal of the config at path without that path,
 // which Load names and which is the test's, not the config's: a temporary
 // directory's name holds random digits, which a serial of digits shares by
-// chance.
+// chance. Load names it with %q, so on Windows each backslash is doubled and
+// the runner's temp directory can be its 8.3 short name (RUNNER~1): the
+// quoted path is taken out by its shape too, not only by the test's spelling
+// of it (CI's windows leg, #1339: TestAWholeNumberSettingTakesNoFraction
+// found "4375" of 7800.4375 in the temp directory's "1954375118").
 func refusalText(err error, path string) string {
-	return strings.ReplaceAll(err.Error(), path, "")
+	return quotedConfigPath.ReplaceAllString(strings.ReplaceAll(err.Error(), path, ""), `parse config "<path>"`)
 }
+
+// quotedConfigPath is the "parse config %q" prefix Load writes, whatever the
+// quoted path's spelling.
+var quotedConfigPath = regexp.MustCompile(`parse config "(?:[^"\\]|\\.)*"`)
 
 // configWith writes a loopback bridge.yaml with the given settings, each a
 // YAML path and its value, beside what a config needs to load, and returns

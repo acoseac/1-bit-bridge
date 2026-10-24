@@ -1,6 +1,6 @@
 module github.com/acoseac/1-bit-bridge
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
@@ -12,12 +12,12 @@ require (
 	github.com/mycophonic/saprobe-alac v1.0.0-rc3
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
-	github.com/quic-go/quic-go v0.64.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	golang.org/x/crypto v0.57.0
-	golang.org/x/image v0.46.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/image v0.47.0
 	golang.org/x/mod v0.42.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
@@ -27,7 +27,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/libc v1.79.0
 	modernc.org/sqlite v1.61.0
-	tailscale.com v1.104.1
+	tailscale.com v1.104.2
 )
 
 require (

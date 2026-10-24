@@ -176,6 +176,10 @@ func TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo(t *testing.T) {
 		{"a loopback port that is not a number", "output:\n    loopbackPort: " + rewriteMPDPassword + "\n" + player,
 			rewriteMPDPassword, []string{"output.loopbackPort (line ", "): it does not read as that setting"}, true},
 		{"a serial of digits as the loopback port", "output:\n    loopbackPort: 202311050044\n" + player, "202311050044", notAPort, true},
+		// Refused as a word there is: it read as its whole part, which the
+		// rewrite kept as the port (backlog B528).
+		{"a loopback port written as a fraction", "output:\n    loopbackPort: 7795.5\n" + player, "7795.5",
+			[]string{"output.loopbackPort (line ", "): it does not read as that setting"}, true},
 		{"a loopback port that is not a port", "output:\n    loopbackPort: 70000\n" + player, "70000", notAPort, true},
 		{"a password that is not text", "output:\n    password: [" + rewriteMPDPassword + "]\n" + player, rewriteMPDPassword,
 			[]string{"output.password (line ", "): it does not read as that setting"}, true},
@@ -377,10 +381,11 @@ func aliasHeavyBlock() string {
 
 // TestPriorOutputOfAFileTheDecoderRefusesElsewhere: a file whose whole decode
 // fails over something outside the output block, here a misspelt top-level
-// key, is one Load refuses, and the rewrite reads its block on its own
-// (outputAsLoaded) before the certainty recovery. A merged block the decoder
-// takes alone is kept as Load decodes it once the typo is put right, which
-// is the config init is run again over; a block the decoder refuses on its
+// key or a fraction in a whole-number setting, is one Load refuses, and the
+// rewrite reads its block on its own (outputAsLoaded) before the certainty
+// recovery. A merged block the decoder takes alone is kept as Load decodes
+// it once the typo is put right, which is the config init is run again
+// over, and so is a block beside a fraction; a block the decoder refuses on its
 // own, for the aliases its merges expand with little else in the file to
 // count against them, keeps nothing and says so. Every fixture of the
 // rewrite's tests decoded whole since round 4, so a priorOutput that dropped
@@ -410,6 +415,29 @@ func TestPriorOutputOfAFileTheDecoderRefusesElsewhere(t *testing.T) {
 			t.Fatalf("without the misspelt key, Load = %v, %+v: the fixture's block is not the one meant", err, loaded)
 		}
 		kept, notKept := priorOutput([]byte(head + typo + block))
+		if len(notKept) != 0 {
+			t.Errorf("priorOutput did not keep %q", notKept)
+		}
+		sameOutput(t, kept, loaded.Output)
+	})
+
+	// A fraction in a whole-number setting is refused by Load's decode
+	// (config.DecodeFile) as a word there is, so the file does not decode
+	// whole here either, and the block is read on its own (backlog B528).
+	t.Run("a block beside a fraction elsewhere", func(t *testing.T) {
+		const fraction = "scanIntervalSec: 900.5\n"
+		block := "output: {mpd: \"off\", loopbackPort: 7795}\n"
+		if _, err := loadWithoutTheTypo(t, fraction+block); err == nil {
+			t.Fatal("Load takes the fraction, so the file pins nothing")
+		}
+		if _, ok := outputAsLoadDecodes([]byte(head + fraction + block)); ok {
+			t.Fatal("a file Load refuses for its fraction decodes whole")
+		}
+		loaded, err := loadWithoutTheTypo(t, block)
+		if err != nil || loaded.Output.Mode() != "off" || loaded.Output.EffectiveLoopbackPort() != 7795 {
+			t.Fatalf("without the fraction, Load = %v, %+v: the fixture's block is not the one meant", err, loaded)
+		}
+		kept, notKept := priorOutput([]byte(head + fraction + block))
 		if len(notKept) != 0 {
 			t.Errorf("priorOutput did not keep %q", notKept)
 		}
@@ -514,6 +542,11 @@ func TestInitRewriteResolvesMergesBesideASettingItCannotKeep(t *testing.T) {
 		{"a merge key that names no block",
 			"output:\n    <<: 5\n    mpd: \"off\"\n" + player,
 			"output:\n", notCertain},
+		// A fraction is refused as a word is, through the merge the decoder
+		// takes it from (backlog B528).
+		{"a fraction in a merged block",
+			"output:\n    <<: {loopbackPort: 7795.5}\n    mpd: \"off\"\n" + player,
+			"output:\n", notCertain},
 		{"a merge sequence with something but blocks in it",
 			"output:\n    <<: [{conf: /etc/merged.conf}, 5]\n    mpd: \"off\"\n" + player,
 			"output:\n", notCertain},
@@ -559,7 +592,7 @@ func TestInitRewriteResolvesMergesBesideASettingItCannotKeep(t *testing.T) {
 					t.Errorf("the rewrite's warning does not say %q:\n%s", s, warning)
 				}
 			}
-			for _, secret := range []string{"maybe", "70000", "merged-pw", rewriteSerial[len(rewriteSerial)-6:]} {
+			for _, secret := range []string{"maybe", "70000", "7795", "merged-pw", rewriteSerial[len(rewriteSerial)-6:]} {
 				if strings.Contains(warning, secret) {
 					t.Errorf("the warning carries %q:\n%s", secret, warning)
 				}

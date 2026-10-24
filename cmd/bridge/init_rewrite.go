@@ -532,7 +532,8 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 // setting, or for the block, it does not keep.
 //
 // A file Load's decoder takes whole gives up Load's own block: raw decoded
-// as Load decodes it, the same decoder set the same way (KnownFields) into
+// by Load's own decode (config.DecodeFile: the decoder set the same way,
+// KnownFields, and a whole number written as a fraction refused) into
 // config.Config, before Load's defaults, its BRIDGE_* overrides, its paths
 // and its checks (outputAsLoadDecodes). So no merge key, alias, tag or
 // encoded key is read one way here and another by Load, and neither is
@@ -604,15 +605,14 @@ func priorOutput(raw []byte) (kept config.OutputConfig, notKept []string) {
 }
 
 // outputAsLoadDecodes is the output block of raw as config.Load decodes it,
-// when Load's decoder takes the whole file: the same decoder, set as Load
-// sets it (KnownFields), into config.Config, the type Load decodes into,
-// taken before anything Load does after the decode. ok is false when the
-// decoder refuses any of the file. An empty file decodes as no block.
+// when Load's decode takes the whole file: Load's own, config.DecodeFile,
+// into config.Config, the type Load decodes into, taken before anything
+// Load does after the decode. ok is false when the decode refuses any of the
+// file, a fraction in a whole-number setting included (backlog B528). An
+// empty file decodes as no block.
 func outputAsLoadDecodes(raw []byte) (block config.OutputConfig, ok bool) {
 	var cfg config.Config
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+	if err := config.DecodeFile(raw, &cfg); err != nil && !errors.Is(err, io.EOF) {
 		return config.OutputConfig{}, false
 	}
 	return cfg.Output, true
@@ -645,14 +645,20 @@ type outputAsLoaded struct {
 
 // UnmarshalYAML is yaml.v3's older Unmarshaler, whose unmarshal decodes a
 // value with the decoder at hand, Load's settings included, and returns the
-// errors of that value alone, a refusal the decoder panics with included. It
-// never fails the file's decode.
+// errors of that value alone, a refusal the decoder panics with included. A
+// whole number the block writes as a fraction decodes as its whole part, and
+// Load's decode refuses it (config.CheckWholeNumbers), so the block is one
+// the decoder refuses here too (backlog B528). It never fails the file's
+// decode.
 func (o *outputAsLoaded) UnmarshalYAML(unmarshal func(any) error) error {
 	o.found = true
 	var n nodeOf
 	_ = unmarshal(&n)
 	o.node = n.node
 	o.err = unmarshal(&o.block)
+	if o.err == nil && o.node != nil {
+		o.err = config.CheckWholeNumbers(o.node, &o.block)
+	}
 	return nil
 }
 
@@ -703,8 +709,11 @@ func outputRecovered(n *yaml.Node, at int) (kept config.OutputConfig, notKept []
 			}
 			continue
 		}
+		// A fraction where a whole number goes decodes as its whole part,
+		// and does not read as Load reads it (config.CheckWholeNumbers).
 		var one config.OutputConfig
-		if err := (&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{k, v}}).Decode(&one); err != nil {
+		pair := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{k, v}}
+		if err := pair.Decode(&one); err != nil || config.CheckWholeNumbers(pair, &one) != nil {
 			notKept = append(notKept, fmt.Sprintf("%s (line %d): it does not read as that setting", setting, k.Line))
 			continue
 		}
