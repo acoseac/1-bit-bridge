@@ -12,3 +12,8 @@ const SnapshotBusyPatience = snapshotBusyPatience
 func WithBusyObserver(ctx context.Context, observe func()) context.Context {
 	return context.WithValue(ctx, busyObserverKey{}, observe)
 }
+
+// ResetPlayerAfterStep exposes the interruption seam to external tests.
+func ResetPlayerAfterStep(dir string, after func(string) error) (bool, error) {
+	return resetPlayer(dir, after)
+}

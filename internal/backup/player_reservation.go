@@ -30,8 +30,8 @@ type RestoreOptions struct {
 const restoreMargin uint64 = 1 << 24
 
 // playerResetAdvice is the single remedy for giving up an exhausted or
-// unreadable live floor. With the service stopped, remove player-uuid,
-// player-ids.json and player-queue.json together; the next start makes a
+// unreadable live floor. With the service stopped, run bridge output player
+// reset to record the identities given up and remove their files; the next start makes a
 // new identity with no queue (a v1 queue has no identity stamp). A reset
 // gives up for good the identity it removes and any the box ran earlier
 // (one an earlier restore replaced on this box), unless, after this box last
@@ -48,10 +48,9 @@ const restoreMargin uint64 = 1 << 24
 // refused restore, remove the two files from a copy of that snapshot, then
 // restore that copy. Only the restore refusal carries this step. A snapshot's
 // player-ids.json is never a repair; never delete the reservation while
-// keeping the identity. B524 will enforce this operator rule before 5a
-// ships.
+// keeping the identity. The history refuses their restoration (B524).
 func playerResetAdvice(restoring bool) string {
-	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
+	advice := "with the service stopped, reset the player: run bridge output player reset (removes player-uuid, player-queue.json and player-ids.json after recording the identities given up)"
 	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; reset any other box that still holds one of them before it runs again; an identity another box took over from this box, after this box last ran it, and has not reset since, keeps its snapshots"
 	if restoring {
 		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
@@ -105,7 +104,7 @@ func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reserv
 
 // restorePlayerReservation preflights both counters, draws once, then makes
 // the new floor durable before the caller writes any identity file.
-func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
+func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions, beforeWrite func() error) error {
 	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
 	if err != nil {
 		return err
@@ -156,6 +155,9 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 		opts.Warn("WARNING: this snapshot " + reason + "; restore the box's newest snapshot when possible to keep player IDs and tokens farther from earlier restores.")
 	}
 	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	if err := beforeWrite(); err != nil {
 		return err
 	}
 	if err := engine.WriteReservation(dataDir, livePath, want); err != nil {

@@ -72,7 +72,8 @@ import (
 // (e.g. new mandatory file, restructured manifest). Restore refuses
 // snapshots newer than this constant. Version 1 remains readable. Version 2
 // makes older restores refuse before they could restore a UUID without a jump.
-const SchemaVersion = 2
+// Version 3 requires player-history merging and given-up identity refusals.
+const SchemaVersion = 3
 
 // ManifestFile is the metadata file written into every snapshot dir.
 const ManifestFile = "manifest.json"
@@ -195,6 +196,16 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	}()
 
 	var captured []string
+	h, historyPresent, err := optionalPlayerHistory(filepath.Join(src.DataDir, PlayerHistoryFileName))
+	if err != nil {
+		return "", err
+	}
+	if historyPresent {
+		if err := writePlayerHistory(dst, h); err != nil {
+			return "", err
+		}
+		captured = append(captured, PlayerHistoryFileName)
+	}
 
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
@@ -334,7 +345,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	if err != nil {
 		return fmt.Errorf("read snapshot manifest: %w", err)
 	}
-	if m.SchemaVersion != 1 && m.SchemaVersion != SchemaVersion {
+	if m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
 	}
@@ -377,8 +388,26 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	var history playerHistory
+	var historyPresent bool
+	if dst.PlayerUUID != "" {
+		history, historyPresent, err = preflightPlayerHistory(snapshotDir, dst.PlayerUUID, playerUUID, m)
+		if err != nil {
+			return err
+		}
+	}
+	writeHistory := func() error {
+		if !historyPresent {
+			return nil
+		}
+		dir := filepath.Dir(dst.PlayerUUID)
+		if err := fsutil.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		return writePlayerHistory(dir, history)
+	}
 	if playerUUIDRead {
-		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
+		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts, writeHistory); err != nil {
 			return err
 		}
 		// A replacement identity must never expose this box's old entries,
@@ -393,9 +422,14 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 		}
 	}
+	if !playerUUIDRead {
+		if err := writeHistory(); err != nil {
+			return err
+		}
+	}
 	for _, name := range m.Files {
 		// The reservation is an input only, never a copied snapshot file.
-		if name == PlayerUUIDFileName || name == engine.ReservationFileName {
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName || name == PlayerHistoryFileName {
 			continue
 		}
 		target, ok := mapping[name]

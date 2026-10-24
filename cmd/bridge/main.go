@@ -2541,8 +2541,11 @@ Subcommands:
            bridge output dac inspect shows each card's unit and port and how
            the player's binding resolves, and bridge output dac bind writes
            one. bridge output player reports the box's MPD and how it is set.
-           Linux only; only dac bind changes anything: the config file, and
-           the player's UUID file the first time it binds an enabled player.
+           These readings and dac bind are Linux only; bind writes the config
+           and the player's first UUID. bridge output player reset [--yes]
+           gives up the bridge player's identity and clears its queue with
+           the service stopped, recording identities that restore must refuse.
+           The next start makes a new device to controllers.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.

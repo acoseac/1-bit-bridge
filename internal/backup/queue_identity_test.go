@@ -250,13 +250,8 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 				advice := err.Error()
 				// Follow the actual error's advice. A legacy queue has no UUID, so
 				// leaving it behind exposes its entries under the new identity.
-				for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
-					if err := os.Remove(filepath.Join(dst, name)); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if strings.Contains(err.Error(), "player-queue.json") {
-					if err := os.Remove(filepath.Join(dst, "player-queue.json")); err != nil {
+				if strings.Contains(advice, "bridge output player reset") {
+					if _, err := backup.ResetPlayer(dst); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -300,7 +295,7 @@ func assertPlayerResetAdvice(t *testing.T, advice, operation string) {
 		t.Errorf("%s refusal restore step present = %t, want %t: %s", operation, got, want, advice)
 	}
 	for _, required := range []string{
-		"with the service stopped, reset the player: remove the box's player-uuid, player-ids.json and player-queue.json together",
+		"with the service stopped, reset the player: run bridge output player reset",
 		"this reset gives up for good the identity it removes and any the box ran earlier, unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off",
 		"no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again",
 		"remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots",
