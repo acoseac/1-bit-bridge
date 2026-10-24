@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -69,6 +70,9 @@ func TestReadingOmitsProcessRelativeConfigHint(t *testing.T) {
 }
 
 func TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an absolute host path mirrored under the injected root is POSIX-shaped: a Windows path carries a volume, and the hint reads MPD's command line from /proc")
+	}
 	r, root, pid := provenanceRig(t)
 	// The target exists on the host, but is outside the injected config root.
 	// A corresponding in-root file must not turn this into host identity evidence.

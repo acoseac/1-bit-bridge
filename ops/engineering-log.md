@@ -208,7 +208,17 @@ the reading-level test's named and canonical spellings of the root identical
 on Linux (a bare temporary directory has one spelling there), so
 `TestHintLinkToEitherSpellingOfTheRoot` reaches the root through a link,
 asserts the two spellings differ, and keeps the hint for a link to either;
-dropping the named comparison reddens it. Production hint tests additionally
+dropping the named comparison reddens it.
+
+The PR's first Windows CI run (windows-latest) failed two tests that are
+POSIX-shaped, and both now skip on Windows with the reason:
+`TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot` mirrors an absolute host
+path under the injected root by dropping its leading slash, which a Windows
+path with a volume cannot do (the hint reads MPD's command line from /proc in
+any case); `TestIncludesResolveDotDotPhysicallyAtEveryLevel` expects `..` to
+resolve physically through a directory link, which Windows normalizes
+lexically before the filesystem follows the link, so the conf reader there is
+as lexical as the OS. Every other new test passed on that run. Production hint tests additionally
 pin forty links accepted against forty-one refused, an in-root absolute link,
 and a relative `dir-link/../x` chain whose lexical clean would name the wrong
 file. Independent controls restore each boundary rejection, lower the hop

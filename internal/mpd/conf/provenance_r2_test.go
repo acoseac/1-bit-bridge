@@ -3,10 +3,14 @@ package conf
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestIncludesResolveDotDotPhysicallyAtEveryLevel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows normalizes .. lexically before the filesystem follows a link (Win32 path rules), so MPD's physical .. is a POSIX rule")
+	}
 	for _, kind := range []string{"main directory link", "child directory link", "main file link", "child file link"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
