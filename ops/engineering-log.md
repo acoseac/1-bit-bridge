@@ -60201,5 +60201,22 @@ The Docker notice guard derives its full version from go.mod, so a coherent
 patch-version change still exercises each intended deletion. A private-copy
 control changes both pins to another supported patch, reproducing the old
 hardcoded test's mutation miss. The missing round-5 index line is restored,
-newest first. The round-6 scratch report records red-first checks, independent
-mutation controls, saved-byte restoration and the requested gates.
+newest first. Red first, then 100 mutation controls, every one red by
+assertion and none by a compile failure: the 51 carried through round 3,
+round 4's 16, round 5's 24 and round 6's nine.
+
+Its review, on the session's own reading, found three more ways a
+documented or scripted build stayed outside the census, each fixed red
+first. A quoted executable (`"$GO" build`, `"/usr/local/go/bin/go" build`)
+did not match, since the pattern wanted white space straight after the
+name: 720 cases, three spellings by the four flag forms, five verbs and
+twelve files. An unlabelled fence, which a reader runs as shell, was left
+out with the prose; the census now leaves out only a fence whose info string
+names another language (`text`, `go`, `yaml`). And the records were in it:
+the engineering log, the History files, plans and release-note drafts quote
+commands as they were run, before the tags existed among them, so they stay
+out, and every other top-level ops document is in. On the real tree the
+census still finds only the reviewed sites. Controls on the committed fix,
+each red as predicted and nothing else: counting only labelled fences, the
+four unlabelled-fence cases; no quote after the executable, the 720 quoted
+cases; the records counted as runbooks, the four record cases.
