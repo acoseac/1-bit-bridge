@@ -2177,12 +2177,14 @@ func TestAReadingNamesItsOutputByID(t *testing.T) {
 	}
 }
 
-// TestHealthAdvertisesOutputReadingOnTheMPDGateAlone: the reading's flag is
+// TestHealthAdvertisesOutputReadingWithLocalOutputs: the reading's flag is
 // on exactly when output.mpd resolves on and the host is Linux, the MPD
-// gate, whatever serve's player says (B470 PR 5b): the reading probes and
-// dials MPD for any well-formed id, so a bridge whose localOutputs is its
-// player's alone advertises no reading. Until 5b the two keys were one gate.
-func TestHealthAdvertisesOutputReadingOnTheMPDGateAlone(t *testing.T) {
+// gate, and so with localOutputs, whatever serve's player says; localOutputs
+// is on without it while the player's gate alone holds (B470 PR 5b): the
+// reading probes and dials MPD for any well-formed id, so a bridge whose
+// localOutputs is its player's alone advertises no reading. Until 5b the two
+// keys were one gate.
+func TestHealthAdvertisesOutputReadingWithLocalOutputs(t *testing.T) {
 	for _, tc := range []struct {
 		goos, mode string
 		player     bool
