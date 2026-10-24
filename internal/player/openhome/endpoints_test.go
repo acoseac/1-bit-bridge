@@ -1,6 +1,7 @@
 package openhome
 
 import (
+	"context"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -91,6 +92,14 @@ func TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints(t *testing.T) {
 	}
 	if locations < 14 {
 		t.Fatalf("%d LOCATIONs advertised, want the alive notifications and the search's replies", locations)
+	}
+	// Once its stop has begun (Refuse: every request refused, discovery
+	// withdrawn), while its sockets are still bound, it lists none.
+	s.Refuse(context.Background())
+	if st := s.Status(); len(st.Listening) == 0 {
+		t.Fatal("the fixture must refuse while the sockets are still bound")
+	} else if got := st.Endpoints(); len(got) != 0 {
+		t.Errorf("a surface whose stop has begun lists endpoints %q", got)
 	}
 	s.Stop()
 	if got := s.Status().Endpoints(); len(got) != 0 {

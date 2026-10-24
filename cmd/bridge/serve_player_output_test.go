@@ -545,8 +545,11 @@ func TestTheChecklistReadsNoBridgeElement(t *testing.T) {
 	mpdEl := api.OutputInfo{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
 		MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "play", LoopbackBaseURL: "http://127.0.0.1:7791"},
 		DAC: &api.OutputDAC{ID: "Audio", Name: "iFi", USBID: "20b1:3009", IsMPDsOutput: &yes}, PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}}
+	// A later change reports the player's DAC (dac, null today): even then
+	// the checklist reads none of it.
 	bridgeEl := api.OutputInfo{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge", Version: "1"},
-		PathRules: []api.OutputPathRule{}, Bridge: &api.OutputBridge{State: "stopped", LibraryScope: "self", Codecs: []string{"flac"}}}
+		DAC: &api.OutputDAC{ID: "Bridge", Name: "the player's DAC", USBID: "20b1:3009"}, PathRules: []api.OutputPathRule{},
+		Bridge: &api.OutputBridge{State: "stopped", LibraryScope: "self", Codecs: []string{"flac"}}}
 	want := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{mpdEl}})
 	if got := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{mpdEl, bridgeEl}}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("with the bridge's element: %+v\nwant MPD's alone: %+v", got, want)
