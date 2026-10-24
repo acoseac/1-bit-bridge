@@ -118,12 +118,16 @@ func TestServeKeepsLibraryWithDamagedSealedPlayerMarker(t *testing.T) {
 				if ps.player.plan.start != enabled || standIn.built != enabled || (eng != nil) != enabled {
 					t.Fatalf("damaged player's plan: %+v", ps.player.plan)
 				}
-				if lines := rec.Lines("player initialization marker is damaged"); len(lines) == 0 || !strings.Contains(lines[0], "player-initialized") || !strings.Contains(lines[0], "move it aside") || strings.Contains(lines[0], "--discard-floor") {
-					t.Fatalf("missing player file reason: %v", lines)
+				// Boot's preflight warns once, covering the player's start (B524 round 10).
+				if lines := rec.Lines("player initialization marker is damaged"); len(lines) != 1 || !strings.Contains(lines[0], "player-initialized") || !strings.Contains(lines[0], "move it aside") || strings.Contains(lines[0], "--discard-floor") {
+					t.Fatalf("want boot's one warning: %v", lines)
 				}
 				var out, errs bytes.Buffer
 				if code := backupCmd([]string{"--config", ps.configPath}, &out, &errs); code != 0 {
 					t.Fatalf("live backup: %d %s", code, &errs)
+				}
+				if lines := rec.Lines("player initialization marker is damaged"); len(lines) != 1 {
+					t.Fatalf("the live backup warned again: %v", lines)
 				}
 				if code := ps.stopServe(t); code != 0 {
 					t.Fatalf("serve exit %d", code)

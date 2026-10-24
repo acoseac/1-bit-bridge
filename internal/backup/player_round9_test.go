@@ -53,7 +53,8 @@ func TestRestoreAdoptsUUIDOnlyAfter8193Starts(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "player-ids.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixedRestore(t, snap, dir, 0); err != nil {
+	// Adoption's draw, then the jump's (B524 round 10): both from restore's source.
+	if err := fixedRestore(t, snap, dir, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	floor := markAt(t, dir)
@@ -64,7 +65,7 @@ func TestRestoreAdoptsUUIDOnlyAfter8193Starts(t *testing.T) {
 		}
 	})
 	for _, v := range []uint32{floor.IDs, floor.Tokens} {
-		if uint64(v) < 1<<31+1<<24 || uint64(v) >= 1<<31+2<<24 {
+		if uint64(v) != 1<<31+1<<24 {
 			t.Fatalf("restore skipped adoption before its jump: %+v", floor)
 		}
 	}
@@ -93,10 +94,12 @@ func TestDamagedMarkerWithMatchingFloorKeepsEveryLifecycle(t *testing.T) {
 				if err := os.WriteFile(path, nil, 0600); err != nil {
 					t.Fatal(err)
 				}
+				// A start's public preflight is the one place that warns
+				// (B524 round 10): once here, and never in the operation after it.
+				rec := loggingtest.Record(t)
 				if err := backup.CheckPlayerStart(dir); err != nil {
 					t.Fatalf("damaged marker rejected matching floor: %v", err)
 				}
-				rec := loggingtest.Record(t)
 				var err error
 				switch op {
 				case "start":
@@ -128,8 +131,8 @@ func TestDamagedMarkerWithMatchingFloorKeepsEveryLifecycle(t *testing.T) {
 					t.Fatal("damaged marker rewritten")
 				}
 				lines := rec.Lines("player initialization marker is damaged")
-				if len(lines) == 0 || !strings.Contains(strings.Join(lines, "\n"), "move it aside") || strings.Contains(strings.Join(lines, "\n"), "--discard-floor") {
-					t.Fatalf("missing proportionate warning: %v", lines)
+				if len(lines) != 1 || !strings.Contains(lines[0], "move it aside") || strings.Contains(lines[0], "--discard-floor") {
+					t.Fatalf("want the preflight's one proportionate warning: %v", lines)
 				}
 				// Remove all allocation evidence: the damaged marker alone must keep the exemption spent.
 				for _, name := range []string{"player-ids.json", "player-uuid", "player-queue.json"} {
@@ -243,7 +246,7 @@ func TestRestoreAdoptionBarrierPrecedesSnapshotWrites(t *testing.T) {
 		}
 		return os.Rename(a, b)
 	})
-	err := fixedRestore(t, snap, dir, 0)
+	err := fixedRestore(t, snap, dir, 0, 0)
 	atomicwrite.SetRenameFuncForTest(prev)
 	if !errors.Is(err, markerFailure) {
 		t.Fatalf("restore bypassed adoption barrier: %v", err)
@@ -252,8 +255,8 @@ func TestRestoreAdoptionBarrierPrecedesSnapshotWrites(t *testing.T) {
 		t.Fatalf("snapshot identity published before adoption: %s %v", id, err)
 	}
 	floor := markAt(t, dir)
-	if floor.UUID != boxPlayerUUID || floor.IDs < 1<<31 || floor.Tokens < 1<<31 {
-		t.Fatalf("failed adoption lost its floor: %+v", floor)
+	if floor.UUID != boxPlayerUUID || floor.IDs != 1<<31 || floor.Tokens != 1<<31 {
+		t.Fatalf("failed adoption lost its floor, or drew from another source: %+v", floor)
 	}
 	if err := fixedRestore(t, snap, dir, 0); err != nil {
 		t.Fatal(err)

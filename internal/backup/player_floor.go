@@ -2,6 +2,7 @@ package backup
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,15 @@ type playerMarker struct {
 	Minted  bool `json:"minted,omitempty"`
 }
 
+// markerRefusal is a local marker an operation will not read, or keep, as it
+// stands. Its text carries its remedy, so a caller adds none of its own.
+type markerRefusal string
+
+func (e markerRefusal) Error() string { return string(e) }
+
+// playerMarkerState reads a local marker and logs nothing: only a start's
+// preflight says anything about a damaged player-initialized, and only where
+// following its advice is safe (CheckPlayerStart).
 func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, err error) {
 	st, err := os.Lstat(filepath.Join(dir, name))
 	if errors.Is(err, os.ErrNotExist) {
@@ -47,7 +57,6 @@ func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, e
 		return false, false, m, err
 	}
 	if !st.Mode().IsRegular() {
-		warnDamagedPlayerMarker(name)
 		return true, false, m, nil
 	}
 	f, _, err := fsutil.OpenAsFile(filepath.Join(dir, name))
@@ -61,27 +70,66 @@ func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, e
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
-		warnDamagedPlayerMarker(name)
 		return true, false, playerMarker{}, nil
 	}
 	if m.Version > 1 {
-		return true, false, m, fmt.Errorf("%s has a newer version; use a newer bridge", name)
-	}
-	if m.Version != 1 {
-		warnDamagedPlayerMarker(name)
+		return true, false, m, markerRefusal(name + " has a newer version; use a newer bridge")
 	}
 	return true, m.Version == 1, m, nil
 }
 
-// warnDamagedPlayerMarker keeps marker reads independent of UUID bytes (reset
-// must be able to remove an unreadable UUID). Floor-loss errors still refuse
-// the operation; moving this evidence aside is safe only with a matching floor.
-func warnDamagedPlayerMarker(name string) {
-	if name != playerInitialized {
-		return
+// markerNotice is what a start's preflight owes a damaged player-initialized
+// beside a readable floor that names the current player-uuid and is not
+// exhausted (damagedMarkerNotice). Everywhere else a damaged marker gets no
+// advice: beside a lost floor it is the evidence the floor existed, and
+// moving it aside would make a UUID beside it read as the upgrade state.
+type markerNotice int
+
+const (
+	noMarkerNotice markerNotice = iota
+	// moveAsideNotice: moving the marker aside is safe. Start re-ensures it,
+	// and beside a valid seal completion records it sealed and minted.
+	moveAsideNotice
+	// soleSealNotice: the marker's sealed bit is the only intact seal record
+	// (playerRestoresSealed honours it). Moved aside, the next start would
+	// write an unsealed marker and identity restores would reopen.
+	soleSealNotice
+)
+
+// warnPlayerMarker logs n. CheckPlayerStart alone calls it, once per call:
+// serve boot's preflight, once per boot, which covers the player serve
+// starts then, and bind's. Marker reads, the minter and every other
+// lifecycle operation log nothing, and no state outlives the call, so a
+// second boot in one process warns again.
+func warnPlayerMarker(n markerNotice) {
+	switch n {
+	case moveAsideNotice:
+		logging.Component("player").Warn("player initialization marker is damaged", "file", playerInitialized,
+			"remedy", "move it aside: player-ids.json names the current player-uuid, so start re-ensures it, and beside a valid seal completion records sealed and minted")
+	case soleSealNotice:
+		logging.Component("player").Warn("player initialization marker is damaged and holds the only intact discard seal", "file", playerInitialized, "seal", playerFloorDiscarded,
+			"remedy", "keep it: do not move or delete it, because player-floor-discarded.json is missing or damaged and this marker's seal is what keeps player identity restores refused; the player runs as it is; bridge reset-player --discard-floor rewrites both seal records and gives up this identity and its queue")
 	}
-	logging.Component("player").Warn("player initialization marker is damaged", "file", name,
-		"remedy", "with a readable player-ids.json naming the current player-uuid, move it aside; start re-ensures it, and beside a valid seal completion records sealed and minted")
+}
+
+// damagedMarkerNotice is the notice checkPlayerStart returns once the floor
+// is present and readable, names the current UUID and is not exhausted. It
+// reads only the two local markers, never UUID bytes.
+func damagedMarkerNotice(dir string) (markerNotice, error) {
+	present, valid, m, err := playerMarkerState(dir, playerInitialized)
+	if err != nil || !present || valid {
+		return noMarkerNotice, err
+	}
+	if m.Sealed {
+		_, sealValid, _, err := playerMarkerState(dir, playerFloorDiscarded)
+		if err != nil {
+			return noMarkerNotice, err
+		}
+		if !sealValid {
+			return soleSealNotice, nil
+		}
+	}
+	return moveAsideNotice, nil
 }
 
 func readPlayerMarker(dir, name string) (bool, error) {
@@ -117,7 +165,7 @@ func ensurePlayerMarker(dir, name string) error {
 				// Preserve non-file evidence without opening or following it.
 				return atomicwrite.ProbeDurable(dir, filepath.Join(dir, ".player-marker-barrier"))
 			}
-			return fmt.Errorf("%s is not a regular file: move it aside", name)
+			return markerRefusal(name + " is not a regular file: move it aside")
 		}
 		return atomicwrite.ProbeDurable(dir, path)
 	}
@@ -221,7 +269,12 @@ func markPlayerMinted(dir string) error {
 // AdoptPlayerState completes local discard evidence and adopts a UUID-only
 // upgrade, without minting an identity on a pristine box. The caller holds the
 // exclusive server.lock, even when the player is disabled.
-func AdoptPlayerState(dir string) error {
+func AdoptPlayerState(dir string) error { return adoptPlayerState(dir, rand.Reader) }
+
+// adoptPlayerState is AdoptPlayerState whose adoption draws its random part
+// from random: restore's own source (RestoreOptions.Random), so a restore
+// onto a UUID-only box reads it twice, the adoption's draw first.
+func adoptPlayerState(dir string, random io.Reader) error {
 	if err := completePlayerSeal(dir); err != nil {
 		return err
 	}
@@ -229,44 +282,78 @@ func AdoptPlayerState(dir string) error {
 	if err != nil || !adopt {
 		return err
 	}
-	_, _, err = EnsurePlayerUUID(dir)
+	_, _, err = ensurePlayerUUID(dir, random)
 	return err
 }
 
+// errSealCompletionBusy is a backup's seal completion that another lifecycle
+// writer's server.lock defers. It is the one completion failure that is
+// deferred: that holder, or the next lifecycle operation, completes it.
+var errSealCompletionBusy = errors.New("player seal completion is busy: another bridge process holds server.lock, and the next lifecycle operation (serve boot, start, bind, reset or restore) completes it")
+
 // completeCapturedPlayerSeal serializes a backup's local marker upgrade with
-// every lifecycle writer. A normal live backup needs no exclusive lock.
+// every lifecycle writer. A normal live backup needs no exclusive lock. Only
+// a busy lock defers the upgrade (errSealCompletionBusy); any other failure
+// recurs at the next serve boot or start (sealCompletionFailed).
 func completeCapturedPlayerSeal(dir string) error {
 	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
 	if err != nil {
-		return err
+		return sealCompletionFailed(err)
 	}
 	present, valid, m, err := playerMarkerState(dir, playerInitialized)
-	if err != nil || !sealed && !m.Sealed || valid && m.Sealed && m.Minted {
-		return err
+	if err != nil {
+		return sealCompletionFailed(err)
+	}
+	if !sealed && !m.Sealed || valid && m.Sealed && m.Minted {
+		return nil
 	}
 	if present && !valid {
 		if sealed {
-			return ensurePlayerMarker(dir, playerFloorDiscarded)
+			if err := ensurePlayerMarker(dir, playerFloorDiscarded); err != nil {
+				return sealCompletionFailed(err)
+			}
 		}
 		return nil
 	}
 	if m.Sealed {
 		evidence, err := playerAllocationEvidence(dir)
-		if err != nil || !evidence {
-			return err
+		if err != nil {
+			return sealCompletionFailed(err)
+		}
+		if !evidence {
+			return nil
 		}
 	}
 
 	f, err := fsutil.OpenLockFile(dir, "server.lock")
 	if err != nil {
-		return err
+		return sealCompletionFailed(err)
 	}
 	defer f.Close()
 	if err := fsutil.TryLock(f); err != nil {
-		return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
+		if errors.Is(err, fsutil.ErrLocked) {
+			return fmt.Errorf("%w: %w", errSealCompletionBusy, err)
+		}
+		return sealCompletionFailed(err)
 	}
 	defer fsutil.Unlock(f)
-	return completePlayerSeal(dir)
+	if err := completePlayerSeal(dir); err != nil {
+		return sealCompletionFailed(err)
+	}
+	return nil
+}
+
+// sealCompletionFailed is a backup's seal completion that failed for any
+// reason but a busy lock. The same failure stops the next serve boot or
+// start, so it is never called deferred: it keeps its error, and a marker
+// refusal its own remedy; anything else is the data directory refusing a
+// read or a write.
+func sealCompletionFailed(err error) error {
+	var refusal markerRefusal
+	if errors.As(err, &refusal) {
+		return fmt.Errorf("player seal completion failed: %w; serve boot and start fail on it too", err)
+	}
+	return fmt.Errorf("player seal completion failed: %w; restore write access to the data directory: serve boot and start fail on it too", err)
 }
 
 // unstartedPlayer recognizes a UUID-only upgrade, which can also be a
@@ -324,6 +411,21 @@ func playerUUIDReadError(err error) error {
 	return fmt.Errorf("%w; restore read access to player-uuid", err)
 }
 
+// keepInitializedMarker is in every floor-loss refusal beside a marker. The
+// marker is the evidence that the floor existed: moved aside, a UUID beside
+// it reads as the upgrade state, whose adoption can land below what the
+// identity already handed out.
+const keepInitializedMarker = "do not move player-initialized aside, which would let this box reissue IDs and tokens"
+
+// playerFloorMissing is the floor-loss refusal; marked is whether
+// player-initialized is there.
+func playerFloorMissing(marked bool) error {
+	if marked {
+		return errors.New("player floor is missing; " + keepInitializedMarker + "; with the service stopped, run bridge reset-player --discard-floor")
+	}
+	return errors.New("player floor is missing; with the service stopped, run bridge reset-player --discard-floor")
+}
+
 // checkPlayerFloorLoss distinguishes a new box from lost local allocation state.
 // A valid, unconsumed discard permits one fresh floor after UUID and queue are gone.
 func checkPlayerFloorLoss(dir string, present bool) error {
@@ -356,39 +458,54 @@ func checkPlayerFloorLoss(dir string, present bool) error {
 		}
 	}
 	if id || queue || marked && !(valid && sealed && !marker.Minted) {
-		return errors.New("player floor is missing; with the service stopped, run bridge reset-player --discard-floor")
+		return playerFloorMissing(marked)
 	}
 	return nil
 }
 
-// CheckPlayerStart performs the read-only preflight shared by serve and bind.
+// CheckPlayerStart is a player start's read-only preflight: serve boot's,
+// once per boot, which covers the player serve starts then, and bind's. It
+// is the one place that warns about a damaged player-initialized, once per
+// call, and only beside a readable floor that names the current UUID and is
+// not exhausted, where following the advice is safe (damagedMarkerNotice).
 func CheckPlayerStart(dir string) error {
-	floor, present, err := readPlayerFloor(dir)
+	notice, err := checkPlayerStart(dir)
 	if err != nil {
 		return err
+	}
+	warnPlayerMarker(notice)
+	return nil
+}
+
+// checkPlayerStart is CheckPlayerStart without its warning: the minter and
+// every other lifecycle operation preflight through it, and stay silent.
+func checkPlayerStart(dir string) (markerNotice, error) {
+	floor, present, err := readPlayerFloor(dir)
+	if err != nil {
+		return noMarkerNotice, err
 	}
 	idPresent, err := playerEntry(dir, config.PlayerUUIDFile)
 	if err != nil {
-		return err
+		return noMarkerNotice, err
 	}
 	queue, err := playerEntry(dir, "player-queue.json")
 	if err != nil {
-		return err
+		return noMarkerNotice, err
 	}
 	if queue {
 		f, _, err := fsutil.OpenAsFile(filepath.Join(dir, "player-queue.json"))
 		if err != nil {
 			if kind := fsutil.NotAFileKind(err); kind != "" {
-				return fmt.Errorf("player-queue.json is a %s, not a file: move it aside: %w", kind, err)
+				return noMarkerNotice, fmt.Errorf("player-queue.json is a %s, not a file: move it aside: %w", kind, err)
 			}
-			return fmt.Errorf("player-queue.json cannot be read: %w; restore read access", err)
+			return noMarkerNotice, fmt.Errorf("player-queue.json cannot be read: %w; restore read access", err)
 		}
 		_ = f.Close()
 	}
 	if idPresent {
 		st, err := os.Lstat(filepath.Join(dir, config.PlayerUUIDFile))
 		if err != nil {
-			return playerUUIDReadError(err)
+			return noMarkerNotice, playerUUIDReadError(err)
 		}
 		if !st.Mode().IsRegular() {
 			kind := fsutil.NotAFile(st.Mode())
@@ -399,38 +516,45 @@ func CheckPlayerStart(dir string) error {
 			if !present {
 				advice = "bridge reset-player --discard-floor"
 			}
-			return fmt.Errorf("player-uuid: %s is not a file: move it aside, then run %s", kind, advice)
+			return noMarkerNotice, fmt.Errorf("player-uuid: %s is not a file: move it aside, then run %s", kind, advice)
 		}
 	}
 	if err := checkPlayerFloorLoss(dir, present); err != nil {
-		return err
+		return noMarkerNotice, err
 	}
 
 	if floor.Exhausted() {
-		return fmt.Errorf("player counter floor is exhausted; %s", playerResetAdvice(false))
+		return noMarkerNotice, fmt.Errorf("player counter floor is exhausted; %s", playerResetAdvice(false))
 	}
 	if !idPresent && queue {
-		return errors.New("player-uuid is missing beside a queue; run bridge reset-player")
+		return noMarkerNotice, errors.New("player-uuid is missing beside a queue; run bridge reset-player")
 	}
 	if idPresent {
 		id, err := config.ReadPlayerUUID(dir)
 		if err != nil {
-			return playerUUIDReadError(err)
+			return noMarkerNotice, playerUUIDReadError(err)
 		}
 		if present && floor.UUID != id {
-			return errors.New("player-ids.json does not name the current player-uuid; run bridge reset-player (the counter floor is kept)")
+			return noMarkerNotice, errors.New("player-ids.json does not name the current player-uuid; run bridge reset-player (the counter floor is kept)")
 		}
 	}
-	return nil
+	if !idPresent || !present {
+		return noMarkerNotice, nil
+	}
+	return damagedMarkerNotice(dir)
 }
 
 // EnsurePlayerUUID is the sole production minter. Floor, marker and UUID commit
 // in that order, with the retained floor merged across every UUID the box runs.
-func EnsurePlayerUUID(dir string) (string, bool, error) {
+// It logs nothing: a start's warning is its preflight's (CheckPlayerStart).
+func EnsurePlayerUUID(dir string) (string, bool, error) { return ensurePlayerUUID(dir, rand.Reader) }
+
+// ensurePlayerUUID is EnsurePlayerUUID whose adoption draws from random.
+func ensurePlayerUUID(dir string, random io.Reader) (string, bool, error) {
 	if err := completePlayerSeal(dir); err != nil {
 		return "", false, err
 	}
-	if err := CheckPlayerStart(dir); err != nil {
+	if _, err := checkPlayerStart(dir); err != nil {
 		return "", false, err
 	}
 	id, readErr := config.ReadPlayerUUID(dir)
@@ -441,8 +565,10 @@ func EnsurePlayerUUID(dir string) (string, bool, error) {
 			// No old floor bounds this identity. Skip the lower half of counter
 			// space, including reservations skipped at every restart. Restore's
 			// smaller jump needs a known bound, which adoption does not have.
+			// The draw precedes every write, so a failed draw leaves the
+			// UUID-only state as it was.
 			base := engine.Reservation{IDs: 1<<31 - uint32(restoreMargin), Tokens: 1<<31 - uint32(restoreMargin)}
-			want, err := jumpedPlayerReservation(id, base, base, (RestoreOptions{}).randomSource())
+			want, err := jumpedPlayerReservation(id, base, base, random)
 			if err != nil {
 				return "", false, err
 			}

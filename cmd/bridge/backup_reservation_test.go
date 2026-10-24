@@ -125,19 +125,25 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := runBackup(t, cfg)
-	// Model a genuine legacy snapshot, predating reservation capture.
-	var m backup.Manifest
-	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &m); err != nil {
+	// Model a genuine legacy snapshot, predating reservation capture: no
+	// floor, and none of the record this bridge's writer adds that it lists
+	// the floor beside the UUID (B524 round 10). Through a map, so the record
+	// is dropped whatever this build's Manifest declares.
+	var doc map[string]any
+	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &doc); err != nil {
 		t.Fatal(err)
 	}
-	m.Files = slices.DeleteFunc(m.Files, func(name string) bool { return name == playerReservationFile })
-	raw, err := json.Marshal(m)
+	files, _ := doc["files"].([]any)
+	doc["files"] = slices.DeleteFunc(files, func(name any) bool { return name == playerReservationFile })
+	delete(doc, "playerFloorRequired")
+	raw, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(snap, backup.ManifestFile), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+	var m backup.Manifest
 	if err := os.Remove(filepath.Join(snap, playerReservationFile)); err != nil {
 		t.Fatal(err)
 	}

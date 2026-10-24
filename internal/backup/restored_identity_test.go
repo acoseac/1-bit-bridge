@@ -48,6 +48,9 @@ func markAt(t *testing.T, dir string) engine.Reservation {
 	return r
 }
 
+// identitySnapshot is this bridge's snapshot of snapshotPlayerUUID at a
+// 10000/30000 floor. Unmarked, it is the snapshot a writer before
+// reservation capture left: the UUID alone (stripSnapshotFloor).
 func identitySnapshot(t *testing.T, marked bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -61,29 +64,21 @@ func identitySnapshot(t *testing.T, marked bool) string {
 		t.Fatal(err)
 	}
 	if !marked {
-		if err := os.Remove(filepath.Join(snap, "player-ids.json")); err != nil {
-			t.Fatal(err)
-		}
-		var m backup.Manifest
-		p := filepath.Join(snap, backup.ManifestFile)
-		if err := json.Unmarshal(readBytes(t, p), &m); err != nil {
-			t.Fatal(err)
-		}
-		m.Files = slices.DeleteFunc(m.Files, func(s string) bool { return s == "player-ids.json" })
-		b, _ := json.Marshal(m)
-		if err := os.WriteFile(p, b, 0600); err != nil {
-			t.Fatal(err)
-		}
+		stripSnapshotFloor(t, snap, true)
 	}
 	return snap
 }
 
-func fixedRestore(t *testing.T, snap, dst string, draw uint32) error {
+// fixedRestore restores snap's identity into dst with one injected draw per
+// value, in the order restore reads them: a UUID-only destination's
+// adoption first, then the jump. It fails the test when a restore that
+// succeeds leaves any of them unread.
+func fixedRestore(t *testing.T, snap, dst string, draws ...uint32) error {
 	t.Helper()
-	r := bytes.NewReader([]byte{byte(draw >> 16), byte(draw >> 8), byte(draw)})
+	r := bytes.NewReader(randomDraws(draws...))
 	err := backup.RestoreWithOptions(snap, backup.Targets{PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}, backup.RestoreOptions{Random: r})
 	if err == nil && r.Len() != 0 {
-		t.Fatal("restore did not consume exactly one three-byte draw")
+		t.Fatalf("restore left %d of its %d injected random bytes unread", r.Len(), 3*len(draws))
 	}
 	return err
 }
@@ -203,7 +198,8 @@ func TestRestoreReservationCases(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := markAt(t, dst)
-			si, st := uint32(0), uint32(0)
+			// An unmarked snapshot's bound is the adoption ceiling (B524 round 10).
+			si, st := uint32(floorlessCeiling), uint32(floorlessCeiling)
 			if tc.marked {
 				si, st = 10000, 30000
 			}

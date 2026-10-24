@@ -19,7 +19,9 @@ import (
 
 // RestoreOptions supplies the restore's warnings and randomness. Zero uses
 // crypto/rand.Reader and discards warnings. Random is for deterministic tests;
-// production callers leave it nil. It is read once per restored identity.
+// production callers leave it nil. A restored identity reads three bytes of it
+// for its jump; onto a UUID-only destination, restore first adopts the box and
+// that adoption reads three bytes before the jump's, six in all.
 type RestoreOptions struct {
 	Random io.Reader
 	Warn   func(string)
@@ -63,10 +65,10 @@ func snapshotIdentityRemedy() string {
 // decoded version decides, not the UUID alone, so a value that reads clean yet
 // is neither a v1 mark nor a matching v2 mark refuses rather than passing as a
 // zero floor. A reservation the manifest does not list is a genuine absence (a
-// snapshot from before reservations, or one an operator stripped), handled by
-// the caller's unmarked path. Live reservations never come here: every
-// decodable live floor covers the box, whatever UUID or supported version it
-// names.
+// snapshot from before reservations, or one an operator stripped), which
+// floorlessSnapshotBound bounds or refuses. Live reservations never come here:
+// every decodable live floor covers the box, whatever UUID or supported
+// version it names.
 func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reservation, bool, error) {
 	if !slices.Contains(m.Files, engine.ReservationFileName) {
 		return engine.Reservation{}, false, nil
@@ -85,11 +87,39 @@ func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reserv
 	}
 }
 
-// restorePlayerReservation preflights both counters, draws once, then makes
-// the new floor durable before the caller writes any identity file.
+// floorlessSnapshotCeiling bounds an identity whose snapshot, from a writer
+// before reservation capture, lists no floor: its counter space below 2^31,
+// the documented upgrade boundary, plus an adoption's random part below 2^24
+// when its source upgraded after the snapshot. Restore adds its jump on top.
+const floorlessSnapshotCeiling = 1<<31 + restoreMargin
+
+// floorlessSnapshotBound is the snapshot bound restorePlayerReservation takes
+// after snapshotReservationFloor, and its one treatment of a snapshot whose
+// manifest lists no floor (!marked), which cannot bound what its identity
+// handed out. This bridge lists the floor beside every UUID it captures and
+// says so in the manifest (Manifest.PlayerFloorRequired), so such a snapshot
+// of its making was stripped: restore refuses it. One from an older writer
+// takes the adoption ceiling. marked stays the caller's, so the missing-mark
+// warning still fires; a listed floor that will not read never comes here.
+func floorlessSnapshotBound(snap engine.Reservation, marked bool, m Manifest) (engine.Reservation, error) {
+	if marked {
+		return snap, nil
+	}
+	if m.PlayerFloorRequired {
+		return engine.Reservation{}, fmt.Errorf("restore: the snapshot holds %s without %s, which the bridge that wrote it lists beside every player UUID; nothing was restored; %s", PlayerUUIDFileName, engine.ReservationFileName, snapshotIdentityRemedy())
+	}
+	return engine.Reservation{IDs: uint32(floorlessSnapshotCeiling), Tokens: uint32(floorlessSnapshotCeiling)}, nil
+}
+
+// restorePlayerReservation preflights both counters, draws its jump (after a
+// UUID-only destination's adoption has drawn first), then makes the new
+// floor durable before the caller writes any identity file.
 func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
 	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
 	if err != nil {
+		return err
+	}
+	if snap, err = floorlessSnapshotBound(snap, marked, m); err != nil {
 		return err
 	}
 	dataDir := filepath.Dir(target)
@@ -100,8 +130,9 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	}
 	// A UUID-only destination has unknown main-era history. Establish the
 	// same durable adoption floor as start before computing max(snapshot, live).
-	// Restore's caller already holds server.lock.
-	if err := AdoptPlayerState(dataDir); err != nil {
+	// Restore's caller already holds server.lock. The adoption draws from
+	// restore's own source, before the jump does.
+	if err := adoptPlayerState(dataDir, opts.randomSource()); err != nil {
 		return fmt.Errorf("restore: adopt destination player: %w; nothing was restored", err)
 	}
 	live, present, err := readPlayerFloor(dataDir)

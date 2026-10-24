@@ -1,6 +1,16 @@
 package backup
 
-import "context"
+import (
+	"context"
+	"io"
+)
+
+// AdoptPlayerStateWith is AdoptPlayerState drawing the adoption's random
+// part from random, as restore's adoption does: a source box adopting at a
+// chosen draw (TestLegacyCeilingCoversASourceThatAdoptedAfterItsSnapshot).
+func AdoptPlayerStateWith(dir string, random io.Reader) error {
+	return adoptPlayerState(dir, random)
+}
 
 // SnapshotBusyPatience is snapshotBusyPatience, for the external tests: a
 // snapshot that waited a lock out in SQLite's busy handler cannot answer

@@ -129,6 +129,13 @@ type Manifest struct {
 	ProtocolVersion int       `json:"protocolVersion"`
 	CreatedAt       time.Time `json:"createdAt"`
 	Files           []string  `json:"files"`
+	// PlayerFloorRequired records a writer that lists player-ids.json beside
+	// every player-uuid it captures, as this bridge's Snapshot does: restore
+	// refuses such a snapshot's UUID without its floor, which only stripping
+	// leaves. A writer before reservation capture recorded nothing, and
+	// BridgeVersion cannot tell the two apart (it is the build's stamped
+	// version, the same 0.0.1 for every build from source).
+	PlayerFloorRequired bool `json:"playerFloorRequired,omitempty"`
 }
 
 // Sources points at the live files that should be captured.
@@ -177,7 +184,13 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
 			// Local repair is not part of a snapshot. The captured UUID/floor
 			// pairing checks below still decide whether its identity is safe.
-			logging.Component("backup").Warn("player seal completion deferred", "reason", err.Error())
+			// Only a busy lock defers the repair; any other failure recurs at
+			// the next serve boot or start, and is logged as the failure it is.
+			if errors.Is(err, errSealCompletionBusy) {
+				logging.Component("backup").Warn("player seal completion deferred", "reason", err.Error())
+			} else {
+				logging.Component("backup").Warn("player seal completion failed", "reason", err.Error())
+			}
 		}
 	}
 	if src.DataDir == "" {
@@ -277,7 +290,11 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 				} else if statErr != nil {
 					return "", fmt.Errorf("backup: check player-uuid: %w", statErr)
 				}
-				return "", fmt.Errorf("backup: player floor is missing; %s", playerResetAdvice(false))
+				advice := playerResetAdvice(false)
+				if marked, err := playerEntry(filepath.Dir(src.PlayerUUID), playerInitialized); err != nil || marked {
+					advice = keepInitializedMarker + "; " + advice
+				}
+				return "", fmt.Errorf("backup: player floor is missing; %s", advice)
 			}
 		}
 		if err != nil {
@@ -308,12 +325,15 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		}
 	}
 
+	// Every captured player UUID above travels with its floor, or the
+	// snapshot was refused: the manifest says so to restore.
 	m := Manifest{
-		SchemaVersion:   SchemaVersion,
-		BridgeVersion:   version.ServerVersion,
-		ProtocolVersion: version.ProtocolVersion,
-		CreatedAt:       time.Now().UTC(),
-		Files:           captured,
+		SchemaVersion:       SchemaVersion,
+		BridgeVersion:       version.ServerVersion,
+		ProtocolVersion:     version.ProtocolVersion,
+		CreatedAt:           time.Now().UTC(),
+		Files:               captured,
+		PlayerFloorRequired: true,
 	}
 	if err := writeManifest(filepath.Join(dst, ManifestFile), m); err != nil {
 		return "", fmt.Errorf("write snapshot manifest: %w", err)
@@ -348,6 +368,9 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // A restored identity first gets a merged, durable reservation, past both
 // the snapshot's and the live counters by 2^24 plus one random 24-bit draw.
 // The snapshot reservation is only an input, never copied to the live path.
+// A snapshot that lists no floor counts as 2^31 + 2^24, the adoption
+// ceiling, when an older writer made it, and is refused when this bridge
+// did (floorlessSnapshotBound).
 func Restore(snapshotDir string, dst Targets) error {
 	return RestoreWithOptions(snapshotDir, dst, RestoreOptions{})
 }
