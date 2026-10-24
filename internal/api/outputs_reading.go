@@ -185,15 +185,15 @@ type OutputTrack struct {
 }
 
 // readingState is the reading's cache and its flight, under
-// localOutputs.mu. proc, conf, alsa and row mark a step that reads files
-// (the /proc read, mpd.conf, the ALSA configuration, the look for the
-// song's row) still running past an earlier reading's deadline: a reading
+// localOutputs.mu. proc, conf, hint, alsa and row mark a step that reads files
+// (the /proc read, mpd.conf, command-line hints, the ALSA configuration,
+// the look for the song's row) still running past an earlier reading's deadline: a reading
 // does not start a second of one while it runs, so a /proc file or a mount
 // that hangs holds one goroutine, not one per call (boundedStep).
 type readingState struct {
-	snap                  *readingSnap
-	flight                *readingFlight
-	proc, conf, alsa, row bool
+	snap                        *readingSnap
+	flight                      *readingFlight
+	proc, conf, hint, alsa, row bool
 	// opens is what the last reading found of each output's PCM device,
 	// kept for the next (watchOpens).
 	opens map[pickID]openRecord
@@ -205,10 +205,10 @@ type readingFlight struct {
 }
 
 // readingLimits are the reading's deadlines: the whole reading, the dial,
-// each MPD command, the /proc read, the mpd.conf read, the ALSA
-// configuration's, and the look for the song's row.
+// each MPD command, the /proc read, the mpd.conf read, the command-line
+// hints, the ALSA configuration, and the look for the song's row.
 type readingLimits struct {
-	build, dial, command, proc, conf, alsa, file time.Duration
+	build, dial, command, proc, conf, hint, alsa, file time.Duration
 }
 
 // openWatch is the most time between two readings across which the bridge
@@ -223,6 +223,7 @@ var defaultReadingLimits = readingLimits{
 	command: 750 * time.Millisecond,
 	proc:    500 * time.Millisecond,
 	conf:    500 * time.Millisecond,
+	hint:    500 * time.Millisecond,
 	alsa:    500 * time.Millisecond,
 	file:    500 * time.Millisecond,
 }
@@ -840,32 +841,44 @@ func logOutputPanic(step string, r any) {
 	logger.Error("local outputs: a step panicked", attrs...)
 }
 
-// readConf reads the configured mpd.conf and its includes under the conf
-// deadline, then collects informational command-line hints. A failed or late
-// step publishes neither config nor hints and gives no config warning.
+// readConf publishes the configured file under its own deadline before
+// collecting optional hints. A stalled hint cannot erase a successful read.
 func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Options) {
 	type result struct {
-		file  conf.File
-		read  bool
-		hints map[pickID]*ReadingMPDConfigHint
+		file conf.File
+		read bool
 	}
+	// Inspect's display path may be symlink-resolved. Reopen the configured
+	// name so relative includes use the same directory as the probe.
+	path := opt.Conf
+	if path == "" {
+		path = s.rep.ConfPath
+	}
+	root := confRoot(opt.Root, path)
 	r, late, failed := boundedStep(o, &o.reading.conf, ctx, o.limits.conf, "the mpd.conf read", func() result {
-		r := result{hints: map[pickID]*ReadingMPDConfigHint{}}
-		if path := s.rep.ConfPath; path != "" {
-			f, err := o.confFile(confRoot(opt.Root, path), path, path)
+		r := result{}
+		if path != "" {
+			f, err := o.confFile(root, path, path)
 			if err == nil {
 				r.file, r.read = f, true
 			}
-		}
-		for i := range s.picks {
-			r.hints[pickIDOf(&s.picks[i])] = o.processConfigHint(s, &s.picks[i])
 		}
 		return r
 	})
 	if late || failed {
 		return
 	}
-	s.conf, s.confRead, s.cardHints = r.file, r.read, r.hints
+	s.conf, s.confRead = r.file, r.read
+	hints, late, failed := boundedStep(o, &o.reading.hint, ctx, o.limits.hint, "the MPD config hint", func() map[pickID]*ReadingMPDConfigHint {
+		hints := map[pickID]*ReadingMPDConfigHint{}
+		for i := range s.picks {
+			hints[pickIDOf(&s.picks[i])] = o.processConfigHint(s, &s.picks[i], root, path)
+		}
+		return hints
+	})
+	if !late && !failed {
+		s.cardHints = hints
+	}
 }
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
@@ -1333,20 +1346,15 @@ func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	if haveDoP {
 		out.DoP, _ = signalpath.ParseBool(liveDoP)
 	}
-	if !haveDoP && s.confRead {
-		for _, block := range s.conf.Outputs {
-			if block.Name == h.Name {
-				out.DoP, _ = signalpath.ParseBool(block.DOP)
-				break
-			}
-		}
-	}
 	if !s.confRead {
 		return out
 	}
 	block, ok := namedBlock(s, h.Name)
 	if !ok {
 		return out
+	}
+	if !haveDoP {
+		out.DoP, _ = signalpath.ParseBool(block.DOP)
 	}
 	out.Configured = true
 	out.MixerType = signalpath.EffectiveMixerType(block.MixerType, block.MixerEnabled, s.conf.MixerType)

@@ -181,7 +181,7 @@ func TestReadingHintOmissionEvidence(t *testing.T) {
 				case "unreadable configured":
 					o.confFile = func(string, string, string) (conf.File, error) { return conf.File{}, fs.ErrPermission }
 				case "hint step late":
-					o.limits.conf = time.Millisecond
+					o.limits.hint = time.Millisecond
 					o.cmdline = func(string, string, int64) ([]byte, error) {
 						defer close(finished)
 						<-released
@@ -207,7 +207,7 @@ func TestReadingHintOmissionEvidence(t *testing.T) {
 				defer tick.Stop()
 				for {
 					local.mu.Lock()
-					busy := local.reading.conf
+					busy := local.reading.conf || local.reading.hint
 					local.mu.Unlock()
 					if !busy {
 						break
@@ -218,7 +218,11 @@ func TestReadingHintOmissionEvidence(t *testing.T) {
 					case <-tick.C:
 					}
 				}
-				if got.MPD.Config != nil {
+				if kind == "hint step late" {
+					if got.MPD.Config == nil {
+						t.Error("late hint erased configured config")
+					}
+				} else if got.MPD.Config != nil {
 					t.Error("late config step published partial config")
 				}
 			}

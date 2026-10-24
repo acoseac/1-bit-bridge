@@ -374,6 +374,51 @@ func staysInRoot(root, path string) error {
 	return nil
 }
 
+// StatHost returns the physical logical path and identity of host under root,
+// using the conf reader's symlink resolution and confinement. It reads no file
+// contents. The final stat stays below the opened root even if a link changes.
+func StatHost(root, host string) (string, os.FileInfo, error) {
+	if root == "" {
+		root = string(filepath.Separator)
+	}
+	if host == "" {
+		return "", nil, errNotFound
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", nil, err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", nil, err
+	}
+	host, err = absoluteNamed(host)
+	if err != nil {
+		return "", nil, err
+	}
+	host, err = filepath.EvalSymlinks(host)
+	if err != nil {
+		return "", nil, err
+	}
+	if !lexicalInside(root, host) {
+		return "", nil, errOutside
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	rel, err := filepath.Rel(root, host)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := dir.Stat(rel)
+	if err != nil {
+		return "", nil, err
+	}
+	return logicalFromHost(root, host), info, nil
+}
+
 // Exists reports whether logical (an absolute path like "/volumio") is
 // inside root after symlinks are followed. A link that leaves root does
 // not count.

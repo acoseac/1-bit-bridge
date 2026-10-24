@@ -962,7 +962,7 @@ func (p *prober) include(line int, name string, optional bool) {
 	}
 	p.load.stack[key] = struct{}{}
 	p.load.depth++
-	child := parseFile(text, logicalFromHost(p.load.root, host), namedDirectory(host), p.load)
+	child := parseFile(text, logicalFromHost(p.load.root, key), namedDirectory(host), p.load)
 	p.load.depth--
 	delete(p.load.stack, key)
 	mergeFile(p.file, child)

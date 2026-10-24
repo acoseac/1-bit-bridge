@@ -15,8 +15,8 @@ import (
 
 // processConfigHint inspects argv only for the card being described. Owner.PID is the
 // Tgid resolved by alsa.Reader, not status's owner_pid (Owner.TID).
-// Every proc/config operation runs inside readConf's bounded step.
-func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick) *ReadingMPDConfigHint {
+// Every proc/identity operation runs inside the hint's own bounded step.
+func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick, configuredRoot, configuredHost string) *ReadingMPDConfigHint {
 	if s.procCode != "" || s.mpdCode != "" || s.cards.ProcRoot == "" {
 		return nil
 	}
@@ -65,19 +65,25 @@ func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick) *Reading
 	// Compare identities in the bridge's view only. Never read the operand's
 	// contents: argv and matching roots cannot prove what MPD loaded.
 	root := alsa.ConfigRoot(proc)
-	if !conf.Exists(root, logical) {
+	if processRelativeConfig(logical) {
 		return nil
 	}
 	host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
-	argument, err := os.Stat(host)
-	configured, confErr := os.Stat(s.rep.ConfPath)
-	if err != nil || confErr != nil || fsutil.NotAFile(argument.Mode()) != "" || fsutil.NotAFile(configured.Mode()) != "" {
+	physical, argument, err := conf.StatHost(root, host)
+	_, configured, confErr := conf.StatHost(configuredRoot, configuredHost)
+	if err != nil || confErr != nil || processRelativeConfig(physical) || fsutil.NotAFile(argument.Mode()) != "" || fsutil.NotAFile(configured.Mode()) != "" {
 		return nil
 	}
 	if os.SameFile(argument, configured) {
 		return &ReadingMPDConfigHint{Argument: "same"}
 	}
 	return &ReadingMPDConfigHint{Argument: "different", Path: logical}
+}
+
+// processRelativeConfig names process-local views that the bridge cannot
+// interpret as MPD's operand, even when their file identities are available.
+func processRelativeConfig(p string) bool {
+	return p == "/proc" || strings.HasPrefix(p, "/proc/") || p == "/dev/fd" || strings.HasPrefix(p, "/dev/fd/") || p == "/dev/stdin"
 }
 
 func processStart(proc, prefix string) (string, bool) {
