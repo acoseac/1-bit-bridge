@@ -168,12 +168,6 @@ func TestServeSharesDiscoveryAcrossItsEligibleDevices(t *testing.T) {
 			wantsSurface := tc.source && !tc.disabled && !tc.refused && !tc.failed
 			if wantsSurface {
 				discoverySurface(t, started)
-			} else {
-				select {
-				case <-started:
-					t.Fatal("ineligible surface started")
-				default:
-				}
 			}
 			sourceCount, mediaCount := 0, 0
 			var sourceUDN, mediaUDN string
@@ -216,6 +210,19 @@ func TestServeSharesDiscoveryAcrossItsEligibleDevices(t *testing.T) {
 				t.Fatalf("memberships %d want %d", listeners, wantListeners)
 			}
 			stopDiscoveryServe(t, ps)
+			if !wantsSurface {
+				select {
+				case <-started:
+					t.Error("ineligible surface started before serve settled")
+				default:
+				}
+				if len(box.Listens()) != 0 {
+					t.Errorf("ineligible surface bound HTTP: %v", box.Listens())
+				}
+			} else if len(box.Listens()) == 0 {
+				t.Error("eligible surface start was not observed")
+			}
+
 			if a, b, c := n.OpenSockets(); a+b+c != 0 {
 				t.Fatalf("serve left SSDP sockets %d/%d/%d", a, b, c)
 			}
@@ -236,9 +243,12 @@ func TestServeDiscoveryRestartsWithStableIdentity(t *testing.T) {
 		n := ssdptest.New()
 		ps, ch := bootDiscoveryServe(t, root, false, goBarPlayer+"    openhome: true\n    openhomePort: 0\n", "linux", box, n, nil)
 		discoverySurface(t, ch)
-		for _, w := range n.Snapshot() {
+		alive := awaitPackets(t, n, "NTS", "ssdp:alive", 7)
+		var generationIdentity string
+		for _, w := range alive {
 			if discoveryPacketHeader(w.Pkt, "NT") == openhome.DeviceType {
 				udn := strings.Split(discoveryPacketHeader(w.Pkt, "USN"), "::")[0]
+				generationIdentity = udn
 				if i == 0 {
 					identity = udn
 				} else if udn != identity {
@@ -246,11 +256,23 @@ func TestServeDiscoveryRestartsWithStableIdentity(t *testing.T) {
 				}
 			}
 		}
+		if generationIdentity == "" || generationIdentity == "uuid:" {
+			t.Fatalf("generation %d advertised no Source identity", i)
+		}
+
 		stopDiscoveryServe(t, ps)
 		byebye := 0
 		for _, w := range n.Snapshot() {
 			if discoveryPacketHeader(w.Pkt, "NTS") == "ssdp:byebye" {
 				byebye++
+				nt := discoveryPacketHeader(w.Pkt, "NT")
+				want := identity + "::" + nt
+				if nt == identity {
+					want = identity
+				}
+				if got := discoveryPacketHeader(w.Pkt, "USN"); got != want {
+					t.Errorf("generation %d byebye %s USN %q want %q", i, nt, got, want)
+				}
 			}
 		}
 		if byebye != 7 {
@@ -333,22 +355,140 @@ func TestServeWithdrawsSourceBeforeStoppingItsEngine(t *testing.T) {
 }
 
 func TestServeDiscoverySharesOneShortShutdownDeadline(t *testing.T) {
+	t.Run("blocked-writes", func(t *testing.T) {
+		needsDirectorySync(t)
+		box := lantest.NewMemory(t)
+		box.Set([]lan.Address{lantest.Address("192.168.1.20/24", "eth0", 2)})
+		n := ssdptest.New()
+		ps, ch := bootDiscoveryServe(t, t.TempDir(), true, goBarPlayer+"    openhome: true\n    openhomePort: 0\n", "linux", box, n, func(o *serveOpts) { o.ssdpStopTimeout = 50 * time.Millisecond })
+		discoverySurface(t, ch)
+		n.Configure(func(n *ssdptest.Network) { n.BlockSends["eth0"] = true })
+		began := time.Now()
+		stopDiscoveryServe(t, ps)
+		if elapsed := time.Since(began); elapsed > 500*time.Millisecond {
+			t.Fatalf("shutdown reset its shared 50ms budget: %s", elapsed)
+		}
+		if a, b, c := n.OpenSockets(); a+b+c != 0 {
+			t.Fatalf("expired retirement retained %d/%d/%d sockets", a, b, c)
+		}
+		if len(box.Open()) != 0 {
+			t.Fatal("expired retirement retained HTTP")
+		}
+	})
+	t.Run("same-absolute-deadline", func(t *testing.T) {
+		needsDirectorySync(t)
+		box := lantest.NewMemory(t)
+		box.Set([]lan.Address{lantest.Address("192.168.1.20/24", "eth0", 2)})
+		n := ssdptest.New()
+		var mu sync.Mutex
+		type write struct {
+			packet   string
+			deadline time.Time
+		}
+		var writes []write
+		n.OnSenderWrite = func(s *ssdptest.Sender, pkt string) {
+			if discoveryPacketHeader(pkt, "NTS") == "ssdp:byebye" {
+				mu.Lock()
+				writes = append(writes, write{pkt, s.WriteDeadline()})
+				mu.Unlock()
+			}
+		}
+		ps, ch := bootDiscoveryServe(t, t.TempDir(), true, goBarPlayer+"    openhome: true\n    openhomePort: 0\n", "linux", box, n, func(o *serveOpts) { o.ssdpStopTimeout = time.Second })
+		discoverySurface(t, ch)
+		awaitPackets(t, n, "NTS", "ssdp:alive", 7+len(dlna.NotifyTargetsFor("uuid:any")))
+		stopDiscoveryServe(t, ps)
+		mu.Lock()
+		defer mu.Unlock()
+		if len(writes) != 7+len(dlna.NotifyTargetsFor("uuid:any")) {
+			t.Fatalf("byebye writes=%d", len(writes))
+		}
+		var source, media bool
+		deadline := writes[0].deadline
+		if deadline.IsZero() {
+			t.Fatal("no write deadline")
+		}
+		for _, w := range writes {
+			if !w.deadline.Equal(deadline) {
+				t.Errorf("byebye deadline %s differs from shared %s", w.deadline, deadline)
+			}
+			nt := discoveryPacketHeader(w.packet, "NT")
+			source = source || nt == openhome.DeviceType
+			media = media || strings.Contains(nt, "device:MediaServer:")
+		}
+		if !source || !media {
+			t.Fatalf("byebye owners Source/MediaServer=%v/%v", source, media)
+		}
+	})
+}
+
+// discoveryClosingListener records the real DLNA HTTP listener's close.
+type discoveryClosingListener struct {
+	net.Listener
+	closed func()
+}
+
+func (l discoveryClosingListener) Close() error {
+	err := l.Listener.Close()
+	l.closed()
+	return err
+}
+
+func TestServeStopsDLNABeforeItsUPnPResolver(t *testing.T) {
 	needsDirectorySync(t)
 	box := lantest.NewMemory(t)
 	box.Set([]lan.Address{lantest.Address("192.168.1.20/24", "eth0", 2)})
 	n := ssdptest.New()
-	ps, ch := bootDiscoveryServe(t, t.TempDir(), true, goBarPlayer+"    openhome: true\n    openhomePort: 0\n", "linux", box, n, func(o *serveOpts) { o.ssdpStopTimeout = 50 * time.Millisecond })
+	var mu sync.Mutex
+	var order []string
+	record := func(event string) { mu.Lock(); defer mu.Unlock(); order = append(order, event) }
+	n.OnSenderWrite = func(_ *ssdptest.Sender, pkt string) {
+		if discoveryPacketHeader(pkt, "NTS") == "ssdp:byebye" && strings.Contains(discoveryPacketHeader(pkt, "NT"), "device:MediaServer:") {
+			record("MediaServer byebye")
+		}
+	}
+	ps, ch := bootDiscoveryServe(t, t.TempDir(), true, goBarPlayer+"    openhome: true\n    openhomePort: 0\n", "linux", box, n, func(o *serveOpts) {
+		o.dlnaNetwork.Listener = discoveryClosingListener{o.dlnaNetwork.Listener, func() { record("DLNA HTTP close") }}
+		o.upnpStopping = func() { record("UPnP stop") }
+	})
 	discoverySurface(t, ch)
-	n.Configure(func(n *ssdptest.Network) { n.BlockSends["eth0"] = true })
-	began := time.Now()
 	stopDiscoveryServe(t, ps)
-	if elapsed := time.Since(began); elapsed > 500*time.Millisecond {
-		t.Fatalf("shutdown reset its shared 50ms budget: %s", elapsed)
+	mu.Lock()
+	defer mu.Unlock()
+	index := func(event string) int {
+		for i, got := range order {
+			if got == event {
+				return i
+			}
+		}
+		t.Fatalf("missing %s in %v", event, order)
+		return -1
 	}
-	if a, b, c := n.OpenSockets(); a+b+c != 0 {
-		t.Fatalf("expired retirement retained %d/%d/%d sockets", a, b, c)
+	bye, http, upstream := index("MediaServer byebye"), index("DLNA HTTP close"), index("UPnP stop")
+	if bye >= http || http >= upstream {
+		t.Fatalf("want MediaServer byebye < DLNA HTTP close < UPnP stop, got %v", order)
 	}
-	if len(box.Open()) != 0 {
-		t.Fatal("expired retirement retained HTTP")
+}
+
+// awaitPackets waits for actual sends; a surface reconciliation is not a
+// barrier for the MediaServer's asynchronous announcement.
+func awaitPackets(t *testing.T, n *ssdptest.Network, key, value string, count int) []ssdptest.Write {
+	t.Helper()
+	give := time.After(5 * time.Second)
+	for {
+		changed := n.Changed()
+		var out []ssdptest.Write
+		for _, w := range n.Snapshot() {
+			if discoveryPacketHeader(w.Pkt, key) == value {
+				out = append(out, w)
+			}
+		}
+		if len(out) >= count {
+			return out
+		}
+		select {
+		case <-changed:
+		case <-give:
+			t.Fatalf("wanted %d %s=%s packets, got %d", count, key, value, len(out))
+		}
 	}
 }

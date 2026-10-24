@@ -52,8 +52,9 @@ view even when the handle needs no Update. A failed listing keeps the last
 good view. Removed endpoints leave admission before withdrawal; their HTTP
 listeners stay bound until withdrawal completes. New listeners enter Serve
 before Register/Update. A prefix or interface change therefore has two
-phases, which also permits rebinding the same address. HTTP Serve exit
-triggers reconciliation; intentional close does not schedule an extra scan.
+phases, which also permits rebinding the same address. Unexpected HTTP Serve exit clears the immutable admission view and cancels
+the current registration lifetime immediately, before queuing reconciliation;
+intentional close keeps its existing path.
 
 Empty is Withdraw and a cleared handle, never Update after Withdraw. Partial
 and total SSDP failures inspect Active/Failed and retry on the next listing,
@@ -89,3 +90,25 @@ advertising suppresses MPD probing on that host. Keep the opt-in false. Owner
 checks must measure Linux restrictions/capabilities and the actual 1-bit row,
 MPD coexistence and restart removal. SNAT can still appear on-link, and
 macOS IP_BOUND_IF scopes sends rather than arrival.
+
+### Round 2: unexpected HTTP exit
+
+An exit could leave a closed port advertising while the listing loop waited
+for Register/Update. The discovery worker now owns a cancellable lifetime per
+registration, separate from the surface lifetime. HTTP exit clears admission
+and cancels that lifetime under the same lock used to publish the view; it
+performs no SSDP I/O there. The next transaction withdraws the cancelled
+handle, checks the queued listeners against the current bound set and creates
+a fresh registration. This pauses the whole Source registration, including
+survivors, until that transaction; MediaServer is unaffected. Normal retiring
+and stop paths stay unchanged. A write already handed to the kernel cannot
+be recalled.
+
+`TestSourceHTTPExitCancelsPendingAdvertisement/Register` holds initial
+registration after HTTP entered Serve; `/Update` begins with an advertised
+Source and holds an update adding another interface. Both close the HTTP
+listeners and join their Serve goroutines before releasing SSDP, require no
+subsequent alive for the dead listeners, then prove a later bind advertises
+again. The initial Register regression failed before the fix; removing the
+invalidation fails both subtests. These are in-memory network tests, not a
+claim about real kernel packet queues.

@@ -185,14 +185,21 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		listeners:     map[ssdpListenerKey]*ssdpListener{},
 		senders:       map[*ssdpOwnedSender]struct{}{},
 	}
-	if opts.Network != nil {
-		s.transport = injectedSSDPNetwork{*opts.Network}
-		s.replyDelay = opts.Network.Delay
-		if opts.Network.IntervalFloor > 0 {
-			s.intervalFloor = opts.Network.IntervalFloor
+	s.configureNetwork(opts.Network)
+	return s
+}
+
+// configureNetwork installs optional overrides without clearing defaults.
+func (s *SSDPSubsystem) configureNetwork(network *SSDPNetwork) {
+	if network != nil {
+		s.transport = injectedSSDPNetwork{*network}
+		if network.Delay != nil {
+			s.replyDelay = network.Delay
+		}
+		if network.IntervalFloor > 0 {
+			s.intervalFloor = network.IntervalFloor
 		}
 	}
-	return s
 }
 
 // withdrawDeadline is the deadline of a withdrawal entered now: the earlier of

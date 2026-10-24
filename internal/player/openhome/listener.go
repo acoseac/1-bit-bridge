@@ -497,6 +497,9 @@ func (s *Surface) bind(a lan.Address) {
 		_ = srv.Serve(admit)
 		k.ended.Store(true)
 		if !k.retiring.Load() && s.ctx.Err() == nil {
+			if s.discovery != nil {
+				s.discovery.invalidate()
+			}
 			s.Rescan()
 		}
 	}()

@@ -1983,7 +1983,11 @@ Its initial incarnation zero shares a listener when the interface overlaps.
 The boot snapshot still gates the surface; live player-disable only withholds
 output. Failed/refused/disabled players publish no Source.
 
-One deferred lifecycle closure refuses Source first, withdraws the MediaServer
+The full lifecycle closure is deferred after the UPnP upstream stop, so it
+runs first under LIFO: MediaServer withdrawal and HTTP stop must precede the
+resolver teardown its routed file handler depends on. A player-only early
+fallback refuses/stops the player if that closure was never registered.
+The full closure refuses Source first, withdraws the MediaServer
 and Source, then calls shared Close, all with the same absolute five-second
 SSDP deadline. Cancellation of serve's parent ends normal sends but leaves
 byebye possible. HTTP receives separate deadlines afterward; the player's
@@ -2000,3 +2004,28 @@ no audio tree read or PCM open is needed. Tests count memberships and packets
 for off/Source-only/MediaServer-only/both/disjoint/failed/refused configurations,
 strict capability failure beside MediaServer, repeat serve generations with
 stable identity, and park withdrawal to observe both 503 and a live engine.
+
+### Round 2: teardown order and non-vacuous observers
+
+`TestServeStopsDLNABeforeItsUPnPResolver` records the MediaServer's actual
+byebye write, its HTTP listener's close, and the upstream stop boundary through
+an instance seam. Before the fix it recorded UPnP first. Moving the full
+teardown to DLNA's slot makes the order byebye, HTTP close, UPnP stop, while
+retaining refusal, both withdrawals, shared Close, DLNA HTTP stop and player
+stop inside the closure. The early fallback runs only if the full closure did
+not run.
+
+The 50 ms blocked-write case in
+`TestServeDiscoverySharesOneShortShutdownDeadline` checks bounded release,
+not equality of budgets: four fresh 50 ms budgets fit under its 500 ms bar.
+Its `same-absolute-deadline` case now records SetWriteDeadline's value at
+every byebye write, requires both Source and MediaServer, and compares those
+absolute deadlines. Fresh per-owner contexts fail that assertion.
+`TestServeDiscoveryRestartsWithStableIdentity` waits for alive packets,
+requires a nonempty Source identity in each generation and checks every
+byebye USN. Replacing Source's NT or corrupting byebye USNs fails it.
+`TestServeSharesDiscoveryAcrossItsEligibleDevices` checks the start channel
+and bind history after serve stops; eligible cases prove a real bind is seen.
+A control injects real late surfaces through the upstream-stop seam for the
+disabled/refused/failed cases: all three fail the settled-state assertions,
+where the old immediate nonblocking check observed nothing.

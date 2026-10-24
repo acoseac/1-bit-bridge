@@ -749,3 +749,81 @@ func TestSourceInterfaceReplacementKeepsOnlyTheCurrentIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceHTTPExitCancelsPendingAdvertisement(t *testing.T) {
+	for _, phase := range []string{"Register", "Update"} {
+		t.Run(phase, func(t *testing.T) {
+			box := lantest.NewMemory(t)
+			box.Set([]lan.Address{eth0})
+			n := ssdptest.New()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unpark := func() { once.Do(func() { close(release) }) }
+			other := lantest.Address("10.0.0.20/24", "eth1", 3)
+			n.OnListen = func(iface string) {
+				if phase == "Register" || iface == "eth1" {
+					close(entered)
+					<-release
+				}
+			}
+			sub := dlna.NewSSDPSubsystem(context.Background(), dlna.SSDPSubsystemOptions{Network: n.Transport()})
+			t.Cleanup(func() { _ = sub.Close(context.Background()) })
+			bound := make(chan net.Listener, 3)
+			s, err := Start(Config{Device: Device{UUID: testUUID}, SSDP: sub, Addresses: box.Addresses,
+				Limits: Limits{Rescan: time.Hour},
+				Listen: func(ctx context.Context, at netip.AddrPort, a lan.Address) (net.Listener, string, error) {
+					ln, r, err := box.Listen(ctx, at, a)
+					if err == nil {
+						bound <- ln
+					}
+					return ln, r, err
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Stop() })
+			t.Cleanup(unpark)
+			before, listeners := 0, 1
+			if phase == "Update" {
+				awaitStatus(t, s, 5*time.Second, "live registration", func(st Status) bool { return st.Reconciles > 0 })
+				awaitPackets(t, n, "NTS", "ssdp:alive", 7)
+				before, listeners = len(n.Snapshot()), 2
+				box.Set([]lan.Address{eth0, other})
+				s.Rescan()
+			}
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("discovery did not enter held phase")
+			}
+			box.FailListen(eth0.Prefix.Addr(), errors.New("listener remains down"))
+			box.FailListen(other.Prefix.Addr(), errors.New("listener remains down"))
+			for i := 0; i < listeners; i++ {
+				_ = (<-bound).Close()
+			}
+			// The loop is waiting for Register/Update. Join every HTTP Serve
+			// exit before releasing that operation, so reconcile cannot hide
+			// the stale endpoint or race the assertion.
+			s.serving.Wait()
+			unpark()
+			awaitStatus(t, s, 5*time.Second, "HTTP exits reconciled", func(st Status) bool { return st.Reconciles >= listeners+1 })
+			for _, w := range n.Snapshot()[before:] {
+				if packetHeader(w.Pkt, "NTS") == "ssdp:alive" {
+					t.Errorf("advertised closed HTTP listener after Serve exited: %s", packetHeader(w.Pkt, "LOCATION"))
+				}
+			}
+			// A cancelled registration must not strand the surviving surface:
+			// a later successful bind gets a fresh handle and bound port.
+			n.Configure(func(n *ssdptest.Network) { n.OnListen = nil })
+			box.Set([]lan.Address{eth0})
+			box.FailListen(eth0.Prefix.Addr(), nil)
+			aliveBefore := len(packets(n, "NTS", "ssdp:alive"))
+			discoveryScan(t, s)
+			awaitPackets(t, n, "NTS", "ssdp:alive", aliveBefore+7)
+			if len(s.Status().Listening) != 1 {
+				t.Fatal("HTTP did not recover")
+			}
+		})
+	}
+}

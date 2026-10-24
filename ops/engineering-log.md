@@ -59188,3 +59188,63 @@ opt-out removal and unaffected library use. SNAT can still appear on-link;
 macOS IP_BOUND_IF scopes sends rather than arrival. Default-on cannot be
 reconsidered before 5a4, implemented actions/URI confinement/restored-ID
 policy, successful owner playback and accepted MPD coexistence.
+
+
+### Round 2: shutdown ordering, HTTP exit and stronger observations
+
+The full discovery/DLNA teardown was deferred before UPnP upstream's stop,
+so LIFO stopped the resolver while MediaServer was still advertised and its
+HTTP listener still served routed tracks. It now occupies DLNA's later slot;
+an early player-only refusal/stop covers a return before that defer exists.
+The closure preserves refuse, both withdraws, shared Close, DLNA HTTP stop,
+player stop and one absolute SSDP deadline.
+`TestServeStopsDLNABeforeItsUPnPResolver` failed first with UPnP stop before
+MediaServer byebye and HTTP close, and now observes the required order.
+
+An unexpected HTTP exit previously only queued Rescan while the listing loop
+could be awaiting discovery. It now clears admission and cancels the current
+registration lifetime immediately, without waiting on SSDP I/O. Reconcile
+withdraws that handle and registers the still-bound set under a fresh lifetime,
+rechecking stale queued snapshots. The whole Source registration pauses until
+then; normal retirement/stop and MediaServer's lifetime are unchanged.
+`TestSourceHTTPExitCancelsPendingAdvertisement` parks Register and Update,
+closes and joins HTTP, releases discovery and requires no alive for the dead
+listeners; a later bind must advertise again. Register was red before the
+fix; removing invalidation makes both cases red.
+
+Three observations are strengthened: all byebye write deadlines from both
+owners must be identical (the old 500 ms elapsed bar did not detect sequential
+50 ms budgets); each serve generation must actually announce a Source
+identity, and every byebye USN must match it; an ineligible player's start
+channel and bind history must remain empty after serve has stopped. Real
+late surface starts injected for disabled/refused/failed players fail all
+three settled-state cases, while normal eligible cases see their starts.
+
+The optional Network.Delay override now has a non-nil guard. Its regression
+seeds a distinct default through the constructor's configuration helper so
+removing the guard fails; production's nil/random default is unchanged, so
+this is hardening, not a reproduced live defect. MediaServer's nil inventory
+fallbacks are unchanged.
+
+Seven independent controls fail behavioral assertions, including separate
+missing-Source and corrupted-byebye controls; the external round-2 manifest
+lists only the exact failing leaf test names. Controls run in an isolated
+snapshot and never restore over the uncommitted worktree. The lifecycle
+regressions and the seeded-default regression were run red before their
+fixes; the three test-strengthening findings use controlled regressions,
+since their production behavior already obeyed the rules.
+
+Round-2 validation on Go 1.27.2 offline: formatting, native/Linux/Windows
+vet, the six-target build and docs-check pass. All six new/changed test
+functions pass `-race -count 20`; the existing Source and SSDP fake-network
+regressions, shared-subsystem and player stop-order guards pass. Bounded
+FuzzSSDPDispatch completed 263,348 executions in 20 seconds without failure.
+The requested full race run was attempted: binding, decode, engine, format,
+hotplug, lan, library and playback pass. Existing host-socket tests in
+cmd/bridge, dlna, dlna/discovery and openhome fail at sandbox-denied binds;
+httptest or the old stop test's cleanup then aborts those binaries. Later
+tests remain unrun, so no clean full-suite claim is made. The separate B520
+host-address check skips at its denied bind. Exact failed names, commands,
+logs and verified controls are in the external round-2 report. Linux/Windows
+runtime and the manual owner hardware/1-bit gate remain unrun. The DLNA goldens
+and server.go are unchanged; the socket-free MediaServer golden test passes.

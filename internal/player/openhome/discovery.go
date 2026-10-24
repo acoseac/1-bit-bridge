@@ -66,6 +66,9 @@ type sourceDiscovery struct {
 	view      atomic.Pointer[discoveryView]
 	mu        sync.Mutex
 	deadline  time.Time
+	// The handle's lifetime can end while the transaction worker is in
+	// Register/Update. HTTP exit cancels it without waiting on that worker.
+	registrationCancel context.CancelFunc
 }
 
 func newSourceDiscovery(s *Surface, subsystem *dlna.SSDPSubsystem) *sourceDiscovery {
@@ -102,6 +105,18 @@ func (d *sourceDiscovery) change(ctx context.Context, listening []Listening, inv
 	}
 }
 
+// invalidate ends normal sends immediately after an unexpected HTTP exit.
+// The whole registration pauses: the next transaction withdraws it and
+// registers the surviving listeners under a fresh lifetime.
+func (d *sourceDiscovery) invalidate() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.view.Store(&discoveryView{})
+	if d.registrationCancel != nil {
+		d.registrationCancel()
+	}
+}
+
 func (d *sourceDiscovery) refuse(ctx context.Context) {
 	deadline := time.Now().Add(DiscoveryStopBound)
 	if t, ok := ctx.Deadline(); ok && t.Before(deadline) {
@@ -128,6 +143,7 @@ func (d *sourceDiscovery) withdrawalContext() (context.Context, context.CancelFu
 func (d *sourceDiscovery) run() {
 	defer close(d.done)
 	var handle *dlna.SSDPHandle
+	var registrationCtx context.Context
 	defer func() {
 		if handle != nil {
 			ctx, cancel := d.withdrawalContext()
@@ -152,6 +168,26 @@ func (d *sourceDiscovery) run() {
 				close(c.done)
 				return
 			}
+			if registrationCtx != nil && registrationCtx.Err() != nil && handle != nil {
+				ctx, cancel := d.withdrawalContext()
+				if err := handle.Withdraw(ctx); err != nil {
+					d.surface.log.Warn("player: OpenHome discovery withdrawal failed", "err", err)
+				}
+				cancel()
+				handle = nil
+			}
+			d.mu.Lock()
+			if handle == nil {
+				if d.registrationCancel != nil {
+					d.registrationCancel()
+				}
+				registrationCtx, d.registrationCancel = context.WithCancel(d.ctx)
+			}
+			// Recheck liveness under the invalidation lock: a change queued
+			// before Serve exited must never republish the dead listener.
+			live := d.surface.Status().Listening
+			c.listening = slices.DeleteFunc(c.listening, func(l Listening) bool { return !slices.Contains(live, l) })
+
 			now := map[dlna.SSDPInterface]bool{}
 			for _, a := range c.inventory.Served {
 				now[dlna.SSDPInterface{Index: a.Index, Name: a.Interface}] = true
@@ -176,7 +212,8 @@ func (d *sourceDiscovery) run() {
 				v.endpoints = append(v.endpoints, dlna.SSDPEndpointSnapshot{Interface: key, Local: ep.Local, Location: ep.Location})
 			}
 			d.view.Store(v)
-			ctx, cancel := context.WithTimeout(d.ctx, DiscoveryStopBound)
+			d.mu.Unlock()
+			ctx, cancel := context.WithTimeout(registrationCtx, DiscoveryStopBound)
 			var result dlna.SSDPResult
 			var err error
 			switch {
@@ -193,7 +230,7 @@ func (d *sourceDiscovery) run() {
 				if seams := d.surface.cfg.Seams; seams != nil {
 					interval = seams.AdvertiseInterval
 				}
-				handle, result, err = d.subsystem.Register(d.ctx, dlna.SSDPRegistration{Name: "OpenHome", UDN: "uuid:" + d.surface.cfg.Device.UUID,
+				handle, result, err = d.subsystem.Register(registrationCtx, dlna.SSDPRegistration{Name: "OpenHome", UDN: "uuid:" + d.surface.cfg.Device.UUID,
 					Targets: sourceTargets(d.surface.cfg.Device.UUID), ServerToken: sourceServerToken(d.surface.cfg.Device.ModelNumber),
 					Endpoints: endpoints, Admission: dlna.SSDPStrictAdmission{Source: d.admits}, Logger: d.surface.log, AdvertiseInterval: interval})
 				retry = err != nil || len(result.Failed) > 0 || len(result.Active) != len(endpoints)

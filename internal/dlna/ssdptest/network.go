@@ -465,3 +465,11 @@ func (n *Network) ReplySources() []dlna.SSDPEndpointSnapshot {
 	}
 	return out
 }
+
+// WriteDeadline returns the deadline installed by SetWriteDeadline, for an
+// observer at OnSenderWrite to compare absolute retirement budgets.
+func (s *Sender) WriteDeadline() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deadline
+}

@@ -166,3 +166,15 @@ parking and socket counts. No global transport swap. `ServerConfig` can adopt
 a test's held HTTP listener and inventory functions without changing normal
 selection. Serve's shared deadline still reaches Close's existing ownership,
 clamp and join machinery; this change does not weaken it or alter the goldens.
+
+### Round 2: optional timing override
+
+`configureNetwork`, called by the constructor, replaces replyDelay only when
+Network.Delay is non-nil, matching IntervalFloor's positive-value guard.
+Production still starts with nil replyDelay and `delay`'s random fallback;
+this is preventive hardening, not a live timing defect.
+`TestSSDPNetworkTimingOverridesPreserveDefaults` seeds a distinct default and
+checks nil network, nil delay, an explicit override and the constructor's
+wiring. The nil-delay case failed before the guard; removing it fails that
+same case. No guard was added to the MediaServer's interfaces/addrsOf seams:
+their readers already fall back to the host when nil.
