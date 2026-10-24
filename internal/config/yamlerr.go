@@ -100,7 +100,9 @@ func valueFreeTypeError(e string) string {
 // valueFreeTagged is what yaml.v3 says it could not decode, without the
 // value: !!map and !!seq as they are (yaml.v3 quotes no value for a block
 // or a list), a value by its standard tag, and anything else as "that
-// value", a tag the file wrote included.
+// value", a tag the file wrote included. What is said so already, "a
+// !!float value" (a line CheckWholeNumbers wrote, or one this rebuilt), is
+// kept as it is: yaml.v3's own always starts with the tag.
 func valueFreeTagged(what string) string {
 	switch what {
 	case "!!map", "!!seq":
@@ -108,6 +110,11 @@ func valueFreeTagged(what string) string {
 	}
 	if tag, _, ok := strings.Cut(what, " `"); ok && standardYAMLTags[tag] && strings.HasSuffix(what, "`") {
 		return "a " + tag + " value"
+	}
+	if tag, ok := strings.CutPrefix(what, "a "); ok {
+		if tag, ok = strings.CutSuffix(tag, " value"); ok && standardYAMLTags[tag] {
+			return what
+		}
 	}
 	return "that value"
 }
