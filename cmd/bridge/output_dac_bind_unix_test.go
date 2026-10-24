@@ -32,16 +32,20 @@ func dacUUIDPipe(t *testing.T, cfgPath string) string {
 // runDACWithin is runDAC on a goroutine of its own, bounded by
 // fsutiltest.ServeBound with the writer played on pipe past it
 // (fsutiltest.AwaitPastFIFOs), so a command that waits on the pipe fails
-// the test rather than hang it.
+// the test rather than hang it; the goroutine is drained on cleanup, before
+// the test's directories go.
 func runDACWithin(t *testing.T, pipe string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
+	what := "bridge output dac " + args[0]
+	ctx, cancel := context.WithCancel(context.Background())
 	var so, se bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		code = runOutputDACBinding(context.Background(), args, dacEnv(), &so, &se)
+		code = runOutputDACBinding(ctx, args, dacEnv(), &so, &se)
 	}()
-	fsutiltest.AwaitPastFIFOs(t, "bridge output dac "+args[0], fsutiltest.ServeBound, done, pipe)
+	drainLoopOnCleanup(t, cancel, done, what)
+	fsutiltest.AwaitPastFIFOs(t, what, fsutiltest.ServeBound, done, pipe)
 	return so.String(), se.String(), code
 }
 
