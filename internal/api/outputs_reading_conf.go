@@ -68,7 +68,10 @@ func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick, configur
 	if processRelativeConfig(logical) {
 		return nil
 	}
-	host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
+	host, ok := hintOperandHost(root, logical)
+	if !ok {
+		return nil
+	}
 	physical, argument, err := conf.StatHost(root, host)
 	_, configured, confErr := conf.StatHost(configuredRoot, configuredHost)
 	if err != nil || confErr != nil || processRelativeConfig(physical) || fsutil.NotAFile(argument.Mode()) != "" || fsutil.NotAFile(configured.Mode()) != "" {
@@ -83,7 +86,90 @@ func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick, configur
 // processRelativeConfig names process-local views that the bridge cannot
 // interpret as MPD's operand, even when their file identities are available.
 func processRelativeConfig(p string) bool {
-	return p == "/proc" || strings.HasPrefix(p, "/proc/") || p == "/dev/fd" || strings.HasPrefix(p, "/dev/fd/") || p == "/dev/stdin"
+	return p == "/proc" || strings.HasPrefix(p, "/proc/") || p == "/dev/fd" || strings.HasPrefix(p, "/dev/fd/") || p == "/dev/stdin" || p == "/dev/stdout" || p == "/dev/stderr"
+}
+
+// hintOperandHost walks every operand prefix and link target before following
+// it. EvalSymlinks alone loses an intermediate process-local name once a magic
+// link ends at an ordinary file. The root itself is trusted, as in conf.StatHost;
+// everything below it stays confined, with at most 40 symlink hops. A relative
+// target's .. is processed only after preceding links, never cleaned over them.
+func hintOperandHost(root, logical string) (string, bool) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	namedRoot := root
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = dir.Close() }()
+	pending := strings.Split(strings.TrimPrefix(logical, "/"), "/")
+	var parts []string
+	hops := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) == 0 {
+				return "", false
+			}
+			parts = parts[:len(parts)-1]
+			continue
+		}
+		candidate := strings.Join(append(append([]string(nil), parts...), part), "/")
+		if processRelativeConfig("/" + candidate) {
+			return "", false
+		}
+		info, err := dir.Lstat(filepath.FromSlash(candidate))
+		if err != nil {
+			return "", false
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			if len(pending) > 0 && !info.IsDir() {
+				return "", false
+			}
+			parts = append(parts, part)
+			continue
+		}
+		hops++
+		if hops > 40 {
+			return "", false
+		}
+		target, err := dir.Readlink(filepath.FromSlash(candidate))
+		if err != nil {
+			return "", false
+		}
+		if filepath.IsAbs(target) {
+			// Absolute links retain host semantics, like the conf reader. Never
+			// reinterpret an outside target as a file under an injected root.
+			if processRelativeConfig(filepath.ToSlash(target)) {
+				return "", false
+			}
+			// Do not clean a link/.. sequence while removing the canonical root.
+			prefix := strings.TrimRight(root, string(filepath.Separator)) + string(filepath.Separator)
+			if !strings.HasPrefix(target, prefix) {
+				prefix = strings.TrimRight(namedRoot, string(filepath.Separator)) + string(filepath.Separator)
+				if !strings.HasPrefix(target, prefix) {
+					return "", false
+				}
+			}
+			target = strings.TrimPrefix(target, prefix)
+			parts = nil
+		} else if filepath.VolumeName(target) != "" {
+			return "", false
+		}
+		pending = append(strings.Split(filepath.ToSlash(target), "/"), pending...)
+	}
+	return filepath.Join(root, filepath.FromSlash(strings.Join(parts, "/"))), true
 }
 
 func processStart(proc, prefix string) (string, bool) {

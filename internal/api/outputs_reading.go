@@ -465,13 +465,16 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 			s.alsaCode = signalpath.ALSAConfigUnread
 		}
 	}
-	o.readConf(ctx, s, opt)
+	root, path, confDone := o.readConf(ctx, s, opt)
 	s.chains = outputChains(s, pcmConfig)
 	if s.mpdCode == "" {
 		s.row = o.lookUpSong(ctx, s)
 	}
 	s.at = o.now()
 	o.watchOpens(s)
+	if confDone {
+		o.readConfigHints(ctx, s, root, path)
+	}
 	return s
 }
 
@@ -841,9 +844,9 @@ func logOutputPanic(step string, r any) {
 	logger.Error("local outputs: a step panicked", attrs...)
 }
 
-// readConf publishes the configured file under its own deadline before
-// collecting optional hints. A stalled hint cannot erase a successful read.
-func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Options) {
+// readConf publishes the configured file under its own deadline. Its result
+// also names the file for hints, which wait until all verdict inputs are gathered.
+func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Options) (string, string, bool) {
 	type result struct {
 		file conf.File
 		read bool
@@ -866,9 +869,15 @@ func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Opt
 		return r
 	})
 	if late || failed {
-		return
+		return "", "", false
 	}
 	s.conf, s.confRead = r.file, r.read
+	return root, path, true
+}
+
+// readConfigHints uses only the reading budget left after every verdict-bearing
+// input, including the song row and open observation. Lateness drops hints alone.
+func (o *localOutputs) readConfigHints(ctx context.Context, s *readingSnap, root, path string) {
 	hints, late, failed := boundedStep(o, &o.reading.hint, ctx, o.limits.hint, "the MPD config hint", func() map[pickID]*ReadingMPDConfigHint {
 		hints := map[pickID]*ReadingMPDConfigHint{}
 		for i := range s.picks {
