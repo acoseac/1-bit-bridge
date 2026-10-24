@@ -279,7 +279,8 @@ issuance-count bound was false. Adoption covers old counter space below 2^31,
 including reserved and skipped values. The largest new floor leaves
 2,130,706,432 values before uint32 exhaustion, past the engine's 4,097-value
 startup requirement. An absent floor cannot prove a history already reaching
-the upper half; that remains unsupported. Restore's known-bound jump is unchanged.
+the upper half; that remains unsupported. Restore's max-and-jump arithmetic is
+unchanged; round 9 below closes its UUID-only destination gap.
 
 Completion now verifies a valid seal and leaves a present damaged initialized
 marker untouched, for conservative floor-loss checks and explicit discard.
@@ -306,6 +307,48 @@ test and names the restricted cases. On the host (macOS, Go 1.27.3),
 `go test -race -count=1` passed cmd/bridge in full (577 s), backup, config and
 all nine player packages, and the live-backup, serve-health, named-pipe, boot
 and player-off cases passed ten race-enabled runs.
+
+**Round 9.**
+
+Serve boot, start, bind, reset, backup and restore adopt UUID-only state at
+2^31 plus a random value below 2^24 on both counters. Restore now adopts the
+destination under its existing exclusive lock before reading its live bound,
+then takes max(snapshot, adopted live) + 2^24 + r. The absent live bound was
+unknown, not zero. A main-era engine regression captures the first reservation
+(8,192), runs 8,193 starts without queue edits or markers, deletes only the
+floor, and restores before upgraded service boot. Both first restored values
+exceed the largest pre-restore startup token (67,112,961). An interrupted
+adoption marker commit leaves the raised local floor and publishes no snapshot
+identity; retry keeps that bound.
+
+A damaged player-initialized beside a readable floor naming the UUID no longer
+turns the player off. Every lifecycle reader retains its presence and treats
+its one-shot exemption as spent. The warning names the file and advises moving
+it aside only with a matching readable floor. Start re-ensures the marker;
+beside a valid seal, completion records sealed and minted. Later floor loss
+still refuses. Non-file markers remain nonblocking evidence, and an invalid
+version carrying a seal bit is preserved rather than rewritten during mint.
+The warning does not read UUID bytes, so reset can still remove an unreadable
+UUID. The serve regression now checks player-on boot, library health, warning
+and live backup with and without a seal, enabled and disabled.
+
+Backup documentation now limits the busy-stop-and-retry advice to adoption;
+busy or failed seal completion is logged and left to the next lifecycle
+operation. Both rule lines and their long forms record destination adoption,
+proportionate marker recovery and the existing unsupported history bounds.
+
+Round-nine evidence records 72 assertion-failing negative controls: all 65
+prior controls, rebased for damaged-marker acceptance, plus seven additions.
+Native, Linux and Windows vet, pinned formatting and docs checks pass. The
+backup, config and engine suites pass with race detection and count 1; each
+of the five new tests passes ten race-enabled runs. The marker lifecycle and
+updated round-6/8 backup and socket-free serve cases also pass ten runs. The
+CLI inventory covers 913 top-level cases: 680 pass, five skip, and 228 need
+socket permissions the sandbox denies (226 listener/multicast, two connects).
+The updated live-serve test is among those host-required cases; it waits for
+startup readiness and requires an engine when enabled, then checks health,
+warning and live backup. The report names every blocked test and retains the
+initial timeout and corrected barrier-fixture evidence separately.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

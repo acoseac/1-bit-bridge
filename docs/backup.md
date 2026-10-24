@@ -54,13 +54,17 @@ the marker when the player starts, binds, resets or adopts an identity.
 A missing floor beside a UUID, queue or initialization marker is floor loss,
 with the upgrade and one-shot post-discard exceptions below.
 The upgrade exception is a valid regular UUID with no floor, queue or either
-local marker. Serve boot, start, bind, reset and backup adopt this state without
+local marker.
+Serve boot, start, bind, reset, backup and restore adopt this state without
 sealing restores. Both counters start at 2^31 plus a random value below 2^24
-before the marker is committed. Restore keeps its smaller jump from the known
-snapshot/live bounds. Reset then removes the UUID; the other adopters retain it.
+before the marker is committed. Restore adopts a UUID-only destination first: its
+history is unknown, not a zero live bound. It then adds its smaller jump to the
+larger of the adopted floor and snapshot bound. Reset removes the UUID; restore
+installs the snapshot UUID; the other adopters retain the current UUID.
 Serve adopts at boot even when playback is disabled. Backup takes the exclusive
-server lock only if adoption or seal completion is needed; if it is busy, stop
-the service and run the backup again.
+server lock for adoption; if adoption is busy, stop the service and run the backup
+again. Backup also takes that lock for seal completion; busy or failed completion
+is logged and left to the next lifecycle operation, while backup continues.
 An older engine can hand out tokens without writing a queue, so losing only
 its floor can look like this upgrade state. Adoption covers old counter space
 below 2^31, including reserved blocks skipped at restarts, not the number of
@@ -72,8 +76,8 @@ A queue without a UUID needs ordinary reset when the floor remains, or
 `--discard-floor` when it is missing. A UUID that is a symlink or does not match
 the floor also needs ordinary reset. A version-1 live floor names no UUID;
 reset retains its counters and the next start writes a named version-2 floor.
-A non-file such as a named pipe is refused promptly with advice to move it
-aside; it is never opened waiting for a writer.
+A non-file at the UUID, queue or floor path, such as a named pipe, is refused
+promptly with advice to move it aside; it is never opened waiting for a writer.
 
 For a lost, corrupt or exhausted floor, the explicit escape is:
 
@@ -95,8 +99,11 @@ the floor rename and its directory sync. The initialization marker and seal are
 never backed up or restored as bytes. Damaged entries conservatively count as
 present. Discard renames malformed or non-file markers aside and writes fresh
 ones after establishing the seal; a well-formed newer version requires a newer
-bridge. Follow a non-file refusal's advice to move the entry aside and run
-discard. Do not delete markers to bypass a refusal.
+bridge. A damaged initialization marker beside a readable floor naming the UUID
+is accepted and kept as present evidence with any exemption spent. Its warning
+names the file and says to move it aside: start re-ensures it; beside a valid seal,
+completion records sealed and minted. Discard advice is for a missing or unreadable
+floor. Do not delete markers to bypass a floor-loss refusal.
 
 A sealed box still restores the database, tokens and configuration from a
 copy of a snapshot with `player-uuid` and `player-ids.json` removed. An
@@ -107,9 +114,9 @@ If `player-floor-discarded.json` exists without a seal recorded in
 is durable and completes the second. Any floor, UUID or queue entry consumes
 an unspent sealed marker, including during reset and backup, even when the
 seal bit was already set by an older version. A damaged initialization marker
-beside a valid seal is left untouched for explicit discard, after verifying
-the seal. This local repair can precede a restore refusal; it never imports
-snapshot bytes.
+beside a valid seal is left untouched as spent evidence, after verifying
+the seal. With a matching readable floor it does not turn the player off. This
+local repair can precede a restore refusal; it never imports snapshot bytes.
 For permission failures restore read access first; for a newer reservation
 format use a newer bridge. **Never copy a snapshot's older floor over the
 live floor, or delete the floor while keeping the identity.**
@@ -119,8 +126,8 @@ before writing any snapshot data. An exhausted snapshot or destination can still
 restore its non-player contents from a copy without `player-uuid` and
 `player-ids.json`; the box keeps its identity. Ordinary reset does not refund
 counter space. If the engine can no longer start, use `--discard-floor` and
-accept the permanent seal. Each restore spends less than 2^25 values, so
-roughly 120 worst-case restores consume the available range.
+accept the permanent seal. Each restore's jump spends less than 2^25 values;
+adopting a UUID-only destination first skips the lower half of counter space.
 
 The retained floor protects repeated restores of old identities on the same
 box. **Two live holders of a UUID, and restoring a non-latest snapshot onto
