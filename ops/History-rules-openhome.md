@@ -105,10 +105,36 @@ and stop paths stay unchanged. A write already handed to the kernel cannot
 be recalled.
 
 `TestSourceHTTPExitCancelsPendingAdvertisement/Register` holds initial
-registration after HTTP entered Serve; `/Update` begins with an advertised
+registration at OnListen, before the cancellation check; `/Update` begins with an advertised
 Source and holds an update adding another interface. Both close the HTTP
 listeners and join their Serve goroutines before releasing SSDP, require no
 subsequent alive for the dead listeners, then prove a later bind advertises
 again. The initial Register regression failed before the fix; removing the
 invalidation fails both subtests. These are in-memory network tests, not a
 claim about real kernel packet queues.
+
+### Round 3: HTTP invalidation joins writes already under way
+
+Cancelling the lifetime alone did not join a normal send past its cancellation
+check. Round 2's OnListen parks were before that check. The Source now supplies
+one SSDPSendBarrier per registration lifetime. Unexpected HTTP exit clears the
+view and cancels under the publication lock, then releases that lock and
+invalidates the captured barrier. Alive and reply writes take its read lock
+across the final lifetime check and write; invalidation takes its write lock.
+It therefore either prevents a write or completes only after that write ends.
+Each write already has the burst's one-second deadline; concurrent writes use
+read locks so their bounds overlap. No surface/publication lock spans this
+wait. Byebye bypasses the barrier and still uses its own withdrawal deadline.
+The whole Source still pauses until reconciliation withdraws and re-registers
+the bound remainder, now with a fresh barrier. MediaServer leaves it nil.
+
+`TestSourceHTTPExitJoinsAnAliveAlreadyWriting` parks the initial alive inside
+OnSenderWrite, after cancellation was checked and before a packet is recorded.
+The hook honors the installed sender deadline. The test closes HTTP and joins
+s.serving before releasing the hook, then checks that no alive with the dead
+LOCATION was recorded after invalidation completed and that all seven byebyes
+carry that LOCATION. Before the fix it recorded one late alive; with the fix
+the write expires before the join returns. Restoring the check-before-write-only
+path reproduces the same assertion failure. These are fake-network observations,
+not a claim that a kernel-queued packet can be recalled. The existing Register
+and Update parks still check cancellation before the write and later recovery.

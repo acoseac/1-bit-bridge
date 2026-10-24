@@ -369,11 +369,12 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 	_ = conn.SetWriteDeadline(time.Now().Add(ssdpBurstDeadline))
 	now := time.Now()
 	for _, target := range targets {
-		if ep.ctx.Err() != nil {
+		response := BuildMSearchResponse(ep.spec.Location, h.serverToken, target.NT, target.USN, now)
+		_, err := h.sendNormal(ep, func() (int, error) { return conn.Write(response) })
+		if errors.Is(err, errSSDPSendCancelled) {
 			return
 		}
-		response := BuildMSearchResponse(ep.spec.Location, h.serverToken, target.NT, target.USN, now)
-		if _, err := conn.Write(response); err != nil {
+		if err != nil {
 			if h.strict() {
 				h.noteReplyRefusal(ep, err)
 				return

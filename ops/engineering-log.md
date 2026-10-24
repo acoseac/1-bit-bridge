@@ -59207,7 +59207,8 @@ registration lifetime immediately, without waiting on SSDP I/O. Reconcile
 withdraws that handle and registers the still-bound set under a fresh lifetime,
 rechecking stale queued snapshots. The whole Source registration pauses until
 then; normal retirement/stop and MediaServer's lifetime are unchanged.
-`TestSourceHTTPExitCancelsPendingAdvertisement` parks Register and Update,
+`TestSourceHTTPExitCancelsPendingAdvertisement` parks Register and Update at
+OnListen, before their send cancellation checks,
 closes and joins HTTP, releases discovery and requires no alive for the dead
 listeners; a later bind must advertise again. Register was red before the
 fix; removing invalidation makes both cases red.
@@ -59248,3 +59249,49 @@ host-address check skips at its denied bind. Exact failed names, commands,
 logs and verified controls are in the external round-2 report. Linux/Windows
 runtime and the manual owner hardware/1-bit gate remain unrun. The DLNA goldens
 and server.go are unchanged; the socket-free MediaServer golden test passes.
+
+
+### Round 3: HTTP exit joins normal SSDP writes
+
+A normal alive could pass the cancellation check and remain inside WriteToUDP
+when HTTP exit invalidated its registration. Register had not returned its
+handle, so reconciliation could not yet withdraw it. Round 2's OnListen parks
+were before the check and did not cover this window.
+
+The Source now gives each registration a fresh SSDPSendBarrier. Invalidation
+clears admission and cancels its context under the publication lock, releases
+that lock and invalidates the captured barrier. Both alive and reply paths
+check lifetime state under the barrier's read lock, held through one write;
+Invalidate takes its write lock, so completion joins every pending normal
+write. The installed one-second burst deadline bounds the wait; concurrent
+writes use concurrent read locks. Byebye bypasses the barrier and remains
+available afterwards. MediaServer supplies none. Whole-Source pause,
+withdrawal and re-registration of the bound remainder are unchanged.
+
+`TestSourceHTTPExitJoinsAnAliveAlreadyWriting` was red first: it parked the
+initial alive inside OnSenderWrite after the cancellation check, closed HTTP,
+joined s.serving, released the write and observed an alive with the dead
+LOCATION after invalidation completed. The hook respects its installed write
+deadline. With the barrier, invalidation waits for that write to expire; no
+late alive is recorded, and all seven subsequent byebyes carry that LOCATION.
+`TestSSDPSendBarrierJoinsRepliesAndLeavesByebyeAndMediaServer` keeps its context
+live to isolate the reply barrier from cancellation's asynchronous socket
+close: invalidation must join the parked reply, later alive/replies are
+refused, byebye still sends, and the shared MediaServer still sends both kinds
+of normal packet. A control restoring only the check-before-write-only path
+fails both regressions' behavioral assertions. No packet already queued in
+the kernel is claimed recalled.
+
+Round-3 validation on Go 1.27.2 offline: formatting, native/Linux/Windows vet,
+the six-target build and docs-check pass. Both new regressions and the existing
+Register/Update HTTP-exit regression pass `-race -count 20`; the existing SSDP
+fake-network, Source and serve regressions pass, including the unchanged
+MediaServer golden check. Bounded FuzzSSDPDispatch completed 248,569 executions
+in 20 seconds with two workers and one-second minimization. The full requested
+race command fails on sandbox-denied binds in cmd/bridge, dlna and openhome;
+those binaries abort before all tests run. Its successes for unchanged packages
+include cached results, not fresh executions here; library ran successfully.
+The separate B520 host-address check skips at its denied bind. Exact commands,
+failed test names, cached outcomes, logs and the verified control are in the
+external round-3 report. Linux/Windows execution and the manual owner gate
+remain unrun. No commit was made.

@@ -178,3 +178,28 @@ checks nil network, nil delay, an explicit override and the constructor's
 wiring. The nil-delay case failed before the guard; removing it fails that
 same case. No guard was added to the MediaServer's interfaces/addrsOf seams:
 their readers already fall back to the host when nil.
+
+### Round 3: a registration's normal-write barrier
+
+`SSDPRegistration.SendBarrier` is optional and copied into the handle before
+staging/initial alive. A zero-value SSDPSendBarrier permits normal writes;
+Invalidate permanently ends that lifetime and joins writes under its read lock.
+`sendNormal` holds that lock across both the cancellation/barrier check and the
+actual alive or reply write. The caller installs the one-second burst deadline
+before entry. Invalidation holds no surface/publication lock while waiting,
+and overlapping normal writes have concurrent read locks, not serial bounds.
+Byebye never enters the barrier; withdrawal still joins normal work before
+sending it. No socket is closed merely by barrier invalidation. MediaServer
+supplies no barrier and retains its context cancellation, packets and routing.
+Do not reuse a barrier for a replacement registration.
+
+`TestSSDPSendBarrierJoinsRepliesAndLeavesByebyeAndMediaServer` parks a reply
+inside its write until release or its installed deadline, keeps its registration
+context live and invalidates the barrier. It requires the write to have left
+before invalidation returns and no recorded reply afterwards, then requires
+later alive/reply attempts to send nothing. The same test withdraws and checks
+every byebye, then sends alive and replies through the MediaServer sharing its
+listener. The Source's HTTP-exit regression covers an initial alive before
+Register returns the handle. Removing only sendNormal's barrier protection
+makes both regressions fail behavioral assertions; compilation still passes.
+Kernel-queued packets remain outside this guarantee.

@@ -68,7 +68,8 @@ type sourceDiscovery struct {
 	deadline  time.Time
 	// The handle's lifetime can end while the transaction worker is in
 	// Register/Update. HTTP exit cancels it without waiting on that worker.
-	registrationCancel context.CancelFunc
+	registrationCancel  context.CancelFunc
+	registrationBarrier *dlna.SSDPSendBarrier
 }
 
 func newSourceDiscovery(s *Surface, subsystem *dlna.SSDPSubsystem) *sourceDiscovery {
@@ -105,15 +106,20 @@ func (d *sourceDiscovery) change(ctx context.Context, listening []Listening, inv
 	}
 }
 
-// invalidate ends normal sends immediately after an unexpected HTTP exit.
+// invalidate cancels and joins normal sends after an unexpected HTTP exit.
 // The whole registration pauses: the next transaction withdraws it and
 // registers the surviving listeners under a fresh lifetime.
 func (d *sourceDiscovery) invalidate() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.view.Store(&discoveryView{})
 	if d.registrationCancel != nil {
 		d.registrationCancel()
+	}
+	barrier := d.registrationBarrier
+	d.mu.Unlock()
+	// No surface/publication lock is held while a bounded write finishes.
+	if barrier != nil {
+		barrier.Invalidate()
 	}
 }
 
@@ -144,6 +150,7 @@ func (d *sourceDiscovery) run() {
 	defer close(d.done)
 	var handle *dlna.SSDPHandle
 	var registrationCtx context.Context
+	var registrationBarrier *dlna.SSDPSendBarrier
 	defer func() {
 		if handle != nil {
 			ctx, cancel := d.withdrawalContext()
@@ -182,6 +189,8 @@ func (d *sourceDiscovery) run() {
 					d.registrationCancel()
 				}
 				registrationCtx, d.registrationCancel = context.WithCancel(d.ctx)
+				registrationBarrier = new(dlna.SSDPSendBarrier)
+				d.registrationBarrier = registrationBarrier
 			}
 			// Recheck liveness under the invalidation lock: a change queued
 			// before Serve exited must never republish the dead listener.
@@ -232,7 +241,8 @@ func (d *sourceDiscovery) run() {
 				}
 				handle, result, err = d.subsystem.Register(registrationCtx, dlna.SSDPRegistration{Name: "OpenHome", UDN: "uuid:" + d.surface.cfg.Device.UUID,
 					Targets: sourceTargets(d.surface.cfg.Device.UUID), ServerToken: sourceServerToken(d.surface.cfg.Device.ModelNumber),
-					Endpoints: endpoints, Admission: dlna.SSDPStrictAdmission{Source: d.admits}, Logger: d.surface.log, AdvertiseInterval: interval})
+					Endpoints: endpoints, Admission: dlna.SSDPStrictAdmission{Source: d.admits}, SendBarrier: registrationBarrier,
+					Logger: d.surface.log, AdvertiseInterval: interval})
 				retry = err != nil || len(result.Failed) > 0 || len(result.Active) != len(endpoints)
 			case retry || !slices.Equal(previous, v.endpoints):
 				result, err = handle.Update(ctx, endpoints)

@@ -827,3 +827,79 @@ func TestSourceHTTPExitCancelsPendingAdvertisement(t *testing.T) {
 		})
 	}
 }
+
+func TestSourceHTTPExitJoinsAnAliveAlreadyWriting(t *testing.T) {
+	box := lantest.NewMemory(t)
+	box.Set([]lan.Address{eth0})
+	n := ssdptest.New()
+	entered, release := make(chan string, 1), make(chan struct{})
+	var held, released sync.Once
+	unpark := func() { released.Do(func() { close(release) }) }
+	n.OnSenderWrite = func(sender *ssdptest.Sender, pkt string) {
+		if packetHeader(pkt, "NTS") != "ssdp:alive" {
+			return
+		}
+		held.Do(func() {
+			entered <- packetHeader(pkt, "LOCATION")
+			// This is inside WriteToUDP, after its caller's cancellation
+			// check, but before any packet is recorded. Like the kernel,
+			// the parked write must still obey its installed deadline.
+			timer := time.NewTimer(time.Until(sender.WriteDeadline()))
+			defer timer.Stop()
+			select {
+			case <-release:
+			case <-timer.C:
+			}
+		})
+	}
+	sub := dlna.NewSSDPSubsystem(context.Background(), dlna.SSDPSubsystemOptions{Network: n.Transport()})
+	t.Cleanup(func() { _ = sub.Close(context.Background()) })
+	bound := make(chan net.Listener, 1)
+	s, err := Start(Config{Device: Device{UUID: testUUID}, SSDP: sub, Addresses: box.Addresses,
+		Limits: Limits{Rescan: time.Hour},
+		Listen: func(ctx context.Context, at netip.AddrPort, a lan.Address) (net.Listener, string, error) {
+			ln, r, err := box.Listen(ctx, at, a)
+			if err == nil {
+				bound <- ln
+			}
+			return ln, r, err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Stop() })
+	t.Cleanup(unpark)
+	var location string
+	select {
+	case location = <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial alive did not enter its write")
+	}
+	box.FailListen(eth0.Prefix.Addr(), errors.New("listener remains down"))
+	_ = (<-bound).Close()
+	invalidated := make(chan struct{})
+	go func() { s.serving.Wait(); close(invalidated) }()
+	select {
+	case <-invalidated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HTTP invalidation did not finish within the write bound")
+	}
+	after := len(n.Snapshot())
+	unpark()
+	awaitStatus(t, s, 5*time.Second, "HTTP exit reconciled", func(st Status) bool { return st.Reconciles >= 2 })
+	for _, w := range n.Snapshot()[after:] {
+		if packetHeader(w.Pkt, "NTS") == "ssdp:alive" && packetHeader(w.Pkt, "LOCATION") == location {
+			t.Errorf("alive for dead LOCATION recorded after invalidation completed: %s", location)
+		}
+	}
+	bye := packets(n, "NTS", "ssdp:byebye")
+	if len(bye) != 7 {
+		t.Fatalf("invalidation suppressed byebye: got %d, want 7", len(bye))
+	}
+	for _, w := range bye {
+		if packetHeader(w.Pkt, "LOCATION") != location {
+			t.Errorf("byebye LOCATION = %q, want %q", packetHeader(w.Pkt, "LOCATION"), location)
+		}
+	}
+}
