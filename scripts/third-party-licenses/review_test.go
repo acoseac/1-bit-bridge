@@ -315,3 +315,29 @@ func TestShardFlagsCannotOverrideTags(t *testing.T) {
 		}
 	}
 }
+
+// TestACRLFCheckoutReadsAsLF: a Windows checkout's autocrlf gives every
+// repository text file CRLF line endings (CI's windows-latest leg), and the
+// release checks read go.mod, .goreleaser.yaml and the build sites by their
+// lines, so they read a CRLF file as its LF text.
+func TestACRLFCheckoutReadsAsLF(t *testing.T) {
+	root := buildSiteFixture(t)
+	for _, name := range buildSiteFiles {
+		b, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lf := strings.ReplaceAll(string(b), "\r\n", "\n")
+		put(t, root, name, strings.ReplaceAll(lf, "\n", "\r\n"))
+	}
+	if err := checkBuildTags(root); err != nil {
+		t.Errorf("a CRLF checkout failed the build-site census: %v", err)
+	}
+	want, err := releaseGoVersion("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := releaseGoVersion(root); err != nil || got != want {
+		t.Errorf("releaseGoVersion of a CRLF go.mod = %q, %v; want %q", got, err, want)
+	}
+}
