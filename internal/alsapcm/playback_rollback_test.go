@@ -30,6 +30,7 @@ func TestPlaybackResumeRollbackDropsFinalDrain(t *testing.T) {
 	}
 	t.Run("live-reporter", func(t *testing.T) { testResumeRollback(t, rollbackFinalDrainLiveReporter, false) })
 	t.Run("gapless-live-reporter", func(t *testing.T) { testResumeRollback(t, rollbackGaplessLiveReporter, false) })
+	t.Run("gapless-session-cancel", func(t *testing.T) { testResumeRollback(t, rollbackGaplessSessionCancel, false) })
 }
 
 // TestPlaybackResumeRollbackKeepsOtherRefusals leaves an xrun's refused
@@ -57,6 +58,7 @@ const (
 	rollbackCompletedAfterRefusal
 	rollbackFinalDrainLiveReporter
 	rollbackGaplessLiveReporter
+	rollbackGaplessSessionCancel
 )
 
 // testResumeRollback uses B523's reporter, timer and command seams.
@@ -64,7 +66,7 @@ const (
 // feeds the engine, pinning its pending Play answer and selection of B.
 func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	t.Helper()
-	gapless := window == rollbackGaplessLiveReporter
+	gapless := window == rollbackGaplessLiveReporter || window == rollbackGaplessSessionCancel
 	liveReporter := window == rollbackFinalDrainLiveReporter || gapless
 	var timerStops atomic.Int32
 	draining := window != rollbackXrun
@@ -80,8 +82,9 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	// Hold the completed Drain's answer before the producer can mark its
 	// output drained or close it. Resume still sees the producer's sink.
 	var holdNextDrain atomic.Bool
+	var observeDrain atomic.Bool
 	var drainContext context.Context
-	drainCompleted := make(chan error, 1)
+	drainResult := make(chan error, 1)
 	drainReply := make(chan struct{})
 	var drainOnce sync.Once
 	allowDrain := func() { drainOnce.Do(func() { close(drainReply) }) }
@@ -89,7 +92,9 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	pauseReply := make(chan struct{})
 	var pauseOnce sync.Once
 	allowPause := func() { pauseOnce.Do(func() { close(pauseReply) }) }
-	drainResult := make(chan error, 1)
+	pausedDrainReply := make(chan struct{})
+	var pausedDrainOnce sync.Once
+	allowPausedDrain := func() { pausedDrainOnce.Do(func() { close(pausedDrainReply) }) }
 	openSink := func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 			s, err := open(ctx, cfg)
@@ -101,7 +106,7 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		cfg.Log = slog.New(logs)
 		cfg.Seams = &playback.Seams{SinkCall: func(ctx context.Context) func(error) {
 			callMu.Lock()
-			if holdNextDrain.Load() && drainContext == nil {
+			if observeDrain.Load() && drainContext == nil {
 				drainContext = ctx
 			}
 			heldDrain := ctx == drainContext
@@ -122,12 +127,14 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 					pauseRefused <- err
 					<-pauseReply
 				}
-				if heldDrain && err == nil && holdNextDrain.CompareAndSwap(true, false) {
-					drainCompleted <- err
-					<-drainReply
-				}
-				if alsapcm.ReasonOf(err) == alsapcm.ReasonCancelled {
+				if heldDrain {
 					drainResult <- err
+					if alsapcm.ReasonOf(err) == alsapcm.ReasonBadState {
+						<-pausedDrainReply
+					}
+					if err == nil && holdNextDrain.CompareAndSwap(true, false) {
+						<-drainReply
+					}
 				}
 			}
 		}}
@@ -163,6 +170,7 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	t.Cleanup(fault)
 	t.Cleanup(allowDrain)
 	t.Cleanup(allowPause)
+	t.Cleanup(allowPausedDrain)
 	// Half a second fits in the lookahead plus hardware buffer, so the
 	// producer can reach EOF without any fake time (and without an xrun).
 	firstFrames := 24000
@@ -202,7 +210,14 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	if v := d.k.View(); v.State != "PAUSED" || v.Appl <= v.Consumed {
 		t.Fatalf("need paused hardware with unplayed frames: %+v", v)
 	}
-	drainStarted := make(chan struct{}, 1)
+	// In the cancellation case, keep the sink-call goroutine from returning
+	// Drain's answer until the engine releases the faulted session. The
+	// producer's call must then answer with its session's context.Canceled.
+	kernelDrainReply := make(chan struct{})
+	var holdKernelDrain atomic.Bool
+	var kernelDrainOnce sync.Once
+	allowKernelDrain := func() { kernelDrainOnce.Do(func() { close(kernelDrainReply) }) }
+	t.Cleanup(allowKernelDrain)
 	dropGate := make(chan struct{})
 	var dropOnce sync.Once
 	allowDrop := func() { dropOnce.Do(func() { close(dropGate) }) }
@@ -228,7 +243,9 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
 		switch op {
 		case "drain":
-			drainStarted <- struct{}{}
+			if holdKernelDrain.Load() {
+				<-kernelDrainReply
+			}
 		case "resume":
 			close(resumeEntered)
 			<-resumeReply
@@ -242,16 +259,20 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		}
 	})
 	if draining {
-		// Name the end as the engine does, and wait for the producer to send
-		// Drain. Starting a test-owned Drain would miss its exit path.
+		// Observe every answer from the producer's context, starting with
+		// the paused refusal. Hold it before its retry until Resume is queued.
+		// Starting a test-owned Drain would miss the producer's exit path.
 		holdNextDrain.Store(playedOut)
+		observeDrain.Store(true)
 		// The gapless case holds the reporter from session start, including
 		// Submitted(B), so the engine cannot yet send this end notification.
 		// B itself came from the engine's real hand-off above.
 		if err := d.be.Prepare(bg, 1, lastID, nil); err != nil {
 			t.Fatal(err)
 		}
-		receiveIn(t, drainStarted, "the producer's Drain")
+		if err := receiveIn(t, drainResult, "the producer's paused Drain refusal"); alsapcm.ReasonOf(err) != alsapcm.ReasonBadState {
+			t.Fatalf("paused Drain = %v; want bad_state", err)
+		}
 	}
 	type resumeAnswer struct {
 		how engine.ResumeResult
@@ -269,6 +290,8 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		allowPause()
 		allowDrain()
 		allowDrop()
+		allowPausedDrain()
+		allowKernelDrain()
 		cancel()
 		receiveIn(t, resumeDone, "Resume's goroutine to exit")
 	})
@@ -276,18 +299,18 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	// assertion runs here, so a watchdog failure cannot Goexit the command
 	// goroutine and strand Resume. Cleanup always frees both held replies.
 	receiveIn(t, resumeEntered, "Resume to reach its command hook")
-	if window == rollbackCompletedBeforeFault {
-		// The first Drain can refuse the paused sink. Resume's command
-		// hook only says it was queued; the producer may still need to
-		// retry Drain after that refusal. Granting time first can run the
-		// sink dry before the retry, so no successful Drain ever arrives.
-		// With fake time held, an accepted Drain stays draining until we
-		// grant time; subscribe before reading its state.
+	holdKernelDrain.Store(window == rollbackGaplessSessionCancel)
+	allowPausedDrain()
+	if draining {
+		// With fake time withheld, an accepted Drain cannot play out before
+		// observation. Enqueueing Resume alone does not establish this retry.
 		waitOn(t, "the producer's Drain to be accepted", sink.Changed, func() bool {
 			return sink.Position().State == alsapcm.SinkDraining
 		})
+	}
+	if window == rollbackCompletedBeforeFault {
 		d.k.Grant(time.Second)
-		if err := receiveIn(t, drainCompleted, "the producer's completed Drain"); err != nil {
+		if err := receiveIn(t, drainResult, "the producer's completed Drain"); err != nil {
 			t.Fatal(err)
 		}
 		if st := sink.Position().State; st != alsapcm.SinkStopped {
@@ -386,7 +409,7 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		// is held at SinkCall, so its stopped sink is still current.
 		receiveIn(t, pauseRefused, "the rollback Pause refusal")
 		d.k.Grant(time.Second)
-		if err := receiveIn(t, drainCompleted, "the producer's completed Drain"); err != nil {
+		if err := receiveIn(t, drainResult, "the producer's completed Drain"); err != nil {
 			t.Fatal(err)
 		}
 		if st := sink.Position().State; st != alsapcm.SinkStopped {
@@ -491,13 +514,21 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	} else if n := drops.Load(); n != 0 || sink.Position().State != alsapcm.SinkXrun {
 		t.Errorf("other refusal sent %d Drops, sink %v; want no Drop and xrun", n, sink.Position().State)
 	}
-	// End an unfixed drain only after the assertions; release must then join
-	// the producer that received the cancelled Drain, as it does in production.
+	// End an unfixed drain only after the assertions. The engine's fault
+	// release can cancel the producer's call before it takes Drop's typed
+	// cancellation. Observe its answer regardless of which cancellation won.
 	allowDrain()
 	if draining && !playedOut {
 		_ = sink.Drop()
-		receiveIn(t, drainResult, "the producer's cancelled Drain result")
+		err := receiveIn(t, drainResult, "the producer's final Drain result")
+		if alsapcm.ReasonOf(err) != alsapcm.ReasonCancelled && !errors.Is(err, context.Canceled) {
+			t.Errorf("final Drain = %v; want Drop's cancellation or session cancellation", err)
+		}
+		if window == rollbackGaplessSessionCancel && err != context.Canceled {
+			t.Errorf("held Drain call = %v; want the session's context.Canceled", err)
+		}
 	}
+	allowKernelDrain()
 	d.release(1)
 	join, stop := context.WithTimeout(bg, alsapcm.Watchdog())
 	defer stop()
