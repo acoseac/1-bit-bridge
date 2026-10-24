@@ -1972,3 +1972,31 @@ mentions across the four `ops/audit-*.md` files.
   to a log line, never a hung exit. A writer includes a goroutine whose CHILD
   PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
   unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
+
+## Shared Source discovery lifecycle (B470 PR 5a2b)
+
+Serve constructs its sole socket-free SSDP subsystem before starting either
+owner. `servePlayerWiring.SSDP` and `dlnaWiring.SSDP` carry the same instance.
+No device means no SSDP sockets or workers; DLNA off does not gate Source.
+The Source's eligible interfaces are independent of the MediaServer's picker.
+Its initial incarnation zero shares a listener when the interface overlaps.
+The boot snapshot still gates the surface; live player-disable only withholds
+output. Failed/refused/disabled players publish no Source.
+
+One deferred lifecycle closure refuses Source first, withdraws the MediaServer
+and Source, then calls shared Close, all with the same absolute five-second
+SSDP deadline. Cancellation of serve's parent ends normal sends but leaves
+byebye possible. HTTP receives separate deadlines afterward; the player's
+surface stops before its engine/backend, before the watcher/store/lock. The
+player's outer stop adds DiscoveryStopBound independently of Limits.StopBound.
+Publication of a new surface and refusal serialize under the player lock;
+no late start can escape a stop that found no surface yet.
+
+The instance `serveOpts.ssdpNetwork` seam reaches the real subsystem, while
+`dlnaNetwork` supplies synthetic pick/gather/inventory and a held HTTP listener.
+Defaults retain production selection and host transport. The new serve tests
+use in-memory HTTP, fake SSDP, an empty hotplug observation and the real engine;
+no audio tree read or PCM open is needed. Tests count memberships and packets
+for off/Source-only/MediaServer-only/both/disjoint/failed/refused configurations,
+strict capability failure beside MediaServer, repeat serve generations with
+stable identity, and park withdrawal to observe both 503 and a live engine.

@@ -11,9 +11,11 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
@@ -95,6 +97,8 @@ type ListenFunc func(ctx context.Context, at netip.AddrPort, a lan.Address) (net
 
 // Seams are a test's holds on the surface; nil in production.
 type Seams struct {
+	// AdvertiseInterval shortens repeats in a test's fake SSDP network.
+	AdvertiseInterval time.Duration
 	// Handling runs once a request holds its slot, before it is answered.
 	Handling func(*http.Request)
 	// Stopping runs once Stop refuses requests, before it shuts the
@@ -108,6 +112,8 @@ type Seams struct {
 // Config is the surface's.
 type Config struct {
 	Device Device
+	// SSDP is serve's shared subsystem; nil leaves discovery off.
+	SSDP *dlna.SSDPSubsystem
 	// Port is output.player.openhomePort: 0 for a port the kernel picks for
 	// each address.
 	Port int
@@ -172,8 +178,7 @@ type StopReport struct {
 // Surface is the player's LAN surface (B470 PR 5a2a): a socket of its own
 // on each address internal/player/lan serves, followed as they come and go,
 // each connection admitted at accept, every request bounded, and a stop
-// that refuses, shuts down within a bound, then closes. It advertises
-// nothing.
+// that refuses, withdraws discovery, then shuts HTTP down within a bound.
 type Surface struct {
 	cfg  Config
 	lim  Limits
@@ -187,8 +192,11 @@ type Surface struct {
 	loopDone chan struct{}
 	serving  sync.WaitGroup
 
-	stopOnce sync.Once
-	report   StopReport
+	stopOnce   sync.Once
+	refuseOnce sync.Once
+	report     StopReport
+	discovery  *sourceDiscovery
+	inventory  lan.Inventory // listing loop's last successful inventory
 
 	mu         sync.Mutex
 	sockets    []*socket
@@ -198,15 +206,19 @@ type Surface struct {
 	noAddress  bool
 	stopped    bool
 	changed    chan struct{}
+	ready      chan struct{}
+	readyOnce  sync.Once
 }
 
 // socket is one bound address.
 type socket struct {
-	key   lan.Address
-	srv   *http.Server
-	ln    net.Listener
-	bound netip.AddrPort
-	restr string
+	key      lan.Address
+	srv      *http.Server
+	ln       net.Listener
+	bound    netip.AddrPort
+	restr    string
+	ended    atomic.Bool
+	retiring atomic.Bool
 }
 
 // close closes the socket's listener and every connection its server
@@ -214,6 +226,7 @@ type socket struct {
 // only the listeners Serve has begun to track: one whose Serve goroutine
 // has not run yet would stay open until it did.
 func (k *socket) close() {
+	k.retiring.Store(true)
 	_ = k.ln.Close()
 	_ = k.srv.Close()
 }
@@ -241,9 +254,12 @@ func Start(cfg Config) (*Surface, error) {
 	lim := cfg.Limits.orDefaults()
 	s := &Surface{cfg: cfg, lim: lim, log: log, h: newHandler(cfg.Device, lim, cfg.Seams),
 		poke: make(chan struct{}, 1), loopDone: make(chan struct{}), failed: map[lan.Address]string{},
-		changed: make(chan struct{})}
+		changed: make(chan struct{}), ready: make(chan struct{})}
 	s.gate = newGate(lim, log, s.publish)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	if cfg.SSDP != nil {
+		s.discovery = newSourceDiscovery(s, cfg.SSDP)
+	}
 	go s.loop()
 	return s, nil
 }
@@ -255,6 +271,10 @@ func (s *Surface) Rescan() {
 	default:
 	}
 }
+
+// Ready closes once this surface has entered HTTP Serve on its first bound
+// address. Start returning, or a failed bind, does not signal success.
+func (s *Surface) Ready() <-chan struct{} { return s.ready }
 
 // Changed is closed at the surface's next change of Status.
 func (s *Surface) Changed() <-chan struct{} {
@@ -268,6 +288,9 @@ func (s *Surface) Status() Status {
 	s.mu.Lock()
 	st := Status{Reconciles: s.reconciles, ListFailure: s.listErr, Stopped: s.stopped}
 	for _, k := range s.sockets {
+		if k.ended.Load() {
+			continue
+		}
 		st.Listening = append(st.Listening, Listening{Address: k.key, Bound: k.bound, Restriction: k.restr})
 	}
 	for a, err := range s.failed {
@@ -288,12 +311,17 @@ func (s *Surface) publish() {
 }
 
 // loop follows the listing until Stop. A panic in it (the address source's
-// or the listing's own) ends the following and nothing else: the surface
+// or the listing's own) ends the following and withdraws discovery: the surface
 // serves what it has bound and stops as before, and the line carries the
 // stack, and the value only when it is the runtime's own error, since a
 // value code panics with could quote what the listing read.
 func (s *Surface) loop() {
 	defer close(s.loopDone)
+	defer func() {
+		if s.discovery != nil {
+			s.discovery.refuse(context.Background())
+		}
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			attrs := []any{"stack", string(debug.Stack())}
@@ -322,35 +350,42 @@ func (s *Surface) loop() {
 // changed its prefix or interface, or stopped being eligible closed, then
 // each new address bound. A listing that fails keeps everything as it was.
 func (s *Surface) reconcile() {
+	if s.ctx.Err() != nil {
+		return
+	}
 	inv, err := s.cfg.Addresses()
 	if err != nil {
 		s.mu.Lock()
 		first := s.listErr == ""
 		s.listErr = err.Error()
-		s.reconciles++
 		s.mu.Unlock()
 		if first {
 			s.log.Warn("player: the OpenHome surface could not list the interfaces; it keeps the addresses it serves and lists them again", "err", err)
 		}
+		s.syncDiscovery(s.Status().Listening, s.inventory)
+		s.mu.Lock()
+		s.reconciles++
+		s.mu.Unlock()
 		s.publish()
 		return
 	}
+	if s.ctx.Err() != nil {
+		return
+	}
+	s.inventory = lan.Inventory{Served: slices.Clone(inv.Served), Own: slices.Clone(inv.Own)}
 	want := servedOf(inv)
 	s.gate.set(want, inv.Own)
 	s.mu.Lock()
 	s.listErr = ""
 	var retire []*socket
-	kept := s.sockets[:0]
+	var kept []*socket
 	for _, k := range s.sockets {
-		if slices.Contains(want, k.key) {
+		if slices.Contains(want, k.key) && !k.ended.Load() {
 			kept = append(kept, k)
 		} else {
 			retire = append(retire, k)
 		}
 	}
-	// The retired sockets' slots beyond kept would otherwise keep them reachable.
-	clear(s.sockets[len(kept):])
-	s.sockets = kept
 	for a := range s.failed {
 		if !slices.Contains(want, a) {
 			delete(s.failed, a)
@@ -358,7 +393,7 @@ func (s *Surface) reconcile() {
 	}
 	var bind []lan.Address
 	for _, a := range want {
-		if !slices.ContainsFunc(s.sockets, func(k *socket) bool { return k.key == a }) {
+		if !slices.ContainsFunc(kept, func(k *socket) bool { return k.key == a }) {
 			bind = append(bind, a)
 		}
 	}
@@ -366,14 +401,32 @@ func (s *Surface) reconcile() {
 	wasNone := s.noAddress
 	s.noAddress = none
 	s.mu.Unlock()
+	if len(retire) > 0 {
+		var listening []Listening
+		for _, k := range kept {
+			listening = append(listening, Listening{Address: k.key, Bound: k.bound, Restriction: k.restr})
+		}
+		s.syncDiscovery(listening, inv)
+	}
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
+	s.sockets = kept
+	s.mu.Unlock()
 	for _, k := range retire {
 		k.close()
 		s.log.Info("player: the OpenHome surface closed an address that went away, changed or is no longer served",
 			"address", k.bound.String(), "interface", k.key.Interface)
 	}
 	for _, a := range bind {
+		if s.ctx.Err() != nil {
+			break
+		}
 		s.bind(a)
 	}
+	s.syncDiscovery(s.Status().Listening, inv)
 	if none && !wasNone {
 		s.log.Info("player: the OpenHome surface has no LAN address to listen on yet (lan_unavailable); it listens once one comes")
 	}
@@ -426,7 +479,8 @@ func (s *Surface) bind(a lan.Address) {
 		MaxHeaderBytes:               maxHeaderRead - 4096,
 		ErrorLog:                     handshakelog.ErrorLog(),
 	}
-	admit := &admitting{Listener: ln, key: a, gate: s.gate}
+	started := make(chan struct{})
+	admit := &admitting{Listener: ln, key: a, gate: s.gate, started: started}
 	k := &socket{key: a, srv: srv, ln: admit, bound: bound, restr: restr}
 	s.mu.Lock()
 	if s.stopped {
@@ -441,8 +495,19 @@ func (s *Surface) bind(a lan.Address) {
 	go func() {
 		defer s.serving.Done()
 		_ = srv.Serve(admit)
+		k.ended.Store(true)
+		if !k.retiring.Load() && s.ctx.Err() == nil {
+			s.Rescan()
+		}
 	}()
-	s.log.Info("player: the OpenHome surface listens on an address (not advertised yet)",
+	select {
+	case <-started:
+	case <-s.ctx.Done():
+	}
+	if s.ctx.Err() == nil && !k.ended.Load() {
+		s.readyOnce.Do(func() { close(s.ready) })
+	}
+	s.log.Info("player: the OpenHome surface listens on an address",
 		"address", bound.String(), "interface", a.Interface, "restricted", restr)
 }
 
@@ -453,6 +518,44 @@ func (s *Surface) bind(a lan.Address) {
 // goroutines it started are joined within Limits.Join. Nothing it started
 // outlives it but what the report counts abandoned.
 func (s *Surface) Stop() StopReport {
+	return s.StopContext(context.Background())
+}
+
+// Refuse freezes publication and makes new requests 503 while HTTP remains
+// bound. The caller supplies the shared SSDP deadline; cancellation alone
+// does not suppress byebye. StopContext finishes the HTTP shutdown.
+func (s *Surface) Refuse(ctx context.Context) {
+	s.h.stopping.Store(true)
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+	if s.discovery != nil {
+		s.discovery.refuse(ctx)
+	}
+	s.refuseOnce.Do(func() {
+		s.cancel()
+		if s.cfg.Seams != nil && s.cfg.Seams.Stopping != nil {
+			s.cfg.Seams.Stopping()
+		}
+	})
+}
+
+// Withdraw waits for discovery retirement, leaving HTTP bound and refusing.
+// It shares the caller's absolute deadline with the other SSDP owners.
+func (s *Surface) Withdraw(ctx context.Context) {
+	s.Refuse(ctx)
+	if s.discovery != nil {
+		select {
+		case <-s.discovery.done:
+		case <-ctx.Done():
+		}
+	}
+}
+
+// StopContext withdraws discovery under ctx's deadline, then drains HTTP
+// under its separate limits. It is idempotent with Stop.
+func (s *Surface) StopContext(ctx context.Context) StopReport {
+	s.Refuse(ctx)
 	s.stopOnce.Do(func() { s.report = s.stop() })
 	return s.report
 }
@@ -460,11 +563,15 @@ func (s *Surface) Stop() StopReport {
 func (s *Surface) stop() StopReport {
 	began := time.Now()
 	var rep StopReport
-	s.h.stopping.Store(true)
-	if s.cfg.Seams != nil && s.cfg.Seams.Stopping != nil {
-		s.cfg.Seams.Stopping()
+	if s.discovery != nil {
+		ctx, cancel := s.discovery.withdrawalContext()
+		select {
+		case <-s.discovery.done:
+		case <-ctx.Done():
+			rep.Abandoned++
+		}
+		cancel()
 	}
-	s.cancel()
 	loopTimer := time.NewTimer(s.lim.Join)
 	select {
 	case <-s.loopDone:
@@ -627,16 +734,8 @@ func (g *gate) judge(key lan.Address, local netip.Addr, lok bool, src netip.Addr
 	switch {
 	case !lok || local != key.Prefix.Addr() || !slices.Contains(g.served, key):
 		why = refusedDestination
-	case !sok || !src.Is4():
-		why = refusedNotIPv4
-	case src.IsLoopback():
-		why = refusedLoopback
-	case g.isOwn(src):
-		why = refusedOwnAddress
-	case !key.Prefix.Masked().Contains(src):
-		why = refusedOutsidePrefix
-	case !lan.IsLANAddress(src):
-		why = refusedNotLAN
+	case sourceRefusal(key.Prefix, src, sok, g.isOwn(src)) != "":
+		why = sourceRefusal(key.Prefix, src, sok, g.isOwn(src))
 	case g.open >= g.lim.MaxConns:
 		why = refusedGlobalCap
 	case g.bySrc[src] >= g.lim.MaxConnsPerSource:
@@ -710,12 +809,19 @@ func tcpAddr(a net.Addr) (netip.Addr, bool) {
 // every other at once, unread, counted against nothing.
 type admitting struct {
 	net.Listener
-	key  lan.Address
-	gate *gate
+	key       lan.Address
+	gate      *gate
+	started   chan struct{}
+	startOnce sync.Once
 }
 
 // Accept returns the next connection the gate admits.
 func (l *admitting) Accept() (net.Conn, error) {
+	l.startOnce.Do(func() {
+		if l.started != nil {
+			close(l.started)
+		}
+	})
 	for {
 		c, err := l.Listener.Accept()
 		if err != nil {

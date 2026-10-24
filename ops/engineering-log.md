@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-23 — B470 PR 5a2a: the player's LAN surface, reachable but not advertised: the opt-in, its own listener, admission and limits, the Source's descriptions, and a SOAP layer that answers every action 602](#2026-10-23--b470-pr-5a2a-the-players-lan-surface-reachable-but-not-advertised-the-opt-in-its-own-listener-admission-and-limits-the-sources-descriptions-and-a-soap-layer-that-answers-every-action-602)
 - [2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting](#2026-10-23--b523-the-players-engine-backend-and-sink-recover-the-panics-on-the-goroutines-they-start-a-dead-engines-sessions-are-let-go-of-and-the-engine-opens-its-own-files-without-waiting)
 - [2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration](#2026-10-23--b470-pr-5a1-one-ssdp-subsystem-for-several-devices-with-the-mediaserver-its-one-registration)
@@ -59092,3 +59093,98 @@ also compile and meet that denial, so their intended behavioral failures
 remain unverified here; their independent patches and commands accompany
 the Round 3 report outside the repository. No equality defect or successful
 behavioral red/green run is claimed.
+
+## 2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source
+
+The opt-in Source now advertises through serve's one SSDP subsystem. Its
+HTTP/SOAP behavior stays 5a2a's: every valid action is 602, GENA is 501,
+Volume is absent and the opt-in remains false by default. No iOS or client
+API schema changes. Backward-compatible protocol change, no iOS change
+required. Discovery alone is not a casting or bit-exact playback gate.
+
+### Registration and dispatch
+
+Serve creates the subsystem before either owner, passes it to the player
+and MediaServer, and needs no DLNA opt-in for Source. Initial interface
+lives are zero so common interfaces share memberships; disjoint Source
+interfaces join independently. The seven targets are rootdevice, player
+UDN, Source:1, and Product/Playlist/Info/Time:1 from the service table. USNs
+use the player's identity and SERVER omits DLNADOC. LOCATION contains each
+actual HTTP bound port, including distinct ephemeral ports.
+
+Strict multicast now walks the receiving listener's aliases after the
+metadata/capability checks, selecting the first whose Source hook admits
+the searcher. Previously firstOn selected the first alias before Source,
+so a second disjoint prefix never answered. The new alias regression failed
+on the old dispatcher first. Unicast still selects exact destination Local
+and arrival index, then Source; there is no fallback to another destination.
+The MediaServer's legacy selection, registration, token and goldens are
+unchanged, including B119/B120/B121.
+
+### Surface transactions and stop
+
+The surface enters HTTP Serve before publishing a bound endpoint; Ready is
+per Surface instance and does not mean the engine acknowledged readiness.
+One worker owns the handle and acknowledges whole-snapshot transactions.
+Additions bind first. Removals withdraw before HTTP close; prefix/interface
+replacement withdraws/closes before rebinding. Remaining endpoints re-alive.
+An empty set Withdraws and clears the handle; return creates a fresh handle.
+Partial/all HTTP or SSDP failures retry at the next listing, including an
+unchanged HTTP set. Listing failure retains the last good inventory.
+
+Admission uses immutable bound endpoints and Own addresses, refreshed even
+for Own-only edits, and the TCP source-only proof without caps or I/O.
+An observed absent interface advances its incarnation; aliases/prefix edits
+do not. Identical name/index recreation between polls remains unobservable.
+HTTP exit triggers reconciliation, listing panic withdraws, and a stop wins
+late bind/Register/Update completion. No automatic engine restart is added.
+
+Refuse freezes publication and answers 503 with connection close while
+HTTP remains bound. Withdrawal precedes HTTP shutdown/force-close/join,
+then engine/backend joins, then watcher/store teardown. Serve gives both
+owners and final subsystem Close the same absolute SSDP deadline; HTTP has
+separate bounds. The player's outer bound includes discovery's allowance.
+Cancellation stops normal sends but never cancels byebye. A registration's
+context is its lifetime: an early test exposed that using and canceling a
+short operation context after Register silently disabled its answers.
+
+### Evidence and limits
+
+Instance SSDP socket injection exposes explicit metadata, capabilities,
+reply source/interface, packet order, parking and socket counts. `ssdptest`
+extracts the existing fake-network model for cross-package tests; the old
+package-local fakeNet and goldens are unchanged. `lantest.NewMemory` runs
+real HTTP over net.Pipe, leaving real TCP buffer/platform checks to the
+existing host tests. Synthetic DLNA pick/gather/inventory and a held HTTP
+listener let runServe execute with the real engine and no audio-tree read
+or PCM open; the engine retains its own storage probe.
+
+Eighteen new test functions cover identity, searches/602, repeats, source
+proofs/refusals, aliases, transactions, retry, interface replacement,
+generations, late completions, 503/engine ordering and shared deadlines.
+The new tests pass race-enabled repetitions; bounded FuzzSSDPDispatch ran
+282,354 inputs in 20 seconds without failure, with disjoint/reversed aliases
+and completeness checks. Thirty-five independent negative patches fail
+behavioral assertions, not compilation; each is applied alone to an isolated
+snapshot and restored. Only the alias regression was run red on the original
+dispatcher; the other rule removals were verified after implementation. No
+commit was made, as requested; controls target the reviewed implementation
+for application once the owner commits it.
+
+Go 1.27.2 offline: formatting, native/Linux/Windows vet, six-target build and
+docs-check pass. The requested full race suites were attempted; binding,
+decode, engine, format, hotplug, lan, library and playback pass. Existing
+socket-based tests in cmd/bridge, dlna, dlna/discovery and openhome are denied
+by this sandbox, some aborting their binary through httptest's bind panic
+or the old stop test's uninitialized connection cleanup. These are not
+behavioral failures of the new tests. Exact failed names, commands, outputs,
+controls and the owner commands are in the external round-1 report. The
+host-only B520 handshakelog check is tracked separately there.
+
+The Pi/GO bar and real 1-bit owner gate was not run. It must check UDP source,
+interface, LOCATION reachability, Linux capabilities, the Unverified row,
+SourceIndex failure preserving output, MPD suppression, restart identity,
+opt-out removal and unaffected library use. SNAT can still appear on-link;
+macOS IP_BOUND_IF scopes sends rather than arrival. Default-on cannot be
+reconsidered before 5a4, implemented actions/URI confinement/restored-ID
+policy, successful owner playback and accepted MPD coexistence.

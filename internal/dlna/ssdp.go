@@ -161,6 +161,8 @@ type SSDPSubsystemOptions struct {
 	// read error, a listener that cannot report destinations). A
 	// registration logs its own on its own logger. nil is ssdpLogger.
 	Logger *slog.Logger
+	// Network replaces only this instance's transport; nil is the host's.
+	Network *SSDPNetwork
 }
 
 // NewSSDPSubsystem returns a subsystem with no registration and no socket.
@@ -173,7 +175,7 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		log = ssdpLogger
 	}
 	inner, cancel := context.WithCancel(ctx)
-	return &SSDPSubsystem{
+	s := &SSDPSubsystem{
 		log:           log,
 		transport:     hostSSDPTransport{},
 		ctx:           inner,
@@ -183,6 +185,14 @@ func NewSSDPSubsystem(ctx context.Context, opts SSDPSubsystemOptions) *SSDPSubsy
 		listeners:     map[ssdpListenerKey]*ssdpListener{},
 		senders:       map[*ssdpOwnedSender]struct{}{},
 	}
+	if opts.Network != nil {
+		s.transport = injectedSSDPNetwork{*opts.Network}
+		s.replyDelay = opts.Network.Delay
+		if opts.Network.IntervalFloor > 0 {
+			s.intervalFloor = opts.Network.IntervalFloor
+		}
+	}
+	return s
 }
 
 // withdrawDeadline is the deadline of a withdrawal entered now: the earlier of

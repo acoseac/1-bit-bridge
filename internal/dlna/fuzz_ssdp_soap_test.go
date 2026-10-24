@@ -86,6 +86,8 @@ func fuzzDispatchTable() (*ssdpTable, []*ssdpListener) {
 		{h: src, key: l0.key, listener: l0, spec: SSDPEndpoint{Location: srcOnEn0, Local: netip.MustParsePrefix("192.168.1.20/24")}},
 		{h: src, key: l0.key, listener: l0, spec: SSDPEndpoint{Location: "http://192.168.1.21:7791/openhome/description.xml",
 			Local: netip.MustParsePrefix("192.168.1.21/24")}},
+		{h: src, key: l0.key, listener: l0, spec: SSDPEndpoint{Location: "http://10.2.0.20:7792/openhome/description.xml",
+			Local: netip.MustParsePrefix("10.2.0.20/24")}},
 		{h: src, key: l2.key, listener: l2, spec: SSDPEndpoint{Location: srcOnEn2, Local: netip.MustParsePrefix("172.20.0.9/16")}},
 	}
 	return buildTable([]*SSDPHandle{ms, src}), []*ssdpListener{l0, l1, l2}
@@ -101,13 +103,18 @@ func fuzzDispatchTable() (*ssdpTable, []*ssdpListener) {
 // both and is confined, from an endpoint on it; and a MediaServer group
 // answer only from its endpoint on the listener that read it.
 func FuzzSSDPDispatch(f *testing.F) {
+	f.Add([]byte(search("ssdp:all")), []byte{239, 255, 255, 250}, true, uint8(2), true, []byte{10, 2, 0, 30}, uint8(0))
+	f.Add([]byte(search("ssdp:all")), []byte{239, 255, 255, 250}, true, uint8(2), true, []byte{192, 168, 1, 30}, uint8(128))
 	f.Add([]byte(search("ssdp:all")), []byte{239, 255, 255, 250}, true, uint8(2), true, []byte{192, 168, 1, 30}, uint8(0))
 	f.Add([]byte(search(srcUDN)), []byte{192, 168, 1, 21}, true, uint8(2), true, []byte{192, 168, 1, 30}, uint8(2))
 	f.Add([]byte(search("upnp:rootdevice")), []byte{100, 64, 0, 7}, true, uint8(9), true, []byte{100, 64, 0, 9}, uint8(1))
 	f.Add([]byte("M-SEARCH * HTTP/1.1\r\nMX: 3\r\nST: "+msUDN+"\r\n\r\n"), []byte{}, false, uint8(0), false, []byte{1, 2, 3, 4}, uint8(0))
-	table, listeners := fuzzDispatchTable()
 	f.Fuzz(func(t *testing.T, pkt, dst []byte, dstOK bool, idx uint8, idxOK bool, src []byte, which uint8) {
-		l := listeners[int(which)%len(listeners)]
+		table, listeners := fuzzDispatchTable()
+		if which&128 != 0 {
+			slices.Reverse(table.entries[1].eps)
+		}
+		l := listeners[int(which&127)%len(listeners)]
 		var m datagramMeta
 		if a, ok := netip.AddrFromSlice(dst); ok && dstOK {
 			m.dst, m.dstOK = a.Unmap(), true
@@ -127,6 +134,36 @@ func FuzzSSDPDispatch(f *testing.F) {
 		seen := map[*SSDPHandle]bool{}
 		for _, p := range plan {
 			checkPlanned(t, table, l, st, m, from, p, seen)
+		}
+		// Completeness as well as refusal: a later disjoint alias cannot
+		// disappear behind the first, and overlap still selects only one.
+		if st != "" && m.dstOK && m.dst == ssdpGroupAddr && m.ifOK && m.ifIndex == l.key.index &&
+			l.setup.caps == fullSetup.caps {
+			e := table.entries[1]
+			matched := false
+			for _, tg := range e.h.targets {
+				if st == "ssdp:all" || tg.NT == st {
+					matched = true
+				}
+			}
+			var expected *ssdpEndpoint
+			if matched {
+				for _, ep := range e.eps {
+					if ep.listener == l && ep.spec.Local.Contains(from.Addr()) {
+						expected = ep
+						break
+					}
+				}
+			}
+			var got *ssdpEndpoint
+			for _, p := range plan {
+				if p.h == e.h {
+					got = p.ep
+				}
+			}
+			if got != expected {
+				t.Fatalf("strict alias selection got %v want %v", got, expected)
+			}
 		}
 	})
 }

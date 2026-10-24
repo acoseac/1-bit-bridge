@@ -144,3 +144,25 @@ marker alone does not establish a supported policy. Dispatch and startup
 capability checks must see the same policy. This is pinned by
 `TestAdmissionFormsAreValidatedBeforeOpening` through Register, the fake
 network, dispatch and sender-pin refusal.
+
+## Strict aliases and cross-package transport (B470 PR 5a2b)
+
+Strict multicast used to select firstOn and only then ask Source, losing a
+searcher on the second alias's disjoint prefix. It now establishes every
+metadata/capability proof first, then walks active endpoints on the receiving
+listener and picks the first Source admits. Overlapping prefixes still produce
+one target set. Unicast preserves exact Local and reported arrival index;
+Source refusal there never falls through to another destination. Legacy
+MediaServer selection, fallback and B119/B120/B121 are unchanged.
+`TestStrictMulticastChoosesAnAdmittedAlias` failed first against the previous
+dispatcher. FuzzSSDPDispatch adds a disjoint alias, reversed order, and a
+completeness assertion beside its existing soundness/refusal properties.
+
+`SSDPSubsystemOptions.Network` is an instance socket seam: explicit datagram
+metadata/capabilities, sender/reply deadlines and Close; nil is the host
+transport. `ssdptest` exposes the 5a1 fake socket model to Source and serve
+tests, retaining packet ordering, source/interface selection, failures,
+parking and socket counts. No global transport swap. `ServerConfig` can adopt
+a test's held HTTP listener and inventory functions without changing normal
+selection. Serve's shared deadline still reaches Close's existing ownership,
+clamp and join machinery; this change does not weaken it or alter the goldens.
