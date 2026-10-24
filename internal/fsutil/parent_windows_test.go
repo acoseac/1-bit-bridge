@@ -60,6 +60,42 @@ func repointJunction(t *testing.T, link, target string) {
 	makeJunction(t, target, link)
 }
 
+// TestEntryOfReadsTheEntryItself: the directory check reads a directory's own
+// entry (entryOf), never what it leads to: a plain directory is no reparse
+// point, a junction is a mount point and a directory, a file is no directory,
+// and a path that is not there is a not-exist error. The check's decision on
+// what it reads, a cloud folder's tag included, is
+// TestCheckResolvedDirRefusesOnlyALinkOrAMove's, which no host without a sync
+// provider can make natively.
+func TestEntryOfReadsTheEntryItself(t *testing.T) {
+	base := t.TempDir()
+	real, junction, file := filepath.Join(base, "real"), filepath.Join(base, "junction"), filepath.Join(base, "file.txt")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	makeJunction(t, real, junction)
+	for _, c := range []struct {
+		name, path string
+		tag        uint32
+		dir        bool
+	}{
+		{"a plain directory", real, 0, true},
+		{"a junction", junction, reparseTagMountPoint, true},
+		{"a file", file, 0, false},
+	} {
+		tag, dir, err := entryOf(c.path)
+		if err != nil || tag != c.tag || dir != c.dir {
+			t.Errorf("entryOf(%s) = %#x, %v, %v; want %#x, %v", c.name, tag, dir, err, c.tag, c.dir)
+		}
+	}
+	if _, _, err := entryOf(filepath.Join(base, "gone")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("entryOf of a path that is not there = %v, want a not-exist error", err)
+	}
+}
+
 // TestResolveParentFollowsAJunctionToTheConfigsDirectory: a plain file
 // reached through a junction is in the junction's target, named as the OS
 // names that directory.

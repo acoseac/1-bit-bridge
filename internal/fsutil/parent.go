@@ -33,7 +33,9 @@ var ErrDanglingLink = errors.New("a symbolic link that leads to no file")
 // through every junction, mounted folder and symbolic link on its way: two
 // names of one directory answer one spelling, and a junction repointed
 // answers the directory it leads to now. A directory that stays a link
-// (ResolveLinks's fallback ends at one) is refused, never answered as itself.
+// (ResolveLinks's fallback ends at one), or whose resolution asked again
+// answers another directory, is refused, never answered as itself; a
+// reparse point that is no link (a OneDrive folder's) is a directory.
 //
 // A last element that is a symbolic link is followed to the file it leads
 // to, as the OS opens it (ResolveLinks: on unix filepath.EvalSymlinks of the

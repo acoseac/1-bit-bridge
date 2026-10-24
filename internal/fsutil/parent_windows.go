@@ -39,9 +39,11 @@ func resolveParent(path string) (dir, name string, err error) {
 // its way; a directory that does not exist yet (a config dir bridge init is
 // about to make) is resolved through its nearest ancestor that does, with the
 // directories after that ancestor as written. One that is not a directory,
-// and one ResolveLinks's fallback leaves a link (no handle could name it), are
-// refused (checkResolvedDir): answered as itself, a junction keeps its
-// spelling when it is repointed.
+// one ResolveLinks's fallback leaves a link (no handle could name it), and one
+// whose resolution, asked again, answers another directory are refused
+// (checkResolvedDir): answered as itself, a junction keeps its spelling when
+// it is repointed. A reparse point that is no link (a OneDrive folder's
+// cloud tag, a container layer's) is a directory like any other.
 func physicalDir(dir string) (string, error) {
 	missing := ""
 	for {

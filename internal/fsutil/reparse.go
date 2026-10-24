@@ -21,9 +21,6 @@ const (
 	// reparseTagDedup is IO_REPARSE_TAG_DEDUP: a file the Data
 	// Deduplication service optimised, which os.Lstat calls regular.
 	reparseTagDedup = 0x80000013
-	// reparseTagAFUnix is IO_REPARSE_TAG_AF_UNIX: a Unix socket, which
-	// os.Lstat calls ModeSocket.
-	reparseTagAFUnix = 0x80000023
 )
 
 // errLinkNotResolved is the cause, inside an *fs.PathError, of ResolveLinks's
@@ -46,19 +43,32 @@ type dirEntryOps struct {
 // checkResolvedDir answers nil when resolved, the directory ResolveLinks
 // answered for dir, is a directory and no link, and otherwise an
 // *fs.PathError naming dir: errLinkNotResolved for one that is still a link,
-// syscall.ENOTDIR for one that is no directory, and the entry's own error
-// when it cannot be read. It decides as Go 1.23's os.Lstat reads the entry,
-// refusing ModeSymlink and ModeIrregular: every reparse point but a
-// deduplicated file's and a Unix socket's.
+// its own entry a name surrogate (IsReparseTagNameSurrogate: a symbolic link,
+// a junction, a mounted folder), or one whose resolution, asked again,
+// answers another directory (still a link, or one repointed meanwhile);
+// syscall.ENOTDIR for one that is no directory; and the entry's or the
+// resolution's own error when either cannot be had. Every other reparse
+// point is a directory like any other: a OneDrive folder's cloud tag
+// (IO_REPARSE_TAG_CLOUD_*), a container layer's (IO_REPARSE_TAG_WCI*), a
+// deduplicated folder's. Go 1.23's os.Lstat calls each of those
+// ModeIrregular, and refusing that mode refused every writer of a config
+// under OneDrive (B506's fifth round).
 func checkResolvedDir(dir, resolved string, ops dirEntryOps) error {
 	tag, isDir, err := ops.entry(resolved)
 	switch {
 	case err != nil:
 		return err
-	case tag != 0 && tag != reparseTagDedup && tag != reparseTagAFUnix:
+	case tag&reparseTagNameSurrogate != 0:
 		return &fs.PathError{Op: "resolve", Path: dir, Err: errLinkNotResolved}
 	case !isDir:
 		return &fs.PathError{Op: "resolve", Path: dir, Err: syscall.ENOTDIR}
+	}
+	again, err := ops.resolve(resolved)
+	switch {
+	case err != nil:
+		return err
+	case again != resolved:
+		return &fs.PathError{Op: "resolve", Path: dir, Err: errLinkNotResolved}
 	}
 	return nil
 }
