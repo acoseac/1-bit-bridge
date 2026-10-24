@@ -258,15 +258,19 @@ type FileLock struct {
 // bounded schedule while Windows answers that another process holds the file
 // (ReadFile), and never for a file that is not there or not a file.
 //
-// The name is resolved again once the turn is taken, before its read, and
-// before each comparison below (stillNamed): a link at the name, or on its
-// way, repointed while a writer waited or while it held the turn (a dotfiles
-// restow, a home-manager switch) makes the name open another file than the
-// one locked, and the turn refuses with a *NameMovedError, writing nothing,
-// rather than read, compare or replace a file the name no longer opens. Every
-// writer refuses it and none tries again on the file the name opens now: a
-// CLI writer says to run it again, and serve's console says the file changed
-// outside it (RuntimeConfig.UpdateChecked).
+// The name is resolved again once the turn has made its read, after each
+// comparison below, and after a writer's own comparison in SaveIf
+// (stillNamed): the last thing asked before the turn is handed to its writer,
+// before a rename and before the work a check authorizes (Check), each after
+// the reads its decision rests on, so a link at the name, or on its way,
+// repointed while a writer waited, while it held the turn or while one of
+// those reads ran (a dotfiles restow, a home-manager switch) is seen. A name
+// that opens another file than the one locked refuses the turn with a
+// *NameMovedError, writing nothing, rather than have it decide on, compare or
+// replace a file the name no longer opens. Every writer refuses it and none
+// tries again on the file the name opens now: a CLI writer says to run it
+// again, and serve's console says the file changed outside it
+// (RuntimeConfig.UpdateChecked).
 //
 // Every save in the turn compares the file with the one the turn found, once
 // its new file is staged and before each attempt at the rename (stillAsFound,
@@ -274,9 +278,10 @@ type FileLock struct {
 // they differ, writing nothing and trying no rename after it: with the lock
 // held only a writer that takes no turns (an edit, a bridge older than the
 // lock) can change the file meanwhile, and without it any writer can. That
-// narrows the window to the instant between a comparison and its rename, and
-// does not close it: no rename can be made conditional on the file it
-// replaces.
+// narrows the window to the time between the turn's final check (the name
+// still opens the file, and the file's bytes are as found) and the rename
+// itself, and does not close it: no rename can be made conditional on the
+// file it replaces.
 func LockFile(path string) (*FileLock, error) {
 	return lockFile(path, fsutil.TryLock, LockWait)
 }
@@ -331,14 +336,16 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 			_ = f.Close()
 			return nil, fmt.Errorf("take the lock beside %s: %w", path, err)
 		}
-		// The name was resolved before the wait, and a link on its way can
-		// have been repointed since: a turn whose name now opens another file
-		// would read, compare and replace one the name no longer opens.
-		if err := l.stillNamed(); err != nil {
+		if err := l.find(); err != nil {
 			l.Unlock()
 			return nil, err
 		}
-		if err := l.find(); err != nil {
+		// The name was resolved before the wait, and a link on its way can
+		// have been repointed since, or while the read above ran: a turn
+		// whose name now opens another file would have its writer decide on,
+		// and replace, one the name no longer opens. Asked after the read,
+		// so the writer's work runs only on a read the name still opens.
+		if err := l.stillNamed(); err != nil {
 			l.Unlock()
 			return nil, err
 		}
@@ -413,16 +420,14 @@ func (l *FileLock) find() error {
 	return nil
 }
 
-// stillAsFound answers nil while the config's name still opens the file the
-// turn locked (stillNamed, else its *NameMovedError) and that file is the one
-// the turn found, or its own last write left, and a *ChangedInTurnError once
-// it is not: other bytes, no file where there was one, or a file where there
-// was none. A read that fails otherwise is an error too, since it cannot say
-// the file is unchanged.
+// stillAsFound answers nil while the file the turn locked is the one the
+// turn found, or its own last write left, and a *ChangedInTurnError once it
+// is not: other bytes, no file where there was one, or a file where there was
+// none. A read that fails otherwise is an error too, since it cannot say the
+// file is unchanged. It reads the file the turn locked, and says nothing of
+// the config's name, which its callers resolve again once it has answered
+// (stillNamed): a link repointed while it read is seen then.
 func (l *FileLock) stillAsFound(ctx context.Context) error {
-	if err := l.stillNamed(); err != nil {
-		return err
-	}
 	now, err := ReadFile(ctx, l.target)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -459,33 +464,40 @@ func (l *FileLock) LoadFound() (*Config, error) {
 	return loadData(l.path, l.found)
 }
 
-// Check resolves the config's name and reads the file again, as the
-// comparison before each rename attempt does (stillAsFound), and answers nil
-// while the name opens the file the turn locked and that file is the one the
-// turn found, or its own last write in the turn left, a *NameMovedError once
-// the name opens another file, a *ChangedInTurnError once another writer has
-// changed the file, and the read's error when it cannot be read: for a writer
-// that is about to do something of its own a refused save would leave done
-// (a console root change's library index change, a restore's first write),
-// so that a change landing since the turn's read, or a link repointed since,
-// refuses it before that. Nothing it asks can stop a link repointed during
-// that work itself, which the save after it refuses.
+// Check reads the file again, as the comparison before each rename attempt
+// does (stillAsFound), then resolves the config's name again (stillNamed),
+// and answers nil while that file is the one the turn found, or its own last
+// write in the turn left, and the name still opens it, a *ChangedInTurnError
+// once another writer has changed the file, a *NameMovedError once the name
+// opens another file, and the read's error when it cannot be read: for a
+// writer that is about to do something of its own a refused save would leave
+// done (a console root change's library index change, a restore's first
+// write), so that a change landing since the turn's read, or a link repointed
+// since, during the read included, refuses it before that. Nothing it asks
+// can stop a link repointed after it, during that work itself, which the save
+// after it refuses.
 func (l *FileLock) Check() error {
 	if err := l.heldFor(); err != nil {
 		return err
 	}
-	return l.stillAsFound(context.Background())
+	if err := l.stillAsFound(context.Background()); err != nil {
+		return err
+	}
+	return l.stillNamed()
 }
 
 // write puts data in place as the config file in this turn: staged in the
 // directory the file is written in, given the owner of the file it replaces,
-// synced, and renamed onto the file only while the config's name still opens
-// it and it is still the one the turn found (stillAsFound) and unchanged,
-// when given, answers nil, both asked before every attempt at the rename,
-// within saveWindow; a refusal of either ends the retries at once, and no
-// rename is made once the window has ended, however late a comparison
-// answered (atomicwrite.RenameWithRetryIf). Once it lands it is what the turn
-// compares with.
+// synced, and renamed onto the file only while it is still the one the turn
+// found (stillAsFound), unchanged, when given, answers nil, and the config's
+// name still opens it (stillNamed), asked in that order before every attempt
+// at the rename, within saveWindow: the name last, once every read the save
+// rests on has answered (unchanged's own included, as bind's reads the file
+// through the name), so a link repointed while one of them ran is seen. A
+// refusal of any ends the retries at once, and no rename is made once the
+// window has ended, however late a comparison answered
+// (atomicwrite.RenameWithRetryIf). Once it lands it is what the turn compares
+// with.
 func (l *FileLock) write(data []byte, unchanged func(context.Context) error) error {
 	if err := l.heldFor(); err != nil {
 		return err
@@ -529,6 +541,9 @@ func (l *FileLock) write(data []byte, unchanged func(context.Context) error) err
 	err = atomicwrite.RenameWithRetryIf(ctx, tmpName, l.target, func() error {
 		if refused = l.stillAsFound(ctx); refused == nil && unchanged != nil {
 			refused = unchanged(ctx)
+		}
+		if refused == nil {
+			refused = l.stillNamed()
 		}
 		return refused
 	})

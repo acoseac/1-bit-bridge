@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // A config's name is the file the OS opens for it: through a link and the
@@ -305,6 +306,98 @@ func TestLibraryAddRefusesANameRepointedWhileItWaited(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dataDir, "bridge.db")); !os.IsNotExist(err) {
 		t.Errorf("library add changed the library index before it refused (bridge.db: %v)", err)
 	}
+}
+
+// repointDuringRead makes link lead to moved just before the nth read of the
+// config that a turn or a writer's own comparison makes through
+// config.ReadFile, counting from the turn's own read once it holds the lock,
+// and returns the path that read was of, "" until it is made.
+func repointDuringRead(t *testing.T, link, moved string, n int) (readOf *string) {
+	t.Helper()
+	reads, of := 0, ""
+	t.Cleanup(config.SetTurnReadForTest(func(p string) ([]byte, error) {
+		if reads++; reads == n {
+			repointLink(t, link, moved)
+			of = p
+		}
+		return fsutil.ReadAsFile(p)
+	}))
+	return &of
+}
+
+// TestLibraryAddRefusesANameRepointedDuringItsTurnsRead: library add whose
+// config's name is repointed while its turn makes its own read, once it holds
+// the lock, to a file holding the same bytes, refuses before it changes
+// anything, saying the name now opens another file and to run it again: the
+// wipe a second root takes never runs, and neither file is written. Until
+// B506's fifth round the turn resolved the name before that read, the add
+// wiped the index on a turn whose name no longer opened the file it had read,
+// and only its save refused.
+func TestLibraryAddRefusesANameRepointedDuringItsTurnsRead(t *testing.T) {
+	l := layouts(t, closedAdminAddr(t))["a link at the last element"]
+	moved, raw := twinBeside(t, l.file)
+	extra := filepath.Join(l.base, "Extra")
+	dataDir := filepath.Join(l.base, "data")
+	for _, d := range []string{extra, dataDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readOf := repointDuringRead(t, l.link, moved, 1)
+	code, out := runLibraryCapture(libraryEnv{}, "add", "--config", l.name, extra)
+	if *readOf != l.file {
+		t.Fatalf("premise: the first read was of %q, want the turn's own, of %s", *readOf, l.file)
+	}
+	if code == 0 || !strings.Contains(out, "now opens another file") || !strings.Contains(out, "run it again") {
+		t.Errorf("library add whose config's name moved during its turn's read: exit %d\n%s\nwant a refusal that says the name moved and to run it again", code, out)
+	}
+	for _, p := range []string{l.file, moved} {
+		if got := readBytes(t, p); string(got) != string(raw) {
+			t.Errorf("library add wrote %s:\n%s", p, got)
+		}
+	}
+	requireLinkTo(t, l.link, moved)
+	if _, err := os.Stat(filepath.Join(dataDir, "bridge.db")); !os.IsNotExist(err) {
+		t.Errorf("library add changed the library index before it refused (bridge.db: %v)", err)
+	}
+}
+
+// TestBindRefusesANameRepointedDuringItsOwnComparison: bind compares the
+// config through its name once more before its save's rename (SaveIf), and a
+// link at that name repointed during that read, to a file holding the same
+// bytes, refuses the binding, saying the name now opens another file and to
+// run it again: neither file is written. Until B506's fifth round the name was
+// resolved before bind's comparison, and the binding was written into the
+// file the name no longer opened.
+func TestBindRefusesANameRepointedDuringItsOwnComparison(t *testing.T) {
+	root := dacTree(t)
+	link := dacConfig(t, "  player:\n    room: Study\n")
+	store := filepath.Join(filepath.Dir(link), "store")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	actual := filepath.Join(store, "actual.yaml")
+	if err := os.Rename(link, actual); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actual, link); err != nil {
+		t.Fatal(err)
+	}
+	moved, raw := twinBeside(t, actual)
+	readOf := repointDuringRead(t, link, moved, 3)
+	_, errOut, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "serial", "--config", link}, treeFlags(root)...)...)
+	if *readOf != link {
+		t.Fatalf("premise: the third read was of %q, want bind's own comparison's, of %s", *readOf, link)
+	}
+	if code == 0 || !strings.Contains(errOut, "now opens another file") || !strings.Contains(errOut, "run it again") {
+		t.Errorf("bind whose config's name moved during its own comparison: exit %d, stderr %q; want a refusal that says the name moved and to run it again", code, errOut)
+	}
+	for _, p := range []string{actual, moved} {
+		if got := readBytes(t, p); string(got) != string(raw) {
+			t.Errorf("bind wrote %s:\n%s", p, got)
+		}
+	}
+	requireLinkTo(t, link, moved)
 }
 
 // TestServeRecordsTheFileItsBootReadOpened: serve's live holder is told the

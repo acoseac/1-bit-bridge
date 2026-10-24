@@ -61,14 +61,16 @@ var configWriters = map[string]string{
 // each with the calls the sweep requires of it: the save refuses a turn of
 // the lock it does not hold (heldFor), and the one write every save goes
 // through compares the file with the one its turn found just before its
-// rename (stillAsFound), so a writer of the config can neither write without
-// a turn nor write over what another writer saved in it.
+// rename (stillAsFound) and resolves the config's name again after that
+// comparison (stillNamed), so a writer of the config can neither write
+// without a turn, nor write over what another writer saved in it, nor write a
+// file its name no longer opens.
 var configSavePrimitive = map[string][]string{
 	"internal/config/config.go:Config.Save":      {"save"},
 	"internal/config/config.go:Config.SaveIf":    {"save"},
 	"internal/config/config.go:Config.save":      {"heldFor", "write"},
 	"internal/config/lock.go:FileLock.SaveBytes": {"write"},
-	"internal/config/lock.go:FileLock.write":     {"heldFor", "stillAsFound", "RenameWithRetryIf"},
+	"internal/config/lock.go:FileLock.write":     {"heldFor", "stillAsFound", "stillNamed", "RenameWithRetryIf"},
 }
 
 // turnReadMethods are the names of a turn's own reads, the bytes LockFile
@@ -243,7 +245,7 @@ func TestEveryConfigWriterTakesTheConfigLock(t *testing.T) {
 		for _, want := range wants {
 			if !callsLock(calls, want) {
 				t.Errorf("%s does not call %s, so a save could write in no turn of bridge.yaml's lock, "+
-					"or over what another writer saved in it", key, want)
+					"over what another writer saved in it, or into a file its name no longer opens", key, want)
 			}
 		}
 	}

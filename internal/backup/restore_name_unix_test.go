@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // A restore takes bridge.yaml's turn and writes the snapshot's copy in it.
@@ -93,6 +94,40 @@ func TestARestoreRefusesANameRepointedBeforeItsFirstWrite(t *testing.T) {
 		!strings.Contains(err.Error(), "run the restore again") {
 		t.Errorf("a restore whose config's name moved before its first write = %v, want the refusal of a changed config: "+
 			"nothing was restored, run the restore again", err)
+	}
+	b.requireUntouched(t)
+	requireConfigsAsTheyWere(t, raw, link, a, twin)
+}
+
+// TestARestoreRefusesANameRepointedDuringItsCheck: a link at the config's
+// name repointed while the restore's check, before its first write, reads the
+// file its turn locked, which the read finds unchanged, refuses the restore
+// with nothing restored: the check resolves the name once that read has
+// answered. Until B506's fifth round it resolved the name first, the restore
+// wrote its files, and only bridge.yaml's own write refused.
+func TestARestoreRefusesANameRepointedDuringItsCheck(t *testing.T) {
+	b := newRestorableBox(t)
+	link, a, twin := linkTheBoxsConfig(t, b)
+	raw := b.live[link]
+	locked, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads, secondOf := 0, ""
+	t.Cleanup(config.SetTurnReadForTest(func(p string) ([]byte, error) {
+		if reads++; reads == 2 {
+			repointLink(t, link, twin)
+			secondOf = p
+		}
+		return fsutil.ReadAsFile(p)
+	}))
+	err = backup.RestoreWithOptions(b.snap, b.targets, backup.RestoreOptions{Random: bytes.NewReader([]byte{0, 0, 7})})
+	if secondOf != locked {
+		t.Fatalf("premise: the second read was of %q, want the check's, of %s", secondOf, locked)
+	}
+	if !errors.Is(err, config.ErrNameMoved) || !strings.Contains(err.Error(), "nothing was restored") {
+		t.Errorf("a restore whose config's name moved during its check's read = %v, want the refusal of a changed config, "+
+			"nothing restored", err)
 	}
 	b.requireUntouched(t)
 	requireConfigsAsTheyWere(t, raw, link, a, twin)
