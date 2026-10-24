@@ -62371,3 +62371,100 @@ inputs against the engine, each with four workers, none failing. The
 Linux-only tests are build-excluded here; round 1 ran them on legion0, and
 round 2 changes none of their code. b93d3cb7, after the race run, changes a
 comment alone.
+
+### Round 3: the Uri stored as sent again
+
+Round 2's reviews (Codex, the Claude API) found the same Medium: round 2
+stored the canonical form (`engine.NewReference(u.String())`), so an Insert
+of `http://Bridge.LOCAL:7790/dlna/file/<id>` read back as `bridge.local`,
+and 1-bit, whose `OpenHomeWake.decide` matches Read's Uri byte for byte
+against what it inserted, lost the cast on a relaunch whenever the bridge
+advertises a name with capitals (a custom endpoint, or a `.local` name made
+from the hostname) and 1-bit builds its Uri from it, as it does when none of
+its bridge URLs holds an RFC 1918 IPv4 address. Round 1 had guaranteed that
+case. The orchestrator's decision, from both reviews: store the spelling
+sent once confined, and compare canonically. Commits, no attribution:
+24b66ce1, c644bbcf, 92f3e6ff and a9061693, and this section. Round 2's
+named follow-up, 1-bit's relaunch match for 5b/5c, is no longer needed: the
+bridge returns what 1-bit inserted again.
+
+Why the spelling sent is safe to store now: `CanonicalName` asks every byte
+of a name to be ASCII before anything is folded (round 2), so a string
+`Parse` takes is ASCII; and `Parse` folds nothing but a name's ASCII case,
+from the code: the scheme and `/dlna/file/` are exact prefixes
+(`strings.CutPrefix`), the id 16 lower-case hex (`IsID`), an IPv4 or IPv6
+literal must equal netip's own string, `%` and `@` are refused anywhere in
+the authority, and the port is decimal digits. So the spelling sent differs
+from its canonical form in its name's case alone and names the same host
+and track, and the U+0130, Kelvin, long-s, fullwidth and non-ASCII-port rows
+still answer 600 before anything is stored; `CanonicalName` stays on both
+sides of every comparison. Until now only canonical strings reached
+`engine.NewReference` and `ParseStored`, so FuzzParse asks of every string
+`Parse` takes that `NewReference` takes it, that `ParseStored` names
+`Parse`'s id from it, and that it differs from its serialization in its host
+alone, the scheme, the port and the path byte for byte the same; its seeds
+now carry an upper-case scheme, path and id, which `Parse` refuses, so a
+loosened `Parse` fails the oracle where round 2's `lowerASCII` oracle would
+not (an upper-case scheme lower-cases to the serialization as a name does).
+No row can take an upper-case scheme, path or id through an Insert, a
+restart and an open: `Parse` refuses all three (the matrix's rows and
+trackref's).
+
+What returns a track's Uri: Playlist's Read and ReadList (the entry's
+`Ref.String()`) and Info's Track (the reference of the occurrence heard,
+handed off from its entry). Product's ImageUri values name no track; the
+transport, Time and the other reads carry no Uri; GENA's evented Uri is not
+served (501). Each gives the spelling sent: `TestAnInsertStoresItsURIAsSent`
+(round 2's test, renamed) asserts `Bridge.LOCAL` on Read, ReadList, the
+backend's occurrence, Info's Track, and after a restart the queue file, Read
+and ReadList; `insertFault` compares Read's Uri exactly again.
+
+One track under two spellings (`TestOneTrackUnderTwoSpellingsIsTwoEntries`):
+`Bridge.LOCAL` and `bridge.local` of the golden track are two entries with
+two IDs, each keeping its spelling, each opening the track's file through
+the real library resolver, and each played as an occurrence of its own
+entry and spelling (SeekId, the backend's occurrence, Info's Track while it
+is heard), after a restart too. Nothing is keyed on a stored Uri, read in
+the code: the engine keys its queue's index and its skips and pass sets by
+entry ID and its sessions and calls by their own IDs, and carries a
+reference from an entry to its occurrence and Track without comparing two;
+the backend keys its sessions by session ID and its packings by rate and
+depth, and hands a reference to the resolver alone; the library's index
+maps the track id an open parses from the stored form (the same for both
+spellings) to paths; the surface compares a Uri only at an Insert, through
+`CanonicalName`; `bridge output play` names occurrences by their IDs. So
+neither spelling stands in for the other, and both open the same file.
+
+**Red first** at 2318ed58: `TestAnInsertStoresItsURIAsSent` (Read, ReadList,
+the occurrence, Info's Track and, after the restart, Read and ReadList all
+`bridge.local`, and the queue file holding `bridge.local`), the matrix's two
+capitals rows and the advertised names' `BRIDGE.local` row (`insertFault`'s
+exact comparison), and `TestOneTrackUnderTwoSpellingsIsTwoEntries` (both
+entries reading `bridge.local`). FuzzParse's new oracle passed at 2318ed58:
+the property held, and the oracle pins it.
+
+**Controls**, each on the committed tree, restored from git, the tree
+checked clean: storing the canonical form again (`trackref.Parse`, then
+`engine.NewReference(pu.String())` in `playlistInsert`) turned the four
+tests red, 16 assertions; letting `HTTP://` through `Parse` turned
+FuzzParse's seed red.
+
+**Decided otherwise than the task, and why**: `confine` returns its fault
+alone again, as in round 1, since the Insert no longer uses the URI it
+parsed; the seeds that give the new oracle a refused spelling to catch are
+a commit of their own (92f3e6ff). The cited-test-names guard (cmd/bridge)
+reads this log, and round 2's section named the test this round renamed, so
+the guard fails at c644bbcf and 92f3e6ff; a9061693 names the test as
+renamed there, and the guard passes from it on.
+
+**Gate**, on the dev Mac with Go 1.27.3 (GOTOOLCHAIN=local), its bin first
+on PATH for make: `make fmt vet docs-check build-all` clean at a9061693
+(`make fmt` rewrote nothing; CLAUDE.md at 70.4% of its budget, player.md
+99.1%, openhome.md well within); `go vet ./...` with the tags for
+GOOS=linux and GOOS=windows clean; `go test -race -count=1` with the tags
+over `./internal/player/...` and `./cmd/bridge` at a9061693: every package
+passes (`cmd/bridge` 626 s, `internal/player/openhome` 34 s); the six
+openhome tests round 3 changed or added (the four `insertFault` serves, the
+renamed test and the two-spellings test) and trackref's two with
+`-race -count=10`, 80 runs, all passing, none skipped; `FuzzParse` for 30 s,
+650,713 inputs with four workers, none failing.
