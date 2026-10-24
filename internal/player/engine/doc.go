@@ -150,7 +150,9 @@
 // repeat-all. Shuffle is release 7a's and refused. The token advances on
 // every change of membership or order.
 //
-// No ID and no token is handed out twice, by any run, a crash included.
+// No ID and no token is handed out twice by runs sharing their durable
+// state, a crash included. Restore's separate margin has the assumptions
+// documented below.
 // Both come from counters whose reservations, a block (idBlock, 4,096) at
 // a time, are written to a file of their own (Config.ReservePath) and made
 // before anything they cover is handed out: a reservation is made once its
@@ -205,11 +207,34 @@
 // ReasonReservation; it is retried by the next such edit, never in the
 // background as if it were optional.
 //
+// Reservations are version 2 and name Config.PlayerUUID. Every write merges
+// each counter with the live file, whatever UUID it names, and stamps this
+// engine's UUID before any value is published. A version 1 reservation has
+// no UUID and remains a floor. A start whose first ID or token would exceed
+// uint32 refuses; edits refuse at the boundary rather than wrapping.
+//
+// A backup carries every decodable live reservation, restamped with its
+// captured UUID; only a missing reservation is omitted, and an unreadable
+// one refuses the backup with repair advice.
+// Restore writes max(snapshot, live) per counter plus 2^24 and one uniform
+// random 24-bit draw, before writing the UUID or any other identity file.
+// The live floor counts even under another UUID; an interrupted restore
+// can leave it raised under the old identity, and nothing rolls it back.
+// This assumes the source issued fewer than 2^24 of either value since its
+// snapshot. Independent restores of an old snapshot rely on the random gap
+// exceeding the earlier restore's usage; this is probabilistic, not a global
+// uniqueness guarantee. Restore the newest snapshot and run only one box
+// with an identity. No queue is backed up.
+//
 // # Persistence
 //
 // The queue file (Config.QueuePath) holds the entries, the counters'
-// values and reservations, the modes and the selection, never the
-// transport state: a start is stopped. One writer goroutine writes the
+// values and reservations, the writer's UUID (version 2), the modes and the selection, never the
+// transport state: a start is stopped. A foreign UUID is ReasonQueueIdentity,
+// logged once and moved aside without loading any entries. Version 1 has no
+// UUID and belongs to the running identity (development boxes only). Restore
+// durably removes the destination queue before replacing its identity; a
+// restore of the same identity keeps it. One writer goroutine writes the
 // newest revision through internal/atomicwrite, fsynced, each write after
 // the last has returned, so an older revision never lands after a newer
 // one; it waits writeCoalesce after a change and at most writeMaxAge in

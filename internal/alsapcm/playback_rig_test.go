@@ -680,7 +680,7 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		t.Fatal(err)
 	}
 	eng, err := engine.New(engine.Config{Backend: tee{Backend: be, r: r.rec}, QueuePath: filepath.Join(data, "queue.json"),
-		DataDir: data, PauseRelease: o.pauseRelease, DSD: "off"})
+		PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: data, PauseRelease: o.pauseRelease, DSD: "off"})
 	if err != nil {
 		t.Skipf("the engine does not start on this test's data directory: %v", err)
 	}

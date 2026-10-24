@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -36,6 +37,8 @@ func runBackup(t *testing.T, cfgPath string) string {
 // controllers that knew the player see the same device. The restore runs
 // through the real CLI, as an operator runs it.
 func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
 	id, created, err := config.EnsurePlayerUUID(dataDir)
 	if err != nil || !created {

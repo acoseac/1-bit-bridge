@@ -25,6 +25,11 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
+- [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
+- [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
+- [2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy](#2026-10-23--b470-pr-5a0-round-3-one-complete-player-reset-remedy)
+- [2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file](#2026-10-23--b470-pr-5a0-a-restored-identity-raises-its-id-and-token-floors-before-any-identity-file)
 - [2026-10-23 — B470 PR 5a2a: the player's LAN surface, reachable but not advertised: the opt-in, its own listener, admission and limits, the Source's descriptions, and a SOAP layer that answers every action 602](#2026-10-23--b470-pr-5a2a-the-players-lan-surface-reachable-but-not-advertised-the-opt-in-its-own-listener-admission-and-limits-the-sources-descriptions-and-a-soap-layer-that-answers-every-action-602)
 - [2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting](#2026-10-23--b523-the-players-engine-backend-and-sink-recover-the-panics-on-the-goroutines-they-start-a-dead-engines-sessions-are-let-go-of-and-the-engine-opens-its-own-files-without-waiting)
 - [2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration](#2026-10-23--b470-pr-5a1-one-ssdp-subsystem-for-several-devices-with-the-mediaserver-its-one-registration)
@@ -40042,7 +40047,8 @@ while restore waited at `Type 'yes' to continue:`.
 
 ### Fallback
 
-`TestALockThatCannotBeTakenFallsBackToTheProbe` was already green on
+`TestRestoreRequiresAnExclusiveDataDirLock` (renamed and changed by B470
+5a0; this record describes its earlier fallback policy) was already green on
 main and stays green. A directory standing where `server.lock` goes is
 the case serve already uses for a lock that cannot be taken. An answering
 admin keeps `a bridge is answering on`. Nothing listening lets restore
@@ -59092,3 +59098,533 @@ also compile and meet that denial, so their intended behavioral failures
 remain unverified here; their independent patches and commands accompany
 the Round 3 report outside the repository. No equality defect or successful
 behavioral red/green run is claimed.
+
+
+## 2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file
+
+**Problem and decision.** 4b3 measured the collision left by B505's identity
+backup: source IDs 4097–14096, followed by 4097–4099 under the same UUID at
+each of two restores. Its queue and reservation stayed behind. The proposed
+flag and operator confirmation were rejected as fragile. Every restored
+identity now starts normally, above a durable jump of both counters.
+
+**Reservation v2.** `player-ids.json` is
+`{"version":2,"uuid":"<canonical lowercase UUID>","ids":<uint32>,"tokens":<uint32>}`.
+Engine construction and subsequent reservations, and restore, share the
+strict durable merge path. It keeps the larger value of each counter from
+the live file, whatever UUID it names, and stamps the writer's UUID. The
+engine consumes any UUID's floor, reserves before publishing its construction
+token, and refuses an exhausted start or edit rather than wrapping. Missing
+and v1 files retain their old floor behavior (development boxes only; no
+released bridge wrote these files). A refused start's mint undo still removes
+only the identity it just made, never the reservation.
+
+**Snapshot and restore.** Snapshot captures the UUID, then any decodable
+live reservation, restamped with that UUID. A v1 or foreign reservation is a
+conservative floor because every writer merges. Only a missing file omits
+the mark; one refused as data gets the three-file player reset advice.
+Cancellation, expiry and file-access errors refuse backup without reset
+advice; an exhausted sharing/access retry says busy and to retry the backup
+(Round 10). The reservation covers every
+value issued before that read. The queue is not backed up. With a UUID to
+restore, one three-byte `crypto/rand` draw is shared by the two counters:
+`new = max(snapshot, live) + 2^24 + uniform[0,2^24)`. Tests inject a reader;
+the production default is pinned to `crypto/rand.Reader` without a flaky
+assertion that two random results differ. A foreign live UUID still supplies
+its floor. A missing live file means zero; an unreadable live file refuses
+instead of silently dropping an unknown floor.
+
+The reservation is written once, merged and made durable, before the UUID
+and every other identity file, irrespective of manifest order. The loop
+never copies it. Without a snapshot UUID, both live files remain untouched.
+Every rerun raises the floors again. A crash between reservation and UUID
+leaves the old identity above the new floor; starting it stamps that floor
+with its own UUID, and a backup before or after that start preserves it.
+An identity replacement durably discards the destination queue before writing
+its UUID; a same-UUID restore keeps the queue. Queue v2 names its writer,
+and an engine moves a foreign queue aside with a typed error logged once. Failure
+never rolls a floor back. The CLI holds the data directory's kernel lock
+throughout. Its former non-contention lock-error fallback is now a refusal:
+the merge requires exclusive ownership. `manifest clear-missing` retains its
+own fallback; serve's fixed-port admin probe remains an additional guard.
+
+**Limits and assumptions.** Before drawing or writing, either source above
+`MaxUint32 - 2^25 - 2^24` refuses deterministically, for each counter. The
+error names the source: remove UUID and reservation from the snapshot to
+restore the rest while retaining the box's identity, or remove the box's
+`player-uuid`, `player-ids.json` and `player-queue.json` together with the service
+stopped AND remove `player-uuid` and `player-ids.json` from a copy of the snapshot
+before retrying a live-floor refusal. This makes a new identity, a new
+controller device with nothing to reuse; removing the box's files alone
+would reintroduce a lower floor from an older snapshot of the same UUID. About 120
+worst-case restores consume the space, with at least 2^24 values left after
+an admitted largest jump. (Superseded by round 4 below.)
+
+The operating assumptions are deliberately not claimed as tested guarantees:
+the source issued fewer than 2^24 IDs and fewer than 2^24 tokens between the
+snapshot and stopping. Independent restores of one old snapshot onto B then C
+after B dies rely on the random gap exceeding B's usage; a collision requires
+usage greater than the gap between draws. This is probabilistic, not globally
+unique allocation. Restore the box's newest snapshot to avoid that second
+case. The CLI prints one advice line if the manifest's creation time is older
+than a day on the restoring clock, or there is no matching reservation mark.
+Two boxes running one bridge identity at once are unsupported, for its player,
+TLS pair and pairing tokens alike. The backup guide states these constraints.
+
+**Older restores, measured before implementation.** The `Restore` bodies at
+tag v0.2.1 and main 71af3f26 were read and captured in
+`internal/backup/legacy_restore_test.go`, with the schema constant frozen at
+1. Both skip unknown file entries. v0.2.1 does not know `player-uuid` at all;
+B505 main writes it but ignores `player-ids.json`, so a schema-1 5a0 bundle
+would silently revive the reuse bug. All new snapshots therefore use schema
+2: both older bodies refuse before writing anything. The new restore reads
+schemas 1 and 2 and jumps for both. **Release checklist: B505 and 5a0 must
+ship in the same release**, since a released B505-only binary could restore
+its own schema-1 identities unsafely. No network or wire schema changed.
+
+**Evidence.** Baseline red tests observed a schema-1 snapshot with no
+reservation, restore without a reservation, and both exhausted constructor
+counters accepting a start. The final tests cover independently sized ID and
+token floors on empty, own, foreign and v1 state; no mark and no identity;
+repeated restores; separated fixed draws with the first box stopped;
+construction's first ID and token; snapshot floor capture; age/no-mark advice;
+every atomicwrite file-sync, rename and directory-sync seam; failed barriers;
+interrupted restore → old-identity start → live backup → restore elsewhere;
+both exhaustion causes and both counters at and beyond the bound; and the
+captured older restores. The serve harness covers a backup's coverage, restore
+refusal while serve owns the lock, the next start after restore, and the
+mint undo that leaves a reservation. API tests use the engine's existing
+fakes and temp directories; no new test reads host /proc or /sys.
+
+**Validation environment.** Go 1.27.2 darwin/arm64 from the repository's
+cached toolchain, `GOTOOLCHAIN=local`, `GOPROXY=off`, and a scratch GOCACHE.
+Engine and backup suites passed `-race -count=5`; new CLI warning/schema-1
+and unavailable-lock cases pass five race-enabled runs using an ephemeral
+admin setting without opening a listener. The sandbox refuses loopback
+listeners, so the serve harness and many existing full-suite tests require
+host validation. This is not a green full-suite claim. `make vet`, all six
+`make build-all` targets, formatting and docs-check pass; build commands emit
+a nonfatal denial writing module VCS metadata outside the sandbox. The
+scratch report and independent negative-control patches record the precise
+commands, failures and test names; no commit or PR was made in this session.
+Twenty-eight controls failed in their predicted assertions; the two serve
+controls were stopped before assertions by the listener restriction. All
+new engine and backup tests passed five race-enabled runs after the controls.
+The full-suite `TestPlaybackStopsAtTheBoundaryOfAnEntryCutTooLate` timed out
+waiting for a reporter tick once; five isolated race-enabled reruns passed,
+and playback code was not changed. B520's named handshake test was skipped
+because its specific-IP listener was denied, not treated as a passing case.
+The complete gate also found `internal/doctor` test-helper buffer races when
+its listening child exited on a denied bind (`startListeningChild`,
+`listening_child_test.go:80` versus the subprocess output-copy goroutine).
+Those files were not changed; the failure and stacks are retained for host
+verification. The cited-test guard caught the lock test's old name in an
+earlier log entry; its reference was updated to the renamed test.
+
+**Follow-up for 5a2.** Detect another LAN device advertising our UDN. This
+change adds no LAN behavior and no new identity-minting verb. 5a3's read
+actions may now build on the restored-identity policy, subject to the host
+validation above.
+
+**Round 2 — three reviewed defects, red first.** Raising counters did not
+remove the destination's queue: a restore of A over B still exposed B's
+4097 under A. Queue v2 now names its writer; load rejects a foreign UUID
+with `ReasonQueueIdentity`, preserves the file aside and logs once. Restore
+raises the reservation, then durably removes the old queue, then writes the
+UUID. The pre/post-unlink directory barriers use `ProbeDurable`, including
+when a retry finds the queue already absent. Own-UUID restores keep the queue.
+Tests start after each crash seam, fail removal and its durability barrier,
+exercise the v1 development format and failed move-aside, and drive the CLI's
+real queue path (`TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue`).
+
+A backup before the old engine restarted also dropped a foreign reservation
+left by an interrupted restore. The new no-start sequence independently puts
+40,000,000 in each counter, interrupts restore before UUID, takes a backup,
+then restores elsewhere: the captured and restored floors must pass both
+marks. The old omission test is now `TestSnapshotCarriesEveryDecodableLiveFloor`:
+v1 and foreign marks are carried and restamped, missing is omitted, and
+unreadable or malformed data refuses (round 3 below replaces the repair advice).
+
+Finally, removing only the box's exhausted files before restoring its older
+same-UUID snapshot lowered its floor from 4,250,000,000 to about 3.02 billion.
+`TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` follows the error's
+advice for each counter: the fixed advice removes the snapshot copy's UUID
+and reservation too. That test used only a v2 queue, whose UUID check made
+the next start empty; round 3 below adds the v1 case and the missing queue reset.
+The public guide and both History entries carry the corrected policy.
+
+All three defects failed against round 1 before production changes. The
+refreshed scratch `controls-r2/manifest.json` contains 44 independent patches:
+42 fail their predicted assertions, and the two serve controls are blocked
+before assertions by the sandbox's listener restriction. Control 08 replaces
+the obsolete foreign-floor omission rule. The new queue barrier initially
+masked control 30's ignored reservation failure, so that test now fails only
+the reservation's directory barrier; the control is red again. No control
+mutates the working tree; Go overlays preserve the uncommitted fixes. Detailed
+commands, case rows, results and sandbox denials are in scratch `report-r2.md`.
+
+
+**Round 2 validation.** The full engine and backup suites passed five runs
+under the race detector, as did the new CLI regression and the existing
+no-mark/schema-1 and ephemeral-admin lock cases. The cited-test-name guard,
+formatting, vet, all six cross-builds, and docs-check passed. The required
+player/backup/cmd race run passed the player and backup packages; cmd failed
+on sandbox-denied listeners. The full gate completed with the same listener
+restrictions, including Unix sockets, and the existing doctor child-output
+buffer races after a denied bind; its player and backup packages passed.
+The manifest package completed in 1229.406 s. B520's specific-bound-IP test
+was explicitly run and skipped because its bind was denied, not claimed as
+a passing case. No full-suite or playback timeout occurred this round.
+
+
+## 2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy
+
+**Rule.** Giving up a player's identity resets its UUID, reservation and
+queue together, with the service stopped. `playerResetAdvice` is the one
+message builder for an exhausted box mark and an unreadable live reservation
+in backup and restore. Remove the box's `player-uuid`, `player-ids.json` and
+`player-queue.json` together; the next start makes a new identity with no
+queue, a new device to controllers. If restoring, also remove `player-uuid`
+and `player-ids.json` from a copy of the snapshot, then restore that copy.
+A snapshot's `player-ids.json` is never a valid repair. Keep the warning
+against deleting the reservation while keeping the player identity. (Superseded by round 4 below.)
+
+**Evidence, red first.** Round 2's exhaustion remedy removed both identity
+pairs but left the live queue. With no snapshot UUID, restore preserves the
+queue, and a v1 queue has no stamp to reject at the new identity's start.
+Extending `TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` to both
+queue versions showed visible ID 4097 under the new UUID for each exhausted
+counter before the fix. The unreadable-floor advice recommended a known
+valid copy, but snapshots can predate a restore's raised floor even while
+carrying the box's UUID. Copying that reservation back can reissue values
+under the same identity. `TestUnreadableReservationAdviceResetsIdentityAndQueue`
+failed on the old advice for unreadable and malformed files in backup and
+restore; it pins the full reset, the snapshot prohibition and the warning,
+and checks refusal leaves live identity, queue and malformed bytes untouched.
+The existing snapshot refusal test checks that same advice. No restore
+arithmetic, file mutation policy, queue decoding or wire surface changed.
+
+**Negative controls and validation.** Scratch `controls-r3/manifest.json`
+refreshes the round 2 controls against this tree and adds one shared-advice
+control for this rule. It restores the unsafe repair wording and omits the
+queue from the common reset, so the v1 remedy test exposes its surviving
+entry and the unreadable-refusal advice assertions fail. Go overlays keep
+all uncommitted changes intact; no commits are made for controls, per the
+owner's stop instruction. Detailed commands, outcomes and sandbox limits
+are recorded in scratch `report-r3.md`.
+
+The full backup suite passed five race-enabled runs (217.610 s), as did the
+full engine suite (78.985 s). The CLI foreign-floor/queue regression,
+ephemeral-admin lock case and no-mark/schema-1 advice passed five runs;
+the cited-test guard passed. All 45 patches apply independently: 43 fail
+their predicted assertions and controls 28/29 stop on sandbox-denied
+listeners. Formatting, vet, all six cross-builds and docs-check pass on
+cached Go 1.27.2, offline. The broad player/backup/cmd race run passes player
+and backup but fails cmd on denied listeners. The full gate also encounters
+listener denials and the previously recorded doctor child-output buffer
+races after a denied bind; this is no green full-suite claim. B520's named
+specific-IP test skips on the denied bind, rather than passes. No hardware
+or network behavior was changed and no commit was made.
+
+The full gate completed with make exit 2. It also hit temporary disk
+exhaustion: manifest's 40,000-track deletion-journal fixture reported
+SQLite `database or disk is full`, followed by TempDir ENOSPC failures
+(manifest finished in 1213.642 s). Transcode's DSD disk-space checks and
+later store/TempDir fixtures failed for the same resource limit. Those
+unchanged packages are not claimed as passing; the focused suites and
+controls retain the separate results above.
+
+
+## 2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent
+
+**Rule.** With the service stopped, a player reset removes the box's
+`player-uuid`, `player-ids.json` and `player-queue.json` together and gives up
+the identity for good. No snapshot taken on this box before the reset may
+restore its player identity: remove `player-uuid` and `player-ids.json` from
+every such snapshot, or delete those snapshots. When restoring, also remove
+those files from a copy of this snapshot, then restore that copy. The next
+start makes a new identity with no queue, a new device to controllers.
+Never repair a reservation from a snapshot or delete it while keeping the
+identity. B524 will enforce this operator rule before 5a ships. (Superseded by round 4's review below.)
+
+**Evidence, red first.** The existing exhaustion, unreadable-reservation and
+snapshot-refusal tests failed the new every-snapshot advice assertions
+before the shared `playerResetAdvice` builder was extended. Separately,
+changing the unreadable restore branch to call `playerResetAdvice(false)`
+failed both restore subtests after `assertPlayerResetAdvice` learned the
+operation. It requires the copy-and-restore step for restore, its absence
+for backup, and the every-snapshot rule for both. The backup guide, both
+rules entries and their History long forms state the same operator rule.
+
+**Controls.** Scratch `controls-r4/` retains the previous rules, corrects
+control 28 to disable the lock refusal and both admin-port probes, and adds
+three independent controls: drop the restore-only step from the unreadable
+restore refusal, and drop the every-snapshot advice from each variant.
+Commands, full predicted test names, observed results and sandbox limits
+are in its manifest and scratch `report-r4.md`. Each patch applies alone;
+Go overlays preserve the uncommitted tree during execution. No commit,
+restore arithmetic or identity-file mutation policy is part of this round.
+
+**Round 4's review (Claude; Codex found none).** The rule named snapshots
+taken on the box, but the floor a reset drops also covered identities a
+restore brought onto the box from another one: a snapshot of such an
+identity, taken elsewhere, would have been allowed. The rule now names
+identities, every one the box ran before the reset, whichever box took the
+snapshot. The guide's sentence about restoring after a reset is scoped to the
+restore whose refusal the reset answers, so a later snapshot of the new
+identity is never stripped by mistake. (Round 5 below supersedes that
+wording.)
+
+**Round 5.** The two review rounds found the snapshot-box scope (round 4),
+two surviving copies of it (round 5, Codex), and the correction's overreach
+into handed-off identities and later snapshots plus the unscoped restore-copy
+step in round 4's Rule paragraph (round 5, Claude). Every reset-rule copy now
+states the same rule: A reset gives up for good the identity it removes and
+any the box ran earlier that no other box took over (one an earlier restore
+replaced on this box). Their values were held only by the floor the reset
+drops. No snapshot of a given-up identity taken before the reset, on this
+box or another, may restore its player identity again: remove `player-uuid`
+and `player-ids.json` from every such snapshot, or delete those snapshots.
+An identity another box took over by a restore is not given up: that box's
+floor holds it, and its snapshots stay valid. If the reset answers a refused
+restore, remove `player-uuid` and `player-ids.json` from a copy of that
+snapshot, then restore that copy. Only the restore refusal carries
+that step; the backup refusal does not. The service is stopped for the
+three-file reset, and the next start makes a new identity with no queue.
+A snapshot reservation is never a valid repair; never delete it while keeping
+the identity. B524 will enforce this operator rule before 5a ships. (Round 5's review below supersedes that wording.)
+
+Validation: the backup and all player packages passed five runs under `-race`
+on cached Go 1.27.2, offline. Formatting and docs-check passed. All 49 refreshed
+controls apply independently; the five changed patches fail their predicted
+assertions, and the other 44 remain byte-identical to the prior set. No commit.
+
+**Round 5's review (Claude; Codex found none).** The exception for an
+identity another box took over by a restore covered only the identities the
+box ran earlier, so the one the reset removes read as given up even after a
+migration had moved it to another box, whose floor holds it. Every copy now
+applies the exception to both. The round-4 review paragraph above is restored
+to what that review found.
+
+
+**Round 6 (Claude's review of round 5's review fix; Codex found none).**
+The review found two things: a past takeover alone kept an identity's
+snapshots valid after the taking box was reset, and the Round 5
+paragraph's quotation had been rewritten to the review fix's wording.
+The quotation above again records what round 5 shipped, with its
+superseding review noted; the Round 5's review paragraph is unchanged.
+Every current-rule copy now states the following rule.
+
+A reset gives up for good the identity it removes and any the box ran
+earlier (one an earlier restore replaced on this box), unless another box
+took it over by a restore and still runs it. Their values were held only by
+the floor the reset drops. No snapshot of a given-up identity taken before
+the reset, on this box or another, may restore its player identity again:
+remove `player-uuid` and `player-ids.json` from every such snapshot, or
+delete those snapshots. Any other box that still holds a given-up identity's
+files (one powered off since a migration, say) must be reset too before it
+runs again. An identity another box took over by a restore, and still runs,
+is not given up: that box's floor holds it, and its snapshots stay valid.
+If the reset answers a refused restore, remove `player-uuid` and
+`player-ids.json` from a copy of that snapshot, then restore that copy.
+Only the restore refusal carries this step; the backup refusal does not.
+The service is stopped for the three-file reset, and the next start
+makes a new identity with no queue, a new device to controllers. A
+snapshot's `player-ids.json` is never a valid repair; never delete the
+reservation while keeping the identity. B524 will enforce this operator
+rule before 5a ships. The advice assertion independently requires the
+four rule clauses, including the still-running takeover condition and
+the reset of any other box that retains a given-up identity's files.
+
+Validation: before the builder changed, the strengthened advice assertions
+failed all ten affected leaf subtests. Backup and all player packages then
+passed five runs under `-race` on cached Go 1.27.2, offline. Formatting and
+docs-check passed. All 51 controls in scratch `controls-r8/` apply alone;
+40, 45, 47, 48, 49 and 50 were re-cut, and 51 drops the other-box reset
+clause. The seven changed controls built and failed their predicted tests;
+the other 44 patches remain byte-identical to `controls-r7/`. Control 50
+reverts the exception to round 5's review fix, without the still-running
+condition. The manifest and scratch `report-r6.md` carry the evidence.
+No requested check was refused by the sandbox. No commit.
+(Superseded by round 7 below.)
+
+**Round 7 (Claude's review of round 6; Codex found none).** The running-only
+condition gave up a valid identity when its takeover box was merely powered
+off. The exception now requires that box to have taken it over by restore
+and not reset it since, running or powered off; its snapshots remain valid.
+The requirement to reset any other box still holding a given-up identity's
+files before it runs again remains. The review also found three earlier log
+paragraphs rewritten to a later round's rule. Their original text is restored
+from the round's docs commits with explicit superseding notes; round 6's
+current-copy list excludes historical log paragraphs. The advice, its two
+independent assertions and every current documentation copy use the corrected
+condition. Scratch report-r7.md and controls-r9/manifest.json record validation
+and the eight changed controls, including 52's return to the running-only
+condition. No commit.
+(Superseded by round 7's review below.)
+
+**Round 7's review (Claude High and Medium; Codex P3).** "Took it over by a
+restore" named no direction, so it also kept an identity on the box it had
+migrated away from, when that box had itself got it by a restore: powered on
+again, or restored elsewhere from its migration snapshot, it would reissue
+values only the reset box's dropped floor held. The exception now names this
+box: a reset gives up for good the identity it removes and any the box ran
+earlier (one an earlier restore replaced on this box), unless another box took
+it over from this box, by restoring a snapshot this box made, and has not
+reset it since, running or powered off; an identity another box took over
+from this box, and has not reset since, keeps its snapshots. The rest of the
+rule is as round 7 states it. The review also found round 6's entry rewritten
+in place by round 7; it again says what round 6 shipped, marked superseded.
+(Superseded by round 8 below.)
+
+**Round 8 (both reviews of round 7's review fix: Claude High, Codex P2).**
+The exception asked only whether another box had ever taken the identity over
+from this box, not whether this box had run it again since: an identity
+migrated to another box and back, then run further here, kept the old
+takeover, whose box holds a floor below what this box issued afterwards. A
+takeover now counts only after this box last ran the identity: a reset gives
+up for good the identity it removes and any the box ran earlier (one an
+earlier restore replaced on this box), unless, after this box last ran it,
+another box took it over from this box, by restoring a snapshot this box
+made, and has not reset it since, running or powered off. The closing clause
+and the advice's last clause say the same, and the advice assertions require
+the new words.
+
+
+**Round 9 (Windows CI, PR #1331 at 9633014f).**
+`TestInterruptedRestoreThenStartBackupAndRestoreKeepsTheRaisedFloor` failed
+opening `player-ids.json` with a sharing violation. This is case (b):
+`firstValues` leaves its engine running intentionally, and an insert's
+`ahead` → `reserveWrite` spawns a refill through `writeReservation` →
+`mergeReservation` → `atomicwrite.WriteBytesDurable` → `writeBytes` →
+`renameRetry`. Beside it, `Snapshot` → `engine.ReadReservation` →
+`readLimited` used one `os.Open`. `readLimited` closes its handle, and
+`writeBytes` closes the staged descriptor before rename; there is no leaked
+reservation handle to close in the test. The race is a live-backup condition,
+not an invalid test lifetime. The Windows test enables the otherwise-refused
+directory barrier through its existing seam; the production player is not
+currently enabled on Windows, but the backup's other renamed files are live
+there too. The other new tests were checked: same-box restart/restore sequences
+join the prior engine through nested-subtest cleanup.
+
+`ReadWithRetryCtx` now shares atomicwrite's five-attempt rename schedule,
+750 ms total backoff, interruptible by the snapshot's context. Only Windows
+sharing/access-denied codes retry, including wrapped errors. Snapshot uses
+it for the reservation, the freshly renamed UUID copy it rereads, and its
+source stats/opens, so UUID and other files replaced by rename are covered too; copy commits once and streams as before.
+Missing and malformed data retain their old policy, and exhausted or
+cancelled reads still fail the snapshot and reap its partial directory.
+
+The Windows regression holds a real staged-file handle through the existing
+rename seam, allows delete sharing so rename lands, and denies read sharing.
+A raw open proves the exact error before the snapshot's read. The snapshot's context
+releases it only on entry to retry backoff, giving deterministic recovery
+without a timed release. Reservation, source/captured UUID and token copies
+are covered. An unreadable captured UUID refuses rather than dropping its
+reservation mark; malformed contents retain the existing no-mark policy.
+Additional tests pin exhaustion, cancellation and partial-snapshot cleanup;
+portable tests pin the shared bounds and immediate permanent-error handling.
+Validation and negative-control evidence are recorded in scratch report-r9.md;
+Windows runtime results are separate from cross-compilation results.
+
+
+Round 9 validation: cached Go 1.27.2, offline, shared GOCACHE. Atomicwrite,
+backup and all player packages passed five race-enabled runs; after the
+captured-UUID read was covered, backup passed another five in 145.316 s.
+Both Windows architectures passed vet and test compilation for atomicwrite
+and backup, including the real-handle tests; Windows execution was unavailable,
+so no Windows runtime red/green is claimed. Three portable negative controls
+built and failed their predicted assertions; four Windows controls compiled,
+and all seven patches apply independently. Formatting, vet, docs-check, the
+cited-test/docblock/owner guards and all six cross-builds passed. The full
+race suite completed with denied TCP/Unix listener failures and the previously
+recorded doctor child-output buffer races after a denied bind; the changed
+packages and all player packages passed. Manifest's 1209.751 s run failed
+its socket fixtures on denied Unix binds, without a timeout. B520's named
+test was explicitly run and skipped for its denied listener. The B523
+stalled-storage test was not changed. Changes remain uncommitted.
+
+
+## 2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data
+
+Review of Round 9 (`a41d682d`, PR #1331) found one valid Low: Snapshot
+attached the permanent three-file player reset remedy to every reservation
+read failure other than absence. The Windows retry added cancellation at
+shutdown and sharing-retry exhaustion to that branch; neither says anything
+about the reservation's contents. Resetting would give up the identity and
+invalidate its older snapshots for no established data problem.
+
+`atomicwrite.ReadWithRetryCtx` now wraps `ErrReadBusy` plus the last read
+error only when the bounded Windows sharing/access retry is exhausted.
+Cancellation and deadline expiry retain their context errors, without the
+busy marker. Snapshot names the reservation and cause, adds retry-the-backup
+advice for busy, and emits no reset remedy for context or filesystem access
+errors. Data refusals retain the reset remedy: malformed JSON, unsupported
+version, invalid UUID and oversized data. Missing files still omit the mark;
+all other failures still refuse the backup and remove its partial directory.
+The Windows `ERROR_ACCESS_DENIED` retry remains: replaced/delete-pending
+files can return it during the swap, bounded by five attempts and 750 ms
+backoff. A persistent permission refusal remains a failure, never a missing
+floor. Restore's existing error policy is unchanged.
+
+The portable file-access case first failed on Round 9's unconditional advice
+(`TestUnreadableReservationAdviceResetsIdentityAndQueue/backup/unreadable`).
+The same test retains full reset advice for malformed data and adds an
+unsupported-version case; refused operations leave the live UUID, queue and
+reservation unchanged. The real Windows handle fixture now requires no reset
+advice in its held, cancelled and expired subtests, busy/retry words on
+exhaustion, and the filename plus preserved cause. The atomicwrite Windows
+test pins the busy marker and cancellation/expiry for both sharing and
+access-denied codes. Runtime Windows results are separate from test-binary
+cross-compilation; validation and independently applicable controls are
+recorded in scratch report-r10.md. No commit is made in this round.
+
+
+Round 10 validation: Go 1.27.2, offline, shared GOCACHE. The final backup
+and atomicwrite suites passed five race-enabled runs (148.756 s and
+53.154 s). Repository-wide vet passed for darwin/arm64, linux/amd64 and
+arm64, and windows/amd64 and arm64; final affected-package vet and Windows
+test compilation passed for the same targets. Both portable controls built
+and failed their exact predicted assertions; the Windows control compiled
+but could not run on this macOS host. Docs-check, source/doc/owner guards,
+formatting and diff checks passed. The first race run exposed a sibling
+file-access test's old reset-advice expectation, corrected before the final
+run. No requested validation was refused; no commit was made.
+## 2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore
+
+Review of the main merge at the merge gate (CodeRabbit on PR #1331) found one
+valid data-integrity defect on the restore path, reproduced before the fix.
+`matchingReservation` turned every `engine.ReadReservation` failure into "no
+mark": a snapshot that *lists* `player-ids.json` in its manifest but whose copy
+is unreadable (corruption, a truncated copy, a partial hand-edit that left the
+manifest entry) was treated the same as a snapshot that never carried one. When
+the restored box had no live reservation to fall back on, the identity was then
+restored at `max(0, 0) + jump` — about 2^24 — and reissued every ID and token
+the snapshot's true floor had already handed out. A throwaway probe confirmed
+it: a snapshot taken at a floor of 2,000,000,000 whose `player-ids.json` was
+then corrupted restored the identity at 18,410,935, silently, with only a
+"carries no player reservation mark" warning. This is the exact reuse 5a0
+exists to prevent.
+
+`snapshotReservationFloor` replaces `matchingReservation`. A reservation the
+manifest does not list stays a genuine absence (a snapshot from before
+reservations, or one an operator stripped per the reset remedy, which also
+removes `player-uuid` so no identity is restored) and takes the unmarked path.
+A reservation the manifest lists must read cleanly: a read error, or a v2 mark
+whose UUID is not the identity being restored (Snapshot always writes the two
+together, so a mismatch is tampering), refuses the restore and writes nothing, with the snapshot
+remedy (strip the identity from a copy of the snapshot; the box keeps its own),
+not the live reset — Claude's round-11 review caught the first draft naming the
+live reset and so telling the operator to give up a healthy box's identity. A listed v1 mark has no UUID and is a floor
+whatever it names, as a live floor is, preserving pre-UUID compatibility.
+
+Red first: `TestRestoreRefusesADamagedListedReservation` (corrupt, truncated,
+uuid_mismatch and a positive v1_floor_ok case) and
+`TestRestoreOfACorruptReservationKeepsTheFloorFromReissuing` all failed on the
+committed tree — the three damage cases restored at the bare jump and the v1
+case lost its floor — and pass with the fix. The full `internal/backup` suite
+is green. Two other review threads: `output_play.go`'s hand-run harness
+minting a fresh identity per run (a new backlog item, not a safety issue on the
+Linux-only test tool); and a History wording nit, applied — the backup
+capture's "only a missing file omits the mark" now says it holds after a valid
+`player-uuid` is captured. Docs in `ops/History-rules-player.md`.
