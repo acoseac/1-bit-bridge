@@ -59771,7 +59771,10 @@ Two Unix tests create real FIFOs with `syscall.Mkfifo`:
 `TestSnapshotRefusesALiveTokensPipeAtOnce`. Both ran red before the fix:
 “Snapshot: still running after 5s, waiting to open a named pipe”; once the
 fixture released the open, the backup succeeded with an empty copy and left
-a snapshot. They require prompt typed refusal, the exact file-and-kind-only
+a snapshot. That holds for `player-uuid` too: `Snapshot` keeps a captured
+copy that does not hold one UUID (`config.ErrNotOnePlayerUUID` is not a
+backup failure; restore refuses such a copy later), so the empty copy did
+not fail the backup (`red-r2.log`: `Snapshot error = <nil>` for both). They require prompt typed refusal, the exact file-and-kind-only
 message, no returned or remaining snapshot directory, and the source pipe
 left intact. The negative control restores the plain open in `copyFileCtx`
 and runs both tests again.
