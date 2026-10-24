@@ -94,8 +94,26 @@ type Config struct {
 	MaintenanceTTL time.Duration
 	// Log is where the engine logs; nil is the "player" component.
 	Log *slog.Logger
+	// Seams are a test's holds on the engine from a package above it; nil in
+	// production. The package's own tests set seams.
+	Seams *Seams
 
 	seams seams
+}
+
+// Seams are the engine's test seams for the packages above it (B470 PR 5a4,
+// round 2: the OpenHome surface's edit gate is tested against an engine held
+// in a reservation write). Each runs on the goroutine that reaches it, and
+// may block there; a nil field, like a nil Seams, changes nothing.
+type Seams struct {
+	// ReserveWrite runs before each reservation write, on the goroutine that
+	// makes it (New's, for the run's first): an error it returns is that
+	// write's, which fails as one the filesystem refused, and while it
+	// blocks the write is under way, as on a filesystem that holds it, so
+	// the edits that need it wait, at most ReserveTimeout. A test that holds
+	// a write lets it go before the engine stops: Run's shutdown waits for a
+	// reservation write under way.
+	ReserveWrite func() error
 }
 
 // seams is what the tests replace on one engine: the clock, the file
@@ -241,6 +259,15 @@ func New(cfg Config) (*Engine, error) {
 		// failed directory fsync is not taken here.
 		sm.writeReserve = func(path string, data []byte) error {
 			return atomicwrite.WriteBytesDurable(dataDir, path, data, ".player-ids-*.tmp")
+		}
+	}
+	if s := cfg.Seams; s != nil && s.ReserveWrite != nil {
+		write, before := sm.writeReserve, s.ReserveWrite
+		sm.writeReserve = func(path string, data []byte) error {
+			if err := before(); err != nil {
+				return err
+			}
+			return write(path, data)
 		}
 	}
 	if sm.probe == nil {
