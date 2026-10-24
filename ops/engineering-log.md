@@ -151,7 +151,7 @@ After the compensating Pause, Resume now checks the sink's own typed reason
 (`ReasonBadState`) and position state (`SinkDraining`). Only that pair takes
 Drop, through `s.call` with the existing detached rollback context and its
 original two-second deadline. The answer joins the fault, the refused Pause
-and any Drop failure. Other refusals and the reporter's fault are unchanged.
+and any Drop failure. Other refusals and the recorded fault are unchanged; round 4 below narrows the reporter's handling of the dropped final buffer.
 No wire schema, iOS behavior, sink gate or teardown order changes.
 
 `TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
@@ -200,7 +200,10 @@ Drop pinned detachment from caller cancellation but accepted a fresh timeout
 for Drop, so it did not pin the shared rollback deadline. The revised tests
 exercise the producer's own cancelled Drain and its exit, count and compare
 all events after release and Wait, grant time after rollback, and observe
-the two contexts directly without measuring elapsed wall time. The rollback
+the two contexts directly without measuring elapsed wall time. Through round 3,
+each fault still comes from a reporter panic: that reporter delivers its
+fault and exits before Drop, so these exact-sequence assertions cover the
+producer but do not pin a live reporter's view of the dropped sink. The rollback
 branch itself is unchanged; the only production additions are the optional,
 nil-in-production call observers. Controls 1–6 are rerun on these tests;
 control 7 gives Drop a fresh detached CallTimeout, and controls 8–10 make the
@@ -271,6 +274,46 @@ listener. A focused run of
 `TestTheSurfaceBindsEachServedAddressAndFollowsThem` independently confirmed
 `listen tcp4 127.0.0.1:0: bind: operation not permitted`. The all-player gate
 still requires a host permitting those listeners and is not claimed passed.
+
+Round 4 adds a live-reporter subtest to
+`TestPlaybackResumeRollbackDropsFinalDrain`. With Resume's successful sink
+reply held and the producer at the final hardware drain, a second backend
+Pause meets that drain's refusal and arms the no-device pause-release timer
+through the existing `Config.AfterFunc` seam. Resume's `unpausedLocked`
+stops that timer; its stop panics once, recording the backend fault without
+ending the reporter. The reporter's Tick factory holds its first read until
+rollback has answered, so it deterministically sees `SinkStopped` with
+`Played < Written == Submitted`. The test checks the measured occurrence
+and frames on Fault, the original shared rollback context and joined errors,
+and exactly one fault event before release and after release and Wait.
+
+Red first on b1b289b8 with only that subtest added, the live reporter sends
+Audible, Position and Fault. It sends neither Finished nor a second fault,
+but the progress callbacks violate the promised exact sequence. The minimal
+fix is confined to `reportStep`: a recorded fault and a stopped, incompletely
+played final buffer discard the queued progress callbacks while preserving
+the measured occurrence and frames for Fault. Other sink states and a
+fully played drain retain the existing path. No sink, rollback, producer,
+wire or teardown code changes in this round. Control 13 removes only the
+reporter guard and restores the Audible, Position, Fault failure. Controls
+1–12 were rerun independently against the final round-4 tests; all thirteen
+compiled and failed their predicted runtime assertions. None failed to
+build, reported a data race, or reached the package timeout. Every mutation
+was restored from saved fixed bytes.
+
+Round 4 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three rollback test functions twenty
+times each under `-race`, including the new live-reporter subtest. Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race run and the separate run excluding OpenHome. The requested all-player
+run failed on sandbox-refused loopback binds in
+`TestAHeaderPastItsBoundIsRefused`, `TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately, and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without an
+established listener. The full all-player gate is not claimed passed; it
+still needs a host permitting those listeners.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
