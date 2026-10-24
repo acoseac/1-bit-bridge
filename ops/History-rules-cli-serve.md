@@ -2099,7 +2099,7 @@ Windows-runner check, distinct from portable race-test results.
 
 ## Player floor and reset (B524 round 5, 2026-10-24)
 
-**The player floor is monotonic across every identity the box runs: nothing lowers or removes it. `bridge reset-player` durably clears queue then UUID and leaves the floor byte-identical; only `--discard-floor` drops it, after a durable permanent seal against identity restores. Every minter uses `backup.EnsurePlayerUUID`: floor → initialization marker → UUID, each durable; bind preflights read-only before saving config. A marker without a floor refuses until explicit discard. Never repair a live floor from a snapshot. Two live holders of a UUID, and a non-latest snapshot onto another box, are unsupported and not guaranteed.**
+**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after sealing restores in BOTH local markers. Start requires a regular UUID file matching its floor; exhausted minting writes nothing. Only an unmarked UUID with no queue or floor upgrades at zero. Backup requires the captured UUID and floor to match. Damaged markers count as present; discard repairs them, never a newer version. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots and loss of both seal records remain unsupported.**
 
 Ordinary reset keeps the box's numeric upper bounds across all identities,
 including identities displaced by successful or interrupted restores. It needs
@@ -2112,16 +2112,23 @@ links can be unlinked safely while the floor remains intact. The command keeps
 its exclusive lock, refuses the lock fallback, probes admin before and after
 confirmation, and lives beside backup and restore, not under output player.
 
-`player-initialized` and `player-floor-discarded.json` are immutable version-1
-local markers with one bounded, nonblocking strict reader and one durable
-writer. A missing floor beside a UUID, queue or initialization marker is loss.
+`player-initialized` and `player-floor-discarded.json` are version-1 local
+markers with one bounded, nonblocking reader. Existing entries, including
+unparsable bytes and non-files, count conservatively as initialized or sealed.
+Only a well-formed newer version requires a newer bridge. Ordinary lifecycle
+operations preserve their bytes. Discard records `sealed:true` in the initialized
+marker as independent evidence, after the seal file is durable and before any
+queue, UUID or floor is removed. It renames an unparsable or non-file marker
+aside before writing a fresh one. Non-file refusals say to move it aside and
+run discard. A missing floor beside a UUID, queue or initialization marker is
+loss, except the exact bind-only upgrade described below.
 A queue without UUID refuses minting, because an unstamped v1 queue must not
 appear under a new device. Existing valid floors gain the initialization marker
 before a UUID is published. Pristine initialization commits a v2 zero floor,
 then marker, then UUID. The UUID writer fsyncs the parent after rename.
 
 `--discard-floor` durably seals every future incoming identity restore, unlinks
-queue then UUID with directory barriers, renames even a non-file floor aside
+queue then UUID with directory barriers after BOTH seals are durable, renames even a non-file floor aside
 with a random suffix, then fsyncs the directory. Rerunning completes any
 interruption. Only after the UUID and queue are gone does the seal permit a new
 floor despite the initialization marker. A sealed box still restores ordinary
@@ -2143,10 +2150,55 @@ floor, preserving the box's identity, or explicit discard with its permanent
 seal. Local files cannot detect full data-directory rollback or erasure.
 
 Tests cover X at 2e9 → restore Y → reset → old X or Y, including an interrupted
-UUID commit followed by a real engine restart, every discard crash point,
+UUID commit followed by a refused start, reset and a real engine restart, every discard crash point,
 marker barrier failures, initialization order, byte-identical ordinary reset,
 seal and lost-floor preflight with no writes, backup without a floor, and both
 serve and bind through the shared wrapper. Negative controls and gate outputs
 are in the round-five scratch report. The design replaces the history model
 after four rounds failed to converge: remembering names was unnecessary while
 preserving their shared numeric bound supplies the same-box proof directly.
+
+### Round 6: pairing, recovery and the upgrade boundary
+
+Before any mint write, the floor must leave room for the engine's skipped
+4,096-value block and its first value in BOTH counters (`Reservation.Exhausted`,
+using `startCounter`). Exhaustion advises discard and leaves the floor byte
+identical, with no marker or UUID written. Restore's stricter bound additionally
+reserves its largest jump and 2^24 values of running room.
+
+A current UUID is a regular directory entry by Lstat, never a symlink, and the
+floor must name exactly it. A successful mint restamps the floor before writing
+the UUID; restore likewise writes its named floor before UUID. An interrupted
+restore can leave mismatched names: start and backup refuse, and ordinary reset
+keeps both numeric bounds while allowing the next mint to restamp them. A live
+version-1 reservation has no UUID and cannot establish this pairing: ordinary
+reset retains its counters and the next mint writes version 2. Historical
+version-1 snapshot floors remain accepted as migration inputs; restore names
+the new live floor before publishing that snapshot's identity.
+
+Backup captures UUID first, then reads the floor through the bounded sharing
+retry and requires the same name. A concurrent discard and mint cannot publish
+an old UUID with the new identity's zero floor. A missing floor names discard
+and its seal consequence while Lstat still finds the UUID; only a UUID that
+vanished between captures receives retry advice. Restore's floor-loss error
+also explains the snapshot-copy remedy and discard's permanent consequence.
+
+Main's bind-only upgrade is exactly a valid regular UUID with no floor, queue,
+initialization marker or seal. Start and bind keep that UUID, writing a zero
+floor naming it and then the initialized marker. Backup does the same only
+under the exclusive server.lock, rechecking the captured UUID before minting;
+otherwise it refuses or captures a floor another writer completed. Residual
+risk: a main-era box whose queue and floor were both deleted by hand looks
+identical. Any additional lifecycle evidence makes absent floor a loss.
+
+The discard evidence is duplicated in the seal and initialized marker rather
+than added to reservation JSON. Every floor writer, including the engine,
+leaves these independent files untouched. Losing, truncating or replacing any
+ONE file cannot reopen identity imports, before a fresh start or after engine
+reservation writes. The smallest deletion set that CAN reopen imports is both
+`player-floor-discarded.json` and `player-initialized`, after a fresh identity has
+a readable floor (or immediately after discard before a new identity exists).
+This two-file loss, full storage rollback, two live holders of one UUID, and
+non-latest cross-box snapshots are documented limits, not guaranteed recovery.
+The new single-file-loss matrix, second-seal barrier test and recovery tests
+pin the supported boundary. Both markers remain local and excluded from backup.

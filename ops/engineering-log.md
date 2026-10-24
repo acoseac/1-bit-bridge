@@ -174,6 +174,54 @@ Two live holders of a UUID and non-latest cross-box snapshots remain unsupported
 and not guaranteed; arbitrary storage rollback cannot be detected locally.
 
 
+**Round 6.** The host's round-five run on cfa4666c, Go 1.27.3, passed every
+package in `go test -race -count=1 ./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/player/...` except
+`TestServeRefusedMintLeavesTheReservationFloor/{ids,tokens}`. Each failed 3/3
+alone: the minter restamped the floor before the engine found exhaustion,
+then its undo removed the UUID. The two FIFO tests passed `-race -count=10`.
+The unchanged host regression is retained; a socket-free minter test reproduces
+both exhaustion bounds and follows discard through an engine start.
+
+Minting now checks the engine's exhaustion predicate before writing. Start
+requires a regular UUID entry by Lstat and a floor naming it. A live v1 floor
+has no name: reset keeps its bounds, then mint restamps it. Successful mint and
+restore always write the named floor before UUID; an interrupted restore's
+mismatch refuses start and backup until retry or reset. Backup never combines
+a captured old UUID with a later discard's fresh floor. Snapshot pairing is
+also checked on restore, retaining historical v1 snapshot compatibility.
+
+Discard now writes two independent seals: the seal file, then `sealed:true`
+in the initialized marker, both durable before deletion. This avoids changing
+the reservation format: all writers, including the engine, preserve the local
+seal files. Any single file's loss, truncation or replacement cannot reopen
+restores. The smallest deletion set that does is BOTH local markers, after a
+new floor exists or before any new identity is minted. This two-file loss is
+a documented limit beside full rollback, two live boxes holding one UUID and
+non-latest cross-box migration. Tests run real engine writes before damage.
+
+Damaged local markers conservatively count as present; only a well-formed
+newer version requires a newer bridge. Discard repairs malformed, truncated,
+FIFO, directory and dangling-link markers by renaming them aside, with the
+seal durable before initialized-marker repair. Each recovery reaches a real
+engine start. Non-file advice names moving the entry aside. Backup advises
+retry only when the captured UUID vanished; persistent loss names discard.
+Restore loss advice includes both the permanent seal and snapshot-copy remedy.
+
+The exact main-era bind-only state (valid regular UUID, no queue, floor or
+markers) upgrades without rotating identity or sealing: floor zero, then
+marker. Backup takes the exclusive lock and rechecks the captured identity
+before this write. Any additional lifecycle evidence means floor loss.
+Residual risk: a main-era box whose queue and floor were both deleted by hand
+looks identical. Tests pin both sides and bind's read-only preflight.
+
+Usage now names --discard-floor and the retained-floor contract exactly;
+command tests require the snapshot UUID, both counters above the pre-reset
+floor, a truly empty no-op and output that claims only actual removals.
+Red-first logs, rebased round-five controls, new controls and gates are recorded
+in the round-six scratch report. No commit or push was performed in this round.
+
+
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
 The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Track.bandwidthHz`; `GET /v1/spectrum`; `spectrum` health flag) answers "is this file an upsampled CD rip?". Five bridge PRs, each finding a defect only REAL data exposed — every synthetic fixture agreed with every other synthetic fixture and they were all wrong together. Invariants:
