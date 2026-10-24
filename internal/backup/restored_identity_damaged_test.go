@@ -38,6 +38,11 @@ func TestRestoreRefusesADamagedListedReservation(t *testing.T) {
 	}{
 		{"corrupt", func(t *testing.T, snap string) { write(t, snap, []byte("}{garbage")) }, true},
 		{"truncated", func(t *testing.T, snap string) { write(t, snap, nil) }, true},
+		{"deleted", func(t *testing.T, snap string) {
+			if err := os.Remove(filepath.Join(snap, engine.ReservationFileName)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
 		{"uuid_mismatch", func(t *testing.T, snap string) {
 			write(t, snap, []byte(fmt.Sprintf(`{"version":2,"uuid":%q,"ids":77,"tokens":88}`, boxPlayerUUID)))
 		}, true},
@@ -57,6 +62,16 @@ func TestRestoreRefusesADamagedListedReservation(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), engine.ReservationFileName) {
 					t.Errorf("refusal does not name the reservation file: %v", err)
+				}
+				// The damage is in the snapshot, not the live box: the remedy
+				// must strip the identity from a copy of the snapshot, never
+				// tell the operator to reset the box (which gives up its
+				// identity and queue). Claude's round-11 review.
+				if strings.Contains(err.Error(), "player-queue.json") {
+					t.Errorf("refusal tells the operator to reset the live box: %v", err)
+				}
+				if !strings.Contains(err.Error(), "copy of the snapshot") {
+					t.Errorf("refusal does not give the snapshot remedy: %v", err)
 				}
 				if _, statErr := os.Stat(resPath); statErr == nil {
 					t.Fatal("restore wrote a reservation despite refusing")

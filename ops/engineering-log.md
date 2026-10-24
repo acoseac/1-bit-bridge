@@ -59612,8 +59612,10 @@ reservations, or one an operator stripped per the reset remedy, which also
 removes `player-uuid` so no identity is restored) and takes the unmarked path.
 A reservation the manifest lists must read cleanly: a read error, or a v2 mark
 whose UUID is not the identity being restored (Snapshot always writes the two
-together, so a mismatch is tampering), refuses the restore with the player
-reset advice and writes nothing. A listed v1 mark has no UUID and is a floor
+together, so a mismatch is tampering), refuses the restore and writes nothing, with the snapshot
+remedy (strip the identity from a copy of the snapshot; the box keeps its own),
+not the live reset — Claude's round-11 review caught the first draft naming the
+live reset and so telling the operator to give up a healthy box's identity. A listed v1 mark has no UUID and is a floor
 whatever it names, as a live floor is, preserving pre-UUID compatibility.
 
 Red first: `TestRestoreRefusesADamagedListedReservation` (corrupt, truncated,

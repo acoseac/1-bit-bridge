@@ -59,31 +59,48 @@ func playerResetAdvice(restoring bool) string {
 	return advice + "; the next start makes a new identity with no queue, a new device to controllers; a snapshot's player-ids.json is never a valid repair; do not delete the reservation while keeping the player identity"
 }
 
+// snapshotIdentityRemedy is the remedy for a snapshot whose player identity
+// cannot be restored — a listed reservation that will not read, or a v2 mark
+// naming another player. The damage is in the snapshot, not the live box, so
+// the operator strips the identity from a copy of the snapshot and restores
+// that, keeping the box's own identity. It is NOT playerResetAdvice, which
+// gives up the box's identity, queue and every earlier snapshot of it.
+func snapshotIdentityRemedy() string {
+	return fmt.Sprintf("remove %s and %s from a copy of the snapshot to restore the rest; the box keeps or makes its own player identity", PlayerUUIDFileName, engine.ReservationFileName)
+}
+
 // snapshotReservationFloor reads the snapshot's already captured and restamped
 // mark when the manifest lists it. A listed reservation is part of the bundle:
-// if it cannot be read (corruption, a truncated copy, a partial hand-edit that
-// left the manifest entry) the restore refuses, because treating it as "no
-// mark" would drop the snapshot's floor and let the restored identity reissue
-// IDs and tokens below its true high-water mark (CodeRabbit on PR #1331,
-// reproduced). A v2 mark must name the identity being restored — Snapshot
-// always writes the two together, so a mismatch is tampering — while a v1
-// mark has no UUID and is a floor whatever it names, as a live floor is. A
-// reservation the manifest does not list is a genuine absence (a snapshot from
-// before reservations, or one an operator stripped), handled by the caller's
-// unmarked path. Live reservations never come here: every decodable live floor
-// covers the box, whatever UUID or supported version it names.
+// if it cannot be read (corruption, a truncated copy, a hand-edit that deleted
+// the file but left the manifest entry) the restore refuses, because treating
+// it as "no mark" would drop the snapshot's floor and let the restored
+// identity reissue IDs and tokens below its true high-water mark (CodeRabbit on
+// PR #1331, reproduced). A v2 mark must name the identity being restored —
+// Snapshot always writes the two together, so a mismatch is tampering — while a
+// v1 mark has no UUID and is a floor whatever it names, as a live floor is. The
+// decoded version decides, not the UUID alone, so a value that reads clean yet
+// is neither a v1 mark nor a matching v2 mark refuses rather than passing as a
+// zero floor. A reservation the manifest does not list is a genuine absence (a
+// snapshot from before reservations, or one an operator stripped), handled by
+// the caller's unmarked path. Live reservations never come here: every
+// decodable live floor covers the box, whatever UUID or supported version it
+// names.
 func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reservation, bool, error) {
 	if !slices.Contains(m.Files, engine.ReservationFileName) {
 		return engine.Reservation{}, false, nil
 	}
 	r, err := engine.ReadReservation(filepath.Join(snapshotDir, engine.ReservationFileName))
 	if err != nil {
-		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot lists %s but it cannot be read: %w; nothing was restored; %s", engine.ReservationFileName, err, playerResetAdvice(true))
+		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot lists %s but it cannot be read: %w; nothing was restored; %s", engine.ReservationFileName, err, snapshotIdentityRemedy())
 	}
-	if r.UUID != "" && r.UUID != id {
-		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot's %s names player %s, not the identity %s being restored; nothing was restored; %s", engine.ReservationFileName, r.UUID, id, playerResetAdvice(true))
+	switch {
+	case r.Version == 1:
+		return r, true, nil
+	case r.Version == 2 && r.UUID == id:
+		return r, true, nil
+	default:
+		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot's %s names player %q, not the identity %s being restored; nothing was restored; %s", engine.ReservationFileName, r.UUID, id, snapshotIdentityRemedy())
 	}
-	return r, true, nil
 }
 
 // restorePlayerReservation preflights both counters, draws once, then makes
