@@ -229,7 +229,13 @@ func FuzzParse(f *testing.F) {
 		// Round 2: what Unicode folds to ASCII, and what it does not.
 		"http://brİdge.local:7790/dlna/file/" + id, "http://Kitchen.local:7790/dlna/file/" + id,
 		"http://ſpeaker.local:7790/dlna/file/" + id, "http://ｂridge.local:7790/dlna/file/" + id,
-		"http://192.168.1.20:７７９０/dlna/file/" + id, "http://192.168.1.20:7790\xff/dlna/file/" + id} {
+		"http://192.168.1.20:７７９０/dlna/file/" + id, "http://192.168.1.20:7790\xff/dlna/file/" + id,
+		// Round 3: spellings Parse refuses today, a name's case beside the
+		// scheme's, the path's or the id's. Were Parse loosened to take one,
+		// the oracle that a URI taken differs from its serialization in its
+		// host alone catches it, where lowerASCII's would not.
+		"HTTP://Bridge.LOCAL:7790/dlna/file/" + id, "http://Bridge.LOCAL:7790/DLNA/FILE/" + id,
+		"http://Bridge.LOCAL:7790/dlna/file/" + strings.ToUpper(id)} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
