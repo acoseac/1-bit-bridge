@@ -120,6 +120,34 @@ func refuseNewSite(t *testing.T, name, content string) {
 	}
 }
 
+// acceptNewSite is refuseNewSite's other side: a line that is no Go command
+// leaves the census passing.
+func acceptNewSite(t *testing.T, name, content string) {
+	t.Helper()
+	root := buildSiteFixture(t)
+	put(t, root, name, content)
+	if err := checkBuildTags(root); err != nil {
+		t.Fatalf("a line that runs no Go command was refused: %v", err)
+	}
+}
+
+// TestCensusCommandWordIsNotGo: a verb in command position is the command
+// itself, the coreutils install or the shell's test, not an argument of a Go
+// executable, so its ./ path is no package (Claude's review of round 8).
+func TestCensusCommandWordIsNotGo(t *testing.T) {
+	for _, line := range []string{
+		"sudo install -m 0755 -o root -g root ./1-bit-bridge /usr/local/bin/1-bit-bridge",
+		"if test -f ./deploy.env; then echo ok; fi",
+		"test -x ./bin/bridge || exit 1",
+		"[ -f x ] && install -m 0755 ./b /x",
+		"env FOO=1 install ./x /y",
+		"(cd out && test -d ./dist)",
+		"while test -e ./lock; do sleep 1; done",
+	} {
+		t.Run(line, func(t *testing.T) { acceptNewSite(t, "deploy/linux/new.sh", line+"\n") })
+	}
+}
+
 func TestCensusVerbForms(t *testing.T) {
 	for _, tc := range []struct{ name, command string }{
 		{"deploy/new.sh", "EXE=; go${EXE} build ./cmd/bridge"},
@@ -314,9 +342,14 @@ func TestCensusGoDrivingTools(t *testing.T) {
 		"golangci-lint run ./...", "staticcheck ./...",
 		"dlv debug ./cmd/bridge -- serve", "dlv test ./internal/player/decode", "dlv exec ./bin/bridge",
 		"gotestsum", "golangci-lint run", "staticcheck", "dlv debug", "dlv test", "dlv exec",
+		"dlv --headless debug ./cmd/bridge -- serve", "dlv --listen=:2345 --headless --api-version=2 debug ./cmd/bridge",
+		"dlv --listen :2345 exec ./bin/bridge", "golangci-lint --timeout 5m run",
 	} {
 		t.Run(command, func(t *testing.T) { refuseNewSite(t, ".github/workflows/new.yml", "run: "+command) })
 	}
+	// The action runs golangci-lint, govet among its analyzers, over the
+	// bridge: a site to review for its build tags.
+	refuseNewSite(t, ".github/workflows/new.yml", "steps:\n  - uses: golangci/golangci-lint-action@v6\n    with:\n      version: v1.61\n")
 }
 
 func TestCensusFenceContainerEnds(t *testing.T) {
