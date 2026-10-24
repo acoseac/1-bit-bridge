@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B515: MPD config provenance and includes from linked config paths](#2026-10-24--b515-mpd-config-provenance-and-includes-from-linked-config-paths)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
@@ -138,6 +139,63 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B515: MPD config provenance and includes from linked config paths
+
+The output reading previously described the configured/discovered `mpd.conf`
+even when the MPD holding the DAC started with another file. A relative
+include from a linked main file or linked include also used the resolved
+file's directory. Both affected information beside the verdict.
+
+The reading now reads `/proc/<tgid>/cmdline` only after its owner is named
+MPD and the owner thread matches one enabled live output. Proc comes from
+the existing injected snapshot root; no owner, foreign owner or ambiguous
+process identity reads no cmdline. NUL-separated argv is bounded to 64 KiB,
+regular-file opened, root-confined, and never logged. The first modeled
+non-option absolute config argument wins; with none, `conf.Locate` searches
+MPD's existing Linux default order. Unreadable, oversized, malformed,
+unmodeled, outside-root or non-file input retains the configured fallback.
+The additive optional `mpd.configProvenance` names the source and redacted
+path, including MPD's default (`mpd_default`). Both files' secrets and the
+bridge password redact every emitted string. All discovery and reads stay
+inside the existing bounded single-outstanding config step.
+
+The selected file feeds `mpd.config`, its output/chain, and config warnings.
+The configured file remains the existing song-row mapping and DoP fallback
+veto input. No signalpath judging rule changes. The include correction
+applies to both reads and other config consumers: main and nested links use
+the named parent; separate symlink-resolved stack keys stop a cycle before
+reparsing; the existing root, optional-include and read bounds remain.
+
+Sources, offline: MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine`,
+`src/fs/glue/StandardDirectory.cxx` `GetUserConfigDir`, `doc/mpd.1`'s
+`mpd [OPTION...] [CONF_FILE]`, and `src/config/File.cxx`'s `ReadConfigFile`
+and include handling. These were not fetched. The default list is already
+recorded in this repository's search rule; the include behavior is B515's
+premise and matches source knowledge. Verify exact helper/option spellings
+against MPD before merging. MPD's own HOME/XDG environment cannot generally
+be read by the bridge user; defaults use the injected existing search
+inputs, explicitly an assumption. A second MPD with matching output names
+and edits after startup remain limitations of informational config.
+
+Red first: all ten new tests failed against the original production
+behavior. API runs used compile-only fields/seam for the final expanded
+suite, without selection behavior; the initial API suite ran directly
+against HEAD's production bytes. Main/nested links read normalization `no`
+instead of `yes`; the outside-root optional include went unreported.
+The bind-free real-handler test also lacked provenance. Exact output,
+commands, gate results and every `.claude/` OLD/NEW pair are in the task's
+`report-r1.md`; control patches and exact failing test names are in
+`controls-r1/manifest.json`. Controls save and restore fixed bytes, never
+HEAD or git restoration. No commit or push was made.
+
+Gates: host/Linux/Windows `go vet ./...` passed; `make fmt` passed. All new
+tests passed `-race -count=10`. The requested package race gate passed
+`internal/mpd/conf`, `internal/alsa` and `internal/signalpath`; API stopped
+at `TestHealthReturns200WithExpectedShape` on sandbox-refused bind, and
+MPD socket fixture tests likewise failed solely on refused TCP/Unix binds.
+The report names every observed refusal. `make docs-check` is recorded in
+the final report after all documentation edits.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
