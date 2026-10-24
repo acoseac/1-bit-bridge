@@ -59747,6 +59747,49 @@ player block's values were measured through main's own decode
 as 45, 0.5 as 0, `-.inf` as the smallest int64, 1.5 as 1, 0.25 as 0. In
 `cmd/bridge`, the three new init cases failed, each on its fixture loading.
 
+### Negative controls
+
+Against the committed change, each restored with `git checkout --` and the
+tests passing again after it:
+
+- **One per setting, 48 in all.** A temporary line in `buildShadow` kept the
+  original type for the one struct field `B528_SKIP` named, so that setting
+  decoded truncating again, and one in `playerReader.whole` ran main's
+  decode for the one path it named. A driver ran `go test -count=1 -run
+  '^TestAWholeNumberSettingTakesNoFraction$' -v ./internal/config/` with
+  `B528_SKIP=<struct>.<field>` for each of the 44 settings, and `-run
+  '^(TestAWholeNumberOfThePlayerTakesNoFraction|TestAnOpenHomeSettingIsValidatedLikeItsNeighbours)$'`
+  with `B528_SKIP=output.player.<setting>` for the player's four, and
+  required each run to fail that setting's refusal subtests and nothing
+  else. All 48 did. Each config setting failed
+  `TestAWholeNumberSettingTakesNoFraction/<path>` alone, "a fraction loaded,
+  as 7" (as 250 for `enrich.coverSize` and `retention.playbackHistoryDays`).
+  The player's failed `TestAWholeNumberOfThePlayerTakesNoFraction/<setting>/not_whole_N`:
+  `pauseReleaseSeconds`' three ("PlayerEnabled = true" for 45.75, and
+  `Problem`'s range refusal for 0.5 and `-.inf`), `openhomePort`'s two and
+  the OpenHome row `a_fraction_for_the_port`, and `device.pcmDevice`'s and
+  `device.subdevice`'s two each, "PlayerEnabled = true". With `B528_SKIP`
+  unset, the mutated tree passed all four tests.
+- **`outputAsLoadDecodes` back to the bare decoder** (KnownFields alone): the
+  three init rows failed, `a_loopback_port_written_as_a_fraction` (its
+  warning did not say the port does not read: the 7795 was kept),
+  `a_block_beside_a_fraction_elsewhere` ("a file Load refuses for its
+  fraction decodes whole") and `a_fraction_in_a_merged_block` (the block
+  kept).
+- **`outputAsLoaded` without `CheckWholeNumbers`**: the in-block and merged
+  rows failed, and the row with the fraction outside the block passed.
+- **`outputRecovered` without `CheckWholeNumbers`**: the in-block row alone
+  failed; the merged row stops at its merge key before a setting is read.
+- **`valueFreeTagged` without the branch that keeps a value-free line**: 52
+  subtests failed, the 44 settings, the five edges the check refuses and
+  the merge, alias and three-fraction cases, each refusal reading "cannot
+  unmarshal that value into int"; `.inf`, `.nan` and `1e19`, which yaml.v3
+  refuses itself, passed.
+- **`exactInteger` without its range bound**: `minus_infinity` and
+  `two_to_the_63rd` failed (the limit loaded as the smallest and the largest
+  int64), and so did the player's `pauseReleaseSeconds/not_whole_3`
+  (`-.inf` reaching `Problem`'s range refusal).
+
 ### Runs
 
 On darwin/arm64 with Go 1.27.3 (go.mod's 1.27.2 toolchain is not in this
