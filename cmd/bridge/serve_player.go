@@ -145,6 +145,10 @@ type servePlayerWiring struct {
 	OpenHome openhomeWiring
 	// SSDP is the one subsystem shared with the MediaServer, even with DLNA off.
 	SSDP *dlna.SSDPSubsystem
+	// Hosts are the hosts and ports an OpenHome Insert's Uri may name
+	// (newPlayerHosts, B470 PR 5a4); nil names none, so the surface takes
+	// no Insert.
+	Hosts openhome.Hosts
 }
 
 // servePlayerSeams are where a boot test holds serve's player between two
@@ -438,7 +442,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	p.eng, p.be = eng, be
 	playerLog.Info("player: started", "uuid", id, "entries", eng.Snapshot().Len(), "pauseRelease", player.PauseRelease())
 	if p.plan.openhome {
-		p.startOpenHome(id, w)
+		p.startOpenHome(id, w, res)
 	}
 	p.markReady()
 	return true

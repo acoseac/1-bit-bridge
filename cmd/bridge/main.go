@@ -4165,6 +4165,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// One socket-free subsystem, before either owner starts. Every owner
 	// withdraws under the same absolute deadline before final Close.
 	ssdpSubsystem := newServeSSDP(ctx, logger, opts.ssdpNetwork)
+	// What an OpenHome Insert's Uri may name (B470 PR 5a4): a host
+	// /v1/health advertises, its very snapshot, or an address the DLNA
+	// listener takes connections on, told to the inventory once DLNA has
+	// started below.
+	playerHosts, playerHostsDLNA := newPlayerHosts(apiSrv.HealthEndpoints, cfg)
 	var player *bridgePlayer
 	discoveryStopped := false
 	// Cover an early return before the DLNA teardown is registered. The
@@ -4190,6 +4195,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Bounds:   opts.playerBounds,
 		OpenHome: opts.playerOpenHome,
 		SSDP:     ssdpSubsystem,
+		Hosts:    playerHosts,
 	})
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
@@ -4247,6 +4253,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Network:     opts.dlnaNetwork,
 	})
 	dlnaOwner := dlnaLC
+	if dlnaLC != nil && dlnaLC.server != nil {
+		playerHostsDLNA(dlnaLC.server)
+	}
 	defer func() {
 		discoveryStopped = true
 		budget := shutdownGrace

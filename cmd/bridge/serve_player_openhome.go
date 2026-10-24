@@ -2,10 +2,59 @@ package main
 
 import (
 	"context"
+	"net"
+	"net/netip"
+	"strconv"
+	"sync/atomic"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// dlnaAcceptor is what the player's address inventory asks of the DLNA
+// listener: whether it takes a connection on an address now
+// (dlna.Server.AcceptsOn).
+type dlnaAcceptor interface{ AcceptsOn(netip.Addr) bool }
+
+// newPlayerHosts is the inventory an OpenHome Insert's Uri is confined to
+// (B470 PR 5a4, openhome.Inventory): a host /v1/health advertises, from its
+// very snapshot (advertised, api.Server.HealthEndpoints), or an address the
+// DLNA listener takes connections on now, which serve hands the setter once
+// DLNA has started, after the player (none until then, and none on a bridge
+// without DLNA); on a port playerTrackPorts names.
+func newPlayerHosts(advertised func() []string, cfg *config.Config) (openhome.Inventory, func(dlnaAcceptor)) {
+	type held struct{ a dlnaAcceptor }
+	var listener atomic.Pointer[held]
+	inv := openhome.Inventory{
+		Advertised: advertised,
+		Served: func(a netip.Addr) bool {
+			h := listener.Load()
+			return h != nil && h.a.AcceptsOn(a)
+		},
+		Ports: playerTrackPorts(cfg),
+	}
+	return inv, func(a dlnaAcceptor) { listener.Store(&held{a}) }
+}
+
+// playerTrackPorts are the ports an OpenHome Insert's Uri may name: the one
+// 1-bit names in every URI of a bridge track, openhome.DefaultTrackPort
+// (7790, whatever dlna.listenAddress says), and the port of the boot
+// snapshot's dlna.listenAddress, on which the DLNA server hands other
+// controllers its tracks. A port 0 (a kernel pick) names none.
+func playerTrackPorts(cfg *config.Config) []uint16 {
+	ports := []uint16{openhome.DefaultTrackPort}
+	_, p, err := net.SplitHostPort(cfg.DLNA.EffectiveDLNAListenAddress())
+	if err != nil {
+		return ports
+	}
+	n, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || n == 0 || n == openhome.DefaultTrackPort {
+		return ports
+	}
+	return append(ports, uint16(n))
+}
 
 // hostLAN lists the host's interfaces where nothing names another box: what
 // serve's OpenHome surface serves (B470 PR 5a2a), through lan.Look. This
@@ -30,13 +79,14 @@ type openhomeWiring struct {
 // startOpenHome starts the player's OpenHome surface, which the plan asks
 // for (output.player.openhome) and the player runs: id is the player's
 // identity, its UDN; the room and the port are the boot snapshot's; its
-// read actions answer from the engine the player runs (B470 PR 5a3), and
-// from no engine once that engine's Run has ended. It listens on each LAN
-// address and registers bound endpoints with serve's shared SSDP
-// subsystem. A surface that cannot start fails alone: the player runs
-// without it, and says so; an address that cannot be bound fails that
-// address alone, said by the surface.
-func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
+// actions answer from the engine the player runs (B470 PRs 5a3 and 5a4),
+// and from no engine once that engine's Run has ended; an Insert's Uri is
+// confined to w.Hosts and to the tracks lib, the player's own library
+// resolver, serves now. It listens on each LAN address and registers bound
+// endpoints with serve's shared SSDP subsystem. A surface that cannot start
+// fails alone: the player runs without it, and says so; an address that
+// cannot be bound fails that address alone, said by the surface.
+func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhome.Library) {
 	player := w.Cfg.Output.Player
 	o := w.OpenHome
 	addresses := o.Addresses
@@ -56,6 +106,8 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 		SSDP:      w.SSDP,
 		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
 		Engine:    eng,
+		Library:   lib,
+		Hosts:     w.Hosts,
 		Port:      player.EffectiveOpenHomePort(),
 		Addresses: addresses,
 		Listen:    o.Listen,
