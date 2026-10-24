@@ -235,7 +235,9 @@ func (s *fakeStore) TrackPathsIndexedAfter(ctx context.Context, after int64, fn 
 	}
 	hold := s.hold
 	s.mu.Unlock()
-	sort.Slice(rows, func(i, j int) bool { return rows[i].at < rows[j].at || rows[i].at == rows[j].at && rows[i].p < rows[j].p })
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].at < rows[j].at || rows[i].at == rows[j].at && rows[i].p < rows[j].p
+	})
 	for i, r := range rows {
 		if hold != nil {
 			hold(i)
@@ -275,7 +277,9 @@ func (s *fakeStore) counts() (handed, gets int) {
 }
 
 // syntheticPath is the i-th path of the synthetic library.
-func syntheticPath(i int) string { return fmt.Sprintf("Artist %03d/Album %03d/%02d Track.flac", i/1000, i/10%100, i%10) }
+func syntheticPath(i int) string {
+	return fmt.Sprintf("Artist %03d/Album %03d/%02d Track.flac", i/1000, i/10%100, i%10)
+}
 
 // syntheticResolver is a resolver over a synthetic library of n tracks.
 func syntheticResolver(t *testing.T, n int) (*Resolver, *fakeStore) {
