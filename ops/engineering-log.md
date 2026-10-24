@@ -25,6 +25,14 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
+- [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
+- [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
+- [2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices](#2026-10-24--b500-round-5-deployed-builds-embedded-file-admission-and-image-notices)
+- [2026-10-24 — B500 round 4: omit unused bundled UIs](#2026-10-24--b500-round-4-omit-unused-bundled-uis)
+- [2026-10-24 — B500 round 3: embedded assets and fail-closed discovery](#2026-10-24--b500-round-3-embedded-assets-and-fail-closed-discovery)
+- [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
+- [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
 - [2026-10-24 — B515: configured MPD file, command-line hint and named includes](#2026-10-24--b515-configured-mpd-file-command-line-hint-and-named-includes)
 - [2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format](#2026-10-24--b470-pr-5a3-the-players-openhome-read-actions-each-answered-from-one-engine-snapshot-and-the-backends-report-of-the-decoders-length-and-format)
 - [2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused](#2026-10-24--b529-drop-a-final-drain-after-resume-rollback-pause-is-refused)
@@ -640,6 +648,179 @@ Join/Clean and early parent resolution. Regression failures were recorded
 before the fixes; fixed tests, restored mutation controls, toolchain gates
 and sandbox socket refusals are detailed in `report-r2.md` and
 `controls-r2/manifest.json`. PROTOCOL.md remains additive at version 1.
+
+## 2026-10-24 — B500 round 8: key the build-site census on the verb
+
+The census is now the union of three branches: build/install/run/test/vet
+followed after optional flags by a package pattern regardless of executable
+spelling; a case-insensitive Go path or variable before a verb, even without
+a package (including go.exe, go1.27.3 and gotip); and gotestsum,
+golangci-lint run, staticcheck, and dlv debug/test/exec. Quotes, backticks,
+commas and brackets are normalized only on the matching copy; exact original
+logical lines and multiplicities remain the review boundary.
+
+Every non-record Markdown file reached by the walk is in scope. Records are
+excluded by basename: engineering-log.md, History-*, plan-* and release-notes-*.
+Fences close with their CommonMark containers: missing quote prefixes end
+blockquote fences; non-blank lines below list content indentation end list
+fences. Existing container fixtures now keep their content inside their
+containers; a skipped inline label pins rejection of backticks in fence info.
+Prose and explicitly non-executable fences stay out.
+
+Before implementation, the regression run on 4eb5769d failed 77 subtests:
+51 verb/package cases, 12 tool cases, five Markdown paths, five container
+endings (including both erroneous admission and omission), and four executable
+forms without package arguments. The real-tree equality check now accounts
+for 42 sites and 51 Markdown files, including zero-site files. Three sites
+were newly discovered and reviewed: Makefile's Docker build, docs/docker.md's
+Docker build, and migration text in scripts/doc-split/restructure-2026-10-18/routes.py
+that says "run all". No newly discovered Go build or test needed release tags.
+
+The rule and its long form replace round 7's scope and matching claims and
+name the remaining limits: a verb computed at run time, a package argument
+and verb on different unjoined lines, and an unlisted tool that drives go.
+Unfenced Markdown, including indented code, stays outside this fence census.
+
+Five controls restored the source from saved bytes after each run. Removing
+the verb rule failed 47 verb/package cases; removing executable case folding
+failed two package-free executable cases; removing the tool list failed ten
+tool cases; restoring round 7's Markdown scope failed five scope cases;
+removing container endings failed all five ending cases. No other test group
+failed, and every control compiled. For the verb control, the three newly
+reviewed non-Go sites were removed from the review map because that control
+makes them invisible; fixture baselines remained valid. The first verb-control
+prediction was 48; the observed 47 identified an intended overlap: the
+case-insensitive executable branch also recognizes Python's GO variable.
+The corrected prediction was rerun and matched exactly.
+
+The first full race gate hit Go's default ten-minute timeout inside the
+existing large refusal matrix, with no assertion failure. Literal substring
+prefilters now avoid path/flag regex work on lines that cannot match that
+branch; normalization cannot create any of those required words. The union
+and review semantics are unchanged. All five controls matched again, and
+all six requested gates passed on the final implementation; the full package
+race run completed in 157.31 seconds.
+
+**After review.** Codex and Claude, reviewing round 8, found three gaps. The
+verb rule counted a verb in command position as Go's, so an ordinary deploy
+line refused the census: `sudo install -m 0755 -o root -g root ./1-bit-bridge
+/usr/local/bin/1-bit-bridge`, `if test -f ./deploy.env`, `test -x ./bin/bridge`
+(seven such lines are now accepted cases). A verb at the start of a line, after
+;, &, |, ( or !, after a VAR=value assignment, or after if, then, else, elif,
+do, while, until, sudo, exec, command, env, time, nohup or nice is the command
+itself; every real Go invocation names an executable before its verb. dlv's
+subcommand may follow its flags (`dlv --headless debug ./cmd/bridge`), and
+golangci-lint is a site wherever it is named, its GitHub action included
+(`uses: golangci/golangci-lint-action@v6`, which the union missed). Red first:
+the twelve new cases; nothing else. Controls on the committed fix, each red as
+predicted and nothing else: without the command-position check, the seven
+accepted lines; without flags before dlv's subcommand, the three flagged dlv
+lines; with golangci-lint matched only before `run`, the flagged run and the
+action. The real tree's census is unchanged (42 sites).
+
+**Windows CI.** The PR's first windows-latest run failed 22 of the package's tests:
+GitHub's Windows checkout gives every text file CRLF line endings, and the release
+checks and their tests read `.goreleaser.yaml`, the Makefile, the Dockerfile and
+the build sites by `\n`-ended lines. `readRepoText` now reads a repository text
+file as its LF text wherever the checks parse it (`checkBuildTags`, the release
+config), and the tests read repository files through it; a licence text the
+generator copies is never normalised, so the notices stay byte for byte.
+`TestACRLFCheckoutReadsAsLF` converts every build-site file to CRLF (red on the
+PR's head, by the same refusal CI showed). A CRLF copy of the whole tree, made as
+autocrlf makes it (the `.gitattributes` eol=lf paths kept), reproduced CI's
+failures on the PR's head and passes on the fix; restoring the unnormalised read
+reddens the new test.
+
+## 2026-10-24 — B500 round 7: the build-site census fails closed
+
+The scope, executable-only matching, and EOF-only fence behavior described
+below are superseded by round 8 above.
+
+Round 6 still enumerated executable spellings and executable fence labels.
+The replacement recognizes build/install/run/test/vet after a possible Go
+path (including go.exe and variable suffixes) or any variable expansion,
+with optional global flags. Quotes, backticks, commas and brackets are
+separators on a matching copy; original logical lines and multiplicities
+still have to match reviewedBuildSites. Ambiguous shapes require review.
+
+Markdown scope now includes every README.md and recursive .md files under
+ops/, deploy/ and docs/, with records and the existing excluded trees kept
+out. Fences are scanned unless their language is on the explicit
+non-executable skip list in the code and rule. Container markers are stripped
+before fence detection; a backtick opener cannot have a backtick in its info.
+Console/session/terminal prompts are removed before comment filtering, so a
+root prompt is a command. The long rule names static-analysis limits, including
+runtime-computed verbs and commands assembled across unjoined lines.
+
+All concrete review examples became refusal tests before the implementation
+changed: on 36b6e617 the run failed 276 subtests (162 invocation forms,
+10 fence labels, 12 container/inline cases, 17 prompt cases, 9 scope cases,
+and 66 prose cases incorrectly admitted after a container fence). A later
+red-first check caught five expansion-in-path/repeated-suffix forms in the
+first redesign; the matcher now reuses its expansion grammar in paths and
+suffixes too. The post-change census matches 39 reviewed sites. It enumerates
+all 22 in-scope Markdown files, including the 17 with no sites; the other five each hold
+one. Three newly visible test commands now have both release tags: the
+review guide and the ALAC/DSD fixture READMEs. Three ambiguous sites were
+reviewed: Make's vet and test recurse into tagged targets, and a firewall
+command's description contains a variable/flag/install shape without running
+Go. No Markdown prose was reviewed as an exception. The walk's renamed
+function is classified in the repository tree-walk audit.
+
+Five negative controls, restored from saved bytes without a commit, all
+failed exactly the predicted subtests: executable list restored, 127
+invocation cases plus five expanded-path/suffix cases; fence allowlist restored,
+10 labels and 16 prompts; container stripping removed, 11 containers and 66 prose cases; prompt
+stripping removed, five root prompts; top-level ops scope restored, nine
+scope cases. For the executable and scope controls only, reviewed baseline
+entries made invisible by the mutation were removed with it, so baseline
+validation still reached each new-site probe. All controls compiled; none
+panicked or failed outside its predicted set. The original-line and duplicate
+site checks, exclusions and real-tree equality remain covered.
+
+Host evidence supplied after round 6: a Linux amd64 host built the Docker
+image at 36b6e617 with Docker 29.1.3, buildx 0.30.1 and
+`docker buildx build --load` in 75 s. Its
+`/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md` is 355,656 bytes,
+SHA-256 `45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4`,
+byte-identical to the notices in all six GoReleaser snapshot archives. The
+image's binary records `-tags=ts_omit_webclient,ts_omit_debugeventbus`,
+`-trimpath`, CGO 0 and linux/amd64, includes no web-client module, and runs
+`bridge version`. This is host evidence for round 6, not a new image build
+in the round-7 workspace.
+
+Verification on Go 1.27.3: tagged vet of ./..., make fmt, make docs-check,
+make check-build-tags, the tagged package race suite with -count=1
+(397.922 s), and make build-all all passed; all six cross-built binaries
+were produced. The tree-walk classification test also passed. The cross-builds
+emitted nonfatal module stat-cache write warnings under the sandbox.
+The rule-line replacement is supplied separately because .claude/ is not
+writable in this workspace. No commit or push was made.
+
+## 2026-10-24 — B500: release archives carry build-derived third-party licences
+
+The release before-hook now runs the stdlib Go notice generator against
+all six configured release targets. The archives include its ignored root
+output, THIRD_PARTY_LICENSES.md. Generating after dependency resolution
+keeps weekly dependency bumps current without a checked-in notice file.
+
+Discovery uses go list's non-test package dependency closure with CGO=0:
+63 modules on each Darwin target, 67 on each Linux target and 68 on each
+Windows target. Entries record replacements and read their root files,
+including the fsnotify fork. saprobe-alac's full Apache licence and NOTICE
+are included. Round 1 incorrectly supplied Go toolchain PATENTS to x/oauth2;
+round 2 below removes that synthesized grant. UNLICENSE extends the requested
+filename patterns for mewkiz/pkg and mewpkg/term; an initial real generation
+failed loudly on mewkiz/pkg before that extension.
+
+Fixture tests were red before implementation. They exercise the actual
+build graph, exclusion of unused/test-only dependencies, target union,
+missing licences, full root texts and stable order. Negative controls
+restore saved bytes of the uncommitted files, not HEAD. Release wiring is
+pinned by a test; the release playbook now checks each snapshot archive's
+notice bytes and the complete matrix. GoReleaser itself was unavailable in
+the offline implementation environment, so the real snapshot check remains
+a required release-candidate step.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
@@ -61231,3 +61412,176 @@ and entry now describe the configured file, informational hint, MPD's include
 rule and redaction; removed round-1/2 provenance designs are explicitly
 superseded in round 3. Backward-compatible protocol change, no iOS change
 required; the protocol mirror remains a companion update.
+
+## 2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment
+
+The generator now collects notices from each compiled package directory up
+through its effective module root, deduplicating module-relative paths. The
+six-target union adds prometheus/client_golang's internal gddo LICENSE and
+klauspost/compress's internal/snapref/LICENSE and zstd/internal/xxhash/LICENSE.txt.
+COPYRIGHT and LICENCE spellings are accepted case-insensitively; miekg/dns's
+COPYRIGHT now ships. Text-name filtering removes tailscale's license_test.go
+and refuses a module whose only apparent licence is source code.
+
+Module PATENTS are reproduced only when shipped by that module or replacement.
+The prior x/oauth2 fallback is removed. The separate Go standard library and
+runtime section carries the go1.27.2 toolchain's LICENSE and PATENTS; missing
+or empty Go LICENSE fails. The running toolchain must match go.mod's version.
+Before listing dependencies, inherited go env values (including persisted
+settings and workspace discovery) must have default GOFLAGS, GOWORK, GOAMD64
+and GOARM64. Discovery no longer clears settings the release build inherits.
+Local replacement labels omit the version separator when no version exists.
+
+Regression tests failed on the round-1 generator before these fixes, then
+passed. Mutation controls cover the old guarantees (with the obsolete patent
+fallback control reversed to forbid synthesis), every new finding, Go notice
+requirements and environment refusal. Saved bytes are restored after each
+control; no commit or HEAD restore is used. The counts remain 63 per Darwin
+target, 67 per Linux target, 68 per Windows target, 75 modules in the union.
+The generated output is 358,063 bytes (was 355,170); two generations match.
+The requested three-platform vet, fmt, docs-check and generator race gates
+pass. Archive checks use synthetic fixtures; no release or packaging run is
+claimed.
+
+## 2026-10-24 — B500 round 3: embedded assets and fail-closed discovery
+
+The release notice generator now requires a licence-class file at each
+effective module root. A nested copied package's licence remains an additional
+notice, but cannot grant coverage to the rest of the module. Replacement roots
+follow the same rule. Notice-prefixed filenames use a three-way suffix policy:
+include known text and licence-name suffixes, skip known source extensions,
+and refuse every unknown suffix by filename even beside a valid licence.
+COPYING.LESSER, LICENSE.Apache-2.0, HTML notices and suffixed PATENTS/UNLICENSE
+are included. A vendor/ directory at the bridge root fails before discovery,
+since release builds would otherwise select different sources from go list.
+
+Checked-in supplements add the web-client bundle's preserved React, React DOM,
+scheduler, classnames and external-store-shim notices and its Inter font;
+the Tailscale supplement adds HTMX and its WebSocket extension and preserves
+the event-bus CSS reset's source notice. Both are pinned by exact module path
+and version, with replacement checks. Upgrades require another asset audit.
+The six-target EmbedFiles union and a module-wide go:embed/asset search found
+17 linked embedded files. Protobuf's edition defaults and Tailscale's own
+metadata, DNS data and resolvconf script remain covered by their module grants.
+Unlinked embed targets are excluded. The offline audit records the missing
+bundle version labels and reconstructed MIT/Zero-Clause BSD texts for upstream
+verification; it does not assert an exhaustive JavaScript component inventory
+from minified bytes whose other package notices were stripped.
+
+The four regressions failed against the round-2 generator before production
+changes, then passed. Fifty-one assertion-level mutation controls retain the
+37 round-2 guarantees and exercise the new root, suffix, vendor and embedded
+notice guards; saved bytes are restored after every mutation. The six-target
+counts remain 63 per Darwin target, 67 per Linux target, 68 per Windows target
+and 75 modules in the union. Two generations match at 370,674 bytes, up 12,611
+from round 2. Besides supplements, the Go heading advances to go1.27.3 and
+Tailscale to v1.104.2 from the merged main; their existing notice bytes are
+unchanged. The requested host/Linux/Windows vet, pinned fmt, docs-check and
+generator race gates are recorded in the round-3 report. No commit, push,
+release or deployment was performed.
+
+
+## 2026-10-24 — B500 round 4: omit unused bundled UIs
+
+The release builds now set ts_omit_webclient and ts_omit_debugeventbus. The
+bridge does not use either UI, and the minified prebuilt web client strips
+component notices that cannot be reconstructed completely offline. Omitting
+those features removes that incomplete audit from the shipped binary.
+GoReleaser's builds.tags owns the list; Make's GO_TAGS and Docker mirror it.
+check-build-tags checks all three and the build invocations, and runs through
+check-go-version in the existing CI gate and before Make builds. docs-check
+remains Python-only. The notice generator's fail-closed builds reader accepts
+only unique literal tags in a block list and supplies them to every go list.
+A tagged import fixture covers all six target invocations.
+
+The untagged six-target omission assertion failed before the change; all six
+tagged graphs pass. Counts are 61 per Darwin target, 65 per Linux target,
+66 per Windows target, 73 modules in the union. The removed modules are
+web-client-prebuilt and coder/websocket. The eventbus package remains, but
+its debugger assets do not. Both stale supplements were deleted; fixture
+components retain the registry's content, version and replacement controls.
+The remaining seven third-party embedded files are protobuf edition defaults
+and Tailscale's metadata, DNS data and resolvconf workaround; their existing
+module notices remain. Future embedded third-party assets must be omitted or
+fully covered through the exact-version registry.
+
+Two generations are byte-identical at 355,656 bytes, SHA-256
+45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4.
+The Tailscale source trace keeps tsnet's tailnet listener, LocalAPI certificate
+path and netstack ListenPacket intact: the web-client stub and no-op debugger
+HTTP registration are separate surfaces. No live tailnet access was used.
+Round-4 control logs record the initial red checks, drift controls, rerun
+round-3 controls and gate results, including sandbox restrictions on tests.
+
+
+## 2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices
+
+Red-first regressions reproduced untagged deploy and CI commands, newly added
+scripts bypassing the build guard, YAML null/boolean/numeric tags being accepted,
+an unreviewed embedded bundle admitted by its module-root licence, forbidden web
+packages with no embeds, and Docker's missing notices and partial toolchain pin.
+
+All three deploy builds and every CI test/vet site now use the release tags,
+including shard enumeration, fuzzing, the small-volume test and the ALSA ABI
+probe. The repository-wide command census compares operational command sites
+against an explicit reviewed allowlist; additions and changes require review.
+The shard flag array is pinned against a later overriding tag. YAML tags accept
+only unambiguous string names with a letter/underscore first byte, excluding
+null and boolean words in both YAML versions.
+
+Each target's real go-list output is checked for package names and embeds.
+Seven module-owned files are admitted by exact module@version, package and file
+set; upgrades, replacements and other embeds fail before notices are emitted.
+The web client and prebuilt bundle are explicitly refused. The supplement
+registry remains empty; it is not the embed admission gate. The committed
+real-graph test covers all six release targets beside the fixture tests.
+
+Docker pins Go 1.27.3, generates notices on its native builder and copies them
+into /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md in the final image.
+Both version guards require the full patch version, and the command guard also
+requires the generator and final-stage COPY. The playbook checks image bytes.
+Docker execution is unavailable in this sandbox; stage wiring was inspected,
+and actual image execution remains a host validation. The round-5 scratch report
+records gates, byte comparisons and negative-control evidence.
+
+The full-suite tree-walk audit required classifying the new census walk. Its
+otherTreeWalks table now names checkBuildSites as a source-repository walk; no
+library-root exception or traversal behavior changed. The focused audit rerun
+passes; the package still has three socket tests refused by this sandbox.
+
+
+## 2026-10-24 — B500 round 6: documented deploy tags and invocation census
+
+The canonical manual Linux deployment now supplies both release omission tags.
+The build-site census includes labelled shell fences in README.md and top-level
+ops Markdown, with prose and other code languages outside it. The deployment
+command and the release playbook's notice-generator command join the reviewed
+sites. Go executable and variable spellings (go, go.exe, $(GO), ${GO}, $GO),
+including global flags before build/install/run/test/vet, now enter the census.
+Regression cases reproduce the previously accepted commands before the fix.
+
+The Docker notice guard derives its full version from go.mod, so a coherent
+patch-version change still exercises each intended deletion. A private-copy
+control changes both pins to another supported patch, reproducing the old
+hardcoded test's mutation miss. The missing round-5 index line is restored,
+newest first. Red first, then 100 mutation controls, every one red by
+assertion and none by a compile failure: the 51 carried through round 3,
+round 4's 16, round 5's 24 and round 6's nine.
+
+Its review, on the session's own reading, found three more ways a
+documented or scripted build stayed outside the census, each fixed red
+first. A quoted executable (`"$GO" build`, `"/usr/local/go/bin/go" build`)
+did not match, since the pattern wanted white space straight after the
+name: 720 cases, three spellings by the four flag forms, five verbs and
+twelve files. An unlabelled fence, which a reader runs as shell, was left
+out with the prose; round 6 added unlabelled fences to its executable-language
+allowlist. It still skipped every label outside that allowlist, not just
+non-executable languages (`text`, `go`, `yaml`); round 7 replaces that allowlist
+with the explicit skip list. And the records were in it:
+the engineering log, the History files, plans and release-note drafts quote
+commands as they were run, before the tags existed among them, so they stay
+out, and every other top-level ops document is in. On the real tree the
+census still finds only the reviewed sites. Controls on the committed fix,
+each red as predicted and nothing else: counting only labelled fences, the
+four unlabelled-fence cases; no quote after the executable, the 720 quoted
+cases; the records counted as runbooks, the four record cases.

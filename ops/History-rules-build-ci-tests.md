@@ -1216,3 +1216,209 @@ Its check that `mountIDOf` still names the link's mount goes through the
 stubbed platform reader, so it shows that the Go wrapper resolves nothing,
 not that statx keeps its no-follow flag.
 Windows skips only this test's privileged symlink creation.
+
+
+## B500 — third-party licences in release archives (2026-10-24)
+
+**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, over every operational file and every non-record Markdown file the walk reaches (records by basename: engineering-log.md, History-*, plan-* and release-notes-*). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers and end fences when their containers end, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. The census is the union of build/install/run/test/vet followed after optional flags by a package pattern regardless of executable spelling, unless the verb is in command position (line start; after ;, &, |, ( or !, a VAR=value assignment, or if, then, else, elif, do, while, until, sudo, exec, command, env, time, nohup, nice), where it is the command itself (coreutils install, the shell's test); the executable rule (a case-insensitive Go path or variable before a verb even without a package; includes go.exe, go1.27.3 and gotip); and the tool list (gotestsum, staticcheck and golangci-lint wherever named, its GitHub action included; dlv debug/test/exec after any flags). Match with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. Static analysis cannot see a verb computed at run time, a package argument and a verb on different unjoined lines, or a tool not on the list that drives go. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+
+`go run ./scripts/third-party-licenses` reads the explicit matrix in
+`.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
+for each GOOS/GOARCH with CGO disabled, as the release build does. The Go
+executable belongs to the running toolchain. Test-only and unused modules
+are excluded; modules used on only one platform still enter the union.
+The small stdlib configuration reader accepts the current builds stanza
+only and refuses unfamiliar settings, exclusions, flags and YAML forms.
+Tags must be a block list of unique literal Go tag names; templates, aliases,
+flow/scalar forms, blank lists and duplicate keys or values refuse. YAML null
+and boolean spellings (1.1 and 1.2, case-insensitively) refuse too; a tag
+must start with a letter or underscore, excluding all numeric spellings. Extend
+discovery and its tests together before changing that stanza.
+Discovery refuses a vendor/ directory at the module root: GoReleaser would
+automatically build its sources while -mod=readonly discovers the cache.
+Discovery refuses a non-default GOFLAGS or workspace. It reads inherited
+`go env GOFLAGS GOWORK GOAMD64 GOARM64`, including persisted `go env -w`
+settings, and also refuses non-default architecture feature levels. It
+preserves that checked environment for discovery so GoReleaser inherits
+the same build settings. Empty values and the defaults (GOWORK=off,
+GOAMD64=v1, GOARM64=v8.0) are accepted.
+
+Every entry identifies the original module path/version and its replacement
+path/version (without a trailing space for an unversioned local replacement),
+but reads files from the replacement's directory. For every compiled package,
+collect files from its directory and every ancestor through the module root;
+deduplicate by module-relative path and label each file with that path. Never
+walk unlinked subtrees. Include full bytes of LICENSE*, LICENCE*, COPYING*,
+COPYRIGHT*, NOTICE*, PATENTS* and UNLICENSE* (case-insensitive). Require a
+licence-class file at the effective module root; a copied package's nested
+licence is additional coverage, never a grant for the rest of the module.
+Accept extensionless names, text extensions (.txt, .md, .rst, .markdown,
+.html, .htm) and the explicit licence-name suffix allow-list. This includes
+.LESSER and .Apache-2.0: these identify licence variants, not source code.
+Match the whole dotted suffix so Apache-2.0 is not mistaken for extension .0.
+Skip known source extensions such as license_test.go; fail on every other
+suffix, naming the file even when another valid licence is present. Extend
+the allow-list deliberately. NOTICE or PATENTS alone is not a licence.
+Empty files and read failures are errors too.
+
+GoReleaser's builds.tags is authoritative. It sets `ts_omit_webclient` and
+`ts_omit_debugeventbus`.
+The Makefile GO_TAGS value, Dockerfile build flags, all three deploy scripts,
+and every CI test/vet invocation mirror that list. check-build-tags uses the
+same fail-closed reader. It scans operational files across the repository
+(shell, PowerShell, Python, batch, workflow YAML, Makefiles, Dockerfiles and
+extensionless scripts). Markdown scope is every .md file the walk reaches.
+Records are excluded by basename wherever they live: engineering-log.md,
+History-*, plan-* and release-notes-*.
+Generated output trees (.git, bin, dist, vendor, node_modules, underscore-prefixed
+directories) and nested checkouts are excluded, as before.
+
+Markdown prose stays outside the census. All fences are scanned, including
+unknown and unlabelled ones, except these explicit non-executable labels:
+text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml,
+toml, ini, xml, html, css, sql, go, golang, swift, mermaid. These labels identify
+data, output, markup or source examples rather than build commands; Python,
+Dockerfile and Make are executable and deliberately absent from the skip list.
+The first whitespace-delimited info word is the label, case-insensitively;
+an unfamiliar attribute-bearing spelling is scanned. Before fence detection,
+strip leading blockquotes and list markers (-, *, +, or 1–9 digits followed by
+. or ) and whitespace), repeatedly for nested containers. A backtick opener
+with a backtick in its info string is inline code, not a fence (CommonMark
+0.31 section 4.5). Closers must have the opener's marker, at least its length,
+and no info string. An unterminated fence ends with its container: a
+blockquote fence ends on the first line without its quote prefix (including
+a blank line); a list-item fence ends on the first non-blank line indented
+less than the item's content. Nested containers end independently. Without
+a container ending, an unterminated fence runs to EOF. In labels containing
+console, session or terminal, strip a leading $, #, % or > prompt and keep the
+command before removing full-line # comments: # there is a root prompt.
+
+Join shell/Docker and PowerShell continuations. Match on a copy where quotes,
+backticks, commas and brackets are separators. The census is the union of:
+
+- The verb-with-package rule: build, install, run, test or vet followed, after
+  optional flags, by a package pattern, whatever precedes the verb. Patterns
+  are `.`, paths beginning `./` or `.\`, `all`, `std`, patterns ending `/...`,
+  and this module's import path or a path below it. Flag values can span
+  normalized tokens, including quoted paths and argv punctuation. This catches
+  nested expansions, workflow templates and Python argv with a variable or
+  shutil.which call for the executable without parsing those expressions. A
+  verb in command position is the command itself and no site: at the start
+  of a line, after ;, &, |, ( or !, after a VAR=value assignment, or after
+  if, then, else, elif, do, while, until, sudo, exec, command, env, time,
+  nohup or nice, it is the coreutils install or the shell's test
+  (`sudo install -m 0755 ./bridge /usr/local/bin`, `if test -f ./deploy.env`),
+  never an argument of a Go executable (round 8's review).
+- The executable rule: a possible Go executable or variable expansion before
+  a verb, with optional global flags, even without a package argument. It is
+  case-insensitive and accepts go, go.exe, version wrappers such as go1.27.3,
+  and gotip, paths and variable suffixes (go${EXE}, go$(EXE)). Its expansion
+  grammar covers $X, ${X…}, $(X), $env:X and %X%; it does not parse arbitrary
+  nested expressions. The verb-with-package branch covers those expressions
+  when the verb and package are visible together.
+- The tool list: gotestsum, staticcheck and golangci-lint wherever named
+  (golangci/golangci-lint-action, which runs golangci-lint with its govet
+  analyzers, included), and dlv with debug, test or exec after any flags
+  (dlv --headless debug), including paths and .exe spellings,
+  case-insensitively.
+
+Keep the original logical line (whitespace collapsed) for the explicit
+reviewedBuildSites comparison, including multiplicities. Ambiguity is a site
+requiring review: $(MAKE) vet/test call tagged Make targets; a firewall
+command's description, two Docker builds and migration text are reviewed
+non-Go matches. New files and additional recognized commands fail until
+reviewed. The same union applies to every operational file and every
+non-record Markdown file described above.
+
+The static census is not a shell, Python, PowerShell or Make interpreter.
+It cannot see a verb computed at run time, a package argument and a verb on
+different unjoined lines (unless the executable rule independently finds the
+verb), or a tool not on the list that drives go. Commands sourced from
+external/generated files outside the scope also need manual review. Extend
+discovery with regression cases before adopting a new build form. Go source,
+Markdown prose and unfenced Markdown (including indented code blocks) remain
+outside this operational census. The untagged Go exceptions remain the notice
+generator, temp-directory helper and two printed test instructions.
+TestRealTreeBuildSiteCensus prints every in-scope Markdown file, even one with
+zero sites, and every discovered site, then requires exact agreement with the
+reviewed census. Round 8 has 42 sites and 51 Markdown files (six with sites),
+adding three reviewed non-Go sites to round 7's 39; no newly discovered bridge
+command needed tags.
+
+The shard's RACE_FLAGS is separately pinned so it cannot override the explicit
+tags. Make's override assignment
+prevents command-line or environment drift. make build and build-all run the
+check, as does check-go-version, already part of gate.yml. That gate was chosen
+to keep docs-check Python-only and to reuse the release-config gate; that job
+now installs the pinned Go toolchain for the shared reader.
+Make's test, test-fast, vet and run also use GO_TAGS. The notice generator passes
+the parsed tags to every target's go list, including fixture builds.
+
+The bridge uses neither Tailscale's web UI nor its event-bus debugger HTTP
+surface. The prebuilt UI strips notices from several bundled npm components;
+an incomplete offline reconstruction is not a release notice. Omit these
+features instead. The six tagged dependency graphs include neither
+web-client-prebuilt nor client/web, and no debugger HTMX/CSS/templates.
+The two former supplements were removed; tailscale.com itself stays linked
+and retains its module notices. Protobuf edition defaults and Tailscale's
+first-party metadata, DNS data and resolvconf workaround are the only reviewed
+third-party embeds: seven files, keyed by module@version and import path in
+reviewedEmbeds. Every target's go list decodes ImportPath and EmbedFiles.
+An unknown package, changed module version, any replacement, or a changed
+nonempty file set fails before notices are emitted. Main-module and standard
+library embeds are outside this dependency census. client/web and the
+web-client-prebuilt module/packages are explicitly forbidden even without
+embeds. TestRealReleaseGraphEmbeds runs discovery on the real six-target graph,
+without an opt-in or fixture substitute.
+
+The registry in main.go remains, currently empty, exercised with fixture
+components. It pins each supplement to an exact module path and version;
+upgrades, local replacements and changed replacement identities/versions
+require review when entries exist. Today there are no real supplements.
+The separate reviewedEmbeds allowlist is the fail-closed gate for new assets;
+a future embedded third-party asset must either be omitted or receive a full
+notice review, an explicit embed allowlist entry and any needed supplement. Audit go-list EmbedFiles across all six targets after
+upgrades, including compressed JS/CSS and fonts; a module-root licence does
+not automatically cover third-party code bundled as assets.
+
+Reproduce only the PATENTS a module or its replacement actually ships; never
+supply a missing grant from another source. In particular, x/oauth2 has no
+PATENTS. Emit one separate "Go standard library and runtime (go1.x.y)" section
+with the release toolchain's GOROOT/LICENSE and GOROOT/PATENTS when present.
+A missing or empty Go LICENSE fails generation. The section covers the
+standard library, runtime and toolchain-vendored code; the module counts
+exclude it. Require the running toolchain to match go.mod's go directive,
+which release CI's setup-go uses, and label the section with that version.
+Module and filename order is sorted, without dates or cache paths.
+
+The before-hook runs after `go mod tidy`, writes the ignored root file
+`THIRD_PARTY_LICENSES.md`, and every archive includes it. Weekly dependency
+bumps therefore refresh module notices automatically on the next release.
+Modules with reviewed embeds instead fail on a version bump until the new
+embedded files and their coverage are reviewed and reviewedEmbeds is updated.
+The empty supplement registry alone would not detect a newly linked bundle. The generated aggregate stays
+untracked; any future supplementary source notices must be checked in. Do not seed dist/
+from the hook: GoReleaser requires it empty at that stage. The release
+playbook verifies every snapshot archive's notice bytes before removing dist/.
+
+Tests build a local fixture graph through the actual go-list entry point,
+including target-specific imports, unused and test-only requirements,
+replacements, missing licences, mixed-case filenames, multiple licence
+files, nested ancestry and deduplication, COPYRIGHT, LICENCE, rejected source
+files, module-owned PATENTS, UNLICENSE, Go toolchain notices and deterministic
+ordering. Environment tests cover inherited flags, explicit and automatically
+found workspaces, persisted settings and architecture levels. The wiring test
+pins the before-hook and the archive file entry. Round-3 fixtures also pin
+nested-only root refusal (including replacements), COPYING.LESSER beside
+COPYING, HTML and unknown suffix handling, supplementary PATENTS/UNLICENSE,
+vendor refusal, embedded notice content and version/replacement rejection.
+
+The Docker builder runs the generator after COPY of the source, on its native
+build platform, before the target-specific binary build. Its final stage copies
+/src/THIRD_PARTY_LICENSES.md to
+/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md. Docker's GO_VERSION pins
+the complete go.mod version (1.27.3), since the generator requires equality
+with runtime.Version(), not merely a compatible major.minor. check-go-version
+compares full versions, and check-build-tags requires the generator, final-stage
+COPY and full toolchain pin. Release validation compares the image's notice
+bytes with a fresh generation, for both published image architectures.

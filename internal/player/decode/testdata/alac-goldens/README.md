@@ -20,7 +20,7 @@ a scratch directory and point the golden tests at it:
 
 ```sh
 python3 scripts/player-alac-goldens/generate.py --out DIR --codex EVALDIR
-go test ./internal/player/decode -args -alac-goldens=DIR
+go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/player/decode -args -alac-goldens=DIR
 ```
 
 The pattern changes kind every 1499 frames, so each 4096-frame packet holds
