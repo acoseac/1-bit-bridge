@@ -120,18 +120,38 @@ func exactInteger(n *yaml.Node, t reflect.Type) bool {
 // number other than zero with an exponent of a million or more, or no
 // number. resolve drops the text's underscores and tries strconv.ParseInt
 // with base 0 first, so !!float 036 is 30, octal, as 036 untagged is, and
-// !!float 0x20000000000001 is 2^53+1, which the float64 rounds to 2^53.
-// What is left is a decimal float: an optional sign, digits with at most
-// one point, and an optional exponent, read here digit by digit, so the
-// work is linear in the text, where big.Rat's is quadratic in a long
-// mantissa's digits. Only a mantissa of a million digits or more brings an
-// exponent of a million or more back to a whole number of 20 digits, so
-// such a text is refused unread; zero is zero whatever its exponent, as
-// strconv.ParseFloat reads it.
+// !!float 0x20000000000001 is 2^53+1, which the float64 rounds to 2^53;
+// then, for a binary or octal prefix base 0 refuses, ParseInt of what
+// follows it in its base, so !!float 0b+11110 is 30 too. What is left is a
+// decimal float: an optional sign, digits with at most one point, and an
+// optional exponent, read here digit by digit, so the work is linear in the
+// text, where big.Rat's is quadratic in a long mantissa's digits. Zero is
+// zero whatever its exponent, as strconv.ParseFloat reads it. Any other
+// number with an exponent of a million or more is refused unread, and is
+// never one yaml.v3 decodes unchanged: strconv stops reading an exponent
+// once it reaches 10000, so such a text overflows, and resolves as a
+// string, or decodes to another value (0. and 9,998 zeros then 3e10000000
+// decodes as 30).
 func writtenInteger(text string) (*big.Int, bool) {
 	plain := strings.ReplaceAll(text, "_", "")
 	if v, err := strconv.ParseInt(plain, 0, 64); err == nil {
 		return big.NewInt(v), true
+	}
+	for _, p := range [...]struct {
+		prefix string
+		base   int
+	}{{"0b", 2}, {"0o", 8}} {
+		rest, ok := strings.CutPrefix(plain, p.prefix)
+		if !ok {
+			if rest, ok = strings.CutPrefix(plain, "-"+p.prefix); ok {
+				rest = "-" + rest
+			}
+		}
+		if ok {
+			if v, err := strconv.ParseInt(rest, p.base, 64); err == nil {
+				return big.NewInt(v), true
+			}
+		}
 	}
 	s, negative := plain, false
 	if s != "" && (s[0] == '+' || s[0] == '-') {
