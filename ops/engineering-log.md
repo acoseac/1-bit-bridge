@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B515: configured MPD file, command-line hint and named includes](#2026-10-24--b515-configured-mpd-file-command-line-hint-and-named-includes)
 - [2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format](#2026-10-24--b470-pr-5a3-the-players-openhome-read-actions-each-answered-from-one-engine-snapshot-and-the-backends-report-of-the-decoders-length-and-format)
 - [2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused](#2026-10-24--b529-drop-a-final-drain-after-resume-rollback-pause-is-refused)
 - [2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config](#2026-10-24--b528-a-whole-number-setting-refuses-a-fraction-rather-than-load-its-whole-part-in-the-player-block-and-across-the-config)
@@ -457,6 +458,188 @@ package cap and TestStopRefusesThenShutsDownThenCloses panics in cleanup
 without a listener. The full gate is not claimed passed. All final stress
 proofs use separate sets of exactly twelve spinners, all stopped and
 reaped; controls use test overlays and preserve the worktree's fixed bytes.
+
+## 2026-10-24 — B515: configured MPD file, command-line hint and named includes
+
+
+**Current design (rounds 3–5).** The reading describes the bridge's
+configured/discovered file. That file supplies `mpd.config`, config warnings,
+song mapping and the DoP veto when live `dop` is absent. The optional
+`mpd.configHint` describes only the observed command-line operand: `same`,
+`different` with a redacted logical path, `none`, or `no_config`. No operand
+file contents or process environment are read, and no MPD default is inferred.
+Argv is mutable and equal roots do not establish equal mount namespaces;
+the hint proves neither what MPD loaded nor its startup settings.
+
+MPD's include rule keeps the unresolved named directory at every level,
+including the explicit configured name when the reading reopens it after
+inspection. Physical resolution supplies confinement, cycle identity and
+nested diagnostic paths, including through an alias of the root. Hints
+compare only confined physical file identities and omit process-relative
+operands and links into them. All verdict inputs, including song lookup and the stream-open observation,
+precede a separately bounded hint step: a late or failed hint drops only hints. The configured
+file and its includes plus `output.password` redact every external string.
+The implementation detail and evidence follow in the round-3 through round-6
+records; protocol version remains 1.
+
+**Round 5.** A stalled hint previously consumed the shared reading deadline
+before song lookup, changing a known row to `source_unknown`. Every verdict
+input is now gathered first; the hint keeps its own busy flag and 500 ms bound
+within the remaining reading time. Intermediate process-relative aliases are
+checked with a confined Lstat/Readlink walk: any prefix or target through
+`/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr` omits the hint,
+even when it ends at a regular file; more than 40 hops also omits it. Named
+reopen, independent config/hint bounds, confined final identity lookup and
+root-relative include diagnostics remain pinned. The slow-song/stalled-hint,
+intermediate-alias and hop-limit regressions failed on round 4 before the fix.
+A Linux-only regression holds a regular descriptor open and checks real
+`/proc/self/fd`, `/dev/fd` and cwd aliases with root `/`; macOS cannot run it.
+The round-4 host socket-capable run passed `go test -p 4 -race -count=1
+./internal/api/ ./internal/mpd/... ./internal/alsa/ ./internal/signalpath/`:
+api 111.6 s, mpd 1.8 s, mpd/conf 1.5 s, alsa 3.1 s, signalpath 1.3 s.
+Round-5 validation: all 59 prior controls and four new macOS controls are
+assertion reds, with saved bytes restored. Host/Linux/Windows vet, formatting,
+docs checks, the conf/ALSA/signalpath race suites and ten race repetitions of
+each new macOS test pass. All runnable API (286) and MPD (21) test invocations
+pass; 437 API and 17 MPD invocations are blocked by refused socket binds.
+The Linux-only test cross-compiles; its runtime and control remain pending.
+Exact gates and rebased controls are in `report-r5.md` and
+`controls-r5/manifest.json`. No new index entry is added. Protocol version
+remains 1; backward-compatible protocol change, no iOS change required.
+The protocol mirror remains a companion documentation update.
+
+**Round 6.** Round-5 host evidence is now available: on macOS arm64 with
+Go 1.27.3, `go test -p 4 -race -count=1 ./internal/api/ ./internal/mpd/...
+./internal/alsa/ ./internal/signalpath/` passes (api 100.3 s). On Linux,
+Ubuntu 26.04, Go 1.27.3, linux/amd64, the same race command passes (api
+103.0 s); `TestHintOmitsLiveProcessAliasesAtHostRoot` passes with
+`-race -count=10`, and control 70 fails its predicted assertion with the
+saved fix restored afterward. This supplies round 5's previously pending
+Linux runtime/control evidence and validates the reading order on both hosts.
+
+Two valid walker boundaries now retain hints: a parent step with no component
+left stays at canonical root `/` (every other injected root still refuses it),
+and an absolute link to exactly the injected root is inside it. Both new
+regressions fail on round 5 before the fix. Claude's review of the round found
+the reading-level test's named and canonical spellings of the root identical
+on Linux (a bare temporary directory has one spelling there), so
+`TestHintLinkToEitherSpellingOfTheRoot` reaches the root through a link,
+asserts the two spellings differ, and keeps the hint for a link to either;
+dropping the named comparison reddens it.
+
+The PR's first Windows CI run (windows-latest) failed two tests that are
+POSIX-shaped, and both now skip on Windows with the reason:
+`TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot` mirrors an absolute host
+path under the injected root by dropping its leading slash, which a Windows
+path with a volume cannot do (the hint reads MPD's command line from /proc in
+any case); `TestIncludesResolveDotDotPhysicallyAtEveryLevel` expects `..` to
+resolve physically through a directory link, which Windows normalizes
+lexically before the filesystem follows the link, so the conf reader there is
+as lexical as the OS. Every other new test passed on that run. Production hint tests additionally
+pin forty links accepted against forty-one refused, an in-root absolute link,
+and a relative `dir-link/../x` chain whose lexical clean would name the wrong
+file. Independent controls restore each boundary rejection, lower the hop
+limit, refuse all links, or clean a relative target early. Round 5's controls
+64–69 are rerun against this tree. No statfs check is added: the process-path
+exclusion recognises names only, so procfs mounted at `/host/proc` or another
+`mount -t proc` location is not recognised by filesystem type. A file replaced
+by a link between the walk and the confined stat can still yield a hint;
+the second pathname resolution retains confinement but cannot atomically
+preserve the alias exclusion. Both are documented limits of an informational
+hint already stated not to prove what MPD loaded. The configured file and
+verdict inputs remain independent. PROTOCOL.md already describes in-root
+identities, more than forty hops and the hint's lack of proof, so its text
+needs no change. Exact red/green, controls and requested gate results are in
+`report-r6.md` and `controls-r6/manifest.json`. No new index line is added.
+
+### Round 1 provenance design — superseded in round 3 (never shipped)
+
+The following paragraphs record the removed design and its checks; they
+are historical evidence, not the current selection or wire contract.
+
+The output reading previously described the configured/discovered `mpd.conf`
+even when the MPD holding the DAC started with another file. A relative
+include from a linked main file or linked include also used the resolved
+file's directory. Both affected information beside the verdict.
+
+The reading now reads `/proc/<tgid>/cmdline` only after its owner is named
+MPD and the owner thread matches one enabled live output. Proc comes from
+the existing injected snapshot root; no owner, foreign owner or ambiguous
+process identity reads no cmdline. NUL-separated argv is bounded to 64 KiB,
+regular-file opened, root-confined, and never logged. The first modeled
+non-option absolute config argument wins; with none, `conf.Locate` searches
+MPD's existing Linux default order. Unreadable, oversized, malformed,
+unmodeled, outside-root or non-file input retains the configured fallback.
+The additive optional `mpd.configProvenance` names the source and redacted
+path, including MPD's default (`mpd_default`). Both files' secrets and the
+bridge password redact every emitted string. All discovery and reads stay
+inside the existing bounded single-outstanding config step.
+
+The selected file feeds `mpd.config`, its output/chain, and config warnings.
+The configured file remains the existing song-row mapping and DoP fallback
+veto input. No signalpath judging rule changes. The include correction
+applies to both reads and other config consumers: main and nested links use
+the named parent; separate symlink-resolved stack keys stop a cycle before
+reparsing; the existing root, optional-include and read bounds remain.
+
+Sources, offline: MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine`,
+`src/fs/glue/StandardDirectory.cxx` `GetUserConfigDir`, `doc/mpd.1`'s
+`mpd [OPTION...] [CONF_FILE]`, and `src/config/File.cxx`'s `ReadConfigFile`
+and include handling. These were not fetched. The default list is already
+recorded in this repository's search rule; the include behavior is B515's
+premise and matches source knowledge. Verify exact helper/option spellings
+against MPD before merging. MPD's own HOME/XDG environment cannot generally
+be read by the bridge user; defaults use the injected existing search
+inputs, explicitly an assumption. A second MPD with matching output names
+and edits after startup remain limitations of informational config.
+
+Red first: all ten new tests failed against the original production
+behavior. API runs used compile-only fields/seam for the final expanded
+suite, without selection behavior; the initial API suite ran directly
+against HEAD's production bytes. Main/nested links read normalization `no`
+instead of `yes`; the outside-root optional include went unreported.
+The bind-free real-handler test also lacked provenance. Exact output,
+commands, gate results and every `.claude/` OLD/NEW pair are in the task's
+`report-r1.md`; control patches and exact failing test names are in
+`controls-r1/manifest.json`. Controls save and restore fixed bytes, never
+HEAD or git restoration. No commit or push was made.
+
+Gates: host/Linux/Windows `go vet ./...` passed; `make fmt` passed. All new
+tests passed `-race -count=10`. The requested package race gate passed
+`internal/mpd/conf`, `internal/alsa` and `internal/signalpath`; API stopped
+at `TestHealthReturns200WithExpectedShape` on sandbox-refused bind, and
+MPD socket fixture tests likewise failed solely on refused TCP/Unix binds.
+The report names every observed refusal. `make docs-check` is recorded in
+the final report after all documentation edits.
+
+### Round 2 provenance design — superseded in round 3 (never shipped)
+
+The following records the second removed design, not current behavior.
+
+Round 2 (2026-10-24): the source copies of MPD 0.24.4 `CommandLine.cxx`,
+`OptionParser.cxx` and `config/File.cxx` were read, replacing round 1's
+unverified grammar assumptions. Options work anywhere, long flags accept
+`=value`, `--` is invalid, and `--no-config` loads no file. Selection is now
+per card, using the already-resolved Tgid, stable stat start time around
+cmdline, basename `mpd`, and root identity (SameFile, else mountinfo device
+and root). Defaults require the daemon's bounded environment; unreadable
+environ always falls back, even for the same uid. Thus the earlier bridge
+HOME/XDG assumption is no longer a source claim. An unread configured file
+has no provenance, correcting the attempted-file claim; verified no-config
+has its own source with empty path and null config. The earlier statement
+that every emitted string used both files' secrets was false for the DAC
+mixer and other external fields: these now share all files' redaction.
+Dot, dotdot and empty argv path segments are refused rather than cleaned
+and published raw. Cap+1 was already implemented in ReadLogical; a new
+NUL-at-cap regression and a truncating-read control pin it. The DoP test now
+removes live dop, makes configured=yes and process=no, and asserts the
+process veto; only song mapping retains the configured file. Includes now
+preserve the unresolved named parent at every level and resolve link/..
+physically for open, confinement and cycle keys, correcting both lexical
+Join/Clean and early parent resolution. Regression failures were recorded
+before the fixes; fixed tests, restored mutation controls, toolchain gates
+and sandbox socket refusals are detailed in `report-r2.md` and
+`controls-r2/manifest.json`. PROTOCOL.md remains additive at version 1.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
@@ -60984,3 +61167,67 @@ every package passes but `internal/transcode`, whose
 run and passes alone, as in round 1, in a package that depends on none this
 change touches. `FuzzControlRequest` ran 495,073 inputs in 30 s, none
 failing.
+
+## 2026-10-24 — B515 round 3: configured MPD file and informational argv hint
+
+The reading again describes only the bridge's configured/discovered mpd.conf.
+That file supplies config, mpd_conf warnings, song mapping and the DoP veto.
+The unshipped provenance field is replaced by optional mpd.configHint:
+same/different (physical identities in the bridge's view), none (no operand),
+or no_config; only different includes a redacted logical path. The operand's
+contents are never read. Process environ and MPD default inference are removed.
+Per-card Tgid/output-thread, stable start time, argv[0], root and bounded grammar
+checks remain, now determining hint presence alone.
+
+The round-3 design change follows the reviews' counterexamples: a private
+bind mount may keep the same root inode, mutable argv may describe a later
+path, /proc/self/cwd is bridge-relative, PID reuse may precede the first stat,
+MPD's HOME fallback uses getpwuid(getuid())->pw_dir, and a different unreadable
+file left the configured fallback displayed. These checks cannot prove which
+file MPD loaded. Signal Path keeps a verifiable description of the configured
+file and makes only an explicitly limited command-line observation.
+
+Named-parent physical include resolution and combined redaction remain.
+Ordinary absent includes already worked; a dangling include reproduced the
+resolution-error defect: optional absence was reported, plain absence lacked
+not-found classification, and the raw host path appeared. Resolution absence
+now maps to not found after checking the physical missing parent is inside
+the root. Both directives and outside-root dangling targets are tested.
+PROTOCOL.md now matches takeReading: ALSA configuration then mpd.conf, after
+the MPD status bracket. The only additive shipped wire field is configHint;
+protocol version remains 1. Backward-compatible protocol change, no iOS change
+required; the protocol mirror should be copied with the next companion update.
+
+Red-first hint values and dangling-include failures, adapted parser/identity,
+include/privacy controls, repeated race tests and the exact gate results are
+recorded in report-r3.md and controls-r3/. No commit or push is part of this round.
+
+
+## 2026-10-24 — B515 round 4: independent hints and configured named paths
+
+The production Inspect-to-reading path reopened a symlink's resolved target,
+so probe and reading could follow different relative includes. The reading
+now reopens the explicit configured name. A shared config/hint deadline also
+discarded a successfully read config when process metadata stalled; config
+publication now precedes a separate hint deadline and busy flag. A late,
+failed or already-running hint omits only hints, and the next reading can
+still refresh the configured file.
+
+Process-relative operands under `/proc/` or `/dev/fd/`, `/dev/stdin`, and
+links resolving there omit hints. Identity comparison uses confined physical
+resolution with `conf.StatHost`, never a second stat of the unresolved
+operand. The static absolute-link escape was already refused by the old
+Exists check; the new path centralizes confinement and identity lookup.
+Nested include diagnostics previously compared an unresolved host name
+against a canonical root; they now use the physical cycle key. The duplicate
+configured DoP scan was replaced by the existing named-block lookup, with
+both configured values pinned when no live attribute is present.
+
+Regressions failed before the fixes; the unchanged absolute-link refusal and
+DoP behavior were green baselines, then tested with deliberate regressions.
+The task's `report-r4.md` and `controls-r4/manifest.json` hold exact red/green
+runs, controls, root behavior comparisons and gates. The original B515 index
+and entry now describe the configured file, informational hint, MPD's include
+rule and redaction; removed round-1/2 provenance designs are explicitly
+superseded in round 3. Backward-compatible protocol change, no iOS change
+required; the protocol mirror remains a companion update.

@@ -93,3 +93,187 @@ bind threatens copy-up durability at a crash even on persistent storage.
 ErrOverlayBind distinguishes it from reboot-volatile media while retaining
 ErrMediumUnknown compatibility. The output state machine and wire are
 unchanged; player.md and History-rules-player.md carry the operative rule.
+
+
+### The reading keeps the configured MPD file and adds a command-line hint (2026-10-24, B515, round 3)
+
+**Never substitute an argument or inferred default for the configured file:
+its config, warnings, song mapping and no-live-dop veto stay together. Keep
+per-card Tgid/output-thread, stable-start, argv[0] and root checks; parse
+MPD's grammar and emit no raw argv. Compare file identities physically in
+the bridge's view and never read the operand's contents. Do not read process
+environ or infer default paths. Redact every external string against every
+config read, including includes, and output.password.**
+
+Round 3 replaces rounds 1–2's unshipped provenance design. The reviews
+found that a private bind mount over `/etc/mpd.conf` can leave the same root
+inode; argv can be rewritten after loading; `/proc/self/cwd/...` resolves
+in the bridge; PID reuse can precede the first stat; MPD falls back from an
+unset or non-directory HOME to `getpwuid(getuid())->pw_dir`; and an unreadable
+but different argument file could leave the configured file displayed as a
+fallback. Linux cannot prove the file MPD loaded through these observations.
+Signal Path therefore describes the bridge's configured file and limits the
+new field to a hint about the command line observed now.
+
+`mpd.configHint` is optional and additive: `argument` is `same`, `different`,
+`none` or `no_config`. Only `different` has `path`, a validated, redacted
+logical operand. `same` compares physical file identity, including symlinks
+and hard links, in the bridge's view. A file operand without available
+identities, a non-file or an out-of-root operand omits the hint; unreadable
+contents alone do not. Neither `none` nor `no_config` suppresses the configured
+file. No process environment is read and no MPD default is inferred.
+
+Only this card's unique MPD Tgid and matching enabled output thread may
+supply a hint. Stat field 22 must agree around the bounded command-line
+read; argv[0]'s basename is `mpd`; root links compare by SameFile, with root
+mount device and root fields as fallback only when links cannot be inspected.
+These are observations, not proof of startup identity or mount equivalence.
+Cmdline is capped at 64 KiB with overflow detection, stat at 64 KiB and
+mountinfo at 1 MiB. The configured file is published from the config step
+alone; after all verdict-bearing inputs (including the song row and
+stream-open observation), hints run in their own single-outstanding bounded
+step with their own busy flag, bounded by 500 ms and the reading time left. A failed or late hint omits only hints. A failed or late
+config step publishes neither config nor hints. A cached view performs no I/O and retains
+a separate hint for each card.
+
+MPD 0.24.4 CommandLine.cxx and OptionParser.cxx define options anywhere,
+hidden flags, long `=value`, rejection of `--`, and at most one file operand.
+`--no-config` returns before checking remaining operands. Relative paths,
+backslashes, empty/dot/dotdot components and unmodeled grammar omit the hint;
+no raw argv or process environment reaches the response or logs. Every
+external string, including hint paths, DAC mixer/control, kernel names,
+song rows and MPD fields, uses the configured file's collected secrets
+(includes too) and output.password. The argument file contributes no bytes.
+
+The production reading and handler tests cover all four values, file identity,
+identity and grammar refusals, per-card caching, unreadable files, bounded
+publication, configured warnings and DoP, and privacy. The exact red/green,
+controls and gates are in the task's `report-r3.md` and `controls-r3/`.
+
+### Linked MPD files keep the named directory for includes (2026-10-24, B515)
+
+**An include is relative to the named path's directory, bounded, and not a
+glob. Concatenate the unresolved named directory and include name; resolve
+symlinks and `..` physically for the open, root check and cycle key at every
+level. Never lexically clean a link/.. pair or resolve the named parent
+early. Never weaken root checks or optional-include refusals.**
+
+MPD 0.24.4 `src/config/File.cxx`, read in round 2, opens the named path and
+passes `path.GetDirectoryName()` to the parser. Includes use
+`AllocatedPath::Apply(directory, name)` and recurse with that named path.
+For `/etc/mpd.conf` linked to `/opt/mpd/mpd.conf`, `include "x.conf"` still
+names `/etc/x.conf`. But for `/etc/linked/child.conf` with `linked` pointing
+to `/opt/mpd/sub`, `include "../x.conf"` opens `/opt/mpd/x.conf`. A lexical
+clean would wrongly open `/etc/x.conf`.
+
+Round 1 resolved the main named parent early, used filepath.Join/Clean
+for includes, and used filepath.Dir for child parents; those inconsistent
+rules are replaced by unresolved string concatenation and a lexical
+substring for the parent at every level. EvalSymlinks walks components
+before applying `..`. The physical path supplies confinement, the open and
+the cycle key; the unresolved name supplies only the next include base.
+A missing optional path is checked through its nearest existing physical
+parent and then ignored as missing; outside-root targets remain refusals.
+Round 3 also classifies physical resolution failure at a dangling link as
+not found, so plain includes report absence and optional includes skip it.
+The resolution error's missing component is checked against its physical
+parent before absence is accepted; a dangling target outside the root stays
+a refusal. Resolution failures never emit the host path.
+Existing depth, file-count, read, non-file and pattern bounds remain.
+
+`TestIncludesResolveDotDotPhysicallyAtEveryLevel` covers directory and file
+links for main and nested files, with further nested includes.
+`TestLinkedConfigIncludesUseTheNamedDirectory` and
+`TestLinkedConfigIncludesKeepConfinementAndCycleChecks` retain the round-1
+simple-link, cycle and outside-root controls.
+
+
+### B515 round 4: named reopen, independent hints and confined identities
+
+The production inspection resolves an explicit file for its display path.
+The reading reopens `output.conf` by the configured name, preserving MPD's
+named include directory through inspection and the later reread. Nested
+include diagnostics use the resolved cycle key against the canonical root;
+the unresolved named path still supplies the next include directory.
+
+Hints use `conf.StatHost`: physical resolution and the conf reader's root
+check, followed by a stat beneath an opened root. An unresolved or escaped
+identity omits the hint, and no operand contents are read. Process-relative
+names under `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr`
+omit hints at every operand prefix or symlink target, even if the final file
+is ordinary. The walk uses Lstat/Readlink one link at a time, refuses failed
+resolution and more than 40 hops, and preserves relative link/.. semantics.
+Absolute links retain the conf reader's host semantics and confinement; the
+named root and canonical root are both accepted for in-root absolute links. A hint worker that times out or panics cannot erase the already
+published configured file, nor block fresh configured reads on the next
+reading. One hint worker may remain outstanding; later readings do not
+start a second. The configured block's no-live-dop fallback is read once
+through `namedBlock`, retaining both yes and no behavior.
+
+`TestReadingKeepsInspectNamedConfig`, `TestReadingOmitsProcessRelativeConfigHint`,
+`TestReadingHintOmissionEvidence`, `TestHungHintDoesNotBlockLaterConfigReads`,
+`TestFailedHintKeepsConfiguredFile`,
+`TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot`,
+`TestNestedIncludeLocationsUnderLinkedRoot` and
+`TestConfiguredDoPVetoWithoutLiveAttribute` pin these paths. The task's
+`report-r4.md` and `controls-r4/` record the red runs, restored controls,
+main comparison and gates.
+
+
+### B515 round 5: hints wait for verdict inputs and omit intermediate aliases
+
+The hint previously ran before song lookup on the shared three-second reading
+context. A stalled hint could consume the remaining time and turn a known
+source into `withheld/source_unknown`. Config acquisition, song lookup and
+the timestamped stream-open observation now all precede the optional hint.
+Its separate 500 ms step uses only the remaining reading time; timeout, panic
+or an outstanding worker can change hint presence alone.
+
+Checking only the written operand and fully resolved endpoint missed chains
+such as `/etc/alias.conf -> /proc/self/cwd/mpd.conf` and descriptor aliases
+whose endpoint is a regular file. `hintOperandHost` checks every traversed
+prefix before Lstat and every absolute link target before following it;
+relative targets are traversed component by component, never cleaned across
+a link/.. pair. `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr`
+all cause omission. More than 40 links, missing paths and confinement failures
+also omit hints. The final identity still comes from `conf.StatHost` under
+its opened root, without reading operand contents.
+
+`TestStalledHintCannotSpendSongLookupTime`,
+`TestReadingOmitsIntermediateProcessAliases` and `TestReadingHintLinkHopLimit`
+failed on round 4 and pass on the fix. The Linux-only
+`TestHintOmitsLiveProcessAliasesAtHostRoot` holds a regular file open and
+uses real `/proc/self/fd`, `/dev/fd` and `/proc/self/cwd` aliases under root `/`;
+its runtime result must come from Linux, not the macOS cross-compile.
+
+
+### B515 round 6: root boundaries, valid links and informational limits
+
+An absolute link targeting exactly the injected root is inside it, under either
+its named or canonical spelling. A relative link target can climb to canonical
+root `/` and stay there on further `..` components, as the kernel and
+EvalSymlinks do. Every other injected root still refuses a parent step with
+no component left. Link targets remain uncleaned until preceding links have
+been followed. Forty symlink hops retain a hint; forty-one omit it. An in-root
+absolute link and a relative `dir-link/../x` chain retain a hint too.
+
+The process-relative exclusion is by name only: procfs mounted elsewhere,
+such as `/host/proc` or another `mount -t proc` location, is not recognised by
+filesystem type. No statfs check is made. The final confined `conf.StatHost`
+also resolves the pathname again after the walk. A file replaced by a link
+between those operations can still yield a hint, including through a
+process-relative alias whose final endpoint is ordinary. Confinement holds,
+but the alias exclusion is not an atomic guarantee across the two resolutions.
+These are limits of an informational hint, already documented as not proof
+of what MPD loaded; neither changes the configured file or verdict inputs.
+
+`TestHintParentAtHostRootStaysAtRoot` pins host-root saturation against the
+conf reader's resolution and refusal at an injected root.
+`TestReadingHintLinkToInjectedRoot`, `TestReadingHintFortyLinks` and
+`TestReadingHintValidLinkChains` exercise the production hint path, including
+a decoy configured file that would turn a lexically cleaned link/.. chain
+into the wrong identity. `TestReadingHintLinkHopLimit` pins forty-one hops.
+The host-root case is POSIX-only; the other cases run on every OS with symlink
+support. Round-6 controls restore each rejection, lower the limit to 39,
+refuse all links, and clean a relative target early; each fails its intended
+assertion. Exact gates and controls are in `report-r6.md` and `controls-r6/`.
