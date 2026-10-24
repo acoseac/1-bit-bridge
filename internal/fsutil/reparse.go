@@ -50,7 +50,7 @@ type dirEntryOps struct {
 // resolution's own error when either cannot be had. Every other reparse
 // point is a directory like any other: a OneDrive folder's cloud tag
 // (IO_REPARSE_TAG_CLOUD_*), a container layer's (IO_REPARSE_TAG_WCI*), a
-// deduplicated folder's. Go 1.23's os.Lstat calls each of those
+// deduplicated folder's. Go 1.23's os.Lstat calls the first two
 // ModeIrregular, and refusing that mode refused every writer of a config
 // under OneDrive (B506's fifth round).
 func checkResolvedDir(dir, resolved string, ops dirEntryOps) error {
