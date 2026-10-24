@@ -56,6 +56,17 @@ func (w *waitingStops) seam(*http.Request) {
 // wait waits until n Stops wait without their slot.
 func (w *waitingStops) wait(tb testing.TB, n int) {
 	tb.Helper()
+	w.waitFor(tb, n, nil)
+}
+
+// waitFor is wait, failing at once if c, the Stop the test sent last, is
+// answered first: it never waited (a 503, say).
+func (w *waitingStops) waitFor(tb testing.TB, n int, c *sent) {
+	tb.Helper()
+	var answered chan *http.Response
+	if c != nil {
+		answered = c.res
+	}
 	give := time.After(testWait)
 	for {
 		w.mu.Lock()
@@ -66,6 +77,8 @@ func (w *waitingStops) wait(tb testing.TB, n int) {
 		}
 		select {
 		case <-ch:
+		case res := <-answered:
+			tb.Fatalf("a Stop was answered %d before it waited without its slot (%d of %d wait)", res.StatusCode, got, n)
 		case <-give:
 			tb.Fatalf("waited %v for %d Stops to wait without their slot; %d do", testWait, n, got)
 		}
@@ -162,8 +175,9 @@ func TestStopsWaitingForAReleaseHoldNoSlot(t *testing.T) {
 			}
 			var stops []sent
 			for i, src := range tc.stops {
-				stops = append(stops, sendRequest(h, playlist, "Stop", from(src, playlist, "Stop")))
-				waits.wait(t, i+1)
+				c := sendRequest(h, playlist, "Stop", from(src, playlist, "Stop"))
+				stops = append(stops, c)
+				waits.waitFor(t, i+1, &c)
 			}
 			other := netip.MustParseAddr("192.168.1.90")
 			if got := serve(t, h, from(other, playlist, "TransportState")); got.status != http.StatusOK {
@@ -174,8 +188,9 @@ func TestStopsWaitingForAReleaseHoldNoSlot(t *testing.T) {
 			if got := serve(t, h, desc); got.status != http.StatusOK {
 				t.Errorf("another source's device description while the Stops wait: %v, want it answered", got)
 			}
-			stops = append(stops, sendRequest(h, playlist, "Stop", from(other, playlist, "Stop")))
-			waits.wait(t, len(stops))
+			c := sendRequest(h, playlist, "Stop", from(other, playlist, "Stop"))
+			stops = append(stops, c)
+			waits.waitFor(t, len(stops), &c)
 			stillWaiting(t, p, stops)
 			g.letGoAll()
 			letGo()
