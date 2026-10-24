@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy](#2026-10-24--b524-round-13-b524-passes-on-windows-a-permission-failure-naming-an-entry-takes-one-union-and-only-a-held-lock-makes-adoption-busy)
 - [2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own](#2026-10-24--b524-round-12-a-seal-completions-permission-advice-takes-one-remedy-for-a-directory-failure-and-names-the-file-for-a-files-own)
 - [2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause](#2026-10-24--b524-round-11-an-unlisted-floor-the-snapshot-holds-refuses-restore-a-non-file-seal-is-kept-and-recorded-twice-and-seal-completion-advice-names-its-cause)
 - [2026-10-24 — B524: a reset keeps the player floor](#2026-10-24--b524-a-reset-keeps-the-player-floor)
@@ -153,6 +154,91 @@ reaches a session that has not gone looking for it.
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
 - [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
+
+---
+
+## 2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy
+
+PR #1346's first CI run, at 032934fe, was B524's first on Windows: eleven
+cases failed in `test (windows-latest)`. Round 12's reviews found more advice
+that a named entry could defeat, and CodeRabbit flagged that adoption read
+every lock error as busy.
+
+**The Windows failures, all in test fixtures.** nomos, a Windows 11 host on
+Go 1.27.3, failed the same eleven at 9a21f8d2.
+- Four tests, seven of the eleven with their subtests, built a fixture with
+  the durable writer, which Windows refuses for want of a directory barrier
+  (`atomicwrite.ErrNoDirectoryBarrier`, from `engine.WriteReservation` in the
+  minter and the probe that ends `config.WritePlayerUUIDFile`). The cmd/bridge
+  restore case and the Windows sharing case seed their identities with plain
+  writes there; the historical restores keep the writer of 71af3f26, which
+  returned once its rename landed. Every assertion stands, and Windows
+  proceeds where they make it.
+- A table case's "neither absent nor present" Lstat error was ENOTDIR, which
+  on Windows is ERROR_PATH_NOT_FOUND and reads as no entry; Windows uses
+  ERROR_SHARING_VIOLATION.
+- Two cases changed the live identity from the snapshot copy's rename, while
+  the copy held the live player-uuid open without delete sharing: Windows
+  refused the removal, and the rename's retry then ran on a temporary file
+  already renamed, hence "cannot find the file specified". The change now runs
+  from a seam once the copy has closed its source, exactly once. Production
+  retries after a consumed temporary file only where a rename lands and still
+  reports failure; that is not changed here.
+
+**One union for a named entry.** Round 12's classification still missed an
+immutable or append-only flag on the marker a rename replaces, a link chain to
+a lock file that refuses reading, a dangling link into a directory that
+refuses writing, and a Windows ACL that denies reading the lock file. A
+permission failure of a step that names an entry, a marker's read or write or
+the lock file's open or lock, now prints the directory's remedy and the
+entry's together, whatever the entry is: on unix the step's access to the
+entry, any immutable or append-only flag or ACL on it and on what it links to,
+a link replaced by a regular file and a sticky directory's owner; on Windows
+full control of the directory and the entry, its read-only attribute, a link
+replaced and any program holding it closed. Red first, on round 12's code:
+`uchg` and `uappnd` on a sealed marker not yet minted named only the data
+directory; a link chain to a 0200 lock file said "restore write access" to the
+link; a dangling link into a 0500 subdirectory named only the data directory.
+A `server.lock` that is a link leading out of the data directory is no
+permission failure: the root refuses it unfollowed
+(`path escapes from parent`) and it keeps that error alone, as in round 12,
+now pinned; round 12's review had taken it for followed.
+
+**Busy only for a held lock.** Adoption opens and locks `server.lock` through
+the completion's open and lock seam, in a commit that changes nothing it does,
+and only `fsutil.ErrLocked` is busy; any other lock error keeps its own text,
+with the lock file's union for a permission error. Red first, on that commit:
+an injected ENOLCK, EIO and EACCES each said "player initialization is busy";
+a held lock still says it.
+
+**nomos.** The SSH session holds an administrator's token with
+SeBackupPrivilege and SeRestorePrivilege enabled, and Go opens files with
+backup semantics, which read through a deny entry; the deny-read case drops
+both privileges while it runs.
+
+Round-thirteen evidence records 157 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 12's 145 less the six that mutated the lock file's
+per-entry classification and the EPERM branch, which this round removes,
+sixteen of the rest rebased onto anchors this round moved, and 18 new ones, at
+least one for each part of each union, each lock outcome of an adoption, the
+identity change's seam, the Windows errno and the lock link leading out.
+Sixty-one documentation mutations, round 11's twenty, eight of round 12's
+eleven (its three on the guide paragraph this round rewrites retired) and 33
+new, each fail the documentation contract. On nomos (Windows 11, Go 1.27.3
+windows/amd64, an administrator's SSH session) 9a21f8d2 failed the eleven
+cases CI failed. At c53496bb the eleven pass, as do the four new cases built
+there; `internal/backup` passes whole (126 top-level cases pass and five skip,
+each with its reason) and so does `cmd/bridge` (824 pass and 89 skip, each
+with its reason); and the seven fixed tests, the four new ones and the revised
+remedy-text test pass ten runs each. The one later code commit, ce3097f4, adds
+a unix-only test. On the owner's Mac (macOS arm64, Go 1.27.3, not root)
+native, Linux and Windows vet pass with the release build tags, `make fmt`
+changes nothing and `make docs-check` passes. `go test -race -count=1` passes
+`internal/backup` and `cmd/bridge` at ce3097f4: 1,070 top-level cases pass and
+five skip (two default-port cases and three root-only CLI cases), cmd/bridge
+in 627 s. The six new tests and sixteen revised ones that build here pass ten
+race-enabled runs each.
 
 ---
 

@@ -80,20 +80,33 @@ larger of the adopted floor and snapshot bound. Its adoption draws from the
 restore's own random source, before the jump does. Reset removes the UUID; restore
 installs the snapshot UUID; the other adopters retain the current UUID.
 Serve adopts at boot even when playback is disabled. Backup takes the exclusive
-server lock for adoption; if adoption is busy, stop the service and run the backup
-again. Backup also takes that lock for seal completion. When the lock is busy,
-the completion is logged and left to the next lifecycle operation. Any other
-failure is logged with its error and advice by its cause. A failure at the data
-directory itself takes one remedy that always suffices: restore read, write and
-search (execute) access to it and each directory above it, or clear an
-immutable flag or ACL on it; on Windows, full control of it. A marker this user
-cannot open names read access to it, and `server.lock` read and write access to
-it, each with the flag or ACL when the system answers "operation not
-permitted"; a `server.lock` the open failed to create takes the directory's
-remedy. A read-only data directory says so, and a marker refusal keeps its own
+server lock for adoption; if adoption is busy, because another process holds
+that lock, stop the service and run the backup again. Any other failure to open
+or take the lock refuses the backup with its own error, and with the lock file's
+remedy below when it is a permission failure. Backup also takes that lock for
+seal completion. When the lock is busy, the completion is logged and left to the
+next lifecycle operation. Any other failure is logged with its error and advice
+by its cause. A permission failure at the data directory alone, an entry's Lstat
+or the barrier that syncs the directory, takes one remedy: restore read, write
+and search (execute) access to it and each directory above it, or clear an
+immutable or append-only flag or ACL on it; on Windows, full control of it. A
+permission failure of a step that names an entry, a marker's read or write, or
+the open or lock of `server.lock`, takes the union of that remedy and the
+entry's, whatever the entry is: a regular file, a link, a named pipe, or nothing
+the open could create. On unix that is the access the step needed on the entry
+(read for a marker's read, read and write for `server.lock`), the directory's
+remedy, any immutable or append-only flag or ACL on the entry and on what it
+links to cleared or a link at it replaced with a regular file, and in a sticky
+directory the entry owned or the sticky bit cleared. On Windows it is full
+control of the data directory and of the entry, its read-only attribute cleared
+or a link at it replaced with a regular file, and any program holding it open
+closed. A read-only data directory says so, and a marker refusal keeps its own
 remedy. Each of these meets the next serve boot or start too, a permission
-failure when it runs as the same user. An interrupted or refused lock, or an
-I/O error, is logged with its error alone. Backup continues either way.
+failure when it runs as the same user. An interrupted or refused lock, or an I/O
+error, is logged with its error alone. So is a `server.lock` that is a link
+leading out of the data directory, which is never followed: its error ends
+`path escapes from parent`, and a regular file in its place clears it. Backup
+continues either way.
 An older engine can hand out tokens without writing a queue, so losing only
 its floor can look like this upgrade state. Adoption covers old counter space
 below 2^31, including reserved blocks skipped at restarts, not the number of

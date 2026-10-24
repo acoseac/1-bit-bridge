@@ -581,3 +581,81 @@ case now asserts the directory remedy.
 `TestTheDirectoryRemedyPerPlatform` and
 `TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged` pin these
 boundaries.
+
+### Round 13: Windows, one union for a named entry, and busy only for a held lock
+
+PR #1346's first CI run, at 032934fe, was B524's first on Windows, and eleven
+cases failed there; nomos, a Windows 11 host on Go 1.27.3, failed the same
+eleven at 9a21f8d2. None was a fault of what Windows production does.
+
+- Four tests, seven of the eleven with their subtests, built a fixture with
+  the durable writer, which Windows production refuses: the player's minter
+  writes its floor durably (`engine.WriteReservation`) and its identity writer
+  (`config.WritePlayerUUIDFile`) ends in a directory probe, and with no
+  directory barrier both return `atomicwrite.ErrNoDirectoryBarrier`.
+  `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo` seeds its
+  identities with plain writes on Windows, and
+  `TestSnapshotRefusesAReservationStillHeldOrCancelled` seeds its UUID with
+  one, since a backup reads the identity there all the same; the historical
+  restores keep the writer of 71af3f26, which returned once its rename landed.
+  What each asserts is unchanged, and Windows proceeds where they assert it: a
+  player-uuid that is not one UUID is refused before any write
+  (`snapshotPlayerUUID`), an identity-free restore writes no player state, and
+  a backup's floor read retries a held file.
+- `TestAnUnlistedFloorRefusesUnlessItIsGenuinelyAbsent` used ENOTDIR as an
+  Lstat error that says neither absent nor present. On Windows
+  `syscall.ENOTDIR` is ERROR_PATH_NOT_FOUND, which reads as no entry; it uses
+  ERROR_SHARING_VIOLATION there.
+- `TestBackupNeverPairsAcrossDiscard` and `TestBackupRetryOnlyWhenUUIDVanished`
+  changed the live identity from the snapshot copy's rename, while the copy
+  still held the live player-uuid open without delete sharing. Windows
+  refused the removal, the hook returned that error, and the rename's retry
+  ran again on a temporary file the first attempt had already renamed: "cannot
+  find the file specified". The change now runs from a seam
+  (`afterIdentityCopy`) once the copy has closed its source, exactly once, and
+  the pairing assertions stand. Production retries a rename after its
+  temporary file was consumed only where a rename lands and still reports
+  failure, as a network share whose reply is lost could; that is not changed
+  here.
+
+A permission failure of a step that names an entry, a marker's read or durable
+write or the open or lock of `server.lock`, now takes one union rather than a
+classification by entry (`entryAccess`, `entryRemedy`). Round 12's
+classification still missed an immutable or append-only flag on the marker a
+rename replaces, a link chain to a file that refuses reading, a dangling link
+into a directory that refuses writing, and a Windows ACL that denies reading
+the lock file. On unix the union is the access the step needed on the entry
+(read for a marker's read, read and write for `server.lock`), the directory's
+remedy, any immutable or append-only flag or ACL on the entry and on what it
+links to cleared or a link at it replaced with a regular file, and in a sticky
+directory the entry owned or the sticky bit cleared. On Windows it is full
+control of the data directory and of the entry, its read-only attribute
+cleared or a link at it replaced with a regular file, and any program holding
+it open closed. A failure at the data directory alone, an Lstat or the
+barrier, keeps the directory's remedy, which now says immutable or append-only
+flag. The lock file's per-entry classification and the EPERM branch are gone.
+A `server.lock` that is a link leading out of the data directory is no
+permission failure: the data directory's root refuses it unfollowed
+(`path escapes from parent`), and a seal completion logs it, or an adoption
+refuses the backup with it, with that error alone, as in round 12; round 12's
+review had taken it for followed.
+
+A backup's adoption takes `server.lock` through the seal completion's open and
+lock seam (`openSealLock`, `tryLock`), and only a lock another open holds
+(`fsutil.ErrLocked`) makes it busy, with its advice to stop the service; any
+other failure to open or take the lock refuses the backup with its own error,
+and the lock file's union for a permission error (`adoptionFailed`). The seal
+completion's lock refused for permission carries the same union.
+
+On nomos the SSH session holds an administrator's token with SeBackupPrivilege
+and SeRestorePrivilege enabled, and Go opens a file with
+FILE_FLAG_BACKUP_SEMANTICS, which then reads through any deny entry: the
+deny-read case drops both privileges for its duration.
+`TestOnlyAHeldLockMakesAdoptionBusy`,
+`TestALockRefusedForPermissionNamesTheLockFile`,
+`TestTheEntryRemedyPerPlatform`,
+`TestALockFileLinkNamesTheEntryAndWhatItLinksTo`,
+`TestAProtectedMarkerNamesTheMarker`,
+`TestALockFileLinkLeadingOutIsNeverFollowed` and
+`TestALockFileDeniedReadingNamesTheEntry` pin these boundaries, beside round
+12's permission cases, which now assert the union.
