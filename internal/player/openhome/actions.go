@@ -2,6 +2,7 @@ package openhome
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"io"
@@ -10,28 +11,46 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
-// The actions (B470 PR 5a3). A request that passes the SOAP table is
-// answered here: a read from one snapshot of the engine, taken without
-// waiting on its owner and never a command; a write fault 602, until PR 5a4,
-// nothing done to the engine. While no engine runs, every read is fault 501
-// (Action Failed: UDA 1.1, §3.2.2, "the current state of the service
+// The actions (B470 PRs 5a3 and 5a4). A request that passes the SOAP table
+// is answered here: a read from one snapshot of the engine, taken without
+// waiting on its owner and never a command; a write by one engine command,
+// within its budget (writes.go). While no engine runs, every action is fault
+// 501 (Action Failed: UDA 1.1, §3.2.2, "the current state of the service
 // prevents invoking that action"), never an answer from an engine that has
-// ended. Every string of a reply goes through escapeTo, once at each level
-// of a value that is XML itself (SourceXml, ReadList's TrackList and the
-// Metadata inside it), as OpenHome's own writes them.
+// ended, and that is asked first, before anything else a write does. Every
+// string of a reply goes through escapeTo, once at each level of a value that
+// is XML itself (SourceXml, ReadList's TrackList and the Metadata inside it),
+// as OpenHome's own writes them.
 
-// Engine is what the surface reads the player from: the running engine
-// (*engine.Engine), whose Snapshot never waits on its owner, and whose Done
-// is closed once its Run has returned or a panic ended it.
+// Engine is what the surface reads the player from and commands it with:
+// the running engine (*engine.Engine), whose Snapshot never waits on its
+// owner, and whose Done is closed once its Run has returned or a panic ended
+// it; and the commands the write actions are, each answered as the engine's
+// own callers are answered.
 type Engine interface {
 	Snapshot() *engine.Snapshot
 	Done() <-chan struct{}
+	Play(ctx context.Context, conds ...engine.Cond) error
+	Pause(ctx context.Context, conds ...engine.Cond) error
+	Stop(ctx context.Context, conds ...engine.Cond) error
+	Next(ctx context.Context, conds ...engine.Cond) error
+	Previous(ctx context.Context, conds ...engine.Cond) error
+	PlayID(ctx context.Context, id uint32, conds ...engine.Cond) error
+	PlayIndex(ctx context.Context, index int, conds ...engine.Cond) error
+	InsertAfter(ctx context.Context, afterID uint32, ref engine.Reference, meta []byte, conds ...engine.Cond) (uint32, error)
+	Delete(ctx context.Context, id uint32, conds ...engine.Cond) error
+	DeleteAll(ctx context.Context, conds ...engine.Cond) error
+	SetRepeat(ctx context.Context, on bool, conds ...engine.Cond) error
+	SetShuffle(ctx context.Context, on bool, conds ...engine.Cond) error
 }
+
+var _ Engine = (*engine.Engine)(nil)
 
 // The Source's fixed values.
 const (
@@ -107,8 +126,8 @@ type readRequest struct {
 }
 
 // reads are the read actions, by service and action: every action of the
-// four services that reads state and changes nothing. Any other is a write,
-// 602 until PR 5a4 (TestTheReadsAndTheWritesAreEveryAction).
+// four services that reads state and changes nothing. Every other is a write
+// (writes.go's writes, TestTheReadsAndTheWritesAreEveryAction).
 var reads = map[string]map[string]reader{
 	"Product": {
 		"Manufacturer": func(readRequest) ([][]byte, *faultReply) {
@@ -153,15 +172,10 @@ var reads = map[string]map[string]reader{
 	},
 }
 
-// act answers an action that passed every row of the table: a read from
-// one snapshot of the engine, 501 while no engine runs; a write 602.
-func (h *handler) act(w http.ResponseWriter, s *service, a *action, call *xmlNode) {
-	read := reads[s.name][a.name]
-	if read == nil {
-		// A write: PR 5a4's. Nothing is done to the engine.
-		writeFault(w, faultReply{code: errActionUnavailable}, false)
-		return
-	}
+// act answers an action that passed every row of the table, 501 while no
+// engine runs, asked first: a read from one snapshot of the engine; a write
+// by its writer (writes.go), within its budget, which runs from arrived.
+func (h *handler) act(w http.ResponseWriter, r *http.Request, s *service, a *action, call *xmlNode, arrived time.Time) {
 	snap := h.snapshot()
 	if snap == nil {
 		writeFault(w, faultReply{code: errActionFailed}, false)
@@ -171,7 +185,18 @@ func (h *handler) act(w http.ResponseWriter, s *service, a *action, call *xmlNod
 	for i, c := range call.children {
 		args[i] = string(c.text)
 	}
-	values, f := read(readRequest{snap: snap, device: h.device, args: args})
+	var values [][]byte
+	var f *faultReply
+	if read := reads[s.name][a.name]; read != nil {
+		values, f = read(readRequest{snap: snap, device: h.device, args: args})
+	} else if write := writes[s.name][a.name]; write != nil {
+		ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(h.lim.writeBudget()))
+		values, f = write(writeRequest{ctx: ctx, h: h, action: a, args: args})
+		cancel()
+	} else {
+		// An action with no answer is a defect, never a malformed reply.
+		f = &faultReply{code: errActionFailed}
+	}
 	switch {
 	case f != nil:
 		writeFault(w, *f, false)
@@ -313,9 +338,10 @@ func playlistTransportState(r readRequest) ([][]byte, *faultReply) {
 	return texts(transportState(r.snap.State(), r.snap.Starting(), r.snap.Pending())), nil
 }
 
-// playlistRead is Playlist's Read(Id): the entry's reference, as the
-// controller inserted it once PR 5a4 makes the confined URI the reference,
-// and its metadata; an ID the queue does not hold is fault 800.
+// playlistRead is Playlist's Read(Id): the entry's reference, the Uri
+// exactly as the controller inserted it (an Insert keeps it as sent, PR 5a4),
+// or a bare track id an entry written before keeps, and its metadata; an ID
+// the queue does not hold is fault 800.
 func playlistRead(r readRequest) ([][]byte, *faultReply) {
 	e, ok := r.snap.Read(ui4Of(r.args[0]))
 	if !ok {

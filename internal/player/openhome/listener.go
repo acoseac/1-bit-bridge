@@ -28,6 +28,14 @@ type Limits struct {
 	MaxConns, MaxConnsPerSource int
 	// Slots are the requests answered at once.
 	Slots int
+	// WriteSlots are the write actions but Stop answered at once, each
+	// holding a slot of Slots too, and WritesPerSource the ones of them one
+	// source may hold (B470 PR 5a4): a write waits for the engine's answer,
+	// up to its budget, so the writes keep at least two of Slots free for the
+	// reads, the descriptions and a Stop, and one source cannot hold every
+	// write slot. WriteSlots is held to Slots less two (one at least), and
+	// WritesPerSource to MaxConnsPerSource less one.
+	WriteSlots, WritesPerSource int
 	// ReadHeader is the header's read deadline; BodyRead a control body's,
 	// set once its headers have passed; Read the whole request's; Write the
 	// response's, from when its headers were read; Idle a kept-alive
@@ -43,14 +51,21 @@ type Limits struct {
 
 // DefaultLimits are production's. 1-bit opens a handful of connections to
 // a player (URLSession's default is 4 per host on iOS, 6 on macOS, by
-// Apple's documentation) and polls about once a second.
+// Apple's documentation), polls about once a second, and sends one SOAP
+// call at a time.
 var DefaultLimits = Limits{
 	MaxConns: 32, MaxConnsPerSource: 8, Slots: 8,
+	WriteSlots: 6, WritesPerSource: maxWritesPerSource,
 	ReadHeader: 5 * time.Second, BodyRead: 5 * time.Second, Read: 10 * time.Second,
 	Write: 10 * time.Second, Idle: 30 * time.Second,
 	ShutdownGrace: 2 * time.Second, Join: time.Second,
 	Rescan: 5 * time.Second,
 }
+
+// maxWritesPerSource is the most writes one source may have waiting at once
+// (Limits.WritesPerSource's default): below the listener's eight connections
+// a source, so one controller cannot fill the write pool for another.
+const maxWritesPerSource = 4
 
 // maxHeaderRead is the most of a request's headers the surface reads;
 // net/http reads MaxHeaderBytes and 4 KiB of lookahead (initialReadLimitSize,
@@ -79,15 +94,24 @@ func (l Limits) orDefaults() Limits {
 		}
 		return def
 	}
-	return Limits{
+	out := Limits{
 		MaxConns: pick(l.MaxConns, d.MaxConns), MaxConnsPerSource: pick(l.MaxConnsPerSource, d.MaxConnsPerSource),
 		Slots:      pick(l.Slots, d.Slots),
+		WriteSlots: pick(l.WriteSlots, d.WriteSlots), WritesPerSource: pick(l.WritesPerSource, d.WritesPerSource),
 		ReadHeader: dur(l.ReadHeader, d.ReadHeader), BodyRead: dur(l.BodyRead, d.BodyRead), Read: dur(l.Read, d.Read),
 		Write: dur(l.Write, d.Write), Idle: dur(l.Idle, d.Idle),
 		ShutdownGrace: dur(l.ShutdownGrace, d.ShutdownGrace), Join: dur(l.Join, d.Join),
 		Rescan: dur(l.Rescan, d.Rescan),
 	}
+	out.WriteSlots = max(min(out.WriteSlots, out.Slots-2), 1)
+	out.WritesPerSource = max(min(out.WritesPerSource, out.MaxConnsPerSource-1), 1)
+	return out
 }
+
+// writeBudget is how long a write may take, from its request's arrival at
+// the handler: the response's write deadline (Write, which net/http counts
+// from the request's headers) less budgetMargin for the reply itself.
+func (l Limits) writeBudget() time.Duration { return l.Write - budgetMargin }
 
 // ListenFunc binds the surface's socket for one served address: at is the
 // address and the configured port, a the address with its prefix and
@@ -113,10 +137,19 @@ type Seams struct {
 type Config struct {
 	Device Device
 	// Engine is the player's engine, whose snapshot every read action
-	// answers from (B470 PR 5a3): nil, never a nil pointer, is no engine,
-	// and so is one whose Run has ended or whose shutdown has begun; every
-	// read is then fault 501.
+	// answers from (B470 PR 5a3) and whose commands the write actions are
+	// (PR 5a4): nil, never a nil pointer, is no engine, and so is one whose
+	// Run has ended or whose shutdown has begun; every action is then fault
+	// 501.
 	Engine Engine
+	// Library is what an Insert's URI must name a track of now: the player's
+	// library resolver (internal/player/library), whose Member answers it.
+	// Nil takes no Insert (fault 501).
+	Library Library
+	// Hosts are the hosts and ports an Insert's URI may name: the ones the
+	// bridge advertises and binds (Inventory). Nil names none, so no URI is
+	// taken (fault 600).
+	Hosts Hosts
 	// SSDP is serve's shared subsystem; nil leaves discovery off.
 	SSDP *dlna.SSDPSubsystem
 	// Port is output.player.openhomePort: 0 for a port the kernel picks for
@@ -257,7 +290,9 @@ func Start(cfg Config) (*Surface, error) {
 		log = logging.Component("player")
 	}
 	lim := cfg.Limits.orDefaults()
-	s := &Surface{cfg: cfg, lim: lim, log: log, h: newHandler(cfg.Device, cfg.Engine, lim, cfg.Seams),
+	h := newHandler(cfg.Device, cfg.Engine, lim, cfg.Seams)
+	h.library, h.hosts = cfg.Library, cfg.Hosts
+	s := &Surface{cfg: cfg, lim: lim, log: log, h: h,
 		poke: make(chan struct{}, 1), loopDone: make(chan struct{}), failed: map[lan.Address]string{},
 		changed: make(chan struct{}), ready: make(chan struct{})}
 	s.gate = newGate(lim, log, s.publish)

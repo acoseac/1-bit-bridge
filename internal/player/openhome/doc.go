@@ -1,7 +1,9 @@
 // Package openhome is the player's LAN surface (B470 PR 5a2a): what an
 // OpenHome controller talks to, reachable on the LAN behind the opt-in
-// (output.player.openhome, off by default until PR 5a4). Bound listeners
-// advertise a Source through serve's shared SSDP subsystem (PR 5a2b).
+// (output.player.openhome, off by default, its default decided once 1-bit
+// lists the bridge's player beside the box's MPD, B470 5b and 5c). Bound
+// listeners advertise a Source through serve's shared SSDP subsystem (PR
+// 5a2b).
 //
 // It is a listener of its own, never mounted on the DLNA listener, whose
 // guards (servedOnlyListener, ownHostOnly) do not meet the player's LAN
@@ -51,8 +53,11 @@
 // admission (DefaultLimits: 32 and 8); a header read deadline, the whole
 // request's, a control body's own (row 6, before a slot is taken), a write
 // deadline from when the request's headers were read, an idle deadline;
-// 16 KiB of headers read; the body bound (maxBody); and Limits.Slots
-// requests answered at once, 503 at once past them. Stop refuses every new
+// 16 KiB of headers read; the body bound (maxBody); Limits.Slots requests
+// answered at once, 503 at once past them; and of those, Limits.WriteSlots
+// writes but Stop waiting for the engine, two slots fewer, and
+// Limits.WritesPerSource of them from one source, 503 at once past either
+// (PR 5a4). Stop refuses every new
 // request (503, its connection closed), withdraws discovery while HTTP is
 // bound, joins the listing loop, shuts each
 // socket down within Limits.ShutdownGrace, closes what is still open, and
@@ -65,6 +70,9 @@
 // the four services' descriptions, the bridge's own, generated from its
 // tables (services.go); the SOAP layer (soap.go); the actions (actions.go):
 // every read answered from one snapshot of the player's engine, fault 501
-// while no engine runs (PR 5a3), every write 602 until PR 5a4; and GENA's
-// refusal, 501.
+// while no engine runs (PR 5a3), and every write one engine command, or none
+// for the Product writes that change nothing and the seeks the engine cannot
+// make, answered within one budget, an Insert's Uri confined to the
+// canonical URI of a track the bridge serves, on a host it advertises or
+// binds (writes.go, inventory.go, PR 5a4); and GENA's refusal, 501.
 package openhome

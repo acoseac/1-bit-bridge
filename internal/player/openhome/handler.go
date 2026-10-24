@@ -25,16 +25,25 @@ import (
 // surface stops, is 503 and its connection closed.
 type handler struct {
 	device Device
-	// engine is what every read action answers from (actions.go); nil is
-	// no engine.
+	// engine is what every action answers from (actions.go, writes.go); nil
+	// is no engine.
 	engine Engine
-	scpds  map[string][]byte
-	lim    Limits
-	seams  *Seams
+	// library and hosts confine an Insert's URI (writes.go); nil takes none.
+	library Library
+	hosts   Hosts
+	scpds   map[string][]byte
+	lim     Limits
+	seams   *Seams
 
 	// slots are the requests answered at once, taken once a request's body
 	// is read; a request past them is 503 at once.
 	slots chan struct{}
+	// writes are the write actions but Stop answered at once, each holding a
+	// slot too, and bySource the ones each source holds (Limits.WriteSlots,
+	// WritesPerSource); a write past either is 503 at once.
+	writes   chan struct{}
+	writesMu sync.Mutex
+	bySource map[netip.Addr]int
 	// stopping is set by Stop: every request after it is 503.
 	stopping atomic.Bool
 	// flight counts the handlers running, which Stop joins.
@@ -42,7 +51,8 @@ type handler struct {
 }
 
 func newHandler(d Device, eng Engine, lim Limits, seams *Seams) *handler {
-	h := &handler{device: d, engine: eng, scpds: map[string][]byte{}, lim: lim, seams: seams, slots: make(chan struct{}, lim.Slots)}
+	h := &handler{device: d, engine: eng, scpds: map[string][]byte{}, lim: lim, seams: seams, slots: make(chan struct{}, lim.Slots),
+		writes: make(chan struct{}, lim.WriteSlots), bySource: map[netip.Addr]int{}}
 	for _, s := range services {
 		h.scpds[s.path] = s.scpd()
 	}
@@ -51,6 +61,10 @@ func newHandler(d Device, eng Engine, lim Limits, seams *Seams) *handler {
 
 // ServeHTTP is the surface's one handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A write's budget runs from here (writes.go): net/http calls the
+	// handler as soon as it has read the request's headers, when it sets the
+	// response's write deadline (Limits.Write).
+	arrived := time.Now()
 	// Every reply carries UPnP's empty EXT header, in the case UDA writes
 	// it: a direct assignment, since Header.Set would write it Ext. It
 	// comes first, so the refusal of a request that arrives after the
@@ -84,7 +98,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case scpdName:
 		h.serveDocument(w, r, func() []byte { return h.scpds[s.path] })
 	case controlName:
-		h.control(w, r, s)
+		h.control(w, r, s, arrived)
 	case eventName:
 		event(w, r)
 	}
@@ -146,8 +160,10 @@ func (h *handler) serveDocument(w http.ResponseWriter, r *http.Request, body fun
 }
 
 // control is the SOAP layer: rows 2 to 9 of the table in soap.go, then the
-// action's answer (act): a read from one engine snapshot, a write 602.
-func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service) {
+// action's answer (act): a read from one engine snapshot, a write by one
+// engine command. A write but Stop holds a slot of the write pool as well,
+// taken with the request's slot.
+func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service, arrived time.Time) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		refuse(w, http.StatusMethodNotAllowed, true)
@@ -192,6 +208,14 @@ func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service) {
 		return
 	}
 	defer h.releaseSlot()
+	if pooled(s, a) {
+		src := sourceOf(r)
+		if !h.takeWrite(src) {
+			refuse(w, http.StatusServiceUnavailable, false)
+			return
+		}
+		defer h.releaseWrite(src)
+	}
 	h.handling(r)
 	root, err := parseRequestXML(body, textLimit(a))
 	if err != nil {
@@ -211,7 +235,51 @@ func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service) {
 		writeFault(w, faultReply{code: errInvalidArgs}, false)
 		return
 	}
-	h.act(w, s, a, env.action)
+	h.act(w, r, s, a, env.action, arrived)
+}
+
+// pooled reports whether a is a write that holds a slot of the write pool:
+// every write but Stop, which waits on the engine at most its release, so a
+// controller can always stop.
+func pooled(s *service, a *action) bool {
+	return reads[s.name][a.name] == nil && !(s.name == "Playlist" && a.name == "Stop")
+}
+
+// sourceOf is the address a request's connection came from: the source
+// admission approved (the zero Addr for none, which counts as one source).
+func sourceOf(r *http.Request) netip.Addr {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ap.Addr().Unmap()
+}
+
+// takeWrite takes a slot of the write pool for a write from src, or reports
+// that the pool, or src's share of it, is full.
+func (h *handler) takeWrite(src netip.Addr) bool {
+	h.writesMu.Lock()
+	defer h.writesMu.Unlock()
+	if h.bySource[src] >= h.lim.WritesPerSource {
+		return false
+	}
+	select {
+	case h.writes <- struct{}{}:
+	default:
+		return false
+	}
+	h.bySource[src]++
+	return true
+}
+
+// releaseWrite gives src's slot of the write pool back.
+func (h *handler) releaseWrite(src netip.Addr) {
+	h.writesMu.Lock()
+	defer h.writesMu.Unlock()
+	<-h.writes
+	if h.bySource[src]--; h.bySource[src] <= 0 {
+		delete(h.bySource, src)
+	}
 }
 
 // event answers GENA at a service's eventSubURL. SUBSCRIBE and UNSUBSCRIBE

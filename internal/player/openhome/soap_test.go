@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -25,13 +24,15 @@ func testHandler() *handler {
 }
 
 // knownFault reports whether code and description are a fault this layer
-// defines: a UPnP code with its description, or one of the reads' OpenHome
-// codes with its own.
+// defines: a UPnP code with its description, or one of the OpenHome codes the
+// reads and the writes answer with its own (Playlist's 801 "Playlist full" and
+// Product's 801 "Source not found" both).
 func knownFault(code int, description string) bool {
 	if d, ok := faultDescription[code]; ok && d == description {
 		return true
 	}
-	for _, f := range []faultReply{faultIDNotFound, faultSourceNotFound} {
+	for _, f := range []faultReply{faultIDNotFound, faultSourceNotFound, faultPlaylistFull, faultIndexNotFound,
+		faultSeekFailed, faultShuffle, faultNotImplemented} {
 		if f.code == code && f.description == description {
 			return true
 		}
@@ -193,33 +194,39 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("the connection went away") }
 
-// writes are the write actions, by service: every action of the four
-// services that changes state, which this release answers fault 602 (B470
-// PR 5a4 implements them); every other action is a read (reads).
-var writes = map[string][]string{
+// writeActions are the write actions, by service, as OpenHome's SCPDs list
+// them: every action of the four services that changes state (B470 PR 5a4
+// implements them, writes.go); every other action is a read (reads).
+var writeActions = map[string][]string{
 	"Product": {"SetStandby", "SetSourceIndex", "SetSourceIndexByName"},
 	"Playlist": {"Play", "Pause", "Stop", "Next", "Previous", "SetRepeat", "SetShuffle", "SeekSecondAbsolute",
 		"SeekSecondRelative", "SeekId", "SeekIndex", "Insert", "DeleteId", "DeleteAll"},
 }
 
-// TestEveryValidActionIsAnswered602 pins the writes, which PR 5a3 leaves
-// unimplemented: every write action of the four services, with arguments
-// of each type that parse (none for those that take none), is answered
-// fault 602 and nothing else, with no engine and with a running one that
-// holds a queue and a session that plays, and nothing reaches the engine:
-// its generation, queue, token, selection and transport are as they were.
-// (5a2a asked it of every action, before the reads.)
-func TestEveryValidActionIsAnswered602(t *testing.T) {
-	answersEvery := func(t *testing.T, h *handler) {
+// TestEveryValidActionIsAnswered602NoMore pins the end of 5a2a's 602
+// (TestEveryValidActionIsAnswered602 until B470 PR 5a4, which implements
+// every write): every write action of the four services, with arguments of
+// each type that parse (none for those that take none), is answered by its
+// own writer, never 602, which no action answers now: with no engine every
+// one is the no-engine fault, 501, asked before anything else the write does;
+// with an engine that plays, each answers success or a fault of its own, and
+// the faults are those writes.go defines.
+func TestEveryValidActionIsAnswered602NoMore(t *testing.T) {
+	answersEvery := func(t *testing.T, h *handler, noEngine bool) {
 		t.Helper()
 		n := 0
-		for svc, names := range writes {
+		for svc, names := range writeActions {
 			s := servicesByPath[strings.ToLower(svc)]
 			for _, name := range names {
 				a := s.action(name)
 				got := serve(t, h, soapRequest(s, header(s, name), "text/xml; charset=\"utf-8\"", envelope(call(s, name, validArgs(s, a)))))
-				if got != (answer{http.StatusInternalServerError, 602}) {
-					t.Errorf("%s#%s: %v, want fault 602", s.name, name, got)
+				switch {
+				case got.code == 602:
+					t.Errorf("%s#%s: %v, the fault no action answers since PR 5a4", s.name, name, got)
+				case noEngine && got != (answer{http.StatusInternalServerError, errActionFailed}):
+					t.Errorf("%s#%s with no engine: %v, want fault 501", s.name, name, got)
+				case !noEngine && got.status != http.StatusOK && got.status != http.StatusInternalServerError:
+					t.Errorf("%s#%s: %v, want a response or a fault", s.name, name, got)
 				}
 				n++
 			}
@@ -228,7 +235,7 @@ func TestEveryValidActionIsAnswered602(t *testing.T) {
 			t.Errorf("%d writes answered, want the 17 of the four services", n)
 		}
 	}
-	t.Run("no engine", func(t *testing.T) { answersEvery(t, testHandler()) })
+	t.Run("no engine", func(t *testing.T) { answersEvery(t, testHandler(), true) })
 	t.Run("an engine that plays", func(t *testing.T) {
 		p := newTestPlayer(t)
 		p.add("a", []byte("meta:a"))
@@ -236,20 +243,15 @@ func TestEveryValidActionIsAnswered602(t *testing.T) {
 		must(t, "play", p.eng.Play(context.Background()))
 		s := p.be.session(t, 1)
 		s.hear(s.first.ID, nil)
-		before := p.heardNow(s.first.ID)
-		answersEvery(t, p.handler(""))
-		after := p.eng.Snapshot()
-		if after.Generation() != before.Generation() || !slices.Equal(after.IDs(), before.IDs()) || after.Token() != before.Token() ||
-			after.Selected() != before.Selected() || after.State() != before.State() || after.Repeat() != before.Repeat() {
-			t.Errorf("a write reached the engine: generation %s, IDs %v, token %d, selected %d, %s, repeat %v; was %s, %v, %d, %d, %s, %v",
-				after.Generation(), after.IDs(), after.Token(), after.Selected(), after.State(), after.Repeat(),
-				before.Generation(), before.IDs(), before.Token(), before.Selected(), before.State(), before.Repeat())
-		}
+		p.heardNow(s.first.ID)
+		answersEvery(t, p.handler(""), false)
 	})
 }
 
 // TestTheSOAPTableRowByRow: each row of the table in soap.go, in its order,
-// with its outcome; the request that passes every row is 602.
+// with its outcome; the request that passes every row reaches its action,
+// which with no engine is the no-engine fault, 501 (602 until B470 PR 5a4,
+// which answers every write).
 func TestTheSOAPTableRowByRow(t *testing.T) {
 	const ct = `text/xml; charset="utf-8"`
 	play := envelope(call(playlist, "Play", ""))
@@ -281,7 +283,7 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 	}
 	valid := soap(header(playlist, "Play"), ct, play)
 	rows := []row{
-		{"the request that passes every row", valid, fault(602)},
+		{"the request that passes every row", valid, fault(501)},
 
 		// Row 1: the Host names exactly the address and port it arrived on.
 		{"1: Host without its port", edit(valid, func(r *http.Request) { r.Host = "192.168.1.20" }), status(400)},
@@ -316,13 +318,13 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"4: another charset", soap(header(playlist, "Play"), "text/xml; charset=iso-8859-1", play), status(415)},
 		{"4: a Content-Type that does not parse", soap(header(playlist, "Play"), "text/xml; charset=", play), status(415)},
 		{"4: two Content-Types", edit(valid, func(r *http.Request) { r.Header.Add("Content-Type", "text/xml") }), status(415)},
-		{"4: text/xml alone", soap(header(playlist, "Play"), "text/xml", play), fault(602)},
-		{"4: utf-8 in capitals, unquoted", soap(header(playlist, "Play"), "TEXT/XML; CHARSET=UTF-8", play), fault(602)},
-		{"4: Utf-8 quoted", soap(header(playlist, "Play"), `text/xml;charset="Utf-8"`, play), fault(602)},
+		{"4: text/xml alone", soap(header(playlist, "Play"), "text/xml", play), fault(501)},
+		{"4: utf-8 in capitals, unquoted", soap(header(playlist, "Play"), "TEXT/XML; CHARSET=UTF-8", play), fault(501)},
+		{"4: Utf-8 quoted", soap(header(playlist, "Play"), `text/xml;charset="Utf-8"`, play), fault(501)},
 
 		// Row 5: one SOAPAction naming this URL's service and one of its actions.
 		{"5: no SOAPAction", soap("", ct, play), fault(401)},
-		{"5: unquoted", soap(playlist.serviceType()+"#Play", ct, play), fault(602)},
+		{"5: unquoted", soap(playlist.serviceType()+"#Play", ct, play), fault(501)},
 		{"5: a quote on one side", soap(`"`+playlist.serviceType()+"#Play", ct, play), fault(401)},
 		{"5: another service's type", soap(header(product, "Standby"), ct, play), fault(401)},
 		{"5: another service's type with this service's action", soap(`"`+product.serviceType()+`#Play"`, ct, play), fault(401)},
@@ -346,7 +348,7 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"7: a DOCTYPE", soap(header(playlist, "Play"), ct, `<?xml version="1.0"?><!DOCTYPE s:Envelope [<!ENTITY x "y">]>`+strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), status(400)},
 		{"7: an ENTITY after the declaration", soap(header(playlist, "Play"), ct, `<?xml version="1.0"?><!ENTITY x "y">`+strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), status(400)},
 		{"7: an entity it does not know", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><Uri>&x;</Uri><Metadata></Metadata>")), status(400)},
-		{"7: a processing instruction beside the declaration", soap(header(playlist, "Play"), ct, strings.Replace(play, "?>", "?><?note x?>", 1)), fault(602)},
+		{"7: a processing instruction beside the declaration", soap(header(playlist, "Play"), ct, strings.Replace(play, "?>", "?><?note x?>", 1)), fault(501)},
 		{"7: the declaration not at the start", soap(header(playlist, "Play"), ct, " "+play), status(400)},
 		{"7: another encoding declared", soap(header(playlist, "Play"), ct, strings.Replace(play, "utf-8", "iso-8859-1", 1)), status(400)},
 		{"7: bytes that are not UTF-8", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><Uri>\xff</Uri><Metadata></Metadata>")), status(400)},
@@ -354,9 +356,9 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"7: an element after the envelope", soap(header(playlist, "Play"), ct, play+"<x/>"), status(400)},
 		{"7: a comment after the envelope", soap(header(playlist, "Play"), ct, play+"<!-- x -->"), status(400)},
 		{"7: text after the envelope", soap(header(playlist, "Play"), ct, play+"x"), status(400)},
-		{"7: white space after the envelope", soap(header(playlist, "Play"), ct, play+"\r\n\t "), fault(602)},
+		{"7: white space after the envelope", soap(header(playlist, "Play"), ct, play+"\r\n\t "), fault(501)},
 		{"7: text before the envelope", soap(header(playlist, "Play"), ct, "x"+strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), status(400)},
-		{"7: no declaration", soap(header(playlist, "Play"), ct, strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), fault(602)},
+		{"7: no declaration", soap(header(playlist, "Play"), ct, strings.TrimPrefix(play, `<?xml version="1.0" encoding="utf-8"?>`)), fault(501)},
 		{"7: an empty body", soap(header(playlist, "Play"), ct, ""), status(400)},
 		{"7: elements nested past the depth", soap(header(playlist, "Play"), ct, envelope(call(playlist, "Play", strings.Repeat("<a>", 6)+strings.Repeat("</a>", 6)))), status(400)},
 		{"7: more elements than it takes", soap(header(playlist, "Play"), ct, withHeader(strings.Repeat("<h/>", maxElements), call(playlist, "Play", ""))), status(400)},
@@ -366,8 +368,8 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"8: another namespace's Envelope around a SOAP 1.1 Body", soap(header(playlist, "Play"), ct,
 			`<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>`+
 				call(playlist, "Play", "")+`</s:Body></e:Envelope>`), fault(401)},
-		{"8: another prefix", soap(header(playlist, "Play"), ct, `<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body>`+call(playlist, "Play", "")+`</SOAP-ENV:Body></SOAP-ENV:Envelope>`), fault(602)},
-		{"8: no prefix at all", soap(header(playlist, "Play"), ct, `<Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/"><Body><Play xmlns="`+playlist.serviceType()+`"/></Body></Envelope>`), fault(602)},
+		{"8: another prefix", soap(header(playlist, "Play"), ct, `<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body>`+call(playlist, "Play", "")+`</SOAP-ENV:Body></SOAP-ENV:Envelope>`), fault(501)},
+		{"8: no prefix at all", soap(header(playlist, "Play"), ct, `<Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/"><Body><Play xmlns="`+playlist.serviceType()+`"/></Body></Envelope>`), fault(501)},
 		{"8: no Body", soap(header(playlist, "Play"), ct, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"></s:Envelope>`), fault(401)},
 		{"8: two Bodies", soap(header(playlist, "Play"), ct, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>`+call(playlist, "Play", "")+`</s:Body><s:Body/></s:Envelope>`), fault(401)},
 		{"8: a Header after the Body", soap(header(playlist, "Play"), ct, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>`+call(playlist, "Play", "")+`</s:Body><s:Header/></s:Envelope>`), fault(401)},
@@ -381,14 +383,14 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"8: a prefix bound to nothing", soap(header(playlist, "Play"), ct, envelope(`<u:Play/>`)), fault(401)},
 		{"8: a Header entry it must understand", soap(header(playlist, "Play"), ct, withHeader(`<t:Tx xmlns:t="urn:x" s:mustUnderstand="1">5</t:Tx>`, call(playlist, "Play", ""))), mustUnderstand},
 		{"8: mustUnderstand with no namespace", soap(header(playlist, "Play"), ct, withHeader(`<t:Tx xmlns:t="urn:x" mustUnderstand="1"/>`, call(playlist, "Play", ""))), mustUnderstand},
-		{"8: a Header entry it may ignore", soap(header(playlist, "Play"), ct, withHeader(`<t:Tx xmlns:t="urn:x" s:mustUnderstand="0">5</t:Tx><t:Ty xmlns:t="urn:x"/>`, call(playlist, "Play", ""))), fault(602)},
-		{"8: an empty Header", soap(header(playlist, "Play"), ct, withHeader("", call(playlist, "Play", ""))), fault(602)},
+		{"8: a Header entry it may ignore", soap(header(playlist, "Play"), ct, withHeader(`<t:Tx xmlns:t="urn:x" s:mustUnderstand="0">5</t:Tx><t:Ty xmlns:t="urn:x"/>`, call(playlist, "Play", ""))), fault(501)},
+		{"8: an empty Header", soap(header(playlist, "Play"), ct, withHeader("", call(playlist, "Play", ""))), fault(501)},
 		{"8: a Header past its entries", soap(header(playlist, "Play"), ct, withHeader(strings.Repeat(`<t:Tx xmlns:t="urn:x"/>`, maxHeaderEntries+1), call(playlist, "Play", ""))), status(400)},
-		{"8: a Header at its entries", soap(header(playlist, "Play"), ct, withHeader(strings.Repeat(`<t:Tx xmlns:t="urn:x"/>`, maxHeaderEntries), call(playlist, "Play", ""))), fault(602)},
+		{"8: a Header at its entries", soap(header(playlist, "Play"), ct, withHeader(strings.Repeat(`<t:Tx xmlns:t="urn:x"/>`, maxHeaderEntries), call(playlist, "Play", ""))), fault(501)},
 		{"8: a Header past its bytes", soap(header(playlist, "Play"), ct, withHeader(`<t:Tx xmlns:t="urn:x">`+strings.Repeat("a", maxHeaderBytes)+`</t:Tx>`, call(playlist, "Play", ""))), status(400)},
 
 		// Row 9: the arguments.
-		{"9: Insert as it should be", soap(header(playlist, "Insert"), ct, insert(okInsert)), fault(602)},
+		{"9: Insert as it should be", soap(header(playlist, "Insert"), ct, insert(okInsert)), fault(501)},
 		{"9: an argument missing", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><Uri>u</Uri>")), fault(402)},
 		{"9: an argument repeated", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><AfterId>0</AfterId><Uri>u</Uri><Metadata></Metadata>")), fault(402)},
 		{"9: an argument it does not know", soap(header(playlist, "Insert"), ct, insert(okInsert+"<Extra>1</Extra>")), fault(402)},
@@ -396,8 +398,8 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"9: an argument that holds an element", soap(header(playlist, "Insert"), ct, insert("<AfterId>0</AfterId><Uri><b>u</b></Uri><Metadata></Metadata>")), fault(402)},
 		{"9: an out-argument sent", soap(header(playlist, "Insert"), ct, insert(okInsert+"<NewId>1</NewId>")), fault(402)},
 		{"9: an argument in another namespace", soap(header(playlist, "Insert"), ct, insert(`<x:AfterId xmlns:x="urn:x">0</x:AfterId><Uri>u</Uri><Metadata></Metadata>`)), fault(402)},
-		{"9: arguments in the action's namespace", soap(header(playlist, "Insert"), ct, insert(`<u:AfterId>0</u:AfterId><u:Uri>u</u:Uri><u:Metadata></u:Metadata>`)), fault(602)},
-		{"9: arguments inheriting a default namespace", soap(header(playlist, "Insert"), ct, envelope(`<Insert xmlns="`+playlist.serviceType()+`"><AfterId>0</AfterId><Uri>u</Uri><Metadata></Metadata></Insert>`)), fault(602)},
+		{"9: arguments in the action's namespace", soap(header(playlist, "Insert"), ct, insert(`<u:AfterId>0</u:AfterId><u:Uri>u</u:Uri><u:Metadata></u:Metadata>`)), fault(501)},
+		{"9: arguments inheriting a default namespace", soap(header(playlist, "Insert"), ct, envelope(`<Insert xmlns="`+playlist.serviceType()+`"><AfterId>0</AfterId><Uri>u</Uri><Metadata></Metadata></Insert>`)), fault(501)},
 		{"9: text beside the arguments", soap(header(playlist, "Insert"), ct, insert("x"+okInsert)), fault(402)},
 		{"9: an argument to an action that takes none", soap(header(playlist, "Play"), ct, envelope(call(playlist, "Play", "<Value>1</Value>"))), fault(402)},
 		{"9: an argument to Info's Counters", func() *http.Request {
@@ -406,27 +408,27 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"9: Time's Time, a read with no engine", func() *http.Request {
 			return soapRequest(timeSvc, header(timeSvc, "Time"), ct, envelope(call(timeSvc, "Time", "")))
 		}, fault(501)},
-		{"9: ui4 at its top", soap(header(playlist, "SeekId"), ct, seekID("4294967295")), fault(602)},
+		{"9: ui4 at its top", soap(header(playlist, "SeekId"), ct, seekID("4294967295")), fault(501)},
 		{"9: ui4 past its top", soap(header(playlist, "SeekId"), ct, seekID("4294967296")), fault(402)},
 		{"9: ui4 with a minus", soap(header(playlist, "SeekId"), ct, seekID("-1")), fault(402)},
 		{"9: ui4 with a plus", soap(header(playlist, "SeekId"), ct, seekID("+1")), fault(402)},
 		{"9: ui4 in hexadecimal", soap(header(playlist, "SeekId"), ct, seekID("0x10")), fault(402)},
 		{"9: ui4 with white space", soap(header(playlist, "SeekId"), ct, seekID(" 1")), fault(402)},
 		{"9: ui4 empty", soap(header(playlist, "SeekId"), ct, seekID("")), fault(402)},
-		{"9: ui4 with leading zeros", soap(header(playlist, "SeekId"), ct, seekID("007")), fault(602)},
-		{"9: i4 at its bottom", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("-2147483648")), fault(602)},
+		{"9: ui4 with leading zeros", soap(header(playlist, "SeekId"), ct, seekID("007")), fault(501)},
+		{"9: i4 at its bottom", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("-2147483648")), fault(501)},
 		{"9: i4 past its top", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("2147483648")), fault(402)},
-		{"9: i4 with a plus", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("+5")), fault(602)},
+		{"9: i4 with a plus", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("+5")), fault(501)},
 		{"9: i4 not a number", soap(header(playlist, "SeekSecondRelative"), ct, seekRel("5s")), fault(402)},
-		{"9: boolean yes in capitals", soap(header(playlist, "SetRepeat"), ct, setRepeat("YES")), fault(602)},
-		{"9: boolean False", soap(header(playlist, "SetRepeat"), ct, setRepeat("False")), fault(602)},
-		{"9: boolean 0", soap(header(playlist, "SetRepeat"), ct, setRepeat("0")), fault(602)},
+		{"9: boolean yes in capitals", soap(header(playlist, "SetRepeat"), ct, setRepeat("YES")), fault(501)},
+		{"9: boolean False", soap(header(playlist, "SetRepeat"), ct, setRepeat("False")), fault(501)},
+		{"9: boolean 0", soap(header(playlist, "SetRepeat"), ct, setRepeat("0")), fault(501)},
 		{"9: boolean 2", soap(header(playlist, "SetRepeat"), ct, setRepeat("2")), fault(402)},
 		{"9: boolean with white space", soap(header(playlist, "SetRepeat"), ct, setRepeat("1 ")), fault(402)},
 		{"9: boolean on", soap(header(playlist, "SetRepeat"), ct, setRepeat("on")), fault(402)},
 		{"9: a string escaped", func() *http.Request {
 			return soapRequest(product, header(product, "SetSourceIndexByName"), ct, envelope(call(product, "SetSourceIndexByName", "<Value>Play &amp; list</Value>")))
-		}, fault(602)},
+		}, fault(501)},
 	}
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
@@ -459,8 +461,8 @@ func TestTheBoundsArePinnedWhereTheTableSaysTheyAre(t *testing.T) {
 			call(playlist, "Insert", "<AfterId>0</AfterId><Uri>u</Uri><Metadata>"+meta+"</Metadata>") + `</s:Body></s:Envelope>`
 		return soapRequest(playlist, header(playlist, "Insert"), ct, env)
 	}
-	if got := serve(t, h, insertWithText(textLimit(ins))); got != (answer{500, 602}) {
-		t.Errorf("text at the bound: %v, want fault 602", got)
+	if got := serve(t, h, insertWithText(textLimit(ins))); got != (answer{500, 501}) {
+		t.Errorf("text at the bound: %v, want fault 501", got)
 	}
 	if got := serve(t, h, insertWithText(textLimit(ins)+1)); got != (answer{status: 400}) {
 		t.Errorf("text a byte past the bound: %v, want 400", got)
@@ -469,8 +471,8 @@ func TestTheBoundsArePinnedWhereTheTableSaysTheyAre(t *testing.T) {
 		return soapRequest(playlist, header(playlist, "Play"), ct, `<?xml version="1.0"?>`+strings.Repeat("<?note x?>", n)+
 			`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>`+call(playlist, "Play", "")+`</s:Body></s:Envelope>`)
 	}
-	if got := serve(t, h, pis(maxProcInsts)); got != (answer{500, 602}) {
-		t.Errorf("four processing instructions: %v, want fault 602", got)
+	if got := serve(t, h, pis(maxProcInsts)); got != (answer{500, 501}) {
+		t.Errorf("four processing instructions: %v, want fault 501", got)
 	}
 	if got := serve(t, h, pis(maxProcInsts+1)); got != (answer{status: 400}) {
 		t.Errorf("five processing instructions: %v, want 400", got)
