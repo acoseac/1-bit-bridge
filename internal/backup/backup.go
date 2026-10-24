@@ -336,7 +336,11 @@ func Restore(snapshotDir string, dst Targets) error {
 // to the end: so a writer that takes turns at the config (a library add, an
 // init) waits for the whole restore and then reads the restored file, and a
 // config another writer holds refuses the restore with nothing restored,
-// never half of it.
+// never half of it. The snapshot's bridge.yaml is written in that turn
+// (FileLock.SaveBytes), where the config file is, and only over the file the
+// turn found: one an edit (or, where the filesystem keeps no locks, any
+// writer) changed during the restore is left as it is, and the restore says
+// so.
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -346,12 +350,14 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
 	}
+	var configTurn *config.FileLock
 	if dst.BridgeYAML != "" && slices.Contains(m.Files, "bridge.yaml") {
 		l, err := config.LockFile(dst.BridgeYAML)
 		if err != nil {
 			return err
 		}
 		defer l.Unlock()
+		configTurn = l
 	}
 
 	// Pair the manifest's file list with the caller's targets.
@@ -429,6 +435,24 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			// mirrors Snapshot's non-ErrNotExist stat handling.
 			return fmt.Errorf("stat snapshot file %s: %w", name, err)
 		}
+		if name == "bridge.yaml" {
+			// Written in the restore's turn of the config file's lock, as
+			// the config's writer: staged beside the file as its name
+			// resolves, given the replaced file's owner, and renamed in
+			// only over the file the turn found (FileLock.SaveBytes),
+			// 0600 as every restored file is.
+			if opts.beforeConfig != nil {
+				opts.beforeConfig()
+			}
+			data, err := readSnapshotFile(srcPath)
+			if err == nil {
+				err = configTurn.SaveBytes(data)
+			}
+			if err != nil {
+				return fmt.Errorf("restore %s: %w", name, err)
+			}
+			continue
+		}
 		// Restore at 0o600 across the board — the snapshot bundle was
 		// stored that way, and bridge.yaml may carry sensitive data
 		// (paths, future secrets). Maintaining 0o600 on the live file
@@ -473,9 +497,6 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 					return fmt.Errorf("remove stale sidecar %s: %w", sidecar, err)
 				}
 			}
-		}
-		if name == "bridge.yaml" && opts.beforeConfig != nil {
-			opts.beforeConfig()
 		}
 		if err := copyFile(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
@@ -768,6 +789,19 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 // --- Internal helpers ---
 //
 // vacuumInto, the manifest database's copy, is in vacuum.go.
+
+// readSnapshotFile reads the snapshot's file at srcPath whole, as copyFile
+// reads a source: a named pipe refused at once, a Windows sharing violation
+// waited out.
+func readSnapshotFile(srcPath string) ([]byte, error) {
+	var data []byte
+	err := atomicwrite.ReadWithRetryCtx(context.Background(), func() error {
+		var err error
+		data, err = fsutil.ReadAsFile(srcPath)
+		return err
+	})
+	return data, err
+}
 
 // copyFile is an atomic byte-for-byte copy: write to `<dir>/.tmp-*`
 // then rename onto `dstPath`. The intermediate file is mode `mode`

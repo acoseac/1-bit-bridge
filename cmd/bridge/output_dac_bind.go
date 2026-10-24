@@ -596,7 +596,10 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	// config.
 	lock.Unlock()
 	switch {
-	case errors.Is(err, errBindConfigChanged):
+	case errors.Is(err, errBindConfigChanged) || errors.Is(err, config.ErrChangedInTurn):
+		// Bind's own comparison, or the one every save in a turn makes first
+		// (against the file as the turn found it), which differ only by the
+		// instant each read.
 		fmt.Fprintf(stderr, "%s: %s changed after bind read it, so the binding was not written: run bind again\n", cmd, cfgPath)
 		fmt.Fprintln(stderr, "  something saved it without bridge.yaml's lock (an edit, or a bridge older than the lock), and bind does not write over what it saved.")
 		return 1

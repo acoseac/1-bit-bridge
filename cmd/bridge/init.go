@@ -919,12 +919,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // saveInitConfig writes cfg as the config at cfgPath, in one turn of
 // bridge.yaml's lock (config.LockFile, backlog B506), and only while the file
 // is still as this run read it at its start (asRead): the check reads the
-// file again under the lock, and no writer that takes the lock can land
-// between it and the save. A run asks its questions between its read and
-// this turn, which is why the turn is this step alone and never the run: it
-// decides from its read and refuses a file that changed, as it did before
-// the lock, rather than hold every other writer off while it waits on the
-// operator. It answers init's exit code.
+// file again under the lock, no writer that takes the lock can land between
+// it and the save, and the save compares the file once more just before its
+// rename, for one that does not (an edit). A run asks its questions between
+// its read and this turn, which is why the turn is this step alone and never
+// the run: it decides from its read and refuses a file that changed, as it
+// did before the lock, rather than hold every other writer off while it
+// waits on the operator. It answers init's exit code.
 func saveInitConfig(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int {
 	lock, err := config.LockFile(cfgPath)
 	if err != nil {
@@ -935,7 +936,12 @@ func saveInitConfig(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *
 	if configChangedSinceRead(stderr, cfgPath, asRead) {
 		return 1
 	}
-	if err := cfg.Save(lock); err != nil {
+	// The save asks once more just before its rename, as every save in a
+	// turn does: a config an edit changed after the check is left as it is.
+	if err := cfg.Save(lock); errors.Is(err, config.ErrChangedInTurn) {
+		sayConfigChangedWhileInitRan(stderr, cfgPath)
+		return 1
+	} else if err != nil {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}

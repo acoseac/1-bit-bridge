@@ -25,7 +25,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -4353,22 +4352,25 @@ func (c *Config) VariantSweepMaxDeletePercent() int {
 }
 
 // Save atomically writes c as YAML to the config file l is a turn at (temp
-// file + rename), and only during that turn: the lock every writer takes
-// around its read-modify-write (LockFile, Edit). Parent directory must
-// exist. Comments and fields unknown to this schema are not preserved —
-// callers that want to keep hand-authored comments should not use Save.
+// file + rename), only during that turn, the lock every writer takes around
+// its read-modify-write (LockFile, Edit), and only over the file the turn
+// found: once the new file is staged, a file another writer changed meanwhile
+// is a *ChangedInTurnError, and nothing is written. The file is staged in the
+// directory its rename lands in, as the OS resolves the config's name.
+// Parent directory must exist. Comments and fields unknown to this schema are
+// not preserved — callers that want to keep hand-authored comments should not
+// use Save.
 func (c *Config) Save(l *FileLock) error {
 	_, err := c.save(l, nil)
 	return err
 }
 
-// SaveIf is Save, asking unchanged once the new file is staged, just before
-// it replaces the file: when unchanged returns an error, the file is left as
-// it is, the staged file is removed, and that error is returned as it is.
-// Under the lock no writer that takes it can land between the read and the
-// save, so the question guards against one that does not: an edit, or a
-// bridge older than the lock (bridge output dac bind asks whether the file
-// still holds the bytes it read). It narrows that window to the instant
+// SaveIf is Save, asking unchanged as well once the new file is staged and
+// the turn's own comparison has passed, just before the rename: when
+// unchanged returns an error, the file is left as it is, the staged file is
+// removed, and that error is returned as it is. bridge output dac bind asks
+// whether the file still holds the bytes it read in its turn, with a refusal
+// of its own. Like the turn's comparison it narrows the window to the instant
 // between the question and the rename, and does not close it: no rename can
 // be made conditional on the file it replaces.
 func (c *Config) SaveIf(l *FileLock, unchanged func() error) error {
@@ -4382,52 +4384,12 @@ func (c *Config) save(l *FileLock, unchanged func() error) ([]byte, error) {
 	if err := l.heldFor(); err != nil {
 		return nil, err
 	}
-	path := l.path
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-*.yaml")
-	if err != nil {
-		return nil, fmt.Errorf("temp file: %w", err)
+	if err := l.write(data, unchanged); err != nil {
+		return nil, err
 	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	// Panic-safety FD close. Registered AFTER the Remove defer so it
-	// runs first (LIFO) — Windows requires the FD closed before
-	// Remove can unlink. See internal/auth/auth.go for the rationale
-	// in detail; pattern repeats across every atomic-write helper.
-	defer func() { _ = tmp.Close() }()
-	// A `sudo bridge library add` beside a service install stages this
-	// file as root; the service reads it at its next start.
-	if err := fsutil.KeepOwner(tmp, path); err != nil {
-		tmp.Close()
-		return nil, fmt.Errorf("keep the config's owner: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return nil, fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return nil, fmt.Errorf("sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("close tmp: %w", err)
-	}
-	noteSaveStaged(turnKey(path))
-	if unchanged != nil {
-		if err := unchanged(); err != nil {
-			return nil, err
-		}
-	}
-	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
-		return nil, fmt.Errorf("rename: %w", err)
-	}
-	tmpName = "" // suppress defer cleanup
 	return data, nil
 }

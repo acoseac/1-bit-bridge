@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -20,7 +21,7 @@ func TestSaveAsRootKeepsTheConfigOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; KeepOwner does nothing there")
 	}
-	path := filepath.Join(t.TempDir(), "bridge.yaml")
+	path := filepath.Join(realTempDir(t), "bridge.yaml")
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
 	var c Config
@@ -33,5 +34,64 @@ func TestSaveAsRootKeepsTheConfigOwner(t *testing.T) {
 	}
 	if got := changes(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("owner changes = %+v, want exactly %+v", got, want)
+	}
+}
+
+// TestALockFileMadeAsRootTakesTheConfigsOwner pins whose the lock file is
+// when a writer run as root creates it: the config file's owner, the owner
+// Save keeps for the file it replaces, and only while there is no config
+// file yet the directory's. Until B506's second round it took the
+// directory's: a user's config in a directory root owns (/tmp, a mount
+// point) had its lock made root's 0600 by the first `sudo bridge library
+// add`, and every later save of the config's own user failed to open it,
+// though Save had kept the config theirs. The two owners differ here, which
+// TestSaveAsRootKeepsTheConfigOwner's one owner cannot show.
+func TestALockFileMadeAsRootTakesTheConfigsOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a file takes its directory's ACL on Windows; no owner is given there")
+	}
+	const dirUID, dirGID = 0, 0       // the directory's: root's, as /tmp's is
+	const cfgUID, cfgGID = 4242, 4243 // the config's: the service user's
+	for _, tc := range []struct {
+		name       string
+		withConfig bool
+		uid, gid   int
+	}{
+		{"beside a config file", true, cfgUID, cfgGID},
+		{"before there is one", false, dirUID, dirGID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := realTempDir(t)
+			path := filepath.Join(dir, "bridge.yaml")
+			if tc.withConfig {
+				if err := os.WriteFile(path, []byte("libraryName: Theirs\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changes, restore := fsutil.SimulateRootOwnersForTest(func(p string) (int, int) {
+				if p == path {
+					return cfgUID, cfgGID
+				}
+				return dirUID, dirGID
+			})
+			defer restore()
+			l, err := LockFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l.Unlock()
+			lockPath := filepath.Join(dir, LockFileName(path))
+			want := fsutil.OwnerChange{Dst: lockPath, UID: tc.uid, GID: tc.gid}
+			if got := changes(); len(got) != 1 || got[0] != want {
+				t.Errorf("owner changes = %+v, want exactly %+v", got, want)
+			}
+			info, err := os.Stat(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm()&0o600 != 0o600 {
+				t.Errorf("the lock file's mode %v does not let its owner open it to read and write", info.Mode().Perm())
+			}
+		})
 	}
 }

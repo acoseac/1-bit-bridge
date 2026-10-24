@@ -2761,8 +2761,10 @@ const autoInitDefaultRoot = "/library"
 // The seed is written in a turn of bridge.yaml's lock (config.LockFile,
 // backlog B506), and only while the file is still missing once the lock is
 // held: a config another writer saved since serve looked (an init, a second
-// container start) is kept, and serve loads it. wrote says whether the seed
-// was written.
+// container start) is kept, and serve loads it. Its save asks once more just
+// before the rename, as every save in a turn does, so a config a writer that
+// takes no turns (an edit, a bridge older than the lock) put there meanwhile
+// is kept too. wrote says whether the seed was written.
 func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return false, fmt.Errorf("create config dir: %w", err)
@@ -2779,7 +2781,12 @@ func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
 	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	if err := cfg.Save(lock); err != nil {
+	// The save asks again just before its rename, in the comparison every
+	// save in a turn makes: a config a writer that takes no turns put there
+	// meanwhile is kept, and serve loads it.
+	if err := cfg.Save(lock); errors.Is(err, config.ErrChangedInTurn) {
+		return false, nil
+	} else if err != nil {
 		return false, fmt.Errorf("save seed config: %w", err)
 	}
 	return true, nil

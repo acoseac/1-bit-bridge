@@ -188,7 +188,8 @@ func (a configAsRead) sameAs(b configAsRead) bool {
 // configChangedSinceRead refuses a run whose config is no longer the one it
 // read at its start, and says so: asRead is that read. initCmd asks it right
 // before Config.Save, after every prompt, refusal and check, so what is left
-// between the check and the write is Save's own staging and rename.
+// between the check and the write is Save's own staging and rename, where
+// Save compares the file once more (backlog B506).
 //
 // A run reads the config (what a rewrite keeps, readPriorInstall) and decides
 // whether to keep or replace it before its preflight and its name prompt,
@@ -206,15 +207,25 @@ func (a configAsRead) sameAs(b configAsRead) bool {
 // review's next round: the second port pass and the TLS load ran after it,
 // and a change there was still written over. Right before Save, a refusal
 // can follow a first install's TLS mint, which the next run loads, as it
-// loads the pair a Save that fails leaves. Nothing but an interprocess lock
-// would close the rename that remains, which #1043 declined for tokens.json.
+// loads the pair a Save that fails leaves. Since backlog B506 the check and
+// the save are one turn of bridge.yaml's lock (saveInitConfig), which every
+// writer that takes the lock waits for, and the save's own comparison just
+// before its rename leaves an edit only the rename itself, which no rename
+// can be made conditional on.
 func configChangedSinceRead(stderr io.Writer, cfgPath string, asRead configAsRead) bool {
 	if asRead.sameAs(readConfigAsIs(cfgPath)) {
 		return false
 	}
+	sayConfigChangedWhileInitRan(stderr, cfgPath)
+	return true
+}
+
+// sayConfigChangedWhileInitRan is init's refusal of a config that changed
+// after the run read it: found by configChangedSinceRead, or by the save's
+// own comparison just before its rename.
+func sayConfigChangedWhileInitRan(stderr io.Writer, cfgPath string) {
 	fmt.Fprintf(stderr, "the config at %s changed while this init ran, after it read it (another init, or an edit?).\n", cfgPath)
 	fmt.Fprintln(stderr, "run init again to decide about the config as it is now; this run did not write it.")
-	return true
 }
 
 // loopback says the file's posture is loopback: deployment.mode unset or

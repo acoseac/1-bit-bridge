@@ -189,6 +189,8 @@ func TestBindKeepsALibraryAddThatLandsInItsWindow(t *testing.T) {
 	root := dacTree(t)
 	music, extra := libraryDir(t, "Music"), libraryDir(t, "Extra")
 	cfgPath, _ := lockTestConfig(t, []string{music}, "output:\n  player:\n    room: Study\n")
+	waited, stop := config.LockWaitedForTest(cfgPath)
+	defer stop()
 	added := make(chan string, 1)
 	started := false
 	env := dacEnv()
@@ -203,11 +205,15 @@ func TestBindKeepsALibraryAddThatLandsInItsWindow(t *testing.T) {
 			code := runLibrary(ctx, []string{"add", "--config", cfgPath, extra}, libraryEnv{}, &o, &e)
 			added <- fmt.Sprintf("exit %d\n%s%s", code, o.String(), e.String())
 		}()
-		// Without the lock the add saves at once; with it, it waits for this
-		// bind's turn. Either way bind goes on after a moment.
+		// Bind holds its turn here. The add has to reach the lock and wait
+		// for it, which the lock says when it happens, and so cannot have
+		// saved; an add that finishes first saved inside bind's turn.
 		select {
+		case <-waited:
 		case <-done:
-		case <-time.After(300 * time.Millisecond):
+			t.Error("the library add finished inside bind's turn, never waiting for bind's lock")
+		case <-time.After(time.Minute):
+			t.Error("the library add neither waited for bind's lock nor finished")
 		}
 	}
 	_, errOut, code := runDAC(t, env, append([]string{"bind", "5", "--binding", "serial", "--config", cfgPath}, treeFlags(root)...)...)
@@ -296,6 +302,67 @@ func TestAConsoleSaveWaitsForTheLockThenRefuses(t *testing.T) {
 	}
 	if cfg, err := config.Load(cfgPath); err != nil || cfg.LibraryName != "After" {
 		t.Errorf("after the free save the file loads with libraryName %v, %v", cfg, err)
+	}
+}
+
+// TestServesSeedLeavesAConfigThatAppearsWhileItSaves: serve's seed writes the
+// default config only while there is none, and asks once more just before
+// its rename, so a config another writer put there while the seed staged its
+// own (an edit, or a bridge older than the lock, which no lock keeps out) is
+// kept, and the seed says it wrote nothing, so serve goes on to load that
+// config. Until B506's second round the seed renamed its default over it.
+func TestServesSeedLeavesAConfigThatAppearsWhileItSaves(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	theirs := []byte("libraryName: Theirs\n")
+	stop := config.OnSaveStagedForTest(cfgPath, func() {
+		if err := os.WriteFile(cfgPath, theirs, 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+	defer stop()
+	wrote, err := writeAutoInitConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("the seed beside a config that appeared: %v", err)
+	}
+	if wrote {
+		t.Error("the seed says it wrote its default over the config that appeared")
+	}
+	if got := readBytes(t, cfgPath); !bytes.Equal(got, theirs) {
+		t.Errorf("the seed wrote over the other writer's config:\n%s", got)
+	}
+}
+
+// TestInitsSaveLeavesAConfigChangedWhileItSaves: init's save compares the
+// config with the one the run read once more, just before its rename, so a
+// config an edit changed while init staged its own is left as the edit left
+// it, and init says so and exits 1; until B506's second round its check
+// before the save was the last, and the rename went over the edit.
+func TestInitsSaveLeavesAConfigChangedWhileItSaves(t *testing.T) {
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+	if err := os.WriteFile(cfgPath, []byte("libraryName: As Read\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asRead := readConfigAsIs(cfgPath)
+	edited := []byte("libraryName: Edited While Init Saved\n")
+	stop := config.OnSaveStagedForTest(cfgPath, func() {
+		if err := os.WriteFile(cfgPath, edited, 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+	defer stop()
+	var stderr bytes.Buffer
+	if code := saveInitConfig(&stderr, cfgPath, asRead, &config.Config{LibraryName: "Mine"}); code == 0 {
+		t.Error("init's save went through over a config edited while it saved")
+	}
+	if got := readBytes(t, cfgPath); !bytes.Equal(got, edited) {
+		t.Errorf("init wrote over the edit:\n%s", got)
+	}
+	if !strings.Contains(stderr.String(), "changed") || !strings.Contains(stderr.String(), "did not write it") {
+		t.Errorf("init's refusal does not say the config changed and that it did not write it:\n%s", stderr.String())
 	}
 }
 
@@ -391,6 +458,7 @@ func configWriterCases() []configWriterCase {
 // refuses, saying another bridge command or the running bridge is changing
 // the file, with the file as it was. Until B506 none of them asked.
 func TestEveryConfigWriterWaitsForTheLockThenRefuses(t *testing.T) {
+	t.Parallel()
 	for _, tc := range configWriterCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -419,6 +487,7 @@ func TestEveryConfigWriterWaitsForTheLockThenRefuses(t *testing.T) {
 // bridge.yaml's lock is refused before it writes any file, the database
 // included, so a busy config never leaves a half-restored install.
 func TestARestoreRefusedTheLockRestoresNothing(t *testing.T) {
+	t.Parallel()
 	cfgPath, dataDir, snap := seedRestorableInstall(t, closedAdminAddr(t))
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
 	if err != nil {
@@ -445,8 +514,8 @@ func TestARestoreRefusedTheLockRestoresNothing(t *testing.T) {
 // locks, bind and restore, takes the data dir's first and bridge.yaml's
 // inside it, never the other way, so two commands cannot each hold the lock
 // the other waits for. Held, bridge.yaml's lock finds the command holding
-// the data dir while it waits; with both held, the command is refused at the
-// data dir at once, never after waiting out bridge.yaml's lock.
+// the data dir once it waits for it; with both held, the command is refused
+// at the data dir at once, never after waiting out bridge.yaml's lock.
 func TestTheDataDirLockComesBeforeTheConfigLock(t *testing.T) {
 	type command struct {
 		name string
@@ -477,6 +546,8 @@ func TestTheDataDirLockComesBeforeTheConfigLock(t *testing.T) {
 		t.Run(c.name+", with bridge.yaml's lock held", func(t *testing.T) {
 			cfgPath, dataDir, run := c.setup(t)
 			release := holdConfigLock(t, cfgPath)
+			waited, stop := config.LockWaitedForTest(cfgPath)
+			defer stop()
 			var code int
 			var out string
 			// The command takes no context: the cancel the drain asks for
@@ -488,7 +559,7 @@ func TestTheDataDirLockComesBeforeTheConfigLock(t *testing.T) {
 				defer close(finished)
 				code, out = run()
 			}()
-			held, early := dataDirHeldMidwayThroughTheWait(t, dataDir, finished)
+			held, early := dataDirHeldOnceItWaits(t, dataDir, waited, finished)
 			release()
 			<-finished
 			switch {
@@ -522,18 +593,20 @@ func TestTheDataDirLockComesBeforeTheConfigLock(t *testing.T) {
 	}
 }
 
-// dataDirHeldMidwayThroughTheWait asks once, halfway through bridge.yaml's
-// lock wait, whether another open holds dataDir's lock: held. early is a
-// command that returned before then. One question, not a poll: the data
-// dir's lock is a try that never waits, so a question that held it at the
-// moment the command asked for it would refuse the command. Halfway through
-// the wait a command that takes the data dir first took it long before.
-func dataDirHeldMidwayThroughTheWait(t *testing.T, dataDir string, finished <-chan struct{}) (held, early bool) {
+// dataDirHeldOnceItWaits asks once, when the command has started to wait for
+// bridge.yaml's lock (waited: the lock's own word for it,
+// config.LockWaitedForTest), whether another open holds dataDir's lock:
+// held. early is a command that returned before it waited. One question, not
+// a poll: the data dir's lock is a try that never waits, so a question that
+// held it at the moment the command asked for it would refuse the command. A
+// command that takes the data dir's lock first has it by the time it waits
+// for bridge.yaml's, and one that takes it second does not yet.
+func dataDirHeldOnceItWaits(t *testing.T, dataDir string, waited, finished <-chan struct{}) (held, early bool) {
 	t.Helper()
 	select {
 	case <-finished:
 		return false, true
-	case <-time.After(configLockWait / 2):
+	case <-waited:
 	}
 	release, err := lockServeDataDir(dataDir)
 	if err == nil {

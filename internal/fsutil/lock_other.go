@@ -14,3 +14,7 @@ func tryLock(f *os.File) error {
 }
 
 func unlock(*os.File) error { return nil }
+
+// keepsNoLocks is KeepsNoLocks where this package has no lock: tryLock's own
+// errors.ErrUnsupported.
+func keepsNoLocks(err error) bool { return errors.Is(err, errors.ErrUnsupported) }

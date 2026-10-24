@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"sync"
 	"sync/atomic"
 )
@@ -131,52 +129,54 @@ func (r *RuntimeConfig) Clone() *Config {
 // have the last Save silently drop the loser's field changes.
 //
 // The save is a turn of the config file's lock (LockFile), shared with
-// every writer outside the process (backlog B506), and in it the file is
-// read again: the clone is of a snapshot read before the turn, so it is
-// saved only over a file that still holds the bytes this holder last read
-// (RecordFile) or wrote. Over a file another writer changed since (a
-// library add, init, a restore or an edit beside the running bridge),
-// nothing is saved or stored and a *ChangedOutsideError says so: the file
-// keeps that writer's change, which the bridge loads when it next starts,
-// and nothing reloads it now. A lock another writer holds past LockWait
-// is a *BusyError, with nothing saved or stored either.
+// every writer outside the process (backlog B506), taken before the clone
+// and before fn runs, and in it the file is read again: the snapshot was
+// read before the turn, so it is changed and saved only over a file that
+// still holds the bytes this holder last read (RecordFile) or wrote, and
+// the save compares once more just before its rename (Save's own
+// comparison). Over a file another writer changed since (a library add,
+// init, a restore or an edit beside the running bridge), nothing is saved
+// or stored and a *ChangedOutsideError says so: the file keeps that
+// writer's change, which the bridge loads when it next starts, and nothing
+// reloads it now. A lock another writer holds past LockWait is a
+// *BusyError. Either refusal comes before fn runs, so a caller that changes
+// something besides the config in fn (the console's root changes change
+// the library index there) changes nothing when the save is refused before
+// it; only the comparison just before the rename, a writer that takes no
+// turns landing in the save's own staging, refuses after fn has run.
 //
 // When fn returns an error the clone is discarded: nothing is saved
 // or stored, and fn's error is returned verbatim. A Save failure
 // likewise leaves both the live snapshot and the on-disk file
-// untouched. fn runs under the write lock, so it must not call
-// Update re-entrantly (the mutex is not re-entrant) and must not
-// retain the clone after returning.
+// untouched. fn runs under the write lock and in the file's turn, so it
+// must not call Update re-entrantly (the mutex is not re-entrant), must
+// not retain the clone after returning, and holds every other writer of
+// the file off while it runs.
 func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 	if r == nil {
 		return errors.New("config: Update on nil RuntimeConfig")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	next := Clone(r.Load())
-	if next == nil {
+	if r.Load() == nil {
 		return errors.New("config: Update with no config loaded")
-	}
-	if err := fn(next); err != nil {
-		return err
 	}
 	l, err := LockFile(path)
 	if err != nil {
 		return err
 	}
 	defer l.Unlock()
-	if r.fileKnown {
-		now, err := os.ReadFile(path)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			return &ChangedOutsideError{Path: path}
-		case err != nil:
-			return fmt.Errorf("read %s again before saving it: %w", path, err)
-		case !bytes.Equal(now, r.file):
-			return &ChangedOutsideError{Path: path}
-		}
+	if r.fileKnown && (l.absent || !bytes.Equal(l.found, r.file)) {
+		return &ChangedOutsideError{Path: path}
+	}
+	next := Clone(r.Load())
+	if err := fn(next); err != nil {
+		return err
 	}
 	written, err := next.save(l, nil)
+	if errors.Is(err, ErrChangedInTurn) {
+		return &ChangedOutsideError{Path: path}
+	}
 	if err != nil {
 		return err
 	}

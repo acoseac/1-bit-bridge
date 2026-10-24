@@ -28,7 +28,7 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
-	dataDir := t.TempDir()
+	dataDir := resolvedTempDir(t)
 	src := primeLiveState(t, dataDir)
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
@@ -77,6 +77,19 @@ func configLockFile(path string) string {
 	return filepath.Join(filepath.Dir(path), config.LockFileName(path))
 }
 
+// resolvedTempDir is t.TempDir() as the OS resolves it (on macOS the temp
+// directory is reached through the link /var → /private/var): a restore's
+// turn of bridge.yaml's lock names the config and its lock file that way, so
+// the owner changes it records do too.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // The console account and the harvest state take the same single chown
 // as the files the snapshot already copied. A second write to sign the
 // console out would show the account twice.
@@ -84,7 +97,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
-	dataDir := t.TempDir()
+	dataDir := resolvedTempDir(t)
 	src := primeLiveState(t, dataDir)
 	src.AdminAuth = filepath.Join(dataDir, backup.AdminAuthFileName)
 	src.AtlasHarvest = filepath.Join(dataDir, backup.AtlasHarvestFileName)

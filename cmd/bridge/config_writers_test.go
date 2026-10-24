@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,14 +17,25 @@ import (
 // with the call by which it takes the file's lock (backlog B506): the lock
 // beside the config file that each read-modify-write of it holds, so that two
 // writers take turns and none saves a copy read before its turn. A writer is
-// a function that calls the config's Save or SaveIf, that saves through the
-// live holder's Update (serve's console), or that writes a file while it names
-// the config's path (configPathNames), as restore copies a snapshot's
-// bridge.yaml over it.
+// a function, or a package-level variable's value, that calls the config's
+// Save or SaveIf or its turn's SaveBytes, or takes one of them as a value
+// (`save := cfg.Save`), that changes the config through config.Edit, that
+// saves through the live holder's Update (serve's console), or that writes a
+// file (fileWriteCall) while it names the config's path (configPathNames, or
+// the literal "bridge.yaml"), as restore once copied a snapshot's bridge.yaml
+// over it.
 //
 // A new writer goes here with its lock, which the sweep then requires it to
-// call. The console's writers all go through (*RuntimeConfig).Update, which
-// takes the lock itself, so theirs is the holder's Update.
+// call, and, for one that saves itself, to call before the read its save is
+// made from (configReadCall). The console's writers all go through
+// (*RuntimeConfig).Update, which takes the lock itself, so theirs is the
+// holder's Update, and Edit's callers' is Edit, which reads in its own turn.
+//
+// The sweep reads one function at a time: a helper that is handed the path
+// by a caller in another function, and writes it, is a writer it does not
+// see, since the helper names no config path and the caller writes nothing
+// (copyFile and writeFrom are listed by name for that reason). That is its
+// one known blind spot.
 var configWriters = map[string]string{
 	"cmd/bridge/library.go:libraryAddCmd":                                "config.Edit",
 	"cmd/bridge/library.go:libraryRemoveCmd":                             "config.Edit",
@@ -41,13 +53,18 @@ var configWriters = map[string]string{
 }
 
 // configSavePrimitive is the config's own save, in internal/config: the
-// methods that write the file, which the sweep does not count as writers
-// but requires to refuse a save in no turn of the lock (heldFor), so that
-// a writer of the config cannot write without one.
-var configSavePrimitive = map[string]bool{
-	"internal/config/config.go:Config.Save":   true,
-	"internal/config/config.go:Config.SaveIf": true,
-	"internal/config/config.go:Config.save":   true,
+// methods that write the file, which the sweep does not count as writers,
+// each with the calls the sweep requires of it: the save refuses a turn of
+// the lock it does not hold (heldFor), and the one write every save goes
+// through compares the file with the one its turn found just before its
+// rename (stillAsFound), so a writer of the config can neither write without
+// a turn nor write over what another writer saved in it.
+var configSavePrimitive = map[string][]string{
+	"internal/config/config.go:Config.Save":      {"save"},
+	"internal/config/config.go:Config.SaveIf":    {"save"},
+	"internal/config/config.go:Config.save":      {"heldFor", "write"},
+	"internal/config/lock.go:FileLock.SaveBytes": {"write"},
+	"internal/config/lock.go:FileLock.write":     {"heldFor", "stillAsFound", "RenameWithRetry"},
 }
 
 // notConfigWriters are the functions that write a file while they name the
@@ -59,20 +76,44 @@ var notConfigWriters = map[string]string{
 }
 
 // configPathNames are the names this tree gives a config file's path: a
-// function that writes a file while it names one of them is a writer of the
-// config (the sweep's third kind).
+// function that writes a file while it names one of them, or the literal
+// "bridge.yaml" (configFileLiteral), is a writer of the config (the sweep's
+// fourth kind).
 var configPathNames = map[string]bool{
 	"BridgeYAML": true, "CfgPath": true, "cfgPath": true, "configPath": true,
-	"cfgFile": true, "resolvedCfgPath": true, "absCfgPath": true,
+	"cfgFile": true, "resolvedCfgPath": true, "absCfgPath": true, "defaultConfigPath": true,
 }
 
-// fileWriteCalls are the calls that write a file's bytes or put a file in
-// place, as the sweep renders them (callChain).
+// fileWriteCalls are the calls, besides the ones fileWriteCall knows by their
+// shape, that write a file's bytes or put a file in place, as the sweep
+// renders them (callChain): this tree's own helpers that do (restore's copy).
 var fileWriteCalls = map[string]bool{
-	"os.WriteFile": true, "os.Create": true, "os.OpenFile": true, "os.Rename": true,
-	"atomicwrite.WriteBytes": true, "atomicwrite.WriteBytesDurable": true,
-	"atomicwrite.RenameWithRetry": true, "atomicwrite.RenameWithRetryCtx": true,
 	"copyFile": true, "writeFrom": true,
+}
+
+// fileWriteMethods are the names of the methods and functions that write a
+// file or put one in place whatever they are called on: os's and an
+// *os.Root's (WriteFile, Create, Rename; OpenFile only with a flag that
+// writes, writeFlags).
+var fileWriteMethods = map[string]bool{"WriteFile": true, "Create": true, "Rename": true}
+
+// writeFlags are the open flags that make an OpenFile a write.
+var writeFlags = map[string]bool{"O_WRONLY": true, "O_RDWR": true, "O_CREATE": true, "O_TRUNC": true, "O_APPEND": true}
+
+// configReadCalls are the calls that read the config file whatever they are
+// handed, as the sweep renders them; os.ReadFile, os.Open, os.Stat, os.Lstat
+// and fsutil.ReadAsFile are reads of it when they name its path, and inside
+// internal/config the package's own reads (Load, LoadFile, loadData) and any
+// os.ReadFile or fsutil.ReadAsFile are.
+var configReadCalls = map[string]bool{
+	"config.Load": true, "config.LoadFile": true, "loadCLIConfig": true, "loadCLIConfigFile": true,
+	"readConfigAsIs": true, "configChangedSinceRead": true,
+}
+
+// pathReadCalls are the reads that are a read of the config when they name
+// its path.
+var pathReadCalls = map[string]bool{
+	"os.ReadFile": true, "os.Open": true, "os.Stat": true, "os.Lstat": true, "fsutil.ReadAsFile": true,
 }
 
 // The kinds of write the sweep tells apart.
@@ -87,8 +128,20 @@ const (
 type configWriteSite struct {
 	pos   token.Position
 	kinds []string
-	// calls is every call the function makes, rendered by callChain.
+	// calls is every call the function makes, rendered by callChain, and
+	// at where each call is made, in source order.
 	calls map[string]bool
+	at    []chainAt
+	// reads are where it reads the config (configReadCall), and saves where
+	// it saves it itself: a Save, SaveIf or SaveBytes, or a file write while
+	// it names the config's path.
+	reads, saves []token.Pos
+}
+
+// chainAt is one call a function makes and where.
+type chainAt struct {
+	chain string
+	pos   token.Pos
 }
 
 // TestEveryConfigWriterTakesTheConfigLock is the pin of backlog B506: every
@@ -108,13 +161,17 @@ func TestEveryConfigWriterTakesTheConfigLock(t *testing.T) {
 	for _, p := range configWriterProblems(sites, configWriters, notConfigWriters) {
 		t.Error(p)
 	}
-	for key := range configSavePrimitive {
+	for key, wants := range configSavePrimitive {
 		calls, ok := primitive[key]
-		switch {
-		case !ok:
+		if !ok {
 			t.Errorf("the sweep found no %s, the config's own save: configSavePrimitive is out of date", key)
-		case key == "internal/config/config.go:Config.save" && !callsLock(calls, "heldFor"):
-			t.Errorf("%s does not ask heldFor, so a save could write in no turn of bridge.yaml's lock", key)
+			continue
+		}
+		for _, want := range wants {
+			if !callsLock(calls, want) {
+				t.Errorf("%s does not call %s, so a save could write in no turn of bridge.yaml's lock, "+
+					"or over what another writer saved in it", key, want)
+			}
 		}
 	}
 }
@@ -143,6 +200,10 @@ func configWriterProblems(sites map[string]configWriteSite, named, excused map[s
 		if !callsLock(site.calls, lock) {
 			problems = append(problems, fmt.Sprintf("%s: %s %s and never calls %s, the lock configWriters names for it",
 				site.pos, key, strings.Join(site.kinds, " and "), lock))
+			continue
+		}
+		if p := lockOrderProblem(key, site, lock); p != "" {
+			problems = append(problems, p)
 		}
 	}
 	for key := range named {
@@ -160,11 +221,55 @@ func configWriterProblems(sites map[string]configWriteSite, named, excused map[s
 // CfgHolder.Update).
 func callsLock(calls map[string]bool, lock string) bool {
 	for c := range calls {
-		if c == lock || strings.HasSuffix(c, "."+lock) {
+		if isChain(c, lock) {
 			return true
 		}
 	}
 	return false
+}
+
+// isChain reports whether the rendered call c is lock: the chain itself, or
+// one that ends with it after a dot.
+func isChain(c, lock string) bool {
+	return c == lock || strings.HasSuffix(c, "."+lock)
+}
+
+// lockOrderProblem says what is wrong with the order of a named writer that
+// saves the config itself, and "" when nothing is: it must take its lock
+// before it saves, and the last read of the config before its first save, the
+// read that save is made from, must come after the lock (a writer may read
+// before its turn to decide, as bind and library add do, if it reads again in
+// it). A writer that saves through Edit or the holder's Update is left out:
+// the save there is made from the read Edit and Update make in their own
+// turn. Positions are the source's, not the control flow's: a read in a loop
+// after the save, or one through a helper configReadCalls does not name, is
+// not seen.
+func lockOrderProblem(key string, site configWriteSite, lock string) string {
+	if len(site.saves) == 0 {
+		return ""
+	}
+	lockAt := token.NoPos
+	for _, c := range site.at {
+		if isChain(c.chain, lock) {
+			lockAt = c.pos
+			break
+		}
+	}
+	saveAt := site.saves[0]
+	if lockAt > saveAt {
+		return fmt.Sprintf("%s: %s saves the config before it takes %s", site.pos, key, lock)
+	}
+	readAt := token.NoPos
+	for _, r := range site.reads {
+		if r < saveAt {
+			readAt = r
+		}
+	}
+	if readAt != token.NoPos && readAt < lockAt {
+		return fmt.Sprintf("%s: %s reads the config before it takes %s and saves what it read, with no read of it in "+
+			"that turn: read it again under the lock, and decide on that copy", site.pos, key, lock)
+	}
+	return ""
 }
 
 // findConfigWriters sweeps the Go files this module builds, test files
@@ -215,12 +320,14 @@ func findConfigWriters(t *testing.T, root string) (map[string]configWriteSite, m
 
 // scanConfigWriters returns the functions in the file name (its slash path
 // from the module root) that write the config, keyed "name:Func" or
-// "name:Recv.Method", and the calls of each part of the config's own save it
+// "name:Recv.Method", and a package-level variable's value that does, keyed
+// "name:Var"; and the calls of each part of the config's own save it
 // declares (configSavePrimitive), which are not counted as writers. A
 // function literal is part of the function it is written in. Inside
 // internal/config a call of the unexported save is a save too. A method
-// declared Save or SaveIf on anything but the config is itself reported,
-// under writesBySave's premise: that the config's are the only ones.
+// declared Save, SaveIf or SaveBytes on anything but the config and its turn
+// is itself reported, under writesBySave's premise: that theirs are the only
+// ones.
 func scanConfigWriters(name, src string) (map[string]configWriteSite, map[string]map[string]bool, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, 0)
@@ -230,66 +337,202 @@ func scanConfigWriters(name, src string) (map[string]configWriteSite, map[string
 	inConfig := strings.HasPrefix(name, "internal/config/")
 	out := map[string]configWriteSite{}
 	primitive := map[string]map[string]bool{}
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		key := name + ":" + funcDeclKey(fn)
-		if fn.Recv != nil && (fn.Name.Name == "Save" || fn.Name.Name == "SaveIf") && !configSavePrimitive[key] {
-			out[key] = configWriteSite{pos: fset.Position(fn.Pos()),
-				kinds: []string{"declares a method named " + fn.Name.Name + " on a type that is not the config, which the sweep would read as the config's"}}
-			continue
-		}
-		calls := map[string]bool{}
-		kinds := map[string]bool{}
-		namesPath, writesFile := false, false
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CallExpr:
-				chain := callChain(x.Fun)
-				calls[chain] = true
-				if chain == "config.Edit" || (inConfig && chain == "Edit") {
-					kinds[writesByEdit] = true
-				}
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
-					switch {
-					case sel.Sel.Name == "Save" || sel.Sel.Name == "SaveIf" || (inConfig && sel.Sel.Name == "save"):
-						kinds[writesBySave] = true
-					case sel.Sel.Name == "Update":
-						if holder := callChain(sel.X); strings.HasSuffix(strings.ToLower(holder), "cfgholder") {
-							kinds[writesByHolder] = true
-						}
-					}
-				}
-				if fileWriteCalls[chain] {
-					writesFile = true
-				}
-			case *ast.Ident:
-				if configPathNames[x.Name] {
-					namesPath = true
-				}
-			}
-			return true
-		})
-		if namesPath && writesFile {
-			kinds[writesByFile] = true
-		}
-		if configSavePrimitive[key] {
-			primitive[key] = calls
-			continue
+	keep := func(key string, pos token.Pos, body ast.Node) {
+		site, kinds := inspectConfigWriter(body, inConfig)
+		if _, ok := configSavePrimitive[key]; ok {
+			primitive[key] = site.calls
+			return
 		}
 		if len(kinds) == 0 {
-			continue
+			return
 		}
-		site := configWriteSite{pos: fset.Position(fn.Pos()), calls: calls}
+		site.pos = fset.Position(pos)
 		for k := range kinds {
 			site.kinds = append(site.kinds, k)
 		}
 		sort.Strings(site.kinds)
 		out[key] = site
 	}
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body == nil {
+				continue
+			}
+			key := name + ":" + funcDeclKey(d)
+			if _, isPrimitive := configSavePrimitive[key]; d.Recv != nil && saveMethods[d.Name.Name] && !isPrimitive {
+				out[key] = configWriteSite{pos: fset.Position(d.Pos()),
+					kinds: []string{"declares a method named " + d.Name.Name + " on a type that is not the config, which the sweep would read as the config's"}}
+				continue
+			}
+			keep(key, d.Pos(), d.Body)
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, id := range vs.Names {
+					if i < len(vs.Values) {
+						keep(name+":"+id.Name, id.Pos(), vs.Values[i])
+					}
+				}
+			}
+		}
+	}
 	return out, primitive, nil
+}
+
+// saveMethods are the names of the config's own saves and its turn's: Save
+// and SaveIf on the config, SaveBytes on the turn.
+var saveMethods = map[string]bool{"Save": true, "SaveIf": true, "SaveBytes": true}
+
+// inspectConfigWriter reads body, a function's or a variable's value, for
+// what makes it a writer of the config: the kinds of write it makes, the
+// calls it makes and where, where it reads the config and where it saves it.
+// A save, an Edit or the holder's Update counts whether it is called or
+// taken as a value (a method value is a save made later, through it).
+func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[string]bool) {
+	site := configWriteSite{calls: map[string]bool{}}
+	kinds := map[string]bool{}
+	namesPath := false
+	var fileWrites []token.Pos
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			chain := callChain(x.Fun)
+			site.calls[chain] = true
+			site.at = append(site.at, chainAt{chain, x.Pos()})
+			if inConfig && chain == "Edit" {
+				kinds[writesByEdit] = true
+			}
+			if fileWriteCall(x, chain) {
+				fileWrites = append(fileWrites, x.Pos())
+			}
+			if configReadCall(x, chain, inConfig) {
+				site.reads = append(site.reads, x.Pos())
+			}
+		case *ast.SelectorExpr:
+			switch {
+			case callChain(x) == "config.Edit":
+				kinds[writesByEdit] = true
+			case saveMethods[x.Sel.Name] || (inConfig && x.Sel.Name == "save"):
+				kinds[writesBySave] = true
+				site.saves = append(site.saves, x.Pos())
+			case x.Sel.Name == "Update":
+				if holder := callChain(x.X); strings.HasSuffix(strings.ToLower(holder), "cfgholder") {
+					kinds[writesByHolder] = true
+				}
+			}
+		case *ast.Ident:
+			if configPathNames[x.Name] {
+				namesPath = true
+			}
+		case *ast.BasicLit:
+			if configFileLiteral(x) {
+				namesPath = true
+			}
+		}
+		return true
+	})
+	if namesPath && len(fileWrites) > 0 {
+		kinds[writesByFile] = true
+		site.saves = append(site.saves, fileWrites...)
+		sort.Slice(site.saves, func(i, j int) bool { return site.saves[i] < site.saves[j] })
+	}
+	return site, kinds
+}
+
+// fileWriteCall reports whether call, rendered as chain, writes a file or
+// puts one in place: a listed helper (fileWriteCalls); any writer of
+// atomicwrite or fsutil (a function whose name begins Write or Rename, and
+// Precreate, which makes the file a child process fills); os's or an
+// *os.Root's WriteFile, Create and Rename, called on anything; and OpenFile,
+// on anything, with a flag that writes, or one the sweep cannot read.
+func fileWriteCall(call *ast.CallExpr, chain string) bool {
+	if fileWriteCalls[chain] {
+		return true
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	name := sel.Sel.Name
+	if pkg := callChain(sel.X); pkg == "atomicwrite" || pkg == "fsutil" {
+		if strings.HasPrefix(name, "Write") || strings.HasPrefix(name, "Rename") || name == "Precreate" {
+			return true
+		}
+	}
+	if fileWriteMethods[name] {
+		return true
+	}
+	return name == "OpenFile" && len(call.Args) >= 2 && opensForWriting(call.Args[1])
+}
+
+// opensForWriting reports whether flag, an open's flag argument, may write:
+// it names a flag that writes (writeFlags), or is something other than the
+// os package's flags the sweep can read (a variable), which it counts as one.
+func opensForWriting(flag ast.Expr) bool {
+	writes, unread := false, false
+	ast.Inspect(flag, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if callChain(x.X) == "os" && strings.HasPrefix(x.Sel.Name, "O_") {
+				writes = writes || writeFlags[x.Sel.Name]
+				return false
+			}
+			unread = true
+			return false
+		case *ast.Ident:
+			unread = true
+		}
+		return true
+	})
+	return writes || unread
+}
+
+// configReadCall reports whether call, rendered as chain, reads the config
+// file: a read that reads it whatever it is handed (configReadCalls; inside
+// internal/config also Load, LoadFile, loadData, and any os.ReadFile or
+// fsutil.ReadAsFile), or a read of a path (pathReadCalls) that names the
+// config's.
+func configReadCall(call *ast.CallExpr, chain string, inConfig bool) bool {
+	if configReadCalls[chain] {
+		return true
+	}
+	if inConfig {
+		switch chain {
+		case "Load", "LoadFile", "loadData", "os.ReadFile", "fsutil.ReadAsFile":
+			return true
+		}
+	}
+	if !pathReadCalls[chain] || len(call.Args) == 0 {
+		return false
+	}
+	named := false
+	ast.Inspect(call.Args[0], func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Ident:
+			named = named || configPathNames[x.Name]
+		case *ast.BasicLit:
+			named = named || configFileLiteral(x)
+		}
+		return !named
+	})
+	return named
+}
+
+// configFileLiteral reports whether lit is a string that names the config
+// file: "bridge.yaml", alone or as a path's last element.
+func configFileLiteral(lit *ast.BasicLit) bool {
+	if lit.Kind != token.STRING {
+		return false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	return v == "bridge.yaml" || strings.HasSuffix(v, "/bridge.yaml") || strings.HasSuffix(v, `\bridge.yaml`)
 }
 
 // funcDeclKey is fn's name, after its receiver's type name for a method.
@@ -336,8 +579,11 @@ func TestTheConfigWriterSweepReportsEveryShape(t *testing.T) {
 
 import (
 	"os"
+	"path/filepath"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 type server struct{ deps struct{ CfgHolder *config.RuntimeConfig; CfgPath string } }
@@ -372,6 +618,57 @@ func copiesThePathElsewhere(cfgPath, bundle string) { _ = os.WriteFile(bundle, [
 type other struct{}
 
 func (other) Save() error { return nil }
+
+func writesTheLiteral(dir string) { _ = os.WriteFile(filepath.Join(dir, "bridge.yaml"), nil, 0o600) }
+
+func writesThroughARoot(r *os.Root, cfgPath string) { _ = r.WriteFile(filepath.Base(cfgPath), nil, 0o600) }
+
+func createsThroughARoot(r *os.Root, cfgPath string) {
+	f, _ := r.Create(filepath.Base(cfgPath))
+	_ = f.Close()
+}
+
+func renamesThroughARoot(r *os.Root, cfgPath string) { _ = r.Rename("staged", filepath.Base(cfgPath)) }
+
+func opensForWritingThroughARoot(r *os.Root, cfgPath string) {
+	f, _ := r.OpenFile(filepath.Base(cfgPath), os.O_WRONLY|os.O_TRUNC, 0)
+	_ = f.Close()
+}
+
+func opensForReadingThroughARoot(r *os.Root, cfgPath string) {
+	f, _ := r.OpenFile(filepath.Base(cfgPath), os.O_RDONLY, 0)
+	_ = f.Close()
+}
+
+func writesThroughAtomicwrite(cfgPath string) { _ = atomicwrite.WriteSomethingNew(cfgPath, nil) }
+
+func writesThroughFsutil(cfgPath string) { _ = fsutil.WriteSomethingNew(cfgPath, nil) }
+
+func precreatesThePath(cfgPath string) { _ = fsutil.Precreate(cfgPath, 0o600, cfgPath) }
+
+func renamesOverThePath(staged, cfgPath string) { _ = os.Rename(staged, cfgPath) }
+
+var savesFromAFuncValue = func(cfg *config.Config, l *config.FileLock) error { return cfg.Save(l) }
+
+func savesThroughAMethodValue(cfg *config.Config, l *config.FileLock) {
+	save := cfg.Save
+	_ = save(l)
+}
+
+func readsBeforeItsLock(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	_ = cfg.Save(l)
+}
+
+func readsAgainInItsTurn(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	cfg, _ = config.Load(cfgPath)
+	_ = cfg.Save(l)
+}
 `
 	sites, _, err := scanConfigWriters("x/x.go", src)
 	if err != nil {
@@ -382,6 +679,8 @@ func (other) Save() error { return nil }
 		"x/x.go:savesNamedWithoutItsLock":     "config.LockFile",
 		"x/x.go:server.savesThroughTheHolder": "CfgHolder.Update",
 		"x/x.go:gone":                         "config.LockFile",
+		"x/x.go:readsBeforeItsLock":           "config.LockFile",
+		"x/x.go:readsAgainInItsTurn":          "config.LockFile",
 	}
 	excused := map[string]string{
 		"x/x.go:copiesThePathElsewhere": "writes the bundle",
@@ -396,6 +695,18 @@ func (other) Save() error { return nil }
 		"x/x.go:savesUnnamed calls the config's Save or SaveIf, and configWriters does not name it",
 		"x/x.go:writesTheConfigsPath writes a file while it names the config's path, and configWriters does not name it",
 		"x/x.go:other.Save declares a method named Save on a type that is not the config",
+		"x/x.go:writesTheLiteral writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:writesThroughARoot writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:createsThroughARoot writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:renamesThroughARoot writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:opensForWritingThroughARoot writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:writesThroughAtomicwrite writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:writesThroughFsutil writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:precreatesThePath writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:renamesOverThePath writes a file while it names the config's path, and configWriters does not name it",
+		"x/x.go:savesFromAFuncValue calls the config's Save or SaveIf, and configWriters does not name it",
+		"x/x.go:savesThroughAMethodValue calls the config's Save or SaveIf, and configWriters does not name it",
+		"x/x.go:readsBeforeItsLock reads the config before it takes config.LockFile",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the sweep reported %d problems, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
@@ -411,7 +722,7 @@ func (other) Save() error { return nil }
 			t.Errorf("the sweep did not report %q; it reported:\n%s", w, strings.Join(got, "\n"))
 		}
 	}
-	for _, through := range []string{"writesAnotherFile", "namesThePathAndWritesNothing"} {
+	for _, through := range []string{"writesAnotherFile", "namesThePathAndWritesNothing", "opensForReadingThroughARoot"} {
 		if _, ok := sites["x/x.go:"+through]; ok {
 			t.Errorf("the sweep took %s for a writer of the config", through)
 		}

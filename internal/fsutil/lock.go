@@ -13,10 +13,12 @@ var ErrLocked = errors.New("locked by another open of the file")
 
 // TryLock takes an exclusive lock on f without waiting for it. It answers
 // nil once f holds the lock, an error wrapping ErrLocked when another open
-// of the file holds it, and any other error when no lock could be taken at
-// all: a filesystem that keeps none (some NFS and SMB mounts answer ENOLCK
-// or EOPNOTSUPP), or a platform this package has no lock for
-// (errors.ErrUnsupported).
+// of the file holds it, and any other error when no lock could be taken: a
+// filesystem that keeps none (some NFS and SMB mounts answer ENOLCK or
+// EOPNOTSUPP), a platform this package has no lock for
+// (errors.ErrUnsupported), both of which KeepsNoLocks reads, or a failure
+// that says nothing about locks being kept (an I/O error, a descriptor the
+// call refuses).
 //
 // The lock belongs to the OPEN FILE, not to the process: another *os.File
 // of the same file, opened in this process, is refused like one opened in
@@ -38,6 +40,16 @@ func TryLock(f *os.File) error {
 		return &os.PathError{Op: "lock", Err: os.ErrInvalid}
 	}
 	return tryLock(f)
+}
+
+// KeepsNoLocks reports whether err, what TryLock answered, says no lock can
+// be taken on that file at all: its filesystem keeps none (ENOLCK, EOPNOTSUPP
+// or ENOTSUP from flock; ERROR_NOT_SUPPORTED or ERROR_INVALID_FUNCTION from
+// LockFileEx), or the platform has none (errors.ErrUnsupported). Any other
+// failure is not that answer: a caller that goes on without a lock where the
+// filesystem keeps none still refuses there.
+func KeepsNoLocks(err error) bool {
+	return err != nil && keepsNoLocks(err)
 }
 
 // Unlock releases the lock TryLock took on f. Closing f releases it too,
@@ -79,8 +91,19 @@ const lockFileOpenTries = 3
 // with 3, 8 and 16 concurrent openers, 300 rounds each, every one opened
 // the file by its second attempt.
 func OpenLockFile(dir, name string) (*os.File, error) {
+	return OpenLockFileLike(dir, name, filepath.Join(dir, name))
+}
+
+// OpenLockFileLike is OpenLockFile whose file, when this process creates it
+// as root, takes the owner a file staged for like would (KeepOwner): the
+// owner of the entry at like, or of like's directory while there is none. A
+// lock that every writer of one file takes is opened that way, so that it
+// belongs to whoever owns that file (bridge.yaml's lock, beside a config the
+// service user owns in a directory root owns), and its 0600 lets that owner
+// open it. A lock file already there is opened as it is.
+func OpenLockFileLike(dir, name, like string) (*os.File, error) {
 	path := filepath.Join(dir, name)
-	if err := Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := Precreate(path, 0o600, like); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
 	}
 	root, err := os.OpenRoot(dir)

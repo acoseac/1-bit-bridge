@@ -43,8 +43,11 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 		// path (used to force a failure to take the file's lock).
 		pathOverride string
 		// occupied puts a directory, not empty, where bridge.yaml goes,
-		// which Save's rename cannot replace.
-		occupied bool
+		// which the turn's read refuses as no file; occupiedWhileSaving
+		// puts it there once the save has staged its file, which the
+		// save's comparison refuses before the rename; lockOccupied puts
+		// it where the lock file goes, which the lock's open refuses.
+		occupied, occupiedWhileSaving, lockOccupied bool
 		// holderEmpty constructs the holder with no config loaded.
 		holderEmpty bool
 
@@ -72,14 +75,26 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			wantName: "Home",
 		},
 		{
-			name:        "save failure keeps live snapshot",
+			name:        "a config path that is no file keeps live snapshot",
 			occupied:    true,
-			wantErrText: "rename",
+			wantErrText: "in its turn",
 			wantName:    "Home",
 		},
 		{
-			name:         "a lock that cannot be opened keeps live snapshot",
+			name:                "save failure keeps live snapshot",
+			occupiedWhileSaving: true,
+			wantErrText:         "before replacing it",
+			wantName:            "Home",
+		},
+		{
+			name:         "a config directory that is not there keeps live snapshot",
 			pathOverride: filepath.Join("no-such-dir", "bridge.yaml"),
+			wantErrText:  "find the directory",
+			wantName:     "Home",
+		},
+		{
+			name:         "a lock that cannot be opened keeps live snapshot",
+			lockOccupied: true,
 			wantErrText:  "open the lock beside",
 			wantName:     "Home",
 		},
@@ -106,10 +121,20 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			if tc.pathOverride != "" {
 				path = filepath.Join(dir, tc.pathOverride)
 			}
-			if tc.occupied {
-				if err := os.MkdirAll(filepath.Join(cfgPath, "occupied"), 0o755); err != nil {
-					t.Fatal(err)
+			occupy := func(p string) {
+				if err := os.MkdirAll(filepath.Join(p, "occupied"), 0o755); err != nil {
+					t.Error(err)
 				}
+			}
+			if tc.occupied {
+				occupy(cfgPath)
+			}
+			if tc.lockOccupied {
+				occupy(filepath.Join(dir, LockFileName(cfgPath)))
+			}
+			if tc.occupiedWhileSaving {
+				stop := OnSaveStagedForTest(cfgPath, func() { occupy(cfgPath) })
+				defer stop()
 			}
 			fn := tc.mutate
 			if fn == nil {
