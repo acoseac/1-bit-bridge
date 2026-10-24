@@ -120,6 +120,15 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { s.ev.Position(id, pos) })
 		}
 	}
+	// A fault's rollback can Drop the final drain before this reporter
+	// observes it. Keep the measured occurrence and frames for Fault,
+	// but send no queued progress from that interrupted final buffer.
+	if s.fault != nil && s.cur != nil {
+		p := posOf(s.cur)
+		if p.State == alsapcm.SinkStopped && p.Played < p.Written && p.Written == p.Submitted {
+			evs = nil
+		}
+	}
 	// A sink that stopped: an xrun, or an end that is not the release's.
 	if c := s.cur; s.fault == nil && c != nil && !c.closed {
 		p := posOf(c)

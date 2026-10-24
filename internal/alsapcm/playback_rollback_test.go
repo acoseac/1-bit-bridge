@@ -17,8 +17,9 @@ import (
 )
 
 // TestPlaybackResumeRollbackDropsFinalDrain holds Resume's successful reply
-// until the producer's own Drain reaches the final hardware drain and a
-// fault is recorded. Rollback must stop sound even when more time is granted.
+// until the producer's own Drain reaches the final hardware drain. A reporter
+// panic or Resume's timer-stop panic faults the session; rollback must stop
+// sound even when more time is granted.
 func TestPlaybackResumeRollbackDropsFinalDrain(t *testing.T) {
 	for _, heldDrop := range []bool{false, true} {
 		name := "dropped"
@@ -27,6 +28,7 @@ func TestPlaybackResumeRollbackDropsFinalDrain(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) { testResumeRollback(t, rollbackFinalDrain, heldDrop) })
 	}
+	t.Run("live-reporter", func(t *testing.T) { testResumeRollback(t, rollbackFinalDrainLiveReporter, false) })
 }
 
 // TestPlaybackResumeRollbackKeepsOtherRefusals leaves an xrun's refused
@@ -52,12 +54,15 @@ const (
 	rollbackFinalDrain
 	rollbackCompletedBeforeFault
 	rollbackCompletedAfterRefusal
+	rollbackFinalDrainLiveReporter
 )
 
-// testResumeRollback uses the same reporter panic and command seams as
-// B523. The direct backend keeps release from hiding the rollback result.
+// testResumeRollback uses B523's reporter, timer and command seams.
+// The direct backend keeps release from hiding the rollback result.
 func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	t.Helper()
+	liveReporter := window == rollbackFinalDrainLiveReporter
+	var timerStops atomic.Int32
 	draining := window != rollbackXrun
 	playedOut := window == rollbackCompletedBeforeFault || window == rollbackCompletedAfterRefusal
 	logs := &lines{}
@@ -121,9 +126,19 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 				}
 			}
 		}}
-		cfg.Tick = func() (<-chan time.Time, func()) {
-			<-gate
-			panic(panicValue)
+		if liveReporter {
+			cfg.AfterFunc = func(time.Duration, func()) func() bool {
+				return func() bool { timerStops.Add(1); panic(panicValue) }
+			}
+			// Keep the reporter alive, with its first read held until Drop
+			// has stopped the final drain. It must then deliver only Fault.
+			tick := cfg.Tick
+			cfg.Tick = func() (<-chan time.Time, func()) { <-gate; return tick() }
+		} else {
+			cfg.Tick = func() (<-chan time.Time, func()) {
+				<-gate
+				panic(panicValue)
+			}
 		}
 	})
 	t.Cleanup(func() { d.release(1) })
@@ -232,13 +247,31 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		}
 	}
 	before = d.k.View()
-	fault()
-	waitOn(t, "the recorded fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) >= 1 })
-	evs := d.rec.events()
-	if len(evs) != 1 || evs[0].kind != "fault" || evs[0].fault.Reason != playback.ReasonFailed {
-		t.Fatalf("events at rollback = %+v; want exactly one backend fault", evs)
+	checkFault := func() {
+		t.Helper()
+		waitOn(t, "the recorded fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) >= 1 })
+		evs := d.rec.events()
+		if len(evs) != 1 || evs[0].kind != "fault" || evs[0].fault.Reason != playback.ReasonFailed {
+			t.Errorf("events at rollback = %+v; want exactly one backend fault", evs)
+		}
+		for _, e := range evs {
+			if e.kind == "fault" {
+				recorded = e
+				break
+			}
+		}
 	}
-	recorded = evs[0]
+	if liveReporter {
+		// A second Pause meets the final drain and arms the session's
+		// no-device timer. Resume's successful reply is still held, so
+		// its unpausedLocked will be the first call to stop that timer.
+		if err := d.be.Pause(bg, 1); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		fault()
+		checkFault()
+	}
 	allowResume()
 	if window == rollbackCompletedAfterRefusal {
 		// Pause observed finalDrain and refused with bad_state. Before its
@@ -255,6 +288,20 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		allowPause()
 	}
 	got := receiveIn(t, answer, "Resume's answer")
+	if liveReporter {
+		if n := timerStops.Load(); n != 1 {
+			t.Errorf("Resume stopped the pause timer %d times; want one", n)
+		}
+		p := sink.Position()
+		if p.State != alsapcm.SinkStopped || p.Played >= p.Written || p.Written != p.Submitted {
+			t.Errorf("live reporter's sink = %+v; want a stopped final drain with unplayed frames", p)
+		}
+		fault() // Release the live reporter only after rollback answered.
+		checkFault()
+		if recorded.fault.Occurrence != 101 || recorded.fault.Frames != p.Played {
+			t.Errorf("fault = %+v; want occurrence 101 at %d measured frames", recorded.fault, p.Played)
+		}
+	}
 	how, err := got.how, got.err
 	allowDrop()
 	var re *playback.ResumeError
@@ -342,7 +389,11 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	if evs := d.rec.events(); !reflect.DeepEqual(evs, []event{recorded}) {
 		t.Errorf("events after release = %+v; want exactly the original fault and nothing after it: %+v", evs, recorded)
 	}
-	logs.panicLogged(t, backendPanicMessage, "the reporter")
+	where := "the reporter"
+	if liveReporter {
+		where = "the pause release timer's stop"
+	}
+	logs.panicLogged(t, backendPanicMessage, where)
 	d.files.allClosed(t)
 	d.k.CheckClosedEach(t)
 }
