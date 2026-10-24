@@ -59719,3 +59719,34 @@ The tests, against the tree before the change:
   file at 97.9% of its budget. It moved verbatim to `History-rules-player.md`
   first (its own commit, through `move_entry.py`, with `verify_moves.py`
   passing), and B525's text went to the long form, its Don't to the line.
+
+### Negative controls
+
+On the committed tree (ac6ed516; the two that go through the bind tests'
+helper again on cac7518a), one control per reader: `ReadPlayerUUIDFile`
+opening with `os.Open` again, applied as a one-line edit checked to match
+once, that reader's test run, the file restored from git and the tree
+checked clean, then the tests run green again.
+
+| NC | Reader | Test | Red |
+|---|---|---|---|
+| 1 | serve's player start | `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` | "the player's start: still running after 5s, waiting to open a named pipe"; refused "the player's identity: … does not hold one UUID: remove it, …", and its log line the same |
+| 2 | bind | `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce` | "bridge output dac bind: still running after 5s, …"; exit 1, "the player's UUID: … does not hold one UUID: …" |
+| 3 | a restore's read of a snapshot's copy | `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` | "Restore: still running after 5s, …"; "restore player-uuid: … does not hold one UUID, so the player cannot have the identity it had; …" (refused as "") |
+| 4 | inspect | `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile` | "bridge output dac inspect: still running after 5s, …"; the UUID line "… does not hold one UUID: …" |
+| 5 | a restore's read of the box's own copy | `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait` | "Restore: still running after 5s, …" |
+| 6 | the reader itself | `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` | every subtest: both pipes 5 s in each of the four readers, then refused as ""; the device and the directory refused as "" |
+
+### Runs
+
+Through the build lock: `make fmt`, which rewrote nothing (go1.27.3's
+gofmt: `go.mod`'s go1.27.2 is not in this host's module cache and GOPROXY is
+off); `make vet`, `GOOS=linux go vet ./...` and `GOOS=windows go vet ./...`,
+clean; `make build-all`, every target built; `make docs-check`, passing,
+`player.md` at 97.0%. `go test -race -timeout 30m`: `internal/config`
+(2.956 s) and `internal/backup` (31.434 s) passing; `cmd/bridge` failed its
+first run on `TestEveryBackgroundGoroutineDrainsOnCleanup` alone, since the
+bind tests' helper (`runDACWithin`) started the command's goroutine without
+draining it on cleanup; it now registers `drainLoopOnCleanup` (cac7518a),
+and `cmd/bridge` passed (499.109 s). The six new tests under `-race -count
+20`: 20 of 20 each, every subtest included.
